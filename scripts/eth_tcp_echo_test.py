@@ -370,13 +370,18 @@ def main() -> int:
         return 1
     client_mac = read_iface_mac(IFACE)
 
-    if os.environ.get("TCP_TEST_HANDSHAKE_ONLY") == "1":
-        ok = do_handshake(
-            new_sock(), client_mac, HANDSHAKE_CLIENT_PORT,
+    if os.environ.get("TCP_TEST_CONNECTED_IO") == "1":
+        sock = new_sock()
+        handshake_ok = do_handshake(
+            sock, client_mac, HANDSHAKE_CLIENT_PORT,
             HANDSHAKE_CLIENT_ISN)
+        sock.close()
         print("  userspace accept handshake port %d: %s" %
-              (SERVER_PORT, "PASS" if ok else "FAIL"))
-        return 0 if ok else 1
+              (SERVER_PORT, "PASS" if handshake_ok else "FAIL"))
+        echo_ok = handshake_ok and test_data_echo(client_mac)
+        print("  userspace connected read/write echo: %s" %
+              ("PASS" if echo_ok else "FAIL"))
+        return 0 if echo_ok else 1
 
     ok1 = test_syn_wrong_port_silent(client_mac)
     print("  SYN to wrong port (silent):        %s" % ("PASS" if ok1 else "FAIL"))

@@ -1,1 +1,1 @@
-linux socket syscalls: socket bind listen accept close ok port=8080
+linux socket syscalls: socket bind listen accept read write close ok port=8080

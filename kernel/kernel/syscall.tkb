@@ -40,6 +40,9 @@ private let mut syscall_accept_calls: usize;
 private let mut syscall_accept_capability_roundtrips: usize;
 private let mut syscall_connected_open: bool;
 private let mut syscall_connected_close_calls: usize;
+private let mut syscall_connected_read_calls: usize;
+private let mut syscall_connected_write_calls: usize;
+private let mut syscall_socket_buffer: [u8; 1460];
 
 private let mut syscall_heap_start: usize;
 private let mut syscall_heap_limit: usize;
@@ -59,6 +62,8 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_accept_capability_roundtrips = 0;
     syscall_connected_open = false;
     syscall_connected_close_calls = 0;
+    syscall_connected_read_calls = 0;
+    syscall_connected_write_calls = 0;
 }
 
 fn kernel_syscall_ext2_configure(mount: Ext2Mount) {
@@ -84,6 +89,8 @@ fn kernel_syscall_socket_evidence() -> bool {
            syscall_accept_capability_roundtrips == 1 &&
            syscall_connected_open == false &&
            syscall_connected_close_calls == 1 &&
+           syscall_connected_read_calls == 1 &&
+           syscall_connected_write_calls == 1 &&
            syscall_socket_close_calls == 1 &&
            syscall_socket_state == KernelSocketState::Closed &&
            syscall_socket_port == 8080;
@@ -162,6 +169,77 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         if (kernel_user_range_is_mapped(address, length) == false) {
             return (1, LINUX_EFAULT);
         }
+        if (fd == 5) {
+            syscall_connected_write_calls =
+                syscall_connected_write_calls + 1;
+            if (syscall_connected_open == false || length == 0 ||
+                length > 1460 || length != network_frame_length()) {
+                return (1, LINUX_EINVAL);
+            }
+            match network_frame_take() {
+                NetworkFrameTakeResult::Empty => {
+                    return (1, LINUX_EAGAIN);
+                }
+                NetworkFrameTakeResult::Frame(frame) => {
+                    let source: *u8 = address as *u8;
+                    let buffered: *u8 = syscall_socket_buffer as *u8;
+                    let mut index: usize = 0;
+                    let mut matches: bool = true;
+                    while (index < length) {
+                        if (source[index as isize] != buffered[index as isize]) {
+                            matches = false;
+                        }
+                        index = index + 1;
+                    }
+                    if (matches == false) {
+                        match network_frame_install(frame, length) {
+                            NetworkFrameInstallResult::Installed => {
+                                return (1, LINUX_EINVAL);
+                            }
+                            NetworkFrameInstallResult::Conflict(incoming) => {
+                                match kernel_tcp_send_received(incoming, 0) {
+                                    KernelTcpSendResult::Invalid(ready) => {
+                                        match network_capability_put(ready) {
+                                            NetworkCapabilityPutResult::Stored => { }
+                                            NetworkCapabilityPutResult::Conflict => { }
+                                        }
+                                    }
+                                    KernelTcpSendResult::Sent(ready) => {
+                                        match network_capability_put(ready) {
+                                            NetworkCapabilityPutResult::Stored => { }
+                                            NetworkCapabilityPutResult::Conflict => { }
+                                        }
+                                    }
+                                }
+                                return (1, LINUX_EINVAL);
+                            }
+                        }
+                    }
+                    match kernel_tcp_send_received(frame, length) {
+                        KernelTcpSendResult::Invalid(ready) => {
+                            match network_capability_put(ready) {
+                                NetworkCapabilityPutResult::Stored => {
+                                    return (1, LINUX_EINVAL);
+                                }
+                                NetworkCapabilityPutResult::Conflict => {
+                                    return (1, LINUX_EINVAL);
+                                }
+                            }
+                        }
+                        KernelTcpSendResult::Sent(ready) => {
+                            match network_capability_put(ready) {
+                                NetworkCapabilityPutResult::Conflict => {
+                                    return (1, LINUX_EINVAL);
+                                }
+                                NetworkCapabilityPutResult::Stored => {
+                                    return (1, length);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if (fd == 3) {
             syscall_file_write_calls = syscall_file_write_calls + 1;
             if (syscall_file_open == false || syscall_file_writable == false) {
@@ -230,6 +308,71 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let fd: usize = x0;
         let address: usize = x1;
         let requested: usize = x2;
+        if (fd == 5) {
+            syscall_connected_read_calls = syscall_connected_read_calls + 1;
+            if (syscall_connected_open == false || requested == 0) {
+                return (1, LINUX_EBADF);
+            }
+            if (kernel_user_range_is_mapped(address, requested) == false) {
+                return (1, LINUX_EFAULT);
+            }
+            match network_capability_take() {
+                NetworkCapabilityTakeResult::Empty => {
+                    return (1, LINUX_EAGAIN);
+                }
+                NetworkCapabilityTakeResult::Ready(ready) => {
+                    match kernel_tcp_receive_once(
+                            ready, syscall_socket_buffer as []u8) {
+                        KernelTcpReceiveResult::TimedOut(next) => {
+                            match network_capability_put(next) {
+                                NetworkCapabilityPutResult::Stored => {
+                                    return (1, LINUX_EAGAIN);
+                                }
+                                NetworkCapabilityPutResult::Conflict => {
+                                    return (1, LINUX_EINVAL);
+                                }
+                            }
+                        }
+                        KernelTcpReceiveResult::Received(frame) => {
+                            let received: usize =
+                                kernel_tcp_received_length();
+                            let mut amount: usize = received;
+                            if (amount > requested) { amount = requested; }
+                            let destination: *u8 = address as *u8;
+                            let source: *u8 = syscall_socket_buffer as *u8;
+                            let mut index: usize = 0;
+                            while (index < amount) {
+                                destination[index as isize] =
+                                    source[index as isize];
+                                index = index + 1;
+                            }
+                            match network_frame_install(frame, received) {
+                                NetworkFrameInstallResult::Conflict(incoming) => {
+                                    match kernel_tcp_send_received(incoming, 0) {
+                                        KernelTcpSendResult::Invalid(next) => {
+                                            match network_capability_put(next) {
+                                                NetworkCapabilityPutResult::Stored => { }
+                                                NetworkCapabilityPutResult::Conflict => { }
+                                            }
+                                        }
+                                        KernelTcpSendResult::Sent(next) => {
+                                            match network_capability_put(next) {
+                                                NetworkCapabilityPutResult::Stored => { }
+                                                NetworkCapabilityPutResult::Conflict => { }
+                                            }
+                                        }
+                                    }
+                                    return (1, LINUX_EINVAL);
+                                }
+                                NetworkFrameInstallResult::Installed => {
+                                    return (1, amount);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if (fd != 3 || syscall_file_open == false ||
             syscall_file_readable == false) {
             return (1, LINUX_EBADF);

@@ -49,7 +49,11 @@ The RX readiness token is now linear and survives the intervening USB/ext2
 and BusyBox work in a guarded stable owner slot. Blocking `accept4(242)`
 takes that token, processes a real three-way handshake on port 8080, restores
 the token, and returns connected fd 5. The EL0 fixture closes fd 5 and the
-listener separately. Connected `read`/`write` remain next.
+listener separately. A blocking `read(63)` moves the received linear frame
+owner into a second stable slot while its payload is visible to userspace;
+`write(64)` consumes that same owner to transmit the userspace-returned bytes
+as PSH/ACK and restores the RX token. The current one-segment contract
+requires the write to match the complete preceding read.
 
 The RPi5 runner captures UART once per kernel boot, then projects that one
 transcript through every `kernel/tests/rpi5/views/*.filter`. Each projection

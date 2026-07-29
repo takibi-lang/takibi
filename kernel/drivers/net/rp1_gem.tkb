@@ -10,7 +10,7 @@ const GEM_BASE: usize = 0x1F00100000;
 const DMA_OFFSET: usize = 0x1000000000;
 const RX_BUF_SIZE: usize = 2048;
 
-private linear struct NetRxCpuOwned[desc: usize] {
+linear struct NetRxCpuOwned[desc: usize] {
     private slot: {0..<1 as usize} @ desc;
     private len: i32;
 }

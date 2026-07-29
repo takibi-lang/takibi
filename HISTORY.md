@@ -15,6 +15,24 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Connected Linux `read`/`write` Echoes Through GEM
+
+Connected fd 5 now crosses the Linux `read(63)` and `write(64)` boundaries.
+While `read` blocks, the syscall owns the sole RX readiness token. A validated
+in-order PSH/ACK payload is copied into a fixed kernel buffer and then to the
+mapped userspace destination; instead of prematurely recreating RX readiness,
+the acquired linear frame owner moves into a second guarded stable slot.
+`write` takes that exact owner, verifies the complete userspace buffer matches
+the preceding read, rewrites the held frame into a checksum-correct PSH/ACK
+reply, transmits it, and only then restores the RX token.
+
+The current concrete contract is one segment and one complete echo write;
+partial writes and stream reassembly remain deferred. The EL0 fixture reads
+the 16-byte `Hello, TCP echo!` payload into its stack and writes it back on fd
+5. Real RPi5 hardware verified the returned wire payload and checksums, then
+passed all 12 UART views and every earlier network/storage/BusyBox check in
+the same boot.
+
 ### 2026-07-29: `accept4` Returns a Connected Userspace FD
 
 Blocking Linux AArch64 `accept4(242)` now takes the sole GEM RX capability

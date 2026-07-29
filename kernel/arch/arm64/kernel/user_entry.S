@@ -72,6 +72,22 @@ initial_user_payload:
     svc     #0
     cmp     x0, #5
     b.ne    .Luser_fail
+    sub     sp, sp, #32
+    mov     x0, #5
+    mov     x1, sp
+    mov     x2, #32
+    mov     x8, #63
+    svc     #0
+    cmp     x0, #16
+    b.ne    .Luser_fail
+    mov     x0, #5
+    mov     x1, sp
+    mov     x2, #16
+    mov     x8, #64
+    svc     #0
+    cmp     x0, #16
+    b.ne    .Luser_fail
+    add     sp, sp, #32
     mov     x0, #5
     mov     x8, #57
     svc     #0

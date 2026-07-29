@@ -94,16 +94,16 @@ if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
 fi
 echo "[kernel/rpi5] TCP integration passed"
 
-echo "[kernel/rpi5] checking userspace accept handshake on port 8080"
+echo "[kernel/rpi5] checking userspace connected I/O on port 8080"
 if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
         ETH_TEST_MAC="$ETH_TEST_MAC" TCP_TEST_PORT=8080 \
-        TCP_TEST_HANDSHAKE_ONLY=1 \
+        TCP_TEST_CONNECTED_IO=1 \
         python3 "$REPO_ROOT/scripts/eth_tcp_echo_test.py" \
         > >(tee "$SOCKET_ACCEPT_LOG") 2>&1; then
-    echo "FAIL kernel/rpi5: userspace accept handshake failed (see $SOCKET_ACCEPT_LOG)" >&2
+    echo "FAIL kernel/rpi5: userspace connected I/O failed (see $SOCKET_ACCEPT_LOG)" >&2
     exit 1
 fi
-echo "[kernel/rpi5] userspace accept handshake passed"
+echo "[kernel/rpi5] userspace connected I/O passed"
 
 # USB Mass Storage may briefly report Not Ready after enumeration. Keep the
 # single capture alive through its bounded readiness loop and ext2 checks.
