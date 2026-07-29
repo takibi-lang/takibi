@@ -73,8 +73,9 @@ plan before the larger owned process-image mapping is attempted.
 
 That measured load plan now drives the real `PT_LOAD` mappings plus an owned
 initial stack and fixed short-lived heap. Alpine BusyBox runs
-`echo "hello from busybox"` at EL0, writes through Linux syscall 64, and exits
-through syscall 93 with status zero. All 401 image, heap, and stack pages sit
+`cat /hello.txt` at EL0, opens the USB ext2 file through `openat(56)`, emits it
+through `sendfile(71)`, closes it, and exits through syscall 93 with status
+zero. All 401 image, heap, and stack pages sit
 under one linear `ProcessImagePages` teardown obligation and are returned
 before the smaller syscall fixture is created.
 
@@ -82,16 +83,19 @@ The first ext2 slice is also active on RPi5. The build creates a checked 1 MiB
 RAM fixture with `mke2fs`, populates it with `e2mkdir`/`e2cp`, and embeds it as
 a writable image. The filesystem core reaches it only through the 1 KiB block
 interface in `kernel/drivers/block/`. It validates the superblock and group
-descriptor, decodes the inode table, walks the root directory, reads a regular
-file, overwrites an existing same-size single-block file, and resolves a fast
-symlink. Block allocation, truncation, indirect blocks, multi-group images,
-and a VFS/syscall binding remain deferred until a concrete caller requires
-each operation.
+descriptor, decodes the inode table, walks the root directory, reads and
+resizes a regular file, resolves a fast symlink, updates allocation bitmaps
+and free counts, and creates and unlinks a root file using typed block/inode
+owners. Indirect blocks and multi-group images remain deferred until a
+concrete caller requires them.
 
 The same ext2 core now mounts the RPi5's real USB Mass Storage device. The
 standalone RP1 xHCI/Bulk-Only/SCSI driver reports 512-byte sectors; the USB
 block adapter combines each adjacent sector pair into the filesystem core's
 1 KiB block contract. During `kernelcheck-rpi5`, the checked embedded image
 is copied into the deliberately bounded first-1-MiB device view, then mounted
-and `/hello.txt` is looked up and read back from USB. The adapter intentionally
+and `/hello.txt` is looked up and read back from USB. Linux-compatible
+`openat`, `read`, `write`, `sendfile`, and `close` bind one process file
+descriptor to this mount; the small EL0 fixture also overwrites
+`/mutable.txt` through those syscall boundaries. The adapter intentionally
 does not expose the rest of the physical medium yet.

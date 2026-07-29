@@ -15,6 +15,23 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: RPi5 USB ext2 Mutation and Linux File Syscalls (GitHub Issue #177)
+
+The standalone kernel's 1 KiB ext2 core progressed from equal-size overwrite
+through inode resizing, allocation bitmap/free-count mutation, typed linear
+block and inode owners, and root-directory file creation/unlink. The same core
+operates on the deliberately bounded first 1 MiB of the RPi5 USB Mass Storage
+device, with each stage covered during one hardware boot.
+
+The USB mount now backs a minimal Linux file-descriptor boundary. Alpine's
+distribution-provided static BusyBox runs `cat /hello.txt` using `openat`,
+`sendfile`, and `close`; the smaller EL0 ABI fixture independently uses
+`openat`, `write`, and `close` to replace `/mutable.txt`. A separate
+`linux_file.expected` view verifies the combined open/read/write/close
+contract without adding transient kernel debug output. Passing syscall x3
+reused the exception dispatcher's previously unused ELR argument, so the
+assembly boundary did not grow.
+
 ### 2026-07-28: Target-Aware DMA Cache-Line Alignment (GitHub Issue #171 Stage 1)
 
 The RX-side DMA builtins no longer hardcode a 32-byte pointer contract.

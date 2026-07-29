@@ -186,6 +186,7 @@ fn main() {
                                             kernel_boot_log("usb ext2: mount failed\n");
                                         }
                                         Ext2MountResult::Mounted(usb_mount) => {
+                                            kernel_syscall_ext2_configure(usb_mount);
                                             match usb_ext2_equal_size_write_check(
                                                     usb_mount) {
                                                 UsbExt2WriteCheckResult::Invalid => {
@@ -423,6 +424,18 @@ fn main() {
                                 } else {
                                     kernel_boot_log("busybox failed\n");
                                 }
+                                let (open_calls, read_calls, file_write_calls,
+                                     close_calls) =
+                                    kernel_syscall_file_evidence();
+                                if (open_calls == 0) {
+                                    kernel_boot_log("linux file syscalls: open not called\n");
+                                } else if (read_calls == 0) {
+                                    kernel_boot_log("linux file syscalls: read not called\n");
+                                } else if (close_calls == 0) {
+                                    kernel_boot_log("linux file syscalls: close not called\n");
+                                } else {
+                                    kernel_boot_log("linux file syscalls: open+read+close called\n");
+                                }
                                 process_image_unmap(image_pages);
                                 if (process_image_window_is_clear()) {
                                     kernel_boot_log("distro unmap: clean\n");
@@ -458,6 +471,13 @@ fn main() {
                         run_initial_user(USER_TEXT_VA, USER_STACK_VA + PAGE_SIZE);
                     if (exit_status == 0) {
                         kernel_boot_log("syscall write errors: ebadf efault\n");
+                        let (open_calls, read_calls, file_write_calls,
+                             close_calls) =
+                            kernel_syscall_file_evidence();
+                        if (open_calls >= 2 && read_calls >= 1 &&
+                            file_write_calls >= 1 && close_calls >= 2) {
+                            kernel_boot_log("linux file syscalls: open read write close ok\n");
+                        }
                         kernel_boot_log("syscall exit: 0\n");
                     }
                     let (data_space2, stack2) =

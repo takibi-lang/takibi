@@ -61,7 +61,7 @@ fn process_image_prepare_stack(page: borrow PageOwner[page],
     let argv1_address: usize = virtual_base + 216;
     let argv2_address: usize = virtual_base + 224;
 
-    // argc=3, argv={"busybox", "echo", "hello from busybox"}, envp={}
+    // argc=3, argv={"busybox", "cat", "/hello.txt"}, envp={}
     let words: *u64 = physical_base as *u64;
     words[0] = 3;
     words[1] = argv0_address as u64;
@@ -95,17 +95,17 @@ fn process_image_prepare_stack(page: borrow PageOwner[page],
     let tail: *u8 = (physical_base + 192) as *u8;
     for i: usize in 0..<16 { tail[i as isize] = (0xA5 ^ i) as u8; }
     let argv0: []u8 = "busybox" as []u8;
-    let argv1: []u8 = "echo" as []u8;
-    let argv2: []u8 = "hello from busybox" as []u8;
+    let argv1: []u8 = "cat" as []u8;
+    let argv2: []u8 = "/hello.txt" as []u8;
     slice_copy(unsafe { tail[16 as isize..<24 as isize] }, argv0);
-    slice_copy(unsafe { tail[24 as isize..<29 as isize] }, argv1);
-    slice_copy(unsafe { tail[32 as isize..<51 as isize] }, argv2);
+    slice_copy(unsafe { tail[24 as isize..<28 as isize] }, argv1);
+    slice_copy(unsafe { tail[32 as isize..<43 as isize] }, argv2);
 
     if (words[0] != 3 || words[7] != PAGE_SIZE as u64 ||
         words[9] != (USER_TEXT_VA + plan.program_offset) as u64 ||
         words[17] != (USER_TEXT_VA + plan.entry) as u64 ||
-        words[23] != 0 || tail[23] != 0 || tail[28] != 0 ||
-        tail[50] != 0) {
+        words[23] != 0 || tail[23] != 0 || tail[27] != 0 ||
+        tail[42] != 0) {
         return ProcessImageStackResult::Invalid;
     }
     return ProcessImageStackResult::Ready;

@@ -25,6 +25,26 @@ initial_user_payload:
     cmp     x0, x9
     b.ne    .Luser_fail
 
+    /* openat/write/close /mutable.txt through the Linux file ABI. */
+    mov     x0, #0
+    adr     x1, .Lmutable_path
+    mov     x2, #1
+    mov     x8, #56
+    svc     #0
+    cmp     x0, #3
+    b.ne    .Luser_fail
+    mov     x0, #3
+    adr     x1, .Lmutable_content
+    mov     x2, #7
+    mov     x8, #64
+    svc     #0
+    cmp     x0, #7
+    b.ne    .Luser_fail
+    mov     x0, #3
+    mov     x8, #57
+    svc     #0
+    cbnz    x0, .Luser_fail
+
     adr     x1, .Luser_message
     mov     x2, #21
     mov     x0, #1
@@ -39,6 +59,10 @@ initial_user_payload:
     b       .Luser_fail
 .Luser_message:
     .ascii  "hello from userspace\n"
+.Lmutable_path:
+    .asciz  "/mutable.txt"
+.Lmutable_content:
+    .ascii  "el0-ok\n"
 initial_user_payload_end:
 
     .section .text, "ax"
@@ -123,7 +147,7 @@ el0_sync_entry:
     ldr     x2, [sp, #0]
     ldr     x3, [sp, #8]
     ldr     x4, [sp, #16]
-    mov     x5, x9
+    ldr     x5, [sp, #24]
     bl      kernel_syscall_dispatch
     mov     x6, x0
     mov     x7, x1

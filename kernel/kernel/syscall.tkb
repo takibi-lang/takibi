@@ -1,6 +1,7 @@
 use "kernel/mm/page.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
+use "kernel/fs/ext2/ext2.tkb";
 
 const AARCH64_NR_WRITE: usize = 64;
 const AARCH64_NR_EXIT: usize = 93;
@@ -8,6 +9,21 @@ const AARCH64_NR_EXIT_GROUP: usize = 94;
 const LINUX_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
 const LINUX_EFAULT: usize = 0xFFFFFFFFFFFFFFF2;
 const LINUX_ENOSYS: usize = 0xFFFFFFFFFFFFFFDA;
+const LINUX_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
+const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
+
+private let mut syscall_ext2_mount: Ext2Mount;
+private let mut syscall_ext2_ready: bool;
+private let mut syscall_file_open: bool;
+private let mut syscall_file_readable: bool;
+private let mut syscall_file_writable: bool;
+private let mut syscall_file_inode: usize;
+private let mut syscall_file_offset: usize;
+private let mut syscall_file_buffer: [u8; KERNEL_BLOCK_SIZE];
+private let mut syscall_open_calls: usize;
+private let mut syscall_read_calls: usize;
+private let mut syscall_file_write_calls: usize;
+private let mut syscall_close_calls: usize;
 
 private let mut syscall_heap_start: usize;
 private let mut syscall_heap_limit: usize;
@@ -17,6 +33,48 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_heap_start = heap_start;
     syscall_heap_limit = heap_limit;
     syscall_heap_break = heap_start;
+}
+
+fn kernel_syscall_ext2_configure(mount: Ext2Mount) {
+    syscall_ext2_mount = mount;
+    syscall_ext2_ready = true;
+    syscall_file_open = false;
+    syscall_file_offset = 0;
+    syscall_open_calls = 0;
+    syscall_read_calls = 0;
+    syscall_file_write_calls = 0;
+    syscall_close_calls = 0;
+}
+
+fn kernel_syscall_file_evidence()
+        -> (usize, usize, usize, usize) {
+    return (syscall_open_calls, syscall_read_calls,
+            syscall_file_write_calls, syscall_close_calls);
+}
+
+// Returns 1 for /hello.txt, 2 for /mutable.txt, and 0 for unsupported or
+// invalid paths. Raw pointer reads are confined behind mapped-range checks.
+fn kernel_syscall_path_kind(address: usize) -> usize {
+    if (kernel_user_range_is_mapped(address, 11)) {
+        let path: *u8 = address as *u8;
+        if (path[0] == 0x2F && path[1] == 0x68 && path[2] == 0x65 &&
+            path[3] == 0x6C && path[4] == 0x6C && path[5] == 0x6F &&
+            path[6] == 0x2E && path[7] == 0x74 && path[8] == 0x78 &&
+            path[9] == 0x74 && path[10] == 0) {
+            return 1;
+        }
+    }
+    if (kernel_user_range_is_mapped(address, 13)) {
+        let path: *u8 = address as *u8;
+        if (path[0] == 0x2F && path[1] == 0x6D && path[2] == 0x75 &&
+            path[3] == 0x74 && path[4] == 0x61 && path[5] == 0x62 &&
+            path[6] == 0x6C && path[7] == 0x65 && path[8] == 0x2E &&
+            path[9] == 0x74 && path[10] == 0x78 && path[11] == 0x74 &&
+            path[12] == 0) {
+            return 2;
+        }
+    }
+    return 0;
 }
 
 fn kernel_user_range_is_mapped(address: usize, length: usize) -> bool {
@@ -56,7 +114,7 @@ fn initial_user_load(text: borrow PageOwner[page])
 // 2 = terminate and return the exit status to run_initial_user's EL1 caller.
 // Linux -errno encoding exists only here at the ABI boundary.
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
-                           x2: usize, elr: usize) -> (usize, usize) {
+                           x2: usize, x3: usize) -> (usize, usize) !{unsafe} {
     let exception_class: usize = (esr >> 26) & 0x3F;
     if (exception_class != 0x15) { return (0, 0); }
 
@@ -64,10 +122,36 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let fd: usize = x0;
         let address: usize = x1;
         let length: usize = x2;
-        if (fd != 1 && fd != 2) { return (1, LINUX_EBADF); }
         if (kernel_user_range_is_mapped(address, length) == false) {
             return (1, LINUX_EFAULT);
         }
+        if (fd == 3) {
+            syscall_file_write_calls = syscall_file_write_calls + 1;
+            if (syscall_file_open == false || syscall_file_writable == false) {
+                return (1, LINUX_EBADF);
+            }
+            if (syscall_file_offset != 0 || length == 0 ||
+                length > KERNEL_BLOCK_SIZE) {
+                return (1, LINUX_EINVAL);
+            }
+            let source: *u8 = address as *u8;
+            let buffer: *u8 = syscall_file_buffer as *u8;
+            let mut copy_index: usize = 0;
+            while (copy_index < length) {
+                buffer[copy_index as isize] = source[copy_index as isize];
+                copy_index = copy_index + 1;
+            }
+            let content = unsafe { buffer[0..<length as isize] };
+            match ext2_resize_small_file(
+                    syscall_ext2_mount, syscall_file_inode, content) {
+                Ext2ResizeResult::Invalid => { return (1, LINUX_EINVAL); }
+                Ext2ResizeResult::Resized => {
+                    syscall_file_offset = length;
+                    return (1, length);
+                }
+            }
+        }
+        if (fd != 1 && fd != 2) { return (1, LINUX_EBADF); }
         let mut cursor: *u8 = address as *u8;
         let mut remaining: usize = length;
         while (remaining != 0) {
@@ -76,6 +160,112 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             remaining = remaining - 1;
         }
         return (1, length);
+    }
+
+    if (number == 56) {
+        syscall_open_calls = syscall_open_calls + 1;
+        // openat(dirfd, pathname, flags): only absolute root paths are in
+        // scope, so dirfd is intentionally ignored.
+        if (syscall_ext2_ready == false || syscall_file_open) {
+            return (1, LINUX_EBADF);
+        }
+        let path_kind: usize = kernel_syscall_path_kind(x1);
+        if (path_kind == 0) { return (1, LINUX_ENOENT); }
+        let mut name: []u8 = "hello.txt" as []u8;
+        if (path_kind == 2) { name = "mutable.txt" as []u8; }
+        match ext2_lookup_root(syscall_ext2_mount, name) {
+            Ext2LookupResult::Invalid => { return (1, LINUX_EINVAL); }
+            Ext2LookupResult::NotFound => { return (1, LINUX_ENOENT); }
+            Ext2LookupResult::Found(inode_number) => {
+                let access_mode: usize = x2 & 3;
+                syscall_file_open = true;
+                syscall_file_readable = access_mode != 1;
+                syscall_file_writable = access_mode != 0;
+                syscall_file_inode = inode_number;
+                syscall_file_offset = 0;
+                return (1, 3);
+            }
+        }
+    }
+
+    if (number == 63) {
+        syscall_read_calls = syscall_read_calls + 1;
+        let fd: usize = x0;
+        let address: usize = x1;
+        let requested: usize = x2;
+        if (fd != 3 || syscall_file_open == false ||
+            syscall_file_readable == false) {
+            return (1, LINUX_EBADF);
+        }
+        if (kernel_user_range_is_mapped(address, requested) == false) {
+            return (1, LINUX_EFAULT);
+        }
+        match ext2_read_small_file(
+                syscall_ext2_mount, syscall_file_inode,
+                syscall_file_buffer as []u8) {
+            Ext2ReadResult::Invalid => { return (1, LINUX_EINVAL); }
+            Ext2ReadResult::Read(file_length) => {
+                if (syscall_file_offset >= file_length) { return (1, 0); }
+                let available: usize = file_length - syscall_file_offset;
+                let mut amount: usize = requested;
+                if (amount > available) { amount = available; }
+                let destination: *u8 = address as *u8;
+                let source: *u8 = syscall_file_buffer as *u8;
+                let mut copy_index: usize = 0;
+                while (copy_index < amount) {
+                    destination[copy_index as isize] =
+                        source[(syscall_file_offset + copy_index) as isize];
+                    copy_index = copy_index + 1;
+                }
+                syscall_file_offset = syscall_file_offset + amount;
+                return (1, amount);
+            }
+        }
+    }
+
+    if (number == 57) {
+        syscall_close_calls = syscall_close_calls + 1;
+        if (x0 != 3 || syscall_file_open == false) {
+            return (1, LINUX_EBADF);
+        }
+        syscall_file_open = false;
+        syscall_file_offset = 0;
+        return (1, 0);
+    }
+
+    if (number == 71) {
+        // sendfile(out_fd, in_fd, offset, count). BusyBox cat uses a null
+        // offset, so the shared file position is sufficient for this first
+        // Linux-compatible path. Output remains the existing UART console.
+        let output_fd: usize = x0;
+        let input_fd: usize = x1;
+        let offset_address: usize = x2;
+        let requested: usize = x3;
+        if ((output_fd != 1 && output_fd != 2) || input_fd != 3 ||
+            syscall_file_open == false || syscall_file_readable == false) {
+            return (1, LINUX_EBADF);
+        }
+        if (offset_address != 0) { return (1, LINUX_EINVAL); }
+        match ext2_read_small_file(
+                syscall_ext2_mount, syscall_file_inode,
+                syscall_file_buffer as []u8) {
+            Ext2ReadResult::Invalid => { return (1, LINUX_EINVAL); }
+            Ext2ReadResult::Read(file_length) => {
+                if (syscall_file_offset >= file_length) { return (1, 0); }
+                let available: usize = file_length - syscall_file_offset;
+                let mut amount: usize = requested;
+                if (amount > available) { amount = available; }
+                let source: *u8 = syscall_file_buffer as *u8;
+                let mut copy_index: usize = 0;
+                while (copy_index < amount) {
+                    uart_putc(source[(syscall_file_offset + copy_index) as isize]);
+                    copy_index = copy_index + 1;
+                }
+                syscall_file_offset = syscall_file_offset + amount;
+                syscall_read_calls = syscall_read_calls + 1;
+                return (1, amount);
+            }
+        }
     }
 
     if (number == AARCH64_NR_EXIT || number == AARCH64_NR_EXIT_GROUP) {
