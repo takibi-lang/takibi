@@ -7,6 +7,8 @@ use "kernel/mm/process_image.tkb";
 use "kernel/printk/log.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 
+private let mut ext2_read_fixture: [u8; 32];
+
 fn main() {
     platform_init();
     kernel_boot_log("takibi kernel: EL1\n");
@@ -23,6 +25,30 @@ fn main() {
                 Ext2MountResult::Mounted(mount) => {
                     if (ext2_fixture_geometry_is_expected(mount)) {
                         kernel_boot_log("ext2 mount: block=1024 inodes=128 blocks=1024\n");
+                    }
+                    match ext2_lookup_root(mount, "hello.txt" as []u8) {
+                        Ext2LookupResult::Invalid => {
+                            kernel_boot_log("ext2 lookup: invalid\n");
+                        }
+                        Ext2LookupResult::NotFound => {
+                            kernel_boot_log("ext2 lookup: not found\n");
+                        }
+                        Ext2LookupResult::Found(inode_number) => {
+                            match ext2_read_small_file(
+                                    mount, inode_number,
+                                    ext2_read_fixture as []u8) {
+                                Ext2ReadResult::Invalid => {
+                                    kernel_boot_log("ext2 read: invalid\n");
+                                }
+                                Ext2ReadResult::Read(length) => {
+                                    if (length == 16 &&
+                                        slice_eq(ext2_read_fixture[0..<16],
+                                                 "hello from ext2\n" as []u8)) {
+                                        kernel_boot_log("ext2 read: /hello.txt ok\n");
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -4,6 +4,7 @@ const EXT2_SUPERBLOCK_BLOCK: usize = 1;
 const EXT2_MAGIC: u16 = 0xEF53;
 
 private let mut ext2_metadata_block: [u8; KERNEL_BLOCK_SIZE];
+private let mut ext2_file_block: [u8; KERNEL_BLOCK_SIZE];
 
 struct Ext2Mount {
     private device: MemoryBlockDevice;
@@ -11,9 +12,19 @@ struct Ext2Mount {
     private filesystem_blocks: usize;
     private inodes_per_group: usize;
     private inode_size: usize;
+    private inode_table_block: usize;
 }
 
 must_use variant Ext2MountResult { Invalid; Mounted(Ext2Mount); }
+must_use variant Ext2InodeResult { Invalid; Inode(Ext2Inode); }
+must_use variant Ext2LookupResult { Invalid; NotFound; Found(usize); }
+must_use variant Ext2ReadResult { Invalid; Read(usize); }
+
+struct Ext2Inode {
+    private mode: usize;
+    private size: usize;
+    private direct_block0: usize;
+}
 
 fn ext2_u16(bytes: borrow *u8, offset: usize) -> u16 {
     if (offset > KERNEL_BLOCK_SIZE - 2) { return 0; }
@@ -58,8 +69,18 @@ fn ext2_mount(device: MemoryBlockDevice) -> Ext2MountResult {
         feature_ro_compat != 0) {
         return Ext2MountResult::Invalid;
     }
+    match block_read(device, 2, ext2_metadata_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2MountResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let inode_table_block: usize =
+        ext2_u32(ext2_metadata_block as *u8, 8) as usize;
+    if (inode_table_block == 0 || inode_table_block >= filesystem_blocks) {
+        return Ext2MountResult::Invalid;
+    }
     let mut mount: Ext2Mount = {
-        device, inode_count, filesystem_blocks, inodes_per_group, inode_size
+        device, inode_count, filesystem_blocks, inodes_per_group, inode_size,
+        inode_table_block
     };
     return Ext2MountResult::Mounted(mount);
 }
@@ -67,4 +88,109 @@ fn ext2_mount(device: MemoryBlockDevice) -> Ext2MountResult {
 fn ext2_fixture_geometry_is_expected(mount: Ext2Mount) -> bool {
     return mount.inode_count == 128 && mount.filesystem_blocks == 1024 &&
            mount.inodes_per_group == 128 && mount.inode_size == 128;
+}
+
+fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
+        -> Ext2InodeResult {
+    if (inode_number == 0 || inode_number > mount.inode_count ||
+        inode_number > mount.inodes_per_group) {
+        return Ext2InodeResult::Invalid;
+    }
+    let inode_index: usize = inode_number - 1;
+    let byte_offset: usize = inode_index * mount.inode_size;
+    let table_block: usize = mount.inode_table_block +
+                             byte_offset / KERNEL_BLOCK_SIZE;
+    let offset: usize = byte_offset % KERNEL_BLOCK_SIZE;
+    if (table_block >= mount.filesystem_blocks ||
+        offset > KERNEL_BLOCK_SIZE - 128) {
+        return Ext2InodeResult::Invalid;
+    }
+    match block_read(mount.device, table_block,
+                     ext2_metadata_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2InodeResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let inode_bytes: *u8 =
+        (ext2_metadata_block as *u8) + (offset as isize);
+    let mode: usize = ext2_u16(inode_bytes, 0) as usize;
+    let size: usize = ext2_u32(inode_bytes, 4) as usize;
+    let direct_block0: usize = ext2_u32(inode_bytes, 40) as usize;
+    if (mode == 0 || size > KERNEL_BLOCK_SIZE || direct_block0 == 0 ||
+        direct_block0 >= mount.filesystem_blocks) {
+        return Ext2InodeResult::Invalid;
+    }
+    let mut inode: Ext2Inode = { mode, size, direct_block0 };
+    return Ext2InodeResult::Inode(inode);
+}
+
+fn ext2_name_matches(entry: borrow *u8, entry_length: usize,
+                     name: []u8) -> bool !{unsafe} {
+    if (entry_length != name.len || entry_length > 255) { return false; }
+    let entry_name = unsafe { entry[0..<entry_length as isize] };
+    return slice_eq(entry_name, name);
+}
+
+fn ext2_lookup_root(mount: Ext2Mount, name: []u8)
+        -> Ext2LookupResult !{unsafe} {
+    if (name.len == 0 || name.len > 255) {
+        return Ext2LookupResult::Invalid;
+    }
+    match ext2_read_inode(mount, 2) {
+        Ext2InodeResult::Invalid => { return Ext2LookupResult::Invalid; }
+        Ext2InodeResult::Inode(root) => {
+            if ((root.mode & 0xF000) != 0x4000 || root.size < 8) {
+                return Ext2LookupResult::Invalid;
+            }
+            match block_read(mount.device, root.direct_block0,
+                             ext2_file_block as []u8) {
+                BlockIoResult::Invalid => { return Ext2LookupResult::Invalid; }
+                BlockIoResult::Ok => { }
+            }
+            let base: *u8 = ext2_file_block as *u8;
+            let mut cursor: usize = 0;
+            while (cursor < root.size) {
+                if (cursor > root.size - 8) {
+                    return Ext2LookupResult::Invalid;
+                }
+                let entry: *u8 = base + (cursor as isize);
+                let inode_number: usize = ext2_u32(entry, 0) as usize;
+                let record_length: usize = ext2_u16(entry, 4) as usize;
+                let name_length: usize = entry[6] as usize;
+                if (record_length < 8 || record_length > root.size - cursor ||
+                    name_length > record_length - 8) {
+                    return Ext2LookupResult::Invalid;
+                }
+                if (inode_number != 0 &&
+                    ext2_name_matches(entry + 8, name_length, name)) {
+                    return Ext2LookupResult::Found(inode_number);
+                }
+                cursor = cursor + record_length;
+            }
+        }
+    }
+    return Ext2LookupResult::NotFound;
+}
+
+fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
+                        destination: []u8)
+        -> Ext2ReadResult !{unsafe} {
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return Ext2ReadResult::Invalid; }
+        Ext2InodeResult::Inode(inode) => {
+            if ((inode.mode & 0xF000) != 0x8000 ||
+                inode.size > destination.len) {
+                return Ext2ReadResult::Invalid;
+            }
+            match block_read(mount.device, inode.direct_block0,
+                             ext2_file_block as []u8) {
+                BlockIoResult::Invalid => { return Ext2ReadResult::Invalid; }
+                BlockIoResult::Ok => { }
+            }
+            let source_pointer: *u8 = ext2_file_block as *u8;
+            let source = unsafe { source_pointer[0..<inode.size as isize] };
+            let target = unsafe { destination[0..<inode.size] };
+            slice_copy(target, source);
+            return Ext2ReadResult::Read(inode.size);
+        }
+    }
 }
