@@ -45,6 +45,30 @@ initial_user_payload:
     svc     #0
     cbnz    x0, .Luser_fail
 
+    /* socket/bind/listen/close one IPv4 stream endpoint. */
+    mov     x0, #2
+    mov     x1, #1
+    mov     x2, #0
+    mov     x8, #198
+    svc     #0
+    cmp     x0, #4
+    b.ne    .Luser_fail
+    mov     x0, #4
+    adr     x1, .Lsocket_address
+    mov     x2, #16
+    mov     x8, #200
+    svc     #0
+    cbnz    x0, .Luser_fail
+    mov     x0, #4
+    mov     x1, #1
+    mov     x8, #201
+    svc     #0
+    cbnz    x0, .Luser_fail
+    mov     x0, #4
+    mov     x8, #57
+    svc     #0
+    cbnz    x0, .Luser_fail
+
     adr     x1, .Luser_message
     mov     x2, #21
     mov     x0, #1
@@ -63,6 +87,12 @@ initial_user_payload:
     .asciz  "/mutable.txt"
 .Lmutable_content:
     .ascii  "el0-ok\n"
+    .balign 2
+.Lsocket_address:
+    .hword  2
+    .byte   0x1f, 0x90
+    .word   0
+    .quad   0
 initial_user_payload_end:
 
     .section .text, "ax"

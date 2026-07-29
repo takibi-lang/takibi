@@ -12,6 +12,8 @@ const LINUX_ENOSYS: usize = 0xFFFFFFFFFFFFFFDA;
 const LINUX_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
 const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
 
+enum KernelSocketState: u8 { Closed; Created; Bound; Listening; }
+
 private let mut syscall_ext2_mount: Ext2Mount;
 private let mut syscall_ext2_ready: bool;
 private let mut syscall_file_open: bool;
@@ -24,6 +26,13 @@ private let mut syscall_open_calls: usize;
 private let mut syscall_read_calls: usize;
 private let mut syscall_file_write_calls: usize;
 private let mut syscall_close_calls: usize;
+private let mut syscall_socket_state: KernelSocketState =
+    KernelSocketState::Closed;
+private let mut syscall_socket_port: u16;
+private let mut syscall_socket_calls: usize;
+private let mut syscall_bind_calls: usize;
+private let mut syscall_listen_calls: usize;
+private let mut syscall_socket_close_calls: usize;
 
 private let mut syscall_heap_start: usize;
 private let mut syscall_heap_limit: usize;
@@ -33,6 +42,12 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_heap_start = heap_start;
     syscall_heap_limit = heap_limit;
     syscall_heap_break = heap_start;
+    syscall_socket_state = KernelSocketState::Closed;
+    syscall_socket_port = 0;
+    syscall_socket_calls = 0;
+    syscall_bind_calls = 0;
+    syscall_listen_calls = 0;
+    syscall_socket_close_calls = 0;
 }
 
 fn kernel_syscall_ext2_configure(mount: Ext2Mount) {
@@ -50,6 +65,13 @@ fn kernel_syscall_file_evidence()
         -> (usize, usize, usize, usize) {
     return (syscall_open_calls, syscall_read_calls,
             syscall_file_write_calls, syscall_close_calls);
+}
+
+fn kernel_syscall_socket_evidence() -> bool {
+    return syscall_socket_calls == 1 && syscall_bind_calls == 1 &&
+           syscall_listen_calls == 1 && syscall_socket_close_calls == 1 &&
+           syscall_socket_state == KernelSocketState::Closed &&
+           syscall_socket_port == 8080;
 }
 
 // Returns 1 for /hello.txt, 2 for /mutable.txt, and 0 for unsupported or
@@ -224,12 +246,64 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     }
 
     if (number == 57) {
+        if (x0 == 4) {
+            if (syscall_socket_state == KernelSocketState::Closed) {
+                return (1, LINUX_EBADF);
+            }
+            syscall_socket_state = KernelSocketState::Closed;
+            syscall_socket_close_calls = syscall_socket_close_calls + 1;
+            return (1, 0);
+        }
         syscall_close_calls = syscall_close_calls + 1;
         if (x0 != 3 || syscall_file_open == false) {
             return (1, LINUX_EBADF);
         }
         syscall_file_open = false;
         syscall_file_offset = 0;
+        return (1, 0);
+    }
+
+    if (number == 198) {
+        // socket(AF_INET, SOCK_STREAM, 0). Flags in the high type bits are
+        // accepted; only the underlying stream type is relevant here.
+        syscall_socket_calls = syscall_socket_calls + 1;
+        if (x0 != 2 || (x1 & 0xF) != 1 || x2 != 0 ||
+            syscall_socket_state != KernelSocketState::Closed) {
+            return (1, LINUX_EINVAL);
+        }
+        syscall_socket_state = KernelSocketState::Created;
+        syscall_socket_port = 0;
+        return (1, 4);
+    }
+
+    if (number == 200) {
+        syscall_bind_calls = syscall_bind_calls + 1;
+        if (x0 != 4 || syscall_socket_state != KernelSocketState::Created ||
+            x2 < 16) {
+            return (1, LINUX_EINVAL);
+        }
+        if (kernel_user_range_is_mapped(x1, 16) == false) {
+            return (1, LINUX_EFAULT);
+        }
+        let address: *u8 = x1 as *u8;
+        if (address[0] != 2 || address[1] != 0 ||
+            address[4] != 0 || address[5] != 0 ||
+            address[6] != 0 || address[7] != 0) {
+            return (1, LINUX_EINVAL);
+        }
+        syscall_socket_port =
+            (((address[2] as u16) << 8) | (address[3] as u16));
+        if (syscall_socket_port == 0) { return (1, LINUX_EINVAL); }
+        syscall_socket_state = KernelSocketState::Bound;
+        return (1, 0);
+    }
+
+    if (number == 201) {
+        syscall_listen_calls = syscall_listen_calls + 1;
+        if (x0 != 4 || syscall_socket_state != KernelSocketState::Bound) {
+            return (1, LINUX_EINVAL);
+        }
+        syscall_socket_state = KernelSocketState::Listening;
         return (1, 0);
     }
 

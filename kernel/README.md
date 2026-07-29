@@ -39,6 +39,13 @@ single-connection TCP state machine on port 7, covering checksum rejection,
 SYN options, handshake, data echo, FIN close, and reconnect. Linux socket
 boundaries are a subsequent milestone.
 
+The first Linux socket boundary is also active at EL0. The syscall fixture
+creates one `AF_INET`/`SOCK_STREAM` fd, binds an explicitly validated
+`sockaddr_in` to port 8080, transitions it to listening state, and closes it
+through AArch64 syscalls 198/200/201/57. This milestone proves socket
+control-plane ABI and lifecycle only; `accept` and transfer of the GEM RX
+capability into a userspace-owned connected socket are not claimed yet.
+
 The RPi5 runner captures UART once per kernel boot, then projects that one
 transcript through every `kernel/tests/rpi5/views/*.filter`. Each projection
 is compared exactly with the same-named `.expected` file. This lets boot,

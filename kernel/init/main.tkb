@@ -511,6 +511,9 @@ fn main() {
                             file_write_calls >= 1 && close_calls >= 2) {
                             kernel_boot_log("linux file syscalls: open read write close ok\n");
                         }
+                        if (kernel_syscall_socket_evidence()) {
+                            kernel_boot_log("linux socket syscalls: socket bind listen close ok port=8080\n");
+                        }
                         kernel_boot_log("syscall exit: 0\n");
                     }
                     let (data_space2, stack2) =

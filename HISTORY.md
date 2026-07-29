@@ -15,6 +15,22 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: First Linux Socket Control-Plane Boundary
+
+The standalone kernel now handles Linux AArch64 `socket(198)`, `bind(200)`,
+`listen(201)`, and `close(57)` for one IPv4 stream fd. A private enum enforces
+the Closed -> Created -> Bound -> Listening lifecycle. `bind` first proves the
+complete 16-byte userspace range is mapped, then decodes native-endian
+AF_INET, network-endian port, and the wildcard address; the fixture binds
+port 8080. Linux `-errno` values remain confined to the ABI dispatcher.
+
+The small EL0 fixture executes the actual four-syscall sequence and a new
+independent `linux_socket.expected` view checks its cumulative evidence. Real
+RPi5 `kernelcheck` passed 12 UART views plus the ARP, ICMP, and full TCP wire
+checks in one boot. This is deliberately a socket control-plane milestone:
+`accept` and connected I/O still require transferring the GEM RX capability
+into the syscall-owned socket lifetime.
+
 ### 2026-07-29: Standalone Kernel Completes a TCP Echo Lifecycle
 
 The initialized GEM receive capability now continues from ARP and ICMP into
