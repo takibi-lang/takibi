@@ -1,6 +1,6 @@
-// Single-connection TCP echo state machine for the standalone kernel.
+// Single-connection TCP state machine for the standalone kernel.
 // It validates IPv4/TCP checksums and connection identity, implements
-// LISTEN -> SYN_RCVD -> ESTABLISHED -> LAST_ACK, echoes one-segment data,
+// LISTEN -> SYN_RCVD -> ESTABLISHED -> LAST_ACK, reconstructs in-order data,
 // and returns to LISTEN after close. Data-bearing input currently requires
 // a 20-byte TCP header; SYN options are accepted and discarded in replies.
 // This concrete bound removes the relational payload slice that the broader
@@ -55,6 +55,7 @@ let mut tcp_completed_handshakes: usize = 0;
 let mut tcp_completed_echoes: usize = 0;
 let mut tcp_completed_closes: usize = 0;
 let mut tcp_received_length: usize = 0;
+let mut tcp_receive_stream_length: usize = 0;
 
 must_use variant KernelTcpResult {
     TimedOut(NetRxCanAcquire);
@@ -129,7 +130,9 @@ fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
 // admits a 20-byte incoming TCP header and places the response at the fixed
 // payload offset before calling this helper.
 // Only called from TCP_ESTABLISHED after the caller has already validated
-// the request and confirmed seq == conn_rcv_nxt. Returns 1 on success, 0
+// the request. received_len is nonzero for the legacy echo path, which has
+// not advanced conn_rcv_nxt yet; the Linux stream path advances on receive
+// and passes zero. Returns true on success.
 // if data_len somehow exceeded TCP_MAX_PAYLOAD (never actually happens
 // given the caller's own tcp_len bound, but see the explicit check below
 // for why this needs to be enforced, not assumed, to construct tcp_seg
@@ -209,6 +212,35 @@ fn build_fin_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
     write_u16be(tcp[TCP_URGENT..<20], 0);
 
+    fix_tcp_checksum(ip, tcp);
+}
+
+// Rewrites a received data frame into an ACK with no payload.  This releases
+// the sole GEM RX capability between non-final stream segments while keeping
+// the already-copied bytes in the caller's reconstruction buffer.
+fn build_receive_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
+    slice_copy(eth[0..<6], eth[6..<12]);
+    slice_copy(eth[6..<12], our_mac as []u8);
+
+    let ip = eth[14..<34];
+    let tcp = eth[34..<54];
+    slice_copy(ip[IP_DST..<20], ip[IP_SRC..<IP_DST]);
+    slice_copy(ip[IP_SRC..<IP_DST], OUR_IP as []u8);
+    ip[IP_TTL] = 64 as u8;
+    write_u16be(ip[IP_TOTAL_LEN..<4], ihl + 20);
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
+    write_u16be(ip[IP_CHECKSUM..<IP_SRC],
+                inet_checksum(ip[0..<ihl as usize]));
+
+    let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], conn_local_port as i32);
+    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
+    write_u32be(tcp[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
+    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+    tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
+    tcp[TCP_FLAGS] = TCP_FLAG_ACK;
+    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
+    write_u16be(tcp[TCP_URGENT..<20], 0);
     fix_tcp_checksum(ip, tcp);
 }
 
@@ -432,6 +464,7 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
     let mut ready = ready_in;
     conn_state = ConnState::Listen;
     conn_local_port = port;
+    tcp_receive_stream_length = 0;
     let start: i64 = read_cntpct();
     let deadline_ticks: i64 = read_cntfrq() * 30;
     while ((read_cntpct() - start) < deadline_ticks) {
@@ -547,6 +580,7 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
                            destination: borrow [u8; 1460..])
         -> KernelTcpReceiveResult !{may_block} {
     let mut ready = ready_in;
+    let mut stream_length: usize = tcp_receive_stream_length;
     let start: i64 = read_cntpct();
     let deadline_ticks: i64 = read_cntfrq() * 30;
     while ((read_cntpct() - start) < deadline_ticks) {
@@ -556,6 +590,7 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
             NetRxAcquire::Acquired(acquired) => {
                 let len: i32 = net_rx_len(acquired);
                 let mut payload_length: usize = 0;
+                let mut final_segment: bool = false;
                 if (len >= 55 && len <= 1514) {
                     let len_n: i32 = len;
                     let frame = net_rx_frame(acquired);
@@ -604,10 +639,27 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
                                         data_length <= TCP_MAX_PAYLOAD) {
                                         let data_length_index: usize =
                                             data_length as usize;
-                                        slice_copy(
-                                            destination[0..<data_length_index],
-                                            frame[54..<54 + data_length_index]);
-                                        payload_length = data_length_index;
+                                        if (stream_length <= 1460 -
+                                                data_length_index) {
+                                            let next_length: usize =
+                                                stream_length + data_length_index;
+                                            let mut copy_index: usize = 0;
+                                            while (copy_index < data_length_index) {
+                                                let destination_index: usize =
+                                                    stream_length + copy_index;
+                                                let source_index: usize =
+                                                    54 as usize + copy_index;
+                                                if (destination_index < 1460 &&
+                                                    source_index < 1514) {
+                                                    destination[destination_index] =
+                                                        frame[source_index];
+                                                }
+                                                copy_index = copy_index + 1;
+                                            }
+                                            payload_length = data_length_index;
+                                            final_segment =
+                                                (tcp[TCP_FLAGS] & TCP_FLAG_PSH) != 0;
+                                        }
                                     }
                                 }
                             }
@@ -615,10 +667,20 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
                     }
                 }
                 if (payload_length != 0) {
-                    tcp_received_length = payload_length;
-                    return KernelTcpReceiveResult::Received(acquired);
+                    stream_length = stream_length + payload_length;
+                    tcp_receive_stream_length = stream_length;
+                    conn_rcv_nxt = conn_rcv_nxt + (payload_length as u32);
+                    if (final_segment) {
+                        tcp_received_length = stream_length;
+                        tcp_receive_stream_length = 0;
+                        return KernelTcpReceiveResult::Received(acquired);
+                    }
+                    build_receive_ack(net_rx_frame(acquired), 20);
+                    ready = net_rx_finish(
+                        acquired, NetRxDisposal::Reply(54));
+                } else {
+                    ready = net_rx_finish(acquired, NetRxDisposal::Release);
                 }
-                ready = net_rx_finish(acquired, NetRxDisposal::Release);
             }
         }
     }
@@ -635,12 +697,10 @@ fn kernel_tcp_send_received(frame: sink NetRxCpuOwned[descriptor],
     if (payload_length >= 1 && payload_length <= 1460 &&
         received_length >= 1 && received_length <= 1460) {
         let length: usize = payload_length;
-        let consumed: usize = received_length;
         let frame_bytes = net_rx_frame(frame);
         slice_copy(frame_bytes[54..<54 + length], source[0..<length]);
         if (build_data_reply(frame_bytes, 20, frame_bytes[34..<54 + length],
-                            length as u16, consumed as u16)) {
-            conn_rcv_nxt = conn_rcv_nxt + (consumed as u32);
+                            length as u16, 0)) {
             conn_snd_nxt = conn_snd_nxt + (length as u32);
             return KernelTcpSendResult::Sent(net_rx_finish(
                 frame, NetRxDisposal::Reply(54 + length as i32)));
