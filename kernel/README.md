@@ -129,6 +129,16 @@ RPi5 boot validation checks the exact names and the known AArch64 PIE entry,
 load-segment count, and extent of both HTTPd inputs before the existing static
 BusyBox process is started.
 
+Both dynamic HTTPd inputs also pass the real owned process-image mapper on
+RPi5. In independent mapping probes, every `PT_LOAD` page receives RX or
+RW+XN permissions, file-backed bytes are copied, BSS remains zero, the fixed
+heap and stack retain page owners, and teardown leaves the complete 2 MiB EL0
+window unmapped. A dedicated `httpd_loader.expected` view records 157 pages
+for the HTTPd PIE and 296 for musl. Independent probes intentionally precede
+the combined layout: the remaining loader work is assigning non-overlapping
+load biases and constructing interpreter-aware auxv, not debugging either
+image's ordinary segment mapping at the same time.
+
 The first ext2 slice is also active on RPi5. The build creates a checked 1 MiB
 RAM fixture with `mke2fs`, populates it with `e2mkdir`/`e2cp`, and embeds it as
 a writable image. The filesystem core reaches it only through the 1 KiB block

@@ -15,6 +15,22 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Map and Reclaim Both Dynamic HTTPd Images
+
+The pinned `busybox-httpd` PIE and `ld-musl-aarch64.so.1` now each traverse
+the real process-image mapper on RPi5 before the existing static BusyBox
+fixture runs. These independent probes exercise every `PT_LOAD`, RX versus
+RW+XN PTE selection, file-byte copies, zero-filled BSS, heap/stack ownership,
+and complete teardown. HTTPd owns 157 pages and musl owns 296; after each
+unmap, all 512 entries in the guarded EL0 window must be clear.
+
+A new `httpd_loader.expected` view isolates these loader invariants from the
+static distribution-image view. Real RPi5 `kernelcheck` passed all 13 UART
+views plus ARP, ICMP, kernel TCP lifecycle, and userspace-generated HTTP
+response checks in one boot. The next step can now focus narrowly on a
+non-overlapping combined load-bias layout and interpreter-aware auxiliary
+vector rather than mixing those concerns with first-time segment mapping.
+
 ### 2026-07-29: Package and Validate the HTTPd PIE and musl Interpreter
 
 The reproducible kernel initramfs now adds `busybox-httpd`, extracted from the

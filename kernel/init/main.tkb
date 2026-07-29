@@ -16,6 +16,45 @@ private let mut ext2_symlink_fixture: [u8; 64];
 must_use variant UsbExt2WriteCheckResult { Invalid; Verified; }
 must_use variant UsbExt2ResizeCheckResult { Invalid; Verified; }
 must_use variant UsbExt2CreateCheckResult { Invalid; Verified; }
+must_use variant HttpdImageMapCheckResult { Invalid; Verified; }
+
+fn httpd_image_mapping_check(httpd_plan: DistroElfLoadPlan,
+                             musl_plan: DistroElfLoadPlan)
+        -> HttpdImageMapCheckResult {
+    match process_image_map(httpd_plan) {
+        ProcessImageMapResult::InvalidImage => {
+            return HttpdImageMapCheckResult::Invalid;
+        }
+        ProcessImageMapResult::OutOfMemory => {
+            return HttpdImageMapCheckResult::Invalid;
+        }
+        ProcessImageMapResult::Mapped(httpd_pages) => {
+            let httpd_count: usize = process_image_page_count(httpd_pages);
+            process_image_unmap(httpd_pages);
+            if (httpd_count != 157 || process_image_window_is_clear() == false) {
+                return HttpdImageMapCheckResult::Invalid;
+            }
+            kernel_boot_log("httpd map: pie pages=157 clean\n");
+        }
+    }
+    match process_image_map(musl_plan) {
+        ProcessImageMapResult::InvalidImage => {
+            return HttpdImageMapCheckResult::Invalid;
+        }
+        ProcessImageMapResult::OutOfMemory => {
+            return HttpdImageMapCheckResult::Invalid;
+        }
+        ProcessImageMapResult::Mapped(musl_pages) => {
+            let musl_count: usize = process_image_page_count(musl_pages);
+            process_image_unmap(musl_pages);
+            if (musl_count != 296 || process_image_window_is_clear() == false) {
+                return HttpdImageMapCheckResult::Invalid;
+            }
+            kernel_boot_log("httpd map: musl pages=296 clean\n");
+        }
+    }
+    return HttpdImageMapCheckResult::Verified;
+}
 
 fn usb_ext2_equal_size_write_check(mount: Ext2Mount)
         -> UsbExt2WriteCheckResult {
@@ -454,6 +493,13 @@ fn main() {
                                         musl_plan.load_segments == 2 &&
                                         musl_plan.extent == 0xC2F20) {
                                         kernel_boot_log("httpd images: busybox-extras+musl valid\n");
+                                        match httpd_image_mapping_check(
+                                                httpd_plan, musl_plan) {
+                                            HttpdImageMapCheckResult::Invalid => {
+                                                kernel_boot_log("httpd map: invalid\n");
+                                            }
+                                            HttpdImageMapCheckResult::Verified => { }
+                                        }
                                     }
                                 }
                             }
