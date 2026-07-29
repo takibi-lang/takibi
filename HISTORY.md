@@ -15,6 +15,24 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: RX Capability Survives into Nonblocking `accept4`
+
+`NetRxCanAcquire` is now linear rather than affine. After the kernel's ARP,
+ICMP, and TCP integration sequence, its sole token is moved into a private
+stable owner slot guarded by an address-indexed linear guard. Timeout paths
+must explicitly consume the token through `net_shutdown`; it can no longer
+silently disappear. The stable install path also returns an incoming token
+if an invariant violation finds the slot occupied.
+
+Linux AArch64 `accept4(242)` now validates a listening fd and nonblocking
+flags, takes the RX token from durable storage, restores it, and returns
+`-EAGAIN` because this milestone deliberately consumes no SYN yet. The EL0
+fixture checks that ABI result, and socket evidence separately requires one
+successful capability round trip so an empty slot cannot false-pass. Real
+RPi5 `kernelcheck` passed all 12 UART views and all ARP/ICMP/TCP wire checks
+in one boot. The next step is processing a handshake while the token is held
+and returning connected fd 5.
+
 ### 2026-07-29: First Linux Socket Control-Plane Boundary
 
 The standalone kernel now handles Linux AArch64 `socket(198)`, `bind(200)`,

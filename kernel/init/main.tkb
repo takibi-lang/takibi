@@ -8,6 +8,7 @@ use "kernel/printk/log.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/platform/rpi5/usb_xhci.tkb";
 use "kernel/net/tcp.tkb";
+use "kernel/net/socket_capability.tkb";
 
 private let mut ext2_read_fixture: [u8; 32];
 private let mut ext2_symlink_fixture: [u8; 64];
@@ -168,21 +169,32 @@ fn main() {
             match kernel_arp_reply_once(link_ready) {
                 KernelArpResult::TimedOut(arp_ready) => {
                     kernel_boot_log("rp1 gem: arp timeout\n");
+                    net_shutdown(arp_ready);
                 }
                 KernelArpResult::Replied(arp_ready) => {
                     kernel_boot_log("rp1 gem: arp reply ok ip=192.168.20.2\n");
                     match kernel_icmp_reply_once(arp_ready) {
                         KernelIcmpResult::TimedOut(icmp_ready) => {
                             kernel_boot_log("rp1 gem: icmp timeout\n");
+                            net_shutdown(icmp_ready);
                         }
                         KernelIcmpResult::Replied(icmp_ready) => {
                             kernel_boot_log("rp1 gem: icmp echo reply ok ip=192.168.20.2\n");
                             match kernel_tcp_echo_check(icmp_ready) {
                                 KernelTcpResult::TimedOut(tcp_ready) => {
                                     kernel_boot_log("rp1 gem: tcp timeout\n");
+                                    net_shutdown(tcp_ready);
                                 }
                                 KernelTcpResult::Verified(tcp_ready) => {
                                     kernel_boot_log("rp1 gem: tcp handshake echo close reconnect ok\n");
+                                    match network_capability_install(tcp_ready) {
+                                        NetworkCapabilityInstallResult::Installed => {
+                                            kernel_boot_log("rp1 gem: rx capability stored for sockets\n");
+                                        }
+                                        NetworkCapabilityInstallResult::AlreadyInstalled(incoming) => {
+                                            net_shutdown(incoming);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -512,7 +524,7 @@ fn main() {
                             kernel_boot_log("linux file syscalls: open read write close ok\n");
                         }
                         if (kernel_syscall_socket_evidence()) {
-                            kernel_boot_log("linux socket syscalls: socket bind listen close ok port=8080\n");
+                            kernel_boot_log("linux socket syscalls: socket bind listen accept-eagain close ok port=8080\n");
                         }
                         kernel_boot_log("syscall exit: 0\n");
                     }

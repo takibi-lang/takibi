@@ -1,0 +1,96 @@
+use "kernel/drivers/net/rp1_gem.tkb";
+
+variant NetworkCapabilityValue {
+    Empty;
+    Ready(NetRxCanAcquire);
+}
+
+struct NetworkCapabilityStore {
+    private mutex: i32;
+    private value: NetworkCapabilityValue;
+}
+
+private let mut network_capability_store: NetworkCapabilityStore;
+private linear view NetworkCapabilityGuard[lock: addr];
+
+must_use variant NetworkCapabilityInstallResult {
+    Installed;
+    AlreadyInstalled(NetRxCanAcquire);
+}
+
+must_use variant NetworkCapabilityTakeResult {
+    Empty;
+    Ready(NetRxCanAcquire);
+}
+
+must_use variant NetworkCapabilityPutResult { Stored; Conflict; }
+
+fn network_capability_lock(lock: *i32 @ address)
+        -> NetworkCapabilityGuard[address] {
+    return view NetworkCapabilityGuard[address];
+}
+
+fn network_capability_unlock(guard: sink NetworkCapabilityGuard[address],
+                             lock: *i32 @ address) {}
+
+fn network_capability_install(ready: sink NetRxCanAcquire)
+        -> NetworkCapabilityInstallResult {
+    let guard = network_capability_lock(&network_capability_store.mutex);
+    let previous: NetworkCapabilityValue = stable_replace(
+        guard, &network_capability_store.mutex,
+        network_capability_store.value,
+        NetworkCapabilityValue::Ready(ready));
+    match previous {
+        NetworkCapabilityValue::Empty => {
+            network_capability_unlock(
+                guard, &network_capability_store.mutex);
+            return NetworkCapabilityInstallResult::Installed;
+        }
+        NetworkCapabilityValue::Ready(stale) => {
+            let displaced: NetworkCapabilityValue = stable_replace(
+                guard, &network_capability_store.mutex,
+                network_capability_store.value,
+                NetworkCapabilityValue::Ready(stale));
+            network_capability_unlock(
+                guard, &network_capability_store.mutex);
+            match displaced {
+                NetworkCapabilityValue::Empty => {
+                    return NetworkCapabilityInstallResult::Installed;
+                }
+                NetworkCapabilityValue::Ready(incoming) => {
+                    return NetworkCapabilityInstallResult::AlreadyInstalled(
+                        incoming);
+                }
+            }
+        }
+    }
+}
+
+fn network_capability_take() -> NetworkCapabilityTakeResult {
+    let guard = network_capability_lock(&network_capability_store.mutex);
+    let previous: NetworkCapabilityValue = stable_replace(
+        guard, &network_capability_store.mutex,
+        network_capability_store.value, NetworkCapabilityValue::Empty);
+    network_capability_unlock(guard, &network_capability_store.mutex);
+    match previous {
+        NetworkCapabilityValue::Empty => {
+            return NetworkCapabilityTakeResult::Empty;
+        }
+        NetworkCapabilityValue::Ready(ready) => {
+            return NetworkCapabilityTakeResult::Ready(ready);
+        }
+    }
+}
+
+fn network_capability_put(ready: sink NetRxCanAcquire)
+        -> NetworkCapabilityPutResult {
+    match network_capability_install(ready) {
+        NetworkCapabilityInstallResult::Installed => {
+            return NetworkCapabilityPutResult::Stored;
+        }
+        NetworkCapabilityInstallResult::AlreadyInstalled(incoming) => {
+            net_shutdown(incoming);
+            return NetworkCapabilityPutResult::Conflict;
+        }
+    }
+}

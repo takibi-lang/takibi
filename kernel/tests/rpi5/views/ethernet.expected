@@ -2,3 +2,4 @@ rp1 gem: link ready mac=02:00:20:00:00:02
 rp1 gem: arp reply ok ip=192.168.20.2
 rp1 gem: icmp echo reply ok ip=192.168.20.2
 rp1 gem: tcp handshake echo close reconnect ok
+rp1 gem: rx capability stored for sockets

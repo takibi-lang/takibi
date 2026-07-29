@@ -2,6 +2,7 @@ use "kernel/mm/page.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
 use "kernel/fs/ext2/ext2.tkb";
+use "kernel/net/socket_capability.tkb";
 
 const AARCH64_NR_WRITE: usize = 64;
 const AARCH64_NR_EXIT: usize = 93;
@@ -11,6 +12,7 @@ const LINUX_EFAULT: usize = 0xFFFFFFFFFFFFFFF2;
 const LINUX_ENOSYS: usize = 0xFFFFFFFFFFFFFFDA;
 const LINUX_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
 const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
+const LINUX_EAGAIN: usize = 0xFFFFFFFFFFFFFFF5;
 
 enum KernelSocketState: u8 { Closed; Created; Bound; Listening; }
 
@@ -33,6 +35,8 @@ private let mut syscall_socket_calls: usize;
 private let mut syscall_bind_calls: usize;
 private let mut syscall_listen_calls: usize;
 private let mut syscall_socket_close_calls: usize;
+private let mut syscall_accept_calls: usize;
+private let mut syscall_accept_capability_roundtrips: usize;
 
 private let mut syscall_heap_start: usize;
 private let mut syscall_heap_limit: usize;
@@ -48,6 +52,8 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_bind_calls = 0;
     syscall_listen_calls = 0;
     syscall_socket_close_calls = 0;
+    syscall_accept_calls = 0;
+    syscall_accept_capability_roundtrips = 0;
 }
 
 fn kernel_syscall_ext2_configure(mount: Ext2Mount) {
@@ -69,7 +75,9 @@ fn kernel_syscall_file_evidence()
 
 fn kernel_syscall_socket_evidence() -> bool {
     return syscall_socket_calls == 1 && syscall_bind_calls == 1 &&
-           syscall_listen_calls == 1 && syscall_socket_close_calls == 1 &&
+           syscall_listen_calls == 1 && syscall_accept_calls == 1 &&
+           syscall_accept_capability_roundtrips == 1 &&
+           syscall_socket_close_calls == 1 &&
            syscall_socket_state == KernelSocketState::Closed &&
            syscall_socket_port == 8080;
 }
@@ -305,6 +313,33 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         }
         syscall_socket_state = KernelSocketState::Listening;
         return (1, 0);
+    }
+
+    if (number == 242) {
+        // accept4(): this first nonblocking boundary proves that the RX
+        // capability can be taken from durable storage and returned intact.
+        syscall_accept_calls = syscall_accept_calls + 1;
+        if (x0 != 4 || syscall_socket_state != KernelSocketState::Listening ||
+            (x3 & 0x800) == 0) {
+            return (1, LINUX_EINVAL);
+        }
+        match network_capability_take() {
+            NetworkCapabilityTakeResult::Empty => {
+                return (1, LINUX_EAGAIN);
+            }
+            NetworkCapabilityTakeResult::Ready(ready) => {
+                match network_capability_put(ready) {
+                    NetworkCapabilityPutResult::Conflict => {
+                        return (1, LINUX_EINVAL);
+                    }
+                    NetworkCapabilityPutResult::Stored => {
+                        syscall_accept_capability_roundtrips =
+                            syscall_accept_capability_roundtrips + 1;
+                        return (1, LINUX_EAGAIN);
+                    }
+                }
+            }
+        }
     }
 
     if (number == 71) {

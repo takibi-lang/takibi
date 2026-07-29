@@ -43,8 +43,12 @@ The first Linux socket boundary is also active at EL0. The syscall fixture
 creates one `AF_INET`/`SOCK_STREAM` fd, binds an explicitly validated
 `sockaddr_in` to port 8080, transitions it to listening state, and closes it
 through AArch64 syscalls 198/200/201/57. This milestone proves socket
-control-plane ABI and lifecycle only; `accept` and transfer of the GEM RX
-capability into a userspace-owned connected socket are not claimed yet.
+control-plane ABI and lifecycle only; a connected `accept` result and
+userspace-owned connected socket are not claimed yet.
+The RX readiness token is now linear and survives the intervening USB/ext2
+and BusyBox work in a guarded stable owner slot. Nonblocking `accept4(242)`
+takes and restores that token before returning `-EAGAIN` when no connection
+has been consumed. A successful handshake and connected fd remain next.
 
 The RPi5 runner captures UART once per kernel boot, then projects that one
 transcript through every `kernel/tests/rpi5/views/*.filter`. Each projection

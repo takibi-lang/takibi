@@ -17,7 +17,7 @@ private linear struct NetRxCpuOwned[desc: usize] {
 private linear struct NetTxInFlight[desc: usize] {
     private slot: {0..<2 as usize};
 }
-affine view NetRxCanAcquire;
+linear view NetRxCanAcquire;
 
 must_use variant NetInitResult { Failed; Ready(NetRxCanAcquire); }
 variant NetRxAcquire {
@@ -276,3 +276,5 @@ fn net_rx_finish(frame: sink NetRxCpuOwned[desc], disposal: NetRxDisposal)
 }
 
 fn net_read_mac(mac_out: *u8) { bytes_copy(mac_out, OUR_MAC as *u8, 6); }
+
+fn net_shutdown(ready: sink NetRxCanAcquire) {}
