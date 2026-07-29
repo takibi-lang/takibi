@@ -161,6 +161,14 @@ fn main() {
                                                     kernel_boot_log("usb ext2: block+inode bitmap counts ok\n");
                                                 }
                                             }
+                                            match ext2_owner_roundtrip_check(usb_mount) {
+                                                Ext2BitmapProbeResult::Invalid => {
+                                                    kernel_boot_log("usb ext2: owner allocation failed\n");
+                                                }
+                                                Ext2BitmapProbeResult::Verified => {
+                                                    kernel_boot_log("usb ext2: block+inode owners ok\n");
+                                                }
+                                            }
                                             match ext2_lookup_root(
                                                     usb_mount,
                                                     "hello.txt" as []u8) {
