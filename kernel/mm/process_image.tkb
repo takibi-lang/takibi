@@ -6,9 +6,22 @@ private let mut image_page_indices: [usize; BOOT_PAGE_COUNT];
 private let mut image_l3_indices: [usize; BOOT_PAGE_COUNT];
 private let mut process_image_zero_page: [u8; PAGE_SIZE];
 
+const PROCESS_STACK_L3_INDEX: usize = 511;
+const PROCESS_STACK_LAYOUT_SIZE: usize = 512;
+const AT_PHDR: usize = 3;
+const AT_PHENT: usize = 4;
+const AT_PHNUM: usize = 5;
+const AT_PAGESZ: usize = 6;
+const AT_BASE: usize = 7;
+const AT_ENTRY: usize = 9;
+const AT_SECURE: usize = 23;
+const AT_RANDOM: usize = 25;
+
 linear struct ProcessImagePages[image: usize] {
     private image: usize @ image;
     private count: usize;
+    private entry: usize;
+    private stack_pointer: usize;
 }
 
 fn process_image_record(slot: usize,
@@ -27,6 +40,73 @@ must_use variant ProcessImageMapResult {
 }
 
 must_use variant ProcessImagePageLoadResult { Invalid; Loaded; }
+must_use variant ProcessImageStackResult { Invalid; Ready; }
+
+fn process_image_prepare_stack(page: borrow PageOwner[page],
+                               plan: DistroElfLoadPlan)
+        -> ProcessImageStackResult !{unsafe} {
+    let bytes = page_bytes(page);
+    for i: usize in 0..<4096 { bytes[i] = 0; }
+
+    let physical_base: usize = page_physical_address(page) +
+                               PAGE_SIZE - PROCESS_STACK_LAYOUT_SIZE;
+    let virtual_base: usize = USER_TEXT_VA +
+                              PROCESS_STACK_L3_INDEX * PAGE_SIZE +
+                              PAGE_SIZE - PROCESS_STACK_LAYOUT_SIZE;
+    let random_address: usize = virtual_base + 192;
+    let argv0_address: usize = virtual_base + 208;
+    let argv1_address: usize = virtual_base + 216;
+    let argv2_address: usize = virtual_base + 224;
+
+    // argc=3, argv={"busybox", "echo", "hello from busybox"}, envp={}
+    let words: *u64 = physical_base as *u64;
+    words[0] = 3;
+    words[1] = argv0_address as u64;
+    words[2] = argv1_address as u64;
+    words[3] = argv2_address as u64;
+    words[4] = 0;
+    words[5] = 0;
+
+    // The static PIE has no interpreter (AT_BASE=0). The ELF header and
+    // program table are in the first PT_LOAD, so AT_PHDR is directly based
+    // on the process load address.
+    words[6] = AT_PAGESZ as u64;
+    words[7] = PAGE_SIZE as u64;
+    words[8] = AT_PHDR as u64;
+    words[9] = (USER_TEXT_VA + plan.program_offset) as u64;
+    words[10] = AT_PHENT as u64;
+    words[11] = ELF_PROGRAM_HEADER_SIZE as u64;
+    words[12] = AT_PHNUM as u64;
+    words[13] = plan.program_count as u64;
+    words[14] = AT_BASE as u64;
+    words[15] = 0;
+    words[16] = AT_ENTRY as u64;
+    words[17] = (USER_TEXT_VA + plan.entry) as u64;
+    words[18] = AT_RANDOM as u64;
+    words[19] = random_address as u64;
+    words[20] = AT_SECURE as u64;
+    words[21] = 0;
+    words[22] = 0;
+    words[23] = 0;
+
+    let tail: *u8 = (physical_base + 192) as *u8;
+    for i: usize in 0..<16 { tail[i as isize] = (0xA5 ^ i) as u8; }
+    let argv0: []u8 = "busybox" as []u8;
+    let argv1: []u8 = "echo" as []u8;
+    let argv2: []u8 = "hello from busybox" as []u8;
+    slice_copy(unsafe { tail[16 as isize..<24 as isize] }, argv0);
+    slice_copy(unsafe { tail[24 as isize..<29 as isize] }, argv1);
+    slice_copy(unsafe { tail[32 as isize..<51 as isize] }, argv2);
+
+    if (words[0] != 3 || words[7] != PAGE_SIZE as u64 ||
+        words[9] != (USER_TEXT_VA + plan.program_offset) as u64 ||
+        words[17] != (USER_TEXT_VA + plan.entry) as u64 ||
+        words[23] != 0 || tail[23] != 0 || tail[28] != 0 ||
+        tail[50] != 0) {
+        return ProcessImageStackResult::Invalid;
+    }
+    return ProcessImageStackResult::Ready;
+}
 
 fn process_image_load_page(page: borrow PageOwner[page],
                            plan: DistroElfLoadPlan,
@@ -176,13 +256,57 @@ fn process_image_map(plan: DistroElfLoadPlan) -> ProcessImageMapResult {
             }
         }
     }
+    if (user_pte_read(PROCESS_STACK_L3_INDEX) != 0) {
+        process_image_cleanup(mapped);
+        return ProcessImageMapResult::InvalidImage;
+    }
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {
+            process_image_cleanup(mapped);
+            return ProcessImageMapResult::OutOfMemory;
+        }
+        PageAllocResult::Allocated(stack) => {
+            match process_image_prepare_stack(stack, plan) {
+                ProcessImageStackResult::Invalid => {
+                    page_free(stack);
+                    process_image_cleanup(mapped);
+                    return ProcessImageMapResult::InvalidImage;
+                }
+                ProcessImageStackResult::Ready => {
+                    let phys: usize = page_physical_address(stack);
+                    user_pte_write(PROCESS_STACK_L3_INDEX,
+                                   phys | USER_RW_XN_FLAGS);
+                    user_tlb_invalidate(USER_TEXT_VA +
+                                        PROCESS_STACK_L3_INDEX * PAGE_SIZE);
+                    let page_index = page_owner_transfer_index(stack);
+                    process_image_record(mapped, page_index,
+                                         PROCESS_STACK_L3_INDEX);
+                    mapped = mapped + 1;
+                }
+            }
+        }
+    }
     let image: usize @ 0 = 0;
-    let mut pages: ProcessImagePages[0] = { image, mapped };
+    let entry: usize = USER_TEXT_VA + plan.entry;
+    let stack_pointer: usize = USER_TEXT_VA +
+                               PROCESS_STACK_L3_INDEX * PAGE_SIZE +
+                               PAGE_SIZE - PROCESS_STACK_LAYOUT_SIZE;
+    let mut pages: ProcessImagePages[0] = {
+        image, mapped, entry, stack_pointer
+    };
     return ProcessImageMapResult::Mapped(pages);
 }
 
 fn process_image_page_count(pages: borrow ProcessImagePages[image]) -> usize {
     return pages.count;
+}
+
+fn process_image_entry(pages: borrow ProcessImagePages[image]) -> usize {
+    return pages.entry;
+}
+
+fn process_image_stack_pointer(pages: borrow ProcessImagePages[image]) -> usize {
+    return pages.stack_pointer;
 }
 
 fn process_image_window_is_clear() -> bool {

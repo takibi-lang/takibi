@@ -33,11 +33,15 @@ fn main() {
                                 kernel_debug_log("distro map: out of memory\n");
                             }
                             ProcessImageMapResult::Mapped(image_pages) => {
-                                if (process_image_page_count(image_pages) == 272) {
-                                    kernel_debug_log("distro map: pages=272 rx+rw-xn\n");
+                                if (process_image_page_count(image_pages) == 273) {
+                                    kernel_debug_log("distro map: pages=273 rx+rw-xn stack=rw+xn\n");
                                 }
                                 if (process_image_gap_is_unmapped()) {
                                     kernel_debug_log("distro load: file bytes match bss=zero gap=unmapped\n");
+                                }
+                                if (process_image_entry(image_pages) == 0x40004524 &&
+                                    process_image_stack_pointer(image_pages) == 0x401FFE00) {
+                                    kernel_debug_log("distro stack: argc=3 argv auxv ready\n");
                                 }
                                 process_image_unmap(image_pages);
                                 if (process_image_window_is_clear()) {
