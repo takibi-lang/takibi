@@ -2,4 +2,5 @@ usb msc: ready sector=512
 usb ext2: provisioned blocks=1024
 usb ext2: write /mutable.txt ok
 usb ext2: resize truncate+extend ok
+usb ext2: block+inode bitmap counts ok
 usb ext2: mounted /hello.txt ok

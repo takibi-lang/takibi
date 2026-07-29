@@ -13,6 +13,8 @@ struct Ext2Mount {
     private inodes_per_group: usize;
     private inode_size: usize;
     private inode_table_block: usize;
+    private block_bitmap_block: usize;
+    private inode_bitmap_block: usize;
 }
 
 must_use variant Ext2MountResult { Invalid; Mounted(Ext2Mount); }
@@ -22,6 +24,14 @@ must_use variant Ext2ReadResult { Invalid; Read(usize); }
 must_use variant Ext2WriteResult { Invalid; Written; }
 must_use variant Ext2ResizeResult { Invalid; Resized; }
 must_use variant Ext2SymlinkResult { Invalid; Read(usize); }
+must_use variant Ext2CounterResult { Invalid; Updated; }
+must_use variant Ext2BitmapClaimResult { Invalid; Claimed(usize); }
+must_use variant Ext2BitmapReleaseResult { Invalid; Released; }
+must_use variant Ext2BitmapProbeResult { Invalid; Verified; }
+must_use variant Ext2FreeCountsResult {
+    Invalid;
+    Counts((usize, usize));
+}
 
 struct Ext2Inode {
     private mode: usize;
@@ -51,6 +61,13 @@ fn ext2_put_u32(bytes: borrow *u8, offset: usize, value: u32) -> bool {
     bytes[(offset + 1) as isize] = ((value >> 8) & 0xFF) as u8;
     bytes[(offset + 2) as isize] = ((value >> 16) & 0xFF) as u8;
     bytes[(offset + 3) as isize] = ((value >> 24) & 0xFF) as u8;
+    return true;
+}
+
+fn ext2_put_u16(bytes: borrow *u8, offset: usize, value: u16) -> bool {
+    if (offset > KERNEL_BLOCK_SIZE - 2) { return false; }
+    bytes[offset as isize] = (value & 0xFF) as u8;
+    bytes[(offset + 1) as isize] = ((value >> 8) & 0xFF) as u8;
     return true;
 }
 
@@ -89,12 +106,18 @@ fn ext2_mount(device: KernelBlockDevice) -> Ext2MountResult {
     }
     let inode_table_block: usize =
         ext2_u32(ext2_metadata_block as *u8, 8) as usize;
-    if (inode_table_block == 0 || inode_table_block >= filesystem_blocks) {
+    let block_bitmap_block: usize =
+        ext2_u32(ext2_metadata_block as *u8, 0) as usize;
+    let inode_bitmap_block: usize =
+        ext2_u32(ext2_metadata_block as *u8, 4) as usize;
+    if (inode_table_block == 0 || inode_table_block >= filesystem_blocks ||
+        block_bitmap_block == 0 || block_bitmap_block >= filesystem_blocks ||
+        inode_bitmap_block == 0 || inode_bitmap_block >= filesystem_blocks) {
         return Ext2MountResult::Invalid;
     }
     let mut mount: Ext2Mount = {
         device, inode_count, filesystem_blocks, inodes_per_group, inode_size,
-        inode_table_block
+        inode_table_block, block_bitmap_block, inode_bitmap_block
     };
     return Ext2MountResult::Mounted(mount);
 }
@@ -307,6 +330,231 @@ fn ext2_read_fast_symlink(mount: Ext2Mount, inode_number: usize,
             let target = unsafe { destination[0..<inode.size] };
             slice_copy(target, source);
             return Ext2SymlinkResult::Read(inode.size);
+        }
+    }
+}
+
+fn ext2_update_free_counts(mount: Ext2Mount, inode_counter: bool,
+                           allocate: bool) -> Ext2CounterResult {
+    match block_read(mount.device, EXT2_SUPERBLOCK_BLOCK,
+                     ext2_metadata_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2CounterResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    match block_read(mount.device, 2, ext2_file_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2CounterResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let mut super_offset: usize = 12;
+    let mut group_offset: usize = 12;
+    if (inode_counter) {
+        super_offset = 16;
+        group_offset = 14;
+    }
+    let super_bytes: *u8 = ext2_metadata_block as *u8;
+    let group_bytes: *u8 = ext2_file_block as *u8;
+    let super_count: u32 = ext2_u32(super_bytes, super_offset);
+    let group_count: u16 = ext2_u16(group_bytes, group_offset);
+    let mut next_super: u32 = super_count;
+    let mut next_group: u16 = group_count;
+    if (allocate) {
+        if (super_count == 0 || group_count == 0) {
+            return Ext2CounterResult::Invalid;
+        }
+        next_super = super_count - 1;
+        next_group = group_count - 1;
+    } else {
+        if (super_count == 0xFFFFFFFF || group_count == 0xFFFF) {
+            return Ext2CounterResult::Invalid;
+        }
+        next_super = super_count + 1;
+        next_group = group_count + 1;
+    }
+    if (ext2_put_u32(super_bytes, super_offset, next_super) == false ||
+        ext2_put_u16(group_bytes, group_offset, next_group) == false) {
+        return Ext2CounterResult::Invalid;
+    }
+    match block_write(mount.device, EXT2_SUPERBLOCK_BLOCK,
+                      ext2_metadata_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2CounterResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    match block_write(mount.device, 2, ext2_file_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2CounterResult::Invalid; }
+        BlockIoResult::Ok => { return Ext2CounterResult::Updated; }
+    }
+}
+
+fn ext2_free_counts(mount: Ext2Mount) -> Ext2FreeCountsResult {
+    match block_read(mount.device, EXT2_SUPERBLOCK_BLOCK,
+                     ext2_metadata_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2FreeCountsResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let free_blocks: usize =
+        ext2_u32(ext2_metadata_block as *u8, 12) as usize;
+    let free_inodes: usize =
+        ext2_u32(ext2_metadata_block as *u8, 16) as usize;
+    match block_read(mount.device, 2, ext2_file_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2FreeCountsResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let group_free_blocks: usize =
+        ext2_u16(ext2_file_block as *u8, 12) as usize;
+    let group_free_inodes: usize =
+        ext2_u16(ext2_file_block as *u8, 14) as usize;
+    if (free_blocks != group_free_blocks || free_inodes != group_free_inodes) {
+        return Ext2FreeCountsResult::Invalid;
+    }
+    return Ext2FreeCountsResult::Counts((free_blocks, free_inodes));
+}
+
+fn ext2_bitmap_claim(mount: Ext2Mount, inode_bitmap: bool,
+                     first_index: usize, item_count: usize)
+        -> Ext2BitmapClaimResult {
+    let mut bitmap_block: usize = mount.block_bitmap_block;
+    if (inode_bitmap) { bitmap_block = mount.inode_bitmap_block; }
+    if (item_count == 0 || item_count > KERNEL_BLOCK_SIZE * 8 ||
+        first_index >= item_count) {
+        return Ext2BitmapClaimResult::Invalid;
+    }
+    match block_read(mount.device, bitmap_block,
+                     ext2_metadata_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2BitmapClaimResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let bitmap: *u8 = ext2_metadata_block as *u8;
+    let mut index: usize = first_index;
+    while (index < item_count) {
+        let byte_index: usize = index / 8;
+        let bit_index: usize = index % 8;
+        let value: u8 = bitmap[byte_index as isize];
+        let mask: u8 = (1 << (bit_index as u8)) as u8;
+        if ((value & mask) == 0) {
+            bitmap[byte_index as isize] = value | mask;
+            match block_write(mount.device, bitmap_block,
+                              ext2_metadata_block as []u8) {
+                BlockIoResult::Invalid => {
+                    return Ext2BitmapClaimResult::Invalid;
+                }
+                BlockIoResult::Ok => { }
+            }
+            match ext2_update_free_counts(mount, inode_bitmap, true) {
+                Ext2CounterResult::Invalid => {
+                    return Ext2BitmapClaimResult::Invalid;
+                }
+                Ext2CounterResult::Updated => {
+                    return Ext2BitmapClaimResult::Claimed(index);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return Ext2BitmapClaimResult::Invalid;
+}
+
+fn ext2_bitmap_release(mount: Ext2Mount, inode_bitmap: bool,
+                       index: usize) -> Ext2BitmapReleaseResult {
+    let mut bitmap_block: usize = mount.block_bitmap_block;
+    let mut item_count: usize = mount.filesystem_blocks - 1;
+    if (inode_bitmap) {
+        bitmap_block = mount.inode_bitmap_block;
+        item_count = mount.inode_count;
+    }
+    if (index >= item_count) { return Ext2BitmapReleaseResult::Invalid; }
+    match block_read(mount.device, bitmap_block,
+                     ext2_metadata_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2BitmapReleaseResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let bitmap: *u8 = ext2_metadata_block as *u8;
+    let byte_index: usize = index / 8;
+    let bit_index: usize = index % 8;
+    let value: u8 = bitmap[byte_index as isize];
+    let mask: u8 = (1 << (bit_index as u8)) as u8;
+    if ((value & mask) == 0) { return Ext2BitmapReleaseResult::Invalid; }
+    bitmap[byte_index as isize] = value & (mask ^ 0xFF);
+    match block_write(mount.device, bitmap_block,
+                      ext2_metadata_block as []u8) {
+        BlockIoResult::Invalid => { return Ext2BitmapReleaseResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    match ext2_update_free_counts(mount, inode_bitmap, false) {
+        Ext2CounterResult::Invalid => { return Ext2BitmapReleaseResult::Invalid; }
+        Ext2CounterResult::Updated => {
+            return Ext2BitmapReleaseResult::Released;
+        }
+    }
+}
+
+fn ext2_bitmap_roundtrip_check(mount: Ext2Mount)
+        -> Ext2BitmapProbeResult {
+    let mut before_blocks: usize = 0;
+    let mut before_inodes: usize = 0;
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => {
+            return Ext2BitmapProbeResult::Invalid;
+        }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            before_blocks = blocks;
+            before_inodes = inodes;
+        }
+    }
+    let mut block_index: usize = 0;
+    match ext2_bitmap_claim(
+            mount, false, mount.inode_table_block + 16,
+            mount.filesystem_blocks - 1) {
+        Ext2BitmapClaimResult::Invalid => {
+            return Ext2BitmapProbeResult::Invalid;
+        }
+        Ext2BitmapClaimResult::Claimed(index) => { block_index = index; }
+    }
+    let mut inode_index: usize = 0;
+    match ext2_bitmap_claim(mount, true, 11, mount.inode_count) {
+        Ext2BitmapClaimResult::Invalid => {
+            match ext2_bitmap_release(mount, false, block_index) {
+                Ext2BitmapReleaseResult::Invalid => { }
+                Ext2BitmapReleaseResult::Released => { }
+            }
+            return Ext2BitmapProbeResult::Invalid;
+        }
+        Ext2BitmapClaimResult::Claimed(index) => { inode_index = index; }
+    }
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => {
+            return Ext2BitmapProbeResult::Invalid;
+        }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            if (blocks + 1 != before_blocks || inodes + 1 != before_inodes) {
+                return Ext2BitmapProbeResult::Invalid;
+            }
+        }
+    }
+    match ext2_bitmap_release(mount, true, inode_index) {
+        Ext2BitmapReleaseResult::Invalid => {
+            return Ext2BitmapProbeResult::Invalid;
+        }
+        Ext2BitmapReleaseResult::Released => { }
+    }
+    match ext2_bitmap_release(mount, false, block_index) {
+        Ext2BitmapReleaseResult::Invalid => {
+            return Ext2BitmapProbeResult::Invalid;
+        }
+        Ext2BitmapReleaseResult::Released => {
+            match ext2_free_counts(mount) {
+                Ext2FreeCountsResult::Invalid => {
+                    return Ext2BitmapProbeResult::Invalid;
+                }
+                Ext2FreeCountsResult::Counts(counts) => {
+                    let (blocks, inodes) = counts;
+                    if (blocks == before_blocks && inodes == before_inodes) {
+                        return Ext2BitmapProbeResult::Verified;
+                    }
+                }
+            }
+            return Ext2BitmapProbeResult::Invalid;
         }
     }
 }
