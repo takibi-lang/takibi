@@ -96,8 +96,9 @@ fn kernel_syscall_socket_evidence() -> bool {
            syscall_socket_port == 8080;
 }
 
-// Returns 1 for /hello.txt, 2 for /mutable.txt, and 0 for unsupported or
-// invalid paths. Raw pointer reads are confined behind mapped-range checks.
+// Returns 1 for /hello.txt, 2 for /mutable.txt, 3 for index.html (absolute
+// or relative), and 0 for unsupported or invalid paths. Raw pointer reads
+// are confined behind mapped-range checks.
 fn kernel_syscall_path_kind(address: usize) -> usize {
     if (kernel_user_range_is_mapped(address, 11)) {
         let path: *u8 = address as *u8;
@@ -116,6 +117,24 @@ fn kernel_syscall_path_kind(address: usize) -> usize {
             path[9] == 0x74 && path[10] == 0x78 && path[11] == 0x74 &&
             path[12] == 0) {
             return 2;
+        }
+    }
+    if (kernel_user_range_is_mapped(address, 12)) {
+        let path: *u8 = address as *u8;
+        if (path[0] == 0x2F && path[1] == 0x69 && path[2] == 0x6E &&
+            path[3] == 0x64 && path[4] == 0x65 && path[5] == 0x78 &&
+            path[6] == 0x2E && path[7] == 0x68 && path[8] == 0x74 &&
+            path[9] == 0x6D && path[10] == 0x6C && path[11] == 0) {
+            return 3;
+        }
+    }
+    if (kernel_user_range_is_mapped(address, 11)) {
+        let path: *u8 = address as *u8;
+        if (path[0] == 0x69 && path[1] == 0x6E && path[2] == 0x64 &&
+            path[3] == 0x65 && path[4] == 0x78 && path[5] == 0x2E &&
+            path[6] == 0x68 && path[7] == 0x74 && path[8] == 0x6D &&
+            path[9] == 0x6C && path[10] == 0) {
+            return 3;
         }
     }
     return 0;
@@ -264,6 +283,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         if (path_kind == 0) { return (1, LINUX_ENOENT); }
         let mut name: []u8 = "hello.txt" as []u8;
         if (path_kind == 2) { name = "mutable.txt" as []u8; }
+        if (path_kind == 3) { name = "index.html" as []u8; }
         match ext2_lookup_root(syscall_ext2_mount, name) {
             Ext2LookupResult::Invalid => { return (1, LINUX_EINVAL); }
             Ext2LookupResult::NotFound => { return (1, LINUX_ENOENT); }
@@ -275,6 +295,48 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 syscall_file_inode = inode_number;
                 syscall_file_offset = 0;
                 return (1, 3);
+            }
+        }
+    }
+
+    if (number == 79) {
+        // newfstatat(AT_FDCWD, path, stat, flags): the current ext2 root has
+        // regular files only. Fill the asm-generic AArch64 stat fields used
+        // by BusyBox httpd after validating the complete userspace result.
+        let path_kind: usize = kernel_syscall_path_kind(x1);
+        if (path_kind == 0) { return (1, LINUX_ENOENT); }
+        if (kernel_user_range_is_mapped(x2, 128) == false) {
+            return (1, LINUX_EFAULT);
+        }
+        let mut name: []u8 = "hello.txt" as []u8;
+        if (path_kind == 2) { name = "mutable.txt" as []u8; }
+        if (path_kind == 3) { name = "index.html" as []u8; }
+        match ext2_lookup_root(syscall_ext2_mount, name) {
+            Ext2LookupResult::Invalid => { return (1, LINUX_EINVAL); }
+            Ext2LookupResult::NotFound => { return (1, LINUX_ENOENT); }
+            Ext2LookupResult::Found(inode_number) => {
+                match ext2_read_small_file(
+                        syscall_ext2_mount, inode_number,
+                        syscall_file_buffer as []u8) {
+                    Ext2ReadResult::Invalid => { return (1, LINUX_EINVAL); }
+                    Ext2ReadResult::Read(file_length) => {
+                        let stat: *u8 = x2 as *u8;
+                        for i: usize in 0..<128 { stat[i as isize] = 0; }
+                        let inode_field: *u64 = (x2 + 8) as *u64;
+                        *inode_field = inode_number as u64;
+                        let mode_field: *u32 = (x2 + 16) as *u32;
+                        *mode_field = 0x81A4 as u32;
+                        let links_field: *u32 = (x2 + 20) as *u32;
+                        *links_field = 1;
+                        let size_field: *u64 = (x2 + 48) as *u64;
+                        *size_field = file_length as u64;
+                        let block_size_field: *u32 = (x2 + 56) as *u32;
+                        *block_size_field = 1024;
+                        let blocks_field: *u64 = (x2 + 64) as *u64;
+                        *blocks_field = 2;
+                        return (1, 0);
+                    }
+                }
             }
         }
     }

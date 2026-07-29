@@ -15,6 +15,22 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Add the ext2 HTTPd Document and Metadata Boundary
+
+The bounded one-MiB ext2 fixture now contains a concrete `/index.html` whose
+body identifies the RPi5 BusyBox HTTPd server. The Linux path decoder accepts
+the relative `index.html` form used by HTTPd after selecting its document
+root, while preserving the existing absolute file fixtures. AArch64
+`newfstatat(79)` now validates the complete 128-byte userspace result, looks
+up the real ext2 inode, reads its exact length, and returns regular-file mode,
+inode, link count, size, block size, and block count in the asm-generic stat
+layout. Missing `httpd.conf` paths remain `-ENOENT`.
+
+This is driven directly by the traced Alpine `httpd -i` request path and does
+not add general directory or metadata infrastructure. The full kernel still
+builds under `--forbid-trap`; real serving verification follows once fd 0/1
+are attached to the accepted connection.
+
 ### 2026-07-29: Enter musl and Run the Distribution HTTPd Applet
 
 The combined 324-page process now transfers EL0 control to musl at its biased

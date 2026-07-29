@@ -181,3 +181,10 @@ and `/hello.txt` is looked up and read back from USB. Linux-compatible
 descriptor to this mount; the small EL0 fixture also overwrites
 `/mutable.txt` through those syscall boundaries. The adapter intentionally
 does not expose the rest of the physical medium yet.
+
+The same reproducible ext2 image now contains `/index.html` for the concrete
+BusyBox HTTPd target. Linux `openat` accepts both `/index.html` and the
+relative `index.html` used after HTTPd changes its document root, and
+`newfstatat(79)` returns the AArch64 asm-generic regular-file metadata and
+exact ext2 length. Unsupported configuration paths continue to return
+`-ENOENT`.
