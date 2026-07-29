@@ -11,6 +11,45 @@ use "kernel/platform/rpi5/usb_xhci.tkb";
 private let mut ext2_read_fixture: [u8; 32];
 private let mut ext2_symlink_fixture: [u8; 64];
 
+must_use variant UsbExt2WriteCheckResult { Invalid; Verified; }
+
+fn usb_ext2_equal_size_write_check(mount: Ext2Mount)
+        -> UsbExt2WriteCheckResult {
+    match ext2_lookup_root(mount, "mutable.txt" as []u8) {
+        Ext2LookupResult::Invalid => {
+            return UsbExt2WriteCheckResult::Invalid;
+        }
+        Ext2LookupResult::NotFound => {
+            return UsbExt2WriteCheckResult::Invalid;
+        }
+        Ext2LookupResult::Found(inode_number) => {
+            match ext2_write_small_file(
+                    mount, inode_number, "usb-ok\n" as []u8) {
+                Ext2WriteResult::Invalid => {
+                    return UsbExt2WriteCheckResult::Invalid;
+                }
+                Ext2WriteResult::Written => {
+                    match ext2_read_small_file(
+                            mount, inode_number,
+                            ext2_read_fixture as []u8) {
+                        Ext2ReadResult::Invalid => {
+                            return UsbExt2WriteCheckResult::Invalid;
+                        }
+                        Ext2ReadResult::Read(length) => {
+                            if (length == 7 &&
+                                slice_eq(ext2_read_fixture[0..<7],
+                                         "usb-ok\n" as []u8)) {
+                                return UsbExt2WriteCheckResult::Verified;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return UsbExt2WriteCheckResult::Invalid;
+}
+
 fn main() {
     platform_init();
     kernel_boot_log("takibi kernel: EL1\n");
@@ -42,6 +81,15 @@ fn main() {
                                             kernel_boot_log("usb ext2: mount failed\n");
                                         }
                                         Ext2MountResult::Mounted(usb_mount) => {
+                                            match usb_ext2_equal_size_write_check(
+                                                    usb_mount) {
+                                                UsbExt2WriteCheckResult::Invalid => {
+                                                    kernel_boot_log("usb ext2: file write failed\n");
+                                                }
+                                                UsbExt2WriteCheckResult::Verified => {
+                                                    kernel_boot_log("usb ext2: write /mutable.txt ok\n");
+                                                }
+                                            }
                                             match ext2_lookup_root(
                                                     usb_mount,
                                                     "hello.txt" as []u8) {
