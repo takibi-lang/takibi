@@ -5,3 +5,4 @@ httpd map: combined pages=331 musl-bias=0x40000 auxv ready clean
 httpd server: syn-ack drop retransmit ok
 httpd server: inetd request exit=0 clean
 httpd server: data drop retransmit ok
+httpd server: fin drop retransmit ok

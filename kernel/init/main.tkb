@@ -517,6 +517,7 @@ fn main() {
                                                     dynamic_heap_limit);
                                                 kernel_tcp_inject_drop_next_syn_ack();
                                                 kernel_tcp_inject_drop_next_data();
+                                                kernel_tcp_inject_drop_next_fin();
                                                 match kernel_syscall_inetd_accept(8080) {
                                                     KernelInetdAcceptResult::TimedOut => {
                                                         process_image_unmap(dynamic_pages);
@@ -655,6 +656,9 @@ fn main() {
                         }
                         if (kernel_tcp_injected_data_recovered()) {
                             kernel_boot_log("httpd server: data drop retransmit ok\n");
+                        }
+                        if (kernel_tcp_injected_fin_recovered()) {
+                            kernel_boot_log("httpd server: fin drop retransmit ok\n");
                         }
                         kernel_boot_log("syscall exit: 0\n");
                     }
