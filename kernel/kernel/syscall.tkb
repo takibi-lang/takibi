@@ -43,6 +43,8 @@ private let mut syscall_connected_close_calls: usize;
 private let mut syscall_connected_read_calls: usize;
 private let mut syscall_connected_write_calls: usize;
 private let mut syscall_socket_buffer: [u8; 1460];
+private let mut syscall_socket_buffer_length: usize;
+private let mut syscall_socket_buffer_offset: usize;
 private let mut syscall_inetd_mode: bool;
 private let mut syscall_inetd_response: [u8; 1460];
 private let mut syscall_inetd_response_length: usize;
@@ -78,6 +80,8 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_connected_close_calls = 0;
     syscall_connected_read_calls = 0;
     syscall_connected_write_calls = 0;
+    syscall_socket_buffer_length = 0;
+    syscall_socket_buffer_offset = 0;
     syscall_inetd_mode = false;
     syscall_inetd_response_length = 0;
 }
@@ -105,6 +109,8 @@ fn kernel_syscall_inetd_accept(port: u16)
                         NetworkCapabilityPutResult::Stored => {
                             syscall_inetd_mode = true;
                             syscall_connected_open = true;
+                            syscall_socket_buffer_length = 0;
+                            syscall_socket_buffer_offset = 0;
                             syscall_inetd_response_length = 0;
                             return KernelInetdAcceptResult::Accepted;
                         }
@@ -138,7 +144,7 @@ fn kernel_syscall_socket_evidence() -> bool {
            syscall_accept_capability_roundtrips == 1 &&
            syscall_connected_open == false &&
            syscall_connected_close_calls == 1 &&
-           syscall_connected_read_calls == 1 &&
+           syscall_connected_read_calls == 2 &&
            syscall_connected_write_calls == 1 &&
            syscall_socket_close_calls == 1 &&
            syscall_socket_state == KernelSocketState::Closed &&
@@ -438,6 +444,28 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             if (kernel_user_range_is_mapped(address, requested) == false) {
                 return (1, LINUX_EFAULT);
             }
+            if (syscall_socket_buffer_offset < syscall_socket_buffer_length) {
+                let available: usize = syscall_socket_buffer_length -
+                    syscall_socket_buffer_offset;
+                let mut amount: usize = requested;
+                if (amount > available) { amount = available; }
+                let destination_base: *u8 = address as *u8;
+                let source_base: *u8 = syscall_socket_buffer as *u8;
+                let mut index: usize = 0;
+                while (index < amount) {
+                    let destination_byte: *u8 =
+                        destination_base + (index as isize);
+                    let source_offset: usize =
+                        syscall_socket_buffer_offset + index;
+                    let source_byte: *u8 =
+                        source_base + (source_offset as isize);
+                    *destination_byte = *source_byte;
+                    index = index + 1;
+                }
+                syscall_socket_buffer_offset =
+                    syscall_socket_buffer_offset + amount;
+                return (1, amount);
+            }
             match network_capability_take() {
                 NetworkCapabilityTakeResult::Empty => {
                     return (1, LINUX_EAGAIN);
@@ -458,6 +486,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                         KernelTcpReceiveResult::Received(frame) => {
                             let received: usize =
                                 kernel_tcp_received_length();
+                            syscall_socket_buffer_length = received;
                             let mut amount: usize = received;
                             if (amount > requested) { amount = requested; }
                             let destination_base: *u8 = address as *u8;
@@ -472,6 +501,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                 *destination_byte = *source_byte;
                                 index = index + 1;
                             }
+                            syscall_socket_buffer_offset = amount;
                             match network_frame_install(frame, received) {
                                 NetworkFrameInstallResult::Conflict(incoming) => {
                                     match kernel_tcp_send_received(
@@ -644,6 +674,8 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                 syscall_accept_capability_roundtrips =
                                     syscall_accept_capability_roundtrips + 1;
                                 syscall_connected_open = true;
+                                syscall_socket_buffer_length = 0;
+                                syscall_socket_buffer_offset = 0;
                                 return (1, 5);
                             }
                         }

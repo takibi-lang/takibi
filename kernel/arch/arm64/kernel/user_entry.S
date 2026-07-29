@@ -75,10 +75,17 @@ initial_user_payload:
     sub     sp, sp, #32
     mov     x0, #5
     mov     x1, sp
-    mov     x2, #32
+    mov     x2, #8
     mov     x8, #63
     svc     #0
-    cmp     x0, #16
+    cmp     x0, #8
+    b.ne    .Luser_fail
+    mov     x0, #5
+    add     x1, sp, #8
+    mov     x2, #8
+    mov     x8, #63
+    svc     #0
+    cmp     x0, #8
     b.ne    .Luser_fail
     mov     x0, #5
     adr     x1, .Lsocket_response

@@ -15,6 +15,23 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Preserve Unread TCP Bytes Across Linux Reads (GitHub Issue #180)
+
+The connected Linux socket path now keeps an explicit offset and length for
+the bytes copied out of the held GEM RX frame.  When a userspace `read(63)`
+requests less than the received TCP payload, the next read is satisfied from
+the remaining kernel socket buffer instead of trying to take the RX
+capability again and incorrectly returning `-EAGAIN`.  Accept and process
+configuration reset both cursors, while the existing frame owner remains
+held until the response consumes the complete received segment.
+
+The EL0 socket fixture now consumes its 16-byte request through two 8-byte
+reads before producing the independent response.  The socket evidence
+requires both calls, and the complete RPi5 kernel builds under
+`--forbid-trap`.  This is the first caller-driven stream-boundary stage of
+issue #180; multi-segment receive reassembly, segmented/partial transmit, and
+retransmission remain separate stages.
+
 ### 2026-07-29: Serve USB ext2 Content with Alpine BusyBox HTTPd
 
 The pinned Alpine `busybox-extras` HTTPd now runs on the RPi5 as a real musl
