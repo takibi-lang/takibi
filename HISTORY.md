@@ -15,6 +15,26 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Select Alpine BusyBox Extras as the HTTPd Binary
+
+Tracing the exact pinned Alpine `busybox-static` image established that it
+does not include the `httpd` applet. Alpine packages that applet in
+`busybox-extras`, an AArch64 PIE whose sole interpreter/runtime dependency is
+the matching `/lib/ld-musl-aarch64.so.1`. A host-side QEMU syscall trace of
+that distribution binary reached `socket`, `setsockopt`, `bind`, `listen`,
+configuration lookup, signal setup, and blocking `accept`.
+
+Ubuntu Noble's distribution `busybox-static` was evaluated because it does
+include `httpd`. Its AArch64 executable is `ET_EXEC` and embeds addresses from
+`0x400000`, while this kernel deliberately places EL0 at `0x40000000` away
+from the identity-mapped monolithic kernel. A trial which normalized only the
+ELF segment addresses mapped and validated successfully but stopped on entry,
+confirming that segment normalization cannot relocate internal absolute
+references. That trial was fully reverted. The supported path will load the
+Alpine PIE together with its real musl interpreter and supply the standard
+auxiliary vector; the kernel will not claim unsafe or incomplete `ET_EXEC`
+support merely to bypass the loader work.
+
 ### 2026-07-29: Connected Writes Generate Independent TCP Responses
 
 Connected fd 5 no longer restricts `write(64)` to echoing the bytes returned

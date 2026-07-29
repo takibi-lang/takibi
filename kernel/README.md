@@ -108,6 +108,19 @@ zero. All 401 image, heap, and stack pages sit
 under one linear `ProcessImagePages` teardown obligation and are returned
 before the smaller syscall fixture is created.
 
+Alpine's `busybox-static` package deliberately does not contain the `httpd`
+applet. The distribution-provided implementation is `/bin/busybox-extras`
+from `busybox-extras`; it is an AArch64 PIE using
+`/lib/ld-musl-aarch64.so.1`. That executable plus Alpine's matching musl
+interpreter is therefore the selected HTTP-server userspace target. An
+Ubuntu `busybox-static` with `httpd` was also evaluated, but it is `ET_EXEC`
+with absolute addresses beginning at `0x400000`; relocating its segments into
+this kernel's guarded `0x40000000` userspace window does not relocate those
+internal references. The kernel continues to reject that unsupported form
+instead of mapping an image which will fail after entry. The next loader work
+is the real ELF-interpreter path for the Alpine PIE, not an `ET_EXEC`
+pseudo-relocation.
+
 The first ext2 slice is also active on RPi5. The build creates a checked 1 MiB
 RAM fixture with `mke2fs`, populates it with `e2mkdir`/`e2cp`, and embeds it as
 a writable image. The filesystem core reaches it only through the 1 KiB block
