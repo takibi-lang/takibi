@@ -44,17 +44,23 @@ The current RPi5 kernel includes:
 - a bounded ext2 implementation with direct-block small files, root directory
   mutation, allocation bitmaps, and fast symlinks;
 - RP1 PCIe, xHCI/USB Mass Storage, Cadence GEM Ethernet, ARP, IPv4, ICMP, and
-  the current single-request TCP slice;
+  a bounded TCP slice with in-order stream reconstruction, short reads,
+  partial writes, duplicate/out-of-order acknowledgement, and timed SYN/ACK,
+  data, and FIN retransmission;
 - an initramfs containing reproducibly pinned Alpine BusyBox, BusyBox Extras,
   and the matching musl interpreter without committing those GPL binaries;
 - one-boot integration views that independently compare boot, VM, process,
   syscall, filesystem, USB, Ethernet, BusyBox, and HTTPd evidence.
 
-The HTTPd milestone uses BusyBox inetd mode. EL1 accepts one connection on
-port 8080, exposes it as fd 0/fd 1, and starts
+The current HTTPd milestone uses BusyBox inetd mode. EL1 accepts one
+connection on port 8080, exposes it as fd 0/fd 1, and starts
 `busybox-httpd httpd -i`. BusyBox reads the request, stats and reads
 `index.html` from USB ext2, writes the response, calls `shutdown`, and exits.
-The host compares the complete 68-byte body with the fixture.
+The host compares the complete 68-byte body with the fixture. The TCP hardware
+fixtures additionally split a request across segments, inject bounded drops,
+and exercise short `read` plus a 1460+1 partial `write` sequence. A complete
+byte-for-byte response larger than one MTU and two independent HTTPd `curl`
+connections in one boot remain issue #180 acceptance work.
 
 ## Tree layout
 
@@ -222,8 +228,11 @@ The passing HTTPd test is a concrete Linux compatibility milestone, not a
 claim of general Linux compatibility.
 
 - [Issue #180](https://github.com/takibi-lang/takibi/issues/180) tracks TCP
-  retransmission, stream reassembly, short reads, partial writes,
-  multi-segment responses, and repeated connections.
+  completion. Bounded retransmission, in-order stream reassembly, short reads,
+  partial writes, and deterministic split/drop fixtures are implemented. The
+  remaining closure work is a reliable multi-segment transmit queue, exact
+  host comparison of a response larger than one MTU (including a dropped
+  segment), and two independent `curl` connections in one boot.
 - [Issue #181](https://github.com/takibi-lang/takibi/issues/181) tracks normal
   BusyBox HTTPd foreground daemon mode, userspace accept, and the clone/fork
   child process model.

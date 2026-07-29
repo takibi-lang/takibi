@@ -15,6 +15,30 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Bounded TCP Streaming and Retransmission Progress (GitHub Issue #180)
+
+The standalone kernel TCP path now reconstructs in-order request segments,
+preserves unread bytes across short Linux reads, returns a partial Linux write
+at the 1460-byte TCP payload bound, and transmits the remaining byte through a
+second write. Duplicate and out-of-order data is acknowledged without
+advancing receive state twice. SYN/ACK, data, and FIN transmissions have
+bounded retry deadlines, and expired half-open connections return to LISTEN.
+
+The RPi5 runner deterministically drops SYN/ACK, response data, and FIN on
+separate connections and requires retransmission evidence for each. It also
+advertises a bounded HTTPd receive window so a real request arrives in
+multiple segments and requires the reconstructed BusyBox response to succeed.
+The final hardware run passed all 13 kernel views together with ARP, ICMP, TCP
+echo/reconnect, BusyBox HTTPd curl, and userspace connected-I/O checks.
+
+This does not yet complete issue #180. The host check validates the original
+19-byte generated response but does not collect the subsequent 1460+1 bytes
+as one exact body. Transmit retry state also has one pending slot, so rapid
+consecutive writes can replace an earlier unacknowledged retransmission
+record. Closure therefore still requires a reliable multi-segment transmit
+queue, byte-for-byte validation of a response larger than one MTU including a
+dropped segment, and two independent curl completions in one kernel boot.
+
 ### 2026-07-29: Preserve Unread TCP Bytes Across Linux Reads (GitHub Issue #180)
 
 The connected Linux socket path now keeps an explicit offset and length for

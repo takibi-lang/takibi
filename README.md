@@ -19,18 +19,20 @@ The repository has three related layers:
 
 - The compiler in `lib/` and `bin/` parses Takibi, checks its types and
   resource rules, generates LLVM IR, and writes native object files.
-- [`examples/`](examples/README.md) contains executable language, bare-metal,
-  driver, filesystem, scheduler, and networking proofs. It includes QEMU
-  integration tests and real STM32F746G-DISCOVERY and Raspberry Pi 5 suites.
+- [`examples/`](examples/README.md) preserves the executable language,
+  bare-metal, driver, filesystem, scheduler, and networking milestones that
+  preceded the standalone kernel. It is historical and is not an actively
+  maintained product surface.
 - [`kernel/`](kernel/README.md) is the standalone RPi5-first monolithic kernel.
   It runs existing Alpine Linux AArch64 binaries through a growing
   Linux-compatible syscall boundary and currently serves USB-ext2 content
   with BusyBox HTTPd over RP1 Ethernet.
 
-The examples and kernel have separate purposes. Examples remain focused
-compiler and hardware regression programs. The production kernel direction is
-developed only under `kernel/` and does not depend on sources under
-`examples/`.
+The examples and kernel have separate purposes. Historical example builds may
+still be useful as evidence, but new features, fixes, tests, fixtures, and
+ports are developed only under `kernel/`, which does not depend on sources
+under `examples/`. An example is changed only when that exact historical
+artifact is explicitly requested.
 
 ## Language direction
 
@@ -52,8 +54,7 @@ not yet expressed enough information for a proof.
 
 Ordinary compilation may insert a runtime check for an access whose bounds are
 not proven. `--forbid-trap` turns every remaining such site into a compile
-error. New kernel code and established-pattern example code are written under
-that policy from the start.
+error. New kernel code is written under that policy from the start.
 
 For details, see:
 
@@ -71,10 +72,11 @@ effect, ownership, static-index, privacy, and authority-region checks, and an
 LLVM 19 backend. The test suite covers both accepted programs and compile-time
 rejections.
 
-The example suite exercises the language from arithmetic and aggregates up to
-preemptive scheduling, FAT12, SD and USB storage, Ethernet DMA, TCP/IP, HTTP,
-and persistent key-value servers. See [`examples/README.md`](examples/README.md)
-for targets and reproduction instructions.
+The historical example suite records language use from arithmetic and
+aggregates up to preemptive scheduling, FAT12, SD and USB storage, Ethernet
+DMA, TCP/IP, HTTP, and persistent key-value servers. See
+[`examples/README.md`](examples/README.md) when reproducing those artifacts;
+their continued compatibility is not part of active kernel maintenance.
 
 The standalone kernel boots at EL1 on RPi5, runs userspace at EL0, manages
 typed pages and mappings, mounts ext2 through USB Mass Storage, implements the
@@ -86,18 +88,24 @@ limitations, and hardware procedure.
 ## Quick start
 
 The provided devcontainer is the easiest way to obtain the exact compiler and
-hardware tooling. For compiler-only work:
+hardware tooling. For the compiler required by the kernel:
 
 ```bash
 make build       # build the Takibi compiler
 make test        # run compiler unit tests
-make check       # language, unit, STM32 build, and QEMU integration checks
 ```
 
-`make check` does not require physical hardware. Real-board targets and their
-safety warnings are documented in the appropriate subtree README:
+For the maintained kernel surface:
 
-- [`examples/README.md`](examples/README.md) for STM32 and RPi5 examples;
+```bash
+make kernelbuild-rpi5  # build without physical hardware
+make kernelcheck-rpi5  # run the destructive RPi5 hardware integration suite
+```
+
+Historical example targets remain documented under `examples/`, but are not
+part of the maintained acceptance surface. The RPi5 kernel hardware procedure
+and its USB-drive safety warning are documented in:
+
 - [`kernel/README.md`](kernel/README.md) for the standalone RPi5 kernel.
 
 Builds are parallel by default. Pass `-j1` when serial output is more useful
@@ -137,10 +145,10 @@ OCaml 5.4.0, dune, menhir, ppx_deriving.show
 LLVM 19 libraries and command-line tools
 ```
 
-QEMU and real-hardware workflows need additional tools listed in
-[`examples/README.md`](examples/README.md) and
+Kernel real-hardware workflows need the additional tools listed in
 [`kernel/README.md`](kernel/README.md). The `.devcontainer/` configuration
-contains the maintained development environment.
+contains the maintained development environment. Historical QEMU and board
+workflows remain described under `examples/` for reproduction only.
 
 ## Prior art
 

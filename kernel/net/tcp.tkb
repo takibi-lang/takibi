@@ -1,8 +1,12 @@
-// Single-connection TCP state machine for the standalone kernel.
+// Bounded TCP state machine for the standalone kernel.
 // It validates IPv4/TCP checksums and connection identity, implements
 // LISTEN -> SYN_RCVD -> ESTABLISHED -> LAST_ACK, reconstructs in-order data,
-// and returns to LISTEN after close. Data-bearing input currently requires
-// a 20-byte TCP header; SYN options are accepted and discarded in replies.
+// acknowledges duplicate/out-of-order data without consuming it twice, retries
+// SYN/ACK, data, and FIN on bounded deadlines, and returns to LISTEN after
+// close. Data-bearing input currently requires a 20-byte TCP header; SYN
+// options are accepted and discarded in replies. Transmit retry state has one
+// pending slot, so a general multi-segment response queue remains issue #180
+// work.
 // This concrete bound removes the relational payload slice that the broader
 // prototype implementation needed to mark unsafe, keeping this path free
 // of unsafe blocks and clean under the kernel's --forbid-trap build.
