@@ -15,6 +15,23 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Connected Writes Generate Independent TCP Responses
+
+Connected fd 5 no longer restricts `write(64)` to echoing the bytes returned
+by the preceding `read(63)`. The syscall copies a separately generated
+userspace buffer into the held RX frame, recalculates the IPv4 and TCP lengths
+and checksums, transmits it as PSH/ACK, and restores the sole RX capability.
+The TCP builder now advances receive sequence state by the consumed request
+length and send sequence state by the independently sized response length.
+
+The EL0 fixture reads the 16-byte test request and replies with the distinct
+19-byte `HTTP/1.0 200 OK` header. The real RPi5 wire test verifies that exact
+payload, ACK number, sequence number, and both checksums. All 12 UART views
+and every prior Ethernet, USB ext2, syscall, and BusyBox check passed in the
+same boot. The concrete restriction remains one request segment followed by
+one complete response write; this is sufficient to unblock an initial static
+HTTP server fixture without prematurely implementing general TCP streaming.
+
 ### 2026-07-29: Connected Linux `read`/`write` Echoes Through GEM
 
 Connected fd 5 now crosses the Linux `read(63)` and `write(64)` boundaries.

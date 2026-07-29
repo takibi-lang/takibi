@@ -36,24 +36,24 @@ request for another address stays unanswered and that an ARP request for
 an ICMP request for another IP and one with a corrupt checksum before
 returning a checksum-correct echo reply. The capability then enters a
 single-connection TCP state machine on port 7, covering checksum rejection,
-SYN options, handshake, data echo, FIN close, and reconnect. Linux socket
-boundaries are a subsequent milestone.
+SYN options, handshake, data echo, FIN close, and reconnect.
 
 The first Linux socket boundary is also active at EL0. The syscall fixture
 creates one `AF_INET`/`SOCK_STREAM` fd, binds an explicitly validated
 `sockaddr_in` to port 8080, transitions it to listening state, and closes it
 through AArch64 syscalls 198/200/201/57. This milestone proves socket
-control-plane ABI and lifecycle only; a connected `accept` result and
-userspace-owned connected socket are not claimed yet.
+control-plane ABI and lifecycle before the connected data path below.
 The RX readiness token is now linear and survives the intervening USB/ext2
 and BusyBox work in a guarded stable owner slot. Blocking `accept4(242)`
 takes that token, processes a real three-way handshake on port 8080, restores
 the token, and returns connected fd 5. The EL0 fixture closes fd 5 and the
 listener separately. A blocking `read(63)` moves the received linear frame
 owner into a second stable slot while its payload is visible to userspace;
-`write(64)` consumes that same owner to transmit the userspace-returned bytes
-as PSH/ACK and restores the RX token. The current one-segment contract
-requires the write to match the complete preceding read.
+`write(64)` consumes that same owner to transmit an independently generated
+userspace response as PSH/ACK and restores the RX token. Receive and response
+lengths advance their respective TCP sequence spaces independently. The
+current contract remains one request segment followed by one complete
+response write; stream reassembly and partial writes are not implemented.
 
 The RPi5 runner captures UART once per kernel boot, then projects that one
 transcript through every `kernel/tests/rpi5/views/*.filter`. Each projection

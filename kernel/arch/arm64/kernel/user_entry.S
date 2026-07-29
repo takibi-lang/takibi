@@ -81,11 +81,11 @@ initial_user_payload:
     cmp     x0, #16
     b.ne    .Luser_fail
     mov     x0, #5
-    mov     x1, sp
-    mov     x2, #16
+    adr     x1, .Lsocket_response
+    mov     x2, #19
     mov     x8, #64
     svc     #0
-    cmp     x0, #16
+    cmp     x0, #19
     b.ne    .Luser_fail
     add     sp, sp, #32
     mov     x0, #5
@@ -121,6 +121,8 @@ initial_user_payload:
     .byte   0x1f, 0x90
     .word   0
     .quad   0
+.Lsocket_response:
+    .ascii  "HTTP/1.0 200 OK\r\n\r\n"
 initial_user_payload_end:
 
     .section .text, "ax"

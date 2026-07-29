@@ -173,49 +173,25 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             syscall_connected_write_calls =
                 syscall_connected_write_calls + 1;
             if (syscall_connected_open == false || length == 0 ||
-                length > 1460 || length != network_frame_length()) {
+                length > 1460) {
                 return (1, LINUX_EINVAL);
             }
+            let received_length: usize = network_frame_length();
             match network_frame_take() {
                 NetworkFrameTakeResult::Empty => {
                     return (1, LINUX_EAGAIN);
                 }
                 NetworkFrameTakeResult::Frame(frame) => {
                     let source: *u8 = address as *u8;
-                    let buffered: *u8 = syscall_socket_buffer as *u8;
                     let mut index: usize = 0;
-                    let mut matches: bool = true;
                     while (index < length) {
-                        if (source[index as isize] != buffered[index as isize]) {
-                            matches = false;
-                        }
+                        let buffered: *u8 = syscall_socket_buffer as *u8;
+                        buffered[index as isize] = source[index as isize];
                         index = index + 1;
                     }
-                    if (matches == false) {
-                        match network_frame_install(frame, length) {
-                            NetworkFrameInstallResult::Installed => {
-                                return (1, LINUX_EINVAL);
-                            }
-                            NetworkFrameInstallResult::Conflict(incoming) => {
-                                match kernel_tcp_send_received(incoming, 0) {
-                                    KernelTcpSendResult::Invalid(ready) => {
-                                        match network_capability_put(ready) {
-                                            NetworkCapabilityPutResult::Stored => { }
-                                            NetworkCapabilityPutResult::Conflict => { }
-                                        }
-                                    }
-                                    KernelTcpSendResult::Sent(ready) => {
-                                        match network_capability_put(ready) {
-                                            NetworkCapabilityPutResult::Stored => { }
-                                            NetworkCapabilityPutResult::Conflict => { }
-                                        }
-                                    }
-                                }
-                                return (1, LINUX_EINVAL);
-                            }
-                        }
-                    }
-                    match kernel_tcp_send_received(frame, length) {
+                    match kernel_tcp_send_received(
+                            frame, syscall_socket_buffer as []u8,
+                            received_length, length) {
                         KernelTcpSendResult::Invalid(ready) => {
                             match network_capability_put(ready) {
                                 NetworkCapabilityPutResult::Stored => {
@@ -348,7 +324,10 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                             }
                             match network_frame_install(frame, received) {
                                 NetworkFrameInstallResult::Conflict(incoming) => {
-                                    match kernel_tcp_send_received(incoming, 0) {
+                                    match kernel_tcp_send_received(
+                                            incoming,
+                                            syscall_socket_buffer as []u8,
+                                            0, 0) {
                                         KernelTcpSendResult::Invalid(next) => {
                                             match network_capability_put(next) {
                                                 NetworkCapabilityPutResult::Stored => { }

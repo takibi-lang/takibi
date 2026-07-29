@@ -58,6 +58,7 @@ HANDSHAKE_CLIENT_ISN = 500
 SERVER_ISN = 0x00001000
 
 DATA_ECHO_PAYLOAD = b"Hello, TCP echo!"
+CONNECTED_RESPONSE_PAYLOAD = b"HTTP/1.0 200 OK\r\n\r\n"
 
 RECONNECT_CLIENT_PORT = 43211
 RECONNECT_CLIENT_ISN = 900
@@ -269,7 +270,7 @@ def test_handshake_only(client_mac: bytes) -> bool:
     return ok
 
 
-def test_data_echo(client_mac: bytes) -> bool:
+def test_data_echo(client_mac: bytes, expected_payload: bytes = DATA_ECHO_PAYLOAD) -> bool:
     # Continues the connection test_handshake_only() already fully
     # established -- see scripts/tcp_echo_test.py's ordering note for why
     # this can't perform its own independent handshake.
@@ -290,7 +291,7 @@ def test_data_echo(client_mac: bytes) -> bool:
     # Exactly 20 + payload bytes -- the frame is well above the 60-byte
     # Ethernet minimum here, so no TX-side padding is actually added in
     # practice, but slicing explicitly keeps this robust regardless.
-    tcp = reply[34:34 + 20 + len(DATA_ECHO_PAYLOAD)]
+    tcp = reply[34:34 + 20 + len(expected_payload)]
     src_port, dst_port, rseq, rack, _doff_res, flags = struct.unpack("!HHIIBB", tcp[0:14])
     rdata = tcp[20:]
 
@@ -301,7 +302,7 @@ def test_data_echo(client_mac: bytes) -> bool:
         src_port == SERVER_PORT and dst_port == HANDSHAKE_CLIENT_PORT and
         flags == (FLAG_ACK | FLAG_PSH) and
         rseq == SERVER_ISN + 1 and rack == seq + len(DATA_ECHO_PAYLOAD) and
-        rdata == DATA_ECHO_PAYLOAD and
+        rdata == expected_payload and
         checksum_fold(checksum_add(ip)) == 0 and
         checksum_fold(checksum_add(pseudo + tcp)) == 0
     )
@@ -378,10 +379,11 @@ def main() -> int:
         sock.close()
         print("  userspace accept handshake port %d: %s" %
               (SERVER_PORT, "PASS" if handshake_ok else "FAIL"))
-        echo_ok = handshake_ok and test_data_echo(client_mac)
-        print("  userspace connected read/write echo: %s" %
-              ("PASS" if echo_ok else "FAIL"))
-        return 0 if echo_ok else 1
+        io_ok = handshake_ok and test_data_echo(
+            client_mac, CONNECTED_RESPONSE_PAYLOAD)
+        print("  userspace connected generated response: %s" %
+              ("PASS" if io_ok else "FAIL"))
+        return 0 if io_ok else 1
 
     ok1 = test_syn_wrong_port_silent(client_mac)
     print("  SYN to wrong port (silent):        %s" % ("PASS" if ok1 else "FAIL"))
