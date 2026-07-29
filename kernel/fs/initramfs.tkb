@@ -11,6 +11,11 @@ must_use variant InitramfsFileResult {
     File((usize, usize));
 }
 
+must_use variant InitramfsEntryResult {
+    Invalid;
+    Entry((usize, usize, usize, usize));
+}
+
 fn cpio_hex_digit(value: u8) -> usize {
     if (value >= 0x30 && value <= 0x39) { return (value - 0x30) as usize; }
     if (value >= 0x41 && value <= 0x46) { return (value - 0x41 + 10) as usize; }
@@ -27,44 +32,114 @@ fn cpio_hex8(base: *u8, offset: usize) -> CpioNumberResult {
     return CpioNumberResult::Value(result);
 }
 
-fn initramfs_busybox() -> InitramfsFileResult {
+fn initramfs_entry(target: usize) -> InitramfsEntryResult {
     let address: usize = kernel_initramfs_addr();
     let length: usize = kernel_initramfs_len();
-    if (length < CPIO_NEWC_HEADER_SIZE) { return InitramfsFileResult::Invalid; }
+    let mut offset: usize = 0;
+    let mut ordinal: usize = 0;
     let bytes: *u8 = address as *u8;
-    if (bytes[0] != 0x30 || bytes[1] != 0x37 || bytes[2] != 0x30 ||
-        bytes[3] != 0x37 || bytes[4] != 0x30 || bytes[5] != 0x31) {
-        return InitramfsFileResult::Invalid;
+    while (offset <= length && CPIO_NEWC_HEADER_SIZE <= length - offset) {
+        let header: *u8 = (address + offset) as *u8;
+        if (header[0] != 0x30 || header[1] != 0x37 || header[2] != 0x30 ||
+            header[3] != 0x37 || header[4] != 0x30 || header[5] != 0x31) {
+            return InitramfsEntryResult::Invalid;
+        }
+        let mut file_size: usize = 0;
+        match cpio_hex8(header, CPIO_FILESIZE_OFFSET) {
+            CpioNumberResult::Invalid => {
+                return InitramfsEntryResult::Invalid;
+            }
+            CpioNumberResult::Value(value) => { file_size = value; }
+        }
+        let mut name_size: usize = 0;
+        match cpio_hex8(header, CPIO_NAMESIZE_OFFSET) {
+            CpioNumberResult::Invalid => {
+                return InitramfsEntryResult::Invalid;
+            }
+            CpioNumberResult::Value(value) => { name_size = value; }
+        }
+        if (name_size == 0 || name_size > length - offset - CPIO_NEWC_HEADER_SIZE) {
+            return InitramfsEntryResult::Invalid;
+        }
+        let name_offset: usize = offset + CPIO_NEWC_HEADER_SIZE;
+        if (name_offset > 0xFFFFFFFFFFFFFFFC - name_size) {
+            return InitramfsEntryResult::Invalid;
+        }
+        let data_offset: usize = (name_offset + name_size + 3) &
+                                 0xFFFFFFFFFFFFFFFC;
+        if (data_offset > length || file_size > length - data_offset) {
+            return InitramfsEntryResult::Invalid;
+        }
+        if (ordinal == target) {
+            return InitramfsEntryResult::Entry(
+                (address + name_offset, name_size,
+                 address + data_offset, file_size));
+        }
+        if (data_offset > 0xFFFFFFFFFFFFFFFC - file_size) {
+            return InitramfsEntryResult::Invalid;
+        }
+        offset = (data_offset + file_size + 3) & 0xFFFFFFFFFFFFFFFC;
+        ordinal = ordinal + 1;
     }
+    return InitramfsEntryResult::Invalid;
+}
 
-    let mut file_size: usize = 0;
-    match cpio_hex8(bytes, CPIO_FILESIZE_OFFSET) {
-        CpioNumberResult::Invalid => { return InitramfsFileResult::Invalid; }
-        CpioNumberResult::Value(value) => { file_size = value; }
+fn initramfs_busybox() -> InitramfsFileResult {
+    match initramfs_entry(0) {
+        InitramfsEntryResult::Invalid => {
+            return InitramfsFileResult::Invalid;
+        }
+        InitramfsEntryResult::Entry(entry) => {
+            let (name_address, name_size, file_address, file_size) = entry;
+            let name: *u8 = name_address as *u8;
+            if (name_size == 15 &&
+                name[0] == 0x62 && name[1] == 0x75 && name[2] == 0x73 &&
+                name[3] == 0x79 && name[4] == 0x62 && name[5] == 0x6F &&
+                name[6] == 0x78 && name[7] == 0x2D && name[8] == 0x73 &&
+                name[9] == 0x74 && name[10] == 0x61 && name[11] == 0x74 &&
+                name[12] == 0x69 && name[13] == 0x63 && name[14] == 0) {
+                return InitramfsFileResult::File((file_address, file_size));
+            }
+            return InitramfsFileResult::Invalid;
+        }
     }
-    let mut name_size: usize = 0;
-    match cpio_hex8(bytes, CPIO_NAMESIZE_OFFSET) {
-        CpioNumberResult::Invalid => { return InitramfsFileResult::Invalid; }
-        CpioNumberResult::Value(value) => { name_size = value; }
-    }
-    if (name_size != 15 || name_size > length - CPIO_NEWC_HEADER_SIZE) {
-        return InitramfsFileResult::Invalid;
-    }
+}
 
-    let name: *u8 = (address + CPIO_NEWC_HEADER_SIZE) as *u8;
-    if (name[0] != 0x62 || name[1] != 0x75 || name[2] != 0x73 ||
-        name[3] != 0x79 || name[4] != 0x62 || name[5] != 0x6F ||
-        name[6] != 0x78 || name[7] != 0x2D || name[8] != 0x73 ||
-        name[9] != 0x74 || name[10] != 0x61 || name[11] != 0x74 ||
-        name[12] != 0x69 || name[13] != 0x63 || name[14] != 0) {
-        return InitramfsFileResult::Invalid;
+fn initramfs_httpd() -> InitramfsFileResult {
+    match initramfs_entry(1) {
+        InitramfsEntryResult::Invalid => { return InitramfsFileResult::Invalid; }
+        InitramfsEntryResult::Entry(entry) => {
+            let (name_address, name_size, file_address, file_size) = entry;
+            let name: *u8 = name_address as *u8;
+            if (name_size == 14 && name[0] == 0x62 && name[1] == 0x75 &&
+                name[2] == 0x73 && name[3] == 0x79 && name[4] == 0x62 &&
+                name[5] == 0x6F && name[6] == 0x78 && name[7] == 0x2D &&
+                name[8] == 0x68 && name[9] == 0x74 && name[10] == 0x74 &&
+                name[11] == 0x70 && name[12] == 0x64 && name[13] == 0) {
+                return InitramfsFileResult::File((file_address, file_size));
+            }
+            return InitramfsFileResult::Invalid;
+        }
     }
+}
 
-    let name_end: usize = CPIO_NEWC_HEADER_SIZE + name_size;
-    if (name_end > 0xFFFFFFFFFFFFFFFC) { return InitramfsFileResult::Invalid; }
-    let file_offset: usize = (name_end + 3) & 0xFFFFFFFFFFFFFFFC;
-    if (file_offset > length || file_size > length - file_offset) {
-        return InitramfsFileResult::Invalid;
+fn initramfs_musl_loader() -> InitramfsFileResult {
+    match initramfs_entry(2) {
+        InitramfsEntryResult::Invalid => { return InitramfsFileResult::Invalid; }
+        InitramfsEntryResult::Entry(entry) => {
+            let (name_address, name_size, file_address, file_size) = entry;
+            let name: *u8 = name_address as *u8;
+            if (name_size == 21 && name[0] == 0x6C && name[1] == 0x64 &&
+                name[2] == 0x2D && name[3] == 0x6D && name[4] == 0x75 &&
+                name[5] == 0x73 && name[6] == 0x6C && name[7] == 0x2D &&
+                name[8] == 0x61 && name[9] == 0x61 && name[10] == 0x72 &&
+                name[11] == 0x63 && name[12] == 0x68 && name[13] == 0x36 &&
+                name[14] == 0x34 && name[15] == 0x2E && name[16] == 0x73 &&
+                name[17] == 0x6F && name[18] == 0x2E && name[19] == 0x31 &&
+                name[20] == 0) {
+                return InitramfsFileResult::File((file_address, file_size));
+            }
+            return InitramfsFileResult::Invalid;
+        }
     }
-    return InitramfsFileResult::File((address + file_offset, file_size));
 }

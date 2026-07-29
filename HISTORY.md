@@ -15,6 +15,24 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-07-29: Package and Validate the HTTPd PIE and musl Interpreter
+
+The reproducible kernel initramfs now adds `busybox-httpd`, extracted from the
+pinned Alpine v3.24 `busybox-extras` package, and its matching pinned
+`ld-musl-aarch64.so.1`, while retaining the static BusyBox used by the current
+`cat /hello.txt` compatibility fixture. The `newc` reader now walks multiple
+aligned entries with overflow and archive-bound checks and validates each
+expected filename rather than assuming the archive has one first member.
+
+The ELF validator accepts the HTTPd PIE's nine program headers under a bounded
+limit of sixteen. RPi5 boot checks the exact entry, two load segments, and
+extent of both the HTTPd PIE and musl interpreter and emits this as a separate
+`distro_image.expected` contract. Real hardware produced the expected line;
+all existing UART views and ARP, ICMP, TCP, userspace generated-response, USB
+ext2, and static BusyBox behavior passed in the same boot. The initially
+reported distro view mismatch was only the new line missing from its filter;
+re-projecting the captured UART after adding the filter matched exactly.
+
 ### 2026-07-29: Select Alpine BusyBox Extras as the HTTPd Binary
 
 Tracing the exact pinned Alpine `busybox-static` image established that it

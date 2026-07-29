@@ -121,6 +121,14 @@ instead of mapping an image which will fail after entry. The next loader work
 is the real ELF-interpreter path for the Alpine PIE, not an `ET_EXEC`
 pseudo-relocation.
 
+The generated `newc` initramfs now contains the original static BusyBox,
+`busybox-httpd` from the pinned Alpine `busybox-extras` package, and the
+matching pinned `ld-musl-aarch64.so.1`. Its parser walks aligned cpio entries
+with archive-bound checks instead of assuming the archive contains one file.
+RPi5 boot validation checks the exact names and the known AArch64 PIE entry,
+load-segment count, and extent of both HTTPd inputs before the existing static
+BusyBox process is started.
+
 The first ext2 slice is also active on RPi5. The build creates a checked 1 MiB
 RAM fixture with `mke2fs`, populates it with `e2mkdir`/`e2cp`, and embeds it as
 a writable image. The filesystem core reaches it only through the 1 KiB block

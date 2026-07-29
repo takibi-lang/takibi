@@ -60,7 +60,7 @@ fn distro_elf_validate(address: usize, length: usize) -> DistroElfResult {
 
     let program_offset: usize = header.program_offset as usize;
     let program_count: usize = header.program_count as usize;
-    if (program_count == 0 || program_count > 8 || program_offset > length) {
+    if (program_count == 0 || program_count > 16 || program_offset > length) {
         return DistroElfResult::Invalid;
     }
     let table_size: usize = program_count * ELF_PROGRAM_HEADER_SIZE;

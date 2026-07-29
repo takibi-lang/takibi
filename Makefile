@@ -2074,6 +2074,12 @@ KERNEL_USER_BUILD_DIR    := $(KERNEL_DIR)/build/user
 KERNEL_BUSYBOX_URL       := https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-static-1.37.0-r31.apk
 KERNEL_BUSYBOX_APK       := $(KERNEL_USER_BUILD_DIR)/busybox-static.apk
 KERNEL_BUSYBOX_STATIC    := $(KERNEL_USER_BUILD_DIR)/busybox-static
+KERNEL_HTTPD_URL         := https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-extras-1.37.0-r31.apk
+KERNEL_HTTPD_APK         := $(KERNEL_USER_BUILD_DIR)/busybox-extras.apk
+KERNEL_HTTPD             := $(KERNEL_USER_BUILD_DIR)/busybox-httpd
+KERNEL_MUSL_URL          := https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/musl-1.2.6-r2.apk
+KERNEL_MUSL_APK          := $(KERNEL_USER_BUILD_DIR)/musl.apk
+KERNEL_MUSL_LOADER       := $(KERNEL_USER_BUILD_DIR)/ld-musl-aarch64.so.1
 KERNEL_INITRAMFS_CPIO    := $(KERNEL_USER_BUILD_DIR)/initramfs.cpio
 KERNEL_INITRAMFS_S       := $(KERNEL_DIR)/user/initramfs.S
 KERNEL_INITRAMFS_O       := $(KERNEL_BUILD_DIR)/initramfs.o
@@ -2124,8 +2130,22 @@ $(KERNEL_BUSYBOX_STATIC): $(KERNEL_BUSYBOX_APK)
 	tar -xOzf $< bin/busybox.static > $@
 	chmod +x $@
 
-$(KERNEL_INITRAMFS_CPIO): $(KERNEL_BUSYBOX_STATIC)
-	cd $(KERNEL_USER_BUILD_DIR) && echo busybox-static | cpio -o -H newc > initramfs.cpio
+$(KERNEL_HTTPD_APK): | $(KERNEL_USER_BUILD_DIR)
+	curl -sSLf $(KERNEL_HTTPD_URL) -o $@
+
+$(KERNEL_HTTPD): $(KERNEL_HTTPD_APK)
+	tar -xOzf $< bin/busybox-extras > $@
+	chmod +x $@
+
+$(KERNEL_MUSL_APK): | $(KERNEL_USER_BUILD_DIR)
+	curl -sSLf $(KERNEL_MUSL_URL) -o $@
+
+$(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
+	tar -xOzf $< lib/ld-musl-aarch64.so.1 > $@
+	chmod +x $@
+
+$(KERNEL_INITRAMFS_CPIO): $(KERNEL_BUSYBOX_STATIC) $(KERNEL_HTTPD) $(KERNEL_MUSL_LOADER)
+	cd $(KERNEL_USER_BUILD_DIR) && printf '%s\n' busybox-static busybox-httpd ld-musl-aarch64.so.1 | cpio -o -H newc > initramfs.cpio
 
 $(KERNEL_EXT2_IMAGE): $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp

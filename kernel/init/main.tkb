@@ -425,6 +425,44 @@ fn main() {
             }
         }
     }
+    match initramfs_httpd() {
+        InitramfsFileResult::Invalid => {
+            kernel_boot_log("httpd images: invalid busybox-extras\n");
+        }
+        InitramfsFileResult::File(httpd_image) => {
+            let (httpd_address, httpd_length) = httpd_image;
+            match distro_elf_validate(httpd_address, httpd_length) {
+                DistroElfResult::Invalid => {
+                    kernel_boot_log("httpd images: invalid busybox-extras elf\n");
+                }
+                DistroElfResult::Valid(httpd_plan) => {
+                    match initramfs_musl_loader() {
+                        InitramfsFileResult::Invalid => {
+                            kernel_boot_log("httpd images: invalid musl\n");
+                        }
+                        InitramfsFileResult::File(musl_image) => {
+                            let (musl_address, musl_length) = musl_image;
+                            match distro_elf_validate(musl_address, musl_length) {
+                                DistroElfResult::Invalid => {
+                                    kernel_boot_log("httpd images: invalid musl elf\n");
+                                }
+                                DistroElfResult::Valid(musl_plan) => {
+                                    if (httpd_plan.entry == 0x3700 &&
+                                        httpd_plan.load_segments == 2 &&
+                                        httpd_plan.extent == 0x304B8 &&
+                                        musl_plan.entry == 0x69DE8 &&
+                                        musl_plan.load_segments == 2 &&
+                                        musl_plan.extent == 0xC2F20) {
+                                        kernel_boot_log("httpd images: busybox-extras+musl valid\n");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     match initramfs_busybox() {
         InitramfsFileResult::Invalid => {
             kernel_boot_log("distro image: invalid initramfs\n");
