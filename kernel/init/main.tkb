@@ -6,6 +6,7 @@ use "kernel/mm/address_space.tkb";
 use "kernel/mm/process_image.tkb";
 use "kernel/printk/log.tkb";
 use "kernel/fs/ext2/ext2.tkb";
+use "kernel/platform/rpi5/usb_xhci.tkb";
 
 private let mut ext2_read_fixture: [u8; 32];
 private let mut ext2_symlink_fixture: [u8; 64];
@@ -14,6 +15,14 @@ fn main() {
     platform_init();
     kernel_boot_log("takibi kernel: EL1\n");
     page_allocator_init();
+    match disk_initialize() {
+        DiskIoResult::Err(error) => {
+            kernel_boot_log("usb msc: initialization failed\n");
+        }
+        DiskIoResult::Ok => {
+            kernel_boot_log("usb msc: ready sector=512\n");
+        }
+    }
     match memory_block_device_ext2() {
         MemoryBlockDeviceResult::Invalid => {
             kernel_boot_log("ext2 image: invalid\n");

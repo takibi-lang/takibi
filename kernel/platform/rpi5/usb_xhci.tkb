@@ -1,0 +1,1400 @@
+// Standalone-kernel RP1 XHCI host controller + USB Mass Storage Bulk-Only
+// Transport. Initially forked byte-for-byte from the real-hardware-proven
+// examples/common_rpi5 driver; this copy is owned entirely by kernel/ and
+// has no build or source dependency on examples/.
+//
+// The original reusable module was extracted from rp1_usb_smoke once
+// once that diagnostic proved the whole path end to end on real hardware
+// (GitHub issue #67 Stage 2 follow-up: el0_shell needs a real
+// disk_initialize/disk_read/disk_write triple to mount FAT12, the same
+// way examples/common_rpi3/usb_msc.tkb serves el0_shell on RPi3).
+//
+// Exposes the exact same disk_initialize/disk_status/disk_read/disk_write
+// Media Access Interface examples/common_stm32/sdmmc.tkb and
+// examples/common_rpi3/usb_msc.tkb already expose (DiskIoResult, 512-byte
+// blocks), so examples/common_rpi5/fat12_usbmsc.tkb (mirroring
+// examples/common_rpi3/fat12_usbmsc.tkb) can `use` it with no
+// target-specific fork above this layer. Unlike RPi3's dwc2-based driver,
+// disk_read/disk_write here take plain `*u8` (not `*align(32) u8`): the
+// DMA address handed to the controller is `cpu_phys + RP1_DMA_PCI_OFFSET`
+// regardless of the buffer's own alignment, and every cache-maintenance
+// call below operates on whole-buffer ranges, not sub-cache-line slices --
+// no alignment constraint this driver's own correctness depends on.
+//
+// rp1_usb_smoke.tkb is kept exactly as it was verified (its own extensive
+// header comment documents the full bring-up investigation and root-cause
+// history) rather than being rewritten to `use` this file -- same "don't
+// destabilize proven bring-up code" reasoning this project applies
+// elsewhere (e.g. el0_elf_load.tkb vs el0_shell.tkb kept as separate
+// files). This file is a faithful port of that same proven logic into
+// library form: identical register offsets, masks, timing and DMA
+// addressing, with the diagnostic-only isolation-test code and per-step
+// uart narration removed, and one real behavioral generalization
+// (msc_run_command takes a caller-supplied data buffer instead of always
+// using an internal one) so disk_read/disk_write can DMA straight into
+// the caller's own buffer.
+//
+// See examples/common_rpi5/AGENTS.md's USB bring-up status updates and
+// the rpi5_usb_bringup memory file for the full derivation of every
+// constant below (RP1_DMA_PCI_OFFSET, the 0xCE00FFE9 PORTSC neutral mask,
+// the Address Device port-reset requirement, U-Boot's endpoint-index/DCI
+// formulas) -- not re-derived here.
+
+// RP1_USBHOST0_BASE is the CAPABILITY register base. Operational
+// registers (USBCMD/USBSTS/CRCR/DCBAAP/CONFIG/PORTSC) start at
+// Capability base + CAPLENGTH -- 0x20 on this hardware (confirmed by
+// rp1_usb_smoke.tkb's own Step 1 read of CAPLENGTH|HCIVERSION). Doorbell
+// array and Runtime/interrupter registers are Capability-base-relative
+// directly (DBOFF/RTSOFF are themselves Capability registers), so
+// RP1_USBHOST0_DOORBELL/RP1_USBHOST0_IR0 below are NOT offset from
+// RP1_USBHOST0_OP.
+const RP1_USBHOST0_BASE: usize = 0x1F00200000;
+const RP1_USBHOST0_OP: usize = 0x1F00200020; // RP1_USBHOST0_BASE + CAPLENGTH(0x20)
+const RP1_USBHOST0_DOORBELL: usize = 0x1F00200500;
+const RP1_USBHOST0_PORTSC3: usize = 0x1F00200440;
+const RP1_USBHOST0_IR0: usize = 0x1F00200480; // RP1_USBHOST0_BASE + 0x460 + 0x20
+
+const CMD_RING_TRBS: usize = 16;
+const EVT_RING_TRBS: usize = 16;
+const EP0_RING_TRBS: usize = 16;
+const BULK_RING_TRBS: usize = 16;
+// HCCPARAMS1 (read on real hardware as 0x0240fe6d) has CSZ (bit2) = 1:
+// this controller uses 64-byte contexts, not the 32-byte default.
+const CTX_STRIDE: usize = 64;
+const INPUT_CTX_SIZE: usize = 2112;  // 33 * CTX_STRIDE
+const DEVICE_CTX_SIZE: usize = 2048; // 32 * CTX_STRIDE
+
+let mut xhci_dcbaa: [u8; 65 * 8] align(64);
+let mut xhci_scratchpad_array: [u8; 2 * 8] align(64);
+let mut xhci_scratchpad_buf0: [u8; 4096] align(4096);
+let mut xhci_scratchpad_buf1: [u8; 4096] align(4096);
+let mut xhci_cmd_ring: [u8; CMD_RING_TRBS * 16] align(64);
+let mut xhci_evt_ring: [u8; EVT_RING_TRBS * 16] align(64);
+let mut xhci_erst: [u8; 16] align(64);
+let mut xhci_input_ctx: [u8; INPUT_CTX_SIZE] align(64);
+let mut xhci_device_ctx: [u8; DEVICE_CTX_SIZE] align(64);
+let mut xhci_ep0_ring: [u8; EP0_RING_TRBS * 16] align(64);
+let mut xhci_bulk_in_ring: [u8; BULK_RING_TRBS * 16] align(64);
+let mut xhci_bulk_out_ring: [u8; BULK_RING_TRBS * 16] align(64);
+let mut xhci_ctrl_buf: [u8; 256] align(64);
+
+let mut xhci_slot_id: usize = 0;
+let mut xhci_ep0_enq: usize = 0;
+let mut xhci_ep0_cycle: u32 = 1;
+let mut xhci_evt_idx: usize = 0;
+let mut xhci_evt_cycle: u32 = 1;
+let mut xhci_last_residual: u32 = 0;
+let mut xhci_last_evt_dw3: u32 = 0;
+
+let mut xhci_msc_config_value: u32 = 0;
+let mut xhci_msc_interface_num: u32 = 0;
+let mut xhci_msc_bulk_in_ep: u32 = 0;
+let mut xhci_msc_bulk_in_mps: u32 = 0;
+let mut xhci_msc_bulk_in_burst: u32 = 0;
+let mut xhci_msc_bulk_out_ep: u32 = 0;
+let mut xhci_msc_bulk_out_mps: u32 = 0;
+let mut xhci_msc_bulk_out_burst: u32 = 0;
+
+let mut xhci_bulk_in_enq: usize = 0;
+let mut xhci_bulk_in_cycle: u32 = 1;
+let mut xhci_bulk_in_dci: usize = 0;
+let mut xhci_bulk_out_enq: usize = 0;
+let mut xhci_bulk_out_cycle: u32 = 1;
+let mut xhci_bulk_out_dci: usize = 0;
+
+// Command Ring producer state. Bring-up (xhci_enable_slot/
+// xhci_address_device/xhci_configure_endpoint) uses fixed TRB[0]/[1]/[2]
+// offsets directly since those three commands run exactly once each in a
+// known order; this tracked index takes over from TRB[3] onward for
+// later, repeated commands (Reset Endpoint / Set TR Dequeue Pointer,
+// issued by xhci_reset_endpoint on every bulk-endpoint stall recovery).
+let mut xhci_cmd_enq: usize = 3;
+let mut xhci_cmd_cycle: u32 = 1;
+
+// Close out a ring segment so the controller can actually WALK from
+// `from_idx` to the Link TRB and follow it back to index 0.
+//
+// This is the single most important correctness detail of a TRB ring's
+// producer side, and getting it wrong is silent: the controller simply
+// stops, with no error and no event. A TD must not straddle the Link
+// TRB, so when one will not fit, the producer has to skip the remaining
+// slots -- but it may NOT simply jump to index 0 and toggle its own
+// cycle, because the controller is still sitting at its own dequeue
+// pointer several TRBs back. It walks forward one TRB at a time and
+// stops the moment it finds a Cycle bit that does not match its Consumer
+// Cycle State, so an untouched (BSS-zero, Cycle=0) gap left behind is a
+// permanent wall: the controller never reaches the Link TRB, never
+// toggles, and the ring is dead forever.
+//
+// So: fill every skipped slot with a real No-Op TRB carrying the CURRENT
+// cycle (the controller consumes and ignores these -- no IOC, so they
+// raise no events), then re-publish the Link TRB with the current cycle
+// too. Only then may the caller wrap to 0 and toggle its own cycle; the
+// controller toggles its own when it follows the Link TRB's Toggle Cycle
+// bit, and the two stay in sync.
+//
+// noop_type is 8 (No-Op Transfer TRB) for Transfer Rings and 23 (No-Op
+// Command TRB) for the Command Ring -- different TRB types with the same
+// "consume and ignore" role.
+//
+// Found on real hardware: EP0 went permanently silent (control transfers
+// returning no Transfer Event at all) after exactly 13 TRBs, the point
+// at which a 3-TRB control TD first failed to fit before the Link TRB.
+// examples/rp1_usb_smoke/rp1_usb_smoke.tkb never hit this only because
+// it happened to issue one fewer control transfer and stopped at 14.
+fn xhci_ring_close_segment(ring_base: usize, link_idx: usize,
+                           from_idx: usize, cycle: u32, noop_type: u32) {
+    let mut pad: usize = from_idx;
+    for k: usize in 0..<64 {
+        if (pad >= link_idx) {
+            break;
+        }
+        let o: usize = pad * 16;
+        let d0_ptr: *u32 = (ring_base + o) as *u32;
+        *d0_ptr = 0;
+        let d1_ptr: *u32 = (ring_base + o + 4) as *u32;
+        *d1_ptr = 0;
+        let d2_ptr: *u32 = (ring_base + o + 8) as *u32;
+        *d2_ptr = 0;
+        let d3_ptr: *u32 = (ring_base + o + 12) as *u32;
+        *d3_ptr = cycle | (noop_type << 10);
+        pad = pad + 1;
+    }
+    // Link TRB: its pointer (DWORD0/1) was written once at ring setup
+    // and never changes; only the Cycle bit needs republishing.
+    let link_off: usize = link_idx * 16;
+    let link_dw3_ptr: *u32 = (ring_base + link_off + 12) as *u32;
+    *link_dw3_ptr = cycle | (1 << 1) | (6 << 10); // Cycle | Toggle Cycle | Link
+}
+
+fn xhci_cmd_advance() {
+    xhci_cmd_enq = xhci_cmd_enq + 1;
+    let link_idx: usize = CMD_RING_TRBS - 1;
+    if (xhci_cmd_enq + 1 > link_idx) {
+        let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
+        xhci_ring_close_segment(cmd_ring_base, link_idx, xhci_cmd_enq,
+                                xhci_cmd_cycle, 23);
+        dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
+        xhci_cmd_enq = 0;
+        xhci_cmd_cycle = 1 - xhci_cmd_cycle;
+    }
+}
+
+let mut msc_cbw_buf: [u8; 64] align(64);
+let mut msc_csw_buf: [u8; 64] align(64);
+// General-purpose 512-byte scratch for small metadata transfers (Get Max
+// LUN, SCSI INQUIRY, READ CAPACITY) -- disk_read/disk_write DMA straight
+// into the caller's own buffer instead, via msc_run_command's data_base
+// parameter.
+let mut msc_scratch_buf: [u8; 512] align(64);
+// Every 512-byte disk_read/disk_write DMAs through this instead of the
+// caller's own buffer. Not an optimization -- a correctness requirement.
+// This CPU's cache line is 64 bytes. DMA receive buffers are whole,
+// cache-line-aligned allocations so dma_prepare_rx/dma_finish_rx can safely
+// invalidate them before device ownership and before CPU consumption.
+//
+// Found on real hardware, and it presented as silent data corruption
+// rather than an error: examples/common/fat12.tkb's buffers are
+// `align(32)`, so reading LBA 200 into one returned the first 16 bytes
+// of the PREVIOUSLY read sector (LBA 3's root directory) with the rest
+// of the sector correct. Reads "worked" for a while purely because the
+// very first read into a never-touched buffer has no dirty lines to
+// write back.
+//
+// Bouncing through a buffer that is 64-byte aligned AND a whole number
+// of cache lines long removes the caller-alignment requirement entirely,
+// which is why disk_read/disk_write below take a plain `*u8`.
+let mut msc_bounce_buf: [u8; 512] align(64);
+let mut msc_tag: u32 = 0;
+
+let mut xhci_ready: bool = false;
+
+// -- Media Access Interface (matches examples/common_stm32/sdmmc.tkb and
+// examples/common_rpi3/usb_msc.tkb) -----------------------------------
+must_use variant DiskIoResult {
+    Ok;
+    Err(i32);
+}
+
+fn disk_io_ok(r: DiskIoResult) -> bool {
+    match r {
+        DiskIoResult::Ok => { return true; }
+        DiskIoResult::Err(err) => { return false; }
+    }
+}
+
+// Consume one Event Ring entry of the requested TRB Type, skipping (and
+// logging) any other event type that arrives first -- port status
+// changes in particular are asynchronous and interleave freely.
+// Advances ERDP past everything consumed, which the controller requires
+// to keep delivering events. Returns the completion code (DWORD2 bits
+// 31:24), or 0 if no matching event turned up.
+fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 {
+    let evt_ring_base: usize = (xhci_evt_ring as *u8) as usize;
+    let evt_ring_dma: usize = evt_ring_base + RP1_DMA_PCI_OFFSET;
+
+    for scan: usize in 0..<8 {
+        let off: usize = xhci_evt_idx * 16;
+        let mut seen: bool = false;
+        let mut dw3: u32 = 0;
+        for i: usize in 0..<timeout_ms {
+            dma_finish_rx(xhci_evt_ring as *align(64) u8, EVT_RING_TRBS * 16);
+            let dw3_ptr: *u32 = (evt_ring_base + off + 12) as *u32;
+            let d3: u32 = *dw3_ptr;
+            if ((d3 & 1) == xhci_evt_cycle) {
+                seen = true;
+                dw3 = d3;
+                break;
+            }
+            delay_us(1000);
+        }
+        if (seen == false) {
+            return 0;
+        }
+
+        let dw2_ptr: *u32 = (evt_ring_base + off + 8) as *u32;
+        let dw2: u32 = *dw2_ptr;
+        let trb_type: u32 = (dw3 >> 10) & 0x3F;
+
+        xhci_evt_idx = xhci_evt_idx + 1;
+        if (xhci_evt_idx >= EVT_RING_TRBS) {
+            xhci_evt_idx = 0;
+            xhci_evt_cycle = 1 - xhci_evt_cycle;
+        }
+        let erdp_lo_ptr: *io u32 = (RP1_USBHOST0_IR0 + 0x18) as *io u32;
+        *erdp_lo_ptr = ((evt_ring_dma + xhci_evt_idx * 16) & 0xFFFFFFFF) as u32;
+        let erdp_hi_ptr: *io u32 = (RP1_USBHOST0_IR0 + 0x1C) as *io u32;
+        *erdp_hi_ptr = (((evt_ring_dma + xhci_evt_idx * 16) >> 32) & 0xFFFFFFFF) as u32;
+
+        if (trb_type == want_type) {
+            xhci_last_residual = dw2 & 0xFFFFFF;
+            xhci_last_evt_dw3 = dw3;
+            return (dw2 >> 24) & 0xFF;
+        }
+    }
+    return 0;
+}
+
+// One USB control transfer over EP0: Setup Stage + optional Data Stage +
+// Status Stage, one doorbell ring, one Transfer Event. Shape follows
+// U-Boot's xhci_ctrl_tx(). Pass w_length=0 for a no-data request, in
+// which case buf_dma is ignored. Returns the Transfer Event's completion
+// code (1 = Success, 0 = no event); the residual byte count lands in
+// xhci_last_residual.
+fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
+                 w_index: u32, w_length: u32, buf_dma: usize,
+                 dir_in: bool) -> u32 {
+    let ep0_ring_base: usize = (xhci_ep0_ring as *u8) as usize;
+    let has_data: bool = w_length > 0;
+
+    // A control TD is at most 3 TRBs (Setup + Data + Status); reserve
+    // that conservatively even for the 2-TRB no-data case. See
+    // xhci_ring_close_segment for why the skipped slots and the Link TRB
+    // must be published rather than simply jumped over.
+    let need: usize = 3;
+    let ep0_link_idx: usize = EP0_RING_TRBS - 1;
+    if (xhci_ep0_enq + need > ep0_link_idx) {
+        xhci_ring_close_segment(ep0_ring_base, ep0_link_idx, xhci_ep0_enq,
+                                xhci_ep0_cycle, 8);
+        xhci_ep0_enq = 0;
+        xhci_ep0_cycle = 1 - xhci_ep0_cycle;
+    }
+    let first_off: usize = xhci_ep0_enq * 16;
+    let cyc: u32 = xhci_ep0_cycle;
+
+    let mut trt: u32 = 0;
+    if (has_data) {
+        if (dir_in) { trt = 3; } else { trt = 2; }
+    }
+    let s_dw0_ptr: *u32 = (ep0_ring_base + first_off) as *u32;
+    *s_dw0_ptr = bm_request_type | (b_request << 8) | (w_value << 16);
+    let s_dw1_ptr: *u32 = (ep0_ring_base + first_off + 4) as *u32;
+    *s_dw1_ptr = w_index | (w_length << 16);
+    let s_dw2_ptr: *u32 = (ep0_ring_base + first_off + 8) as *u32;
+    *s_dw2_ptr = 8;
+    let s_dw3_ptr: *u32 = (ep0_ring_base + first_off + 12) as *u32;
+    *s_dw3_ptr = cyc | (1 << 6) | (2 << 10) | (trt << 16);
+
+    let mut off: usize = first_off + 16;
+
+    if (has_data) {
+        let mut dir_bit: u32 = 0;
+        if (dir_in) { dir_bit = 1; }
+        let d_dw0_ptr: *u32 = (ep0_ring_base + off) as *u32;
+        *d_dw0_ptr = (buf_dma & 0xFFFFFFFF) as u32;
+        let d_dw1_ptr: *u32 = (ep0_ring_base + off + 4) as *u32;
+        *d_dw1_ptr = ((buf_dma >> 32) & 0xFFFFFFFF) as u32;
+        let d_dw2_ptr: *u32 = (ep0_ring_base + off + 8) as *u32;
+        *d_dw2_ptr = w_length;
+        let d_dw3_ptr: *u32 = (ep0_ring_base + off + 12) as *u32;
+        *d_dw3_ptr = cyc | (3 << 10) | (dir_bit << 16);
+        off = off + 16;
+    }
+
+    let mut st_dir: u32 = 1;
+    if (has_data) {
+        if (dir_in) { st_dir = 0; }
+    }
+    let t_dw0_ptr: *u32 = (ep0_ring_base + off) as *u32;
+    *t_dw0_ptr = 0;
+    let t_dw1_ptr: *u32 = (ep0_ring_base + off + 4) as *u32;
+    *t_dw1_ptr = 0;
+    let t_dw2_ptr: *u32 = (ep0_ring_base + off + 8) as *u32;
+    *t_dw2_ptr = 0;
+    let t_dw3_ptr: *u32 = (ep0_ring_base + off + 12) as *u32;
+    *t_dw3_ptr = cyc | (1 << 5) | (4 << 10) | (st_dir << 16);
+
+    xhci_ep0_enq = (off + 16) / 16;
+    dma_prepare_tx(xhci_ep0_ring as *u8, EP0_RING_TRBS * 16);
+
+    let db_ptr: *io u32 = (RP1_USBHOST0_DOORBELL + xhci_slot_id * 4) as *io u32;
+    *db_ptr = 1;
+
+    return usb_await_event(32, 1000);
+}
+
+// One bulk transfer: a single Normal TRB (Type 1) on the endpoint's own
+// ring, then that endpoint's doorbell, then one Transfer Event. ISP
+// (Interrupt on Short Packet) is set so a device that returns fewer
+// bytes than asked still raises the event rather than leaving the
+// transfer outstanding. Returns the completion code -- 1 is Success and
+// 13 is Short Packet, both of which mean the data arrived.
+fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 {
+    let mut ring_base: usize = (xhci_bulk_out_ring as *u8) as usize;
+    let mut enq: usize = xhci_bulk_out_enq;
+    let mut cyc: u32 = xhci_bulk_out_cycle;
+    let mut dci: usize = xhci_bulk_out_dci;
+    if (dir_in) {
+        ring_base = (xhci_bulk_in_ring as *u8) as usize;
+        enq = xhci_bulk_in_enq;
+        cyc = xhci_bulk_in_cycle;
+        dci = xhci_bulk_in_dci;
+    }
+
+    // Same Link-TRB discipline as the EP0 ring -- see
+    // xhci_ring_close_segment. A bulk TD is a single TRB here, so this
+    // only ever triggers exactly at the Link TRB slot, but the Link TRB
+    // still has to be re-published with the current cycle or the SECOND
+    // wrap (when the cycle is 0, not the 1 it was initialized with)
+    // silently kills the ring.
+    let bulk_link_idx: usize = BULK_RING_TRBS - 1;
+    if (enq + 1 > bulk_link_idx) {
+        xhci_ring_close_segment(ring_base, bulk_link_idx, enq, cyc, 8);
+        enq = 0;
+        cyc = 1 - cyc;
+    }
+
+    let off: usize = enq * 16;
+    let dw0_ptr: *u32 = (ring_base + off) as *u32;
+    *dw0_ptr = (buf_dma & 0xFFFFFFFF) as u32;
+    let dw1_ptr: *u32 = (ring_base + off + 4) as *u32;
+    *dw1_ptr = ((buf_dma >> 32) & 0xFFFFFFFF) as u32;
+    let dw2_ptr: *u32 = (ring_base + off + 8) as *u32;
+    *dw2_ptr = length;
+    // ISP (Interrupt on Short Packet, bit2) only has defined meaning for
+    // IN transfers (a device sending fewer bytes than offered); left
+    // off for OUT, where the host always controls the exact byte count.
+    let mut isp_bit: u32 = 0;
+    if (dir_in) { isp_bit = 1 << 2; }
+    let dw3_ptr: *u32 = (ring_base + off + 12) as *u32;
+    *dw3_ptr = cyc | isp_bit | (1 << 5) | (1 << 10);
+    if (dir_in) {
+        dma_prepare_tx(xhci_bulk_in_ring as *u8, BULK_RING_TRBS * 16);
+    } else {
+        dma_prepare_tx(xhci_bulk_out_ring as *u8, BULK_RING_TRBS * 16);
+    }
+
+    enq = enq + 1;
+    if (dir_in) {
+        xhci_bulk_in_enq = enq;
+        xhci_bulk_in_cycle = cyc;
+    } else {
+        xhci_bulk_out_enq = enq;
+        xhci_bulk_out_cycle = cyc;
+    }
+
+    let db_ptr: *io u32 = (RP1_USBHOST0_DOORBELL + xhci_slot_id * 4) as *io u32;
+    *db_ptr = dci as u32;
+
+    return usb_await_event(32, 5000);
+}
+
+// Recover a STALLed bulk endpoint. Unlike RPi3's DWC2 driver (which only
+// needs to clear the device-side STALL via CLEAR_FEATURE(ENDPOINT_HALT)
+// -- see examples/common_rpi3/usb_msc.tkb's own msc_recover_transport),
+// xHCI ALSO halts the endpoint's Endpoint Context internally on a
+// Transfer Event with a non-success completion code (STALL Error = 6,
+// among others): no further TRB on that ring is processed until
+// software issues a Reset Endpoint Command (TRB Type 14) targeting the
+// endpoint's own DCI. A Set TR Dequeue Pointer Command (Type 16)
+// afterward repoints the controller's own dequeue pointer at the ring's
+// NEXT producer slot (this driver's own `enq`/`cycle` state, which
+// already advanced past the failed TRB when it was enqueued) so the
+// controller does not attempt to re-fetch the TRB that just stalled.
+// Found the hard way: the first-ever bulk OUT transfer this driver
+// attempted (WRITE(10)'s data phase) succeeded, but the CSW's own
+// bulk-IN read afterward came back with completion_code=0x06 (STALL)
+// every time, until this recovery was added.
+// Issues an xHCI Reset Endpoint Command (TRB Type 14) for the given DCI
+// Issue one Command Ring command and wait for its Command Completion
+// Event. EVERY DWORD is written explicitly, including the ones that are
+// zero: the Command Ring is reused, so a slot revisited after a wrap
+// still holds the previous command's DWORDs. Leaving DWORD2 untouched
+// on a Set TR Dequeue Pointer command (whose DWORD2 carries the Stream
+// ID) is exactly how that command came back with completion_code=0x05
+// (TRB Error) on real hardware here.
+fn xhci_run_command(dw0: u32, dw1: u32, dw2: u32, trb_type: u32,
+                    dci: usize) -> u32 {
+    let dci_u32: u32 = dci as u32;
+    let slot_u32: u32 = xhci_slot_id as u32;
+    let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
+    let cmd_off: usize = xhci_cmd_enq * 16;
+    let d0_ptr: *u32 = (cmd_ring_base + cmd_off) as *u32;
+    *d0_ptr = dw0;
+    let d1_ptr: *u32 = (cmd_ring_base + cmd_off + 4) as *u32;
+    *d1_ptr = dw1;
+    let d2_ptr: *u32 = (cmd_ring_base + cmd_off + 8) as *u32;
+    *d2_ptr = dw2;
+    let d3_ptr: *u32 = (cmd_ring_base + cmd_off + 12) as *u32;
+    *d3_ptr = xhci_cmd_cycle | (trb_type << 10) | (dci_u32 << 16)
+            | (slot_u32 << 24);
+    dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
+    xhci_cmd_advance();
+
+    let doorbell0_ptr: *io u32 = RP1_USBHOST0_DOORBELL as *io u32;
+    *doorbell0_ptr = 0;
+    return usb_await_event(33, 1000);
+}
+
+// Reset Endpoint (TRB Type 14) clears the CONTROLLER-side Halted state
+// an Endpoint Context enters on any non-success Transfer Event.
+// CLEAR_FEATURE(ENDPOINT_HALT) alone only clears the DEVICE side; xHCI
+// requires both, and per the spec a Set TR Dequeue Pointer (Type 16)
+// must follow before the endpoint's doorbell is rung again, to tell the
+// controller where to resume -- the ring's next free producer slot,
+// since this driver has already advanced past the TRB that failed.
+fn xhci_reset_endpoint(dci: usize, ring_dma: usize, next_off: usize,
+                       next_cycle: u32) {
+    xhci_run_command(0, 0, 0, 14, dci);
+    let deq: usize = (ring_dma + next_off) | (next_cycle as usize);
+    xhci_run_command((deq & 0xFFFFFFFF) as u32,
+                     ((deq >> 32) & 0xFFFFFFFF) as u32,
+                     0, 16, dci);
+}
+
+// Recover a STALLed bulk endpoint. Clear the xHC's Halted Endpoint Context
+// first (Reset Endpoint + Set TR Dequeue Pointer), then clear the device's
+// endpoint halt via CLEAR_FEATURE(ENDPOINT_HALT). This matches Linux xHCI's
+// split recovery: its Transfer Event handler resets the host endpoint as
+// soon as the STALL arrives; the class driver clears the device-side halt
+// afterward before retrying the transfer.
+fn xhci_recover_bulk_stall(dir_in: bool, ep_addr: u32, dci: usize) {
+    if (dir_in) {
+        let ring_base: usize = (xhci_bulk_in_ring as *u8) as usize;
+        let ring_dma: usize = ring_base + RP1_DMA_PCI_OFFSET;
+        xhci_reset_endpoint(dci, ring_dma, xhci_bulk_in_enq * 16,
+                            xhci_bulk_in_cycle);
+    } else {
+        let ring_base: usize = (xhci_bulk_out_ring as *u8) as usize;
+        let ring_dma: usize = ring_base + RP1_DMA_PCI_OFFSET;
+        xhci_reset_endpoint(dci, ring_dma, xhci_bulk_out_enq * 16,
+                            xhci_bulk_out_cycle);
+    }
+    usb_ctrl_xfer(0x02, 1, 0, ep_addr, 0, 0, false);
+}
+
+// Bulk-Only Mass Storage Reset (class request, interface recipient, no
+// data stage) -- best-effort override of any inherited device state,
+// same reasoning as RPi3's own msc_bulk_only_reset.
+fn msc_bulk_only_reset() -> bool {
+    return usb_ctrl_xfer(0x21, 0xFF, 0, xhci_msc_interface_num, 0, 0, false) == 1;
+}
+
+// Full USB Mass Storage BOT reset recovery, in the order the BOT spec
+// requires: class-specific Mass Storage Reset, then clear the STALL
+// condition on BOTH bulk endpoints (not just whichever one happened to
+// stall) -- see RPi3's own msc_recover_transport for the same sequence.
+// A single-endpoint xhci_recover_bulk_stall() was tried first here and
+// was NOT sufficient on real hardware: it cleared the immediate STALL
+// but the following CSW read then failed with completion_code=0x04 (USB
+// Transaction Error), consistent with the BOT spec's own reasoning that
+// a stalled CSW stage is a genuine "Phase Error" the device signals by
+// discarding its whole notion of the in-flight command -- only a full
+// reset, not a single endpoint recovery, puts both sides back in sync.
+// Full BOT reset recovery, in the order the spec (5.3.4) requires: class-
+// specific Mass Storage Reset, then Clear Feature HALT on BOTH bulk
+// endpoints. Found necessary on real hardware after a persistent CSW
+// stall: clearing just the IN endpoint's halt was not enough to make the
+// device answer again -- a retried CSW read timed out completely rather
+// than re-stalling (the device had nothing left to send at all, having
+// apparently discarded that CSW), and worse, a fresh CBW sent afterward
+// on the OUT endpoint (never itself touched) stalled immediately too.
+// Only Mass Storage Reset actually resets the device's own BOT state
+// machine back to "ready for a new CBW" -- device-side CLEAR_FEATURE
+// alone clears an endpoint's halt bit but does not do that. No xHCI
+// Reset Endpoint Command here (see xhci_recover_bulk_stall's own
+// comment: it was tried and made an isolated stall into a total
+// transport breakdown).
+fn msc_recover_transport() -> bool {
+    msc_bulk_only_reset();
+    usb_ctrl_xfer(0x02, 1, 0, xhci_msc_bulk_in_ep, 0, 0, false);
+    usb_ctrl_xfer(0x02, 1, 0, xhci_msc_bulk_out_ep, 0, 0, false);
+    return true;
+}
+
+// Fills the fixed 15-byte CBW header and zeroes the 16-byte CDB region;
+// callers fill in the CDB's own opcode/fields at msc_cbw_buf[15..]
+// afterward. bCBWLUN is always 0 -- single-drive scope, same as the RPi3
+// side.
+fn msc_cbw_header(data_len: u32, dir_in: bool, cb_len: u32) {
+    msc_tag = msc_tag + 1;
+    let tag: u32 = msc_tag;
+    let base: usize = (msc_cbw_buf as *u8) as usize;
+    for i: usize in 0..<31 {
+        let p: *u8 = (base + i) as *u8;
+        *p = 0;
+    }
+    let sig: u32 = 0x43425355;
+    for i: usize in 0..<4 {
+        let sh: u32 = (i * 8) as u32;
+        let p: *u8 = (base + i) as *u8;
+        *p = ((sig >> sh) & 0xFF) as u8;
+        let pt: *u8 = (base + 4 + i) as *u8;
+        *pt = ((tag >> sh) & 0xFF) as u8;
+        let pd: *u8 = (base + 8 + i) as *u8;
+        *pd = ((data_len >> sh) & 0xFF) as u8;
+    }
+    let flags_ptr: *u8 = (base + 12) as *u8;
+    if (dir_in) {
+        *flags_ptr = 0x80;
+    } else {
+        *flags_ptr = 0x00;
+    }
+    let cblen_ptr: *u8 = (base + 14) as *u8;
+    *cblen_ptr = cb_len as u8;
+}
+
+// Run one complete Bulk-Only Transport command: CBW out, optional data
+// phase (into/from data_base, the CALLER's own buffer -- unlike the
+// rp1_usb_smoke.tkb original this was ported from, which always used one
+// fixed internal buffer), CSW in. The CBW must already be built by
+// msc_cbw_header() plus the caller's CDB bytes. Returns 0 on success, or
+// a small nonzero code identifying which stage failed.
+fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
+    let data_base: usize = data as usize;
+    let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
+    let cbw_dma: usize = cbw_base + RP1_DMA_PCI_OFFSET;
+    let csw_base: usize = (msc_csw_buf as *u8) as usize;
+    let csw_dma: usize = csw_base + RP1_DMA_PCI_OFFSET;
+    let data_dma: usize = data_base + RP1_DMA_PCI_OFFSET;
+
+    dma_prepare_tx(msc_cbw_buf as *u8, 64);
+    let cbw_cc: u32 = usb_bulk_xfer(false, cbw_dma, 31);
+    if (cbw_cc != 1) {
+        return 1;
+    }
+
+    if (data_len > 0) {
+        if (dir_in) {
+            dma_prepare_rx(data, 512);
+        } else {
+            dma_prepare_tx(data as *u8, 512);
+        }
+        // Short Packet (13) is a normal, successful outcome for a
+        // device that had less data than we offered to read. Any other
+        // non-success code (STALL Error=6 in particular) means the
+        // transport is out of sync; this function makes exactly one
+        // attempt and reports which stage failed, matching RPi3's own
+        // msc_read10_once/msc_write10_once -- callers (disk_read/
+        // disk_write) own the recovery-and-retry policy, via
+        // msc_recover_transport().
+        let data_cc: u32 = usb_bulk_xfer(dir_in, data_dma, data_len);
+        if (data_cc != 1 && data_cc != 13) {
+            return 2;
+        }
+        if (dir_in) {
+            dma_finish_rx(data, 512);
+        }
+    }
+
+    dma_prepare_rx(msc_csw_buf as *align(64) u8, 64);
+    let mut csw_cc: u32 = usb_bulk_xfer(true, csw_dma, 13);
+    // Special-cased STALL handling on the CSW stage specifically, kept
+    // to a bounded retry LOOP -- not a single retry, and deliberately
+    // NOT a restart with a fresh CBW. A single retry (U-Boot's own
+    // usb_stor_BBB_clear_endpt_stall pattern) was tried first here and
+    // was not always enough on real hardware: this device can apparently
+    // take more than one attempt to finish internally committing a
+    // WRITE(10) before its CSW is ready. Critically, once the device has
+    // accepted a CBW it is WAITING for that CBW's own CSW to be read --
+    // sending a brand new CBW instead (this function's own caller's
+    // first instinct, matching a naive "restart the whole command" retry
+    // policy) is a genuine BOT phase violation from the device's point
+    // of view and was confirmed on real hardware to make things worse:
+    // the FRESH CBW itself then stalls too, because the device is still
+    // sitting on the OLD CSW. Keep retrying the SAME CSW read.
+    for i: usize in 0..<8 {
+        if (csw_cc != 6) {
+            break;
+        }
+        xhci_recover_bulk_stall(true, xhci_msc_bulk_in_ep, xhci_bulk_in_dci);
+        delay_us(50000);
+        dma_prepare_rx(msc_csw_buf as *align(64) u8, 64);
+        csw_cc = usb_bulk_xfer(true, csw_dma, 13);
+    }
+    if (csw_cc != 1 && csw_cc != 13) {
+        return 3;
+    }
+    dma_finish_rx(msc_csw_buf as *align(64) u8, 64);
+
+    let mut csw_sig: u32 = 0;
+    let mut csw_tag: u32 = 0;
+    for i: usize in 0..<4 {
+        let sh: u32 = (i * 8) as u32;
+        let p: *u8 = (csw_base + i) as *u8;
+        csw_sig = csw_sig | ((*p as u32) << sh);
+        let pt: *u8 = (csw_base + 4 + i) as *u8;
+        csw_tag = csw_tag | ((*pt as u32) << sh);
+    }
+    if (csw_sig != 0x53425355) {
+        return 4;
+    }
+    if (csw_tag != msc_tag) {
+        return 5;
+    }
+    let status_ptr: *u8 = (csw_base + 12) as *u8;
+    if (*status_ptr != 0) {
+        return 6;
+    }
+    return 0;
+}
+
+// -- Bring-up sequence, split into stages matching rp1_usb_smoke.tkb's
+// own proven Steps 5-10 (see that file's header comment for the full
+// investigation history behind every constant/mask below). ------------
+
+fn xhci_halt_and_reset() -> bool {
+    let usbcmd_ptr: *io u32 = RP1_USBHOST0_OP as *io u32;
+    let usbcmd_before: u32 = *usbcmd_ptr;
+    *usbcmd_ptr = usbcmd_before & 0xFFFFFFFE;
+
+    let mut halt_confirmed: bool = false;
+    for i: usize in 0..<100 {
+        let usbsts_ptr: *io u32 = (RP1_USBHOST0_OP + 0x04) as *io u32;
+        let usbsts: u32 = *usbsts_ptr;
+        if ((usbsts & 1) == 1) {
+            halt_confirmed = true;
+            break;
+        }
+        delay_us(1000);
+    }
+    if (halt_confirmed == false) {
+        return false;
+    }
+
+    // Real Host Controller Reset (USBCMD.HCRST, bit1) -- required
+    // because firmware leaves this controller running with a device
+    // already fully addressed on port 3; a soft RS-cycle alone does not
+    // discard that internal state.
+    let usbcmd_hcrst_ptr: *io u32 = RP1_USBHOST0_OP as *io u32;
+    let usbcmd_before_hcrst: u32 = *usbcmd_hcrst_ptr;
+    *usbcmd_hcrst_ptr = usbcmd_before_hcrst | 2;
+
+    let mut hcrst_confirmed: bool = false;
+    for i: usize in 0..<1000 {
+        let usbcmd_poll_ptr: *io u32 = RP1_USBHOST0_OP as *io u32;
+        let usbcmd_poll: u32 = *usbcmd_poll_ptr;
+        let usbsts_poll_ptr: *io u32 = (RP1_USBHOST0_OP + 0x04) as *io u32;
+        let usbsts_poll: u32 = *usbsts_poll_ptr;
+        if (((usbcmd_poll >> 1) & 1) == 0 && ((usbsts_poll >> 11) & 1) == 0) {
+            hcrst_confirmed = true;
+            break;
+        }
+        delay_us(1000);
+    }
+    return hcrst_confirmed;
+}
+
+fn xhci_setup_rings_and_start() -> bool {
+    // RP1 bus masters reach system RAM only at PCI 0x10_00000000 +
+    // cpu_phys (BCM2712's own device tree), not raw cpu_phys.
+    pcie2_dma_inbound_setup();
+
+    // HCRST resets the CONTROLLER's own ring positions (its Event Ring
+    // producer restarts at index 0 with Cycle=1, and CRCR/ERDP are
+    // reprogrammed below), so this driver's matching CONSUMER/producer
+    // state has to be reset too or the two disagree from the first
+    // event onward. Found the hard way: calling disk_initialize() a
+    // SECOND time (to rebuild a wedged transport) left xhci_evt_idx
+    // wherever the previous session had advanced it, so the very next
+    // Address Device command's completion event was looked for in the
+    // wrong slot and timed out. Every buffer is re-zeroed as well --
+    // stale Cycle bits in a No-Op-padded or wrapped ring would be read
+    // as live TRBs by a freshly reset controller.
+    xhci_ready = false;
+    xhci_evt_idx = 0;
+    xhci_evt_cycle = 1;
+    // 3, not 0: bring-up writes Enable Slot / Address Device / Configure
+    // Endpoint into the fixed slots TRB[0..2] below, so the tracked
+    // producer index for every LATER command starts after them.
+    xhci_cmd_enq = 3;
+    xhci_cmd_cycle = 1;
+    xhci_ep0_enq = 0;
+    xhci_ep0_cycle = 1;
+    xhci_bulk_in_enq = 0;
+    xhci_bulk_in_cycle = 1;
+    xhci_bulk_out_enq = 0;
+    xhci_bulk_out_cycle = 1;
+
+    let evt_zero_base: usize = (xhci_evt_ring as *u8) as usize;
+    for i: usize in 0..<EVT_RING_TRBS {
+        let p: *u32 = (evt_zero_base + i * 16 + 12) as *u32;
+        *p = 0;
+    }
+    dma_prepare_tx(xhci_evt_ring as *u8, EVT_RING_TRBS * 16);
+    let cmd_zero_base: usize = (xhci_cmd_ring as *u8) as usize;
+    for i: usize in 0..<CMD_RING_TRBS {
+        let p: *u32 = (cmd_zero_base + i * 16 + 12) as *u32;
+        *p = 0;
+    }
+    let ep0_zero_base: usize = (xhci_ep0_ring as *u8) as usize;
+    for i: usize in 0..<EP0_RING_TRBS {
+        let p: *u32 = (ep0_zero_base + i * 16 + 12) as *u32;
+        *p = 0;
+    }
+    dma_prepare_tx(xhci_ep0_ring as *u8, EP0_RING_TRBS * 16);
+    let bin_zero_base: usize = (xhci_bulk_in_ring as *u8) as usize;
+    let bout_zero_base: usize = (xhci_bulk_out_ring as *u8) as usize;
+    for i: usize in 0..<BULK_RING_TRBS {
+        let pi: *u32 = (bin_zero_base + i * 16 + 12) as *u32;
+        *pi = 0;
+        let po: *u32 = (bout_zero_base + i * 16 + 12) as *u32;
+        *po = 0;
+    }
+    dma_prepare_tx(xhci_bulk_in_ring as *u8, BULK_RING_TRBS * 16);
+    dma_prepare_tx(xhci_bulk_out_ring as *u8, BULK_RING_TRBS * 16);
+
+    let scratchpad_array_base: usize = (xhci_scratchpad_array as *u8) as usize;
+    let scratchpad_buf0_base: usize = (xhci_scratchpad_buf0 as *u8) as usize;
+    let scratchpad_buf1_base: usize = (xhci_scratchpad_buf1 as *u8) as usize;
+    let scratchpad_array_dma: usize = scratchpad_array_base + RP1_DMA_PCI_OFFSET;
+    let scratchpad_buf0_dma: usize = scratchpad_buf0_base + RP1_DMA_PCI_OFFSET;
+    let scratchpad_buf1_dma: usize = scratchpad_buf1_base + RP1_DMA_PCI_OFFSET;
+    let sp0_ptr: *u32 = scratchpad_array_base as *u32;
+    *sp0_ptr = (scratchpad_buf0_dma & 0xFFFFFFFF) as u32;
+    let sp0_hi_ptr: *u32 = (scratchpad_array_base + 4) as *u32;
+    *sp0_hi_ptr = ((scratchpad_buf0_dma >> 32) & 0xFFFFFFFF) as u32;
+    let sp1_ptr: *u32 = (scratchpad_array_base + 8) as *u32;
+    *sp1_ptr = (scratchpad_buf1_dma & 0xFFFFFFFF) as u32;
+    let sp1_hi_ptr: *u32 = (scratchpad_array_base + 12) as *u32;
+    *sp1_hi_ptr = ((scratchpad_buf1_dma >> 32) & 0xFFFFFFFF) as u32;
+    dma_prepare_tx(xhci_scratchpad_array as *u8, 16);
+
+    let dcbaa_base: usize = (xhci_dcbaa as *u8) as usize;
+    let dcbaa_dma: usize = dcbaa_base + RP1_DMA_PCI_OFFSET;
+    let dcbaa0_ptr: *u32 = dcbaa_base as *u32;
+    *dcbaa0_ptr = (scratchpad_array_dma & 0xFFFFFFFF) as u32;
+    let dcbaa0_hi_ptr: *u32 = (dcbaa_base + 4) as *u32;
+    *dcbaa0_hi_ptr = ((scratchpad_array_dma >> 32) & 0xFFFFFFFF) as u32;
+    dma_prepare_tx(xhci_dcbaa as *u8, 65 * 8);
+
+    let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
+    let cmd_ring_dma: usize = cmd_ring_base + RP1_DMA_PCI_OFFSET;
+    let trb0_dw3_ptr: *u32 = (cmd_ring_base + 12) as *u32;
+    *trb0_dw3_ptr = 0x00002401; // Enable Slot, Cycle=1
+
+    let cmd_link_off: usize = (CMD_RING_TRBS - 1) * 16;
+    let clink_dw0_ptr: *u32 = (cmd_ring_base + cmd_link_off) as *u32;
+    *clink_dw0_ptr = (cmd_ring_dma & 0xFFFFFFFF) as u32;
+    let clink_dw1_ptr: *u32 = (cmd_ring_base + cmd_link_off + 4) as *u32;
+    *clink_dw1_ptr = ((cmd_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+    let clink_dw3_ptr: *u32 = (cmd_ring_base + cmd_link_off + 12) as *u32;
+    *clink_dw3_ptr = 0x00001803;
+    dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
+
+    let evt_ring_base: usize = (xhci_evt_ring as *u8) as usize;
+    let erst_base: usize = (xhci_erst as *u8) as usize;
+    let evt_ring_dma: usize = evt_ring_base + RP1_DMA_PCI_OFFSET;
+    let erst_dma: usize = erst_base + RP1_DMA_PCI_OFFSET;
+    let erst_dw0_ptr: *u32 = erst_base as *u32;
+    *erst_dw0_ptr = (evt_ring_dma & 0xFFFFFFFF) as u32;
+    let erst_dw1_ptr: *u32 = (erst_base + 4) as *u32;
+    *erst_dw1_ptr = ((evt_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+    let erst_dw2_ptr: *u32 = (erst_base + 8) as *u32;
+    *erst_dw2_ptr = 16;
+    dma_prepare_tx(xhci_erst as *u8, 16);
+
+    // Programming order (ERSTSZ, then ERSTBA, then ERDP last) matches
+    // Linux's own xhci_add_interrupter() exactly -- a different order
+    // was tried first and silently never produced a Command Completion
+    // Event.
+    let erstsz_ptr: *io u32 = RP1_USBHOST0_IR0 as *io u32;
+    *erstsz_ptr = 1;
+    let erstba_lo_ptr: *io u32 = (RP1_USBHOST0_IR0 + 0x10) as *io u32;
+    *erstba_lo_ptr = (erst_dma & 0xFFFFFFFF) as u32;
+    let erstba_hi_ptr: *io u32 = (RP1_USBHOST0_IR0 + 0x14) as *io u32;
+    *erstba_hi_ptr = ((erst_dma >> 32) & 0xFFFFFFFF) as u32;
+    let erdp_lo_ptr: *io u32 = (RP1_USBHOST0_IR0 + 0x18) as *io u32;
+    *erdp_lo_ptr = (evt_ring_dma & 0xFFFFFFFF) as u32;
+    let erdp_hi_ptr: *io u32 = (RP1_USBHOST0_IR0 + 0x1C) as *io u32;
+    *erdp_hi_ptr = ((evt_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+
+    let dcbaap_lo_ptr: *io u32 = (RP1_USBHOST0_OP + 0x30) as *io u32;
+    *dcbaap_lo_ptr = (dcbaa_dma & 0xFFFFFFFF) as u32;
+    let dcbaap_hi_ptr: *io u32 = (RP1_USBHOST0_OP + 0x34) as *io u32;
+    *dcbaap_hi_ptr = ((dcbaa_dma >> 32) & 0xFFFFFFFF) as u32;
+
+    let crcr_lo_ptr: *io u32 = (RP1_USBHOST0_OP + 0x18) as *io u32;
+    *crcr_lo_ptr = ((cmd_ring_dma & 0xFFFFFFC0) | 1) as u32;
+    let crcr_hi_ptr: *io u32 = (RP1_USBHOST0_OP + 0x1C) as *io u32;
+    *crcr_hi_ptr = ((cmd_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+
+    let config_ptr: *io u32 = (RP1_USBHOST0_OP + 0x38) as *io u32;
+    *config_ptr = 1; // MaxSlotsEn=1
+
+    let usbcmd_restart_ptr: *io u32 = RP1_USBHOST0_OP as *io u32;
+    let usbcmd_fresh: u32 = *usbcmd_restart_ptr;
+    *usbcmd_restart_ptr = usbcmd_fresh | 1;
+
+    let mut run_confirmed: bool = false;
+    for i: usize in 0..<100 {
+        let usbsts_run_ptr: *io u32 = (RP1_USBHOST0_OP + 0x04) as *io u32;
+        let usbsts_run: u32 = *usbsts_run_ptr;
+        if ((usbsts_run & 1) == 0) {
+            run_confirmed = true;
+            break;
+        }
+        delay_us(1000);
+    }
+    return run_confirmed;
+}
+
+fn xhci_enable_slot() -> bool {
+    let doorbell0_ptr: *io u32 = RP1_USBHOST0_DOORBELL as *io u32;
+    *doorbell0_ptr = 0;
+
+    let enable_cc: u32 = usb_await_event(33, 1000);
+    if (enable_cc == 0) {
+        return false;
+    }
+    xhci_slot_id = ((xhci_last_evt_dw3 >> 24) & 0xFF) as usize;
+    return true;
+}
+
+// Address Device: build the Input Context (Slot + EP0 Context), point
+// DCBAA[slot_id] at a fresh Device Context, and issue the Address Device
+// command -- but first, a real USB Port Reset. USBCMD.HCRST resets the
+// controller, not the device, and firmware already enumerated this drive
+// before handoff, so Address Device's implicit SET_ADDRESS needs the
+// device back in the Default state a port reset produces.
+fn xhci_address_device() -> bool {
+    let dcbaa_base: usize = (xhci_dcbaa as *u8) as usize;
+    let device_ctx_base: usize = (xhci_device_ctx as *u8) as usize;
+    let device_ctx_dma: usize = device_ctx_base + RP1_DMA_PCI_OFFSET;
+    let dcbaa_slot_ptr: *u32 = (dcbaa_base + xhci_slot_id * 8) as *u32;
+    *dcbaa_slot_ptr = (device_ctx_dma & 0xFFFFFFFF) as u32;
+    let dcbaa_slot_hi_ptr: *u32 = (dcbaa_base + xhci_slot_id * 8 + 4) as *u32;
+    *dcbaa_slot_hi_ptr = ((device_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
+    dma_prepare_tx(xhci_dcbaa as *u8, 65 * 8);
+
+    let ep0_ring_base: usize = (xhci_ep0_ring as *u8) as usize;
+    let ep0_ring_dma: usize = ep0_ring_base + RP1_DMA_PCI_OFFSET;
+    let ep0_link_off: usize = (EP0_RING_TRBS - 1) * 16;
+    let ep0_link_dw0_ptr: *u32 = (ep0_ring_base + ep0_link_off) as *u32;
+    *ep0_link_dw0_ptr = (ep0_ring_dma & 0xFFFFFFFF) as u32;
+    let ep0_link_dw1_ptr: *u32 = (ep0_ring_base + ep0_link_off + 4) as *u32;
+    *ep0_link_dw1_ptr = ((ep0_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+    let ep0_link_dw3_ptr: *u32 = (ep0_ring_base + ep0_link_off + 12) as *u32;
+    *ep0_link_dw3_ptr = 0x00001803;
+    dma_prepare_tx(xhci_ep0_ring as *u8, EP0_RING_TRBS * 16);
+    xhci_ep0_enq = 0;
+    xhci_ep0_cycle = 1;
+
+    let input_ctx_base: usize = (xhci_input_ctx as *u8) as usize;
+    let input_ctx_dma: usize = input_ctx_base + RP1_DMA_PCI_OFFSET;
+    let drop_flags_ptr: *u32 = input_ctx_base as *u32;
+    *drop_flags_ptr = 0;
+    let add_flags_ptr: *u32 = (input_ctx_base + 4) as *u32;
+    *add_flags_ptr = 3; // A0 (Slot) | A1 (EP0)
+
+    // Slot Context: Route String=0 (root-port-attached), Speed = the
+    // value PORTSC3 itself reports (bits 13:10), Context Entries=1,
+    // Root Hub Port Number=3 (usbhost0 port 3, this project's only ever
+    // populated port).
+    //
+    // rp1_usb_smoke.tkb's own proven version read this from a snapshot
+    // taken at the very start of its own run, well before HCRST -- a
+    // choice that (by luck of ordering, not by design) avoided a real
+    // race this library version hit directly: reading PORTSC3 for Speed
+    // immediately after HCRST + restart can catch the SuperSpeed link
+    // mid-retrain (Speed=0/Undefined), which Address Device then rejects
+    // with completion_code=0x11 (Parameter Error) -- confirmed on real
+    // hardware. Poll until Speed is nonzero before trusting it.
+    let mut slot_speed: u32 = 0;
+    for i: usize in 0..<500 {
+        let portsc3_speed_ptr: *io u32 = RP1_USBHOST0_PORTSC3 as *io u32;
+        let portsc3_speed_read: u32 = *portsc3_speed_ptr;
+        slot_speed = (portsc3_speed_read >> 10) & 0xF;
+        if (slot_speed != 0) {
+            break;
+        }
+        delay_us(1000);
+    }
+    let slot_ctx_base: usize = input_ctx_base + 64;
+    let slot_dev_info_ptr: *u32 = slot_ctx_base as *u32;
+    *slot_dev_info_ptr = (slot_speed << 20) | (1 << 27);
+    let slot_dev_info2_ptr: *u32 = (slot_ctx_base + 4) as *u32;
+    *slot_dev_info2_ptr = 3 << 16; // ROOT_HUB_PORT(3)
+
+    // EP0 Context: EP Type=4 (Control Bidirectional), Error Count=3, Max
+    // Packet Size=512 (SuperSpeed's own fixed control-endpoint value).
+    let ep0_ctx_base: usize = input_ctx_base + 128;
+    let ep0_ep_info2_ptr: *u32 = (ep0_ctx_base + 4) as *u32;
+    *ep0_ep_info2_ptr = (4 << 3) | (3 << 1) | (512 << 16);
+    let ep0_deq_lo_ptr: *u32 = (ep0_ctx_base + 8) as *u32;
+    *ep0_deq_lo_ptr = ((ep0_ring_dma & 0xFFFFFFFF) | 1) as u32;
+    let ep0_deq_hi_ptr: *u32 = (ep0_ctx_base + 12) as *u32;
+    *ep0_deq_hi_ptr = ((ep0_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+    let ep0_tx_info_ptr: *u32 = (ep0_ctx_base + 16) as *u32;
+    *ep0_tx_info_ptr = 8;
+    dma_prepare_tx(xhci_input_ctx as *u8, INPUT_CTX_SIZE);
+
+    // USB Port Reset. 0xCE00FFE9 is Linux's own
+    // xhci_port_state_to_neutral() mask (drivers/usb/host/xhci.h) --
+    // keep ONLY the read-only and read-write-shared PORTSC fields, write
+    // zero everywhere else. Getting this wrong is not cosmetic: bit1
+    // (PED) is RW1CS, so writing back a read-modify-write that preserves
+    // PED=1 actually DISABLES the port.
+    let portsc3_reset_ptr: *io u32 = RP1_USBHOST0_PORTSC3 as *io u32;
+    let portsc3_before_reset: u32 = *portsc3_reset_ptr;
+    *portsc3_reset_ptr = (portsc3_before_reset & 0xCE00FFE9) | (1 << 4);
+
+    let mut reset_confirmed: bool = false;
+    for i: usize in 0..<500 {
+        let portsc3_poll_ptr: *io u32 = RP1_USBHOST0_PORTSC3 as *io u32;
+        let portsc3_poll: u32 = *portsc3_poll_ptr;
+        if (((portsc3_poll >> 21) & 1) == 1) {
+            reset_confirmed = true;
+            break;
+        }
+        delay_us(1000);
+    }
+    if (reset_confirmed == false) {
+        return false;
+    }
+
+    // Clear the change bits the reset raised (RW1C), same neutral mask.
+    let portsc3_clear_ptr: *io u32 = RP1_USBHOST0_PORTSC3 as *io u32;
+    let portsc3_before_clear: u32 = *portsc3_clear_ptr;
+    *portsc3_clear_ptr = (portsc3_before_clear & 0xCE00FFE9)
+        | (1 << 21) | (1 << 17) | (1 << 19);
+
+    // USB reset recovery time (TRSTRCY, USB2 spec 7.1.7.3): the device
+    // needs >=10ms after reset before it reliably answers SET_ADDRESS.
+    // Linux's hub_port_reset() waits 10ms + 40ms margin.
+    delay_us(50000);
+
+    let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
+    let trb1_dw0_ptr: *u32 = (cmd_ring_base + 16) as *u32;
+    *trb1_dw0_ptr = (input_ctx_dma & 0xFFFFFFFF) as u32;
+    let trb1_dw1_ptr: *u32 = (cmd_ring_base + 20) as *u32;
+    *trb1_dw1_ptr = ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
+    let trb1_dw3_ptr: *u32 = (cmd_ring_base + 28) as *u32;
+    *trb1_dw3_ptr = (1 | (11 << 10) | (xhci_slot_id << 24)) as u32;
+    dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
+
+    let doorbell0_ptr: *io u32 = RP1_USBHOST0_DOORBELL as *io u32;
+    *doorbell0_ptr = 0;
+
+    // The port reset above queues its own async Port Status Change
+    // Event (Type 34), which lands before Address Device's real Command
+    // Completion Event (Type 33) -- usb_await_event() scans past it.
+    let addr_cc: u32 = usb_await_event(33, 1000);
+    if (addr_cc != 1) {
+    }
+    return addr_cc == 1;
+}
+
+// Configuration Descriptor -> parse Mass Storage interface + bulk
+// endpoints -> Configure Endpoint -> SET_CONFIGURATION.
+fn xhci_configure() -> bool {
+    let ctrl_buf_base: usize = (xhci_ctrl_buf as *u8) as usize;
+    let ctrl_buf_dma: usize = ctrl_buf_base + RP1_DMA_PCI_OFFSET;
+
+    let cfg9_cc: u32 = usb_ctrl_xfer(0x80, 6, 0x0200, 0, 9, ctrl_buf_dma, true);
+    if (cfg9_cc != 1) {
+        return false;
+    }
+    dma_finish_rx(xhci_ctrl_buf as *align(64) u8, 256);
+    let tot_lo_ptr: *u8 = (ctrl_buf_base + 2) as *u8;
+    let tot_hi_ptr: *u8 = (ctrl_buf_base + 3) as *u8;
+    let mut total_len: usize = (*tot_lo_ptr as usize) | ((*tot_hi_ptr as usize) << 8);
+    if (total_len > 256) {
+        total_len = 256;
+    }
+    if (total_len < 9) {
+        return false;
+    }
+
+    let cfg_cc: u32 = usb_ctrl_xfer(0x80, 6, 0x0200, 0, total_len as u32,
+                                    ctrl_buf_dma, true);
+    if (cfg_cc != 1) {
+        return false;
+    }
+    dma_finish_rx(xhci_ctrl_buf as *align(64) u8, 256);
+
+    let mut pos: usize = 0;
+    let mut in_msc_iface: bool = false;
+    let mut last_ep_in: bool = false;
+    let mut last_ep_bulk: bool = false;
+    for step: usize in 0..<64 {
+        if (pos + 2 > total_len) {
+            break;
+        }
+        let blen_ptr: *u8 = (ctrl_buf_base + pos) as *u8;
+        let btype_ptr: *u8 = (ctrl_buf_base + pos + 1) as *u8;
+        let blen: usize = *blen_ptr as usize;
+        let btype: u32 = *btype_ptr as u32;
+        if (blen < 2) {
+            break;
+        }
+
+        if (btype == 2 && blen >= 6) {
+            let cval_ptr: *u8 = (ctrl_buf_base + pos + 5) as *u8;
+            xhci_msc_config_value = *cval_ptr as u32;
+        }
+
+        if (btype == 4 && blen >= 9) {
+            let ifnum_ptr: *u8 = (ctrl_buf_base + pos + 2) as *u8;
+            let icls_ptr: *u8 = (ctrl_buf_base + pos + 5) as *u8;
+            let icls: u32 = *icls_ptr as u32;
+            in_msc_iface = icls == 8;
+            if (in_msc_iface) {
+                xhci_msc_interface_num = *ifnum_ptr as u32;
+            }
+        }
+
+        if (btype == 5 && blen >= 7) {
+            let epa_ptr: *u8 = (ctrl_buf_base + pos + 2) as *u8;
+            let attr_ptr: *u8 = (ctrl_buf_base + pos + 3) as *u8;
+            let mps_lo_ptr: *u8 = (ctrl_buf_base + pos + 4) as *u8;
+            let mps_hi_ptr: *u8 = (ctrl_buf_base + pos + 5) as *u8;
+            let epa: u32 = *epa_ptr as u32;
+            let attr: u32 = *attr_ptr as u32;
+            let mps: u32 = (*mps_lo_ptr as u32) | ((*mps_hi_ptr as u32) << 8);
+            last_ep_in = (epa & 0x80) != 0;
+            last_ep_bulk = (attr & 3) == 2;
+            if (in_msc_iface && last_ep_bulk) {
+                if (last_ep_in) {
+                    xhci_msc_bulk_in_ep = epa;
+                    xhci_msc_bulk_in_mps = mps;
+                } else {
+                    xhci_msc_bulk_out_ep = epa;
+                    xhci_msc_bulk_out_mps = mps;
+                }
+            }
+        }
+
+        if (btype == 0x30 && blen >= 6) {
+            let burst_ptr: *u8 = (ctrl_buf_base + pos + 2) as *u8;
+            let burst: u32 = *burst_ptr as u32;
+            if (in_msc_iface && last_ep_bulk) {
+                if (last_ep_in) {
+                    xhci_msc_bulk_in_burst = burst;
+                } else {
+                    xhci_msc_bulk_out_burst = burst;
+                }
+            }
+        }
+
+        pos = pos + blen;
+    }
+
+    let in_num: usize = (xhci_msc_bulk_in_ep & 0x0F) as usize;
+    let out_num: usize = (xhci_msc_bulk_out_ep & 0x0F) as usize;
+    if (in_num > 0 && out_num > 0) {
+        return xhci_configure_endpoint(in_num, out_num);
+    }
+    return false;
+}
+
+// Split out of xhci_configure() above so in_num/out_num > 0 is a real
+// narrowing guard on this function's own parameters (matching
+// rp1_usb_smoke.tkb's own proven pattern) -- --forbid-trap otherwise
+// rejects out_num*2-1 as a possible underflow.
+fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool {
+    let in_idx: usize = in_num * 2;
+    let out_idx: usize = out_num * 2 - 1;
+    let mut max_idx: usize = in_idx;
+    if (out_idx > max_idx) {
+        max_idx = out_idx;
+    }
+
+    let device_ctx_base: usize = (xhci_device_ctx as *u8) as usize;
+    let input_ctx_base: usize = (xhci_input_ctx as *u8) as usize;
+    let input_ctx_dma: usize = input_ctx_base + RP1_DMA_PCI_OFFSET;
+    dma_finish_rx(xhci_device_ctx as *align(64) u8, DEVICE_CTX_SIZE);
+
+    // Seed the Input Context from the controller's OUTPUT Device
+    // Context (U-Boot's xhci_slot_copy/xhci_endpoint_copy) -- the Slot
+    // Context already holds the USB address Address Device assigned.
+    for i: usize in 0..<32 {
+        let src_ptr: *u8 = (device_ctx_base + i) as *u8;
+        let dst_ptr: *u8 = (input_ctx_base + CTX_STRIDE + i) as *u8;
+        *dst_ptr = *src_ptr;
+    }
+    for i: usize in 0..<32 {
+        let src_ptr: *u8 = (device_ctx_base + CTX_STRIDE + i) as *u8;
+        let dst_ptr: *u8 = (input_ctx_base + 2 * CTX_STRIDE + i) as *u8;
+        *dst_ptr = *src_ptr;
+    }
+
+    let slot_dw0_ptr: *u32 = (input_ctx_base + CTX_STRIDE) as *u32;
+    let slot_dw0: u32 = *slot_dw0_ptr;
+    *slot_dw0_ptr = (slot_dw0 & 0x07FFFFFF) | (((max_idx + 1) as u32) << 27);
+
+    let bulk_in_ring_base: usize = (xhci_bulk_in_ring as *u8) as usize;
+    let bulk_in_ring_dma: usize = bulk_in_ring_base + RP1_DMA_PCI_OFFSET;
+    let bulk_out_ring_base: usize = (xhci_bulk_out_ring as *u8) as usize;
+    let bulk_out_ring_dma: usize = bulk_out_ring_base + RP1_DMA_PCI_OFFSET;
+    let bulk_link_off: usize = (BULK_RING_TRBS - 1) * 16;
+
+    let bin_link0_ptr: *u32 = (bulk_in_ring_base + bulk_link_off) as *u32;
+    *bin_link0_ptr = (bulk_in_ring_dma & 0xFFFFFFFF) as u32;
+    let bin_link1_ptr: *u32 = (bulk_in_ring_base + bulk_link_off + 4) as *u32;
+    *bin_link1_ptr = ((bulk_in_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+    let bin_link3_ptr: *u32 = (bulk_in_ring_base + bulk_link_off + 12) as *u32;
+    *bin_link3_ptr = 0x00001803;
+    dma_prepare_tx(xhci_bulk_in_ring as *u8, BULK_RING_TRBS * 16);
+
+    let bout_link0_ptr: *u32 = (bulk_out_ring_base + bulk_link_off) as *u32;
+    *bout_link0_ptr = (bulk_out_ring_dma & 0xFFFFFFFF) as u32;
+    let bout_link1_ptr: *u32 = (bulk_out_ring_base + bulk_link_off + 4) as *u32;
+    *bout_link1_ptr = ((bulk_out_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+    let bout_link3_ptr: *u32 = (bulk_out_ring_base + bulk_link_off + 12) as *u32;
+    *bout_link3_ptr = 0x00001803;
+    dma_prepare_tx(xhci_bulk_out_ring as *u8, BULK_RING_TRBS * 16);
+
+    let in_ctx_off: usize = (in_idx + 2) * CTX_STRIDE;
+    let in_ep_dw1_ptr: *u32 = (input_ctx_base + in_ctx_off + 4) as *u32;
+    *in_ep_dw1_ptr = (6 << 3) | (3 << 1)
+        | ((xhci_msc_bulk_in_burst & 0xFF) << 8)
+        | ((xhci_msc_bulk_in_mps & 0xFFFF) << 16);
+    let in_ep_dw2_ptr: *u32 = (input_ctx_base + in_ctx_off + 8) as *u32;
+    *in_ep_dw2_ptr = ((bulk_in_ring_dma & 0xFFFFFFFF) | 1) as u32;
+    let in_ep_dw3_ptr: *u32 = (input_ctx_base + in_ctx_off + 12) as *u32;
+    *in_ep_dw3_ptr = ((bulk_in_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+
+    let out_ctx_off: usize = (out_idx + 2) * CTX_STRIDE;
+    let out_ep_dw1_ptr: *u32 = (input_ctx_base + out_ctx_off + 4) as *u32;
+    *out_ep_dw1_ptr = (2 << 3) | (3 << 1)
+        | ((xhci_msc_bulk_out_burst & 0xFF) << 8)
+        | ((xhci_msc_bulk_out_mps & 0xFFFF) << 16);
+    let out_ep_dw2_ptr: *u32 = (input_ctx_base + out_ctx_off + 8) as *u32;
+    *out_ep_dw2_ptr = ((bulk_out_ring_dma & 0xFFFFFFFF) | 1) as u32;
+    let out_ep_dw3_ptr: *u32 = (input_ctx_base + out_ctx_off + 12) as *u32;
+    *out_ep_dw3_ptr = ((bulk_out_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+
+    // Input Control Context: add the Slot Context (A0) plus one bit per
+    // endpoint at (index + 1). EP0's A1 is deliberately not set --
+    // Configure Endpoint must not touch the control endpoint.
+    let icc_drop_ptr: *u32 = input_ctx_base as *u32;
+    *icc_drop_ptr = 0;
+    let icc_add_ptr: *u32 = (input_ctx_base + 4) as *u32;
+    let in_add_bit: u32 = (1 << (in_idx + 1)) as u32;
+    let out_add_bit: u32 = (1 << (out_idx + 1)) as u32;
+    *icc_add_ptr = 1 | in_add_bit | out_add_bit;
+    dma_prepare_tx(xhci_input_ctx as *u8, INPUT_CTX_SIZE);
+
+    let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
+    let ce_dw0_ptr: *u32 = (cmd_ring_base + 32) as *u32;
+    *ce_dw0_ptr = (input_ctx_dma & 0xFFFFFFFF) as u32;
+    let ce_dw1_ptr: *u32 = (cmd_ring_base + 36) as *u32;
+    *ce_dw1_ptr = ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
+    let ce_dw3_ptr: *u32 = (cmd_ring_base + 44) as *u32;
+    *ce_dw3_ptr = (1 | (12 << 10) | (xhci_slot_id << 24)) as u32;
+    dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
+
+    let doorbell0_ptr: *io u32 = RP1_USBHOST0_DOORBELL as *io u32;
+    *doorbell0_ptr = 0;
+    let ce_cc: u32 = usb_await_event(33, 1000);
+    if (ce_cc != 1) {
+        return false;
+    }
+
+    let setcfg_cc: u32 = usb_ctrl_xfer(0x00, 9, xhci_msc_config_value, 0, 0, 0, false);
+    if (setcfg_cc != 1) {
+        return false;
+    }
+
+    xhci_bulk_in_dci = in_idx + 1;
+    xhci_bulk_out_dci = out_idx + 1;
+    return true;
+}
+
+// disk_initialize: halt -> HCRST -> DMA window + rings -> Enable Slot ->
+// Address Device -> Configuration Descriptor + Configure Endpoint +
+// SET_CONFIGURATION -> Bulk-Only Transport bring-up -> confirm the unit
+// is ready and reports 512-byte blocks.
+fn disk_initialize() -> DiskIoResult {
+    if (xhci_halt_and_reset() == false) {
+        return DiskIoResult::Err(-1);
+    }
+    if (xhci_setup_rings_and_start() == false) {
+        return DiskIoResult::Err(-1);
+    }
+    if (xhci_enable_slot() == false) {
+        return DiskIoResult::Err(-1);
+    }
+    if (xhci_address_device() == false) {
+        return DiskIoResult::Err(-1);
+    }
+    if (xhci_configure() == false) {
+        return DiskIoResult::Err(-1);
+    }
+
+    let scratch_base: usize = (msc_scratch_buf as *u8) as usize;
+    let scratch_dma: usize = scratch_base + RP1_DMA_PCI_OFFSET;
+
+    // Get Max LUN -- a single-LUN device is allowed to STALL this rather
+    // than answer, so its own outcome is not checked.
+    dma_prepare_tx(msc_scratch_buf as *u8, 512);
+    usb_ctrl_xfer(0xA1, 0xFE, 0, xhci_msc_interface_num, 1, scratch_dma, true);
+
+    // Do NOT send a gratuitous Bulk-Only Mass Storage Reset here. The
+    // port reset + SET_CONFIGURATION above already established a fresh
+    // transport, and the BOT specification defines its reset request as
+    // only the first step of Reset Recovery, followed by Clear Feature
+    // HALT on Bulk-In and then Bulk-Out (msc_recover_transport performs
+    // that complete sequence when an actual transport failure needs it).
+    // Sending only the reset request here left this SanDisk drive in a
+    // state where reads happened to work but WRITE(10) always STALLed its
+    // CSW; Linux usbfs reproduced the same persistent failure.
+
+    // TEST UNIT READY, retried: a flash drive routinely reports Not
+    // Ready for the first moment after configuration while it spins up
+    // its own translation layer.
+    let mut ready: bool = false;
+    for i: usize in 0..<50 {
+        msc_cbw_header(0, false, 6);
+        let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
+        let op_ptr: *u8 = (cbw_base + 15) as *u8;
+        *op_ptr = 0x00;
+        if (msc_run_command(0, false, msc_scratch_buf as *align(64) u8) == 0) {
+            ready = true;
+            break;
+        }
+        delay_us(100000);
+    }
+    if (ready == false) {
+        return DiskIoResult::Err(-1);
+    }
+
+    // READ CAPACITY(10): confirm 512-byte blocks, this project's whole
+    // storage stack's own fixed assumption.
+    msc_cbw_header(8, true, 10);
+    let cbw_base2: usize = (msc_cbw_buf as *u8) as usize;
+    let cap_op_ptr: *u8 = (cbw_base2 + 15) as *u8;
+    *cap_op_ptr = 0x25;
+    if (msc_run_command(8, true, msc_scratch_buf as *align(64) u8) != 0) {
+        return DiskIoResult::Err(-1);
+    }
+    let mut block_size: u32 = 0;
+    for i: usize in 4..<8 {
+        let p: *u8 = (scratch_base + i) as *u8;
+        block_size = (block_size << 8) | (*p as u32);
+    }
+    if (block_size != 512) {
+        return DiskIoResult::Err(-1);
+    }
+
+    xhci_ready = true;
+    return DiskIoResult::Ok;
+}
+
+fn disk_status() -> DiskIoResult {
+    if (xhci_ready) {
+        return DiskIoResult::Ok;
+    }
+    return DiskIoResult::Err(-1);
+}
+
+// READ(10)/WRITE(10) share the same CDB shape: opcode | flags(0) |
+// LBA(4, big-endian) | group number(0) | transfer length(2, big-endian,
+// always 1 block here) | control(0). msc_cbw_header() must already have
+// been called to build the CBW header and zero this CDB region.
+fn msc_scsi_lba_cdb(op: u8, sector: u32) {
+    let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
+    let op_ptr: *u8 = (cbw_base + 15) as *u8;
+    *op_ptr = op;
+    let lba_hi_ptr: *u8 = (cbw_base + 17) as *u8;
+    *lba_hi_ptr = ((sector >> 24) & 0xFF) as u8;
+    let lba_2_ptr: *u8 = (cbw_base + 18) as *u8;
+    *lba_2_ptr = ((sector >> 16) & 0xFF) as u8;
+    let lba_1_ptr: *u8 = (cbw_base + 19) as *u8;
+    *lba_1_ptr = ((sector >> 8) & 0xFF) as u8;
+    let lba_lo_ptr: *u8 = (cbw_base + 20) as *u8;
+    *lba_lo_ptr = (sector & 0xFF) as u8;
+    let len_ptr: *u8 = (cbw_base + 23) as *u8;
+    *len_ptr = 1;
+}
+
+// Same retry policy as RPi3's own disk_read/disk_write: one attempt, and
+// on ANY failure a full msc_recover_transport() (Bulk-Only Mass Storage
+// Reset + clear-halt on both bulk endpoints) followed by exactly one
+// retry of the same, side-effect-free-to-repeat command. Not attempted
+// more than once -- a transport that fails twice in a row needs a caller
+// decision, not a longer retry loop.
+fn disk_read(sector: u32, buf: *u8) -> DiskIoResult {
+    if (disk_io_ok(disk_status()) == false) {
+        return DiskIoResult::Err(-1);
+    }
+    let bounce: usize = (msc_bounce_buf as *u8) as usize;
+    msc_cbw_header(512, true, 10);
+    msc_scsi_lba_cdb(0x28, sector);
+    let mut rc: u32 = msc_run_command(512, true, msc_bounce_buf as *align(64) u8);
+    if (rc != 0) {
+        msc_recover_transport();
+        msc_cbw_header(512, true, 10);
+        msc_scsi_lba_cdb(0x28, sector);
+        rc = msc_run_command(512, true, msc_bounce_buf as *align(64) u8);
+    }
+    if (rc != 0) {
+        return DiskIoResult::Err(-1);
+    }
+    for i: isize in 0..<512 {
+        let src: *u8 = (bounce as *u8);
+        buf[i] = src[i];
+    }
+    return DiskIoResult::Ok;
+}
+
+fn disk_write(sector: u32, buf: *u8) -> DiskIoResult {
+    if (disk_io_ok(disk_status()) == false) {
+        return DiskIoResult::Err(-1);
+    }
+    let bounce: usize = (msc_bounce_buf as *u8) as usize;
+    for i: isize in 0..<512 {
+        let dst: *u8 = (bounce as *u8);
+        dst[i] = buf[i];
+    }
+    msc_cbw_header(512, false, 10);
+    msc_scsi_lba_cdb(0x2A, sector);
+    let rc1: u32 = msc_run_command(512, false, msc_bounce_buf as *align(64) u8);
+    if (rc1 == 0) {
+        return DiskIoResult::Ok;
+    }
+    msc_recover_transport();
+    // This is deliberately limited to one replay of the exact same
+    // single-block WRITE(10). If the first command reached media before
+    // its CSW was lost, repeating identical bytes to the identical LBA
+    // is content-idempotent; no general write-command retry policy is
+    // implied.
+    msc_cbw_header(512, false, 10);
+    msc_scsi_lba_cdb(0x2A, sector);
+    let rc2: u32 = msc_run_command(512, false, msc_bounce_buf as *align(64) u8);
+    if (rc2 != 0) {
+        return DiskIoResult::Err(-1);
+    }
+    return DiskIoResult::Ok;
+}

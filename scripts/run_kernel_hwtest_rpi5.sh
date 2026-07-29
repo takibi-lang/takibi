@@ -50,7 +50,9 @@ if ! "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$ELF" >"$LOADER_LOG" 2>&1; then
     exit 1
 fi
 
-sleep 3
+# USB Mass Storage may briefly report Not Ready after enumeration. Keep the
+# single capture alive through its bounded readiness loop and ext2 checks.
+sleep "${RPI5_KERNEL_CAPTURE_SECONDS:-10}"
 cleanup
 trap - EXIT INT TERM HUP
 tr -d '\r' <"$UART_LOG" >"$UART_LOG.normalized"
