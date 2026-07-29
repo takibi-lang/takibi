@@ -1831,7 +1831,21 @@ let resolve_local_ast (pt : Types.program_types option) fname name ty_opt =
              | Some t -> t
              | None ->
                  match Types.StringMap.find_opt name fi.Types.local_types with
-                 | Some t -> t
+                 | Some inferred ->
+                     (* local_types is keyed only by source name, so a later
+                        binding in a disjoint lexical scope may have replaced
+                        this binding's entry.  An explicit annotation belongs
+                        to this exact Let node and therefore wins, except for
+                        the two immutable proof-strengthening cases preserved
+                        by type_inf: refined integers and longer slices. *)
+                     (match ty_opt, inferred with
+                      | Some declared, TypeRefined (_, _, base)
+                        when declared = base -> inferred
+                      | Some (TypeSlice (decl_el, decl_min)),
+                        TypeSlice (infer_el, infer_min)
+                        when decl_el = infer_el && infer_min > decl_min -> inferred
+                      | Some declared, _ -> declared
+                      | None, _ -> inferred)
                  | None ->
                      match ty_opt with
                      | Some t -> t

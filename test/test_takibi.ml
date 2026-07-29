@@ -6312,6 +6312,32 @@ let infer_tests = [
 
 let codegen_tests = [
   Alcotest.test_case
+    "disjoint same-name annotated locals retain their own pointer widths" `Quick
+    (fun () ->
+      let src =
+        "fn cg_scoped_local_width(flag: bool, byte_out: *u8, word_out: *u64)
+             !{unsafe} {
+           if (flag) {
+             let previous: *u8 = byte_out;
+             previous[0 as isize] = 0;
+           }
+           if (flag) {
+             let previous: *u64 = word_out;
+             previous[0 as isize] = 0;
+           }
+         }" in
+      ignore (gen_codegen src);
+      let fn = match Hashtbl.find_opt Llvm_gen.functions "cg_scoped_local_width" with
+        | Some (_, fn) -> fn
+        | None -> Alcotest.fail "cg_scoped_local_width not found"
+      in
+      let ir = Llvm.string_of_llvalue fn in
+      Alcotest.(check bool) "byte branch stores one byte" true
+        (contains_substring ir "store i8 0");
+      Alcotest.(check bool) "word branch stores one word" true
+        (contains_substring ir "store i64 0"));
+
+  Alcotest.test_case
     "all-return nested if/else terminates its unreachable merge blocks" `Quick
     (expect_codegen_ok
       "variant CgAllReturnResult { First(i32); Second(i32); Third(i32); }

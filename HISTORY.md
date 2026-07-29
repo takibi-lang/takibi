@@ -12646,3 +12646,23 @@ after any SD payload replacement. The RPi5 hardware harnesses pass the flag
 because their test payloads are injected into RAM over one unchanged SD-card
 spin stub, so their reset-before-test behavior remains deterministic without
 claiming that a warm reset reloads SD storage.
+
+## 2026-07-29: Lexical local types survive disjoint same-name bindings in codegen
+
+BusyBox HTTPd bring-up exposed a code-generation bug after two disjoint
+syscall branches used the local name `previous` with different annotated
+pointer types. Type inference's function-wide `local_types` result is keyed
+by name, so the later `*u64` binding replaced the earlier `*u8` entry. LLVM
+codegen then lowered the earlier byte-zeroing loop as 64-bit indexed stores,
+cleared eight times the intended memory, and corrupted BusyBox's saved return
+address.
+
+`resolve_local_ast` now treats the annotation on the exact `let` statement as
+authoritative when a function-wide same-name entry disagrees. It still keeps
+the inferred type for the two intentional proof-strengthening cases: a
+same-base refined integer and a slice with a stronger minimum length. A
+codegen regression uses disjoint `*u8` and `*u64` bindings with the same name
+and verifies that the resulting IR contains both one-byte and eight-byte
+stores. Fully supporting different *unannotated* same-name bindings remains a
+separate representation improvement: inferred local types need a binding
+location key in addition to the existing name-keyed compatibility map.
