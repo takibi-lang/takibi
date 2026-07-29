@@ -518,8 +518,10 @@ fn main() {
                                                 kernel_tcp_inject_drop_next_syn_ack();
                                                 kernel_tcp_inject_drop_next_data();
                                                 kernel_tcp_inject_drop_next_fin();
+                                                kernel_tcp_inject_split_request();
                                                 match kernel_syscall_inetd_accept(8080) {
                                                     KernelInetdAcceptResult::TimedOut => {
+                                                        kernel_tcp_restore_stream_policy();
                                                         process_image_unmap(dynamic_pages);
                                                         kernel_boot_log("httpd server: accept timed out\n");
                                                     }
@@ -536,8 +538,13 @@ fn main() {
                                                         process_image_unmap(dynamic_pages);
                                                         if (dynamic_status == 0 &&
                                                             process_image_window_is_clear()) {
+                                                            if (kernel_tcp_split_request_recovered()) {
+                                                                kernel_boot_log("httpd server: split request stream ok\n");
+                                                            }
+                                                            kernel_tcp_restore_stream_policy();
                                                             kernel_boot_log("httpd server: inetd request exit=0 clean\n");
                                                         } else {
+                                                            kernel_tcp_restore_stream_policy();
                                                             kernel_boot_log("httpd server: failed\n");
                                                         }
                                                     }

@@ -71,6 +71,9 @@ let mut tcp_drop_next_fin: bool = false;
 let mut tcp_injected_fin_pending: bool = false;
 let mut tcp_injected_fin_retransmitted: bool = false;
 let mut tcp_injected_fin_acked: bool = false;
+let mut tcp_advertised_window: u16 = 65535;
+let mut tcp_ack_each_stream_segment: bool = false;
+let mut tcp_split_request_segments: usize = 0;
 let mut pending_tcp_kind: PendingTcpKind = PendingTcpKind::None;
 let mut pending_tcp_frame: [u8; 1514];
 let mut pending_tcp_frame_length: usize = 0;
@@ -145,6 +148,21 @@ fn kernel_tcp_inject_drop_next_fin() {
 
 fn kernel_tcp_injected_fin_recovered() -> bool {
     return tcp_injected_fin_acked;
+}
+
+fn kernel_tcp_inject_split_request() {
+    tcp_advertised_window = 8;
+    tcp_ack_each_stream_segment = true;
+    tcp_split_request_segments = 0;
+}
+
+fn kernel_tcp_split_request_recovered() -> bool {
+    return tcp_split_request_segments >= 2;
+}
+
+fn kernel_tcp_restore_stream_policy() {
+    tcp_advertised_window = 65535;
+    tcp_ack_each_stream_segment = false;
 }
 
 fn pending_tcp_record(kind: PendingTcpKind, frame_length: usize) {
@@ -243,7 +261,8 @@ fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
     tcp[TCP_DATA_OFFSET] = (5 << 4) as u8; // 20-byte header, no options
     tcp[TCP_FLAGS] = TCP_FLAG_SYN | TCP_FLAG_ACK;
-    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
+    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM],
+                tcp_advertised_window as i32);
     write_u16be(tcp[TCP_URGENT..<20], 0);
 
     fix_tcp_checksum(ip, tcp);
@@ -332,7 +351,8 @@ fn build_fin_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
     tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
     tcp[TCP_FLAGS] = TCP_FLAG_FIN | TCP_FLAG_ACK;
-    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
+    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM],
+                tcp_advertised_window as i32);
     write_u16be(tcp[TCP_URGENT..<20], 0);
 
     fix_tcp_checksum(ip, tcp);
@@ -362,7 +382,8 @@ fn build_receive_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
     tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
     tcp[TCP_FLAGS] = TCP_FLAG_ACK;
-    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
+    write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM],
+                tcp_advertised_window as i32);
     write_u16be(tcp[TCP_URGENT..<20], 0);
     fix_tcp_checksum(ip, tcp);
 }
@@ -913,6 +934,13 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
                     TcpReceiveDisposition::Payload(payload_length) => {
                         conn_rcv_nxt = conn_rcv_nxt + (payload_length as u32);
                         tcp_received_length = payload_length;
+                        if (tcp_ack_each_stream_segment) {
+                            tcp_split_request_segments =
+                                tcp_split_request_segments + 1;
+                            build_receive_ack(net_rx_frame(acquired), 20);
+                            return KernelTcpReceiveResult::Received(net_rx_finish(
+                                acquired, NetRxDisposal::Reply(54)));
+                        }
                         // Delayed ACK: release RX immediately so another
                         // in-order segment can reach the next read, then
                         // piggyback the cumulative ACK on userspace output.
