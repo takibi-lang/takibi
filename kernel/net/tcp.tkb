@@ -134,6 +134,11 @@ variant TcpReceiveDisposition {
     Payload(usize);
 }
 
+variant TcpRxPlan {
+    Release;
+    Send(i32);
+}
+
 must_use variant KernelTcpCloseResult {
     Closed(NetRxCanAcquire);
 }
@@ -349,7 +354,7 @@ fn pending_tcp_service_once(ready_in: sink NetRxCanAcquire,
                 }
                 slot = slot + 1;
             }
-            ready = net_rx_finish(acquired, NetRxDisposal::Release);
+            ready = net_rx_release(acquired);
         }
     }
     let now: i64 = read_cntpct();
@@ -597,7 +602,7 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                         // should_tx/tx_len integer flag pair: a reply and
                         // its length are now one value, so "flagged but no
                         // length" is unrepresentable.
-                        let mut plan: NetRxDisposal = NetRxDisposal::Release;
+                        let mut plan: TcpRxPlan = TcpRxPlan::Release;
                         let frame = net_rx_frame(acquired);   // only read when len proves acquisition
 
                         // 14 (eth) + 20 (min IPv4) + 20 (min TCP) = 54
@@ -686,7 +691,7 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                                                                 conn_snd_nxt = TCP_INITIAL_SEQ + 1;
 
                                                                 build_syn_ack(frame, ihl);
-                                                                plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20);
+                                                                plan = TcpRxPlan::Send(14 + (ihl as i32) + 20);
                                                                 conn_state = ConnState::SynRcvd;
                                                             }
                                                         } else {
@@ -710,7 +715,7 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                                                                     if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
                                                                         conn_rcv_nxt = conn_rcv_nxt + 1; // FIN consumes one seq number
                                                                         build_fin_ack(frame, ihl);
-                                                                        plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20);
+                                                                        plan = TcpRxPlan::Send(14 + (ihl as i32) + 20);
                                                                         conn_snd_nxt = conn_snd_nxt + 1; // our FIN too
                                                                         conn_state = ConnState::LastAck;
                                                                     } else {
@@ -741,7 +746,7 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                                                                             seq == conn_rcv_nxt) {
                                                                             if (build_data_reply(frame, ihl, tcp_seg,
                                                                                     data_len, data_len)) {
-                                                                                plan = NetRxDisposal::Reply(14 + (ihl as i32) + 20 + (data_len as i32));
+                                                                                plan = TcpRxPlan::Send(14 + (ihl as i32) + 20 + (data_len as i32));
                                                                                 // conn_rcv_nxt/conn_snd_nxt are u32
                                                                                 // (sequence numbers), data_len is u16 --
                                                                                 // the widening cast here is harmless
@@ -776,7 +781,15 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                             }
                         }
 
-                        ready = net_rx_finish(acquired, plan);
+                        match plan {
+                            TcpRxPlan::Release => {
+                                ready = net_rx_release(acquired);
+                            }
+                            TcpRxPlan::Send(reply_len) => {
+                                ready = net_rx_send_reply(
+                                    net_rx_reply_ready(acquired, reply_len));
+                            }
+                        }
                         if (tcp_completed_handshakes >= 2 &&
                             tcp_completed_echoes >= 1 &&
                             tcp_completed_closes >= 1) {
@@ -826,12 +839,12 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
             NetRxAcquire::None(next) => { ready = next; }
             NetRxAcquire::Acquired(acquired) => {
                 let len: i32 = net_rx_len(acquired);
-                let mut plan: NetRxDisposal = NetRxDisposal::Release;
+                let mut plan: TcpRxPlan = TcpRxPlan::Release;
                 let mut accepted: bool = false;
                 if (len >= 42) {
                     let arp_frame = net_rx_frame(acquired);
                     if (arp_prepare_reply(arp_frame)) {
-                        plan = NetRxDisposal::Reply(len);
+                        plan = TcpRxPlan::Send(len);
                     }
                 }
                 if (len >= 54 && len <= 1514) {
@@ -903,10 +916,10 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                                                     if (tcp_drop_next_syn_ack) {
                                                         tcp_drop_next_syn_ack = false;
                                                         tcp_injected_syn_pending = true;
-                                                        plan = NetRxDisposal::Release;
+                                                        plan = TcpRxPlan::Release;
                                                     } else {
                                                         tcp_injected_syn_pending = false;
-                                                        plan = NetRxDisposal::Reply(
+                                                        plan = TcpRxPlan::Send(
                                                             14 + (ihl as i32) + 20);
                                                     }
                                                     syn_ack_sent_at =
@@ -947,7 +960,15 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                         }
                     }
                 }
-                ready = net_rx_finish(acquired, plan);
+                match plan {
+                    TcpRxPlan::Release => {
+                        ready = net_rx_release(acquired);
+                    }
+                    TcpRxPlan::Send(reply_len) => {
+                        ready = net_rx_send_reply(
+                            net_rx_reply_ready(acquired, reply_len));
+                    }
+                }
                 if (accepted) {
                     return KernelTcpAcceptResult::Accepted(ready);
                 }
@@ -1073,13 +1094,12 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
                 }
                 match disposition {
                     TcpReceiveDisposition::Ignore => {
-                        ready = net_rx_finish(
-                            acquired, NetRxDisposal::Release);
+                        ready = net_rx_release(acquired);
                     }
                     TcpReceiveDisposition::AckOnly => {
                         build_receive_ack(net_rx_frame(acquired), 20);
-                        ready = net_rx_finish(
-                            acquired, NetRxDisposal::Reply(54));
+                        ready = net_rx_send_reply(
+                            net_rx_reply_ready(acquired, 54));
                     }
                     TcpReceiveDisposition::Payload(payload_length) => {
                         conn_rcv_nxt = conn_rcv_nxt + (payload_length as u32);
@@ -1088,14 +1108,15 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
                             tcp_split_request_segments =
                                 tcp_split_request_segments + 1;
                             build_receive_ack(net_rx_frame(acquired), 20);
-                            return KernelTcpReceiveResult::Received(net_rx_finish(
-                                acquired, NetRxDisposal::Reply(54)));
+                            return KernelTcpReceiveResult::Received(
+                                net_rx_send_reply(
+                                    net_rx_reply_ready(acquired, 54)));
                         }
                         // Delayed ACK: release RX immediately so another
                         // in-order segment can reach the next read, then
                         // piggyback the cumulative ACK on userspace output.
-                        return KernelTcpReceiveResult::Received(net_rx_finish(
-                            acquired, NetRxDisposal::Release));
+                        return KernelTcpReceiveResult::Received(
+                            net_rx_release(acquired));
                     }
                 }
             }

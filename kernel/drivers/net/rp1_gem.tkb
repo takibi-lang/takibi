@@ -9,24 +9,31 @@ const GEM_BASE: usize = 0x1F00100000;
 const DMA_OFFSET: usize = 0x1000000000;
 const RX_BUF_SIZE: usize = 2048;
 
-linear struct NetRxCpuOwned[desc: usize] {
+// Only net_rx_acquire can validate a hardware-supplied length and mint this
+// owner.  Protocol code can borrow the buffer, then must release it or turn it
+// into a reply-ready owner exactly once.
+private linear struct NetRxValidated[desc: usize] {
     private slot: {0..<1 as usize} @ desc;
-    private len: i32;
+    private len: {0..<1515 as i32};
+}
+private linear struct NetRxReplyReady[desc: usize] {
+    private slot: {0..<1 as usize} @ desc;
+    private len: {0..<1515 as i32};
 }
 private linear struct NetTxInFlight[desc: usize] {
     private slot: {0..<2 as usize};
 }
-linear view NetRxCanAcquire;
+private linear view NetRxCanAcquire;
 
 must_use variant NetInitResult { Failed; Ready(NetRxCanAcquire); }
 variant NetRxAcquire {
     None(NetRxCanAcquire);
-    Acquired(exists desc: usize. NetRxCpuOwned[desc]);
+    Acquired(exists desc: usize. NetRxValidated[desc]);
 }
-variant NetRxDisposal { Release; Reply(i32); }
 
-fn net_rx_owned(slot: {0..<1 as usize} @ desc, len: i32) -> NetRxCpuOwned[desc] {
-    let mut frame: NetRxCpuOwned[desc] = { slot, len };
+fn net_rx_validated(slot: {0..<1 as usize} @ desc,
+                    len: {0..<1515 as i32}) -> NetRxValidated[desc] {
+    let mut frame: NetRxValidated[desc] = { slot, len };
     return frame;
 }
 
@@ -210,22 +217,38 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
     let len: i32 = (gem_rx_desc[1] & 0x3FFF) as i32;
     dma_finish_rx(gem_rx_buf as *align(64) u8, RX_BUF_SIZE);
     let slot: {0..<1 as usize} = 0;
-    return NetRxAcquire::Acquired(net_rx_owned(slot, len));
+    if (len >= 0 && len <= 1514) {
+        let valid_len: {0..<1515 as i32} = len;
+        return NetRxAcquire::Acquired(net_rx_validated(slot, valid_len));
+    }
+    gem_rearm_rx();
+    return NetRxAcquire::None(view NetRxCanAcquire);
 }
 
-fn net_rx_len(frame: borrow NetRxCpuOwned[desc]) -> i32 { return frame.len; }
+fn net_rx_len(frame: borrow NetRxValidated[desc]) -> {0..<1515 as i32} {
+    return frame.len;
+}
 
-fn net_rx_frame(frame: borrow NetRxCpuOwned[desc]) -> [u8; 1514..] @ desc {
+fn net_rx_frame(frame: borrow NetRxValidated[desc]) -> [u8; 1514..] @ desc {
     return gem_rx_buf[0..<1514];
 }
 
-fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire {
+fn net_rx_release(frame: sink NetRxValidated[desc]) -> NetRxCanAcquire {
     gem_rearm_rx();
     return view NetRxCanAcquire;
 }
 
-fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32) -> NetTxInFlight[desc] {
+fn net_rx_reply_ready(frame: sink NetRxValidated[desc], len: i32)
+        -> NetRxReplyReady[desc] {
+    // Keep the reply length inside the private linear owner so the terminal
+    // send operation cannot be called with an unrelated bare integer.
     let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
+    let mut reply: NetRxReplyReady[desc] = { frame.slot, safe_len };
+    return reply;
+}
+
+fn net_transmit(reply: sink NetRxReplyReady[desc]) -> NetTxInFlight[desc] {
+    let safe_len: {0..<1515 as i32} = reply.len;
     let tx_base: usize = (gem_tx_buf as *u8) as usize;
     let tx_dma: usize = tx_base + DMA_OFFSET;
     let txd_base: usize = (gem_tx_desc as *u32) as usize;
@@ -265,12 +288,9 @@ fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may
     return view NetRxCanAcquire;
 }
 
-fn net_rx_finish(frame: sink NetRxCpuOwned[desc], disposal: NetRxDisposal)
+fn net_rx_send_reply(reply: sink NetRxReplyReady[desc])
         -> NetRxCanAcquire !{may_block} {
-    match disposal {
-        NetRxDisposal::Reply(len) => { return net_tx_complete(net_transmit(frame, len)); }
-        NetRxDisposal::Release => { return net_rx_release(frame); }
-    }
+    return net_tx_complete(net_transmit(reply));
 }
 
 // Transmits a kernel-built frame while preserving the sole armed RX

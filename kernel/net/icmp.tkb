@@ -85,11 +85,11 @@ fn kernel_icmp_reply_once(ready_in: sink NetRxCanAcquire)
                     }
                 }
                 if (reply_length != 0) {
-                    let completed = net_rx_finish(
-                        acquired, NetRxDisposal::Reply(reply_length));
+                    let completed = net_rx_send_reply(
+                        net_rx_reply_ready(acquired, reply_length));
                     return KernelIcmpResult::Replied(completed);
                 }
-                ready = net_rx_finish(acquired, NetRxDisposal::Release);
+                ready = net_rx_release(acquired);
             }
         }
     }
