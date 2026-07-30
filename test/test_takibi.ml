@@ -8754,6 +8754,48 @@ let codegen_tests = [
             return ExLeakResult::Ready;
         }");
 
+  (* GitHub issue #183's non-mut follow-up: `let id: ty = match ...;` (no
+     `mut`) reads as "this value is fixed after this statement", matching
+     Kotlin/Swift's own "definitely-assigned val across branches" pattern.
+     `id` is still alloca-based internally (an arm's own `id = e;` needs a
+     memory location no matter what -- see llvm_gen.ml's LetMatch case),
+     but type_inf.ml downgrades it back to immutable in the tyenv that
+     continues past the whole statement, so ordinary Assign's own
+     "cannot assign to immutable variable" check catches any later
+     `id = ...;` outside the arms, exactly like a plain non-mut `let`. *)
+  Alcotest.test_case
+    "issue #183 non-mut follow-up: `let id: ty = match ...;` (no `mut`) \
+     still compiles and reads back correctly -- the arms' own internal \
+     assignment is exempt, only code AFTER the statement is restricted" `Quick
+    (expect_codegen_ok
+       "must_use variant LmNoMutResult { OutOfMemory; Allocated(usize); }
+        fn lm_nomut_alloc() -> LmNoMutResult { return LmNoMutResult::Allocated(42); }
+        fn lm_nomut_use() -> usize {
+            let text: usize = match lm_nomut_alloc() {
+                LmNoMutResult::OutOfMemory => { return 0; }
+                LmNoMutResult::Allocated(p) => { text = p; }
+            };
+            return text;
+        }");
+
+  Alcotest.test_case
+    "issue #183 non-mut follow-up: assigning to a non-mut let-match \
+     binding OUTSIDE its own arms is rejected, the same \"use let mut\" \
+     error a plain non-mut `let` already gives" `Quick
+    (expect_type_error "cannot assign to immutable variable"
+       "must_use variant LmNoMutReassignResult { OutOfMemory; Allocated(usize); }
+        fn lm_nomut_reassign_alloc() -> LmNoMutReassignResult {
+            return LmNoMutReassignResult::Allocated(42);
+        }
+        fn lm_nomut_reassign() -> usize {
+            let text: usize = match lm_nomut_reassign_alloc() {
+                LmNoMutReassignResult::OutOfMemory => { return 0; }
+                LmNoMutReassignResult::Allocated(p) => { text = p; }
+            };
+            text = 5;
+            return text;
+        }");
+
   Alcotest.test_case
     "global let initializer: referencing a `let mut` global is rejected -- \
      a mutable global's value can change at runtime, so it is never a \

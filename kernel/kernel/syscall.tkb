@@ -476,7 +476,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                     syscall_socket_buffer_offset + amount;
                 return (1, amount);
             }
-            let mut ready: NetRxCanAcquire = match network_capability_take() {
+            let ready: NetRxCanAcquire = match network_capability_take() {
                 NetworkCapabilityTakeResult::Empty => {
                     return (1, LINUX_EAGAIN);
                 }

@@ -384,7 +384,20 @@ stmt:
        branch): MATCH is not a valid start-of-expr token, so one token
        of lookahead after ASSIGN is enough to pick this production
        instead. *)
-    { { desc = LetMatch (id, ty, disc,
+    { { desc = LetMatch (true, id, ty, disc,
+                          validate_let_match_arms id $symbolstartpos arms);
+        loc = $symbolstartpos } }
+  | LET id = IDENT COLON ty = type_expr ASSIGN MATCH disc = expr
+    LBRACE arms = match_arms RBRACE SEMI
+    (* let id: ty = match disc { arms }; -- the non-mut spelling. `id`
+       is still alloca-based internally (an arm's `id = e;` needs a
+       memory location to assign into no matter what), but type_inf.ml's
+       LetMatch case downgrades it back to immutable in the tyenv that
+       continues past this whole statement, once its own arms (which DO
+       need it mutable) have been checked -- so a later `id = ...;`
+       outside these arms is rejected exactly like assigning to any
+       other non-mut `let` would be. *)
+    { { desc = LetMatch (false, id, ty, disc,
                           validate_let_match_arms id $symbolstartpos arms);
         loc = $symbolstartpos } }
   | LBRACE s = stmts RBRACE { { desc = Block s; loc = $symbolstartpos } }

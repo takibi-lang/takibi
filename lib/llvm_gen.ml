@@ -1727,10 +1727,14 @@ let rec collect_lets stmts =
           | ArmWild body            -> collect_lets body
           | ArmIntLit (_, body)     -> collect_lets body
         ) arms
-    | LetMatch (name, ty, _, arms) ->
-        (* Always mutable (the parser requires `mut`), so this always
-           contributes its own alloca entry, unlike Match above which
-           only ever pre-allocates what its ARMS separately declare. *)
+    | LetMatch (_, name, ty, _, arms) ->
+        (* Always alloca-based internally regardless of the surface
+           `mut` (an arm's own `name = e;` needs a memory location to
+           assign into no matter what -- see type_inf.ml's LetMatch case
+           for where the surface mut/non-mut distinction is actually
+           enforced), so this always contributes its own alloca entry,
+           unlike Match above which only ever pre-allocates what its
+           ARMS separately declare. *)
         (name, Some ty, s.loc, None) ::
         List.concat_map (fun arm ->
           match arm with
@@ -1755,7 +1759,7 @@ let rec collect_mutable_pattern_binders stmts =
     | If (_, yes, no) ->
         collect_mutable_pattern_binders yes
         @ collect_mutable_pattern_binders no
-    | Match (_, arms) | LetMatch (_, _, _, arms) ->
+    | Match (_, arms) | LetMatch (_, _, _, _, arms) ->
         List.concat_map (fun arm ->
           match arm with
           | ArmVariant (vtype, cname, binding, body) ->
@@ -1798,10 +1802,11 @@ let rec collect_immutable_lets stmts =
     | While (_, b)                -> collect_immutable_lets b
     | For (_, _, _, _, body)      -> collect_immutable_lets body
     | ForEach (_, _, body)        -> collect_immutable_lets body
-    | Match (_, arms) | LetMatch (_, _, _, arms) ->
-        (* LetMatch's own bound name is always mutable (no entry
-           contributed here), but a block-diverging arm can still
-           contain its own nested immutable lets needing a debug alloca. *)
+    | Match (_, arms) | LetMatch (_, _, _, _, arms) ->
+        (* LetMatch's own bound name is always alloca-based internally
+           regardless of surface mut (no entry contributed here), but a
+           block-diverging arm can still contain its own nested
+           immutable lets needing a debug alloca. *)
         List.concat_map (fun arm ->
           match arm with
           | ArmVariant (_, _, _, body) -> collect_immutable_lets body
@@ -4276,7 +4281,7 @@ let gen_func ?prog_types fdef =
            it open made gen_func's generic scalar fallback try to return an
            integer zero from aggregate-returning functions. *)
         if not !merge_reachable then ignore (build_unreachable builder)
-    | LetMatch (name, ty, disc, arms) ->
+    | LetMatch (_, name, ty, disc, arms) ->
         (* GitHub issue #183 follow-up: `name`'s alloca already exists --
            collect_lets (called once, up front, over the whole function
            body -- see its own LetMatch case) already contributed it,

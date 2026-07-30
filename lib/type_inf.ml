@@ -3365,21 +3365,27 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
            (tyenv, raw_locals')
        | t -> raise (TypeError (disc.loc, Printf.sprintf
            "match requires an enum, variant, or primitive integer type, got '%s'" (to_string t))))
-  | LetMatch (name, ty_expr, disc, arms) ->
-      (* GitHub issue #183 follow-up ("Layer 1"): `let mut name: ty =
-         match disc { arms };`. The parser has already rewritten `arms`
-         into ordinary match_arm bodies (a value arm's body is
-         `[Assign(name, e)]`; a block arm is used as-is, already verified
-         to end in Return/Break/Continue) -- so exhaustiveness, linear-
-         payload handling, and every other Match rule above apply
-         completely unchanged by recursing on a synthesized `Match`
-         node. `name` itself is declared exactly like an ordinary `let
-         mut name: ty;` (see the Let case above, which this mirrors
-         minus the initializer-unification logic that doesn't apply
-         here: there is no single initializer expression to unify a
-         declared type against, only per-arm Assign targets that Assign's
-         own existing rule already checks against name's now-known
-         type). *)
+  | LetMatch (is_mut, name, ty_expr, disc, arms) ->
+      (* GitHub issue #183 follow-up ("Layer 1", plus a later non-mut
+         extension): `let [mut] name: ty = match disc { arms };`. The
+         parser has already verified each arm's body ends in
+         `Assign(name, e)` (this arm's value) or Return/Break/Continue
+         (diverges) -- so exhaustiveness, linear-payload handling, and
+         every other Match rule above apply completely unchanged by
+         recursing on a synthesized `Match` node. `name` itself is
+         declared exactly like an ordinary `let mut name: ty;` (see the
+         Let case above, which this mirrors minus the initializer-
+         unification logic that doesn't apply here: there is no single
+         initializer expression to unify a declared type against, only
+         per-arm Assign targets that Assign's own existing rule already
+         checks against name's now-known type) -- ALWAYS mutable while
+         checking the arms, regardless of the surface `mut`, since an
+         arm's own `name = e;` needs that. A non-mut surface binding
+         downgrades `name` back to immutable in the tyenv returned here,
+         which is what continues past this whole statement -- a later
+         `name = ...;` outside these arms then hits Assign's own
+         existing "cannot assign to immutable variable" check, same as
+         for any other non-mut `let`. *)
       value_static_identities := StringMap.remove name !value_static_identities;
       invalidate_place_binding name;
       let ty = of_ast ty_expr in
@@ -3388,8 +3394,12 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
           "stable owner container storage must be a private mutable global, not a local value"));
       let tyenv' = StringMap.add name (ty, true) tyenv in
       let raw_locals' = StringMap.add name ty raw_locals in
-      infer_stmt senv eenv tyenv' fenv ret_ty raw_locals' in_loop
-        { desc = Match (disc, arms); loc = s.loc }
+      let (tyenv'', raw_locals'') = infer_stmt senv eenv tyenv' fenv ret_ty
+        raw_locals' in_loop { desc = Match (disc, arms); loc = s.loc } in
+      let tyenv''' =
+        if is_mut then tyenv'' else StringMap.add name (ty, false) tyenv''
+      in
+      (tyenv''', raw_locals'')
 
 (* -- Function inference ---------------------------------------------------- *)
 
@@ -4370,7 +4380,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          List.iter (function
            | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) ->
                List.iter validate_stmt_types b) arms
-     | Ast.LetMatch (_, ty, disc, arms) ->
+     | Ast.LetMatch (_, _, ty, disc, arms) ->
          if ast_contains_stable_owner_value ty then
            raise (TypeError (s.loc,
              "stable owner container storage must be a private mutable global, not a local value"));
@@ -6089,7 +6099,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Continue ->
           require_no_pending_linear s.loc "continue" moved declared;
           (moved, declared, taints)
-      | Ast.LetMatch (name, ty_expr, disc, arms) ->
+      | Ast.LetMatch (_, name, ty_expr, disc, arms) ->
           (* GitHub issue #183 follow-up. `name` IS pre-registered into
              `declared` before recursing (needed so a continuing arm's
              `name = ...;` is not mistaken by check_stmts's end-of-block
@@ -6255,7 +6265,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             | Ast.ArmVariant (_, _, _, stmts) | Ast.ArmWild stmts
             | Ast.ArmIntLit (_, stmts) ->
                 List.iter visit_stmt stmts) arms
-      | Ast.LetMatch (_, _, subject, arms) ->
+      | Ast.LetMatch (_, _, _, subject, arms) ->
           visit_expr subject;
           List.iter (function
             | Ast.ArmVariant (_, _, _, stmts) | Ast.ArmWild stmts
