@@ -365,6 +365,93 @@ def test_reconnect_after_close(client_mac: bytes) -> bool:
     return ok
 
 
+# GitHub issue #180: kernel/arch/arm64/kernel/user_entry.S's EL0 fixture
+# (used only by TCP_TEST_CONNECTED_IO=1, the userspace socket-syscall
+# path -- not the BusyBox/curl path) issues exactly 3 write(5, ...)
+# calls on the one connection this test continues: 19 bytes
+# ("HTTP/1.0 200 OK\r\n\r\n"), 1461 bytes of 0x5a fill capped at 1460 by
+# the kernel's partial-write behavior, then the final byte. kernel/init/
+# main.tkb arms kernel_tcp_inject_drop_data_segment(1) before running
+# this fixture, so the MIDDLE (1460-byte) segment's first transmission
+# is always silently skipped and only reaches the wire via the kernel's
+# real timeout+retry queue (kernel/net/tcp.tkb's pending_tcp_service_once)
+# -- this one check therefore has to prove both the multi-segment queue's
+# happy path (segments 0 and 2) and its drop-recovery path (segment 1) at
+# once, since both happen in the same boot. Earlier versions of this
+# check only read the first reply frame and only verified the 19-byte
+# header; this reconstructs and byte-compares the complete response.
+CONNECTED_LARGE_RESPONSE = CONNECTED_RESPONSE_PAYLOAD + (b"\x5a" * 1460) + b"\x5a"
+
+
+def test_connected_large_response(client_mac: bytes) -> bool:
+    # Continues the connection test_handshake_only()-equivalent (main()'s
+    # own do_handshake call below) already established -- same ordering
+    # requirement as test_data_echo.
+    sock = new_sock()
+    client_seq = HANDSHAKE_CLIENT_ISN + 1 + len(DATA_ECHO_PAYLOAD)
+    server_seq = SERVER_ISN + 1
+
+    req = build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
+                       HANDSHAKE_CLIENT_ISN + 1, server_seq,
+                       FLAG_ACK | FLAG_PSH, data=DATA_ECHO_PAYLOAD)
+    sock.send(req)
+
+    collected = b""
+    want = len(CONNECTED_LARGE_RESPONSE)
+    # Generous but bounded: the kernel's own retry budget for one dropped
+    # segment is TCP_RETRY_LIMIT(3) * retry_ticks(~200ms) =~ 600ms (see
+    # kernel/net/tcp.tkb's kernel_tcp_accept_once comment) -- 10s covers
+    # that many times over without masking a genuine hang as a slow pass.
+    deadline = time.monotonic() + 10.0
+    while len(collected) < want and time.monotonic() < deadline:
+        reply = recv_reply(sock, req, 2.0)
+        if reply is None:
+            continue
+        if len(reply) < 54:
+            continue
+        ip = reply[14:34]
+        tcp_hdr = reply[34:54]
+        src_port, dst_port, rseq, rack, _doff_res, flags = struct.unpack(
+            "!HHIIBB", tcp_hdr[0:14])
+        if src_port != SERVER_PORT or dst_port != HANDSHAKE_CLIENT_PORT:
+            continue
+        if (flags & FLAG_ACK) == 0:
+            continue
+        total_len = struct.unpack("!H", ip[2:4])[0]
+        payload_len = total_len - 40  # 20 IP + 20 TCP, no options on any reply here
+        if payload_len <= 0:
+            continue
+        if rseq != server_seq:
+            # Not the next in-order byte -- either a retransmit of a
+            # segment already collected, or (should not happen here) one
+            # arriving out of order. Cumulative-ACK it again without
+            # appending, matching real TCP receiver behavior, so the
+            # kernel's own retry loop sees the ack it is waiting for even
+            # if this reply is a duplicate.
+            dup_ack = build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
+                                   client_seq, server_seq, FLAG_ACK)
+            sock.send(dup_ack)
+            continue
+        payload = reply[54:54 + payload_len]
+        collected += payload
+        server_seq += payload_len
+        ack = build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
+                           client_seq, server_seq, FLAG_ACK)
+        sock.send(ack)
+
+    sock.close()
+    if collected != CONNECTED_LARGE_RESPONSE:
+        print("  connected large response mismatch: got %d bytes, want %d" %
+              (len(collected), want))
+        for i in range(min(len(collected), want)):
+            if collected[i] != CONNECTED_LARGE_RESPONSE[i]:
+                print("    first difference at byte %d: got 0x%02x want 0x%02x" %
+                      (i, collected[i], CONNECTED_LARGE_RESPONSE[i]))
+                break
+        return False
+    return True
+
+
 def main() -> int:
     if not os.path.exists(f"/sys/class/net/{IFACE}"):
         print(f"error: interface {IFACE!r} not found -- set ETH_TEST_IFACE?", file=sys.stderr)
@@ -379,10 +466,10 @@ def main() -> int:
         sock.close()
         print("  userspace accept handshake port %d: %s" %
               (SERVER_PORT, "PASS" if handshake_ok else "FAIL"))
-        io_ok = handshake_ok and test_data_echo(
-            client_mac, CONNECTED_RESPONSE_PAYLOAD)
-        print("  userspace connected generated response: %s" %
-              ("PASS" if io_ok else "FAIL"))
+        io_ok = handshake_ok and test_connected_large_response(client_mac)
+        print("  userspace connected generated response (%d bytes, incl. "
+              "mid-response drop recovery): %s" %
+              (len(CONNECTED_LARGE_RESPONSE), "PASS" if io_ok else "FAIL"))
         return 0 if io_ok else 1
 
     ok1 = test_syn_wrong_port_silent(client_mac)

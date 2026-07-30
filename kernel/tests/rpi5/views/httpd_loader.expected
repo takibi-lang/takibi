@@ -7,3 +7,4 @@ httpd server: split request stream ok
 httpd server: inetd request exit=0 clean
 httpd server: data drop retransmit ok
 httpd server: fin drop retransmit ok
+httpd server: second request ok

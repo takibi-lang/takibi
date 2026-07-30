@@ -549,6 +549,49 @@ fn main() {
                                                 }
                                             }
                                         }
+                                        // GitHub issue #180: a second, independent curl
+                                        // completes in the same boot -- no injected-fault
+                                        // setup here (that stays scoped to the first
+                                        // connection above), just a plain repeat of
+                                        // map+accept+run+unmap to prove the listener
+                                        // genuinely accepts more than one sequential
+                                        // connection without rebooting. httpd_plan/
+                                        // musl_plan are plain DistroElfLoadPlan structs
+                                        // (kernel/fs/elf64.tkb), not a linear/consumed
+                                        // resource, so reusing them for a second
+                                        // process_image_pair_probe call here is safe.
+                                        match process_image_pair_probe(
+                                                httpd_plan, musl_plan,
+                                                0x40000) {
+                                            ProcessImagePairProbeResult::Invalid => { }
+                                            ProcessImagePairProbeResult::Ready(second_pages) => {
+                                                let (second_heap_start,
+                                                     second_heap_limit) =
+                                                    process_image_heap_range(
+                                                        second_pages);
+                                                kernel_syscall_process_configure(
+                                                    second_heap_start,
+                                                    second_heap_limit);
+                                                match kernel_syscall_inetd_accept(8080) {
+                                                    KernelInetdAcceptResult::TimedOut => {
+                                                        process_image_unmap(second_pages);
+                                                    }
+                                                    KernelInetdAcceptResult::Accepted => {
+                                                        let second_status: usize =
+                                                            run_initial_user(
+                                                                process_image_entry(
+                                                                    second_pages),
+                                                                process_image_stack_pointer(
+                                                                    second_pages));
+                                                        process_image_unmap(second_pages);
+                                                        if (second_status == 0 &&
+                                                            process_image_window_is_clear()) {
+                                                            kernel_boot_log("httpd server: second request ok\n");
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -625,7 +668,10 @@ fn main() {
             }
         }
     }
-    kernel_tcp_inject_drop_next_data();
+    // GitHub issue #180: index 1 is the middle of the EL0 fixture's 3
+    // write()s (0 = 19-byte header, 1 = 1460-byte body, 2 = final byte)
+    // -- a genuine drop within the large response, not a bookend.
+    kernel_tcp_inject_drop_data_segment(1);
     kernel_tcp_inject_drop_next_fin();
     match initial_process_create() {
         ProcessCreateResult::OutOfMemory => {

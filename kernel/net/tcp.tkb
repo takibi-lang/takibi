@@ -67,27 +67,46 @@ let mut tcp_drop_next_syn_ack: bool = false;
 let mut tcp_injected_syn_pending: bool = false;
 let mut tcp_injected_syn_retransmitted: bool = false;
 let mut tcp_injected_syn_accepted: bool = false;
-let mut tcp_drop_next_data: bool = false;
-let mut tcp_injected_data_pending: bool = false;
+// GitHub issue #180: a single write() (up to TCP_MAX_PAYLOAD) used to be
+// the only unit of retransmission tracking (one pending_tcp_* slot).
+// Consecutive write()s on one connection -- exactly what
+// kernel/arch/arm64/kernel/user_entry.S's EL0 fixture already does (19 +
+// 1460 + 1 bytes, three separate write() calls) -- silently overwrote an
+// earlier segment's still-unacknowledged retransmission record. Now
+// PENDING_TCP_MAX independent slots, one per in-flight segment. Flat
+// arrays with manual slot*WIDTH offsets, not [[u8;1514];N]/[[u8;4];N]:
+// indexed writes into a nested/structured target are not reliably
+// supported (matches examples/common/http_server_common.tkb's own
+// conn_remote_ip precedent and header comment for the identical reason).
+const PENDING_TCP_MAX: usize = 4;
+
+let mut tcp_drop_data_segment_index: i32 = -1;
+let mut tcp_data_segment_counter: usize = 0;
+// Which queue slot (see PENDING_TCP_MAX below) is the one currently
+// armed for drop-recovery observation, -1 if none. A slot INDEX rather
+// than a bool: pending_tcp_service_once below can then require the
+// retransmit+ack it observed came from THIS specific slot, not merely
+// "some Data/Fin slot or other" -- meaningful now that several slots
+// can be in flight for one connection at once (GitHub issue #180).
+let mut tcp_injected_data_slot: i32 = -1;
 let mut tcp_injected_data_retransmitted: bool = false;
 let mut tcp_injected_data_recovery_observed: bool = false;
 let mut tcp_drop_next_fin: bool = false;
-let mut tcp_injected_fin_pending: bool = false;
+let mut tcp_injected_fin_slot: i32 = -1;
 let mut tcp_injected_fin_retransmitted: bool = false;
 let mut tcp_injected_fin_recovery_observed: bool = false;
 let mut tcp_advertised_window: u16 = 65535;
 let mut tcp_ack_each_stream_segment: bool = false;
 let mut tcp_split_request_segments: usize = 0;
-let mut pending_tcp_kind: PendingTcpKind = PendingTcpKind::None;
-let mut pending_tcp_frame: [u8; 1514];
-let mut pending_tcp_frame_length: usize = 0;
-let mut pending_tcp_expected_ack: u32 = 0;
-let mut pending_tcp_remote_ip: [u8; 4];
-let mut pending_tcp_remote_port: u16 = 0;
-let mut pending_tcp_local_port: u16 = 0;
-let mut pending_tcp_sent_at: i64 = 0;
-let mut pending_tcp_retries: usize = 0;
-let mut pending_tcp_want_fin: bool = false;
+let mut pending_tcp_kind:         [PendingTcpKind; PENDING_TCP_MAX];
+let mut pending_tcp_frame:        [u8; 1514 * PENDING_TCP_MAX];
+let mut pending_tcp_frame_length: [usize; PENDING_TCP_MAX];
+let mut pending_tcp_expected_ack: [u32; PENDING_TCP_MAX];
+let mut pending_tcp_remote_ip:    [u8; 4 * PENDING_TCP_MAX];
+let mut pending_tcp_remote_port:  [u16; PENDING_TCP_MAX];
+let mut pending_tcp_local_port:   [u16; PENDING_TCP_MAX];
+let mut pending_tcp_sent_at:      [i64; PENDING_TCP_MAX];
+let mut pending_tcp_retries:      [usize; PENDING_TCP_MAX];
 
 must_use variant KernelTcpResult {
     TimedOut(NetRxCanAcquire);
@@ -132,9 +151,21 @@ fn kernel_tcp_injected_syn_ack_recovered() -> bool {
     return tcp_injected_syn_accepted;
 }
 
-fn kernel_tcp_inject_drop_next_data() {
-    tcp_drop_next_data = true;
-    tcp_injected_data_pending = false;
+// GitHub issue #180: drop the Nth data segment sent on this connection
+// (0-based; kernel/arch/arm64/kernel/user_entry.S's EL0 fixture sends
+// exactly 3: index 0 = the 19-byte header, 1 = the 1460-byte body, 2 =
+// the final byte -- kernel/init/main.tkb arms index 1, a genuine
+// mid-large-response drop, not a bookend). Unlike
+// kernel_tcp_inject_drop_next_data's old synchronous busy-wait-then-
+// unconditional-resend, this only skips the targeted segment's INITIAL
+// transmit; its actual retransmission and recovery now go entirely
+// through the same real timeout+peer-ack path every other queued
+// segment uses (pending_tcp_service_once), so
+// kernel_tcp_injected_data_recovered() below only reports true once a
+// real peer ACK actually cleared that slot after at least one retry.
+fn kernel_tcp_inject_drop_data_segment(index: usize) {
+    tcp_drop_data_segment_index = index as i32;
+    tcp_injected_data_slot = -1;
     tcp_injected_data_retransmitted = false;
     tcp_injected_data_recovery_observed = false;
 }
@@ -145,7 +176,7 @@ fn kernel_tcp_injected_data_recovered() -> bool {
 
 fn kernel_tcp_inject_drop_next_fin() {
     tcp_drop_next_fin = true;
-    tcp_injected_fin_pending = false;
+    tcp_injected_fin_slot = -1;
     tcp_injected_fin_retransmitted = false;
     tcp_injected_fin_recovery_observed = false;
 }
@@ -169,26 +200,78 @@ fn kernel_tcp_restore_stream_policy() {
     tcp_ack_each_stream_segment = false;
 }
 
-fn pending_tcp_record(kind: PendingTcpKind, frame_length: usize) {
-    let mut copy_index: usize = 0;
-    while (copy_index < frame_length) {
-        if (copy_index < 1514) {
-            pending_tcp_frame[copy_index] = tcp_stream_tx_frame[copy_index];
+// Resets every slot to free. Called once per connection (from
+// kernel_tcp_accept_once, alongside its own conn_state = Listen reset)
+// so a new connection never inherits a stale slot from a previous one.
+fn pending_tcp_reset_all() {
+    let mut slot: usize = 0;
+    while (slot < 4) {
+        if (slot < 4) {
+            pending_tcp_kind[slot] = PendingTcpKind::None;
         }
-        copy_index = copy_index + 1;
+        slot = slot + 1;
     }
-    pending_tcp_kind = kind;
-    pending_tcp_frame_length = frame_length;
-    pending_tcp_expected_ack = conn_snd_nxt;
-    slice_copy(pending_tcp_remote_ip as []u8, conn_remote_ip as []u8);
-    pending_tcp_remote_port = conn_remote_port;
-    pending_tcp_local_port = conn_local_port;
-    pending_tcp_sent_at = read_cntpct();
-    pending_tcp_retries = 0;
+    tcp_data_segment_counter = 0;
 }
 
-fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32) -> bool {
-    if (pending_tcp_kind == PendingTcpKind::None || len < 54 || len > 1514) {
+// Finds a free (PendingTcpKind::None) slot and returns its index. If
+// every slot is genuinely occupied (shouldn't happen at
+// PENDING_TCP_MAX=4 against the 3-segment EL0 fixture this was sized
+// for), falls back to slot 0 -- the same single-slot behavior this file
+// always had, not a new regression. Refined return type (matching
+// examples/common/http_server_common.tkb's idx: {0..<MAX_CONNS as
+// usize} convention for its own MAX_CONNS-wide flat arrays): a plain
+// usize return would leave every caller's use of the result unprovable
+// under --forbid-trap, no matter how the while loop that produced it
+// looks -- the refinement has to be carried on the type itself.
+fn pending_tcp_find_free_slot() -> {0..<4 as usize} {
+    let mut slot: usize = 0;
+    while (slot < 4) {
+        if (slot < 4) {
+            let kind: PendingTcpKind = pending_tcp_kind[slot];
+            if (kind == PendingTcpKind::None) {
+                return slot;
+            }
+        }
+        slot = slot + 1;
+    }
+    return 0;
+}
+
+fn pending_tcp_record(kind: PendingTcpKind, frame_length: usize) -> {0..<4 as usize} {
+    let slot: {0..<4 as usize} = pending_tcp_find_free_slot();
+    // Same-base subslice rule (see pending_tcp_ack_matches's identical
+    // comment): "slot * 1514" computed twice would not itself prove in
+    // range, so it is bound once into `base` and both the write loop
+    // below and any later `base..<base + N` subslice reference that one
+    // local instead of recomputing the multiply.
+    let base: usize = slot * 1514;
+    let frame_dest = pending_tcp_frame as []u8;
+    slice_copy(frame_dest[base..<base + 1514], tcp_stream_tx_frame as []u8);
+    pending_tcp_kind[slot] = kind;
+    pending_tcp_frame_length[slot] = frame_length;
+    pending_tcp_expected_ack[slot] = conn_snd_nxt;
+    let ip_base: usize = slot * 4;
+    let remote_ip_bytes = pending_tcp_remote_ip as []u8;
+    slice_copy(remote_ip_bytes[ip_base..<ip_base + 4],
+               conn_remote_ip as []u8);
+    pending_tcp_remote_port[slot] = conn_remote_port;
+    pending_tcp_local_port[slot] = conn_local_port;
+    pending_tcp_sent_at[slot] = read_cntpct();
+    pending_tcp_retries[slot] = 0;
+    return slot;
+}
+
+// slot: {0..<4 as usize} (not plain usize + an internal `if (slot >= 4)
+// return false` guard, tried first): a refined PARAMETER type is what
+// lets every pending_tcp_*[slot] access below prove in range under
+// --forbid-trap, matching http_server_common.tkb's tcp_remote_matches
+// (idx: {0..<MAX_CONNS as usize}) precedent -- a runtime bounds check
+// alone does not carry the same compile-time information forward.
+fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
+                            slot: {0..<4 as usize}) -> bool {
+    let slot_kind: PendingTcpKind = pending_tcp_kind[slot];
+    if (slot_kind == PendingTcpKind::None || len < 54 || len > 1514) {
         return false;
     }
     let len_n: i32 = len;
@@ -197,10 +280,12 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32) -> bool {
     let ihl: u16 = (ip[0] & 0x0F) * 4;
     let len16: u16 = len_n as u16;
     let total_len: u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
+    let ip_base: usize = slot * 4;
+    let remote_ip_bytes = pending_tcp_remote_ip as []u8;
     if ((ip[0] >> 4) != 4 || ihl != 20 || total_len != 40 ||
         total_len > len16 - 14 || ip[IP_PROTOCOL] != PROTO_TCP ||
         inet_checksum(ip) != 0 ||
-        slice_eq(ip[IP_SRC..<IP_DST], pending_tcp_remote_ip as []u8) == false ||
+        slice_eq(ip[IP_SRC..<IP_DST], remote_ip_bytes[ip_base..<ip_base + 4]) == false ||
         slice_eq(ip[IP_DST..<20], OUR_IP as []u8) == false) {
         return false;
     }
@@ -212,14 +297,117 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32) -> bool {
     pseudo[9] = PROTO_TCP;
     write_u16be(pseudo[10..<12], 20);
     return read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) ==
-               pending_tcp_remote_port as i32 &&
+               pending_tcp_remote_port[slot] as i32 &&
            read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]) ==
-               pending_tcp_local_port as i32 &&
+               pending_tcp_local_port[slot] as i32 &&
            (tcp[TCP_FLAGS] & TCP_FLAG_ACK) != 0 &&
            (read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32) >=
-               pending_tcp_expected_ack &&
+               pending_tcp_expected_ack[slot] &&
            checksum_fold(checksum_add(
                tcp, checksum_add(pseudo as []u8, 0))) == 0;
+}
+
+// One non-blocking net_rx acquire attempt: if a frame is already
+// waiting, checks it against every active slot (a real ACK is
+// cumulative -- one frame can clear several older slots at once, exactly
+// what happens here since these are same-direction sequential
+// segments), then separately retransmits any slot still active past its
+// own retry_ticks deadline (bumping its retry count, giving up and
+// freeing the slot silently at TCP_RETRY_LIMIT -- same exhaustion
+// behavior this file always had for its one slot). A frame that matches
+// no active slot is simply released: TCP's own retry semantics already
+// assume any frame can be safely dropped, so an opportunistic caller
+// (kernel_tcp_send_received) stealing an unrelated frame here is no
+// worse than that frame never having arrived at all.
+fn pending_tcp_service_once(ready_in: sink NetRxCanAcquire,
+                             retry_ticks: i64)
+        -> NetRxCanAcquire !{may_block} {
+    let mut ready = ready_in;
+    match net_rx_acquire(ready) {
+        NetRxAcquire::None(next) => { ready = next; }
+        NetRxAcquire::Acquired(acquired) => {
+            let len: i32 = net_rx_len(acquired);
+            let frame = net_rx_frame(acquired);
+            let mut slot: usize = 0;
+            while (slot < 4) {
+                if (slot < 4) {
+                    if (pending_tcp_ack_matches(frame, len, slot)) {
+                        // A real peer ACK, not a synthetic flag flip: this
+                        // is what makes kernel_tcp_injected_data_recovered()
+                        // / kernel_tcp_injected_fin_recovered() genuinely
+                        // prove recovery, matching the same rigor
+                        // kernel_tcp_injected_syn_ack_recovered() already
+                        // had.
+                        if (slot as i32 == tcp_injected_data_slot &&
+                            tcp_injected_data_retransmitted) {
+                            tcp_injected_data_recovery_observed = true;
+                        }
+                        if (slot as i32 == tcp_injected_fin_slot &&
+                            tcp_injected_fin_retransmitted) {
+                            tcp_injected_fin_recovery_observed = true;
+                        }
+                        pending_tcp_kind[slot] = PendingTcpKind::None;
+                    }
+                }
+                slot = slot + 1;
+            }
+            ready = net_rx_finish(acquired, NetRxDisposal::Release);
+        }
+    }
+    let now: i64 = read_cntpct();
+    let mut slot: usize = 0;
+    while (slot < 4) {
+        if (slot < 4) {
+            let slot_kind: PendingTcpKind = pending_tcp_kind[slot];
+            if (slot_kind != PendingTcpKind::None) {
+                if (pending_tcp_retries[slot] < TCP_RETRY_LIMIT &&
+                    now - pending_tcp_sent_at[slot] >= retry_ticks) {
+                    let base: usize = slot * 1514;
+                    let length: usize = pending_tcp_frame_length[slot];
+                    let frame_bytes = pending_tcp_frame as []u8;
+                    ready = net_transmit_ready(
+                        ready, frame_bytes[base..<base + 1514],
+                        length as i32);
+                    pending_tcp_sent_at[slot] = now;
+                    pending_tcp_retries[slot] = pending_tcp_retries[slot] + 1;
+                    if (slot as i32 == tcp_injected_data_slot) {
+                        tcp_injected_data_retransmitted = true;
+                    }
+                    if (slot as i32 == tcp_injected_fin_slot) {
+                        tcp_injected_fin_retransmitted = true;
+                    }
+                } else if (pending_tcp_retries[slot] == TCP_RETRY_LIMIT &&
+                           now - pending_tcp_sent_at[slot] >= retry_ticks) {
+                    // Give up silently on this one slot -- same per-slot
+                    // exhaustion behavior this file always had for its one
+                    // pending slot, just scoped to this slot instead of the
+                    // whole queue.
+                    pending_tcp_kind[slot] = PendingTcpKind::None;
+                }
+            }
+        }
+        slot = slot + 1;
+    }
+    return ready;
+}
+
+// True while any slot (Data or Fin) is still outstanding -- the
+// condition kernel_tcp_close_stream's own bounded wait drains toward
+// before returning, so close() genuinely waits for its FIN (and any
+// Data segment still outstanding when it was called) to be acknowledged
+// or give up, instead of returning immediately with unfinished business.
+fn pending_tcp_any_active() -> bool {
+    let mut slot: usize = 0;
+    while (slot < 4) {
+        if (slot < 4) {
+            let slot_kind: PendingTcpKind = pending_tcp_kind[slot];
+            if (slot_kind != PendingTcpKind::None) {
+                return true;
+            }
+        }
+        slot = slot + 1;
+    }
+    return false;
 }
 
 // Recomputes the TCP checksum over the pseudo-header implied by `ip` and
@@ -612,6 +800,12 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
     let mut ready = ready_in;
     conn_state = ConnState::Listen;
     conn_local_port = port;
+    // GitHub issue #180: a fresh connection never inherits a stale queue
+    // slot from a previous one. kernel_tcp_close_stream now drains its
+    // own pending queue synchronously before it ever returns (see that
+    // function), so -- unlike before -- this loop no longer needs to
+    // opportunistically service leftover pending_tcp state itself.
+    pending_tcp_reset_all();
     let start: i64 = read_cntpct();
     let counter_frequency: i64 = read_cntfrq();
     let deadline_ticks: i64 = counter_frequency * 30;
@@ -636,11 +830,6 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
             NetRxAcquire::None(next) => { ready = next; }
             NetRxAcquire::Acquired(acquired) => {
                 let len: i32 = net_rx_len(acquired);
-                let pending_frame = net_rx_frame(acquired);
-                let pending_ack: bool =
-                    pending_tcp_ack_matches(pending_frame, len);
-                let pending_peer_fin: bool = pending_ack &&
-                    (pending_frame[47] & TCP_FLAG_FIN) != 0;
                 let mut plan: NetRxDisposal = NetRxDisposal::Release;
                 let mut accepted: bool = false;
                 if (len >= 42) {
@@ -763,34 +952,6 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                     }
                 }
                 ready = net_rx_finish(acquired, plan);
-                if (pending_ack) {
-                    if (tcp_injected_data_pending &&
-                        tcp_injected_data_retransmitted &&
-                        pending_tcp_kind == PendingTcpKind::Data) {
-                        tcp_injected_data_recovery_observed = true;
-                    }
-                    tcp_injected_data_pending = false;
-                    if (tcp_injected_fin_pending &&
-                        tcp_injected_fin_retransmitted &&
-                        pending_tcp_kind == PendingTcpKind::Fin) {
-                        tcp_injected_fin_recovery_observed = true;
-                    }
-                    tcp_injected_fin_pending = false;
-                    if (pending_peer_fin) {
-                        conn_rcv_nxt = conn_rcv_nxt + 1;
-                    }
-                    let send_fin: bool = pending_tcp_want_fin &&
-                        pending_tcp_kind == PendingTcpKind::Data;
-                    pending_tcp_kind = PendingTcpKind::None;
-                    pending_tcp_want_fin = false;
-                    if (send_fin) {
-                        match kernel_tcp_close_stream(ready) {
-                            KernelTcpCloseResult::Closed(after_fin) => {
-                                ready = after_fin;
-                            }
-                        }
-                    }
-                }
                 if (accepted) {
                     return KernelTcpAcceptResult::Accepted(ready);
                 }
@@ -815,29 +976,6 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
             // a new ephemeral source port, can use the same listener.
             conn_state = ConnState::Listen;
             tcp_injected_syn_pending = false;
-        }
-        if (pending_tcp_kind != PendingTcpKind::None) {
-            let pending_now: i64 = read_cntpct();
-            if (pending_tcp_retries < TCP_RETRY_LIMIT &&
-                pending_now - pending_tcp_sent_at >= retry_ticks) {
-                ready = net_transmit_ready(
-                    ready, pending_tcp_frame as []u8,
-                    pending_tcp_frame_length as i32);
-                pending_tcp_sent_at = pending_now;
-                pending_tcp_retries = pending_tcp_retries + 1;
-                if (tcp_injected_data_pending &&
-                    pending_tcp_kind == PendingTcpKind::Data) {
-                    tcp_injected_data_retransmitted = true;
-                }
-                if (tcp_injected_fin_pending &&
-                    pending_tcp_kind == PendingTcpKind::Fin) {
-                    tcp_injected_fin_retransmitted = true;
-                }
-            } else if (pending_tcp_retries == TCP_RETRY_LIMIT &&
-                       pending_now - pending_tcp_sent_at >= retry_ticks) {
-                pending_tcp_kind = PendingTcpKind::None;
-                pending_tcp_want_fin = false;
-            }
         }
     }
     return KernelTcpAcceptResult::TimedOut(ready);
@@ -1010,33 +1148,45 @@ fn kernel_tcp_send_received(ready: sink NetRxCanAcquire,
         fix_tcp_checksum(ip, frame_bytes[34..<54 + length]);
         conn_snd_nxt = conn_snd_nxt + (length as u32);
         let frame_length: usize = 54 + length;
-        pending_tcp_record(PendingTcpKind::Data, frame_length);
-        if (tcp_drop_next_data) {
-            tcp_drop_next_data = false;
-            tcp_injected_data_pending = true;
-            let retry_start: i64 = read_cntpct();
-            let retry_delay: i64 = read_cntfrq() / 20;
-            while (read_cntpct() - retry_start < retry_delay) { }
-            let after_retry = net_transmit_ready(
-                ready, pending_tcp_frame as []u8, frame_length as i32);
-            tcp_injected_data_retransmitted = true;
-            tcp_injected_data_recovery_observed = true;
-            tcp_injected_data_pending = false;
-            pending_tcp_kind = PendingTcpKind::None;
-            return KernelTcpSendResult::Sent(after_retry);
+        // GitHub issue #180: opportunistically retire any already-acked
+        // older segment (and retry any overdue one) before queuing this
+        // new one -- consecutive write()s no longer clobber each other's
+        // retransmission record now that pending_tcp_record finds its own
+        // free slot instead of always overwriting slot 0.
+        let mut serviced = pending_tcp_service_once(ready, read_cntfrq() / 5);
+        let this_index: usize = tcp_data_segment_counter;
+        tcp_data_segment_counter = tcp_data_segment_counter + 1;
+        let this_slot: usize = pending_tcp_record(PendingTcpKind::Data, frame_length);
+        if (this_index as i32 == tcp_drop_data_segment_index) {
+            // Skip only this segment's initial transmit -- it stays
+            // queued (pending_tcp_record already ran above), so its
+            // first REAL transmission, and the recovery-observed flag,
+            // both come from pending_tcp_service_once's real timeout+
+            // peer-ack path, the same one every other segment uses.
+            tcp_drop_data_segment_index = -1;
+            tcp_injected_data_slot = this_slot as i32;
+            return KernelTcpSendResult::Sent(serviced);
         }
         return KernelTcpSendResult::Sent(net_transmit_ready(
-            ready, tcp_stream_tx_frame as []u8, frame_length as i32));
+            serviced, tcp_stream_tx_frame as []u8, frame_length as i32));
     }
     return KernelTcpSendResult::Invalid(ready);
 }
 
-fn kernel_tcp_close_stream(ready: sink NetRxCanAcquire)
+// GitHub issue #180: used to defer sending FIN entirely (setting
+// pending_tcp_want_fin and returning immediately) whenever a Data
+// segment was still outstanding, because the old single pending slot
+// could not track a Data segment and a FIN segment at the same time --
+// recording the FIN would have clobbered the Data segment's own
+// retransmission record. With independent slots that limitation is
+// gone: FIN is queued and sent immediately below like any other segment,
+// and this function now waits (bounded) for every slot -- any Data
+// segment still outstanding when close() was called, plus the FIN this
+// call just queued -- to be acknowledged or give up, instead of
+// returning with unfinished business for some later caller to notice.
+fn kernel_tcp_close_stream(ready_in: sink NetRxCanAcquire)
         -> KernelTcpCloseResult !{may_block} {
-    if (pending_tcp_kind == PendingTcpKind::Data) {
-        pending_tcp_want_fin = true;
-        return KernelTcpCloseResult::Closed(ready);
-    }
+    let mut ready = ready_in;
     let frame = tcp_stream_tx_frame as []u8;
     slice_copy(frame[0..<6], conn_remote_mac as []u8);
     slice_copy(frame[6..<12], our_mac as []u8);
@@ -1065,22 +1215,21 @@ fn kernel_tcp_close_stream(ready: sink NetRxCanAcquire)
     write_u16be(tcp[TCP_URGENT..<20], 0);
     fix_tcp_checksum(ip, tcp);
     conn_snd_nxt = conn_snd_nxt + 1;
-    pending_tcp_record(PendingTcpKind::Fin, 54);
+    let fin_slot: usize = pending_tcp_record(PendingTcpKind::Fin, 54);
     if (tcp_drop_next_fin) {
         tcp_drop_next_fin = false;
-        tcp_injected_fin_pending = true;
-        let retry_start: i64 = read_cntpct();
-        let retry_delay: i64 = read_cntfrq() / 20;
-        while (read_cntpct() - retry_start < retry_delay) { }
-        let after_retry = net_transmit_ready(
-            ready, pending_tcp_frame as []u8, 54);
-        tcp_injected_fin_retransmitted = true;
-        tcp_injected_fin_recovery_observed = true;
-        tcp_injected_fin_pending = false;
-        pending_tcp_kind = PendingTcpKind::None;
-        return KernelTcpCloseResult::Closed(after_retry);
+        tcp_injected_fin_slot = fin_slot as i32;
+    } else {
+        ready = net_transmit_ready(ready, tcp_stream_tx_frame as []u8, 54);
     }
-    let after_initial = net_transmit_ready(
-        ready, tcp_stream_tx_frame as []u8, 54);
-    return KernelTcpCloseResult::Closed(after_initial);
+    let start: i64 = read_cntpct();
+    let counter_frequency: i64 = read_cntfrq();
+    let deadline_ticks: i64 = counter_frequency * 5;
+    let retry_ticks: i64 = counter_frequency / 5;
+    while (pending_tcp_any_active() &&
+           (read_cntpct() - start) < deadline_ticks) {
+        net_rx_wait();
+        ready = pending_tcp_service_once(ready, retry_ticks);
+    }
+    return KernelTcpCloseResult::Closed(ready);
 }

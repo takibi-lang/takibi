@@ -15,6 +15,8 @@ ICMP_LOG="$ARTIFACT_DIR/icmp.log"
 TCP_LOG="$ARTIFACT_DIR/tcp.log"
 HTTPD_LOG="$ARTIFACT_DIR/httpd-curl.log"
 HTTPD_BODY="$ARTIFACT_DIR/httpd-body.actual"
+SECOND_HTTPD_LOG="$ARTIFACT_DIR/httpd-curl-second.log"
+SECOND_HTTPD_BODY="$ARTIFACT_DIR/httpd-body-second.actual"
 SOCKET_ACCEPT_LOG="$ARTIFACT_DIR/socket-accept.log"
 ETH_TEST_IFACE="${ETH_TEST_IFACE:-enp5s0}"
 ETH_TEST_SUBNET="${ETH_TEST_SUBNET:-192.168.20}"
@@ -118,6 +120,33 @@ if [ "$httpd_ok" -ne 1 ]; then
     exit 1
 fi
 echo "[kernel/rpi5] BusyBox httpd curl passed"
+
+# GitHub issue #180: kernel/init/main.tkb now accepts a second, independent
+# inetd connection right after the first busybox process exits, in the same
+# boot (no kernel reset between the two). Proves the listener genuinely
+# handles more than one sequential curl, not just the first one ever tried.
+echo "[kernel/rpi5] curling BusyBox httpd index.html a second time (same boot)"
+second_httpd_ok=0
+for _attempt in $(seq 1 20); do
+    if curl --silent --show-error --fail \
+            --interface "$ETH_TEST_IFACE" --noproxy '*' \
+            --connect-timeout 1 --max-time 5 \
+            --output "$SECOND_HTTPD_BODY" \
+            "http://${ETH_TEST_SUBNET}.2:8080/" 2>"$SECOND_HTTPD_LOG"; then
+        if cmp -s "$REPO_ROOT/kernel/tests/ext2/index.html" "$SECOND_HTTPD_BODY"; then
+            second_httpd_ok=1
+            break
+        fi
+        echo 'unexpected response body (see httpd-body-second.actual)' >"$SECOND_HTTPD_LOG"
+        break
+    fi
+    sleep 0.25
+done
+if [ "$second_httpd_ok" -ne 1 ]; then
+    echo "FAIL kernel/rpi5: second BusyBox httpd curl failed (see $SECOND_HTTPD_LOG)" >&2
+    exit 1
+fi
+echo "[kernel/rpi5] second BusyBox httpd curl passed"
 
 echo "[kernel/rpi5] checking userspace connected I/O on port 8080"
 socket_accept_ok=0
