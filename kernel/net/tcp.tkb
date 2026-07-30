@@ -579,7 +579,7 @@ fn build_receive_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
 fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
         -> KernelTcpResult !{may_block} {
     let mut ready = ready_in;
-    net_read_mac(our_mac as *u8);
+    net_read_mac(our_mac as []u8);
     conn_state = ConnState::Listen;
     conn_local_port = TCP_ECHO_PORT;
     tcp_completed_handshakes = 0;

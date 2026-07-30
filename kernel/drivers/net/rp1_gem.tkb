@@ -3,7 +3,6 @@
 // deliberately uses one RX and one TX descriptor and polls both rings: it
 // proves PHY, MAC and DMA before adding interrupt/ring complexity.
 
-use "kernel/lib/byte.tkb";
 use "kernel/net/netconfig.tkb";
 
 const GEM_BASE: usize = 0x1F00100000;
@@ -227,11 +226,10 @@ fn net_rx_release(frame: sink NetRxCpuOwned[desc]) -> NetRxCanAcquire {
 
 fn net_transmit(frame: sink NetRxCpuOwned[desc], len: i32) -> NetTxInFlight[desc] {
     let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
-    let rx_base: usize = (gem_rx_buf as *u8) as usize;
     let tx_base: usize = (gem_tx_buf as *u8) as usize;
     let tx_dma: usize = tx_base + DMA_OFFSET;
     let txd_base: usize = (gem_tx_desc as *u32) as usize;
-    bytes_copy(tx_base as *u8, rx_base as *u8, safe_len as isize);
+    slice_copy(gem_tx_buf[0..<safe_len as usize], gem_rx_buf[0..<safe_len as usize]);
     dma_prepare_tx(gem_tx_buf as *u8, safe_len as usize);
     let mut slot: {0..<2 as usize} = 0;
     if (gem_tx_next == 0) {
@@ -284,7 +282,7 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
     let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
     let tx_base: usize = (gem_tx_buf as *u8) as usize;
     let tx_dma: usize = tx_base + DMA_OFFSET;
-    bytes_copy(tx_base as *u8, bytes as *u8, safe_len as isize);
+    slice_copy(gem_tx_buf[0..<safe_len as usize], bytes[0..<safe_len as usize]);
     dma_prepare_tx(gem_tx_buf as *u8, safe_len as usize);
     let mut slot: {0..<2 as usize} = 0;
     if (gem_tx_next == 0) {
@@ -311,6 +309,6 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
     return view NetRxCanAcquire;
 }
 
-fn net_read_mac(mac_out: *u8) { bytes_copy(mac_out, OUR_MAC as *u8, 6); }
+fn net_read_mac(mac_out: borrow [u8; 6..]) { slice_copy(mac_out, OUR_MAC as []u8); }
 
 fn net_shutdown(ready: sink NetRxCanAcquire) {}
