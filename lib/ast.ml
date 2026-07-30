@@ -187,6 +187,29 @@ and stmt_desc =
   | Continue
   | Match of expr * match_arm list
       (* match expr { Name::Case(binding) => {...} Name::None => {...} } *)
+  | LetMatch of ident * type_expr * expr * match_arm list
+      (* let mut id: ty = match disc { arms }; -- GitHub issue #183
+         follow-up ("Layer 1": match producing a value for a let binding,
+         so a chain of fallible steps reads as flat statements instead of
+         nesting one match per step). Always mutable internally (parser
+         requires `mut` in the surface syntax); `ty` is always required,
+         never inferred from the arms.
+
+         `arms` have ALREADY been rewritten by the parser into ordinary
+         match_arm bodies before this node exists: a bare-expression arm
+         `Pattern => e;` becomes `[Assign(id, e)]`; a block arm `Pattern
+         => { stmts }` is used as-is, after the parser verified its last
+         statement is Return/Break/Continue (checked structurally, not
+         via full flow analysis -- a legitimately-always-diverging block
+         whose last statement is itself a nested if/match is rejected as
+         a clear error rather than silently accepted). This means
+         type_inf.ml and llvm_gen.ml can treat `arms` as a completely
+         ordinary match_arm list and reuse the existing Match handling
+         in both files unchanged, by recursing on a synthesized
+         `Match (disc, arms)` node -- see those files' own LetMatch
+         cases for why. Kept as one AST node (not desugared into a
+         separate Let + Match at parse time) so `id` stays live in the
+         ENCLOSING scope rather than a sub-block's. *)
 and match_arm =
   | ArmVariant of string * string * (ident * bool) option * stmt list
       (* Name::Case[(payload_name)] => { stmts }; bool means `mut` binding. *)
@@ -373,6 +396,15 @@ let written_names (stmts : stmt list) : string list =
     | Break | Continue       -> ()
     | Match (d, arms)        ->
         go_expr d;
+        List.iter (function
+          | ArmVariant (_, _, binding, b) ->
+              Option.iter (fun (name, _) -> add name) binding;
+              List.iter go_stmt b
+          | ArmWild b -> List.iter go_stmt b
+          | ArmIntLit (_, b) -> List.iter go_stmt b
+        ) arms
+    | LetMatch (n, _, d, arms) ->
+        add n; go_expr d;
         List.iter (function
           | ArmVariant (_, _, binding, b) ->
               Option.iter (fun (name, _) -> add name) binding;

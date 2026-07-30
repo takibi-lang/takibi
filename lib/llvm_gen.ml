@@ -1727,6 +1727,17 @@ let rec collect_lets stmts =
           | ArmWild body            -> collect_lets body
           | ArmIntLit (_, body)     -> collect_lets body
         ) arms
+    | LetMatch (name, ty, _, arms) ->
+        (* Always mutable (the parser requires `mut`), so this always
+           contributes its own alloca entry, unlike Match above which
+           only ever pre-allocates what its ARMS separately declare. *)
+        (name, Some ty, s.loc, None) ::
+        List.concat_map (fun arm ->
+          match arm with
+          | ArmVariant (_, _, _, body) -> collect_lets body
+          | ArmWild body            -> collect_lets body
+          | ArmIntLit (_, body)     -> collect_lets body
+        ) arms
     | _                           -> []
   ) stmts
 
@@ -1744,7 +1755,7 @@ let rec collect_mutable_pattern_binders stmts =
     | If (_, yes, no) ->
         collect_mutable_pattern_binders yes
         @ collect_mutable_pattern_binders no
-    | Match (_, arms) ->
+    | Match (_, arms) | LetMatch (_, _, _, arms) ->
         List.concat_map (fun arm ->
           match arm with
           | ArmVariant (vtype, cname, binding, body) ->
@@ -1787,7 +1798,10 @@ let rec collect_immutable_lets stmts =
     | While (_, b)                -> collect_immutable_lets b
     | For (_, _, _, _, body)      -> collect_immutable_lets body
     | ForEach (_, _, body)        -> collect_immutable_lets body
-    | Match (_, arms)             ->
+    | Match (_, arms) | LetMatch (_, _, _, arms) ->
+        (* LetMatch's own bound name is always mutable (no entry
+           contributed here), but a block-diverging arm can still
+           contain its own nested immutable lets needing a debug alloca. *)
         List.concat_map (fun arm ->
           match arm with
           | ArmVariant (_, _, _, body) -> collect_immutable_lets body
@@ -4262,6 +4276,33 @@ let gen_func ?prog_types fdef =
            it open made gen_func's generic scalar fallback try to return an
            integer zero from aggregate-returning functions. *)
         if not !merge_reachable then ignore (build_unreachable builder)
+    | LetMatch (name, ty, disc, arms) ->
+        (* GitHub issue #183 follow-up: `name`'s alloca already exists --
+           collect_lets (called once, up front, over the whole function
+           body -- see its own LetMatch case) already contributed it,
+           exactly like an ordinary `let mut name: ty;`. The arms were
+           already rewritten by the parser (a value arm's body is
+           `[Assign(name, e)]`, an ordinary store into that alloca via
+           the existing Assign codegen; a block arm is untouched). So
+           the entire Match codegen above -- switch, per-arm blocks,
+           fall-through-to-merge for non-diverging arms, no fall-through
+           for diverging ones -- applies completely unchanged; nothing
+           LetMatch-specific is needed here beyond this one recursive
+           call.
+           Erased view types are the one exception: the pre-alloca pass
+           deliberately skips them (they have no runtime storage), and
+           ordinarily it is `Let(true, ...)`'s own codegen case that
+           first registers the `Imm (ty, erased_view_value ())` locals
+           entry an Assign later overwrites. LetMatch never runs that
+           case (there is no single initializer expression -- each arm's
+           `name = ...;` is itself an ordinary Assign), so that first
+           registration must happen here instead, or Assign's codegen
+           finds no `locals` entry at all and raises "Undefined
+           variable". *)
+        let ast_ty = res name (Some ty) in
+        if is_erased_view_type ast_ty && not (Hashtbl.mem locals name) then
+          Hashtbl.add locals name (Imm (ast_ty, erased_view_value ()));
+        gen_stmt { desc = Match (disc, arms); loc = s.loc }
   in
 
   List.iter gen_stmt fdef.body;

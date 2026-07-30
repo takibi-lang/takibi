@@ -3332,6 +3332,31 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
            (tyenv, raw_locals')
        | t -> raise (TypeError (disc.loc, Printf.sprintf
            "match requires an enum, variant, or primitive integer type, got '%s'" (to_string t))))
+  | LetMatch (name, ty_expr, disc, arms) ->
+      (* GitHub issue #183 follow-up ("Layer 1"): `let mut name: ty =
+         match disc { arms };`. The parser has already rewritten `arms`
+         into ordinary match_arm bodies (a value arm's body is
+         `[Assign(name, e)]`; a block arm is used as-is, already verified
+         to end in Return/Break/Continue) -- so exhaustiveness, linear-
+         payload handling, and every other Match rule above apply
+         completely unchanged by recursing on a synthesized `Match`
+         node. `name` itself is declared exactly like an ordinary `let
+         mut name: ty;` (see the Let case above, which this mirrors
+         minus the initializer-unification logic that doesn't apply
+         here: there is no single initializer expression to unify a
+         declared type against, only per-arm Assign targets that Assign's
+         own existing rule already checks against name's now-known
+         type). *)
+      value_static_identities := StringMap.remove name !value_static_identities;
+      invalidate_place_binding name;
+      let ty = of_ast ty_expr in
+      if contains_stable_owner_value_ty ty then
+        raise (TypeError (s.loc,
+          "stable owner container storage must be a private mutable global, not a local value"));
+      let tyenv' = StringMap.add name (ty, true) tyenv in
+      let raw_locals' = StringMap.add name ty raw_locals in
+      infer_stmt senv eenv tyenv' fenv ret_ty raw_locals' in_loop
+        { desc = Match (disc, arms); loc = s.loc }
 
 (* -- Function inference ---------------------------------------------------- *)
 
@@ -4269,6 +4294,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          validate_expr_types e; List.iter validate_stmt_types body
      | Ast.Match (e, arms) ->
          validate_expr_types e;
+         List.iter (function
+           | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) ->
+               List.iter validate_stmt_types b) arms
+     | Ast.LetMatch (_, ty, disc, arms) ->
+         if ast_contains_stable_owner_value ty then
+           raise (TypeError (s.loc,
+             "stable owner container storage must be a private mutable global, not a local value"));
+         validate_nonparam_type s.loc ty;
+         validate_expr_types disc;
          List.iter (function
            | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) ->
                List.iter validate_stmt_types b) arms
@@ -5973,6 +6007,39 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Continue ->
           require_no_pending_linear s.loc "continue" moved declared;
           (moved, declared, taints)
+      | Ast.LetMatch (name, ty_expr, disc, arms) ->
+          (* GitHub issue #183 follow-up. `name` IS pre-registered into
+             `declared` before recursing (needed so a continuing arm's
+             `name = ...;` is not mistaken by check_stmts's end-of-block
+             sweep for a fresh, arm-scoped declaration that must be
+             consumed before THAT arm's own block ends -- it is meant to
+             escape to the enclosing scope instead, like any other
+             already-declared Assign target).
+             Unlike Ast.Let's initialized case, though, `name` is
+             pre-registered as already CONSUMED, not merely produced:
+             the two kinds of arm need different starting obligations and
+             `declared` alone cannot distinguish them, so the obligation
+             itself carries the distinction. A diverging arm (early
+             return/break/continue) never touches `name` at all -- seen
+             as "already consumed", it raises nothing, matching the fact
+             that nothing was ever produced on that path. A continuing
+             arm's `name = ...;` (ordinary Ast.Assign) re-produces it
+             fresh; Assign's own "discard an outstanding obligation"
+             guard only fires when the existing obligation is NOT already
+             fully consumed, so this re-production is accepted cleanly.
+             Ast.Match's arm-merge logic (just above) already excludes
+             terminating arms from the merge, so the diverging arm's
+             vacuous "consumed" state cannot leak into what continues
+             past the whole statement. *)
+          var_types := StringMap.add name (resolve_declared_type ty_expr) !var_types;
+          let p = PVar name in
+          require_no_authority_rebind s.loc declared taints name;
+          set_decl_loc p s.loc;
+          let moved = mv_consume p moved in
+          let declared = PathSet.add p declared in
+          let taints = TaintEnv.set name PathSet.empty taints in
+          check_stmt moved declared taints
+            { desc = Ast.Match (disc, arms); loc = s.loc }
     in
     if not (always_terminates fdef.body) then begin
       if is_direct_variant_type finfo.ret_type then
@@ -6101,6 +6168,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.ForEach (_, collection, stmts) ->
           visit_expr collection; List.iter visit_stmt stmts
       | Ast.Match (subject, arms) ->
+          visit_expr subject;
+          List.iter (function
+            | Ast.ArmVariant (_, _, _, stmts) | Ast.ArmWild stmts
+            | Ast.ArmIntLit (_, stmts) ->
+                List.iter visit_stmt stmts) arms
+      | Ast.LetMatch (_, _, subject, arms) ->
           visit_expr subject;
           List.iter (function
             | Ast.ArmVariant (_, _, _, stmts) | Ast.ArmWild stmts

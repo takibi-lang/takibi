@@ -28,6 +28,43 @@ let narrow_int64 pos what (n : Int64.t) : int =
       raise (Types.TypeError (pos,
         Printf.sprintf "%s value %Ld is too large to represent" what n))
 
+(* `let mut id: ty = match disc { arms };` (GitHub issue #183 follow-up,
+   "Layer 1"). Reuses match_arms/match_arm's existing, already-unambiguous
+   grammar verbatim -- an arm's body is always `{ stmts }`, exactly like
+   an ordinary match statement. (A terser `Pattern => expr,` sugar for
+   the value case was tried first and dropped: making `expr` reachable
+   directly after `=>` genuinely conflicts with this grammar's own bare
+   `{ e, e, ... }` positional struct-literal expression -- confirmed via
+   real Menhir reduce/reduce and shift/reduce conflicts, not merely a
+   style call.) validate_let_match_arms below walks the already-parsed
+   arms and requires each one's LAST statement to be either
+   `id = expr;` (Assign targeting this exact id -- the arm's value) or
+   Return/Break/Continue (diverges) -- checked structurally rather than
+   via full flow analysis, so a block that diverges only through a
+   nested if/match's own tail is conservatively rejected, not silently
+   accepted as unsound. No AST rewriting happens here (unlike an earlier
+   version of this comment might suggest) -- `arms` is returned as-is
+   once validated, which is what lets type_inf.ml and llvm_gen.ml reuse
+   their existing Match handling for it completely unchanged (see
+   Ast.LetMatch's own comment). *)
+let let_match_arm_ok id stmts =
+  match List.rev stmts with
+  | { Ast.desc = Ast.Assign (n, _); _ } :: _ -> n = id
+  | { Ast.desc = (Ast.Return _ | Ast.Break | Ast.Continue); _ } :: _ -> true
+  | _ -> false
+
+let validate_let_match_arms id pos arms =
+  List.iter (fun arm ->
+    let stmts = match arm with
+      | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) -> b
+    in
+    if not (let_match_arm_ok id stmts) then
+      raise (Types.TypeError (pos, Printf.sprintf
+        "this match-let arm must end in `%s = ...;`, or in return/break/continue \
+         to diverge" id))
+  ) arms;
+  arms
+
 (* Display name for an explicit {lo..<hi as base} base, error messages only. *)
 let base_type_name = function
   | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
@@ -326,6 +363,29 @@ stmt:
         loc = $symbolstartpos } }
   | LET MUT IDENT COLON type_expr ALIGN LPAREN alignment_value RPAREN ASSIGN expr SEMI
     { { desc = Let (true, $3, Some $5, Some $11, Some $8);
+        loc = $symbolstartpos } }
+  | LET MUT id = IDENT COLON ty = type_expr ASSIGN MATCH disc = expr
+    LBRACE arms = match_arms RBRACE SEMI
+    (* let mut id: ty = match disc { arms }; -- GitHub issue #183
+       follow-up ("Layer 1"). Reuses match_arms/match_arm UNCHANGED (an
+       arm's body is always `{ stmts }`, exactly like an ordinary
+       `match` statement -- a bare `Pattern => expr,` sugar was tried
+       first and dropped: it made `expr` reachable right after `=>`,
+       which genuinely conflicts with this grammar's own bare
+       `{ e, e, ... }` positional struct-literal expression -- Menhir
+       reported real reduce/reduce and shift/reduce conflicts, not just
+       a style preference). Each arm therefore assigns `id` explicitly
+       (`Pattern => { id = e; }`) or diverges
+       (`Pattern => { ...; return e; }`) -- verified by
+       validate_let_match_arms below, which walks the ALREADY-PARSED arms
+       (no new grammar) and rejects any arm whose last statement is
+       neither. Unambiguous against the ordinary `LET MUT id COLON ty
+       ASSIGN expr SEMI` path (let_rhs's own COLON-type_expr-ASSIGN-expr
+       branch): MATCH is not a valid start-of-expr token, so one token
+       of lookahead after ASSIGN is enough to pick this production
+       instead. *)
+    { { desc = LetMatch (id, ty, disc,
+                          validate_let_match_arms id $symbolstartpos arms);
         loc = $symbolstartpos } }
   | LBRACE s = stmts RBRACE { { desc = Block s; loc = $symbolstartpos } }
   | IF LPAREN c = expr RPAREN LBRACE t = stmts RBRACE p = else_part

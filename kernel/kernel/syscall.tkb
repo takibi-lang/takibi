@@ -476,50 +476,49 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                     syscall_socket_buffer_offset + amount;
                 return (1, amount);
             }
-            match network_capability_take() {
+            let mut ready: NetRxCanAcquire = match network_capability_take() {
                 NetworkCapabilityTakeResult::Empty => {
                     return (1, LINUX_EAGAIN);
                 }
-                NetworkCapabilityTakeResult::Ready(ready) => {
-                    match kernel_tcp_receive_once(
-                            ready, syscall_socket_buffer as []u8) {
-                        KernelTcpReceiveResult::TimedOut(next) => {
-                            match network_capability_put(next) {
-                                NetworkCapabilityPutResult::Stored => {
-                                    return (1, LINUX_EAGAIN);
-                                }
-                                NetworkCapabilityPutResult::Conflict => {
-                                    return (1, LINUX_EINVAL);
-                                }
-                            }
+                NetworkCapabilityTakeResult::Ready(r) => { ready = r; }
+            };
+            match kernel_tcp_receive_once(
+                    ready, syscall_socket_buffer as []u8) {
+                KernelTcpReceiveResult::TimedOut(next) => {
+                    match network_capability_put(next) {
+                        NetworkCapabilityPutResult::Stored => {
+                            return (1, LINUX_EAGAIN);
                         }
-                        KernelTcpReceiveResult::Received(next) => {
-                            let received: usize =
-                                kernel_tcp_received_length();
-                            syscall_socket_buffer_length = received;
-                            let mut amount: usize = received;
-                            if (amount > requested) { amount = requested; }
-                            let destination_base: *u8 = address as *u8;
-                            let source_base: *u8 =
-                                syscall_socket_buffer as *u8;
-                            let mut index: usize = 0;
-                            while (index < amount) {
-                                let destination_byte: *u8 =
-                                    destination_base + (index as isize);
-                                let source_byte: *u8 =
-                                    source_base + (index as isize);
-                                *destination_byte = *source_byte;
-                                index = index + 1;
-                            }
-                            syscall_socket_buffer_offset = amount;
-                            match network_capability_put(next) {
-                                NetworkCapabilityPutResult::Stored => {
-                                    return (1, amount);
-                                }
-                                NetworkCapabilityPutResult::Conflict => {
-                                    return (1, LINUX_EINVAL);
-                                }
-                            }
+                        NetworkCapabilityPutResult::Conflict => {
+                            return (1, LINUX_EINVAL);
+                        }
+                    }
+                }
+                KernelTcpReceiveResult::Received(next) => {
+                    let received: usize =
+                        kernel_tcp_received_length();
+                    syscall_socket_buffer_length = received;
+                    let mut amount: usize = received;
+                    if (amount > requested) { amount = requested; }
+                    let destination_base: *u8 = address as *u8;
+                    let source_base: *u8 =
+                        syscall_socket_buffer as *u8;
+                    let mut index: usize = 0;
+                    while (index < amount) {
+                        let destination_byte: *u8 =
+                            destination_base + (index as isize);
+                        let source_byte: *u8 =
+                            source_base + (index as isize);
+                        *destination_byte = *source_byte;
+                        index = index + 1;
+                    }
+                    syscall_socket_buffer_offset = amount;
+                    match network_capability_put(next) {
+                        NetworkCapabilityPutResult::Stored => {
+                            return (1, amount);
+                        }
+                        NetworkCapabilityPutResult::Conflict => {
+                            return (1, LINUX_EINVAL);
                         }
                     }
                 }

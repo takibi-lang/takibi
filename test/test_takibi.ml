@@ -8572,6 +8572,103 @@ let codegen_tests = [
             return 0;
         }");
 
+  (* GitHub issue #183 follow-up ("Layer 1"): `let mut id: ty = match
+     disc { arms };` -- lets a chain of fallible steps (each its own
+     `match`) read as flat statements instead of nesting one match per
+     step. Each arm's body is an ordinary `{ stmts }` block, exactly
+     like a plain `match` statement's own arm -- exhaustiveness and
+     payload-binder scoping are the SAME existing Match machinery,
+     reused unchanged (see lib/ast.ml's LetMatch comment for why). The
+     one new rule this construct enforces itself: every arm's last
+     statement must be `id = expr;` (this arm's value) or
+     return/break/continue (diverges). *)
+  Alcotest.test_case
+    "issue #183 layer 1: let-match flattens a chain of fallible steps \
+     (each match's arms are plain blocks, no new arm-body syntax)"
+    `Quick
+    (expect_codegen_ok
+       "must_use variant LmAllocResult { OutOfMemory; Allocated(usize); }
+        must_use variant LmCreateResult { OutOfMemory; Created(usize); }
+        fn lm_alloc() -> LmAllocResult { return LmAllocResult::Allocated(42); }
+        fn lm_free(p: usize) { }
+        fn lm_create() -> LmCreateResult {
+            let mut text: usize = match lm_alloc() {
+                LmAllocResult::OutOfMemory => { return LmCreateResult::OutOfMemory; }
+                LmAllocResult::Allocated(p) => { text = p; }
+            };
+            let mut data: usize = match lm_alloc() {
+                LmAllocResult::OutOfMemory => { lm_free(text); return LmCreateResult::OutOfMemory; }
+                LmAllocResult::Allocated(p) => { data = p; }
+            };
+            return LmCreateResult::Created(text + data);
+        }");
+
+  Alcotest.test_case
+    "issue #183 layer 1: let-match still requires exhaustiveness -- a \
+     missing variant arm is the same error a plain match would give"
+    `Quick
+    (expect_type_error "non-exhaustive match"
+       "must_use variant LmAllocResult2 { OutOfMemory; Allocated(usize); }
+        fn lm_alloc2() -> LmAllocResult2 { return LmAllocResult2::Allocated(42); }
+        fn lm_missing_arm() -> usize {
+            let mut text: usize = match lm_alloc2() {
+                LmAllocResult2::Allocated(p) => { text = p; }
+            };
+            return text;
+        }");
+
+  Alcotest.test_case
+    "issue #183 layer 1: an arm that neither assigns the bound name nor \
+     diverges is rejected -- this is the safety check hand-writing \
+     `let mut x: T;` then a plain `match` does not get for free (that \
+     pattern has no definite-assignment checking at all)"
+    `Quick
+    (expect_type_error "must end in"
+       "must_use variant LmAllocResult3 { OutOfMemory; Allocated(usize); }
+        fn lm_alloc3() -> LmAllocResult3 { return LmAllocResult3::Allocated(42); }
+        fn lm_forgot_assign() -> usize {
+            let mut text: usize = match lm_alloc3() {
+                LmAllocResult3::OutOfMemory => { }
+                LmAllocResult3::Allocated(p) => { text = p; }
+            };
+            return text;
+        }");
+
+  Alcotest.test_case
+    "issue #183 layer 1: an arm assigning a DIFFERENT name than the one \
+     being bound does not count as this arm's value" `Quick
+    (expect_type_error "must end in"
+       "must_use variant LmAllocResult4 { OutOfMemory; Allocated(usize); }
+        fn lm_alloc4() -> LmAllocResult4 { return LmAllocResult4::Allocated(42); }
+        fn lm_wrong_target() -> usize {
+            let mut other: usize = 0;
+            let mut text: usize = match lm_alloc4() {
+                LmAllocResult4::OutOfMemory => { return 0; }
+                LmAllocResult4::Allocated(p) => { other = p; }
+            };
+            return text;
+        }");
+
+  Alcotest.test_case
+    "issue #183 layer 1: let-match with a linear `view` payload -- the \
+     diverging arm never produces the bound name (nothing pending to \
+     consume there), the continuing arm's assignment produces it fresh, \
+     and the erased view type (no runtime storage, no pre-allocated \
+     alloca) still codegens since Assign needs a locals entry to exist \
+     before it can overwrite one" `Quick
+    (expect_codegen_ok
+       "linear view LmToken;
+        must_use variant LmTakeResult { Empty; Ready(LmToken); }
+        fn lm_take() -> LmTakeResult { return LmTakeResult::Ready(view LmToken); }
+        fn lm_consume(t: sink LmToken) -> usize { return 1; }
+        fn lm_use_token() -> usize {
+            let mut tok: LmToken = match lm_take() {
+                LmTakeResult::Empty => { return 0; }
+                LmTakeResult::Ready(t) => { tok = t; }
+            };
+            return lm_consume(tok);
+        }");
+
   Alcotest.test_case
     "global let initializer: referencing a `let mut` global is rejected -- \
      a mutable global's value can change at runtime, so it is never a \
