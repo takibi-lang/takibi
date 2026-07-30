@@ -615,7 +615,19 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
     let start: i64 = read_cntpct();
     let counter_frequency: i64 = read_cntfrq();
     let deadline_ticks: i64 = counter_frequency * 30;
-    let retry_ticks: i64 = counter_frequency / 20;
+    // /20 (50ms) gave TCP_RETRY_LIMIT * retry_ticks = 150ms total budget for
+    // the injected SYN-ACK-drop recovery check (kernel_tcp_inject_drop_next_
+    // syn_ack) -- too tight against scripts/run_kernel_hwtest_rpi5.sh's
+    // curl-based httpd probe (--connect-timeout 1s): on one real-hardware
+    // run, curl's own attempt didn't complete within that 150ms window, the
+    // kernel gave up on the half-open connection and reset to Listen, and a
+    // later curl retry then succeeded as a *fresh* connection -- passing the
+    // overall test but silently skipping the retransmit-recovery
+    // observation (kernel_tcp_injected_syn_ack_recovered() returned false;
+    // 5 immediate re-runs afterward did not reproduce it). /5 (200ms) gives
+    // 600ms total, comfortably inside curl's 1s budget while still well
+    // under deadline_ticks below.
+    let retry_ticks: i64 = counter_frequency / 5;
     let mut syn_ack_sent_at: i64 = start;
     let mut syn_ack_retries: usize = 0;
     while ((read_cntpct() - start) < deadline_ticks) {
