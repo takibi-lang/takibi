@@ -219,6 +219,66 @@ let require_writable_pointer_effect_invariance t1 t2 =
     raise (Unify_error
       "function-pointer effect contracts are invariant behind writable pointers")
 
+(* Replace one static_term (a TExists binder, either a rigid SParam or an
+   SVar) with another throughout a ty. Shared by unify's own TExists-vs-
+   TExists alpha-equivalence check (aligning the two binders before
+   comparing bodies) and by instantiate_exists_ty below (opening a sealed
+   existential for packing -- see its own comment). *)
+let rec subst_static_term old replacement term =
+  match static_repr old, static_repr term with
+  | SParam (old_id, _), SParam (id, _) when old_id = id -> replacement
+  | SVar old_r, SVar r when old_r == r -> replacement
+  | _, term -> term
+and subst_in_ty old replacement t =
+  match repr t with
+  | TFun (ps, r, effects) ->
+      TFun (List.map (subst_in_ty old replacement) ps,
+            subst_in_ty old replacement r, effects)
+  | TPtr t -> TPtr (subst_in_ty old replacement t)
+  | TIo t -> TIo (subst_in_ty old replacement t)
+  | TArray (t, n) -> TArray (subst_in_ty old replacement t, n)
+  | TRefinedInt (lo, hi, base) ->
+      TRefinedInt (lo, hi, subst_in_ty old replacement base)
+  | TTuple ts -> TTuple (List.map (subst_in_ty old replacement) ts)
+  | TSlice (t, n) -> TSlice (subst_in_ty old replacement t, n)
+  | TAlignedPtr (n, t) -> TAlignedPtr (n, subst_in_ty old replacement t)
+  | TIndexedStruct (name, args) ->
+      TIndexedStruct (name, List.map (subst_static_term old replacement) args)
+  | TView (name, args) ->
+      TView (name, List.map (subst_static_term old replacement) args)
+  | TSingleton (base, n) ->
+      TSingleton (subst_in_ty old replacement base,
+                  subst_static_term old replacement n)
+  | TExists (name, sort, binder, body) ->
+      TExists (name, sort, binder, subst_in_ty old replacement body)
+  | t -> t
+
+(* `TExists`'s own binder is a SEALED name -- unifying a value directly
+   against its body would compare that value's witness against this ONE
+   specific rigid parameter and (correctly) always fail, since two
+   different rigid witnesses can never unify. Both directions substitute
+   a fresh replacement for the binder throughout the body first, but they
+   need different KINDS of fresh term:
+   - Introduction/pack (a value flowing INTO an existential-typed target,
+     e.g. LetMatch's `x = payload;` (type_inf.ml's Assign case), or
+     VariantCtor's own instantiate_exists over the AST form before a
+     value even has a `ty`): a solvable SVar. The actual value's witness
+     is discovered BY unifying against it -- this is what lets a caller
+     write `x = p;` without ever having to spell out `page` explicitly.
+   - Elimination/open (an existential-typed value flowing OUT to be used,
+     e.g. passing a LetMatch-bound `exists page. PageOwner[page]` local
+     as a plain `PageOwner[page]` argument): a rigid SParam, exactly like
+     open_payload's match-arm payload binding already uses for the same
+     reason -- the callee must never be able to discover, or accidentally
+     get unified with, a concrete or otherwise-unrelated witness. *)
+let instantiate_exists_ty ~witness t =
+  match repr t with
+  | TExists (_, _, binder, body) -> subst_in_ty binder witness body
+  | t -> t
+
+let pack_exists_ty t = instantiate_exists_ty ~witness:(fresh_static ()) t
+let open_exists_ty t = instantiate_exists_ty ~witness:(rigid_static "_") t
+
 let rec unify t1 t2 =
   match repr t1, repr t2 with
   | TBool, TBool | TVoid, TVoid -> ()
@@ -377,37 +437,7 @@ let rec unify t1 t2 =
     TExists (_, sort2, binder2, body2) ->
       if sort1 <> sort2 then
         raise (Unify_error "existential static sort mismatch");
-      let rec subst_static_term old replacement term =
-        match static_repr old, static_repr term with
-        | SParam (old_id, _), SParam (id, _) when old_id = id -> replacement
-        | SVar old_r, SVar r when old_r == r -> replacement
-        | _, term -> term
-      and subst_ty old replacement t =
-        match repr t with
-        | TFun (ps, r, effects) ->
-            TFun (List.map (subst_ty old replacement) ps,
-                  subst_ty old replacement r, effects)
-        | TPtr t -> TPtr (subst_ty old replacement t)
-        | TIo t -> TIo (subst_ty old replacement t)
-        | TArray (t, n) -> TArray (subst_ty old replacement t, n)
-        | TRefinedInt (lo, hi, base) ->
-            TRefinedInt (lo, hi, subst_ty old replacement base)
-        | TTuple ts -> TTuple (List.map (subst_ty old replacement) ts)
-        | TSlice (t, n) -> TSlice (subst_ty old replacement t, n)
-        | TAlignedPtr (n, t) -> TAlignedPtr (n, subst_ty old replacement t)
-        | TIndexedStruct (name, args) ->
-            TIndexedStruct (name,
-              List.map (subst_static_term old replacement) args)
-        | TView (name, args) ->
-            TView (name, List.map (subst_static_term old replacement) args)
-        | TSingleton (base, n) ->
-            TSingleton (subst_ty old replacement base,
-                        subst_static_term old replacement n)
-        | TExists (name, sort, binder, body) ->
-            TExists (name, sort, binder, subst_ty old replacement body)
-        | t -> t
-      in
-      unify body1 (subst_ty binder2 binder1 body2)
+      unify body1 (subst_in_ty binder2 binder1 body2)
   | TVar rv, t | t, TVar rv ->
       (match !rv with
        | Link t' -> unify t' t
@@ -417,6 +447,20 @@ let rec unify t1 t2 =
                "infinite type: %s occurs in %s"
                (to_string (TVar rv)) (to_string t)));
            rv := Link t)
+  (* One side is an existential, the other a concrete/fresh-metavariable
+     shape (not itself TExists, and not an unbound TVar -- that already
+     matched above and must keep taking priority so plain type inference
+     is unaffected). Structural contexts can nest an already-existential
+     value inside another expected existential shape without ever
+     reading it back out again -- e.g. VariantCtor packing a tuple of
+     LetMatch-bound existential locals into a variant case whose payload
+     schema existentially quantifies each tuple slot itself. Packing
+     (fresh SVar, not rigid) is the right default here: this is a
+     structural fit check, not a use site, so nothing needs the stronger
+     "can never be unified with anything else" guarantee a genuine open
+     (see open_exists_ty) provides. *)
+  | TExists _, t2 -> unify (pack_exists_ty t1) t2
+  | t1, TExists _ -> unify t1 (pack_exists_ty t2)
   | t1, t2 ->
       raise (Unify_error (Printf.sprintf "cannot unify %s with %s"
         (to_string t1) (to_string t2)))

@@ -24,32 +24,28 @@ fn process_new() -> InitialProcess[ProcessState::Ready] {
 }
 
 fn initial_process_create() -> ProcessCreateResult {
-    match page_alloc() {
+    let mut text: exists text_page: usize. PageOwner[text_page] = match page_alloc() {
         PageAllocResult::OutOfMemory => {
             return ProcessCreateResult::OutOfMemory;
         }
-        PageAllocResult::Allocated(text) => {
-            match page_alloc() {
-                PageAllocResult::OutOfMemory => {
-                    page_free(text);
-                    return ProcessCreateResult::OutOfMemory;
-                }
-                PageAllocResult::Allocated(data) => {
-                    match page_alloc() {
-                        PageAllocResult::OutOfMemory => {
-                            page_free(data);
-                            page_free(text);
-                            return ProcessCreateResult::OutOfMemory;
-                        }
-                        PageAllocResult::Allocated(stack) => {
-                            return ProcessCreateResult::Created(
-                                (process_new(), text, data, stack));
-                        }
-                    }
-                }
-            }
+        PageAllocResult::Allocated(p) => { text = p; }
+    };
+    let mut data: exists data_page: usize. PageOwner[data_page] = match page_alloc() {
+        PageAllocResult::OutOfMemory => {
+            page_free(text);
+            return ProcessCreateResult::OutOfMemory;
         }
-    }
+        PageAllocResult::Allocated(p) => { data = p; }
+    };
+    let mut stack: exists stack_page: usize. PageOwner[stack_page] = match page_alloc() {
+        PageAllocResult::OutOfMemory => {
+            page_free(data);
+            page_free(text);
+            return ProcessCreateResult::OutOfMemory;
+        }
+        PageAllocResult::Allocated(p) => { stack = p; }
+    };
+    return ProcessCreateResult::Created((process_new(), text, data, stack));
 }
 
 fn initial_process_destroy(

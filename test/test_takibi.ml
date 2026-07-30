@@ -8669,6 +8669,91 @@ let codegen_tests = [
             return lm_consume(tok);
         }");
 
+  (* GitHub issue #183's existential follow-up: a `let`/LetMatch annotation
+     may now be a bare `exists idx: T. Owner[idx]`, packaging an indexed
+     runtime owner/erased view/tuple exactly like a variant payload already
+     could. This is what actually lets initial_process_create's own three
+     sequential page_alloc() calls (the ORIGINAL motivating example for
+     LetMatch, kernel/kernel/process.tkb) flatten: page_alloc()'s success
+     case returns `exists page: usize. PageOwner[page]`, a fresh index per
+     call that cannot be written as a single, static, non-existential type. *)
+  Alcotest.test_case
+    "issue #183 existential follow-up: let-match may bind an existential \
+     indexed owner, flattening the exact initial_process_create shape -- \
+     each step's success arm re-packs its match-arm-opened (rigid) witness \
+     into the let's existential annotation, and the final variant \
+     construction re-packs all three (through a tuple) into its own \
+     triple-nested existential payload" `Quick
+    (expect_codegen_ok
+       "linear struct ExPageOwner[page: usize] { private index: usize; }
+        must_use variant ExPageAllocResult {
+            OutOfMemory; Allocated(exists page: usize. ExPageOwner[page]);
+        }
+        fn ex_page_alloc() -> ExPageAllocResult {
+            let mut owner: ExPageOwner[1] = { 0 };
+            return ExPageAllocResult::Allocated(owner);
+        }
+        fn ex_page_free(owner: sink ExPageOwner[page]) { }
+        must_use variant ExCreateResult {
+            OutOfMemory;
+            Created(exists text_page: usize. exists data_page: usize.
+                    (ExPageOwner[text_page], ExPageOwner[data_page]));
+        }
+        fn ex_create() -> ExCreateResult {
+            let mut text: exists text_page: usize. ExPageOwner[text_page] =
+                match ex_page_alloc() {
+                    ExPageAllocResult::OutOfMemory => {
+                        return ExCreateResult::OutOfMemory;
+                    }
+                    ExPageAllocResult::Allocated(p) => { text = p; }
+                };
+            let mut data: exists data_page: usize. ExPageOwner[data_page] =
+                match ex_page_alloc() {
+                    ExPageAllocResult::OutOfMemory => {
+                        ex_page_free(text);
+                        return ExCreateResult::OutOfMemory;
+                    }
+                    ExPageAllocResult::Allocated(p) => { data = p; }
+                };
+            return ExCreateResult::Created((text, data));
+        }");
+
+  Alcotest.test_case
+    "issue #183 existential follow-up: the affine/linear checker still sees \
+     through the existential wrapper -- forgetting to free an existentially \
+     bound owner on a cleanup path is still rejected, the same all-paths \
+     guarantee ordinary (non-existential) LetMatch already enforced" `Quick
+    (expect_type_error "still pending"
+       "linear struct ExLeakOwner[page: usize] { private index: usize; }
+        must_use variant ExLeakAllocResult {
+            OutOfMemory; Allocated(exists page: usize. ExLeakOwner[page]);
+        }
+        fn ex_leak_alloc() -> ExLeakAllocResult {
+            let mut owner: ExLeakOwner[1] = { 0 };
+            return ExLeakAllocResult::Allocated(owner);
+        }
+        fn ex_leak_free(owner: sink ExLeakOwner[page]) { }
+        must_use variant ExLeakResult { OutOfMemory; Ready; }
+        fn ex_leaky() -> ExLeakResult {
+            let mut text: exists page: usize. ExLeakOwner[page] =
+                match ex_leak_alloc() {
+                    ExLeakAllocResult::OutOfMemory => {
+                        return ExLeakResult::OutOfMemory;
+                    }
+                    ExLeakAllocResult::Allocated(p) => { text = p; }
+                };
+            let mut data: exists page: usize. ExLeakOwner[page] =
+                match ex_leak_alloc() {
+                    ExLeakAllocResult::OutOfMemory => {
+                        return ExLeakResult::OutOfMemory;
+                    }
+                    ExLeakAllocResult::Allocated(p) => { data = p; }
+                };
+            ex_leak_free(text);
+            ex_leak_free(data);
+            return ExLeakResult::Ready;
+        }");
+
   Alcotest.test_case
     "global let initializer: referencing a `let mut` global is rejected -- \
      a mutable global's value can change at runtime, so it is never a \

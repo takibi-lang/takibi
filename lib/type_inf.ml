@@ -2461,6 +2461,22 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            ) mutable_places;
            List.iter2 (fun arg pt ->
              let at = infer_expr senv eenv tyenv fenv arg in
+             (* An existentially-typed argument (e.g. passing a LetMatch-
+                bound `exists page: usize. PageOwner[page]` local to a
+                function expecting a plain, per-call-generic `PageOwner
+                [page]` parameter) is opened here: a function parameter
+                cannot itself be existential (Slice 3 restriction, see
+                validate_param_type), so `pt` is always the concrete
+                shape underneath. Passing the actual argument through
+                without opening it first would unify against `at`'s own
+                SEALED binder and always fail (see instantiate_exists_ty's
+                comment for why); this is existential elimination, same
+                operation match-arm payload binding already performs, just
+                triggered by a call site instead of a pattern match. *)
+             let at = match repr at with
+               | TExists _ -> open_exists_ty at
+               | _ -> at
+             in
              let at = adapt_actual_to_expected tyenv arg at pt in
              unify_at arg.loc at pt;
              check_literal_fits_refined arg.loc arg pt
@@ -2710,12 +2726,29 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       if not is_mut then
         raise (TypeError (s.loc,
           Printf.sprintf "cannot assign to immutable variable '%s'; use 'let mut'" name));
+      (* An existentially-typed target (e.g. a LetMatch-bound `let mut x:
+         exists page: usize. PageOwner[page];`, GitHub issue #183's
+         existential follow-up) cannot be unified against directly: its
+         `TExists` wraps a body built around ITS OWN sealed binder, and a
+         concrete or already-opened (rigid) actual witness can never
+         equal that one specific rigid parameter -- unifying against it
+         verbatim would always fail. Opening it here (substituting a
+         fresh, solvable static variable for the binder) is existential
+         introduction/packing: the fresh variable is free to unify with
+         whatever witness the actual value carries, mirroring how
+         VariantCtor already packs a payload into a variant case's own
+         existential schema. *)
+      let target_ty = strip_io vty in
+      let unify_target = match repr target_ty with
+        | TExists _ -> pack_exists_ty target_ty
+        | _ -> target_ty
+      in
       let ety = infer_expr senv eenv tyenv fenv e in
-      let ety = adapt_actual_to_expected tyenv e ety (strip_io vty) in
+      let ety = adapt_actual_to_expected tyenv e ety unify_target in
       (* Assignment: match as "actual(rhs) is a subtype of expected(lhs)".
          TRefinedInt -> TI32 is OK (assigning with loss of precision). Reverse is NG. *)
-      unify_at e.loc ety (strip_io vty);
-      check_literal_fits_refined e.loc e (strip_io vty);
+      unify_at e.loc ety unify_target;
+      check_literal_fits_refined e.loc e unify_target;
       (tyenv, raw_locals)
   | AssignDeref (ptr_expr, val_expr) ->
       let pt = infer_expr senv eenv tyenv fenv ptr_expr in
@@ -4241,6 +4274,46 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         "a singleton value cannot live behind a pointer or inside array/slice storage"));
     validate_complete_type loc false ty
   in
+  (* A `let`/LetMatch annotation may ALSO be a bare existential, packaging an
+     indexed owner/view/tuple exactly like a variant payload does (same
+     restriction, same reason: an existential's whole point is hiding the
+     concrete index, and only these three shapes have a runtime
+     representation that does not otherwise depend on it). Reuses the
+     variant-payload validator's own "bind_all, then validate the stripped
+     body under a scope that knows the bound names" pattern; the temporary
+     scope is swapped back out afterward since a local `let`'s existential
+     names are meant to be fresh to that one declaration, not to leak into
+     the rest of the enclosing function the way a function's own static
+     parameters do. *)
+  let validate_let_type loc ty =
+    match ty with
+    | Ast.TypeExists _ ->
+        let saved_scope = !validation_static_scope in
+        let saved_implicit = !allow_implicit_static in
+        let scope = Hashtbl.create 8 in
+        let rec bind_all = function
+          | Ast.TypeExists (name, sort, body) ->
+              validate_static_sort loc sort;
+              if Hashtbl.mem scope name then
+                raise (TypeError (loc, Printf.sprintf
+                  "duplicate existential '%s' in let binding" name));
+              Hashtbl.add scope name sort;
+              bind_all body
+          | body -> body
+        in
+        let body = bind_all ty in
+        (match resolve_declared_type body with
+         | Ast.TypeIndexed _ | Ast.TypeView _ | Ast.TypeTuple _ -> ()
+         | _ -> raise (TypeError (loc,
+             "an existential let binding must package an indexed runtime \
+              owner, erased view, or tuple containing owners")));
+        validation_static_scope := Some scope;
+        allow_implicit_static := false;
+        validate_nonparam_type loc body;
+        validation_static_scope := saved_scope;
+        allow_implicit_static := saved_implicit
+    | _ -> validate_nonparam_type loc ty
+  in
   let rec validate_expr_types (e : Ast.expr) =
     (match e.desc with
      | Ast.Cast (ty, x) -> validate_nonparam_type e.loc ty; validate_expr_types x
@@ -4272,7 +4345,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              raise (TypeError (s.loc,
                "stable owner container storage must be a private mutable global, not a local value"))
          ) ty;
-         Option.iter (validate_nonparam_type s.loc) ty;
+         Option.iter (validate_let_type s.loc) ty;
          Option.iter validate_expr_types init
      | Ast.For (_, ty, lo, hi, body) ->
          Option.iter (validate_nonparam_type s.loc) ty;
@@ -4301,7 +4374,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          if ast_contains_stable_owner_value ty then
            raise (TypeError (s.loc,
              "stable owner container storage must be a private mutable global, not a local value"));
-         validate_nonparam_type s.loc ty;
+         validate_let_type s.loc ty;
          validate_expr_types disc;
          List.iter (function
            | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) ->
@@ -4984,6 +5057,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Hashtbl.find_opt view_kinds name = Some Ast.KindAffine
         || Hashtbl.find_opt variant_kinds name = Some Ast.KindAffine
     | Ast.TypeTuple ts -> List.exists is_affine_type ts
+    (* An existential (GitHub issue #183's follow-up) hides its index, not
+       its ownership kind: `exists page. PageOwner[page]` still owns the
+       SAME single-use resource `PageOwner[N]` would for a known N, so it
+       must stay just as tracked -- otherwise a LetMatch-bound existential
+       local would silently escape all affine/linear/must-use obligation
+       checking the moment its type stopped being written out concretely. *)
+    | Ast.TypeExists (_, _, body) -> is_affine_type body
     | _ -> false
   in
   let rec is_linear_type ty = match strip_borrow ty with
@@ -4993,12 +5073,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Hashtbl.find_opt view_kinds name = Some Ast.KindLinear
         || Hashtbl.find_opt variant_kinds name = Some Ast.KindLinear
     | Ast.TypeTuple ts -> List.exists is_linear_type ts
+    | Ast.TypeExists (_, _, body) -> is_linear_type body
     | _ -> false
   in
   let rec is_must_use_type ty = match strip_borrow ty with
     | Ast.TypeNamed name | Ast.TypeVariant name ->
         Hashtbl.mem must_use_variants name
     | Ast.TypeTuple ts -> List.exists is_must_use_type ts
+    | Ast.TypeExists (_, _, body) -> is_must_use_type body
     | _ -> false
   in
   let is_tracked_type ty =
