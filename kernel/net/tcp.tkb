@@ -228,8 +228,7 @@ fn pending_tcp_find_free_slot() -> {0..<4 as usize} {
     let mut slot: usize = 0;
     while (slot < 4) {
         if (slot < 4) {
-            let kind: PendingTcpKind = pending_tcp_kind[slot];
-            if (kind == PendingTcpKind::None) {
+            if (pending_tcp_kind[slot] == PendingTcpKind::None) {
                 return slot;
             }
         }
@@ -270,8 +269,7 @@ fn pending_tcp_record(kind: PendingTcpKind, frame_length: usize) -> {0..<4 as us
 // alone does not carry the same compile-time information forward.
 fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
                             slot: {0..<4 as usize}) -> bool {
-    let slot_kind: PendingTcpKind = pending_tcp_kind[slot];
-    if (slot_kind == PendingTcpKind::None || len < 54 || len > 1514) {
+    if (pending_tcp_kind[slot] == PendingTcpKind::None || len < 54 || len > 1514) {
         return false;
     }
     let len_n: i32 = len;
@@ -358,8 +356,7 @@ fn pending_tcp_service_once(ready_in: sink NetRxCanAcquire,
     let mut slot: usize = 0;
     while (slot < 4) {
         if (slot < 4) {
-            let slot_kind: PendingTcpKind = pending_tcp_kind[slot];
-            if (slot_kind != PendingTcpKind::None) {
+            if (pending_tcp_kind[slot] != PendingTcpKind::None) {
                 if (pending_tcp_retries[slot] < TCP_RETRY_LIMIT &&
                     now - pending_tcp_sent_at[slot] >= retry_ticks) {
                     let base: usize = slot * 1514;
@@ -400,8 +397,7 @@ fn pending_tcp_any_active() -> bool {
     let mut slot: usize = 0;
     while (slot < 4) {
         if (slot < 4) {
-            let slot_kind: PendingTcpKind = pending_tcp_kind[slot];
-            if (slot_kind != PendingTcpKind::None) {
+            if (pending_tcp_kind[slot] != PendingTcpKind::None) {
                 return true;
             }
         }
