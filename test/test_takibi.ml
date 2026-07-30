@@ -8527,6 +8527,51 @@ let codegen_tests = [
         let GLOBALCONST_SERVER_IP: [u8; 4] = GLOBALCONST_OUR_IP;
         fn codegen_globalconst_array_ref_use() -> u8 { return GLOBALCONST_SERVER_IP[0]; }");
 
+  (* Found while extending kernel/net/tcp.tkb for GitHub issue #180 (a
+     [PendingTcpKind; N] queue-slot array): reading an element out of an
+     array-of-enum and comparing it inline to an enum literal
+     (`arr[i] == Variant`) used to make load_from_array/load_through_ptr
+     return the element's raw GEP pointer instead of loading it (the
+     TypeNamed _ branch didn't distinguish enum from struct the way the
+     plain-variable Var case already did), so the Eq codegen fed a
+     pointer and an i8 literal straight into build_icmp -- LLVM's
+     verifier then rejected it as invalid IR, an internal compiler error
+     rather than either a correct compile or a normal diagnostic. GitHub
+     issue #183. Both a compile-time-constant index and a runtime
+     (loop-variable) index reproduced it; both are covered here. *)
+  Alcotest.test_case
+    "issue #183: reading an array-of-enum element by a CONSTANT index and \
+     comparing it inline to an enum literal codegens (used to crash with \
+     invalid LLVM IR: a pointer compared to an i8 literal, no load \
+     inserted)"
+    `Quick
+    (expect_codegen_ok
+       "enum Issue183Kind: u8 { None; Data; Fin; }
+        let mut ISSUE183_KINDS: [Issue183Kind; 4];
+        fn codegen_issue183_const_index() -> bool {
+            return ISSUE183_KINDS[0] == Issue183Kind::None;
+        }");
+
+  Alcotest.test_case
+    "issue #183: reading an array-of-enum element by a RUNTIME (loop \
+     counter) index and comparing it inline to an enum literal codegens"
+    `Quick
+    (expect_codegen_ok
+       "enum Issue183Kind: u8 { None; Data; Fin; }
+        let mut ISSUE183_KINDS2: [Issue183Kind; 4];
+        fn codegen_issue183_runtime_index() -> usize {
+            let mut i: usize = 0;
+            while (i < 4) {
+                if (i < 4) {
+                    if (ISSUE183_KINDS2[i] == Issue183Kind::None) {
+                        return i;
+                    }
+                }
+                i = i + 1;
+            }
+            return 0;
+        }");
+
   Alcotest.test_case
     "global let initializer: referencing a `let mut` global is rejected -- \
      a mutable global's value can change at runtime, so it is never a \

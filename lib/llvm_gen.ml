@@ -2693,6 +2693,19 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         let zero   = const_int (i32_type context) 0 in
         let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
         match elem_ty with
+        | TypeNamed sname when Hashtbl.mem enum_underlying sname ->
+            (* Enum array element: load the integer value (unlike struct,
+               which returns the element pointer for further field
+               access) -- same distinction the Var case above already
+               makes for a plain (non-array) enum variable. Omitting this
+               used to return the raw element pointer here, which a
+               caller comparing it directly to an enum literal (`arr[i]
+               == Variant`) would feed straight into build_icmp: a
+               pointer-vs-integer comparison LLVM's verifier rejects,
+               crashing the compiler instead of miscompiling. *)
+            let ut = Hashtbl.find enum_underlying sname in
+            let v  = build_load (ltype_of_ast ut) ep "idx_val" builder in
+            (elem_ty, v)
         | TypeNamed _ -> (elem_ty, ep)
         | _ ->
             let v = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
@@ -2701,6 +2714,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let load_through_ptr elem_ty ptr_v is_volatile =
         let ep = build_gep (ltype_of_ast elem_ty) ptr_v [|idx_v|] "idx_ptr" builder in
         match elem_ty with
+        | TypeNamed sname when Hashtbl.mem enum_underlying sname ->
+            (* Same enum-vs-struct distinction as load_from_array above. *)
+            let ut = Hashtbl.find enum_underlying sname in
+            let v  = build_load (ltype_of_ast ut) ep "idx_val" builder in
+            if is_volatile then set_volatile true v;
+            (elem_ty, v)
         | TypeNamed _ when is_volatile -> (TypePtr (TypeIo elem_ty), ep)
         | TypeNamed _ -> (elem_ty, ep)
         | _ ->
