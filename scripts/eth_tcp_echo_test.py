@@ -398,12 +398,20 @@ def test_connected_large_response(client_mac: bytes) -> bool:
 
     collected = b""
     want = len(CONNECTED_LARGE_RESPONSE)
+    fin_acked = False
     # Generous but bounded: the kernel's own retry budget for one dropped
     # segment is TCP_RETRY_LIMIT(3) * retry_ticks(~200ms) =~ 600ms (see
     # kernel/net/tcp.tkb's kernel_tcp_accept_once comment) -- 10s covers
     # that many times over without masking a genuine hang as a slow pass.
+    # kernel/init/main.tkb also arms kernel_tcp_inject_drop_next_fin, so
+    # close()'s own FIN is silently unsent on its first attempt too and
+    # only reaches the wire via the same retry path -- this loop keeps
+    # running past a fully-collected body specifically to see and ACK
+    # that FIN once it (eventually) arrives; skipping it would leave
+    # kernel_tcp_injected_fin_recovered() permanently false, since it
+    # requires a real peer ACK, not merely a retransmit attempt.
     deadline = time.monotonic() + 10.0
-    while len(collected) < want and time.monotonic() < deadline:
+    while (len(collected) < want or not fin_acked) and time.monotonic() < deadline:
         reply = recv_reply(sock, req, 2.0)
         if reply is None:
             continue
@@ -419,25 +427,33 @@ def test_connected_large_response(client_mac: bytes) -> bool:
             continue
         total_len = struct.unpack("!H", ip[2:4])[0]
         payload_len = total_len - 40  # 20 IP + 20 TCP, no options on any reply here
-        if payload_len <= 0:
+
+        if len(collected) < want and payload_len > 0:
+            if rseq != server_seq:
+                # Not the next in-order byte -- either a retransmit of a
+                # segment already collected, or (should not happen here)
+                # one arriving out of order. Cumulative-ACK it again
+                # without appending, matching real TCP receiver behavior,
+                # so the kernel's own retry loop sees the ack it is
+                # waiting for even if this reply is a duplicate.
+                dup_ack = build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
+                                       client_seq, server_seq, FLAG_ACK)
+                sock.send(dup_ack)
+                continue
+            payload = reply[54:54 + payload_len]
+            collected += payload
+            server_seq += payload_len
+            ack = build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
+                               client_seq, server_seq, FLAG_ACK)
+            sock.send(ack)
             continue
-        if rseq != server_seq:
-            # Not the next in-order byte -- either a retransmit of a
-            # segment already collected, or (should not happen here) one
-            # arriving out of order. Cumulative-ACK it again without
-            # appending, matching real TCP receiver behavior, so the
-            # kernel's own retry loop sees the ack it is waiting for even
-            # if this reply is a duplicate.
-            dup_ack = build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
+
+        if (flags & FLAG_FIN) != 0 and not fin_acked and rseq == server_seq:
+            server_seq += 1  # FIN consumes one sequence number
+            fin_ack = build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
                                    client_seq, server_seq, FLAG_ACK)
-            sock.send(dup_ack)
-            continue
-        payload = reply[54:54 + payload_len]
-        collected += payload
-        server_seq += payload_len
-        ack = build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
-                           client_seq, server_seq, FLAG_ACK)
-        sock.send(ack)
+            sock.send(fin_ack)
+            fin_acked = True
 
     sock.close()
     if collected != CONNECTED_LARGE_RESPONSE:
@@ -448,6 +464,9 @@ def test_connected_large_response(client_mac: bytes) -> bool:
                 print("    first difference at byte %d: got 0x%02x want 0x%02x" %
                       (i, collected[i], CONNECTED_LARGE_RESPONSE[i]))
                 break
+        return False
+    if not fin_acked:
+        print("  server FIN was never observed/acknowledged")
         return False
     return True
 
