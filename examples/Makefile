@@ -244,9 +244,23 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
 # Every target below that needs the compiler still lists $(TAKIBI) as a
 # real (not order-only) prerequisite, same as before the split -- only
 # the recipe that produces the file has moved.
+#
+# `build` MUST stay a plain alias for $(TAKIBI) (no recipe of its own):
+# $(TAKIBI)'s rule is FORCE-based (always considered out of date), and
+# Make only re-runs a given target's recipe once per invocation no matter
+# how many other targets depend on it -- but that dedup is per TARGET, not
+# per recipe text. Giving `build` its own copy of the same recursive
+# `$(MAKE) -f Makefile build` line (as a previous version of this file
+# did) makes it a second, independent target with the identical recipe,
+# so `-j` can launch it concurrently with $(TAKIBI)'s own copy (`test`
+# pulls in `build`, dozens of .o rules pull in $(TAKIBI) directly) --
+# two concurrent recursive `dune build` calls, which is exactly the
+# concurrent-dune-build deadlock this design exists to prevent. Confirmed
+# live: `make -f examples/Makefile check` hung for 14+ minutes with a
+# `dune build` process stuck in futex_wait_queue at 0% CPU before this
+# was found and fixed.
 ## build: build only the OCaml compiler (dune), via the root Makefile
-build:
-	$(MAKE) -f Makefile build
+build: $(TAKIBI)
 
 .PHONY: FORCE
 FORCE:
