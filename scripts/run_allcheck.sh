@@ -5,15 +5,19 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MAKE_COMMAND="${ALLCHECK_MAKE:-make}"
+# examples/Makefile owns `check` (see its own header comment for why examples/
+# and kernel/ targets live in separate Makefiles); an array (not a plain
+# string) so ALLCHECK_MAKE overrides still word-split correctly even though
+# the default itself is now multiple words.
+read -ra MAKE_COMMAND <<< "${ALLCHECK_MAKE:-make -f examples/Makefile}"
 LOG_DIR="$REPO_ROOT/_build/allcheck-logs"
 mkdir -p "$LOG_DIR"
 
-: "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run through make allcheck or set it explicitly}"
+: "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run through make -f examples/Makefile allcheck or set it explicitly}"
 
 qemu_lane() {
     echo "[allcheck-stage] unit, language, build, and QEMU checks"
-    "$MAKE_COMMAND" --no-print-directory check
+    "${MAKE_COMMAND[@]}" --no-print-directory check
 }
 
 stm32_lane() {

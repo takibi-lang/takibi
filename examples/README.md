@@ -65,38 +65,44 @@ abstraction is added only when a second concrete implementation needs it.
 
 ## Build and test targets
 
-Run these from the repository root.
+Run these from the repository root, always with `-f examples/Makefile` (never
+`cd examples` first -- every target below is a path relative to the repo
+root). These targets live in their own Makefile, separate from the root
+`Makefile`'s `kernel/` targets, specifically so a plain `make <target>` at
+the repo root cannot accidentally run an examples-only check in place of the
+intended kernel one -- see the root [`AGENTS.md`](../AGENTS.md)'s Build
+Commands section.
 
 ### No physical hardware required
 
 ```bash
-make build          # build the Takibi compiler
-make test           # compiler unit tests
-make qemubuild      # build maintained QEMU/AArch64 examples
-make qemutest       # run QEMU and host-side integration checks
-make stm32build     # cross-build all ported STM32 examples
-make linuxbuild     # build the Linux/AMD64 userspace examples
-make linuxcheck     # run and compare the Linux/AMD64 examples
-make optimizercheck # inspect selected generated objects
-make check          # langcheck + test + stm32build + qemutest
+make -f examples/Makefile build          # build the Takibi compiler
+make -f examples/Makefile test           # compiler unit tests
+make -f examples/Makefile qemubuild      # build maintained QEMU/AArch64 examples
+make -f examples/Makefile qemutest       # run QEMU and host-side integration checks
+make -f examples/Makefile stm32build     # cross-build all ported STM32 examples
+make -f examples/Makefile linuxbuild     # build the Linux/AMD64 userspace examples
+make -f examples/Makefile linuxcheck     # run and compare the Linux/AMD64 examples
+make -f examples/Makefile optimizercheck # inspect selected generated objects
+make -f examples/Makefile check          # langcheck + test + stm32build + qemutest
 ```
 
-`make check` is the normal hardware-independent regression target. Builds fan
-out over all available cores by default; use `make -j1 check` to force serial
+`make -f examples/Makefile check` is the normal hardware-independent regression target. Builds fan
+out over all available cores by default; use `make -f examples/Makefile -j1 check` to force serial
 recipes.
 
 ### Real hardware required
 
 ```bash
-make hwcheck-stm32          # STM32 UART integration suite, RAM execution
-make hwcheck-stm32-net      # STM32 Ethernet and storage network suite
-make hwcheck-rpi5           # RPi5 SWD/UART suite
-make hwcheck-rpi5-net       # RPi5 Ethernet and USB-backed server suite
-make perfcheck              # real-board profiling mechanism smoke tests
-make allcheck               # clean/build, then QEMU + STM32 + RPi5 lanes
+make -f examples/Makefile hwcheck-stm32          # STM32 UART integration suite, RAM execution
+make -f examples/Makefile hwcheck-stm32-net      # STM32 Ethernet and storage network suite
+make -f examples/Makefile hwcheck-rpi5           # RPi5 SWD/UART suite
+make -f examples/Makefile hwcheck-rpi5-net       # RPi5 Ethernet and USB-backed server suite
+make -f examples/Makefile perfcheck              # real-board profiling mechanism smoke tests
+make -f examples/Makefile allcheck               # clean/build, then QEMU + STM32 + RPi5 lanes
 ```
 
-`make allcheck` requires both maintained physical boards. It builds artifacts
+`make -f examples/Makefile allcheck` requires both maintained physical boards. It builds artifacts
 once and runs the independent QEMU, STM32, and RPi5 lanes in parallel; tests
 sharing one board remain serial inside that lane. Raw logs are written under
 `_build/allcheck-logs/`.
@@ -104,7 +110,7 @@ sharing one board remain serial inside that lane. Raw logs are written under
 The sustained STM32 KVS concurrency workload is deliberately separate:
 
 ```bash
-make stress-stm32-kvs-server-sdcard-rtos
+make -f examples/Makefile stress-stm32-kvs-server-sdcard-rtos
 ```
 
 It can be tuned with `TAKIBI_STRESS_CONCURRENCY`,
@@ -114,11 +120,11 @@ variables documented in the Makefile.
 ### Interactive server conveniences
 
 ```bash
-make qemu-http-server
-make qemu-kvs
-make stm32-http-server
-make stm32-http-server-sdcard
-make stm32-http-server-sdcard-rtos
+make -f examples/Makefile qemu-http-server
+make -f examples/Makefile qemu-kvs
+make -f examples/Makefile stm32-http-server
+make -f examples/Makefile stm32-http-server-sdcard
+make -f examples/Makefile stm32-http-server-sdcard-rtos
 ```
 
 The `qemu-*` targets run under QEMU. The `stm32-*` targets load the selected
@@ -127,14 +133,14 @@ demo, while `hwcheck-*` is the reproducible integration suite.
 
 ## QEMU/AArch64
 
-QEMU uses the `virt` machine and an AArch64 CPU. `make qemutest` builds each
+QEMU uses the `virt` machine and an AArch64 CPU. `make -f examples/Makefile qemutest` builds each
 maintained fixture, boots it, and compares UART or host-observed behavior. The
 network examples use the QEMU virtio-net HAL and host-side test scripts.
 
 Start with:
 
 ```bash
-make qemutest
+make -f examples/Makefile qemutest
 ```
 
 Use the individual `qemu-*` targets when keeping a server alive for manual
@@ -161,13 +167,13 @@ The UART device is normally detected automatically. Override an ambiguous
 device with, for example:
 
 ```bash
-STM32_SERIAL_DEV=/dev/ttyACM1 make hwcheck-stm32
+STM32_SERIAL_DEV=/dev/ttyACM1 make -f examples/Makefile hwcheck-stm32
 ```
 
 ### UART suite
 
 ```bash
-make hwcheck-stm32
+make -f examples/Makefile hwcheck-stm32
 ```
 
 The suite loads test images into RAM and compares captured UART output. It does
@@ -181,14 +187,14 @@ wired host NIC:
 ```bash
 sudo ip addr add 192.168.10.1/24 dev <interface>
 sudo ip link set <interface> up
-ETH_TEST_IFACE=<interface> make hwcheck-stm32-net
+ETH_TEST_IFACE=<interface> make -f examples/Makefile hwcheck-stm32-net
 ```
 
 The network checker needs raw-packet privileges. The scripts confine elevated
 execution to the host packet checks. For an interactive demo:
 
 ```bash
-ETH_TEST_IFACE=<interface> make stm32-http-server
+ETH_TEST_IFACE=<interface> make -f examples/Makefile stm32-http-server
 ```
 
 Open `http://192.168.10.2/`. Ctrl-C stops the UART viewer; the board continues
@@ -211,7 +217,7 @@ Build the spin stub, install it on the mounted boot partition outside the
 container when necessary, then power-cycle the board:
 
 ```bash
-make examples/common_rpi5/jtag_stub.img
+make -f examples/Makefile examples/common_rpi5/jtag_stub.img
 scripts/rpi5_prepare_sdcard.sh /path/to/mounted/boot/partition
 ```
 
@@ -223,7 +229,7 @@ notes are retained in [`common_rpi5/AGENTS.md`](common_rpi5/AGENTS.md).
 ### UART suite
 
 ```bash
-make hwcheck-rpi5
+make -f examples/Makefile hwcheck-rpi5
 ```
 
 The runner resets to the resident stub before each case, injects an ELF into
@@ -232,7 +238,7 @@ resolved by USB identity rather than unstable `ttyACM` numbering. Override it
 when needed:
 
 ```bash
-RPI5_SERIAL_DEV=/dev/ttyACM1 make hwcheck-rpi5
+RPI5_SERIAL_DEV=/dev/ttyACM1 make -f examples/Makefile hwcheck-rpi5
 ```
 
 WARNING: storage cases in this suite reformat the attached USB device. Use
@@ -245,12 +251,12 @@ The RPi5 examples use `192.168.20.2/24` by default:
 ```bash
 sudo ip addr add 192.168.20.1/24 dev <interface>
 sudo ip link set <interface> up
-ETH_TEST_IFACE=<interface> make hwcheck-rpi5-net
+ETH_TEST_IFACE=<interface> make -f examples/Makefile hwcheck-rpi5-net
 ```
 
 This runs real ARP, ICMP, TCP, HTTP, KVS, and USB-backed persistence checks.
 It also rewrites the sacrificial USB device. Use
-`make hwcheck-rpi5-net-l2` for the smaller ARP/ICMP-only lane.
+`make -f examples/Makefile hwcheck-rpi5-net-l2` for the smaller ARP/ICMP-only lane.
 
 Do not run OpenOCD itself with `sudo` inside the devcontainer. USB device
 permissions should be fixed at the host/container boundary instead.
@@ -261,8 +267,8 @@ RPi3 remains available for historical JTAG/UART and LAN9514 USB-Ethernet
 coverage:
 
 ```bash
-make hwcheck-rpi3
-make hwcheck-rpi3-net
+make -f examples/Makefile hwcheck-rpi3
+make -f examples/Makefile hwcheck-rpi3-net
 ```
 
 It requires its own SD spin stub, JTAG probe, UART adapter, and sacrificial

@@ -262,28 +262,50 @@ description drift between the two files.
 
 ## Build Commands
 
+The root `Makefile` covers the compiler and `kernel/` only -- the maintained
+product surface. Everything under `examples/` (frozen, historical, see
+"Maintenance Scope: `kernel/` Only" above) lives in its own `examples/Makefile`
+instead, so a plain `make <target>` at the repo root can never accidentally
+run an examples-only check against `kernel/` work. Always invoke it explicitly
+from the repo root -- never `cd examples` first:
+
 ```bash
-make build          # build the compiler (takibi) only (= dune build)
-make test           # run unit tests
-make qemutest       # run QEMU plus host-side integration tests (build and verify automatically)
-make stm32build     # cross-compile every ported example for STM32F746G-DISCOVERY (no hardware needed)
-make check          # run langcheck + test + stm32build + qemutest together
-make hwcheck-stm32        # like stm32build, but also loads into RAM + UART-diffs against real STM32 hardware
-make hwcheck-stm32-net    # real-Ethernet hardware tests (needs the board's Ethernet port wired to this host)
-make stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress test (not in allcheck)
-make hwcheck-rpi3   # opt-in Raspberry Pi 3B JTAG hardware integration test (not in allcheck, see examples/common_rpi3/AGENTS.md)
-make hwcheck-rpi3-net     # RPi3 real-Ethernet hardware tests (needs the board's Ethernet port -- behind its USB host stack, see examples/common_rpi3/AGENTS.md -- wired to this host)
-make hwcheck-rpi5   # opt-in RPi5 SWD + RP1-UART suite for all non-Ethernet RPi3 ports; reformats the attached USB drive (not in allcheck)
-make hwcheck-rpi5-net     # RPi5 real-Ethernet tests, including USB-backed HTTP/KVS persistence; reformats the attached USB drive
-make perfcheck      # real-hardware profiler smoke tests (not in allcheck -- shares phy_init's occasional link-negotiation flakiness with hwcheck-stm32-net, but adds no functional coverage beyond it)
-make allcheck       # clean/build, then QEMU + STM32 + RPi5 lanes in parallel
-make clean          # remove generated artifacts
+make build              # build the compiler (takibi) only (= dune build)
+make test               # run unit tests
+make langcheck          # repo-wide ASCII-only check (kernel/ + examples/ + compiler)
+make kernelbuild-rpi5   # build kernel/build/rpi5/kernel.elf (no hardware needed)
+make kernelbuild        # build every maintained kernel target (currently = kernelbuild-rpi5)
+make kernelcheck-rpi5   # build and run the RPi5 hardware integration suite
+make kernelcheck        # build and test every maintained kernel target
+make clean              # remove dune build artifacts and kernel/ link outputs
 ```
 
-**Parallel by default** (`Makefile`'s `MAKEFLAGS += -j$(shell nproc)`): every `.tkb` example
-is an independent build, so `make check`/`make stm32build`/etc. fan out across all cores with
-no flag needed. Pass `-j1` explicitly (`make -j1 check`) to force serial execution back, e.g.
-when a build error's parallel-interleaved output needs to be read one recipe at a time.
+Examples-only targets (STM32/RPi3/QEMU/Linux-userspace milestones) all require
+the `-f examples/Makefile` flag:
+
+```bash
+make -f examples/Makefile qemutest       # run QEMU plus host-side integration tests (build and verify automatically)
+make -f examples/Makefile stm32build     # cross-compile every ported example for STM32F746G-DISCOVERY (no hardware needed)
+make -f examples/Makefile check          # run langcheck + test + stm32build + qemutest together
+make -f examples/Makefile hwcheck-stm32        # like stm32build, but also loads into RAM + UART-diffs against real STM32 hardware
+make -f examples/Makefile hwcheck-stm32-net    # real-Ethernet hardware tests (needs the board's Ethernet port wired to this host)
+make -f examples/Makefile stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress test (not in allcheck)
+make -f examples/Makefile hwcheck-rpi3   # opt-in Raspberry Pi 3B JTAG hardware integration test (not in allcheck, see examples/common_rpi3/AGENTS.md)
+make -f examples/Makefile hwcheck-rpi3-net     # RPi3 real-Ethernet hardware tests (needs the board's Ethernet port -- behind its USB host stack, see examples/common_rpi3/AGENTS.md -- wired to this host)
+make -f examples/Makefile hwcheck-rpi5   # opt-in RPi5 SWD + RP1-UART suite for the historical RPi5 example milestones (not kernel/ -- see kernelcheck-rpi5 above for that); reformats the attached USB drive, not in allcheck
+make -f examples/Makefile hwcheck-rpi5-net     # RPi5 real-Ethernet tests for the same example milestones, including USB-backed HTTP/KVS persistence; reformats the attached USB drive
+make -f examples/Makefile perfcheck      # real-hardware profiler smoke tests (not in allcheck -- shares phy_init's occasional link-negotiation flakiness with hwcheck-stm32-net, but adds no functional coverage beyond it)
+make -f examples/Makefile allcheck       # clean/build, then QEMU + STM32 + RPi5(examples) lanes in parallel
+make -f examples/Makefile clean          # remove examples/ build artifacts
+```
+
+**Parallel by default** (both `Makefile` and `examples/Makefile` set their own
+`MAKEFLAGS += -j$(shell nproc)`): every `.tkb` example is an independent build, so
+`make -f examples/Makefile check`/`stm32build`/etc. fan out across all cores with no flag
+needed, same for `make kernelbuild`/`kernelcheck`. Pass `-j1` explicitly
+(`make -j1 kernelcheck`, `make -f examples/Makefile -j1 check`) to force serial execution
+back, e.g. when a build error's parallel-interleaved output needs to be read one recipe at a
+time.
 `-Otarget` (which buffers each recipe's output into one clean block) was tried and rejected --
 it hides progress until each recipe finishes, worse for watching a long build than the
 occasional interleaved line.
@@ -337,10 +359,13 @@ by making the `test` target depend on `build` (a normal prerequisite, ensuring `
 always completes before `dune test` starts) and by making sure nothing else in the build graph
 calls `dune exec`/`dune build`/`dune test` directly (see `scripts/run_qemutest.sh`'s
 `run_compile_error_test`, which had its own independent `dune exec takibi --` call fixed for the
-same reason). `$(TAKIBI)`'s rule is now the ONLY place that invokes `dune build` -- if a future
-change reintroduces a second, independent `dune build`/`dune test` invocation anywhere in the
-`make -j` graph (rather than depending on `$(TAKIBI)`/`build` like everything else does), expect
-this same class of flake to come back.
+same reason). `$(TAKIBI)`'s rule in the root `Makefile` is now the ONLY place in the repo that
+invokes `dune build` -- if a future change reintroduces a second, independent `dune
+build`/`dune test` invocation anywhere in a `make -j` graph (rather than depending on
+`$(TAKIBI)`/`build` like everything else does), expect this same class of flake to come back.
+This is also why `examples/Makefile`'s own `build`/`test`/`$(TAKIBI)` targets don't call `dune`
+themselves: they forward to `make -f Makefile build`/`test` in the root Makefile instead, so the
+invariant holds even though the two Makefiles are separate `make` invocations.
 
 ## Directory Layout
 
