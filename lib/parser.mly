@@ -761,6 +761,17 @@ refined_bound:
               "refined type bound '%s' is not a known compile-time integer constant \
                (declare it earlier as `const %s: T = N;`)"
               name name)) }
+  | SIZEOF LPAREN t = type_expr RPAREN
+    { Type_layout.sizeof_type $symbolstartpos t }
+  | LPAREN n = refined_bound RPAREN { n }
+  | a = refined_bound PLUS  b = refined_bound { a + b }
+  | a = refined_bound MINUS b = refined_bound { a - b }
+  | a = refined_bound TIMES b = refined_bound { a * b }
+  | a = refined_bound DIV   b = refined_bound
+    { if b = 0 then
+        raise (Types.TypeError ($symbolstartpos,
+          "refined type bound expression: division by zero"))
+      else a / b }
 
 (* Restricted to the primitive integer types {lo..<hi as base} is allowed
    to name -- matches the "by convention" restriction on TRefinedInt's own

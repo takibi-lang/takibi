@@ -8796,6 +8796,28 @@ let codegen_tests = [
             return text;
         }");
 
+  (* Found while cleaning up kernel/mm/page.tkb's magic numbers: a refined
+     type's bound could only be a bare integer literal or a single const
+     name, unlike array_size (used for `[T; N]`), which already supports
+     +/-/*//, parens, and sizeof. refined_bound now mirrors array_size's
+     grammar exactly, so a refinement can spell out how its own bound was
+     derived (e.g. `(BOOT_PAGE_COUNT - 1) * PAGE_SIZE + 1`) instead of
+     requiring the programmer to precompute it into a bare magic number
+     with an explanatory comment. TypeRefined's lo/hi are already plain
+     OCaml ints computed at parse time (not stored as an expr AST node),
+     so this is purely a grammar extension -- no type_inf.ml/llvm_gen.ml
+     changes were needed. *)
+  Alcotest.test_case
+    "refined type bounds accept simple constant arithmetic (+/-/*//,\
+     parens, sizeof), mirroring array_size's existing grammar" `Quick
+    (expect_codegen_ok
+       "const RTB_PAGE_SIZE: usize = 4096;
+        const RTB_COUNT: usize = 512;
+        fn rtb_use() -> usize {
+            let offset: {0..<(RTB_COUNT - 1) * RTB_PAGE_SIZE + 1 as usize} = 5;
+            return offset;
+        }");
+
   Alcotest.test_case
     "global let initializer: referencing a `let mut` global is rejected -- \
      a mutable global's value can change at runtime, so it is never a \

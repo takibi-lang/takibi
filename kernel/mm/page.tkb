@@ -4,7 +4,7 @@
 const PAGE_SIZE: usize = 4096;
 const BOOT_PAGE_COUNT: usize = 512;
 
-private let mut boot_pages: [u8; PAGE_SIZE * BOOT_PAGE_COUNT] align(4096);
+private let mut boot_pages: [u8; PAGE_SIZE * BOOT_PAGE_COUNT] align(PAGE_SIZE);
 private let mut boot_page_used: [u8; BOOT_PAGE_COUNT];
 private let mut boot_page_generation: usize = 1;
 
@@ -66,12 +66,17 @@ fn page_owner_from_parts(index: {0..<BOOT_PAGE_COUNT as usize},
 }
 
 fn page_bytes(owner: borrow PageOwner[page]) -> [u8; PAGE_SIZE..] @ page {
-    // (BOOT_PAGE_COUNT - 1) * PAGE_SIZE + 1 = 2093057.
-    let offset: {0..<2093057 as usize} = owner.index * PAGE_SIZE;
-    let pool = boot_pages as [u8; 2097152..];
+    let offset: {0..<(BOOT_PAGE_COUNT - 1) * PAGE_SIZE + 1 as usize} =
+        owner.index * PAGE_SIZE;
+    let pool = boot_pages as [u8; PAGE_SIZE * BOOT_PAGE_COUNT..];
+    // Both of the following keep the literal 4096, not PAGE_SIZE: two
+    // separate --forbid-trap proof mechanisms (the same-base subslice
+    // rule here, and the slice-length narrowing at the `if` below) only
+    // recognize a bare integer literal, not a const reference -- see
+    // GitHub issue #185.
     let bytes: []u8 = pool[offset..<offset + 4096];
     if (bytes.len >= 4096) { return bytes; }
-    return pool[0..<4096];
+    return pool[0..<PAGE_SIZE];
 }
 
 // Transfers per-page responsibility into a coarser linear owner such as a
