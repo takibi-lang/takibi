@@ -28,40 +28,31 @@ let narrow_int64 pos what (n : Int64.t) : int =
       raise (Types.TypeError (pos,
         Printf.sprintf "%s value %Ld is too large to represent" what n))
 
-(* `let mut id: ty = match disc { arms };` (GitHub issue #183 follow-up,
-   "Layer 1"). Reuses match_arms/match_arm's existing, already-unambiguous
-   grammar verbatim -- an arm's body is always `{ stmts }`, exactly like
-   an ordinary match statement. (A terser `Pattern => expr,` sugar for
-   the value case was tried first and dropped: making `expr` reachable
-   directly after `=>` genuinely conflicts with this grammar's own bare
-   `{ e, e, ... }` positional struct-literal expression -- confirmed via
-   real Menhir reduce/reduce and shift/reduce conflicts, not merely a
-   style call.) validate_let_match_arms below walks the already-parsed
-   arms and requires each one's LAST statement to be either
-   `id = expr;` (Assign targeting this exact id -- the arm's value) or
+(* GitHub issue #184: an arm body's LAST statement (for BOTH plain
+   `match` and `let mut id: ty = match disc { arms };`) must be `Yield e`
+   (this arm's value -- discarded for a plain match, captured for a
+   let-match, see type_inf.ml/llvm_gen.ml's own Yield/LetMatch cases) or
    Return/Break/Continue (diverges) -- checked structurally rather than
    via full flow analysis, so a block that diverges only through a
    nested if/match's own tail is conservatively rejected, not silently
-   accepted as unsound. No AST rewriting happens here (unlike an earlier
-   version of this comment might suggest) -- `arms` is returned as-is
-   once validated, which is what lets type_inf.ml and llvm_gen.ml reuse
-   their existing Match handling for it completely unchanged (see
-   Ast.LetMatch's own comment). *)
-let let_match_arm_ok id stmts =
+   accepted as unsound. Reuses `arm_body`'s own bare-tail-expr production
+   (below) for the Yield case -- a bare `expr` with no trailing `;` is
+   already how an arm produces a value, so this check only needs to
+   confirm the LAST statement's shape, not desugar anything itself. *)
+let arm_body_ok stmts =
   match List.rev stmts with
-  | { Ast.desc = Ast.Assign (n, _); _ } :: _ -> n = id
-  | { Ast.desc = (Ast.Return _ | Ast.Break | Ast.Continue); _ } :: _ -> true
+  | { Ast.desc = (Ast.Yield _ | Ast.Return _ | Ast.Break | Ast.Continue); _ } :: _ -> true
   | _ -> false
 
-let validate_let_match_arms id pos arms =
+let validate_arm_bodies pos arms =
   List.iter (fun arm ->
     let stmts = match arm with
       | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) -> b
     in
-    if not (let_match_arm_ok id stmts) then
-      raise (Types.TypeError (pos, Printf.sprintf
-        "this match-let arm must end in `%s = ...;`, or in return/break/continue \
-         to diverge" id))
+    if not (arm_body_ok stmts) then
+      raise (Types.TypeError (pos,
+        "this match arm must end in a value expression, or in \
+         return/break/continue to diverge"))
   ) arms;
   arms
 
@@ -136,6 +127,24 @@ let check_const_type pos = function
 %token PLUS_EQ MINUS_EQ PIPE_EQ AMP_EQ HAT_EQ SHL_EQ SHR_EQ
 
 (* Precedence: low -> high.  UNARY is a pseudo-token for %prec. *)
+%right ASSIGN PLUS_EQ MINUS_EQ PIPE_EQ AMP_EQ HAT_EQ SHL_EQ SHR_EQ
+                  (* GitHub issue #184: `=` and compound (`+=` etc.) as
+                     exprs, LOWEST of all -- `a + b = c` still requires
+                     explicit parens around the assignment, matching
+                     every other language with this feature (right-
+                     associative so `a = b = c` parses, though
+                     type_inf.ml rejects it: Assign's own type is TVoid,
+                     which never unifies as a valid RHS). The compound-op
+                     tokens need a precedence declared here too (not just
+                     `%prec ASSIGN` on their own production): without
+                     one, Menhir has no basis to resolve shift/reduce
+                     between e.g. `expr TIMES expr` and `expr SHR_EQ
+                     expr` when SHR_EQ is the lookahead token, which
+                     produced real conflicts (confirmed via
+                     `dune build`) once compound-op became a genuine
+                     infix `expr` operator instead of a token only ever
+                     reachable from dedicated, unambiguous `stmt`
+                     productions. *)
 %left OR          (* || -- lowest precedence logical operator *)
 %left DAMP        (* && -- higher than ||, lower than comparison operators *)
 %left PIPE        (* bitwise OR: looser than comparison so (a==0)|(b==0) works *)
@@ -341,10 +350,14 @@ stmts:
 stmt:
   | RETURN e = expr SEMI { { desc = Return (Some e); loc = $symbolstartpos } }
   | RETURN SEMI { { desc = Return None; loc = $symbolstartpos } }
-  | fname = IDENT LPAREN args = args RPAREN SEMI
-    (* Only function calls are allowed as expression statements. IDENT LPAREN disambiguates, eliminating S/R conflicts with DOT *)
-    { let loc = $symbolstartpos in
-      { desc = Expr { desc = Call (fname, args); loc }; loc } }
+  | e = expr SEMI
+    (* GitHub issue #184: any expr, evaluated for effect and discarded --
+       generalized from the pre-#184 call-only restriction now that
+       assignment is itself an expr (`x = e;` is `Expr (Assign (Var x,
+       e))`) and needs an ordinary statement form to appear in. Subsumes
+       the old dedicated call-statement production entirely: `expr`
+       already has its own Call alternative. *)
+    { { desc = Expr e; loc = $symbolstartpos } }
   | LET id = IDENT rhs = let_rhs SEMI
     { { desc = Let (false, id, fst rhs, snd rhs, None); loc = $symbolstartpos } }
   | LET LPAREN id1 = IDENT COMMA id2 = IDENT ids = ident_rest RPAREN ASSIGN e = expr SEMI
@@ -367,40 +380,43 @@ stmt:
   | LET MUT id = IDENT COLON ty = type_expr ASSIGN MATCH disc = expr
     LBRACE arms = match_arms RBRACE SEMI
     (* let mut id: ty = match disc { arms }; -- GitHub issue #183
-       follow-up ("Layer 1"). Reuses match_arms/match_arm UNCHANGED (an
-       arm's body is always `{ stmts }`, exactly like an ordinary
-       `match` statement -- a bare `Pattern => expr,` sugar was tried
-       first and dropped: it made `expr` reachable right after `=>`,
-       which genuinely conflicts with this grammar's own bare
-       `{ e, e, ... }` positional struct-literal expression -- Menhir
-       reported real reduce/reduce and shift/reduce conflicts, not just
-       a style preference). Each arm therefore assigns `id` explicitly
-       (`Pattern => { id = e; }`) or diverges
-       (`Pattern => { ...; return e; }`) -- verified by
-       validate_let_match_arms below, which walks the ALREADY-PARSED arms
-       (no new grammar) and rejects any arm whose last statement is
-       neither. Unambiguous against the ordinary `LET MUT id COLON ty
-       ASSIGN expr SEMI` path (let_rhs's own COLON-type_expr-ASSIGN-expr
-       branch): MATCH is not a valid start-of-expr token, so one token
-       of lookahead after ASSIGN is enough to pick this production
-       instead. *)
+       follow-up, now using the shared `match_arms`/`arm_body` grammar
+       (see arm_body's own comment): each arm ends in a bare tail `expr`
+       (desugars to `Yield e`, this arm's value) or diverges. Unambiguous
+       against the ordinary `LET MUT id COLON ty ASSIGN expr SEMI` path
+       (let_rhs's own COLON-type_expr-ASSIGN-expr branch): MATCH is not a
+       valid start-of-expr token, so one token of lookahead after ASSIGN
+       is enough to pick this production instead. *)
     { { desc = LetMatch (true, id, ty, disc,
-                          validate_let_match_arms id $symbolstartpos arms);
+                          validate_arm_bodies $symbolstartpos arms);
         loc = $symbolstartpos } }
   | LET id = IDENT COLON ty = type_expr ASSIGN MATCH disc = expr
     LBRACE arms = match_arms RBRACE SEMI
     (* let id: ty = match disc { arms }; -- the non-mut spelling. `id`
-       is still alloca-based internally (an arm's `id = e;` needs a
-       memory location to assign into no matter what), but type_inf.ml's
-       LetMatch case downgrades it back to immutable in the tyenv that
-       continues past this whole statement, once its own arms (which DO
-       need it mutable) have been checked -- so a later `id = ...;`
-       outside these arms is rejected exactly like assigning to any
-       other non-mut `let` would be. *)
+       is still alloca-based internally (an arm's yielded value needs a
+       memory location to be stored into no matter what), but
+       type_inf.ml's LetMatch case downgrades it back to immutable in the
+       tyenv that continues past this whole statement, once its own arms
+       (which DO need it mutable) have been checked -- so a later
+       `id = ...;` outside these arms is rejected exactly like assigning
+       to any other non-mut `let` would be. *)
     { { desc = LetMatch (false, id, ty, disc,
-                          validate_let_match_arms id $symbolstartpos arms);
+                          validate_arm_bodies $symbolstartpos arms);
         loc = $symbolstartpos } }
-  | LBRACE s = stmts RBRACE { { desc = Block s; loc = $symbolstartpos } }
+  | LBRACE first = stmt rest = stmts RBRACE
+    (* GitHub issue #184: requires at least one statement (unlike every
+       other `{ stmts }` position in this grammar, which stays 0-or-more)
+       specifically to break a genuine reduce/reduce ambiguity an EMPTY
+       `{}` here would otherwise have against a bare empty struct literal
+       `{}` used as a discarded expr-statement (both reduce on the same
+       LBRACE-then-immediate-RBRACE token sequence, and this is the one
+       stmt position where a nested Block-as-statement and the general
+       `expr SEMI` stmt production -- which now includes struct literals
+       -- are both reachable) -- confirmed via `dune build` reporting
+       zero conflicts with this restriction in place. A deliberately
+       empty scope block has no observable effect either way, so
+       requiring at least one statement costs nothing in practice. *)
+    { { desc = Block (first :: rest); loc = $symbolstartpos } }
   | IF LPAREN c = expr RPAREN LBRACE t = stmts RBRACE p = else_part
     { { desc = If(c, t, p); loc = $symbolstartpos } }
   | WHILE LPAREN c = expr RPAREN LBRACE b = stmts RBRACE
@@ -423,56 +439,22 @@ stmt:
   | CONTINUE SEMI { { desc = Continue; loc = $symbolstartpos } }
   | MATCH expr LBRACE match_arms RBRACE
     { { desc = Match ($2, $4); loc = $symbolstartpos } }
-  | id = IDENT ASSIGN e = expr SEMI
-    { { desc = Assign (id, e); loc = $symbolstartpos } }
-  | id = IDENT LBRACKET idx = expr RBRACKET ASSIGN rhs = expr SEMI
-    (* arr[i] = rhs -- preserves id+size for bounds checking in codegen *)
-    { { desc = AssignIndex (id, idx, rhs); loc = $symbolstartpos } }
-  | TIMES id = IDENT ASSIGN rhs = expr SEMI
-    (* *p = v  -- simple pointer-deref write *)
-    { let loc = $symbolstartpos in
-      let ptr = { desc = Var id; loc } in
-      { desc = AssignDeref (ptr, rhs); loc } }
-  | TIMES LPAREN lhs = expr RPAREN ASSIGN rhs = expr SEMI
-    (* *(complex_expr) = v  -- e.g. *(arr + i) = v *)
-    { { desc = AssignDeref (lhs, rhs); loc = $symbolstartpos } }
-  | id = IDENT DOT fname = IDENT ASSIGN rhs = expr SEMI
-    (* s.field = v  or  ptr.field = v -- struct field write *)
-    { let loc = $symbolstartpos in
-      let base = { desc = Var id; loc } in
-      { desc = AssignField (base, fname, rhs); loc } }
-  | id = IDENT LBRACKET idx = expr RBRACKET DOT fname = IDENT ASSIGN rhs = expr SEMI
-    (* arr[i].field = v -- indexed struct field write *)
-    { let loc = $symbolstartpos in
-      let base = { desc = Index (id, idx); loc } in
-      { desc = AssignField (base, fname, rhs); loc } }
-  | id = IDENT op = compound_op rhs = expr SEMI
-    { let loc = $symbolstartpos in
-      let lhs = { desc = Var id; loc } in
-      { desc = Assign (id, { desc = BinOp (op, lhs, rhs); loc }); loc } }
-  | id = IDENT LBRACKET idx = expr RBRACKET op = compound_op rhs = expr SEMI
-    { let loc = $symbolstartpos in
-      let load = { desc = Index (id, idx); loc } in
-      { desc = AssignIndex (id, idx, { desc = BinOp (op, load, rhs); loc }); loc } }
-  | TIMES id = IDENT op = compound_op rhs = expr SEMI
-    { let loc = $symbolstartpos in
-      let ptr = { desc = Var id; loc } in
-      let load = { desc = Deref ptr; loc } in
-      { desc = AssignDeref (ptr, { desc = BinOp (op, load, rhs); loc }); loc } }
-  | TIMES LPAREN lhs = expr RPAREN op = compound_op rhs = expr SEMI
-    { let loc = $symbolstartpos in
-      let load = { desc = Deref lhs; loc } in
-      { desc = AssignDeref (lhs, { desc = BinOp (op, load, rhs); loc }); loc } }
-  | id = IDENT DOT fname = IDENT op = compound_op rhs = expr SEMI
-    { let loc = $symbolstartpos in
-      let base = { desc = Var id; loc } in
-      let load = { desc = FieldGet (base, fname); loc } in
-      { desc = AssignField (base, fname, { desc = BinOp (op, load, rhs); loc }); loc } }
-  | id = IDENT LBRACKET idx = expr RBRACKET DOT fname = IDENT op = compound_op rhs = expr SEMI
-    { let loc = $symbolstartpos in
-      let base = { desc = Index (id, idx); loc } in
-      let load = { desc = FieldGet (base, fname); loc } in
-      { desc = AssignField (base, fname, { desc = BinOp (op, load, rhs); loc }); loc } }
+  (* Plain `=` and compound (`+=` etc.) assignment (GitHub issue #184)
+     are no longer dedicated `stmt` productions -- `x = e;` /
+     `arr[i] = e;` / `*p = e;` / `*(expr) = e;` / `x.field = e;` /
+     `arr[i].field = e;`, and their compound-op equivalents, are all now
+     just `expr SEMI` (the general expr-statement production above).
+     Compound assignment was FIRST tried as a separate, bare-IDENT-rooted
+     `stmt` production (on the theory that its own distinct compound-op
+     tokens would never overlap with `expr`'s start tokens) -- this
+     reproduced the same class of conflict `expr SEMI`'s own
+     introduction was meant to fix: `id.field` is a valid PREFIX of both
+     `expr`'s own FieldGet chain (eventually forming a plain `expr SEMI`
+     statement) and the dedicated compound-op production, so the two
+     nonterminals still competed for the same tokens. Folding compound
+     assignment into `expr` too (below) removes that overlap the same
+     way plain assignment's own fold did, confirmed via `dune build`
+     reporting zero conflicts with this design. *)
 
 %inline compound_op:
   | PLUS_EQ  { Add }
@@ -494,13 +476,13 @@ match_arms:
   | match_arm match_arms { $1 :: $2 }
 
 match_arm:
-  | IDENT COLONCOLON IDENT DARROW LBRACE stmts RBRACE
+  | IDENT COLONCOLON IDENT DARROW LBRACE arm_body RBRACE
     { ArmVariant ($1, $3, None, $6) }
-  | IDENT COLONCOLON IDENT LPAREN mutable_ = mut_flag binding = IDENT RPAREN DARROW LBRACE stmts RBRACE
+  | IDENT COLONCOLON IDENT LPAREN mutable_ = mut_flag binding = IDENT RPAREN DARROW LBRACE arm_body RBRACE
     { ArmVariant ($1, $3, Some (binding, mutable_), $10) }
-  | UNDERSCORE DARROW LBRACE stmts RBRACE
+  | UNDERSCORE DARROW LBRACE arm_body RBRACE
     { ArmWild $4 }
-  | ns = match_int_lits DARROW LBRACE body = stmts RBRACE
+  | ns = match_int_lits DARROW LBRACE body = arm_body RBRACE
     (* N => { ... }, or N1 | N2 | ... => { ... } -- one or more
        pipe-separated literal-integer patterns sharing one body (GitHub
        issue #156: OCaml-/Rust-style pattern alternation, so several
@@ -527,7 +509,54 @@ match_int_lit:
        native int here since a pattern is not a general expression. *)
     { - (narrow_int64 $symbolstartpos "match arm literal" n) }
 
+(* arm_body: a match/let-match arm's body -- ordinary statements
+   (reusing `stmt`'s full grammar verbatim: every existing statement form
+   works here exactly as it always has, INCLUDING the ones that build an
+   `Assign` expr internally, e.g. `x.field = e;`) optionally capped by
+   ONE trailing bare `expr` with NO trailing `;` -- the ML/Rust "a
+   block's value is its last expression" convention (GitHub issue #184).
+   The earlier, abandoned attempt at this exact shape hit real Menhir
+   conflicts (struct-literal-vs-block, call-expr-vs-call-stmt, field-
+   read-expr-vs-field-assign-stmt) because `stmt` and `expr` had disjoint,
+   overlapping-prefix productions for those cases; folding assignment
+   (and the old call-only statement form) into `expr` beforehand removes
+   every one of those conflicts, confirmed by `dune build` reporting zero
+   shift/reduce and zero reduce/reduce conflicts with this final design.
+   The bare tail is wrapped as `Yield e`; validate_arm_bodies (above)
+   confirms it (or a diverging Return/Break/Continue) is present. *)
+arm_body:
+  | /* empty */ { [] }
+  | e = expr { [ { desc = Yield e; loc = $symbolstartpos } ] }
+  | s = stmt rest = arm_body { s :: rest }
+
 expr:
+  | e1 = expr ASSIGN e2 = expr %prec ASSIGN
+    (* GitHub issue #184: assignment as a genuine expr, LHS unrestricted
+       at the grammar level -- type_inf.ml's infer_expr dispatches on
+       lhs.desc (Var/FieldGet/Index/Deref; anything else is a clear "not
+       an assignable expression" TypeError), matching how Rust's own
+       parser accepts a syntactically-any-expr LHS and rejects it
+       semantically in a later pass. `expr`'s own existing FieldGet/
+       Index/Deref productions already cover every LHS shape the 6 old
+       dedicated `stmt`-only Assign/AssignIndex/AssignDeref(x2)/
+       AssignField(x2) productions used to (`x`, `arr[i]`, `*p`,
+       `*(expr)`, `x.field`, `arr[i].field`) -- this ONE production
+       subsumes all of them, which is what removes the grammar-level
+       ambiguity a match/let-match arm's tail-expr sugar (arm_body,
+       below) used to hit: `expr` and `stmt` no longer have separate,
+       overlapping-prefix productions competing for the same tokens. *)
+    { { desc = Assign (e1, e2); loc = $symbolstartpos } }
+  | e1 = expr op = compound_op e2 = expr %prec ASSIGN
+    (* `x += e` sugar for `x = x + e` -- e1 is reused as BOTH the read
+       (inside the synthesized BinOp) and the write target (via Assign's
+       own LHS-shape dispatch), matching how the pre-#184 dedicated
+       compound-op productions already reused the same idx/base
+       sub-expression twice (once for the read, once for the store
+       address) -- unchanged evaluation-order behavior, just reached via
+       a single general production instead of 6 duplicated, LHS-shape-
+       specific ones. *)
+    { { desc = Assign (e1, { desc = BinOp (op, e1, e2); loc = $symbolstartpos });
+        loc = $symbolstartpos } }
   | expr OR      expr  { { desc = BinOp (Or,   $1, $3); loc = $symbolstartpos } }
   | expr DAMP    expr  { { desc = BinOp (And,  $1, $3); loc = $symbolstartpos } }
   | expr PIPE    expr  { { desc = BinOp (Bor,  $1, $3); loc = $symbolstartpos } }

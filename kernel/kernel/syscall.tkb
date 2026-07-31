@@ -480,7 +480,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 NetworkCapabilityTakeResult::Empty => {
                     return (1, LINUX_EAGAIN);
                 }
-                NetworkCapabilityTakeResult::Ready(r) => { ready = r; }
+                NetworkCapabilityTakeResult::Ready(r) => { r }
             };
             match kernel_tcp_receive_once(
                     ready, syscall_socket_buffer as []u8) {

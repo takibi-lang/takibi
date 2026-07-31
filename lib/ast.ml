@@ -148,6 +148,29 @@ and expr_desc =
   | SizeOf of type_expr        (* sizeof(T) -- compile-time size in bytes, type usize *)
   | OffsetOf of type_expr * string
       (* offsetof(T, field) -- compile-time field offset in bytes, type usize *)
+  | Assign of expr * expr
+      (* lhs = rhs -- GitHub issue #184: assignment is a genuine expr (not
+         a family of statement-only forms), matching Rust's own
+         `ExprKind::Assign`. `lhs` may be ANY expr syntactically; type_inf.ml
+         dispatches on its shape (Var/FieldGet/Index/Deref) and rejects
+         anything else ("not an assignable expression") -- the same
+         "accept syntactically, reject semantically in a later pass"
+         split Rust's own parser uses for `f() = x`. Always types as
+         TVoid (NOT the assigned value's type, unlike C/Rust): this
+         sidesteps any question of a linear/affine RHS being "read back"
+         through this new expr path -- chained assignment `a = b = c`
+         is simply a type error (`c`'s void result not unifying with
+         whatever `b`'s own type is), which is fine since nothing needs
+         it. Parsed at the LOWEST precedence (below `||`), matching every
+         other language with this feature, so `a + b = c` still requires
+         explicit parens. Needed so a match/let-match arm's tail
+         (Ast.Yield below) can be told apart from an ordinary preceding
+         statement with only 1 token of LALR(1) lookahead: when
+         assignment was a separate `stmt`-only category, `x.field` (a
+         legal PREFIX of both a field-read expr and a field-assign stmt)
+         made that decision genuinely ambiguous partway through parsing
+         the prefix -- see the GitHub issue for the full conflict
+         analysis that grounded this design. *)
 [@@deriving show]
 
 type stmt = stmt_desc located
@@ -157,10 +180,25 @@ and stmt_desc =
        None -- only legal inside a function whose declared return type is
        void; see type_inf.ml's own check. *)
   | Expr of expr
-  | Assign of ident * expr
-  | AssignDeref of expr * expr   (* *lhs = rhs -- write through pointer *)
-  | AssignField of expr * string * expr  (* base.field = rhs -- write a struct field *)
-  | AssignIndex of ident * expr * expr  (* arr[idx] = rhs -- indexed write with bounds check *)
+      (* Evaluate for effect, discard the value -- GitHub issue #184
+         generalized this from "calls only" (the original grammar
+         restriction) to any expr, since assignment (now itself an expr,
+         see Ast.Assign) needed a way to appear as an ordinary statement:
+         `x = e;` is `Expr (Assign (Var x, e))`. The old dedicated
+         `stmt`-only Assign/AssignDeref/AssignField/AssignIndex
+         constructors are gone -- this is their sole replacement. *)
+  | Yield of expr
+      (* GitHub issue #184: `Pattern => e;` inside a match/let-match arm
+         body -- `e` IS this arm's value. Valid ONLY as an arm body's
+         LAST statement (checked structurally by the parser, the same
+         way it already checked the pre-#184 `id = e;`-or-diverge
+         convention -- see lib/parser.mly). For an ordinary `match`
+         STATEMENT, a `Yield e` arm just evaluates `e` and discards it
+         (treated like `Expr e`); for `LetMatch`, the yielded value
+         becomes the arm's contribution to the bound name. Not reachable
+         anywhere else -- unlike Return/Break/Continue, this does not
+         participate in general control flow, only in "is this an arm's
+         terminal statement" structural checks. *)
   | Block of stmt list
   | Let of bool * ident * type_expr option * expr option * int option  (* is_mutable, name, type, init, align *)
   | If of expr * stmt list * stmt list
@@ -191,31 +229,31 @@ and stmt_desc =
       (* let [mut] id: ty = match disc { arms }; -- GitHub issue #183
          follow-up ("Layer 1": match producing a value for a let binding,
          so a chain of fallible steps reads as flat statements instead of
-         nesting one match per step). The bool is the surface `mut`
-         (parser-supplied, mirrors Let's own leading bool): internally
-         `id` is ALWAYS alloca-based regardless (an arm's `id = e;`
-         assignment needs a memory location to write to no matter what
-         the surface binding claims -- there is no phi-node/pure-SSA
-         alternative implemented), so a non-mut LetMatch differs from a
-         mut one ONLY in that infer_stmt downgrades `id` back to
-         immutable in the tyenv that continues past this statement,
-         once its own arms (which DO need it mutable, to assign into)
-         have been checked -- see type_inf.ml's LetMatch case. `ty` is
-         always required, never inferred from the arms.
+         nesting one match per step), extended by issue #184's `Yield`
+         sugar (see Ast.Yield above): each arm's body ends in `Yield e`
+         (this arm's value) or Return/Break/Continue (diverges). The bool
+         is the surface `mut` (parser-supplied, mirrors Let's own leading
+         bool): internally `id` is ALWAYS alloca-based regardless (a
+         `Yield e` arm needs a memory location to store its value into no
+         matter what the surface binding claims -- there is no phi-node/
+         pure-SSA alternative implemented), so a non-mut LetMatch differs
+         from a mut one ONLY in that infer_stmt downgrades `id` back to
+         immutable in the tyenv that continues past this statement, once
+         its own arms have been checked -- see type_inf.ml's LetMatch
+         case. `ty` is always required, never inferred from the arms.
 
-         `arms` are ordinary match_arm bodies: each one's last statement
-         must be `id = e;` (this arm's value) or Return/Break/Continue
-         (diverges), checked structurally by the parser (not via full
-         flow analysis -- a legitimately-always-diverging block whose
-         last statement is itself a nested if/match is rejected as a
-         clear error rather than silently accepted). This means
-         type_inf.ml and llvm_gen.ml can treat `arms` as a completely
-         ordinary match_arm list and reuse the existing Match handling
-         in both files unchanged, by recursing on a synthesized
-         `Match (disc, arms)` node -- see those files' own LetMatch
-         cases for why. Kept as one AST node (not desugared into a
-         separate Let + Match at parse time) so `id` stays live in the
-         ENCLOSING scope rather than a sub-block's. *)
+         `arms` are ordinary match_arm bodies (each one's last statement
+         checked structurally by the parser, not via full flow analysis
+         -- a legitimately-always-diverging block whose last statement is
+         itself a nested if/match is rejected as a clear error rather
+         than silently accepted). This means type_inf.ml and llvm_gen.ml
+         can treat `arms` as a completely ordinary match_arm list and
+         reuse the existing Match handling in both files, adding only one
+         new `Yield` case each, by recursing on a synthesized `Match
+         (disc, arms)` node -- see those files' own LetMatch cases for
+         why. Kept as one AST node (not desugared into a separate Let +
+         Match at parse time) so `id` stays live in the ENCLOSING scope
+         rather than a sub-block's. *)
 and match_arm =
   | ArmVariant of string * string * (ident * bool) option * stmt list
       (* Name::Case[(payload_name)] => { stmts }; bool means `mut` binding. *)
@@ -377,20 +415,28 @@ let written_names (stmts : stmt list) : string list =
     | VariantCtor (_, _, payload) -> go_expr payload
     | Index (_, idx) -> go_expr idx
     | SliceOf (_, lo, hi) -> go_expr lo; go_expr hi
+    | Assign (lhs, rhs) ->
+        (* GitHub issue #184: mirrors the old dedicated Assign/AssignIndex/
+           AssignDeref/AssignField stmt cases exactly (same names added,
+           same sub-expressions walked), now dispatched by the unified
+           expr's LHS shape instead of 4 separate AST constructors. *)
+        (match lhs.desc with
+         | Var n -> add n
+         | Index (n, idx) -> add n; go_expr idx
+         | Deref p -> go_expr p
+         | FieldGet (b, _) -> go_expr b
+         | _ -> go_expr lhs);
+        go_expr rhs
     | IntLit _ | BoolLit _ | StringLit _ | Var _ | ViewLit _
     | EnumVariant _ | SizeOf _
     | OffsetOf _ ->
         ()
   in
   let rec go_stmt (s : stmt) = match s.desc with
-    | Assign (n, e)          -> add n; go_expr e
-    | AssignIndex (n, i, e)  -> add n; go_expr i; go_expr e
-    | AssignDeref (p, e)     -> go_expr p; go_expr e
-    | AssignField (b, _, e)  -> go_expr b; go_expr e
     | Let (_, n, _, init, _) -> add n; (match init with
                                         | Some e -> go_expr e | None -> ())
     | LetTuple (ns, e)       -> List.iter add ns; go_expr e
-    | Expr e | Return (Some e) -> go_expr e
+    | Expr e | Return (Some e) | Yield e -> go_expr e
     | Return None            -> ()
     | Block ss               -> List.iter go_stmt ss
     | If (c, t, el)          -> go_expr c;

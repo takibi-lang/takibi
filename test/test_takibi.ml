@@ -700,8 +700,9 @@ let parser_tests = [
     match parse "fn f() { x = 3; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Assign ("x", { desc = Ast.IntLit 3L; _ }) -> ()
-         | _ -> Alcotest.fail "expected Assign(x, IntLit 3)")
+         | Ast.Expr { desc = Ast.Assign (
+             { desc = Ast.Var "x"; _ }, { desc = Ast.IntLit 3L; _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Expr(Assign(Var x, IntLit 3))")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -843,9 +844,10 @@ let parser_tests = [
     match parse "fn f(p: *i32) { *p = 42; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.AssignDeref ({ desc = Ast.Var "p"; _ },
-                             { desc = Ast.IntLit 42L; _ }) -> ()
-         | _ -> Alcotest.fail "expected AssignDeref(Var p, IntLit 42)")
+         | Ast.Expr { desc = Ast.Assign (
+             { desc = Ast.Deref { desc = Ast.Var "p"; _ }; _ },
+             { desc = Ast.IntLit 42L; _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Expr(Assign(Deref(Var p), IntLit 42))")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -1194,14 +1196,14 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  Alcotest.test_case "array write arr[i]=v produces AssignIndex" `Quick (fun () ->
+  Alcotest.test_case "array write arr[i]=v produces Assign(Index(...))" `Quick (fun () ->
     match parse "fn f(arr: *u8, i: i32) { arr[i] = 'X'; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.AssignIndex ("arr",
-             { desc = Ast.Var "i"; _ },
-             { desc = Ast.IntLit 88L; _ }) -> ()   (* 'X' = 88 *)
-         | _ -> Alcotest.fail "expected AssignIndex(arr, Var i, IntLit 88)")
+         | Ast.Expr { desc = Ast.Assign (
+             { desc = Ast.Index ("arr", { desc = Ast.Var "i"; _ }); _ },
+             { desc = Ast.IntLit 88L; _ }); _ } -> ()   (* 'X' = 88 *)
+         | _ -> Alcotest.fail "expected Expr(Assign(Index(arr, Var i), IntLit 88))")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -1306,24 +1308,27 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  Alcotest.test_case "field assignment statement parses to AssignField" `Quick (fun () ->
+  Alcotest.test_case "field assignment statement parses to Assign(FieldGet(...))" `Quick (fun () ->
     match parse "fn f() { p.x = 5; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.AssignField ({ desc = Ast.Var "p"; _ }, "x",
-                             { desc = Ast.IntLit 5L; _ }) -> ()
-         | _ -> Alcotest.fail "expected AssignField(p, x, 5)")
+         | Ast.Expr { desc = Ast.Assign (
+             { desc = Ast.FieldGet ({ desc = Ast.Var "p"; _ }, "x"); _ },
+             { desc = Ast.IntLit 5L; _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Expr(Assign(FieldGet(p, x), 5))")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  Alcotest.test_case "indexed field assignment parses to AssignField(Index(...))" `Quick (fun () ->
+  Alcotest.test_case "indexed field assignment parses to Assign(FieldGet(Index(...)))" `Quick (fun () ->
     match parse "fn f(i: i32) { descs[i].value = 5; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.AssignField (
-             { desc = Ast.Index ("descs", { desc = Ast.Var "i"; _ }); _ },
-             "value", { desc = Ast.IntLit 5L; _ }) -> ()
-         | _ -> Alcotest.fail "expected AssignField(Index(descs, i), value, 5)")
+         | Ast.Expr { desc = Ast.Assign (
+             { desc = Ast.FieldGet (
+                 { desc = Ast.Index ("descs", { desc = Ast.Var "i"; _ }); _ },
+                 "value"); _ },
+             { desc = Ast.IntLit 5L; _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Expr(Assign(FieldGet(Index(descs, i), value), 5))")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -1331,13 +1336,11 @@ let parser_tests = [
     match parse "fn f(i: i32) { descs[i].value += 1; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.AssignField (
-             ({ desc = Ast.Index ("descs", _); _ } as base), "value",
-             { desc = Ast.BinOp (Ast.Add,
-                 { desc = Ast.FieldGet (load_base, "value"); _ },
-                 { desc = Ast.IntLit 1L; _ }); _ })
-           when base == load_base -> ()
-         | _ -> Alcotest.fail "expected indexed AssignField compound desugaring")
+         | Ast.Expr { desc = Ast.Assign (
+             ({ desc = Ast.FieldGet ({ desc = Ast.Index ("descs", _); _ }, "value"); _ } as lhs),
+             { desc = Ast.BinOp (Ast.Add, load, { desc = Ast.IntLit 1L; _ }); _ }); _ }
+           when lhs == load -> ()
+         | _ -> Alcotest.fail "expected indexed Assign(FieldGet, BinOp) compound desugaring")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -1543,14 +1546,14 @@ let parser_tests = [
 
   (* -- Compound pointer assignment ------------------------------------------ *)
 
-  Alcotest.test_case "complex pointer assign *(expr) = v parses to AssignDeref" `Quick (fun () ->
+  Alcotest.test_case "complex pointer assign *(expr) = v parses to Assign(Deref(...))" `Quick (fun () ->
     match parse "fn f(arr: *i32, i: i32) { *(arr + i) = 42; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.AssignDeref (
-             { desc = Ast.BinOp (Ast.Add, _, _); _ },
-             { desc = Ast.IntLit 42L; _ }) -> ()
-         | _ -> Alcotest.fail "expected AssignDeref(BinOp(Add,...), 42)")
+         | Ast.Expr { desc = Ast.Assign (
+             { desc = Ast.Deref { desc = Ast.BinOp (Ast.Add, _, _); _ }; _ },
+             { desc = Ast.IntLit 42L; _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Expr(Assign(Deref(BinOp(Add,...)), 42))")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -1647,8 +1650,10 @@ let parser_tests = [
     match parse "fn f() { let mut x = 0; x += 1; }" with
     | [Ast.FuncDef { body = [_let; s]; _ }] ->
         (match s.desc with
-         | Ast.Assign ("x", { desc = Ast.BinOp (Ast.Add, { desc = Ast.Var "x"; _ }, _); _ }) -> ()
-         | _ -> Alcotest.fail "expected Assign(x, BinOp(Add, Var x, _))")
+         | Ast.Expr { desc = Ast.Assign (
+             { desc = Ast.Var "x"; _ },
+             { desc = Ast.BinOp (Ast.Add, { desc = Ast.Var "x"; _ }, _); _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Expr(Assign(Var x, BinOp(Add, Var x, _)))")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -1656,17 +1661,21 @@ let parser_tests = [
     match parse "fn f() { let mut x = 0; x |= 2; }" with
     | [Ast.FuncDef { body = [_let; s]; _ }] ->
         (match s.desc with
-         | Ast.Assign ("x", { desc = Ast.BinOp (Ast.Bor, { desc = Ast.Var "x"; _ }, _); _ }) -> ()
-         | _ -> Alcotest.fail "expected Assign(x, BinOp(Bor, Var x, _))")
+         | Ast.Expr { desc = Ast.Assign (
+             { desc = Ast.Var "x"; _ },
+             { desc = Ast.BinOp (Ast.Bor, { desc = Ast.Var "x"; _ }, _); _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Expr(Assign(Var x, BinOp(Bor, Var x, _)))")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
-  Alcotest.test_case "compound &= on deref desugars to AssignDeref(BinOp(Band))" `Quick (fun () ->
+  Alcotest.test_case "compound &= on deref desugars to Assign(Deref, BinOp(Band))" `Quick (fun () ->
     match parse "fn f(p: *i32) { *p &= 0xff; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.AssignDeref (_, { desc = Ast.BinOp (Ast.Band, { desc = Ast.Deref _; _ }, _); _ }) -> ()
-         | _ -> Alcotest.fail "expected AssignDeref(_, BinOp(Band, Deref _, _))")
+         | Ast.Expr { desc = Ast.Assign (
+             { desc = Ast.Deref _; _ },
+             { desc = Ast.BinOp (Ast.Band, { desc = Ast.Deref _; _ }, _); _ }); _ } -> ()
+         | _ -> Alcotest.fail "expected Expr(Assign(Deref _, BinOp(Band, Deref _, _)))")
     | _ -> Alcotest.fail "unexpected structure"
   );
 
@@ -8575,16 +8584,16 @@ let codegen_tests = [
   (* GitHub issue #183 follow-up ("Layer 1"): `let mut id: ty = match
      disc { arms };` -- lets a chain of fallible steps (each its own
      `match`) read as flat statements instead of nesting one match per
-     step. Each arm's body is an ordinary `{ stmts }` block, exactly
-     like a plain `match` statement's own arm -- exhaustiveness and
-     payload-binder scoping are the SAME existing Match machinery,
-     reused unchanged (see lib/ast.ml's LetMatch comment for why). The
-     one new rule this construct enforces itself: every arm's last
-     statement must be `id = expr;` (this arm's value) or
-     return/break/continue (diverges). *)
+     step. Exhaustiveness and payload-binder scoping are the SAME
+     existing Match machinery, reused unchanged (see lib/ast.ml's
+     LetMatch comment for why). The one new rule this construct enforces
+     itself: every arm's last statement must be a bare tail expression
+     (GitHub issue #184's `Yield` sugar -- `Pattern => e;`, this arm's
+     value) or return/break/continue (diverges). *)
   Alcotest.test_case
     "issue #183 layer 1: let-match flattens a chain of fallible steps \
-     (each match's arms are plain blocks, no new arm-body syntax)"
+     (each arm's value is its bare tail expr, GitHub issue #184's Yield \
+     sugar)"
     `Quick
     (expect_codegen_ok
        "must_use variant LmAllocResult { OutOfMemory; Allocated(usize); }
@@ -8594,11 +8603,11 @@ let codegen_tests = [
         fn lm_create() -> LmCreateResult {
             let mut text: usize = match lm_alloc() {
                 LmAllocResult::OutOfMemory => { return LmCreateResult::OutOfMemory; }
-                LmAllocResult::Allocated(p) => { text = p; }
+                LmAllocResult::Allocated(p) => { p }
             };
             let mut data: usize = match lm_alloc() {
                 LmAllocResult::OutOfMemory => { lm_free(text); return LmCreateResult::OutOfMemory; }
-                LmAllocResult::Allocated(p) => { data = p; }
+                LmAllocResult::Allocated(p) => { p }
             };
             return LmCreateResult::Created(text + data);
         }");
@@ -8612,16 +8621,16 @@ let codegen_tests = [
         fn lm_alloc2() -> LmAllocResult2 { return LmAllocResult2::Allocated(42); }
         fn lm_missing_arm() -> usize {
             let mut text: usize = match lm_alloc2() {
-                LmAllocResult2::Allocated(p) => { text = p; }
+                LmAllocResult2::Allocated(p) => { p }
             };
             return text;
         }");
 
   Alcotest.test_case
-    "issue #183 layer 1: an arm that neither assigns the bound name nor \
-     diverges is rejected -- this is the safety check hand-writing \
-     `let mut x: T;` then a plain `match` does not get for free (that \
-     pattern has no definite-assignment checking at all)"
+    "issue #183 layer 1: an arm that neither yields a value nor diverges \
+     is rejected -- this is the safety check hand-writing `let mut x: T;` \
+     then a plain `match` does not get for free (that pattern has no \
+     definite-assignment checking at all)"
     `Quick
     (expect_type_error "must end in"
        "must_use variant LmAllocResult3 { OutOfMemory; Allocated(usize); }
@@ -8629,14 +8638,16 @@ let codegen_tests = [
         fn lm_forgot_assign() -> usize {
             let mut text: usize = match lm_alloc3() {
                 LmAllocResult3::OutOfMemory => { }
-                LmAllocResult3::Allocated(p) => { text = p; }
+                LmAllocResult3::Allocated(p) => { p }
             };
             return text;
         }");
 
   Alcotest.test_case
-    "issue #183 layer 1: an arm assigning a DIFFERENT name than the one \
-     being bound does not count as this arm's value" `Quick
+    "issue #183 layer 1 (GitHub issue #184 follow-up): an arm ending in \
+     an ordinary assignment statement, not a bare tail expression, does \
+     not count as this arm's value -- `other = p;` is `Expr(Assign(...))`, \
+     not `Yield`, so it is rejected the same way an empty body is" `Quick
     (expect_type_error "must end in"
        "must_use variant LmAllocResult4 { OutOfMemory; Allocated(usize); }
         fn lm_alloc4() -> LmAllocResult4 { return LmAllocResult4::Allocated(42); }
@@ -8652,10 +8663,10 @@ let codegen_tests = [
   Alcotest.test_case
     "issue #183 layer 1: let-match with a linear `view` payload -- the \
      diverging arm never produces the bound name (nothing pending to \
-     consume there), the continuing arm's assignment produces it fresh, \
-     and the erased view type (no runtime storage, no pre-allocated \
-     alloca) still codegens since Assign needs a locals entry to exist \
-     before it can overwrite one" `Quick
+     consume there), the continuing arm's bare-tail Yield produces it \
+     fresh, and the erased view type (no runtime storage, no pre-allocated \
+     alloca) still codegens since the rewritten Assign needs a locals \
+     entry to exist before it can overwrite one" `Quick
     (expect_codegen_ok
        "linear view LmToken;
         must_use variant LmTakeResult { Empty; Ready(LmToken); }
@@ -8664,7 +8675,7 @@ let codegen_tests = [
         fn lm_use_token() -> usize {
             let mut tok: LmToken = match lm_take() {
                 LmTakeResult::Empty => { return 0; }
-                LmTakeResult::Ready(t) => { tok = t; }
+                LmTakeResult::Ready(t) => { t }
             };
             return lm_consume(tok);
         }");
@@ -8705,7 +8716,7 @@ let codegen_tests = [
                     ExPageAllocResult::OutOfMemory => {
                         return ExCreateResult::OutOfMemory;
                     }
-                    ExPageAllocResult::Allocated(p) => { text = p; }
+                    ExPageAllocResult::Allocated(p) => { p }
                 };
             let mut data: exists data_page: usize. ExPageOwner[data_page] =
                 match ex_page_alloc() {
@@ -8713,7 +8724,7 @@ let codegen_tests = [
                         ex_page_free(text);
                         return ExCreateResult::OutOfMemory;
                     }
-                    ExPageAllocResult::Allocated(p) => { data = p; }
+                    ExPageAllocResult::Allocated(p) => { p }
                 };
             return ExCreateResult::Created((text, data));
         }");
@@ -8740,14 +8751,14 @@ let codegen_tests = [
                     ExLeakAllocResult::OutOfMemory => {
                         return ExLeakResult::OutOfMemory;
                     }
-                    ExLeakAllocResult::Allocated(p) => { text = p; }
+                    ExLeakAllocResult::Allocated(p) => { p }
                 };
             let mut data: exists page: usize. ExLeakOwner[page] =
                 match ex_leak_alloc() {
                     ExLeakAllocResult::OutOfMemory => {
                         return ExLeakResult::OutOfMemory;
                     }
-                    ExLeakAllocResult::Allocated(p) => { data = p; }
+                    ExLeakAllocResult::Allocated(p) => { p }
                 };
             ex_leak_free(text);
             ex_leak_free(data);
@@ -8773,7 +8784,7 @@ let codegen_tests = [
         fn lm_nomut_use() -> usize {
             let text: usize = match lm_nomut_alloc() {
                 LmNoMutResult::OutOfMemory => { return 0; }
-                LmNoMutResult::Allocated(p) => { text = p; }
+                LmNoMutResult::Allocated(p) => { p }
             };
             return text;
         }");
@@ -8790,7 +8801,7 @@ let codegen_tests = [
         fn lm_nomut_reassign() -> usize {
             let text: usize = match lm_nomut_reassign_alloc() {
                 LmNoMutReassignResult::OutOfMemory => { return 0; }
-                LmNoMutReassignResult::Allocated(p) => { text = p; }
+                LmNoMutReassignResult::Allocated(p) => { p }
             };
             text = 5;
             return text;
@@ -8852,6 +8863,85 @@ let codegen_tests = [
                 return I185NResult::Ok(bytes);
             }
             return I185NResult::TooShort;
+        }");
+
+  (* GitHub issue #184: unifying assignment into `expr` (a single general
+     `Assign(lhs, rhs)`, dispatched by lhs shape, replacing 4 separate
+     dedicated `stmt`-only constructors) is what let match/let-match arm
+     bodies gain a bare-tail-expr sugar (`Pattern => { e }`, no trailing
+     `;`, desugars to `Yield e`) without hitting the Menhir conflicts an
+     earlier, narrower attempt did -- see the extensive comments in
+     lib/ast.ml/lib/parser.mly/lib/type_inf.ml/lib/llvm_gen.ml for the
+     full design. These tests cover the genuinely new surface: a plain
+     `match` (not let-match) using the same sugar, ordinary statements
+     (including field/index assignment) mixed with a Yield tail in one
+     arm, assignment rejected as a general sub-expression in a
+     nonsensical position, and assigning to a non-lvalue. *)
+  Alcotest.test_case
+    "issue #184: a plain `match` statement's arm can also use the \
+     bare-tail Yield sugar -- the value is simply evaluated and \
+     discarded (same as an ordinary `Expr` statement), no LetMatch \
+     capture involved" `Quick
+    (expect_codegen_ok
+       "must_use variant I184MatchResult { A; B(usize); }
+        fn i184_plain_match(r: I184MatchResult) -> usize {
+            match r {
+                I184MatchResult::A => { return 0; }
+                I184MatchResult::B(n) => { n }
+            }
+            return 1;
+        }");
+
+  Alcotest.test_case
+    "issue #184: an arm mixes ordinary statements -- including field and \
+     index assignment, both of which used to be separate dedicated `stmt` \
+     productions before this issue folded them into `expr` -- with a \
+     bare-tail Yield, the exact shape this feature exists to unblock \
+     (e.g. `page_free(text); page_free(data); return ...;` alongside a \
+     value-producing arm elsewhere in the same match)" `Quick
+    (expect_codegen_ok
+       "struct I184Counter { n: usize; }
+        must_use variant I184MixedResult { Cleanup; Value(usize); }
+        fn i184_mixed_arm(r: I184MixedResult, c: *I184Counter,
+                          arr: [usize; 4], i: {0..<4 as usize}) -> usize {
+            let mut text: usize = match r {
+                I184MixedResult::Cleanup => {
+                    c.n = 0;
+                    arr[i] = 0;
+                    return 0;
+                }
+                I184MixedResult::Value(v) => {
+                    c.n = v;
+                    arr[i] = v;
+                    v
+                }
+            };
+            return text;
+        }");
+
+  Alcotest.test_case
+    "issue #184: assignment is syntactically valid as a general \
+     sub-expression but rejected by ordinary type-checking in a \
+     nonsensical position -- Assign's TVoid result cannot unify against \
+     the bool an `if` condition requires, confirming no special-casing \
+     was needed to reject this beyond ordinary unification" `Quick
+    (expect_type_error "cannot unify"
+       "fn i184_assign_in_condition() -> usize {
+            let mut x: usize = 0;
+            if (x = 5) { return 1; }
+            return 0;
+        }");
+
+  Alcotest.test_case
+    "issue #184: assigning to a non-lvalue expression is a clear type \
+     error, not a parser crash -- the grammar accepts any expr as \
+     Assign's LHS (matching Rust's own `f() = x` parses-then-rejects \
+     split), so this is caught by infer_expr's LHS-shape dispatch" `Quick
+    (expect_type_error "not an assignable expression"
+       "fn i184_helper() -> usize { return 1; }
+        fn i184_assign_non_lvalue() -> usize {
+            i184_helper() = 5;
+            return 0;
         }");
 
   Alcotest.test_case

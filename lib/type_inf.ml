@@ -30,6 +30,8 @@ let rec count_var_occurrences name (e : Ast.expr) =
   | Ast.SliceOf (base, lo, hi) ->
       (if base = name then 1 else 0)
       + count_var_occurrences name lo + count_var_occurrences name hi
+  | Ast.Assign (lhs, rhs) ->
+      count_var_occurrences name lhs + count_var_occurrences name rhs
   | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.ViewLit _
   | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.OffsetOf _ -> 0
 
@@ -2497,6 +2499,193 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              check_literal_fits_refined arg.loc arg pt
            ) args param_tys;
            ret_ty)
+  | Assign (lhs, rhs) ->
+      (* GitHub issue #184: relocated verbatim from the 4 old dedicated
+         `infer_stmt` cases (Assign/AssignDeref/AssignIndex/AssignField),
+         dispatched on the unified expr's LHS shape instead of 4 separate
+         AST constructors -- same logic, same error messages, just now
+         reached from infer_expr instead of infer_stmt (using the whole
+         Assign expr's own `e.loc` wherever the old code used the
+         enclosing statement's `s.loc`). Always returns TVoid: assignment
+         is not itself a readable value in this language (see Ast.Assign's
+         own comment for why). *)
+      (match lhs.desc with
+       | Var name ->
+           check_private_global_access lhs.loc name;
+           invalidate_place_projections name;
+           if StringSet.mem name !active_readonly_borrows then
+             raise (TypeError (e.loc, Printf.sprintf
+               "cannot assign to borrowed value '%s'; use `borrow mut` for scoped mutation"
+               name));
+           let (vty, is_mut) = lookup_binding e.loc name tyenv in
+           if contains_stable_owner_value_ty vty then
+             raise (TypeError (e.loc,
+               "stable owner container storage cannot be assigned or copied as a whole"));
+           if not is_mut then
+             raise (TypeError (e.loc,
+               Printf.sprintf "cannot assign to immutable variable '%s'; use 'let mut'" name));
+           let target_ty = strip_io vty in
+           let unify_target = match repr target_ty with
+             | TExists _ -> pack_exists_ty target_ty
+             | _ -> target_ty
+           in
+           let ety = infer_expr senv eenv tyenv fenv rhs in
+           let ety = adapt_actual_to_expected tyenv rhs ety unify_target in
+           unify_at rhs.loc ety unify_target;
+           check_literal_fits_refined rhs.loc rhs unify_target;
+           TVoid
+       | Deref ptr_expr ->
+           let pt = infer_expr senv eenv tyenv fenv ptr_expr in
+           let inner = match repr pt with
+             | TPtr i -> strip_io i
+             | _ ->
+                 let inner = fresh () in
+                 unify_at ptr_expr.loc pt (TPtr inner);
+                 inner
+           in
+           if contains_stable_owner_value_ty inner then
+             raise (TypeError (e.loc,
+               "stable owner container storage cannot be overwritten or copied through a pointer"));
+           let vt = infer_expr senv eenv tyenv fenv rhs in
+           let vt = adapt_actual_to_expected tyenv rhs vt inner in
+           if contains_view_ty vt then
+             raise (TypeError (rhs.loc,
+               "cannot store an erased view through a pointer"));
+           if contains_variant_ty vt then
+             raise (TypeError (rhs.loc,
+               "cannot store a variant through a pointer in Slice 3"));
+           if is_tuple_ty vt then
+             raise (TypeError (rhs.loc,
+               "cannot store a tuple through a pointer: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
+           if is_linear_ptr_ty vt then
+             raise (TypeError (rhs.loc,
+               "cannot store a linear value through a pointer: it would escape \
+                obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"));
+           if is_indexed_owner_ty vt then
+             raise (TypeError (rhs.loc,
+               "cannot store an indexed owner through a pointer: it would escape obligation tracking"));
+           unify_at rhs.loc vt inner;
+           check_literal_fits_refined rhs.loc rhs inner;
+           TVoid
+       | Index (id, idx) ->
+           check_private_global_access lhs.loc id;
+           let vt = lookup lhs.loc id tyenv in
+           let it = infer_expr senv eenv tyenv fenv idx in
+           let rt = infer_expr senv eenv tyenv fenv rhs in
+           let elem_ty = match repr vt with
+             | TArray (elem, n) ->
+                 require_usize_index idx.loc it;
+                 (match idx.desc with
+                  | IntLit k64 ->
+                      (match Ast.int_of_intlit k64 with
+                       | Some k when k >= n ->
+                           raise (TypeError (idx.loc,
+                             Printf.sprintf "index %d is out of bounds for array of size %d" k n))
+                       | Some _ -> ()
+                       | None ->
+                           raise (TypeError (idx.loc,
+                             Printf.sprintf "index %Ld is out of bounds for array of size %d" k64 n)))
+                  | _ -> ());
+                 elem
+             | TSlice (elem, _) -> require_usize_index idx.loc it; elem
+             | TPtr   elem      ->
+                 check_ptr_arith_complete e.loc (repr vt);
+                 require_isize_offset idx.loc it; strip_io elem
+             | TAlignedPtr (_, elem) ->
+                 check_ptr_arith_complete e.loc (repr vt);
+                 require_isize_offset idx.loc it; strip_io elem
+             | _ -> raise (TypeError (e.loc,
+                 Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
+           in
+           if contains_stable_owner_value_ty elem_ty then
+             raise (TypeError (e.loc,
+               "stable owner container storage cannot be overwritten or copied through an index"));
+           let rt = adapt_actual_to_expected tyenv rhs rt elem_ty in
+           if contains_view_ty rt then
+             raise (TypeError (rhs.loc,
+               "cannot store an erased view into an array/slice element"));
+           if contains_variant_ty rt then
+             raise (TypeError (rhs.loc,
+               "cannot store a variant into an array/slice element in Slice 3"));
+           if is_tuple_ty rt then
+             raise (TypeError (rhs.loc,
+               "cannot store a tuple into an array/slice element: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
+           if is_linear_ptr_ty rt then
+             raise (TypeError (rhs.loc,
+               "cannot store a linear value into an array/slice element: it would \
+                escape obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"));
+           if is_indexed_owner_ty rt then
+             raise (TypeError (rhs.loc,
+               "cannot store an indexed owner into an array/slice element: it would escape obligation tracking"));
+           unify_at rhs.loc rt elem_ty;
+           check_literal_fits_refined rhs.loc rhs elem_ty;
+           TVoid
+       | FieldGet (base_expr, fname) ->
+           let bt = infer_expr senv eenv tyenv fenv base_expr in
+           (match repr bt with
+            | TIndexedStruct _ ->
+                (match base_expr.desc with
+                 | Var name ->
+                     if StringSet.mem name !active_readonly_borrows then
+                       raise (TypeError (base_expr.loc, Printf.sprintf
+                         "cannot mutate shared-borrow parameter '%s'; use `borrow mut` for scoped mutation"
+                         name));
+                     let (_, is_mut) = lookup_binding base_expr.loc name tyenv in
+                     if not is_mut then
+                       raise (TypeError (base_expr.loc, Printf.sprintf
+                         "cannot assign a field of immutable indexed owner '%s'; use 'let mut'"
+                         name))
+                 | _ ->
+                     raise (TypeError (base_expr.loc,
+                       "field assignment on an indexed owner requires a mutable local or parameter")))
+            | _ -> ());
+           let (sname, static_args) = match struct_instance (repr bt) with
+             | Some x -> x
+             | _ ->
+                 raise (TypeError (base_expr.loc,
+                   Printf.sprintf "field assignment '.%s' on non-struct type '%s'"
+                     fname (to_string bt)))
+           in
+           let fields = match StringMap.find_opt sname senv with
+             | Some (fs, _, _) -> fs
+             | None ->
+                 raise (TypeError (e.loc,
+                   Printf.sprintf "unknown struct type '%s'" sname))
+           in
+           check_private_field_access e.loc sname fname;
+           if is_stable_owner_field sname fname then
+             raise (TypeError (e.loc, Printf.sprintf
+               "stable owner field '%s.%s' cannot be assigned directly; use stable_replace while holding its guard"
+               sname fname));
+           let field_ty = match List.assoc_opt fname fields with
+             | Some ft -> field_type_for_instance sname static_args ft
+             | None ->
+                 raise (TypeError (e.loc,
+                   Printf.sprintf "no field '%s' in struct '%s'" fname sname))
+           in
+           let vt = infer_expr senv eenv tyenv fenv rhs in
+           let vt = adapt_actual_to_expected tyenv rhs vt (strip_io field_ty) in
+           if contains_view_ty vt then
+             raise (TypeError (rhs.loc,
+               "cannot store an erased view into a struct field"));
+           if contains_kinded_variant_ty vt then
+             raise (TypeError (rhs.loc,
+               "cannot store an affine/linear variant into a struct field"));
+           if is_tuple_ty vt then
+             raise (TypeError (rhs.loc,
+               "cannot store a tuple into a struct field: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
+           if is_linear_ptr_ty vt then
+             raise (TypeError (rhs.loc,
+               "cannot store a linear value into a struct field: it would escape \
+                obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"));
+           if is_indexed_owner_ty vt then
+             raise (TypeError (rhs.loc,
+               "cannot store an indexed owner into a struct field: it would escape obligation tracking"));
+           unify_at rhs.loc vt (strip_io field_ty);
+           check_literal_fits_refined rhs.loc rhs (strip_io field_ty);
+           TVoid
+       | _ ->
+           raise (TypeError (lhs.loc, "not an assignable expression")))
 
 (* -- Checking mode --------------------------------------------------------- *)
 (* check_expr pushes the expected type inward (bidirectional checking).
@@ -2699,6 +2888,42 @@ let narrow_from_cond tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
       | None -> env
   ) env (Ast.slice_len_mins ~resolve_const:Const_env.find cond)
 
+(* GitHub issue #184: LetMatch's arms end in `Yield e` (this arm's value)
+   or a diverging statement -- but LetMatch's own infer_stmt/check_stmt
+   cases reuse `Match`'s ~300-line exhaustiveness/linear-payload engine
+   as a black box, by recursing on a synthesized `Match (disc, arms)`
+   node (see those cases' own comments). That shared Match engine has no
+   notion of "capture this arm's value into a name" -- a bare `Yield e`
+   walked through it just evaluates `e` and discards it (correct for an
+   ORDINARY `match` statement, where the value genuinely has nowhere to
+   go). So LetMatch's own case rewrites each arm's terminal `Yield e`
+   into `Expr (Assign (Var name, e))` -- literally reconstructing the
+   exact `name = e;` shape the pre-#184 sentinel-rewrite parser hack used
+   to produce -- immediately before constructing the synthesized `Match`
+   node, so the shared engine sees an ordinary, already-well-understood
+   Assign-statement arm and needs no LetMatch-specific awareness at all.
+   Purely an internal AST transform: the SOURCE syntax stays the clean
+   `Allocated(p) => p;` tail; only the desugared tree handed to Match's
+   engine differs. A diverging arm (Return/Break/Continue) has nothing to
+   capture and passes through unchanged. Sync rule: llvm_gen.ml's own
+   LetMatch codegen case needs the identical rewrite -- see its own copy
+   of this function. *)
+let rewrite_letmatch_arm_bodies (name : string) (arms : Ast.match_arm list)
+    : Ast.match_arm list =
+  let rewrite_body stmts =
+    match List.rev stmts with
+    | { Ast.desc = Ast.Yield e; loc } :: rest ->
+        let assign = { Ast.desc = Ast.Assign (
+          { Ast.desc = Ast.Var name; loc }, e); loc } in
+        List.rev ({ Ast.desc = Ast.Expr assign; loc } :: rest)
+    | _ -> stmts (* diverges; nothing to capture *)
+  in
+  List.map (function
+    | Ast.ArmVariant (v, c, b, stmts) -> Ast.ArmVariant (v, c, b, rewrite_body stmts)
+    | Ast.ArmWild stmts -> Ast.ArmWild (rewrite_body stmts)
+    | Ast.ArmIntLit (ns, stmts) -> Ast.ArmIntLit (ns, rewrite_body stmts)
+  ) arms
+
 (* -- Statement inference --------------------------------------------------- *)
 (* Returns (updated_tyenv, updated_raw_locals).
    tyenv grows with each Let in the current scope.
@@ -2727,198 +2952,16 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
   | Expr e ->
       ignore (infer_expr senv eenv tyenv fenv e);
       (tyenv, raw_locals)
-  | Assign (name, e) ->
-      check_private_global_access s.loc name;
-      invalidate_place_projections name;
-      if StringSet.mem name !active_readonly_borrows then
-        raise (TypeError (s.loc, Printf.sprintf
-          "cannot assign to borrowed value '%s'; use `borrow mut` for scoped mutation"
-          name));
-      let (vty, is_mut) = lookup_binding s.loc name tyenv in
-      if contains_stable_owner_value_ty vty then
-        raise (TypeError (s.loc,
-          "stable owner container storage cannot be assigned or copied as a whole"));
-      if not is_mut then
-        raise (TypeError (s.loc,
-          Printf.sprintf "cannot assign to immutable variable '%s'; use 'let mut'" name));
-      (* An existentially-typed target (e.g. a LetMatch-bound `let mut x:
-         exists page: usize. PageOwner[page];`, GitHub issue #183's
-         existential follow-up) cannot be unified against directly: its
-         `TExists` wraps a body built around ITS OWN sealed binder, and a
-         concrete or already-opened (rigid) actual witness can never
-         equal that one specific rigid parameter -- unifying against it
-         verbatim would always fail. Opening it here (substituting a
-         fresh, solvable static variable for the binder) is existential
-         introduction/packing: the fresh variable is free to unify with
-         whatever witness the actual value carries, mirroring how
-         VariantCtor already packs a payload into a variant case's own
-         existential schema. *)
-      let target_ty = strip_io vty in
-      let unify_target = match repr target_ty with
-        | TExists _ -> pack_exists_ty target_ty
-        | _ -> target_ty
-      in
-      let ety = infer_expr senv eenv tyenv fenv e in
-      let ety = adapt_actual_to_expected tyenv e ety unify_target in
-      (* Assignment: match as "actual(rhs) is a subtype of expected(lhs)".
-         TRefinedInt -> TI32 is OK (assigning with loss of precision). Reverse is NG. *)
-      unify_at e.loc ety unify_target;
-      check_literal_fits_refined e.loc e unify_target;
-      (tyenv, raw_locals)
-  | AssignDeref (ptr_expr, val_expr) ->
-      let pt = infer_expr senv eenv tyenv fenv ptr_expr in
-      let inner = match repr pt with
-        | TPtr i ->
-            (* Write through *io T pointer: inner is TIo T, strip it and check against T *)
-            strip_io i
-        | _ ->
-            let inner = fresh () in
-            unify_at ptr_expr.loc pt (TPtr inner);
-            inner
-      in
-      if contains_stable_owner_value_ty inner then
-        raise (TypeError (s.loc,
-          "stable owner container storage cannot be overwritten or copied through a pointer"));
-      let vt = infer_expr senv eenv tyenv fenv val_expr in
-      let vt = adapt_actual_to_expected tyenv val_expr vt inner in
-      if contains_view_ty vt then
-        raise (TypeError (val_expr.loc,
-          "cannot store an erased view through a pointer"));
-      if contains_variant_ty vt then
-        raise (TypeError (val_expr.loc,
-          "cannot store a variant through a pointer in Slice 3"));
-      if is_tuple_ty vt then
-        raise (TypeError (val_expr.loc,
-          "cannot store a tuple through a pointer: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
-      if is_linear_ptr_ty vt then
-        raise (TypeError (val_expr.loc,
-          "cannot store a linear value through a pointer: it would escape \
-           obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"));
-      if is_indexed_owner_ty vt then
-        raise (TypeError (val_expr.loc,
-          "cannot store an indexed owner through a pointer: it would escape obligation tracking"));
-      unify_at val_expr.loc vt inner;
-      check_literal_fits_refined val_expr.loc val_expr inner;
-      (tyenv, raw_locals)
-  | AssignIndex (id, idx, rhs) ->
-      check_private_global_access s.loc id;
-      (* Dispatch on the variable's original type ([T; N] vs *T). tyenv holds the pre-decay type *)
-      let vt = lookup s.loc id tyenv in
-      let it = infer_expr senv eenv tyenv fenv idx in
-      let rt = infer_expr senv eenv tyenv fenv rhs in
-      let elem_ty = match repr vt with
-        | TArray (elem, n) ->
-            require_usize_index idx.loc it;
-            (match idx.desc with
-             | IntLit k64 ->
-                 (match Ast.int_of_intlit k64 with
-                  | Some k when k >= n ->
-                      raise (TypeError (idx.loc,
-                        Printf.sprintf "index %d is out of bounds for array of size %d" k n))
-                  | Some _ -> ()
-                  | None ->
-                      raise (TypeError (idx.loc,
-                        Printf.sprintf "index %Ld is out of bounds for array of size %d" k64 n)))
-             | _ -> ());
-            elem
-        | TSlice (elem, _) -> require_usize_index idx.loc it; elem
-        | TPtr   elem      ->
-            check_ptr_arith_complete s.loc (repr vt);
-            require_isize_offset idx.loc it; strip_io elem
-        | TAlignedPtr (_, elem) ->
-            check_ptr_arith_complete s.loc (repr vt);
-            require_isize_offset idx.loc it; strip_io elem
-        | _ -> raise (TypeError (s.loc,
-            Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
-      in
-      if contains_stable_owner_value_ty elem_ty then
-        raise (TypeError (s.loc,
-          "stable owner container storage cannot be overwritten or copied through an index"));
-      let rt = adapt_actual_to_expected tyenv rhs rt elem_ty in
-      if contains_view_ty rt then
-        raise (TypeError (rhs.loc,
-          "cannot store an erased view into an array/slice element"));
-      if contains_variant_ty rt then
-        raise (TypeError (rhs.loc,
-          "cannot store a variant into an array/slice element in Slice 3"));
-      if is_tuple_ty rt then
-        raise (TypeError (rhs.loc,
-          "cannot store a tuple into an array/slice element: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
-      if is_linear_ptr_ty rt then
-        raise (TypeError (rhs.loc,
-          "cannot store a linear value into an array/slice element: it would \
-           escape obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"));
-      if is_indexed_owner_ty rt then
-        raise (TypeError (rhs.loc,
-          "cannot store an indexed owner into an array/slice element: it would escape obligation tracking"));
-      unify_at rhs.loc rt elem_ty;
-      check_literal_fits_refined rhs.loc rhs elem_ty;
-      (tyenv, raw_locals)
-
-  | AssignField (base_expr, fname, val_expr) ->
-      let bt = infer_expr senv eenv tyenv fenv base_expr in
-      (match repr bt with
-       | TIndexedStruct _ ->
-           (match base_expr.desc with
-            | Var name ->
-                if StringSet.mem name !active_readonly_borrows then
-                  raise (TypeError (base_expr.loc, Printf.sprintf
-                    "cannot mutate shared-borrow parameter '%s'; use `borrow mut` for scoped mutation"
-                    name));
-                let (_, is_mut) = lookup_binding base_expr.loc name tyenv in
-                if not is_mut then
-                  raise (TypeError (base_expr.loc, Printf.sprintf
-                    "cannot assign a field of immutable indexed owner '%s'; use 'let mut'"
-                    name))
-            | _ ->
-                raise (TypeError (base_expr.loc,
-                  "field assignment on an indexed owner requires a mutable local or parameter")))
-       | _ -> ());
-      let (sname, static_args) = match struct_instance (repr bt) with
-        | Some x -> x
-        | _ ->
-            raise (TypeError (base_expr.loc,
-              Printf.sprintf "field assignment '.%s' on non-struct type '%s'"
-                fname (to_string bt)))
-      in
-      let fields = match StringMap.find_opt sname senv with
-        | Some (fs, _, _) -> fs
-        | None ->
-            raise (TypeError (s.loc,
-              Printf.sprintf "unknown struct type '%s'" sname))
-      in
-      check_private_field_access s.loc sname fname;
-      if is_stable_owner_field sname fname then
-        raise (TypeError (s.loc, Printf.sprintf
-          "stable owner field '%s.%s' cannot be assigned directly; use stable_replace while holding its guard"
-          sname fname));
-      let field_ty = match List.assoc_opt fname fields with
-        | Some ft -> field_type_for_instance sname static_args ft
-        | None ->
-            raise (TypeError (s.loc,
-              Printf.sprintf "no field '%s' in struct '%s'" fname sname))
-      in
-      let vt = infer_expr senv eenv tyenv fenv val_expr in
-      let vt = adapt_actual_to_expected tyenv val_expr vt (strip_io field_ty) in
-      if contains_view_ty vt then
-        raise (TypeError (val_expr.loc,
-          "cannot store an erased view into a struct field"));
-      if contains_kinded_variant_ty vt then
-        raise (TypeError (val_expr.loc,
-          "cannot store an affine/linear variant into a struct field"));
-      if is_tuple_ty vt then
-        raise (TypeError (val_expr.loc,
-          "cannot store a tuple into a struct field: tuples are values, not storage (OWNERSHIP_KERNEL.md 5.9)"));
-      if is_linear_ptr_ty vt then
-        raise (TypeError (val_expr.loc,
-          "cannot store a linear value into a struct field: it would escape \
-           obligation tracking (OWNERSHIP_KERNEL.md Stage 3 will lift this)"));
-      if is_indexed_owner_ty vt then
-        raise (TypeError (val_expr.loc,
-          "cannot store an indexed owner into a struct field: it would escape obligation tracking"));
-      (* Assignment to io field: check compatibility with T (io is a storage qualifier, strip it) *)
-      unify_at val_expr.loc vt (strip_io field_ty);
-      check_literal_fits_refined val_expr.loc val_expr (strip_io field_ty);
+  | Yield e ->
+      (* GitHub issue #184: reached when infer_arm_body (the Match case
+         below) walks a plain `match` STATEMENT's arm bodies via ordinary
+         infer_stmt -- a `Yield e` arm here just means "this arm's value,
+         if this were a value-producing context, would be `e`"; a plain
+         `match` discards it, so this behaves exactly like `Expr e`.
+         LetMatch's own case (below) does NOT reach here for a `Yield`
+         arm -- it special-cases the arm bodies itself to CAPTURE the
+         yielded value instead of discarding it (see its own comment). *)
+      ignore (infer_expr senv eenv tyenv fenv e);
       (tyenv, raw_locals)
   | Let (is_mut, name, ty_opt, expr_opt, align_opt) ->
       value_static_identities := StringMap.remove name !value_static_identities;
@@ -3382,25 +3425,27 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
            "match requires an enum, variant, or primitive integer type, got '%s'" (to_string t))))
   | LetMatch (is_mut, name, ty_expr, disc, arms) ->
       (* GitHub issue #183 follow-up ("Layer 1", plus a later non-mut
-         extension): `let [mut] name: ty = match disc { arms };`. The
-         parser has already verified each arm's body ends in
-         `Assign(name, e)` (this arm's value) or Return/Break/Continue
-         (diverges) -- so exhaustiveness, linear-payload handling, and
+         extension and #184's `Yield`-tail sugar): `let [mut] name: ty =
+         match disc { arms };`. The parser has already verified each
+         arm's body ends in `Yield e` (this arm's value) or
+         Return/Break/Continue (diverges). rewrite_letmatch_arm_bodies
+         (above) turns each `Yield e` into an ordinary `name = e;`
+         statement first, so exhaustiveness, linear-payload handling, and
          every other Match rule above apply completely unchanged by
-         recursing on a synthesized `Match` node. `name` itself is
-         declared exactly like an ordinary `let mut name: ty;` (see the
-         Let case above, which this mirrors minus the initializer-
-         unification logic that doesn't apply here: there is no single
-         initializer expression to unify a declared type against, only
-         per-arm Assign targets that Assign's own existing rule already
-         checks against name's now-known type) -- ALWAYS mutable while
-         checking the arms, regardless of the surface `mut`, since an
-         arm's own `name = e;` needs that. A non-mut surface binding
-         downgrades `name` back to immutable in the tyenv returned here,
-         which is what continues past this whole statement -- a later
-         `name = ...;` outside these arms then hits Assign's own
-         existing "cannot assign to immutable variable" check, same as
-         for any other non-mut `let`. *)
+         recursing on a synthesized `Match` node -- Assign's own existing
+         rule checks the rewritten `e` against name's now-known type,
+         nothing new needed there. `name` itself is declared exactly like
+         an ordinary `let mut name: ty;` (see the Let case above, which
+         this mirrors minus the initializer-unification logic that
+         doesn't apply here: there is no single initializer expression to
+         unify a declared type against) -- ALWAYS mutable while checking
+         the arms, regardless of the surface `mut`, since the rewritten
+         `name = e;` needs that. A non-mut surface binding downgrades
+         `name` back to immutable in the tyenv returned here, which is
+         what continues past this whole statement -- a later
+         `name = ...;` outside these arms then hits Assign's own existing
+         "cannot assign to immutable variable" check, same as for any
+         other non-mut `let`. *)
       value_static_identities := StringMap.remove name !value_static_identities;
       invalidate_place_binding name;
       let ty = of_ast ty_expr in
@@ -3409,6 +3454,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
           "stable owner container storage must be a private mutable global, not a local value"));
       let tyenv' = StringMap.add name (ty, true) tyenv in
       let raw_locals' = StringMap.add name ty raw_locals in
+      let arms = rewrite_letmatch_arm_bodies name arms in
       let (tyenv'', raw_locals'') = infer_stmt senv eenv tyenv' fenv ret_ty
         raw_locals' in_loop { desc = Match (disc, arms); loc = s.loc } in
       let tyenv''' =
@@ -4360,6 +4406,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               "unknown erased view '%s'" name))
           | Some formals ->
               validate_static_application e.loc "view" name formals args)
+     | Ast.Assign (lhs, rhs) -> validate_expr_types lhs; validate_expr_types rhs
      | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.Var _
      | Ast.EnumVariant _ -> ())
   and validate_stmt_types (s : Ast.stmt) =
@@ -4376,12 +4423,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          Option.iter (validate_nonparam_type s.loc) ty;
          validate_expr_types lo; validate_expr_types hi;
          List.iter validate_stmt_types body
-     | Ast.Return (Some e) | Ast.Expr e -> validate_expr_types e
+     | Ast.Return (Some e) | Ast.Expr e | Ast.Yield e -> validate_expr_types e
      | Ast.Return None -> ()
      | Ast.LetTuple (_, e) -> validate_expr_types e
-     | Ast.Assign (_, e) -> validate_expr_types e
-     | Ast.AssignDeref (a, b) | Ast.AssignField (a, _, b)
-     | Ast.AssignIndex (_, a, b) -> validate_expr_types a; validate_expr_types b
      | Ast.Block body -> List.iter validate_stmt_types body
      | Ast.While (c, body) ->
          validate_expr_types c; List.iter validate_stmt_types body
@@ -5769,6 +5813,52 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             raise (TypeError (e.loc, msg))
           end;
           moved
+      | Ast.Assign (lhs, rhs) ->
+          (* GitHub issue #184: a GENUINELY NESTED assignment (not the
+             ordinary `x = e;` top-level-statement shape, which
+             check_stmt's own dedicated Ast.Expr(Assign(...)) case above
+             handles instead, with full declared/taints threading this
+             function's signature cannot provide). A target that would
+             need declared/taints updated -- a bare Var, or a tracked
+             (indexed-owner) field -- is rejected outright here rather
+             than silently skipping that update (which the old dedicated
+             stmt cases always performed for exactly these two shapes):
+             those two ARE reachable in check_stmt's own dedicated case,
+             so this restriction only bites when someone genuinely nests
+             a tracked-target assignment inside a larger expression (e.g.
+             `if (x = alloc()) {...}`), which was never expressible before
+             this feature existed anyway. Deref/Index/an ordinary
+             (non-tracked) FieldGet target never touched declared/taints
+             in the old code either -- those are handled fully here,
+             identically to check_stmt's own case. *)
+          (match lhs.desc with
+           | Ast.Var name when is_tracked_path (PVar name) ->
+               raise (TypeError (e.loc, Printf.sprintf
+                 "assignment to linear/affine/must-use value '%s' is only \
+                  supported as a standalone statement, not nested inside \
+                  a larger expression" name))
+           | Ast.FieldGet (Ast.{ desc = Var base_name; _ }, fname)
+             when is_tracked_path (PField (base_name, fname)) ->
+               raise (TypeError (e.loc,
+                 "assignment to a linear/affine indexed-owner field is \
+                  only supported as a standalone statement, not nested \
+                  inside a larger expression"))
+           | Ast.Var _ ->
+               (* An untracked (plain scalar/etc.) bare-name target: the
+                  old dedicated Assign case's declared/taints update is a
+                  no-op-equivalent for tracking purposes here (nothing
+                  safety-relevant depends on it for a value that was never
+                  tracked to begin with), so evaluating the RHS for
+                  move-safety is sufficient. *)
+               check_expr taints moved false rhs
+           | Ast.Deref a ->
+               check_expr taints (check_expr taints moved false a) false rhs
+           | Ast.FieldGet (base_expr, _) ->
+               check_expr taints (check_expr taints moved false base_expr) false rhs
+           | Ast.Index (base, i) ->
+               require_region_live e.loc taints moved base;
+               check_expr taints (check_expr taints moved false i) false rhs
+           | _ -> moved (* not an lvalue; infer_expr already rejected it *))
     in
     (* Scope-end checks apply to LINEAR and MUST_USE obligations. Affine
        permits weakening by definition; maybe-consumed still rejects double
@@ -5848,75 +5938,96 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let moved = check_expr taints moved consumes e in
           require_no_pending_linear s.loc "return" moved declared;
           (moved, declared, taints)
-      | Ast.Expr e -> (check_expr taints moved false e, declared, taints)
-      | Ast.Assign (name, e) ->
-          let p = PVar name in
-          require_no_authority_rebind s.loc declared taints name;
-          if PathSet.mem p borrowed_params then
-            raise (TypeError (s.loc, Printf.sprintf
-              "cannot assign to borrowed value '%s'; borrow permits non-consuming access only"
-              name));
-          if PathSet.mem p sink_params then
-            raise (TypeError (s.loc, Printf.sprintf
-              "cannot assign to sink value '%s'; sink designates this parameter's terminal consumption"
-              name));
-          (* Region taint: a GLOBAL target is durable storage the
-             function-local tracking cannot follow -- reject a tainted RHS.
-             A local target instead REPLACES its taint with the RHS's
-             (creation from a region call, alias/subslice propagation, or
-             clearing on any other RHS), mirroring how reassignment clears
-             consumed status. *)
-          let is_local_target = StringMap.mem name !var_types in
-          if not is_local_target then
-            require_no_taint_escape s.loc taints `Store e;
-          let moved = check_expr taints moved (is_tracked_path p) e in
-          (* Assignment is not a use of the old value: a binding whose value
-             was already moved may be reinitialized. The RHS walk still
-             rejects trying to read that moved value. A live affine value may
-             be weakened by overwrite; a live linear obligation may not. The
-             RHS runs first, so `p = transform(p);` discharges the old linear
-             value before this check and remains legal. *)
-          if requires_all_paths p
-             && PathSet.mem p declared
-             && not (ResourceFlow.is_consumed_on_all_paths p moved) then
-            raise (TypeError (s.loc, Printf.sprintf
-              "assigning over %s value '%s' would discard its obligation \
-               (consume it first)" (kind_word p) name));
-          let taints =
-            if is_local_target then TaintEnv.set name (expr_taint taints e) taints
-            else taints
-          in
-          (mv_clear p moved, PathSet.add p declared, taints)
-      | Ast.AssignDeref (a, b) ->
-          require_no_taint_escape s.loc taints `Store b;
-          (check_expr taints (check_expr taints moved false a) false b,
-           declared, taints)
-      | Ast.AssignField (base_expr, fname, rhs) ->
-          require_no_taint_escape s.loc taints `Store rhs;
-          (match base_expr.desc with
-           | Ast.Var base_name when is_tracked_path (PField (base_name, fname)) ->
-               (* Stage 3a: this field is the producing site for a fresh
-                  obligation, the field-path equivalent of a `let`. The
-                  RHS is consumed if it is itself a tracked expression
-                  (e.g. `h.t = some_other_handle;`), same as a plain
-                  Assign's RHS. Linear fields cannot reach this branch
-                  (banned at declaration), so no overwrite-ban check is
-                  needed here yet -- kept path-generic in is_tracked_path/
-                  is_linear_path above so lifting that ban later is a
-                  small diff, not a redesign. *)
-               let p = PField (base_name, fname) in
-               set_decl_loc p s.loc;
-               let moved = check_expr taints moved true rhs in
+      | Ast.Expr { desc = Ast.Assign (lhs, rhs); loc } ->
+          (* GitHub issue #184: relocated verbatim from the 4 old dedicated
+             stmt cases (Assign/AssignDeref/AssignField/AssignIndex),
+             dispatched on the unified expr's LHS shape. Handled as its
+             own Ast.Expr sub-case (matched BEFORE the generic `Ast.Expr e`
+             case below) rather than folded into the shared check_expr:
+             only THIS statement position can thread updated `declared`/
+             `taints` back out (check_expr's own signature only threads
+             `moved`) -- see check_expr's own new Assign case for how a
+             genuinely NESTED assignment (not the top-level-statement
+             shape every real use of this feature actually needs) is
+             handled instead. *)
+          (match lhs.desc with
+           | Ast.Var name ->
+               let p = PVar name in
+               require_no_authority_rebind loc declared taints name;
+               if PathSet.mem p borrowed_params then
+                 raise (TypeError (loc, Printf.sprintf
+                   "cannot assign to borrowed value '%s'; borrow permits non-consuming access only"
+                   name));
+               if PathSet.mem p sink_params then
+                 raise (TypeError (loc, Printf.sprintf
+                   "cannot assign to sink value '%s'; sink designates this parameter's terminal consumption"
+                   name));
+               (* Region taint: a GLOBAL target is durable storage the
+                  function-local tracking cannot follow -- reject a tainted
+                  RHS. A local target instead REPLACES its taint with the
+                  RHS's (creation from a region call, alias/subslice
+                  propagation, or clearing on any other RHS), mirroring how
+                  reassignment clears consumed status. *)
+               let is_local_target = StringMap.mem name !var_types in
+               if not is_local_target then
+                 require_no_taint_escape loc taints `Store rhs;
+               let moved = check_expr taints moved (is_tracked_path p) rhs in
+               (* Assignment is not a use of the old value: a binding whose
+                  value was already moved may be reinitialized. The RHS walk
+                  still rejects trying to read that moved value. A live
+                  affine value may be weakened by overwrite; a live linear
+                  obligation may not. The RHS runs first, so
+                  `p = transform(p);` discharges the old linear value before
+                  this check and remains legal. *)
+               if requires_all_paths p
+                  && PathSet.mem p declared
+                  && not (ResourceFlow.is_consumed_on_all_paths p moved) then
+                 raise (TypeError (loc, Printf.sprintf
+                   "assigning over %s value '%s' would discard its \
+                    obligation (consume it first)" (kind_word p) name));
+               let taints =
+                 if is_local_target then TaintEnv.set name (expr_taint taints rhs) taints
+                 else taints
+               in
                (mv_clear p moved, PathSet.add p declared, taints)
+           | Ast.Deref a ->
+               require_no_taint_escape loc taints `Store rhs;
+               (check_expr taints (check_expr taints moved false a) false rhs,
+                declared, taints)
+           | Ast.FieldGet (base_expr, fname) ->
+               require_no_taint_escape loc taints `Store rhs;
+               (match base_expr.desc with
+                | Ast.Var base_name when is_tracked_path (PField (base_name, fname)) ->
+                    (* Stage 3a: this field is the producing site for a
+                       fresh obligation, the field-path equivalent of a
+                       `let`. The RHS is consumed if it is itself a tracked
+                       expression (e.g. `h.t = some_other_handle;`), same
+                       as a plain Assign's RHS. Linear fields cannot reach
+                       this branch (banned at declaration), so no
+                       overwrite-ban check is needed here yet -- kept
+                       path-generic in is_tracked_path/is_linear_path above
+                       so lifting that ban later is a small diff, not a
+                       redesign. *)
+                    let p = PField (base_name, fname) in
+                    set_decl_loc p loc;
+                    let moved = check_expr taints moved true rhs in
+                    (mv_clear p moved, PathSet.add p declared, taints)
+                | _ ->
+                    (check_expr taints (check_expr taints moved false base_expr)
+                       false rhs,
+                     declared, taints))
+           | Ast.Index (base, i) ->
+               require_region_live loc taints moved base;
+               require_no_taint_escape loc taints `Store rhs;
+               (check_expr taints (check_expr taints moved false i) false rhs,
+                declared, taints)
            | _ ->
-               (check_expr taints (check_expr taints moved false base_expr)
-                  false rhs,
-                declared, taints))
-      | Ast.AssignIndex (base, i, v) ->
-          require_region_live s.loc taints moved base;
-          require_no_taint_escape s.loc taints `Store v;
-          (check_expr taints (check_expr taints moved false i) false v,
-           declared, taints)
+               (* Not an lvalue shape infer_expr's own Assign case would
+                  have already rejected during type inference -- this
+                  branch is unreachable in a program that passed type
+                  checking, kept only so this match stays exhaustive. *)
+               (moved, declared, taints))
+      | Ast.Expr e -> (check_expr taints moved false e, declared, taints)
       | Ast.Let (_, name, ty_opt, init, _) ->
           Option.iter (fun ty ->
             var_types := StringMap.add name (resolve_declared_type ty) !var_types)
@@ -6114,14 +6225,30 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Continue ->
           require_no_pending_linear s.loc "continue" moved declared;
           (moved, declared, taints)
+      | Ast.Yield e ->
+          (* GitHub issue #184: reached when a plain `match` STATEMENT's
+             arm bodies are walked here (LetMatch's own case below
+             rewrites `Yield` away via rewrite_letmatch_arm_bodies before
+             ever recursing into check_stmt, so it never sees a bare
+             `Yield` itself) -- a plain match discards the arm's value,
+             so this is identical to `Ast.Expr e`. *)
+          (check_expr taints moved false e, declared, taints)
       | Ast.LetMatch (_, name, ty_expr, disc, arms) ->
-          (* GitHub issue #183 follow-up. `name` IS pre-registered into
-             `declared` before recursing (needed so a continuing arm's
-             `name = ...;` is not mistaken by check_stmts's end-of-block
-             sweep for a fresh, arm-scoped declaration that must be
-             consumed before THAT arm's own block ends -- it is meant to
-             escape to the enclosing scope instead, like any other
-             already-declared Assign target).
+          (* GitHub issue #183 follow-up, extended by #184's `Yield`-tail
+             sugar: rewrite_letmatch_arm_bodies (module-level, shared with
+             infer_stmt's own LetMatch case) turns each arm's terminal
+             `Yield e` into an ordinary `name = e;` statement first, so
+             everything below -- including this function's OWN new
+             `Ast.Expr (Ast.Assign (...))` case above -- applies exactly
+             as it did before #184, with no LetMatch-specific handling
+             needed in the shared Match-recursion machinery itself.
+             `name` IS pre-registered into `declared` before recursing
+             (needed so a continuing arm's rewritten `name = ...;` is not
+             mistaken by check_stmts's end-of-block sweep for a fresh,
+             arm-scoped declaration that must be consumed before THAT
+             arm's own block ends -- it is meant to escape to the
+             enclosing scope instead, like any other already-declared
+             Assign target).
              Unlike Ast.Let's initialized case, though, `name` is
              pre-registered as already CONSUMED, not merely produced:
              the two kinds of arm need different starting obligations and
@@ -6130,14 +6257,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              return/break/continue) never touches `name` at all -- seen
              as "already consumed", it raises nothing, matching the fact
              that nothing was ever produced on that path. A continuing
-             arm's `name = ...;` (ordinary Ast.Assign) re-produces it
-             fresh; Assign's own "discard an outstanding obligation"
-             guard only fires when the existing obligation is NOT already
-             fully consumed, so this re-production is accepted cleanly.
-             Ast.Match's arm-merge logic (just above) already excludes
-             terminating arms from the merge, so the diverging arm's
-             vacuous "consumed" state cannot leak into what continues
-             past the whole statement. *)
+             arm's rewritten `name = ...;` re-produces it fresh; Assign's
+             own "discard an outstanding obligation" guard only fires
+             when the existing obligation is NOT already fully consumed,
+             so this re-production is accepted cleanly. Ast.Match's
+             arm-merge logic (just above) already excludes terminating
+             arms from the merge, so the diverging arm's vacuous
+             "consumed" state cannot leak into what continues past the
+             whole statement. *)
           var_types := StringMap.add name (resolve_declared_type ty_expr) !var_types;
           let p = PVar name in
           require_no_authority_rebind s.loc declared taints name;
@@ -6145,6 +6272,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let moved = mv_consume p moved in
           let declared = PathSet.add p declared in
           let taints = TaintEnv.set name PathSet.empty taints in
+          let arms = rewrite_letmatch_arm_bodies name arms in
           check_stmt moved declared taints
             { desc = Ast.Match (disc, arms); loc = s.loc }
     in
@@ -6254,16 +6382,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.StructLit xs | Ast.TupleLit xs -> List.iter visit_expr xs
       | Ast.Index (_, index) -> visit_expr index
       | Ast.SliceOf (_, lo, hi) -> visit_expr lo; visit_expr hi
+      | Ast.Assign (lhs, rhs) -> visit_expr lhs; visit_expr rhs
       | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.Var _
       | Ast.ViewLit _ | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.OffsetOf _ -> ()
     and visit_stmt (s : Ast.stmt) =
       match s.desc with
-      | Ast.Return (Some e) | Ast.Expr e | Ast.LetTuple (_, e)
-      | Ast.Assign (_, e) -> visit_expr e
+      | Ast.Return (Some e) | Ast.Expr e | Ast.LetTuple (_, e) | Ast.Yield e ->
+          visit_expr e
       | Ast.Return None -> ()
-      | Ast.AssignDeref (left, right) | Ast.AssignField (left, _, right)
-      | Ast.AssignIndex (_, left, right) ->
-          visit_expr left; visit_expr right
       | Ast.Block stmts -> List.iter visit_stmt stmts
       | Ast.Let (_, _, _, init, _) -> Option.iter visit_expr init
       | Ast.If (condition, yes, no) ->

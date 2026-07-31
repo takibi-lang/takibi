@@ -1784,8 +1784,7 @@ let rec collect_mutable_pattern_binders stmts =
           | ArmWild body -> collect_mutable_pattern_binders body
           | ArmIntLit (_, body) -> collect_mutable_pattern_binders body
         ) arms
-    | Let _ | LetTuple _ | Return _ | Expr _ | Assign _ | AssignDeref _
-    | AssignField _ | AssignIndex _ | Break | Continue -> []
+    | Let _ | LetTuple _ | Return _ | Expr _ | Yield _ | Break | Continue -> []
   ) stmts
 
 (* Immutable `let` bindings normally stay as SSA values (Imm) so codegen can
@@ -1817,6 +1816,35 @@ let rec collect_immutable_lets stmts =
         ) arms
     | _                           -> []
   ) stmts
+
+(* GitHub issue #184: sync rule with type_inf.ml's own
+   rewrite_letmatch_arm_bodies (see its comment for the full rationale) --
+   LetMatch's arms end in `Yield e`, but the shared `Match` codegen just
+   below (switch, per-arm blocks, fall-through-to-merge) has no notion of
+   "capture this arm's value into a name"; a bare `Yield e` walked through
+   it just evaluates `e` and discards it (correct for an ordinary `match`
+   STATEMENT). LetMatch's own codegen case rewrites each arm's terminal
+   `Yield e` into `Expr (Assign (Var name, e))` -- the exact `name = e;`
+   shape the pre-#184 sentinel-rewrite parser hack used to produce --
+   immediately before delegating to the shared Match codegen, so that
+   codegen needs no LetMatch-specific awareness at all: it just sees an
+   ordinary store into `name`'s alloca via Assign's own existing codegen
+   (the new gen_expr case above). *)
+let rewrite_letmatch_arm_bodies (name : string) (arms : Ast.match_arm list)
+    : Ast.match_arm list =
+  let rewrite_body stmts =
+    match List.rev stmts with
+    | { Ast.desc = Ast.Yield e; loc } :: rest ->
+        let assign = { Ast.desc = Ast.Assign (
+          { Ast.desc = Ast.Var name; loc }, e); loc } in
+        List.rev ({ Ast.desc = Ast.Expr assign; loc } :: rest)
+    | _ -> stmts (* diverges; nothing to capture *)
+  in
+  List.map (function
+    | Ast.ArmVariant (v, c, b, stmts) -> Ast.ArmVariant (v, c, b, rewrite_body stmts)
+    | Ast.ArmWild stmts -> Ast.ArmWild (rewrite_body stmts)
+    | Ast.ArmIntLit (ns, stmts) -> Ast.ArmIntLit (ns, rewrite_body stmts)
+  ) arms
 
 (* -- resolve helpers: map AST annotation -> Ast.type_expr using HM results -- *)
 
@@ -3446,6 +3474,189 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 raise (Error (Printf.sprintf
                   "'%s' is not a function or function pointer" fname))))
 
+  | Assign (lhs, rhs) ->
+      (* GitHub issue #184: relocated verbatim from the 4 old dedicated
+         `gen_stmt` cases (Assign/AssignDeref/AssignIndex/AssignField),
+         dispatched on the unified expr's LHS shape instead of 4 separate
+         AST constructors -- same codegen, just reached from gen_expr
+         instead of gen_stmt (using the whole Assign expr's own `e.loc`
+         wherever the old code used the enclosing statement's `s.loc`).
+         Always returns (TypeVoid, <dummy i1>), matching every other
+         effect-only expr case in this function (dma_publish/
+         interrupt_wait/etc. above). *)
+      (match lhs.desc with
+       | Var name ->
+           let target_ty_opt =
+             match Hashtbl.find_opt locals name with
+             | Some (Mut (ast_ty, _)) -> Some ast_ty
+             | Some (Imm (ast_ty, _)) when is_erased_view_type ast_ty -> Some ast_ty
+             | Some (Imm _) | None ->
+                 (match Hashtbl.find_opt global_vars name with
+                  | Some (ast_ty, _) -> Some ast_ty
+                  | None -> None)
+           in
+           let (_, v) = gen_expr ?expected_ty:target_ty_opt locals rhs in
+           (match Hashtbl.find_opt locals name with
+            | Some (Mut (ast_ty, ptr)) ->
+                let inst = build_store (coerce v ast_ty) ptr builder in
+                (match ast_ty with TypeIo _ -> set_volatile true inst | _ -> ())
+            | Some (Imm (ast_ty, _)) when is_erased_view_type ast_ty ->
+                Hashtbl.replace locals name (Imm (ast_ty, erased_view_value ()))
+            | Some (Imm _) ->
+                raise (Error (Printf.sprintf "BUG: assign to immutable '%s'" name))
+            | None ->
+                match Hashtbl.find_opt global_vars name with
+                | Some (ast_ty, gvar) ->
+                    let inst = build_store (coerce v ast_ty) gvar builder in
+                    (match ast_ty with TypeIo _ -> set_volatile true inst | _ -> ())
+                | None -> raise (Error (Printf.sprintf "Undefined variable: %s" name)));
+           (TypeVoid, const_null (i1_type context))
+       | Deref ptr_expr ->
+           let (ptr_ty, ptr_v) = gen_expr locals ptr_expr in
+           let pointee_ty = match ptr_ty with
+             | TypePtr (TypeIo inner) | TypePtr inner -> Some inner
+             | _ -> None
+           in
+           let (_, val_v) = gen_expr ?expected_ty:pointee_ty locals rhs in
+           let (is_volatile, coerced) = match ptr_ty with
+             | TypePtr (TypeIo inner) -> (true,  coerce val_v inner)
+             | TypePtr inner          -> (false, coerce val_v inner)
+             | _                      -> (false, val_v)
+           in
+           let inst = build_store coerced ptr_v builder in
+           if is_volatile then set_volatile true inst;
+           (TypeVoid, const_null (i1_type context))
+       | Index (id, idx) ->
+           let (idx_ty_raw, idx_raw) = gen_expr locals idx in
+           let idx_v = to_index_width ~is_signed:(not (is_unsigned idx_ty_raw)) idx_raw in
+           let idx_ty = match Const_env.bound_value idx with
+             | Some k -> TypeRefined (k, k + 1, TypeUsize)
+             | None ->
+                 (match idx.desc with
+                  | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
+                              | Some t -> t | None -> idx_ty_raw)
+                  | _ -> idx_ty_raw)
+           in
+           let elem_ty_hint =
+             match Hashtbl.find_opt locals id with
+             | Some (Mut (TypeArray (elem_ty, _), _))
+             | Some (Mut (TypeSlice (elem_ty, _), _))
+             | Some (Imm (TypeSlice (elem_ty, _), _))
+             | Some (Mut (TypePtr (TypeIo elem_ty), _))
+             | Some (Mut (TypePtr elem_ty, _))
+             | Some (Imm (TypePtr (TypeIo elem_ty), _))
+             | Some (Imm (TypePtr elem_ty, _))
+             | Some (Mut (TypeAlignedPtr (_, TypeIo elem_ty), _))
+             | Some (Mut (TypeAlignedPtr (_, elem_ty), _))
+             | Some (Imm (TypeAlignedPtr (_, TypeIo elem_ty), _))
+             | Some (Imm (TypeAlignedPtr (_, elem_ty), _)) -> Some elem_ty
+             | _ -> None
+           in
+           let (_, rhs_v) = gen_expr ?expected_ty:elem_ty_hint locals rhs in
+           let store_to_array elem_ty n arr_ptr =
+             let needs_check = match refinement_range idx_ty with
+               | Some (lo, hi) -> lo < 0 || hi > n
+               | _ -> true
+             in
+             if needs_check then emit_bounds_check idx.loc idx_ty idx_v n;
+             let arr_ll = array_type (ltype_of_ast elem_ty) n in
+             let zero   = const_int (i32_type context) 0 in
+             let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
+             ignore (build_store (coerce rhs_v elem_ty) ep builder)
+           in
+           let store_through_ptr elem_ty ptr_v is_volatile =
+             let ep = build_gep (ltype_of_ast elem_ty) ptr_v [|idx_v|] "idx_ptr" builder in
+             let inst = build_store (coerce rhs_v elem_ty) ep builder in
+             if is_volatile then set_volatile true inst
+           in
+           let store_to_slice elem_ty min_len fat =
+             let proven = match refinement_range idx_ty with
+               | Some (lo, hi) -> lo >= 0 && hi <= min_len
+               | _ -> false
+             in
+             if not proven then
+               emit_bounds_check_dyn idx.loc idx_ty idx_v min_len (slice_len fat);
+             let ep = build_gep (ltype_of_ast elem_ty) (slice_ptr fat) [|idx_v|] "idx_ptr" builder in
+             ignore (build_store (coerce rhs_v elem_ty) ep builder)
+           in
+           (match Hashtbl.find_opt locals id with
+            | Some (Mut (TypeArray (elem_ty, n), ptr)) ->
+                store_to_array elem_ty n ptr
+            | Some (Mut (TypeSlice (el, m), alloca_ptr)) ->
+                let fat = build_load (ltype_of_ast (TypeSlice (el, m))) alloca_ptr id builder in
+                store_to_slice el (effective_slice_min id m) fat
+            | Some (Imm (TypeSlice (el, m), fat)) ->
+                store_to_slice el m fat
+            | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr))
+            | Some (Mut (TypeAlignedPtr (_, TypeIo elem_ty), alloca_ptr)) ->
+                let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
+                store_through_ptr elem_ty ptr_v true
+            | Some (Mut (TypePtr elem_ty, alloca_ptr))
+            | Some (Mut (TypeAlignedPtr (_, elem_ty), alloca_ptr)) ->
+                let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
+                store_through_ptr elem_ty ptr_v false
+            | Some (Imm (TypePtr (TypeIo elem_ty), ptr_v))
+            | Some (Imm (TypeAlignedPtr (_, TypeIo elem_ty), ptr_v)) ->
+                store_through_ptr elem_ty ptr_v true
+            | Some (Imm (TypePtr elem_ty, ptr_v))
+            | Some (Imm (TypeAlignedPtr (_, elem_ty), ptr_v)) ->
+                store_through_ptr elem_ty ptr_v false
+            | Some _ ->
+                raise (Error (Printf.sprintf "AssignIndex: '%s' is not an array or pointer" id))
+            | None ->
+                (match Hashtbl.find_opt global_vars id with
+                 | Some (TypeArray (elem_ty, n), gptr) ->
+                     store_to_array elem_ty n gptr
+                 | Some (TypeSlice (el, m), gptr) ->
+                     let fat = build_load (ltype_of_ast (TypeSlice (el, m))) gptr id builder in
+                     store_to_slice el (effective_slice_min id m) fat
+                 | Some (TypePtr (TypeIo elem_ty), gptr)
+                 | Some (TypeAlignedPtr (_, TypeIo elem_ty), gptr) ->
+                     let ptr_v = build_load (pointer_type context) gptr id builder in
+                     store_through_ptr elem_ty ptr_v true
+                 | Some (TypePtr elem_ty, gptr)
+                 | Some (TypeAlignedPtr (_, elem_ty), gptr) ->
+                     let ptr_v = build_load (pointer_type context) gptr id builder in
+                     store_through_ptr elem_ty ptr_v false
+                 | Some _ ->
+                     raise (Error (Printf.sprintf "AssignIndex: '%s' is not an array or pointer" id))
+                 | None ->
+                     raise (Error (Printf.sprintf "AssignIndex: undefined variable '%s'" id))));
+           (TypeVoid, const_null (i1_type context))
+       | FieldGet (base_expr, fname) ->
+           let (base_ty, base_v) = gen_expr locals base_expr in
+           let (sname, through_io, base_ptr) = match base_ty with
+             | TypeNamed s                      -> (s, false, base_v)
+             | TypePtr (TypeNamed s)            -> (s, false, base_v)
+             | TypePtr (TypeIo (TypeNamed s))   -> (s, true, base_v)
+             | TypeAlignedPtr (_, TypeNamed s)  -> (s, false, base_v)
+             | TypeIndexed (s, _) ->
+                 (match base_expr.desc with
+                  | Var name ->
+                      (match Hashtbl.find_opt locals name with
+                       | Some (Mut (TypeIndexed _, ptr)) -> (s, false, ptr)
+                       | _ -> raise (Error (Printf.sprintf
+                           "BUG: indexed owner '%s' field assignment has no mutable storage"
+                           name)))
+                  | _ -> raise (Error
+                      "BUG: indexed owner field assignment has no stable base"))
+             | _ -> raise (Error (Printf.sprintf
+                 "field assignment '.%s' on non-struct type" fname))
+           in
+           let (idx, field_ty) = field_info sname fname in
+           let llty = Hashtbl.find struct_lltypes sname in
+           let (_, val_v) = gen_expr ~expected_ty:field_ty locals rhs in
+           let field_ptr = build_in_bounds_gep llty base_ptr
+             [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
+             (fname ^ "_ptr") builder
+           in
+           let inst = build_store (coerce val_v field_ty) field_ptr builder in
+           if through_io || (match field_ty with TypeIo _ -> true | _ -> false)
+           then set_volatile true inst;
+           (TypeVoid, const_null (i1_type context))
+       | _ ->
+           raise (Error "BUG: not an assignable expression (should have been rejected by type_inf.ml)"))
+
 (* -- Function codegen ---------------------------------------------------- *)
 
 let gen_func ?prog_types fdef =
@@ -3719,186 +3930,14 @@ let gen_func ?prog_types fdef =
              ignore (build_unreachable builder)
          | _ -> ())
 
-    | Assign (name, e) ->
-        (* Look up the target's type first (a second, cheap lookup below
-           re-derives the same binding for the actual store) so a bare
-           literal on the RHS can be hinted directly at the assignment
-           target's type instead of guessing from its own magnitude. *)
-        let target_ty_opt =
-          match Hashtbl.find_opt locals name with
-          | Some (Mut (ast_ty, _)) -> Some ast_ty
-          | Some (Imm (ast_ty, _)) when is_erased_view_type ast_ty -> Some ast_ty
-          | Some (Imm _) | None ->
-              (match Hashtbl.find_opt global_vars name with
-               | Some (ast_ty, _) -> Some ast_ty
-               | None -> None)
-        in
-        let (_, v) = gen_expr ?expected_ty:target_ty_opt locals e in
-        (match Hashtbl.find_opt locals name with
-         | Some (Mut (ast_ty, ptr)) ->
-             let inst = build_store (coerce v ast_ty) ptr builder in
-             (match ast_ty with TypeIo _ -> set_volatile true inst | _ -> ())
-         | Some (Imm (ast_ty, _)) when is_erased_view_type ast_ty ->
-             Hashtbl.replace locals name (Imm (ast_ty, erased_view_value ()))
-         | Some (Imm _) ->
-             raise (Error (Printf.sprintf "BUG: assign to immutable '%s'" name))
-         | None ->
-             match Hashtbl.find_opt global_vars name with
-             | Some (ast_ty, gvar) ->
-                 let inst = build_store (coerce v ast_ty) gvar builder in
-                 (match ast_ty with TypeIo _ -> set_volatile true inst | _ -> ())
-             | None -> raise (Error (Printf.sprintf "Undefined variable: %s" name)))
-
-    | AssignDeref (ptr_expr, val_expr) ->
-        let (ptr_ty, ptr_v) = gen_expr locals ptr_expr in
-        let pointee_ty = match ptr_ty with
-          | TypePtr (TypeIo inner) | TypePtr inner -> Some inner
-          | _ -> None
-        in
-        let (_, val_v) = gen_expr ?expected_ty:pointee_ty locals val_expr in
-        let (is_volatile, coerced) = match ptr_ty with
-          | TypePtr (TypeIo inner) -> (true,  coerce val_v inner)   (* *io T: volatile store *)
-          | TypePtr inner          -> (false, coerce val_v inner)   (* regular pointer: non-volatile *)
-          | _                      -> (false, val_v)
-        in
-        let inst = build_store coerced ptr_v builder in
-        if is_volatile then set_volatile true inst
-
-    | AssignIndex (id, idx, rhs) ->
-        let (idx_ty_raw, idx_raw) = gen_expr locals idx in
-        let idx_v = to_index_width ~is_signed:(not (is_unsigned idx_ty_raw)) idx_raw in
-        (* Same idx_ty priority as gen_expr's Index case (sync rule):
-           Const_env constant name > narrowing_ctx > raw inferred type. *)
-        let idx_ty = match Const_env.bound_value idx with
-          | Some k -> TypeRefined (k, k + 1, TypeUsize)  (* idx_v is already forced to usize width via to_index_width above *)
-          | None ->
-              (match idx.desc with
-               | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
-                           | Some t -> t | None -> idx_ty_raw)
-               | _ -> idx_ty_raw)
-        in
-        (* Peek at the container's element type so a bare literal RHS can
-           be hinted directly, mirroring the fuller match on the same
-           binding further below (which does the actual store). *)
-        let elem_ty_hint =
-          match Hashtbl.find_opt locals id with
-          | Some (Mut (TypeArray (elem_ty, _), _))
-          | Some (Mut (TypeSlice (elem_ty, _), _))
-          | Some (Imm (TypeSlice (elem_ty, _), _))
-          | Some (Mut (TypePtr (TypeIo elem_ty), _))
-          | Some (Mut (TypePtr elem_ty, _))
-          | Some (Imm (TypePtr (TypeIo elem_ty), _))
-          | Some (Imm (TypePtr elem_ty, _))
-          | Some (Mut (TypeAlignedPtr (_, TypeIo elem_ty), _))
-          | Some (Mut (TypeAlignedPtr (_, elem_ty), _))
-          | Some (Imm (TypeAlignedPtr (_, TypeIo elem_ty), _))
-          | Some (Imm (TypeAlignedPtr (_, elem_ty), _)) -> Some elem_ty
-          | _ -> None
-        in
-        let (_, rhs_v) = gen_expr ?expected_ty:elem_ty_hint locals rhs in
-        let store_to_array elem_ty n arr_ptr =
-          let needs_check = match refinement_range idx_ty with
-            | Some (lo, hi) -> lo < 0 || hi > n
-            | _ -> true
-          in
-          if needs_check then emit_bounds_check s.loc idx_ty idx_v n;
-          let arr_ll = array_type (ltype_of_ast elem_ty) n in
-          let zero   = const_int (i32_type context) 0 in
-          let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
-          ignore (build_store (coerce rhs_v elem_ty) ep builder)
-        in
-        let store_through_ptr elem_ty ptr_v is_volatile =
-          let ep = build_gep (ltype_of_ast elem_ty) ptr_v [|idx_v|] "idx_ptr" builder in
-          let inst = build_store (coerce rhs_v elem_ty) ep builder in
-          if is_volatile then set_volatile true inst
-        in
-        (* Mirrors load_from_slice in gen_expr's Index case: elide only when
-           idx's range fits the compile-time minimum, else check against the
-           runtime length. *)
-        let store_to_slice elem_ty min_len fat =
-          let proven = match refinement_range idx_ty with
-            | Some (lo, hi) -> lo >= 0 && hi <= min_len
-            | _ -> false
-          in
-          if not proven then
-            emit_bounds_check_dyn s.loc idx_ty idx_v min_len (slice_len fat);
-          let ep = build_gep (ltype_of_ast elem_ty) (slice_ptr fat) [|idx_v|] "idx_ptr" builder in
-          ignore (build_store (coerce rhs_v elem_ty) ep builder)
-        in
-        (match Hashtbl.find_opt locals id with
-         | Some (Mut (TypeArray (elem_ty, n), ptr)) ->
-             store_to_array elem_ty n ptr
-         | Some (Mut (TypeSlice (el, m), alloca_ptr)) ->
-             let fat = build_load (ltype_of_ast (TypeSlice (el, m))) alloca_ptr id builder in
-             store_to_slice el (effective_slice_min id m) fat
-         | Some (Imm (TypeSlice (el, m), fat)) ->
-             store_to_slice el m fat
-         | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr))
-         | Some (Mut (TypeAlignedPtr (_, TypeIo elem_ty), alloca_ptr)) ->
-             let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
-             store_through_ptr elem_ty ptr_v true
-         | Some (Mut (TypePtr elem_ty, alloca_ptr))
-         | Some (Mut (TypeAlignedPtr (_, elem_ty), alloca_ptr)) ->
-             let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
-             store_through_ptr elem_ty ptr_v false
-         | Some (Imm (TypePtr (TypeIo elem_ty), ptr_v))
-         | Some (Imm (TypeAlignedPtr (_, TypeIo elem_ty), ptr_v)) ->
-             store_through_ptr elem_ty ptr_v true
-         | Some (Imm (TypePtr elem_ty, ptr_v))
-         | Some (Imm (TypeAlignedPtr (_, elem_ty), ptr_v)) ->
-             store_through_ptr elem_ty ptr_v false
-         | Some _ ->
-             raise (Error (Printf.sprintf "AssignIndex: '%s' is not an array or pointer" id))
-         | None ->
-             (match Hashtbl.find_opt global_vars id with
-              | Some (TypeArray (elem_ty, n), gptr) ->
-                  store_to_array elem_ty n gptr
-              | Some (TypeSlice (el, m), gptr) ->
-                  let fat = build_load (ltype_of_ast (TypeSlice (el, m))) gptr id builder in
-                  store_to_slice el (effective_slice_min id m) fat
-              | Some (TypePtr (TypeIo elem_ty), gptr)
-              | Some (TypeAlignedPtr (_, TypeIo elem_ty), gptr) ->
-                  let ptr_v = build_load (pointer_type context) gptr id builder in
-                  store_through_ptr elem_ty ptr_v true
-              | Some (TypePtr elem_ty, gptr)
-              | Some (TypeAlignedPtr (_, elem_ty), gptr) ->
-                  let ptr_v = build_load (pointer_type context) gptr id builder in
-                  store_through_ptr elem_ty ptr_v false
-              | Some _ ->
-                  raise (Error (Printf.sprintf "AssignIndex: '%s' is not an array or pointer" id))
-              | None ->
-                  raise (Error (Printf.sprintf "AssignIndex: undefined variable '%s'" id))))
-
-    | AssignField (base_expr, fname, val_expr) ->
-        let (base_ty, base_v) = gen_expr locals base_expr in
-        let (sname, through_io, base_ptr) = match base_ty with
-          | TypeNamed s                      -> (s, false, base_v)
-          | TypePtr (TypeNamed s)            -> (s, false, base_v)
-          | TypePtr (TypeIo (TypeNamed s))   -> (s, true, base_v)
-          | TypeAlignedPtr (_, TypeNamed s)  -> (s, false, base_v)   (* GitHub issue #102 *)
-          | TypeIndexed (s, _) ->
-              (match base_expr.desc with
-               | Var name ->
-                   (match Hashtbl.find_opt locals name with
-                    | Some (Mut (TypeIndexed _, ptr)) -> (s, false, ptr)
-                    | _ -> raise (Error (Printf.sprintf
-                        "BUG: indexed owner '%s' field assignment has no mutable storage"
-                        name)))
-               | _ -> raise (Error
-                   "BUG: indexed owner field assignment has no stable base"))
-          | _ -> raise (Error (Printf.sprintf
-              "field assignment '.%s' on non-struct type" fname))
-        in
-        let (idx, field_ty) = field_info sname fname in
-        let llty = Hashtbl.find struct_lltypes sname in
-        let (_, val_v) = gen_expr ~expected_ty:field_ty locals val_expr in
-        let field_ptr = build_in_bounds_gep llty base_ptr
-          [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
-          (fname ^ "_ptr") builder
-        in
-        let inst = build_store (coerce val_v field_ty) field_ptr builder in
-        if through_io || (match field_ty with TypeIo _ -> true | _ -> false)
-        then set_volatile true inst
+    | Yield e ->
+        (* GitHub issue #184: reached when gen_stmt walks a plain `match`
+           STATEMENT's arm bodies (LetMatch's own codegen case rewrites
+           `Yield` away via rewrite_letmatch_arm_bodies before ever
+           recursing into gen_stmt on the arms, so it never sees a bare
+           `Yield` itself) -- a plain match discards the arm's value,
+           identical to `Expr e`. *)
+        ignore (gen_expr locals e)
 
     | Let (true, name, ty_opt, expr_opt, _) ->
         (* Mutable: alloca was pre-allocated; store the initial value via init_memory *)
@@ -4287,31 +4326,33 @@ let gen_func ?prog_types fdef =
            integer zero from aggregate-returning functions. *)
         if not !merge_reachable then ignore (build_unreachable builder)
     | LetMatch (_, name, ty, disc, arms) ->
-        (* GitHub issue #183 follow-up: `name`'s alloca already exists --
-           collect_lets (called once, up front, over the whole function
-           body -- see its own LetMatch case) already contributed it,
-           exactly like an ordinary `let mut name: ty;`. The arms were
-           already rewritten by the parser (a value arm's body is
-           `[Assign(name, e)]`, an ordinary store into that alloca via
-           the existing Assign codegen; a block arm is untouched). So
-           the entire Match codegen above -- switch, per-arm blocks,
-           fall-through-to-merge for non-diverging arms, no fall-through
-           for diverging ones -- applies completely unchanged; nothing
-           LetMatch-specific is needed here beyond this one recursive
-           call.
+        (* GitHub issue #183 follow-up, extended by #184's `Yield`-tail
+           sugar: `name`'s alloca already exists -- collect_lets (called
+           once, up front, over the whole function body -- see its own
+           LetMatch case) already contributed it, exactly like an
+           ordinary `let mut name: ty;`. rewrite_letmatch_arm_bodies
+           (above) turns each arm's terminal `Yield e` into an ordinary
+           `name = e;` statement first -- an ordinary store into that
+           alloca via the new Assign gen_expr case above; a diverging arm
+           is untouched. So the entire Match codegen below -- switch,
+           per-arm blocks, fall-through-to-merge for non-diverging arms,
+           no fall-through for diverging ones -- applies completely
+           unchanged; nothing LetMatch-specific is needed here beyond
+           this one rewrite-then-recurse.
            Erased view types are the one exception: the pre-alloca pass
            deliberately skips them (they have no runtime storage), and
            ordinarily it is `Let(true, ...)`'s own codegen case that
            first registers the `Imm (ty, erased_view_value ())` locals
            entry an Assign later overwrites. LetMatch never runs that
-           case (there is no single initializer expression -- each arm's
-           `name = ...;` is itself an ordinary Assign), so that first
-           registration must happen here instead, or Assign's codegen
-           finds no `locals` entry at all and raises "Undefined
-           variable". *)
+           case (there is no single initializer expression -- each
+           rewritten arm's `name = ...;` is itself an ordinary Assign),
+           so that first registration must happen here instead, or
+           Assign's codegen finds no `locals` entry at all and raises
+           "Undefined variable". *)
         let ast_ty = res name (Some ty) in
         if is_erased_view_type ast_ty && not (Hashtbl.mem locals name) then
           Hashtbl.add locals name (Imm (ast_ty, erased_view_value ()));
+        let arms = rewrite_letmatch_arm_bodies name arms in
         gen_stmt { desc = Match (disc, arms); loc = s.loc }
   in
 

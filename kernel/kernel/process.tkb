@@ -28,14 +28,14 @@ fn initial_process_create() -> ProcessCreateResult {
         PageAllocResult::OutOfMemory => {
             return ProcessCreateResult::OutOfMemory;
         }
-        PageAllocResult::Allocated(p) => { text = p; }
+        PageAllocResult::Allocated(p) => { p }
     };
     let data: exists data_page: usize. PageOwner[data_page] = match page_alloc() {
         PageAllocResult::OutOfMemory => {
             page_free(text);
             return ProcessCreateResult::OutOfMemory;
         }
-        PageAllocResult::Allocated(p) => { data = p; }
+        PageAllocResult::Allocated(p) => { p }
     };
     let stack: exists stack_page: usize. PageOwner[stack_page] = match page_alloc() {
         PageAllocResult::OutOfMemory => {
@@ -43,7 +43,7 @@ fn initial_process_create() -> ProcessCreateResult {
             page_free(text);
             return ProcessCreateResult::OutOfMemory;
         }
-        PageAllocResult::Allocated(p) => { stack = p; }
+        PageAllocResult::Allocated(p) => { p }
     };
     return ProcessCreateResult::Created((process_new(), text, data, stack));
 }
