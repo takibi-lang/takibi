@@ -823,7 +823,7 @@ let apply_narrowing (locals : (string, local_binding) Hashtbl.t)
           Hashtbl.replace locals name (Imm (TypeSlice (el, k), v));
           (name, old) :: saved
       | _ -> saved
-  ) saved (Ast.slice_len_mins cond)
+  ) saved (Ast.slice_len_mins ~resolve_const:Const_env.find cond)
 
 let restore_narrowing (locals : (string, local_binding) Hashtbl.t) saved =
   List.iter (fun (name, old) -> Hashtbl.replace locals name old) saved
@@ -898,7 +898,7 @@ let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t)
           Hashtbl.replace narrowing_ctx name (TypeSlice (el, max m k));
           (name, old) :: saved
       | _ -> saved
-  ) saved (Ast.slice_len_mins cond)
+  ) saved (Ast.slice_len_mins ~resolve_const:Const_env.find cond)
 
 let restore_narrowing_mut saved =
   List.iter (fun (name, old_opt) ->
@@ -1480,17 +1480,19 @@ let rec refinement_range = function
   | TypeRefined (lo, hi, _) -> Some (lo, hi)
   | _ -> None
 
-(* Extract a small-number-scoped compile-time integer from an expression,
-   iff it is exactly an integer literal that fits natively (see
-   Ast.int_of_intlit's comment for why IntLit's Int64.t payload cannot
-   always be narrowed to `int`). Used throughout the range-propagation
-   mirror of type_inf.ml's BinOp typing below (sync rule: both sides must
-   make the same decision). None uniformly covers both "not a literal at
-   all" and "a literal, but too large to reason about here" -- both fall
-   back to the conservative (unrefined) case. *)
+(* Extract a small-number-scoped compile-time integer from an expression:
+   either a bare integer literal (see Ast.int_of_intlit's comment for why
+   IntLit's Int64.t payload cannot always be narrowed to `int`), or
+   (GitHub issue #185) a reference to a compile-time `const`. Used
+   throughout the range-propagation mirror of type_inf.ml's BinOp typing
+   below (sync rule: both sides must make the same decision -- including
+   this const-resolution addition). None uniformly covers both "not a
+   literal or known const at all" and "one, but too large to reason
+   about here" -- both fall back to the conservative (unrefined) case. *)
 let intlit_opt (e : Ast.expr) : int option =
   match e.desc with
   | Ast.IntLit k -> Ast.int_of_intlit k
+  | Ast.Var name -> Const_env.find name
   | _ -> None
 
 (* Widen a loaded value to the arithmetic width (i32 or i64).
@@ -2863,26 +2865,29 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                       its comment for why re-evaluating an arbitrary
                       expression here would risk duplicating side
                       effects). *)
-                   (match w.desc with
-                    | IntLit _ ->
-                        (match intlit_opt w with
-                         | Some k when k >= 0 -> Some k
-                         | _ -> None)
-                    | Var w_name ->
-                        let wty = match Hashtbl.find_opt narrowing_ctx w_name with
-                          | Some t -> Some t
-                          | None ->
-                              (match Hashtbl.find_opt locals w_name with
-                               | Some (Imm (t, _)) | Some (Mut (t, _)) -> Some t
-                               | None ->
-                                   (match Hashtbl.find_opt global_vars w_name with
-                                    | Some (t, _) -> Some t
-                                    | None -> None))
-                        in
-                        (match wty with
-                         | Some (TypeRefined (wlo, _, _)) when wlo >= 0 -> Some wlo
-                         | _ -> None)
-                    | _ -> None))
+                   (* A const reference (GitHub issue #185) resolves the
+                      same way type_inf.ml's mirror now does -- sync rule
+                      above still applies to everything else. *)
+                   (match Const_env.bound_value w with
+                    | Some k when k >= 0 -> Some k
+                    | Some _ -> None
+                    | None ->
+                        match w.desc with
+                        | Var w_name ->
+                            let wty = match Hashtbl.find_opt narrowing_ctx w_name with
+                              | Some t -> Some t
+                              | None ->
+                                  (match Hashtbl.find_opt locals w_name with
+                                   | Some (Imm (t, _)) | Some (Mut (t, _)) -> Some t
+                                   | None ->
+                                       (match Hashtbl.find_opt global_vars w_name with
+                                        | Some (t, _) -> Some t
+                                        | None -> None))
+                            in
+                            (match wty with
+                             | Some (TypeRefined (wlo, _, _)) when wlo >= 0 -> Some wlo
+                             | _ -> None)
+                        | _ -> None))
         | _ -> None
       in
       let ranges_proven lo_r hi_r limit =

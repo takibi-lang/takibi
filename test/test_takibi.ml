@@ -8818,6 +8818,42 @@ let codegen_tests = [
             return offset;
         }");
 
+  (* GitHub issue #185: two --forbid-trap proof mechanisms recognized a
+     bare integer literal but not a const reference, even though the
+     const's value is exactly as statically known. Root cause traced to
+     intlit_opt (type_inf.ml's central range-propagation helper, mirrored
+     in llvm_gen.ml) only matching IntLit, not a Var naming a registered
+     const; same_base_len (the subslice same-base rule) and
+     Ast.slice_len_mins (slice-length if-narrowing) had their own,
+     narrower copies of the same gap. All three now resolve a const
+     reference via Const_env, exactly like a literal. *)
+  Alcotest.test_case
+    "issue #185: the same-base subslice rule proves a const-sized \
+     subslice (`pool[offset..<offset + PAGE_SIZE]`), not just a literal \
+     one -- exercises intlit_opt's Add range propagation feeding the \
+     same-base rule's own const check" `Quick
+    (expect_codegen_ok
+       "const I185_PAGE_SIZE: usize = 4096;
+        const I185_COUNT: usize = 512;
+        fn i185_subslice(
+                offset: {0..<(I185_COUNT - 1) * I185_PAGE_SIZE + 1 as usize},
+                pool: [u8; I185_PAGE_SIZE * I185_COUNT..]) -> []u8 {
+            return pool[offset..<offset + I185_PAGE_SIZE];
+        }");
+
+  Alcotest.test_case
+    "issue #185: slice-length narrowing (`if (s.len >= K)`) accepts a \
+     const K, not just a literal one" `Quick
+    (expect_codegen_ok
+       "const I185N_PAGE_SIZE: usize = 4096;
+        must_use variant I185NResult { TooShort; Ok([u8; I185N_PAGE_SIZE..]); }
+        fn i185n_narrow(bytes: []u8) -> I185NResult {
+            if (bytes.len >= I185N_PAGE_SIZE) {
+                return I185NResult::Ok(bytes);
+            }
+            return I185NResult::TooShort;
+        }");
+
   Alcotest.test_case
     "global let initializer: referencing a `let mut` global is rejected -- \
      a mutable global's value can change at runtime, so it is never a \

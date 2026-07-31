@@ -654,18 +654,24 @@ let check_match_int_literal_range loc lit base =
     raise (TypeError (loc, Printf.sprintf
       "match arm literal %d does not fit type '%s'" lit (to_string base)))
 
-(* Extract a small-number-scoped compile-time integer from an expression,
-   iff it is exactly an integer literal that fits natively (see
-   Ast.int_of_intlit's comment for why IntLit's Int64.t payload cannot
-   always be narrowed to `int`). Used throughout range propagation below,
-   which only ever needs to reason about realistic mask/comparison/
-   multiplier constants, never a genuinely 64-bit-wide value. None
-   uniformly covers both "not a literal at all" and "a literal, but too
-   large to reason about here" -- both fall back to the conservative
-   (unrefined) case, the same as any other non-constant expression would. *)
+(* Extract a small-number-scoped compile-time integer from an expression:
+   either a bare integer literal (see Ast.int_of_intlit's comment for why
+   IntLit's Int64.t payload cannot always be narrowed to `int`), or
+   (GitHub issue #185) a reference to a compile-time `const` -- exactly
+   as statically known as a literal, and Const_env.find's own shadowing
+   precondition (see its comment) means a Var here can only ever denote
+   the global constant, never a same-named local. Used throughout range
+   propagation below, which only ever needs to reason about realistic
+   mask/comparison/multiplier constants, never a genuinely 64-bit-wide
+   value. None uniformly covers "not a literal or known const at all"
+   and "one, but too large to reason about here" -- both fall back to
+   the conservative (unrefined) case, the same as any other non-constant
+   expression would. Sync rule: llvm_gen.ml's own intlit_opt mirrors this
+   exactly, change together. *)
 let intlit_opt (e : Ast.expr) : int option =
   match e.desc with
   | IntLit k -> Ast.int_of_intlit k
+  | Var name -> Const_env.find name
   | _ -> None
 
 (* Is this expression built up entirely from compile-time integer
@@ -1849,19 +1855,28 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  in
                  if is_io then None
                  else
-                   match w.desc with
-                   | IntLit _ ->
-                       (match intlit_opt w with
-                        | Some k when k >= 0 -> Some k
-                        | _ -> None)
-                   | Var w_name ->
-                       (match StringMap.find_opt w_name tyenv with
-                        | Some (t, _) ->
-                            (match repr t with
-                             | TRefinedInt (wlo, _, _) when wlo >= 0 -> Some wlo
-                             | _ -> None)
-                        | None -> None)
-                   | _ -> None)
+                   (* A const reference (GitHub issue #185) has as exact a
+                      known value as a literal -- Const_env.bound_value
+                      already covers both IntLit and a Var naming a
+                      registered const, and Const_env's own shadowing
+                      precondition (see its bound_value comment) means a
+                      Var here can only ever denote the global constant,
+                      never a same-named local. Only fall through to the
+                      refined-variable check for a genuine non-const
+                      variable. *)
+                   match Const_env.bound_value w with
+                   | Some k when k >= 0 -> Some k
+                   | Some _ -> None
+                   | None ->
+                       match w.desc with
+                       | Var w_name ->
+                           (match StringMap.find_opt w_name tyenv with
+                            | Some (t, _) ->
+                                (match repr t with
+                                 | TRefinedInt (wlo, _, _) when wlo >= 0 -> Some wlo
+                                 | _ -> None)
+                            | None -> None)
+                       | _ -> None)
         | _ -> None
       in
       (match repr vt with
@@ -2682,7 +2697,7 @@ let narrow_from_cond tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
                StringMap.add name (TSlice (el, k), is_mut) env
            | _ -> env)
       | None -> env
-  ) env (Ast.slice_len_mins cond)
+  ) env (Ast.slice_len_mins ~resolve_const:Const_env.find cond)
 
 (* -- Statement inference --------------------------------------------------- *)
 (* Returns (updated_tyenv, updated_raw_locals).
