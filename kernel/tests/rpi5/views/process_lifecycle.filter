@@ -1,1 +1,1 @@
-^(initial process:|process clone:|resources:)
+^(initial process:|process clone:|vm fork:|resources:)

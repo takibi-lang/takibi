@@ -33,6 +33,25 @@ per-process descriptor/socket ownership remain the next issue #181 stage;
 the daemon argv intentionally remains in inetd mode until those semantics are
 connected.
 
+### 2026-08-01: Eager Private VM Copy Across HTTPd Fork (GitHub Issue #181)
+
+The observed `clone(SIGCHLD)` path now receives fork VM semantics instead of
+temporarily sharing the parent's writable mappings. The bounded bootstrap page
+pool grows from 512 to 1024 pages, enough for the concrete 331-page HTTPd
+parent plus one eager child copy. Clone scans the 512-entry user window,
+allocates and copies each present page, and switches the live PTE to the child
+page while retaining the original parent PTE and page ownership. Child exit
+restores every parent PTE, invalidates the corresponding TLB entry, and
+releases every child page.
+
+A linear `ProcessCloneVmOwner` travels through a guarded global store across
+the child userspace lifetime, so the copied pages cannot be silently dropped
+between syscalls. Allocation or validation failure rolls back every partial
+mapping before returning `-EAGAIN`. The focused three-page EL0 fixture proves
+all three child pages are reclaimed and the final allocator count returns to
+zero. The complete RPi5 kernel still builds under `--forbid-trap`; descriptor
+and socket ownership remain the next issue #181 stage.
+
 ### 2026-07-29: Bounded TCP Streaming and Retransmission Progress (GitHub Issue #180)
 
 The standalone kernel TCP path now reconstructs in-order request segments,

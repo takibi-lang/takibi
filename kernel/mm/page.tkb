@@ -1,8 +1,10 @@
 // Fixed bootstrap page allocator. A general allocator is deliberately deferred
 // until a real later milestone needs it; the initial process needs exactly
-// three independently-owned pages.
+// three independently-owned pages. The foreground HTTPd fork adds one eager
+// private copy of its mapped process image; 1024 pages cover the observed
+// 331-page parent and child without introducing a general allocator policy.
 const PAGE_SIZE: usize = 4096;
-const BOOT_PAGE_COUNT: usize = 512;
+const BOOT_PAGE_COUNT: usize = 1024;
 
 private let mut boot_pages: [u8; PAGE_SIZE * BOOT_PAGE_COUNT] align(PAGE_SIZE);
 private let mut boot_page_used: [u8; BOOT_PAGE_COUNT];
@@ -72,6 +74,29 @@ fn page_bytes(owner: borrow PageOwner[page]) -> [u8; PAGE_SIZE..] @ page {
     let bytes: []u8 = pool[offset..<offset + PAGE_SIZE];
     if (bytes.len >= PAGE_SIZE) { return bytes; }
     return pool[0..<PAGE_SIZE];
+}
+
+// Copy one page already transferred into a coarse mapping owner. The source
+// physical address comes from a present user PTE and is accepted only when it
+// names this allocator's pool exactly; the destination retains its PageOwner.
+fn page_copy_mapped_physical(source_physical: usize,
+                             destination: borrow PageOwner[page])
+        -> bool !{unsafe} {
+    let base: usize = (boot_pages as *u8) as usize;
+    let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
+    if (source_physical < base || source_physical >= base + pool_bytes ||
+        (source_physical - base) % PAGE_SIZE != 0) {
+        return false;
+    }
+    let source_offset: usize = source_physical - base;
+    if (source_offset > pool_bytes - PAGE_SIZE) { return false; }
+    let source_base: *u8 = boot_pages as *u8;
+    let source = unsafe {
+        source_base[source_offset as isize..<
+                    (source_offset + PAGE_SIZE) as isize]
+    };
+    slice_copy(page_bytes(destination), source);
+    return true;
 }
 
 // Transfers per-page responsibility into a coarser linear owner such as a

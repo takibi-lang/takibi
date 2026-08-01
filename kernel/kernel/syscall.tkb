@@ -774,18 +774,36 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     }
 
     if (number == AARCH64_NR_CLONE) {
-        match kernel_process_clone_begin(x0, x1) {
-            ProcessCloneResult::Invalid => { return (1, LINUX_EINVAL); }
-            ProcessCloneResult::ChildReady(child_pid) => {
-                // Assembly copies the complete saved parent frame to the
-                // dedicated child kernel stack and resumes it with x0=0.
-                return (3, child_pid);
+        if (x0 != 0x11 || x1 != 0) { return (1, LINUX_EINVAL); }
+        match process_image_clone_vm_begin() {
+            ProcessCloneVmResult::OutOfMemory => {
+                return (1, LINUX_EAGAIN);
+            }
+            ProcessCloneVmResult::Copied => {
+                match kernel_process_clone_begin(x0, x1) {
+                    ProcessCloneResult::Invalid => {
+                        match process_image_clone_vm_reap() {
+                            ProcessCloneVmReapResult::Missing => { }
+                            ProcessCloneVmReapResult::Reaped => { }
+                        }
+                        return (1, LINUX_EINVAL);
+                    }
+                    ProcessCloneResult::ChildReady(child_pid) => {
+                        // Assembly copies the complete saved parent frame to
+                        // the dedicated child kernel stack and resumes x0=0.
+                        return (3, child_pid);
+                    }
+                }
             }
         }
     }
     if (number == AARCH64_NR_EXIT || number == AARCH64_NR_EXIT_GROUP) {
         if (kernel_process_is_child()) {
             // Restore the preserved parent frame with clone() == child PID.
+            match process_image_clone_vm_reap() {
+                ProcessCloneVmReapResult::Missing => { return (0, 0); }
+                ProcessCloneVmReapResult::Reaped => { }
+            }
             return (4, kernel_process_child_exit(x0));
         }
         return (2, x0);

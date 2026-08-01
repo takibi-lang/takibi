@@ -5,6 +5,26 @@ use "kernel/fs/elf64.tkb";
 private let mut image_page_indices: [usize; BOOT_PAGE_COUNT];
 private let mut image_l3_indices: [usize; BOOT_PAGE_COUNT];
 private let mut process_image_zero_page: [u8; PAGE_SIZE];
+private let mut clone_page_indices: [usize; 512];
+private let mut clone_parent_ptes: [usize; 512];
+private let mut clone_l3_indices: [usize; 512];
+private let mut clone_page_count: usize;
+private let mut clone_last_reaped_count: usize;
+
+private linear view ProcessCloneVmOwner;
+variant ProcessCloneVmValue {
+    Empty;
+    Ready(ProcessCloneVmOwner);
+}
+struct ProcessCloneVmStore {
+    private mutex: i32;
+    private value: ProcessCloneVmValue;
+}
+private let mut process_clone_vm_store: ProcessCloneVmStore;
+private linear view ProcessCloneVmGuard[lock: addr];
+
+must_use variant ProcessCloneVmResult { OutOfMemory; Copied; }
+must_use variant ProcessCloneVmReapResult { Missing; Reaped; }
 
 const PROCESS_STACK_L3_INDEX: usize = 511;
 const PROCESS_DYNAMIC_STACK_FIRST_L3_INDEX: usize = 504;
@@ -23,6 +43,144 @@ const AT_EUID: usize = 12;
 const AT_GID: usize = 13;
 const AT_EGID: usize = 14;
 const AT_EXECFN: usize = 31;
+
+fn process_clone_vm_lock(lock: *i32 @ address)
+        -> ProcessCloneVmGuard[address] {
+    return view ProcessCloneVmGuard[address];
+}
+
+fn process_clone_vm_unlock(guard: sink ProcessCloneVmGuard[address],
+                           lock: *i32 @ address) {}
+
+fn process_clone_vm_owner_drop(owner: sink ProcessCloneVmOwner) {}
+
+fn process_clone_vm_install(owner: sink ProcessCloneVmOwner) -> bool {
+    let guard = process_clone_vm_lock(&process_clone_vm_store.mutex);
+    let previous: ProcessCloneVmValue = stable_replace(
+        guard, &process_clone_vm_store.mutex,
+        process_clone_vm_store.value, ProcessCloneVmValue::Ready(owner));
+    match previous {
+        ProcessCloneVmValue::Empty => {
+            process_clone_vm_unlock(
+                guard, &process_clone_vm_store.mutex);
+            return true;
+        }
+        ProcessCloneVmValue::Ready(stale) => {
+            let displaced: ProcessCloneVmValue = stable_replace(
+                guard, &process_clone_vm_store.mutex,
+                process_clone_vm_store.value,
+                ProcessCloneVmValue::Ready(stale));
+            process_clone_vm_unlock(
+                guard, &process_clone_vm_store.mutex);
+            match displaced {
+                ProcessCloneVmValue::Empty => { return false; }
+                ProcessCloneVmValue::Ready(incoming) => {
+                    // This branch is unreachable in the single-child model;
+                    // consume the incoming proof after rolling its pages back.
+                    process_clone_vm_owner_drop(incoming);
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+fn process_clone_vm_take() -> ProcessCloneVmValue {
+    let guard = process_clone_vm_lock(&process_clone_vm_store.mutex);
+    let previous: ProcessCloneVmValue = stable_replace(
+        guard, &process_clone_vm_store.mutex,
+        process_clone_vm_store.value, ProcessCloneVmValue::Empty);
+    process_clone_vm_unlock(guard, &process_clone_vm_store.mutex);
+    return previous;
+}
+
+fn process_clone_vm_rollback(count: usize) {
+    for i: usize in 0..<count {
+        if (i < 512) {
+            let l3_index: usize = clone_l3_indices[i];
+            let parent_pte: usize = clone_parent_ptes[i];
+            let child_page: usize = clone_page_indices[i];
+            if (l3_index < 512 && child_page < BOOT_PAGE_COUNT) {
+                user_pte_write(l3_index, parent_pte);
+                user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
+                page_transferred_release(child_page);
+            }
+        }
+    }
+    clone_page_count = 0;
+}
+
+fn process_image_clone_vm_begin() -> ProcessCloneVmResult !{unsafe} {
+    clone_page_count = 0;
+    for l3_index: usize in 0..<512 {
+        let parent_pte: usize = user_pte_read(l3_index);
+        if (parent_pte != 0) {
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {
+                    process_clone_vm_rollback(clone_page_count);
+                    return ProcessCloneVmResult::OutOfMemory;
+                }
+                PageAllocResult::Allocated(child_page) => {
+                    let parent_physical: usize =
+                        parent_pte & 0x000000FFFFFFF000;
+                    let slot_value: usize = clone_page_count;
+                    if (slot_value >= 0 && slot_value < 512) {
+                        let slot: {0..<512 as usize} = slot_value;
+                        if (page_copy_mapped_physical(
+                                parent_physical, child_page) == false) {
+                            page_free(child_page);
+                            process_clone_vm_rollback(clone_page_count);
+                            return ProcessCloneVmResult::OutOfMemory;
+                        }
+                        clone_l3_indices[slot] = l3_index;
+                        clone_parent_ptes[slot] = parent_pte;
+                        let child_physical: usize =
+                            page_physical_address(child_page);
+                        let child_pte: usize = child_physical |
+                            (parent_pte & 0xFFFFFF0000000FFF);
+                        user_pte_write(l3_index, child_pte);
+                        user_tlb_invalidate(
+                            USER_TEXT_VA + l3_index * PAGE_SIZE);
+                        clone_page_indices[slot] =
+                            page_owner_transfer_index(child_page);
+                        clone_page_count = clone_page_count + 1;
+                    } else {
+                        page_free(child_page);
+                        process_clone_vm_rollback(clone_page_count);
+                        return ProcessCloneVmResult::OutOfMemory;
+                    }
+                }
+            }
+        }
+    }
+    if (clone_page_count == 0) {
+        return ProcessCloneVmResult::OutOfMemory;
+    }
+    if (process_clone_vm_install(view ProcessCloneVmOwner) == false) {
+        process_clone_vm_rollback(clone_page_count);
+        return ProcessCloneVmResult::OutOfMemory;
+    }
+    return ProcessCloneVmResult::Copied;
+}
+
+fn process_image_clone_vm_reap() -> ProcessCloneVmReapResult {
+    match process_clone_vm_take() {
+        ProcessCloneVmValue::Empty => {
+            return ProcessCloneVmReapResult::Missing;
+        }
+        ProcessCloneVmValue::Ready(owner) => {
+            let count: usize = clone_page_count;
+            process_clone_vm_rollback(count);
+            process_clone_vm_owner_drop(owner);
+            clone_last_reaped_count = count;
+            return ProcessCloneVmReapResult::Reaped;
+        }
+    }
+}
+
+fn process_image_clone_vm_reaped_pages() -> usize {
+    return clone_last_reaped_count;
+}
 
 linear struct ProcessImagePages[image: usize] {
     private image: usize @ image;
