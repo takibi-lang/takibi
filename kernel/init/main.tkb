@@ -693,6 +693,7 @@ fn main() {
                     if (user_layout_is_correct()) {
                         kernel_boot_log("vm layout: text=rx data=rw+xn stack=rw+xn\n");
                     }
+                    kernel_process_execution_reset();
                     let exit_status: usize =
                         run_initial_user(USER_TEXT_VA, USER_STACK_VA + PAGE_SIZE);
                     if (exit_status == 0) {
@@ -709,6 +710,9 @@ fn main() {
                         }
                         if (kernel_syscall_partial_write_evidence()) {
                             kernel_boot_log("linux socket partial write: 1460+1 ok\n");
+                        }
+                        if (kernel_process_clone_evidence()) {
+                            kernel_boot_log("process clone: parent=1 child=2 exit=42 reaped\n");
                         }
                         if (kernel_tcp_injected_data_recovered()) {
                             kernel_boot_log("httpd server: data drop retransmit ok\n");

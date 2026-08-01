@@ -119,6 +119,25 @@ initial_user_payload:
     svc     #0
     cbnz    x0, .Luser_fail
 
+    /* clone(SIGCHLD, NULL, ...): child exits on its distinct kernel stack;
+     * the preserved parent resumes with PID 2. */
+    mov     x0, #0x11
+    mov     x1, #0
+    mov     x2, #0
+    mov     x3, #0
+    mov     x4, #0
+    mov     x8, #220
+    svc     #0
+    cbz     x0, .Lclone_child
+    cmp     x0, #2
+    b.ne    .Luser_fail
+    b       .Lclone_parent_done
+.Lclone_child:
+    mov     x0, #42
+    mov     x8, #93
+    svc     #0
+.Lclone_parent_done:
+
     adr     x1, .Luser_message
     mov     x2, #21
     mov     x0, #1
@@ -148,6 +167,17 @@ initial_user_payload:
 .Llarge_socket_response:
     .fill   1461, 1, 0x5a
 initial_user_payload_end:
+
+    .section .text, "ax"
+
+    .section .bss, "aw", %nobits
+    .align 12
+clone_child_kernel_stack:
+    .skip   4096
+clone_child_kernel_stack_end:
+    .align 3
+clone_parent_frame:
+    .skip   8
 
     .section .text, "ax"
     .global initial_user_payload_addr
@@ -253,6 +283,7 @@ el0_sync_entry:
     ldr     x3, [sp, #8]
     ldr     x4, [sp, #16]
     ldr     x5, [sp, #24]
+    ldr     x6, [sp, #32]
     bl      kernel_syscall_dispatch
     mov     x6, x0
     mov     x7, x1
@@ -260,8 +291,42 @@ el0_sync_entry:
     b.eq    .Lsyscall_resume
     cmp     x6, #2
     b.eq    .Lsyscall_exit
+    cmp     x6, #3
+    b.eq    .Lsyscall_clone_child
+    cmp     x6, #4
+    b.eq    .Lsyscall_clone_parent
     mov     x16, #8
     b       el1_exception_evidence
+
+.Lsyscall_clone_child:
+    /* Preserve the parent's complete syscall frame, then give the child a
+     * distinct EL1 kernel stack containing its own copy of that frame. */
+    adrp    x9, clone_parent_frame
+    add     x9, x9, :lo12:clone_parent_frame
+    mov     x14, sp
+    str     x14, [x9]
+    adrp    x10, clone_child_kernel_stack_end
+    add     x10, x10, :lo12:clone_child_kernel_stack_end
+    sub     x10, x10, #0x320
+    mov     x11, sp
+    mov     x12, #0x320
+.Lclone_frame_copy:
+    ldr     x13, [x11], #8
+    str     x13, [x10], #8
+    subs    x12, x12, #8
+    b.ne    .Lclone_frame_copy
+    adrp    x10, clone_child_kernel_stack_end
+    add     x10, x10, :lo12:clone_child_kernel_stack_end
+    sub     sp, x10, #0x320
+    mov     x7, #0
+    b       .Lsyscall_resume
+
+.Lsyscall_clone_parent:
+    adrp    x9, clone_parent_frame
+    add     x9, x9, :lo12:clone_parent_frame
+    ldr     x14, [x9]
+    mov     sp, x14
+    b       .Lsyscall_resume
 
 .Lsyscall_resume:
     str     x7, [sp, #0]

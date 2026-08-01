@@ -2,6 +2,58 @@ use "kernel/mm/page.tkb";
 
 enum ProcessState: u8 { Ready; Exited; }
 
+enum ExecutionProcess: u8 { Parent; Child; }
+
+private let mut execution_process: ExecutionProcess = ExecutionProcess::Parent;
+private let mut execution_child_live: bool;
+private let mut execution_clone_calls: usize;
+private let mut execution_child_exit_status: usize;
+
+must_use variant ProcessCloneResult {
+    Invalid;
+    ChildReady(usize);
+}
+
+fn kernel_process_execution_reset() {
+    execution_process = ExecutionProcess::Parent;
+    execution_child_live = false;
+    execution_clone_calls = 0;
+    execution_child_exit_status = 0;
+}
+
+// The pinned Alpine BusyBox HTTPd uses clone(SIGCHLD, NULL, NULL, tls,
+// child_tid), i.e. fork semantics. The unused pointers carry no ownership
+// without their corresponding clone flags, so this first process-control
+// boundary accepts only the observed flag and null child stack.
+fn kernel_process_clone_begin(flags: usize, child_stack: usize)
+        -> ProcessCloneResult {
+    if (flags != 0x11 || child_stack != 0 || execution_child_live ||
+        execution_process != ExecutionProcess::Parent) {
+        return ProcessCloneResult::Invalid;
+    }
+    execution_child_live = true;
+    execution_process = ExecutionProcess::Child;
+    execution_clone_calls = execution_clone_calls + 1;
+    return ProcessCloneResult::ChildReady(2);
+}
+
+fn kernel_process_is_child() -> bool {
+    return execution_process == ExecutionProcess::Child;
+}
+
+fn kernel_process_child_exit(status: usize) -> usize {
+    execution_child_exit_status = status;
+    execution_child_live = false;
+    execution_process = ExecutionProcess::Parent;
+    return 2;
+}
+
+fn kernel_process_clone_evidence() -> bool {
+    return execution_process == ExecutionProcess::Parent &&
+           execution_child_live == false && execution_clone_calls == 1 &&
+           execution_child_exit_status == 42;
+}
+
 // Page owners travel beside this process token. Takibi intentionally forbids
 // nesting indexed owners in ordinary struct fields; the returned linear
 // variant package still forces all three page roles to be handled together.

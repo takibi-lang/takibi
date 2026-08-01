@@ -8,6 +8,7 @@ use "kernel/net/tcp.tkb";
 const AARCH64_NR_WRITE: usize = 64;
 const AARCH64_NR_EXIT: usize = 93;
 const AARCH64_NR_EXIT_GROUP: usize = 94;
+const AARCH64_NR_CLONE: usize = 220;
 const LINUX_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
 const LINUX_EFAULT: usize = 0xFFFFFFFFFFFFFFF2;
 const LINUX_ENOSYS: usize = 0xFFFFFFFFFFFFFFDA;
@@ -238,7 +239,7 @@ fn initial_user_load(text: borrow PageOwner[page])
 // 2 = terminate and return the exit status to run_initial_user's EL1 caller.
 // Linux -errno encoding exists only here at the ABI boundary.
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
-                           x2: usize, x3: usize)
+                           x2: usize, x3: usize, x4: usize)
         -> (usize, usize) !{unsafe} {
     let exception_class: usize = (esr >> 26) & 0x3F;
     if (exception_class != 0x15) { return (0, 0); }
@@ -772,7 +773,21 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         }
     }
 
+    if (number == AARCH64_NR_CLONE) {
+        match kernel_process_clone_begin(x0, x1) {
+            ProcessCloneResult::Invalid => { return (1, LINUX_EINVAL); }
+            ProcessCloneResult::ChildReady(child_pid) => {
+                // Assembly copies the complete saved parent frame to the
+                // dedicated child kernel stack and resumes it with x0=0.
+                return (3, child_pid);
+            }
+        }
+    }
     if (number == AARCH64_NR_EXIT || number == AARCH64_NR_EXIT_GROUP) {
+        if (kernel_process_is_child()) {
+            // Restore the preserved parent frame with clone() == child PID.
+            return (4, kernel_process_child_exit(x0));
+        }
         return (2, x0);
     }
     if (number == 17) {

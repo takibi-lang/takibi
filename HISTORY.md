@@ -15,6 +15,24 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-01: Distinct Parent/Child Register State and Kernel Stacks (GitHub Issue #181)
+
+A fresh trace of the pinned Alpine BusyBox HTTPd confirmed its exact process
+boundary: after `accept`, musl emits `clone(0x11, child_stack=NULL, ...)`, the
+plain `SIGCHLD` fork shape. The parent closes the accepted descriptor and
+returns immediately to `accept`; the child closes the listener, handles the
+request, and calls `exit_group(0)`.
+
+The kernel now accepts only that observed clone form. It preserves the full
+parent syscall frame, copies the child frame onto a distinct 4 KiB EL1 kernel
+stack, returns zero in the child, and resumes the parent with PID 2 after the
+child exits. The focused EL0 fixture proves parent PID 1, child PID 2, a child
+exit status of 42, and parent resumption before the ordinary process teardown;
+the RPi5 kernel continues to compile with `--forbid-trap`. VM copying and
+per-process descriptor/socket ownership remain the next issue #181 stage;
+the daemon argv intentionally remains in inetd mode until those semantics are
+connected.
+
 ### 2026-07-29: Bounded TCP Streaming and Retransmission Progress (GitHub Issue #180)
 
 The standalone kernel TCP path now reconstructs in-order request segments,

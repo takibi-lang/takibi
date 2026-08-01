@@ -234,7 +234,7 @@ claim of general Linux compatibility.
   host comparison of a response larger than one MTU (including a dropped
   segment), and two independent `curl` connections in one boot.
 - [Issue #181](https://github.com/takibi-lang/takibi/issues/181) tracks normal
-  BusyBox HTTPd foreground daemon mode, userspace accept, and the clone/fork
+  BusyBox HTTPd foreground daemon mode, fork VM/descriptor ownership, and
   child process model.
 - [Issue #182](https://github.com/takibi-lang/takibi/issues/182) tracks ext2
   indirect blocks, multiple block groups, and nested directory operations.
