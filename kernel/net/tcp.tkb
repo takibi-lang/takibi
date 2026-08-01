@@ -991,6 +991,24 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
             // The half-open peer did not acknowledge any bounded attempt.
             // Release the tuple so a later connect() attempt, commonly with
             // a new ephemeral source port, can use the same listener.
+            // If this give-up was itself the injected-drop observation
+            // window (tcp_injected_syn_pending), re-arm the drop for the
+            // *next* SYN instead of letting the observation vanish for the
+            // rest of this boot: kernel_tcp_inject_drop_next_syn_ack()
+            // only tests the very first SYN this accept_once() call ever
+            // sees, so previously any single lost race here (real-hardware
+            // network jitter, the retransmitted SYN-ACK itself getting
+            // dropped, ...) meant the caller's httpd curl retry loop (up
+            // to 20 attempts) could keep completing fresh connections
+            // that were never drop-tested, and the "syn-ack drop
+            // retransmit ok" milestone would go missing for the whole run
+            // even though the overall boot still passed. Re-arming turns
+            // this from a single race into "must lose 20 times running"
+            // -- see the kernel-tcp-retry-timing memory for the earlier,
+            // narrower retry_ticks widening this builds on.
+            if (tcp_injected_syn_pending) {
+                tcp_drop_next_syn_ack = true;
+            }
             conn_state = ConnState::Listen;
             tcp_injected_syn_pending = false;
         }
