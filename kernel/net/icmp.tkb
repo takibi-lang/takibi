@@ -37,6 +37,87 @@ fn icmp_build_echo_reply(ethernet: borrow [u8; 42..],
                     inet_checksum(icmp) as u16);
 }
 
+// Facts proven once by icmp_parse_ipv4 and threaded through by type
+// alone (LetMatch, GitHub issue #183) instead of by staying nested
+// inside the `if` that proved them. `icmp_length` is total_length -
+// ihl, computed here (not re-derived later) because this is the one
+// place `total_length >= ihl` is already known, so the subtraction
+// cannot underflow.
+struct Ipv4Header {
+    ihl: {20..<21 as u16};
+    total_length: u16;
+    icmp_length: u16;
+}
+
+must_use variant Ipv4ParseResult {
+    Reject;
+    Parsed(Ipv4Header);
+}
+
+fn icmp_parse_ipv4(frame: borrow [u8; 1514..], len: i32) -> Ipv4ParseResult {
+    if (len >= 42 && len <= 1514 &&
+        arp_read_u16be(frame[12..<14]) == 0x0800) {
+        let ipv4 = frame[14..<34];
+        let version: u8 = ipv4[IPV4_VERSION_IHL] >> 4;
+        let ihl: u16 = (ipv4[IPV4_VERSION_IHL] & 0x0F) as u16 * 4;
+        if (version == 4 && ihl == 20) {
+            let len16: u16 = len as u16;
+            let total_length: u16 = arp_read_u16be(ipv4[2..<4]);
+            let ipv4_bytes_in_frame: u16 = len16 - 14;
+            if (total_length <= ipv4_bytes_in_frame &&
+                total_length >= ihl &&
+                ipv4[IPV4_PROTOCOL] == 1 &&
+                inet_checksum(ipv4[0..<ihl as usize]) == 0 &&
+                slice_eq(ipv4[IPV4_DST..<20], OUR_IP as []u8)) {
+                let icmp_length: u16 = total_length - ihl;
+                let mut header: Ipv4Header = {ihl, total_length, icmp_length};
+                return Ipv4ParseResult::Parsed(header);
+            }
+        }
+    }
+    return Ipv4ParseResult::Reject;
+}
+
+must_use variant IcmpEchoParseResult {
+    Reject;
+    Parsed({8..<1481 as u16});
+}
+
+fn icmp_parse_echo_request(frame: borrow [u8; 1514..],
+                            icmp_length: u16) -> IcmpEchoParseResult {
+    if (icmp_length >= 8 && icmp_length <= 1480) {
+        let icmp_length_index: usize = icmp_length as usize;
+        let icmp = frame[34..<34 + icmp_length_index];
+        if (icmp[ICMP_TYPE] == 8 &&
+            icmp[ICMP_CODE] == 0 &&
+            inet_checksum(icmp) == 0) {
+            return IcmpEchoParseResult::Parsed(icmp_length);
+        }
+    }
+    return IcmpEchoParseResult::Reject;
+}
+
+// Flattens icmp_parse_ipv4 -> icmp_parse_echo_request -> reply-build
+// into a straight-line sequence: each LetMatch either yields the next
+// proven value (its declared type, e.g. Ipv4Header or the refined
+// icmp_length, stays valid for the rest of this function -- unlike
+// plain `if` narrowing, which dies at the branch) or returns 0
+// ("not a request we reply to") on the Reject arm.
+fn icmp_try_build_reply(frame: borrow [u8; 1514..], len: i32) -> i32 {
+    let mut header: Ipv4Header = match icmp_parse_ipv4(frame, len) {
+        Ipv4ParseResult::Reject => { return 0; }
+        Ipv4ParseResult::Parsed(h) => { h }
+    };
+    let mut icmp_length: {8..<1481 as u16} =
+        match icmp_parse_echo_request(frame, header.icmp_length) {
+            IcmpEchoParseResult::Reject => { return 0; }
+            IcmpEchoParseResult::Parsed(l) => { l }
+        };
+    let icmp = frame[34..<34 + icmp_length as usize];
+    icmp_build_echo_reply(frame, header.ihl, icmp);
+    return 14 + header.total_length as i32;
+}
+
 fn kernel_icmp_reply_once(ready_in: sink NetRxCanAcquire)
         -> KernelIcmpResult !{may_block} {
     let mut ready = ready_in;
@@ -48,42 +129,8 @@ fn kernel_icmp_reply_once(ready_in: sink NetRxCanAcquire)
             NetRxAcquire::None(next) => { ready = next; }
             NetRxAcquire::Acquired(acquired) => {
                 let len: i32 = net_rx_len(acquired);
-                let mut reply_length: i32 = 0;
-                if (len >= 42 && len <= 1514) {
-                    let len_n: i32 = len;
-                    let frame = net_rx_frame(acquired);
-                    if (arp_read_u16be(frame[12..<14]) == 0x0800) {
-                        let ipv4 = frame[14..<34];
-                        let version: u8 = ipv4[IPV4_VERSION_IHL] >> 4;
-                        let ihl: u16 =
-                            (ipv4[IPV4_VERSION_IHL] & 0x0F) as u16 * 4;
-                        if (version == 4 && ihl == 20) {
-                            let len16: u16 = len_n as u16;
-                            let total_length: u16 =
-                                arp_read_u16be(ipv4[2..<4]);
-                            let ipv4_bytes_in_frame: u16 = len16 - 14;
-                            if (total_length <= ipv4_bytes_in_frame &&
-                                total_length >= ihl &&
-                                ipv4[IPV4_PROTOCOL] == 1 &&
-                                inet_checksum(ipv4[0..<ihl as usize]) == 0 &&
-                                slice_eq(ipv4[IPV4_DST..<20], OUR_IP as []u8)) {
-                                let icmp_length: u16 = total_length - ihl;
-                                if (icmp_length >= 8 && icmp_length <= 1480) {
-                                    let icmp_length_index: usize =
-                                        icmp_length as usize;
-                                    let icmp =
-                                        frame[34..<34 + icmp_length_index];
-                                    if (icmp[ICMP_TYPE] == 8 &&
-                                        icmp[ICMP_CODE] == 0 &&
-                                        inet_checksum(icmp) == 0) {
-                                        icmp_build_echo_reply(frame, ihl, icmp);
-                                        reply_length = 14 + total_length as i32;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                let frame = net_rx_frame(acquired);
+                let reply_length: i32 = icmp_try_build_reply(frame, len);
                 if (reply_length != 0) {
                     let completed = net_rx_send_reply(
                         net_rx_reply_ready(acquired, reply_length));
