@@ -61,6 +61,8 @@
 // enumeration (link training, root-bridge forwarding, BAR assignment),
 // now implemented in examples/common_rpi5/pcie.tkb.
 
+use "kernel/platform/rpi5/intc.tkb";
+
 let mut uart_rx_handler: fn !{}() -> void;
 
 fn uart_putc(c: u8) {

@@ -65,9 +65,13 @@ _start:
     b       .Lpark
 
 /* All sixteen architectural vector slots lead to an evidence-preserving
- * fail-stop path. x16 identifies the slot. No slot silently spins at an
- * anonymous PC. Lower-EL synchronous dispatch becomes a separate entry when
- * the first EL0 process is added.
+ * fail-stop path except slot 8 (lower-EL AArch64 sync, EL0 syscalls) and
+ * slot 5 (Current-EL SPx IRQ, GitHub issue #187). x16 identifies the slot
+ * for the ones that still fail-stop. No slot silently spins at an anonymous
+ * PC. Lower-EL IRQ (an interrupt arriving while an EL0 process is running)
+ * remains unhandled -- see kernel/platform/rpi5/intc.tkb's header comment
+ * for why this kernel only unmasks DAIF.I once no EL0 process is executing
+ * for the rest of the boot, so that slot never needs to fire.
  */
     .section .text.vectors, "ax"
     .align 11
@@ -82,7 +86,8 @@ el1_vectors:
     VECTOR 2
     VECTOR 3
     VECTOR 4
-    VECTOR 5
+    b       el1_irq_entry
+    .align  7
     VECTOR 6
     VECTOR 7
     mov     x16, #8
@@ -113,6 +118,76 @@ el1_exception_evidence:
 .Levidence_park:
     wfe
     b       .Levidence_park
+
+/* enable_irq()/disable_irq(): DAIF.I-only mask, matching
+ * examples/common_rpi5/startup.S's spelling. kernel/platform/rpi5/intc.tkb's
+ * irq_uart_rx_setup() calls enable_irq() once all GIC/MIP0/MSI-X routing is
+ * configured; the PL011 peripheral itself stays source-masked (IMSC=0)
+ * until irq_uart_rx_unmask() runs immediately after, so no interrupt can
+ * actually arrive during the gap between the two calls. */
+    .global enable_irq
+enable_irq:
+    msr     DAIFClr, #0x2
+    ret
+
+    .global disable_irq
+disable_irq:
+    msr     DAIFSet, #0x2
+    ret
+
+/* Full x0-x30 + ELR_EL1/SPSR_EL1 save/restore around rpi5_irq_dispatch,
+ * the Current-EL-SPx IRQ handler for GitHub issue #187. Same 272-byte frame
+ * shape as examples/common_rpi5/startup.S's rpi5_irq_entry, adapted to
+ * EL1's own elr_el1/spsr_el1 since this kernel (unlike examples/common_rpi5)
+ * runs its own code at EL1, not EL2. */
+    .global el1_irq_entry
+el1_irq_entry:
+    sub     sp,  sp,  #272
+    stp     x0,  x1,  [sp, #0]
+    stp     x2,  x3,  [sp, #16]
+    stp     x4,  x5,  [sp, #32]
+    stp     x6,  x7,  [sp, #48]
+    stp     x8,  x9,  [sp, #64]
+    stp     x10, x11, [sp, #80]
+    stp     x12, x13, [sp, #96]
+    stp     x14, x15, [sp, #112]
+    stp     x16, x17, [sp, #128]
+    stp     x18, x19, [sp, #144]
+    stp     x20, x21, [sp, #160]
+    stp     x22, x23, [sp, #176]
+    stp     x24, x25, [sp, #192]
+    stp     x26, x27, [sp, #208]
+    stp     x28, x29, [sp, #224]
+    stp     x30, xzr, [sp, #240]
+    mrs     x0,  elr_el1
+    mrs     x1,  spsr_el1
+    stp     x0,  x1,  [sp, #256]
+
+    mov     x0, sp
+    bl      rpi5_irq_dispatch
+    mov     sp, x0
+
+    ldp     x0,  x1,  [sp, #256]
+    msr     elr_el1,  x0
+    msr     spsr_el1, x1
+    ldp     x0,  x1,  [sp, #0]
+    ldp     x2,  x3,  [sp, #16]
+    ldp     x4,  x5,  [sp, #32]
+    ldp     x6,  x7,  [sp, #48]
+    ldp     x8,  x9,  [sp, #64]
+    ldp     x10, x11, [sp, #80]
+    ldp     x12, x13, [sp, #96]
+    ldp     x14, x15, [sp, #112]
+    ldp     x16, x17, [sp, #128]
+    ldp     x18, x19, [sp, #144]
+    ldp     x20, x21, [sp, #160]
+    ldp     x22, x23, [sp, #176]
+    ldp     x24, x25, [sp, #192]
+    ldp     x26, x27, [sp, #208]
+    ldp     x28, x29, [sp, #224]
+    ldp     x30, xzr, [sp, #240]
+    add     sp,  sp,  #272
+    eret
 
     .section .bss, "aw", %nobits
     .align 3

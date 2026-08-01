@@ -15,6 +15,55 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-01: kernel/ Gets Real GIC-400 IRQ Dispatch; UART RX Goes Interrupt-Driven (GitHub Issue #187)
+
+Follow-up to #181's closing note that interrupt-driven device conversion
+would follow the completed process milestone. Until now `kernel/` had zero
+functional IRQ handling: `kernel/arch/arm64/boot/entry.S`'s `el1_vectors`
+routed every IRQ slot to the fail-stop evidence path, so any interrupt,
+masked or not, crashed the kernel outright.
+
+`kernel/platform/rpi5/intc.tkb` is a new port of
+`examples/common_rpi5/intc.tkb`'s hardware-proven GIC-400/MIP0/RP1-MSI-X
+route for RP1 UART0 (issue #164), adapted for this kernel's EL1 (not EL2)
+privilege level -- the interrupt is taken on the Current-EL-SPx IRQ vector
+slot instead of EL2's. `entry.S` gained a real `el1_irq_entry` (the same
+272-byte x0-x30/ELR_EL1/SPSR_EL1 frame shape as the EL2 reference) plus
+`enable_irq`/`disable_irq` DAIF helpers; slot 5 of `el1_vectors` now reaches
+it instead of the fail-stop path. The Lower-EL-AArch64 IRQ slot (an
+interrupt arriving while an EL0 process is executing) is deliberately left
+unhandled: `kernel/init/main.tkb` only calls `irq_uart_rx_setup()`/
+`irq_uart_rx_unmask()` after every EL0 process for the boot has already run
+and exited, so that slot can never fire in practice. The BCM2712 PCIe/GIC
+and MIP0 physical windows this needed were already present in
+`kernel/arch/arm64/mm/mmu.S`'s L1 device mapping, and
+`pcie2_mip0_inbound_setup()` already existed in `kernel/platform/rpi5/pcie.tkb`
+-- both apparently staged ahead of time for exactly this work.
+
+`kernel/platform/rpi5/uart.tkb`'s existing `uart_irq_handler`/
+`uart_set_rx_handler`/`uart_isr_getc` scaffolding had no caller until now.
+`kernel/init/main.tkb` adds a small RX ring buffer and ISR (mirroring
+`examples/irq/irq.tkb`'s own ring/ISR shape) and waits on the compiler's
+existing race-free `interrupt_wait()`/`interrupt_notify()` builtin
+(`wfe`/`sev`, ARM/AArch64-only) instead of polling, receiving one 8-byte
+fixture line over the real GIC/MIP0/MSI-X path. `scripts/run_kernel_hwtest_rpi5.sh`
+sends that fixture over the same physical duplex debug-UART cable already
+used to capture `kernel_boot_log` output, once the kernel's own readiness
+log line confirms it is blocked in `interrupt_wait()`; the kernel's
+interrupt-driven receive confirmation line replaces `resources: pages=0` as
+the harness's true completion marker. A new `uart_rx_irq` focused view
+covers both log lines.
+
+**A real RPi5 run passed on the first attempt: all 15 kernel/rpi5 views**
+(the 14 pre-existing plus the new `uart_rx_irq` view), unchanged ARP/ICMP/TCP/
+USB/ext2/httpd coverage, `--forbid-trap` intact. `make langcheck test
+linuxcheck` also passed. RP1 GEM Ethernet and USB xHCI completion remain
+polling-only follow-up work (issue #187's explicitly out-of-scope section):
+neither device's GIC SPI/MSI-X vector number is documented anywhere in this
+repository yet, and determining them needs real device-tree/driver research
+plus hardware trial and error, unlike UART0 which already had issue #164's
+proven route to port from.
+
 ### 2026-08-01: BusyBox HTTPd Runs as a Persistent Foreground Daemon (GitHub Issue #181)
 
 The pinned, unmodified Alpine BusyBox Extras binary now runs as

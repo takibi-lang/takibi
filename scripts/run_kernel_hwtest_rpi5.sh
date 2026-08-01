@@ -174,13 +174,29 @@ echo "[kernel/rpi5] userspace connected I/O passed"
 # This is host-side progress only: no temporary debug UART messages are added
 # to the kernel. Stop as soon as the stable final resource marker arrives,
 # while retaining a deadline for a hung kernel.
+#
+# GitHub issue #187: after the "resources: pages=0" marker, the kernel goes
+# on to set up RP1 UART0's real GIC/MIP0/MSI-X RX-interrupt path and blocks
+# in interrupt_wait() for one line on this exact serial device -- the same
+# duplex debug-UART cable already used for this capture (see
+# scripts/run_hwtest_rpi5.sh's run_hw_test_rpi5_stdin for the established
+# bidirectional-UART technique this mirrors). Send the fixture once the
+# kernel's own readiness log line confirms it is actually waiting, then keep
+# polling for its interrupt-driven receive confirmation as the new true
+# final marker.
 capture_deadline="${RPI5_KERNEL_CAPTURE_SECONDS:-90}"
 capture_elapsed=0
 capture_complete=0
+uart_rx_fixture_sent=0
 while [ "$capture_elapsed" -lt "$capture_deadline" ]; do
     sleep 1
     capture_elapsed=$((capture_elapsed + 1))
-    if LC_ALL=C grep -aFq 'resources: pages=0' "$UART_LOG"; then
+    if [ "$uart_rx_fixture_sent" -eq 0 ] && \
+            LC_ALL=C grep -aFq 'uart rx: waiting for interrupt input' "$UART_LOG"; then
+        printf 'irqtest\n' >"$SERIAL_DEV"
+        uart_rx_fixture_sent=1
+    fi
+    if LC_ALL=C grep -aFq 'uart rx: interrupt-driven receive ok' "$UART_LOG"; then
         capture_complete=1
         break
     fi

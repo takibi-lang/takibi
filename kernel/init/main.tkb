@@ -13,6 +13,54 @@ use "kernel/net/socket_capability.tkb";
 private let mut ext2_read_fixture: [u8; 32];
 private let mut ext2_symlink_fixture: [u8; 64];
 
+// GitHub issue #187 (follow-up to #181's "Interrupt-driven device
+// conversion ... follows this completed process milestone" note): a
+// minimal RX ring buffer proving kernel/platform/rpi5/intc.tkb's GIC-400
+// dispatch and uart.tkb's existing (previously unwired) RX-interrupt
+// scaffolding actually deliver a byte through the real GIC/MIP0/MSI-X path.
+// Mirrors examples/irq/irq.tkb's uart_rx_isr/ring exactly; kept here rather
+// than in uart.tkb because uart.tkb is a register-level HAL (see its other
+// callers) and ring-buffer policy belongs with the one caller that needs
+// it, same separation examples/irq/irq.tkb already uses relative to
+// examples/common_rpi5/uart.tkb.
+let mut kernel_uart_rx_buf: [u8; 64];
+let mut kernel_uart_rx_head: io usize;
+let mut kernel_uart_rx_tail: io usize;
+let mut kernel_uart_rx_fixture: [u8; 8];
+
+fn kernel_uart_rx_ring_reset() {
+    kernel_uart_rx_head = 0;
+    kernel_uart_rx_tail = 0;
+}
+
+fn kernel_uart_rx_pending() -> bool {
+    return kernel_uart_rx_tail != kernel_uart_rx_head;
+}
+
+// Runs in interrupt context: rpi5_irq_dispatch -> uart_irq_handler ->
+// uart_rx_handler (stored via uart_set_rx_handler below).
+fn kernel_uart_rx_isr() !{} {
+    let c: u8 = uart_isr_getc();
+    let head: usize = kernel_uart_rx_head;
+    let next: usize = (head + 1) % 64;
+    if (next != kernel_uart_rx_tail) {
+        let ring: *u8 = kernel_uart_rx_buf;
+        ring[head as isize] = c;
+        signal_fence();
+        kernel_uart_rx_head = next;
+    }
+    interrupt_notify();
+}
+
+fn kernel_uart_rx_getc() -> u8 {
+    signal_fence();
+    let tail: usize = kernel_uart_rx_tail;
+    let ring: *u8 = kernel_uart_rx_buf;
+    let c: u8 = ring[tail as isize];
+    kernel_uart_rx_tail = (tail + 1) % 64;
+    return c;
+}
+
 must_use variant UsbExt2WriteCheckResult { Invalid; Verified; }
 must_use variant UsbExt2ResizeCheckResult { Invalid; Verified; }
 must_use variant UsbExt2CreateCheckResult { Invalid; Verified; }
@@ -696,6 +744,27 @@ fn main() {
                 kernel_boot_log("resources: pages=0\n");
             }
         }
+    }
+
+    // GitHub issue #187: every EL0 process for this boot has already run
+    // and exited above, so DAIF.I can be safely unmasked from here on --
+    // see kernel/platform/rpi5/intc.tkb's header comment for why that
+    // ordering matters (the Lower-EL-AArch64 IRQ vector slot, which would
+    // fire if an interrupt arrived during EL0 execution, is not
+    // implemented yet).
+    uart_set_rx_handler(kernel_uart_rx_isr);
+    kernel_uart_rx_ring_reset();
+    irq_uart_rx_setup();
+    irq_uart_rx_unmask();
+    kernel_boot_log("uart rx: waiting for interrupt input\n");
+    for rx_count: usize in 0..<8 {
+        while (kernel_uart_rx_pending() == false) {
+            interrupt_wait();
+        }
+        kernel_uart_rx_fixture[rx_count] = kernel_uart_rx_getc();
+    }
+    if (slice_eq(kernel_uart_rx_fixture[0..<8], "irqtest\n" as []u8)) {
+        kernel_boot_log("uart rx: interrupt-driven receive ok\n");
     }
     while (true) { }
 }
