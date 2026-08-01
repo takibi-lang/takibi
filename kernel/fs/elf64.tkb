@@ -1,8 +1,6 @@
 const ELF_ET_DYN: u16 = 3;
 const ELF_EM_AARCH64: u16 = 183;
 const ELF_PT_LOAD: u32 = 1;
-const ELF_HEADER_SIZE: usize = 64;
-const ELF_PROGRAM_HEADER_SIZE: usize = 56;
 
 struct packed KernelElf64Header {
     ident: [u8; 16];
@@ -31,6 +29,11 @@ struct packed KernelElf64ProgramHeader {
     memory_size: u64;
     alignment: u64;
 }
+
+// sizeof(...) instead of hand-maintained literals (64/56) that used to
+// duplicate the two packed structs' own actual sizes.
+let ELF_HEADER_SIZE: usize = sizeof(KernelElf64Header);
+let ELF_PROGRAM_HEADER_SIZE: usize = sizeof(KernelElf64ProgramHeader);
 
 struct DistroElfLoadPlan {
     image_address: usize;
