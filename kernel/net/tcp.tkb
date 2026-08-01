@@ -581,6 +581,86 @@ fn build_receive_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     fix_tcp_checksum(ip, tcp);
 }
 
+// Facts proven once by tcp_parse_segment and threaded through by type
+// alone (LetMatch, GitHub issue #183) instead of by staying nested
+// inside the if that proved them -- same technique used to flatten
+// kernel/net/icmp.tkb's kernel_icmp_reply_once. kernel_tcp_echo_check
+// and kernel_tcp_accept_once parse and checksum-validate an inbound
+// TCP-over-IPv4 segment addressed to OUR_IP with IDENTICAL thresholds,
+// so they share this one parse. kernel_tcp_receive_once keeps its own
+// inline parse below: it enforces a tighter total_len lower bound (it
+// expects data, not just any segment) and an additional source-IP
+// match at parse time, so folding it into this shared shape would
+// blur two genuinely different validity conditions into one.
+struct TcpSegmentHeader {
+    ihl: {20..<21 as u16};
+    tcp_len: {20..<1481 as u16};
+    tcp_hdr_len: u16;
+    src_port: u16;
+    dst_port: u16;
+    flags: u8;
+    seq: u32;
+    ack: u32;
+}
+
+must_use variant TcpSegmentParseResult {
+    Reject;
+    Parsed(TcpSegmentHeader);
+}
+
+fn tcp_parse_segment(frame: borrow [u8; 1514..], len: i32) -> TcpSegmentParseResult {
+    if (len >= 54 && len <= 1514 &&
+        read_u16be(frame[12..<14]) == 0x0800) {
+        let ip = frame[14..<34];
+        let version: u8 = ip[0] >> 4;
+        let ihl:     u16 = (ip[0] & 0x0f) * 4;
+
+        if (version == 4 && ihl == 20) {
+            let len16: u16 = len as u16;
+            let total_len:       u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
+            let ip_len_in_frame: u16 = len16 - 14;
+
+            if (total_len <= ip_len_in_frame && total_len >= ihl &&
+                ip[IP_PROTOCOL] == PROTO_TCP &&
+                inet_checksum(ip[0..<ihl as usize]) == 0 &&
+                slice_eq(ip[IP_DST..<20], OUR_IP as []u8)) {
+                let tcp:     [u8; 20..] = frame[34..<54];
+                let tcp_len: u16 = total_len - ihl;
+                let doff:    u8  = tcp[TCP_DATA_OFFSET] >> 4;
+
+                if (tcp_len >= 20 && tcp_len <= 1480 &&
+                    doff >= 5 && doff <= 15) {
+                    let tcp_hdr_len: u16 = (doff * 4) as u16;
+
+                    if (tcp_len >= tcp_hdr_len) {
+                        let mut pseudo: [u8; 12];
+                        slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
+                        slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
+                        pseudo[8] = 0 as u8;
+                        pseudo[9] = PROTO_TCP;
+                        write_u16be(pseudo[10..<12], tcp_len);
+                        let sum: i32 = checksum_add(pseudo as []u8, 0);
+                        let tcp_len_idx: usize = tcp_len as usize;
+                        let tcp_seg = frame[34..<34 + tcp_len_idx];
+
+                        if (checksum_fold(checksum_add(tcp_seg, sum)) == 0) {
+                            let dst_port: u16 = read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]) as u16;
+                            let src_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
+                            let flags:    u8  = tcp[TCP_FLAGS];
+                            let seq:      u32 = read_u32be(tcp[TCP_SEQ..<TCP_ACK]) as u32;
+                            let ack:      u32 = read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32;
+                            let mut header: TcpSegmentHeader =
+                                {ihl, tcp_len, tcp_hdr_len, src_port, dst_port, flags, seq, ack};
+                            return TcpSegmentParseResult::Parsed(header);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return TcpSegmentParseResult::Reject;
+}
+
 fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
         -> KernelTcpResult !{may_block} {
     let mut ready = ready_in;
@@ -605,175 +685,98 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                         let mut plan: TcpRxPlan = TcpRxPlan::Release;
                         let frame = net_rx_frame(acquired);   // only read when len proves acquisition
 
-                        // 14 (eth) + 20 (min IPv4) + 20 (min TCP) = 54
-                        if (len >= 54 && len <= 1514) {
-                            // Snapshot into an immutable local: the explicit refined
-                            // cast below (len_n as u16) needs to see
-                            // len's CURRENT narrowed range, but a function PARAMETER
-                            // (always Mut) only exposes its narrowed range through
-                            // the separate narrowing_ctx side-table, which a bare
-                            // Cast does not consult -- an immutable snapshot's type
-                            // inherits the narrowing directly (same "B-plan"
-                            // mechanism used elsewhere), so the cast proves clean.
-                            let len_n: i32 = len;
-                            if (read_u16be(frame[12..<14]) == 0x0800) {
-                                let ip = frame[14..<34];
-                                // version is standalone (compared only to a literal)
-                                // -- safely u8.
-                                let version: u8 = ip[0] >> 4;
-                                let ihl:     u16 = (ip[0] & 0x0f) * 4;
+                        match tcp_parse_segment(frame, len) {
+                            TcpSegmentParseResult::Reject => { }
+                            TcpSegmentParseResult::Parsed(header) => {
+                                if (header.dst_port == conn_local_port) {
+                                    let ip = frame[14..<34];
+                                    if (conn_state == ConnState::Listen) {
+                                        if ((header.flags & TCP_FLAG_SYN) != 0) {
+                                            slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
+                                            conn_remote_port = header.src_port;
+                                            conn_rcv_nxt = header.seq + 1;
+                                            conn_snd_nxt = TCP_INITIAL_SEQ + 1;
 
-                                if (version == 4 && ihl == 20) {
-                                    // Bridge len_n's proven {54..<1515} range into
-                                    // u16 (a free coercion: the source range already
-                                    // implies the target range exactly). This bound
-                                    // must be kept in sync with the `len >= 54 &&
-                                    // len <= 1514` check above.
-                                    let len16: u16 = len_n as u16;
-                                    let total_len:       u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
-                                    let ip_len_in_frame: u16 = len16 - 14;
-
-                                    if (total_len <= ip_len_in_frame && total_len >= ihl &&
-                                        ip[IP_PROTOCOL] == PROTO_TCP &&
-                                        inet_checksum(ip[0..<ihl as usize]) == 0) {
-                                        if (slice_eq(ip[IP_DST..<20], OUR_IP as []u8)) {
-                                            let tcp:     [u8; 20..] = frame[34..<54];
-                                            let tcp_len: u16 = total_len - ihl;
-
-                                            // doff is TCP's own byte-scale field,
-                                            // never combined with the ihl/tcp_len
-                                            // chain directly (tcp_hdr_len, derived
-                                            // from it via Mul, carries its proven
-                                            // range across a bridge cast to u16
-                                            // below, to match tcp_len for the
-                                            // subtraction that follows) -- doff
-                                            // itself stays genuinely u8.
-                                            let doff: u8 = tcp[TCP_DATA_OFFSET] >> 4;
-
-                                            // doff must be narrowed to {5..<16} BEFORE
-                                            // tcp_hdr_len = doff * 4 is computed, so
-                                            // Mul propagation gives tcp_hdr_len (and
-                                            // later data_off) a real range -- see
-                                            // http_server.tkb's identical comment
-                                            // (including why the bridge cast below,
-                                            // not a plain `as i32`, is needed to
-                                            // carry that range across the width
-                                            // change.
-                                            if (tcp_len >= 20 && doff >= 5 &&
-                                                doff <= 15) {
-                                            let tcp_hdr_len: u16 = (doff * 4) as u16;
-
-                                            if (tcp_len >= tcp_hdr_len) {
-                                                let mut pseudo: [u8; 12];
-                                                slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
-                                                slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
-                                                pseudo[8] = 0 as u8;
-                                                pseudo[9] = PROTO_TCP;
-                                                write_u16be(pseudo[10..<12], tcp_len);
-                                                let sum: i32 = checksum_add(pseudo as []u8, 0);
-                                                let tcp_len_idx: usize =
-                                                    tcp_len as usize;
-                                                let tcp_seg = frame[34..<34 + tcp_len_idx];
-
-                                                if (checksum_fold(checksum_add(tcp_seg, sum)) == 0) {
-                                                    let dst_port: u16 = read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]) as u16;
-                                                    let src_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
-                                                    let flags:    u8  = tcp[TCP_FLAGS];
-                                                    let seq:      u32 = read_u32be(tcp[TCP_SEQ..<TCP_ACK]) as u32;
-                                                    let ack:      u32 = read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32;
-
-                                                    if (dst_port == conn_local_port) {
-                                                        if (conn_state == ConnState::Listen) {
-                                                            if ((flags & TCP_FLAG_SYN) != 0) {
-                                                                slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
-                                                                conn_remote_port = src_port;
-                                                                conn_rcv_nxt = seq + 1;
-                                                                conn_snd_nxt = TCP_INITIAL_SEQ + 1;
-
-                                                                build_syn_ack(frame, ihl);
-                                                                plan = TcpRxPlan::Send(14 + (ihl as i32) + 20);
-                                                                conn_state = ConnState::SynRcvd;
-                                                            }
-                                                        } else {
-                                                            // SYN_RCVD, ESTABLISHED, or LAST_ACK: only the
-                                                            // recorded connection's segments matter.
-                                                            if (slice_eq(ip[IP_SRC..<IP_DST], conn_remote_ip as []u8) &&
-                                                                src_port == conn_remote_port) {
-                                                                if ((flags & TCP_FLAG_RST) != 0) {
-                                                                    // Abrupt close from the client: drop the
-                                                                    // connection with no reply and free the slot.
-                                                                    conn_state = ConnState::Listen;
-                                                                } else if (conn_state == ConnState::SynRcvd) {
-                                                                    if ((flags & TCP_FLAG_ACK) != 0 &&
-                                                                        (flags & TCP_FLAG_SYN) == 0 &&
-                                                                        ack == conn_snd_nxt && seq == conn_rcv_nxt) {
-                                                                        conn_state = ConnState::Established;
-                                                                        tcp_completed_handshakes =
-                                                                            tcp_completed_handshakes + 1;
-                                                                    }
-                                                                } else if (conn_state == ConnState::Established) {
-                                                                    if ((flags & TCP_FLAG_FIN) != 0 && seq == conn_rcv_nxt) {
-                                                                        conn_rcv_nxt = conn_rcv_nxt + 1; // FIN consumes one seq number
-                                                                        build_fin_ack(frame, ihl);
-                                                                        plan = TcpRxPlan::Send(14 + (ihl as i32) + 20);
-                                                                        conn_snd_nxt = conn_snd_nxt + 1; // our FIN too
-                                                                        conn_state = ConnState::LastAck;
-                                                                    } else {
-                                                                        // max(.., 0): tcp_len - tcp_hdr_len's raw
-                                                                        // Sub-derived range has a spuriously negative
-                                                                        // lower bound (the type system can't see the
-                                                                        // tcp_len>=tcp_hdr_len guard that makes a
-                                                                        // genuinely negative result impossible), which
-                                                                        // would otherwise make data_len look like it
-                                                                        // could be negative to any code reading its
-                                                                        // type. Clamping to >=0 here doesn't change
-                                                                        // observable behavior at all: a malformed
-                                                                        // packet where the raw subtraction WOULD have
-                                                                        // been negative clamps to exactly 0, and 0
-                                                                        // still fails the `data_len > 0` check below
-                                                                        // exactly like a negative value would have --
-                                                                        // this only makes data_len's OWN type honestly
-                                                                        // reflect a fact that was already true, safe
-                                                                        // improvement in isolation (P4c section).
-                                                                        // data_len/data_off are u16 (matching tcp_len/
-                                                                        // tcp_hdr_len's base): both flow into the same
-                                                                        // `data_off + data_len` addition below, which
-                                                                        // needs them to share a type regardless of the
-                                                                        let data_len: u16 = max(tcp_len - tcp_hdr_len, 0);
-                                                                        if (data_len > 0 &&
-                                                                            tcp_hdr_len == 20 &&
-                                                                            (flags & TCP_FLAG_ACK) != 0 &&
-                                                                            seq == conn_rcv_nxt) {
-                                                                            if (build_data_reply(frame, ihl, tcp_seg,
-                                                                                    data_len, data_len)) {
-                                                                                plan = TcpRxPlan::Send(14 + (ihl as i32) + 20 + (data_len as i32));
-                                                                                // conn_rcv_nxt/conn_snd_nxt are u32
-                                                                                // (sequence numbers), data_len is u16 --
-                                                                                // the widening cast here is harmless
-                                                                                // (loses data_len's own refined range,
-                                                                                // but neither counter is ever used as a
-                                                                                // slice bound/index, so no proof depends
-                                                                                // on their refined-ness).
-                                                                                conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
-                                                                                conn_snd_nxt = conn_snd_nxt + (data_len as u32);
-                                                                                tcp_completed_echoes =
-                                                                                    tcp_completed_echoes + 1;
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                } else if (conn_state == ConnState::LastAck) {
-                                                                    if ((flags & TCP_FLAG_ACK) != 0 && ack == conn_snd_nxt) {
-                                                                        // Close complete; ready for a new client.
-                                                                        conn_state = ConnState::Listen;
-                                                                        tcp_completed_closes =
-                                                                            tcp_completed_closes + 1;
-                                                                    }
-                                                                }
-                                                            }
+                                            build_syn_ack(frame, header.ihl);
+                                            plan = TcpRxPlan::Send(14 + (header.ihl as i32) + 20);
+                                            conn_state = ConnState::SynRcvd;
+                                        }
+                                    } else {
+                                        // SYN_RCVD, ESTABLISHED, or LAST_ACK: only the
+                                        // recorded connection's segments matter.
+                                        if (slice_eq(ip[IP_SRC..<IP_DST], conn_remote_ip as []u8) &&
+                                            header.src_port == conn_remote_port) {
+                                            if ((header.flags & TCP_FLAG_RST) != 0) {
+                                                // Abrupt close from the client: drop the
+                                                // connection with no reply and free the slot.
+                                                conn_state = ConnState::Listen;
+                                            } else if (conn_state == ConnState::SynRcvd) {
+                                                if ((header.flags & TCP_FLAG_ACK) != 0 &&
+                                                    (header.flags & TCP_FLAG_SYN) == 0 &&
+                                                    header.ack == conn_snd_nxt && header.seq == conn_rcv_nxt) {
+                                                    conn_state = ConnState::Established;
+                                                    tcp_completed_handshakes =
+                                                        tcp_completed_handshakes + 1;
+                                                }
+                                            } else if (conn_state == ConnState::Established) {
+                                                if ((header.flags & TCP_FLAG_FIN) != 0 && header.seq == conn_rcv_nxt) {
+                                                    conn_rcv_nxt = conn_rcv_nxt + 1; // FIN consumes one seq number
+                                                    build_fin_ack(frame, header.ihl);
+                                                    plan = TcpRxPlan::Send(14 + (header.ihl as i32) + 20);
+                                                    conn_snd_nxt = conn_snd_nxt + 1; // our FIN too
+                                                    conn_state = ConnState::LastAck;
+                                                } else {
+                                                    // max(.., 0): tcp_len - tcp_hdr_len's raw
+                                                    // Sub-derived range has a spuriously negative
+                                                    // lower bound (the type system can't see the
+                                                    // tcp_len>=tcp_hdr_len guard that makes a
+                                                    // genuinely negative result impossible), which
+                                                    // would otherwise make data_len look like it
+                                                    // could be negative to any code reading its
+                                                    // type. Clamping to >=0 here doesn't change
+                                                    // observable behavior at all: a malformed
+                                                    // packet where the raw subtraction WOULD have
+                                                    // been negative clamps to exactly 0, and 0
+                                                    // still fails the `data_len > 0` check below
+                                                    // exactly like a negative value would have --
+                                                    // this only makes data_len's OWN type honestly
+                                                    // reflect a fact that was already true, safe
+                                                    // improvement in isolation (P4c section).
+                                                    // data_len/data_off are u16 (matching tcp_len/
+                                                    // tcp_hdr_len's base): both flow into the same
+                                                    // `data_off + data_len` addition below, which
+                                                    // needs them to share a type regardless of the
+                                                    let data_len: u16 = max(header.tcp_len - header.tcp_hdr_len, 0);
+                                                    if (data_len > 0 &&
+                                                        header.tcp_hdr_len == 20 &&
+                                                        (header.flags & TCP_FLAG_ACK) != 0 &&
+                                                        header.seq == conn_rcv_nxt) {
+                                                        let tcp_len_idx: usize = header.tcp_len as usize;
+                                                        let tcp_seg = frame[34..<34 + tcp_len_idx];
+                                                        if (build_data_reply(frame, header.ihl, tcp_seg,
+                                                                data_len, data_len)) {
+                                                            plan = TcpRxPlan::Send(14 + (header.ihl as i32) + 20 + (data_len as i32));
+                                                            // conn_rcv_nxt/conn_snd_nxt are u32
+                                                            // (sequence numbers), data_len is u16 --
+                                                            // the widening cast here is harmless
+                                                            // (loses data_len's own refined range,
+                                                            // but neither counter is ever used as a
+                                                            // slice bound/index, so no proof depends
+                                                            // on their refined-ness).
+                                                            conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
+                                                            conn_snd_nxt = conn_snd_nxt + (data_len as u32);
+                                                            tcp_completed_echoes =
+                                                                tcp_completed_echoes + 1;
                                                         }
                                                     }
                                                 }
-                                            }
+                                            } else if (conn_state == ConnState::LastAck) {
+                                                if ((header.flags & TCP_FLAG_ACK) != 0 && header.ack == conn_snd_nxt) {
+                                                    // Close complete; ready for a new client.
+                                                    conn_state = ConnState::Listen;
+                                                    tcp_completed_closes =
+                                                        tcp_completed_closes + 1;
+                                                }
                                             }
                                         }
                                     }
@@ -848,113 +851,66 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                     }
                 }
                 if (len >= 54 && len <= 1514) {
-                    let len_n: i32 = len;
                     let frame = net_rx_frame(acquired);
-                    if (read_u16be(frame[12..<14]) == 0x0800) {
-                        let ip = frame[14..<34];
-                        let version: u8 = ip[0] >> 4;
-                        let ihl: u16 = (ip[0] & 0x0F) * 4;
-                        if (version == 4 && ihl == 20) {
-                            let len16: u16 = len_n as u16;
-                            let total_len: u16 =
-                                read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
-                            let ip_len_in_frame: u16 = len16 - 14;
-                            if (total_len <= ip_len_in_frame &&
-                                total_len >= ihl &&
-                                ip[IP_PROTOCOL] == PROTO_TCP &&
-                                inet_checksum(ip[0..<ihl as usize]) == 0 &&
-                                slice_eq(ip[IP_DST..<20], OUR_IP as []u8)) {
-                                let tcp = frame[34..<54];
-                                let tcp_len: u16 = total_len - ihl;
-                                let doff: u8 = tcp[TCP_DATA_OFFSET] >> 4;
-                                if (tcp_len >= 20 && doff >= 5 && doff <= 15) {
-                                    let tcp_header_len: u16 =
-                                        (doff * 4) as u16;
-                                    if (tcp_len >= tcp_header_len) {
-                                        let mut pseudo: [u8; 12];
-                                        slice_copy(pseudo[0..<4],
-                                                   ip[IP_SRC..<IP_DST]);
-                                        slice_copy(pseudo[4..<8],
-                                                   ip[IP_DST..<20]);
-                                        pseudo[8] = 0;
-                                        pseudo[9] = PROTO_TCP;
-                                        write_u16be(pseudo[10..<12], tcp_len);
-                                        let sum: i32 =
-                                            checksum_add(pseudo as []u8, 0);
-                                        let tcp_len_index: usize =
-                                            tcp_len as usize;
-                                        let tcp_segment =
-                                            frame[34..<34 + tcp_len_index];
-                                        if (checksum_fold(checksum_add(
-                                                tcp_segment, sum)) == 0) {
-                                            let destination_port: u16 =
-                                                read_u16be(tcp[2..<4]) as u16;
-                                            let source_port: u16 =
-                                                read_u16be(tcp[0..<2]) as u16;
-                                            let flags: u8 = tcp[TCP_FLAGS];
-                                            let sequence: u32 =
-                                                read_u32be(tcp[4..<8]) as u32;
-                                            let acknowledgment: u32 =
-                                                read_u32be(tcp[8..<12]) as u32;
-                                            if (destination_port == port) {
-                                                if (conn_state == ConnState::Listen &&
-                                                    (flags & TCP_FLAG_SYN) != 0) {
-                                                    slice_copy(
-                                                        conn_remote_ip as []u8,
-                                                        ip[IP_SRC..<IP_DST]);
-                                                    slice_copy(
-                                                        conn_remote_mac as []u8,
-                                                        frame[6..<12]);
-                                                    conn_remote_port = source_port;
-                                                    conn_rcv_nxt = sequence + 1;
-                                                    conn_snd_nxt =
-                                                        TCP_INITIAL_SEQ + 1;
-                                                    build_syn_ack(frame, ihl);
-                                                    slice_copy(
-                                                        tcp_stream_tx_frame[0..<54],
-                                                        frame[0..<54]);
-                                                    if (tcp_drop_next_syn_ack) {
-                                                        tcp_drop_next_syn_ack = false;
-                                                        tcp_injected_syn_pending = true;
-                                                        plan = TcpRxPlan::Release;
-                                                    } else {
-                                                        tcp_injected_syn_pending = false;
-                                                        plan = TcpRxPlan::Send(
-                                                            14 + (ihl as i32) + 20);
-                                                    }
-                                                    syn_ack_sent_at =
-                                                        read_cntpct();
-                                                    syn_ack_retries = 0;
-                                                    conn_state =
-                                                        ConnState::SynRcvd;
-                                                } else if (
-                                                    conn_state == ConnState::SynRcvd &&
-                                                    source_port == conn_remote_port &&
-                                                    slice_eq(ip[IP_SRC..<IP_DST],
-                                                             conn_remote_ip as []u8) &&
-                                                    (flags & TCP_FLAG_RST) != 0) {
-                                                    conn_state = ConnState::Listen;
-                                                    tcp_injected_syn_pending = false;
-                                                } else if (
-                                                    conn_state == ConnState::SynRcvd &&
-                                                    source_port == conn_remote_port &&
-                                                    slice_eq(ip[IP_SRC..<IP_DST],
-                                                             conn_remote_ip as []u8) &&
-                                                    (flags & TCP_FLAG_ACK) != 0 &&
-                                                    (flags & TCP_FLAG_SYN) == 0 &&
-                                                    acknowledgment == conn_snd_nxt &&
-                                                    sequence == conn_rcv_nxt) {
-                                                    conn_state =
-                                                        ConnState::Established;
-                                                    if (tcp_injected_syn_pending &&
-                                                        tcp_injected_syn_retransmitted) {
-                                                        tcp_injected_syn_accepted = true;
-                                                    }
-                                                    accepted = true;
-                                                }
-                                            }
-                                        }
+                    match tcp_parse_segment(frame, len) {
+                        TcpSegmentParseResult::Reject => { }
+                        TcpSegmentParseResult::Parsed(header) => {
+                            let ip = frame[14..<34];
+                            if (header.dst_port == port) {
+                                if (conn_state == ConnState::Listen &&
+                                    (header.flags & TCP_FLAG_SYN) != 0) {
+                                    slice_copy(
+                                        conn_remote_ip as []u8,
+                                        ip[IP_SRC..<IP_DST]);
+                                    slice_copy(
+                                        conn_remote_mac as []u8,
+                                        frame[6..<12]);
+                                    conn_remote_port = header.src_port;
+                                    conn_rcv_nxt = header.seq + 1;
+                                    conn_snd_nxt =
+                                        TCP_INITIAL_SEQ + 1;
+                                    build_syn_ack(frame, header.ihl);
+                                    slice_copy(
+                                        tcp_stream_tx_frame[0..<54],
+                                        frame[0..<54]);
+                                    if (tcp_drop_next_syn_ack) {
+                                        tcp_drop_next_syn_ack = false;
+                                        tcp_injected_syn_pending = true;
+                                        plan = TcpRxPlan::Release;
+                                    } else {
+                                        tcp_injected_syn_pending = false;
+                                        plan = TcpRxPlan::Send(
+                                            14 + (header.ihl as i32) + 20);
                                     }
+                                    syn_ack_sent_at =
+                                        read_cntpct();
+                                    syn_ack_retries = 0;
+                                    conn_state =
+                                        ConnState::SynRcvd;
+                                } else if (
+                                    conn_state == ConnState::SynRcvd &&
+                                    header.src_port == conn_remote_port &&
+                                    slice_eq(ip[IP_SRC..<IP_DST],
+                                             conn_remote_ip as []u8) &&
+                                    (header.flags & TCP_FLAG_RST) != 0) {
+                                    conn_state = ConnState::Listen;
+                                    tcp_injected_syn_pending = false;
+                                } else if (
+                                    conn_state == ConnState::SynRcvd &&
+                                    header.src_port == conn_remote_port &&
+                                    slice_eq(ip[IP_SRC..<IP_DST],
+                                             conn_remote_ip as []u8) &&
+                                    (header.flags & TCP_FLAG_ACK) != 0 &&
+                                    (header.flags & TCP_FLAG_SYN) == 0 &&
+                                    header.ack == conn_snd_nxt &&
+                                    header.seq == conn_rcv_nxt) {
+                                    conn_state =
+                                        ConnState::Established;
+                                    if (tcp_injected_syn_pending &&
+                                        tcp_injected_syn_retransmitted) {
+                                        tcp_injected_syn_accepted = true;
+                                    }
+                                    accepted = true;
                                 }
                             }
                         }
