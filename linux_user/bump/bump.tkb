@@ -1,0 +1,36 @@
+// Simple bump allocator demo. BumpAlloc struct contains a 256-byte heap.
+// bump_alloc(n) returns heap + offset and advances the offset by n.
+struct BumpAlloc {
+    heap:   [u8; 256];
+    offset: isize;
+}
+
+let mut alloc: BumpAlloc;
+
+fn bump_alloc(size: isize) -> *u8 {
+    let result: *u8 = alloc.heap + alloc.offset;
+    alloc.offset = alloc.offset + size;
+    return result;
+}
+
+fn app_main() {
+    let buf1: *u8 = bump_alloc(4);
+    buf1[0] = 'A';
+    buf1[1] = 'B';
+    buf1[2] = 'C';
+    buf1[3] = '\0';
+    uart_puts(buf1);
+    uart_puts("\r\n");
+
+    let buf2: *u8 = bump_alloc(4);
+    buf2[0] = 'X';
+    buf2[1] = 'Y';
+    buf2[2] = 'Z';
+    buf2[3] = '\0';
+    uart_puts(buf2);
+    uart_puts("\r\n");
+
+    uart_puts("used: ");
+    uart_print(alloc.offset);
+    uart_puts(" bytes\r\n");
+}

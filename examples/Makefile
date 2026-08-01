@@ -9,7 +9,6 @@
 MAKEFLAGS += -j$(shell nproc)
 
 AARCH64_TARGET := aarch64-none-elf
-LINUX_AMD64_TARGET := x86_64-pc-linux-gnu
 
 # Invoke the built binary directly rather than "dune exec takibi --": dune
 # exec re-checks/re-locks the workspace on every call, which serializes
@@ -89,17 +88,6 @@ COMMON_CHECKED_USIZE := $(COMMON_DIR)/checked_usize.tkb
 COMMON_AARCH64_DIR := examples/common_aarch64
 COMMON_AARCH64_EL0_SHELL_ASM_EXTERN := $(COMMON_AARCH64_DIR)/el0_shell_asm_extern.tkb
 COMMON_AARCH64_ELF64_VALIDATE := $(COMMON_AARCH64_DIR)/elf64_validate.tkb $(COMMON_CHECKED_USIZE)
-
-# -- Linux/AMD64 user-space support files -------------------------------------
-COMMON_LINUX_DIR       := examples/common_linux
-COMMON_LINUX_STARTUP_S := $(COMMON_LINUX_DIR)/startup.S
-COMMON_LINUX_STARTUP_O := $(COMMON_LINUX_DIR)/startup.o
-COMMON_LINUX_SYSCALL_S := $(COMMON_LINUX_DIR)/syscall.S
-COMMON_LINUX_SYSCALL_O := $(COMMON_LINUX_DIR)/syscall.o
-COMMON_LINUX_UART      := $(COMMON_LINUX_DIR)/uart.tkb
-COMMON_LINUX_PRINT     := $(COMMON_LINUX_DIR)/print.tkb
-LINUX_EXAMPLES         := linux_hello
-LINUX_BINS             := $(foreach e,$(LINUX_EXAMPLES),examples/$(e)/$(e).exe)
 
 # -- Examples ------------------------------------------------------------------
 # To add a new example, just append its name here.
@@ -219,7 +207,7 @@ STM32_RAM_ELFS := $(STM32_RAM_ELFS_GENERIC) \
                    examples/fatfs/kernel_stm32_ram.elf
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test qemubuild qemutest stm32build linuxbuild linuxcheck optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-stm32-net-l2 hwcheck-rpi3 hwcheck-rpi3-net hwcheck-rpi3-net-l2 hwcheck-rpi5 hwcheck-rpi5-net hwcheck-rpi5-net-l2 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
+.PHONY: build test qemubuild qemutest stm32build optimizercheck hwcheck-stm32 hwcheck-stm32-net hwcheck-stm32-net-l2 hwcheck-rpi3 hwcheck-rpi3-net hwcheck-rpi3-net-l2 hwcheck-rpi5 hwcheck-rpi5-net hwcheck-rpi5-net-l2 stress-stm32-kvs-server-sdcard-rtos perfcheck langcheck check allcheck allcheck-build clean qemu-echo qemu-net-echo qemu-arp-reply qemu-icmp-echo qemu-tcp-echo qemu-http-server qemu-kvs stm32-http-server stm32-http-server-sdcard stm32-http-server-sdcard-rtos rpi3-http-server profile-http-server profile-tcp-echo profile-stm32-http-server-sdcard-rtos profile-stm32-kvs-server-sdcard-rtos
 
 .DEFAULT_GOAL := build
 
@@ -273,7 +261,7 @@ test: build
 	$(MAKE) -f Makefile test
 
 ## qemubuild: build every artifact consumed by qemutest without running it
-qemubuild: $(ALL_KERNELS) examples/fibonacci/kernel.debug.elf examples/dwarf_debug/kernel.debug.elf $(LINUX_BINS) examples/inline_check/inline_check.o
+qemubuild: $(ALL_KERNELS) examples/fibonacci/kernel.debug.elf examples/dwarf_debug/kernel.debug.elf examples/inline_check/inline_check.o
 
 ## qemutest: run QEMU plus host-side integration tests and verify automatically
 qemutest: qemubuild
@@ -362,13 +350,6 @@ langcheck:
 ## check: run unit tests + QEMU/host integration tests + STM32 build check + ASCII check
 check: langcheck test stm32build qemutest
 
-## linuxbuild: build Linux/AMD64 user-space examples (no libc, _start -> app_main)
-linuxbuild: $(LINUX_BINS)
-
-## linuxcheck: run Linux/AMD64 user-space examples and diff expected stdout
-linuxcheck: linuxbuild
-	@bash scripts/run_qemutest.sh --host-only linux_hello
-
 ## optimizercheck: inspect generated objects for backend optimization regressions
 examples/inline_check/inline_check.o: examples/inline_check/inline_check.tkb $(TAKIBI)
 	$(TAKIBI) $< --target $(AARCH64_TARGET) -o $@ --forbid-trap
@@ -397,18 +378,6 @@ $(COMMON_SEM_ASM_O): $(COMMON_SEM_ASM_S)
 
 $(COMMON_SEMIHOSTING_ASM_O): $(COMMON_SEMIHOSTING_ASM_S)
 	$(LLVM_MC) --triple=aarch64-none-elf --filetype=obj $< -o $@
-
-$(COMMON_LINUX_STARTUP_O): $(COMMON_LINUX_STARTUP_S)
-	$(LLVM_MC) --triple=$(LINUX_AMD64_TARGET) --filetype=obj $< -o $@
-
-$(COMMON_LINUX_SYSCALL_O): $(COMMON_LINUX_SYSCALL_S)
-	$(LLVM_MC) --triple=$(LINUX_AMD64_TARGET) --filetype=obj $< -o $@
-
-examples/linux_hello/linux_hello_exe.o: examples/linux_hello/linux_hello.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_PRINT_BASE) $(TAKIBI)
-	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $< --target $(LINUX_AMD64_TARGET) -o $@ --forbid-trap
-
-examples/linux_hello/linux_hello.exe: $(COMMON_LINUX_STARTUP_O) $(COMMON_LINUX_SYSCALL_O) examples/linux_hello/linux_hello_exe.o
-	$(LLD) -static -nostdlib -e _start $^ -o $@
 
 # -- .tkb -> .o  (static pattern rules) ----------------------------------------
 # For examples/%.o, % matches "name/name" (including the slash).

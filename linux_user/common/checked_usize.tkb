@@ -1,0 +1,8 @@
+// Result type for compiler-lowered native-width checked arithmetic.
+// Callers must handle Value/Overflow; no runtime trap, dropped result, or
+// wrapping value escapes.
+
+must_use variant CheckedUsize {
+    Value(usize);
+    Overflow;
+}

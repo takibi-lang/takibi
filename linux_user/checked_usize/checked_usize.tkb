@@ -1,0 +1,26 @@
+use "linux_user/common/checked_usize.tkb";
+
+fn report(label: *u8, result: CheckedUsize, expect_overflow: bool) {
+    uart_puts(label);
+    match result {
+        CheckedUsize::Value(value) => {
+            if (expect_overflow == false) { uart_puts("PASS\n"); }
+            else { uart_puts("FAIL\n"); }
+        }
+        CheckedUsize::Overflow => {
+            if (expect_overflow == true) { uart_puts("PASS\n"); }
+            else { uart_puts("FAIL\n"); }
+        }
+    }
+}
+
+fn app_main() {
+    // Native-width maximum: this stays valid when the same source is
+    // compiled for either a 32-bit or 64-bit target.
+    let mut max: usize = 0;
+    max = max - 1;
+    report("add success: ", checked_add_usize(max, 0), false);
+    report("add overflow: ", checked_add_usize(max, 1), true);
+    report("mul success: ", checked_mul_usize(max, 1), false);
+    report("mul overflow: ", checked_mul_usize(max, 2), true);
+}

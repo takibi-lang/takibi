@@ -28,25 +28,97 @@ virtual memory, drivers, syscall boundaries) with the same discipline.
 See `SPEC.md`.** This file is the engineering log -- design rationale, bugs found
 and fixed, and the history behind each decision.
 
-## Maintenance Scope: `kernel/` Only
+## Maintenance Scope: `kernel/` and `linux_user/`
 
-**All new implementation and maintenance work is restricted to `kernel/`.**
-The standalone Unix-like kernel is the active product surface.  New features,
-bug fixes, tests, fixtures, and target-specific code belong under `kernel/`.
+**All new feature/product implementation work is restricted to `kernel/`.**
+The standalone Unix-like kernel is the active product surface.  New kernel
+features, bug fixes, fixtures, and target-specific code belong under
+`kernel/`.
+
+**`linux_user/` is a second, narrower actively-maintained surface**: fast,
+host-native (x86_64-pc-linux-gnu, no QEMU/hardware) compiled-and-executed
+tests for compiler/language features and algorithms whose correctness does
+not depend on real hardware timing, interrupts, cache behavior, or
+concurrency.  It exists specifically for iterating on new type-system
+features (e.g. prototyping a data structure) before -- or independent of --
+integrating them into `kernel/`.  See "Where Should a New Test Go?" below
+for the exact criterion and `make linuxbuild`/`make linuxcheck` under
+"Build Commands".  Add to it freely when a test satisfies that criterion;
+its whole point is to be cheap to grow.
 
 The `examples/` tree is historical heritage.  It records the language and
-bare-metal milestones that led to the standalone kernel, but it is no longer a
-maintained product surface.  Do not add features to it, port new behavior into
-it, refactor it, or update it merely to keep parity with `kernel/`.  Existing
-example build or test failures caused by an intentional kernel-only change do
-not justify modifying `examples/`; report the historical incompatibility
-instead.  Modify an example only when the user explicitly asks for that exact
-historical artifact to be changed.
+bare-metal milestones that led to the standalone kernel and to `linux_user/`.
+It is not a target for new feature work: do not add features to it, port new
+`kernel/` behavior into it, refactor it, or update it merely to keep parity
+with `kernel/`.  It is, however, checked regularly (`make -f examples/Makefile
+allcheck`, roughly daily) and kept green: a genuine regression found that way
+(e.g. a compiler bug that breaks existing, unchanged example behavior) should
+be fixed, not left to bit-rot silently.  This is distinct from an example
+build/test failure caused by an *intentional* kernel-only or `linux_user/`-only
+change (e.g. deliberately renaming a shared concept that only `kernel/` still
+uses) -- that kind of failure does not justify modifying `examples/`; report
+the historical incompatibility instead.  Modify an example's own `.tkb`/build
+files only when the user explicitly asks for that exact historical artifact
+to be changed.  A test being extracted (copied or moved) into `linux_user/`
+is exactly such an explicit ask; see the extraction note below.
+
+**Copy, don't blindly move, when extracting an example into `linux_user/`.**
+Some examples exist *only* for QEMU/host coverage (e.g. the now-removed
+`examples/linux_hello`) and can be moved outright once ported. Many others
+(anything in `examples/Makefile`'s `EXAMPLES` list) are also independently
+cross-compiled for STM32 (`stm32build`) and exercised on real RPi3/RPi5
+hardware (`hwcheck-rpi3`/`hwcheck-rpi5`, see `scripts/run_hwtest_rpi5.sh`).
+Removing one of those from `examples/` would silently drop real-hardware
+regression coverage that has nothing to do with `linux_user/`'s purpose --
+check each candidate's hardware-test scripts before removing anything, and
+default to copying (leaving the original in place) whenever unsure.
 
 Repository-level governance documents such as this file may still be updated
 when needed to describe or enforce the maintenance policy.  Do not expand a
-kernel task into compiler, root build-system, or other non-`kernel/` work
-without a separate concrete requirement and explicit user direction.
+kernel task into compiler, root build-system, or other non-`kernel/`/
+non-`linux_user/` work without a separate concrete requirement and explicit
+user direction.
+
+## Where Should a New Test Go?
+
+Three tiers exist, and a new test should be justified into the tier that
+positively fits it -- not dropped into whichever tier is left over after
+ruling out the others, which is how `examples/` grew into something slow
+enough that people stopped running it casually (see its own header comment
+in `examples/Makefile`'s history, and HISTORY.md, for that trajectory).
+
+1. **`test/test_takibi.ml`** (Alcotest, `make test`) -- fastest.  In-process:
+   does this compile/type-check/get rejected correctly, and (sometimes) does
+   the generated LLVM IR have the expected shape.  Never executes the
+   compiled program.  Use this for pure syntax/type-system questions: "does
+   this refined-type narrowing survive an early return", "is this construct
+   even parseable", "does this ownership rule reject the unsound case".
+2. **`linux_user/`** (`make linuxbuild`/`make linuxcheck`) -- compiles AND
+   *executes* a small host-native x86_64 program, diffing real stdout
+   against `<name>.expected`.  Still cheap (no QEMU/hardware), but catches
+   what (1) structurally cannot: is the runtime BEHAVIOR correct (does this
+   algorithm/data structure actually compute the right answer, not just
+   typecheck).
+3. **`kernel/` on RPi5 + QEMU** (`make kernelcheck`) / **`examples/`'s
+   QEMU+real-hardware lanes** -- the expensive, fully-faithful tier: real
+   MMIO, real interrupts, real cache/memory-ordering behavior, real
+   concurrency/timing.
+
+**The litmus test for tier 2 (`linux_user/`) is positive, not residual:**
+
+> Would this exact test's pass/fail verdict be identical if run on real
+> hardware and if run as a native Linux/AMD64 process?
+
+If yes, it belongs in `linux_user/` -- e.g. a queue's push/pop ordering, a
+generation-counter wraparound, a checksum/parser's correctness, a refined-type
+proof's compile-time acceptance backed by a runtime check of the computed
+value. If the answer depends on real timing, interrupt latency, cache
+coherency, or actual concurrent execution, it belongs in tier 3 -- even
+though tier 3 is slower and more inconvenient, downgrading such a test to
+`linux_user/` for convenience produces a test that reliably passes without
+ever being able to catch the bug it exists to catch, which is worse than not
+having the test at all.  Do not place a test in `linux_user/` merely because
+it doesn't obviously fit tiers 1 or 3; justify it against the question above.
 
 ## GitHub Issue Policy
 
@@ -262,25 +334,28 @@ description drift between the two files.
 
 ## Build Commands
 
-The root `Makefile` covers the compiler and `kernel/` only -- the maintained
-product surface. Everything under `examples/` (frozen, historical, see
-"Maintenance Scope: `kernel/` Only" above) lives in its own `examples/Makefile`
-instead, so a plain `make <target>` at the repo root can never accidentally
-run an examples-only check against `kernel/` work. Always invoke it explicitly
-from the repo root -- never `cd examples` first:
+The root `Makefile` covers the compiler, `kernel/`, and `linux_user/` --
+the maintained product + fast-test surface. Everything under `examples/`
+(frozen, historical, see "Maintenance Scope: `kernel/` and `linux_user/`"
+above) lives in its own `examples/Makefile` instead, so a plain `make
+<target>` at the repo root can never accidentally run an examples-only
+check against `kernel/` work. Always invoke it explicitly from the repo
+root -- never `cd examples` first:
 
 ```bash
 make build              # build the compiler (takibi) only (= dune build)
 make test               # run unit tests
-make langcheck          # repo-wide ASCII-only check (kernel/ + examples/ + compiler)
+make langcheck          # repo-wide ASCII-only check (kernel/ + examples/ + linux_user/ + compiler)
 make kernelbuild-rpi5   # build kernel/build/rpi5/kernel.elf (no hardware needed)
 make kernelbuild        # build every maintained kernel target (currently = kernelbuild-rpi5)
 make kernelcheck-rpi5   # build and run the RPi5 hardware integration suite
 make kernelcheck        # build and test every maintained kernel target
-make clean              # remove dune build artifacts and kernel/ link outputs
+make linuxbuild         # build linux_user/'s host-native Linux/AMD64 tests (no QEMU/hardware needed)
+make linuxcheck         # build and run linux_user/'s tests, diffing stdout against each .expected
+make clean              # remove dune build artifacts, kernel/ link outputs, and linux_user/ build outputs
 ```
 
-Examples-only targets (STM32/RPi3/QEMU/Linux-userspace milestones) all require
+Examples-only targets (STM32/RPi3/QEMU milestones) all require
 the `-f examples/Makefile` flag:
 
 ```bash
@@ -580,6 +655,24 @@ examples/
                      `<name>_stm32.tkb` exists anywhere in this repo (see the STM32 section
                      below for how the hardest cases, irq/preempt/semaphore/condvar/watchdog/
                      msgqueue, got there too).
+linux_user/       -- see "Maintenance Scope: kernel/ and linux_user/" and "Where Should a
+                     New Test Go?" above for what belongs here. Deliberately self-contained:
+                     nothing here `use`s anything under examples/. Built/run via the root
+                     Makefile's `linuxbuild`/`linuxcheck`, not examples/Makefile.
+  common/         -- platform-agnostic .tkb logic (own copies, not shared with examples/
+                     common/, so this tree has no dependency on the frozen one): print.tkb/
+                     runtime.tkb (uart_print/uart_println core + app_main wrapper, mirrors
+                     examples/common/'s own), checked_usize.tkb, elf64_validate.tkb (ELF64/
+                     AArch64 load-plan structural validation -- parses bytes, doesn't execute
+                     them, so it's portable despite validating an AArch64 target)
+  common_linux/   -- x86_64-pc-linux-gnu-only HAL: startup.S (_start -> main, raw exit
+                     syscall), syscall.S (linux_write/linux_exit, no libc), uart.tkb
+                     (uart_putc/uart_puts over the write(2) syscall), print.tkb (`use`s
+                     common/print.tkb + common/runtime.tkb)
+  <name>/         -- each directory: see the leading comment in <name>.tkb. Any test copied
+                     in from examples/ (rather than moved) keeps its examples/ original too
+                     if that original is independently exercised on real STM32/RPi3/RPi5
+                     hardware -- see the "Copy, don't blindly move" note above.
 scripts/
   run_qemutest.sh -- integration test script: host-side checks plus QEMU tests
                      (FIFO sync and timing verification included)

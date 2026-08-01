@@ -1,0 +1,103 @@
+// Focused malformed-ELF regression tests for the shared AArch64 validator.
+// The fixture builds with --forbid-trap and performs no ELF loading.
+
+use "linux_user/common/elf64_validate.tkb";
+
+private let mut image: [u8; 256] align(8);
+
+fn put_u16(offset: usize, value: u16) {
+    let p: *u8 = image as *u8;
+    p[offset as isize] = value as u8;
+    p[(offset + 1) as isize] = (value >> 8) as u8;
+}
+
+fn put_u32(offset: usize, value: u32) {
+    let p: *u8 = image as *u8;
+    for i: usize in 0..<4 {
+        p[(offset + i) as isize] = (value >> ((i * 8) as u32)) as u8;
+    }
+}
+
+fn put_u64(offset: usize, value: u64) {
+    let p: *u8 = image as *u8;
+    for i: usize in 0..<8 {
+        p[(offset + i) as isize] = (value >> ((i * 8) as u64)) as u8;
+    }
+}
+
+fn valid_image_init() {
+    for i: usize in 0..<256 {
+        image[i] = 0;
+    }
+    image[0] = 0x7F;
+    image[1] = 0x45;
+    image[2] = 0x4C;
+    image[3] = 0x46;
+    image[4] = 2;
+    image[5] = 1;
+    image[6] = 1;
+    put_u16(16, 3);       // ET_DYN
+    put_u16(18, 183);     // EM_AARCH64
+    put_u32(20, 1);
+    put_u64(24, 0);       // entry
+    put_u64(32, 64);      // program-header table
+    put_u16(52, 64);
+    put_u16(54, 56);
+    put_u16(56, 1);
+
+    put_u32(64, 1);       // PT_LOAD
+    put_u64(72, 128);     // p_offset
+    put_u64(80, 0);       // p_vaddr
+    put_u64(96, 16);      // p_filesz
+    put_u64(104, 16);     // p_memsz
+    put_u64(112, 8);      // p_align
+}
+
+fn print_result(label: *u8, expected_valid: bool, image_len: usize) {
+    uart_puts(label);
+    let result: Elf64Validation = elf64_validate_load(
+        image as usize, image_len, 0x40000000);
+    match result {
+        Elf64Validation::Invalid => {
+            if (expected_valid == false) { uart_puts("PASS\n"); }
+            else { uart_puts("FAIL\n"); }
+        }
+        Elf64Validation::Valid(info) => {
+            if (expected_valid == true) { uart_puts("PASS\n"); }
+            else { uart_puts("FAIL\n"); }
+        }
+    }
+}
+
+fn app_main() {
+    valid_image_init();
+    print_result("valid: ", true, 256);
+
+    valid_image_init();
+    print_result("truncated header: ", false, 63);
+
+    valid_image_init();
+    put_u64(32, 240);
+    print_result("phoff outside table: ", false, 256);
+
+    valid_image_init();
+    put_u16(54, 55);
+    print_result("bad phentsize: ", false, 256);
+
+    valid_image_init();
+    put_u16(56, 9);
+    print_result("too many phdrs: ", false, 256);
+
+    valid_image_init();
+    put_u64(96, 17);
+    print_result("filesz over memsz: ", false, 256);
+
+    valid_image_init();
+    put_u64(80, 0xFFFFFFFFFFFFFFF8);
+    put_u64(104, 16);
+    print_result("wrapped segment extent: ", false, 256);
+
+    valid_image_init();
+    put_u64(112, 3);
+    print_result("non-power-two align: ", false, 256);
+}

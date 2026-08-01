@@ -34,7 +34,7 @@ LLD     := ld.lld-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelcheck-rpi5 langcheck clean FORCE
+.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelcheck-rpi5 langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -88,6 +88,90 @@ langcheck:
 	    echo "ERROR: non-ASCII characters found (see above)"; exit 1; \
 	fi
 	@echo "OK: all files are ASCII-clean"
+
+# -- linux_user/ (host-native Linux/AMD64 environment-independent tests) -----
+# See AGENTS.md's "Where Should a New Test Go?": this directory holds
+# compiled-AND-EXECUTED integration tests whose pass/fail does not depend on
+# real hardware timing, interrupts, cache behavior, or concurrency -- if it
+# would, the test belongs under kernel/ hardware testing instead, however
+# inconvenient that is, not here for convenience. Compiled for this host's
+# own x86_64 architecture and run natively, no QEMU or real hardware needed,
+# so these stay part of the always-on `kernel/` + compiler surface (see the
+# section comment above "-- This file covers kernel/ + the compiler only").
+# Deliberately self-contained: nothing here `use`s anything under examples/,
+# so it has no dependency on that frozen tree.
+LINUX_AMD64_TARGET      := x86_64-pc-linux-gnu
+LINUX_USER_DIR           := linux_user
+LINUX_USER_BUILD_DIR     := $(LINUX_USER_DIR)/build
+COMMON_LINUX_DIR         := $(LINUX_USER_DIR)/common_linux
+COMMON_LINUX_STARTUP_S   := $(COMMON_LINUX_DIR)/startup.S
+COMMON_LINUX_STARTUP_O   := $(LINUX_USER_BUILD_DIR)/startup.o
+COMMON_LINUX_SYSCALL_S   := $(COMMON_LINUX_DIR)/syscall.S
+COMMON_LINUX_SYSCALL_O   := $(LINUX_USER_BUILD_DIR)/syscall.o
+COMMON_LINUX_UART        := $(COMMON_LINUX_DIR)/uart.tkb
+COMMON_LINUX_PRINT       := $(COMMON_LINUX_DIR)/print.tkb
+COMMON_LINUX_PRINT_BASE  := $(LINUX_USER_DIR)/common/print.tkb $(LINUX_USER_DIR)/common/runtime.tkb
+# One test per directory, name == directory name, matching examples/'s own
+# convention. Add to this list as tests are migrated in from examples/ or
+# written fresh (see AGENTS.md). Each of these six was verified to compile,
+# link, and run under x86_64-pc-linux-gnu with output byte-identical to its
+# original examples/ QEMU .expected before being migrated -- pure logic
+# (type system, algorithms, checked arithmetic, ELF parsing, single-core
+# allocator bookkeeping), no MMIO/interrupt/concurrency dependency.
+# examples/klock_guard was tried and rejected: it links against
+# enable_irq/disable_irq (real interrupt control), so it belongs in
+# kernel/-style hardware testing per the litmus test below, not here,
+# despite compiling cleanly -- compiling is not the bar, the litmus test is.
+LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump percpu page_pool
+LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
+
+# Extra prerequisites (staleness tracking only -- `use` already resolves
+# these transitively at compile time, same reasoning as examples/Makefile's
+# own .tkb -> .o rule comment) for the tests above that `use` a shared file
+# outside their own directory.
+$(LINUX_USER_DIR)/checked_usize/checked_usize_exe.o: $(LINUX_USER_DIR)/common/checked_usize.tkb
+$(LINUX_USER_DIR)/elf64_validate/elf64_validate_exe.o: $(LINUX_USER_DIR)/common/elf64_validate.tkb $(LINUX_USER_DIR)/common/checked_usize.tkb
+$(LINUX_USER_DIR)/page_pool/page_pool_exe.o: $(LINUX_USER_DIR)/page_pool/page_pool_core.tkb
+
+$(LINUX_USER_BUILD_DIR):
+	mkdir -p $@
+
+$(COMMON_LINUX_STARTUP_O): $(COMMON_LINUX_STARTUP_S) | $(LINUX_USER_BUILD_DIR)
+	$(LLVM_MC) --triple=$(LINUX_AMD64_TARGET) --filetype=obj $< -o $@
+
+$(COMMON_LINUX_SYSCALL_O): $(COMMON_LINUX_SYSCALL_S) | $(LINUX_USER_BUILD_DIR)
+	$(LLVM_MC) --triple=$(LINUX_AMD64_TARGET) --filetype=obj $< -o $@
+
+# $(LINUX_USER_DIR)/%_exe.o <- $(LINUX_USER_DIR)/%.tkb (% matches "name/name",
+# same static-pattern-rule idiom as examples/Makefile's own .tkb -> .o rule).
+# Every linux_user test only ever needs the same minimal uart+print HAL --
+# unlike examples/'s many hardware-HAL groupings, there is no MMIO/interrupt
+# surface here to vary by test.
+$(LINUX_USER_DIR)/%_exe.o: $(LINUX_USER_DIR)/%.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE) $(TAKIBI)
+	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $< --target $(LINUX_AMD64_TARGET) -o $@ --forbid-trap
+
+$(LINUX_USER_DIR)/%.exe: $(LINUX_USER_DIR)/%_exe.o $(COMMON_LINUX_STARTUP_O) $(COMMON_LINUX_SYSCALL_O)
+	$(LLD) -static -nostdlib -e _start $^ -o $@
+
+## linuxbuild: build linux_user/'s host-native Linux/AMD64 tests (no libc, _start -> app_main)
+linuxbuild: $(LINUX_USER_BINS)
+
+## linuxcheck: run linux_user/'s tests natively and diff stdout against each .expected
+linuxcheck: linuxbuild
+	@fail=0; \
+	for e in $(LINUX_USER_EXAMPLES); do \
+	    got=$$($(LINUX_USER_DIR)/$$e/$$e.exe); \
+	    exp=$$(cat $(LINUX_USER_DIR)/$$e/$$e.expected); \
+	    if [ "$$got" = "$$exp" ]; then \
+	        echo "PASS  $$e (linux amd64)"; \
+	    else \
+	        echo "FAIL  $$e (linux amd64)"; \
+	        echo "  expected: $$exp"; \
+	        echo "  got:      $$got"; \
+	        fail=1; \
+	    fi; \
+	done; \
+	exit $$fail
 
 # -- Raspberry Pi 5 (BCM2712) -------------------------------------------------
 RPI5_TARGET := aarch64-none-elf
@@ -237,8 +321,11 @@ kernelcheck-rpi5: kernelbuild-rpi5
 kernelcheck: kernelcheck-rpi5
 
 # -- clean ---------------------------------------------------------------------
-## clean: remove dune build artifacts and kernel/ link outputs. Does not
-## touch examples/ -- use `make -f examples/Makefile clean` for that.
+## clean: remove dune build artifacts, kernel/ link outputs, and linux_user/
+## build outputs. Does not touch examples/ -- use `make -f examples/Makefile
+## clean` for that.
 clean:
 	dune clean
 	find kernel/build -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.img' \) -delete 2>/dev/null || true
+	rm -rf $(LINUX_USER_BUILD_DIR)
+	find $(LINUX_USER_DIR) -type f \( -name '*.o' -o -name '*.exe' \) -delete 2>/dev/null || true

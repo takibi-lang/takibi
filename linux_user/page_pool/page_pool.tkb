@@ -1,0 +1,72 @@
+// Single-core fixed-page allocator baseline.
+//
+// The pool owns 64 physical 4096-byte slots.  A successful allocation does
+// not return a loose page number: it packages a linear PageOwner behind a
+// fresh existential allocation identity.  page_bytes ties its slice to that
+// owner, so consuming the owner invalidates every slice derived from it even
+// when a later allocation reuses the same physical page index.
+//
+// This first working milestone deliberately uses ordinary checked indices
+// and is compiled without --forbid-trap.  The follow-up hardening commit adds
+// only the refinements reported by the compiler.
+
+use "linux_user/page_pool/page_pool_core.tkb";
+
+fn app_main() {
+    page_pool_init();
+    uart_puts("page_pool\n");
+
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => {
+            uart_puts("first allocation failed\n");
+        }
+        PageAllocResult::Allocated(first) => {
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {
+                    uart_puts("second allocation failed\n");
+                    page_free(first);
+                }
+                PageAllocResult::Allocated(second) => {
+                    let first_bytes = page_bytes(first);
+                    let second_bytes = page_bytes(second);
+                    first_bytes[0] = 17;
+                    first_bytes[4095] = 18;
+                    second_bytes[0] = 34;
+
+                    uart_puts("allocated: ");
+                    uart_print(page_index(first));
+                    uart_puts(" ");
+                    uart_print(page_index(second));
+                    uart_puts("\nvalues: ");
+                    uart_print(first_bytes[0]);
+                    uart_puts(" ");
+                    uart_print(first_bytes[4095]);
+                    uart_puts(" ");
+                    uart_print(second_bytes[0]);
+                    uart_puts("\ngenerations: ");
+                    uart_print(page_generation(first));
+                    uart_puts(" ");
+                    uart_print(page_generation(second));
+                    uart_puts("\n");
+
+                    page_free(first);
+                    match page_alloc() {
+                        PageAllocResult::OutOfMemory => {
+                            uart_puts("reuse allocation failed\n");
+                        }
+                        PageAllocResult::Allocated(reused) => {
+                            uart_puts("reused: ");
+                            uart_print(page_index(reused));
+                            uart_puts(" generation ");
+                            uart_print(page_generation(reused));
+                            uart_puts("\n");
+                            page_free(reused);
+                        }
+                    }
+                    page_free(second);
+                }
+            }
+        }
+    }
+    uart_puts("done\n");
+}

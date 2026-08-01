@@ -270,40 +270,6 @@ run_forbid_unsafe_ok_test() {
     rm -f "$tmp_err" "$tmp_obj"
 }
 
-# run_linux_binary_test NAME BINARY EXPECTED
-#
-# Executes a host Linux/AMD64 user-space Takibi binary and diffs stdout against
-# EXPECTED. QEMU is not involved, but this lives in the same harness as the
-# compile-only tests so `make check` gets one coloured PASS/FAIL stream.
-run_linux_binary_test() {
-    local name="$1" binary="$2" expected="$3"
-    local tmp_out
-    tmp_out=$(mktemp)
-
-    if "$binary" > "$tmp_out"; then
-        if diff -q "$expected" "$tmp_out" > /dev/null 2>&1; then
-            save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_out" stdout.log
-            printf "${GRN}PASS${RST}  %s\n" "$name"
-            PASS=$((PASS + 1))
-        else
-            save_artifact_file "$CHECK_ARTIFACT_ROOT" "$name" "$tmp_out" stdout.log
-            printf "${RED}FAIL${RST}  %s\n" "$name"
-            printf "       expected bytes: %s\n" "$(od -An -c "$expected" | tr -s ' \n' ' ')"
-            printf "       got bytes:      %s\n" "$(od -An -c "$tmp_out"  | tr -s ' \n' ' ')"
-            FAIL=$((FAIL + 1))
-            FAILED_TESTS+=("$name")
-        fi
-    else
-        local status=$?
-        printf "${RED}FAIL${RST}  %s\n" "$name"
-        printf "       process exited with status %d\n" "$status"
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("$name")
-    fi
-
-    rm -f "$tmp_out"
-}
-
 # run_inline_optimizer_test NAME OBJECT
 #
 # Verifies the explicit `inline fn` contract on a purpose-built object:
@@ -348,9 +314,6 @@ run_inline_optimizer_test() {
 
 run_host_integration_tests() {
     local only="${1:-}"
-    if [ -z "$only" ] || [ "$only" = "linux_hello" ]; then
-        run_linux_binary_test "linux_hello (linux amd64)" examples/linux_hello/linux_hello.exe examples/linux_hello/linux_hello.expected
-    fi
     if [ -z "$only" ] || [ "$only" = "inline_check" ]; then
         run_inline_optimizer_test "inline_check" examples/inline_check/inline_check.o
     fi
