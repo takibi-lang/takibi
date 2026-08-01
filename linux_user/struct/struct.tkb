@@ -1,0 +1,69 @@
+// Struct demo: field access, assignment, indexed assignment, pass-by-pointer,
+// and swap.
+// Defines two struct types: Point (x, y) and Rect (tl, br, w, h).
+struct Point {
+    x: i32;
+    y: i32;
+}
+
+struct Rect {
+    tl: i32;
+    br: i32;
+    w:  i32;
+    h:  i32;
+}
+
+fn point_sum(p: *Point) -> i32 {
+    return p.x + p.y;
+}
+
+fn point_swap(p: *Point) {
+    let tmp: i32 = p.x;
+    p.x = p.y;
+    p.y = tmp;
+}
+
+fn rect_area(r: *Rect) -> i32 {
+    return r.w * r.h;
+}
+
+let mut g: Point = {10, 20};
+let mut points: [Point; 2];
+
+fn test_struct() {
+    uart_puts("global sum: ");
+    uart_print(point_sum(&g));
+    uart_puts("\r\n");
+
+    let mut p: Point = {3, 4};
+    uart_puts("local sum: ");
+    uart_print(point_sum(&p));
+    uart_puts("\r\n");
+
+    point_swap(&p);
+    uart_puts("after swap x: ");
+    uart_print(p.x);
+    uart_puts(" y: ");
+    uart_print(p.y);
+    uart_puts("\r\n");
+
+    let mut r: Rect = {0, 1, 5, 6};
+    uart_puts("rect area: ");
+    uart_print(rect_area(&r));
+    uart_puts("\r\n");
+
+    points[0].x = 7;
+    points[0].y = 8;
+    points[1].x = 10;
+    points[1].y = 5;
+    points[1].x += 5;
+    uart_puts("indexed sums: ");
+    uart_print(points[0].x + points[0].y);
+    uart_puts(" ");
+    uart_print(points[1].x + points[1].y);
+    uart_puts("\r\n");
+}
+
+fn app_main() {
+    test_struct();
+}

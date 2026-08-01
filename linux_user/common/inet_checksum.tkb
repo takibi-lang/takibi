@@ -1,0 +1,52 @@
+// Internet checksum (RFC 1071): the one's-complement 16-bit checksum used
+// by IPv4, ICMP, UDP, and TCP. Shared by examples/inet_checksum (algorithm
+// demo), examples/ip_parse (header validation), examples/icmp_echo/
+// arp_reply/tcp_parse/tcp_echo/http_server (validation + reply
+// construction). TCP's checksum also covers a 12-byte "pseudo-header" of
+// src/dst IP + protocol + length that isn't actually on the wire, so it
+// can't be checksummed as a single contiguous buffer with the segment --
+// hence checksum_add/checksum_fold are split out as their own primitives
+// rather than only exposing the single-buffer inet_checksum convenience
+// wrapper.
+//
+// SLICE-BASED (P4b): checksum_add takes a slice, not a pointer+len pair --
+// the length lives in the slice's own .len, so a caller with a
+// compile-time-proven view (a fixed-offset header field, or a runtime
+// span proven via the P4a same-base/interval rules) gets a fully
+// --forbid-trap-clean call; only a genuinely unbounded span falls back to
+// a runtime-checked subslice (one recorded trap site) at the CALL site,
+// not inside this function. `for b in data` replaces the old stride-2
+// index loop (data[i], data[i+1], guarded by i+1<len) with the hi/lo
+// alternation technique from examples/foreach/foreach.tkb: odd-length
+// input naturally leaves the last byte shifted into the high half exactly
+// like the old tail-padding branch did, with zero indexing at all.
+fn checksum_add(data: borrow []u8, sum_in: i32) -> i32 {
+    let mut sum: i32 = sum_in;
+    let mut hi: i32 = 1;
+    for b in data {
+        if (hi == 1) {
+            sum = sum + ((b as i32) << 8);
+            hi = 0;
+        } else {
+            sum = sum + (b as i32);
+            hi = 1;
+        }
+    }
+    return sum;
+}
+
+// Folds a running sum's carries into the low 16 bits and one's-complements
+// it, producing the final checksum value.
+fn checksum_fold(sum_in: i32) -> i32 {
+    let mut sum: i32 = sum_in;
+    while ((sum >> 16) != 0) {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    return (~sum) & 0xffff;
+}
+
+// Convenience wrapper for the common single-buffer case (IPv4 header,
+// whole ICMP message): checksum_fold(checksum_add(data, 0)).
+fn inet_checksum(data: borrow []u8) -> i32 {
+    return checksum_fold(checksum_add(data, 0));
+}

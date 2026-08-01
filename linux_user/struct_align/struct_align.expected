@@ -1,0 +1,8 @@
+global Vec4:     aligned
+local  Vec4:     aligned
+global ring:     aligned
+global ring_dma: aligned
+odds[0]:         aligned
+odds[1]:         aligned
+odds[2]:         aligned
+done

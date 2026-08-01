@@ -1,0 +1,19 @@
+// Demo of hex display for 32-bit integers. Extracts nibbles (4 bits) using >> and &.
+
+fn test_print_hex() {
+    uart_puts("=== uart_print_hex test ===\r\n");
+    uart_print_hex(0);
+    uart_putc('\r');
+    uart_putc('\n');
+    uart_print_hex(0x0000cafe);
+    uart_putc('\r');
+    uart_putc('\n');
+    uart_print_hex(0x12345678);
+    uart_putc('\r');
+    uart_putc('\n');
+    uart_puts("done\r\n");
+}
+
+fn app_main() {
+    test_print_hex();
+}

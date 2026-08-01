@@ -1,0 +1,33 @@
+// break and continue demo.
+//
+// Part 1 (break): search 0..9 for the first value divisible by 3,
+//   print it and stop. Expected: "3\r\n"
+//
+// Part 2 (continue): iterate 0..7 and print only even values.
+//   Expected: "0\r\n2\r\n4\r\n6\r\n"
+//
+// QEMU expected output: 3\r\n0\r\n2\r\n4\r\n6\r\n
+
+fn test_loop() -> i32 {
+    // Part 1: find first multiple of 3 in 0..<10 using break.
+    for i: i32 in 0..<10 {
+        if (i % 3 == 0 && i != 0) {
+            uart_println(i);
+            break;
+        }
+    }
+
+    // Part 2: print even numbers in 0..<8 using continue.
+    for i: i32 in 0..<8 {
+        if (i % 2 != 0) {
+            continue;
+        }
+        uart_println(i);
+    }
+
+    return 0;
+}
+
+fn app_main() {
+    test_loop();
+}

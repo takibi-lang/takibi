@@ -122,7 +122,26 @@ COMMON_LINUX_PRINT_BASE  := $(LINUX_USER_DIR)/common/print.tkb $(LINUX_USER_DIR)
 # enable_irq/disable_irq (real interrupt control), so it belongs in
 # kernel/-style hardware testing per the litmus test below, not here,
 # despite compiling cleanly -- compiling is not the bar, the litmus test is.
-LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump percpu page_pool
+# The 41 single-fixture tests below were basic_suite/type_system_suite/
+# algorithm_suite's sub-fixtures in examples/ (see AGENTS.md's "Copy, don't
+# blindly move" note): those suites batch many fixtures into one QEMU/
+# hardware boot and split the UART stream on markers to keep each fixture's
+# own .expected independently checkable, because a QEMU/hardware boot is
+# expensive enough that batching mattered. That reason doesn't apply here --
+# a native process starts in a few milliseconds -- so each fixture below is
+# its own directory/binary/`.expected`, source content unchanged from
+# examples/ except one appended `fn app_main() { test_<name>(); }` wrapper
+# (the suites supplied that wrapper themselves; a standalone binary needs
+# its own). This split-not-batched shape is the template to follow when
+# adding new linux_user/ tests for a new algorithm or data structure.
+LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump percpu page_pool \
+                             hello print_int print_hex print_ptr mem array struct struct_refined \
+                             nonexhaustive refined narrow enum align packed struct_align const_global \
+                             sizeof_offsetof int64 bitops indexed_view tcp_conn_view \
+                             affine_escape_via_index align_ptr_proof linear_obligation tuple_pair \
+                             field_lease match_int_lit \
+                             callstack ringbuf crc8 djb2 slice foreach for loop fizzbuzz fibonacci \
+                             bubblesort inet_checksum ip_parse tcp_parse
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 
 # Extra prerequisites (staleness tracking only -- `use` already resolves
@@ -132,6 +151,9 @@ LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)
 $(LINUX_USER_DIR)/checked_usize/checked_usize_exe.o: $(LINUX_USER_DIR)/common/checked_usize.tkb
 $(LINUX_USER_DIR)/elf64_validate/elf64_validate_exe.o: $(LINUX_USER_DIR)/common/elf64_validate.tkb $(LINUX_USER_DIR)/common/checked_usize.tkb
 $(LINUX_USER_DIR)/page_pool/page_pool_exe.o: $(LINUX_USER_DIR)/page_pool/page_pool_core.tkb
+$(LINUX_USER_DIR)/inet_checksum/inet_checksum_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb
+$(LINUX_USER_DIR)/ip_parse/ip_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
+$(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 
 $(LINUX_USER_BUILD_DIR):
 	mkdir -p $@

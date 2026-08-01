@@ -1,0 +1,71 @@
+// 64-bit integer literal demo. IntLit's payload is Int64.t (see CLAUDE.md's
+// "64-bit Integer Literals" section), so a literal all the way up to
+// u64::MAX now parses and codegens correctly, whether it appears as a
+// global initializer, a local variable's initializer, or a bare function
+// argument -- all three are exercised below, since they go through
+// different code paths (eval_const/eval_const_int for the global,
+// gen_expr's IntLit case for the other two).
+//
+// print_u64_hex remains a local hexadecimal helper.  Shared print.tkb now
+// overloads decimal printing for every primitive integer type; its legacy
+// uart_print_hex API still intentionally formats one i32 word.
+//
+// QEMU expected output:
+//   global   : 0xffffffff:0xffffffff
+//   local    : 0x00000001:0x2a05f200
+//   local2   : 0xffffffff:0xffffffff
+//   argument : 0xffffffff:0xffffffff
+//   negative : -1
+
+const FULL_MASK: u64 = 0xFFFFFFFFFFFFFFFF;
+
+fn print_u64_hex(v: u64) {
+    let hi: u32 = (v >> 32) as u32;
+    let lo: u32 = (v & 0xFFFFFFFF) as u32;
+    uart_print_hex(hi as i32);
+    uart_puts(":");
+    uart_print_hex(lo as i32);
+    uart_puts("\r\n");
+}
+
+fn local_big_value() -> u64 {
+    // 5_000_000_000 exceeds i32's range but fits comfortably in Int64 --
+    // the exact shape that used to silently truncate-then-zero-extend to
+    // the wrong value before gen_expr's IntLit case became width-aware.
+    let x: u64 = 5000000000;
+    return x;
+}
+
+fn local_full_mask() -> u64 {
+    // A local variable set to a full 64-bit value: gen_expr's ?expected_ty
+    // hint (threaded from this Let's declared type) embeds this directly
+    // as an i64 constant, with no i32 stage even conceptually -- unlike
+    // local_big_value's value above, this one doesn't rely on LLVM's own
+    // constant folding to reach the right answer.
+    let w: u64 = 0xFFFFFFFFFFFFFFFF;
+    return w;
+}
+
+fn test_int64() {
+    uart_puts("global   : ");
+    print_u64_hex(FULL_MASK);
+
+    uart_puts("local    : ");
+    print_u64_hex(local_big_value());
+
+    uart_puts("local2   : ");
+    print_u64_hex(local_full_mask());
+
+    uart_puts("argument : ");
+    // A bare wide literal passed directly as a u64 argument (Int64 -1's
+    // bit pattern -- the case that specifically needs bit-31-aware
+    // routing between the i32-native and i64-native codegen paths).
+    print_u64_hex(0xFFFFFFFFFFFFFFFF);
+
+    uart_puts("negative : ");
+    uart_println(-1 as i32);
+}
+
+fn app_main() {
+    test_int64();
+}

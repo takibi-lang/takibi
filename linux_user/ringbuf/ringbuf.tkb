@@ -1,0 +1,56 @@
+// Ring buffer demo. RingBuf struct wraps head/tail with % cap.
+struct RingBuf {
+    buf:  *i32;
+    head: isize;
+    tail: isize;
+    size: i32;
+    cap:  isize;
+}
+
+fn rb_push(rb: *RingBuf, val: i32) {
+    let buf: *i32 = rb.buf;
+    buf[rb.tail] = val;
+    rb.tail = (rb.tail + 1) % rb.cap;
+    rb.size = rb.size + 1;
+}
+
+fn rb_pop(rb: *RingBuf) -> i32 {
+    let buf: *i32 = rb.buf;
+    let val: i32 = buf[rb.head];
+    rb.head = (rb.head + 1) % rb.cap;
+    rb.size = rb.size - 1;
+    return val;
+}
+
+fn test_ringbuf() {
+    let mut data: [i32; 4];
+    let mut rb: RingBuf = {data, 0, 0, 0, 4};
+
+    rb_push(&rb, 1);
+    rb_push(&rb, 2);
+    rb_push(&rb, 3);
+    rb_push(&rb, 4);
+
+    uart_puts("pop: ");
+    uart_print(rb_pop(&rb));
+    uart_puts(" ");
+    uart_print(rb_pop(&rb));
+    uart_puts("\r\n");
+
+    rb_push(&rb, 5);
+    rb_push(&rb, 6);
+
+    uart_puts("pop: ");
+    uart_print(rb_pop(&rb));
+    uart_puts(" ");
+    uart_print(rb_pop(&rb));
+    uart_puts(" ");
+    uart_print(rb_pop(&rb));
+    uart_puts(" ");
+    uart_print(rb_pop(&rb));
+    uart_puts("\r\n");
+}
+
+fn app_main() {
+    test_ringbuf();
+}

@@ -1,0 +1,42 @@
+// memset / memcpy demo using a stack-allocated [u8; 5] array.
+
+fn my_memset(p: *u8, val: u8, n: isize) {
+    for i in 0..<n {
+        p[i] = val;
+    }
+}
+
+fn my_memcpy(dst: *u8, src: *u8, n: isize) {
+    for i in 0..<n {
+        dst[i] = src[i];
+    }
+}
+
+fn print_buf(p: *u8, n: isize) {
+    for i in 0..<n {
+        uart_putc(p[i]);
+    }
+}
+
+fn test_mem() {
+    uart_puts("=== memset/memcpy test ===\r\n");
+
+    let mut buf_a: [u8; 5];
+    let mut buf_b: [u8; 5];
+
+    my_memset(buf_a, 'A', 5);
+    uart_puts("memset: ");
+    print_buf(buf_a, 5);
+    uart_puts("\r\n");
+
+    my_memcpy(buf_b, buf_a, 5);
+    uart_puts("memcpy: ");
+    print_buf(buf_b, 5);
+    uart_puts("\r\n");
+
+    uart_puts("done\r\n");
+}
+
+fn app_main() {
+    test_mem();
+}

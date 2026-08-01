@@ -1,0 +1,115 @@
+// enum Phase 1 demo: discriminant enums, match statement, if-comparison, and as-cast.
+// Verifies: enum definition, EnumVariant expr, match exhaustiveness,
+//           enum == / != comparison (bool result), enum->int cast (no-op),
+//           int->enum cast (round-trips for a non-exhaustive enum, no trap).
+//
+// Color is NON-EXHAUSTIVE (`_;`): `raw as Color` at line ~49 casts a u8
+// with no statically-known range (freshly loaded, not narrowed), so an
+// EXHAUSTIVE enum would need a runtime variant check there -- the one
+// residual --forbid-trap site this whole example suite used to carry
+// (see CLAUDE.md's P4 sections). Marking Color non-exhaustive is the
+// right fix, not a workaround: this demo's own cast site has no evidence
+// bounding raw to {0,1,2}, so the type-level choice that matches reality
+// is "any byte value is a legal Color" (round-trip guaranteed, see
+// CLAUDE.md's enum section) -- exactly the DIRECTION enum was designed to
+// support for open-ended wire fields (compare Direction below, which
+// stays exhaustive since every call site here already proves its casts
+// belong to {0..3}, via the `for i in 0..<3` loop). The tradeoff:
+// color_name's match must now carry a `_` arm (compiler-enforced for a
+// non-exhaustive enum) -- see its comment for how an out-of-range value
+// is handled.
+enum Color: u8 {
+    Red   = 0;
+    Green = 1;
+    Blue  = 2;
+    _;
+}
+
+enum Direction {
+    North;
+    East;
+    South;
+    West;
+}
+
+fn color_name(c: Color) -> *u8 {
+    match c {
+        Color::Red   => { return "Red\r\n"; }
+        Color::Green => { return "Green\r\n"; }
+        Color::Blue  => { return "Blue\r\n"; }
+        // Required because Color is non-exhaustive: a byte outside
+        // {0,1,2} is a legal Color value (round-trip guaranteed), so this
+        // arm is reachable in principle, not dead code the compiler could
+        // assume away (contrast with an exhaustive enum's match, whose
+        // uncovered case compiles to `unreachable`, not a wildcard).
+        _ => { return "(unknown color)\r\n"; }
+    }
+    return "";
+}
+
+fn direction_name(d: Direction) -> *u8 {
+    match d {
+        Direction::North => { return "North\r\n"; }
+        Direction::East  => { return "East\r\n"; }
+        Direction::South => { return "South\r\n"; }
+        Direction::West  => { return "West\r\n"; }
+    }
+    return "";
+}
+
+fn test_enum() {
+    let c: Color = Color::Green;
+    uart_puts(color_name(c));
+
+    let d: Direction = Direction::West;
+    uart_puts(direction_name(d));
+
+    let raw: u8 = c as u8;
+    uart_print(raw);
+    uart_puts("\r\n");
+
+    let c2: Color = raw as Color;
+    uart_puts(color_name(c2));
+
+    for i: i32 in 0..<3 {
+        let ci: Color = i as Color;
+        uart_puts(color_name(ci));
+    }
+
+    // enum == / != : result type is bool, exactly like integer comparison.
+    // LLVM emits: icmp eq i8 %val1, %val2
+    if (c == Color::Green) {
+        uart_puts("c is Green\r\n");
+    }
+    if (c != Color::Red) {
+        uart_puts("c is not Red\r\n");
+    }
+
+    // comparing two enum variables of the same type
+    let r: Color = Color::Red;
+    if (r != c) {
+        uart_puts("r != c\r\n");
+    }
+    if (r == Color::Red) {
+        uart_puts("r is Red\r\n");
+    }
+
+    // match and if are both valid; use whichever fits:
+    //   match  -- when you need to handle every variant (exhaustiveness enforced)
+    //   if     -- when you only care about one or two specific values
+    if (d == Direction::West) {
+        uart_puts("d is West\r\n");
+    }
+
+    // _ wildcard: catches any variant not listed above it.
+    // Useful when you only care about a subset of variants.
+    // Unlike an exhaustive match, _ silences the exhaustiveness check.
+    match c {
+        Color::Red => { uart_puts("wildcard: red\r\n"); }
+        _ => { uart_puts("wildcard: not red\r\n"); }
+    }
+}
+
+fn app_main() {
+    test_enum();
+}

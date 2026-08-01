@@ -1,0 +1,20 @@
+// FizzBuzz: demo of % modulo and if/else if chain. Prints 1 to 20.
+
+fn test_fizzbuzz() {
+    for i: i32 in 1..<21 {
+        if (i % 15 == 0) {
+            uart_puts("FizzBuzz\r\n");
+        } else if (i % 3 == 0) {
+            uart_puts("Fizz\r\n");
+        } else if (i % 5 == 0) {
+            uart_puts("Buzz\r\n");
+        } else {
+            uart_print(i);
+            uart_puts("\r\n");
+        }
+    }
+}
+
+fn app_main() {
+    test_fizzbuzz();
+}

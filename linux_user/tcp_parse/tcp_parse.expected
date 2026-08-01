@@ -1,0 +1,24 @@
+=== valid SYN packet ===
+TCP segment:
+  src_port:    54321
+  dst_port:    80
+  seq:         0x000003e8
+  ack:         0x00000000
+  data_offset: 20
+  flags:       SYN
+  window:      65535
+  src_ip:      192.0.2.55
+  dst_ip:      192.0.2.1
+  checksum:    OK
+=== corrupted packet (TCP checksum zeroed) ===
+TCP segment:
+  src_port:    54321
+  dst_port:    80
+  seq:         0x000003e8
+  ack:         0x00000000
+  data_offset: 20
+  flags:       SYN
+  window:      65535
+  src_ip:      192.0.2.55
+  dst_ip:      192.0.2.1
+  checksum:    BAD

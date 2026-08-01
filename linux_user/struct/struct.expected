@@ -1,0 +1,5 @@
+global sum: 30
+local sum: 7
+after swap x: 4 y: 3
+rect area: 30
+indexed sums: 15 20

@@ -1,0 +1,49 @@
+// Bubble sort demo. IntSlice struct bundles data and length for pass-by-pointer.
+// Demonstrates array read/write through a pointer using arr[i]=v and arr[i].
+struct IntSlice {
+    data: *i32;
+    len:  isize;
+}
+
+fn print_arr(s: *IntSlice) {
+    let arr: *i32 = s.data;
+    for i in 0..<s.len {
+        uart_print(arr[i]);
+        if (i < s.len - 1) {
+            uart_putc(' ');
+        }
+    }
+    uart_puts("\r\n");
+}
+
+fn bubble_sort(s: *IntSlice) {
+    let arr: *i32 = s.data;
+    let n: isize = s.len;
+    for i in 0..<(n - 1) {
+        for j in 0..<(n - 1 - i) {
+            if (arr[j] > arr[j + 1]) {
+                let mut tmp: i32 = arr[j];
+                arr[j] = arr[j + 1];
+                arr[j + 1] = tmp;
+            }
+        }
+    }
+}
+
+fn test_bubblesort() {
+    let mut buf: [i32; 8] = {5, 3, 8, 1, 9, 2, 7, 4};
+
+    let mut s: IntSlice = {buf, 8};
+
+    uart_puts("before: ");
+    print_arr(&s);
+
+    bubble_sort(&s);
+
+    uart_puts("after:  ");
+    print_arr(&s);
+}
+
+fn app_main() {
+    test_bubblesort();
+}

@@ -1,0 +1,74 @@
+// Step 3.5: flow-sensitive type narrowing via if-condition
+//
+// Demonstrates narrowing an "i32 of unknown range" (e.g. from MMIO) to {lo..<hi}
+// via a runtime if-check, then using it for array access or a function expecting a refined argument.
+//
+// How narrowing works:
+//   In the then-branch of  if (v >= 0 && v < 8) { ... }
+//   the compiler treats v as {0..<8}.
+//   -> Array/slice indexing is usize-only (see CLAUDE.md's "Array/Slice
+//      Indices Must Be usize"), so the narrowed {0..<8} (base i32, since v
+//      itself is i32) still needs a `v as usize` cast to bridge into the
+//      index/parameter's required base -- but GitHub issue #72 made that
+//      bridge free to WRITE, not just free to RUN: a bare `as usize` (no
+//      explicit range) now infers {0..<8 as usize} automatically from v's
+//      already-narrowed range, exactly as if `as {0..<8 as usize}` had
+//      been spelled out by hand. This is a local inference, not a general
+//      "guess any type" one -- it only ever widens what a cast already
+//      proves (an out-of-range/unrefined source still needs the runtime
+//      check it always needed; see CLAUDE.md's issue #72 entry).
+//   -> v can be passed to write_entry(i: {0..<8 as usize}), which requires
+//      an EXACT (bounds AND base) match, not just a proven-safe range --
+//      that PARAMETER annotation itself is a function-boundary type and
+//      still has to be written by hand (issue #72 deliberately does not
+//      attempt to infer those; see CLAUDE.md for why).
+//
+// QEMU expected output: ABCDEFGH\r\n
+
+let mut narrow_buf: [u8; 8];
+
+// Function requiring a refined-type argument. Without narrowing, i32 cannot be passed directly.
+fn write_entry(i: {0..<8 as usize}, c: u8) {
+    narrow_buf[i] = c;  // bounds check elided (TypeRefined proves safety)
+}
+
+fn narrow_print_buf() {
+    for i: usize in 0..<8 {
+        uart_putc(narrow_buf[i]);  // i: {0..<8} -> bounds check elided
+    }
+    uart_putc('\r');
+    uart_putc('\n');
+}
+
+// Caller treats v as "some external input (type i32, unknown range)".
+// The if-condition performs a runtime check; in the then-branch v is narrowed to {0..<8}.
+fn fill_from_unknown(v: i32, c: u8) {
+    if (v >= 0 && v < 8) {
+        // Inside here, v is typed as {0..<8}; `as usize` infers {0..<8 as
+        // usize} automatically (issue #72) -- no explicit range to restate.
+        write_entry(v as usize, c);   // pass to refined argument: compiles OK (already narrowed)
+        narrow_buf[v as usize] = c;   // direct array access: bounds check elided
+    }
+    // Outside the if-block, v is i32 again (narrowing does not escape the block)
+}
+
+fn test_narrow() -> i32 {
+    // Pass each index 0 to 7 as "external input" and write
+    fill_from_unknown(0, 'A');
+    fill_from_unknown(1, 'B');
+    fill_from_unknown(2, 'C');
+    fill_from_unknown(3, 'D');
+    fill_from_unknown(4, 'E');
+    fill_from_unknown(5, 'F');
+    fill_from_unknown(6, 'G');
+    fill_from_unknown(7, 'H');
+    // Out-of-range values are rejected by the if-check (buf remains unchanged)
+    fill_from_unknown(-1, 'X');
+    fill_from_unknown(8, 'X');
+    narrow_print_buf();
+    return 0;
+}
+
+fn app_main() {
+    test_narrow();
+}

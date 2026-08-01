@@ -1,0 +1,4 @@
+=== memset/memcpy test ===
+memset: AAAAA
+memcpy: AAAAA
+done

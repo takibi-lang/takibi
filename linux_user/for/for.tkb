@@ -1,0 +1,52 @@
+// for i: T in lo..<hi loop: i gets type {lo..<hi}, so array bounds checks
+// are elided. The explicit `: usize` annotation is required here for two
+// reasons now: neither fill()'s nor print_buf()'s body ever passes `i` to
+// anything with a concrete type of its own except `buf[i]`; array/slice
+// indexing pins an unresolved counter to usize. The annotation documents
+// that requirement explicitly and keeps the loop's range proof attached to
+// the usize base with no cast (see CLAUDE.md's
+// "Array and Slice Indices Must Be usize").
+//
+// Difference in generated machine code (AArch64 AEL1 bare-metal):
+//
+//   while loop (let mut i: i32):
+//     str i, [sp]        ; save to stack
+//     ldr i, [sp]        ; load (every iteration)
+//     cmp i, #8          ; bounds check <- llvm.trap candidate
+//     b.hi trap
+//     ...
+//
+//   for i: usize in 0..<8:
+//     load i_ctr         ; load loop counter
+//     i: {0..<8} -- bounds check fully elided
+//     strb val, [buf+i]  ; direct write (no cmp)
+//
+// QEMU expected output: ABCDEFGH\r\n
+
+let mut for_buf: [u8; 8];
+
+// Write 'A' to 'H' using a for loop. i: {0..<8}, so buf[i] has no bounds check.
+fn for_fill() {
+    for i: usize in 0..<8 {
+        for_buf[i] = 'A' + i as u8;
+    }
+}
+
+// Read and send to UART using a for loop. Bounds check elided here too.
+fn for_print_buf() {
+    for i: usize in 0..<8 {
+        uart_putc(for_buf[i]);
+    }
+    uart_putc('\r');
+    uart_putc('\n');
+}
+
+fn test_for() -> i32 {
+    for_fill();
+    for_print_buf();
+    return 0;
+}
+
+fn app_main() {
+    test_for();
+}

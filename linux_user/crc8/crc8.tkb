@@ -1,0 +1,53 @@
+// CRC-8/SMBUS calculation demo (polynomial 0x07).
+// The CRC-8 of "123456789" is 0xF4. Uses pointer scan, ^ XOR, and << shift.
+
+fn uart_print_hex8(n: i32) {
+    let hi: i32 = (n >> 4) & 0xf;
+    let lo: i32 = n & 0xf;
+    if (hi < 10) {
+        uart_putc((hi + '0') as u8);
+    } else {
+        uart_putc((hi - 10 + 'A') as u8);
+    }
+    if (lo < 10) {
+        uart_putc((lo + '0') as u8);
+    } else {
+        uart_putc((lo - 10 + 'A') as u8);
+    }
+}
+
+fn strlen(s: *u8) isize {
+    let mut n: isize = 0;
+    while (*s != 0) {
+        n = n + 1;
+        s = s + 1;
+    }
+    return n;
+}
+
+fn crc8(data: *u8, len: isize) u8 {
+    let mut crc: u8 = 0;
+    for i in 0..<len {
+        crc = crc ^ *(data + i);
+        for bit: i32 in 0..<8 {
+            if ((crc & 0x80) != 0) {
+                crc = (crc << 1) ^ 0x07;
+            } else {
+                crc = crc << 1;
+            }
+        }
+    }
+    return crc;
+}
+
+fn test_crc8() {
+    let s: *u8 = "123456789";
+    let result: i32 = crc8(s, strlen(s)) as i32;
+    uart_puts("CRC-8: 0x");
+    uart_print_hex8(result);
+    uart_puts("\r\n");
+}
+
+fn app_main() {
+    test_crc8();
+}

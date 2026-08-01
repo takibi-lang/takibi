@@ -1,0 +1,18 @@
+// Fibonacci sequence (iterative). Prints the first 10 terms.
+
+fn test_fibonacci() {
+    let mut a: i32 = 0;
+    let mut b: i32 = 1;
+    let mut tmp: i32 = 0;
+    for i: i32 in 0..<10 {
+        uart_print(b);
+        uart_puts("\r\n");
+        tmp = a + b;
+        a = b;
+        b = tmp;
+    }
+}
+
+fn app_main() {
+    test_fibonacci();
+}

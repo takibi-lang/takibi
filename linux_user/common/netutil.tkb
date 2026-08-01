@@ -1,0 +1,307 @@
+// Small byte-buffer helpers shared by the protocol examples (arp_reply,
+// icmp_echo, tcp_parse, tcp_echo, http_server). MAC/IP addresses and
+// multi-byte header fields are always handled as raw byte arrays rather
+// than native multi-byte integers -- see the read_u16be/write_u16be
+// comment below for why.
+//
+// SLICE MIGRATION (P4b): read/write_u16be/u32be now take slices (see
+// their own comment below) -- every caller has migrated, so no
+// transitional pointer wrapper remains here. bytes_eq/bytes_copy/
+// copy_str/write_udec stay pointer-based: bytes_eq/bytes_copy are general
+// -purpose (still used by fat12.tkb / common_stm32/eth.tkb / the HTTP
+// response-body construction), and copy_str/write_udec's
+// unbounded-append pattern is the one deliberately-deferred item (see
+// CLAUDE.md's P4b section) -- use slice_copy/slice_eq (compiler builtins)
+// directly wherever a slice view is already in hand instead of these.
+
+// Shared protocol layouts. These packed structs exist so the examples can
+// spell header lengths and field offsets with `sizeof(...)` / `offsetof(...)`
+// instead of hand-maintaining duplicated byte constants in each protocol file.
+// The payload bytes are still manipulated through byte slices; the structs are
+// just a single source of truth for the wire layout.
+struct packed EthHdr {
+    dst: [u8; 6];
+    src: [u8; 6];
+    ethertype: [u8; 2];
+}
+
+struct packed ArpHdr {
+    htype: [u8; 2];
+    ptype: [u8; 2];
+    hlen: u8;
+    plen: u8;
+    oper: [u8; 2];
+    sha: [u8; 6];
+    spa: [u8; 4];
+    tha: [u8; 6];
+    tpa: [u8; 4];
+}
+
+struct packed Ipv4Hdr {
+    version_ihl: u8;
+    dscp_ecn: u8;
+    total_len: [u8; 2];
+    ident: [u8; 2];
+    flags_frag: [u8; 2];
+    ttl: u8;
+    protocol: u8;
+    checksum: [u8; 2];
+    src: [u8; 4];
+    dst: [u8; 4];
+}
+
+struct packed TcpHdr {
+    src_port: [u8; 2];
+    dst_port: [u8; 2];
+    seq: [u8; 4];
+    ack: [u8; 4];
+    data_offset: u8;
+    flags: u8;
+    window: [u8; 2];
+    checksum: [u8; 2];
+    urgent: [u8; 2];
+}
+
+struct packed IcmpHdr {
+    ty: u8;
+    code: u8;
+    checksum: [u8; 2];
+    rest: [u8; 4];
+}
+
+// Every offset constant below is offsetof(...)-derived instead of a
+// hand-maintained literal -- GitHub issue #77's fix is what makes this
+// provable at all: these are exactly the packed-struct-field-offset shape
+// that fix targets, and each remains fully usable as a proven slice index
+// or subslice bound (verified per-consumer under --forbid-trap, not just
+// "it type-checks" -- see HISTORY.md's issue #77 follow-up entry). The
+// last hand-maintained isize trio (ETH_MAC_LEN/ETH_DST_OFF/ETH_SRC_OFF)
+// existed only to feed net_echo's raw-pointer swap_mac loop; that
+// function now takes a borrowed slice and uses ETH_DST/ETH_SRC/ETH_TYPE
+// as proven subslice bounds instead, so the trio is gone.
+let ETH_DST: usize = offsetof(EthHdr, dst);
+let ETH_SRC: usize = offsetof(EthHdr, src);
+let ETH_TYPE: usize = offsetof(EthHdr, ethertype);
+
+let ARP_HTYPE: usize = offsetof(ArpHdr, htype);
+let ARP_PTYPE: usize = offsetof(ArpHdr, ptype);
+let ARP_HLEN: usize = offsetof(ArpHdr, hlen);
+let ARP_PLEN: usize = offsetof(ArpHdr, plen);
+let ARP_OPER: usize = offsetof(ArpHdr, oper);
+let ARP_SHA: usize = offsetof(ArpHdr, sha);
+let ARP_SPA: usize = offsetof(ArpHdr, spa);
+let ARP_THA: usize = offsetof(ArpHdr, tha);
+let ARP_TPA: usize = offsetof(ArpHdr, tpa);
+
+let IP_VERSION_IHL: usize = offsetof(Ipv4Hdr, version_ihl);
+let IP_TOTAL_LEN: usize = offsetof(Ipv4Hdr, total_len);
+let IP_TTL: usize = offsetof(Ipv4Hdr, ttl);
+let IP_PROTOCOL: usize = offsetof(Ipv4Hdr, protocol);
+let IP_CHECKSUM: usize = offsetof(Ipv4Hdr, checksum);
+let IP_SRC: usize = offsetof(Ipv4Hdr, src);
+let IP_DST: usize = offsetof(Ipv4Hdr, dst);
+
+let TCP_SRC_PORT: usize = offsetof(TcpHdr, src_port);
+let TCP_DST_PORT: usize = offsetof(TcpHdr, dst_port);
+let TCP_SEQ: usize = offsetof(TcpHdr, seq);
+let TCP_ACK: usize = offsetof(TcpHdr, ack);
+let TCP_DATA_OFFSET: usize = offsetof(TcpHdr, data_offset);
+let TCP_FLAGS: usize = offsetof(TcpHdr, flags);
+let TCP_WINDOW: usize = offsetof(TcpHdr, window);
+let TCP_CHECKSUM: usize = offsetof(TcpHdr, checksum);
+let TCP_URGENT: usize = offsetof(TcpHdr, urgent);
+
+let ICMP_TYPE: usize = offsetof(IcmpHdr, ty);
+let ICMP_CODE: usize = offsetof(IcmpHdr, code);
+let ICMP_CHECKSUM: usize = offsetof(IcmpHdr, checksum);
+
+const TCP_FLAG_FIN: u8 = 0x01;
+const TCP_FLAG_SYN: u8 = 0x02;
+const TCP_FLAG_RST: u8 = 0x04;
+const TCP_FLAG_PSH: u8 = 0x08;
+const TCP_FLAG_ACK: u8 = 0x10;
+
+const PROTO_TCP: u8 = 6;
+const TCP_INITIAL_SEQ: u32 = 0x00001000;
+
+// GitHub issue #135's N-way concurrent connection support: TCP_INITIAL_SEQ
+// alone was harmless while only one connection could ever be open at a
+// time, but two SIMULTANEOUSLY open connections handshaking with the
+// identical ISN is a real, live collision once http_server_common.tkb
+// tracks MAX_CONNS slots. This is deliberately NOT RFC 6528-style
+// unpredictable ISN generation -- nothing here needs to be secret, only
+// distinct per slot, so a fixed per-slot offset is enough (YAGNI).
+const TCP_ISN_SLOT_STRIDE: u32 = 0x01000000;
+
+fn tcp_initial_seq(idx: {0..<24 as usize}) -> u32 {
+    return TCP_INITIAL_SEQ + (idx as u32) * TCP_ISN_SLOT_STRIDE;
+}
+
+fn bytes_eq(a: borrow *u8, b: borrow *u8, n: isize) -> bool {
+    for i in 0..<n {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn bytes_copy(dst: borrow *u8, src: borrow *u8, n: isize) {
+    for i in 0..<n {
+        dst[i] = src[i];
+    }
+}
+
+fn http_name83_index(name83: borrow *u8) {
+    bytes_copy(name83, "INDEX   HTM", 11);
+}
+
+fn http_path_char_to_fat(c: u8) -> u8 {
+    if (c >= 'a' as u8 && c <= 'z' as u8) {
+        return c - 32;
+    }
+    return c;
+}
+
+fn http_path_char_ok(c: u8) -> bool {
+    let u: u8 = http_path_char_to_fat(c);
+    return ((u >= 'A' as u8 && u <= 'Z' as u8) ||
+            (u >= '0' as u8 && u <= '9' as u8) ||
+            u == '_' as u8 || u == '-' as u8);
+}
+
+// Maps a deliberately small HTTP path subset to a FAT12 8.3 name:
+//   GET /           -> INDEX   HTM
+//   GET /ABOUT.HTM  -> ABOUT   HTM
+// Only one path component is accepted. Long names, subdirectories, query
+// strings, and other characters are rejected by returning false.
+fn http_request_path_to_name83(req: borrow *u8, len: isize,
+        name83: borrow *u8) -> bool {
+    if (len < 6) {
+        return false;
+    }
+    if (req[0] != 'G' as u8 || req[1] != 'E' as u8 ||
+        req[2] != 'T' as u8 || req[3] != ' ' as u8 ||
+        req[4] != '/' as u8) {
+        return false;
+    }
+
+    if (req[5] == ' ' as u8) {
+        http_name83_index(name83);
+        return true;
+    }
+
+    for i: isize in 0..<11 {
+        name83[i] = ' ' as u8;
+    }
+
+    let mut base_len: isize = 0;
+    let mut ext_len: isize = 0;
+    let mut in_ext: bool = false;
+    let mut saw_space: bool = false;
+    for i: isize in 5..<len {
+        let c: u8 = req[i];
+        if (c == ' ' as u8) {
+            saw_space = true;
+            break;
+        }
+        if (c == '/' as u8 || c == '?' as u8 || c == '#' as u8) {
+            return false;
+        }
+        if (c == '.' as u8) {
+            if (in_ext || base_len == 0) {
+                return false;
+            }
+            in_ext = true;
+        } else if (http_path_char_ok(c)) {
+            let u: u8 = http_path_char_to_fat(c);
+            if (in_ext) {
+                if (ext_len >= 3) {
+                    return false;
+                }
+                name83[8 + ext_len] = u;
+                ext_len = ext_len + 1;
+            } else {
+                if (base_len >= 8) {
+                    return false;
+                }
+                name83[base_len] = u;
+                base_len = base_len + 1;
+            }
+        } else {
+            return false;
+        }
+    }
+
+    return saw_space && base_len > 0 && (in_ext == false || ext_len > 0);
+}
+
+// Manually composes/decomposes a big-endian 16-bit integer from individual
+// byte reads/writes, rather than loading/storing 2 bytes at once through a
+// cast pointer. Network fields are big-endian on the wire; this target is
+// little-endian; a raw multi-byte load would silently byte-reverse the
+// value. Doing it byte-by-byte sidesteps the issue regardless of target
+// endianness.
+//
+// Slice signatures ([u8; 2..] / [u8; 4..]): the caller passes a view that
+// PROVES the field fits -- e.g. read_u16be(ip[2..<4]) on an ip view of
+// minimum length 20 is fully compile-time proven, so these bodies contain
+// zero bounds checks and stay --forbid-trap clean.
+fn read_u16be(s: borrow [u8; 2..]) -> i32 {
+    return (s[0] as i32) * 256 + (s[1] as i32);
+}
+
+fn write_u16be(s: borrow [u8; 2..], v: i32) {
+    s[0] = (v / 256) as u8;
+    s[1] = (v - (v / 256) * 256) as u8;
+}
+
+// Same idea, for the 32-bit fields TCP needs (sequence/ack numbers).
+fn read_u32be(s: borrow [u8; 4..]) -> i32 {
+    return ((s[0] as i32) << 24) | ((s[1] as i32) << 16) | ((s[2] as i32) << 8) | (s[3] as i32);
+}
+
+fn write_u32be(s: borrow [u8; 4..], v: i32) {
+    s[0] = (v >> 24) as u8;
+    s[1] = (v >> 16) as u8;
+    s[2] = (v >> 8) as u8;
+    s[3] = v as u8;
+}
+
+fn print_ip(p: borrow [u8; 4..]) {
+    uart_print(p[0]);
+    uart_putc('.');
+    uart_print(p[1]);
+    uart_putc('.');
+    uart_print(p[2]);
+    uart_putc('.');
+    uart_print(p[3]);
+}
+
+// Copies a NUL-terminated string (as produced by a string literal) into
+// dst and returns the number of bytes copied (the NUL itself is not
+// copied) -- used to build a response body/headers into a buffer instead
+// of streaming to UART like uart_puts does.
+fn copy_str(dst: borrow *u8, src: borrow *u8) -> isize {
+    let mut n: isize = 0;
+    while (src[n] != 0) {
+        dst[n] = src[n];
+        n = n + 1;
+    }
+    return n;
+}
+
+// Writes the decimal digits of n (n must be >= 0) into buf, with no
+// leading zeros, and returns the digit count. Same recursive-digit
+// approach as print.tkb's unsigned decimal core, just targeting a memory
+// buffer instead of streaming to UART one byte at a time.
+fn write_udec(buf: borrow *u8, n: i32) -> isize {
+    if (n >= 10) {
+        let hi_len: isize = write_udec(buf, n / 10);
+        buf[hi_len] = (n - (n / 10) * 10 + '0') as u8;
+        return hi_len + 1;
+    } else {
+        buf[0] = (n + '0') as u8;
+        return 1;
+    }
+}

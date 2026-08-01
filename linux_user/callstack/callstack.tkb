@@ -1,0 +1,25 @@
+// Test for call order across multiple functions (prints in order: main -> A -> B -> C).
+// Verifies that the AArch64 call stack works correctly.
+
+fn print_c() {
+    uart_puts("C\r\n");
+}
+
+fn print_b() {
+    uart_puts("B\r\n");
+    print_c();
+}
+
+fn print_a() {
+    uart_puts("A\r\n");
+    print_b();
+}
+
+fn test_callstack() {
+    print_a();
+    uart_puts("done\r\n");
+}
+
+fn app_main() {
+    test_callstack();
+}
