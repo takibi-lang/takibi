@@ -52,6 +52,25 @@ all three child pages are reclaimed and the final allocator count returns to
 zero. The complete RPi5 kernel still builds under `--forbid-trap`; descriptor
 and socket ownership remain the next issue #181 stage.
 
+### 2026-08-01: Restore Parent FDs and Reference the Accepted Socket Across Fork
+
+The fork boundary now snapshots the parent process-local file, listener,
+accepted-socket, buffer cursor, inetd, heap-break, and working descriptor
+state before entering the child. The accepted TCP stream gains a second
+descriptor reference at clone. A child close releases only its reference;
+child exit closes any descriptor it left open and restores the preserved
+parent table. The parent listener therefore survives the child's close, and
+the parent's later accepted-fd close releases the final reference and the TCP
+owner exactly once.
+
+The EL0 fixture now follows the daemon ordering rather than cloning after all
+descriptors were already closed: it accepts, clones, lets the child perform
+the reads and writes and close both descriptors, reaps the child, then proves
+the resumed parent can independently close its inherited accepted socket and
+listener. Socket evidence requires both process-local close calls for each fd,
+zero remaining accepted-socket references, and the existing clean TCP close.
+The kernel continues to build under `--forbid-trap`.
+
 ### 2026-07-29: Bounded TCP Streaming and Retransmission Progress (GitHub Issue #180)
 
 The standalone kernel TCP path now reconstructs in-order request segments,

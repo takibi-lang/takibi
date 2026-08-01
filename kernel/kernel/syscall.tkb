@@ -40,6 +40,7 @@ private let mut syscall_socket_close_calls: usize;
 private let mut syscall_accept_calls: usize;
 private let mut syscall_accept_capability_roundtrips: usize;
 private let mut syscall_connected_open: bool;
+private let mut syscall_connected_references: usize;
 private let mut syscall_connected_close_calls: usize;
 private let mut syscall_connected_read_calls: usize;
 private let mut syscall_connected_write_calls: usize;
@@ -56,6 +57,23 @@ must_use variant KernelInetdAcceptResult { TimedOut; Accepted; }
 private let mut syscall_heap_start: usize;
 private let mut syscall_heap_limit: usize;
 private let mut syscall_heap_break: usize;
+
+private let mut clone_parent_file_open: bool;
+private let mut clone_parent_file_readable: bool;
+private let mut clone_parent_file_writable: bool;
+private let mut clone_parent_file_inode: usize;
+private let mut clone_parent_file_offset: usize;
+private let mut clone_parent_socket_state: KernelSocketState;
+private let mut clone_parent_socket_port: u16;
+private let mut clone_parent_connected_open: bool;
+private let mut clone_parent_socket_buffer_length: usize;
+private let mut clone_parent_socket_buffer_offset: usize;
+private let mut clone_parent_inetd_mode: bool;
+private let mut clone_parent_inetd_response_length: usize;
+private let mut clone_parent_heap_break: usize;
+private let mut clone_file_state_live: bool;
+
+must_use variant KernelFdReapResult { Failed; Reaped; }
 
 fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_heap_start = heap_start;
@@ -79,6 +97,7 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_accept_calls = 0;
     syscall_accept_capability_roundtrips = 0;
     syscall_connected_open = false;
+    syscall_connected_references = 0;
     syscall_connected_close_calls = 0;
     syscall_connected_read_calls = 0;
     syscall_connected_write_calls = 0;
@@ -87,6 +106,80 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_socket_buffer_offset = 0;
     syscall_inetd_mode = false;
     syscall_inetd_response_length = 0;
+    clone_file_state_live = false;
+}
+
+fn kernel_syscall_clone_files_begin() {
+    clone_parent_file_open = syscall_file_open;
+    clone_parent_file_readable = syscall_file_readable;
+    clone_parent_file_writable = syscall_file_writable;
+    clone_parent_file_inode = syscall_file_inode;
+    clone_parent_file_offset = syscall_file_offset;
+    clone_parent_socket_state = syscall_socket_state;
+    clone_parent_socket_port = syscall_socket_port;
+    clone_parent_connected_open = syscall_connected_open;
+    clone_parent_socket_buffer_length = syscall_socket_buffer_length;
+    clone_parent_socket_buffer_offset = syscall_socket_buffer_offset;
+    clone_parent_inetd_mode = syscall_inetd_mode;
+    clone_parent_inetd_response_length = syscall_inetd_response_length;
+    clone_parent_heap_break = syscall_heap_break;
+    if (syscall_connected_open) {
+        syscall_connected_references = syscall_connected_references + 1;
+    }
+    clone_file_state_live = true;
+}
+
+fn kernel_connected_transport_release() -> bool {
+    match network_capability_take() {
+        NetworkCapabilityTakeResult::Empty => { return false; }
+        NetworkCapabilityTakeResult::Ready(ready) => {
+            match kernel_tcp_close_stream(ready) {
+                KernelTcpCloseResult::Closed(after_close) => {
+                    match network_capability_put(after_close) {
+                        NetworkCapabilityPutResult::Conflict => {
+                            return false;
+                        }
+                        NetworkCapabilityPutResult::Stored => { return true; }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn kernel_connected_descriptor_release() -> bool {
+    if (syscall_connected_references == 0) { return false; }
+    syscall_connected_references = syscall_connected_references - 1;
+    if (syscall_connected_references == 0) {
+        return kernel_connected_transport_release();
+    }
+    return true;
+}
+
+fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
+    if (clone_file_state_live == false) {
+        return KernelFdReapResult::Failed;
+    }
+    if (syscall_connected_open) {
+        if (kernel_connected_descriptor_release() == false) {
+            return KernelFdReapResult::Failed;
+        }
+    }
+    syscall_file_open = clone_parent_file_open;
+    syscall_file_readable = clone_parent_file_readable;
+    syscall_file_writable = clone_parent_file_writable;
+    syscall_file_inode = clone_parent_file_inode;
+    syscall_file_offset = clone_parent_file_offset;
+    syscall_socket_state = clone_parent_socket_state;
+    syscall_socket_port = clone_parent_socket_port;
+    syscall_connected_open = clone_parent_connected_open;
+    syscall_socket_buffer_length = clone_parent_socket_buffer_length;
+    syscall_socket_buffer_offset = clone_parent_socket_buffer_offset;
+    syscall_inetd_mode = clone_parent_inetd_mode;
+    syscall_inetd_response_length = clone_parent_inetd_response_length;
+    syscall_heap_break = clone_parent_heap_break;
+    clone_file_state_live = false;
+    return KernelFdReapResult::Reaped;
 }
 
 fn kernel_syscall_inetd_accept(port: u16)
@@ -112,6 +205,7 @@ fn kernel_syscall_inetd_accept(port: u16)
                         NetworkCapabilityPutResult::Stored => {
                             syscall_inetd_mode = true;
                             syscall_connected_open = true;
+                            syscall_connected_references = 1;
                             syscall_socket_buffer_length = 0;
                             syscall_socket_buffer_offset = 0;
                             syscall_inetd_response_length = 0;
@@ -146,10 +240,11 @@ fn kernel_syscall_socket_evidence() -> bool {
            syscall_listen_calls == 1 && syscall_accept_calls == 1 &&
            syscall_accept_capability_roundtrips == 1 &&
            syscall_connected_open == false &&
-           syscall_connected_close_calls == 1 &&
+           syscall_connected_references == 0 &&
+           syscall_connected_close_calls == 2 &&
            syscall_connected_read_calls == 2 &&
            syscall_connected_write_calls == 3 &&
-           syscall_socket_close_calls == 1 &&
+           syscall_socket_close_calls == 2 &&
            syscall_socket_state == KernelSocketState::Closed &&
            syscall_socket_port == 8080;
 }
@@ -565,22 +660,8 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             if (syscall_connected_open == false) {
                 return (1, LINUX_EBADF);
             }
-            match network_capability_take() {
-                NetworkCapabilityTakeResult::Empty => {
-                    return (1, LINUX_EAGAIN);
-                }
-                NetworkCapabilityTakeResult::Ready(ready) => {
-                    match kernel_tcp_close_stream(ready) {
-                        KernelTcpCloseResult::Closed(after_close) => {
-                            match network_capability_put(after_close) {
-                                NetworkCapabilityPutResult::Conflict => {
-                                    return (1, LINUX_EINVAL);
-                                }
-                                NetworkCapabilityPutResult::Stored => { }
-                            }
-                        }
-                    }
-                }
+            if (kernel_connected_descriptor_release() == false) {
+                return (1, LINUX_EAGAIN);
             }
             syscall_connected_open = false;
             syscall_connected_close_calls =
@@ -684,6 +765,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                 syscall_accept_capability_roundtrips =
                                     syscall_accept_capability_roundtrips + 1;
                                 syscall_connected_open = true;
+                                syscall_connected_references = 1;
                                 syscall_socket_buffer_length = 0;
                                 syscall_socket_buffer_offset = 0;
                                 return (1, 5);
@@ -780,8 +862,13 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 return (1, LINUX_EAGAIN);
             }
             ProcessCloneVmResult::Copied => {
+                kernel_syscall_clone_files_begin();
                 match kernel_process_clone_begin(x0, x1) {
                     ProcessCloneResult::Invalid => {
+                        match kernel_syscall_clone_files_reap() {
+                            KernelFdReapResult::Failed => { }
+                            KernelFdReapResult::Reaped => { }
+                        }
                         match process_image_clone_vm_reap() {
                             ProcessCloneVmReapResult::Missing => { }
                             ProcessCloneVmReapResult::Reaped => { }
@@ -800,6 +887,10 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     if (number == AARCH64_NR_EXIT || number == AARCH64_NR_EXIT_GROUP) {
         if (kernel_process_is_child()) {
             // Restore the preserved parent frame with clone() == child PID.
+            match kernel_syscall_clone_files_reap() {
+                KernelFdReapResult::Failed => { return (0, 0); }
+                KernelFdReapResult::Reaped => { }
+            }
             match process_image_clone_vm_reap() {
                 ProcessCloneVmReapResult::Missing => { return (0, 0); }
                 ProcessCloneVmReapResult::Reaped => { }
