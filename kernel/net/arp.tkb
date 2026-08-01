@@ -1,14 +1,34 @@
 use "kernel/drivers/net/rp1_gem.tkb";
 
-const ARP_HTYPE: usize = 0;
-const ARP_PTYPE: usize = 2;
-const ARP_HLEN: usize = 4;
-const ARP_PLEN: usize = 5;
-const ARP_OPER: usize = 6;
-const ARP_SHA: usize = 8;
-const ARP_SPA: usize = 14;
-const ARP_THA: usize = 18;
-const ARP_TPA: usize = 24;
+// Single source of truth for the ARP wire layout: offsetof(...) is
+// verified against ArpHdr's actual (packed) layout instead of being a
+// hand-maintained literal that could silently drift from the struct
+// if a field were ever reordered or resized. Fields stay `[u8; N]`
+// rather than native u16/u32 -- ARP is big-endian on the wire and this
+// target is little-endian, so a native multi-byte load would silently
+// byte-reverse the value (see arp_read_u16be/arp_write_u16be below,
+// which is why those still exist instead of direct field access).
+struct packed ArpHdr {
+    htype: [u8; 2];
+    ptype: [u8; 2];
+    hlen: u8;
+    plen: u8;
+    oper: [u8; 2];
+    sha: [u8; 6];
+    spa: [u8; 4];
+    tha: [u8; 6];
+    tpa: [u8; 4];
+}
+
+let ARP_HTYPE: usize = offsetof(ArpHdr, htype);
+let ARP_PTYPE: usize = offsetof(ArpHdr, ptype);
+let ARP_HLEN: usize = offsetof(ArpHdr, hlen);
+let ARP_PLEN: usize = offsetof(ArpHdr, plen);
+let ARP_OPER: usize = offsetof(ArpHdr, oper);
+let ARP_SHA: usize = offsetof(ArpHdr, sha);
+let ARP_SPA: usize = offsetof(ArpHdr, spa);
+let ARP_THA: usize = offsetof(ArpHdr, tha);
+let ARP_TPA: usize = offsetof(ArpHdr, tpa);
 
 must_use variant KernelArpResult {
     TimedOut(NetRxCanAcquire);

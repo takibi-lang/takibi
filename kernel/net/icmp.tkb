@@ -1,16 +1,41 @@
 use "kernel/net/arp.tkb";
 use "kernel/net/checksum.tkb";
 
-const IPV4_VERSION_IHL: usize = 0;
-const IPV4_TOTAL_LEN: usize = 2;
-const IPV4_TTL: usize = 8;
-const IPV4_PROTOCOL: usize = 9;
-const IPV4_CHECKSUM: usize = 10;
-const IPV4_SRC: usize = 12;
-const IPV4_DST: usize = 16;
-const ICMP_TYPE: usize = 0;
-const ICMP_CODE: usize = 1;
-const ICMP_CHECKSUM: usize = 2;
+// Single source of truth for the IPv4/ICMP wire layout: offsetof(...)
+// is verified against each struct's actual (packed) layout instead of
+// being a hand-maintained literal. Fields stay `[u8; N]` rather than
+// native u16/u32 for the same reason as ArpHdr in kernel/net/arp.tkb --
+// see that file's comment.
+struct packed Ipv4Hdr {
+    version_ihl: u8;
+    dscp_ecn: u8;
+    total_len: [u8; 2];
+    ident: [u8; 2];
+    flags_frag: [u8; 2];
+    ttl: u8;
+    protocol: u8;
+    checksum: [u8; 2];
+    src: [u8; 4];
+    dst: [u8; 4];
+}
+
+struct packed IcmpHdr {
+    ty: u8;
+    code: u8;
+    checksum: [u8; 2];
+    rest: [u8; 4];
+}
+
+let IPV4_VERSION_IHL: usize = offsetof(Ipv4Hdr, version_ihl);
+let IPV4_TOTAL_LEN:   usize = offsetof(Ipv4Hdr, total_len);
+let IPV4_TTL:         usize = offsetof(Ipv4Hdr, ttl);
+let IPV4_PROTOCOL:    usize = offsetof(Ipv4Hdr, protocol);
+let IPV4_CHECKSUM:    usize = offsetof(Ipv4Hdr, checksum);
+let IPV4_SRC:         usize = offsetof(Ipv4Hdr, src);
+let IPV4_DST:         usize = offsetof(Ipv4Hdr, dst);
+let ICMP_TYPE:        usize = offsetof(IcmpHdr, ty);
+let ICMP_CODE:        usize = offsetof(IcmpHdr, code);
+let ICMP_CHECKSUM:    usize = offsetof(IcmpHdr, checksum);
 
 must_use variant KernelIcmpResult {
     TimedOut(NetRxCanAcquire);
