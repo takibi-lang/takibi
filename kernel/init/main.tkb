@@ -469,8 +469,8 @@ fn main() {
             kernel_boot_log("httpd images: invalid busybox-extras\n");
         }
         InitramfsFileResult::File(httpd_image) => {
-            let (httpd_address, httpd_length) = httpd_image;
-            match distro_elf_validate(httpd_address, httpd_length) {
+            let (httpd_address, httpd_bytes) = httpd_image;
+            match distro_elf_validate(httpd_address, httpd_bytes) {
                 DistroElfResult::Invalid => {
                     kernel_boot_log("httpd images: invalid busybox-extras elf\n");
                 }
@@ -480,8 +480,8 @@ fn main() {
                             kernel_boot_log("httpd images: invalid musl\n");
                         }
                         InitramfsFileResult::File(musl_image) => {
-                            let (musl_address, musl_length) = musl_image;
-                            match distro_elf_validate(musl_address, musl_length) {
+                            let (musl_address, musl_bytes) = musl_image;
+                            match distro_elf_validate(musl_address, musl_bytes) {
                                 DistroElfResult::Invalid => {
                                     kernel_boot_log("httpd images: invalid musl elf\n");
                                 }
@@ -606,8 +606,8 @@ fn main() {
             kernel_boot_log("distro image: invalid initramfs\n");
         }
         InitramfsFileResult::File(image) => {
-            let (image_address, image_length) = image;
-            match distro_elf_validate(image_address, image_length) {
+            let (image_address, image_bytes) = image;
+            match distro_elf_validate(image_address, image_bytes) {
                 DistroElfResult::Invalid => {
                     kernel_boot_log("distro image: invalid elf\n");
                 }

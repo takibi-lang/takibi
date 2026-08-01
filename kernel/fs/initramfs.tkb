@@ -32,14 +32,38 @@ let CPIO_NAMESIZE_OFFSET:  usize = offsetof(CpioNewcHeader, namesize);
 
 must_use variant CpioNumberResult { Invalid; Value(usize); }
 
+// File((usize, []u8)) keeps the raw base address alongside the slice:
+// downstream (kernel/mm/process_image.tkb) still needs a plain address
+// to actually copy bytes into a fresh process image, and the compiler
+// will not let an address derived FROM a `borrow []u8` parameter escape
+// into a returned/stored struct (an address is authority-derived once
+// it comes from a borrow -- "keep the derived value in a directly
+// tracked local binding" -- so distro_elf_validate cannot manufacture
+// one from its own `image` parameter). Handing over the ORIGINAL,
+// never-borrowed address here, before it ever becomes a `borrow`
+// parameter anywhere, sidesteps that without weakening it: the address
+// was never the actual safety question (see the length one below).
 must_use variant InitramfsFileResult {
     Invalid;
-    File((usize, usize));
+    File((usize, []u8));
 }
 
 must_use variant InitramfsEntryResult {
     Invalid;
     Entry((usize, usize, usize, usize));
+}
+
+// The one place a cpio entry's (address, length) -- both derived from
+// ASCII-hex fields inside the initramfs blob, not from any type-checked
+// allocation -- gets turned into a slice that the rest of the kernel
+// (distro_elf_validate and onward) can trust and index without further
+// manual bounds arithmetic. Every InitramfsFileResult::File is built
+// through this one function, so this is the whole review surface for
+// "is the initramfs file length assumption correct" -- not repeated at
+// each of initramfs_busybox/httpd/musl_loader's three call sites.
+fn initramfs_file_bytes(address: usize, length: usize) -> []u8 !{unsafe} {
+    let p: *u8 = address as *u8;
+    return unsafe { p[0..<length as isize] };
 }
 
 fn cpio_hex_digit(value: u8) -> usize {
@@ -124,7 +148,8 @@ fn initramfs_busybox() -> InitramfsFileResult {
                 name[6] == 0x78 && name[7] == 0x2D && name[8] == 0x73 &&
                 name[9] == 0x74 && name[10] == 0x61 && name[11] == 0x74 &&
                 name[12] == 0x69 && name[13] == 0x63 && name[14] == 0) {
-                return InitramfsFileResult::File((file_address, file_size));
+                return InitramfsFileResult::File(
+                    (file_address, initramfs_file_bytes(file_address, file_size)));
             }
             return InitramfsFileResult::Invalid;
         }
@@ -142,7 +167,8 @@ fn initramfs_httpd() -> InitramfsFileResult {
                 name[5] == 0x6F && name[6] == 0x78 && name[7] == 0x2D &&
                 name[8] == 0x68 && name[9] == 0x74 && name[10] == 0x74 &&
                 name[11] == 0x70 && name[12] == 0x64 && name[13] == 0) {
-                return InitramfsFileResult::File((file_address, file_size));
+                return InitramfsFileResult::File(
+                    (file_address, initramfs_file_bytes(file_address, file_size)));
             }
             return InitramfsFileResult::Invalid;
         }
@@ -163,7 +189,8 @@ fn initramfs_musl_loader() -> InitramfsFileResult {
                 name[14] == 0x34 && name[15] == 0x2E && name[16] == 0x73 &&
                 name[17] == 0x6F && name[18] == 0x2E && name[19] == 0x31 &&
                 name[20] == 0) {
-                return InitramfsFileResult::File((file_address, file_size));
+                return InitramfsFileResult::File(
+                    (file_address, initramfs_file_bytes(file_address, file_size)));
             }
             return InitramfsFileResult::Invalid;
         }
