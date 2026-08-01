@@ -121,10 +121,9 @@ if [ "$httpd_ok" -ne 1 ]; then
 fi
 echo "[kernel/rpi5] BusyBox httpd curl passed"
 
-# GitHub issue #180: kernel/init/main.tkb now accepts a second, independent
-# inetd connection right after the first busybox process exits, in the same
-# boot (no kernel reset between the two). Proves the listener genuinely
-# handles more than one sequential curl, not just the first one ever tried.
+# GitHub issues #180/#181: the same foreground daemon parent accepts this
+# second connection after its first request child exits, without a reboot or
+# process-image restart.
 echo "[kernel/rpi5] curling BusyBox httpd index.html a second time (same boot)"
 second_httpd_ok=0
 for _attempt in $(seq 1 20); do

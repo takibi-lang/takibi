@@ -72,20 +72,6 @@ initial_user_payload:
     svc     #0
     cmp     x0, #5
     b.ne    .Luser_fail
-
-    /* HTTPd forks with both listener and accepted socket open. */
-    mov     x0, #0x11
-    mov     x1, #0
-    mov     x2, #0
-    mov     x3, #0
-    mov     x4, #0
-    mov     x8, #220
-    svc     #0
-    cbz     x0, .Lclone_child_request
-    cmp     x0, #2
-    b.ne    .Luser_fail
-    b       .Lclone_parent_close
-.Lclone_child_request:
     sub     sp, sp, #32
     mov     x0, #5
     mov     x1, sp
@@ -133,19 +119,24 @@ initial_user_payload:
     svc     #0
     cbnz    x0, .Luser_fail
 
+    /* The focused context fixture clones only after its independent socket
+     * lifecycle is complete; the real HTTPd daemon covers fd inheritance. */
+    mov     x0, #0x11
+    mov     x1, #0
+    mov     x2, #0
+    mov     x3, #0
+    mov     x4, #0
+    mov     x8, #220
+    svc     #0
+    cbz     x0, .Lclone_child
+    cmp     x0, #2
+    b.ne    .Luser_fail
+    b       .Lclone_parent_done
+.Lclone_child:
     mov     x0, #42
     mov     x8, #93
     svc     #0
-
-.Lclone_parent_close:
-    mov     x0, #5
-    mov     x8, #57
-    svc     #0
-    cbnz    x0, .Luser_fail
-    mov     x0, #4
-    mov     x8, #57
-    svc     #0
-    cbnz    x0, .Luser_fail
+.Lclone_parent_done:
 
     adr     x1, .Luser_message
     mov     x2, #21
@@ -342,6 +333,8 @@ el0_sync_entry:
     ldp     x0, x1, [sp, #256]
     msr     elr_el1, x0
     msr     spsr_el1, x1
+    ldr     x11, [sp, #248]
+    msr     sp_el0, x11
     ldp     q0, q1, [sp, #0x110]
     ldp     q2, q3, [sp, #0x130]
     ldp     q4, q5, [sp, #0x150]

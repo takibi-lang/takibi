@@ -7,6 +7,7 @@ enum ExecutionProcess: u8 { Parent; Child; }
 private let mut execution_process: ExecutionProcess = ExecutionProcess::Parent;
 private let mut execution_child_live: bool;
 private let mut execution_clone_calls: usize;
+private let mut execution_child_exit_count: usize;
 private let mut execution_child_exit_status: usize;
 
 must_use variant ProcessCloneResult {
@@ -18,6 +19,7 @@ fn kernel_process_execution_reset() {
     execution_process = ExecutionProcess::Parent;
     execution_child_live = false;
     execution_clone_calls = 0;
+    execution_child_exit_count = 0;
     execution_child_exit_status = 0;
 }
 
@@ -41,11 +43,21 @@ fn kernel_process_is_child() -> bool {
     return execution_process == ExecutionProcess::Child;
 }
 
+fn kernel_process_current_pid() -> usize {
+    if (execution_process == ExecutionProcess::Child) { return 2; }
+    return 1;
+}
+
 fn kernel_process_child_exit(status: usize) -> usize {
     execution_child_exit_status = status;
+    execution_child_exit_count = execution_child_exit_count + 1;
     execution_child_live = false;
     execution_process = ExecutionProcess::Parent;
     return 2;
+}
+
+fn kernel_process_child_exit_count() -> usize {
+    return execution_child_exit_count;
 }
 
 fn kernel_process_clone_evidence() -> bool {

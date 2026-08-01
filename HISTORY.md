@@ -15,6 +15,35 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-01: BusyBox HTTPd Runs as a Persistent Foreground Daemon (GitHub Issue #181)
+
+The pinned, unmodified Alpine BusyBox Extras binary now runs as
+`busybox-httpd httpd -f -p 8080 -h /`, replacing the earlier inetd staging
+path. The daemon creates an IPv6 wildcard stream socket, binds, listens, and
+uses Linux `accept(202)` itself. Each accepted request follows the reproduced
+musl sequence: `clone(0x11)`, child PID/TID 2, listener close, `dup3` of the
+accepted fd onto stdin and stdout, USB-ext2 metadata/file reads, response
+writes, `shutdown(1, SHUT_WR)`, and `exit_group(0)`.
+
+The parent syscall frame and SP_EL0 are restored after each child, its
+listener and accepted-fd table survive the child's closes, and the child VM's
+331 eager-copy pages are reclaimed before the parent resumes. The integration
+harness completes two exact `curl` comparisons against the 68-byte ext2
+fixture through the same daemon parent. A bounded third accept then terminates
+the test process so the remaining one-boot kernel suite can run; teardown
+requires zero accepted-socket references, no open child file, and the
+listener's explicit transition to Closed before all process-image pages are
+released.
+
+The dedicated `httpd_daemon` expected view records two reaped children and
+331 reclaimed child pages. A final real RPi5 run passed both curls, the
+1480-byte connected-I/O/drop fixture, and all 14 UART views in one boot. One
+immediately preceding run completed the same daemon and resource checks but
+missed only the pre-existing SYN/ACK-drop observation marker; the unchanged
+binary passed it on the required confirmation rerun. Interrupt-driven device
+conversion remains deliberately out of scope and follows this completed
+process milestone.
+
 ### 2026-08-01: Distinct Parent/Child Register State and Kernel Stacks (GitHub Issue #181)
 
 A fresh trace of the pinned Alpine BusyBox HTTPd confirmed its exact process

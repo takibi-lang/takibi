@@ -52,15 +52,17 @@ The current RPi5 kernel includes:
 - one-boot integration views that independently compare boot, VM, process,
   syscall, filesystem, USB, Ethernet, BusyBox, and HTTPd evidence.
 
-The current HTTPd milestone uses BusyBox inetd mode. EL1 accepts one
-connection on port 8080, exposes it as fd 0/fd 1, and starts
-`busybox-httpd httpd -i`. BusyBox reads the request, stats and reads
-`index.html` from USB ext2, writes the response, calls `shutdown`, and exits.
-The host compares the complete 68-byte body with the fixture. The TCP hardware
-fixtures additionally split a request across segments, inject bounded drops,
-and exercise short `read` plus a 1460+1 partial `write` sequence. A complete
-byte-for-byte response larger than one MTU and two independent HTTPd `curl`
-connections in one boot remain issue #180 acceptance work.
+The current HTTPd milestone runs the unmodified pinned BusyBox Extras binary
+as a persistent foreground daemon: `busybox-httpd httpd -f -p 8080 -h /`.
+HTTPd creates its own IPv6 wildcard listener, accepts each connection, and
+uses the observed `clone(SIGCHLD)` fork shape. Each child receives a private
+331-page VM copy and a distinct kernel stack, aliases the accepted socket onto
+fd 0/fd 1, reads `index.html` from USB ext2, writes the response, and exits.
+The same parent accepts two sequential host `curl` requests before the bounded
+integration teardown reclaims every child page, fd, and socket reference. The
+host compares both complete 68-byte bodies with the fixture. TCP fixtures also
+split a request across segments, inject bounded drops, and exercise short
+`read` plus a 1460+1 partial `write` sequence.
 
 ## Tree layout
 
@@ -178,8 +180,9 @@ one-minute SWD transfer. A successful run includes:
 
 ```text
 [kernel/rpi5] BusyBox httpd curl passed
+[kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (13 views, one boot)
+PASS kernel/rpi5 (14 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2
@@ -233,9 +236,9 @@ claim of general Linux compatibility.
   remaining closure work is a reliable multi-segment transmit queue, exact
   host comparison of a response larger than one MTU (including a dropped
   segment), and two independent `curl` connections in one boot.
-- [Issue #181](https://github.com/takibi-lang/takibi/issues/181) tracks normal
-  BusyBox HTTPd foreground daemon mode, fork VM/descriptor ownership, and
-  child process model.
+- [Issue #181](https://github.com/takibi-lang/takibi/issues/181) completed the
+  foreground BusyBox HTTPd daemon, eager fork VM ownership, parent/child
+  kernel stacks, descriptor references, and deterministic child reaping.
 - [Issue #182](https://github.com/takibi-lang/takibi/issues/182) tracks ext2
   indirect blocks, multiple block groups, and nested directory operations.
 
