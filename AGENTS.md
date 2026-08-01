@@ -352,6 +352,7 @@ make kernelcheck-rpi5   # build and run the RPi5 hardware integration suite
 make kernelcheck        # build and test every maintained kernel target
 make linuxbuild         # build linux_user/'s host-native Linux/AMD64 tests (no QEMU/hardware needed)
 make linuxcheck         # build and run linux_user/'s tests, diffing stdout against each .expected
+make allcheck           # langcheck + test + linuxcheck + kernelcheck together (needs real RPi5 hardware for the last one)
 make clean              # remove dune build artifacts, kernel/ link outputs, and linux_user/ build outputs
 ```
 

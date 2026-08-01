@@ -342,6 +342,20 @@ kernelcheck-rpi5: kernelbuild-rpi5
 
 kernelcheck: kernelcheck-rpi5
 
+## allcheck: run every check this Makefile knows about -- langcheck, test,
+## linuxcheck, kernelcheck -- so a single command surfaces a failure
+## anywhere in the compiler/kernel/linux_user surface. kernelcheck talks to
+## real RPi5 hardware (RPI5_SERIAL_DEV) same as it always has; nothing about
+## bundling it into allcheck changes that. Parallel by default like
+## everything else in this file (MAKEFLAGS -j at the top); safe because
+## every one of these four ultimately funnels through the single shared
+## $(TAKIBI) prerequisite, which Make's own dependency tracking runs (and
+## therefore serializes `dune build`) at most once regardless of how many
+## targets reach it concurrently -- see "Known dune footgun" above for why
+## that invariant matters and must not be bypassed by a future change.
+.PHONY: allcheck
+allcheck: langcheck test linuxcheck kernelcheck
+
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts, kernel/ link outputs, and linux_user/
 ## build outputs. Does not touch examples/ -- use `make -f examples/Makefile
