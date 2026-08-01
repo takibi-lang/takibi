@@ -1,24 +1,13 @@
 use "kernel/net/arp.tkb";
 use "kernel/net/checksum.tkb";
+use "kernel/net/wire.tkb";
 
-// Single source of truth for the IPv4/ICMP wire layout: offsetof(...)
-// is verified against each struct's actual (packed) layout instead of
-// being a hand-maintained literal. Fields stay `[u8; N]` rather than
-// native u16/u32 for the same reason as ArpHdr in kernel/net/arp.tkb --
-// see that file's comment.
-struct packed Ipv4Hdr {
-    version_ihl: u8;
-    dscp_ecn: u8;
-    total_len: [u8; 2];
-    ident: [u8; 2];
-    flags_frag: [u8; 2];
-    ttl: u8;
-    protocol: u8;
-    checksum: [u8; 2];
-    src: [u8; 4];
-    dst: [u8; 4];
-}
-
+// Ipv4Hdr is kernel/net/wire.tkb's shared struct (tcp.tkb needs the
+// identical IPv4 wire layout, so it lives there rather than being
+// declared twice); IPV4_* below are this file's own offsetof(...)
+// names derived from that same struct. IcmpHdr is local to this file.
+// Fields stay `[u8; N]` rather than native u16/u32 for the same reason
+// as ArpHdr in kernel/net/arp.tkb -- see that file's comment.
 struct packed IcmpHdr {
     ty: u8;
     code: u8;
