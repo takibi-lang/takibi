@@ -1,8 +1,34 @@
 use "kernel/user/initramfs_extern.tkb";
 
-const CPIO_NEWC_HEADER_SIZE: usize = 110;
-const CPIO_FILESIZE_OFFSET: usize = 54;
-const CPIO_NAMESIZE_OFFSET: usize = 94;
+// Single source of truth for the cpio "newc" ASCII-hex header layout:
+// sizeof(...)/offsetof(...) are verified against CpioNewcHeader's
+// actual (packed) layout instead of being hand-maintained literals.
+// Every field is 8 ASCII hex digits (parsed via cpio_hex8 below) except
+// the 6-byte magic; fields the kernel never reads (ino/mode/uid/gid/
+// nlink/mtime/devmajor/devminor/rdevmajor/rdevminor/check) are still
+// declared, both to make the on-disk layout self-documenting and
+// because packed-struct offsets are only provably correct when every
+// preceding field is accounted for.
+struct packed CpioNewcHeader {
+    magic:      [u8; 6];
+    ino:        [u8; 8];
+    mode:       [u8; 8];
+    uid:        [u8; 8];
+    gid:        [u8; 8];
+    nlink:      [u8; 8];
+    mtime:      [u8; 8];
+    filesize:   [u8; 8];
+    devmajor:   [u8; 8];
+    devminor:   [u8; 8];
+    rdevmajor:  [u8; 8];
+    rdevminor:  [u8; 8];
+    namesize:   [u8; 8];
+    check:      [u8; 8];
+}
+
+let CPIO_NEWC_HEADER_SIZE: usize = sizeof(CpioNewcHeader);
+let CPIO_FILESIZE_OFFSET:  usize = offsetof(CpioNewcHeader, filesize);
+let CPIO_NAMESIZE_OFFSET:  usize = offsetof(CpioNewcHeader, namesize);
 
 must_use variant CpioNumberResult { Invalid; Value(usize); }
 
