@@ -4,9 +4,8 @@
 // acknowledges duplicate/out-of-order data without consuming it twice, retries
 // SYN/ACK, data, and FIN on bounded deadlines, and returns to LISTEN after
 // close. Data-bearing input currently requires a 20-byte TCP header; SYN
-// options are accepted and discarded in replies. Transmit retry state has one
-// pending slot, so a general multi-segment response queue remains issue #180
-// work.
+// options are accepted and discarded in replies. Transmit retry state uses a
+// bounded four-slot queue, including independent data and FIN retransmission.
 // This concrete bound removes the relational payload slice that the broader
 // prototype implementation needed to mark unsafe, keeping this path free
 // of unsafe blocks and clean under the kernel's --forbid-trap build.

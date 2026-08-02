@@ -15,6 +15,8 @@ and the development container verifies the response with real `curl`.
 - Raspberry Pi firmware and TF-A hand control to a minimal AArch64 EL2 shim.
 - The shim performs required architectural setup and drops once to EL1.
 - The monolithic kernel and its drivers run at EL1.
+- RPi5 UART RX is dispatched through GIC-400 and RP1 MIP0/MSI-X interrupts;
+  Ethernet and USB remain polling-driven.
 - Linux-compatible processes run at EL0 with RX text and RW+XN data, heap, and
   stack mappings.
 - Ordinary kernel services do not use EL2 HVC as an internal service layer.
@@ -73,10 +75,9 @@ kernel/drivers/net/      RP1 Cadence GEM driver
 kernel/fs/ext2/          ext2 implementation
 kernel/init/             top-level kernel initialization and integration flow
 kernel/kernel/           process and Linux syscall policy
-kernel/lib/              kernel-local byte and support routines
 kernel/mm/               pages, address spaces, mappings, and ELF images
 kernel/net/              ARP, checksums, IPv4/ICMP/TCP, socket capabilities
-kernel/platform/rpi5/    RPi5 PCIe, UART, xHCI, and platform setup
+kernel/platform/rpi5/    RPi5 PCIe, GIC, UART, xHCI, and platform setup
 kernel/tests/            ext2 fixtures and RPi5 expected-file views
 kernel/build/            generated images and linked artifacts
 ```
@@ -182,13 +183,14 @@ one-minute SWD transfer. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (14 views, one boot)
+PASS kernel/rpi5 (15 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2
 provisioning and mutation, static BusyBox file access, dynamic musl plus
 BusyBox HTTPd, exact `curl` content, Linux socket I/O, VM layout, and complete
-resource teardown.
+resource teardown. After teardown, the host sends `irqtest` over RP1 UART0 and
+the final view verifies that EL1 received the line through the interrupt path.
 
 ### Device overrides and artifacts
 
@@ -230,17 +232,18 @@ bring-up. Host-side progress output is separate from kernel UART output.
 The passing HTTPd test is a concrete Linux compatibility milestone, not a
 claim of general Linux compatibility.
 
-- [Issue #180](https://github.com/takibi-lang/takibi/issues/180) tracks TCP
-  completion. Bounded retransmission, in-order stream reassembly, short reads,
-  partial writes, and deterministic split/drop fixtures are implemented. The
-  remaining closure work is a reliable multi-segment transmit queue, exact
-  host comparison of a response larger than one MTU (including a dropped
-  segment), and two independent `curl` connections in one boot.
+- [Issue #180](https://github.com/takibi-lang/takibi/issues/180) completed the
+  bounded multi-segment transmit queue, retransmission and stream-reassembly
+  behavior, exact host comparison above one MTU with a dropped segment, and
+  two independent `curl` connections in one boot.
 - [Issue #181](https://github.com/takibi-lang/takibi/issues/181) completed the
   foreground BusyBox HTTPd daemon, eager fork VM ownership, parent/child
   kernel stacks, descriptor references, and deterministic child reaping.
 - [Issue #182](https://github.com/takibi-lang/takibi/issues/182) tracks ext2
   indirect blocks, multiple block groups, and nested directory operations.
+- [Issue #187](https://github.com/takibi-lang/takibi/issues/187) tracks the
+  interrupt-driven device conversion. GIC-400 dispatch and RP1 UART0 RX are
+  implemented; Cadence GEM Ethernet and xHCI USB remain polling-driven.
 
 Unsupported Linux calls return `-ENOSYS`. Filesystem, TCP, process, and VM
 features continue to be added only when an executable workload requires them.
