@@ -733,6 +733,7 @@ fn main() {
                         kernel_boot_log("vm layout: text=rx data=rw+xn stack=rw+xn\n");
                     }
                     kernel_process_execution_reset();
+                    kernel_process_scheduler_enable();
                     let exit_status: usize =
                         run_initial_user(USER_TEXT_VA, USER_STACK_VA + PAGE_SIZE);
                     if (exit_status == 0) {
@@ -752,6 +753,9 @@ fn main() {
                         }
                         if (kernel_process_clone_evidence()) {
                             kernel_boot_log("process clone: parent=1 child=2 exit=42 reaped\n");
+                        }
+                        if (kernel_process_scheduler_acceptance_evidence()) {
+                            kernel_boot_log("scheduler preempt: parent+child gpr+simd asid deferred ok\n");
                         }
                         if (process_image_clone_vm_reaped_pages() == 3) {
                             kernel_boot_log("vm fork: private pages=3 reclaimed\n");

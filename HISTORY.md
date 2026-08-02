@@ -15,6 +15,32 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: Real Timer-Driven EL0 Preemption on RPi5 (GitHub Issue #188, Stage 10)
+
+The focused three-page EL0 fixture now enables the staged scheduler and runs
+parent and child in long syscall-free compute loops. Both write different
+bytes at the same user VA and retain distinct x19 and q8 signatures. The
+acceptance line is emitted only after at least two real Lower-EL timer
+switches, a deferred Current-EL request, child status 42, and clean return to
+the surviving parent; separate fail-stop PCs identify GPR, SIMD, or ASID data
+corruption if any signature check fails.
+
+Enabling the fixture exposed two real integration defects. First,
+`run_initial_user` still started EL0 with SPSR.DAIF set to `0x3c0`, so every
+timer was masked until a syscall temporarily enabled IRQs: SWD counters showed
+zero immediate switches but nine deferred ones. EL0t now starts with IRQ
+delivery enabled, relying on the complete Lower-EL frame before selection.
+Second, child exit still restored the assembly-era original clone frame,
+discarding the parent's newer timer-saved context. Clone now writes the child
+PID into the parent's saved x0 before publication, and exit resumes the latest
+parent SP held by the process slot without overwriting that frame.
+
+The compute fixture uses longer parent and child loops so multiple 1/64-second
+ticks are guaranteed on the real Cortex-A76. Existing HTTPd remains scheduler-
+disabled pending issue #193's blocking transitions, while the complete one-
+boot RPi5 suite proves that unmasked EL0 IRQ delivery does not regress timer
+wakeups, USB, GEM, files, sockets, or the synchronous compatibility workloads.
+
 ### 2026-08-02: Round-Robin Selection Reaches Both IRQ Boundaries (GitHub Issue #188, Stage 9)
 
 The RPi5 exception paths now distinguish Current-EL and Lower-EL dispatch all

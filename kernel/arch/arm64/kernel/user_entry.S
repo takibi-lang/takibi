@@ -163,10 +163,76 @@ initial_user_payload:
     b.ne    .Luser_fail
     b       .Lclone_parent_done
 .Lclone_child:
+    /* Scheduler acceptance: private same-VA data plus GPR and SIMD
+     * signatures must survive involuntary timer preemption. */
+    movz    x9, #0x1000
+    movk    x9, #0x4000, lsl #16
+    mov     w10, #0x22
+    strb    w10, [x9]
+    movz    x19, #0xdef0
+    movk    x19, #0x9abc, lsl #16
+    movk    x19, #0x5678, lsl #32
+    movk    x19, #0x1234, lsl #48
+    movi    v8.16b, #0x5a
+    movz    x9, #0xc200
+    movk    x9, #0x0beb, lsl #16
+.Lclone_child_compute:
+    subs    x9, x9, #1
+    b.ne    .Lclone_child_compute
+    movz    x20, #0xdef0
+    movk    x20, #0x9abc, lsl #16
+    movk    x20, #0x5678, lsl #32
+    movk    x20, #0x1234, lsl #48
+    cmp     x19, x20
+    b.ne    .Lscheduler_child_gpr_fail
+    umov    x10, v8.d[0]
+    movz    x11, #0x5a5a
+    movk    x11, #0x5a5a, lsl #16
+    movk    x11, #0x5a5a, lsl #32
+    movk    x11, #0x5a5a, lsl #48
+    cmp     x10, x11
+    b.ne    .Lscheduler_child_simd_fail
+    movz    x9, #0x1000
+    movk    x9, #0x4000, lsl #16
+    ldrb    w10, [x9]
+    cmp     w10, #0x22
+    b.ne    .Lscheduler_child_asid_fail
     mov     x0, #42
     mov     x8, #93
     svc     #0
 .Lclone_parent_done:
+    movz    x9, #0x1000
+    movk    x9, #0x4000, lsl #16
+    mov     w10, #0x11
+    strb    w10, [x9]
+    movz    x19, #0xdef0
+    movk    x19, #0x9abc, lsl #16
+    movk    x19, #0x5678, lsl #32
+    movk    x19, #0x1234, lsl #48
+    movi    v8.16b, #0xa5
+    movz    x9, #0x8400
+    movk    x9, #0x17d7, lsl #16
+.Lclone_parent_compute:
+    subs    x9, x9, #1
+    b.ne    .Lclone_parent_compute
+    movz    x20, #0xdef0
+    movk    x20, #0x9abc, lsl #16
+    movk    x20, #0x5678, lsl #32
+    movk    x20, #0x1234, lsl #48
+    cmp     x19, x20
+    b.ne    .Lscheduler_parent_gpr_fail
+    umov    x10, v8.d[0]
+    movz    x11, #0xa5a5
+    movk    x11, #0xa5a5, lsl #16
+    movk    x11, #0xa5a5, lsl #32
+    movk    x11, #0xa5a5, lsl #48
+    cmp     x10, x11
+    b.ne    .Lscheduler_parent_simd_fail
+    movz    x9, #0x1000
+    movk    x9, #0x4000, lsl #16
+    ldrb    w10, [x9]
+    cmp     w10, #0x11
+    b.ne    .Lscheduler_parent_asid_fail
 
     adr     x1, .Luser_message
     mov     x2, #21
@@ -180,6 +246,18 @@ initial_user_payload:
     svc     #0
 .Luser_fail:
     b       .Luser_fail
+.Lscheduler_child_gpr_fail:
+    b       .Lscheduler_child_gpr_fail
+.Lscheduler_child_simd_fail:
+    b       .Lscheduler_child_simd_fail
+.Lscheduler_child_asid_fail:
+    b       .Lscheduler_child_asid_fail
+.Lscheduler_parent_gpr_fail:
+    b       .Lscheduler_parent_gpr_fail
+.Lscheduler_parent_simd_fail:
+    b       .Lscheduler_parent_simd_fail
+.Lscheduler_parent_asid_fail:
+    b       .Lscheduler_parent_asid_fail
 .Luser_message:
     .ascii  "hello from userspace\n"
 .Lmutable_path:
@@ -254,7 +332,9 @@ run_initial_user:
     stp     x27, x28, [sp, #64]
     stp     x29, x30, [sp, #80]
     msr     sp_el0, x1
-    mov     x2, #0x3c0
+    /* EL0t with IRQ delivery enabled. The Lower-EL IRQ vector saves the
+     * complete context before any scheduler decision. */
+    mov     x2, #0
     msr     spsr_el1, x2
     msr     elr_el1, x0
     eret
@@ -273,7 +353,7 @@ el0_sync_entry:
      * a nested IRQ lands on this same SP_EL1 stack, strictly below this
      * frame, and el1_current_irq_entry's own save/restore does not touch
      * any state already saved above. .Lsyscall_resume's eret restores the
-     * ORIGINAL captured SPSR_EL1 (DAIF already masked for EL0t), and the
+     * ORIGINAL captured SPSR_EL1 (including EL0's enabled IRQ state), and the
      * next exception entry re-masks DAIF regardless, so this only widens
      * the window during which THIS syscall's own handling can be
      * interrupted. */
@@ -307,6 +387,9 @@ el0_sync_entry:
     add     x9, x9, :lo12:clone_parent_frame
     mov     x14, sp
     str     x14, [x9]
+    /* The suspended parent observes clone() == child PID whenever it is
+     * first selected; the copied child frame is changed to zero below. */
+    str     x7, [sp, #EL0_CONTEXT_X0]
     bl      kernel_process_clone_child_stack_top
     cbz     x0, .Lclone_context_fail
     sub     x10, x0, #EL0_CONTEXT_SIZE
@@ -340,11 +423,11 @@ el0_sync_entry:
     b       el1_exception_evidence
 
 .Lsyscall_clone_parent:
-    adrp    x9, clone_parent_frame
-    add     x9, x9, :lo12:clone_parent_frame
-    ldr     x14, [x9]
-    mov     sp, x14
-    b       .Lsyscall_resume
+    cbz     x7, .Lclone_context_fail
+    mov     sp, x7
+    EL0_CONTEXT_RESTORE
+    add     sp, sp, #EL0_CONTEXT_SIZE
+    eret
 
 .Lsyscall_resume:
     str     x7, [sp, #EL0_CONTEXT_X0]

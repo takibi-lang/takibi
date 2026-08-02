@@ -479,6 +479,7 @@ private let mut execution_reschedule_pending: bool;
 private let mut execution_timer_switches: usize;
 private let mut execution_deferred_switches: usize;
 private let mut execution_scheduler_enabled: bool;
+private let mut execution_deferred_requests: usize;
 
 fn kernel_process_start_handle(handle: ProcessHandle) -> bool {
     match scheduled_process_ready_take(handle) {
@@ -526,6 +527,7 @@ fn kernel_process_execution_reset() {
     execution_timer_switches = 0;
     execution_deferred_switches = 0;
     execution_scheduler_enabled = false;
+    execution_deferred_requests = 0;
     match scheduled_process_alloc() {
         ScheduledProcessAllocResult::Full => {}
         ScheduledProcessAllocResult::Allocated(parent) => {
@@ -538,6 +540,7 @@ fn kernel_process_execution_reset() {
 fn kernel_process_request_reschedule() {
     if (execution_scheduler_enabled) {
         execution_reschedule_pending = true;
+        execution_deferred_requests = execution_deferred_requests + 1;
     }
 }
 
@@ -713,6 +716,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
     execution_child_exit_count = execution_child_exit_count + 1;
     execution_child_live = false;
     execution_process = ExecutionProcess::Parent;
+    kernel_process_scheduler_disable();
     if (execution_child_handle_live && execution_parent_handle_live) {
         match scheduled_process_running_take(execution_child_handle) {
             ScheduledProcessRunningTakeResult::Missing => {}
@@ -736,9 +740,20 @@ fn kernel_process_child_exit(status: usize) -> usize {
                 }
             }
         }
-        if (kernel_process_start_handle(execution_parent_handle)) {}
+        if (kernel_process_start_handle(execution_parent_handle)) {
+            return scheduled_process_saved_sp[
+                execution_parent_handle.pool_index];
+        }
     }
-    return 2;
+    return 0;
+}
+
+fn kernel_process_scheduler_acceptance_evidence() -> bool {
+    return execution_timer_switches >= 2 &&
+           execution_deferred_requests != 0 &&
+           execution_child_exit_status == 42 &&
+           execution_process == ExecutionProcess::Parent &&
+           execution_scheduler_enabled == false;
 }
 
 fn kernel_process_child_exit_count() -> usize {
