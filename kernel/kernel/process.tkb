@@ -1,7 +1,416 @@
 use "kernel/mm/page.tkb";
 
-enum ProcessState: u8 { Ready; Exited; }
+enum ProcessState: u8 { Ready; Running; Exited; }
+enum ProcessSlotState: u8 { Free; Ready; Running; Exited; }
 
+const KERNEL_PROCESS_MAX: usize = 2;
+const KERNEL_PROCESS_STACK_SIZE: usize = 4096;
+
+// Issue #188 Stage 2: the stable store holds one generation-indexed process
+// identity. A separate linear state token carries Ready/Running/Exited, so
+// adding a later Blocked state does not require another copy of the stable
+// store algorithm. The reusable table slot is never the static identity.
+linear struct ScheduledProcessOwner[process: usize] {
+    private pool_index: {0..<KERNEL_PROCESS_MAX as usize};
+    private generation: usize @ process;
+}
+
+linear struct ScheduledProcessState[process: usize, state: ProcessState] {
+    private pool_index: {0..<KERNEL_PROCESS_MAX as usize};
+}
+
+struct ProcessHandle {
+    private pool_index: {0..<KERNEL_PROCESS_MAX as usize};
+    private generation: usize;
+}
+
+variant ScheduledProcessValue {
+    Empty;
+    Occupied(exists process: usize. ScheduledProcessOwner[process]);
+}
+
+struct ScheduledProcessStore {
+    private mutex: i32;
+    private value: ScheduledProcessValue;
+}
+
+private linear view ScheduledProcessGuard[lock: addr];
+private let mut scheduled_process_store:
+    [ScheduledProcessStore; KERNEL_PROCESS_MAX];
+private let mut scheduled_process_used: [u8; KERNEL_PROCESS_MAX];
+private let mut scheduled_process_generation: [usize; KERNEL_PROCESS_MAX];
+private let mut scheduled_process_saved_sp: [usize; KERNEL_PROCESS_MAX];
+private let mut scheduled_process_state: [ProcessSlotState; KERNEL_PROCESS_MAX];
+private let mut scheduled_process_next_generation: usize = 1;
+private let mut scheduled_process_kernel_stacks:
+    [u8; KERNEL_PROCESS_MAX * KERNEL_PROCESS_STACK_SIZE] align(4096);
+
+must_use variant ScheduledProcessAllocResult {
+    Full;
+    Allocated(ProcessHandle);
+}
+
+must_use variant ScheduledProcessReadyTakeResult {
+    Missing;
+    Ready(exists process: usize.
+          (ScheduledProcessOwner[process],
+           ScheduledProcessState[process, ProcessState::Ready]));
+}
+
+must_use variant ScheduledProcessExitedTakeResult {
+    Missing;
+    Exited(exists process: usize.
+           (ScheduledProcessOwner[process],
+            ScheduledProcessState[process, ProcessState::Exited]));
+}
+
+must_use variant ScheduledProcessPutResult { Stored; Conflict; }
+
+fn scheduled_process_lock(lock: *i32 @ address)
+        -> ScheduledProcessGuard[address] {
+    return view ScheduledProcessGuard[address];
+}
+
+fn scheduled_process_unlock(guard: sink ScheduledProcessGuard[address],
+                            lock: *i32 @ address) {}
+
+fn scheduled_process_owner_new(
+        slot: {0..<KERNEL_PROCESS_MAX as usize},
+        generation: usize @ process) -> ScheduledProcessOwner[process] {
+    let mut owner: ScheduledProcessOwner[process] = { slot, generation };
+    return owner;
+}
+
+fn scheduled_process_owner_drop(
+        owner: sink ScheduledProcessOwner[process]) {}
+
+fn scheduled_process_state_drop(
+        state: sink ScheduledProcessState[process, process_state]) {}
+
+fn scheduled_process_ready_state(
+        owner: borrow ScheduledProcessOwner[process])
+        -> ScheduledProcessState[process, ProcessState::Ready] {
+    let mut state: ScheduledProcessState[process, ProcessState::Ready] =
+        { owner.pool_index };
+    return state;
+}
+
+fn scheduled_process_exited_state(
+        owner: borrow ScheduledProcessOwner[process])
+        -> ScheduledProcessState[process, ProcessState::Exited] {
+    let mut state: ScheduledProcessState[process, ProcessState::Exited] =
+        { owner.pool_index };
+    return state;
+}
+
+fn scheduled_process_matches(
+        owner: borrow ScheduledProcessOwner[process],
+        handle: ProcessHandle) -> bool {
+    return owner.pool_index == handle.pool_index &&
+           owner.generation == handle.generation &&
+           scheduled_process_used[owner.pool_index] != 0 &&
+           scheduled_process_generation[owner.pool_index] ==
+               handle.generation;
+}
+
+fn scheduled_process_identity_put(
+        owner: sink ScheduledProcessOwner[process])
+        -> ScheduledProcessPutResult {
+    let slot: {0..<KERNEL_PROCESS_MAX as usize} = owner.pool_index;
+    let guard = scheduled_process_lock(&scheduled_process_store[slot].mutex);
+    let previous: ScheduledProcessValue = stable_replace(
+        guard, &scheduled_process_store[slot].mutex,
+        scheduled_process_store[slot].value,
+        ScheduledProcessValue::Occupied(owner));
+    match previous {
+        ScheduledProcessValue::Empty => {
+            scheduled_process_unlock(
+                guard, &scheduled_process_store[slot].mutex);
+            return ScheduledProcessPutResult::Stored;
+        }
+        ScheduledProcessValue::Occupied(stale) => {
+            let displaced: ScheduledProcessValue = stable_replace(
+                guard, &scheduled_process_store[slot].mutex,
+                scheduled_process_store[slot].value,
+                ScheduledProcessValue::Occupied(stale));
+            scheduled_process_unlock(
+                guard, &scheduled_process_store[slot].mutex);
+            match displaced {
+                ScheduledProcessValue::Empty => {}
+                ScheduledProcessValue::Occupied(incoming) => {
+                    scheduled_process_owner_drop(incoming);
+                }
+            }
+            return ScheduledProcessPutResult::Conflict;
+        }
+    }
+}
+
+fn scheduled_process_put(
+        owner: sink ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, process_state])
+        -> ScheduledProcessPutResult {
+    scheduled_process_state_drop(state);
+    return scheduled_process_identity_put(owner);
+}
+
+fn scheduled_process_identity_take(handle: ProcessHandle)
+        -> ScheduledProcessValue {
+    let slot: {0..<KERNEL_PROCESS_MAX as usize} = handle.pool_index;
+    let guard = scheduled_process_lock(&scheduled_process_store[slot].mutex);
+    let previous: ScheduledProcessValue = stable_replace(
+        guard, &scheduled_process_store[slot].mutex,
+        scheduled_process_store[slot].value, ScheduledProcessValue::Empty);
+    scheduled_process_unlock(guard, &scheduled_process_store[slot].mutex);
+    match previous {
+        ScheduledProcessValue::Empty => {
+            return ScheduledProcessValue::Empty;
+        }
+        ScheduledProcessValue::Occupied(owner) => {
+            if (scheduled_process_matches(owner, handle)) {
+                return ScheduledProcessValue::Occupied(owner);
+            }
+            match scheduled_process_identity_put(owner) {
+                ScheduledProcessPutResult::Stored => {}
+                ScheduledProcessPutResult::Conflict => {}
+            }
+            return ScheduledProcessValue::Empty;
+        }
+    }
+}
+
+fn scheduled_process_table_init() {
+    for slot: usize in 0..<KERNEL_PROCESS_MAX {
+        scheduled_process_used[slot] = 0;
+        scheduled_process_generation[slot] = 0;
+        scheduled_process_saved_sp[slot] = 0;
+        scheduled_process_state[slot] = ProcessSlotState::Free;
+    }
+}
+
+fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
+    for slot: usize in 0..<KERNEL_PROCESS_MAX {
+        if (scheduled_process_used[slot] == 0) {
+            let generation: usize = scheduled_process_next_generation;
+            scheduled_process_next_generation = generation + 1;
+            scheduled_process_used[slot] = 1;
+            scheduled_process_generation[slot] = generation;
+            scheduled_process_state[slot] = ProcessSlotState::Ready;
+            let stack_base: usize = scheduled_process_kernel_stacks as usize;
+            scheduled_process_saved_sp[slot] = stack_base +
+                (slot + 1) * KERNEL_PROCESS_STACK_SIZE;
+            let mut handle: ProcessHandle = { slot, generation };
+            match scheduled_process_identity_put(
+                    scheduled_process_owner_new(slot, generation)) {
+                ScheduledProcessPutResult::Conflict => {
+                    scheduled_process_used[slot] = 0;
+                    scheduled_process_generation[slot] = 0;
+                    scheduled_process_saved_sp[slot] = 0;
+                    scheduled_process_state[slot] = ProcessSlotState::Free;
+                    return ScheduledProcessAllocResult::Full;
+                }
+                ScheduledProcessPutResult::Stored => {
+                    return ScheduledProcessAllocResult::Allocated(handle);
+                }
+            }
+        }
+    }
+    return ScheduledProcessAllocResult::Full;
+}
+
+fn scheduled_process_ready_take(handle: ProcessHandle)
+        -> ScheduledProcessReadyTakeResult {
+    if (scheduled_process_state[handle.pool_index] !=
+            ProcessSlotState::Ready) {
+        return ScheduledProcessReadyTakeResult::Missing;
+    }
+    match scheduled_process_identity_take(handle) {
+        ScheduledProcessValue::Empty => {
+            return ScheduledProcessReadyTakeResult::Missing;
+        }
+        ScheduledProcessValue::Occupied(owner) => {
+            let state = scheduled_process_ready_state(owner);
+            return ScheduledProcessReadyTakeResult::Ready(
+                (owner, state));
+        }
+    }
+}
+
+fn scheduled_process_exited_take(handle: ProcessHandle)
+        -> ScheduledProcessExitedTakeResult {
+    if (scheduled_process_state[handle.pool_index] !=
+            ProcessSlotState::Exited) {
+        return ScheduledProcessExitedTakeResult::Missing;
+    }
+    match scheduled_process_identity_take(handle) {
+        ScheduledProcessValue::Empty => {
+            return ScheduledProcessExitedTakeResult::Missing;
+        }
+        ScheduledProcessValue::Occupied(owner) => {
+            let state = scheduled_process_exited_state(owner);
+            return ScheduledProcessExitedTakeResult::Exited(
+                (owner, state));
+        }
+    }
+}
+
+fn scheduled_process_start(
+        owner: borrow ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Ready])
+        -> ScheduledProcessState[process, ProcessState::Running] {
+    scheduled_process_state_drop(state);
+    scheduled_process_state[owner.pool_index] = ProcessSlotState::Running;
+    let mut running:
+        ScheduledProcessState[process, ProcessState::Running] =
+        { owner.pool_index };
+    return running;
+}
+
+fn scheduled_process_yield(
+        owner: borrow ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Running])
+        -> ScheduledProcessState[process, ProcessState::Ready] {
+    scheduled_process_state_drop(state);
+    scheduled_process_state[owner.pool_index] = ProcessSlotState::Ready;
+    let mut ready: ScheduledProcessState[process, ProcessState::Ready] =
+        { owner.pool_index };
+    return ready;
+}
+
+fn scheduled_process_exit(
+        owner: borrow ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Running])
+        -> ScheduledProcessState[process, ProcessState::Exited] {
+    scheduled_process_state_drop(state);
+    scheduled_process_state[owner.pool_index] = ProcessSlotState::Exited;
+    let mut exited: ScheduledProcessState[process, ProcessState::Exited] =
+        { owner.pool_index };
+    return exited;
+}
+
+fn scheduled_process_reap(
+        owner: sink ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Exited]) {
+    scheduled_process_state_drop(state);
+    scheduled_process_used[owner.pool_index] = 0;
+    scheduled_process_generation[owner.pool_index] = 0;
+    scheduled_process_saved_sp[owner.pool_index] = 0;
+    scheduled_process_state[owner.pool_index] = ProcessSlotState::Free;
+}
+
+fn scheduled_process_stack_top(handle: ProcessHandle) -> usize {
+    if (scheduled_process_used[handle.pool_index] != 0 &&
+        scheduled_process_generation[handle.pool_index] ==
+            handle.generation) {
+        return scheduled_process_saved_sp[handle.pool_index];
+    }
+    return 0;
+}
+
+fn scheduled_process_same_slot(a: ProcessHandle, b: ProcessHandle) -> bool {
+    return a.pool_index == b.pool_index;
+}
+
+fn scheduled_process_same_generation(
+        a: ProcessHandle, b: ProcessHandle) -> bool {
+    return a.generation == b.generation;
+}
+
+fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool {
+    match scheduled_process_ready_take(handle) {
+        ScheduledProcessReadyTakeResult::Missing => { return false; }
+        ScheduledProcessReadyTakeResult::Ready(resources) => {
+            let (owner, ready) = resources;
+            let running = scheduled_process_start(owner, ready);
+            let ready_again = scheduled_process_yield(owner, running);
+            match scheduled_process_put(owner, ready_again) {
+                ScheduledProcessPutResult::Conflict => { return false; }
+                ScheduledProcessPutResult::Stored => {}
+            }
+        }
+    }
+    match scheduled_process_ready_take(handle) {
+        ScheduledProcessReadyTakeResult::Missing => { return false; }
+        ScheduledProcessReadyTakeResult::Ready(resources) => {
+            let (owner, ready) = resources;
+            let running = scheduled_process_start(owner, ready);
+            let exited = scheduled_process_exit(owner, running);
+            match scheduled_process_put(owner, exited) {
+                ScheduledProcessPutResult::Conflict => { return false; }
+                ScheduledProcessPutResult::Stored => {}
+            }
+        }
+    }
+    match scheduled_process_exited_take(handle) {
+        ScheduledProcessExitedTakeResult::Missing => { return false; }
+        ScheduledProcessExitedTakeResult::Exited(resources) => {
+            let (owner, exited) = resources;
+            scheduled_process_reap(owner, exited);
+            return true;
+        }
+    }
+}
+
+// Stage-local hardware evidence. This does not schedule either owner: it
+// proves bounded allocation, typed Ready -> Running -> Ready/Exited
+// transitions, page-aligned distinct kernel stacks, and generation-safe slot
+// reuse before later stages attach real VM/fd state to these identities.
+fn scheduled_process_table_probe() -> bool {
+    scheduled_process_table_init();
+    match scheduled_process_alloc() {
+        ScheduledProcessAllocResult::Full => { return false; }
+        ScheduledProcessAllocResult::Allocated(first) => {
+            match scheduled_process_alloc() {
+                ScheduledProcessAllocResult::Full => { return false; }
+                ScheduledProcessAllocResult::Allocated(second) => {
+                    let mut capacity_ok: bool = false;
+                    match scheduled_process_alloc() {
+                        ScheduledProcessAllocResult::Allocated(unexpected) => {
+                            if (scheduled_process_probe_cycle(unexpected)) {}
+                        }
+                        ScheduledProcessAllocResult::Full => {
+                            capacity_ok = true;
+                        }
+                    }
+                    if (capacity_ok == false) { return false; }
+                    let first_stack: usize =
+                        scheduled_process_stack_top(first);
+                    let second_stack: usize =
+                        scheduled_process_stack_top(second);
+                    if (first_stack == 0 || second_stack == 0 ||
+                        (first_stack & 4095) != 0 ||
+                        (second_stack & 4095) != 0 ||
+                        first_stack == second_stack) {
+                        return false;
+                    }
+                    if (scheduled_process_probe_cycle(first) == false) {
+                        return false;
+                    }
+                    match scheduled_process_alloc() {
+                        ScheduledProcessAllocResult::Full => { return false; }
+                        ScheduledProcessAllocResult::Allocated(reused) => {
+                            if (scheduled_process_same_slot(first, reused) ==
+                                    false ||
+                                scheduled_process_same_generation(
+                                    first, reused) ||
+                                scheduled_process_stack_top(first) != 0) {
+                                return false;
+                            }
+                            if (scheduled_process_probe_cycle(reused) ==
+                                    false) {
+                                return false;
+                            }
+                        }
+                    }
+                    return scheduled_process_probe_cycle(second);
+                }
+            }
+        }
+    }
+}
+
+// Existing synchronous clone fixture. Later #188 stages replace this state
+// with the table above once VM and fd state can be live concurrently.
 enum ExecutionProcess: u8 { Parent; Child; }
 
 private let mut execution_process: ExecutionProcess = ExecutionProcess::Parent;

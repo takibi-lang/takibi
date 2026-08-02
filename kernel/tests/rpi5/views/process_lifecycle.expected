@@ -1,3 +1,4 @@
+process table: slots=2 stacks=4096 generation reuse safe
 initial process: ready
 process clone: parent=1 child=2 exit=42 reaped
 vm fork: private pages=3 reclaimed

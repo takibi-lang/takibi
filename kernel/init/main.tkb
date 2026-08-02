@@ -260,6 +260,12 @@ fn main() {
     // IRQ vector slots are wired.
     platform_irq_init();
 
+    if (scheduled_process_table_probe()) {
+        kernel_boot_log("process table: slots=2 stacks=4096 generation reuse safe\n");
+    } else {
+        kernel_boot_log("process table: failed\n");
+    }
+
     match net_init() {
         NetInitResult::Failed => {
             kernel_boot_log("rp1 gem: link failed\n");

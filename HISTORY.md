@@ -15,6 +15,31 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: Bounded Typed Process Table and Dedicated Kernel Stacks (GitHub Issue #188, Stage 2)
+
+The scheduler foundation now has a deliberately fixed two-slot process table,
+matching the current one-parent-plus-one-child workload rather than guessing a
+general capacity. Each allocation receives a monotonic static generation
+identity distinct from its reusable runtime slot. A stale `ProcessHandle`
+therefore fails after reap and cannot alias the next process placed in that
+slot. Linear identities rest in per-slot `stable_replace` stores between
+operations.
+
+`Ready`, `Running`, and `Exited` are linear state tokens tied to the same
+static process identity. Transitions consume one token and produce the next;
+the stable store itself only needs one identity operation rather than one
+duplicated implementation per state. This also leaves a later `Blocked` state
+from issue #193 as an additive state transition instead of another owner-store
+algorithm. The old synchronous clone globals remain temporarily separate
+until the VM and fd stages can keep parent and child resources live together.
+
+Two 4096-byte, page-aligned EL1 kernel stacks are reserved beside saved-SP
+metadata. They are not activated yet. A hardware probe proves the two-slot
+capacity, distinct aligned stack tops, `Ready -> Running -> Ready` and
+`Ready -> Running -> Exited -> reap`, same-slot reuse with a new generation,
+and rejection of the stale generation. The new process-lifecycle view passed
+alongside all existing RPi5 integration views under `--forbid-trap`.
+
 ### 2026-08-02: One Complete EL0 Context ABI for Syscalls and Timer IRQs (GitHub Issue #188, Stage 1)
 
 The first scheduler milestone deliberately adds no process table and performs
