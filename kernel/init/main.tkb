@@ -327,6 +327,12 @@ fn main() {
     } else {
         kernel_boot_log("user memory: failed\n");
     }
+    if (kernel_syscall_subset_probe()) {
+        kernel_boot_log(
+            "syscall subset: mmap prot+fd reject, sigaction signum+oldact ok\n");
+    } else {
+        kernel_boot_log("syscall subset: failed\n");
+    }
     if (unified_fd_table_probe()) {
         kernel_boot_log("fd table: processes=2 fds=8 shared-offset refs clean\n");
     } else {

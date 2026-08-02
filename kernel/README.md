@@ -49,7 +49,9 @@ The current RPi5 kernel includes:
   loading, initial Linux stack and auxv construction, `brk`, and bounded
   anonymous `mmap` behavior;
 - the Linux AArch64 syscall subset reached by the current BusyBox, file, and
-  socket workloads;
+  socket workloads, plus a typed user-memory boundary (`kernel/mm/
+  user_memory.tkb`) enforcing non-RWX process mappings -- see `SYSCALLS.md`
+  for the full per-syscall support matrix;
 - a block-device boundary shared by an in-memory fixture and RPi5 USB Mass
   Storage;
 - a bounded ext2 implementation with direct-block small files, root directory

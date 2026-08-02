@@ -1540,7 +1540,27 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         }
         return (1, 0);
     }
-    if (number == 134) { return (1, 0); }
+    if (number == 134) {
+        // rt_sigaction(signum, act, oldact, sigsetsize): this kernel does
+        // not deliver signals, but musl's signal() (SIGPIPE/SIGALRM/SIGCHLD/
+        // SIGHUP in BusyBox httpd) always passes a non-null oldact expecting
+        // the previous struct sigaction (32 bytes on aarch64: handler,
+        // flags, restorer, 2-word mask) to be filled, not left untouched.
+        let signum: usize = x0;
+        let oldact: usize = x2;
+        if (signum == 0 || signum == 9 || signum == 19) {
+            return (1, LINUX_EINVAL);
+        }
+        if (oldact != 0) {
+            match user_range_check(oldact, 32, UserAccessMode::Write) {
+                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Ok(range) => {
+                    let zeroed: bool = user_zero_fill(range);
+                }
+            }
+        }
+        return (1, 0);
+    }
     if (number == 135) {
         if (x2 != 0) {
             match user_range_check(x2, 8, UserAccessMode::Write) {
@@ -1570,7 +1590,21 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         }
         return (1, 0);
     }
-    if (number == 208) { return (1, 0); }
+    if (number == 208) {
+        // setsockopt(level, optname, optval, optlen): this kernel's
+        // single-listener-per-port/single-connection model has no state any
+        // real option here would change, but the optval pointer itself is
+        // now validated instead of never being touched.
+        let optval: usize = x2;
+        let optlen: usize = x3;
+        if (optlen != 0) {
+            match user_range_check(optval, optlen, UserAccessMode::Read) {
+                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Ok(range) => {}
+            }
+        }
+        return (1, 0);
+    }
     if (number == 96) {
         return (1, kernel_process_current_pid());
     }
@@ -1591,6 +1625,20 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     }
     if (number == 222) {
         let length: usize = x1;
+        let prot: usize = x2;
+        let flags: usize = x3;
+        let fd: usize = x4;
+        // This kernel has no file-backed or shared mapping and no
+        // executable anonymous memory (issue #174's W^X story): only a
+        // private anonymous request with fd=-1 and no PROT_EXEC is
+        // supported. musl's mallocng is the only real caller reached by
+        // BusyBox httpd and every one of its three call shapes (fixed
+        // MAP_FIXED guard page, PROT_NONE meta-area pool, PROT_READ|WRITE
+        // growth) already satisfies this.
+        if ((flags & 0x22) != 0x22 || fd != 0xFFFFFFFFFFFFFFFF ||
+                (prot & 0x4) != 0) {
+            return (1, LINUX_EINVAL);
+        }
         if (length == 0 || length > 0xFFFFFFFFFFFFF000) {
             return (1, 0xFFFFFFFFFFFFFFFF);
         }
@@ -1657,4 +1705,72 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         return (1, LINUX_EACCES);
     }
     return (1, LINUX_ENOSYS);
+}
+
+const SYSCALL_SUBSET_PROBE_L3_INDEX: usize = 503;
+const SYSCALL_TRAP_ESR: usize = 0x54000000;
+
+// Boot-time negative-test coverage for issue #175: the real BusyBox/musl
+// binary never requests PROT_EXEC/a real fd for mmap, an invalid rt_sigaction
+// signum, or a non-null rt_sigaction oldact it then checks byte-for-byte, so
+// passing hardware behavior alone can't prove those reject/zero-fill paths
+// work. Exercises kernel_syscall_dispatch directly with crafted esr/args
+// (exception_class 0x15, matching the real SVC trap), using its own
+// throwaway page (outside issue #174's own probe's L3 indices 500-502) for
+// the oldact buffer.
+fn kernel_syscall_subset_probe() -> bool !{unsafe} {
+    if (user_pte_read(SYSCALL_SUBSET_PROBE_L3_INDEX) != 0) { return false; }
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => { return false; }
+        PageAllocResult::Allocated(page) => {
+            let phys: usize = page_physical_address(page);
+            user_pte_write(SYSCALL_SUBSET_PROBE_L3_INDEX,
+                           phys | USER_RW_XN_FLAGS);
+            user_tlb_invalidate(
+                USER_TEXT_VA + SYSCALL_SUBSET_PROBE_L3_INDEX * PAGE_SIZE);
+            let oldact_va: usize =
+                USER_TEXT_VA + SYSCALL_SUBSET_PROBE_L3_INDEX * PAGE_SIZE;
+
+            let mut ok: bool = true;
+
+            // mmap: PROT_EXEC is always rejected.
+            let (action1, value1) = kernel_syscall_dispatch(
+                SYSCALL_TRAP_ESR, 222, 0, 4096, 0x4, 0x22,
+                0xFFFFFFFFFFFFFFFF);
+            if (action1 != 1 || value1 != LINUX_EINVAL) { ok = false; }
+
+            // mmap: a real fd (file-backed) is always rejected.
+            let (action2, value2) = kernel_syscall_dispatch(
+                SYSCALL_TRAP_ESR, 222, 0, 4096, 0x3, 0x22, 3);
+            if (action2 != 1 || value2 != LINUX_EINVAL) { ok = false; }
+
+            // rt_sigaction: signum 0 is rejected.
+            let (action3, value3) = kernel_syscall_dispatch(
+                SYSCALL_TRAP_ESR, 134, 0, 0, 0, 0, 0);
+            if (action3 != 1 || value3 != LINUX_EINVAL) { ok = false; }
+
+            // rt_sigaction: a non-null oldact is zero-filled, not left as
+            // whatever was already there (poison it first to prove that).
+            match user_range_check(oldact_va, 32, UserAccessMode::Write) {
+                UserRangeResult::Fault => { ok = false; }
+                UserRangeResult::Ok(range) => {
+                    let poisoned: bool = user_write_byte(range, 0, 0xAA);
+                }
+            }
+            let (action4, value4) = kernel_syscall_dispatch(
+                SYSCALL_TRAP_ESR, 134, 1, 0, oldact_va, 0, 0);
+            if (action4 != 1 || value4 != 0) { ok = false; }
+            match user_range_check(oldact_va, 1, UserAccessMode::Read) {
+                UserRangeResult::Fault => { ok = false; }
+                UserRangeResult::Ok(range) => {
+                    if (user_read_byte(range, 0) != 0) { ok = false; }
+                }
+            }
+
+            user_pte_write(SYSCALL_SUBSET_PROBE_L3_INDEX, 0);
+            user_tlb_invalidate(oldact_va);
+            page_free(page);
+            return ok;
+        }
+    }
 }
