@@ -15,6 +15,30 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: Two-Entry Typed TCP Connection Pool and Descriptor Table (GitHub Issue #189)
+
+The standalone kernel no longer stores one TCP stream in a single set of
+`conn_*` globals or hardcodes one connected fd 5. A bounded two-entry pool now
+allocates a linear `TcpConnectionOwner[connection]`; its static identity is a
+monotonic generation, distinct from the reusable runtime pool index, so a
+stale `(index,generation)` descriptor cannot alias a later connection that
+reuses the same slot. Owners rest in an indexed stable-owner array between
+operations. Every connection now has independent tuple, sequence, receive
+buffer, transmit frame, and four-entry retransmission state.
+
+The syscall boundary uses a fixed descriptor table for listener and connected
+socket entries. `socket` and `accept4` allocate the first free bounded entry;
+`dup3`, clone inheritance/reaping, shutdown, and close preserve per-connection
+reference counts and generation checks. The GEM RX descriptor and its linear
+`NetRxCanAcquire` capability intentionally remain singleton device resources:
+issue #189 requires two tracked connections with sequentially interleaved
+syscalls, not concurrent ownership of one physical descriptor.
+
+The RPi5 EL0 fixture accepts fd 5 and fd 6 before reading either, exchanges
+distinct payloads and responses on both, and closes B before A. Its raw-link
+host test establishes both handshakes while A remains live and verifies both
+responses and FINs. All `.tkb` paths compile under `--forbid-trap`.
+
 ### 2026-08-02: RP1 GEM Ethernet and the ARM Generic Timer Go Interrupt-Driven; the SYN-ACK-Drop Flake Was a Test-Sync Bug, Not a Polling-Shape One (GitHub Issue #187)
 
 Closes out the two items this issue's own earlier entries had left

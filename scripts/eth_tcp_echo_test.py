@@ -368,7 +368,7 @@ def test_reconnect_after_close(client_mac: bytes) -> bool:
 # GitHub issue #180: kernel/arch/arm64/kernel/user_entry.S's EL0 fixture
 # (used only by TCP_TEST_CONNECTED_IO=1, the userspace socket-syscall
 # path -- not the BusyBox/curl path) issues exactly 3 write(5, ...)
-# calls on the one connection this test continues: 19 bytes
+# calls on connection A after connection B has also been accepted: 19 bytes
 # ("HTTP/1.0 200 OK\r\n\r\n"), 1461 bytes of 0x5a fill capped at 1460 by
 # the kernel's partial-write behavior, then the final byte. kernel/init/
 # main.tkb arms kernel_tcp_inject_drop_data_segment(1) before running
@@ -384,21 +384,45 @@ CONNECTED_LARGE_RESPONSE = CONNECTED_RESPONSE_PAYLOAD + (b"\x5a" * 1460) + b"\x5
 
 
 def test_connected_large_response(client_mac: bytes) -> bool:
-    # Continues the connection test_handshake_only()-equivalent (main()'s
-    # own do_handshake call below) already established -- same ordering
-    # requirement as test_data_echo.
+    # Issue #189: establish A and B before sending data on either one. The
+    # EL0 fixture blocks in its second accept4() while A remains live, so a
+    # successful second handshake proves the kernel allocated fd 6 and an
+    # independent connection-pool slot rather than overwriting fd 5/A.
     sock = new_sock()
+    if not do_handshake(sock, client_mac, HANDSHAKE_CLIENT_PORT,
+                        HANDSHAKE_CLIENT_ISN):
+        sock.close()
+        return False
+    if not do_handshake(sock, client_mac, RECONNECT_CLIENT_PORT,
+                        RECONNECT_CLIENT_ISN):
+        sock.close()
+        return False
     client_seq = HANDSHAKE_CLIENT_ISN + 1 + len(DATA_ECHO_PAYLOAD)
     server_seq = SERVER_ISN + 1
+    second_payload = b"second-B"
+    second_response = b"conn-B\n!"
+    second_client_seq = RECONNECT_CLIENT_ISN + 1 + len(second_payload)
+    second_server_seq = SERVER_ISN + 1
 
     req = build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
                        HANDSHAKE_CLIENT_ISN + 1, server_seq,
                        FLAG_ACK | FLAG_PSH, data=DATA_ECHO_PAYLOAD)
     sock.send(req)
+    # A's first read rearms the sole physical GEM RX descriptor before the
+    # fixture asks for B. This small delay avoids intentionally overrunning
+    # that one-entry hardware ring; #189 tests connection state, not RX-ring
+    # depth or concurrent packet arrival.
+    time.sleep(0.05)
+    second_req = build_frame(
+        client_mac, RECONNECT_CLIENT_PORT, RECONNECT_CLIENT_ISN + 1,
+        second_server_seq, FLAG_ACK | FLAG_PSH, data=second_payload)
+    sock.send(second_req)
 
     collected = b""
     want = len(CONNECTED_LARGE_RESPONSE)
     fin_acked = False
+    second_response_ok = False
+    second_fin_acked = False
     # Generous but bounded: the kernel's own retry budget for one dropped
     # segment is TCP_RETRY_LIMIT(3) * retry_ticks(~200ms) =~ 600ms (see
     # kernel/net/tcp.tkb's kernel_tcp_accept_once comment) -- 10s covers
@@ -411,7 +435,8 @@ def test_connected_large_response(client_mac: bytes) -> bool:
     # kernel_tcp_injected_fin_recovered() permanently false, since it
     # requires a real peer ACK, not merely a retransmit attempt.
     deadline = time.monotonic() + 10.0
-    while (len(collected) < want or not fin_acked) and time.monotonic() < deadline:
+    while (len(collected) < want or not second_response_ok or
+           not fin_acked or not second_fin_acked) and time.monotonic() < deadline:
         reply = recv_reply(sock, req, 2.0)
         if reply is None:
             continue
@@ -421,12 +446,34 @@ def test_connected_large_response(client_mac: bytes) -> bool:
         tcp_hdr = reply[34:54]
         src_port, dst_port, rseq, rack, _doff_res, flags = struct.unpack(
             "!HHIIBB", tcp_hdr[0:14])
-        if src_port != SERVER_PORT or dst_port != HANDSHAKE_CLIENT_PORT:
+        if src_port != SERVER_PORT or dst_port not in (
+                HANDSHAKE_CLIENT_PORT, RECONNECT_CLIENT_PORT):
             continue
         if (flags & FLAG_ACK) == 0:
             continue
         total_len = struct.unpack("!H", ip[2:4])[0]
         payload_len = total_len - 40  # 20 IP + 20 TCP, no options on any reply here
+
+        if dst_port == RECONNECT_CLIENT_PORT:
+            if payload_len > 0 and not second_response_ok:
+                payload = reply[54:54 + payload_len]
+                if (rseq == second_server_seq and
+                    rack == second_client_seq and
+                    payload == second_response):
+                    second_server_seq += payload_len
+                    second_response_ok = True
+                    sock.send(build_frame(
+                        client_mac, RECONNECT_CLIENT_PORT,
+                        second_client_seq, second_server_seq, FLAG_ACK))
+                continue
+            if ((flags & FLAG_FIN) != 0 and not second_fin_acked and
+                    rseq == second_server_seq):
+                second_server_seq += 1
+                sock.send(build_frame(
+                    client_mac, RECONNECT_CLIENT_PORT,
+                    second_client_seq, second_server_seq, FLAG_ACK))
+                second_fin_acked = True
+            continue
 
         if len(collected) < want and payload_len > 0:
             if rseq != server_seq:
@@ -465,6 +512,12 @@ def test_connected_large_response(client_mac: bytes) -> bool:
                       (i, collected[i], CONNECTED_LARGE_RESPONSE[i]))
                 break
         return False
+    if not second_response_ok:
+        print("  second overlapping connection response mismatch")
+        return False
+    if not second_fin_acked:
+        print("  second overlapping connection FIN was never acknowledged")
+        return False
     if not fin_acked:
         print("  server FIN was never observed/acknowledged")
         return False
@@ -478,14 +531,9 @@ def main() -> int:
     client_mac = read_iface_mac(IFACE)
 
     if os.environ.get("TCP_TEST_CONNECTED_IO") == "1":
-        sock = new_sock()
-        handshake_ok = do_handshake(
-            sock, client_mac, HANDSHAKE_CLIENT_PORT,
-            HANDSHAKE_CLIENT_ISN)
-        sock.close()
-        print("  userspace accept handshake port %d: %s" %
-              (SERVER_PORT, "PASS" if handshake_ok else "FAIL"))
-        io_ok = handshake_ok and test_connected_large_response(client_mac)
+        io_ok = test_connected_large_response(client_mac)
+        print("  userspace overlapping accepts (fd 5 + fd 6): %s" %
+              ("PASS" if io_ok else "FAIL"))
         print("  userspace connected generated response (%d bytes, incl. "
               "mid-response drop recovery): %s" %
               (len(CONNECTED_LARGE_RESPONSE), "PASS" if io_ok else "FAIL"))

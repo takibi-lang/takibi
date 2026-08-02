@@ -66,7 +66,12 @@ The same parent accepts two sequential host `curl` requests before the bounded
 integration teardown reclaims every child page, fd, and socket reference. The
 host compares both complete 68-byte bodies with the fixture. TCP fixtures also
 split a request across segments, inject bounded drops, and exercise short
-`read` plus a 1460+1 partial `write` sequence.
+`read` plus a 1460+1 partial `write` sequence. The focused EL0 socket fixture
+also keeps connection A open while accepting connection B: a two-entry typed
+connection pool gives each stream independent TCP/retransmission/buffer state,
+and the fixed descriptor table maps them to fd 5 and fd 6 before either is
+closed. The physical one-descriptor GEM RX capability remains a singleton and
+is borrowed by one sequential syscall operation at a time.
 
 ## Tree layout
 

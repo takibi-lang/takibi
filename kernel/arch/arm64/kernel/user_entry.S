@@ -72,11 +72,35 @@ initial_user_payload:
     svc     #0
     cmp     x0, #5
     b.ne    .Luser_fail
+    /* Issue #189: accept a second stream while fd 5 remains live. The
+     * bounded fd/connection pools must allocate an independent fd 6/slot. */
+    mov     x0, #4
+    mov     x1, #0
+    mov     x2, #0
+    mov     x3, #0
+    mov     x8, #242
+    svc     #0
+    cmp     x0, #6
+    b.ne    .Luser_fail
     sub     sp, sp, #32
     mov     x0, #5
     mov     x1, sp
     mov     x2, #8
     mov     x8, #63
+    svc     #0
+    cmp     x0, #8
+    b.ne    .Luser_fail
+    mov     x0, #6
+    add     x1, sp, #16
+    mov     x2, #8
+    mov     x8, #63
+    svc     #0
+    cmp     x0, #8
+    b.ne    .Luser_fail
+    mov     x0, #6
+    adr     x1, .Lconnection_b_response
+    mov     x2, #8
+    mov     x8, #64
     svc     #0
     cmp     x0, #8
     b.ne    .Luser_fail
@@ -110,6 +134,10 @@ initial_user_payload:
     cmp     x0, #1
     b.ne    .Luser_fail
     add     sp, sp, #32
+    mov     x0, #6
+    mov     x8, #57
+    svc     #0
+    cbnz    x0, .Luser_fail
     mov     x0, #5
     mov     x8, #57
     svc     #0
@@ -164,6 +192,8 @@ initial_user_payload:
     .quad   0
 .Lsocket_response:
     .ascii  "HTTP/1.0 200 OK\r\n\r\n"
+.Lconnection_b_response:
+    .ascii  "conn-B\n!"
 .Llarge_socket_response:
     .fill   1461, 1, 0x5a
 initial_user_payload_end:

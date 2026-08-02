@@ -41,6 +41,7 @@ const TCP_ECHO_PORT: u16 = 7;
 // see that function's comment.
 const TCP_MAX_PAYLOAD: u16 = 1460;
 const TCP_RETRY_LIMIT: usize = 3;
+const TCP_CONNECTION_MAX: usize = 2;
 
 enum ConnState: u8 {
     Listen;
@@ -51,17 +52,55 @@ enum ConnState: u8 {
 
 enum PendingTcpKind: u8 { None; Data; Fin; }
 
-let mut conn_state:       ConnState = ConnState::Listen;
-let mut conn_remote_ip:   [u8; 4];
-let mut conn_remote_mac:  [u8; 6];
-let mut conn_remote_port: u16 = 0;
-let mut conn_local_port: u16 = TCP_ECHO_PORT;
-let mut conn_snd_nxt:     u32 = 0; // our next unacknowledged sequence number
-let mut conn_rcv_nxt:     u32 = 0; // next sequence number we expect from remote
+// Issue #189: TCP connections have dynamic lifetimes even though this first
+// pool has a deliberately tiny fixed capacity.  Callers receive a linear
+// owner whose static identity is a monotonically increasing generation; the
+// runtime slot is only the pool location.  Reusing a freed slot therefore
+// cannot make a stale (slot,generation) descriptor refer to the new stream.
+linear struct TcpConnectionOwner[connection: usize] {
+    private pool_index: {0..<TCP_CONNECTION_MAX as usize};
+    private generation: usize @ connection;
+}
+
+must_use variant TcpConnectionAllocResult {
+    Full;
+    Allocated(exists connection: usize. TcpConnectionOwner[connection]);
+}
+
+variant TcpConnectionValue {
+    Empty;
+    Ready(exists connection: usize. TcpConnectionOwner[connection]);
+}
+
+struct TcpConnectionStore {
+    private mutex: i32;
+    private value: TcpConnectionValue;
+}
+
+private linear view TcpConnectionGuard[lock: addr];
+private let mut tcp_connection_store: [TcpConnectionStore; TCP_CONNECTION_MAX];
+
+must_use variant TcpConnectionTakeResult {
+    Missing;
+    Ready(exists connection: usize. TcpConnectionOwner[connection]);
+}
+
+must_use variant TcpConnectionPutResult { Stored; Conflict; }
+
+let mut tcp_connection_used:       [u8; TCP_CONNECTION_MAX];
+let mut tcp_connection_generation: [usize; TCP_CONNECTION_MAX];
+let mut tcp_next_generation: usize = 1;
+let mut conn_state:       [ConnState; TCP_CONNECTION_MAX];
+let mut conn_remote_ip:   [u8; 4 * TCP_CONNECTION_MAX];
+let mut conn_remote_mac:  [u8; 6 * TCP_CONNECTION_MAX];
+let mut conn_remote_port: [u16; TCP_CONNECTION_MAX];
+let mut conn_local_port:  [u16; TCP_CONNECTION_MAX];
+let mut conn_snd_nxt:     [u32; TCP_CONNECTION_MAX]; // next unacknowledged seq
+let mut conn_rcv_nxt:     [u32; TCP_CONNECTION_MAX]; // next expected seq
 let mut tcp_completed_handshakes: usize = 0;
 let mut tcp_completed_echoes: usize = 0;
 let mut tcp_completed_closes: usize = 0;
-let mut tcp_received_length: usize = 0;
+let mut tcp_received_length: [usize; TCP_CONNECTION_MAX];
 let mut tcp_drop_next_syn_ack: bool = false;
 let mut tcp_injected_syn_pending: bool = false;
 let mut tcp_injected_syn_retransmitted: bool = false;
@@ -80,32 +119,32 @@ let mut tcp_injected_syn_accepted: bool = false;
 const PENDING_TCP_MAX: usize = 4;
 
 let mut tcp_drop_data_segment_index: i32 = -1;
-let mut tcp_data_segment_counter: usize = 0;
+let mut tcp_data_segment_counter: [usize; TCP_CONNECTION_MAX];
 // Which queue slot (see PENDING_TCP_MAX below) is the one currently
 // armed for drop-recovery observation, -1 if none. A slot INDEX rather
 // than a bool: pending_tcp_service_once below can then require the
 // retransmit+ack it observed came from THIS specific slot, not merely
 // "some Data/Fin slot or other" -- meaningful now that several slots
 // can be in flight for one connection at once (GitHub issue #180).
-let mut tcp_injected_data_slot: i32 = -1;
+let mut tcp_injected_data_slot: [i32; TCP_CONNECTION_MAX];
 let mut tcp_injected_data_retransmitted: bool = false;
 let mut tcp_injected_data_recovery_observed: bool = false;
 let mut tcp_drop_next_fin: bool = false;
-let mut tcp_injected_fin_slot: i32 = -1;
+let mut tcp_injected_fin_slot: [i32; TCP_CONNECTION_MAX];
 let mut tcp_injected_fin_retransmitted: bool = false;
 let mut tcp_injected_fin_recovery_observed: bool = false;
 let mut tcp_advertised_window: u16 = 65535;
 let mut tcp_ack_each_stream_segment: bool = false;
 let mut tcp_split_request_segments: usize = 0;
-let mut pending_tcp_kind:         [PendingTcpKind; PENDING_TCP_MAX];
-let mut pending_tcp_frame:        [u8; 1514 * PENDING_TCP_MAX];
-let mut pending_tcp_frame_length: [usize; PENDING_TCP_MAX];
-let mut pending_tcp_expected_ack: [u32; PENDING_TCP_MAX];
-let mut pending_tcp_remote_ip:    [u8; 4 * PENDING_TCP_MAX];
-let mut pending_tcp_remote_port:  [u16; PENDING_TCP_MAX];
-let mut pending_tcp_local_port:   [u16; PENDING_TCP_MAX];
-let mut pending_tcp_sent_at:      [i64; PENDING_TCP_MAX];
-let mut pending_tcp_retries:      [usize; PENDING_TCP_MAX];
+let mut pending_tcp_kind:         [PendingTcpKind; PENDING_TCP_MAX * TCP_CONNECTION_MAX];
+let mut pending_tcp_frame:        [u8; 1514 * PENDING_TCP_MAX * TCP_CONNECTION_MAX];
+let mut pending_tcp_frame_length: [usize; PENDING_TCP_MAX * TCP_CONNECTION_MAX];
+let mut pending_tcp_expected_ack: [u32; PENDING_TCP_MAX * TCP_CONNECTION_MAX];
+let mut pending_tcp_remote_ip:    [u8; 4 * PENDING_TCP_MAX * TCP_CONNECTION_MAX];
+let mut pending_tcp_remote_port:  [u16; PENDING_TCP_MAX * TCP_CONNECTION_MAX];
+let mut pending_tcp_local_port:   [u16; PENDING_TCP_MAX * TCP_CONNECTION_MAX];
+let mut pending_tcp_sent_at:      [i64; PENDING_TCP_MAX * TCP_CONNECTION_MAX];
+let mut pending_tcp_retries:      [usize; PENDING_TCP_MAX * TCP_CONNECTION_MAX];
 
 must_use variant KernelTcpResult {
     TimedOut(NetRxCanAcquire);
@@ -142,7 +181,138 @@ must_use variant KernelTcpCloseResult {
     Closed(NetRxCanAcquire);
 }
 
-let mut tcp_stream_tx_frame: [u8; 1514];
+let mut tcp_stream_tx_frame: [u8; 1514 * TCP_CONNECTION_MAX];
+
+fn tcp_connection_owner_new(
+        slot: {0..<TCP_CONNECTION_MAX as usize},
+        generation: usize @ connection) -> TcpConnectionOwner[connection] {
+    let mut owner: TcpConnectionOwner[connection] = { slot, generation };
+    return owner;
+}
+
+fn tcp_connection_owner_drop(owner: sink TcpConnectionOwner[connection]) {}
+
+fn tcp_connection_lock(lock: *i32 @ address)
+        -> TcpConnectionGuard[address] {
+    return view TcpConnectionGuard[address];
+}
+
+fn tcp_connection_unlock(guard: sink TcpConnectionGuard[address],
+                         lock: *i32 @ address) {}
+
+fn tcp_connection_pool_init() {
+    for connection_index: usize in 0..<TCP_CONNECTION_MAX {
+        tcp_connection_used[connection_index] = 0;
+        tcp_connection_generation[connection_index] = 0;
+        conn_state[connection_index] = ConnState::Listen;
+        conn_local_port[connection_index] = TCP_ECHO_PORT;
+        tcp_injected_data_slot[connection_index] = -1;
+        tcp_injected_fin_slot[connection_index] = -1;
+    }
+}
+
+fn tcp_connection_alloc() -> TcpConnectionAllocResult {
+    for connection_index: usize in 0..<TCP_CONNECTION_MAX {
+        if (tcp_connection_used[connection_index] == 0) {
+            tcp_connection_used[connection_index] = 1;
+            let generation: usize = tcp_next_generation;
+            tcp_next_generation = tcp_next_generation + 1;
+            tcp_connection_generation[connection_index] = generation;
+            conn_state[connection_index] = ConnState::Listen;
+            return TcpConnectionAllocResult::Allocated(
+                tcp_connection_owner_new(connection_index, generation));
+        }
+    }
+    return TcpConnectionAllocResult::Full;
+}
+
+fn tcp_connection_slot(owner: borrow TcpConnectionOwner[connection])
+        -> {0..<TCP_CONNECTION_MAX as usize} {
+    return owner.pool_index;
+}
+
+fn tcp_connection_identity(owner: borrow TcpConnectionOwner[connection])
+        -> usize {
+    return owner.generation;
+}
+
+fn tcp_connection_matches(owner: borrow TcpConnectionOwner[connection],
+                          slot: usize, generation: usize) -> bool {
+    return owner.pool_index == slot && owner.generation == generation &&
+           tcp_connection_used[owner.pool_index] != 0 &&
+           tcp_connection_generation[owner.pool_index] == generation;
+}
+
+fn tcp_connection_put(owner: sink TcpConnectionOwner[connection])
+        -> TcpConnectionPutResult {
+    let slot: {0..<TCP_CONNECTION_MAX as usize} = owner.pool_index;
+    let guard = tcp_connection_lock(&tcp_connection_store[slot].mutex);
+    let previous: TcpConnectionValue = stable_replace(
+        guard, &tcp_connection_store[slot].mutex,
+        tcp_connection_store[slot].value,
+        TcpConnectionValue::Ready(owner));
+    match previous {
+        TcpConnectionValue::Empty => {
+            tcp_connection_unlock(
+                guard, &tcp_connection_store[slot].mutex);
+            return TcpConnectionPutResult::Stored;
+        }
+        TcpConnectionValue::Ready(stale) => {
+            let displaced: TcpConnectionValue = stable_replace(
+                guard, &tcp_connection_store[slot].mutex,
+                tcp_connection_store[slot].value,
+                TcpConnectionValue::Ready(stale));
+            tcp_connection_unlock(
+                guard, &tcp_connection_store[slot].mutex);
+            match displaced {
+                TcpConnectionValue::Empty => {
+                    return TcpConnectionPutResult::Stored;
+                }
+                TcpConnectionValue::Ready(incoming) => {
+                    // The stable slot kept the pre-existing owner. Consume
+                    // the impossible duplicate without clearing that live
+                    // slot's pool bookkeeping.
+                    tcp_connection_owner_drop(incoming);
+                    return TcpConnectionPutResult::Conflict;
+                }
+            }
+        }
+    }
+}
+
+fn tcp_connection_take(slot_value: usize, generation: usize)
+        -> TcpConnectionTakeResult {
+    if (slot_value >= 0 && slot_value < TCP_CONNECTION_MAX) {
+        let slot: {0..<TCP_CONNECTION_MAX as usize} = slot_value;
+        let guard = tcp_connection_lock(&tcp_connection_store[slot].mutex);
+        let previous: TcpConnectionValue = stable_replace(
+            guard, &tcp_connection_store[slot].mutex,
+            tcp_connection_store[slot].value, TcpConnectionValue::Empty);
+        tcp_connection_unlock(guard, &tcp_connection_store[slot].mutex);
+        match previous {
+            TcpConnectionValue::Empty => {
+                return TcpConnectionTakeResult::Missing;
+            }
+            TcpConnectionValue::Ready(owner) => {
+                if (tcp_connection_matches(owner, slot, generation)) {
+                    return TcpConnectionTakeResult::Ready(owner);
+                }
+                match tcp_connection_put(owner) {
+                    TcpConnectionPutResult::Stored => {}
+                    TcpConnectionPutResult::Conflict => {}
+                }
+                return TcpConnectionTakeResult::Missing;
+            }
+        }
+    }
+    return TcpConnectionTakeResult::Missing;
+}
+
+fn tcp_connection_free(owner: sink TcpConnectionOwner[connection]) {
+    tcp_connection_used[owner.pool_index] = 0;
+    tcp_connection_generation[owner.pool_index] = 0;
+    conn_state[owner.pool_index] = ConnState::Listen;
+}
 
 fn kernel_tcp_inject_drop_next_syn_ack() {
     tcp_drop_next_syn_ack = true;
@@ -169,7 +339,9 @@ fn kernel_tcp_injected_syn_ack_recovered() -> bool {
 // real peer ACK actually cleared that slot after at least one retry.
 fn kernel_tcp_inject_drop_data_segment(index: usize) {
     tcp_drop_data_segment_index = index as i32;
-    tcp_injected_data_slot = -1;
+    for connection_slot: usize in 0..<TCP_CONNECTION_MAX {
+        tcp_injected_data_slot[connection_slot] = -1;
+    }
     tcp_injected_data_retransmitted = false;
     tcp_injected_data_recovery_observed = false;
 }
@@ -180,7 +352,9 @@ fn kernel_tcp_injected_data_recovered() -> bool {
 
 fn kernel_tcp_inject_drop_next_fin() {
     tcp_drop_next_fin = true;
-    tcp_injected_fin_slot = -1;
+    for connection_slot: usize in 0..<TCP_CONNECTION_MAX {
+        tcp_injected_fin_slot[connection_slot] = -1;
+    }
     tcp_injected_fin_retransmitted = false;
     tcp_injected_fin_recovery_observed = false;
 }
@@ -207,15 +381,19 @@ fn kernel_tcp_restore_stream_policy() {
 // Resets every slot to free. Called once per connection (from
 // kernel_tcp_accept_once, alongside its own conn_state = Listen reset)
 // so a new connection never inherits a stale slot from a previous one.
-fn pending_tcp_reset_all() {
-    let mut slot: usize = 0;
-    while (slot < 4) {
-        if (slot < 4) {
-            pending_tcp_kind[slot] = PendingTcpKind::None;
+fn pending_tcp_reset_all(connection_slot: {0..<TCP_CONNECTION_MAX as usize}) {
+    let mut pending_slot: usize = 0;
+    while (pending_slot < 4) {
+        if (pending_slot < 4) {
+            let pending_index: usize =
+                connection_slot * PENDING_TCP_MAX + pending_slot;
+            if (pending_index < PENDING_TCP_MAX * TCP_CONNECTION_MAX) {
+                pending_tcp_kind[pending_index] = PendingTcpKind::None;
+            }
         }
-        slot = slot + 1;
+        pending_slot = pending_slot + 1;
     }
-    tcp_data_segment_counter = 0;
+    tcp_data_segment_counter[connection_slot] = 0;
 }
 
 // Finds a free (PendingTcpKind::None) slot and returns its index. If
@@ -228,40 +406,54 @@ fn pending_tcp_reset_all() {
 // usize return would leave every caller's use of the result unprovable
 // under --forbid-trap, no matter how the while loop that produced it
 // looks -- the refinement has to be carried on the type itself.
-fn pending_tcp_find_free_slot() -> {0..<4 as usize} {
-    let mut slot: usize = 0;
-    while (slot < 4) {
-        if (slot < 4) {
-            if (pending_tcp_kind[slot] == PendingTcpKind::None) {
-                return slot;
+fn pending_tcp_find_free_slot(
+        connection_slot: {0..<TCP_CONNECTION_MAX as usize})
+        -> {0..<4 as usize} {
+    let mut pending_slot: usize = 0;
+    while (pending_slot < 4) {
+        if (pending_slot < 4) {
+            let pending_index: usize =
+                connection_slot * PENDING_TCP_MAX + pending_slot;
+            if (pending_index < PENDING_TCP_MAX * TCP_CONNECTION_MAX) {
+                if (pending_tcp_kind[pending_index] == PendingTcpKind::None) {
+                return pending_slot;
+                }
             }
         }
-        slot = slot + 1;
+        pending_slot = pending_slot + 1;
     }
     return 0;
 }
 
-fn pending_tcp_record(kind: PendingTcpKind, frame_length: usize) -> {0..<4 as usize} {
-    let slot: {0..<4 as usize} = pending_tcp_find_free_slot();
+fn pending_tcp_record(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+                      kind: PendingTcpKind, frame_length: usize)
+        -> {0..<4 as usize} {
+    let slot: {0..<4 as usize} = pending_tcp_find_free_slot(connection_slot);
+    let pending_index: usize = connection_slot * PENDING_TCP_MAX + slot;
     // Same-base subslice rule (see pending_tcp_ack_matches's identical
     // comment): "slot * 1514" computed twice would not itself prove in
     // range, so it is bound once into `base` and both the write loop
     // below and any later `base..<base + N` subslice reference that one
     // local instead of recomputing the multiply.
-    let base: usize = slot * 1514;
+    let base: usize = pending_index * 1514;
     let frame_dest = pending_tcp_frame as []u8;
-    slice_copy(frame_dest[base..<base + 1514], tcp_stream_tx_frame as []u8);
-    pending_tcp_kind[slot] = kind;
-    pending_tcp_frame_length[slot] = frame_length;
-    pending_tcp_expected_ack[slot] = conn_snd_nxt;
-    let ip_base: usize = slot * 4;
+    let stream_base: usize = connection_slot * 1514;
+    let stream_frames = tcp_stream_tx_frame as []u8;
+    slice_copy(frame_dest[base..<base + 1514],
+               stream_frames[stream_base..<stream_base + 1514]);
+    pending_tcp_kind[pending_index] = kind;
+    pending_tcp_frame_length[pending_index] = frame_length;
+    pending_tcp_expected_ack[pending_index] = conn_snd_nxt[connection_slot];
+    let ip_base: usize = pending_index * 4;
+    let conn_ip_base: usize = connection_slot * 4;
     let remote_ip_bytes = pending_tcp_remote_ip as []u8;
+    let conn_ip_bytes = conn_remote_ip as []u8;
     slice_copy(remote_ip_bytes[ip_base..<ip_base + 4],
-               conn_remote_ip as []u8);
-    pending_tcp_remote_port[slot] = conn_remote_port;
-    pending_tcp_local_port[slot] = conn_local_port;
-    pending_tcp_sent_at[slot] = read_cntpct();
-    pending_tcp_retries[slot] = 0;
+               conn_ip_bytes[conn_ip_base..<conn_ip_base + 4]);
+    pending_tcp_remote_port[pending_index] = conn_remote_port[connection_slot];
+    pending_tcp_local_port[pending_index] = conn_local_port[connection_slot];
+    pending_tcp_sent_at[pending_index] = read_cntpct();
+    pending_tcp_retries[pending_index] = 0;
     return slot;
 }
 
@@ -272,8 +464,11 @@ fn pending_tcp_record(kind: PendingTcpKind, frame_length: usize) -> {0..<4 as us
 // (idx: {0..<MAX_CONNS as usize}) precedent -- a runtime bounds check
 // alone does not carry the same compile-time information forward.
 fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
-                            slot: {0..<4 as usize}) -> bool {
-    if (pending_tcp_kind[slot] == PendingTcpKind::None || len < 54 || len > 1514) {
+                           connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+                           slot: {0..<4 as usize}) -> bool {
+    let pending_index: usize = connection_slot * PENDING_TCP_MAX + slot;
+    if (pending_tcp_kind[pending_index] == PendingTcpKind::None ||
+        len < 54 || len > 1514) {
         return false;
     }
     let len_n: i32 = len;
@@ -282,7 +477,7 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
     let ihl: u16 = (ip[0] & 0x0F) * 4;
     let len16: u16 = len_n as u16;
     let total_len: u16 = read_u16be(ip[IP_TOTAL_LEN..<4]) as u16;
-    let ip_base: usize = slot * 4;
+    let ip_base: usize = pending_index * 4;
     let remote_ip_bytes = pending_tcp_remote_ip as []u8;
     if ((ip[0] >> 4) != 4 || ihl != 20 || total_len != 40 ||
         total_len > len16 - 14 || ip[IP_PROTOCOL] != PROTO_TCP ||
@@ -299,12 +494,12 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
     pseudo[9] = PROTO_TCP;
     write_u16be(pseudo[10..<12], 20);
     return read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) ==
-               pending_tcp_remote_port[slot] as i32 &&
+               pending_tcp_remote_port[pending_index] as i32 &&
            read_u16be(tcp[TCP_DST_PORT..<TCP_SEQ]) ==
-               pending_tcp_local_port[slot] as i32 &&
+               pending_tcp_local_port[pending_index] as i32 &&
            (tcp[TCP_FLAGS] & TCP_FLAG_ACK) != 0 &&
            (read_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET]) as u32) >=
-               pending_tcp_expected_ack[slot] &&
+               pending_tcp_expected_ack[pending_index] &&
            checksum_fold(checksum_add(
                tcp, checksum_add(pseudo as []u8, 0))) == 0;
 }
@@ -321,7 +516,8 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
 // assume any frame can be safely dropped, so an opportunistic caller
 // (kernel_tcp_send_received) stealing an unrelated frame here is no
 // worse than that frame never having arrived at all.
-fn pending_tcp_service_once(ready_in: sink NetRxCanAcquire,
+fn pending_tcp_service_once(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+                            ready_in: sink NetRxCanAcquire,
                              retry_ticks: i64)
         -> NetRxCanAcquire !{may_block} {
     let mut ready = ready_in;
@@ -330,64 +526,74 @@ fn pending_tcp_service_once(ready_in: sink NetRxCanAcquire,
         NetRxAcquire::Acquired(acquired) => {
             let len: i32 = net_rx_len(acquired);
             let frame = net_rx_frame(acquired);
-            let mut slot: usize = 0;
-            while (slot < 4) {
-                if (slot < 4) {
-                    if (pending_tcp_ack_matches(frame, len, slot)) {
+            let mut ack_slot: usize = 0;
+            while (ack_slot < 4) {
+                if (ack_slot < 4) {
+                    let pending_index: usize =
+                        connection_slot * PENDING_TCP_MAX + ack_slot;
+                    if (pending_tcp_ack_matches(
+                            frame, len, connection_slot, ack_slot)) {
                         // A real peer ACK, not a synthetic flag flip: this
                         // is what makes kernel_tcp_injected_data_recovered()
                         // / kernel_tcp_injected_fin_recovered() genuinely
                         // prove recovery, matching the same rigor
                         // kernel_tcp_injected_syn_ack_recovered() already
                         // had.
-                        if (slot as i32 == tcp_injected_data_slot &&
+                        if (ack_slot as i32 ==
+                                tcp_injected_data_slot[connection_slot] &&
                             tcp_injected_data_retransmitted) {
                             tcp_injected_data_recovery_observed = true;
                         }
-                        if (slot as i32 == tcp_injected_fin_slot &&
+                        if (ack_slot as i32 ==
+                                tcp_injected_fin_slot[connection_slot] &&
                             tcp_injected_fin_retransmitted) {
                             tcp_injected_fin_recovery_observed = true;
                         }
-                        pending_tcp_kind[slot] = PendingTcpKind::None;
+                        pending_tcp_kind[pending_index] = PendingTcpKind::None;
                     }
                 }
-                slot = slot + 1;
+                ack_slot = ack_slot + 1;
             }
             ready = net_rx_release(acquired);
         }
     }
     let now: i64 = read_cntpct();
-    let mut slot: usize = 0;
-    while (slot < 4) {
-        if (slot < 4) {
-            if (pending_tcp_kind[slot] != PendingTcpKind::None) {
-                if (pending_tcp_retries[slot] < TCP_RETRY_LIMIT &&
-                    now - pending_tcp_sent_at[slot] >= retry_ticks) {
-                    let base: usize = slot * 1514;
-                    let length: usize = pending_tcp_frame_length[slot];
+    let mut retry_slot: usize = 0;
+    while (retry_slot < 4) {
+        if (retry_slot < 4) {
+            let pending_index: usize =
+                connection_slot * PENDING_TCP_MAX + retry_slot;
+            if (pending_tcp_kind[pending_index] != PendingTcpKind::None) {
+                if (pending_tcp_retries[pending_index] < TCP_RETRY_LIMIT &&
+                    now - pending_tcp_sent_at[pending_index] >= retry_ticks) {
+                    let base: usize = pending_index * 1514;
+                    let length: usize = pending_tcp_frame_length[pending_index];
                     let frame_bytes = pending_tcp_frame as []u8;
                     ready = net_transmit_ready(
                         ready, frame_bytes[base..<base + 1514],
                         length as i32);
-                    pending_tcp_sent_at[slot] = now;
-                    pending_tcp_retries[slot] = pending_tcp_retries[slot] + 1;
-                    if (slot as i32 == tcp_injected_data_slot) {
+                    pending_tcp_sent_at[pending_index] = now;
+                    pending_tcp_retries[pending_index] =
+                        pending_tcp_retries[pending_index] + 1;
+                    if (retry_slot as i32 ==
+                        tcp_injected_data_slot[connection_slot]) {
                         tcp_injected_data_retransmitted = true;
                     }
-                    if (slot as i32 == tcp_injected_fin_slot) {
+                    if (retry_slot as i32 ==
+                        tcp_injected_fin_slot[connection_slot]) {
                         tcp_injected_fin_retransmitted = true;
                     }
-                } else if (pending_tcp_retries[slot] == TCP_RETRY_LIMIT &&
-                           now - pending_tcp_sent_at[slot] >= retry_ticks) {
+                } else if (pending_tcp_retries[pending_index] == TCP_RETRY_LIMIT &&
+                           now - pending_tcp_sent_at[pending_index] >= retry_ticks) {
                     // Give up silently on this one slot -- same per-slot
                     // exhaustion behavior this file always had for its one
                     // pending slot, just scoped to this slot instead of the
                     // whole queue.
-                    pending_tcp_kind[slot] = PendingTcpKind::None;
+                    pending_tcp_kind[pending_index] = PendingTcpKind::None;
                 }
             }
         }
-        slot = slot + 1;
+        retry_slot = retry_slot + 1;
     }
     return ready;
 }
@@ -397,15 +603,18 @@ fn pending_tcp_service_once(ready_in: sink NetRxCanAcquire,
 // before returning, so close() genuinely waits for its FIN (and any
 // Data segment still outstanding when it was called) to be acknowledged
 // or give up, instead of returning immediately with unfinished business.
-fn pending_tcp_any_active() -> bool {
-    let mut slot: usize = 0;
-    while (slot < 4) {
-        if (slot < 4) {
-            if (pending_tcp_kind[slot] != PendingTcpKind::None) {
+fn pending_tcp_any_active(
+        connection_slot: {0..<TCP_CONNECTION_MAX as usize}) -> bool {
+    let mut active_slot: usize = 0;
+    while (active_slot < 4) {
+        if (active_slot < 4) {
+            let pending_index: usize =
+                connection_slot * PENDING_TCP_MAX + active_slot;
+            if (pending_tcp_kind[pending_index] != PendingTcpKind::None) {
                 return true;
             }
         }
-        slot = slot + 1;
+        active_slot = active_slot + 1;
     }
     return false;
 }
@@ -431,7 +640,8 @@ fn fix_tcp_checksum(ip: borrow [u8; 20..], tcp_seg: borrow [u8; 20..]) {
 // Rewrites a SYN request into a SYN-ACK reply in place. Only called from
 // TCP_LISTEN after the caller has already validated the request (IP/TCP
 // checksums, dst port, SYN flag set).
-fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
+fn build_syn_ack(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+                 eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -447,10 +657,12 @@ fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
                 inet_checksum(ip[0..<ihl as usize]));
 
     let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
-    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], conn_local_port as i32);
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT],
+                conn_local_port[connection_slot] as i32);
     write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
     write_u32be(tcp[TCP_SEQ..<TCP_ACK], TCP_INITIAL_SEQ as i32);
-    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET],
+                conn_rcv_nxt[connection_slot] as i32);
     tcp[TCP_DATA_OFFSET] = (5 << 4) as u8; // 20-byte header, no options
     tcp[TCP_FLAGS] = TCP_FLAG_SYN | TCP_FLAG_ACK;
     write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM],
@@ -471,7 +683,8 @@ fn build_syn_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
 // given the caller's own tcp_len bound, but see the explicit check below
 // for why this needs to be enforced, not assumed, to construct tcp_seg
 // with a proven minimum).
-fn build_data_reply(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
+fn build_data_reply(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+        eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
         tcp_seg: borrow [u8; 20..], response_len: u16,
         received_len: u16) -> bool {
     // Snapshot into an immutable local after an explicit bound check: a
@@ -500,11 +713,14 @@ fn build_data_reply(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
                     inet_checksum(ip[0..<ihl as usize]));
 
         let client_port: u16 = read_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
-        write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT], conn_local_port as i32);
+        write_u16be(tcp_seg[TCP_SRC_PORT..<TCP_DST_PORT],
+                    conn_local_port[connection_slot] as i32);
         write_u16be(tcp_seg[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
-        write_u32be(tcp_seg[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
+        write_u32be(tcp_seg[TCP_SEQ..<TCP_ACK],
+                    conn_snd_nxt[connection_slot] as i32);
         write_u32be(tcp_seg[TCP_ACK..<TCP_DATA_OFFSET],
-                    (conn_rcv_nxt as i32) + (received_len as i32));
+                    (conn_rcv_nxt[connection_slot] as i32) +
+                    (received_len as i32));
         tcp_seg[TCP_DATA_OFFSET] = (5 << 4) as u8;
         tcp_seg[TCP_FLAGS] = TCP_FLAG_ACK | TCP_FLAG_PSH;
         write_u16be(tcp_seg[TCP_WINDOW..<TCP_CHECKSUM], 65535);
@@ -521,7 +737,8 @@ fn build_data_reply(eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
 // conn_rcv_nxt by the caller) and sends our own FIN in the same segment.
 // Only called from TCP_ESTABLISHED after the caller has already validated
 // the request and confirmed seq == conn_rcv_nxt (before incrementing it).
-fn build_fin_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
+fn build_fin_ack(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+                 eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -537,10 +754,13 @@ fn build_fin_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
                 inet_checksum(ip[0..<ihl as usize]));
 
     let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
-    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], conn_local_port as i32);
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT],
+                conn_local_port[connection_slot] as i32);
     write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
-    write_u32be(tcp[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
-    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+    write_u32be(tcp[TCP_SEQ..<TCP_ACK],
+                conn_snd_nxt[connection_slot] as i32);
+    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET],
+                conn_rcv_nxt[connection_slot] as i32);
     tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
     tcp[TCP_FLAGS] = TCP_FLAG_FIN | TCP_FLAG_ACK;
     write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM],
@@ -553,7 +773,8 @@ fn build_fin_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
 // Rewrites a received data frame into an ACK with no payload.  This releases
 // the sole GEM RX capability between non-final stream segments while keeping
 // the already-copied bytes in the caller's reconstruction buffer.
-fn build_receive_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
+fn build_receive_ack(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+                     eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
 
@@ -568,10 +789,13 @@ fn build_receive_ack(eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
                 inet_checksum(ip[0..<ihl as usize]));
 
     let client_port: u16 = read_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT]) as u16;
-    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], conn_local_port as i32);
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT],
+                conn_local_port[connection_slot] as i32);
     write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], client_port as i32);
-    write_u32be(tcp[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
-    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+    write_u32be(tcp[TCP_SEQ..<TCP_ACK],
+                conn_snd_nxt[connection_slot] as i32);
+    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET],
+                conn_rcv_nxt[connection_slot] as i32);
     tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
     tcp[TCP_FLAGS] = TCP_FLAG_ACK;
     write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM],
@@ -663,9 +887,12 @@ fn tcp_parse_segment(frame: borrow [u8; 1514..], len: i32) -> TcpSegmentParseRes
 fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
         -> KernelTcpResult !{may_block} {
     let mut ready = ready_in;
+    let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = 0;
+    let remote_ip_base: usize = connection_slot * 4;
+    let remote_ip_bytes = conn_remote_ip as []u8;
     net_read_mac(our_mac as []u8);
-    conn_state = ConnState::Listen;
-    conn_local_port = TCP_ECHO_PORT;
+    conn_state[connection_slot] = ConnState::Listen;
+    conn_local_port[connection_slot] = TCP_ECHO_PORT;
     tcp_completed_handshakes = 0;
     tcp_completed_echoes = 0;
     tcp_completed_closes = 0;
@@ -687,43 +914,50 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                         match tcp_parse_segment(frame, len) {
                             TcpSegmentParseResult::Reject => { }
                             TcpSegmentParseResult::Parsed(header) => {
-                                if (header.dst_port == conn_local_port) {
+                                if (header.dst_port == conn_local_port[connection_slot]) {
                                     let ip = frame[14..<34];
-                                    if (conn_state == ConnState::Listen) {
+                                    if (conn_state[connection_slot] == ConnState::Listen) {
                                         if ((header.flags & TCP_FLAG_SYN) != 0) {
-                                            slice_copy(conn_remote_ip as []u8, ip[IP_SRC..<IP_DST]);
-                                            conn_remote_port = header.src_port;
-                                            conn_rcv_nxt = header.seq + 1;
-                                            conn_snd_nxt = TCP_INITIAL_SEQ + 1;
+                                            slice_copy(remote_ip_bytes[
+                                                remote_ip_base..<remote_ip_base + 4],
+                                                ip[IP_SRC..<IP_DST]);
+                                            conn_remote_port[connection_slot] = header.src_port;
+                                            conn_rcv_nxt[connection_slot] = header.seq + 1;
+                                            conn_snd_nxt[connection_slot] = TCP_INITIAL_SEQ + 1;
 
-                                            build_syn_ack(frame, header.ihl);
+                                            build_syn_ack(connection_slot, frame, header.ihl);
                                             plan = TcpRxPlan::Send(14 + (header.ihl as i32) + 20);
-                                            conn_state = ConnState::SynRcvd;
+                                            conn_state[connection_slot] = ConnState::SynRcvd;
                                         }
                                     } else {
                                         // SYN_RCVD, ESTABLISHED, or LAST_ACK: only the
                                         // recorded connection's segments matter.
-                                        if (slice_eq(ip[IP_SRC..<IP_DST], conn_remote_ip as []u8) &&
-                                            header.src_port == conn_remote_port) {
+                                        if (slice_eq(ip[IP_SRC..<IP_DST],
+                                                remote_ip_bytes[remote_ip_base..<remote_ip_base + 4]) &&
+                                            header.src_port == conn_remote_port[connection_slot]) {
                                             if ((header.flags & TCP_FLAG_RST) != 0) {
                                                 // Abrupt close from the client: drop the
                                                 // connection with no reply and free the slot.
-                                                conn_state = ConnState::Listen;
-                                            } else if (conn_state == ConnState::SynRcvd) {
+                                                conn_state[connection_slot] = ConnState::Listen;
+                                            } else if (conn_state[connection_slot] == ConnState::SynRcvd) {
                                                 if ((header.flags & TCP_FLAG_ACK) != 0 &&
                                                     (header.flags & TCP_FLAG_SYN) == 0 &&
-                                                    header.ack == conn_snd_nxt && header.seq == conn_rcv_nxt) {
-                                                    conn_state = ConnState::Established;
+                                                    header.ack == conn_snd_nxt[connection_slot] &&
+                                                    header.seq == conn_rcv_nxt[connection_slot]) {
+                                                    conn_state[connection_slot] = ConnState::Established;
                                                     tcp_completed_handshakes =
                                                         tcp_completed_handshakes + 1;
                                                 }
-                                            } else if (conn_state == ConnState::Established) {
-                                                if ((header.flags & TCP_FLAG_FIN) != 0 && header.seq == conn_rcv_nxt) {
-                                                    conn_rcv_nxt = conn_rcv_nxt + 1; // FIN consumes one seq number
-                                                    build_fin_ack(frame, header.ihl);
+                                            } else if (conn_state[connection_slot] == ConnState::Established) {
+                                                if ((header.flags & TCP_FLAG_FIN) != 0 &&
+                                                    header.seq == conn_rcv_nxt[connection_slot]) {
+                                                    conn_rcv_nxt[connection_slot] =
+                                                        conn_rcv_nxt[connection_slot] + 1;
+                                                    build_fin_ack(connection_slot, frame, header.ihl);
                                                     plan = TcpRxPlan::Send(14 + (header.ihl as i32) + 20);
-                                                    conn_snd_nxt = conn_snd_nxt + 1; // our FIN too
-                                                    conn_state = ConnState::LastAck;
+                                                    conn_snd_nxt[connection_slot] =
+                                                        conn_snd_nxt[connection_slot] + 1;
+                                                    conn_state[connection_slot] = ConnState::LastAck;
                                                 } else {
                                                     // max(.., 0): tcp_len - tcp_hdr_len's raw
                                                     // Sub-derived range has a spuriously negative
@@ -749,10 +983,10 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                                                     if (data_len > 0 &&
                                                         header.tcp_hdr_len == 20 &&
                                                         (header.flags & TCP_FLAG_ACK) != 0 &&
-                                                        header.seq == conn_rcv_nxt) {
+                                                        header.seq == conn_rcv_nxt[connection_slot]) {
                                                         let tcp_len_idx: usize = header.tcp_len as usize;
                                                         let tcp_seg = frame[34..<34 + tcp_len_idx];
-                                                        if (build_data_reply(frame, header.ihl, tcp_seg,
+                                                        if (build_data_reply(connection_slot, frame, header.ihl, tcp_seg,
                                                                 data_len, data_len)) {
                                                             plan = TcpRxPlan::Send(14 + (header.ihl as i32) + 20 + (data_len as i32));
                                                             // conn_rcv_nxt/conn_snd_nxt are u32
@@ -762,17 +996,20 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                                                             // but neither counter is ever used as a
                                                             // slice bound/index, so no proof depends
                                                             // on their refined-ness).
-                                                            conn_rcv_nxt = conn_rcv_nxt + (data_len as u32);
-                                                            conn_snd_nxt = conn_snd_nxt + (data_len as u32);
+                                                            conn_rcv_nxt[connection_slot] =
+                                                                conn_rcv_nxt[connection_slot] + (data_len as u32);
+                                                            conn_snd_nxt[connection_slot] =
+                                                                conn_snd_nxt[connection_slot] + (data_len as u32);
                                                             tcp_completed_echoes =
                                                                 tcp_completed_echoes + 1;
                                                         }
                                                     }
                                                 }
-                                            } else if (conn_state == ConnState::LastAck) {
-                                                if ((header.flags & TCP_FLAG_ACK) != 0 && header.ack == conn_snd_nxt) {
+                                            } else if (conn_state[connection_slot] == ConnState::LastAck) {
+                                                if ((header.flags & TCP_FLAG_ACK) != 0 &&
+                                                    header.ack == conn_snd_nxt[connection_slot]) {
                                                     // Close complete; ready for a new client.
-                                                    conn_state = ConnState::Listen;
+                                                    conn_state[connection_slot] = ConnState::Listen;
                                                     tcp_completed_closes =
                                                         tcp_completed_closes + 1;
                                                 }
@@ -806,17 +1043,25 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
 // Blocks for one three-way handshake on the requested listening port. The
 // caller owns the returned RX capability in both outcomes; connected stream
 // I/O is added separately after accept establishes fd state.
-fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
+fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
+                          ready_in: sink NetRxCanAcquire, port: u16)
         -> KernelTcpAcceptResult !{may_block} {
     let mut ready = ready_in;
-    conn_state = ConnState::Listen;
-    conn_local_port = port;
+    let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = owner.pool_index;
+    let remote_ip_base: usize = connection_slot * 4;
+    let remote_mac_base: usize = connection_slot * 6;
+    let remote_ip_bytes = conn_remote_ip as []u8;
+    let remote_mac_bytes = conn_remote_mac as []u8;
+    let stream_base: usize = connection_slot * 1514;
+    let stream_frames = tcp_stream_tx_frame as []u8;
+    conn_state[connection_slot] = ConnState::Listen;
+    conn_local_port[connection_slot] = port;
     // GitHub issue #180: a fresh connection never inherits a stale queue
     // slot from a previous one. kernel_tcp_close_stream now drains its
     // own pending queue synchronously before it ever returns (see that
     // function), so -- unlike before -- this loop no longer needs to
     // opportunistically service leftover pending_tcp state itself.
-    pending_tcp_reset_all();
+    pending_tcp_reset_all(connection_slot);
     let start: i64 = read_cntpct();
     let counter_frequency: i64 = read_cntfrq();
     let deadline_ticks: i64 = counter_frequency * 30;
@@ -856,21 +1101,21 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                         TcpSegmentParseResult::Parsed(header) => {
                             let ip = frame[14..<34];
                             if (header.dst_port == port) {
-                                if (conn_state == ConnState::Listen &&
+                                if (conn_state[connection_slot] == ConnState::Listen &&
                                     (header.flags & TCP_FLAG_SYN) != 0) {
-                                    slice_copy(
-                                        conn_remote_ip as []u8,
+                                    slice_copy(remote_ip_bytes[
+                                        remote_ip_base..<remote_ip_base + 4],
                                         ip[IP_SRC..<IP_DST]);
-                                    slice_copy(
-                                        conn_remote_mac as []u8,
+                                    slice_copy(remote_mac_bytes[
+                                        remote_mac_base..<remote_mac_base + 6],
                                         frame[6..<12]);
-                                    conn_remote_port = header.src_port;
-                                    conn_rcv_nxt = header.seq + 1;
-                                    conn_snd_nxt =
+                                    conn_remote_port[connection_slot] = header.src_port;
+                                    conn_rcv_nxt[connection_slot] = header.seq + 1;
+                                    conn_snd_nxt[connection_slot] =
                                         TCP_INITIAL_SEQ + 1;
-                                    build_syn_ack(frame, header.ihl);
-                                    slice_copy(
-                                        tcp_stream_tx_frame[0..<54],
+                                    build_syn_ack(connection_slot, frame, header.ihl);
+                                    slice_copy(stream_frames[
+                                        stream_base..<stream_base + 54],
                                         frame[0..<54]);
                                     if (tcp_drop_next_syn_ack) {
                                         tcp_drop_next_syn_ack = false;
@@ -884,26 +1129,26 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
                                     syn_ack_sent_at =
                                         read_cntpct();
                                     syn_ack_retries = 0;
-                                    conn_state =
+                                    conn_state[connection_slot] =
                                         ConnState::SynRcvd;
                                 } else if (
-                                    conn_state == ConnState::SynRcvd &&
-                                    header.src_port == conn_remote_port &&
+                                    conn_state[connection_slot] == ConnState::SynRcvd &&
+                                    header.src_port == conn_remote_port[connection_slot] &&
                                     slice_eq(ip[IP_SRC..<IP_DST],
-                                             conn_remote_ip as []u8) &&
+                                        remote_ip_bytes[remote_ip_base..<remote_ip_base + 4]) &&
                                     (header.flags & TCP_FLAG_RST) != 0) {
-                                    conn_state = ConnState::Listen;
+                                    conn_state[connection_slot] = ConnState::Listen;
                                     tcp_injected_syn_pending = false;
                                 } else if (
-                                    conn_state == ConnState::SynRcvd &&
-                                    header.src_port == conn_remote_port &&
+                                    conn_state[connection_slot] == ConnState::SynRcvd &&
+                                    header.src_port == conn_remote_port[connection_slot] &&
                                     slice_eq(ip[IP_SRC..<IP_DST],
-                                             conn_remote_ip as []u8) &&
+                                        remote_ip_bytes[remote_ip_base..<remote_ip_base + 4]) &&
                                     (header.flags & TCP_FLAG_ACK) != 0 &&
                                     (header.flags & TCP_FLAG_SYN) == 0 &&
-                                    header.ack == conn_snd_nxt &&
-                                    header.seq == conn_rcv_nxt) {
-                                    conn_state =
+                                    header.ack == conn_snd_nxt[connection_slot] &&
+                                    header.seq == conn_rcv_nxt[connection_slot]) {
+                                    conn_state[connection_slot] =
                                         ConnState::Established;
                                     if (tcp_injected_syn_pending &&
                                         tcp_injected_syn_retransmitted) {
@@ -930,17 +1175,17 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
             }
         }
         let retry_now: i64 = read_cntpct();
-        if (conn_state == ConnState::SynRcvd &&
+        if (conn_state[connection_slot] == ConnState::SynRcvd &&
             syn_ack_retries < TCP_RETRY_LIMIT &&
             retry_now - syn_ack_sent_at >= retry_ticks) {
             ready = net_transmit_ready(
-                ready, tcp_stream_tx_frame as []u8, 54);
+                ready, stream_frames[stream_base..<stream_base + 1514], 54);
             syn_ack_sent_at = retry_now;
             syn_ack_retries = syn_ack_retries + 1;
             if (tcp_injected_syn_pending) {
                 tcp_injected_syn_retransmitted = true;
             }
-        } else if (conn_state == ConnState::SynRcvd &&
+        } else if (conn_state[connection_slot] == ConnState::SynRcvd &&
                    syn_ack_retries == TCP_RETRY_LIMIT &&
                    retry_now - syn_ack_sent_at >= retry_ticks) {
             // The half-open peer did not acknowledge any bounded attempt.
@@ -964,17 +1209,21 @@ fn kernel_tcp_accept_once(ready_in: sink NetRxCanAcquire, port: u16)
             if (tcp_injected_syn_pending) {
                 tcp_drop_next_syn_ack = true;
             }
-            conn_state = ConnState::Listen;
+            conn_state[connection_slot] = ConnState::Listen;
             tcp_injected_syn_pending = false;
         }
     }
     return KernelTcpAcceptResult::TimedOut(ready);
 }
 
-fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
+fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection],
+                           ready_in: sink NetRxCanAcquire,
                            destination: borrow [u8; 1460..])
         -> KernelTcpReceiveResult !{may_block} {
     let mut ready = ready_in;
+    let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = owner.pool_index;
+    let remote_ip_base: usize = connection_slot * 4;
+    let remote_ip_bytes = conn_remote_ip as []u8;
     let start: i64 = read_cntpct();
     let deadline_ticks: i64 = read_cntfrq() * 30;
     while ((read_cntpct() - start) < deadline_ticks) {
@@ -1001,7 +1250,7 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
                             inet_checksum(ip[0..<20]) == 0 &&
                             slice_eq(ip[IP_DST..<20], OUR_IP as []u8) &&
                             slice_eq(ip[IP_SRC..<IP_DST],
-                                     conn_remote_ip as []u8)) {
+                                remote_ip_bytes[remote_ip_base..<remote_ip_base + 4])) {
                             let tcp = frame[34..<54];
                             let tcp_len: u16 = total_len - 20;
                             let doff: u8 = tcp[TCP_DATA_OFFSET] >> 4;
@@ -1021,13 +1270,13 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
                                     read_u16be(tcp[2..<4]) as u16;
                                 let sequence: u32 =
                                     read_u32be(tcp[4..<8]) as u32;
-                                if (source_port == conn_remote_port &&
-                                    destination_port == conn_local_port &&
+                                if (source_port == conn_remote_port[connection_slot] &&
+                                    destination_port == conn_local_port[connection_slot] &&
                                     (tcp[TCP_FLAGS] & TCP_FLAG_ACK) != 0 &&
                                     checksum_fold(checksum_add(
                                         tcp_segment,
                                         checksum_add(pseudo as []u8, 0))) == 0) {
-                                    if (sequence != conn_rcv_nxt) {
+                                    if (sequence != conn_rcv_nxt[connection_slot]) {
                                         // Duplicate (sequence behind rcv_nxt) and
                                         // out-of-order (ahead) data both elicit the
                                         // same cumulative ACK. Neither advances the
@@ -1070,17 +1319,20 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
                         ready = net_rx_release(acquired);
                     }
                     TcpReceiveDisposition::AckOnly => {
-                        build_receive_ack(net_rx_frame(acquired), 20);
+                        build_receive_ack(
+                            connection_slot, net_rx_frame(acquired), 20);
                         ready = net_rx_send_reply(
                             net_rx_reply_ready(acquired, 54));
                     }
                     TcpReceiveDisposition::Payload(payload_length) => {
-                        conn_rcv_nxt = conn_rcv_nxt + (payload_length as u32);
-                        tcp_received_length = payload_length;
+                        conn_rcv_nxt[connection_slot] =
+                            conn_rcv_nxt[connection_slot] + (payload_length as u32);
+                        tcp_received_length[connection_slot] = payload_length;
                         if (tcp_ack_each_stream_segment) {
                             tcp_split_request_segments =
                                 tcp_split_request_segments + 1;
-                            build_receive_ack(net_rx_frame(acquired), 20);
+                            build_receive_ack(
+                                connection_slot, net_rx_frame(acquired), 20);
                             return KernelTcpReceiveResult::Received(
                                 net_rx_send_reply(
                                     net_rx_reply_ready(acquired, 54)));
@@ -1098,18 +1350,30 @@ fn kernel_tcp_receive_once(ready_in: sink NetRxCanAcquire,
     return KernelTcpReceiveResult::TimedOut(ready);
 }
 
-fn kernel_tcp_received_length() -> usize { return tcp_received_length; }
+fn kernel_tcp_received_length(owner: borrow TcpConnectionOwner[connection])
+        -> usize {
+    return tcp_received_length[owner.pool_index];
+}
 
-fn kernel_tcp_send_received(ready: sink NetRxCanAcquire,
+fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
+                            ready: sink NetRxCanAcquire,
                             source: borrow [u8; 1460..],
                             received_length: usize,
                             payload_length: usize)
         -> KernelTcpSendResult !{may_block} {
+    let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = owner.pool_index;
+    let remote_ip_base: usize = connection_slot * 4;
+    let remote_mac_base: usize = connection_slot * 6;
+    let stream_base: usize = connection_slot * 1514;
+    let remote_ip_bytes = conn_remote_ip as []u8;
+    let remote_mac_bytes = conn_remote_mac as []u8;
+    let stream_frames = tcp_stream_tx_frame as []u8;
     if (payload_length >= 1 && payload_length <= 1460 &&
         received_length >= 1 && received_length <= 1460) {
         let length: usize = payload_length;
-        let frame_bytes = tcp_stream_tx_frame as []u8;
-        slice_copy(frame_bytes[0..<6], conn_remote_mac as []u8);
+        let frame_bytes = stream_frames[stream_base..<stream_base + 1514];
+        slice_copy(frame_bytes[0..<6],
+                   remote_mac_bytes[remote_mac_base..<remote_mac_base + 6]);
         slice_copy(frame_bytes[6..<12], our_mac as []u8);
         write_u16be(frame_bytes[12..<14], 0x0800);
         let ip = frame_bytes[14..<34];
@@ -1122,13 +1386,18 @@ fn kernel_tcp_send_received(ready: sink NetRxCanAcquire,
         ip[IP_PROTOCOL] = PROTO_TCP;
         write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
         slice_copy(ip[IP_SRC..<IP_DST], OUR_IP as []u8);
-        slice_copy(ip[IP_DST..<20], conn_remote_ip as []u8);
+        slice_copy(ip[IP_DST..<20],
+                   remote_ip_bytes[remote_ip_base..<remote_ip_base + 4]);
         write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip));
         let tcp = frame_bytes[34..<54];
-        write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], conn_local_port as i32);
-        write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], conn_remote_port as i32);
-        write_u32be(tcp[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
-        write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+        write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT],
+                    conn_local_port[connection_slot] as i32);
+        write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ],
+                    conn_remote_port[connection_slot] as i32);
+        write_u32be(tcp[TCP_SEQ..<TCP_ACK],
+                    conn_snd_nxt[connection_slot] as i32);
+        write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET],
+                    conn_rcv_nxt[connection_slot] as i32);
         tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
         tcp[TCP_FLAGS] = TCP_FLAG_ACK | TCP_FLAG_PSH;
         write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
@@ -1136,17 +1405,21 @@ fn kernel_tcp_send_received(ready: sink NetRxCanAcquire,
         write_u16be(tcp[TCP_URGENT..<20], 0);
         slice_copy(frame_bytes[54..<54 + length], source[0..<length]);
         fix_tcp_checksum(ip, frame_bytes[34..<54 + length]);
-        conn_snd_nxt = conn_snd_nxt + (length as u32);
+        conn_snd_nxt[connection_slot] =
+            conn_snd_nxt[connection_slot] + (length as u32);
         let frame_length: usize = 54 + length;
         // GitHub issue #180: opportunistically retire any already-acked
         // older segment (and retry any overdue one) before queuing this
         // new one -- consecutive write()s no longer clobber each other's
         // retransmission record now that pending_tcp_record finds its own
         // free slot instead of always overwriting slot 0.
-        let mut serviced = pending_tcp_service_once(ready, read_cntfrq() / 5);
-        let this_index: usize = tcp_data_segment_counter;
-        tcp_data_segment_counter = tcp_data_segment_counter + 1;
-        let this_slot: usize = pending_tcp_record(PendingTcpKind::Data, frame_length);
+        let mut serviced = pending_tcp_service_once(
+            connection_slot, ready, read_cntfrq() / 5);
+        let this_index: usize = tcp_data_segment_counter[connection_slot];
+        tcp_data_segment_counter[connection_slot] =
+            tcp_data_segment_counter[connection_slot] + 1;
+        let this_slot: usize = pending_tcp_record(
+            connection_slot, PendingTcpKind::Data, frame_length);
         if (this_index as i32 == tcp_drop_data_segment_index) {
             // Skip only this segment's initial transmit -- it stays
             // queued (pending_tcp_record already ran above), so its
@@ -1154,11 +1427,11 @@ fn kernel_tcp_send_received(ready: sink NetRxCanAcquire,
             // both come from pending_tcp_service_once's real timeout+
             // peer-ack path, the same one every other segment uses.
             tcp_drop_data_segment_index = -1;
-            tcp_injected_data_slot = this_slot as i32;
+            tcp_injected_data_slot[connection_slot] = this_slot as i32;
             return KernelTcpSendResult::Sent(serviced);
         }
         return KernelTcpSendResult::Sent(net_transmit_ready(
-            serviced, tcp_stream_tx_frame as []u8, frame_length as i32));
+            serviced, frame_bytes, frame_length as i32));
     }
     return KernelTcpSendResult::Invalid(ready);
 }
@@ -1174,11 +1447,20 @@ fn kernel_tcp_send_received(ready: sink NetRxCanAcquire,
 // segment still outstanding when close() was called, plus the FIN this
 // call just queued -- to be acknowledged or give up, instead of
 // returning with unfinished business for some later caller to notice.
-fn kernel_tcp_close_stream(ready_in: sink NetRxCanAcquire)
+fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
+                           ready_in: sink NetRxCanAcquire)
         -> KernelTcpCloseResult !{may_block} {
     let mut ready = ready_in;
-    let frame = tcp_stream_tx_frame as []u8;
-    slice_copy(frame[0..<6], conn_remote_mac as []u8);
+    let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = owner.pool_index;
+    let remote_ip_base: usize = connection_slot * 4;
+    let remote_mac_base: usize = connection_slot * 6;
+    let stream_base: usize = connection_slot * 1514;
+    let remote_ip_bytes = conn_remote_ip as []u8;
+    let remote_mac_bytes = conn_remote_mac as []u8;
+    let stream_frames = tcp_stream_tx_frame as []u8;
+    let frame = stream_frames[stream_base..<stream_base + 1514];
+    slice_copy(frame[0..<6],
+               remote_mac_bytes[remote_mac_base..<remote_mac_base + 6]);
     slice_copy(frame[6..<12], our_mac as []u8);
     write_u16be(frame[12..<14], 0x0800);
     let ip = frame[14..<34];
@@ -1191,35 +1473,41 @@ fn kernel_tcp_close_stream(ready_in: sink NetRxCanAcquire)
     ip[IP_PROTOCOL] = PROTO_TCP;
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], 0);
     slice_copy(ip[IP_SRC..<IP_DST], OUR_IP as []u8);
-    slice_copy(ip[IP_DST..<20], conn_remote_ip as []u8);
+    slice_copy(ip[IP_DST..<20],
+               remote_ip_bytes[remote_ip_base..<remote_ip_base + 4]);
     write_u16be(ip[IP_CHECKSUM..<IP_SRC], inet_checksum(ip));
     let tcp = frame[34..<54];
-    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT], conn_local_port as i32);
-    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ], conn_remote_port as i32);
-    write_u32be(tcp[TCP_SEQ..<TCP_ACK], conn_snd_nxt as i32);
-    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET], conn_rcv_nxt as i32);
+    write_u16be(tcp[TCP_SRC_PORT..<TCP_DST_PORT],
+                conn_local_port[connection_slot] as i32);
+    write_u16be(tcp[TCP_DST_PORT..<TCP_SEQ],
+                conn_remote_port[connection_slot] as i32);
+    write_u32be(tcp[TCP_SEQ..<TCP_ACK],
+                conn_snd_nxt[connection_slot] as i32);
+    write_u32be(tcp[TCP_ACK..<TCP_DATA_OFFSET],
+                conn_rcv_nxt[connection_slot] as i32);
     tcp[TCP_DATA_OFFSET] = (5 << 4) as u8;
     tcp[TCP_FLAGS] = TCP_FLAG_FIN | TCP_FLAG_ACK;
     write_u16be(tcp[TCP_WINDOW..<TCP_CHECKSUM], 65535);
     write_u16be(tcp[TCP_CHECKSUM..<TCP_URGENT], 0);
     write_u16be(tcp[TCP_URGENT..<20], 0);
     fix_tcp_checksum(ip, tcp);
-    conn_snd_nxt = conn_snd_nxt + 1;
-    let fin_slot: usize = pending_tcp_record(PendingTcpKind::Fin, 54);
+    conn_snd_nxt[connection_slot] = conn_snd_nxt[connection_slot] + 1;
+    let fin_slot: usize = pending_tcp_record(
+        connection_slot, PendingTcpKind::Fin, 54);
     if (tcp_drop_next_fin) {
         tcp_drop_next_fin = false;
-        tcp_injected_fin_slot = fin_slot as i32;
+        tcp_injected_fin_slot[connection_slot] = fin_slot as i32;
     } else {
-        ready = net_transmit_ready(ready, tcp_stream_tx_frame as []u8, 54);
+        ready = net_transmit_ready(ready, frame, 54);
     }
     let start: i64 = read_cntpct();
     let counter_frequency: i64 = read_cntfrq();
     let deadline_ticks: i64 = counter_frequency * 5;
     let retry_ticks: i64 = counter_frequency / 5;
-    while (pending_tcp_any_active() &&
+    while (pending_tcp_any_active(connection_slot) &&
            (read_cntpct() - start) < deadline_ticks) {
         net_rx_wait();
-        ready = pending_tcp_service_once(ready, retry_ticks);
+        ready = pending_tcp_service_once(connection_slot, ready, retry_ticks);
     }
     return KernelTcpCloseResult::Closed(ready);
 }
