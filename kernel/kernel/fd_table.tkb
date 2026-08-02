@@ -12,6 +12,9 @@ private let mut object_kind: [UnifiedFdKind; SHARED_OBJECT_MAX];
 private let mut object_generation: [usize; SHARED_OBJECT_MAX];
 private let mut object_references: [usize; SHARED_OBJECT_MAX];
 private let mut object_offset: [usize; SHARED_OBJECT_MAX];
+private let mut object_inode: [usize; SHARED_OBJECT_MAX];
+private let mut object_readable: [bool; SHARED_OBJECT_MAX];
+private let mut object_writable: [bool; SHARED_OBJECT_MAX];
 private let mut next_object_generation: usize = 1;
 
 must_use variant UnifiedFdResult { Invalid; Ok; }
@@ -25,6 +28,10 @@ must_use variant UnifiedObjectResult {
     Allocated(UnifiedObjectHandle);
 }
 must_use variant UnifiedOffsetResult { Missing; Found(usize); }
+must_use variant UnifiedFileResult {
+    Missing;
+    Found(UnifiedObjectHandle);
+}
 
 fn unified_fd_table_init() {
     for entry: usize in 0..<PROCESS_FD_ENTRY_MAX {
@@ -37,11 +44,97 @@ fn unified_fd_table_init() {
         object_generation[object] = 0;
         object_references[object] = 0;
         object_offset[object] = 0;
+        object_inode[object] = 0;
+        object_readable[object] = false;
+        object_writable[object] = false;
     }
     for process: usize in 0..<PROCESS_CONTEXT_MAX {
         process_heap_break[process] = 0;
     }
     next_object_generation = 1;
+}
+
+fn unified_process_heap_configure(process: usize, value: usize)
+        -> UnifiedFdResult {
+    if (process < PROCESS_CONTEXT_MAX) {
+        let index: {0..<PROCESS_CONTEXT_MAX as usize} = process;
+        process_heap_break[index] = value;
+        return UnifiedFdResult::Ok;
+    }
+    return UnifiedFdResult::Invalid;
+}
+
+fn unified_process_heap_break(process: usize) -> UnifiedOffsetResult {
+    if (process < PROCESS_CONTEXT_MAX) {
+        let index: {0..<PROCESS_CONTEXT_MAX as usize} = process;
+        return UnifiedOffsetResult::Found(process_heap_break[index]);
+    }
+    return UnifiedOffsetResult::Missing;
+}
+
+fn unified_file_open(process: usize, fd: usize, inode: usize,
+                     readable: bool, writable: bool) -> UnifiedFdResult {
+    match unified_object_alloc(0, UnifiedFdKind::OpenFile) {
+        UnifiedObjectResult::Invalid => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Full => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Allocated(handle) => {
+            object_inode[handle.slot] = inode;
+            object_readable[handle.slot] = readable;
+            object_writable[handle.slot] = writable;
+            match unified_fd_install(process, fd, handle.slot,
+                                     handle.generation) {
+                UnifiedFdResult::Invalid => {
+                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    object_generation[handle.slot] = 0;
+                    return UnifiedFdResult::Invalid;
+                }
+                UnifiedFdResult::Ok => { return UnifiedFdResult::Ok; }
+            }
+        }
+    }
+}
+
+fn unified_file_lookup(process: usize, fd: usize) -> UnifiedFileResult {
+    if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX) {
+        return UnifiedFileResult::Missing;
+    }
+    let value: usize = unified_fd_index(process, fd);
+    if (value < PROCESS_FD_ENTRY_MAX) {
+        let index: {0..<PROCESS_FD_ENTRY_MAX as usize} = value;
+        let object_value: usize = fd_object[index];
+        if (fd_kind[index] == UnifiedFdKind::OpenFile &&
+            object_value < SHARED_OBJECT_MAX) {
+            let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
+            if (object_kind[object] == UnifiedFdKind::OpenFile &&
+                object_generation[object] == fd_generation[index]) {
+                let mut handle: UnifiedObjectHandle = {
+                    object, object_generation[object]
+                };
+                return UnifiedFileResult::Found(handle);
+            }
+        }
+    }
+    return UnifiedFileResult::Missing;
+}
+
+fn unified_file_inode(handle: UnifiedObjectHandle) -> usize {
+    if (object_kind[handle.slot] == UnifiedFdKind::OpenFile &&
+        object_generation[handle.slot] == handle.generation) {
+        return object_inode[handle.slot];
+    }
+    return 0;
+}
+
+fn unified_file_is_readable(handle: UnifiedObjectHandle) -> bool {
+    return object_kind[handle.slot] == UnifiedFdKind::OpenFile &&
+           object_generation[handle.slot] == handle.generation &&
+           object_readable[handle.slot];
+}
+
+fn unified_file_is_writable(handle: UnifiedObjectHandle) -> bool {
+    return object_kind[handle.slot] == UnifiedFdKind::OpenFile &&
+           object_generation[handle.slot] == handle.generation &&
+           object_writable[handle.slot];
 }
 
 fn unified_object_alloc(slot: {0..<SHARED_OBJECT_MAX as usize},
@@ -271,6 +364,10 @@ fn unified_fd_table_probe() -> bool {
         UnifiedFdResult::Invalid => { return false; }
         UnifiedFdResult::Ok => {}
     }
+    match unified_process_heap_configure(1, 0x50001000) {
+        UnifiedFdResult::Invalid => { return false; }
+        UnifiedFdResult::Ok => {}
+    }
     match unified_fd_set_offset(1, 3, 9) {
         UnifiedFdResult::Invalid => { return false; }
         UnifiedFdResult::Ok => {}
@@ -298,5 +395,12 @@ fn unified_fd_table_probe() -> bool {
         if (object_kind[object] != UnifiedFdKind::Empty ||
             object_references[object] != 0) { return false; }
     }
-    return shared;
+    let mut heap_independent: bool = false;
+    match unified_process_heap_break(0) {
+        UnifiedOffsetResult::Missing => {}
+        UnifiedOffsetResult::Found(value) => {
+            if (value == 0x50000000) { heap_independent = true; }
+        }
+    }
+    return shared && heap_independent;
 }

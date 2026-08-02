@@ -15,6 +15,26 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: File Syscalls and Heap State Join the Process Table (GitHub Issue #188, Stage 5)
+
+The syscall dispatcher now resolves regular-file descriptors through the
+unified per-process fd table. Inode identity, access mode, and the shared open
+file offset live in the generation-checked shared object; `openat`, `read`,
+`write`, `sendfile`, and `close` no longer consult the former file globals.
+The process-local program break also moved into the process table, so `brk`
+and the current `mmap` fixture update the active parent or child slot.
+
+The synchronous clone path now clones slot 0 into slot 1 and destroys slot 1
+on child reap. This removes the file and heap snapshot/restore globals: an
+inherited file offset is shared by reference, while a child's changed heap
+break remains independent. The boot probe checks both properties and complete
+reference cleanup under `--forbid-trap`.
+
+Socket metadata still uses its existing compatibility arrays in this stage.
+Moving listener and connection lookup, duplication, and last-reference
+transport teardown onto the same fd table is the next bounded integration
+step.
+
 ### 2026-08-02: Unified Per-Process Descriptor Table Foundation (GitHub Issue #188, Stage 4)
 
 The two-process model now has one bounded descriptor namespace per process:

@@ -24,11 +24,6 @@ const KERNEL_SOCKET_FD_MAX: usize = 8;
 
 private let mut syscall_ext2_mount: Ext2Mount;
 private let mut syscall_ext2_ready: bool;
-private let mut syscall_file_open: bool;
-private let mut syscall_file_readable: bool;
-private let mut syscall_file_writable: bool;
-private let mut syscall_file_inode: usize;
-private let mut syscall_file_offset: usize;
 private let mut syscall_file_buffer: [u8; KERNEL_BLOCK_SIZE];
 private let mut syscall_open_calls: usize;
 private let mut syscall_read_calls: usize;
@@ -62,13 +57,6 @@ must_use variant KernelInetdAcceptResult { TimedOut; Accepted; }
 
 private let mut syscall_heap_start: usize;
 private let mut syscall_heap_limit: usize;
-private let mut syscall_heap_break: usize;
-
-private let mut clone_parent_file_open: bool;
-private let mut clone_parent_file_readable: bool;
-private let mut clone_parent_file_writable: bool;
-private let mut clone_parent_file_inode: usize;
-private let mut clone_parent_file_offset: usize;
 private let mut clone_parent_socket_fd_kind: [KernelSocketFdKind; KERNEL_SOCKET_FD_MAX];
 private let mut clone_parent_socket_state: [KernelSocketState; KERNEL_SOCKET_FD_MAX];
 private let mut clone_parent_socket_port: [u16; KERNEL_SOCKET_FD_MAX];
@@ -78,7 +66,6 @@ private let mut clone_parent_socket_buffer_length: [usize; TCP_CONNECTION_MAX];
 private let mut clone_parent_socket_buffer_offset: [usize; TCP_CONNECTION_MAX];
 private let mut clone_parent_inetd_mode: bool;
 private let mut clone_parent_inetd_response_length: [usize; TCP_CONNECTION_MAX];
-private let mut clone_parent_heap_break: usize;
 private let mut clone_file_state_live: bool;
 
 must_use variant KernelFdReapResult { Failed; Reaped; }
@@ -96,15 +83,85 @@ variant KernelListenerLookupResult {
     Found({0..<KERNEL_SOCKET_FD_MAX as usize});
 }
 
+fn kernel_syscall_process_slot() -> usize {
+    if (kernel_process_current_pid() == 2) { return 1; }
+    return 0;
+}
+
+fn kernel_syscall_file_lookup() -> UnifiedFileResult {
+    return unified_file_lookup(kernel_syscall_process_slot(), 3);
+}
+
+fn kernel_syscall_file_is_open() -> bool {
+    match kernel_syscall_file_lookup() {
+        UnifiedFileResult::Missing => { return false; }
+        UnifiedFileResult::Found(handle) => { return true; }
+    }
+}
+
+fn kernel_syscall_file_readable() -> bool {
+    match kernel_syscall_file_lookup() {
+        UnifiedFileResult::Missing => { return false; }
+        UnifiedFileResult::Found(handle) => {
+            return unified_file_is_readable(handle);
+        }
+    }
+}
+
+fn kernel_syscall_file_writable() -> bool {
+    match kernel_syscall_file_lookup() {
+        UnifiedFileResult::Missing => { return false; }
+        UnifiedFileResult::Found(handle) => {
+            return unified_file_is_writable(handle);
+        }
+    }
+}
+
+fn kernel_syscall_file_inode() -> usize {
+    match kernel_syscall_file_lookup() {
+        UnifiedFileResult::Missing => { return 0; }
+        UnifiedFileResult::Found(handle) => {
+            return unified_file_inode(handle);
+        }
+    }
+}
+
+fn kernel_syscall_file_offset() -> usize {
+    match unified_fd_offset(kernel_syscall_process_slot(), 3) {
+        UnifiedOffsetResult::Missing => { return 0; }
+        UnifiedOffsetResult::Found(value) => { return value; }
+    }
+}
+
+fn kernel_syscall_file_set_offset(value: usize) -> bool {
+    match unified_fd_set_offset(kernel_syscall_process_slot(), 3, value) {
+        UnifiedFdResult::Invalid => { return false; }
+        UnifiedFdResult::Ok => { return true; }
+    }
+}
+
+fn kernel_syscall_heap_break() -> usize {
+    match unified_process_heap_break(kernel_syscall_process_slot()) {
+        UnifiedOffsetResult::Missing => { return 0; }
+        UnifiedOffsetResult::Found(value) => { return value; }
+    }
+}
+
+fn kernel_syscall_heap_set(value: usize) -> bool {
+    match unified_process_heap_configure(kernel_syscall_process_slot(), value) {
+        UnifiedFdResult::Invalid => { return false; }
+        UnifiedFdResult::Ok => { return true; }
+    }
+}
+
 fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_heap_start = heap_start;
     syscall_heap_limit = heap_limit;
-    syscall_heap_break = heap_start;
-    syscall_file_open = false;
-    syscall_file_readable = false;
-    syscall_file_writable = false;
-    syscall_file_inode = 0;
-    syscall_file_offset = 0;
+    unified_fd_table_init();
+    match unified_process_heap_configure(0, heap_start) {
+        UnifiedFdResult::Invalid => {}
+        UnifiedFdResult::Ok => {}
+    }
     syscall_open_calls = 0;
     syscall_read_calls = 0;
     syscall_file_write_calls = 0;
@@ -138,12 +195,14 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     clone_file_state_live = false;
 }
 
-fn kernel_syscall_clone_files_begin() {
-    clone_parent_file_open = syscall_file_open;
-    clone_parent_file_readable = syscall_file_readable;
-    clone_parent_file_writable = syscall_file_writable;
-    clone_parent_file_inode = syscall_file_inode;
-    clone_parent_file_offset = syscall_file_offset;
+fn kernel_syscall_clone_files_begin() -> UnifiedFdResult {
+    match unified_fd_clone(0, 1) {
+        UnifiedFdResult::Invalid => {
+            clone_file_state_live = false;
+            return UnifiedFdResult::Invalid;
+        }
+        UnifiedFdResult::Ok => { clone_file_state_live = true; }
+    }
     for fd: usize in 0..<KERNEL_SOCKET_FD_MAX {
         clone_parent_socket_fd_kind[fd] = syscall_socket_fd_kind[fd];
         clone_parent_socket_state[fd] = syscall_socket_state[fd];
@@ -168,8 +227,7 @@ fn kernel_syscall_clone_files_begin() {
             syscall_inetd_response_length[connection_index];
     }
     clone_parent_inetd_mode = syscall_inetd_mode;
-    clone_parent_heap_break = syscall_heap_break;
-    clone_file_state_live = true;
+    return UnifiedFdResult::Ok;
 }
 
 fn kernel_connected_fd_is_open(fd: usize) -> bool {
@@ -329,11 +387,10 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
             kernel_connected_fd_clear(fd);
         }
     }
-    syscall_file_open = clone_parent_file_open;
-    syscall_file_readable = clone_parent_file_readable;
-    syscall_file_writable = clone_parent_file_writable;
-    syscall_file_inode = clone_parent_file_inode;
-    syscall_file_offset = clone_parent_file_offset;
+    match unified_fd_destroy(1) {
+        UnifiedFdResult::Invalid => { return KernelFdReapResult::Failed; }
+        UnifiedFdResult::Ok => {}
+    }
     for fd: usize in 0..<KERNEL_SOCKET_FD_MAX {
         syscall_socket_fd_kind[fd] = clone_parent_socket_fd_kind[fd];
         syscall_socket_state[fd] = clone_parent_socket_state[fd];
@@ -351,7 +408,6 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
             clone_parent_inetd_response_length[connection_index];
     }
     syscall_inetd_mode = clone_parent_inetd_mode;
-    syscall_heap_break = clone_parent_heap_break;
     clone_file_state_live = false;
     return KernelFdReapResult::Reaped;
 }
@@ -359,7 +415,7 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
 fn kernel_syscall_daemon_teardown() -> KernelDaemonTeardownResult {
     if (syscall_socket_fd_kind[4] != KernelSocketFdKind::Listener ||
         syscall_socket_state[4] != KernelSocketState::Listening ||
-        syscall_file_open) {
+        kernel_syscall_file_is_open()) {
         return KernelDaemonTeardownResult::Invalid;
     }
     for connection_index: usize in 0..<TCP_CONNECTION_MAX {
@@ -443,8 +499,6 @@ fn kernel_syscall_inetd_accept(port: u16)
 fn kernel_syscall_ext2_configure(mount: Ext2Mount) {
     syscall_ext2_mount = mount;
     syscall_ext2_ready = true;
-    syscall_file_open = false;
-    syscall_file_offset = 0;
     syscall_open_calls = 0;
     syscall_read_calls = 0;
     syscall_file_write_calls = 0;
@@ -705,10 +759,10 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         }
         if (fd == 3) {
             syscall_file_write_calls = syscall_file_write_calls + 1;
-            if (syscall_file_open == false || syscall_file_writable == false) {
+            if (kernel_syscall_file_is_open() == false || kernel_syscall_file_writable() == false) {
                 return (1, LINUX_EBADF);
             }
-            if (syscall_file_offset != 0 || length == 0 ||
+            if (kernel_syscall_file_offset() != 0 || length == 0 ||
                 length > KERNEL_BLOCK_SIZE) {
                 return (1, LINUX_EINVAL);
             }
@@ -725,10 +779,12 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             }
             let content = unsafe { destination_base[0..<length as isize] };
             match ext2_resize_small_file(
-                    syscall_ext2_mount, syscall_file_inode, content) {
+                    syscall_ext2_mount, kernel_syscall_file_inode(), content) {
                 Ext2ResizeResult::Invalid => { return (1, LINUX_EINVAL); }
                 Ext2ResizeResult::Resized => {
-                    syscall_file_offset = length;
+                    if (kernel_syscall_file_set_offset(length) == false) {
+                        return (1, LINUX_EBADF);
+                    }
                     return (1, length);
                 }
             }
@@ -748,7 +804,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         syscall_open_calls = syscall_open_calls + 1;
         // openat(dirfd, pathname, flags): only absolute root paths are in
         // scope, so dirfd is intentionally ignored.
-        if (syscall_ext2_ready == false || syscall_file_open) {
+        if (syscall_ext2_ready == false || kernel_syscall_file_is_open()) {
             return (1, LINUX_EBADF);
         }
         let path_kind: usize = kernel_syscall_path_kind(x1);
@@ -761,12 +817,14 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             Ext2LookupResult::NotFound => { return (1, LINUX_ENOENT); }
             Ext2LookupResult::Found(inode_number) => {
                 let access_mode: usize = x2 & 3;
-                syscall_file_open = true;
-                syscall_file_readable = access_mode != 1;
-                syscall_file_writable = access_mode != 0;
-                syscall_file_inode = inode_number;
-                syscall_file_offset = 0;
-                return (1, 3);
+                match unified_file_open(
+                        kernel_syscall_process_slot(), 3, inode_number,
+                        access_mode != 1, access_mode != 0) {
+                    UnifiedFdResult::Invalid => {
+                        return (1, LINUX_EBADF);
+                    }
+                    UnifiedFdResult::Ok => { return (1, 3); }
+                }
             }
         }
     }
@@ -933,20 +991,20 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
               }
             }
         }
-        if (fd != 3 || syscall_file_open == false ||
-            syscall_file_readable == false) {
+        if (fd != 3 || kernel_syscall_file_is_open() == false ||
+            kernel_syscall_file_readable() == false) {
             return (1, LINUX_EBADF);
         }
         if (kernel_user_range_is_mapped(address, requested) == false) {
             return (1, LINUX_EFAULT);
         }
         match ext2_read_small_file(
-                syscall_ext2_mount, syscall_file_inode,
+                syscall_ext2_mount, kernel_syscall_file_inode(),
                 syscall_file_buffer as []u8) {
             Ext2ReadResult::Invalid => { return (1, LINUX_EINVAL); }
             Ext2ReadResult::Read(file_length) => {
-                if (syscall_file_offset >= file_length) { return (1, 0); }
-                let available: usize = file_length - syscall_file_offset;
+                if (kernel_syscall_file_offset() >= file_length) { return (1, 0); }
+                let available: usize = file_length - kernel_syscall_file_offset();
                 let mut amount: usize = requested;
                 if (amount > available) { amount = available; }
                 let destination_base: *u8 = address as *u8;
@@ -956,13 +1014,16 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                     let destination_byte: *u8 =
                         destination_base + (copy_index as isize);
                     let source_offset: usize =
-                        syscall_file_offset + copy_index;
+                        kernel_syscall_file_offset() + copy_index;
                     let source_byte: *u8 =
                         source_base + (source_offset as isize);
                     *destination_byte = *source_byte;
                     copy_index = copy_index + 1;
                 }
-                syscall_file_offset = syscall_file_offset + amount;
+                if (kernel_syscall_file_set_offset(
+                        kernel_syscall_file_offset() + amount) == false) {
+                    return (1, LINUX_EBADF);
+                }
                 return (1, amount);
             }
         }
@@ -1014,12 +1075,13 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
           }
         }
         syscall_close_calls = syscall_close_calls + 1;
-        if (x0 != 3 || syscall_file_open == false) {
+        if (x0 != 3 || kernel_syscall_file_is_open() == false) {
             return (1, LINUX_EBADF);
         }
-        syscall_file_open = false;
-        syscall_file_offset = 0;
-        return (1, 0);
+        match unified_fd_close(kernel_syscall_process_slot(), 3) {
+            UnifiedFdResult::Invalid => { return (1, LINUX_EBADF); }
+            UnifiedFdResult::Ok => { return (1, 0); }
+        }
     }
 
     if (number == 198) {
@@ -1201,26 +1263,29 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let offset_address: usize = x2;
         let requested: usize = x3;
         if ((output_fd != 1 && output_fd != 2) || input_fd != 3 ||
-            syscall_file_open == false || syscall_file_readable == false) {
+            kernel_syscall_file_is_open() == false || kernel_syscall_file_readable() == false) {
             return (1, LINUX_EBADF);
         }
         if (offset_address != 0) { return (1, LINUX_EINVAL); }
         match ext2_read_small_file(
-                syscall_ext2_mount, syscall_file_inode,
+                syscall_ext2_mount, kernel_syscall_file_inode(),
                 syscall_file_buffer as []u8) {
             Ext2ReadResult::Invalid => { return (1, LINUX_EINVAL); }
             Ext2ReadResult::Read(file_length) => {
-                if (syscall_file_offset >= file_length) { return (1, 0); }
-                let available: usize = file_length - syscall_file_offset;
+                if (kernel_syscall_file_offset() >= file_length) { return (1, 0); }
+                let available: usize = file_length - kernel_syscall_file_offset();
                 let mut amount: usize = requested;
                 if (amount > available) { amount = available; }
                 let source: *u8 = syscall_file_buffer as *u8;
                 let mut copy_index: usize = 0;
                 while (copy_index < amount) {
-                    uart_putc(source[(syscall_file_offset + copy_index) as isize]);
+                    uart_putc(source[(kernel_syscall_file_offset() + copy_index) as isize]);
                     copy_index = copy_index + 1;
                 }
-                syscall_file_offset = syscall_file_offset + amount;
+                if (kernel_syscall_file_set_offset(
+                        kernel_syscall_file_offset() + amount) == false) {
+                    return (1, LINUX_EBADF);
+                }
                 syscall_read_calls = syscall_read_calls + 1;
                 return (1, amount);
             }
@@ -1332,7 +1397,16 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 return (1, LINUX_EAGAIN);
             }
             ProcessCloneVmResult::Copied => {
-                kernel_syscall_clone_files_begin();
+                match kernel_syscall_clone_files_begin() {
+                    UnifiedFdResult::Invalid => {
+                        match process_image_clone_vm_reap() {
+                            ProcessCloneVmReapResult::Missing => {}
+                            ProcessCloneVmReapResult::Reaped => {}
+                        }
+                        return (1, LINUX_EAGAIN);
+                    }
+                    UnifiedFdResult::Ok => {}
+                }
                 match kernel_process_clone_begin(x0, x1) {
                     ProcessCloneResult::Invalid => {
                         match kernel_syscall_clone_files_reap() {
@@ -1447,11 +1521,13 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         return (1, 0);
     }
     if (number == 214) {
-        if (x0 == 0) { return (1, syscall_heap_break); }
+        if (x0 == 0) { return (1, kernel_syscall_heap_break()); }
         if (x0 >= syscall_heap_start && x0 <= syscall_heap_limit) {
-            syscall_heap_break = x0;
+            if (kernel_syscall_heap_set(x0) == false) {
+                return (1, LINUX_EINVAL);
+            }
         }
-        return (1, syscall_heap_break);
+        return (1, kernel_syscall_heap_break());
     }
     if (number == 222) {
         let length: usize = x1;
@@ -1470,11 +1546,14 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             }
             return (1, x0);
         }
-        if (rounded > syscall_heap_limit - syscall_heap_break) {
+        if (rounded > syscall_heap_limit - kernel_syscall_heap_break()) {
             return (1, 0xFFFFFFFFFFFFFFFF);
         }
-        let result: usize = syscall_heap_break;
-        syscall_heap_break = syscall_heap_break + rounded;
+        let result: usize = kernel_syscall_heap_break();
+        if (kernel_syscall_heap_set(
+                kernel_syscall_heap_break() + rounded) == false) {
+            return (1, LINUX_EINVAL);
+        }
         return (1, result);
     }
     if (number == 215 || number == 226) {
