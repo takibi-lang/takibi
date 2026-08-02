@@ -50,7 +50,12 @@ timeout 1 cat "$SERIAL_DEV" >/dev/null 2>&1 || true
 # before the CPU is resumed; cleanup below bounds the post-load capture.
 cat "$SERIAL_DEV" >"$UART_LOG" 2>/dev/null &
 reader_pid=$!
+uart_sender_pid=
 cleanup() {
+    if [ -n "$uart_sender_pid" ]; then
+        kill "$uart_sender_pid" 2>/dev/null || true
+        wait "$uart_sender_pid" 2>/dev/null || true
+    fi
     kill "$reader_pid" 2>/dev/null || true
     wait "$reader_pid" 2>/dev/null || true
 }
@@ -194,6 +199,22 @@ if [ "$userspace_ready" -ne 1 ]; then
     exit 1
 fi
 
+# Watch concurrently with the connected-I/O client: the child reaches its
+# UART wait immediately after that socket exchange, while its runnable parent
+# deliberately continues the scheduler fixture. Polling only after the client
+# exits could let the parent finish before the input is delivered.
+(
+    for _wait in $(seq 1 6000); do
+        if LC_ALL=C grep -aFq 'uart rx: scheduler child blocked' "$UART_LOG"; then
+            printf 'irqtest\n' >"$SERIAL_DEV"
+            exit 0
+        fi
+        sleep 0.01
+    done
+    exit 1
+) &
+uart_sender_pid=$!
+
 echo "[kernel/rpi5] checking userspace connected I/O on port 8080"
 socket_accept_ok=0
 for _attempt in $(seq 1 60); do
@@ -222,28 +243,16 @@ echo "[kernel/rpi5] userspace connected I/O passed"
 # to the kernel. Stop as soon as the stable final resource marker arrives,
 # while retaining a deadline for a hung kernel.
 #
-# GitHub issue #187: after the "resources: pages=0" marker, the kernel goes
-# on to set up RP1 UART0's real GIC/MIP0/MSI-X RX-interrupt path and blocks
-# in interrupt_wait() for one line on this exact serial device -- the same
-# duplex debug-UART cable already used for this capture (see
-# scripts/run_hwtest_rpi5.sh's run_hw_test_rpi5_stdin for the established
-# bidirectional-UART technique this mirrors). Send the fixture once the
-# kernel's own readiness log line confirms it is actually waiting, then keep
-# polling for its interrupt-driven receive confirmation as the new true
-# final marker.
+# The child publishes Blocked with IRQ delivery masked and logs the readiness
+# marker before returning through the scheduler. Send the line only after
+# that marker, then wait for the IRQ-driven Blocked -> Ready evidence.
 capture_deadline="${RPI5_KERNEL_CAPTURE_SECONDS:-90}"
 capture_elapsed=0
 capture_complete=0
-uart_rx_fixture_sent=0
 while [ "$capture_elapsed" -lt "$capture_deadline" ]; do
     sleep 1
     capture_elapsed=$((capture_elapsed + 1))
-    if [ "$uart_rx_fixture_sent" -eq 0 ] && \
-            LC_ALL=C grep -aFq 'uart rx: waiting for interrupt input' "$UART_LOG"; then
-        printf 'irqtest\n' >"$SERIAL_DEV"
-        uart_rx_fixture_sent=1
-    fi
-    if LC_ALL=C grep -aFq 'uart rx: interrupt-driven receive ok' "$UART_LOG"; then
+    if LC_ALL=C grep -aFq 'uart rx: scheduler block+wake ok' "$UART_LOG"; then
         capture_complete=1
         break
     fi

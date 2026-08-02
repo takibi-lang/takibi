@@ -163,6 +163,19 @@ initial_user_payload:
     b.ne    .Luser_fail
     b       .Lclone_parent_done
 .Lclone_child:
+    /* The first byte must take the scheduler-aware Blocked -> Ready path.
+     * Later bytes may already be in the bounded RX ring when selected. */
+    adr     x24, .Luart_fixture
+    mov     x25, #0
+.Luart_wait_loop:
+    mov     x8, #451
+    svc     #0
+    ldrb    w10, [x24, x25]
+    cmp     w0, w10
+    b.ne    .Luser_fail
+    add     x25, x25, #1
+    cmp     x25, #8
+    b.ne    .Luart_wait_loop
     /* Scheduler acceptance: private same-VA data plus GPR and SIMD
      * signatures must survive involuntary timer preemption. */
     movz    x9, #0x1000
@@ -276,6 +289,8 @@ initial_user_payload:
     .asciz  "/mutable.txt"
 .Lmutable_content:
     .ascii  "el0-ok\n"
+.Luart_fixture:
+    .ascii  "irqtest\n"
     .balign 2
 .Lsocket_address:
     .hword  2
@@ -389,6 +404,8 @@ el0_sync_entry:
     b.eq    .Lsyscall_clone_child
     cmp     x6, #4
     b.eq    .Lsyscall_clone_parent
+    cmp     x6, #5
+    b.eq    .Lsyscall_block
     mov     x16, #8
     b       el1_exception_evidence
 
@@ -441,6 +458,15 @@ el0_sync_entry:
     add     sp, sp, #EL0_CONTEXT_SIZE
     eret
 
+.Lsyscall_block:
+    mov     x0, sp
+    bl      kernel_process_block_uart
+    cbz     x0, .Lclone_context_fail
+    mov     sp, x0
+    EL0_CONTEXT_RESTORE
+    add     sp, sp, #EL0_CONTEXT_SIZE
+    eret
+
 .Lsyscall_resume:
     str     x7, [sp, #EL0_CONTEXT_X0]
     mov     x0, sp
@@ -460,4 +486,9 @@ el0_sync_entry:
     ldp     x27, x28, [sp, #64]
     ldp     x29, x30, [sp, #80]
     add     sp, sp, #96
+    ret
+
+    .global el0_context_set_x0
+el0_context_set_x0:
+    str     x1, [x0, #EL0_CONTEXT_X0]
     ret

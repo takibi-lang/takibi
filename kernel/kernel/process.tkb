@@ -1,7 +1,8 @@
 use "kernel/mm/page.tkb";
 
-enum ProcessState: u8 { Ready; Running; Exited; }
-enum ProcessSlotState: u8 { Free; Ready; Running; Exited; }
+enum ProcessState: u8 { Ready; Running; Blocked; Exited; }
+enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
+enum ProcessWaitReason: u8 { None; UartRx; }
 
 const KERNEL_PROCESS_MAX: usize = 2;
 const KERNEL_PROCESS_STACK_SIZE: usize = 4096;
@@ -41,6 +42,8 @@ private let mut scheduled_process_used: [u8; KERNEL_PROCESS_MAX];
 private let mut scheduled_process_generation: [usize; KERNEL_PROCESS_MAX];
 private let mut scheduled_process_saved_sp: [usize; KERNEL_PROCESS_MAX];
 private let mut scheduled_process_state: [ProcessSlotState; KERNEL_PROCESS_MAX];
+private let mut scheduled_process_wait_reason:
+    [ProcessWaitReason; KERNEL_PROCESS_MAX];
 private let mut scheduled_process_next_generation: usize = 1;
 private let mut scheduled_process_kernel_stacks:
     [u8; KERNEL_PROCESS_MAX * KERNEL_PROCESS_STACK_SIZE] align(4096);
@@ -69,6 +72,13 @@ must_use variant ScheduledProcessRunningTakeResult {
     Running(exists process: usize.
             (ScheduledProcessOwner[process],
              ScheduledProcessState[process, ProcessState::Running]));
+}
+
+must_use variant ScheduledProcessBlockedTakeResult {
+    Missing;
+    Blocked(exists process: usize.
+            (ScheduledProcessOwner[process],
+             ScheduledProcessState[process, ProcessState::Blocked]));
 }
 
 must_use variant ScheduledProcessPutResult { Stored; Conflict; }
@@ -106,6 +116,14 @@ fn scheduled_process_running_state(
         owner: borrow ScheduledProcessOwner[process])
         -> ScheduledProcessState[process, ProcessState::Running] {
     let mut state: ScheduledProcessState[process, ProcessState::Running] =
+        { owner.pool_index };
+    return state;
+}
+
+fn scheduled_process_blocked_state(
+        owner: borrow ScheduledProcessOwner[process])
+        -> ScheduledProcessState[process, ProcessState::Blocked] {
+    let mut state: ScheduledProcessState[process, ProcessState::Blocked] =
         { owner.pool_index };
     return state;
 }
@@ -200,6 +218,7 @@ fn scheduled_process_table_init() {
         scheduled_process_generation[slot] = 0;
         scheduled_process_saved_sp[slot] = 0;
         scheduled_process_state[slot] = ProcessSlotState::Free;
+        scheduled_process_wait_reason[slot] = ProcessWaitReason::None;
     }
 }
 
@@ -220,6 +239,7 @@ fn scheduled_process_table_clear() {
         scheduled_process_generation[slot] = 0;
         scheduled_process_saved_sp[slot] = 0;
         scheduled_process_state[slot] = ProcessSlotState::Free;
+        scheduled_process_wait_reason[slot] = ProcessWaitReason::None;
     }
 }
 
@@ -307,6 +327,23 @@ fn scheduled_process_running_take(handle: ProcessHandle)
     }
 }
 
+fn scheduled_process_blocked_take(handle: ProcessHandle)
+        -> ScheduledProcessBlockedTakeResult {
+    if (scheduled_process_state[handle.pool_index] !=
+            ProcessSlotState::Blocked) {
+        return ScheduledProcessBlockedTakeResult::Missing;
+    }
+    match scheduled_process_identity_take(handle) {
+        ScheduledProcessValue::Empty => {
+            return ScheduledProcessBlockedTakeResult::Missing;
+        }
+        ScheduledProcessValue::Occupied(owner) => {
+            let state = scheduled_process_blocked_state(owner);
+            return ScheduledProcessBlockedTakeResult::Blocked((owner, state));
+        }
+    }
+}
+
 fn scheduled_process_start(
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Ready])
@@ -322,6 +359,28 @@ fn scheduled_process_start(
 fn scheduled_process_yield(
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Running])
+        -> ScheduledProcessState[process, ProcessState::Ready] {
+    scheduled_process_state_drop(state);
+    scheduled_process_state[owner.pool_index] = ProcessSlotState::Ready;
+    let mut ready: ScheduledProcessState[process, ProcessState::Ready] =
+        { owner.pool_index };
+    return ready;
+}
+
+fn scheduled_process_block(
+        owner: borrow ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Running])
+        -> ScheduledProcessState[process, ProcessState::Blocked] {
+    scheduled_process_state_drop(state);
+    scheduled_process_state[owner.pool_index] = ProcessSlotState::Blocked;
+    let mut blocked: ScheduledProcessState[process, ProcessState::Blocked] =
+        { owner.pool_index };
+    return blocked;
+}
+
+fn scheduled_process_wake(
+        owner: borrow ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Blocked])
         -> ScheduledProcessState[process, ProcessState::Ready] {
     scheduled_process_state_drop(state);
     scheduled_process_state[owner.pool_index] = ProcessSlotState::Ready;
@@ -349,6 +408,7 @@ fn scheduled_process_reap(
     scheduled_process_generation[owner.pool_index] = 0;
     scheduled_process_saved_sp[owner.pool_index] = 0;
     scheduled_process_state[owner.pool_index] = ProcessSlotState::Free;
+    scheduled_process_wait_reason[owner.pool_index] = ProcessWaitReason::None;
 }
 
 fn scheduled_process_stack_top(handle: ProcessHandle) -> usize {
@@ -480,6 +540,8 @@ private let mut execution_timer_switches: usize;
 private let mut execution_deferred_switches: usize;
 private let mut execution_scheduler_enabled: bool;
 private let mut execution_deferred_requests: usize;
+private let mut execution_uart_blocks: usize;
+private let mut execution_uart_wakes: usize;
 
 fn kernel_process_start_handle(handle: ProcessHandle) -> bool {
     match scheduled_process_ready_take(handle) {
@@ -528,6 +590,8 @@ fn kernel_process_execution_reset() {
     execution_deferred_switches = 0;
     execution_scheduler_enabled = false;
     execution_deferred_requests = 0;
+    execution_uart_blocks = 0;
+    execution_uart_wakes = 0;
     match scheduled_process_alloc() {
         ScheduledProcessAllocResult::Full => {}
         ScheduledProcessAllocResult::Allocated(parent) => {
@@ -622,6 +686,74 @@ fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {
         execution_deferred_switches = execution_deferred_switches + 1;
     }
     return next_sp;
+}
+
+// Called with IRQ delivery masked after the UART ring's final empty check.
+// Publishing Blocked before returning the parent's saved frame closes the
+// otherwise-lost wakeup window between checking the ring and sleeping.
+fn kernel_process_block_uart(current_sp: usize) -> usize {
+    if (execution_process != ExecutionProcess::Child ||
+        execution_child_handle_live == false ||
+        execution_parent_handle_live == false ||
+        scheduled_process_state[execution_parent_handle.pool_index] !=
+            ProcessSlotState::Ready) {
+        return 0;
+    }
+    scheduled_process_saved_sp[execution_child_handle.pool_index] = current_sp;
+    match scheduled_process_running_take(execution_child_handle) {
+        ScheduledProcessRunningTakeResult::Missing => { return 0; }
+        ScheduledProcessRunningTakeResult::Running(resources) => {
+            let (owner, running) = resources;
+            let blocked = scheduled_process_block(owner, running);
+            scheduled_process_wait_reason[owner.pool_index] =
+                ProcessWaitReason::UartRx;
+            match scheduled_process_put(owner, blocked) {
+                ScheduledProcessPutResult::Conflict => { return 0; }
+                ScheduledProcessPutResult::Stored => {}
+            }
+        }
+    }
+    if (kernel_process_start_handle(execution_parent_handle) == false) {
+        return 0;
+    }
+    execution_process = ExecutionProcess::Parent;
+    execution_uart_blocks = execution_uart_blocks + 1;
+    process_image_activate_parent();
+    return scheduled_process_saved_sp[execution_parent_handle.pool_index];
+}
+
+// The UART IRQ transfers one byte directly into the suspended syscall frame.
+// true means the byte was consumed by a waiter and must not enter the ring.
+fn kernel_process_uart_wake(value: usize) -> bool !{interrupt} {
+    if (execution_child_handle_live == false ||
+        scheduled_process_state[execution_child_handle.pool_index] !=
+            ProcessSlotState::Blocked ||
+        scheduled_process_wait_reason[execution_child_handle.pool_index] !=
+            ProcessWaitReason::UartRx) {
+        return false;
+    }
+    match scheduled_process_blocked_take(execution_child_handle) {
+        ScheduledProcessBlockedTakeResult::Missing => { return false; }
+        ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+            let (owner, blocked) = resources;
+            el0_context_set_x0(
+                scheduled_process_saved_sp[owner.pool_index], value);
+            let ready = scheduled_process_wake(owner, blocked);
+            scheduled_process_wait_reason[owner.pool_index] =
+                ProcessWaitReason::None;
+            match scheduled_process_put(owner, ready) {
+                ScheduledProcessPutResult::Conflict => { return false; }
+                ScheduledProcessPutResult::Stored => {}
+            }
+        }
+    }
+    execution_uart_wakes = execution_uart_wakes + 1;
+    return true;
+}
+
+fn kernel_process_uart_block_evidence() -> bool {
+    return execution_uart_blocks != 0 &&
+           execution_uart_wakes == execution_uart_blocks;
 }
 
 fn kernel_process_scheduler_probe() -> bool {

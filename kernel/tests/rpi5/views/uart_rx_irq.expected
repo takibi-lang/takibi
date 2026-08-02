@@ -1,2 +1,2 @@
-uart rx: waiting for interrupt input
-uart rx: interrupt-driven receive ok
+uart rx: scheduler child blocked
+uart rx: scheduler block+wake ok

@@ -26,8 +26,6 @@ private let mut ext2_symlink_fixture: [u8; 64];
 let mut kernel_uart_rx_buf: [u8; 64];
 let mut kernel_uart_rx_head: io usize;
 let mut kernel_uart_rx_tail: io usize;
-let mut kernel_uart_rx_fixture: [u8; 8];
-
 fn kernel_uart_rx_ring_reset() {
     kernel_uart_rx_head = 0;
     kernel_uart_rx_tail = 0;
@@ -41,6 +39,10 @@ fn kernel_uart_rx_pending() -> bool {
 // uart_rx_handler (stored via uart_set_rx_handler below).
 fn kernel_uart_rx_isr() !{} {
     let c: u8 = uart_isr_getc();
+    if (kernel_process_uart_wake(c as usize)) {
+        interrupt_notify();
+        return;
+    }
     let head: usize = kernel_uart_rx_head;
     let next: usize = (head + 1) % 64;
     if (next != kernel_uart_rx_tail) {
@@ -712,6 +714,9 @@ fn main() {
     // -- a genuine drop within the large response, not a bookend.
     kernel_tcp_inject_drop_data_segment(1);
     kernel_tcp_inject_drop_next_fin();
+    uart_set_rx_handler(kernel_uart_rx_isr);
+    kernel_uart_rx_ring_reset();
+    irq_uart_rx_unmask();
     match initial_process_create() {
         ProcessCreateResult::OutOfMemory => {
             kernel_boot_log("initial process: allocation failed\n");
@@ -757,6 +762,9 @@ fn main() {
                         if (kernel_process_scheduler_acceptance_evidence()) {
                             kernel_boot_log("scheduler preempt: parent+child gpr+sp+pc+simd asid deferred ok\n");
                         }
+                        if (kernel_process_uart_block_evidence()) {
+                            kernel_boot_log("uart rx: scheduler block+wake ok\n");
+                        }
                         if (process_image_clone_vm_reaped_pages() == 3) {
                             kernel_boot_log("vm fork: private pages=3 reclaimed\n");
                         }
@@ -784,22 +792,5 @@ fn main() {
         }
     }
 
-    // GIC/MIP0/MSI-X routing and DAIF.I were already armed by
-    // platform_irq_init() near the top of this function. Only UART0's own
-    // PL011 source-level unmask was deferred until now, since the fixture
-    // below is the first and only consumer of UART input this boot.
-    uart_set_rx_handler(kernel_uart_rx_isr);
-    kernel_uart_rx_ring_reset();
-    irq_uart_rx_unmask();
-    kernel_boot_log("uart rx: waiting for interrupt input\n");
-    for rx_count: usize in 0..<8 {
-        while (kernel_uart_rx_pending() == false) {
-            interrupt_wait();
-        }
-        kernel_uart_rx_fixture[rx_count] = kernel_uart_rx_getc();
-    }
-    if (slice_eq(kernel_uart_rx_fixture[0..<8], "irqtest\n" as []u8)) {
-        kernel_boot_log("uart rx: interrupt-driven receive ok\n");
-    }
     while (true) { }
 }

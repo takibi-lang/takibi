@@ -10,6 +10,7 @@ const AARCH64_NR_WRITE: usize = 64;
 const AARCH64_NR_EXIT: usize = 93;
 const AARCH64_NR_EXIT_GROUP: usize = 94;
 const AARCH64_NR_CLONE: usize = 220;
+const AARCH64_NR_TAKIBI_UART_RX_WAIT: usize = 451;
 const LINUX_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
 const LINUX_EFAULT: usize = 0xFFFFFFFFFFFFFFF2;
 const LINUX_ENOSYS: usize = 0xFFFFFFFFFFFFFFDA;
@@ -593,13 +594,25 @@ fn initial_user_load(text: borrow PageOwner[page])
 }
 
 // Returns (action, value): 0 = fail-stop, 1 = resume EL0 with value in x0,
-// 2 = terminate and return the exit status to run_initial_user's EL1 caller.
+// 2 = terminate and return the exit status to run_initial_user's EL1 caller,
+// 5 = block this frame and resume the scheduler-selected process.
 // Linux -errno encoding exists only here at the ABI boundary.
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize)
         -> (usize, usize) !{unsafe} {
     let exception_class: usize = (esr >> 26) & 0x3F;
     if (exception_class != 0x15) { return (0, 0); }
+
+    if (number == AARCH64_NR_TAKIBI_UART_RX_WAIT) {
+        disable_irq();
+        if (kernel_uart_rx_pending()) {
+            let value: usize = kernel_uart_rx_getc() as usize;
+            enable_irq();
+            return (1, value);
+        }
+        kernel_boot_log("uart rx: scheduler child blocked\n");
+        return (5, 0);
+    }
 
     if (number == AARCH64_NR_WRITE) {
         let fd: usize = x0;

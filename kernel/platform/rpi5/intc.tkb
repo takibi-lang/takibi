@@ -46,6 +46,7 @@
 use "kernel/platform/rpi5/timer_irq.tkb";
 
 extern fn enable_irq();
+extern fn disable_irq();
 
 const RP1_UART0_VECTOR: u32 = 25;
 const RPI5_UART0_GIC_INTID: u32 = 185; // 32 + (MIP0 SPI base 128 + vector 25)
