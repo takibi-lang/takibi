@@ -348,6 +348,9 @@ el0_sync_entry:
 
 .Lsyscall_resume:
     str     x7, [sp, #EL0_CONTEXT_X0]
+    mov     x0, sp
+    bl      kernel_process_syscall_return_schedule
+    mov     sp, x0
     EL0_CONTEXT_RESTORE
     add     sp, sp, #EL0_CONTEXT_SIZE
     eret

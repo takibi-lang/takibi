@@ -475,6 +475,10 @@ private let mut execution_parent_handle: ProcessHandle;
 private let mut execution_child_handle: ProcessHandle;
 private let mut execution_parent_handle_live: bool;
 private let mut execution_child_handle_live: bool;
+private let mut execution_reschedule_pending: bool;
+private let mut execution_timer_switches: usize;
+private let mut execution_deferred_switches: usize;
+private let mut execution_scheduler_enabled: bool;
 
 fn kernel_process_start_handle(handle: ProcessHandle) -> bool {
     match scheduled_process_ready_take(handle) {
@@ -518,6 +522,10 @@ fn kernel_process_execution_reset() {
     execution_child_exit_status = 0;
     execution_parent_handle_live = false;
     execution_child_handle_live = false;
+    execution_reschedule_pending = false;
+    execution_timer_switches = 0;
+    execution_deferred_switches = 0;
+    execution_scheduler_enabled = false;
     match scheduled_process_alloc() {
         ScheduledProcessAllocResult::Full => {}
         ScheduledProcessAllocResult::Allocated(parent) => {
@@ -525,6 +533,123 @@ fn kernel_process_execution_reset() {
             execution_parent_handle_live = kernel_process_start_handle(parent);
         }
     }
+}
+
+fn kernel_process_request_reschedule() {
+    if (execution_scheduler_enabled) {
+        execution_reschedule_pending = true;
+    }
+}
+
+fn kernel_process_scheduler_enable() {
+    execution_scheduler_enabled = true;
+}
+
+fn kernel_process_scheduler_disable() {
+    execution_scheduler_enabled = false;
+    execution_reschedule_pending = false;
+}
+
+fn kernel_process_switch_to_parent(current_sp: usize) -> usize {
+    if (execution_child_handle_live == false ||
+        execution_parent_handle_live == false ||
+        scheduled_process_state[execution_parent_handle.pool_index] !=
+            ProcessSlotState::Ready) {
+        return current_sp;
+    }
+    scheduled_process_saved_sp[execution_child_handle.pool_index] = current_sp;
+    if (kernel_process_yield_handle(execution_child_handle) == false) {
+        return current_sp;
+    }
+    if (kernel_process_start_handle(execution_parent_handle) == false) {
+        if (kernel_process_start_handle(execution_child_handle)) {}
+        return current_sp;
+    }
+    execution_process = ExecutionProcess::Parent;
+    process_image_activate_parent();
+    return scheduled_process_saved_sp[execution_parent_handle.pool_index];
+}
+
+fn kernel_process_switch_to_child(current_sp: usize) -> usize {
+    if (execution_child_handle_live == false ||
+        execution_parent_handle_live == false ||
+        scheduled_process_state[execution_child_handle.pool_index] !=
+            ProcessSlotState::Ready) {
+        return current_sp;
+    }
+    scheduled_process_saved_sp[execution_parent_handle.pool_index] = current_sp;
+    if (kernel_process_yield_handle(execution_parent_handle) == false) {
+        return current_sp;
+    }
+    if (kernel_process_start_handle(execution_child_handle) == false) {
+        if (kernel_process_start_handle(execution_parent_handle)) {}
+        return current_sp;
+    }
+    execution_process = ExecutionProcess::Child;
+    process_image_activate_child();
+    return scheduled_process_saved_sp[execution_child_handle.pool_index];
+}
+
+fn kernel_process_schedule(current_sp: usize) -> usize {
+    let mut next_sp: usize = current_sp;
+    if (execution_process == ExecutionProcess::Child) {
+        next_sp = kernel_process_switch_to_parent(current_sp);
+    } else {
+        next_sp = kernel_process_switch_to_child(current_sp);
+    }
+    return next_sp;
+}
+
+fn kernel_process_timer_schedule(current_sp: usize) -> usize !{interrupt} {
+    if (execution_scheduler_enabled == false) { return current_sp; }
+    execution_reschedule_pending = false;
+    let next_sp: usize = kernel_process_schedule(current_sp);
+    if (next_sp != current_sp) {
+        execution_timer_switches = execution_timer_switches + 1;
+    }
+    return next_sp;
+}
+
+fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {
+    if (execution_scheduler_enabled == false) { return current_sp; }
+    if (execution_reschedule_pending == false) { return current_sp; }
+    execution_reschedule_pending = false;
+    let next_sp: usize = kernel_process_schedule(current_sp);
+    if (next_sp != current_sp) {
+        execution_deferred_switches = execution_deferred_switches + 1;
+    }
+    return next_sp;
+}
+
+fn kernel_process_scheduler_probe() -> bool {
+    kernel_process_execution_reset();
+    match kernel_process_clone_begin(0x11, 0) {
+        ProcessCloneResult::Invalid => { return false; }
+        ProcessCloneResult::ChildReady(child_pid) => {
+            if (child_pid != 2 ||
+                kernel_process_clone_context_install(0x1000, 0x2000) !=
+                    0x2000) {
+                return false;
+            }
+        }
+    }
+    kernel_process_scheduler_enable();
+    let parent_sp: usize = kernel_process_timer_schedule(0x2000);
+    let child_sp: usize = kernel_process_timer_schedule(0x1000);
+    kernel_process_request_reschedule();
+    let deferred_parent_sp: usize =
+        kernel_process_syscall_return_schedule(0x2000);
+    let ok: bool = parent_sp == 0x1000 && child_sp == 0x2000 &&
+        deferred_parent_sp == 0x1000 && execution_timer_switches == 2 &&
+        execution_deferred_switches == 1 &&
+        execution_process == ExecutionProcess::Parent;
+    kernel_process_scheduler_disable();
+    scheduled_process_table_clear();
+    execution_parent_handle_live = false;
+    execution_child_handle_live = false;
+    execution_child_live = false;
+    execution_process = ExecutionProcess::Parent;
+    return ok;
 }
 
 // The pinned Alpine BusyBox HTTPd uses clone(SIGCHLD, NULL, NULL, tls,

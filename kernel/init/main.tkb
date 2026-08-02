@@ -275,6 +275,11 @@ fn main() {
     } else {
         kernel_boot_log("fd table: failed\n");
     }
+    if (kernel_process_scheduler_probe()) {
+        kernel_boot_log("scheduler: rr immediate=2 deferred=1 staged\n");
+    } else {
+        kernel_boot_log("scheduler: failed\n");
+    }
 
     match net_init() {
         NetInitResult::Failed => {

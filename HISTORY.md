@@ -15,6 +15,30 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: Round-Robin Selection Reaches Both IRQ Boundaries (GitHub Issue #188, Stage 9)
+
+The RPi5 exception paths now distinguish Current-EL and Lower-EL dispatch all
+the way through the interrupt controller. A timer taken from EL0 saves the
+running slot's complete frame, performs typed Running-to-Ready and
+Ready-to-Running transitions, activates the selected slot's TTBR0/ASID, and
+returns the selected saved SP. A timer taken during EL1 records a pending
+request; the common syscall return path consumes it only after the syscall's
+locals and capabilities have been discharged.
+
+The fixed two-slot selector alternates parent and child and rolls back to the
+current slot if a typed transition unexpectedly fails. A deterministic boot
+probe exercises two immediate selections and one deferred syscall-return
+selection over distinct synthetic frame addresses, proving state, SP, and
+address-space selection without relying on interrupt timing.
+
+Selection is deliberately staged behind an enable flag for the existing
+HTTPd workload. Its parent enters a blocking second `accept` immediately after
+fork; enabling time slicing there before issue #193's scheduler-aware blocking
+would let the parent suspend the child indefinitely inside EL1, contradicting
+the approved non-preemptible-kernel design. The next dedicated acceptance
+workload enables this completed path using compute-bound EL0 processes and
+proves real timer-driven preemption; existing workloads remain unchanged.
+
 ### 2026-08-02: Fork Populates Independent Live Address Spaces (GitHub Issue #188, Stage 8)
 
 The real `clone` VM path now copies parent slot 0 mappings into child slot 1

@@ -202,7 +202,7 @@ el0_irq_entry:
     EL0_CONTEXT_SAVE
 
     mov     x0, sp
-    bl      rpi5_irq_dispatch
+    bl      rpi5_el0_irq_dispatch
     mov     sp, x0
 
     EL0_CONTEXT_RESTORE

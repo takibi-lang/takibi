@@ -258,7 +258,8 @@ fn irq_uart_rx_unmask() {
     *uart0_imsc = (1 << 4) | (1 << 6); // RXIM | RTIM
 }
 
-fn rpi5_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
+fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
+        -> usize !{interrupt} {
     let gicc_iar: *io u32 = 0x107FFFA00C;
     let gicc_eoir: *io u32 = 0x107FFFA010;
     let id: u32 = *gicc_iar;
@@ -282,8 +283,22 @@ fn rpi5_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
         *rp1_msix_cfg6_set = 1 << 2; // MSIX_CFG_IACK
     } else if (id == RPI5_TIMER_GIC_INTID) {
         timer_irq_handler();
+        if (lower_el) {
+            let next_sp: usize = kernel_process_timer_schedule(frame_sp);
+            *gicc_eoir = id;
+            return next_sp;
+        }
+        kernel_process_request_reschedule();
     }
 
     *gicc_eoir = id;
     return frame_sp;
+}
+
+fn rpi5_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
+    return rpi5_irq_dispatch_inner(frame_sp, false);
+}
+
+fn rpi5_el0_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
+    return rpi5_irq_dispatch_inner(frame_sp, true);
 }

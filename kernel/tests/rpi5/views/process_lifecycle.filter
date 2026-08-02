@@ -1,3 +1,4 @@
 ^(initial process:|process clone:|vm fork:|resources:)
 process table:
 fd table:
+scheduler:
