@@ -213,14 +213,14 @@ if [ "$second_httpd_ok" -ne 1 ]; then
 fi
 echo "[kernel/rpi5] second BusyBox httpd curl passed"
 
-# GitHub issue #187: same reasoning as the pre-daemon wait above -- this
-# fixture's own accept() only becomes live after the BusyBox distro-image
-# fixture between it and the httpd checks finishes, so wait for its last
-# pre-fixture log line rather than firing the connected-I/O check blind.
+# GitHub issue #195: vm-layout completion is earlier than socket/bind/listen
+# and therefore is not evidence that the connected-I/O endpoint is ready.
+# Wait for the unique fixture-scoped post-listen marker. An unconditional
+# listen marker would match the earlier BusyBox daemon in the same UART log.
 echo "[kernel/rpi5] waiting for the kernel to be ready for the userspace connected-I/O fixture"
 userspace_ready=0
 for _wait in $(seq 1 600); do
-    if LC_ALL=C grep -aFq 'vm layout: text=rx data=rw+xn stack=rw+xn' "$UART_LOG"; then
+    if LC_ALL=C grep -aFq 'linux socket: listener ready port=8080' "$UART_LOG"; then
         userspace_ready=1
         break
     fi

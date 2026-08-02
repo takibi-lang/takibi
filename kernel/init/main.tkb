@@ -788,6 +788,7 @@ fn main() {
                     }
                     kernel_process_execution_reset();
                     kernel_process_scheduler_enable();
+                    kernel_syscall_connected_fixture_start();
                     let exit_status: usize =
                         run_initial_user(USER_TEXT_VA, USER_STACK_VA + PAGE_SIZE);
                     if (exit_status == 0) {

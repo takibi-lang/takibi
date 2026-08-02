@@ -580,6 +580,12 @@ must_use variant ProcessCloneResult {
 }
 
 fn kernel_process_execution_reset() {
+    // Timer IRQs stay enabled across consecutive EL0 workloads. Close the
+    // scheduling gate before invalidating any handle or saved frame: leaving
+    // the previous workload enabled until later in this reset allowed an IRQ
+    // to select a half-cleared stale context.
+    execution_scheduler_enabled = false;
+    execution_reschedule_pending = false;
     scheduled_process_table_clear();
     execution_process = ExecutionProcess::Parent;
     execution_child_live = false;
@@ -588,10 +594,8 @@ fn kernel_process_execution_reset() {
     execution_child_exit_status = 0;
     execution_parent_handle_live = false;
     execution_child_handle_live = false;
-    execution_reschedule_pending = false;
     execution_timer_switches = 0;
     execution_deferred_switches = 0;
-    execution_scheduler_enabled = false;
     execution_deferred_requests = 0;
     execution_uart_blocks = 0;
     execution_uart_wakes = 0;
@@ -674,6 +678,7 @@ fn kernel_process_schedule(current_sp: usize) -> usize {
 fn kernel_process_timer_schedule(current_sp: usize) -> usize !{interrupt} {
     if (execution_scheduler_enabled == false) { return current_sp; }
     execution_reschedule_pending = false;
+    if (execution_child_handle_live == false) { return current_sp; }
     let next_sp: usize = kernel_process_schedule(current_sp);
     if (next_sp != current_sp) {
         execution_timer_switches = execution_timer_switches + 1;
@@ -685,6 +690,7 @@ fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {
     if (execution_scheduler_enabled == false) { return current_sp; }
     if (execution_reschedule_pending == false) { return current_sp; }
     execution_reschedule_pending = false;
+    if (execution_child_handle_live == false) { return current_sp; }
     let next_sp: usize = kernel_process_schedule(current_sp);
     if (next_sp != current_sp) {
         execution_deferred_switches = execution_deferred_switches + 1;
@@ -722,6 +728,9 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
     }
     execution_process = ExecutionProcess::Parent;
     execution_uart_blocks = execution_uart_blocks + 1;
+    if (execution_uart_blocks == 1) {
+        kernel_boot_log("uart rx: scheduler child blocked\n");
+    }
     process_image_activate_parent();
     return scheduled_process_saved_sp[execution_parent_handle.pool_index];
 }

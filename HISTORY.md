@@ -15,6 +15,44 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: Scheduler Ignores Ticks Until a Child Exists (GitHub Issue #195)
+
+The userspace connected-I/O fixture intermittently received no SYN-ACK after
+the preceding kernel TCP and two BusyBox HTTP connections had succeeded.
+Temporary milestones localized the stop before the fixture's `listen`, and a
+control run that sent no SYN reproduced it, ruling out both TCP demultiplexing
+and an early-host-packet race.
+
+SWD exception evidence exposed the actual failure. One run stopped in the
+Current-EL IRQ entry's first frame store with slot 4, ESR `0x96000046`, and an
+unmapped SP_EL1; another reached socket setup but faulted while restoring the
+EL0 syscall frame with slot 4, ESR `0x96000007`, and SP in the user-VA range.
+The latter run's syscall counters showed `socket()` had executed but `bind()`
+had not. In both cases a timer request entered scheduler selection while no
+second runnable process existed, and stale/uninitialized context values
+escaped into the architectural kernel SP.
+
+There were two ordering defects. `kernel_process_execution_reset()` left the
+previous workload's scheduler enabled while it began clearing handles and
+saved frames; it now closes the scheduler and deferred-request gates before
+touching that table. Both immediate timer selection and deferred syscall-
+return selection also now return the current frame directly until a live
+child handle exists. Selecting among one runnable process had no useful
+effect and unnecessarily exposed partially initialized scheduler state.
+
+The hardware harness now waits for a fixture-scoped post-`listen` record
+rather than treating the earlier VM-layout record as network readiness. The
+marker is armed explicitly for this fixture so it cannot match the BusyBox
+daemon's earlier listener in the same boot log. Temporary issue-local traces
+were removed.
+
+During repeated verification, the UART child legitimately blocked a second
+time when a multi-byte host burst was not yet wholly present. Its stable
+acceptance record is now emitted only when the first Blocked transition has
+actually completed, instead of speculatively before every block request.
+Three consecutive real RPi5 runs passed all 16 views, including both
+overlapping userspace connections, timer preemption, and UART block/wake.
+
 ### 2026-08-02: RPi5 UART Capture Rejects Stale Readers (GitHub Issue #194)
 
 Two post-issue-#192 hardware runs appeared to show core0/core1 UART output
