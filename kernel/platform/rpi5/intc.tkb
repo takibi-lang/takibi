@@ -34,11 +34,17 @@
 // SPI base (128), 64-vector range, and MSI target address come from
 // bcm2712.dtsi plus irq-bcm2712-mip.c.
 //
-// dispatch is a small table (UART0 and USB xHCI today) rather than a single
-// `if` so RP1 GEM Ethernet can be registered later without restructuring
-// rpi5_irq_dispatch itself -- deferred because its callers' deadline-based
-// retry loops (ARP/ICMP/TCP silent-negative checks) need a companion timer
-// interrupt to stay race-free, which does not exist yet (issue #187).
+// RP1 GEM Ethernet (RP1_INT_ETH, local interrupt 6, GIC INTID 166) and the
+// ARM generic timer (PPI 30, kernel/platform/rpi5/timer_irq.tkb) are wired
+// below too: GEM's net_rx_wait() callers' deadline-based retry loops
+// (ARP/ICMP/TCP silent-negative checks, and the SYN-ACK-drop-recovery
+// test) need a companion periodic wake source to stay race-free once
+// net_rx_wait() itself blocks in interrupt_wait() instead of polling --
+// the timer PPI is that source. RP1_INT_ETH is IRQ_TYPE_LEVEL_HIGH per
+// rp1.dtsi, so it needs the same per-vector RP1-level IACK write as
+// UART0, unlike USB0's edge-triggered source.
+
+use "kernel/platform/rpi5/timer_irq.tkb";
 
 extern fn enable_irq();
 
@@ -46,6 +52,8 @@ const RP1_UART0_VECTOR: u32 = 25;
 const RPI5_UART0_GIC_INTID: u32 = 185; // 32 + (MIP0 SPI base 128 + vector 25)
 const RP1_USB0_VECTOR: u32 = 31;
 const RPI5_USB0_GIC_INTID: u32 = 191; // 32 + (MIP0 SPI base 128 + vector 31)
+const RP1_GEM_VECTOR: u32 = 6;
+const RPI5_GEM_GIC_INTID: u32 = 166; // 32 + (MIP0 SPI base 128 + vector 6)
 
 fn gic_uart0_msi_setup() {
     let gicd_ctlr: *io u32 = 0x107FFF9000;
@@ -168,6 +176,54 @@ fn rp1_usbhost0_msix_setup() {
     *rp1_msix_cfg31_set = 1 << 0;
 }
 
+fn gic_gem_msi_setup() {
+    let gicd_isenabler5: *io u32 = 0x107FFF9114; // INTIDs 160..191 (shared with UART0/USB0)
+    let gicd_icpendr5: *io u32 = 0x107FFF9294;
+    let gicd_itargetsr41: *io u32 = 0x107FFF98A4; // INTIDs 164..167
+    let gicd_icfgr10: *io u32 = 0x107FFF9C28; // INTIDs 160..175
+
+    // INTID 166 occupies byte 2 of ITARGETSR41.
+    let targets: u32 = *gicd_itargetsr41;
+    *gicd_itargetsr41 = (targets & ~(0xFF << 16)) | (1 << 16);
+
+    // Upper bit of INTID 166's pair is bit 13 in ICFGR10.
+    *gicd_icfgr10 = *gicd_icfgr10 | (1 << 13);
+    *gicd_icpendr5 = 1 << 6;
+    *gicd_isenabler5 = 1 << 6;
+}
+
+fn mip0_gem_setup() {
+    let mip_cfg_low_host: *io u32 = 0x1000130020;
+    let mip_mask_low_host: *io u32 = 0x1000130040;
+    let mip_mask_low_vpu: *io u32 = 0x1000130060;
+
+    *mip_cfg_low_host = *mip_cfg_low_host | (1 << 6);
+    *mip_mask_low_host = *mip_mask_low_host & ~(1 << 6);
+    *mip_mask_low_vpu = *mip_mask_low_vpu | (1 << 6);
+}
+
+fn rp1_gem_msix_setup() {
+    let msix_cap: u32 = pcie2_config_read32(1, 0, 0xB0);
+    let entry_base: usize = 0x1F00410000 + ((RP1_GEM_VECTOR as usize) * 16);
+    let msg_addr_lo: *io u32 = entry_base as *io u32;
+    let msg_addr_hi: *io u32 = (entry_base + 4) as *io u32;
+    let msg_data: *io u32 = (entry_base + 8) as *io u32;
+    let vector_ctrl: *io u32 = (entry_base + 12) as *io u32;
+
+    *vector_ctrl = 1;
+    *msg_addr_lo = 0xFFFFF000;
+    *msg_addr_hi = 0xFF;
+    *msg_data = RP1_GEM_VECTOR;
+    *vector_ctrl = 0;
+
+    pcie2_config_write32(1, 0, 0xB0, (msix_cap | 0x80000000) & ~0x40000000);
+
+    // RP1_INT_ETH is IRQ_TYPE_LEVEL_HIGH in rp1.dtsi, matching UART0: ENABLE
+    // plus IACK_EN, and rpi5_irq_dispatch below issues the post-service IACK.
+    let rp1_msix_cfg6_set: *io u32 = 0x1F00108820; // 0x1F00108808 + 6*4
+    *rp1_msix_cfg6_set = (1 << 0) | (1 << 3);
+}
+
 // GIC/MIP0/MSI-X routing for every source this kernel currently handles,
 // followed by the one global DAIF.I unmask. Callers must not invoke this
 // until they are ready for ANY of these interrupts to preempt them at any
@@ -188,6 +244,12 @@ fn platform_irq_init() {
     gic_usb0_msi_setup();
     mip0_usb0_setup();
     rp1_usbhost0_msix_setup();
+
+    gic_gem_msi_setup();
+    mip0_gem_setup();
+    rp1_gem_msix_setup();
+
+    timer_irq_setup();
 
     enable_irq();
 }
@@ -214,6 +276,13 @@ fn rpi5_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
         // Edge-triggered source (see rp1_usbhost0_msix_setup): no RP1-level
         // IACK write here, matching rp1_chained_handle_irq's own
         // rp1_level_triggered_irq[hwirq] check.
+    } else if (id == RPI5_GEM_GIC_INTID) {
+        gem_irq_handler();
+
+        let rp1_msix_cfg6_set: *io u32 = 0x1F00108820;
+        *rp1_msix_cfg6_set = 1 << 2; // MSIX_CFG_IACK
+    } else if (id == RPI5_TIMER_GIC_INTID) {
+        timer_irq_handler();
     }
 
     *gicc_eoir = id;

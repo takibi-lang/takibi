@@ -98,6 +98,35 @@ if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
 fi
 echo "[kernel/rpi5] TCP integration passed"
 
+# GitHub issue #187: the kernel injects a one-shot SYN-ACK drop right
+# before starting the real BusyBox HTTPd daemon (kernel_tcp_inject_drop_
+# next_syn_ack(), kernel/init/main.tkb), so its own bounded retransmit
+# budget (TCP_RETRY_LIMIT * retry_ticks, kernel/net/tcp.tkb) can race
+# against curl's --connect-timeout 1 if the FIRST curl attempt's SYN
+# happens to arrive while the kernel is still busy with the earlier
+# USB-ext2 provisioning step (measured to vary by roughly 10x in wall-clock
+# time between otherwise-identical real-hardware runs). Waiting for the
+# kernel's own last pre-daemon log line here, instead of firing curl blind
+# immediately after the TCP echo check above, means curl's first SYN can
+# only ever arrive once the kernel is already about to enter the daemon's
+# accept() loop -- decoupling this race from USB provisioning time
+# entirely without touching tcp.tkb's own timing constants or weakening
+# what the drop-recovery check proves (still the real daemon's real
+# accept() path, still a real dropped packet).
+echo "[kernel/rpi5] waiting for the kernel to be ready to start the BusyBox httpd daemon"
+httpd_ready=0
+for _wait in $(seq 1 600); do
+    if LC_ALL=C grep -aFq 'httpd map: combined pages=331 musl-bias=0x40000 auxv ready clean' "$UART_LOG"; then
+        httpd_ready=1
+        break
+    fi
+    sleep 0.1
+done
+if [ "$httpd_ready" -ne 1 ]; then
+    echo "FAIL kernel/rpi5: kernel never reached the pre-daemon readiness marker (see $UART_LOG)" >&2
+    exit 1
+fi
+
 echo "[kernel/rpi5] curling BusyBox httpd index.html on port 8080"
 httpd_ok=0
 for _attempt in $(seq 1 20); do
@@ -147,9 +176,27 @@ if [ "$second_httpd_ok" -ne 1 ]; then
 fi
 echo "[kernel/rpi5] second BusyBox httpd curl passed"
 
+# GitHub issue #187: same reasoning as the pre-daemon wait above -- this
+# fixture's own accept() only becomes live after the BusyBox distro-image
+# fixture between it and the httpd checks finishes, so wait for its last
+# pre-fixture log line rather than firing the connected-I/O check blind.
+echo "[kernel/rpi5] waiting for the kernel to be ready for the userspace connected-I/O fixture"
+userspace_ready=0
+for _wait in $(seq 1 600); do
+    if LC_ALL=C grep -aFq 'vm layout: text=rx data=rw+xn stack=rw+xn' "$UART_LOG"; then
+        userspace_ready=1
+        break
+    fi
+    sleep 0.1
+done
+if [ "$userspace_ready" -ne 1 ]; then
+    echo "FAIL kernel/rpi5: kernel never reached the userspace-fixture readiness marker (see $UART_LOG)" >&2
+    exit 1
+fi
+
 echo "[kernel/rpi5] checking userspace connected I/O on port 8080"
 socket_accept_ok=0
-for _attempt in $(seq 1 20); do
+for _attempt in $(seq 1 60); do
     if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" \
             ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
             ETH_TEST_MAC="$ETH_TEST_MAC" TCP_TEST_PORT=8080 \

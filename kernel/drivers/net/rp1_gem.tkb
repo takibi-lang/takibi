@@ -198,15 +198,40 @@ fn net_init() -> NetInitResult {
     gem_write(0x14, 0xFFFFFFFF);
     gem_write(0x00, (1 << 4) | (1 << 3) | (1 << 2)); // MPE | TE | RE
 
+    // GitHub issue #187: enable RX/TX-complete interrupts on the same
+    // per-queue-0 register bank (GEM_ISR/IER/IDR(0) = 0x0400/0x0600/0x0620)
+    // this function already used to mask everything at init above --
+    // raspberrypi/linux's macb.h defines GEM_IER(hw_q) = 0x0600 + (hw_q<<2),
+    // distinct from the legacy single-queue MACB_IER at 0x28 that this
+    // multi-queue-capable GEM_GXL does not appear to route queue 0's real
+    // interrupt status through.
+    gem_write(0x0600, (1 << 1) | (1 << 7)); // GEM_IER(0): RCOMP | TCOMP
+
     gem_initialized = 1;
     return NetInitResult::Ready(view NetRxCanAcquire);
 }
 
+// GitHub issue #187: called from kernel/platform/rpi5/intc.tkb's
+// rpi5_irq_dispatch on GIC INTID 166. GEM_ISR(0)'s clear-on-read-vs-write
+// capability is runtime-detected on real hardware (DCFG1.IRQCOR) and not
+// checked here; writing the observed status back unconditionally is a
+// harmless no-op if the read already cleared it, matching the same
+// defensive pattern used for USB xHCI's EHB bit.
+fn gem_irq_handler() !{interrupt} {
+    let isr: u32 = gem_read(0x0400); // GEM_ISR(0)
+    gem_write(0x0400, isr);
+    interrupt_notify();
+}
+
 fn net_rx_wait() !{may_block} {
-    for i: i32 in 0..<10000 {
-        dma_finish_rx(gem_rx_desc as *align(64) u8, 64);
-        if ((gem_rx_desc[0] & 1) != 0) { return; }
-    }
+    dma_finish_rx(gem_rx_desc as *align(64) u8, 64);
+    if ((gem_rx_desc[0] & 1) != 0) { return; }
+    // GitHub issue #187: wakes on a real GEM RX interrupt, or on
+    // kernel/platform/rpi5/timer_irq.tkb's periodic ~15ms tick if nothing
+    // arrives -- callers (kernel/net/{arp,icmp,tcp}.tkb) keep their own
+    // unchanged CNTPCT-based deadline loops, which now get to re-check
+    // regularly instead of only after a long busy-spin.
+    interrupt_wait();
 }
 
 fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
@@ -280,10 +305,17 @@ fn net_transmit(reply: sink NetRxReplyReady[desc]) -> NetTxInFlight[desc] {
 }
 
 fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may_block} {
-    for i: i32 in 0..<1000000 {
+    // GitHub issue #187: real TCOMP interrupt, or the periodic timer tick,
+    // wakes each interrupt_wait() instead of a tight CPU spin. Bounded at
+    // 1000 wake-ups (each at most one ~15ms timer period apart, so at
+    // least ~15s) to match the old spin's own role as a defensive cap
+    // rather than a real deadline -- TX completion is not expected to
+    // ever genuinely take this long.
+    for i: i32 in 0..<1000 {
         dma_finish_rx(gem_tx_desc as *align(64) u8, 64);
         if (in_flight.slot == 0 && (gem_tx_desc[1] & (1 << 31)) != 0) { break; }
         if (in_flight.slot == 1 && (gem_tx_desc[5] & (1 << 31)) != 0) { break; }
+        interrupt_wait();
     }
     return view NetRxCanAcquire;
 }

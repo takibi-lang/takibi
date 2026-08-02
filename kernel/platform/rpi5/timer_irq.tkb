@@ -1,0 +1,52 @@
+// ARM Generic Timer (CNTP_EL0, non-secure EL1 physical timer) interrupt,
+// GitHub issue #187 follow-up. This is the architectural PPI #30, the same
+// INTID examples/common_qemu/gic.tkb's gic_enable_timer_ppi() and
+// examples/common_rpi3/timer.tkb's scheduler group both use -- PPIs are
+// banked per-CPU by the GIC itself, so unlike UART0/USB0's SPIs this needs
+// no RP1/MIP0 routing and no GICD_ITARGETSR write.
+//
+// kernel/arch/arm64/kernel/timer.S's set_cntp_tval/enable_cntp/disable_cntp
+// stubs were staged ahead of this work (their own header comment already
+// named "the RPi5 scheduler port" as the reason they exist) but were never
+// declared or called from any .tkb file until now.
+//
+// Purpose here is narrower than a scheduler tick: RP1 GEM Ethernet's
+// net_rx_wait() needs a periodic wake source so it can use
+// interrupt_wait() without losing the bounded-timeout behavior its
+// callers' own CNTPCT-based deadline loops (kernel/net/{arp,icmp,tcp}.tkb,
+// unchanged) depend on -- including the silent-negative ARP/ICMP checks
+// and the SYN-ACK-drop-recovery test. A real GEM RX interrupt (once wired)
+// wakes net_rx_wait() immediately when a packet actually arrives; this
+// timer guarantees a wake roughly every tick even when nothing does, so
+// the caller's own deadline check still runs regularly instead of net_rx_
+// wait() blocking indefinitely.
+
+extern fn set_cntp_tval(n: i32);
+extern fn enable_cntp();
+extern fn disable_cntp();
+
+const RPI5_TIMER_GIC_INTID: u32 = 30;
+
+// read_cntfrq() >> 6 matches examples/common_qemu/timer.tkb and
+// examples/common_rpi3/timer.tkb's own scheduler-tick divisor exactly
+// (roughly a 1/64 second period for any board's real CNTFRQ_EL0) --
+// reused here as an already-proven-safe tick rate, not re-derived.
+fn timer_tick_rearm() {
+    set_cntp_tval((read_cntfrq() >> 6) as i32);
+}
+
+fn gic_timer_ppi_enable() {
+    let gicd_isenabler0: *io u32 = 0x107FFF9100;
+    *gicd_isenabler0 = *gicd_isenabler0 | (1 << 30);
+}
+
+fn timer_irq_setup() {
+    gic_timer_ppi_enable();
+    timer_tick_rearm();
+    enable_cntp();
+}
+
+fn timer_irq_handler() !{interrupt} {
+    timer_tick_rearm();
+    interrupt_notify();
+}

@@ -15,6 +15,72 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: RP1 GEM Ethernet and the ARM Generic Timer Go Interrupt-Driven; the SYN-ACK-Drop Flake Was a Test-Sync Bug, Not a Polling-Shape One (GitHub Issue #187)
+
+Closes out the two items this issue's own earlier entries had left
+explicitly out of scope. `kernel/platform/rpi5/timer_irq.tkb` (new) wires
+the ARM generic timer's non-secure EL1 physical timer (PPI #30) --
+`GICD_ISENABLER0` bit 30 only, no RP1/MIP0 routing or `GICD_ITARGETSR`
+write, since PPIs are banked per-CPU by the GIC itself, unlike the SPI
+sources wired so far. `kernel/arch/arm64/kernel/timer.S`'s
+`set_cntp_tval`/`enable_cntp`/`disable_cntp` stubs had been staged ahead of
+this work (their own comment already named "the RPi5 scheduler port") but
+were never declared or called from any `.tkb` file until now. It ticks
+roughly every 15ms (`read_cntfrq() >> 6`, the same divisor
+`examples/common_qemu/timer.tkb` and `examples/common_rpi3/timer.tkb`
+use) for the rest of the boot once armed.
+
+`intc.tkb` also gained routing for RP1 GEM Ethernet (`RP1_INT_ETH`, local
+interrupt 6, GIC INTID 166, level-triggered like UART0).
+`kernel/drivers/net/rp1_gem.tkb` enables RCOMP/TCOMP on the per-queue-0
+register bank it already used to mask everything at init
+(`GEM_IER(0) = 0x0600` -- `raspberrypi/linux`'s macb.h defines
+`GEM_IER(hw_q) = 0x0600 + (hw_q<<2)`; this GEM_GXL variant's queue 0
+does not appear to route through the legacy single-queue `MACB_IER` at
+0x28). Both `net_rx_wait()` (a bounded 10000-iteration tight spin) and
+`net_tx_complete()` (a bounded 1,000,000-iteration tight spin) now wait
+via `interrupt_wait()`, woken by a real GEM interrupt or the timer's
+tick. Their callers (`kernel/net/{arp,icmp,tcp}.tkb`) were deliberately
+left untouched -- they keep their own existing CNTPCT-based deadline/retry
+loops, which now just get to re-check regularly via the timer tick
+instead of only after a long busy-spin, preserving the exact same
+bounded-timeout semantics (including the silent-negative ARP/ICMP checks)
+with no per-caller changes needed.
+
+**The SYN-ACK-drop-recovery flake's actual root cause**: the previous
+entry's guess that GEM's polling-loop-that-tracks-its-own-retransmit-
+deadline shape was structurally entangled with the flake was wrong --
+this conversion left `kernel_tcp_accept_once`'s own `retry_ticks`/
+`TCP_RETRY_LIMIT` logic completely untouched, and the flake still
+reproduced. The real mechanism, found by working through what the 600ms
+budget is actually racing against: `scripts/run_kernel_hwtest_rpi5.sh`
+fired its first `curl` immediately after the earlier ARP/ICMP/TCP checks,
+without regard for how far the kernel's own single-threaded boot had
+gotten. If curl's first SYN arrived while the kernel was still busy with
+USB-ext2 provisioning (the previous entry's measured ~10x wall-clock
+variance), curl's own `--connect-timeout 1` clock was already running
+down before the kernel even looked at the packet, so the kernel's 600ms
+retransmit budget could complete too late for that specific curl
+invocation's own patience, even though the kernel's internal budget itself
+never changed. Fixed by having the harness wait for the kernel's own last
+pre-daemon log line (`httpd map: combined pages=331 ...`) before sending
+any curl attempt, and the last pre-fixture log line (`vm layout: ...`)
+before the userspace connected-I/O check -- test-harness-only changes,
+`kernel/net/tcp.tkb` untouched, no reduction in what either check proves
+(still the real daemon's real `accept()`, still a real dropped packet).
+Passed 3 consecutive real-hardware runs afterward. The userspace
+connected-I/O fixture (an ordinary, non-fault-injected connection) still
+needed its own outer retry budget widened from 20 to 60 attempts even with
+its own readiness wait; unlike the one-shot drop-recovery check it has no
+state to consume across retries, so widening its budget is a safe
+accommodation rather than a race workaround.
+
+A real RPi5 run passed all 15 kernel/rpi5 views three times in a row with
+GEM interrupt-driven for the entire boot. `make langcheck test linuxcheck`
+also passed; `examples/` was not touched. USB xHCI's own ~10x run-to-run
+variance in bulk-transfer retry counts (previous entry) remains
+uninvestigated at the protocol level.
+
 ### 2026-08-02: USB xHCI Disk I/O Goes Interrupt-Driven (GitHub Issue #187)
 
 Follow-up to this issue's UART0 milestone. `kernel/platform/rpi5/intc.tkb`
