@@ -6,7 +6,6 @@ private let mut image_page_indices: [usize; BOOT_PAGE_COUNT];
 private let mut image_l3_indices: [usize; BOOT_PAGE_COUNT];
 private let mut process_image_zero_page: [u8; PAGE_SIZE];
 private let mut clone_page_indices: [usize; 512];
-private let mut clone_parent_ptes: [usize; 512];
 private let mut clone_l3_indices: [usize; 512];
 private let mut clone_page_count: usize;
 private let mut clone_last_reaped_count: usize;
@@ -98,11 +97,11 @@ fn process_clone_vm_rollback(count: usize) {
     for i: usize in 0..<count {
         if (i < 512) {
             let l3_index: usize = clone_l3_indices[i];
-            let parent_pte: usize = clone_parent_ptes[i];
             let child_page: usize = clone_page_indices[i];
             if (l3_index < 512 && child_page < BOOT_PAGE_COUNT) {
-                user_pte_write(l3_index, parent_pte);
-                user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
+                address_space_pte_write(1, l3_index, 0);
+                address_space_tlb_invalidate(
+                    1, USER_TEXT_VA + l3_index * PAGE_SIZE);
                 page_transferred_release(child_page);
             }
         }
@@ -112,8 +111,9 @@ fn process_clone_vm_rollback(count: usize) {
 
 fn process_image_clone_vm_begin() -> ProcessCloneVmResult !{unsafe} {
     clone_page_count = 0;
+    address_space_clear_root(1);
     for l3_index: usize in 0..<512 {
-        let parent_pte: usize = user_pte_read(l3_index);
+        let parent_pte: usize = address_space_pte_read(0, l3_index);
         if (parent_pte != 0) {
             match page_alloc() {
                 PageAllocResult::OutOfMemory => {
@@ -133,14 +133,13 @@ fn process_image_clone_vm_begin() -> ProcessCloneVmResult !{unsafe} {
                             return ProcessCloneVmResult::OutOfMemory;
                         }
                         clone_l3_indices[slot] = l3_index;
-                        clone_parent_ptes[slot] = parent_pte;
                         let child_physical: usize =
                             page_physical_address(child_page);
                         let child_pte: usize = child_physical |
                             (parent_pte & 0xFFFFFF0000000FFF);
-                        user_pte_write(l3_index, child_pte);
-                        user_tlb_invalidate(
-                            USER_TEXT_VA + l3_index * PAGE_SIZE);
+                        address_space_pte_write(1, l3_index, child_pte);
+                        address_space_tlb_invalidate(
+                            1, USER_TEXT_VA + l3_index * PAGE_SIZE);
                         clone_page_indices[slot] =
                             page_owner_transfer_index(child_page);
                         clone_page_count = clone_page_count + 1;
@@ -163,6 +162,14 @@ fn process_image_clone_vm_begin() -> ProcessCloneVmResult !{unsafe} {
     return ProcessCloneVmResult::Copied;
 }
 
+fn process_image_activate_parent() {
+    address_space_activate_root(0);
+}
+
+fn process_image_activate_child() {
+    address_space_activate_root(1);
+}
+
 fn process_image_clone_vm_reap() -> ProcessCloneVmReapResult {
     match process_clone_vm_take() {
         ProcessCloneVmValue::Empty => {
@@ -171,6 +178,7 @@ fn process_image_clone_vm_reap() -> ProcessCloneVmReapResult {
         ProcessCloneVmValue::Ready(owner) => {
             let count: usize = clone_page_count;
             process_clone_vm_rollback(count);
+            process_image_activate_parent();
             process_clone_vm_owner_drop(owner);
             clone_last_reaped_count = count;
             return ProcessCloneVmReapResult::Reaped;

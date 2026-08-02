@@ -15,6 +15,22 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: Fork Populates Independent Live Address Spaces (GitHub Issue #188, Stage 8)
+
+The real `clone` VM path now copies parent slot 0 mappings into child slot 1
+instead of replacing the active global user L3 entries. Parent PTEs remain
+installed throughout the child's lifetime; rollback and reap clear only the
+child root and release only the copied child pages. ASID-qualified TLB
+invalidation is used for every child mapping change.
+
+The synchronous compatibility handoff now activates TTBR0/ASID 2 before the
+child resumes and restores TTBR0/ASID 1 while reaping the child. Thus the
+existing hardware workload exercises the same independent roots that the
+round-robin scheduler will select, including 331-page dynamic HTTPd children
+and the focused three-page fork fixture. This removes the last architectural
+blocker to keeping both contexts runnable at once; the next step can change
+selection policy without another VM representation change.
+
 ### 2026-08-02: Clone Contexts Join the Typed Process Slots (GitHub Issue #188, Stage 7)
 
 The live clone fixture now allocates its parent and child identities from the

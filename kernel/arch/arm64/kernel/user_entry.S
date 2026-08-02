@@ -329,7 +329,9 @@ el0_sync_entry:
     ldr     x0, [x9]
     bl      kernel_process_clone_context_install
     cbz     x0, .Lclone_context_fail
-    mov     sp, x0
+    mov     x19, x0
+    bl      process_image_activate_child
+    mov     sp, x19
     mov     x7, #0
     b       .Lsyscall_resume
 
