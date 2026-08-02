@@ -15,8 +15,10 @@ and the development container verifies the response with real `curl`.
 - Raspberry Pi firmware and TF-A hand control to a minimal AArch64 EL2 shim.
 - The shim performs required architectural setup and drops once to EL1.
 - The monolithic kernel and its drivers run at EL1.
-- RPi5 UART RX is dispatched through GIC-400 and RP1 MIP0/MSI-X interrupts;
-  Ethernet and USB remain polling-driven.
+- RPi5 UART RX, RP1 Cadence GEM Ethernet, and RP1 xHCI USB are all dispatched
+  through GIC-400 and RP1 MIP0/MSI-X interrupts; the ARM generic timer (PPI
+  #30) provides a periodic wake source so Ethernet's retry loops keep their
+  bounded-timeout behavior without polling.
 - Linux-compatible processes run at EL0 with RX text and RW+XN data, heap, and
   stack mappings.
 - Ordinary kernel services do not use EL2 HVC as an internal service layer.
@@ -241,9 +243,15 @@ claim of general Linux compatibility.
   kernel stacks, descriptor references, and deterministic child reaping.
 - [Issue #182](https://github.com/takibi-lang/takibi/issues/182) tracks ext2
   indirect blocks, multiple block groups, and nested directory operations.
-- [Issue #187](https://github.com/takibi-lang/takibi/issues/187) tracks the
-  interrupt-driven device conversion. GIC-400 dispatch and RP1 UART0 RX are
-  implemented; Cadence GEM Ethernet and xHCI USB remain polling-driven.
+- [Issue #187](https://github.com/takibi-lang/takibi/issues/187) completed
+  the interrupt-driven device conversion: GIC-400 dispatch, RP1 UART0 RX,
+  xHCI USB disk I/O, Cadence GEM Ethernet, and the ARM generic timer tick are
+  all implemented. USB xHCI's own real-hardware bulk-transfer retry counts
+  still vary roughly 10x run to run for reasons not yet root-caused at the
+  protocol level (see the issue for details).
+- [Issue #188](https://github.com/takibi-lang/takibi/issues/188) tracks
+  preemptive time-slicing across multiple processes, building on #187's
+  timer interrupt. Needs a design pass before implementation; not started.
 
 Unsupported Linux calls return `-ENOSYS`. Filesystem, TCP, process, and VM
 features continue to be added only when an executable workload requires them.

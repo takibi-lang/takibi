@@ -1,7 +1,11 @@
 // Raspberry Pi 5 RP1 Ethernet driver. RP1 contains a Cadence GEM_GXL
 // connected to the board PHY through RGMII. This first hardware milestone
-// deliberately uses one RX and one TX descriptor and polls both rings: it
-// proves PHY, MAC and DMA before adding interrupt/ring complexity.
+// deliberately uses one RX and one TX descriptor -- proving PHY, MAC and
+// DMA with a single-descriptor ring came first (GitHub issue #177), interrupt
+// -driven completion came later (GitHub issue #187: net_rx_wait()/
+// net_tx_complete() wait via interrupt_wait(), woken by a real GEM RX/TX
+// interrupt or kernel/platform/rpi5/timer_irq.tkb's periodic tick, not by
+// polling either ring).
 
 use "kernel/net/netconfig.tkb";
 
