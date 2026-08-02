@@ -11,6 +11,7 @@ const AARCH64_NR_EXIT: usize = 93;
 const AARCH64_NR_EXIT_GROUP: usize = 94;
 const AARCH64_NR_CLONE: usize = 220;
 const AARCH64_NR_TAKIBI_UART_RX_WAIT: usize = 451;
+const AARCH64_NR_TAKIBI_PARENT_PROGRESS: usize = 452;
 const LINUX_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
 const LINUX_EFAULT: usize = 0xFFFFFFFFFFFFFFF2;
 const LINUX_ENOSYS: usize = 0xFFFFFFFFFFFFFFDA;
@@ -612,6 +613,19 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         }
         kernel_boot_log("uart rx: scheduler child blocked\n");
         return (5, 0);
+    }
+
+    if (number == AARCH64_NR_TAKIBI_PARENT_PROGRESS) {
+        match kernel_process_uart_record_parent_progress() {
+            ProcessUartProgressResult::Invalid => {
+                return (1, LINUX_EINVAL);
+            }
+            ProcessUartProgressResult::Recorded => {
+                kernel_boot_log(
+                    "concurrency: parent progressed while child uart-blocked\n");
+                return (1, 0);
+            }
+        }
     }
 
     if (number == AARCH64_NR_WRITE) {

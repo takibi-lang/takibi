@@ -255,6 +255,21 @@ initial_user_payload:
     cmp     w10, #0x11
     b.ne    .Lscheduler_parent_asid_fail
 
+    /* Accepted only if this parent reached the end of its compute section
+     * while the child is still Blocked on UART RX. */
+    mov     x8, #452
+    svc     #0
+    cbnz    x0, .Luser_fail
+
+    /* Keep the independently-running parent live while the host observes the
+     * progress marker and delivers UART input. Timer preemption then selects
+     * the child after the IRQ changes it from Blocked to Ready. */
+    movz    x9, #0x8400
+    movk    x9, #0x17d7, lsl #16
+.Lclone_parent_after_progress:
+    subs    x9, x9, #1
+    b.ne    .Lclone_parent_after_progress
+
     adr     x1, .Luser_message
     mov     x2, #21
     mov     x0, #1

@@ -1,1 +1,1 @@
-^uart rx:
+^(uart rx:|concurrency:)

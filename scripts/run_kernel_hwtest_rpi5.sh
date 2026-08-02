@@ -200,12 +200,14 @@ if [ "$userspace_ready" -ne 1 ]; then
 fi
 
 # Watch concurrently with the connected-I/O client: the child reaches its
-# UART wait immediately after that socket exchange, while its runnable parent
-# deliberately continues the scheduler fixture. Polling only after the client
-# exits could let the parent finish before the input is delivered.
+# UART wait immediately after that socket exchange. Do not send input merely
+# because Blocked is visible: wait until the kernel has also verified that the
+# parent completed its compute section while that child remained Blocked.
 (
     for _wait in $(seq 1 6000); do
-        if LC_ALL=C grep -aFq 'uart rx: scheduler child blocked' "$UART_LOG"; then
+        if LC_ALL=C grep -aFq \
+                'concurrency: parent progressed while child uart-blocked' \
+                "$UART_LOG"; then
             printf 'irqtest\n' >"$SERIAL_DEV"
             exit 0
         fi
@@ -243,16 +245,16 @@ echo "[kernel/rpi5] userspace connected I/O passed"
 # to the kernel. Stop as soon as the stable final resource marker arrives,
 # while retaining a deadline for a hung kernel.
 #
-# The child publishes Blocked with IRQ delivery masked and logs the readiness
-# marker before returning through the scheduler. Send the line only after
-# that marker, then wait for the IRQ-driven Blocked -> Ready evidence.
+# The sender above waits for kernel-validated interleaving, then the completion
+# loop waits for the IRQ-driven Blocked -> Ready evidence.
 capture_deadline="${RPI5_KERNEL_CAPTURE_SECONDS:-90}"
 capture_elapsed=0
 capture_complete=0
 while [ "$capture_elapsed" -lt "$capture_deadline" ]; do
     sleep 1
     capture_elapsed=$((capture_elapsed + 1))
-    if LC_ALL=C grep -aFq 'uart rx: scheduler block+wake ok' "$UART_LOG"; then
+    if LC_ALL=C grep -aFq 'uart rx: scheduler block+wake ok' "$UART_LOG" &&
+            LC_ALL=C grep -aFq 'resources: pages=0' "$UART_LOG"; then
         capture_complete=1
         break
     fi

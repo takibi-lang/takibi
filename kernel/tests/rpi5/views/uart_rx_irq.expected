@@ -1,2 +1,3 @@
 uart rx: scheduler child blocked
+concurrency: parent progressed while child uart-blocked
 uart rx: scheduler block+wake ok
