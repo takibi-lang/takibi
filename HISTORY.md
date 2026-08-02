@@ -15,6 +15,32 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: RPi5 UART Capture Rejects Stale Readers (GitHub Issue #194)
+
+Two post-issue-#192 hardware runs appeared to show core0/core1 UART output
+interleaving and caused the harness to miss a complete HTTPd readiness marker.
+Code inspection disproved that explanation: core 1 only publishes its boot
+state and returns to the assembly park loop, and no interrupt handler emits TX
+output. The real device had an older `cat /dev-host/ttyACM0` process orphaned
+under PID 1. It competed with the current capture reader for tty bytes, while
+also writing into the newly truncated `uart.log` from its old file offset.
+That explains both the fragmented records and the large NUL-filled holes.
+
+The RPi5 kernel hardware runner now examines existing serial-device holders
+before configuring or capturing the tty. It removes only the exact safe stale
+shape produced by its own failed cleanup (same user, parent PID 1, exactly
+`cat SERIAL_DEV`), waits for it to exit, and rejects every other holder rather
+than stealing an interactive or foreign session. A synthetic orphan proved
+this cleanup path before the expected `stty` rejection on `/dev/zero`.
+
+With the real orphan removed, the next RPi5 run captured every boot record
+contiguously, recognized the HTTPd readiness marker immediately, and passed
+both real HTTP requests. The later pre-existing userspace connected-I/O
+fixture exhausted its network retry budget, but the UART log remained clean
+through that point. No kernel log lock or atomic primitive was added: there
+was no concurrent kernel writer to serialize, and doing so would have hidden
+the host-side ownership bug rather than fixing it.
+
 ### 2026-08-02: xHCI Interrupt Counts Were Not Bulk Retries (GitHub Issue #192)
 
 Temporary counters scoped exactly around the 1024-block USB provisioning copy

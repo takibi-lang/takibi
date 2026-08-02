@@ -32,6 +32,38 @@ if [ ! -f "$ELF" ]; then
     exit 1
 fi
 
+# A killed test runner cannot execute its EXIT trap. In that case its
+# background `cat SERIAL_DEV` survives under PID 1 and competes with the next
+# run for bytes from the same tty; each reader then receives only fragments,
+# and the orphan can also keep writing into a truncated uart.log at its old
+# file offset. Remove only this script's exact, same-user orphan shape. Never
+# take the device away from an interactive terminal or another program.
+for holder_pid in $(fuser "$SERIAL_DEV" 2>/dev/null || true); do
+    [ -r "/proc/$holder_pid/cmdline" ] || continue
+    if [ "$(stat -c %u "/proc/$holder_pid" 2>/dev/null || echo -1)" != "$(id -u)" ]; then
+        echo "error: RPi5 UART is held by another user (PID $holder_pid)" >&2
+        exit 1
+    fi
+    mapfile -d '' -t holder_argv <"/proc/$holder_pid/cmdline"
+    if [ "${#holder_argv[@]}" -eq 2 ] &&
+            [ "${holder_argv[0]##*/}" = cat ] &&
+            [ "${holder_argv[1]}" = "$SERIAL_DEV" ] &&
+            [ "$(awk '/^PPid:/{print $2}' "/proc/$holder_pid/status" 2>/dev/null || echo -1)" = 1 ]; then
+        kill "$holder_pid"
+        for _wait in $(seq 1 100); do
+            kill -0 "$holder_pid" 2>/dev/null || break
+            sleep 0.01
+        done
+        if kill -0 "$holder_pid" 2>/dev/null; then
+            echo "error: stale RPi5 UART reader did not exit (PID $holder_pid)" >&2
+            exit 1
+        fi
+        continue
+    fi
+    echo "error: RPi5 UART is already in use by PID $holder_pid" >&2
+    exit 1
+done
+
 stty -F "$SERIAL_DEV" 115200 raw -echo
 echo "[kernel/rpi5] resetting board"
 if ! "$REPO_ROOT/scripts/rpi5_jtag_reset.sh" --resident-image-unchanged >"$RESET_LOG" 2>&1; then
