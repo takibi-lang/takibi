@@ -26,7 +26,7 @@
 // non-scheduling frame, and the Lower-EL-AArch64 IRQ slot (an interrupt
 // while an EL0 process is actually executing) to issue #188's complete
 // resumable EL0 context frame. Both call rpi5_irq_dispatch; only the
-// Lower-EL path may use its returned frame SP for a later process switch.
+// Lower-EL path may replace its returned frame SP to switch processes.
 //
 // The RP1 interrupt number and level-triggered IACK protocol come from
 // raspberrypi/linux's dt-bindings/mfd/rp1.h and drivers/mfd/rp1.c. MIP0's

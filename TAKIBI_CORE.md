@@ -302,8 +302,10 @@ fn cond_wait(seq: *io i32, held: sink MutexGuard[lock],
 runtime result; `mutex_unlock` takes only `m`. The checker assigns an erased,
 rigid address identity to supported `&name` and `&name.field...` places, so a
 guard obtained for one mutex cannot be passed with another mutex pointer.
-`KGuard` uses the same contract. CPU/interrupt-state identity remains
-demand-led until multicore support creates that concrete need.
+`KGuard` uses the same contract. The kernel now brings up a second RPi5 core,
+but that core parks after its entry proof; no mutable kernel object is yet
+accessed concurrently by both cores. CPU/interrupt-state identity therefore
+remains demand-led until a concrete shared-mutation workload requires it.
 
 If an API instead wants `mutex_unlock(guard)` with no mutex argument, use a
 runtime package explicitly:

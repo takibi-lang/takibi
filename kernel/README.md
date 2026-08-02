@@ -15,6 +15,9 @@ and the development container verifies the response with real `curl`.
 - Raspberry Pi firmware and TF-A hand control to a minimal AArch64 EL2 shim.
 - The shim performs required architectural setup and drops once to EL1.
 - The monolithic kernel and its drivers run at EL1.
+- PSCI starts core 1 through its own stack and EL2-to-EL1 transition; it
+  validates shared-MMU visibility and then parks. Core 0 runs the current
+  process scheduler and all device interrupts.
 - RPi5 UART RX, RP1 Cadence GEM Ethernet, and RP1 xHCI USB are all dispatched
   through GIC-400 and RP1 MIP0/MSI-X interrupts; the ARM generic timer (PPI
   #30) provides a periodic wake source so Ethernet's retry loops keep their
@@ -24,6 +27,10 @@ and the development container verifies the response with real `curl`.
 - Ordinary kernel services do not use EL2 HVC as an internal service layer.
 - Page, mapping, process, file, socket, frame, and DMA lifetimes retain
   explicit affine or linear ownership.
+- A fixed two-slot process table gives each live process a dedicated kernel
+  stack, address-space root, ASID, and unified descriptor table. The generic
+  timer preempts EL0 round-robin once both slots are runnable; a UART RX wait
+  demonstrates a typed Blocked-to-Ready transition.
 - Kernel Takibi sources build with `--forbid-trap`; fallible internal
   operations return variants and convert to Linux `-errno` only at the syscall
   boundary.
@@ -251,15 +258,31 @@ claim of general Linux compatibility.
 - [Issue #187](https://github.com/takibi-lang/takibi/issues/187) completed
   the interrupt-driven device conversion: GIC-400 dispatch, RP1 UART0 RX,
   xHCI USB disk I/O, Cadence GEM Ethernet, and the ARM generic timer tick are
-  all implemented. USB xHCI's own real-hardware bulk-transfer retry counts
-  still vary roughly 10x run to run for reasons not yet root-caused at the
-  protocol level (see the issue for details).
-- [Issue #188](https://github.com/takibi-lang/takibi/issues/188) tracks
-  preemptive time-slicing across multiple processes, building on #187's
-  timer interrupt. Needs a design pass before implementation; not started.
+  all implemented. [Issue #192](https://github.com/takibi-lang/takibi/issues/192)
+  subsequently proved that the reported xHCI count variation was not a
+  bulk-transfer retry count: two scoped real-hardware runs completed exactly
+  6144 transfers and 2048 writes with zero phase failures, stalls, or retries.
+- [Issues #188 through #195](https://github.com/takibi-lang/takibi/issues/188)
+  completed the first bounded process/concurrency slice: a typed two-slot
+  process table, two address-space roots and ASIDs, unified per-process fd
+  tables, independent TCP connection slots, complete EL0 context switching,
+  timer-driven round-robin preemption, scheduler-aware UART blocking, PSCI
+  core-1 bring-up, and the reset/selection ordering fixes found by repeated
+  real-hardware execution. Core 1 currently proves autonomous EL1 entry and
+  shared-MMU visibility, then parks; processes still execute on core 0.
+- [Issue #174](https://github.com/takibi-lang/takibi/issues/174) tracks the
+  remaining user-memory safety boundary: typed access and complete mapping-
+  permission enforcement. Initial RX-text and RW+XN-data mappings already
+  exist, so its premise must be re-scoped against the current implementation.
+- [Issue #175](https://github.com/takibi-lang/takibi/issues/175) tracks a
+  deliberately correct Linux syscall subset with no false-success stubs.
 
-Unsupported Linux calls return `-ENOSYS`. Filesystem, TCP, process, and VM
-features continue to be added only when an executable workload requires them.
+Unrecognized Linux calls return `-ENOSYS`. A few calls reached by the pinned
+userspace still have deliberately bounded compatibility behavior (notably
+signal-state calls and `mprotect`); issue #175 tracks replacing every such
+partial-success path with correct subset semantics or a real error.
+Filesystem, TCP, process, and VM features continue to be added only when an
+executable workload requires them.
 
 ## Future kernel targets
 

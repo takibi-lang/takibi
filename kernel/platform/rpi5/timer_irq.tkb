@@ -10,8 +10,8 @@
 // named "the RPi5 scheduler port" as the reason they exist) but were never
 // declared or called from any .tkb file until now.
 //
-// Purpose here is narrower than a scheduler tick: RP1 GEM Ethernet's
-// net_rx_wait() needs a periodic wake source so it can use
+// This tick first existed as RP1 GEM Ethernet's periodic wake source:
+// net_rx_wait() needs it so it can use
 // interrupt_wait() without losing the bounded-timeout behavior its
 // callers' own CNTPCT-based deadline loops (kernel/net/{arp,icmp,tcp}.tkb,
 // unchanged) depend on -- including the silent-negative ARP/ICMP checks
@@ -19,7 +19,10 @@
 // wakes net_rx_wait() immediately when a packet actually arrives; this
 // timer guarantees a wake roughly every tick even when nothing does, so
 // the caller's own deadline check still runs regularly instead of net_rx_
-// wait() blocking indefinitely.
+// wait() blocking indefinitely. Issue #188 subsequently made the same PPI
+// the EL0 preemption tick; Current-EL ticks request a deferred switch at the
+// syscall-return boundary, while Lower-EL ticks may select another runnable
+// context immediately.
 
 extern fn set_cntp_tval(n: i32);
 extern fn enable_cntp();

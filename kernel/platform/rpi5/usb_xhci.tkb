@@ -270,14 +270,10 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 {
         let mut dw3: u32 = 0;
         // GitHub issue #187: waits via interrupt_wait() (race-free wfe/sev,
         // woken by xhci_irq_handler's interrupt_notify()) instead of
-        // polling with delay_us(). timeout_ms is now a bounded iteration
-        // count, not true wall-clock milliseconds -- no timer interrupt
-        // exists yet to force a periodic re-check if the controller truly
-        // never raises the expected event, so a permanently wedged/absent
-        // device would block here instead of timing out. No currently
-        // passing test exercises that path (a real USB drive is always
-        // attached), matching this project's other documented
-        // still-bounded-only-in-iterations hardware waits.
+        // polling with delay_us(). The generic timer now wakes this loop
+        // periodically, so timeout_ms remains a bounded iteration count
+        // rather than literal milliseconds but a permanently wedged device
+        // eventually returns 0 instead of sleeping forever.
         for i: usize in 0..<timeout_ms {
             dma_finish_rx(xhci_evt_ring as *align(64) u8, EVT_RING_TRBS * 16);
             let dw3_ptr: *u32 = (evt_ring_base + off + 12) as *u32;
