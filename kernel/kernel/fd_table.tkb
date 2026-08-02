@@ -1,0 +1,302 @@
+const PROCESS_CONTEXT_MAX: usize = 2;
+const PROCESS_FD_MAX: usize = 8;
+const PROCESS_FD_ENTRY_MAX: usize = 16;
+const SHARED_OBJECT_MAX: usize = 4;
+
+enum UnifiedFdKind: u8 { Empty; OpenFile; Listener; Connection; }
+private let mut fd_kind: [UnifiedFdKind; PROCESS_FD_ENTRY_MAX];
+private let mut fd_object: [usize; PROCESS_FD_ENTRY_MAX];
+private let mut fd_generation: [usize; PROCESS_FD_ENTRY_MAX];
+private let mut process_heap_break: [usize; PROCESS_CONTEXT_MAX];
+private let mut object_kind: [UnifiedFdKind; SHARED_OBJECT_MAX];
+private let mut object_generation: [usize; SHARED_OBJECT_MAX];
+private let mut object_references: [usize; SHARED_OBJECT_MAX];
+private let mut object_offset: [usize; SHARED_OBJECT_MAX];
+private let mut next_object_generation: usize = 1;
+
+must_use variant UnifiedFdResult { Invalid; Ok; }
+struct UnifiedObjectHandle {
+    private slot: {0..<SHARED_OBJECT_MAX as usize};
+    private generation: usize;
+}
+must_use variant UnifiedObjectResult {
+    Invalid;
+    Full;
+    Allocated(UnifiedObjectHandle);
+}
+must_use variant UnifiedOffsetResult { Missing; Found(usize); }
+
+fn unified_fd_table_init() {
+    for entry: usize in 0..<PROCESS_FD_ENTRY_MAX {
+        fd_kind[entry] = UnifiedFdKind::Empty;
+        fd_object[entry] = 0;
+        fd_generation[entry] = 0;
+    }
+    for object: usize in 0..<SHARED_OBJECT_MAX {
+        object_kind[object] = UnifiedFdKind::Empty;
+        object_generation[object] = 0;
+        object_references[object] = 0;
+        object_offset[object] = 0;
+    }
+    for process: usize in 0..<PROCESS_CONTEXT_MAX {
+        process_heap_break[process] = 0;
+    }
+    next_object_generation = 1;
+}
+
+fn unified_object_alloc(slot: {0..<SHARED_OBJECT_MAX as usize},
+                        kind: UnifiedFdKind) -> UnifiedObjectResult {
+    if (kind == UnifiedFdKind::Empty) {
+        return UnifiedObjectResult::Invalid;
+    }
+    if (object_kind[slot] != UnifiedFdKind::Empty) {
+        return UnifiedObjectResult::Full;
+    }
+    let generation: usize = next_object_generation;
+    next_object_generation = generation + 1;
+    object_kind[slot] = kind;
+    object_generation[slot] = generation;
+    object_references[slot] = 0;
+    object_offset[slot] = 0;
+    let mut handle: UnifiedObjectHandle = { slot, generation };
+    return UnifiedObjectResult::Allocated(handle);
+}
+
+fn unified_fd_index(process: usize, fd: usize) -> usize {
+    return process * PROCESS_FD_MAX + fd;
+}
+
+fn unified_fd_install(process: usize, fd: usize, object_value: usize,
+                      generation: usize) -> UnifiedFdResult {
+    if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX ||
+        object_value >= SHARED_OBJECT_MAX) {
+        return UnifiedFdResult::Invalid;
+    }
+    let index_value: usize = unified_fd_index(process, fd);
+    if (index_value < PROCESS_FD_ENTRY_MAX) {
+        let index: {0..<PROCESS_FD_ENTRY_MAX as usize} = index_value;
+        if (object_value < SHARED_OBJECT_MAX) {
+            let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
+            if (fd_kind[index] != UnifiedFdKind::Empty ||
+                object_kind[object] == UnifiedFdKind::Empty ||
+                object_generation[object] != generation) {
+                return UnifiedFdResult::Invalid;
+            }
+            fd_kind[index] = object_kind[object];
+            fd_object[index] = object;
+            fd_generation[index] = generation;
+            object_references[object] = object_references[object] + 1;
+            return UnifiedFdResult::Ok;
+        }
+    }
+    return UnifiedFdResult::Invalid;
+}
+
+fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult {
+    if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX) {
+        return UnifiedFdResult::Invalid;
+    }
+    let index_value: usize = unified_fd_index(process, fd);
+    if (index_value < PROCESS_FD_ENTRY_MAX) {
+        let index: {0..<PROCESS_FD_ENTRY_MAX as usize} = index_value;
+        let object_value: usize = fd_object[index];
+        if (fd_kind[index] != UnifiedFdKind::Empty &&
+            object_value < SHARED_OBJECT_MAX) {
+            let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
+            if (object_generation[object] != fd_generation[index] ||
+                object_references[object] == 0) {
+                return UnifiedFdResult::Invalid;
+            }
+            fd_kind[index] = UnifiedFdKind::Empty;
+            fd_object[index] = 0;
+            fd_generation[index] = 0;
+            object_references[object] = object_references[object] - 1;
+            if (object_references[object] == 0) {
+                object_kind[object] = UnifiedFdKind::Empty;
+                object_generation[object] = 0;
+            }
+            return UnifiedFdResult::Ok;
+        }
+    }
+    return UnifiedFdResult::Invalid;
+}
+
+fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult {
+    if (parent >= PROCESS_CONTEXT_MAX || child >= PROCESS_CONTEXT_MAX ||
+        parent == child) { return UnifiedFdResult::Invalid; }
+    for fd: usize in 0..<PROCESS_FD_MAX {
+        let source_value: usize = unified_fd_index(parent, fd);
+        let target_value: usize = unified_fd_index(child, fd);
+        if (source_value < PROCESS_FD_ENTRY_MAX &&
+            target_value < PROCESS_FD_ENTRY_MAX) {
+            let source: {0..<PROCESS_FD_ENTRY_MAX as usize} = source_value;
+            let target: {0..<PROCESS_FD_ENTRY_MAX as usize} = target_value;
+            if (fd_kind[target] != UnifiedFdKind::Empty) {
+                return UnifiedFdResult::Invalid;
+            }
+            if (fd_kind[source] != UnifiedFdKind::Empty) {
+                let object_value: usize = fd_object[source];
+                if (object_value < SHARED_OBJECT_MAX) {
+                    let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
+                    if (object_kind[object] != fd_kind[source] ||
+                        object_generation[object] != fd_generation[source] ||
+                        object_references[object] == 0) {
+                        return UnifiedFdResult::Invalid;
+                    }
+                } else {
+                    return UnifiedFdResult::Invalid;
+                }
+            }
+        } else {
+            return UnifiedFdResult::Invalid;
+        }
+    }
+    if (parent < PROCESS_CONTEXT_MAX && child < PROCESS_CONTEXT_MAX) {
+        let parent_index: {0..<PROCESS_CONTEXT_MAX as usize} = parent;
+        let child_index: {0..<PROCESS_CONTEXT_MAX as usize} = child;
+        process_heap_break[child_index] = process_heap_break[parent_index];
+    } else {
+        return UnifiedFdResult::Invalid;
+    }
+    for fd: usize in 0..<PROCESS_FD_MAX {
+        let source_value: usize = unified_fd_index(parent, fd);
+        let target_value: usize = unified_fd_index(child, fd);
+        if (source_value < PROCESS_FD_ENTRY_MAX &&
+            target_value < PROCESS_FD_ENTRY_MAX) {
+            let source: {0..<PROCESS_FD_ENTRY_MAX as usize} = source_value;
+            let target: {0..<PROCESS_FD_ENTRY_MAX as usize} = target_value;
+            fd_kind[target] = fd_kind[source];
+            fd_object[target] = fd_object[source];
+            fd_generation[target] = fd_generation[source];
+            if (fd_kind[source] != UnifiedFdKind::Empty) {
+                let value: usize = fd_object[source];
+                if (value < SHARED_OBJECT_MAX) {
+                    let object: {0..<SHARED_OBJECT_MAX as usize} = value;
+                    object_references[object] = object_references[object] + 1;
+                } else {
+                    return UnifiedFdResult::Invalid;
+                }
+            }
+        }
+    }
+    return UnifiedFdResult::Ok;
+}
+
+fn unified_fd_set_offset(process: usize, fd: usize, offset: usize)
+        -> UnifiedFdResult {
+    if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX) {
+        return UnifiedFdResult::Invalid;
+    }
+    let value: usize = unified_fd_index(process, fd);
+    if (value < PROCESS_FD_ENTRY_MAX) {
+        let index: {0..<PROCESS_FD_ENTRY_MAX as usize} = value;
+        let object_value: usize = fd_object[index];
+        if (fd_kind[index] == UnifiedFdKind::OpenFile &&
+            object_value < SHARED_OBJECT_MAX) {
+            let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
+            if (object_kind[object] == UnifiedFdKind::OpenFile &&
+                object_generation[object] == fd_generation[index]) {
+                object_offset[object] = offset;
+                return UnifiedFdResult::Ok;
+            }
+        }
+    }
+    return UnifiedFdResult::Invalid;
+}
+
+fn unified_fd_offset(process: usize, fd: usize) -> UnifiedOffsetResult {
+    if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX) {
+        return UnifiedOffsetResult::Missing;
+    }
+    let value: usize = unified_fd_index(process, fd);
+    if (value < PROCESS_FD_ENTRY_MAX) {
+        let index: {0..<PROCESS_FD_ENTRY_MAX as usize} = value;
+        let object_value: usize = fd_object[index];
+        if (fd_kind[index] == UnifiedFdKind::OpenFile &&
+            object_value < SHARED_OBJECT_MAX) {
+            let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
+            if (object_kind[object] == UnifiedFdKind::OpenFile &&
+                object_generation[object] == fd_generation[index]) {
+                return UnifiedOffsetResult::Found(object_offset[object]);
+            }
+        }
+    }
+    return UnifiedOffsetResult::Missing;
+}
+
+fn unified_fd_destroy(process: usize) -> UnifiedFdResult {
+    if (process >= PROCESS_CONTEXT_MAX) { return UnifiedFdResult::Invalid; }
+    for fd: usize in 0..<PROCESS_FD_MAX {
+        let value: usize = unified_fd_index(process, fd);
+        if (value < PROCESS_FD_ENTRY_MAX) {
+            let index: {0..<PROCESS_FD_ENTRY_MAX as usize} = value;
+            if (fd_kind[index] != UnifiedFdKind::Empty) {
+                match unified_fd_close(process, fd) {
+                    UnifiedFdResult::Invalid => {
+                        return UnifiedFdResult::Invalid;
+                    }
+                    UnifiedFdResult::Ok => {}
+                }
+            }
+        }
+    }
+    return UnifiedFdResult::Ok;
+}
+
+fn unified_fd_probe_install(fd: usize, result: UnifiedObjectResult) -> bool {
+    match result {
+        UnifiedObjectResult::Invalid => { return false; }
+        UnifiedObjectResult::Full => { return false; }
+        UnifiedObjectResult::Allocated(handle) => {
+            match unified_fd_install(0, fd, handle.slot, handle.generation) {
+                UnifiedFdResult::Invalid => { return false; }
+                UnifiedFdResult::Ok => { return true; }
+            }
+        }
+    }
+}
+
+fn unified_fd_table_probe() -> bool {
+    unified_fd_table_init();
+    process_heap_break[0] = 0x50000000;
+    if (unified_fd_probe_install(
+            3, unified_object_alloc(0, UnifiedFdKind::OpenFile)) == false ||
+        unified_fd_probe_install(
+            4, unified_object_alloc(1, UnifiedFdKind::Listener)) == false ||
+        unified_fd_probe_install(
+            5, unified_object_alloc(2, UnifiedFdKind::Connection)) == false) {
+        return false;
+    }
+    match unified_fd_clone(0, 1) {
+        UnifiedFdResult::Invalid => { return false; }
+        UnifiedFdResult::Ok => {}
+    }
+    match unified_fd_set_offset(1, 3, 9) {
+        UnifiedFdResult::Invalid => { return false; }
+        UnifiedFdResult::Ok => {}
+    }
+    let mut shared: bool = false;
+    match unified_fd_offset(0, 3) {
+        UnifiedOffsetResult::Missing => {}
+        UnifiedOffsetResult::Found(offset) => {
+            if (offset == 9) { shared = true; }
+        }
+    }
+    match unified_fd_close(1, 4) {
+        UnifiedFdResult::Invalid => { return false; }
+        UnifiedFdResult::Ok => {}
+    }
+    match unified_fd_destroy(1) {
+        UnifiedFdResult::Invalid => { return false; }
+        UnifiedFdResult::Ok => {}
+    }
+    match unified_fd_destroy(0) {
+        UnifiedFdResult::Invalid => { return false; }
+        UnifiedFdResult::Ok => {}
+    }
+    for object: usize in 0..<SHARED_OBJECT_MAX {
+        if (object_kind[object] != UnifiedFdKind::Empty ||
+            object_references[object] != 0) { return false; }
+    }
+    return shared;
+}

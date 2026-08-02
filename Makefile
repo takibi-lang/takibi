@@ -238,6 +238,7 @@ KERNEL_PAGE_TKB         := $(KERNEL_DIR)/mm/page.tkb
 KERNEL_ADDRESS_SPACE_TKB := $(KERNEL_DIR)/mm/address_space.tkb
 KERNEL_PROCESS_IMAGE_TKB := $(KERNEL_DIR)/mm/process_image.tkb
 KERNEL_PROCESS_TKB      := $(KERNEL_DIR)/kernel/process.tkb
+KERNEL_FD_TABLE_TKB     := $(KERNEL_DIR)/kernel/fd_table.tkb
 KERNEL_SYSCALL_TKB      := $(KERNEL_DIR)/kernel/syscall.tkb
 KERNEL_INITRAMFS_TKB    := $(KERNEL_DIR)/fs/initramfs.tkb
 KERNEL_ELF64_TKB        := $(KERNEL_DIR)/fs/elf64.tkb
@@ -259,6 +260,8 @@ KERNEL_TCP_TKB          := $(KERNEL_DIR)/net/tcp.tkb
 KERNEL_SOCKET_CAP_TKB   := $(KERNEL_DIR)/net/socket_capability.tkb
 KERNEL_RPI5_TIMER_EXTERN := $(KERNEL_DIR)/arch/arm64/kernel/timer_asm_extern.tkb
 KERNEL_RPI5_MAIN_O      := $(KERNEL_BUILD_DIR)/main.o
+
+$(KERNEL_RPI5_MAIN_O): $(KERNEL_FD_TABLE_TKB)
 KERNEL_RPI5_ELF         := $(KERNEL_BUILD_DIR)/kernel.elf
 
 $(KERNEL_BUILD_DIR):

@@ -15,6 +15,29 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: Unified Per-Process Descriptor Table Foundation (GitHub Issue #188, Stage 4)
+
+The two-process model now has one bounded descriptor namespace per process:
+eight entries each, backed by a four-entry shared-object table. Open files,
+listeners, and TCP connections use the same descriptor entry shape rather
+than growing separate process-local tables. Each entry records the shared
+object generation, and each shared object records its reference count, so a
+stale descriptor cannot alias a reused object slot.
+
+Clone copies the descriptor references and the process-local heap break while
+leaving an open-file offset in the shared object. The boot probe creates one
+object of each current kind, clones the parent table, changes the file offset
+through the child, observes the change through the parent, closes one child
+descriptor independently, and verifies that destroying both process tables
+reclaims every shared object. The table and probe compile under
+`--forbid-trap`; all runtime-selected indices are narrowed before access.
+
+This stage deliberately establishes the ownership and lifetime model without
+yet replacing the synchronous clone compatibility state in the existing
+syscall dispatcher. Switching syscall lookup and teardown to this table is
+the next integration step, where the concrete syscall metadata fields will
+be added as they are consumed.
+
 ### 2026-08-02: Two Static EL1 Address-Space Roots and Hardware ASIDs (GitHub Issue #188, Stage 3)
 
 The bounded two-process model now has two statically reserved EL1 translation

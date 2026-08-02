@@ -270,6 +270,11 @@ fn main() {
     } else {
         kernel_boot_log("address spaces: failed\n");
     }
+    if (unified_fd_table_probe()) {
+        kernel_boot_log("fd table: processes=2 fds=8 shared-offset refs clean\n");
+    } else {
+        kernel_boot_log("fd table: failed\n");
+    }
 
     match net_init() {
         NetInitResult::Failed => {

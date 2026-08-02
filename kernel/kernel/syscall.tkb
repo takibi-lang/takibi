@@ -4,6 +4,7 @@ use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/net/socket_capability.tkb";
 use "kernel/net/tcp.tkb";
+use "kernel/kernel/fd_table.tkb";
 
 const AARCH64_NR_WRITE: usize = 64;
 const AARCH64_NR_EXIT: usize = 93;
