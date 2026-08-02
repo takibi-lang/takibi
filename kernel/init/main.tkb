@@ -9,9 +9,46 @@ use "kernel/fs/ext2/ext2.tkb";
 use "kernel/platform/rpi5/usb_xhci.tkb";
 use "kernel/net/tcp.tkb";
 use "kernel/net/socket_capability.tkb";
+use "kernel/arch/arm64/boot/boot_extern.tkb";
 
 private let mut ext2_read_fixture: [u8; 32];
 private let mut ext2_symlink_fixture: [u8; 64];
+private let mut kernel_secondary_boot_state: io usize;
+
+must_use variant SecondaryBootResult {
+    Started;
+    UnexpectedStatus(usize);
+    NotStarted(usize);
+}
+
+// Reached only by core 1 after PSCI has installed the secondary entry point,
+// that entry has selected its private stack, and the shared EL1 page table is
+// active. The context value prevents a coincidental stale write from passing.
+fn kernel_secondary_main(context: usize, core_id: usize) {
+    if (context == 0x191 && core_id == 1) {
+        kernel_secondary_boot_state = 0x100 + core_id;
+        signal_fence();
+    }
+}
+
+fn kernel_secondary_boot_probe() -> SecondaryBootResult {
+    kernel_secondary_boot_state = 0;
+    signal_fence();
+    let status: usize = psci_cpu_on(
+        0x100, kernel_secondary_entry_address(), 0x191);
+    let start: i64 = read_cntpct();
+    let deadline_ticks: i64 = read_cntfrq();
+    while ((read_cntpct() - start) < deadline_ticks) {
+        signal_fence();
+        if (kernel_secondary_boot_state == 0x101) {
+            if (status == 0) {
+                return SecondaryBootResult::Started;
+            }
+            return SecondaryBootResult::UnexpectedStatus(status);
+        }
+    }
+    return SecondaryBootResult::NotStarted(status);
+}
 
 // GitHub issue #187 (follow-up to #181's "Interrupt-driven device
 // conversion ... follows this completed process milestone" note): a
@@ -261,6 +298,18 @@ fn main() {
     // this is safe now that both the Current-EL-SPx and Lower-EL-AArch64
     // IRQ vector slots are wired.
     platform_irq_init();
+
+    match kernel_secondary_boot_probe() {
+        SecondaryBootResult::Started => {
+            kernel_boot_log("smp bringup: core1 psci+el1+takibi ok\n");
+        }
+        SecondaryBootResult::UnexpectedStatus(status) => {
+            kernel_boot_log("smp bringup: core1 unexpected psci status\n");
+        }
+        SecondaryBootResult::NotStarted(status) => {
+            kernel_boot_log("smp bringup: core1 failed\n");
+        }
+    }
 
     if (scheduled_process_table_probe()) {
         kernel_boot_log("process table: slots=2 stacks=4096 generation reuse safe\n");

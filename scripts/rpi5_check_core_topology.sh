@@ -91,7 +91,7 @@ for core in 0 1 2 3; do
 
     aff1=$(( (mpidr >> 8) & 3 ))
     note=""
-    if [ "$mode" = "EL2H" ]; then
+    if [ "$mode" = "EL2H" ] || [ "$mode" = "EL1H" ]; then
         note="running takibi code"
     else
         note="parked in TF-A (never reached _start)"

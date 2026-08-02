@@ -1,0 +1,3 @@
+extern fn psci_cpu_on(target_affinity: usize, entry: usize,
+                      context: usize) -> usize;
+extern fn kernel_secondary_entry_address() -> usize;

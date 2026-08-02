@@ -29,5 +29,7 @@ SECTIONS {
         . += 0x10000;
         boot_stack_top = .;
         stack_top = boot_stack_top;
+        . += 0x4000;
+        secondary_stack_top = .;
     }
 }

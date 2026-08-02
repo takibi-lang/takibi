@@ -76,6 +76,35 @@ kernel_mmu_init:
     isb
     ret
 
+/* Install the primary's already-published kernel root on core 1. This must
+ * never rebuild or clear shared tables. */
+    .global kernel_mmu_init_secondary
+kernel_mmu_init_secondary:
+    movz    x0, #0xff00
+    msr     mair_el1, x0
+    movz    x0, #0x351b
+    orr     x0, x0, #(1 << 23)
+    movk    x0, #2, lsl #32
+    msr     tcr_el1, x0
+    adrp    x1, kernel_l1_0
+    add     x1, x1, :lo12:kernel_l1_0
+    mov     x2, #1
+    lsl     x2, x2, #48
+    orr     x1, x1, x2
+    msr     ttbr0_el1, x1
+    isb
+    tlbi    vmalle1
+    dsb     ish
+    isb
+    mrs     x0, sctlr_el1
+    orr     x0, x0, #1
+    orr     x0, x0, #(1 << 2)
+    orr     x0, x0, #(1 << 12)
+    bic     x0, x0, #(1 << 1)
+    msr     sctlr_el1, x0
+    isb
+    ret
+
 /* user_pte_write(index, value): one 4KB PTE in the 2MB user window. */
     .global user_pte_write
     .type user_pte_write, %function

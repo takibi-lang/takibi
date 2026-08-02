@@ -66,6 +66,69 @@ _start:
     wfe
     b       .Lpark
 
+/* PSCI enters a successfully started secondary in Non-secure EL2 with x0
+ * carrying the caller-supplied context. Unlike the JTAG loader, this path is
+ * equally usable when the same image is later loaded from SD/USB/network. */
+    .global kernel_secondary_entry
+kernel_secondary_entry:
+    msr     DAIFSet, #0xf
+    mov     x19, x0
+
+    adrp    x0, secondary_stack_top
+    add     x0, x0, :lo12:secondary_stack_top
+    mov     sp, x0
+
+    mrs     x0, cnthctl_el2
+    orr     x0, x0, #3
+    msr     cnthctl_el2, x0
+    mrs     x0, hcr_el2
+    orr     x0, x0, #(1 << 31)
+    msr     hcr_el2, x0
+
+    adrp    x0, el1_vectors
+    add     x0, x0, :lo12:el1_vectors
+    msr     vbar_el1, x0
+    adrp    x0, secondary_stack_top
+    add     x0, x0, :lo12:secondary_stack_top
+    msr     sp_el1, x0
+
+    mov     x0, #0x3c5
+    msr     spsr_el2, x0
+    adr     x0, .Lsecondary_el1
+    msr     elr_el2, x0
+    isb
+    eret
+
+.Lsecondary_el1:
+    mrs     x0, cpacr_el1
+    orr     x0, x0, #(3 << 20)
+    msr     cpacr_el1, x0
+    isb
+    bl      kernel_mmu_init_secondary
+    mov     x0, x19
+    mrs     x1, mpidr_el1
+    ubfx    x1, x1, #8, #2
+    bl      kernel_secondary_main
+.Lsecondary_park:
+    wfe
+    b       .Lsecondary_park
+
+    .global psci_cpu_on
+psci_cpu_on: /* fn(target_affinity, entry, context) -> usize */
+    mov     x3, x2
+    mov     x2, x1
+    mov     x1, x0
+    movz    x0, #0x0003
+    movk    x0, #0xc400, lsl #16
+    smc     #0
+    ret
+
+    .global kernel_secondary_entry_address
+kernel_secondary_entry_address:
+    adrp    x0, kernel_secondary_entry
+    add     x0, x0, :lo12:kernel_secondary_entry
+    ret
+
 /* All sixteen architectural vector slots lead to an evidence-preserving
  * fail-stop path except slot 8 (lower-EL AArch64 sync, EL0 syscalls) and
  * slots 5/9 (Current-EL SPx IRQ and Lower-EL AArch64 IRQ). x16 identifies
