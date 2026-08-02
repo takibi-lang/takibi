@@ -17,9 +17,6 @@ const LINUX_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
 const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
 const LINUX_EAGAIN: usize = 0xFFFFFFFFFFFFFFF5;
 
-enum KernelSocketState: u8 { Closed; Created; Bound; Listening; }
-enum KernelSocketFdKind: u8 { Empty; Listener; Connection; }
-
 const KERNEL_SOCKET_FD_MAX: usize = 8;
 
 private let mut syscall_ext2_mount: Ext2Mount;
@@ -29,13 +26,7 @@ private let mut syscall_open_calls: usize;
 private let mut syscall_read_calls: usize;
 private let mut syscall_file_write_calls: usize;
 private let mut syscall_close_calls: usize;
-private let mut syscall_socket_fd_kind: [KernelSocketFdKind; KERNEL_SOCKET_FD_MAX];
-private let mut syscall_socket_state: [KernelSocketState; KERNEL_SOCKET_FD_MAX];
-private let mut syscall_socket_port: [u16; KERNEL_SOCKET_FD_MAX];
-private let mut syscall_connection_slot: [usize; KERNEL_SOCKET_FD_MAX];
-private let mut syscall_connection_generation: [usize; KERNEL_SOCKET_FD_MAX];
 private let mut syscall_connection_open: [bool; TCP_CONNECTION_MAX];
-private let mut syscall_connection_references: [usize; TCP_CONNECTION_MAX];
 private let mut syscall_socket_calls: usize;
 private let mut syscall_bind_calls: usize;
 private let mut syscall_listen_calls: usize;
@@ -57,15 +48,7 @@ must_use variant KernelInetdAcceptResult { TimedOut; Accepted; }
 
 private let mut syscall_heap_start: usize;
 private let mut syscall_heap_limit: usize;
-private let mut clone_parent_socket_fd_kind: [KernelSocketFdKind; KERNEL_SOCKET_FD_MAX];
-private let mut clone_parent_socket_state: [KernelSocketState; KERNEL_SOCKET_FD_MAX];
-private let mut clone_parent_socket_port: [u16; KERNEL_SOCKET_FD_MAX];
-private let mut clone_parent_connection_slot: [usize; KERNEL_SOCKET_FD_MAX];
-private let mut clone_parent_connection_generation: [usize; KERNEL_SOCKET_FD_MAX];
-private let mut clone_parent_socket_buffer_length: [usize; TCP_CONNECTION_MAX];
-private let mut clone_parent_socket_buffer_offset: [usize; TCP_CONNECTION_MAX];
 private let mut clone_parent_inetd_mode: bool;
-private let mut clone_parent_inetd_response_length: [usize; TCP_CONNECTION_MAX];
 private let mut clone_file_state_live: bool;
 
 must_use variant KernelFdReapResult { Failed; Reaped; }
@@ -167,16 +150,8 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_file_write_calls = 0;
     syscall_close_calls = 0;
     tcp_connection_pool_init();
-    for fd: usize in 0..<KERNEL_SOCKET_FD_MAX {
-        syscall_socket_fd_kind[fd] = KernelSocketFdKind::Empty;
-        syscall_socket_state[fd] = KernelSocketState::Closed;
-        syscall_socket_port[fd] = 0;
-        syscall_connection_slot[fd] = 0;
-        syscall_connection_generation[fd] = 0;
-    }
     for connection_index: usize in 0..<TCP_CONNECTION_MAX {
         syscall_connection_open[connection_index] = false;
-        syscall_connection_references[connection_index] = 0;
         syscall_socket_buffer_length[connection_index] = 0;
         syscall_socket_buffer_offset[connection_index] = 0;
         syscall_inetd_response_length[connection_index] = 0;
@@ -203,56 +178,32 @@ fn kernel_syscall_clone_files_begin() -> UnifiedFdResult {
         }
         UnifiedFdResult::Ok => { clone_file_state_live = true; }
     }
-    for fd: usize in 0..<KERNEL_SOCKET_FD_MAX {
-        clone_parent_socket_fd_kind[fd] = syscall_socket_fd_kind[fd];
-        clone_parent_socket_state[fd] = syscall_socket_state[fd];
-        clone_parent_socket_port[fd] = syscall_socket_port[fd];
-        clone_parent_connection_slot[fd] = syscall_connection_slot[fd];
-        clone_parent_connection_generation[fd] =
-            syscall_connection_generation[fd];
-        if (syscall_socket_fd_kind[fd] == KernelSocketFdKind::Connection) {
-            let slot: usize = syscall_connection_slot[fd];
-            if (slot < TCP_CONNECTION_MAX) {
-                syscall_connection_references[slot] =
-                    syscall_connection_references[slot] + 1;
-            }
-        }
-    }
-    for connection_index: usize in 0..<TCP_CONNECTION_MAX {
-        clone_parent_socket_buffer_length[connection_index] =
-            syscall_socket_buffer_length[connection_index];
-        clone_parent_socket_buffer_offset[connection_index] =
-            syscall_socket_buffer_offset[connection_index];
-        clone_parent_inetd_response_length[connection_index] =
-            syscall_inetd_response_length[connection_index];
-    }
     clone_parent_inetd_mode = syscall_inetd_mode;
     return UnifiedFdResult::Ok;
 }
 
 fn kernel_connected_fd_is_open(fd: usize) -> bool {
-    if (fd >= 0 && fd < KERNEL_SOCKET_FD_MAX) {
-        let index: {0..<KERNEL_SOCKET_FD_MAX as usize} = fd;
-        return syscall_socket_fd_kind[index] == KernelSocketFdKind::Connection;
+    match unified_socket_lookup(kernel_syscall_process_slot(), fd,
+                                UnifiedFdKind::Connection) {
+        UnifiedSocketResult::Missing => { return false; }
+        UnifiedSocketResult::Found(handle) => { return true; }
     }
-    return false;
 }
 
 fn kernel_connected_fd_clear(fd: usize) {
-    if (fd >= 0 && fd < KERNEL_SOCKET_FD_MAX) {
-        let index: {0..<KERNEL_SOCKET_FD_MAX as usize} = fd;
-        syscall_socket_fd_kind[index] = KernelSocketFdKind::Empty;
-        syscall_connection_slot[index] = 0;
-        syscall_connection_generation[index] = 0;
+    match unified_fd_close(kernel_syscall_process_slot(), fd) {
+        UnifiedFdResult::Invalid => {}
+        UnifiedFdResult::Ok => {}
     }
 }
 
 fn kernel_connection_fd_lookup(fd: usize) -> KernelConnectionLookupResult {
-    if (fd >= 0 && fd < KERNEL_SOCKET_FD_MAX) {
-        let index: {0..<KERNEL_SOCKET_FD_MAX as usize} = fd;
-        if (syscall_socket_fd_kind[index] == KernelSocketFdKind::Connection) {
-          let slot_value: usize = syscall_connection_slot[index];
-          if (slot_value >= 0 && slot_value < TCP_CONNECTION_MAX) {
+    match unified_socket_lookup(kernel_syscall_process_slot(), fd,
+                                UnifiedFdKind::Connection) {
+        UnifiedSocketResult::Missing => {}
+        UnifiedSocketResult::Found(handle) => {
+          let slot_value: usize = unified_connection_slot(handle);
+          if (slot_value < TCP_CONNECTION_MAX) {
             let slot: {0..<TCP_CONNECTION_MAX as usize} = slot_value;
             return KernelConnectionLookupResult::Found(slot);
           }
@@ -262,55 +213,96 @@ fn kernel_connection_fd_lookup(fd: usize) -> KernelConnectionLookupResult {
 }
 
 fn kernel_socket_fd_alloc(first: usize) -> KernelSocketFdAllocResult {
-    let mut fd: usize = first;
-    while (fd < KERNEL_SOCKET_FD_MAX) {
-        if (fd >= 0 && fd < KERNEL_SOCKET_FD_MAX) {
-          let index: {0..<KERNEL_SOCKET_FD_MAX as usize} = fd;
-          if (syscall_socket_fd_kind[index] == KernelSocketFdKind::Empty) {
-            return KernelSocketFdAllocResult::Allocated(index);
-          }
+    match unified_fd_alloc(kernel_syscall_process_slot(), first) {
+        UnifiedFdAllocResult::Full => { return KernelSocketFdAllocResult::Full; }
+        UnifiedFdAllocResult::Allocated(fd) => {
+            return KernelSocketFdAllocResult::Allocated(fd);
         }
-        fd = fd + 1;
     }
-    return KernelSocketFdAllocResult::Full;
 }
 
 fn kernel_listener_fd_lookup(fd: usize) -> KernelListenerLookupResult {
     if (fd >= 0 && fd < KERNEL_SOCKET_FD_MAX) {
         let index: {0..<KERNEL_SOCKET_FD_MAX as usize} = fd;
-        if (syscall_socket_fd_kind[index] == KernelSocketFdKind::Listener) {
-            return KernelListenerLookupResult::Found(index);
+        match unified_socket_lookup(kernel_syscall_process_slot(), index,
+                                    UnifiedFdKind::Listener) {
+            UnifiedSocketResult::Missing => {}
+            UnifiedSocketResult::Found(handle) => {
+                return KernelListenerLookupResult::Found(index);
+            }
         }
     }
     return KernelListenerLookupResult::Missing;
 }
 
+fn kernel_listener_handle(fd: usize) -> UnifiedSocketResult {
+    return unified_socket_lookup(kernel_syscall_process_slot(), fd,
+                                 UnifiedFdKind::Listener);
+}
+
+fn kernel_listener_state(fd: usize) -> UnifiedListenerState {
+    match kernel_listener_handle(fd) {
+        UnifiedSocketResult::Missing => {
+            return UnifiedListenerState::Closed;
+        }
+        UnifiedSocketResult::Found(handle) => {
+            return unified_listener_state(handle);
+        }
+    }
+}
+
+fn kernel_listener_set_state(fd: usize, state: UnifiedListenerState) -> bool {
+    match kernel_listener_handle(fd) {
+        UnifiedSocketResult::Missing => { return false; }
+        UnifiedSocketResult::Found(handle) => {
+            match unified_listener_set_state(handle, state) {
+                UnifiedFdResult::Invalid => { return false; }
+                UnifiedFdResult::Ok => { return true; }
+            }
+        }
+    }
+}
+
+fn kernel_listener_port(fd: usize) -> u16 {
+    match kernel_listener_handle(fd) {
+        UnifiedSocketResult::Missing => { return 0; }
+        UnifiedSocketResult::Found(handle) => {
+            return unified_listener_port(handle);
+        }
+    }
+}
+
+fn kernel_listener_set_port(fd: usize, port: u16) -> bool {
+    match kernel_listener_handle(fd) {
+        UnifiedSocketResult::Missing => { return false; }
+        UnifiedSocketResult::Found(handle) => {
+            match unified_listener_set_port(handle, port) {
+                UnifiedFdResult::Invalid => { return false; }
+                UnifiedFdResult::Ok => { return true; }
+            }
+        }
+    }
+}
+
 fn kernel_connected_fd_duplicate(old_fd: usize, new_fd: usize) -> bool {
     if (old_fd >= 0 && old_fd < KERNEL_SOCKET_FD_MAX &&
         new_fd >= 0 && new_fd < KERNEL_SOCKET_FD_MAX) {
-        let old_index: {0..<KERNEL_SOCKET_FD_MAX as usize} = old_fd;
-        let new_index: {0..<KERNEL_SOCKET_FD_MAX as usize} = new_fd;
-        match kernel_connection_fd_lookup(old_index) {
-            KernelConnectionLookupResult::Missing => { return false; }
-            KernelConnectionLookupResult::Found(connection_index) => {
-                syscall_socket_fd_kind[new_index] =
-                    KernelSocketFdKind::Connection;
-                syscall_connection_slot[new_index] = connection_index;
-                syscall_connection_generation[new_index] =
-                    syscall_connection_generation[old_index];
-                syscall_connection_references[connection_index] =
-                    syscall_connection_references[connection_index] + 1;
-                return true;
-            }
+        match unified_fd_duplicate(kernel_syscall_process_slot(), old_fd,
+                                   new_fd) {
+            UnifiedFdResult::Invalid => { return false; }
+            UnifiedFdResult::Ok => { return true; }
         }
     }
     return false;
 }
 
 fn kernel_connection_fd_identity(fd: usize) -> usize {
-    if (fd >= 0 && fd < KERNEL_SOCKET_FD_MAX) {
-        let index: {0..<KERNEL_SOCKET_FD_MAX as usize} = fd;
-        return syscall_connection_generation[index];
+    match unified_socket_lookup(kernel_syscall_process_slot(), fd,
+                                UnifiedFdKind::Connection) {
+        UnifiedSocketResult::Missing => { return 0; }
+        UnifiedSocketResult::Found(handle) => {
+            return unified_connection_generation(handle);
+        }
     }
     return 0;
 }
@@ -350,29 +342,27 @@ fn kernel_connected_transport_release(slot: usize, generation: usize)
 }
 
 fn kernel_connected_descriptor_release(fd: usize) -> bool {
-    if (fd >= 0 && fd < KERNEL_SOCKET_FD_MAX) {
-      let index: {0..<KERNEL_SOCKET_FD_MAX as usize} = fd;
-      if (syscall_socket_fd_kind[index] == KernelSocketFdKind::Connection) {
-       match kernel_connection_fd_lookup(index) {
-        KernelConnectionLookupResult::Missing => { return false; }
-        KernelConnectionLookupResult::Found(found_slot) => {
-          let generation: usize = syscall_connection_generation[index];
-          if (syscall_connection_references[found_slot] == 0) { return false; }
-          syscall_connection_references[found_slot] =
-              syscall_connection_references[found_slot] - 1;
-          if (syscall_connection_references[found_slot] == 0 &&
-              syscall_connection_open[found_slot]) {
-              let closed: bool = kernel_connected_transport_release(
-                  found_slot, generation);
-              if (closed) { syscall_connection_open[found_slot] = false; }
-              return closed;
+    match unified_socket_lookup(kernel_syscall_process_slot(), fd,
+                                UnifiedFdKind::Connection) {
+      UnifiedSocketResult::Missing => { return false; }
+      UnifiedSocketResult::Found(handle) => {
+          let found_slot: usize = unified_connection_slot(handle);
+          let generation: usize = unified_connection_generation(handle);
+          let references: usize = unified_object_references(handle);
+          if (found_slot < TCP_CONNECTION_MAX) {
+              let slot: {0..<TCP_CONNECTION_MAX as usize} = found_slot;
+              if (references == 0) { return false; }
+              if (references == 1 && syscall_connection_open[slot]) {
+                  let closed: bool = kernel_connected_transport_release(
+                      slot, generation);
+                  if (closed) { syscall_connection_open[slot] = false; }
+                  return closed;
+              }
+              return true;
           }
-          return true;
-        }
-       }
+          return false;
       }
     }
-    return false;
 }
 
 fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
@@ -380,7 +370,7 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
         return KernelFdReapResult::Failed;
     }
     for fd: usize in 0..<KERNEL_SOCKET_FD_MAX {
-        if (syscall_socket_fd_kind[fd] == KernelSocketFdKind::Connection) {
+        if (kernel_connected_fd_is_open(fd)) {
             if (kernel_connected_descriptor_release(fd) == false) {
                 return KernelFdReapResult::Failed;
             }
@@ -391,41 +381,27 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
         UnifiedFdResult::Invalid => { return KernelFdReapResult::Failed; }
         UnifiedFdResult::Ok => {}
     }
-    for fd: usize in 0..<KERNEL_SOCKET_FD_MAX {
-        syscall_socket_fd_kind[fd] = clone_parent_socket_fd_kind[fd];
-        syscall_socket_state[fd] = clone_parent_socket_state[fd];
-        syscall_socket_port[fd] = clone_parent_socket_port[fd];
-        syscall_connection_slot[fd] = clone_parent_connection_slot[fd];
-        syscall_connection_generation[fd] =
-            clone_parent_connection_generation[fd];
-    }
-    for connection_index: usize in 0..<TCP_CONNECTION_MAX {
-        syscall_socket_buffer_length[connection_index] =
-            clone_parent_socket_buffer_length[connection_index];
-        syscall_socket_buffer_offset[connection_index] =
-            clone_parent_socket_buffer_offset[connection_index];
-        syscall_inetd_response_length[connection_index] =
-            clone_parent_inetd_response_length[connection_index];
-    }
     syscall_inetd_mode = clone_parent_inetd_mode;
     clone_file_state_live = false;
     return KernelFdReapResult::Reaped;
 }
 
 fn kernel_syscall_daemon_teardown() -> KernelDaemonTeardownResult {
-    if (syscall_socket_fd_kind[4] != KernelSocketFdKind::Listener ||
-        syscall_socket_state[4] != KernelSocketState::Listening ||
+    if (kernel_listener_state(4) != UnifiedListenerState::Listening ||
         kernel_syscall_file_is_open()) {
         return KernelDaemonTeardownResult::Invalid;
     }
     for connection_index: usize in 0..<TCP_CONNECTION_MAX {
-        if (syscall_connection_references[connection_index] != 0 ||
-            syscall_connection_open[connection_index]) {
+        if (syscall_connection_open[connection_index]) {
             return KernelDaemonTeardownResult::Invalid;
         }
     }
-    syscall_socket_fd_kind[4] = KernelSocketFdKind::Empty;
-    syscall_socket_state[4] = KernelSocketState::Closed;
+    match unified_fd_close(kernel_syscall_process_slot(), 4) {
+        UnifiedFdResult::Invalid => {
+            return KernelDaemonTeardownResult::Invalid;
+        }
+        UnifiedFdResult::Ok => {}
+    }
     syscall_socket_close_calls = syscall_socket_close_calls + 1;
     return KernelDaemonTeardownResult::Reclaimed;
 }
@@ -471,15 +447,22 @@ fn kernel_syscall_inetd_accept(port: u16)
                                             }
                                             syscall_inetd_mode = true;
                                             syscall_connection_open[slot] = true;
-                                            syscall_connection_references[slot] = 2;
-                                            syscall_socket_fd_kind[0] =
-                                                KernelSocketFdKind::Connection;
-                                            syscall_socket_fd_kind[1] =
-                                                KernelSocketFdKind::Connection;
-                                            syscall_connection_slot[0] = slot;
-                                            syscall_connection_slot[1] = slot;
-                                            syscall_connection_generation[0] = generation;
-                                            syscall_connection_generation[1] = generation;
+                                            match unified_connection_create(
+                                                    kernel_syscall_process_slot(),
+                                                    0, slot, generation) {
+                                                UnifiedFdResult::Invalid => {
+                                                    return KernelInetdAcceptResult::TimedOut;
+                                                }
+                                                UnifiedFdResult::Ok => {}
+                                            }
+                                            match unified_fd_duplicate(
+                                                    kernel_syscall_process_slot(),
+                                                    0, 1) {
+                                                UnifiedFdResult::Invalid => {
+                                                    return KernelInetdAcceptResult::TimedOut;
+                                                }
+                                                UnifiedFdResult::Ok => {}
+                                            }
                                             syscall_socket_buffer_length[slot] = 0;
                                             syscall_socket_buffer_offset[slot] = 0;
                                             syscall_inetd_response_length[slot] = 0;
@@ -516,19 +499,16 @@ fn kernel_syscall_socket_evidence() -> bool {
            syscall_listen_calls == 1 && syscall_accept_calls == 2 &&
            syscall_accept_capability_roundtrips == 2 &&
            syscall_connection_open[0] == false &&
-           syscall_connection_references[0] == 0 &&
            kernel_connected_fd_is_open(0) == false &&
            kernel_connected_fd_is_open(1) == false &&
            kernel_connected_fd_is_open(5) == false &&
            syscall_connection_open[1] == false &&
-           syscall_connection_references[1] == 0 &&
            kernel_connected_fd_is_open(6) == false &&
            syscall_connected_close_calls == 2 &&
            syscall_connected_read_calls == 3 &&
            syscall_connected_write_calls == 4 &&
            syscall_socket_close_calls == 1 &&
-           syscall_socket_state[4] == KernelSocketState::Closed &&
-           syscall_socket_port[4] == 8080;
+           kernel_listener_state(4) == UnifiedListenerState::Closed;
 }
 
 fn kernel_syscall_partial_write_evidence() -> bool {
@@ -1064,12 +1044,15 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         match kernel_listener_fd_lookup(x0) {
           KernelListenerLookupResult::Missing => {}
           KernelListenerLookupResult::Found(close_listener_fd) => {
-            if (syscall_socket_state[close_listener_fd] ==
-                    KernelSocketState::Closed) {
+            if (kernel_listener_state(close_listener_fd) ==
+                    UnifiedListenerState::Closed) {
               return (1, LINUX_EBADF);
             }
-            syscall_socket_fd_kind[close_listener_fd] = KernelSocketFdKind::Empty;
-            syscall_socket_state[close_listener_fd] = KernelSocketState::Closed;
+            match unified_fd_close(kernel_syscall_process_slot(),
+                                   close_listener_fd) {
+                UnifiedFdResult::Invalid => { return (1, LINUX_EBADF); }
+                UnifiedFdResult::Ok => {}
+            }
             syscall_socket_close_calls = syscall_socket_close_calls + 1;
             return (1, 0);
           }
@@ -1094,11 +1077,11 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         match kernel_socket_fd_alloc(4) {
           KernelSocketFdAllocResult::Full => { return (1, LINUX_EAGAIN); }
           KernelSocketFdAllocResult::Allocated(created_socket_fd) => {
-            syscall_socket_fd_kind[created_socket_fd] =
-                KernelSocketFdKind::Listener;
-            syscall_socket_state[created_socket_fd] = KernelSocketState::Created;
-            syscall_socket_port[created_socket_fd] = 0;
-            return (1, created_socket_fd);
+            match unified_listener_create(kernel_syscall_process_slot(),
+                                          created_socket_fd) {
+                UnifiedFdResult::Invalid => { return (1, LINUX_EAGAIN); }
+                UnifiedFdResult::Ok => { return (1, created_socket_fd); }
+            }
           }
         }
     }
@@ -1112,7 +1095,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 }
                 KernelListenerLookupResult::Found(found) => { found }
             };
-        if (syscall_socket_state[bind_fd] != KernelSocketState::Created ||
+        if (kernel_listener_state(bind_fd) != UnifiedListenerState::Created ||
             x2 < 16) { return (1, LINUX_EINVAL); }
         if (kernel_user_range_is_mapped(x1, x2) == false) {
             return (1, LINUX_EFAULT);
@@ -1135,10 +1118,14 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 address_index = address_index + 1;
             }
         }
-        syscall_socket_port[bind_fd] =
+        let bind_port: u16 =
             (((address[2] as u16) << 8) | (address[3] as u16));
-        if (syscall_socket_port[bind_fd] == 0) { return (1, LINUX_EINVAL); }
-        syscall_socket_state[bind_fd] = KernelSocketState::Bound;
+        if (bind_port == 0 ||
+            kernel_listener_set_port(bind_fd, bind_port) == false ||
+            kernel_listener_set_state(
+                bind_fd, UnifiedListenerState::Bound) == false) {
+            return (1, LINUX_EINVAL);
+        }
         return (1, 0);
     }
 
@@ -1151,10 +1138,13 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 }
                 KernelListenerLookupResult::Found(found) => { found }
             };
-        if (syscall_socket_state[listen_fd] != KernelSocketState::Bound) {
+        if (kernel_listener_state(listen_fd) != UnifiedListenerState::Bound) {
             return (1, LINUX_EINVAL);
         }
-        syscall_socket_state[listen_fd] = KernelSocketState::Listening;
+        if (kernel_listener_set_state(
+                listen_fd, UnifiedListenerState::Listening) == false) {
+            return (1, LINUX_EINVAL);
+        }
         return (1, 0);
     }
 
@@ -1177,8 +1167,8 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 }
                 KernelListenerLookupResult::Found(found) => { found }
             };
-        if (syscall_socket_state[accept_listener_fd] !=
-                KernelSocketState::Listening ||
+        if (kernel_listener_state(accept_listener_fd) !=
+                UnifiedListenerState::Listening ||
             (number == 242 && x3 != 0)) {
             return (1, LINUX_EINVAL);
         }
@@ -1201,7 +1191,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             }
             NetworkCapabilityTakeResult::Ready(ready) => {
                 match kernel_tcp_accept_once(
-                        owner, ready, syscall_socket_port[accept_listener_fd]) {
+                        owner, ready, kernel_listener_port(accept_listener_fd)) {
                     KernelTcpAcceptResult::TimedOut(next) => {
                         match network_capability_put(next) {
                             NetworkCapabilityPutResult::Conflict => {
@@ -1234,11 +1224,14 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                         return (1, LINUX_EINVAL);
                                     }
                                     syscall_connection_open[slot] = true;
-                                    syscall_connection_references[slot] = 1;
-                                    syscall_socket_fd_kind[connected_fd] =
-                                        KernelSocketFdKind::Connection;
-                                    syscall_connection_slot[connected_fd] = slot;
-                                    syscall_connection_generation[connected_fd] = generation;
+                                    match unified_connection_create(
+                                            kernel_syscall_process_slot(),
+                                            connected_fd, slot, generation) {
+                                        UnifiedFdResult::Invalid => {
+                                            return (1, LINUX_EAGAIN);
+                                        }
+                                        UnifiedFdResult::Ok => {}
+                                    }
                                     syscall_socket_buffer_length[slot] = 0;
                                     syscall_socket_buffer_offset[slot] = 0;
                                     return (1, connected_fd);

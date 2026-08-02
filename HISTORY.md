@@ -15,6 +15,26 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: Socket Descriptors Join the Unified FD Table (GitHub Issue #188, Stage 6)
+
+Listener and connected-socket descriptors now use the same per-process table
+as regular files. Listener state and port, plus a connection's transport slot
+and generation, live in generation-checked shared objects. Socket allocation,
+lookup, `dup3`, clone inheritance, close, and daemon teardown no longer use
+the parallel descriptor-kind, state, port, transport, or reference arrays.
+
+Descriptor references are now counted once by the shared-object table. A
+connection close inspects that count and releases the TCP transport only when
+the final descriptor reference disappears; closing an alias or reaping a
+child leaves the parent's transport live. The listener state is a closed enum
+rather than an integer sentinel, and the four shared-object slots remain the
+deliberate bound for the present listener plus two-connection workload and
+one possible regular file.
+
+The transport receive/response buffers remain keyed by the bounded physical
+TCP slot. They represent shared connection state rather than another fd
+namespace, so clone no longer snapshots and restores their offsets.
+
 ### 2026-08-02: File Syscalls and Heap State Join the Process Table (GitHub Issue #188, Stage 5)
 
 The syscall dispatcher now resolves regular-file descriptors through the

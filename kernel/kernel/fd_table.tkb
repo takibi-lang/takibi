@@ -4,6 +4,7 @@ const PROCESS_FD_ENTRY_MAX: usize = 16;
 const SHARED_OBJECT_MAX: usize = 4;
 
 enum UnifiedFdKind: u8 { Empty; OpenFile; Listener; Connection; }
+enum UnifiedListenerState: u8 { Closed; Created; Bound; Listening; }
 private let mut fd_kind: [UnifiedFdKind; PROCESS_FD_ENTRY_MAX];
 private let mut fd_object: [usize; PROCESS_FD_ENTRY_MAX];
 private let mut fd_generation: [usize; PROCESS_FD_ENTRY_MAX];
@@ -15,6 +16,10 @@ private let mut object_offset: [usize; SHARED_OBJECT_MAX];
 private let mut object_inode: [usize; SHARED_OBJECT_MAX];
 private let mut object_readable: [bool; SHARED_OBJECT_MAX];
 private let mut object_writable: [bool; SHARED_OBJECT_MAX];
+private let mut object_listener_state: [UnifiedListenerState; SHARED_OBJECT_MAX];
+private let mut object_port: [u16; SHARED_OBJECT_MAX];
+private let mut object_transport_slot: [usize; SHARED_OBJECT_MAX];
+private let mut object_transport_generation: [usize; SHARED_OBJECT_MAX];
 private let mut next_object_generation: usize = 1;
 
 must_use variant UnifiedFdResult { Invalid; Ok; }
@@ -32,6 +37,14 @@ must_use variant UnifiedFileResult {
     Missing;
     Found(UnifiedObjectHandle);
 }
+must_use variant UnifiedSocketResult {
+    Missing;
+    Found(UnifiedObjectHandle);
+}
+must_use variant UnifiedFdAllocResult {
+    Full;
+    Allocated({0..<PROCESS_FD_MAX as usize});
+}
 
 fn unified_fd_table_init() {
     for entry: usize in 0..<PROCESS_FD_ENTRY_MAX {
@@ -47,6 +60,10 @@ fn unified_fd_table_init() {
         object_inode[object] = 0;
         object_readable[object] = false;
         object_writable[object] = false;
+        object_listener_state[object] = UnifiedListenerState::Closed;
+        object_port[object] = 0;
+        object_transport_slot[object] = 0;
+        object_transport_generation[object] = 0;
     }
     for process: usize in 0..<PROCESS_CONTEXT_MAX {
         process_heap_break[process] = 0;
@@ -74,7 +91,7 @@ fn unified_process_heap_break(process: usize) -> UnifiedOffsetResult {
 
 fn unified_file_open(process: usize, fd: usize, inode: usize,
                      readable: bool, writable: bool) -> UnifiedFdResult {
-    match unified_object_alloc(0, UnifiedFdKind::OpenFile) {
+    match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
         UnifiedObjectResult::Invalid => { return UnifiedFdResult::Invalid; }
         UnifiedObjectResult::Full => { return UnifiedFdResult::Invalid; }
         UnifiedObjectResult::Allocated(handle) => {
@@ -92,6 +109,177 @@ fn unified_file_open(process: usize, fd: usize, inode: usize,
             }
         }
     }
+}
+
+fn unified_object_alloc_first(kind: UnifiedFdKind) -> UnifiedObjectResult {
+    for slot: usize in 0..<SHARED_OBJECT_MAX {
+        if (object_kind[slot] == UnifiedFdKind::Empty) {
+            return unified_object_alloc(slot, kind);
+        }
+    }
+    return UnifiedObjectResult::Full;
+}
+
+fn unified_fd_alloc(process: usize, first: usize) -> UnifiedFdAllocResult {
+    if (process >= PROCESS_CONTEXT_MAX) { return UnifiedFdAllocResult::Full; }
+    let mut fd: usize = first;
+    while (fd < PROCESS_FD_MAX) {
+        let value: usize = unified_fd_index(process, fd);
+        if (value < PROCESS_FD_ENTRY_MAX) {
+            let index: {0..<PROCESS_FD_ENTRY_MAX as usize} = value;
+            if (fd_kind[index] == UnifiedFdKind::Empty &&
+                fd < PROCESS_FD_MAX) {
+                let result: {0..<PROCESS_FD_MAX as usize} = fd;
+                return UnifiedFdAllocResult::Allocated(result);
+            }
+        }
+        fd = fd + 1;
+    }
+    return UnifiedFdAllocResult::Full;
+}
+
+fn unified_socket_lookup(process: usize, fd: usize,
+                         kind: UnifiedFdKind) -> UnifiedSocketResult {
+    if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX) {
+        return UnifiedSocketResult::Missing;
+    }
+    let value: usize = unified_fd_index(process, fd);
+    if (value < PROCESS_FD_ENTRY_MAX) {
+        let index: {0..<PROCESS_FD_ENTRY_MAX as usize} = value;
+        let object_value: usize = fd_object[index];
+        if (fd_kind[index] == kind && object_value < SHARED_OBJECT_MAX) {
+            let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
+            if (object_kind[object] == kind &&
+                object_generation[object] == fd_generation[index]) {
+                let mut handle: UnifiedObjectHandle = {
+                    object, object_generation[object]
+                };
+                return UnifiedSocketResult::Found(handle);
+            }
+        }
+    }
+    return UnifiedSocketResult::Missing;
+}
+
+fn unified_listener_create(process: usize, fd: usize) -> UnifiedFdResult {
+    match unified_object_alloc_first(UnifiedFdKind::Listener) {
+        UnifiedObjectResult::Invalid => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Full => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Allocated(handle) => {
+            object_listener_state[handle.slot] = UnifiedListenerState::Created;
+            object_port[handle.slot] = 0;
+            match unified_fd_install(process, fd, handle.slot,
+                                     handle.generation) {
+                UnifiedFdResult::Invalid => {
+                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    object_generation[handle.slot] = 0;
+                    return UnifiedFdResult::Invalid;
+                }
+                UnifiedFdResult::Ok => { return UnifiedFdResult::Ok; }
+            }
+        }
+    }
+}
+
+fn unified_connection_create(process: usize, fd: usize,
+                             transport_slot: usize,
+                             transport_generation: usize)
+        -> UnifiedFdResult {
+    match unified_object_alloc_first(UnifiedFdKind::Connection) {
+        UnifiedObjectResult::Invalid => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Full => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Allocated(handle) => {
+            object_transport_slot[handle.slot] = transport_slot;
+            object_transport_generation[handle.slot] = transport_generation;
+            match unified_fd_install(process, fd, handle.slot,
+                                     handle.generation) {
+                UnifiedFdResult::Invalid => {
+                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    object_generation[handle.slot] = 0;
+                    return UnifiedFdResult::Invalid;
+                }
+                UnifiedFdResult::Ok => { return UnifiedFdResult::Ok; }
+            }
+        }
+    }
+}
+
+fn unified_fd_duplicate(process: usize, old_fd: usize, new_fd: usize)
+        -> UnifiedFdResult {
+    if (process >= PROCESS_CONTEXT_MAX || old_fd >= PROCESS_FD_MAX ||
+        new_fd >= PROCESS_FD_MAX || old_fd == new_fd) {
+        return UnifiedFdResult::Invalid;
+    }
+    let old_value: usize = unified_fd_index(process, old_fd);
+    if (old_value < PROCESS_FD_ENTRY_MAX) {
+        let old_index: {0..<PROCESS_FD_ENTRY_MAX as usize} = old_value;
+        if (fd_kind[old_index] == UnifiedFdKind::Empty) {
+            return UnifiedFdResult::Invalid;
+        }
+        return unified_fd_install(process, new_fd, fd_object[old_index],
+                                  fd_generation[old_index]);
+    }
+    return UnifiedFdResult::Invalid;
+}
+
+fn unified_object_references(handle: UnifiedObjectHandle) -> usize {
+    if (object_generation[handle.slot] == handle.generation) {
+        return object_references[handle.slot];
+    }
+    return 0;
+}
+
+fn unified_listener_state(handle: UnifiedObjectHandle) -> UnifiedListenerState {
+    if (object_kind[handle.slot] == UnifiedFdKind::Listener &&
+        object_generation[handle.slot] == handle.generation) {
+        return object_listener_state[handle.slot];
+    }
+    return UnifiedListenerState::Closed;
+}
+
+fn unified_listener_set_state(handle: UnifiedObjectHandle,
+                              state: UnifiedListenerState)
+        -> UnifiedFdResult {
+    if (object_kind[handle.slot] == UnifiedFdKind::Listener &&
+        object_generation[handle.slot] == handle.generation) {
+        object_listener_state[handle.slot] = state;
+        return UnifiedFdResult::Ok;
+    }
+    return UnifiedFdResult::Invalid;
+}
+
+fn unified_listener_port(handle: UnifiedObjectHandle) -> u16 {
+    if (object_kind[handle.slot] == UnifiedFdKind::Listener &&
+        object_generation[handle.slot] == handle.generation) {
+        return object_port[handle.slot];
+    }
+    return 0;
+}
+
+fn unified_listener_set_port(handle: UnifiedObjectHandle, port: u16)
+        -> UnifiedFdResult {
+    if (object_kind[handle.slot] == UnifiedFdKind::Listener &&
+        object_generation[handle.slot] == handle.generation) {
+        object_port[handle.slot] = port;
+        return UnifiedFdResult::Ok;
+    }
+    return UnifiedFdResult::Invalid;
+}
+
+fn unified_connection_slot(handle: UnifiedObjectHandle) -> usize {
+    if (object_kind[handle.slot] == UnifiedFdKind::Connection &&
+        object_generation[handle.slot] == handle.generation) {
+        return object_transport_slot[handle.slot];
+    }
+    return SHARED_OBJECT_MAX;
+}
+
+fn unified_connection_generation(handle: UnifiedObjectHandle) -> usize {
+    if (object_kind[handle.slot] == UnifiedFdKind::Connection &&
+        object_generation[handle.slot] == handle.generation) {
+        return object_transport_generation[handle.slot];
+    }
+    return 0;
 }
 
 fn unified_file_lookup(process: usize, fd: usize) -> UnifiedFileResult {
