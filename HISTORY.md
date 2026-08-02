@@ -19,7 +19,9 @@ commands, directory layout, and day-to-day operating instructions, see
 
 The focused three-page EL0 fixture now enables the staged scheduler and runs
 parent and child in long syscall-free compute loops. Both write different
-bytes at the same user VA and retain distinct x19 and q8 signatures. The
+bytes at the same user VA and retain distinct x19, SP_EL0, and q8 signatures;
+resuming and completing each countdown also checks the saved PC and status
+flags. The
 acceptance line is emitted only after at least two real Lower-EL timer
 switches, a deferred Current-EL request, child status 42, and clean return to
 the surviving parent; separate fail-stop PCs identify GPR, SIMD, or ASID data

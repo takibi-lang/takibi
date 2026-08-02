@@ -755,7 +755,7 @@ fn main() {
                             kernel_boot_log("process clone: parent=1 child=2 exit=42 reaped\n");
                         }
                         if (kernel_process_scheduler_acceptance_evidence()) {
-                            kernel_boot_log("scheduler preempt: parent+child gpr+simd asid deferred ok\n");
+                            kernel_boot_log("scheduler preempt: parent+child gpr+sp+pc+simd asid deferred ok\n");
                         }
                         if (process_image_clone_vm_reaped_pages() == 3) {
                             kernel_boot_log("vm fork: private pages=3 reclaimed\n");

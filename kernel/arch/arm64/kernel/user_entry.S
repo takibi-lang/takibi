@@ -173,6 +173,7 @@ initial_user_payload:
     movk    x19, #0x9abc, lsl #16
     movk    x19, #0x5678, lsl #32
     movk    x19, #0x1234, lsl #48
+    mov     x22, sp
     movi    v8.16b, #0x5a
     movz    x9, #0xc200
     movk    x9, #0x0beb, lsl #16
@@ -185,6 +186,9 @@ initial_user_payload:
     movk    x20, #0x1234, lsl #48
     cmp     x19, x20
     b.ne    .Lscheduler_child_gpr_fail
+    mov     x23, sp
+    cmp     x22, x23
+    b.ne    .Lscheduler_child_sp_fail
     umov    x10, v8.d[0]
     movz    x11, #0x5a5a
     movk    x11, #0x5a5a, lsl #16
@@ -209,6 +213,7 @@ initial_user_payload:
     movk    x19, #0x9abc, lsl #16
     movk    x19, #0x5678, lsl #32
     movk    x19, #0x1234, lsl #48
+    mov     x22, sp
     movi    v8.16b, #0xa5
     movz    x9, #0x8400
     movk    x9, #0x17d7, lsl #16
@@ -221,6 +226,9 @@ initial_user_payload:
     movk    x20, #0x1234, lsl #48
     cmp     x19, x20
     b.ne    .Lscheduler_parent_gpr_fail
+    mov     x23, sp
+    cmp     x22, x23
+    b.ne    .Lscheduler_parent_sp_fail
     umov    x10, v8.d[0]
     movz    x11, #0xa5a5
     movk    x11, #0xa5a5, lsl #16
@@ -250,12 +258,16 @@ initial_user_payload:
     b       .Lscheduler_child_gpr_fail
 .Lscheduler_child_simd_fail:
     b       .Lscheduler_child_simd_fail
+.Lscheduler_child_sp_fail:
+    b       .Lscheduler_child_sp_fail
 .Lscheduler_child_asid_fail:
     b       .Lscheduler_child_asid_fail
 .Lscheduler_parent_gpr_fail:
     b       .Lscheduler_parent_gpr_fail
 .Lscheduler_parent_simd_fail:
     b       .Lscheduler_parent_simd_fail
+.Lscheduler_parent_sp_fail:
+    b       .Lscheduler_parent_sp_fail
 .Lscheduler_parent_asid_fail:
     b       .Lscheduler_parent_asid_fail
 .Luser_message:
