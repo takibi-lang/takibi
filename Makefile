@@ -212,6 +212,7 @@ KERNEL_RPI5_MMU_EXTERN  := $(KERNEL_DIR)/arch/arm64/mm/mmu_extern.tkb
 KERNEL_RPI5_USER_ENTRY_S := $(KERNEL_DIR)/arch/arm64/kernel/user_entry.S
 KERNEL_RPI5_USER_ENTRY_O := $(KERNEL_BUILD_DIR)/user_entry.o
 KERNEL_RPI5_USER_EXTERN  := $(KERNEL_DIR)/arch/arm64/kernel/user_entry_extern.tkb
+KERNEL_RPI5_USER_CONTEXT := $(KERNEL_DIR)/arch/arm64/kernel/user_context.inc
 KERNEL_USER_BUILD_DIR    := $(KERNEL_DIR)/build/user
 KERNEL_BUSYBOX_URL       := https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-static-1.37.0-r31.apk
 KERNEL_BUSYBOX_APK       := $(KERNEL_USER_BUILD_DIR)/busybox-static.apk
@@ -302,7 +303,7 @@ $(KERNEL_EXT2_IMAGE): $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE
 	e2fsck -fn $@.tmp >/dev/null
 	mv $@.tmp $@
 
-$(KERNEL_RPI5_ENTRY_O): $(KERNEL_RPI5_ENTRY_S) | $(KERNEL_BUILD_DIR)
+$(KERNEL_RPI5_ENTRY_O): $(KERNEL_RPI5_ENTRY_S) $(KERNEL_RPI5_USER_CONTEXT) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(KERNEL_RPI5_TIMER_O): $(KERNEL_RPI5_TIMER_S) | $(KERNEL_BUILD_DIR)
@@ -311,7 +312,7 @@ $(KERNEL_RPI5_TIMER_O): $(KERNEL_RPI5_TIMER_S) | $(KERNEL_BUILD_DIR)
 $(KERNEL_RPI5_MMU_O): $(KERNEL_RPI5_MMU_S) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
-$(KERNEL_RPI5_USER_ENTRY_O): $(KERNEL_RPI5_USER_ENTRY_S) | $(KERNEL_BUILD_DIR)
+$(KERNEL_RPI5_USER_ENTRY_O): $(KERNEL_RPI5_USER_ENTRY_S) $(KERNEL_RPI5_USER_CONTEXT) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(KERNEL_INITRAMFS_O): $(KERNEL_INITRAMFS_S) $(KERNEL_INITRAMFS_CPIO) | $(KERNEL_BUILD_DIR)

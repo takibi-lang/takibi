@@ -3,6 +3,8 @@
  * the system-register work Takibi cannot express and drops exactly once to
  * the monolithic EL1 kernel. It is not an EL2 service layer.
  */
+    .include "kernel/arch/arm64/kernel/user_context.inc"
+
     .section .text.boot, "ax"
     .global _start
     .type _start, %function
@@ -66,14 +68,11 @@ _start:
 
 /* All sixteen architectural vector slots lead to an evidence-preserving
  * fail-stop path except slot 8 (lower-EL AArch64 sync, EL0 syscalls) and
- * slots 5/9 (Current-EL SPx IRQ and Lower-EL AArch64 IRQ, GitHub issue
- * #187). x16 identifies the slot for the ones that still fail-stop. No slot
- * silently spins at an anonymous PC. Slots 5 and 9 both branch to the same
- * el1_irq_entry: EL1h always uses SP_EL1 for a taken exception regardless
- * of which EL it interrupted, so one generic frame-save/dispatch/restore
- * stub correctly handles an interrupt arriving either while this kernel's
- * own EL1 code runs (slot 5) or while an EL0 process is actually executing
- * (slot 9) -- see kernel/platform/rpi5/intc.tkb's header comment.
+ * slots 5/9 (Current-EL SPx IRQ and Lower-EL AArch64 IRQ). x16 identifies
+ * the slot for the ones that still fail-stop. No slot silently spins at an
+ * anonymous PC. Issue #188 separates the IRQ entries: slot 5 retains the
+ * lightweight non-scheduling kernel frame, while slot 9 creates the same
+ * complete resumable EL0 frame used by the syscall path.
  */
     .section .text.vectors, "ax"
     .align 11
@@ -88,14 +87,14 @@ el1_vectors:
     VECTOR 2
     VECTOR 3
     VECTOR 4
-    b       el1_irq_entry
+    b       el1_current_irq_entry
     .align  7
     VECTOR 6
     VECTOR 7
     mov     x16, #8
     b       el0_sync_entry
     .align  7
-    b       el1_irq_entry
+    b       el0_irq_entry
     .align  7
     VECTOR 10
     VECTOR 11
@@ -144,8 +143,8 @@ disable_irq:
  * shape as examples/common_rpi5/startup.S's rpi5_irq_entry, adapted to
  * EL1's own elr_el1/spsr_el1 since this kernel (unlike examples/common_rpi5)
  * runs its own code at EL1, not EL2. */
-    .global el1_irq_entry
-el1_irq_entry:
+    .global el1_current_irq_entry
+el1_current_irq_entry:
     sub     sp,  sp,  #272
     stp     x0,  x1,  [sp, #0]
     stp     x2,  x3,  [sp, #16]
@@ -191,6 +190,23 @@ el1_irq_entry:
     ldp     x28, x29, [sp, #224]
     ldp     x30, xzr, [sp, #240]
     add     sp,  sp,  #272
+    eret
+
+/* Lower-EL AArch64 IRQ entry. Unlike the Current-EL path above, this frame
+ * is a complete resumable EL0 context. rpi5_irq_dispatch still returns the
+ * same SP in this milestone; a later issue #188 step may select another
+ * process by returning its saved frame SP. */
+    .global el0_irq_entry
+el0_irq_entry:
+    sub     sp, sp, #EL0_CONTEXT_SIZE
+    EL0_CONTEXT_SAVE
+
+    mov     x0, sp
+    bl      rpi5_irq_dispatch
+    mov     sp, x0
+
+    EL0_CONTEXT_RESTORE
+    add     sp, sp, #EL0_CONTEXT_SIZE
     eret
 
     .section .bss, "aw", %nobits

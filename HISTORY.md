@@ -15,6 +15,26 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: One Complete EL0 Context ABI for Syscalls and Timer IRQs (GitHub Issue #188, Stage 1)
+
+The first scheduler milestone deliberately adds no process table and performs
+no context switch. It establishes the assembly boundary the later switch will
+consume. New `kernel/arch/arm64/kernel/user_context.inc` defines one 0x320-byte
+resumable EL0 frame containing x0-x30, SP_EL0, ELR_EL1/SPSR_EL1, q0-q31,
+FPSR, and FPCR, plus shared save/restore macros. The syscall path now uses
+those macros instead of carrying a second handwritten copy of the layout.
+
+The exception vector no longer routes Current-EL and Lower-EL IRQs through
+one lightweight entry. Current-EL IRQs retain the existing 272-byte GPR-only
+frame and can interrupt long-running syscalls without becoming schedulable
+kernel continuations. Lower-EL IRQs now build the complete shared EL0 frame,
+pass its SP to `rpi5_irq_dispatch`, accept the returned SP, and restore the
+complete context. The dispatcher still returns its input unchanged at this
+stage, so runtime behavior remains the issue #187 interrupt model; the new
+path only makes a future EL0 process selection mechanically possible. The
+Makefile tracks the shared include as a normal prerequisite of both assembly
+objects.
+
 ### 2026-08-02: Two-Entry Typed TCP Connection Pool and Descriptor Table (GitHub Issue #189)
 
 The standalone kernel no longer stores one TCP stream in a single set of

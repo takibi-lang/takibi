@@ -21,13 +21,12 @@
 // Unlike examples/common_rpi5, this standalone kernel runs its own code at
 // EL1 (not EL2) with EL0 user processes above it, so the taken exception is
 // EL1's own IRQ vector slots, not EL2's. kernel/arch/arm64/boot/entry.S
-// routes BOTH the Current-EL-SPx IRQ slot (an interrupt while this kernel's
-// own EL1 code is running, e.g. servicing a syscall) and the
-// Lower-EL-AArch64 IRQ slot (an interrupt while an EL0 process is actually
-// executing, e.g. between two of BusyBox's own syscalls) to the same
-// el1_irq_entry: EL1h always uses SP_EL1 for a taken exception regardless of
-// which EL it interrupted, so one generic frame-save/dispatch/restore stub
-// serves both slots without needing to know which one fired.
+// routes the Current-EL-SPx IRQ slot (an interrupt while this kernel's own
+// EL1 code is running, e.g. servicing a syscall) to a lightweight
+// non-scheduling frame, and the Lower-EL-AArch64 IRQ slot (an interrupt
+// while an EL0 process is actually executing) to issue #188's complete
+// resumable EL0 context frame. Both call rpi5_irq_dispatch; only the
+// Lower-EL path may use its returned frame SP for a later process switch.
 //
 // The RP1 interrupt number and level-triggered IACK protocol come from
 // raspberrypi/linux's dt-bindings/mfd/rp1.h and drivers/mfd/rp1.c. MIP0's

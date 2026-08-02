@@ -2,6 +2,8 @@
  * process lifetime remain in Takibi. run_initial_user returns to its EL1
  * caller after exit, so linear VM/page owners stay live on that call frame.
  */
+    .include "kernel/arch/arm64/kernel/user_context.inc"
+
     .section .rodata, "a"
     .align 4
 initial_user_payload:
@@ -264,48 +266,8 @@ run_initial_user:
     .global el0_sync_entry
     .type el0_sync_entry, %function
 el0_sync_entry:
-    sub     sp, sp, #0x320
-    stp     x0, x1, [sp, #0]
-    stp     x2, x3, [sp, #16]
-    stp     x4, x5, [sp, #32]
-    stp     x6, x7, [sp, #48]
-    stp     x8, x9, [sp, #64]
-    stp     x10, x11, [sp, #80]
-    stp     x12, x13, [sp, #96]
-    stp     x14, x15, [sp, #112]
-    stp     x16, x17, [sp, #128]
-    stp     x18, x19, [sp, #144]
-    stp     x20, x21, [sp, #160]
-    stp     x22, x23, [sp, #176]
-    stp     x24, x25, [sp, #192]
-    stp     x26, x27, [sp, #208]
-    stp     x28, x29, [sp, #224]
-    mrs     x9, sp_el0
-    stp     x30, x9, [sp, #240]
-    mrs     x9, elr_el1
-    mrs     x10, spsr_el1
-    stp     x9, x10, [sp, #256]
-    /* Linux preserves the complete user FP/SIMD state across syscalls. */
-    stp     q0, q1, [sp, #0x110]
-    stp     q2, q3, [sp, #0x130]
-    stp     q4, q5, [sp, #0x150]
-    stp     q6, q7, [sp, #0x170]
-    stp     q8, q9, [sp, #0x190]
-    stp     q10, q11, [sp, #0x1b0]
-    stp     q12, q13, [sp, #0x1d0]
-    stp     q14, q15, [sp, #0x1f0]
-    stp     q16, q17, [sp, #0x210]
-    stp     q18, q19, [sp, #0x230]
-    stp     q20, q21, [sp, #0x250]
-    stp     q22, q23, [sp, #0x270]
-    stp     q24, q25, [sp, #0x290]
-    stp     q26, q27, [sp, #0x2b0]
-    stp     q28, q29, [sp, #0x2d0]
-    stp     q30, q31, [sp, #0x2f0]
-    mrs     x9, fpsr
-    mrs     x10, fpcr
-    str     x9, [sp, #0x310]
-    str     x10, [sp, #0x318]
+    sub     sp, sp, #EL0_CONTEXT_SIZE
+    EL0_CONTEXT_SAVE
 
     /* GitHub issue #187: exception entry unconditionally masks DAIF, so
      * without this, any syscall whose handling reaches a real
@@ -313,8 +275,8 @@ el0_sync_entry:
      * forever -- its own xhci_irq_handler ISR can never be taken while I
      * is masked, so the paired wfe/sev never wakes. Safe to clear here:
      * a nested IRQ lands on this same SP_EL1 stack, strictly below this
-     * frame, and el1_irq_entry's own save/restore does not touch any of
-     * the state already saved above. .Lsyscall_resume's eret restores the
+     * frame, and el1_current_irq_entry's own save/restore does not touch
+     * any state already saved above. .Lsyscall_resume's eret restores the
      * ORIGINAL captured SPSR_EL1 (DAIF already masked for EL0t), and the
      * next exception entry re-masks DAIF regardless, so this only widens
      * the window during which THIS syscall's own handling can be
@@ -351,9 +313,9 @@ el0_sync_entry:
     str     x14, [x9]
     adrp    x10, clone_child_kernel_stack_end
     add     x10, x10, :lo12:clone_child_kernel_stack_end
-    sub     x10, x10, #0x320
+    sub     x10, x10, #EL0_CONTEXT_SIZE
     mov     x11, sp
-    mov     x12, #0x320
+    mov     x12, #EL0_CONTEXT_SIZE
 .Lclone_frame_copy:
     ldr     x13, [x11], #8
     str     x13, [x10], #8
@@ -361,7 +323,7 @@ el0_sync_entry:
     b.ne    .Lclone_frame_copy
     adrp    x10, clone_child_kernel_stack_end
     add     x10, x10, :lo12:clone_child_kernel_stack_end
-    sub     sp, x10, #0x320
+    sub     sp, x10, #EL0_CONTEXT_SIZE
     mov     x7, #0
     b       .Lsyscall_resume
 
@@ -373,54 +335,14 @@ el0_sync_entry:
     b       .Lsyscall_resume
 
 .Lsyscall_resume:
-    str     x7, [sp, #0]
-    ldp     x0, x1, [sp, #256]
-    msr     elr_el1, x0
-    msr     spsr_el1, x1
-    ldr     x11, [sp, #248]
-    msr     sp_el0, x11
-    ldp     q0, q1, [sp, #0x110]
-    ldp     q2, q3, [sp, #0x130]
-    ldp     q4, q5, [sp, #0x150]
-    ldp     q6, q7, [sp, #0x170]
-    ldp     q8, q9, [sp, #0x190]
-    ldp     q10, q11, [sp, #0x1b0]
-    ldp     q12, q13, [sp, #0x1d0]
-    ldp     q14, q15, [sp, #0x1f0]
-    ldp     q16, q17, [sp, #0x210]
-    ldp     q18, q19, [sp, #0x230]
-    ldp     q20, q21, [sp, #0x250]
-    ldp     q22, q23, [sp, #0x270]
-    ldp     q24, q25, [sp, #0x290]
-    ldp     q26, q27, [sp, #0x2b0]
-    ldp     q28, q29, [sp, #0x2d0]
-    ldp     q30, q31, [sp, #0x2f0]
-    ldr     x9, [sp, #0x310]
-    ldr     x10, [sp, #0x318]
-    msr     fpsr, x9
-    msr     fpcr, x10
-    ldp     x0, x1, [sp, #0]
-    ldp     x2, x3, [sp, #16]
-    ldp     x4, x5, [sp, #32]
-    ldp     x6, x7, [sp, #48]
-    ldp     x8, x9, [sp, #64]
-    ldp     x10, x11, [sp, #80]
-    ldp     x12, x13, [sp, #96]
-    ldp     x14, x15, [sp, #112]
-    ldp     x16, x17, [sp, #128]
-    ldp     x18, x19, [sp, #144]
-    ldp     x20, x21, [sp, #160]
-    ldp     x22, x23, [sp, #176]
-    ldp     x24, x25, [sp, #192]
-    ldp     x26, x27, [sp, #208]
-    ldp     x28, x29, [sp, #224]
-    ldp     x30, xzr, [sp, #240]
-    add     sp, sp, #0x320
+    str     x7, [sp, #EL0_CONTEXT_X0]
+    EL0_CONTEXT_RESTORE
+    add     sp, sp, #EL0_CONTEXT_SIZE
     eret
 
 .Lsyscall_exit:
     mov     x0, x7
-    add     sp, sp, #0x320
+    add     sp, sp, #EL0_CONTEXT_SIZE
     ldp     x19, x20, [sp, #0]
     ldp     x21, x22, [sp, #16]
     ldp     x23, x24, [sp, #32]
