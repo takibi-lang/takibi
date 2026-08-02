@@ -265,6 +265,11 @@ fn main() {
     } else {
         kernel_boot_log("process table: failed\n");
     }
+    if (process_address_space_probe()) {
+        kernel_boot_log("address spaces: roots=2 asids=1,2 same-va isolated\n");
+    } else {
+        kernel_boot_log("address spaces: failed\n");
+    }
 
     match net_init() {
         NetInitResult::Failed => {

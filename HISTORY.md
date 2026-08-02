@@ -15,6 +15,29 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: Two Static EL1 Address-Space Roots and Hardware ASIDs (GitHub Issue #188, Stage 3)
+
+The bounded two-process model now has two statically reserved EL1 translation
+roots. Each root owns a separate L1/L2/L3 chain while reproducing the same
+kernel RAM and device mappings; slot 0 uses hardware ASID 1 and slot 1 uses
+ASID 2. This intentionally spends six fixed 4KiB table pages rather than
+prematurely designing a general page-table allocator that a later VM redesign
+will replace.
+
+User leaf descriptors are now non-global. Leaving nG clear would make a cached
+same-VA translation ignore ASID and silently defeat the independent roots.
+Slot-qualified PTE access, ASID-qualified invalidation, root activation, and
+root clearing are exposed through the minimal assembly boundary. Existing
+single-process code continues to use slot 0 through its unchanged accessor
+names.
+
+`ProcessAddressSpaceOwner[space]`, `ActiveProcessAddressSpace[space]`, and
+`ProcessSpaceMappingOwner[space,page]` tie activation and VA access to the
+same static address-space identity. The RPi5 probe maps two distinct owned
+pages at `0x40000000`, writes 11 under ASID 1 and 22 under ASID 2, switches
+back, and observes both values intact before typed unmap/free teardown. The
+complete existing kernel workload also remains on slot 0 after the probe.
+
 ### 2026-08-02: Bounded Typed Process Table and Dedicated Kernel Stacks (GitHub Issue #188, Stage 2)
 
 The scheduler foundation now has a deliberately fixed two-slot process table,
