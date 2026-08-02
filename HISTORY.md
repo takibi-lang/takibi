@@ -15,6 +15,34 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: xHCI Interrupt Counts Were Not Bulk Retries (GitHub Issue #192)
+
+Temporary counters scoped exactly around the 1024-block USB provisioning copy
+separated IRQ entries, bulk transfers, CBW/data/CSW failures, CSW stalls, and
+whole-command retries. Two real RPi5 runs reported 12286 and 12287 IRQ entries,
+respectively, but both had exactly 6144 bulk transfers, 2048 successful sector
+writes, and zero failures, stalls, or retries in every phase. The transfer
+count is exact rather than incidental: the kernel's 1 KiB block copy becomes
+two 512-byte WRITE(10) commands per block, and each command has one CBW, data,
+and CSW bulk transfer (`1024 * 2 * 3 = 6144`).
+
+This falsifies issue #187's provisional explanation that its unscoped
+approximately 1000--10000 IRQ count variation represented USB retry variation.
+The old temporary counter was never committed, so its reset and sample points
+cannot be reconstructed; moreover, 1000--2000 IRQs cannot cover 6144
+interrupt-waited transfers. It was therefore not a complete measurement of the
+same provisioning interval. The high IRQ count is repeatable transport/IRQ
+behavior, not failed transfer attempts.
+
+As a control, clearing ERDP.EHB only after Event Ring consumption instead of
+also in the IRQ handler caused an immediate level-triggered IRQ storm and UART
+corruption on real hardware. Handler-side acknowledgement remains necessary
+for asynchronous events that arrive without a waiting consumer. Avoiding the
+roughly two handler entries per transfer would require a larger ISR/consumer
+ownership redesign and solves no demonstrated correctness or performance
+problem, so YAGNI leaves the production driver unchanged. All temporary
+profiling and UART output were removed after the investigation.
+
 ### 2026-08-02: Real Timer-Driven EL0 Preemption on RPi5 (GitHub Issue #188, Stage 10)
 
 The focused three-page EL0 fixture now enables the staged scheduler and runs
