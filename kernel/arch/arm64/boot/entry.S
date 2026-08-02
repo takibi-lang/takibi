@@ -66,12 +66,14 @@ _start:
 
 /* All sixteen architectural vector slots lead to an evidence-preserving
  * fail-stop path except slot 8 (lower-EL AArch64 sync, EL0 syscalls) and
- * slot 5 (Current-EL SPx IRQ, GitHub issue #187). x16 identifies the slot
- * for the ones that still fail-stop. No slot silently spins at an anonymous
- * PC. Lower-EL IRQ (an interrupt arriving while an EL0 process is running)
- * remains unhandled -- see kernel/platform/rpi5/intc.tkb's header comment
- * for why this kernel only unmasks DAIF.I once no EL0 process is executing
- * for the rest of the boot, so that slot never needs to fire.
+ * slots 5/9 (Current-EL SPx IRQ and Lower-EL AArch64 IRQ, GitHub issue
+ * #187). x16 identifies the slot for the ones that still fail-stop. No slot
+ * silently spins at an anonymous PC. Slots 5 and 9 both branch to the same
+ * el1_irq_entry: EL1h always uses SP_EL1 for a taken exception regardless
+ * of which EL it interrupted, so one generic frame-save/dispatch/restore
+ * stub correctly handles an interrupt arriving either while this kernel's
+ * own EL1 code runs (slot 5) or while an EL0 process is actually executing
+ * (slot 9) -- see kernel/platform/rpi5/intc.tkb's header comment.
  */
     .section .text.vectors, "ax"
     .align 11
@@ -93,7 +95,8 @@ el1_vectors:
     mov     x16, #8
     b       el0_sync_entry
     .align  7
-    VECTOR 9
+    b       el1_irq_entry
+    .align  7
     VECTOR 10
     VECTOR 11
     VECTOR 12
@@ -121,10 +124,11 @@ el1_exception_evidence:
 
 /* enable_irq()/disable_irq(): DAIF.I-only mask, matching
  * examples/common_rpi5/startup.S's spelling. kernel/platform/rpi5/intc.tkb's
- * irq_uart_rx_setup() calls enable_irq() once all GIC/MIP0/MSI-X routing is
- * configured; the PL011 peripheral itself stays source-masked (IMSC=0)
- * until irq_uart_rx_unmask() runs immediately after, so no interrupt can
- * actually arrive during the gap between the two calls. */
+ * platform_irq_init() calls enable_irq() once all GIC/MIP0/MSI-X routing for
+ * every currently-handled source is configured; UART0's PL011 peripheral
+ * itself stays source-masked (IMSC=0) until kernel/init/main.tkb's later
+ * irq_uart_rx_unmask() call, so no UART interrupt can actually arrive before
+ * then even though DAIF.I is already clear. */
     .global enable_irq
 enable_irq:
     msr     DAIFClr, #0x2

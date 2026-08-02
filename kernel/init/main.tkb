@@ -247,6 +247,19 @@ fn usb_ext2_create_check(mount: Ext2Mount) -> UsbExt2CreateCheckResult {
 fn main() {
     platform_init();
     kernel_boot_log("takibi kernel: EL1\n");
+
+    // GitHub issue #187: arms GIC/MIP0/MSI-X routing for UART0 and USB
+    // xHCI and unmasks DAIF.I globally. UART0's own PL011 source stays
+    // masked until this function's much later irq_uart_rx_unmask() call;
+    // USB xHCI's interrupter is already enabled by the time
+    // disk_initialize() runs below, so every disk_read/disk_write for the
+    // rest of this boot -- including USB xHCI calls interleaved with EL0
+    // BusyBox/HTTPd execution -- waits via interrupt_wait() instead of
+    // polling. See kernel/platform/rpi5/intc.tkb's header comment for why
+    // this is safe now that both the Current-EL-SPx and Lower-EL-AArch64
+    // IRQ vector slots are wired.
+    platform_irq_init();
+
     match net_init() {
         NetInitResult::Failed => {
             kernel_boot_log("rp1 gem: link failed\n");
@@ -746,15 +759,12 @@ fn main() {
         }
     }
 
-    // GitHub issue #187: every EL0 process for this boot has already run
-    // and exited above, so DAIF.I can be safely unmasked from here on --
-    // see kernel/platform/rpi5/intc.tkb's header comment for why that
-    // ordering matters (the Lower-EL-AArch64 IRQ vector slot, which would
-    // fire if an interrupt arrived during EL0 execution, is not
-    // implemented yet).
+    // GIC/MIP0/MSI-X routing and DAIF.I were already armed by
+    // platform_irq_init() near the top of this function. Only UART0's own
+    // PL011 source-level unmask was deferred until now, since the fixture
+    // below is the first and only consumer of UART input this boot.
     uart_set_rx_handler(kernel_uart_rx_isr);
     kernel_uart_rx_ring_reset();
-    irq_uart_rx_setup();
     irq_uart_rx_unmask();
     kernel_boot_log("uart rx: waiting for interrupt input\n");
     for rx_count: usize in 0..<8 {

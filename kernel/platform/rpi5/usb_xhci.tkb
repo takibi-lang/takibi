@@ -223,6 +223,37 @@ fn disk_io_ok(r: DiskIoResult) -> bool {
     }
 }
 
+// GitHub issue #187: called from kernel/platform/rpi5/intc.tkb's
+// rpi5_irq_dispatch on GIC INTID 191 (RP1_USBHOST0_0). IMAN.IP (bit 0) and
+// USBSTS.EINT (bit 3) are both write-1-to-clear per the xHCI spec; clearing
+// both here is what lets the controller assert the interrupt again for the
+// next event.
+//
+// ERDP bit 3 (Event Handler Busy, RW1C) also has to be cleared here, not
+// only inside usb_await_event()'s own consumer loop below. An asynchronous
+// event that arrives while nothing is calling usb_await_event() (a Port
+// Status Change Event queued by xhci_address_device()'s USB port reset,
+// while that function is still busy polling PORTSC for reset completion,
+// is the concrete case that hung on real hardware) still raises exactly
+// one interrupt and sets EHB, but its own ERDP is never advanced by
+// anyone, so EHB stays set. Per the xHCI spec the xHC will not assert a
+// further interrupt while EHB=1, so the NEXT real event (Address Device's
+// own Command Completion Event) produces no interrupt at all and
+// usb_await_event()'s interrupt_wait() blocks forever. Re-reading and
+// rewriting the CURRENT ERDP value (not advancing xhci_evt_idx, which
+// stays owned by usb_await_event()'s own consumer loop) clears EHB
+// unconditionally on every interrupt, so a still-unconsumed event never
+// blocks the next one's interrupt from firing.
+fn xhci_irq_handler() !{interrupt} {
+    let iman_ptr: *io u32 = RP1_USBHOST0_IR0 as *io u32;
+    *iman_ptr = *iman_ptr | 1; // IMAN.IP write-1-to-clear
+    let usbsts_ptr: *io u32 = (RP1_USBHOST0_OP + 0x04) as *io u32;
+    *usbsts_ptr = 1 << 3; // USBSTS.EINT write-1-to-clear
+    let erdp_lo_ptr: *io u32 = (RP1_USBHOST0_IR0 + 0x18) as *io u32;
+    *erdp_lo_ptr = *erdp_lo_ptr | (1 << 3); // ERDP.EHB write-1-to-clear
+    interrupt_notify();
+}
+
 // Consume one Event Ring entry of the requested TRB Type, skipping (and
 // logging) any other event type that arrives first -- port status
 // changes in particular are asynchronous and interleave freely.
@@ -237,6 +268,16 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 {
         let off: usize = xhci_evt_idx * 16;
         let mut seen: bool = false;
         let mut dw3: u32 = 0;
+        // GitHub issue #187: waits via interrupt_wait() (race-free wfe/sev,
+        // woken by xhci_irq_handler's interrupt_notify()) instead of
+        // polling with delay_us(). timeout_ms is now a bounded iteration
+        // count, not true wall-clock milliseconds -- no timer interrupt
+        // exists yet to force a periodic re-check if the controller truly
+        // never raises the expected event, so a permanently wedged/absent
+        // device would block here instead of timing out. No currently
+        // passing test exercises that path (a real USB drive is always
+        // attached), matching this project's other documented
+        // still-bounded-only-in-iterations hardware waits.
         for i: usize in 0..<timeout_ms {
             dma_finish_rx(xhci_evt_ring as *align(64) u8, EVT_RING_TRBS * 16);
             let dw3_ptr: *u32 = (evt_ring_base + off + 12) as *u32;
@@ -246,7 +287,7 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 {
                 dw3 = d3;
                 break;
             }
-            delay_us(1000);
+            interrupt_wait();
         }
         if (seen == false) {
             return 0;
@@ -261,8 +302,17 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 {
             xhci_evt_idx = 0;
             xhci_evt_cycle = 1 - xhci_evt_cycle;
         }
+        // GitHub issue #187: bit 3 (Event Handler Busy, RW1C) must be
+        // written as 1 here to clear it, or the xHC never asserts another
+        // interrupt after the first one -- harmless under the old
+        // polling-only driver (EHB only gates interrupt generation, not
+        // event-ring consumption) but a real hang once the interrupter is
+        // enabled: the first usb_await_event() succeeds, and every later
+        // one blocks in interrupt_wait() forever. The pointer's own low 4
+        // bits are already 0 (16-byte TRB alignment, single ERST segment),
+        // so ORing in EHB cannot corrupt them.
         let erdp_lo_ptr: *io u32 = (RP1_USBHOST0_IR0 + 0x18) as *io u32;
-        *erdp_lo_ptr = ((evt_ring_dma + xhci_evt_idx * 16) & 0xFFFFFFFF) as u32;
+        *erdp_lo_ptr = (((evt_ring_dma + xhci_evt_idx * 16) & 0xFFFFFFFF) as u32) | (1 << 3);
         let erdp_hi_ptr: *io u32 = (RP1_USBHOST0_IR0 + 0x1C) as *io u32;
         *erdp_hi_ptr = (((evt_ring_dma + xhci_evt_idx * 16) >> 32) & 0xFFFFFFFF) as u32;
 
@@ -839,6 +889,20 @@ fn xhci_setup_rings_and_start() -> bool {
     let erdp_hi_ptr: *io u32 = (RP1_USBHOST0_IR0 + 0x1C) as *io u32;
     *erdp_hi_ptr = ((evt_ring_dma >> 32) & 0xFFFFFFFF) as u32;
 
+    // GitHub issue #187: enable this primary interrupter (IMAN.IE, bit 1) so
+    // usb_await_event() can wait via interrupt_wait() instead of polling.
+    // USBCMD.INTE (bit 2, set alongside Run/Stop below) is the matching
+    // controller-wide enable. IMOD (Interrupt Moderation, at IR0+0x04) is
+    // zeroed explicitly rather than trusting its post-HCRST reset value --
+    // a nonzero moderation interval would add real per-interrupt latency
+    // across the many bulk transfers block_copy's 1024-block USB-ext2
+    // provisioning issues, which is unnecessary now that every wait is a
+    // real interrupt rather than a 1ms polling step.
+    let imod_ptr: *io u32 = (RP1_USBHOST0_IR0 + 0x04) as *io u32;
+    *imod_ptr = 0;
+    let iman_ptr: *io u32 = RP1_USBHOST0_IR0 as *io u32;
+    *iman_ptr = *iman_ptr | (1 << 1);
+
     let dcbaap_lo_ptr: *io u32 = (RP1_USBHOST0_OP + 0x30) as *io u32;
     *dcbaap_lo_ptr = (dcbaa_dma & 0xFFFFFFFF) as u32;
     let dcbaap_hi_ptr: *io u32 = (RP1_USBHOST0_OP + 0x34) as *io u32;
@@ -854,7 +918,7 @@ fn xhci_setup_rings_and_start() -> bool {
 
     let usbcmd_restart_ptr: *io u32 = RP1_USBHOST0_OP as *io u32;
     let usbcmd_fresh: u32 = *usbcmd_restart_ptr;
-    *usbcmd_restart_ptr = usbcmd_fresh | 1;
+    *usbcmd_restart_ptr = usbcmd_fresh | 1 | (1 << 2); // Run/Stop | INTE
 
     let mut run_confirmed: bool = false;
     for i: usize in 0..<100 {

@@ -15,6 +15,76 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: USB xHCI Disk I/O Goes Interrupt-Driven (GitHub Issue #187)
+
+Follow-up to this issue's UART0 milestone. `kernel/platform/rpi5/intc.tkb`
+gained GIC/MIP0/MSI-X routing for RP1_USBHOST0_0 (local interrupt 31, GIC
+INTID 191), confirmed against `raspberrypi/linux` (rp1.dtsi's `rp1_usb0`
+node is `IRQ_TYPE_EDGE_RISING`, unlike UART0's level-triggered source, so
+no per-vector RP1-level IACK write is needed for it) rather than ported
+from any examples/ precedent, since none exists for this device.
+`kernel/arch/arm64/boot/entry.S` now routes both the Current-EL-SPx IRQ
+slot and the Lower-EL-AArch64 IRQ slot to the same `el1_irq_entry`: EL1h
+always uses SP_EL1 for a taken exception regardless of which EL it
+interrupted, so one generic frame-save/dispatch/restore stub correctly
+serves an interrupt arriving either while this kernel's own EL1 code runs
+or while an EL0 process (BusyBox/HTTPd) is actually executing.
+`kernel/init/main.tkb` now arms every currently-handled GIC source and
+unmasks DAIF.I once, early (`platform_irq_init()`, before
+`disk_initialize()`), instead of only at the very end of the boot the way
+UART0's fixture did -- USB xHCI's disk I/O needs to be interrupt-driven for
+the entire rest of the boot, not just a final isolated proof.
+`kernel/platform/rpi5/usb_xhci.tkb`'s `usb_await_event()` now waits via
+`interrupt_wait()` instead of polling with `delay_us()`.
+
+Two real bugs surfaced only through real-hardware trial and error:
+
+1. `usb_await_event()`'s ERDP write never cleared bit 3 (Event Handler
+   Busy, RW1C) -- harmless under the old polling-only driver, but once the
+   interrupter was enabled the first wait succeeded and every later one
+   blocked forever, since the xHC will not assert a further interrupt
+   while EHB=1. Fixed by unconditionally clearing EHB inside
+   `xhci_irq_handler()` itself, not only in `usb_await_event()`'s own
+   consumer loop: an asynchronous event (the Port Status Change Event a
+   USB port reset queues, while `xhci_address_device()` is still busy
+   polling PORTSC for reset completion, was the concrete case that hung)
+   can arrive while nothing is calling `usb_await_event()` to clear it
+   otherwise.
+2. `el0_sync_entry` (`kernel/arch/arm64/kernel/user_entry.S`'s SVC handler)
+   never re-enabled DAIF.I after exception entry unconditionally masked
+   it, so any syscall whose handling reached `disk_read`/`disk_write` ->
+   `usb_await_event` -> `interrupt_wait()` blocked forever: the ISR could
+   never be taken while I was masked. Fixed with one `msr DAIFClr, #0x2`
+   right after the syscall frame is saved.
+
+With both fixed, a real RPi5 run passes all 15 kernel/rpi5 views
+(`make kernelcheck-rpi5`), including both BusyBox HTTPd curls (byte-exact
+body compare) and the userspace connected-I/O test, with real USB disk I/O
+running interrupt-driven for the entire boot. `make langcheck test
+linuxcheck` also passed; `examples/` was not touched.
+
+**Known intermittent regression**: `kernel/net/tcp.tkb`'s
+`kernel_tcp_accept_once` has a pre-existing retry_ticks/TCP_RETRY_LIMIT
+race (see this file's "Kernel TCP Retry Timing" history) between the
+kernel's own 600ms SYN-ACK retransmit budget and curl's 1-second
+connect-timeout. Real-hardware measurement found the elapsed time and
+interrupt count to reach the HTTPd fixture varying roughly 10x between
+otherwise-identical runs (~1000-2000 xHCI interrupts / 10-15s vs.
+~10000+ interrupts / 30+s) for the same 1024-block USB-ext2 provisioning
+step -- almost certainly real bulk-transfer retries whose frequency is
+sensitive to interrupt-driven vs. polling I/O timing. This intermittently
+starves the 600ms window, so the `httpd_loader` view's `httpd server:
+syn-ack drop retransmit ok` line goes missing on some runs (3 consecutive
+real-hardware failures were observed, then one clean pass) with no other
+functional regression. `kernel/net/tcp.tkb`'s timing constants were
+deliberately left untouched rather than widened again as a standalone
+workaround: `kernel_tcp_accept_once`'s polling-loop-that-also-tracks-its-
+own-retransmit-deadline shape is exactly what RP1 GEM Ethernet's own
+interrupt-driven conversion (this issue's remaining out-of-scope item,
+needing a companion ARM generic-timer interrupt for bounded waits) will
+need to redesign anyway; the plan is to revisit this flake as part of
+that follow-up instead of patching it twice.
+
 ### 2026-08-01: kernel/ Gets Real GIC-400 IRQ Dispatch; UART RX Goes Interrupt-Driven (GitHub Issue #187)
 
 Follow-up to #181's closing note that interrupt-driven device conversion

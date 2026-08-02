@@ -277,6 +277,20 @@ el0_sync_entry:
     str     x9, [sp, #0x310]
     str     x10, [sp, #0x318]
 
+    /* GitHub issue #187: exception entry unconditionally masks DAIF, so
+     * without this, any syscall whose handling reaches a real
+     * interrupt_wait() (RP1 USB xHCI's disk I/O completion) blocks
+     * forever -- its own xhci_irq_handler ISR can never be taken while I
+     * is masked, so the paired wfe/sev never wakes. Safe to clear here:
+     * a nested IRQ lands on this same SP_EL1 stack, strictly below this
+     * frame, and el1_irq_entry's own save/restore does not touch any of
+     * the state already saved above. .Lsyscall_resume's eret restores the
+     * ORIGINAL captured SPSR_EL1 (DAIF already masked for EL0t), and the
+     * next exception entry re-masks DAIF regardless, so this only widens
+     * the window during which THIS syscall's own handling can be
+     * interrupted. */
+    msr     DAIFClr, #0x2
+
     mrs     x0, esr_el1
     ldr     x1, [sp, #64]
     ldr     x2, [sp, #0]
