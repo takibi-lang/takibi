@@ -357,10 +357,14 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
     }
     dma_prepare_tx(gem_tx_desc as *u8, 64);
     gem_write(0x00, gem_read(0x00) | (1 << 9));
-    for i: i32 in 0..<1000000 {
+    // GitHub issue #187: matches net_tx_complete()'s own conversion --
+    // waits via interrupt_wait() (real TCOMP interrupt or the periodic
+    // timer tick) instead of a tight CPU spin, bounded the same way.
+    for i: i32 in 0..<1000 {
         dma_finish_rx(gem_tx_desc as *align(64) u8, 64);
         if (slot == 0 && (gem_tx_desc[1] & (1 << 31)) != 0) { break; }
         if (slot == 1 && (gem_tx_desc[5] & (1 << 31)) != 0) { break; }
+        interrupt_wait();
     }
     return view NetRxCanAcquire;
 }
