@@ -321,6 +321,12 @@ fn main() {
     } else {
         kernel_boot_log("address spaces: failed\n");
     }
+    if (user_memory_boundary_probe()) {
+        kernel_boot_log(
+            "user memory: overflow+cross-page+permission+mprotect enforced\n");
+    } else {
+        kernel_boot_log("user memory: failed\n");
+    }
     if (unified_fd_table_probe()) {
         kernel_boot_log("fd table: processes=2 fds=8 shared-offset refs clean\n");
     } else {

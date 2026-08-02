@@ -462,7 +462,9 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
         let header: *KernelElf64ProgramHeader =
             header_address as *KernelElf64ProgramHeader;
         if (header.segment_type == ELF_PT_LOAD) {
-            if (header.flags != 5 && header.flags != 6) {
+            // PF_R=4 (rodata), PF_R|PF_X=5 (text), PF_R|PF_W=6 (data). A
+            // writable+executable combination is never accepted.
+            if (header.flags != 4 && header.flags != 5 && header.flags != 6) {
                 process_image_cleanup(mapped);
                 return ProcessImageSegmentsResult::Invalid;
             }
@@ -501,6 +503,9 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
                                     if (header.flags == 5) {
                                         flags = USER_TEXT_RX_FLAGS;
                                         user_code_sync(phys, PAGE_SIZE);
+                                    }
+                                    if (header.flags == 4) {
+                                        flags = USER_RODATA_R_FLAGS;
                                     }
                                     user_pte_write(l3_index, phys | flags);
                                     user_tlb_invalidate(

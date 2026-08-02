@@ -1,0 +1,290 @@
+use "kernel/mm/page.tkb";
+use "kernel/mm/address_space.tkb";
+
+// The single dynamically-writable L3 window: see kernel/mm/address_space.tkb
+// (USER_TEXT_VA) and issue #159's note that today's kernel has exactly one
+// such window per address-space slot.
+const USER_RANGE_WINDOW: usize = 0x200000;
+const USER_RANGE_MAX_INDEX: usize = 512;
+
+// Isolates AP/UXN/PXN/AF/nG attribute bits from the physical address in a
+// live PTE; same mask already used by user_layout_is_correct() below.
+const USER_PERMISSION_MASK: usize = 0xFFE0000000000FFF;
+const USER_PAGE_PHYS_MASK: usize = 0x0000FFFFFFFFF000;
+
+// L3 index used by user_memory_boundary_probe()'s own throwaway page, chosen
+// outside the live process's own layout (text starts at index 0; heap/stack
+// occupy the top of the window).
+const USER_PROBE_L3_INDEX: usize = 500;
+
+enum UserAccessMode: u8 { Read; Write; }
+
+// Proof that [address, address+length) has already been validated against
+// the active process's page table for the requested access kind. Private
+// fields mean only this file's own constructor (user_range_check) can
+// produce one, so a syscall body can no longer manufacture a *u8 out of a
+// raw integer without going through validation first.
+struct UserRange {
+    private address: usize;
+    private length: usize;
+}
+
+must_use variant UserRangeResult { Fault; Ok(UserRange); }
+
+fn user_page_writable(pte: usize) -> bool {
+    return pte != 0 && (pte & USER_PERMISSION_MASK) == USER_RW_XN_FLAGS;
+}
+
+fn user_page_readable(pte: usize) -> bool {
+    if (pte == 0) { return false; }
+    let masked: usize = pte & USER_PERMISSION_MASK;
+    return masked == USER_RW_XN_FLAGS || masked == USER_TEXT_RX_FLAGS ||
+           masked == USER_RODATA_R_FLAGS;
+}
+
+fn user_page_allows(pte: usize, mode: UserAccessMode) -> bool {
+    if (mode == UserAccessMode::Write) { return user_page_writable(pte); }
+    return user_page_readable(pte);
+}
+
+// 0 = not present, 1 = text (RX), 2 = rodata (R), 3 = data/heap/stack (RW+XN).
+fn user_page_class_at(index: usize) -> usize {
+    let pte: usize = user_pte_read(index);
+    if (pte == 0) { return 0; }
+    let masked: usize = pte & USER_PERMISSION_MASK;
+    if (masked == USER_TEXT_RX_FLAGS) { return 1; }
+    if (masked == USER_RODATA_R_FLAGS) { return 2; }
+    if (masked == USER_RW_XN_FLAGS) { return 3; }
+    return 0;
+}
+
+fn user_range_l3_span(address: usize, length: usize) -> (bool, usize, usize) {
+    if (address < USER_TEXT_VA || address >= USER_TEXT_VA + USER_RANGE_WINDOW ||
+        length == 0 || length > USER_RANGE_WINDOW ||
+        address - USER_TEXT_VA > USER_RANGE_WINDOW - length) {
+        return (false, 0, 0);
+    }
+    let first: usize = (address - USER_TEXT_VA) / PAGE_SIZE;
+    let last: usize = (address - USER_TEXT_VA + length - 1) / PAGE_SIZE;
+    return (true, first, last);
+}
+
+fn user_range_check(address: usize, length: usize, mode: UserAccessMode)
+        -> UserRangeResult {
+    if (length == 0) {
+        let mut range: UserRange = { address, length };
+        return UserRangeResult::Ok(range);
+    }
+    let (span_ok, first, last) = user_range_l3_span(address, length);
+    if (span_ok == false) { return UserRangeResult::Fault; }
+    let mut index: usize = first;
+    while (index <= last) {
+        if (index >= USER_RANGE_MAX_INDEX ||
+            user_page_allows(user_pte_read(index), mode) == false) {
+            return UserRangeResult::Fault;
+        }
+        index = index + 1;
+    }
+    let mut range: UserRange = { address, length };
+    return UserRangeResult::Ok(range);
+}
+
+fn user_range_length(range: UserRange) -> usize { return range.length; }
+
+fn copy_from_user(range: UserRange, destination: []u8) -> bool !{unsafe} {
+    if (destination.len > range.length) { return false; }
+    let source_base: *u8 = range.address as *u8;
+    let source_view = unsafe { source_base[0..<range.length as isize] };
+    let copied: usize = slice_copy(destination, source_view);
+    return copied == destination.len;
+}
+
+fn copy_to_user(range: UserRange, source: []u8) -> bool !{unsafe} {
+    if (source.len > range.length) { return false; }
+    let destination_base: *u8 = range.address as *u8;
+    let destination_view =
+        unsafe { destination_base[0..<range.length as isize] };
+    let copied: usize = slice_copy(destination_view, source);
+    return copied == source.len;
+}
+
+// Raw-pointer-count variants of copy_from_user/copy_to_user for kernel-side
+// destinations/sources whose own offset isn't a compile-time-provable slice
+// bound (e.g. a per-connection cursor into a shared buffer) -- the pattern
+// this codebase already uses raw pointer arithmetic for on the kernel side.
+// The user-facing half is still only ever reached through UserRange.
+fn copy_from_user_raw(range: UserRange, destination: *u8, length: usize)
+        -> bool {
+    if (length > range.length) { return false; }
+    let source_base: *u8 = range.address as *u8;
+    let mut index: usize = 0;
+    while (index < length) {
+        let source_byte: *u8 = source_base + (index as isize);
+        let destination_byte: *u8 = destination + (index as isize);
+        *destination_byte = *source_byte;
+        index = index + 1;
+    }
+    return true;
+}
+
+fn copy_to_user_raw(range: UserRange, source: *u8, length: usize) -> bool {
+    if (length > range.length) { return false; }
+    let destination_base: *u8 = range.address as *u8;
+    let mut index: usize = 0;
+    while (index < length) {
+        let source_byte: *u8 = source + (index as isize);
+        let destination_byte: *u8 = destination_base + (index as isize);
+        *destination_byte = *source_byte;
+        index = index + 1;
+    }
+    return true;
+}
+
+fn user_read_byte(range: UserRange, offset: usize) -> u8 {
+    let source_byte: *u8 = (range.address + offset) as *u8;
+    return *source_byte;
+}
+
+fn user_write_byte(range: UserRange, offset: usize, value: u8) -> bool {
+    if (offset >= range.length) { return false; }
+    let field: *u8 = (range.address + offset) as *u8;
+    *field = value;
+    return true;
+}
+
+fn user_write_u32(range: UserRange, offset: usize, value: u32) -> bool {
+    if (offset + 4 > range.length || offset + 4 < offset) { return false; }
+    let field: *u32 = (range.address + offset) as *u32;
+    *field = value;
+    return true;
+}
+
+fn user_write_u64(range: UserRange, offset: usize, value: u64) -> bool {
+    if (offset + 8 > range.length || offset + 8 < offset) { return false; }
+    let field: *u64 = (range.address + offset) as *u64;
+    *field = value;
+    return true;
+}
+
+fn user_zero_fill(range: UserRange) -> bool {
+    let base: *u8 = range.address as *u8;
+    let mut index: usize = 0;
+    while (index < range.length) {
+        let byte: *u8 = base + (index as isize);
+        *byte = 0;
+        index = index + 1;
+    }
+    return true;
+}
+
+// Rewrites [first_l3, last_l3] in place, preserving each page's physical
+// frame and replacing only the attribute bits. Used by mprotect and rodata
+// segment mapping alike.
+fn user_range_reprotect(first_l3: usize, last_l3: usize, new_flags: usize) {
+    let mut index: usize = first_l3;
+    while (index <= last_l3) {
+        let old_pte: usize = user_pte_read(index);
+        let phys: usize = old_pte & USER_PAGE_PHYS_MASK;
+        user_pte_write(index, phys | new_flags);
+        user_tlb_invalidate(USER_TEXT_VA + index * PAGE_SIZE);
+        index = index + 1;
+    }
+}
+
+// Boot-time negative-test coverage for issue #174: overflow, cross-page,
+// wrong-permission-write, and mprotect-style downgrade/upgrade. Uses two of
+// its own throwaway pages (L3 indices 500 and 502, with 501 deliberately
+// left unmapped in between for the cross-page case) outside the live
+// process's own layout, independent of whatever process is or isn't loaded
+// elsewhere in the boot sequence. Both pages are freed before returning.
+fn user_memory_boundary_probe() -> bool {
+    if (user_pte_read(USER_PROBE_L3_INDEX) != 0 ||
+        user_pte_read(USER_PROBE_L3_INDEX + 1) != 0 ||
+        user_pte_read(USER_PROBE_L3_INDEX + 2) != 0) {
+        return false;
+    }
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => { return false; }
+        PageAllocResult::Allocated(data_page) => {
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {
+                    page_free(data_page);
+                    return false;
+                }
+                PageAllocResult::Allocated(text_page) => {
+                    let ok: bool = user_memory_boundary_probe_run(
+                        data_page, text_page);
+                    page_free(data_page);
+                    page_free(text_page);
+                    return ok;
+                }
+            }
+        }
+    }
+}
+
+fn user_memory_boundary_probe_run(data_page: borrow PageOwner[data],
+                                  text_page: borrow PageOwner[text]) -> bool {
+    let data_phys: usize = page_physical_address(data_page);
+    let text_phys: usize = page_physical_address(text_page);
+    user_pte_write(USER_PROBE_L3_INDEX, data_phys | USER_RW_XN_FLAGS);
+    user_tlb_invalidate(USER_TEXT_VA + USER_PROBE_L3_INDEX * PAGE_SIZE);
+    user_pte_write(USER_PROBE_L3_INDEX + 2, text_phys | USER_TEXT_RX_FLAGS);
+    user_tlb_invalidate(USER_TEXT_VA + (USER_PROBE_L3_INDEX + 2) * PAGE_SIZE);
+    let data_va: usize = USER_TEXT_VA + USER_PROBE_L3_INDEX * PAGE_SIZE;
+    let text_va: usize = USER_TEXT_VA + (USER_PROBE_L3_INDEX + 2) * PAGE_SIZE;
+
+    let mut ok: bool = true;
+
+    // Overflow: address near usize::MAX with a nonzero length must never
+    // wrap around into an apparently-valid range.
+    match user_range_check(0xFFFFFFFFFFFFFFF0, 32, UserAccessMode::Read) {
+        UserRangeResult::Fault => {}
+        UserRangeResult::Ok(bad) => { ok = false; }
+    }
+
+    // Cross-page: a range spanning the mapped data page and the deliberately
+    // unmapped page right after it must fault as a whole.
+    match user_range_check(data_va, PAGE_SIZE + 1, UserAccessMode::Read) {
+        UserRangeResult::Fault => {}
+        UserRangeResult::Ok(bad) => { ok = false; }
+    }
+
+    // Wrong permission: Text-RX must reject Write while still allowing Read.
+    match user_range_check(text_va, 8, UserAccessMode::Read) {
+        UserRangeResult::Fault => { ok = false; }
+        UserRangeResult::Ok(readable) => {}
+    }
+    match user_range_check(text_va, 8, UserAccessMode::Write) {
+        UserRangeResult::Fault => {}
+        UserRangeResult::Ok(bad) => { ok = false; }
+    }
+
+    // mprotect-style downgrade/upgrade on the data page.
+    match user_range_check(data_va, 8, UserAccessMode::Write) {
+        UserRangeResult::Fault => { ok = false; }
+        UserRangeResult::Ok(writable) => {}
+    }
+    user_range_reprotect(USER_PROBE_L3_INDEX, USER_PROBE_L3_INDEX,
+                         USER_RODATA_R_FLAGS);
+    match user_range_check(data_va, 8, UserAccessMode::Write) {
+        UserRangeResult::Fault => {}
+        UserRangeResult::Ok(bad) => { ok = false; }
+    }
+    match user_range_check(data_va, 8, UserAccessMode::Read) {
+        UserRangeResult::Fault => { ok = false; }
+        UserRangeResult::Ok(still_readable) => {}
+    }
+    user_range_reprotect(USER_PROBE_L3_INDEX, USER_PROBE_L3_INDEX,
+                         USER_RW_XN_FLAGS);
+    match user_range_check(data_va, 8, UserAccessMode::Write) {
+        UserRangeResult::Fault => { ok = false; }
+        UserRangeResult::Ok(writable_again) => {}
+    }
+
+    user_pte_write(USER_PROBE_L3_INDEX, 0);
+    user_tlb_invalidate(data_va);
+    user_pte_write(USER_PROBE_L3_INDEX + 2, 0);
+    user_tlb_invalidate(text_va);
+    return ok;
+}

@@ -9,6 +9,10 @@ const USER_STACK_VA: usize = 0x40002000;
 // would ignore the ASID and defeat same-VA isolation.
 const USER_TEXT_RX_FLAGS: usize = 0x0020000000000FC7;
 const USER_RW_XN_FLAGS: usize = 0x0060000000000F47;
+// Same AP-read-only encoding as USER_TEXT_RX_FLAGS (bit 7) combined with
+// UXN/PXN both set (bits 54/53, the USER_RW_XN_FLAGS upper half): readable,
+// never writable, never executable.
+const USER_RODATA_R_FLAGS: usize = 0x0060000000000FC7;
 
 const PROCESS_ADDRESS_SPACE_MAX: usize = 2;
 

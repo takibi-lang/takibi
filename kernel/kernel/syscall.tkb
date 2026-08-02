@@ -1,5 +1,6 @@
 use "kernel/mm/page.tkb";
 use "kernel/mm/address_space.tkb";
+use "kernel/mm/user_memory.tkb";
 use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/net/socket_capability.tkb";
@@ -18,12 +19,18 @@ const LINUX_ENOSYS: usize = 0xFFFFFFFFFFFFFFDA;
 const LINUX_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
 const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
 const LINUX_EAGAIN: usize = 0xFFFFFFFFFFFFFFF5;
+const LINUX_EACCES: usize = 0xFFFFFFFFFFFFFFF3;
+
+const LINUX_PROT_READ: usize = 1;
+const LINUX_PROT_WRITE: usize = 2;
 
 const KERNEL_SOCKET_FD_MAX: usize = 8;
 
 private let mut syscall_ext2_mount: Ext2Mount;
 private let mut syscall_ext2_ready: bool;
 private let mut syscall_file_buffer: [u8; KERNEL_BLOCK_SIZE];
+private let mut syscall_path_buffer: [u8; 16];
+private let mut syscall_sockaddr_buffer: [u8; 28];
 private let mut syscall_open_calls: usize;
 private let mut syscall_read_calls: usize;
 private let mut syscall_file_write_calls: usize;
@@ -523,64 +530,73 @@ fn kernel_syscall_partial_write_evidence() -> bool {
 }
 
 // Returns 1 for /hello.txt, 2 for /mutable.txt, 3 for index.html (absolute
-// or relative), and 0 for unsupported or invalid paths. Raw pointer reads
-// are confined behind mapped-range checks.
+// or relative), and 0 for unsupported or invalid paths. Every read goes
+// through user_range_check()/copy_from_user() -- no raw pointer cast of the
+// user-supplied address happens in this file.
 fn kernel_syscall_path_kind(address: usize) -> usize {
-    if (kernel_user_range_is_mapped(address, 11)) {
-        let path: *u8 = address as *u8;
-        if (path[0] == 0x2F && path[1] == 0x68 && path[2] == 0x65 &&
-            path[3] == 0x6C && path[4] == 0x6C && path[5] == 0x6F &&
-            path[6] == 0x2E && path[7] == 0x74 && path[8] == 0x78 &&
-            path[9] == 0x74 && path[10] == 0) {
-            return 1;
+    let path_view: []u8 = syscall_path_buffer as []u8;
+    match user_range_check(address, 11, UserAccessMode::Read) {
+        UserRangeResult::Fault => {}
+        UserRangeResult::Ok(range) => {
+            if (copy_from_user(range, path_view[0..<11])) {
+                if (path_view[0] == 0x2F && path_view[1] == 0x68 &&
+                    path_view[2] == 0x65 && path_view[3] == 0x6C &&
+                    path_view[4] == 0x6C && path_view[5] == 0x6F &&
+                    path_view[6] == 0x2E && path_view[7] == 0x74 &&
+                    path_view[8] == 0x78 && path_view[9] == 0x74 &&
+                    path_view[10] == 0) {
+                    return 1;
+                }
+            }
         }
     }
-    if (kernel_user_range_is_mapped(address, 13)) {
-        let path: *u8 = address as *u8;
-        if (path[0] == 0x2F && path[1] == 0x6D && path[2] == 0x75 &&
-            path[3] == 0x74 && path[4] == 0x61 && path[5] == 0x62 &&
-            path[6] == 0x6C && path[7] == 0x65 && path[8] == 0x2E &&
-            path[9] == 0x74 && path[10] == 0x78 && path[11] == 0x74 &&
-            path[12] == 0) {
-            return 2;
+    match user_range_check(address, 13, UserAccessMode::Read) {
+        UserRangeResult::Fault => {}
+        UserRangeResult::Ok(range) => {
+            if (copy_from_user(range, path_view[0..<13])) {
+                if (path_view[0] == 0x2F && path_view[1] == 0x6D &&
+                    path_view[2] == 0x75 && path_view[3] == 0x74 &&
+                    path_view[4] == 0x61 && path_view[5] == 0x62 &&
+                    path_view[6] == 0x6C && path_view[7] == 0x65 &&
+                    path_view[8] == 0x2E && path_view[9] == 0x74 &&
+                    path_view[10] == 0x78 && path_view[11] == 0x74 &&
+                    path_view[12] == 0) {
+                    return 2;
+                }
+            }
         }
     }
-    if (kernel_user_range_is_mapped(address, 12)) {
-        let path: *u8 = address as *u8;
-        if (path[0] == 0x2F && path[1] == 0x69 && path[2] == 0x6E &&
-            path[3] == 0x64 && path[4] == 0x65 && path[5] == 0x78 &&
-            path[6] == 0x2E && path[7] == 0x68 && path[8] == 0x74 &&
-            path[9] == 0x6D && path[10] == 0x6C && path[11] == 0) {
-            return 3;
+    match user_range_check(address, 12, UserAccessMode::Read) {
+        UserRangeResult::Fault => {}
+        UserRangeResult::Ok(range) => {
+            if (copy_from_user(range, path_view[0..<12])) {
+                if (path_view[0] == 0x2F && path_view[1] == 0x69 &&
+                    path_view[2] == 0x6E && path_view[3] == 0x64 &&
+                    path_view[4] == 0x65 && path_view[5] == 0x78 &&
+                    path_view[6] == 0x2E && path_view[7] == 0x68 &&
+                    path_view[8] == 0x74 && path_view[9] == 0x6D &&
+                    path_view[10] == 0x6C && path_view[11] == 0) {
+                    return 3;
+                }
+            }
         }
     }
-    if (kernel_user_range_is_mapped(address, 11)) {
-        let path: *u8 = address as *u8;
-        if (path[0] == 0x69 && path[1] == 0x6E && path[2] == 0x64 &&
-            path[3] == 0x65 && path[4] == 0x78 && path[5] == 0x2E &&
-            path[6] == 0x68 && path[7] == 0x74 && path[8] == 0x6D &&
-            path[9] == 0x6C && path[10] == 0) {
-            return 3;
+    match user_range_check(address, 11, UserAccessMode::Read) {
+        UserRangeResult::Fault => {}
+        UserRangeResult::Ok(range) => {
+            if (copy_from_user(range, path_view[0..<11])) {
+                if (path_view[0] == 0x69 && path_view[1] == 0x6E &&
+                    path_view[2] == 0x64 && path_view[3] == 0x65 &&
+                    path_view[4] == 0x78 && path_view[5] == 0x2E &&
+                    path_view[6] == 0x68 && path_view[7] == 0x74 &&
+                    path_view[8] == 0x6D && path_view[9] == 0x6C &&
+                    path_view[10] == 0) {
+                    return 3;
+                }
+            }
         }
     }
     return 0;
-}
-
-fn kernel_user_range_is_mapped(address: usize, length: usize) -> bool {
-    if (length == 0) { return true; }
-    if (address < USER_TEXT_VA || address >= USER_TEXT_VA + 0x200000 ||
-        length > 0x200000 ||
-        address - USER_TEXT_VA > 0x200000 - length) {
-        return false;
-    }
-    let first: usize = (address - USER_TEXT_VA) / PAGE_SIZE;
-    let last: usize = (address - USER_TEXT_VA + length - 1) / PAGE_SIZE;
-    let mut index: usize = first;
-    while (index <= last) {
-        if (index >= 512 || user_pte_read(index) == 0) { return false; }
-        index = index + 1;
-    }
-    return true;
 }
 
 must_use variant InitialUserLoadResult { Loaded; TooLarge; }
@@ -636,9 +652,6 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let fd: usize = x0;
         let address: usize = x1;
         let length: usize = x2;
-        if (kernel_user_range_is_mapped(address, length) == false) {
-            return (1, LINUX_EFAULT);
-        }
         if (kernel_connected_fd_is_open(fd) &&
             (fd != 1 || syscall_inetd_mode == false)) {
             syscall_connected_write_calls =
@@ -677,23 +690,27 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                         return (1, LINUX_EAGAIN);
                     }
                     NetworkCapabilityTakeResult::Ready(ready) => {
-                    // The complete userspace range and the kernel buffer
-                    // capacity were checked above. Use explicitly typed byte
-                    // pointers at this ABI boundary so each transfer is one
-                    // byte, independent of raw-pointer indexing semantics.
-                    let source_base: *u8 = address as *u8;
                     let destination_base: *u8 =
                         (syscall_socket_buffer as *u8) +
                         ((write_slot * 1460) as isize);
                     let buffer_base: {0..<1461 as usize} = write_slot * 1460;
                     let socket_buffers = syscall_socket_buffer as []u8;
-                    let mut index: usize = 0;
-                    while (index < amount) {
-                        let source_byte: *u8 = source_base + (index as isize);
-                        let destination_byte: *u8 =
-                            destination_base + (index as isize);
-                        *destination_byte = *source_byte;
-                        index = index + 1;
+                    match user_range_check(address, amount, UserAccessMode::Read) {
+                        UserRangeResult::Fault => {
+                            match tcp_connection_put(owner) {
+                                TcpConnectionPutResult::Stored => {}
+                                TcpConnectionPutResult::Conflict => {}
+                            }
+                            match network_capability_put(ready) {
+                                NetworkCapabilityPutResult::Stored => {}
+                                NetworkCapabilityPutResult::Conflict => {}
+                            }
+                            return (1, LINUX_EFAULT);
+                        }
+                        UserRangeResult::Ok(range) => {
+                            let copied: bool = copy_from_user_raw(
+                                range, destination_base, amount);
+                        }
                     }
                     match kernel_tcp_send_received(
                             owner, ready,
@@ -751,18 +768,15 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                     syscall_inetd_response_length[inetd_write_slot]) {
                 return (1, LINUX_EINVAL);
             }
-            let source_base: *u8 = address as *u8;
-            let destination_base: *u8 = (syscall_inetd_response as *u8) +
-                ((inetd_write_slot * 1460) as isize);
-            let mut index: usize = 0;
-            while (index < length) {
-                let source_byte: *u8 = source_base + (index as isize);
-                let destination_offset: usize =
-                    syscall_inetd_response_length[inetd_write_slot] + index;
-                let destination_byte: *u8 =
-                    destination_base + (destination_offset as isize);
-                *destination_byte = *source_byte;
-                index = index + 1;
+            let response_base: *u8 = (syscall_inetd_response as *u8) +
+                ((inetd_write_slot * 1460 +
+                  syscall_inetd_response_length[inetd_write_slot]) as isize);
+            match user_range_check(address, length, UserAccessMode::Read) {
+                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Ok(range) => {
+                    let copied: bool =
+                        copy_from_user_raw(range, response_base, length);
+                }
             }
             syscall_inetd_response_length[inetd_write_slot] =
                 syscall_inetd_response_length[inetd_write_slot] + length;
@@ -777,16 +791,13 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 length > KERNEL_BLOCK_SIZE) {
                 return (1, LINUX_EINVAL);
             }
-            let source_base: *u8 = address as *u8;
             let destination_base: *u8 = syscall_file_buffer as *u8;
-            let mut copy_index: usize = 0;
-            while (copy_index < length) {
-                let source_byte: *u8 =
-                    source_base + (copy_index as isize);
-                let destination_byte: *u8 =
-                    destination_base + (copy_index as isize);
-                *destination_byte = *source_byte;
-                copy_index = copy_index + 1;
+            match user_range_check(address, length, UserAccessMode::Read) {
+                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Ok(range) => {
+                    let copied: bool =
+                        copy_from_user_raw(range, destination_base, length);
+                }
             }
             let content = unsafe { destination_base[0..<length as isize] };
             match ext2_resize_small_file(
@@ -801,12 +812,17 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             }
         }
         if (fd != 1 && fd != 2) { return (1, LINUX_EBADF); }
-        let mut cursor: *u8 = address as *u8;
-        let mut remaining: usize = length;
-        while (remaining != 0) {
-            uart_putc(*cursor);
-            cursor = cursor + 1;
-            remaining = remaining - 1;
+        match user_range_check(address, length, UserAccessMode::Read) {
+            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Ok(range) => {
+                let mut remaining: usize = length;
+                let mut offset: usize = 0;
+                while (remaining != 0) {
+                    uart_putc(user_read_byte(range, offset));
+                    offset = offset + 1;
+                    remaining = remaining - 1;
+                }
+            }
         }
         return (1, length);
     }
@@ -846,8 +862,9 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         // by BusyBox httpd after validating the complete userspace result.
         let path_kind: usize = kernel_syscall_path_kind(x1);
         if (path_kind == 0) { return (1, LINUX_ENOENT); }
-        if (kernel_user_range_is_mapped(x2, 128) == false) {
-            return (1, LINUX_EFAULT);
+        match user_range_check(x2, 128, UserAccessMode::Write) {
+            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Ok(precheck) => {}
         }
         let mut name: []u8 = "hello.txt" as []u8;
         if (path_kind == 2) { name = "mutable.txt" as []u8; }
@@ -861,22 +878,27 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                         syscall_file_buffer as []u8) {
                     Ext2ReadResult::Invalid => { return (1, LINUX_EINVAL); }
                     Ext2ReadResult::Read(file_length) => {
-                        let stat_base: *u8 = x2 as *u8;
-                        let stat = unsafe { stat_base[0..<128] };
-                        for i: usize in 0..<128 { stat[i] = 0; }
-                        let inode_field: *u64 = (x2 + 8) as *u64;
-                        *inode_field = inode_number as u64;
-                        let mode_field: *u32 = (x2 + 16) as *u32;
-                        *mode_field = 0x81A4 as u32;
-                        let links_field: *u32 = (x2 + 20) as *u32;
-                        *links_field = 1;
-                        let size_field: *u64 = (x2 + 48) as *u64;
-                        *size_field = file_length as u64;
-                        let block_size_field: *u32 = (x2 + 56) as *u32;
-                        *block_size_field = 1024;
-                        let blocks_field: *u64 = (x2 + 64) as *u64;
-                        *blocks_field = 2;
-                        return (1, 0);
+                        match user_range_check(x2, 128, UserAccessMode::Write) {
+                            UserRangeResult::Fault => {
+                                return (1, LINUX_EFAULT);
+                            }
+                            UserRangeResult::Ok(range) => {
+                                let zeroed: bool = user_zero_fill(range);
+                                let wrote_inode: bool = user_write_u64(
+                                    range, 8, inode_number as u64);
+                                let wrote_mode: bool = user_write_u32(
+                                    range, 16, 0x81A4 as u32);
+                                let wrote_links: bool =
+                                    user_write_u32(range, 20, 1);
+                                let wrote_size: bool = user_write_u64(
+                                    range, 48, file_length as u64);
+                                let wrote_block_size: bool =
+                                    user_write_u32(range, 56, 1024);
+                                let wrote_blocks: bool =
+                                    user_write_u64(range, 64, 2);
+                                return (1, 0);
+                            }
+                        }
                     }
                 }
             }
@@ -901,28 +923,21 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             if (syscall_connection_open[read_slot] == false || requested == 0) {
                 return (1, LINUX_EBADF);
             }
-            if (kernel_user_range_is_mapped(address, requested) == false) {
-                return (1, LINUX_EFAULT);
-            }
             if (syscall_socket_buffer_offset[read_slot] <
                     syscall_socket_buffer_length[read_slot]) {
                 let available: usize = syscall_socket_buffer_length[read_slot] -
                     syscall_socket_buffer_offset[read_slot];
                 let mut amount: usize = requested;
                 if (amount > available) { amount = available; }
-                let destination_base: *u8 = address as *u8;
                 let source_base: *u8 = (syscall_socket_buffer as *u8) +
-                    ((read_slot * 1460) as isize);
-                let mut index: usize = 0;
-                while (index < amount) {
-                    let destination_byte: *u8 =
-                        destination_base + (index as isize);
-                    let source_offset: usize =
-                        syscall_socket_buffer_offset[read_slot] + index;
-                    let source_byte: *u8 =
-                        source_base + (source_offset as isize);
-                    *destination_byte = *source_byte;
-                    index = index + 1;
+                    ((read_slot * 1460 +
+                      syscall_socket_buffer_offset[read_slot]) as isize);
+                match user_range_check(address, amount, UserAccessMode::Write) {
+                    UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                    UserRangeResult::Ok(range) => {
+                        let copied: bool =
+                            copy_to_user_raw(range, source_base, amount);
+                    }
                 }
                 syscall_socket_buffer_offset[read_slot] =
                     syscall_socket_buffer_offset[read_slot] + amount;
@@ -969,17 +984,24 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                     syscall_socket_buffer_length[read_slot] = received;
                     let mut amount: usize = received;
                     if (amount > requested) { amount = requested; }
-                    let destination_base: *u8 = address as *u8;
                     let source_base: *u8 = (syscall_socket_buffer as *u8) +
                         ((read_slot * 1460) as isize);
-                    let mut index: usize = 0;
-                    while (index < amount) {
-                        let destination_byte: *u8 =
-                            destination_base + (index as isize);
-                        let source_byte: *u8 =
-                            source_base + (index as isize);
-                        *destination_byte = *source_byte;
-                        index = index + 1;
+                    match user_range_check(address, amount, UserAccessMode::Write) {
+                        UserRangeResult::Fault => {
+                            match network_capability_put(next) {
+                                NetworkCapabilityPutResult::Stored => {}
+                                NetworkCapabilityPutResult::Conflict => {}
+                            }
+                            match tcp_connection_put(owner) {
+                                TcpConnectionPutResult::Stored => {}
+                                TcpConnectionPutResult::Conflict => {}
+                            }
+                            return (1, LINUX_EFAULT);
+                        }
+                        UserRangeResult::Ok(range) => {
+                            let copied: bool =
+                                copy_to_user_raw(range, source_base, amount);
+                        }
                     }
                     syscall_socket_buffer_offset[read_slot] = amount;
                     match network_capability_put(next) {
@@ -1006,9 +1028,6 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             kernel_syscall_file_readable() == false) {
             return (1, LINUX_EBADF);
         }
-        if (kernel_user_range_is_mapped(address, requested) == false) {
-            return (1, LINUX_EFAULT);
-        }
         match ext2_read_small_file(
                 syscall_ext2_mount, kernel_syscall_file_inode(),
                 syscall_file_buffer as []u8) {
@@ -1018,18 +1037,14 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 let available: usize = file_length - kernel_syscall_file_offset();
                 let mut amount: usize = requested;
                 if (amount > available) { amount = available; }
-                let destination_base: *u8 = address as *u8;
-                let source_base: *u8 = syscall_file_buffer as *u8;
-                let mut copy_index: usize = 0;
-                while (copy_index < amount) {
-                    let destination_byte: *u8 =
-                        destination_base + (copy_index as isize);
-                    let source_offset: usize =
-                        kernel_syscall_file_offset() + copy_index;
-                    let source_byte: *u8 =
-                        source_base + (source_offset as isize);
-                    *destination_byte = *source_byte;
-                    copy_index = copy_index + 1;
+                let source_base: *u8 = (syscall_file_buffer as *u8) +
+                    (kernel_syscall_file_offset() as isize);
+                match user_range_check(address, amount, UserAccessMode::Write) {
+                    UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                    UserRangeResult::Ok(range) => {
+                        let copied: bool =
+                            copy_to_user_raw(range, source_base, amount);
+                    }
                 }
                 if (kernel_syscall_file_set_offset(
                         kernel_syscall_file_offset() + amount) == false) {
@@ -1128,10 +1143,16 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             };
         if (kernel_listener_state(bind_fd) != UnifiedListenerState::Created ||
             x2 < 16) { return (1, LINUX_EINVAL); }
-        if (kernel_user_range_is_mapped(x1, x2) == false) {
-            return (1, LINUX_EFAULT);
+        let mut sockaddr_len: usize = x2;
+        if (sockaddr_len > 28) { sockaddr_len = 28; }
+        match user_range_check(x1, sockaddr_len, UserAccessMode::Read) {
+            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Ok(range) => {
+                let copied: bool = copy_from_user_raw(
+                    range, syscall_sockaddr_buffer as *u8, sockaddr_len);
+            }
         }
-        let address: *u8 = x1 as *u8;
+        let address: []u8 = syscall_sockaddr_buffer as []u8;
         if (address[0] == 2 && address[1] == 0) {
             if (address[4] != 0 || address[5] != 0 ||
                 address[6] != 0 || address[7] != 0) {
@@ -1141,12 +1162,10 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             if (address[0] != 10 || address[1] != 0 || x2 < 28) {
                 return (1, LINUX_EINVAL);
             }
-            let mut address_index: usize = 8;
-            while (address_index < 24) {
-                if (address[address_index as isize] != 0) {
+            for address_index: usize in 8..<24 {
+                if (address[address_index] != 0) {
                     return (1, LINUX_EINVAL);
                 }
-                address_index = address_index + 1;
             }
         }
         let bind_port: u16 =
@@ -1474,68 +1493,81 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     if (number == 17) {
         // getcwd(): HTTPd immediately changes to its configured root; `/` is
         // the only current working directory exposed by this kernel slice.
-        if (x1 < 2 || kernel_user_range_is_mapped(x0, 2) == false) {
-            return (1, LINUX_EFAULT);
+        if (x1 < 2) { return (1, LINUX_EFAULT); }
+        match user_range_check(x0, 2, UserAccessMode::Write) {
+            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Ok(range) => {
+                let wrote_slash: bool = user_write_byte(range, 0, 0x2F);
+                let wrote_nul: bool = user_write_byte(range, 1, 0);
+            }
         }
-        let output_base: *u8 = x0 as *u8;
-        let output = unsafe { output_base[0..<2] };
-        output[0] = 0x2F;
-        output[1] = 0;
         return (1, x0);
     }
     if (number == 49) {
-        if (kernel_user_range_is_mapped(x0, 2) == false) {
-            return (1, LINUX_EFAULT);
+        match user_range_check(x0, 2, UserAccessMode::Read) {
+            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Ok(range) => {
+                let path_view: []u8 = syscall_path_buffer as []u8;
+                if (copy_from_user(range, path_view[0..<2]) &&
+                        path_view[0] == 0x2F && path_view[1] == 0) {
+                    return (1, 0);
+                }
+            }
         }
-        let path: *u8 = x0 as *u8;
-        if (path[0] == 0x2F && path[1] == 0) { return (1, 0); }
         return (1, LINUX_ENOENT);
     }
     if (number == 103) {
         // setitimer(): HTTPd's request timeout is unnecessary for the single
         // bounded integration request. Return an all-zero previous timer.
         if (x2 != 0) {
-            if (kernel_user_range_is_mapped(x2, 32) == false) {
-                return (1, LINUX_EFAULT);
+            match user_range_check(x2, 32, UserAccessMode::Write) {
+                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Ok(range) => {
+                    let zeroed: bool = user_zero_fill(range);
+                }
             }
-            let previous_base: *u8 = x2 as *u8;
-            let previous_timer = unsafe { previous_base[0..<32] };
-            for i: usize in 0..<32 { previous_timer[i] = 0; }
         }
         return (1, 0);
     }
     if (number == 113) {
-        if (kernel_user_range_is_mapped(x1, 16) == false) {
-            return (1, LINUX_EFAULT);
+        match user_range_check(x1, 16, UserAccessMode::Write) {
+            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Ok(range) => {
+                let wrote_seconds: bool =
+                    user_write_u64(range, 0, 1700000000 as u64);
+                let wrote_nanoseconds: bool = user_write_u64(range, 8, 0);
+            }
         }
-        let seconds: *u64 = x1 as *u64;
-        *seconds = 1700000000 as u64;
-        let nanoseconds: *u64 = (x1 + 8) as *u64;
-        *nanoseconds = 0;
         return (1, 0);
     }
     if (number == 134) { return (1, 0); }
     if (number == 135) {
         if (x2 != 0) {
-            if (kernel_user_range_is_mapped(x2, 8) == false) {
-                return (1, LINUX_EFAULT);
+            match user_range_check(x2, 8, UserAccessMode::Write) {
+                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Ok(range) => {
+                    let wrote_mask: bool = user_write_u64(range, 0, 0);
+                }
             }
-            let previous_mask: *u64 = x2 as *u64;
-            *previous_mask = 0;
         }
         return (1, 0);
     }
     if (number == 205) {
-        if (x0 != 0 || kernel_user_range_is_mapped(x1, 16) == false ||
-            kernel_user_range_is_mapped(x2, 4) == false) {
-            return (1, LINUX_EFAULT);
+        if (x0 != 0) { return (1, LINUX_EFAULT); }
+        match user_range_check(x1, 16, UserAccessMode::Write) {
+            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Ok(peer_range) => {
+                let zeroed: bool = user_zero_fill(peer_range);
+                let wrote_family: bool = user_write_byte(peer_range, 0, 2);
+            }
         }
-        let peer_base: *u8 = x1 as *u8;
-        let peer = unsafe { peer_base[0..<16] };
-        for i: usize in 0..<16 { peer[i] = 0; }
-        peer[0] = 2;
-        let peer_length: *u32 = x2 as *u32;
-        *peer_length = 16;
+        match user_range_check(x2, 4, UserAccessMode::Write) {
+            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Ok(length_range) => {
+                let wrote_length: bool =
+                    user_write_u32(length_range, 0, 16);
+            }
+        }
         return (1, 0);
     }
     if (number == 208) { return (1, 0); }
@@ -1584,10 +1616,45 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         }
         return (1, result);
     }
-    if (number == 215 || number == 226) {
-        // munmap/mprotect: the fixed short-lived process arena is reclaimed
-        // as a unit, and its load-time permissions are not relaxed here.
+    if (number == 215) {
+        // munmap: the fixed short-lived process arena is reclaimed as a
+        // unit; this does not relax load-time permissions.
         return (1, 0);
+    }
+    if (number == 226) {
+        let addr: usize = x0;
+        let len: usize = x1;
+        let prot: usize = x2;
+        if (addr % PAGE_SIZE != 0 || len == 0) {
+            return (1, LINUX_EINVAL);
+        }
+        let (span_ok, first, last) = user_range_l3_span(addr, len);
+        if (span_ok == false) {
+            return (1, LINUX_EINVAL);
+        }
+        let class: usize = user_page_class_at(first);
+        let mut index: usize = first;
+        while (index <= last) {
+            if (index >= USER_RANGE_MAX_INDEX ||
+                    user_page_class_at(index) != class) {
+                return (1, LINUX_EINVAL);
+            }
+            index = index + 1;
+        }
+        // The only transition this bounded per-page model supports:
+        // downgrading a currently read-write data/heap/stack range to
+        // read-only+XN. Once downgraded (or if the range is already
+        // text/rodata), the page is bit-identical to ELF-loaded rodata, so
+        // re-widening permissions is refused rather than risked -- a real
+        // error, never false success.
+        if (prot == LINUX_PROT_READ && class == 3) {
+            user_range_reprotect(first, last, USER_RODATA_R_FLAGS);
+            return (1, 0);
+        }
+        if (prot == (LINUX_PROT_READ | LINUX_PROT_WRITE) && class == 3) {
+            return (1, 0);
+        }
+        return (1, LINUX_EACCES);
     }
     return (1, LINUX_ENOSYS);
 }
