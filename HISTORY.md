@@ -15,6 +15,29 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-02: Clone Contexts Join the Typed Process Slots (GitHub Issue #188, Stage 7)
+
+The live clone fixture now allocates its parent and child identities from the
+same generation-checked two-slot process table used by the earlier lifecycle
+probe. The child EL0 frame is copied onto that slot's dedicated 4KiB kernel
+stack; the old assembly-private child stack has been removed. Parent and child
+saved SP_EL1 values are recorded in their process slots.
+
+Clone context publication performs typed Running-to-Ready for the parent and
+Ready-to-Running for the child. Exit performs the child's
+Running-to-Exited transition, explicitly reaps that identity, and returns the
+parent to Running. A new typed running-state take operation makes these
+transitions use the stable owner store rather than editing the state tag as an
+untracked side channel. Reset also drains any surviving stored identity before
+reusing the bounded table across successive hardware fixtures.
+
+This is the context/lifecycle half of issue #188's asynchronous-clone step.
+The existing assembly still hands execution directly to the child and resumes
+the parent on child exit, preserving the current acceptance workload until the
+next step enables round-robin selection. At that point the saved parent and
+child frames introduced here become scheduler inputs instead of a hidden
+parent-frame restoration path.
+
 ### 2026-08-02: Socket Descriptors Join the Unified FD Table (GitHub Issue #188, Stage 6)
 
 Listener and connected-socket descriptors now use the same per-process table

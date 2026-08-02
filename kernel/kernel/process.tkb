@@ -64,6 +64,13 @@ must_use variant ScheduledProcessExitedTakeResult {
             ScheduledProcessState[process, ProcessState::Exited]));
 }
 
+must_use variant ScheduledProcessRunningTakeResult {
+    Missing;
+    Running(exists process: usize.
+            (ScheduledProcessOwner[process],
+             ScheduledProcessState[process, ProcessState::Running]));
+}
+
 must_use variant ScheduledProcessPutResult { Stored; Conflict; }
 
 fn scheduled_process_lock(lock: *i32 @ address)
@@ -91,6 +98,14 @@ fn scheduled_process_ready_state(
         owner: borrow ScheduledProcessOwner[process])
         -> ScheduledProcessState[process, ProcessState::Ready] {
     let mut state: ScheduledProcessState[process, ProcessState::Ready] =
+        { owner.pool_index };
+    return state;
+}
+
+fn scheduled_process_running_state(
+        owner: borrow ScheduledProcessOwner[process])
+        -> ScheduledProcessState[process, ProcessState::Running] {
+    let mut state: ScheduledProcessState[process, ProcessState::Running] =
         { owner.pool_index };
     return state;
 }
@@ -188,6 +203,26 @@ fn scheduled_process_table_init() {
     }
 }
 
+fn scheduled_process_table_clear() {
+    for slot: usize in 0..<KERNEL_PROCESS_MAX {
+        if (scheduled_process_used[slot] != 0) {
+            let mut handle: ProcessHandle = {
+                slot, scheduled_process_generation[slot]
+            };
+            match scheduled_process_identity_take(handle) {
+                ScheduledProcessValue::Empty => {}
+                ScheduledProcessValue::Occupied(owner) => {
+                    scheduled_process_owner_drop(owner);
+                }
+            }
+        }
+        scheduled_process_used[slot] = 0;
+        scheduled_process_generation[slot] = 0;
+        scheduled_process_saved_sp[slot] = 0;
+        scheduled_process_state[slot] = ProcessSlotState::Free;
+    }
+}
+
 fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
         if (scheduled_process_used[slot] == 0) {
@@ -249,6 +284,24 @@ fn scheduled_process_exited_take(handle: ProcessHandle)
         ScheduledProcessValue::Occupied(owner) => {
             let state = scheduled_process_exited_state(owner);
             return ScheduledProcessExitedTakeResult::Exited(
+                (owner, state));
+        }
+    }
+}
+
+fn scheduled_process_running_take(handle: ProcessHandle)
+        -> ScheduledProcessRunningTakeResult {
+    if (scheduled_process_state[handle.pool_index] !=
+            ProcessSlotState::Running) {
+        return ScheduledProcessRunningTakeResult::Missing;
+    }
+    match scheduled_process_identity_take(handle) {
+        ScheduledProcessValue::Empty => {
+            return ScheduledProcessRunningTakeResult::Missing;
+        }
+        ScheduledProcessValue::Occupied(owner) => {
+            let state = scheduled_process_running_state(owner);
+            return ScheduledProcessRunningTakeResult::Running(
                 (owner, state));
         }
     }
@@ -418,6 +471,38 @@ private let mut execution_child_live: bool;
 private let mut execution_clone_calls: usize;
 private let mut execution_child_exit_count: usize;
 private let mut execution_child_exit_status: usize;
+private let mut execution_parent_handle: ProcessHandle;
+private let mut execution_child_handle: ProcessHandle;
+private let mut execution_parent_handle_live: bool;
+private let mut execution_child_handle_live: bool;
+
+fn kernel_process_start_handle(handle: ProcessHandle) -> bool {
+    match scheduled_process_ready_take(handle) {
+        ScheduledProcessReadyTakeResult::Missing => { return false; }
+        ScheduledProcessReadyTakeResult::Ready(resources) => {
+            let (owner, ready) = resources;
+            let running = scheduled_process_start(owner, ready);
+            match scheduled_process_put(owner, running) {
+                ScheduledProcessPutResult::Conflict => { return false; }
+                ScheduledProcessPutResult::Stored => { return true; }
+            }
+        }
+    }
+}
+
+fn kernel_process_yield_handle(handle: ProcessHandle) -> bool {
+    match scheduled_process_running_take(handle) {
+        ScheduledProcessRunningTakeResult::Missing => { return false; }
+        ScheduledProcessRunningTakeResult::Running(resources) => {
+            let (owner, running) = resources;
+            let ready = scheduled_process_yield(owner, running);
+            match scheduled_process_put(owner, ready) {
+                ScheduledProcessPutResult::Conflict => { return false; }
+                ScheduledProcessPutResult::Stored => { return true; }
+            }
+        }
+    }
+}
 
 must_use variant ProcessCloneResult {
     Invalid;
@@ -425,11 +510,21 @@ must_use variant ProcessCloneResult {
 }
 
 fn kernel_process_execution_reset() {
+    scheduled_process_table_clear();
     execution_process = ExecutionProcess::Parent;
     execution_child_live = false;
     execution_clone_calls = 0;
     execution_child_exit_count = 0;
     execution_child_exit_status = 0;
+    execution_parent_handle_live = false;
+    execution_child_handle_live = false;
+    match scheduled_process_alloc() {
+        ScheduledProcessAllocResult::Full => {}
+        ScheduledProcessAllocResult::Allocated(parent) => {
+            execution_parent_handle = parent;
+            execution_parent_handle_live = kernel_process_start_handle(parent);
+        }
+    }
 }
 
 // The pinned Alpine BusyBox HTTPd uses clone(SIGCHLD, NULL, NULL, tls,
@@ -439,13 +534,44 @@ fn kernel_process_execution_reset() {
 fn kernel_process_clone_begin(flags: usize, child_stack: usize)
         -> ProcessCloneResult {
     if (flags != 0x11 || child_stack != 0 || execution_child_live ||
-        execution_process != ExecutionProcess::Parent) {
+        execution_process != ExecutionProcess::Parent ||
+        execution_parent_handle_live == false) {
         return ProcessCloneResult::Invalid;
+    }
+    match scheduled_process_alloc() {
+        ScheduledProcessAllocResult::Full => {
+            return ProcessCloneResult::Invalid;
+        }
+        ScheduledProcessAllocResult::Allocated(child) => {
+            execution_child_handle = child;
+            execution_child_handle_live = true;
+        }
     }
     execution_child_live = true;
     execution_process = ExecutionProcess::Child;
     execution_clone_calls = execution_clone_calls + 1;
     return ProcessCloneResult::ChildReady(2);
+}
+
+fn kernel_process_clone_child_stack_top() -> usize {
+    if (execution_child_handle_live) {
+        return scheduled_process_stack_top(execution_child_handle);
+    }
+    return 0;
+}
+
+fn kernel_process_clone_context_install(parent_sp: usize, child_sp: usize)
+        -> usize {
+    if (execution_parent_handle_live == false ||
+        execution_child_handle_live == false || parent_sp == 0 ||
+        child_sp == 0 ||
+        kernel_process_yield_handle(execution_parent_handle) == false ||
+        kernel_process_start_handle(execution_child_handle) == false) {
+        return 0;
+    }
+    scheduled_process_saved_sp[execution_parent_handle.pool_index] = parent_sp;
+    scheduled_process_saved_sp[execution_child_handle.pool_index] = child_sp;
+    return child_sp;
 }
 
 fn kernel_process_is_child() -> bool {
@@ -462,6 +588,31 @@ fn kernel_process_child_exit(status: usize) -> usize {
     execution_child_exit_count = execution_child_exit_count + 1;
     execution_child_live = false;
     execution_process = ExecutionProcess::Parent;
+    if (execution_child_handle_live && execution_parent_handle_live) {
+        match scheduled_process_running_take(execution_child_handle) {
+            ScheduledProcessRunningTakeResult::Missing => {}
+            ScheduledProcessRunningTakeResult::Running(resources) => {
+                let (owner, running) = resources;
+                let exited = scheduled_process_exit(owner, running);
+                match scheduled_process_put(owner, exited) {
+                    ScheduledProcessPutResult::Conflict => {}
+                    ScheduledProcessPutResult::Stored => {
+                        match scheduled_process_exited_take(
+                                execution_child_handle) {
+                            ScheduledProcessExitedTakeResult::Missing => {}
+                            ScheduledProcessExitedTakeResult::Exited(done) => {
+                                let (exited_owner, exited_state) = done;
+                                scheduled_process_reap(
+                                    exited_owner, exited_state);
+                                execution_child_handle_live = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (kernel_process_start_handle(execution_parent_handle)) {}
+    }
     return 2;
 }
 
@@ -472,7 +623,12 @@ fn kernel_process_child_exit_count() -> usize {
 fn kernel_process_clone_evidence() -> bool {
     return execution_process == ExecutionProcess::Parent &&
            execution_child_live == false && execution_clone_calls == 1 &&
-           execution_child_exit_status == 42;
+           execution_child_exit_status == 42 &&
+           execution_parent_handle_live &&
+           execution_child_handle_live == false &&
+           scheduled_process_state[execution_parent_handle.pool_index] ==
+               ProcessSlotState::Running &&
+           scheduled_process_saved_sp[execution_parent_handle.pool_index] != 0;
 }
 
 // Page owners travel beside this process token. Takibi intentionally forbids

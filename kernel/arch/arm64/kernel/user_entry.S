@@ -203,10 +203,6 @@ initial_user_payload_end:
     .section .text, "ax"
 
     .section .bss, "aw", %nobits
-    .align 12
-clone_child_kernel_stack:
-    .skip   4096
-clone_child_kernel_stack_end:
     .align 3
 clone_parent_frame:
     .skip   8
@@ -306,26 +302,40 @@ el0_sync_entry:
 
 .Lsyscall_clone_child:
     /* Preserve the parent's complete syscall frame, then give the child a
-     * distinct EL1 kernel stack containing its own copy of that frame. */
+     * process-table-owned EL1 kernel stack containing its own copy. */
     adrp    x9, clone_parent_frame
     add     x9, x9, :lo12:clone_parent_frame
     mov     x14, sp
     str     x14, [x9]
-    adrp    x10, clone_child_kernel_stack_end
-    add     x10, x10, :lo12:clone_child_kernel_stack_end
-    sub     x10, x10, #EL0_CONTEXT_SIZE
-    mov     x11, sp
+    bl      kernel_process_clone_child_stack_top
+    cbz     x0, .Lclone_context_fail
+    sub     x10, x0, #EL0_CONTEXT_SIZE
+    adrp    x9, clone_parent_frame
+    add     x9, x9, :lo12:clone_parent_frame
+    ldr     x11, [x9]
     mov     x12, #EL0_CONTEXT_SIZE
 .Lclone_frame_copy:
     ldr     x13, [x11], #8
     str     x13, [x10], #8
     subs    x12, x12, #8
     b.ne    .Lclone_frame_copy
-    adrp    x10, clone_child_kernel_stack_end
-    add     x10, x10, :lo12:clone_child_kernel_stack_end
-    sub     sp, x10, #EL0_CONTEXT_SIZE
+    adrp    x9, clone_parent_frame
+    add     x9, x9, :lo12:clone_parent_frame
+    ldr     x0, [x9]
+    bl      kernel_process_clone_child_stack_top
+    sub     x1, x0, #EL0_CONTEXT_SIZE
+    adrp    x9, clone_parent_frame
+    add     x9, x9, :lo12:clone_parent_frame
+    ldr     x0, [x9]
+    bl      kernel_process_clone_context_install
+    cbz     x0, .Lclone_context_fail
+    mov     sp, x0
     mov     x7, #0
     b       .Lsyscall_resume
+
+.Lclone_context_fail:
+    mov     x16, #8
+    b       el1_exception_evidence
 
 .Lsyscall_clone_parent:
     adrp    x9, clone_parent_frame
