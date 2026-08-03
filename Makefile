@@ -135,6 +135,7 @@ COMMON_LINUX_PRINT_BASE  := $(LINUX_USER_DIR)/common/print.tkb $(LINUX_USER_DIR)
 # its own). This split-not-batched shape is the template to follow when
 # adding new linux_user/ tests for a new algorithm or data structure.
 LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump percpu page_pool \
+                             freelist_pool \
                              hello print_int print_hex print_ptr mem array struct struct_refined \
                              nonexhaustive refined narrow enum align packed struct_align const_global \
                              sizeof_offsetof int64 bitops indexed_view tcp_conn_view \
@@ -151,6 +152,7 @@ LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)
 $(LINUX_USER_DIR)/checked_usize/checked_usize_exe.o: $(LINUX_USER_DIR)/common/checked_usize.tkb
 $(LINUX_USER_DIR)/elf64_validate/elf64_validate_exe.o: $(LINUX_USER_DIR)/common/elf64_validate.tkb $(LINUX_USER_DIR)/common/checked_usize.tkb
 $(LINUX_USER_DIR)/page_pool/page_pool_exe.o: $(LINUX_USER_DIR)/page_pool/page_pool_core.tkb
+$(LINUX_USER_DIR)/freelist_pool/freelist_pool_exe.o: $(LINUX_USER_DIR)/freelist_pool/freelist_pool_core.tkb
 $(LINUX_USER_DIR)/inet_checksum/inet_checksum_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb
 $(LINUX_USER_DIR)/ip_parse/ip_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb

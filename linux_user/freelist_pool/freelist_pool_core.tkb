@@ -1,0 +1,74 @@
+// O(1) free-slot pool: an intrusive index-linked free list, replacing the
+// linear `for i in 0..<MAX { if (used[i] == 0) ... }` scan that
+// kernel/mm/page.tkb's page_alloc (and the same pattern repeated in
+// kernel/kernel/process.tkb, kernel/mm/address_space.tkb,
+// kernel/kernel/fd_table.tkb, kernel/net/tcp.tkb) currently uses -- see
+// GitHub issue #207. Prototyped here first, per AGENTS.md's linux_user/
+// charter, to find out whether the existing ownership machinery
+// (SlotOwner below mirrors page_pool_core.tkb's PageOwner) accommodates an
+// index-linked list without any compiler change, before touching kernel/.
+//
+// Each free slot's `next_free` entry holds the next free index, or the
+// sentinel POOL_COUNT ("no next") when it is the last link. free_head is
+// POOL_COUNT when the free list is empty. Both are plain usize state, not
+// indexed runtime owners, so the existing restriction that indexed owners
+// cannot be stored in arrays/globals/fields never applies to them -- only
+// the ephemeral SlotOwner returned to a caller is an indexed owner, exactly
+// like PageOwner already is.
+
+const POOL_COUNT: usize = 4;
+
+private let mut next_free: [usize; POOL_COUNT];
+private let mut free_head: usize = 0;
+private let mut next_generation: usize = 1;
+
+private linear struct SlotOwner[allocation: usize] {
+    private index: {0..<POOL_COUNT as usize};
+    private generation: usize @ allocation;
+}
+
+variant SlotAllocResult {
+    OutOfMemory;
+    Allocated(exists allocation: usize. SlotOwner[allocation]);
+}
+
+fn slot_owner_new(index: {0..<POOL_COUNT as usize},
+                  generation: usize @ allocation)
+        -> SlotOwner[allocation] {
+    let mut owner: SlotOwner[allocation] = { index, generation };
+    return owner;
+}
+
+fn freelist_pool_init() {
+    for i: usize in 0..<POOL_COUNT {
+        next_free[i] = i + 1;
+    }
+    free_head = 0;
+    next_generation = 1;
+}
+
+fn slot_alloc() -> SlotAllocResult {
+    let head: usize = free_head;
+    if (head >= 0 && head < POOL_COUNT) {
+        let index: {0..<POOL_COUNT as usize} = head;
+        free_head = next_free[index];
+        let generation: usize = next_generation;
+        next_generation = next_generation + 1;
+        return SlotAllocResult::Allocated(slot_owner_new(index, generation));
+    }
+    return SlotAllocResult::OutOfMemory;
+}
+
+fn slot_free(owner: sink SlotOwner[allocation]) {
+    next_free[owner.index] = free_head;
+    free_head = owner.index;
+}
+
+fn slot_index(owner: borrow SlotOwner[allocation])
+        -> {0..<POOL_COUNT as usize} {
+    return owner.index;
+}
+
+fn slot_generation(owner: borrow SlotOwner[allocation]) -> usize {
+    return owner.generation;
+}

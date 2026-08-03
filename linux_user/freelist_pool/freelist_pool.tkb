@@ -1,0 +1,111 @@
+// Exercises freelist_pool_core.tkb's O(1) free list: allocate three slots,
+// free the first two in order (a, then b), then reallocate three times.
+// A free list hands back the most-recently-freed slot first (LIFO), so the
+// reuse order is b's slot, then a's slot, then the never-yet-used slot --
+// the opposite of what page_pool.tkb's lowest-free-index linear scan would
+// produce from the same sequence. That divergence is the point: it proves
+// this is a genuinely different mechanism, not a renamed copy.
+
+use "linux_user/freelist_pool/freelist_pool_core.tkb";
+
+fn app_main() {
+    freelist_pool_init();
+    uart_puts("freelist_pool\n");
+
+    let a: exists sa: usize. SlotOwner[sa] = match slot_alloc() {
+        SlotAllocResult::OutOfMemory => {
+            uart_puts("alloc a failed\n");
+            return;
+        }
+        SlotAllocResult::Allocated(o) => { o }
+    };
+    let b: exists sb: usize. SlotOwner[sb] = match slot_alloc() {
+        SlotAllocResult::OutOfMemory => {
+            uart_puts("alloc b failed\n");
+            slot_free(a);
+            return;
+        }
+        SlotAllocResult::Allocated(o) => { o }
+    };
+    let c: exists sc: usize. SlotOwner[sc] = match slot_alloc() {
+        SlotAllocResult::OutOfMemory => {
+            uart_puts("alloc c failed\n");
+            slot_free(a);
+            slot_free(b);
+            return;
+        }
+        SlotAllocResult::Allocated(o) => { o }
+    };
+
+    uart_puts("allocated: ");
+    uart_print(slot_index(a));
+    uart_puts(" ");
+    uart_print(slot_index(b));
+    uart_puts(" ");
+    uart_print(slot_index(c));
+    uart_puts("\n");
+
+    slot_free(a);
+    slot_free(b);
+
+    let r1: exists s1: usize. SlotOwner[s1] = match slot_alloc() {
+        SlotAllocResult::OutOfMemory => {
+            uart_puts("reuse 1 failed\n");
+            slot_free(c);
+            return;
+        }
+        SlotAllocResult::Allocated(o) => { o }
+    };
+    let r2: exists s2: usize. SlotOwner[s2] = match slot_alloc() {
+        SlotAllocResult::OutOfMemory => {
+            uart_puts("reuse 2 failed\n");
+            slot_free(r1);
+            slot_free(c);
+            return;
+        }
+        SlotAllocResult::Allocated(o) => { o }
+    };
+    let r3: exists s3: usize. SlotOwner[s3] = match slot_alloc() {
+        SlotAllocResult::OutOfMemory => {
+            uart_puts("reuse 3 failed\n");
+            slot_free(r1);
+            slot_free(r2);
+            slot_free(c);
+            return;
+        }
+        SlotAllocResult::Allocated(o) => { o }
+    };
+
+    uart_puts("reused (LIFO order: b's slot, then a's slot, ");
+    uart_puts("then never-used slot): ");
+    uart_print(slot_index(r1));
+    uart_puts(" ");
+    uart_print(slot_index(r2));
+    uart_puts(" ");
+    uart_print(slot_index(r3));
+    uart_puts("\ngenerations: ");
+    uart_print(slot_generation(r1));
+    uart_puts(" ");
+    uart_print(slot_generation(r2));
+    uart_puts(" ");
+    uart_print(slot_generation(r3));
+    uart_puts("\n");
+
+    match slot_alloc() {
+        SlotAllocResult::OutOfMemory => {
+            uart_puts("pool exhausted as expected\n");
+        }
+        SlotAllocResult::Allocated(o) => {
+            uart_puts("unexpected extra allocation: ");
+            uart_print(slot_index(o));
+            uart_puts("\n");
+            slot_free(o);
+        }
+    }
+
+    slot_free(r1);
+    slot_free(r2);
+    slot_free(r3);
+    slot_free(c);
+    uart_puts("done\n");
+}
