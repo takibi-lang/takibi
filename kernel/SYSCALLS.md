@@ -13,14 +13,17 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 
 | # | name | status | notes |
 |---|------|--------|-------|
-| 17 | getcwd | Implemented | this kernel has exactly one real directory (`/`); always returns it |
+| 17 | getcwd | Implemented | this kernel has exactly one real directory (`/`); always returns it. Returns the real byte count written (matching the raw syscall's own contract, distinct from the POSIX library wrapper's buffer-pointer return) -- previously returned the buffer address instead, never caught because no scenario called it before issue #196's `sh -c` scenario did |
 | 24 | dup3 | Implemented | accepted-fd -> stdin/stdout aliasing only, matching the traced daemon child's own shape |
 | 49 | chdir | Implemented | succeeds only for `/` (`ENOENT` otherwise) -- honest, since the one real cwd never actually changes |
 | 56 | openat | Implemented | absolute root paths only against the USB ext2 mount; `dirfd` ignored |
 | 57 | close | Implemented | |
 | 63 | read | Implemented | connected-socket, ext2-file, and UART-fallback paths, all through the issue #174 user-memory boundary |
 | 64 | write | Implemented | same three paths as `read`, plus the inetd-response path |
+| 65 | readv | Partial | fd 3 (ext2 file) only, via a standalone segment helper not shared with `read`(64)'s TCP/inetd branches. Each iovec entry validated and copied individually through the #174/#196 boundary (`struct packed Iovec`, `IOV_MAX`-bounded, `checked_mul_usize`/`checked_add_usize`-guarded array-length and running-total arithmetic). Connected-TCP/inetd fd support tracked in #204 |
+| 66 | writev | Partial | fd 1/2 (UART) only -- same scoping and #204 note as `readv` above |
 | 71 | sendfile | Implemented | fd 3 (ext2 file) -> fd 1/2 (UART) only, offset must be 0 |
+| 73 | ppoll | Partial | real pollfd array validation (`struct packed Pollfd`, `POLL_MAX`-bounded) and real per-fd readiness (UART RX pending, connected-TCP buffered data) -- but never actually blocks regardless of the caller's timeout. Real blocking semantics tracked in #205 |
 | 79 | newfstatat | Implemented | fixed asm-generic AArch64 `stat` fields for the ext2 root's regular files |
 | 93/94 | exit/exit_group | Implemented | real child-vs-parent teardown via the process/fd/VM-clone machinery |
 | 96 | set_tid_address | Implemented | returns the real current pid (single-threaded-per-process model) |
@@ -28,6 +31,7 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 | 113 | clock_gettime | Implemented | fixed epoch-ish timestamp; sufficient for BusyBox httpd's own use |
 | 134 | rt_sigaction | Partial | `signum` validated (`EINVAL` for 0/`SIGKILL`/`SIGSTOP`); non-null `oldact` is validated and zero-filled via the #174 boundary instead of left uninitialized; no real signal delivery exists, so an installed handler is never actually invoked (see issue #175's own audit for why this is safe against the real traced calls: `signal(SIGPIPE\|SIGALRM\|SIGCHLD\|SIGHUP, ...)`, none of which check the return value) |
 | 135 | rt_sigprocmask | Implemented | previous mask is honestly zeroed |
+| 160 | uname | Implemented | real `struct utsname` reply via the #174/#196 boundary (`sysname="Linux"`, `nodename="takibi"`, `release="6.1.0-takibi"`, `version="#1"`, `machine="aarch64"`), zero-filled scratch buffer first so no uninitialized kernel memory reaches userspace |
 | 172 | getpid | Implemented | |
 | 173 | getppid | Implemented | returns 0 (single-process-tree-root model) |
 | 174-177 | getuid/geteuid/getgid/getegid | Implemented | return 0 (always-root model) |

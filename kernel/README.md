@@ -199,7 +199,7 @@ one-minute SWD transfer. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (15 views, one boot)
+PASS kernel/rpi5 (21 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2
@@ -272,17 +272,34 @@ claim of general Linux compatibility.
   core-1 bring-up, and the reset/selection ordering fixes found by repeated
   real-hardware execution. Core 1 currently proves autonomous EL1 entry and
   shared-MMU visibility, then parks; processes still execute on core 0.
-- [Issue #174](https://github.com/takibi-lang/takibi/issues/174) tracks the
-  remaining user-memory safety boundary: typed access and complete mapping-
-  permission enforcement. Initial RX-text and RW+XN-data mappings already
-  exist, so its premise must be re-scoped against the current implementation.
-- [Issue #175](https://github.com/takibi-lang/takibi/issues/175) tracks a
-  deliberately correct Linux syscall subset with no false-success stubs.
+- [Issue #174](https://github.com/takibi-lang/takibi/issues/174) completed
+  the typed user-memory boundary (`kernel/mm/user_memory.tkb`'s
+  `UserRange`/`copy_from_user`/`copy_to_user`) and per-page permission
+  classes (text RX, rodata R, data/heap/stack RW+XN), plus a real
+  `mprotect` supporting exactly one transition and a real error otherwise.
+- [Issue #175](https://github.com/takibi-lang/takibi/issues/175) completed
+  a syscall false-success audit; every recognized syscall's actual
+  behavior (Implemented/Partial/Unsupported-by-design) is tracked in
+  `SYSCALLS.md`, not this file.
+- [Issue #186](https://github.com/takibi-lang/takibi/issues/186) added
+  `u16be`/`u32be`, type-checked big-endian integer types, and migrated
+  `kernel/net/`'s wire-format handling onto them.
+- [Issue #196](https://github.com/takibi-lang/takibi/issues/196) built
+  `uname`/`writev`/`readv`/`ppoll` on the #174 boundary, with `struct
+  packed` ABI layout types and overflow-safe iovec/pollfd array
+  validation. `writev`/`readv` are scoped to the fd kinds their traced
+  BusyBox scenarios actually use (UART, ext2 file) -- extending to
+  connected TCP and inetd-mode fds is tracked in
+  [#204](https://github.com/takibi-lang/takibi/issues/204). `ppoll`
+  reports real per-fd readiness but never actually blocks regardless of
+  the caller's timeout; real blocking semantics are tracked in
+  [#205](https://github.com/takibi-lang/takibi/issues/205).
 
 Unrecognized Linux calls return `-ENOSYS`. A few calls reached by the pinned
 userspace still have deliberately bounded compatibility behavior (notably
-signal-state calls and `mprotect`); issue #175 tracks replacing every such
-partial-success path with correct subset semantics or a real error.
+signal-state calls, `mprotect`, and `ppoll`'s non-blocking-only readiness);
+see `SYSCALLS.md`'s per-syscall notes and the issues linked above for what
+replacing each with full subset semantics still needs.
 Filesystem, TCP, process, and VM features continue to be added only when an
 executable workload requires them.
 
