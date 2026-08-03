@@ -1,6 +1,9 @@
 const PROCESS_CONTEXT_MAX: usize = 2;
-const PROCESS_FD_MAX: usize = 8;
-const PROCESS_FD_ENTRY_MAX: usize = 16;
+// Ash reserves a script fd at 10 with F_DUPFD_CLOEXEC. Keep a small but real
+// per-process descriptor namespace rather than treating fd 3 as a special
+// file-only slot; two process contexts require the matching 32 table entries.
+const PROCESS_FD_MAX: usize = 16;
+const PROCESS_FD_ENTRY_MAX: usize = 32;
 const SHARED_OBJECT_MAX: usize = 4;
 
 enum UnifiedFdKind: u8 { Empty; OpenFile; Listener; Connection; }

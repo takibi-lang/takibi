@@ -15,6 +15,7 @@ const AARCH64_NR_UNAME: usize = 160;
 const AARCH64_NR_EXIT: usize = 93;
 const AARCH64_NR_EXIT_GROUP: usize = 94;
 const AARCH64_NR_CLONE: usize = 220;
+const AARCH64_NR_FCNTL: usize = 25;
 const AARCH64_NR_TAKIBI_UART_RX_WAIT: usize = 451;
 const AARCH64_NR_TAKIBI_PARENT_PROGRESS: usize = 452;
 const LINUX_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
@@ -24,6 +25,10 @@ const LINUX_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
 const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
 const LINUX_EAGAIN: usize = 0xFFFFFFFFFFFFFFF5;
 const LINUX_EACCES: usize = 0xFFFFFFFFFFFFFFF3;
+
+const LINUX_F_DUPFD: usize = 0;
+const LINUX_F_SETFD: usize = 2;
+const LINUX_F_DUPFD_CLOEXEC: usize = 1030;
 
 const LINUX_PROT_READ: usize = 1;
 const LINUX_PROT_WRITE: usize = 2;
@@ -140,19 +145,19 @@ fn kernel_syscall_process_slot() -> usize {
     return 0;
 }
 
-fn kernel_syscall_file_lookup() -> UnifiedFileResult {
-    return unified_file_lookup(kernel_syscall_process_slot(), 3);
+fn kernel_syscall_file_lookup(fd: usize) -> UnifiedFileResult {
+    return unified_file_lookup(kernel_syscall_process_slot(), fd);
 }
 
-fn kernel_syscall_file_is_open() -> bool {
-    match kernel_syscall_file_lookup() {
+fn kernel_syscall_file_is_open(fd: usize) -> bool {
+    match kernel_syscall_file_lookup(fd) {
         UnifiedFileResult::Missing => { return false; }
         UnifiedFileResult::Found(handle) => { return true; }
     }
 }
 
-fn kernel_syscall_file_readable() -> bool {
-    match kernel_syscall_file_lookup() {
+fn kernel_syscall_file_readable(fd: usize) -> bool {
+    match kernel_syscall_file_lookup(fd) {
         UnifiedFileResult::Missing => { return false; }
         UnifiedFileResult::Found(handle) => {
             return unified_file_is_readable(handle);
@@ -160,8 +165,8 @@ fn kernel_syscall_file_readable() -> bool {
     }
 }
 
-fn kernel_syscall_file_writable() -> bool {
-    match kernel_syscall_file_lookup() {
+fn kernel_syscall_file_writable(fd: usize) -> bool {
+    match kernel_syscall_file_lookup(fd) {
         UnifiedFileResult::Missing => { return false; }
         UnifiedFileResult::Found(handle) => {
             return unified_file_is_writable(handle);
@@ -169,8 +174,8 @@ fn kernel_syscall_file_writable() -> bool {
     }
 }
 
-fn kernel_syscall_file_inode() -> usize {
-    match kernel_syscall_file_lookup() {
+fn kernel_syscall_file_inode(fd: usize) -> usize {
+    match kernel_syscall_file_lookup(fd) {
         UnifiedFileResult::Missing => { return 0; }
         UnifiedFileResult::Found(handle) => {
             return unified_file_inode(handle);
@@ -178,18 +183,25 @@ fn kernel_syscall_file_inode() -> usize {
     }
 }
 
-fn kernel_syscall_file_offset() -> usize {
-    match unified_fd_offset(kernel_syscall_process_slot(), 3) {
+fn kernel_syscall_file_offset(fd: usize) -> usize {
+    match unified_fd_offset(kernel_syscall_process_slot(), fd) {
         UnifiedOffsetResult::Missing => { return 0; }
         UnifiedOffsetResult::Found(value) => { return value; }
     }
 }
 
-fn kernel_syscall_file_set_offset(value: usize) -> bool {
-    match unified_fd_set_offset(kernel_syscall_process_slot(), 3, value) {
+fn kernel_syscall_file_set_offset(fd: usize, value: usize) -> bool {
+    match unified_fd_set_offset(kernel_syscall_process_slot(), fd, value) {
         UnifiedFdResult::Invalid => { return false; }
         UnifiedFdResult::Ok => { return true; }
     }
+}
+
+fn kernel_syscall_any_file_is_open() -> bool {
+    for fd: usize in 0..<PROCESS_FD_MAX {
+        if (kernel_syscall_file_is_open(fd)) { return true; }
+    }
+    return false;
 }
 
 fn kernel_syscall_heap_break() -> usize {
@@ -285,7 +297,11 @@ fn kernel_socket_fd_alloc(first: usize) -> KernelSocketFdAllocResult {
     match unified_fd_alloc(kernel_syscall_process_slot(), first) {
         UnifiedFdAllocResult::Full => { return KernelSocketFdAllocResult::Full; }
         UnifiedFdAllocResult::Allocated(fd) => {
-            return KernelSocketFdAllocResult::Allocated(fd);
+            if (fd < KERNEL_SOCKET_FD_MAX) {
+                let socket_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} = fd;
+                return KernelSocketFdAllocResult::Allocated(socket_fd);
+            }
+            return KernelSocketFdAllocResult::Full;
         }
     }
 }
@@ -457,7 +473,7 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
 
 fn kernel_syscall_daemon_teardown() -> KernelDaemonTeardownResult {
     if (kernel_listener_state(4) != UnifiedListenerState::Listening ||
-        kernel_syscall_file_is_open()) {
+        kernel_syscall_any_file_is_open()) {
         return KernelDaemonTeardownResult::Invalid;
     }
     for connection_index: usize in 0..<TCP_CONNECTION_MAX {
@@ -727,27 +743,26 @@ fn syscall_writev_segment(fd: usize, address: usize, length: usize)
     return WriteSegmentResult::Written(length);
 }
 
-// Single-segment read, fd 3 (ext2) only -- same scoping rationale as
-// syscall_writev_segment above, mirroring read(63)'s own fd==3 branch.
+// Single-segment read from any open ext2 file descriptor.
 fn syscall_readv_segment(fd: usize, address: usize, length: usize)
         -> ReadSegmentResult {
-    if (fd != 3 || kernel_syscall_file_is_open() == false ||
-            kernel_syscall_file_readable() == false) {
+    if (kernel_syscall_file_is_open(fd) == false ||
+            kernel_syscall_file_readable(fd) == false) {
         return ReadSegmentResult::Errno(LINUX_EBADF);
     }
     match ext2_read_small_file(
-            syscall_ext2_mount, kernel_syscall_file_inode(),
+            syscall_ext2_mount, kernel_syscall_file_inode(fd),
             syscall_file_buffer as []u8) {
         Ext2ReadResult::Invalid => { return ReadSegmentResult::Errno(LINUX_EINVAL); }
         Ext2ReadResult::Read(file_length) => {
-            if (kernel_syscall_file_offset() >= file_length) {
+            if (kernel_syscall_file_offset(fd) >= file_length) {
                 return ReadSegmentResult::Read(0);
             }
-            let available: usize = file_length - kernel_syscall_file_offset();
+            let available: usize = file_length - kernel_syscall_file_offset(fd);
             let mut amount: usize = length;
             if (amount > available) { amount = available; }
             let source_base: *u8 = (syscall_file_buffer as *u8) +
-                (kernel_syscall_file_offset() as isize);
+                (kernel_syscall_file_offset(fd) as isize);
             match user_range_check(address, amount, UserAccessMode::Write) {
                 UserRangeResult::Fault => {
                     return ReadSegmentResult::Errno(LINUX_EFAULT);
@@ -758,7 +773,7 @@ fn syscall_readv_segment(fd: usize, address: usize, length: usize)
                 }
             }
             if (kernel_syscall_file_set_offset(
-                    kernel_syscall_file_offset() + amount) == false) {
+                    fd, kernel_syscall_file_offset(fd) + amount) == false) {
                 return ReadSegmentResult::Errno(LINUX_EBADF);
             }
             return ReadSegmentResult::Read(amount);
@@ -815,7 +830,9 @@ fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
             }
         }
     }
-    if (fd == 1 || fd == 2 || fd == 3) { return (true, 0); }
+    if (fd == 1 || fd == 2 || kernel_syscall_file_is_open(fd)) {
+        return (true, 0);
+    }
     return (false, POLLNVAL);
 }
 
@@ -998,12 +1015,12 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 syscall_inetd_response_length[inetd_write_slot] + length;
             return (1, length);
         }
-        if (fd == 3) {
+        if (kernel_syscall_file_is_open(fd)) {
             syscall_file_write_calls = syscall_file_write_calls + 1;
-            if (kernel_syscall_file_is_open() == false || kernel_syscall_file_writable() == false) {
+            if (kernel_syscall_file_writable(fd) == false) {
                 return (1, LINUX_EBADF);
             }
-            if (kernel_syscall_file_offset() != 0 || length == 0 ||
+            if (kernel_syscall_file_offset(fd) != 0 || length == 0 ||
                 length > KERNEL_BLOCK_SIZE) {
                 return (1, LINUX_EINVAL);
             }
@@ -1017,10 +1034,10 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             }
             let content = unsafe { destination_base[0..<length as isize] };
             match ext2_resize_small_file(
-                    syscall_ext2_mount, kernel_syscall_file_inode(), content) {
+                    syscall_ext2_mount, kernel_syscall_file_inode(fd), content) {
                 Ext2ResizeResult::Invalid => { return (1, LINUX_EINVAL); }
                 Ext2ResizeResult::Resized => {
-                    if (kernel_syscall_file_set_offset(length) == false) {
+                    if (kernel_syscall_file_set_offset(fd, length) == false) {
                         return (1, LINUX_EBADF);
                     }
                     return (1, length);
@@ -1047,7 +1064,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         syscall_open_calls = syscall_open_calls + 1;
         // openat(dirfd, pathname, flags): only absolute root paths are in
         // scope, so dirfd is intentionally ignored.
-        if (syscall_ext2_ready == false || kernel_syscall_file_is_open()) {
+        if (syscall_ext2_ready == false) {
             return (1, LINUX_EBADF);
         }
         let path_kind: usize = kernel_syscall_path_kind(x1);
@@ -1061,13 +1078,18 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             Ext2LookupResult::NotFound => { return (1, LINUX_ENOENT); }
             Ext2LookupResult::Found(inode_number) => {
                 let access_mode: usize = x2 & 3;
-                match unified_file_open(
-                        kernel_syscall_process_slot(), 3, inode_number,
-                        access_mode != 1, access_mode != 0) {
-                    UnifiedFdResult::Invalid => {
-                        return (1, LINUX_EBADF);
+                match unified_fd_alloc(kernel_syscall_process_slot(), 3) {
+                    UnifiedFdAllocResult::Full => { return (1, LINUX_EBADF); }
+                    UnifiedFdAllocResult::Allocated(fd) => {
+                        match unified_file_open(
+                                kernel_syscall_process_slot(), fd, inode_number,
+                                access_mode != 1, access_mode != 0) {
+                            UnifiedFdResult::Invalid => {
+                                return (1, LINUX_EBADF);
+                            }
+                            UnifiedFdResult::Ok => { return (1, fd); }
+                        }
                     }
-                    UnifiedFdResult::Ok => { return (1, 3); }
                 }
             }
         }
@@ -1242,21 +1264,21 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
               }
             }
         }
-        if (fd != 3 || kernel_syscall_file_is_open() == false ||
-            kernel_syscall_file_readable() == false) {
+        if (kernel_syscall_file_is_open(fd) == false ||
+            kernel_syscall_file_readable(fd) == false) {
             return (1, LINUX_EBADF);
         }
         match ext2_read_small_file(
-                syscall_ext2_mount, kernel_syscall_file_inode(),
+                syscall_ext2_mount, kernel_syscall_file_inode(fd),
                 syscall_file_buffer as []u8) {
             Ext2ReadResult::Invalid => { return (1, LINUX_EINVAL); }
             Ext2ReadResult::Read(file_length) => {
-                if (kernel_syscall_file_offset() >= file_length) { return (1, 0); }
-                let available: usize = file_length - kernel_syscall_file_offset();
+                if (kernel_syscall_file_offset(fd) >= file_length) { return (1, 0); }
+                let available: usize = file_length - kernel_syscall_file_offset(fd);
                 let mut amount: usize = requested;
                 if (amount > available) { amount = available; }
                 let source_base: *u8 = (syscall_file_buffer as *u8) +
-                    (kernel_syscall_file_offset() as isize);
+                    (kernel_syscall_file_offset(fd) as isize);
                 match user_range_check(address, amount, UserAccessMode::Write) {
                     UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
                     UserRangeResult::Ok(range) => {
@@ -1265,12 +1287,43 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                     }
                 }
                 if (kernel_syscall_file_set_offset(
-                        kernel_syscall_file_offset() + amount) == false) {
+                        fd, kernel_syscall_file_offset(fd) + amount) == false) {
                     return (1, LINUX_EBADF);
                 }
                 return (1, amount);
             }
         }
+    }
+
+    if (number == AARCH64_NR_FCNTL) {
+        // The ash script loader marks its temporary descriptor close-on-exec,
+        // then moves it out of the conventional low-fd range. There is no
+        // execve surface yet, so FD_CLOEXEC has no retained state; descriptor
+        // duplication remains real and shares the open-file offset.
+        let fd: usize = x0;
+        let command: usize = x1;
+        if (kernel_syscall_file_is_open(fd) == false) {
+            return (1, LINUX_EBADF);
+        }
+        if (command == LINUX_F_SETFD) {
+            if (x2 != 0 && x2 != 1) { return (1, LINUX_EINVAL); }
+            return (1, 0);
+        }
+        if (command == LINUX_F_DUPFD || command == LINUX_F_DUPFD_CLOEXEC) {
+            match unified_fd_alloc(kernel_syscall_process_slot(), x2) {
+                UnifiedFdAllocResult::Full => { return (1, LINUX_EBADF); }
+                UnifiedFdAllocResult::Allocated(new_fd) => {
+                    match unified_fd_duplicate(
+                            kernel_syscall_process_slot(), fd, new_fd) {
+                        UnifiedFdResult::Invalid => {
+                            return (1, LINUX_EBADF);
+                        }
+                        UnifiedFdResult::Ok => { return (1, new_fd); }
+                    }
+                }
+            }
+        }
+        return (1, LINUX_ENOSYS);
     }
 
     if (number == 24) {
@@ -1322,10 +1375,10 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
           }
         }
         syscall_close_calls = syscall_close_calls + 1;
-        if (x0 != 3 || kernel_syscall_file_is_open() == false) {
+        if (kernel_syscall_file_is_open(x0) == false) {
             return (1, LINUX_EBADF);
         }
-        match unified_fd_close(kernel_syscall_process_slot(), 3) {
+        match unified_fd_close(kernel_syscall_process_slot(), x0) {
             UnifiedFdResult::Invalid => { return (1, LINUX_EBADF); }
             UnifiedFdResult::Ok => { return (1, 0); }
         }
@@ -1527,28 +1580,29 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let input_fd: usize = x1;
         let offset_address: usize = x2;
         let requested: usize = x3;
-        if ((output_fd != 1 && output_fd != 2) || input_fd != 3 ||
-            kernel_syscall_file_is_open() == false || kernel_syscall_file_readable() == false) {
+        if ((output_fd != 1 && output_fd != 2) ||
+            kernel_syscall_file_is_open(input_fd) == false ||
+            kernel_syscall_file_readable(input_fd) == false) {
             return (1, LINUX_EBADF);
         }
         if (offset_address != 0) { return (1, LINUX_EINVAL); }
         match ext2_read_small_file(
-                syscall_ext2_mount, kernel_syscall_file_inode(),
+                syscall_ext2_mount, kernel_syscall_file_inode(input_fd),
                 syscall_file_buffer as []u8) {
             Ext2ReadResult::Invalid => { return (1, LINUX_EINVAL); }
             Ext2ReadResult::Read(file_length) => {
-                if (kernel_syscall_file_offset() >= file_length) { return (1, 0); }
-                let available: usize = file_length - kernel_syscall_file_offset();
+                if (kernel_syscall_file_offset(input_fd) >= file_length) { return (1, 0); }
+                let available: usize = file_length - kernel_syscall_file_offset(input_fd);
                 let mut amount: usize = requested;
                 if (amount > available) { amount = available; }
                 let source: *u8 = syscall_file_buffer as *u8;
                 let mut copy_index: usize = 0;
                 while (copy_index < amount) {
-                    uart_putc(source[(kernel_syscall_file_offset() + copy_index) as isize]);
+                    uart_putc(source[(kernel_syscall_file_offset(input_fd) + copy_index) as isize]);
                     copy_index = copy_index + 1;
                 }
                 if (kernel_syscall_file_set_offset(
-                        kernel_syscall_file_offset() + amount) == false) {
+                        input_fd, kernel_syscall_file_offset(input_fd) + amount) == false) {
                     return (1, LINUX_EBADF);
                 }
                 syscall_read_calls = syscall_read_calls + 1;

@@ -1,2 +1,3 @@
-^busybox script failed$
+^ash script fixture$
+^busybox script exit: 0$
 ^script unmap: clean$
