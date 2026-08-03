@@ -102,7 +102,7 @@ must_use variant HttpdImageMapCheckResult { Invalid; Verified; }
 fn httpd_image_mapping_check(httpd_plan: DistroElfLoadPlan,
                              musl_plan: DistroElfLoadPlan)
         -> HttpdImageMapCheckResult {
-    match process_image_map(httpd_plan, "check\0" as []u8, 1, 0) {
+    match process_image_map(httpd_plan, "check\0" as []u8, 1) {
         ProcessImageMapResult::InvalidImage => {
             return HttpdImageMapCheckResult::Invalid;
         }
@@ -118,7 +118,7 @@ fn httpd_image_mapping_check(httpd_plan: DistroElfLoadPlan,
             kernel_boot_log("httpd map: pie pages=157 clean\n");
         }
     }
-    match process_image_map(musl_plan, "check\0" as []u8, 1, 0) {
+    match process_image_map(musl_plan, "check\0" as []u8, 1) {
         ProcessImageMapResult::InvalidImage => {
             return HttpdImageMapCheckResult::Invalid;
         }
@@ -717,7 +717,7 @@ fn main() {
                         match process_image_map(
                                 plan,
                                 "busybox\0cat\0/hello.txt\0" as []u8,
-                                3, 0) {
+                                3) {
                             ProcessImageMapResult::InvalidImage => {
                                 kernel_boot_log("distro map: invalid image\n");
                             }
@@ -874,7 +874,7 @@ fn main() {
                 match process_image_map(
                         saved_distro_plan,
                         "busybox\0uname\0-a\0" as []u8,
-                        3, 0) {
+                        3) {
                     ProcessImageMapResult::InvalidImage => {
                         kernel_boot_log("uname map: invalid image\n");
                     }
@@ -919,7 +919,7 @@ fn main() {
                 match process_image_map(
                         saved_distro_plan,
                         "busybox\0sh\0-c\0read x\0" as []u8,
-                        4, SHELL_STACK_EXTRA_PAGES) {
+                        4) {
                     ProcessImageMapResult::InvalidImage => {
                         kernel_boot_log("shell read map: invalid image\n");
                     }
@@ -938,6 +938,9 @@ fn main() {
                             kernel_boot_log("busybox shell read exit: 0\n");
                         } else {
                             kernel_boot_log("busybox shell read failed\n");
+                        }
+                        if (process_image_stack_grew(shell_pages)) {
+                            kernel_boot_log("shell stack: demand-grown\n");
                         }
                         process_image_unmap(shell_pages);
                         if (process_image_window_is_clear()) {
@@ -964,7 +967,7 @@ fn main() {
                 match process_image_map(
                         saved_distro_plan,
                         "busybox\0od\0/hello.txt\0" as []u8,
-                        3, 0) {
+                        3) {
                     ProcessImageMapResult::InvalidImage => {
                         kernel_boot_log("od map: invalid image\n");
                     }

@@ -9,6 +9,12 @@ private let mut clone_page_indices: [usize; 512];
 private let mut clone_l3_indices: [usize; 512];
 private let mut clone_page_count: usize;
 private let mut clone_last_reaped_count: usize;
+// The active static-PIE image is the only process-image user of root 0.
+// Its initial mappings are recorded at map time; pages faulted into its
+// reserved stack are appended here so process_image_unmap releases them too.
+private let mut process_image_active_page_count: usize;
+private let mut process_image_stack_lowest_l3: usize;
+private let mut process_image_stack_growth_active: bool;
 
 private linear view ProcessCloneVmOwner;
 variant ProcessCloneVmValue {
@@ -27,12 +33,13 @@ must_use variant ProcessCloneVmReapResult { Missing; Reaped; }
 
 const PROCESS_STACK_L3_INDEX: usize = 511;
 const PROCESS_DYNAMIC_STACK_FIRST_L3_INDEX: usize = 504;
+// 256 KiB is a bounded virtual reservation, not an eager allocation. It
+// leaves the static BusyBox heap (ending at page 419) below the reservation.
+// The unmapped page immediately below it is the guard page; #198 only maps
+// pages in this interval after an EL0 translation fault.
+const PROCESS_STACK_GROWTH_FIRST_L3_INDEX: usize = 448;
 const PROCESS_STACK_LAYOUT_SIZE: usize = 512;
 const PROCESS_HEAP_PAGE_COUNT: usize = 128;
-// Issue #196 pre-work: BusyBox ash's real startup + `read` builtin needs
-// five pages. This remains an eager temporary policy until #198 provides
-// one virtual reservation with fault-driven stack growth.
-const SHELL_STACK_EXTRA_PAGES: usize = 4;
 const AT_PHDR: usize = 3;
 const AT_PHENT: usize = 4;
 const AT_PHNUM: usize = 5;
@@ -206,7 +213,7 @@ linear struct ProcessImagePages[image: usize] {
 fn process_image_record(slot: usize,
                         page_index: {0..<BOOT_PAGE_COUNT as usize},
                         l3_index: usize) {
-    if (slot >= 0 && slot < 512) {
+    if (slot < BOOT_PAGE_COUNT) {
         image_page_indices[slot] = page_index;
         image_l3_indices[slot] = l3_index;
     }
@@ -474,8 +481,63 @@ fn process_image_cleanup(count: usize) {
     }
 }
 
+// Called directly from el0_sync_entry for a lower-EL data-abort translation
+// fault. It accepts only an address inside the reserved, downward-growing
+// stack and maps every missing page down to that address. Mapping the whole
+// gap handles an ABI that subtracts a large stack frame before its first
+// store, while the guard page below the reservation remains unmapped.
+fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
+    let exception_class: usize = (esr >> 26) & 0x3F;
+    let fault_status: usize = esr & 0x3F;
+    if (process_image_stack_growth_active == false ||
+        exception_class != 0x24 || fault_status != 0x07) {
+        return false;
+    }
+    let stack_start: usize = USER_TEXT_VA +
+        PROCESS_STACK_GROWTH_FIRST_L3_INDEX * PAGE_SIZE;
+    let stack_top: usize = USER_TEXT_VA + PROCESS_STACK_L3_INDEX * PAGE_SIZE;
+    if (fault_address < stack_start || fault_address >= stack_top) {
+        return false;
+    }
+    let fault_index: usize = (fault_address - USER_TEXT_VA) / PAGE_SIZE;
+    if (fault_index < PROCESS_STACK_GROWTH_FIRST_L3_INDEX ||
+        fault_index >= process_image_stack_lowest_l3) {
+        return false;
+    }
+    for l3_index: usize in fault_index..<process_image_stack_lowest_l3 {
+        if (process_image_active_page_count >= BOOT_PAGE_COUNT ||
+            user_pte_read(l3_index) != 0) {
+            return false;
+        }
+        match page_alloc() {
+            PageAllocResult::OutOfMemory => { return false; }
+            PageAllocResult::Allocated(stack_page) => {
+                let bytes = page_bytes(stack_page);
+                for i: usize in 0..<4096 { bytes[i] = 0; }
+                let phys: usize = page_physical_address(stack_page);
+                user_pte_write(l3_index, phys | USER_RW_XN_FLAGS);
+                user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
+                let page_index = page_owner_transfer_index(stack_page);
+                process_image_record(
+                    process_image_active_page_count, page_index, l3_index);
+                process_image_active_page_count =
+                    process_image_active_page_count + 1;
+            }
+        }
+    }
+    process_image_stack_lowest_l3 = fault_index;
+    return true;
+}
+
 fn process_image_unmap(pages: sink ProcessImagePages[image]) {
-    process_image_cleanup(pages.count);
+    let mut count: usize = pages.count;
+    if (process_image_stack_growth_active) {
+        count = process_image_active_page_count;
+        process_image_stack_growth_active = false;
+        process_image_active_page_count = 0;
+        process_image_stack_lowest_l3 = PROCESS_STACK_L3_INDEX;
+    }
+    process_image_cleanup(count);
 }
 
 fn process_image_map_segments(plan: DistroElfLoadPlan,
@@ -717,14 +779,12 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
     }
 }
 
-// `extra_stack_pages` is a temporary eager-backing policy. #198 will replace
-// it with one virtual stack reservation and fault-driven page growth; keeping
-// it an argument here prevents another workload-specific mapper in the
-// meantime.
 fn process_image_map(plan: DistroElfLoadPlan,
                      argv: []u8,
-                     argc: usize,
-                     extra_stack_pages: usize) -> ProcessImageMapResult {
+                     argc: usize) -> ProcessImageMapResult {
+    process_image_stack_growth_active = false;
+    process_image_active_page_count = 0;
+    process_image_stack_lowest_l3 = PROCESS_STACK_L3_INDEX;
     if (plan.extent > 0x200000) {
         return ProcessImageMapResult::OutOfMemory;
     }
@@ -740,8 +800,7 @@ fn process_image_map(plan: DistroElfLoadPlan,
     }
     let heap_first_page: usize = (plan.extent + PAGE_SIZE - 1) / PAGE_SIZE;
     let heap_last_page: usize = heap_first_page + PROCESS_HEAP_PAGE_COUNT;
-    if (extra_stack_pages >= PROCESS_STACK_L3_INDEX ||
-        heap_last_page >= PROCESS_STACK_L3_INDEX - extra_stack_pages) {
+    if (heap_last_page >= PROCESS_STACK_GROWTH_FIRST_L3_INDEX) {
         process_image_cleanup(mapped);
         return ProcessImageMapResult::OutOfMemory;
     }
@@ -763,29 +822,6 @@ fn process_image_map(plan: DistroElfLoadPlan,
                 user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
                 let page_index = page_owner_transfer_index(heap_page);
                 process_image_record(mapped, page_index, l3_index);
-                mapped = mapped + 1;
-            }
-        }
-    }
-    for extra_index: usize in
-            (PROCESS_STACK_L3_INDEX - extra_stack_pages)..<PROCESS_STACK_L3_INDEX {
-        if (user_pte_read(extra_index) != 0) {
-            process_image_cleanup(mapped);
-            return ProcessImageMapResult::InvalidImage;
-        }
-        match page_alloc() {
-            PageAllocResult::OutOfMemory => {
-                process_image_cleanup(mapped);
-                return ProcessImageMapResult::OutOfMemory;
-            }
-            PageAllocResult::Allocated(extra_stack_page) => {
-                let bytes = page_bytes(extra_stack_page);
-                for i: usize in 0..<4096 { bytes[i] = 0; }
-                let phys: usize = page_physical_address(extra_stack_page);
-                user_pte_write(extra_index, phys | USER_RW_XN_FLAGS);
-                user_tlb_invalidate(USER_TEXT_VA + extra_index * PAGE_SIZE);
-                let page_index = page_owner_transfer_index(extra_stack_page);
-                process_image_record(mapped, page_index, extra_index);
                 mapped = mapped + 1;
             }
         }
@@ -830,6 +866,8 @@ fn process_image_map(plan: DistroElfLoadPlan,
     let mut pages: ProcessImagePages[0] = {
         image, mapped, entry, stack_pointer, heap_start, heap_limit
     };
+    process_image_active_page_count = mapped;
+    process_image_stack_growth_active = true;
     return ProcessImageMapResult::Mapped(pages);
 }
 
@@ -843,6 +881,11 @@ fn process_image_entry(pages: borrow ProcessImagePages[image]) -> usize {
 
 fn process_image_stack_pointer(pages: borrow ProcessImagePages[image]) -> usize {
     return pages.stack_pointer;
+}
+
+fn process_image_stack_grew(pages: borrow ProcessImagePages[image]) -> bool {
+    return process_image_stack_growth_active &&
+           process_image_active_page_count > pages.count;
 }
 
 fn process_image_heap_range(pages: borrow ProcessImagePages[image])

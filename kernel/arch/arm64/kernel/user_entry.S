@@ -387,6 +387,19 @@ el0_sync_entry:
     sub     sp, sp, #EL0_CONTEXT_SIZE
     EL0_CONTEXT_SAVE
 
+    /* Lower-EL synchronous exceptions are either SVC64 syscalls or, for the
+     * bounded process-image stack reservation, a translation fault. Handle
+     * the latter with IRQs still masked: page allocation and one PTE update
+     * are non-blocking, and a scheduler switch cannot interpose between the
+     * fault and retry. All other non-SVC exceptions retain the fail-stop
+     * evidence path. */
+    mrs     x0, esr_el1
+    lsr     x1, x0, #26
+    cmp     x1, #0x24          /* Data Abort taken without a change in EL */
+    b.eq    .Ldata_abort
+    cmp     x1, #0x15          /* SVC instruction execution in AArch64 */
+    b.ne    .Lsync_fail
+
     /* GitHub issue #187: exception entry unconditionally masks DAIF, so
      * without this, any syscall whose handling reaches a real
      * interrupt_wait() (RP1 USB xHCI's disk I/O completion) blocks
@@ -421,6 +434,18 @@ el0_sync_entry:
     b.eq    .Lsyscall_clone_parent
     cmp     x6, #5
     b.eq    .Lsyscall_block
+    mov     x16, #8
+    b       el1_exception_evidence
+
+.Ldata_abort:
+    mrs     x1, far_el1
+    bl      process_image_handle_data_abort
+    cbz     x0, .Lsync_fail
+    EL0_CONTEXT_RESTORE
+    add     sp, sp, #EL0_CONTEXT_SIZE
+    eret
+
+.Lsync_fail:
     mov     x16, #8
     b       el1_exception_evidence
 

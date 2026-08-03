@@ -1,2 +1,3 @@
 ^busybox shell read failed$
+^shell stack: demand-grown$
 ^shell read unmap: clean$
