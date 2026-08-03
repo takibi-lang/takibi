@@ -4632,6 +4632,29 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable decl_loc =
     match e.desc, ft with
     | IntLit i, TypePtr _ ->
         const_inttoptr (const_of_int64 (usize_lltype ()) i true) (pointer_type context)
+    | IntLit i, TypeU16Be ->
+        (* Mirror gen_expr's IntLit case (GitHub issue #186): a global
+           `const X: u16be = 0x0806;` is written the conventional way and
+           must be byte-swapped at compile time, same as any other u16be
+           literal -- this is the compile-time constant evaluator used for
+           top-level global initializers, a separate code path from
+           gen_expr's, and it was missing this case entirely (found via
+           kernel/net/tcp.tkb's `eth_hdr.ethertype = ETHERTYPE_IPV4;`,
+           which loads the global directly rather than going through
+           BinOp's intlit_opt/Const_env shortcut). *)
+        let n = Int64.to_int (Int64.logand i 0xFFFFL) in
+        let swapped = ((n land 0xFF) lsl 8) lor ((n lsr 8) land 0xFF) in
+        const_of_int64 (i16_type context) (Int64.of_int swapped) true
+    | IntLit i, TypeU32Be ->
+        let n = Int64.logand i 0xFFFFFFFFL in
+        let b0 = Int64.logand n 0xFFL in
+        let b1 = Int64.logand (Int64.shift_right_logical n 8) 0xFFL in
+        let b2 = Int64.logand (Int64.shift_right_logical n 16) 0xFFL in
+        let b3 = Int64.logand (Int64.shift_right_logical n 24) 0xFFL in
+        let swapped = Int64.logor (Int64.shift_left b0 24)
+          (Int64.logor (Int64.shift_left b1 16)
+             (Int64.logor (Int64.shift_left b2 8) b3)) in
+        const_of_int64 (i32_type context) swapped true
     | IntLit i, _ ->
         const_of_int64 (ltype_of_ast ft) i true
     | BoolLit b, TypeBool ->

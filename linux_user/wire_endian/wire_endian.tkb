@@ -42,6 +42,18 @@ struct packed be WireHdrSugar {
 
 let mut wire_bytes: [u8; 10];
 
+// GitHub issue #186 follow-up: a top-level `const` of u16be type must be
+// byte-swapped at its OWN compile-time global-initializer evaluation
+// (lib/llvm_gen.ml's gen_global/eval_const), a separate code path from
+// gen_expr's IntLit case that handles a literal bound directly via
+// ~expected_ty. Comparing hdr.field == TEST_MAGIC below would not catch a
+// regression here -- BinOp's intlit_opt/Const_env shortcut resolves a
+// Var-referencing-a-const operand back to its literal value and swaps it
+// inline, bypassing whatever eval_const stored for the global entirely.
+// Only an ASSIGNMENT (hdr.magic = TEST_MAGIC;), which genuinely loads the
+// global, exercises eval_const's own swap.
+const TEST_MAGIC: u16be = 0x0abc;
+
 // Accepting the exact refined range `{20..<1501 as u16}` here proves that
 // `hdr.len as u16` below carries its proven range across the byte-swap
 // with no runtime check -- this whole example is built with --forbid-trap,
@@ -111,6 +123,17 @@ fn test_wire_endian() {
     }
     uart_puts("\r\nsugar-seq: ");
     uart_print_hex((hdr_sugar.seq as u32) as i32);
+    uart_puts("\r\n");
+
+    // Assigning a global u16be const into a field must produce the same
+    // wire bytes as a hand-written literal would: 0x0abc big-endian is
+    // bytes [0x0a, 0xbc]. Read back via the RAW byte array (not the u16be
+    // field again) so a broken eval_const swap is directly visible here.
+    hdr.magic = TEST_MAGIC;
+    uart_puts("const-assign-bytes: ");
+    uart_print_hex(wire_bytes[0] as i32);
+    uart_puts(" ");
+    uart_print_hex(wire_bytes[1] as i32);
     uart_puts("\r\n");
 
     uart_puts("done\r\n");

@@ -6,4 +6,5 @@ seq: 0x12345678
 seq-masked: 0x02345000
 sugar-magic-eq: true
 sugar-seq: 0x12345678
+const-assign-bytes: 0x0000000a 0x000000bc
 done
