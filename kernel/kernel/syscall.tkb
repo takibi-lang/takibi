@@ -79,7 +79,7 @@ const KERNEL_SOCKET_FD_MAX: usize = 8;
 private let mut syscall_ext2_mount: Ext2Mount;
 private let mut syscall_ext2_ready: bool;
 private let mut syscall_file_buffer: [u8; KERNEL_BLOCK_SIZE];
-private let mut syscall_path_buffer: [u8; 16];
+private let mut syscall_path_buffer: [u8; 19];
 private let mut syscall_sockaddr_buffer: [u8; 28];
 private let mut syscall_open_calls: usize;
 private let mut syscall_read_calls: usize;
@@ -584,10 +584,10 @@ fn kernel_syscall_partial_write_evidence() -> bool {
     return syscall_partial_write_observed;
 }
 
-// Returns 1 for /hello.txt, 2 for /mutable.txt, 3 for index.html (absolute
-// or relative), and 0 for unsupported or invalid paths. Every read goes
-// through user_range_check()/copy_from_user() -- no raw pointer cast of the
-// user-supplied address happens in this file.
+// Returns 1 for /hello.txt, 2 for /mutable.txt, 3 for index.html, and 4 for
+// /busybox-demand.sh (absolute or relative), and 0 for unsupported or invalid
+// paths. Every read goes through user_range_check()/copy_from_user() -- no raw
+// pointer cast of the user-supplied address happens in this file.
 fn kernel_syscall_path_kind(address: usize) -> usize {
     let path_view: []u8 = syscall_path_buffer as []u8;
     match user_range_check(address, 11, UserAccessMode::Read) {
@@ -632,6 +632,25 @@ fn kernel_syscall_path_kind(address: usize) -> usize {
                     path_view[8] == 0x74 && path_view[9] == 0x6D &&
                     path_view[10] == 0x6C && path_view[11] == 0) {
                     return 3;
+                }
+            }
+        }
+    }
+    match user_range_check(address, 19, UserAccessMode::Read) {
+        UserRangeResult::Fault => {}
+        UserRangeResult::Ok(range) => {
+            if (copy_from_user(range, path_view[0..<19])) {
+                if (path_view[0] == 0x2F && path_view[1] == 0x62 &&
+                    path_view[2] == 0x75 && path_view[3] == 0x73 &&
+                    path_view[4] == 0x79 && path_view[5] == 0x62 &&
+                    path_view[6] == 0x6F && path_view[7] == 0x78 &&
+                    path_view[8] == 0x2D && path_view[9] == 0x64 &&
+                    path_view[10] == 0x65 && path_view[11] == 0x6D &&
+                    path_view[12] == 0x61 && path_view[13] == 0x6E &&
+                    path_view[14] == 0x64 && path_view[15] == 0x2E &&
+                    path_view[16] == 0x73 && path_view[17] == 0x68 &&
+                    path_view[18] == 0) {
+                    return 4;
                 }
             }
         }
@@ -1036,6 +1055,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let mut name: []u8 = "hello.txt" as []u8;
         if (path_kind == 2) { name = "mutable.txt" as []u8; }
         if (path_kind == 3) { name = "index.html" as []u8; }
+        if (path_kind == 4) { name = "busybox-demand.sh" as []u8; }
         match ext2_lookup_root(syscall_ext2_mount, name) {
             Ext2LookupResult::Invalid => { return (1, LINUX_EINVAL); }
             Ext2LookupResult::NotFound => { return (1, LINUX_ENOENT); }
@@ -1066,6 +1086,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let mut name: []u8 = "hello.txt" as []u8;
         if (path_kind == 2) { name = "mutable.txt" as []u8; }
         if (path_kind == 3) { name = "index.html" as []u8; }
+        if (path_kind == 4) { name = "busybox-demand.sh" as []u8; }
         match ext2_lookup_root(syscall_ext2_mount, name) {
             Ext2LookupResult::Invalid => { return (1, LINUX_EINVAL); }
             Ext2LookupResult::NotFound => { return (1, LINUX_ENOENT); }

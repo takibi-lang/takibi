@@ -995,6 +995,44 @@ fn main() {
                 }
             }
 
+            // Issue #206: execute a real ash script stored in the ext2
+            // fixture rather than passing an inline `sh -c` command. This
+            // first traced run reaches ash's fcntl(F_DUPFD_CLOEXEC) script-FD
+            // setup, which the current narrow descriptor surface rejects;
+            // retaining the expected nonzero exit records that concrete
+            // follow-up boundary instead of hiding it behind an inline argv.
+            if (distro_plan_ready) {
+                match process_image_map(
+                        saved_distro_plan,
+                        "busybox\0sh\0/busybox-demand.sh\0" as []u8,
+                        3) {
+                    ProcessImageMapResult::InvalidImage => {
+                        kernel_boot_log("script map: invalid image\n");
+                    }
+                    ProcessImageMapResult::OutOfMemory => {
+                        kernel_boot_log("script map: out of memory\n");
+                    }
+                    ProcessImageMapResult::Mapped(script_pages) => {
+                        let (script_heap_start, script_heap_limit) =
+                            process_image_heap_range(script_pages);
+                        kernel_syscall_process_configure(
+                            script_heap_start, script_heap_limit);
+                        let script_status: usize = run_initial_user(
+                            process_image_entry(script_pages),
+                            process_image_stack_pointer(script_pages));
+                        if (script_status == 0) {
+                            kernel_boot_log("busybox script exit: 0\n");
+                        } else {
+                            kernel_boot_log("busybox script failed\n");
+                        }
+                        process_image_unmap(script_pages);
+                        if (process_image_window_is_clear()) {
+                            kernel_boot_log("script unmap: clean\n");
+                        }
+                    }
+                }
+            }
+
             if (page_allocator_live_count() == 0) {
                 kernel_boot_log("resources: pages=0\n");
             } else {

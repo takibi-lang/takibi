@@ -1,0 +1,1 @@
+echo ash script fixture
