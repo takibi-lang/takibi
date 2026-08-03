@@ -13315,3 +13315,60 @@ and verifies that the resulting IR contains both one-byte and eight-byte
 stores. Fully supporting different *unannotated* same-name bindings remains a
 separate representation improvement: inferred local types need a binding
 location key in addition to the existing name-keyed compatibility map.
+
+## 2026-08-03: A fourth duplicated compile-time-constant evaluator missed u16be/u32be
+
+Issue #186 added `u16be`/`u32be`, distinct 16-/32-bit types stored in
+big-endian (wire) byte order that do not unify with their host-order
+counterparts, plus `struct packed be Name { field: u16; ... }` sugar that
+auto-promotes eligible fields at parse time. `kernel/net/{wire,arp,icmp}.tkb`
+were migrated from offsetof-derived `read_u16be`/`write_u16be` byte-slice
+access to real typed fields first; `kernel/net/tcp.tkb` (the remaining ~80%
+of call sites, and the file with real sequence-number arithmetic) was
+deliberately migrated in a separate pass given this project's history of
+subtle TCP timing bugs.
+
+The tcp.tkb migration regressed the real BusyBox HTTPd flow on `make
+kernelcheck-rpi5`: curl could not complete the TCP handshake even though the
+kernel's own SYN-ACK-drop-recovery bookkeeping reported success. `git stash`
+of tcp.tkb alone, followed by a full hardware re-run of the pre-migration
+tree (18/18 views passed), confirmed this was a real regression in the new
+code, not a repeat of the known curl/readiness-timing flake this exact test
+had hit twice before.
+
+Root cause: `eth_hdr.ethertype = ETHERTYPE_IPV4;` (`kernel_tcp_send_received`/
+`kernel_tcp_close_stream`) is the first place in the codebase a top-level
+`const` of type `u16be`/`u32be` is *assigned*, rather than compared, into a
+field. Every existing use (`eth.ethertype == ETHERTYPE_ARP` in arp.tkb/
+icmp.tkb) is a `==`/`!=` comparison, and `BinOp`'s own literal-recognition
+shortcut (`intlit_opt`, extended by issue #185 to resolve a `Var` operand
+back to an earlier `const`'s known integer value via `Const_env`) swaps that
+value inline at the comparison site -- never touching the global's actual
+stored LLVM value. The assignment case does load the real global, whose
+value was computed by `gen_global`'s `eval_const`, a compile-time constant
+evaluator for global initializers, entirely separate from `gen_expr`'s own
+`IntLit` case. `eval_const`'s generic `IntLit i, _ -> const_of_int64 ...`
+fallback never got the u16be/u32be byte-swap added when the type shipped, so
+`const ETHERTYPE_IPV4: u16be = 0x0800;` was silently materialized with the
+*unswapped* bit pattern -- correct by construction wherever a comparison's
+shortcut bypassed the global, wrong wherever code genuinely loaded it.
+
+This is the fourth independently-duplicated "new base type must be taught
+here too" site found across the u16be/u32be work (after `lib/parser.mly`'s
+`check_const_type`, and two separate `const_type_size`/`const_field_offset`
+copies in `lib/type_inf.ml`/`lib/llvm_gen.ml`) -- and the first of the four
+to depend on a call-site SHAPE (assignment vs. comparison) rather than
+simply on which type appeared, so no amount of "did every `packed`-struct
+site compile" checking would have caught it structurally. Fixed by mirroring
+`gen_expr`'s swap logic inside `eval_const`'s own `IntLit` case. A regression
+was added to `linux_user/wire_endian/wire_endian.tkb` that assigns a global
+`u16be` const to a field and reads the raw bytes back through the byte array
+(not the field again), since a comparison-based test cannot exercise
+`eval_const`'s code path at all.
+
+Verified with `make test` (889 cases), `make linuxcheck`, `make langcheck`,
+`make kernelbuild-rpi5`, and `make kernelcheck-rpi5` (18/18 views: full ARP/
+ICMP/TCP lifecycle, BusyBox httpd including the injected SYN-ACK drop and
+split-request recovery, two sequential requests, and the userspace
+connected-I/O socket fixture). Issue #186 is closed: `u16be`/`u32be`, the
+`packed be` sugar, and the full `kernel/net/` migration are all done.

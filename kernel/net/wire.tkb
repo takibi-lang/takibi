@@ -1,23 +1,23 @@
 // Single source of truth for the Ethernet/IPv4/TCP wire layout.
 //
-// GitHub issue #186: EthHdr/Ipv4Hdr/TcpHdr's multi-byte NUMERIC fields are
-// typed `u16be`/`u32be` via the `packed be` sugar, so accessing them
-// through a *EthHdr/*Ipv4Hdr/*TcpHdr pointer performs the required
-// byte-swap directly -- kernel/net/arp.tkb and icmp.tkb use this. MAC/IP
-// address fields (dst/src on EthHdr and Ipv4Hdr) stay `[u8; N]`: they are
-// compared/copied byte-wise, never treated as a swapped numeric value, so
-// a `u16be`/`u32be` type adds nothing for them (the `packed be` sugar
-// already leaves array-typed fields untouched).
+// GitHub issue #186 (CLOSED): EthHdr/Ipv4Hdr/TcpHdr's multi-byte NUMERIC
+// fields are typed `u16be`/`u32be` via the `packed be` sugar, so accessing
+// them through a *EthHdr/*Ipv4Hdr/*TcpHdr pointer performs the required
+// byte-swap directly -- kernel/net/arp.tkb, icmp.tkb, and tcp.tkb all use
+// this now. MAC/IP address fields (dst/src on EthHdr and Ipv4Hdr) stay
+// `[u8; N]`: they are compared/copied byte-wise, never treated as a
+// swapped numeric value, so a `u16be`/`u32be` type adds nothing for them
+// (the `packed be` sugar already leaves array-typed fields untouched).
 //
 // offsetof(...) constants and read_u16be/write_u16be/read_u32be/
-// write_u32be below remain exactly as they were: kernel/net/tcp.tkb still
-// uses them for its own byte-slice-based field access (not yet migrated
-// to typed fields -- a separate, larger follow-up given tcp.tkb's size and
-// its sequence-number arithmetic). Both are pure byte-offset/byte-slice
-// operations that don't name a field's type at all, so they are
-// unaffected by the struct field type changes here: offsetof computes an
-// identical byte offset whether a field is `[u8; 2]` or `u16be` (same
-// size), and read_u16be/write_u16be only ever see raw bytes.
+// write_u32be below remain in use for two things that stay pure
+// byte-offset/byte-slice operations even after the tcp.tkb migration:
+// tcp.tkb's IPv4-pseudo-header checksum scratch buffer (`pseudo:
+// [u8;12]`, never a real wire struct, so there is no field to type) and
+// arp.tkb/icmp.tkb's leftover IP-address-field offsets. Neither read nor
+// write_u16be/u32be ever names a field's type, so both are unaffected by
+// struct field type changes: offsetof computes an identical byte offset
+// whether a field is `[u8; 2]` or `u16be` (same size).
 struct packed be EthHdr {
     dst: [u8; 6];
     src: [u8; 6];
