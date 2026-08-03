@@ -102,7 +102,7 @@ must_use variant HttpdImageMapCheckResult { Invalid; Verified; }
 fn httpd_image_mapping_check(httpd_plan: DistroElfLoadPlan,
                              musl_plan: DistroElfLoadPlan)
         -> HttpdImageMapCheckResult {
-    match process_image_map(httpd_plan) {
+    match process_image_map(httpd_plan, "check\0" as []u8, 1, 0) {
         ProcessImageMapResult::InvalidImage => {
             return HttpdImageMapCheckResult::Invalid;
         }
@@ -118,7 +118,7 @@ fn httpd_image_mapping_check(httpd_plan: DistroElfLoadPlan,
             kernel_boot_log("httpd map: pie pages=157 clean\n");
         }
     }
-    match process_image_map(musl_plan) {
+    match process_image_map(musl_plan, "check\0" as []u8, 1, 0) {
         ProcessImageMapResult::InvalidImage => {
             return HttpdImageMapCheckResult::Invalid;
         }
@@ -714,7 +714,10 @@ fn main() {
                         plan.extent == 0x122138) {
                         kernel_boot_log("distro image: alpine busybox static-pie\n");
                         kernel_boot_log("distro elf: aarch64 loads=2 extent=0x122138\n");
-                        match process_image_map(plan) {
+                        match process_image_map(
+                                plan,
+                                "busybox\0cat\0/hello.txt\0" as []u8,
+                                3, 0) {
                             ProcessImageMapResult::InvalidImage => {
                                 kernel_boot_log("distro map: invalid image\n");
                             }
@@ -868,7 +871,10 @@ fn main() {
             // actually reaches the UART console, so a real, non-empty
             // BusyBox uname line should appear in this boot log.
             if (distro_plan_ready) {
-                match process_image_map_uname(saved_distro_plan) {
+                match process_image_map(
+                        saved_distro_plan,
+                        "busybox\0uname\0-a\0" as []u8,
+                        3, 0) {
                     ProcessImageMapResult::InvalidImage => {
                         kernel_boot_log("uname map: invalid image\n");
                     }
@@ -910,7 +916,10 @@ fn main() {
             // command legitimately fails (nonzero exit) -- same as real
             // Linux would if `read` timed out with no data available.
             if (distro_plan_ready) {
-                match process_image_map_shell_read(saved_distro_plan) {
+                match process_image_map(
+                        saved_distro_plan,
+                        "busybox\0sh\0-c\0read x\0" as []u8,
+                        4, SHELL_STACK_EXTRA_PAGES) {
                     ProcessImageMapResult::InvalidImage => {
                         kernel_boot_log("shell read map: invalid image\n");
                     }
@@ -952,7 +961,10 @@ fn main() {
             // time from musl's stdio, which always selects plain read(2),
             // never readv(2).
             if (distro_plan_ready) {
-                match process_image_map_od(saved_distro_plan) {
+                match process_image_map(
+                        saved_distro_plan,
+                        "busybox\0od\0/hello.txt\0" as []u8,
+                        3, 0) {
                     ProcessImageMapResult::InvalidImage => {
                         kernel_boot_log("od map: invalid image\n");
                     }
