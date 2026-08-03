@@ -703,6 +703,8 @@ fn main() {
             }
         }
     }
+    let mut saved_distro_plan: DistroElfLoadPlan = {0, 0, 0, 0, 0, 0, 0};
+    let mut distro_plan_ready: bool = false;
     match initramfs_busybox() {
         InitramfsFileResult::Invalid => {
             kernel_boot_log("distro image: invalid initramfs\n");
@@ -763,6 +765,18 @@ fn main() {
                                 if (process_image_window_is_clear()) {
                                     kernel_boot_log("distro unmap: clean\n");
                                 }
+                                // Issue #196 pre-work: the same distro plan
+                                // is reused for a second, separately-timed
+                                // run (argv={"busybox","uname","-a"}) after
+                                // every other boot-time fixture below has
+                                // already taken its own evidence -- running
+                                // a third process image through the shared
+                                // single-window process_image_map/unmap
+                                // sequence any earlier disturbed the final
+                                // EL0 fixture's cumulative
+                                // kernel_syscall_file_evidence() counts.
+                                saved_distro_plan = plan;
+                                distro_plan_ready = true;
                             }
                         }
                     }
@@ -850,6 +864,59 @@ fn main() {
             }
             if (page_allocator_live_count() == 0) {
                 kernel_boot_log("resources: pages=0\n");
+            }
+        }
+    }
+
+    // Issue #196 pre-work: run the same Alpine BusyBox static-PIE image a
+    // second time, with argv={"busybox","uname","-a"} instead of
+    // {"busybox","cat","/hello.txt"}, now that every earlier boot-time
+    // fixture has already taken its own evidence. BusyBox's uname applet
+    // calls uname(2) unconditionally and then flushes its output through
+    // musl's stdio, which on this pinned musl 1.2.6 build always goes
+    // through writev(2) -- neither syscall is implemented yet (both still
+    // fall through to the generic ENOSYS return in kernel/kernel/syscall.tkb),
+    // so this is expected to exit 0 while printing nothing. It exists to
+    // demonstrate real userspace demand for issue #196 empirically before
+    // implementing it, not to demonstrate it working.
+    if (distro_plan_ready) {
+        match process_image_map_uname(saved_distro_plan) {
+            ProcessImageMapResult::InvalidImage => {
+                kernel_boot_log("uname map: invalid image\n");
+            }
+            ProcessImageMapResult::OutOfMemory => {
+                kernel_boot_log("uname map: out of memory\n");
+            }
+            ProcessImageMapResult::Mapped(uname_pages) => {
+                let (uname_heap_start, uname_heap_limit) =
+                    process_image_heap_range(uname_pages);
+                kernel_syscall_process_configure(
+                    uname_heap_start, uname_heap_limit);
+                let uname_status: usize = run_initial_user(
+                    process_image_entry(uname_pages),
+                    process_image_stack_pointer(uname_pages));
+                if (uname_status == 0) {
+                    kernel_boot_log("busybox uname exit: 0\n");
+                } else {
+                    kernel_boot_log("busybox uname failed\n");
+                }
+                let (readv_requested, writev_requested,
+                     ppoll_requested, uname_requested) =
+                    kernel_syscall_196_demand_evidence();
+                if (uname_requested && writev_requested) {
+                    kernel_boot_log(
+                        "issue #196 demand: uname(2)+writev(2) requested by real userspace\n");
+                } else if (uname_requested) {
+                    kernel_boot_log(
+                        "issue #196 demand: uname(2) requested by real userspace\n");
+                } else {
+                    kernel_boot_log(
+                        "issue #196 demand: uname(2) not observed\n");
+                }
+                process_image_unmap(uname_pages);
+                if (process_image_window_is_clear()) {
+                    kernel_boot_log("uname unmap: clean\n");
+                }
             }
         }
     }

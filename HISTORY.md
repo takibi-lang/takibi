@@ -13372,3 +13372,51 @@ ICMP/TCP lifecycle, BusyBox httpd including the injected SYN-ACK drop and
 split-request recovery, two sequential requests, and the userspace
 connected-I/O socket fixture). Issue #186 is closed: `u16be`/`u32be`, the
 `packed be` sugar, and the full `kernel/net/` migration are all done.
+
+## 2026-08-03: Proving real demand for issue #196 before implementing it
+
+Issue #196 asks for `writev`/`readv`/`ppoll`/`uname` to be built on the #174
+user-memory boundary once they exist, but none of the four are implemented
+(all still fall through to the generic ENOSYS return in
+`kernel/kernel/syscall.tkb`). Rather than starting that implementation from
+guesswork about which real userspace code needs them, the pinned musl 1.2.6
+and BusyBox 1.37.0 sources already vendored for this kernel's distro image
+were read directly: musl's `__stdio_write`/`__stdio_read` unconditionally
+route any buffered stdio write/read through `writev`/`readv` (not `write`/
+`read`) on this build, `poll()` unconditionally maps to `ppoll` on aarch64
+(no legacy `SYS_poll` on this arch), and BusyBox's `uname` applet calls
+`uname(2)` directly -- `uname(&uname_info.name); /* never fails */` --
+without checking its return value.
+
+That last fact matters operationally: BusyBox's own existing scenario
+(`argv={"busybox","cat","/hello.txt"}`) bypasses stdio entirely (raw
+`full_write`), so it never exercised any of this. A second scenario was
+added -- the same distro ELF, `argv={"busybox","uname","-a"}` -- along with
+two new syscall-demand flags (`syscall_uname_requested`/
+`syscall_writev_requested` in `kernel/kernel/syscall.tkb`, read via
+`kernel_syscall_196_demand_evidence`) that record whether a real syscall
+number was requested, without implementing any real behavior for it.
+
+Placement mattered: initially the second scenario ran immediately after the
+existing `busybox cat` one, inside the same `DistroElfResult::Valid(plan)`
+boot sequence. That passed on its own new `uname` view but broke the
+pre-existing `linux_file` view (`open read write close ok` never appeared)
+on `make kernelcheck-rpi5` -- a hand-written EL0 fixture much later in boot
+asserts `kernel_syscall_file_evidence()`'s cumulative open/read/write/close
+counts, and inserting a third process run before it, even one that never
+touches the ext2 file, was enough to break that fixture's downstream state.
+`git stash` confirmed the baseline (2 scenarios) passed all 18 views cleanly,
+isolating the regression to the insertion point rather than the new code
+itself. Moving the uname scenario to run once at the very end of `main()`
+(after every pre-existing fixture has already taken its evidence, plan
+carried forward via a `saved_distro_plan`/`distro_plan_ready` pair set in the
+original scope) fixed it: 19/19 views pass on real RPi5 hardware, with the
+new `uname` view capturing `busybox uname exit: 0` followed by `issue #196
+demand: uname(2)+writev(2) requested by real userspace` -- confirming, from
+an actual boot rather than source-reading alone, that uname(2) and writev(2)
+are both requested by real, unmodified BusyBox and currently answered with a
+silent ENOSYS. `readv`/`ppoll` demand (e.g. via `busybox wc`/`sort` and
+`busybox wget` against the kernel's own already-running httpd) is left for a
+follow-up scenario; this one intentionally stays narrow. Issue #196's real
+implementation (the actual `copy_to_user`/`copy_from_user` boundary work)
+has not started -- this is groundwork, not that issue's closure.

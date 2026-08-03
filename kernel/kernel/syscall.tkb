@@ -8,6 +8,10 @@ use "kernel/net/tcp.tkb";
 use "kernel/kernel/fd_table.tkb";
 
 const AARCH64_NR_WRITE: usize = 64;
+const AARCH64_NR_READV: usize = 65;
+const AARCH64_NR_WRITEV: usize = 66;
+const AARCH64_NR_PPOLL: usize = 73;
+const AARCH64_NR_UNAME: usize = 160;
 const AARCH64_NR_EXIT: usize = 93;
 const AARCH64_NR_EXIT_GROUP: usize = 94;
 const AARCH64_NR_CLONE: usize = 220;
@@ -52,6 +56,16 @@ private let mut syscall_socket_buffer_offset: [usize; TCP_CONNECTION_MAX];
 private let mut syscall_inetd_mode: bool;
 private let mut syscall_inetd_response: [u8; 1460 * TCP_CONNECTION_MAX];
 private let mut syscall_inetd_response_length: [usize; TCP_CONNECTION_MAX];
+
+// Issue #196 pre-work: none of readv/writev/ppoll/uname are implemented yet
+// (they still fall through to the generic ENOSYS return below). These flags
+// only record whether real userspace code actually asked for one, so the
+// demand can be shown empirically instead of argued from source-reading
+// alone before that issue's real implementation work starts.
+private let mut syscall_readv_requested: bool;
+private let mut syscall_writev_requested: bool;
+private let mut syscall_ppoll_requested: bool;
+private let mut syscall_uname_requested: bool;
 
 must_use variant KernelInetdAcceptResult { TimedOut; Accepted; }
 
@@ -506,6 +520,13 @@ fn kernel_syscall_file_evidence()
         -> (usize, usize, usize, usize) {
     return (syscall_open_calls, syscall_read_calls,
             syscall_file_write_calls, syscall_close_calls);
+}
+
+// Issue #196 pre-work evidence: which of readv/writev/ppoll/uname real
+// userspace code actually requested (see the syscall_*_requested flags).
+fn kernel_syscall_196_demand_evidence() -> (bool, bool, bool, bool) {
+    return (syscall_readv_requested, syscall_writev_requested,
+            syscall_ppoll_requested, syscall_uname_requested);
 }
 
 fn kernel_syscall_socket_evidence() -> bool {
@@ -1703,6 +1724,22 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             return (1, 0);
         }
         return (1, LINUX_EACCES);
+    }
+    if (number == AARCH64_NR_READV) {
+        syscall_readv_requested = true;
+        return (1, LINUX_ENOSYS);
+    }
+    if (number == AARCH64_NR_WRITEV) {
+        syscall_writev_requested = true;
+        return (1, LINUX_ENOSYS);
+    }
+    if (number == AARCH64_NR_PPOLL) {
+        syscall_ppoll_requested = true;
+        return (1, LINUX_ENOSYS);
+    }
+    if (number == AARCH64_NR_UNAME) {
+        syscall_uname_requested = true;
+        return (1, LINUX_ENOSYS);
     }
     return (1, LINUX_ENOSYS);
 }

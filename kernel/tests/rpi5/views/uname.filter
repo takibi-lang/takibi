@@ -1,0 +1,3 @@
+^busybox uname exit: 0$
+^issue #196 demand: uname\(2\)\+writev\(2\) requested by real userspace$
+^uname unmap: clean$
