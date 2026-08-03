@@ -58,6 +58,7 @@ rule read = parse
   | "sink"    { SINK }
   | "private" { PRIVATE }
   | "packed"  { PACKED }
+  | "be"      { BE }
   | "io"      { IO }
   | "enum"    { ENUM }
   | "match"   { MATCH }
@@ -116,6 +117,7 @@ rule read = parse
   | "i8"   { I8_TYPE  } | "i16"  { I16_TYPE } | "i32"  { I32_TYPE } | "i64"  { I64_TYPE }
   | "u8"   { U8_TYPE  } | "u16"  { U16_TYPE } | "u32"  { U32_TYPE } | "u64"  { U64_TYPE }
   | "u16be" { U16BE_TYPE }  (* GitHub issue #186: wire-order (big-endian) u16; ocamllex longest-match already prefers this over "u16" *)
+  | "u32be" { U32BE_TYPE }
   | "isize" { ISIZE_TYPE }
   | "usize" { USIZE_TYPE }
   | ':' { COLON }

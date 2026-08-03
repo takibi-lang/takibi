@@ -60,7 +60,7 @@ let validate_arm_bodies pos arms =
 let base_type_name = function
   | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
   | TypeU8 -> "u8" | TypeU16 -> "u16" | TypeU32 -> "u32" | TypeU64 -> "u64"
-  | TypeU16Be -> "u16be"
+  | TypeU16Be -> "u16be" | TypeU32Be -> "u32be"
   | TypeIsize -> "isize" | TypeUsize -> "usize" | _ -> "?"
 
 (* The (inclusive lo, exclusive-upper-bound-or-None) range an explicit
@@ -84,6 +84,7 @@ let base_bound_range = function
   | TypeU16   -> (0L, Some 65536L)
   | TypeU16Be -> (0L, Some 65536L)
   | TypeU32   -> (0L, Some 4294967296L)
+  | TypeU32Be -> (0L, Some 4294967296L)
   | TypeU64   -> (0L, None)
   | TypeIsize -> (-2147483648L, Some 2147483647L)
   | TypeUsize -> (0L, Some 4294967296L)
@@ -102,19 +103,35 @@ let check_refined_base_range pos lo hi base =
 
 let check_const_type pos = function
   | TypeI8 | TypeI16 | TypeI32 | TypeI64
-  | TypeU8 | TypeU16 | TypeU16Be | TypeU32 | TypeU64
+  | TypeU8 | TypeU16 | TypeU16Be | TypeU32 | TypeU32Be | TypeU64
   | TypeIsize | TypeUsize -> ()
   | _ ->
       raise (Types.TypeError (pos,
         "`const` declarations are restricted to primitive integer types; \
          use a global `let` for pointers, io registers, arrays, structs, \
          sizeof/offsetof-derived values, or other runtime constants"))
+
+(* `struct packed be Name { field: u16; ... }` sugar (GitHub issue #186):
+   every eligible multi-byte integer field is auto-promoted to its `*be`
+   type, so a whole wire-format header can be declared endian-aware at
+   once instead of writing `u16be`/`u32be` on each field by hand. Only
+   plain u16/u32 (bare or refined-over-them) are promoted -- u8 and
+   byte-array fields need no swap and are left exactly as written;
+   anything else (nested structs, pointers, arrays of other element
+   types, ...) is also left alone, matching how a hand-written `u16be`
+   field would never appear there either. *)
+let promote_be_field_type = function
+  | TypeU16 -> TypeU16Be
+  | TypeU32 -> TypeU32Be
+  | TypeRefined (lo, hi, TypeU16) -> TypeRefined (lo, hi, TypeU16Be)
+  | TypeRefined (lo, hi, TypeU32) -> TypeRefined (lo, hi, TypeU32Be)
+  | ty -> ty
 %}
 
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN INLINE RETURN CONST LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
+%token FN INLINE RETURN CONST LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
 %token ASSIGN DOT
@@ -165,7 +182,7 @@ let check_const_type pos = function
 %token VOID_TYPE BOOL_TYPE
 %token I8_TYPE I16_TYPE I32_TYPE I64_TYPE
 %token U8_TYPE U16_TYPE U32_TYPE U64_TYPE ISIZE_TYPE USIZE_TYPE
-%token U16BE_TYPE
+%token U16BE_TYPE U32BE_TYPE
 %token TRUE FALSE
 %token COLON ARROW
 
@@ -210,8 +227,9 @@ item:
   | EXTERN FN IDENT LPAREN params RPAREN ret_type_opt effects_opt SEMI
     { ExternFuncDef ($3, $5, $7, $8) }
   | struct_intro LBRACE struct_fields RBRACE
-    { let (name, is_packed, align_opt) = $1 in
-      let fields = List.map (fun (fname, ty, _) -> (fname, ty)) $3 in
+    { let (name, is_packed, align_opt, is_be) = $1 in
+      let fields = List.map (fun (fname, ty, _) ->
+        (fname, if is_be then promote_be_field_type ty else ty)) $3 in
       let private_fields =
         List.filter_map (fun (fname, _, is_priv) ->
           if is_priv then Some fname else None) $3 in
@@ -256,16 +274,22 @@ item:
 struct_intro:
   | STRUCT IDENT
     { Type_layout.begin_struct $2;
-      ($2, false, None) }
+      ($2, false, None, false) }
   | STRUCT PACKED IDENT
     { Type_layout.begin_struct $3;
-      ($3, true, None) }
+      ($3, true, None, false) }
+  | STRUCT PACKED BE IDENT
+    { Type_layout.begin_struct $4;
+      ($4, true, None, true) }
   | STRUCT IDENT ALIGN LPAREN alignment_value RPAREN
     { Type_layout.begin_struct $2;
-      ($2, false, Some $5) }
+      ($2, false, Some $5, false) }
   | STRUCT PACKED IDENT ALIGN LPAREN alignment_value RPAREN
     { Type_layout.begin_struct $3;
-      ($3, true, Some $6) }
+      ($3, true, Some $6, false) }
+  | STRUCT PACKED BE IDENT ALIGN LPAREN alignment_value RPAREN
+    { Type_layout.begin_struct $4;
+      ($4, true, Some $7, true) }
 
 owned_struct_intro:
   | p = private_flag k = owned_kind STRUCT name = IDENT ps = static_params
@@ -652,6 +676,7 @@ base_type_expr:
   | I8_TYPE   { TypeI8  } | I16_TYPE { TypeI16 } | I32_TYPE { TypeI32 } | I64_TYPE { TypeI64 }
   | U8_TYPE   { TypeU8  } | U16_TYPE { TypeU16 } | U32_TYPE { TypeU32 } | U64_TYPE { TypeU64 }
   | U16BE_TYPE { TypeU16Be }
+  | U32BE_TYPE { TypeU32Be }
   | ISIZE_TYPE { TypeIsize }
   | USIZE_TYPE { TypeUsize }
   | IO         type_expr { lift_singleton (fun t -> TypeIo t) $2 }
@@ -819,6 +844,7 @@ int_base_type_expr:
   | U16_TYPE   { TypeU16 }
   | U16BE_TYPE { TypeU16Be }
   | U32_TYPE   { TypeU32 }
+  | U32BE_TYPE { TypeU32Be }
   | U64_TYPE   { TypeU64 }
   | ISIZE_TYPE { TypeIsize }
   | USIZE_TYPE { TypeUsize }

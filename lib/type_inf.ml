@@ -1197,8 +1197,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          order from receive through transmit, so this is deliberately not
          "reject everything". Anything else must `as u16` first. *)
       (let is_wire_be_ty t = match repr t with
-         | TU16Be -> true
-         | TRefinedInt (_, _, TU16Be) -> true
+         | TU16Be | TU32Be -> true
+         | TRefinedInt (_, _, (TU16Be | TU32Be)) -> true
          | _ -> false
        in
        match op with
@@ -1206,9 +1206,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ ->
            if is_wire_be_ty t1 || is_wire_be_ty t2 then
              raise (TypeError (e.loc,
-               "cannot use a wire-endian (u16be) value with this operator; \
-                convert with `as u16` first (==, !=, &, |, ^ are allowed \
-                directly on u16be)")));
+               "cannot use a wire-endian (u16be/u32be) value with this \
+                operator; convert with `as u16`/`as u32` first (==, !=, &, \
+                |, ^ are allowed directly)")));
       (match op with
        | Add ->
            (* Pointer arithmetic: ptr + isize -> returns the same pointer type. TIo is a value type, excluded.
@@ -1401,7 +1401,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               plain wire-order type instead of manufacturing a false proof
               that --forbid-trap code could then trust to elide a real
               check. *)
-           if ct1 = TU16Be then ct1 else
+           if ct1 = TU16Be || ct1 = TU32Be then ct1 else
            (match intlit_opt e2 with
             | Some k when k >= 0 -> TRefinedInt (0, k + 1, ct1)
             | _ -> (match intlit_opt e1 with
@@ -1613,34 +1613,34 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                           "slice cast requires an array variable, string \
                            literal, or slice source"))))
             | _ ->
-           (* GitHub issue #186: u16be casts ONLY to/from plain or refined
-              u16 -- never to/from any other integer type, which would let
-              it silently reinterpret through a back door and defeat the
-              entire point of a distinct wire-order type. Checked here,
-              before the general numeric-cast dispatch below, since that
-              dispatch's own final catch-all otherwise treats any bare
-              integer source/target pair as an ordinary, unchecked
+           (* GitHub issue #186: u16be/u32be cast ONLY to/from their own
+              plain or refined host type (u16be<->u16, u32be<->u32) --
+              never to/from any other integer type (including each other),
+              which would let one silently reinterpret through a back door
+              and defeat the entire point of a distinct wire-order type.
+              Checked here, before the general numeric-cast dispatch below,
+              since that dispatch's own final catch-all otherwise treats
+              any bare integer source/target pair as an ordinary, unchecked
               truncating/widening reinterpret. *)
-           let is_u16be_flavored t = match t with
-             | TU16Be -> true
-             | TRefinedInt (_, _, TU16Be) -> true
+           let is_wire_be_flavored t = match t with
+             | TU16Be | TU32Be -> true
+             | TRefinedInt (_, _, (TU16Be | TU32Be)) -> true
              | _ -> false
            in
-           let is_u16_flavored t = match t with
-             | TU16 -> true
-             | TRefinedInt (_, _, TU16) -> true
+           let base_of t = match t with TRefinedInt (_, _, b) -> b | b -> b in
+           let same_wire_family a b = match a, b with
+             | TU16Be, TU16 | TU16, TU16Be | TU16Be, TU16Be -> true
+             | TU32Be, TU32 | TU32, TU32Be | TU32Be, TU32Be -> true
              | _ -> false
            in
-           if is_u16be_flavored (repr src_ty) || is_u16be_flavored tgt then begin
-             if not ((is_u16be_flavored (repr src_ty)
-                      && (is_u16_flavored tgt || is_u16be_flavored tgt))
-                     || (is_u16_flavored (repr src_ty) && is_u16be_flavored tgt))
-             then
+           if is_wire_be_flavored (repr src_ty) || is_wire_be_flavored tgt then begin
+             if not (same_wire_family (base_of (repr src_ty)) (base_of tgt)) then
                raise (TypeError (e.loc, Printf.sprintf
-                 "cannot cast %s to %s; only u16be <-> u16 is a legal conversion"
+                 "cannot cast %s to %s; only u16be <-> u16 or u32be <-> u32 \
+                  is a legal conversion"
                  (to_string src_ty) (to_string tgt)));
-             match repr src_ty, tgt with
-             | TRefinedInt (lo, hi, _), (TU16 | TU16Be) -> TRefinedInt (lo, hi, tgt)
+             match repr src_ty with
+             | TRefinedInt (lo, hi, _) -> TRefinedInt (lo, hi, tgt)
              | _ -> tgt
            end else
            (match repr src_ty with

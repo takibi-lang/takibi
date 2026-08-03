@@ -119,6 +119,7 @@ let rec show_type = function
   | Ast.TypeI8          -> "i8"  | Ast.TypeI16 -> "i16" | Ast.TypeI32 -> "i32" | Ast.TypeI64 -> "i64"
   | Ast.TypeU8          -> "u8"  | Ast.TypeU16 -> "u16" | Ast.TypeU32 -> "u32" | Ast.TypeU64 -> "u64"
   | Ast.TypeU16Be       -> "u16be"
+  | Ast.TypeU32Be       -> "u32be"
   | Ast.TypeIsize       -> "isize"
   | Ast.TypeUsize       -> "usize"
   | Ast.TypeVoid        -> "void"
@@ -1382,6 +1383,38 @@ let parser_tests = [
     | [Ast.StructDef ("Hdr", _, true, Some 4, _, _)] -> ()
     | _ -> Alcotest.fail "expected is_packed=true, align_bytes=Some 4"
   );
+
+  (* GitHub issue #186 follow-up: `struct packed be Name { ... }` sugar
+     auto-promotes eligible multi-byte integer fields to their `*be` type
+     (u16->u16be, u32->u32be, refined-over-either preserves the range) --
+     u8 and other field kinds are left exactly as written. *)
+  Alcotest.test_case "struct packed be: u16/u32 fields promoted, u8 untouched" `Quick
+    (fun () ->
+      match parse
+        "struct packed be WireHdr { magic: u16; ttl: u8; seq: u32; }"
+      with
+      | [Ast.StructDef ("WireHdr",
+          [("magic", Ast.TypeU16Be); ("ttl", Ast.TypeU8); ("seq", Ast.TypeU32Be)],
+          true, None, _, _)] -> ()
+      | _ -> Alcotest.fail
+          "expected magic:u16be, ttl:u8 (unchanged), seq:u32be");
+
+  Alcotest.test_case "struct packed be: a refined u16 field keeps its range" `Quick
+    (fun () ->
+      match parse
+        "struct packed be WireHdr { len: {20..<1501 as u16}; }"
+      with
+      | [Ast.StructDef ("WireHdr",
+          [("len", Ast.TypeRefined (20, 1501, Ast.TypeU16Be))],
+          true, None, _, _)] -> ()
+      | _ -> Alcotest.fail "expected len: {20..<1501 as u16be}");
+
+  Alcotest.test_case "struct packed be align(N) parses with all three flags" `Quick
+    (fun () ->
+      match parse "struct packed be Hdr align(4) { a: u16; }" with
+      | [Ast.StructDef ("Hdr", [("a", Ast.TypeU16Be)], true, Some 4, _, _)] -> ()
+      | _ -> Alcotest.fail
+          "expected is_packed=true, align_bytes=Some 4, a promoted to u16be");
 
   (* -- Enum syntax ------------------------------------------------- *)
 
@@ -6309,29 +6342,53 @@ let infer_tests = [
           early_exit_token_drop(token);
         }");
 
-  (* GitHub issue #186: u16be is a distinct type from u16 that does not
-     unify with it -- arithmetic, ordering comparisons, and casts to any
-     integer type other than u16 must all be rejected, forcing an explicit
-     `as u16` conversion first. ==/!=/bitwise ops are allowed directly (see
-     the linux_user/wire_endian/ example for the positive/runtime-value
-     side of this same feature). *)
+  (* GitHub issue #186: u16be/u32be are distinct types from u16/u32 that do
+     not unify with them -- arithmetic, ordering comparisons, and casts to
+     any integer type other than their own host type must all be rejected,
+     forcing an explicit `as u16`/`as u32` conversion first. ==/!=/bitwise
+     ops are allowed directly (see the linux_user/wire_endian/ example for
+     the positive/runtime-value side of this same feature). *)
   Alcotest.test_case "u16be: arithmetic is rejected without a cast" `Quick
     (expect_type_error
-       "convert with `as u16` first"
+       "convert with `as u16`"
        "struct packed WireHdr { magic: u16be; flags: u16be; }
         fn bad_add(h: *WireHdr) -> u16be { return h.magic + 1; }");
 
   Alcotest.test_case "u16be: ordering comparison is rejected without a cast" `Quick
     (expect_type_error
-       "convert with `as u16` first"
+       "convert with `as u16`"
        "struct packed WireHdr { magic: u16be; flags: u16be; }
         fn bad_cmp(h: *WireHdr) -> bool { return h.magic < h.flags; }");
 
   Alcotest.test_case "u16be: cast to a type other than u16 is rejected" `Quick
     (expect_type_error
-       "only u16be <-> u16 is a legal conversion"
+       "only u16be <-> u16 or u32be <-> u32 is a legal conversion"
        "struct packed WireHdr { magic: u16be; }
         fn bad_cast(h: *WireHdr) -> u32 { return h.magic as u32; }");
+
+  Alcotest.test_case "u32be: arithmetic is rejected without a cast" `Quick
+    (expect_type_error
+       "convert with `as u16`"
+       "struct packed WireHdr { seq: u32be; ack: u32be; }
+        fn bad_add32(h: *WireHdr) -> u32be { return h.seq + 1; }");
+
+  Alcotest.test_case "u32be: ordering comparison is rejected without a cast" `Quick
+    (expect_type_error
+       "convert with `as u16`"
+       "struct packed WireHdr { seq: u32be; ack: u32be; }
+        fn bad_cmp32(h: *WireHdr) -> bool { return h.seq < h.ack; }");
+
+  Alcotest.test_case "u32be: cast to a type other than u32 is rejected" `Quick
+    (expect_type_error
+       "only u16be <-> u16 or u32be <-> u32 is a legal conversion"
+       "struct packed WireHdr { seq: u32be; }
+        fn bad_cast32(h: *WireHdr) -> u16 { return h.seq as u16; }");
+
+  Alcotest.test_case "u16be and u32be cannot cast to each other" `Quick
+    (expect_type_error
+       "only u16be <-> u16 or u32be <-> u32 is a legal conversion"
+       "struct packed WireHdr { magic: u16be; seq: u32be; }
+        fn bad_cross(h: *WireHdr) -> u32be { return h.magic as u32be; }");
 
 ]
 

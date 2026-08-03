@@ -357,6 +357,8 @@ struct Name { field: type; ... }             // plain struct
 struct packed Name { field: type; ... }      // no inter-field padding
 struct Name align(N) { field: type; ... }    // every instance/array element aligned to N
 struct packed Name align(N) { ... }          // both
+struct packed be Name { field: u16; ... }    // packed + auto-promote u16/u32 fields to u16be/u32be
+struct packed be Name align(N) { ... }       // packed + be + align, all three
 opaque struct Name;                          // incomplete type, pointer-only
 affine opaque struct Name;                   // opaque + ownership-handle semantics, see below
 affine struct Name[n: usize] { field: T; }   // indexed runtime owner
@@ -400,7 +402,9 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   nominally typed, not structurally.
 - **`packed`** removes inter-field padding: use for protocol headers and
   MMIO register maps where layout must match hardware/wire format
-  exactly.
+  exactly. **`packed be`** additionally auto-promotes eligible fields to
+  `u16be`/`u32be` (see "Endian-Aware Integer Types" below) -- pure sugar,
+  not a distinct mechanism.
 - **`align(N)`** (N a power of two) aligns every variable and every
   element of a `[Name; K]` array of that struct type to N bytes, with
   tail padding automatically appended so `sizeof(struct) % N == 0`. Use
@@ -1801,9 +1805,9 @@ at codegen time rather than silently lowering to a racy `wfi`.
 
 `{lo..<hi as base}` is a value of type `base` statically known to lie in
 `[lo, hi)`. `base` may be any of the nine primitive integer types (`i8`
-`i16` `i32` `i64` `u8` `u16` `u32` `u64` `usize`), `isize`, or `u16be` (see
-"Endian-Aware Integer Types" below). The bare `{lo..<hi}` form (no explicit
-base) is rejected -- always spell out the base.
+`i16` `i32` `i64` `u8` `u16` `u32` `u64` `usize`), `isize`, or `u16be`/
+`u32be` (see "Endian-Aware Integer Types" below). The bare `{lo..<hi}` form
+(no explicit base) is rejected -- always spell out the base.
 
 - **`lo` and `hi` must be integer literals or earlier `const` names** --
   ordinary global `let` names are deliberately not accepted here, even
@@ -1892,55 +1896,63 @@ base) is rejected -- always spell out the base.
 
 ## Endian-Aware Integer Types
 
-`u16be` (GitHub issue #186) is a 16-bit value stored in big-endian (wire)
-byte order -- for a protocol header field where a raw native load on a
-little-endian target would silently byte-swap the value with no
-compiler-visible signal. Prototype scope as of this writing: `u16be` only;
-`u32be` follows the identical pattern once needed. A later, separate layer
-(not yet implemented): `struct packed be Name { field: u16; ... }` as pure
-parser sugar rewriting each eligible multi-byte integer field to its `*be`
-type, so a whole header can be declared endian-aware at once instead of
-field by field.
+`u16be`/`u32be` (GitHub issue #186) are 16-/32-bit values stored in
+big-endian (wire) byte order -- for a protocol header field where a raw
+native load on a little-endian target would silently byte-swap the value
+with no compiler-visible signal.
 
-- **Does not unify with `u16`.** Reading a `u16be` field, casting it, or
-  combining it with another value is checked distinctly from ordinary
-  host-order integers -- crossing between wire and host order always needs
-  an explicit `as` cast, the same discipline `{lo..<hi as base}` already
-  requires to cross representations. A `u16be` field's own declared type
-  may itself be refined, `{lo..<hi as u16be}`, with the same field-read/
-  write semantics as any other refined struct field (see "Structs" above).
-- **The only legal cast is `u16be <-> u16`** (in either direction, and for
-  either side already refined): `x as u16` and `x as u16be` perform a real
-  byte-swap (`llvm.bswap.i16`) at the point of the cast; casting a `u16be`
-  to or from any other integer type is a compile error. A refined source's
-  range survives the cast unchanged (`{20..<1501 as u16be} as u16` ->
-  `{20..<1501 as u16}`, no runtime check), the same range-preservation
-  bare casts already get for ordinary bases.
+`struct packed be Name { field: u16; ... }` is pure parser sugar: every
+eligible multi-byte integer field (`u16`/`u32`, bare or refined-over-them)
+is auto-promoted to its `*be` type at parse time, so a whole header can be
+declared endian-aware at once instead of field by field. `u8` and any
+other field kind are left exactly as written (see
+`promote_be_field_type` in `lib/parser.mly`). The type checker never sees
+a difference between a `packed be` struct and the identical struct with
+every field spelled `u16be`/`u32be` by hand.
+
+- **Does not unify with its host-order counterpart.** Reading a `u16be`/
+  `u32be` field, casting it, or combining it with another value is checked
+  distinctly from ordinary host-order integers -- crossing between wire and
+  host order always needs an explicit `as` cast, the same discipline
+  `{lo..<hi as base}` already requires to cross representations. A field's
+  own declared type may itself be refined, `{lo..<hi as u16be}`/
+  `{lo..<hi as u32be}`, with the same field-read/write semantics as any
+  other refined struct field (see "Structs" above).
+- **The only legal cast is `u16be <-> u16` or `u32be <-> u32`** (in either
+  direction, and for either side already refined; `u16be` and `u32be` never
+  cast to/from each other or any other integer type): `x as u16`/
+  `x as u16be` perform a real byte-swap (`llvm.bswap.i16`/`.i32` for the
+  32-bit pair) at the point of the cast. A refined source's range survives
+  the cast unchanged (`{20..<1501 as u16be} as u16` -> `{20..<1501 as
+  u16}`, no runtime check), the same range-preservation bare casts already
+  get for ordinary bases.
 - **Operator matrix**: `==`, `!=`, `&`, `|`, `^`, and unary `~` are allowed
-  directly on `u16be` operands (result stays `u16be`); every other operator
-  (`+ - * / %`, `<< >>`, and `< > <= >=`) is a compile error requiring an
-  `as u16` conversion first. Comparing or masking two byte-swapped bit
-  patterns as raw integers does not preserve numeric ordering on a
-  little-endian target, so ordering comparisons in particular are never
-  allowed on wire-order values directly. `==`/`!=`/bitwise ops ARE sound
-  directly on the raw bytes because byte-swapping is a fixed bit-position
-  permutation: `swap(a) OP swap(b) == swap(a OP b)` for any bitwise
-  (position-independent) `OP`, so a conventionally-written literal operand
-  (e.g. `0x0806` for an Ethertype, which already matches its own
-  big-endian wire encoding byte-for-byte) is swapped at compile time to
-  match the field's raw stored representation, and the comparison/mask
-  result is correct once cast back `as u16` -- even for a mask that
-  crosses a byte boundary (e.g. extracting IPv4's 13-bit fragment-offset
-  subfield out of its combined 16-bit flags+offset field). The `x & k ->
-  {0..<k+1}` range-proving optimization ordinary integers get (see "Refined
-  Integer Types" above) is deliberately NOT applied to `u16be`: it would
-  prove a bound on the raw bit pattern, which does not translate to a
+  directly on `u16be`/`u32be` operands (result stays the same wire-order
+  type); every other operator (`+ - * / %`, `<< >>`, and `< > <= >=`) is a
+  compile error requiring an `as u16`/`as u32` conversion first. Comparing
+  or masking two byte-swapped bit patterns as raw integers does not
+  preserve numeric ordering on a little-endian target, so ordering
+  comparisons in particular are never allowed on wire-order values
+  directly. `==`/`!=`/bitwise ops ARE sound directly on the raw bytes
+  because byte-swapping is a fixed bit-position permutation: `swap(a) OP
+  swap(b) == swap(a OP b)` for any bitwise (position-independent) `OP`, so
+  a conventionally-written literal operand (e.g. `0x0806` for an
+  Ethertype, which already matches its own big-endian wire encoding
+  byte-for-byte) is swapped at compile time to match the field's raw
+  stored representation, and the comparison/mask result is correct once
+  cast back `as u16`/`as u32` -- even for a mask that crosses a byte
+  boundary (e.g. extracting IPv4's 13-bit fragment-offset subfield out of
+  its combined 16-bit flags+offset field). The `x & k -> {0..<k+1}`
+  range-proving optimization ordinary integers get (see "Refined
+  Integer Types" above) is deliberately NOT applied to `u16be`/`u32be`: it
+  would prove a bound on the raw bit pattern, which does not translate to a
   bound on the logical (post-swap) value language users actually reason
   about, since byte-swapping is not monotonic.
 - See `linux_user/wire_endian/wire_endian.tkb` for a complete worked
-  example (a packed struct with a plain and a refined `u16be` field,
-  overlaid on a raw wire buffer via a pointer cast, exercising the cast,
-  equality, and bitwise-masking behavior above end to end).
+  example (a packed struct with a plain and a refined `u16be` field plus a
+  `u32be` field, overlaid on a raw wire buffer via a pointer cast,
+  exercising the cast, equality, and bitwise-masking behavior above end to
+  end for both widths).
 
 ## For Loops
 

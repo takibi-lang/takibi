@@ -559,6 +559,7 @@ let rec ty_str = function
   | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
   | TypeU8 -> "u8" | TypeU16 -> "u16" | TypeU32 -> "u32" | TypeU64 -> "u64"
   | TypeU16Be -> "u16be"
+  | TypeU32Be -> "u32be"
   | TypeIsize -> "isize"
   | TypeUsize -> "usize"
   | TypeVoid  -> "void"
@@ -1147,7 +1148,7 @@ let rec ltype_of_ast = function
   | TypeBool        -> i1_type  context
   | TypeI8  | TypeU8  -> i8_type  context
   | TypeI16 | TypeU16 | TypeU16Be -> i16_type context
-  | TypeI32 | TypeU32 -> i32_type context
+  | TypeI32 | TypeU32 | TypeU32Be -> i32_type context
   | TypeI64 | TypeU64 -> i64_type context
   | TypeIsize       -> isize_lltype ()
   | TypeUsize       -> usize_lltype ()
@@ -1251,7 +1252,7 @@ let di_struct_placeholder dib file sname =
       placeholder
 
 let rec di_is_unsigned = function
-  | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize | TypeU16Be -> true
+  | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize | TypeU16Be | TypeU32Be -> true
   | TypeRefined (_, _, base) -> di_is_unsigned base
   | _ -> false
 
@@ -1282,6 +1283,7 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
   | TypeU16   -> basic_int "u16"   16 dw_ate_unsigned
   | TypeU16Be -> basic_int "u16be" 16 dw_ate_unsigned
   | TypeU32   -> basic_int "u32"   32 dw_ate_unsigned
+  | TypeU32Be -> basic_int "u32be" 32 dw_ate_unsigned
   | TypeU64   -> basic_int "u64"   64 dw_ate_unsigned
   | TypeIsize -> basic_int "isize" (integer_bitwidth (isize_lltype ())) dw_ate_signed
   | TypeUsize -> basic_int "usize" (integer_bitwidth (usize_lltype ())) dw_ate_unsigned
@@ -1527,7 +1529,7 @@ let rec widen_load (ast_ty : Ast.type_expr) v =
       let src = type_of v in
       if src = dst then v
       else build_sext v dst "sext" builder
-  | TypeU8 | TypeU16 | TypeU32 | TypeU16Be ->
+  | TypeU8 | TypeU16 | TypeU32 | TypeU16Be | TypeU32Be ->
       let dst = i32_type context in
       let src = type_of v in
       if src = dst then v
@@ -1581,7 +1583,7 @@ let rec coerce v (dst : Ast.type_expr) =
       if vty = i32_type context || vty = i64_type context
       then build_trunc v (i16_type context) "trunc" builder
       else v
-  | TypeI32 | TypeU32 ->
+  | TypeI32 | TypeU32 | TypeU32Be ->
       if vty = i64_type context then build_trunc v (i32_type context) "trunc" builder
       else if vty = i1_type  context then build_zext  v (i32_type context) "zext"  builder
       else if vty = pointer_type context then
@@ -2072,6 +2074,17 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let n = Int64.to_int (Int64.logand i 0xFFFFL) in
            let swapped = ((n land 0xFF) lsl 8) lor ((n lsr 8) land 0xFF) in
            (TypeU16Be, const_of_int64 (i16_type context) (Int64.of_int swapped) true)
+       | Some TypeU32Be ->
+           (* Same compile-time swap as TypeU16Be just above, 32-bit width. *)
+           let n = Int64.logand i 0xFFFFFFFFL in
+           let b0 = Int64.logand n 0xFFL in
+           let b1 = Int64.logand (Int64.shift_right_logical n 8) 0xFFL in
+           let b2 = Int64.logand (Int64.shift_right_logical n 16) 0xFFL in
+           let b3 = Int64.logand (Int64.shift_right_logical n 24) 0xFFL in
+           let swapped = Int64.logor (Int64.shift_left b0 24)
+             (Int64.logor (Int64.shift_left b1 16)
+                (Int64.logor (Int64.shift_left b2 8) b3)) in
+           (TypeU32Be, const_of_int64 (i32_type context) swapped true)
        | Some ((TypeI8|TypeI16|TypeI32|TypeI64
                |TypeU8|TypeU16|TypeU32|TypeU64|TypeIsize|TypeUsize|TypeBool) as ty) ->
            (ty, const_of_int64 (ltype_of_ast ty) i true)
@@ -2276,21 +2289,37 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          only Eq/Ne/Band/Bor/Bxor, so this is never reached for any other
          operator with a u16be operand. *)
       let (v1, v2) =
-        let is_u16be_ty = function
-          | TypeU16Be -> true
-          | TypeRefined (_, _, TypeU16Be) -> true
-          | _ -> false
+        (* GitHub issue #186: u32be gets the identical treatment, 32-bit
+           width -- same reasoning as the comment above, just four bytes. *)
+        let wire_be_width = function
+          | TypeU16Be -> Some 16
+          | TypeU32Be -> Some 32
+          | TypeRefined (_, _, TypeU16Be) -> Some 16
+          | TypeRefined (_, _, TypeU32Be) -> Some 32
+          | _ -> None
         in
         let swap16 k = ((k land 0xFF) lsl 8) lor ((k lsr 8) land 0xFF) in
-        if is_u16be_ty ty1 then
-          match intlit_opt e2 with
-          | Some k -> (v1, const_int (type_of v2) (swap16 (k land 0xFFFF)))
-          | None -> (v1, v2)
-        else if is_u16be_ty ty2 then
-          match intlit_opt e1 with
-          | Some k -> (const_int (type_of v1) (swap16 (k land 0xFFFF)), v2)
-          | None -> (v1, v2)
-        else (v1, v2)
+        let swap32 k =
+          let b0 = k land 0xFF and b1 = (k lsr 8) land 0xFF in
+          let b2 = (k lsr 16) land 0xFF and b3 = (k lsr 24) land 0xFF in
+          (b0 lsl 24) lor (b1 lsl 16) lor (b2 lsl 8) lor b3
+        in
+        let swapped_const other_v = function
+          | 16 -> (fun k -> const_int (type_of other_v) (swap16 (k land 0xFFFF)))
+          | _  -> (fun k -> const_int (type_of other_v) (swap32 (k land 0xFFFFFFFF)))
+        in
+        match wire_be_width ty1 with
+        | Some w ->
+            (match intlit_opt e2 with
+             | Some k -> (v1, swapped_const v2 w k)
+             | None -> (v1, v2))
+        | None ->
+            (match wire_be_width ty2 with
+             | Some w ->
+                 (match intlit_opt e1 with
+                  | Some k -> (swapped_const v1 w k, v2)
+                  | None -> (v1, v2))
+             | None -> (v1, v2))
       in
       (* GitHub issue #102: TypeAlignedPtr is also a pointer at the LLVM
          level (see ltype_of_ast) but carries a proof that may or may not
@@ -2416,7 +2445,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
               would be unsound (a raw-bytes AND bound does not translate to
               a bound on the logical post-swap value). *)
            let ret_ty =
-             if canon_ty ty1 = TypeU16Be then canon_ty ty1 else
+             if canon_ty ty1 = TypeU16Be || canon_ty ty1 = TypeU32Be
+             then canon_ty ty1 else
              match intlit_opt e2 with
              | Some k when k >= 0 -> TypeRefined (0, k + 1, canon_ty ty1)
              | _ -> (match intlit_opt e1 with
@@ -2607,14 +2637,22 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       in
       let src_base = strip_refined_base src_ty in
       let tgt_base = strip_refined_base target_ty in
-      if (src_base = TypeU16Be && tgt_base = TypeU16)
-         || (src_base = TypeU16 && tgt_base = TypeU16Be) then begin
-        let narrowed = coerce v src_base in  (* real i16, not widen_load's i32 *)
-        let bswap_ft = function_type (i16_type context) [| i16_type context |] in
-        let bswap_fn = declare_function "llvm.bswap.i16" bswap_ft the_module in
-        let swapped = build_call bswap_ft bswap_fn [| narrowed |] "bswap16" builder in
-        (target_ty, to_arith_width target_ty swapped)
-      end else
+      let wire_be_pair_width = function
+        | (TypeU16Be, TypeU16) | (TypeU16, TypeU16Be) -> Some 16
+        | (TypeU32Be, TypeU32) | (TypeU32, TypeU32Be) -> Some 32
+        | _ -> None
+      in
+      (match wire_be_pair_width (src_base, tgt_base) with
+       | Some width ->
+           let bswap_ty = if width = 16 then i16_type context else i32_type context in
+           let narrowed = coerce v src_base in  (* real i16/i32, not widen_load's i32 *)
+           let bswap_ft = function_type bswap_ty [| bswap_ty |] in
+           let bswap_name = if width = 16 then "llvm.bswap.i16" else "llvm.bswap.i32" in
+           let bswap_fn = declare_function bswap_name bswap_ft the_module in
+           let swapped = build_call bswap_ft bswap_fn [| narrowed |]
+             (Printf.sprintf "bswap%d" width) builder in
+           (target_ty, to_arith_width target_ty swapped)
+       | None ->
       (match target_ty with
        | TypeNamed ename when Hashtbl.mem enum_underlying ename ->
            let ut    = Hashtbl.find enum_underlying ename in
@@ -2739,7 +2777,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
               idx_expr is an i32-widened Index read of a u8 array/pointer
               -- returning a bare narrow i8 here would make the two sides
               of `==` disagree in LLVM type despite matching AST types). *)
-           (target_ty, to_arith_width target_ty (coerce v target_ty)))
+           (target_ty, to_arith_width target_ty (coerce v target_ty))))
 
   | FieldGet (base_expr, fname) ->
       let (base_ty, base_v) = gen_expr locals base_expr in
@@ -3859,7 +3897,7 @@ let gen_func ?prog_types fdef =
     | TypeSink base
     | TypeIo base -> is_debug_aggregate_ty base
     | TypeView _ | TypeAlignedPtr _ | TypePtr _ | TypeFn _
-    | TypeI8 | TypeU8 | TypeI16 | TypeU16 | TypeU16Be | TypeI32 | TypeU32
+    | TypeI8 | TypeU8 | TypeI16 | TypeU16 | TypeU16Be | TypeI32 | TypeU32 | TypeU32Be
     | TypeI64 | TypeU64 | TypeUsize | TypeIsize | TypeBool | TypeVoid -> false
   in
 
@@ -4513,14 +4551,14 @@ let rec eval_const_int (e : Ast.expr) : Int64.t =
        | Some value -> Int64.of_int value
        | None -> raise (Error (Printf.sprintf "Unknown variant %s::%s" ename vname)))
   | Cast (target_ty, inner) ->
-      (* GitHub issue #186: a u16be<->u16 cast folded at COMPILE time (a
-         `const`/global initializer) would need the same bswap the runtime
-         Cast codegen above performs, but this function has no type
-         environment to tell a wire-order source/target apart from an
-         ordinary same-width one -- deliberately left unsupported (silently
-         wrong is worse than a clear error) rather than guessed at. Not
-         needed for this session's prototype scope; runtime casts (the
-         Cast case in gen_expr) are unaffected. *)
+      (* GitHub issue #186: a u16be<->u16 or u32be<->u32 cast folded at
+         COMPILE time (a `const`/global initializer) would need the same
+         bswap the runtime Cast codegen above performs, but this function
+         has no type environment to tell a wire-order source/target apart
+         from an ordinary same-width one -- deliberately left unsupported
+         (silently wrong is worse than a clear error) rather than guessed
+         at. Not needed for this session's prototype scope; runtime casts
+         (the Cast case in gen_expr) are unaffected. *)
       let v = eval_const_int inner in
       (match target_ty with
        | TypePtr _ | TypeAlignedPtr _ -> v  (* address value; no integer width to mask against *)

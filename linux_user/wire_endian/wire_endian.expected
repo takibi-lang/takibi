@@ -2,4 +2,8 @@ len: 0x00000578
 refined-param: 0x00000578
 magic-eq: true
 flags-masked: 0x00000abc
+seq: 0x12345678
+seq-masked: 0x02345000
+sugar-magic-eq: true
+sugar-seq: 0x12345678
 done

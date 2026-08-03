@@ -30,14 +30,16 @@ type type_expr =
   | TypeI8  | TypeI16 | TypeI32 | TypeI64
   | TypeU8  | TypeU16 | TypeU32 | TypeU64
   | TypeU16Be
-    (* u16be -- a 16-bit value stored in big-endian (wire) byte order.
-       Deliberately does NOT unify with TypeU16: crossing between wire and
-       host order requires an explicit `as` cast (GitHub issue #186), the
-       same discipline TypeRefined's own `{lo..<hi as base}` already
-       requires to cross representations. See lib/types.ml's TU16Be for the
-       unification/subtyping rules and lib/type_inf.ml's BinOp case for the
-       narrow set of operators (==, !=, &, |, ^, ~) allowed directly on it
-       without a conversion. *)
+  | TypeU32Be
+    (* u16be/u32be -- 16-/32-bit values stored in big-endian (wire) byte
+       order. Deliberately does NOT unify with TypeU16/TypeU32: crossing
+       between wire and host order requires an explicit `as` cast (GitHub
+       issue #186), the same discipline TypeRefined's own `{lo..<hi as
+       base}` already requires to cross representations. See
+       lib/types.ml's TU16Be/TU32Be for the unification/subtyping rules
+       and lib/type_inf.ml's BinOp case for the narrow set of operators
+       (==, !=, &, |, ^, ~) allowed directly on either without a
+       conversion. *)
   | TypeIsize                              (* pointer-sized signed integer *)
   | TypeUsize                              (* pointer-sized unsigned integer *)
   | TypeVoid

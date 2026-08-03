@@ -1,9 +1,10 @@
 // Prototype for GitHub issue #186: a packed struct field's declared type
-// may be `u16be`, a 16-bit value stored in big-endian (wire) byte order.
-// u16be does NOT unify with u16 -- reading it, casting it, and comparing/
-// masking it are all checked distinctly from ordinary host-order integers
-// (see SPEC.md's "Endian-Aware Integer Types" section and lib/types.ml's
-// TU16Be for the exact unification/subtyping rules).
+// may be `u16be`/`u32be`, a 16-/32-bit value stored in big-endian (wire)
+// byte order. Neither unifies with its plain host-order counterpart --
+// reading it, casting it, and comparing/masking it are all checked
+// distinctly from ordinary host-order integers (see SPEC.md's
+// "Endian-Aware Integer Types" section and lib/types.ml's TU16Be/TU32Be
+// for the exact unification/subtyping rules).
 //
 // This example overlays WireHdr on a raw byte buffer the same way
 // kernel/net/*.tkb overlays its own wire-format structs on a real captured
@@ -15,15 +16,31 @@
 //   refined-param: 0x00000578
 //   magic-eq: true
 //   flags-masked: 0x00000abc
+//   seq: 0x12345678
+//   seq-masked: 0x02345000
+//   sugar-magic-eq: true
+//   sugar-seq: 0x12345678
 //   done
 
 struct packed WireHdr {
     magic: u16be;
     flags: u16be;
     len: {20..<1501 as u16be};
+    seq: u32be;
 }
 
-let mut wire_bytes: [u8; 6];
+// `struct packed be` sugar (GitHub issue #186 follow-up): every field
+// written as a plain u16/u32 is auto-promoted to u16be/u32be at parse
+// time -- WireHdrSugar has the exact same runtime layout and field types
+// as WireHdr above, just spelled without repeating "be" on each field.
+struct packed be WireHdrSugar {
+    magic: u16;
+    flags: u16;
+    len: {20..<1501 as u16};
+    seq: u32;
+}
+
+let mut wire_bytes: [u8; 10];
 
 // Accepting the exact refined range `{20..<1501 as u16}` here proves that
 // `hdr.len as u16` below carries its proven range across the byte-swap
@@ -35,11 +52,13 @@ fn requires_len(n: {20..<1501 as u16}) -> usize {
 }
 
 fn test_wire_endian() {
-    // Wire bytes for magic=0x0806, flags=0x2abc, len=1400 (0x0578), each
-    // stored big-endian (most significant byte first).
+    // Wire bytes for magic=0x0806, flags=0x2abc, len=1400 (0x0578), and
+    // seq=0x12345678, each stored big-endian (most significant byte first).
     wire_bytes[0] = 0x08; wire_bytes[1] = 0x06;
     wire_bytes[2] = 0x2a; wire_bytes[3] = 0xbc;
     wire_bytes[4] = 0x05; wire_bytes[5] = 0x78;
+    wire_bytes[6] = 0x12; wire_bytes[7] = 0x34;
+    wire_bytes[8] = 0x56; wire_bytes[9] = 0x78;
 
     let hdr: *WireHdr = wire_bytes as *WireHdr;
 
@@ -68,6 +87,30 @@ fn test_wire_endian() {
     let masked: u16be = hdr.flags & 0x1fff;
     uart_puts("flags-masked: ");
     uart_print_hex((masked as u16) as i32);
+    uart_puts("\r\n");
+
+    // u32be: cast to host order (32-bit byte-swap) and bitwise masking
+    // across a byte boundary, same rules as u16be above.
+    uart_puts("seq: ");
+    uart_print_hex((hdr.seq as u32) as i32);
+    uart_puts("\r\n");
+
+    let seq_masked: u32be = hdr.seq & 0x0fffF000;
+    uart_puts("seq-masked: ");
+    uart_print_hex((seq_masked as u32) as i32);
+    uart_puts("\r\n");
+
+    // `struct packed be` sugar produces an equivalent struct: same bytes
+    // overlay, same fields, same values.
+    let hdr_sugar: *WireHdrSugar = wire_bytes as *WireHdrSugar;
+    uart_puts("sugar-magic-eq: ");
+    if (hdr_sugar.magic == 0x0806) {
+        uart_puts("true");
+    } else {
+        uart_puts("false");
+    }
+    uart_puts("\r\nsugar-seq: ");
+    uart_print_hex((hdr_sugar.seq as u32) as i32);
     uart_puts("\r\n");
 
     uart_puts("done\r\n");
