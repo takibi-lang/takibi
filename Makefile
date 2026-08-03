@@ -141,7 +141,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair \
                              field_lease match_int_lit \
                              callstack ringbuf crc8 djb2 slice foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 
 # Extra prerequisites (staleness tracking only -- `use` already resolves

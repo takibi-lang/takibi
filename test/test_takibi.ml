@@ -118,6 +118,7 @@ let rec show_type = function
   | Ast.TypeBool        -> "bool"
   | Ast.TypeI8          -> "i8"  | Ast.TypeI16 -> "i16" | Ast.TypeI32 -> "i32" | Ast.TypeI64 -> "i64"
   | Ast.TypeU8          -> "u8"  | Ast.TypeU16 -> "u16" | Ast.TypeU32 -> "u32" | Ast.TypeU64 -> "u64"
+  | Ast.TypeU16Be       -> "u16be"
   | Ast.TypeIsize       -> "isize"
   | Ast.TypeUsize       -> "usize"
   | Ast.TypeVoid        -> "void"
@@ -6307,6 +6308,30 @@ let infer_tests = [
           }
           early_exit_token_drop(token);
         }");
+
+  (* GitHub issue #186: u16be is a distinct type from u16 that does not
+     unify with it -- arithmetic, ordering comparisons, and casts to any
+     integer type other than u16 must all be rejected, forcing an explicit
+     `as u16` conversion first. ==/!=/bitwise ops are allowed directly (see
+     the linux_user/wire_endian/ example for the positive/runtime-value
+     side of this same feature). *)
+  Alcotest.test_case "u16be: arithmetic is rejected without a cast" `Quick
+    (expect_type_error
+       "convert with `as u16` first"
+       "struct packed WireHdr { magic: u16be; flags: u16be; }
+        fn bad_add(h: *WireHdr) -> u16be { return h.magic + 1; }");
+
+  Alcotest.test_case "u16be: ordering comparison is rejected without a cast" `Quick
+    (expect_type_error
+       "convert with `as u16` first"
+       "struct packed WireHdr { magic: u16be; flags: u16be; }
+        fn bad_cmp(h: *WireHdr) -> bool { return h.magic < h.flags; }");
+
+  Alcotest.test_case "u16be: cast to a type other than u16 is rejected" `Quick
+    (expect_type_error
+       "only u16be <-> u16 is a legal conversion"
+       "struct packed WireHdr { magic: u16be; }
+        fn bad_cast(h: *WireHdr) -> u32 { return h.magic as u32; }");
 
 ]
 

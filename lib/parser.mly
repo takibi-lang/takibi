@@ -60,6 +60,7 @@ let validate_arm_bodies pos arms =
 let base_type_name = function
   | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
   | TypeU8 -> "u8" | TypeU16 -> "u16" | TypeU32 -> "u32" | TypeU64 -> "u64"
+  | TypeU16Be -> "u16be"
   | TypeIsize -> "isize" | TypeUsize -> "usize" | _ -> "?"
 
 (* The (inclusive lo, exclusive-upper-bound-or-None) range an explicit
@@ -81,6 +82,7 @@ let base_bound_range = function
   | TypeI64   -> (Int64.min_int, None)
   | TypeU8    -> (0L, Some 256L)
   | TypeU16   -> (0L, Some 65536L)
+  | TypeU16Be -> (0L, Some 65536L)
   | TypeU32   -> (0L, Some 4294967296L)
   | TypeU64   -> (0L, None)
   | TypeIsize -> (-2147483648L, Some 2147483647L)
@@ -100,7 +102,7 @@ let check_refined_base_range pos lo hi base =
 
 let check_const_type pos = function
   | TypeI8 | TypeI16 | TypeI32 | TypeI64
-  | TypeU8 | TypeU16 | TypeU32 | TypeU64
+  | TypeU8 | TypeU16 | TypeU16Be | TypeU32 | TypeU64
   | TypeIsize | TypeUsize -> ()
   | _ ->
       raise (Types.TypeError (pos,
@@ -163,6 +165,7 @@ let check_const_type pos = function
 %token VOID_TYPE BOOL_TYPE
 %token I8_TYPE I16_TYPE I32_TYPE I64_TYPE
 %token U8_TYPE U16_TYPE U32_TYPE U64_TYPE ISIZE_TYPE USIZE_TYPE
+%token U16BE_TYPE
 %token TRUE FALSE
 %token COLON ARROW
 
@@ -648,6 +651,7 @@ base_type_expr:
   | BOOL_TYPE { TypeBool }
   | I8_TYPE   { TypeI8  } | I16_TYPE { TypeI16 } | I32_TYPE { TypeI32 } | I64_TYPE { TypeI64 }
   | U8_TYPE   { TypeU8  } | U16_TYPE { TypeU16 } | U32_TYPE { TypeU32 } | U64_TYPE { TypeU64 }
+  | U16BE_TYPE { TypeU16Be }
   | ISIZE_TYPE { TypeIsize }
   | USIZE_TYPE { TypeUsize }
   | IO         type_expr { lift_singleton (fun t -> TypeIo t) $2 }
@@ -813,6 +817,7 @@ int_base_type_expr:
   | I64_TYPE   { TypeI64 }
   | U8_TYPE    { TypeU8 }
   | U16_TYPE   { TypeU16 }
+  | U16BE_TYPE { TypeU16Be }
   | U32_TYPE   { TypeU32 }
   | U64_TYPE   { TypeU64 }
   | ISIZE_TYPE { TypeIsize }

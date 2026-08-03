@@ -1,0 +1,78 @@
+// Prototype for GitHub issue #186: a packed struct field's declared type
+// may be `u16be`, a 16-bit value stored in big-endian (wire) byte order.
+// u16be does NOT unify with u16 -- reading it, casting it, and comparing/
+// masking it are all checked distinctly from ordinary host-order integers
+// (see SPEC.md's "Endian-Aware Integer Types" section and lib/types.ml's
+// TU16Be for the exact unification/subtyping rules).
+//
+// This example overlays WireHdr on a raw byte buffer the same way
+// kernel/net/*.tkb overlays its own wire-format structs on a real captured
+// packet buffer -- via a pointer cast, not a struct literal, since that is
+// how a real wire parser actually obtains one of these.
+//
+// Expected QEMU output:
+//   len: 0x00000578
+//   refined-param: 0x00000578
+//   magic-eq: true
+//   flags-masked: 0x00000abc
+//   done
+
+struct packed WireHdr {
+    magic: u16be;
+    flags: u16be;
+    len: {20..<1501 as u16be};
+}
+
+let mut wire_bytes: [u8; 6];
+
+// Accepting the exact refined range `{20..<1501 as u16}` here proves that
+// `hdr.len as u16` below carries its proven range across the byte-swap
+// with no runtime check -- this whole example is built with --forbid-trap,
+// so if that proof were lost, the call below would fail to compile instead
+// of silently inserting a bounds check.
+fn requires_len(n: {20..<1501 as u16}) -> usize {
+    return n as usize;
+}
+
+fn test_wire_endian() {
+    // Wire bytes for magic=0x0806, flags=0x2abc, len=1400 (0x0578), each
+    // stored big-endian (most significant byte first).
+    wire_bytes[0] = 0x08; wire_bytes[1] = 0x06;
+    wire_bytes[2] = 0x2a; wire_bytes[3] = 0xbc;
+    wire_bytes[4] = 0x05; wire_bytes[5] = 0x78;
+
+    let hdr: *WireHdr = wire_bytes as *WireHdr;
+
+    // Cast to host order: must byte-swap, not reinterpret the raw bytes,
+    // and must keep {20..<1501} afterward with no runtime check.
+    let via_refined_param: usize = requires_len(hdr.len as u16);
+    uart_puts("len: ");
+    uart_print_hex((hdr.len as u16) as i32);
+    uart_puts("\r\nrefined-param: ");
+    uart_print_hex(via_refined_param as i32);
+    uart_puts("\r\n");
+
+    // == against a conventionally-written big-endian literal needs no cast:
+    // 0x0806 already matches its own big-endian wire storage order.
+    uart_puts("magic-eq: ");
+    if (hdr.magic == 0x0806) {
+        uart_puts("true");
+    } else {
+        uart_puts("false");
+    }
+    uart_puts("\r\n");
+
+    // Bitwise masking directly on the wire-order value, no cast needed:
+    // 0x2abc & 0x1fff == 0x0abc in logical space, even though the mask
+    // crosses a byte boundary.
+    let masked: u16be = hdr.flags & 0x1fff;
+    uart_puts("flags-masked: ");
+    uart_print_hex((masked as u16) as i32);
+    uart_puts("\r\n");
+
+    uart_puts("done\r\n");
+}
+
+fn app_main() {
+    test_wire_endian();
+}

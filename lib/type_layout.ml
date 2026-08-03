@@ -58,7 +58,7 @@ let primitive_size_align ty =
             Llvm_target.DataLayout.abi_align llty dl)
        | None -> (1, 1))
   | TypeI8 | TypeU8 -> (1, 1)
-  | TypeI16 | TypeU16 -> (2, 2)
+  | TypeI16 | TypeU16 | TypeU16Be -> (2, 2)
   | TypeI32 | TypeU32 -> (4, 4)
   | TypeI64 | TypeU64 -> (8, 8)
   | TypeIsize | TypeUsize -> ptr_size_align ()
@@ -70,7 +70,7 @@ let align_up n a =
 let rec size_align_of_type pos seen ty =
   match ty with
   | TypeBool | TypeI8 | TypeI16 | TypeI32 | TypeI64
-  | TypeU8 | TypeU16 | TypeU32 | TypeU64
+  | TypeU8 | TypeU16 | TypeU16Be | TypeU32 | TypeU64
   | TypeIsize | TypeUsize -> primitive_size_align ty
   | TypeVoid -> fail pos "sizeof(void) is not allowed"
   | TypeView (name, _) -> fail pos (Printf.sprintf

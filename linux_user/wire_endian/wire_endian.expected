@@ -1,0 +1,5 @@
+len: 0x00000578
+refined-param: 0x00000578
+magic-eq: true
+flags-masked: 0x00000abc
+done

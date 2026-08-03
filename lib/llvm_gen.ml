@@ -121,7 +121,7 @@ let erased_view_value () = undef (i1_type context)
 let rec const_type_size (ty : Ast.type_expr) : int option =
   match ty with
   | Ast.TypeBool | Ast.TypeU8 | Ast.TypeI8 -> Some 1
-  | Ast.TypeU16 | Ast.TypeI16 -> Some 2
+  | Ast.TypeU16 | Ast.TypeI16 | Ast.TypeU16Be -> Some 2
   | Ast.TypeU32 | Ast.TypeI32 -> Some 4
   | Ast.TypeU64 | Ast.TypeI64 -> Some 8
   | Ast.TypeArray (elem, n) ->
@@ -558,6 +558,7 @@ let rec ty_str = function
   | TypeBool -> "bool"
   | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
   | TypeU8 -> "u8" | TypeU16 -> "u16" | TypeU32 -> "u32" | TypeU64 -> "u64"
+  | TypeU16Be -> "u16be"
   | TypeIsize -> "isize"
   | TypeUsize -> "usize"
   | TypeVoid  -> "void"
@@ -1145,7 +1146,7 @@ let isize_bitwidth () = integer_bitwidth (isize_lltype ())
 let rec ltype_of_ast = function
   | TypeBool        -> i1_type  context
   | TypeI8  | TypeU8  -> i8_type  context
-  | TypeI16 | TypeU16 -> i16_type context
+  | TypeI16 | TypeU16 | TypeU16Be -> i16_type context
   | TypeI32 | TypeU32 -> i32_type context
   | TypeI64 | TypeU64 -> i64_type context
   | TypeIsize       -> isize_lltype ()
@@ -1250,7 +1251,7 @@ let di_struct_placeholder dib file sname =
       placeholder
 
 let rec di_is_unsigned = function
-  | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize -> true
+  | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize | TypeU16Be -> true
   | TypeRefined (_, _, base) -> di_is_unsigned base
   | _ -> false
 
@@ -1279,6 +1280,7 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
   | TypeI64   -> basic_int "i64"   64 dw_ate_signed
   | TypeU8    -> basic_int "u8"    8  dw_ate_unsigned
   | TypeU16   -> basic_int "u16"   16 dw_ate_unsigned
+  | TypeU16Be -> basic_int "u16be" 16 dw_ate_unsigned
   | TypeU32   -> basic_int "u32"   32 dw_ate_unsigned
   | TypeU64   -> basic_int "u64"   64 dw_ate_unsigned
   | TypeIsize -> basic_int "isize" (integer_bitwidth (isize_lltype ())) dw_ate_signed
@@ -1525,7 +1527,7 @@ let rec widen_load (ast_ty : Ast.type_expr) v =
       let src = type_of v in
       if src = dst then v
       else build_sext v dst "sext" builder
-  | TypeU8 | TypeU16 | TypeU32 ->
+  | TypeU8 | TypeU16 | TypeU32 | TypeU16Be ->
       let dst = i32_type context in
       let src = type_of v in
       if src = dst then v
@@ -1575,7 +1577,7 @@ let rec coerce v (dst : Ast.type_expr) =
       if vty = i32_type context || vty = i64_type context
       then build_trunc v (i8_type context) "trunc" builder
       else v
-  | TypeU16 | TypeI16 ->
+  | TypeU16 | TypeI16 | TypeU16Be ->
       if vty = i32_type context || vty = i64_type context
       then build_trunc v (i16_type context) "trunc" builder
       else v
@@ -2058,6 +2060,18 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | other -> other
       in
       (match direct_ty with
+       | Some TypeU16Be ->
+           (* GitHub issue #186: a literal bound to u16be is written the
+              CONVENTIONAL (logical/host-order-looking) way, e.g. 0x0806 for
+              an Ethertype -- not the raw wire-order bit pattern. Swap it at
+              COMPILE time so `hdr.field == 0x0806` compares correctly
+              against the field's own raw, unswapped-at-load stored bytes;
+              this is the exact transform an explicit `0x0806 as u16be`
+              cast performs at runtime via the Cast case's bswap above, just
+              folded away here since the input is already a constant. *)
+           let n = Int64.to_int (Int64.logand i 0xFFFFL) in
+           let swapped = ((n land 0xFF) lsl 8) lor ((n lsr 8) land 0xFF) in
+           (TypeU16Be, const_of_int64 (i16_type context) (Int64.of_int swapped) true)
        | Some ((TypeI8|TypeI16|TypeI32|TypeI64
                |TypeU8|TypeU16|TypeU32|TypeU64|TypeIsize|TypeUsize|TypeBool) as ty) ->
            (ty, const_of_int64 (ltype_of_ast ty) i true)
@@ -2244,6 +2258,40 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         else
           (ty1, v1, ty2, v2)
       in
+      (* GitHub issue #186: a u16be operand's own value is the raw stored
+         (wire-order) bit pattern -- never swapped at load time, only at an
+         explicit `as u16` cast. A LITERAL on the other side of ==/!=/&/|/^
+         is written the CONVENTIONAL (logical) way, e.g. 0x0806 for an
+         Ethertype, so it must be swapped here to compare/mask correctly
+         against the field's raw bytes (this is the runtime-BinOp
+         counterpart of IntLit's own directly-hinted swap above; that path
+         is never reached here because BinOp's operand gen_expr calls below
+         pass no ?expected_ty hint, so the literal would otherwise
+         materialize unswapped). Bitwise AND/OR/XOR are position-independent
+         operations, so applying the SAME fixed permutation (byte-swap) to
+         both operands and masking in "swapped space" gives exactly
+         swap(logical_a OP logical_b) -- correct once cast back `as u16`,
+         even for a mask that crosses the byte boundary (e.g. a 13-bit
+         subfield). type_inf.ml's BinOp guard already restricts u16be to
+         only Eq/Ne/Band/Bor/Bxor, so this is never reached for any other
+         operator with a u16be operand. *)
+      let (v1, v2) =
+        let is_u16be_ty = function
+          | TypeU16Be -> true
+          | TypeRefined (_, _, TypeU16Be) -> true
+          | _ -> false
+        in
+        let swap16 k = ((k land 0xFF) lsl 8) lor ((k lsr 8) land 0xFF) in
+        if is_u16be_ty ty1 then
+          match intlit_opt e2 with
+          | Some k -> (v1, const_int (type_of v2) (swap16 (k land 0xFFFF)))
+          | None -> (v1, v2)
+        else if is_u16be_ty ty2 then
+          match intlit_opt e1 with
+          | Some k -> (const_int (type_of v1) (swap16 (k land 0xFFFF)), v2)
+          | None -> (v1, v2)
+        else (v1, v2)
+      in
       (* GitHub issue #102: TypeAlignedPtr is also a pointer at the LLVM
          level (see ltype_of_ast) but carries a proof that may or may not
          survive THIS SPECIFIC addition/subtraction -- mirrors (sync rule)
@@ -2363,8 +2411,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Band ->
            (* Range propagation (sync rule with type_inf.ml's Band case):
               x & k -> {0..<k+1} for a non-negative literal mask k,
-              regardless of x's own sign/range. *)
-           let ret_ty = match intlit_opt e2 with
+              regardless of x's own sign/range. GitHub issue #186: skipped
+              for u16be -- see type_inf.ml's Band case for why the bound
+              would be unsound (a raw-bytes AND bound does not translate to
+              a bound on the logical post-swap value). *)
+           let ret_ty =
+             if canon_ty ty1 = TypeU16Be then canon_ty ty1 else
+             match intlit_opt e2 with
              | Some k when k >= 0 -> TypeRefined (0, k + 1, canon_ty ty1)
              | _ -> (match intlit_opt e1 with
                      | Some k when k >= 0 -> TypeRefined (0, k + 1, canon_ty ty1)
@@ -2539,6 +2592,29 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
             if fits then TypeRefined (lo, hi, target_ty) else target_ty
         | _ -> target_ty
       in
+      (* GitHub issue #186: u16be <-> u16 needs a real byte-swap at the exact
+         point of conversion -- the entire reason this cast exists -- instead
+         of the ordinary same-width no-op reinterpret every other integer
+         pair gets below. Checked on the refined-stripped base of src_ty/
+         target_ty since the refined-range-preserving upgrade just above may
+         already have wrapped target_ty in TypeRefined; must fire regardless
+         of that wrapping, so this has to come before the big dispatch that
+         follows (which would otherwise route a TypeRefined target into its
+         own branch and never see this pair at all). *)
+      let strip_refined_base = function
+        | TypeRefined (_, _, b) -> b
+        | t -> t
+      in
+      let src_base = strip_refined_base src_ty in
+      let tgt_base = strip_refined_base target_ty in
+      if (src_base = TypeU16Be && tgt_base = TypeU16)
+         || (src_base = TypeU16 && tgt_base = TypeU16Be) then begin
+        let narrowed = coerce v src_base in  (* real i16, not widen_load's i32 *)
+        let bswap_ft = function_type (i16_type context) [| i16_type context |] in
+        let bswap_fn = declare_function "llvm.bswap.i16" bswap_ft the_module in
+        let swapped = build_call bswap_ft bswap_fn [| narrowed |] "bswap16" builder in
+        (target_ty, to_arith_width target_ty swapped)
+      end else
       (match target_ty with
        | TypeNamed ename when Hashtbl.mem enum_underlying ename ->
            let ut    = Hashtbl.find enum_underlying ename in
@@ -3783,7 +3859,7 @@ let gen_func ?prog_types fdef =
     | TypeSink base
     | TypeIo base -> is_debug_aggregate_ty base
     | TypeView _ | TypeAlignedPtr _ | TypePtr _ | TypeFn _
-    | TypeI8 | TypeU8 | TypeI16 | TypeU16 | TypeI32 | TypeU32
+    | TypeI8 | TypeU8 | TypeI16 | TypeU16 | TypeU16Be | TypeI32 | TypeU32
     | TypeI64 | TypeU64 | TypeUsize | TypeIsize | TypeBool | TypeVoid -> false
   in
 
@@ -4437,6 +4513,14 @@ let rec eval_const_int (e : Ast.expr) : Int64.t =
        | Some value -> Int64.of_int value
        | None -> raise (Error (Printf.sprintf "Unknown variant %s::%s" ename vname)))
   | Cast (target_ty, inner) ->
+      (* GitHub issue #186: a u16be<->u16 cast folded at COMPILE time (a
+         `const`/global initializer) would need the same bswap the runtime
+         Cast codegen above performs, but this function has no type
+         environment to tell a wire-order source/target apart from an
+         ordinary same-width one -- deliberately left unsupported (silently
+         wrong is worse than a clear error) rather than guessed at. Not
+         needed for this session's prototype scope; runtime casts (the
+         Cast case in gen_expr) are unaffected. *)
       let v = eval_const_int inner in
       (match target_ty with
        | TypePtr _ | TypeAlignedPtr _ -> v  (* address value; no integer width to mask against *)

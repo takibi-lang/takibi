@@ -1185,6 +1185,30 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       if contains_view_ty t1 || contains_view_ty t2 then
         raise (TypeError (e.loc,
           "erased views cannot be operands of runtime operators"));
+      (* GitHub issue #186: u16be (bare or refined-over-it) deliberately does
+         not participate in ordinary arithmetic, shifts, or ORDERING
+         comparisons -- comparing two byte-swapped bit patterns numerically
+         does not preserve the logical ordering on this little-endian
+         target. == and != and the bitwise ops are safe and useful directly
+         on wire-order bytes without a conversion (a conventionally-written
+         big-endian hex literal already matches its own wire storage order,
+         and bitwise masking is order-independent as long as the mask is
+         written the same way) -- real network code keeps values in wire
+         order from receive through transmit, so this is deliberately not
+         "reject everything". Anything else must `as u16` first. *)
+      (let is_wire_be_ty t = match repr t with
+         | TU16Be -> true
+         | TRefinedInt (_, _, TU16Be) -> true
+         | _ -> false
+       in
+       match op with
+       | Eq | Ne | Band | Bor | Bxor -> ()
+       | _ ->
+           if is_wire_be_ty t1 || is_wire_be_ty t2 then
+             raise (TypeError (e.loc,
+               "cannot use a wire-endian (u16be) value with this operator; \
+                convert with `as u16` first (==, !=, &, |, ^ are allowed \
+                directly on u16be)")));
       (match op with
        | Add ->
            (* Pointer arithmetic: ptr + isize -> returns the same pointer type. TIo is a value type, excluded.
@@ -1367,6 +1391,17 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Band ->
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
            unify_at e.loc ct1 ct2;
+           (* GitHub issue #186: the [0, k+1) range-proving optimization just
+              below is UNSOUND for u16be. It proves a bound on the RAW
+              bit-pattern AND result; TRefinedInt's own meaning for a u16be
+              base (see the Cast case's range-preservation) is the LOGICAL
+              (post-swap) value's range, and byte-swapping a raw value
+              bounded by k does not bound the logical value by k (swapping
+              is not monotonic) -- so skip proving anything and keep the
+              plain wire-order type instead of manufacturing a false proof
+              that --forbid-trap code could then trust to elide a real
+              check. *)
+           if ct1 = TU16Be then ct1 else
            (match intlit_opt e2 with
             | Some k when k >= 0 -> TRefinedInt (0, k + 1, ct1)
             | _ -> (match intlit_opt e1 with
@@ -1578,6 +1613,36 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                           "slice cast requires an array variable, string \
                            literal, or slice source"))))
             | _ ->
+           (* GitHub issue #186: u16be casts ONLY to/from plain or refined
+              u16 -- never to/from any other integer type, which would let
+              it silently reinterpret through a back door and defeat the
+              entire point of a distinct wire-order type. Checked here,
+              before the general numeric-cast dispatch below, since that
+              dispatch's own final catch-all otherwise treats any bare
+              integer source/target pair as an ordinary, unchecked
+              truncating/widening reinterpret. *)
+           let is_u16be_flavored t = match t with
+             | TU16Be -> true
+             | TRefinedInt (_, _, TU16Be) -> true
+             | _ -> false
+           in
+           let is_u16_flavored t = match t with
+             | TU16 -> true
+             | TRefinedInt (_, _, TU16) -> true
+             | _ -> false
+           in
+           if is_u16be_flavored (repr src_ty) || is_u16be_flavored tgt then begin
+             if not ((is_u16be_flavored (repr src_ty)
+                      && (is_u16_flavored tgt || is_u16be_flavored tgt))
+                     || (is_u16_flavored (repr src_ty) && is_u16be_flavored tgt))
+             then
+               raise (TypeError (e.loc, Printf.sprintf
+                 "cannot cast %s to %s; only u16be <-> u16 is a legal conversion"
+                 (to_string src_ty) (to_string tgt)));
+             match repr src_ty, tgt with
+             | TRefinedInt (lo, hi, _), (TU16 | TU16Be) -> TRefinedInt (lo, hi, tgt)
+             | _ -> tgt
+           end else
            (match repr src_ty with
             | TPtr _ | TAlignedPtr _ ->
                 (* TAlignedPtr src (GitHub issue #102) shares TPtr's cast

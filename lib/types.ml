@@ -4,6 +4,8 @@ type ty =
   | TBool
   | TI8  | TI16 | TI32 | TI64
   | TU8  | TU16 | TU32 | TU64
+  | TU16Be  (* u16be: 16-bit value stored in big-endian (wire) byte order.
+               Does not unify with TU16 -- GitHub issue #186, see Ast.TypeU16Be. *)
   | TIsize  (* pointer-sized signed integer *)
   | TUsize  (* pointer-sized unsigned integer; maps to i64 on 64-bit targets *)
   | TVoid
@@ -142,6 +144,7 @@ let rec to_string t =
   | TBool -> "bool"
   | TI8   -> "i8"  | TI16 -> "i16" | TI32 -> "i32" | TI64 -> "i64"
   | TU8   -> "u8"  | TU16 -> "u16" | TU32 -> "u32" | TU64 -> "u64"
+  | TU16Be -> "u16be"
   | TIsize -> "isize"
   | TUsize -> "usize"
   | TVoid -> "void"
@@ -284,6 +287,7 @@ let rec unify t1 t2 =
   | TBool, TBool | TVoid, TVoid -> ()
   | TI8,  TI8  | TI16, TI16 | TI32, TI32 | TI64, TI64 -> ()
   | TU8,  TU8  | TU16, TU16 | TU32, TU32 | TU64, TU64 -> ()
+  | TU16Be, TU16Be -> ()
   | TIsize, TIsize -> ()
   | TUsize, TUsize -> ()
   | TPtr t1, TPtr t2 ->
@@ -330,6 +334,19 @@ let rec unify t1 t2 =
            narrow with if (s.len >= %d) { ... } or a constant subslice"
           (to_string (TSlice (e1, m1))) (to_string (TSlice (e2, m2))) m2));
       unify e1 e2
+  (* GitHub issue #186: TU16Be is deliberately NOT one of the ordinary
+     integer bases the generic range-fit rules just below apply to. Those
+     rules are base-BLIND (they only check whether the numeric range fits,
+     not which base produced it), so without these two arms placed first,
+     a refined wire-endian value would silently widen into an ordinary
+     integer type purely because its range happens to fit -- exactly the
+     accidental-host-order-use this type exists to prevent. Must come
+     before the generic rules so OCaml's first-match-wins order catches it. *)
+  | TRefinedInt (lo, hi, TU16Be), TU16Be when lo >= 0 && hi <= 65536 -> ()
+  | TRefinedInt (_, _, TU16Be), (TU8|TU16|TU32|TU64|TUsize|TI8|TI16|TI32|TI64|TIsize) ->
+      raise (Unify_error
+        "cannot use a wire-endian {..<.. as u16be} value as a plain integer \
+         type; convert with `as u16` first")
   (* Subtyping: TRefinedInt(lo, hi, base) is a subtype of any integer type
      where the range fits, REGARDLESS of its own base -- this check is
      purely about whether the VALUE range fits the target's representable
@@ -491,6 +508,7 @@ let rec of_ast_in_scope scope = function
   | Ast.TypeBool     -> TBool
   | Ast.TypeI8       -> TI8  | Ast.TypeI16 -> TI16 | Ast.TypeI32 -> TI32 | Ast.TypeI64 -> TI64
   | Ast.TypeU8       -> TU8  | Ast.TypeU16 -> TU16 | Ast.TypeU32 -> TU32 | Ast.TypeU64 -> TU64
+  | Ast.TypeU16Be    -> TU16Be
   | Ast.TypeIsize    -> TIsize
   | Ast.TypeUsize    -> TUsize
   | Ast.TypeVoid     -> TVoid
@@ -580,6 +598,7 @@ let rec to_ast t =
   | TBool -> Ast.TypeBool
   | TI8   -> Ast.TypeI8  | TI16 -> Ast.TypeI16 | TI32 -> Ast.TypeI32 | TI64 -> Ast.TypeI64
   | TU8   -> Ast.TypeU8  | TU16 -> Ast.TypeU16 | TU32 -> Ast.TypeU32 | TU64 -> Ast.TypeU64
+  | TU16Be -> Ast.TypeU16Be
   | TIsize -> Ast.TypeIsize
   | TUsize -> Ast.TypeUsize
   | TVoid -> Ast.TypeVoid
