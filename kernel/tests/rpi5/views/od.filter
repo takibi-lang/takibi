@@ -1,0 +1,5 @@
+^od: /hello\.txt: read error$
+^od: standard input: Bad file descriptor$
+^busybox od failed$
+^issue #196 demand: readv\(2\) requested by real userspace$
+^od unmap: clean$

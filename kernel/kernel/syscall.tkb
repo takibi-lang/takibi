@@ -1514,6 +1514,14 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     if (number == 17) {
         // getcwd(): HTTPd immediately changes to its configured root; `/` is
         // the only current working directory exposed by this kernel slice.
+        // The real syscall (unlike the POSIX library wrapper, which returns
+        // the buffer pointer) returns the number of bytes written including
+        // the NUL terminator -- found via a real hang: BusyBox ash's `sh -c`
+        // startup calls this, and this handler previously returned the
+        // buffer ADDRESS instead of the byte count, which some downstream
+        // use of that value (as a length, not just a >=0 success check)
+        // turned into an effectively-unbounded userspace loop with no
+        // further syscalls, not a kernel-visible fault.
         if (x1 < 2) { return (1, LINUX_EFAULT); }
         match user_range_check(x0, 2, UserAccessMode::Write) {
             UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
@@ -1522,7 +1530,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 let wrote_nul: bool = user_write_byte(range, 1, 0);
             }
         }
-        return (1, x0);
+        return (1, 2);
     }
     if (number == 49) {
         match user_range_check(x0, 2, UserAccessMode::Read) {

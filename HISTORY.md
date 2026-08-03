@@ -13420,3 +13420,77 @@ silent ENOSYS. `readv`/`ppoll` demand (e.g. via `busybox wc`/`sort` and
 follow-up scenario; this one intentionally stays narrow. Issue #196's real
 implementation (the actual `copy_to_user`/`copy_from_user` boundary work)
 has not started -- this is groundwork, not that issue's closure.
+
+## 2026-08-03: readv/ppoll demand, a wrong assumption, a real getcwd bug,
+## and a genuine stack overflow -- all found via qemu-aarch64-static, not guesswork
+
+Continuing the #196 pre-work above: proving real demand for `readv`(2) and
+`ppoll`(2) too, from unmodified BusyBox running on this kernel's real RPi5
+hardware.
+
+**`qemu-user-static` installed as a research tool** (same rationale as the
+earlier `busybox-static` install noted in
+[[feedback_consult_oss_kernels|takibi_kernel_ultimate_goal.md]]'s history):
+it runs this exact pinned `busybox-static` binary as a real AArch64 Linux
+process on the host, letting `-strace` show its actual syscall sequence in
+seconds instead of a multi-minute SWD hardware cycle. Not a build/toolchain
+dependency, purely a debugging aid.
+
+**A wrong assumption, corrected before it shipped.** The original plan used
+`busybox head /hello.txt` for readv demand, reasoning (from a paraphrased
+web-fetched summary of musl's `__stdio_read.c`) that any `fgets()` call
+goes through `readv(2)`. Reading musl 1.2.6's actual source directly
+(`src/stdio/__uflow.c`, `fgets.c`, `fread.c`, `__stdio_read.c`) showed the
+opposite: `fgets`/`getc` always call `f->read(f, &c, 1)` with `len=1`,
+which `__stdio_read`'s own condition (`iov[0].iov_len = len - !!f->buf_size`)
+always resolves to plain `read(2)`, never `readv(2)`. Only `fread()`'s
+direct-into-caller's-buffer path (`f->read(f, dest, l)` with `l` large)
+selects `readv(2)`. Confirmed empirically before touching hardware: an
+`env -i qemu-aarch64-static -strace ./busybox-static head /hello.txt` run
+showed no `readv` at all, while `od /hello.txt` (uses `fread()`,
+`coreutils/od_bloaty.c`) showed exactly one `readv(3,...) = 16`. The
+scenario was built around `od`, not `head`, from the start.
+
+**A real, previously-unexercised bug found in `getcwd`(17)'s handler**
+(`kernel/kernel/syscall.tkb`): it returned `x0` (the buffer's own address)
+instead of the byte count written, unlike the real syscall contract (the
+POSIX *library* wrapper returns the buffer pointer; the raw *syscall*
+returns bytes-written-including-NUL). No prior scenario had ever called
+`getcwd` -- BusyBox's `cat`/`uname`/`head`/`od` don't touch it, but `sh -c
+"read x"` does (ash's own startup, once `$PWD` is unset by this kernel's
+empty `envp={}` -- confirmed by re-taking the `qemu-aarch64-static -strace`
+trace with `env -i` to match; the first, environment-carrying trace never
+called `getcwd` at all and was misleading). Fixed to return the real byte
+count (`2`, for `/\0`).
+
+**The getcwd fix alone did not resolve the hang.** `sh -c "read x"` still
+never reached `ppoll`. Root cause, found by reading
+`kernel/arch/arm64/boot/entry.S`: this kernel's EL0 exception vector
+intentionally fail-stops (`el1_exception_evidence` records
+`esr_el1`/`far_el1`/`elr_el1`/`spsr_el1` into a fixed memory location, then
+parks in `wfe` forever) on any unhandled synchronous exception -- not just
+unrecognized syscalls, but genuine hardware faults like a data abort.
+`process_image_map_shell_read`'s process (like every other distro-image
+scenario) had only a single 4KB page for its ENTIRE stack. BusyBox
+`ash`'s real startup plus the `read` builtin (PATH_MAX-scale local buffers,
+several more call frames than `uname`/`od`) is far heavier than those
+smaller applets and overflowed it -- a genuine runtime fault, silently and
+safely caught by the kernel's own fail-stop design exactly as intended,
+not a syscall-handler bug. Fixed narrowly and only for this one scenario:
+`SHELL_STACK_EXTRA_PAGES = 4` in `kernel/mm/process_image.tkb` backs four
+more, lower-L3-indexed pages immediately below the existing top stack page
+(same `process_image_record`/cleanup machinery already used for heap
+pages, so `process_image_unmap`/`process_image_window_is_clear` needed no
+changes). This is a hardcoded per-scenario bump, not a general fix --
+flagged to the user as worth a real growable-stack (guard page + demand
+paging) design if/when more shell-script-driven scenarios are added; not
+attempted here.
+
+Verified end to end on real RPi5 hardware: 21/21 `make kernelcheck-rpi5`
+views pass, with three new permanent views (`uname`, `od`, `shell_read`)
+each capturing a real demand line -- `issue #196 demand: uname(2)+writev(2)
+requested by real userspace`, `...readv(2) requested...`, `...ppoll(2)
+requested...`. All four of #196's named syscalls (`writev`/`readv`/`ppoll`/
+`uname`) now have hardware-verified real demand from unmodified BusyBox;
+none of their real implementations (the `copy_to_user`/`copy_from_user`
+boundary work #196 actually asks for) have been started.

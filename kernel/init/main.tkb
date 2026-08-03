@@ -862,61 +862,160 @@ fn main() {
                     initial_process_destroy(process, text2, data2, stack2);
                 }
             }
+            // Issue #196 pre-work: run the same Alpine BusyBox static-PIE image a
+            // second time, with argv={"busybox","uname","-a"} instead of
+            // {"busybox","cat","/hello.txt"}, now that every earlier boot-time
+            // fixture has already taken its own evidence. BusyBox's uname applet
+            // calls uname(2) unconditionally and then flushes its output through
+            // musl's stdio, which on this pinned musl 1.2.6 build always goes
+            // through writev(2) -- neither syscall is implemented yet (both still
+            // fall through to the generic ENOSYS return in kernel/kernel/syscall.tkb),
+            // so this is expected to exit 0 while printing nothing. It exists to
+            // demonstrate real userspace demand for issue #196 empirically before
+            // implementing it, not to demonstrate it working.
+            if (distro_plan_ready) {
+                match process_image_map_uname(saved_distro_plan) {
+                    ProcessImageMapResult::InvalidImage => {
+                        kernel_boot_log("uname map: invalid image\n");
+                    }
+                    ProcessImageMapResult::OutOfMemory => {
+                        kernel_boot_log("uname map: out of memory\n");
+                    }
+                    ProcessImageMapResult::Mapped(uname_pages) => {
+                        let (uname_heap_start, uname_heap_limit) =
+                            process_image_heap_range(uname_pages);
+                        kernel_syscall_process_configure(
+                            uname_heap_start, uname_heap_limit);
+                        let uname_status: usize = run_initial_user(
+                            process_image_entry(uname_pages),
+                            process_image_stack_pointer(uname_pages));
+                        if (uname_status == 0) {
+                            kernel_boot_log("busybox uname exit: 0\n");
+                        } else {
+                            kernel_boot_log("busybox uname failed\n");
+                        }
+                        let (readv_requested, writev_requested,
+                             ppoll_requested, uname_requested) =
+                            kernel_syscall_196_demand_evidence();
+                        if (uname_requested && writev_requested) {
+                            kernel_boot_log(
+                                "issue #196 demand: uname(2)+writev(2) requested by real userspace\n");
+                        } else if (uname_requested) {
+                            kernel_boot_log(
+                                "issue #196 demand: uname(2) requested by real userspace\n");
+                        } else {
+                            kernel_boot_log(
+                                "issue #196 demand: uname(2) not observed\n");
+                        }
+                        process_image_unmap(uname_pages);
+                        if (process_image_window_is_clear()) {
+                            kernel_boot_log("uname unmap: clean\n");
+                        }
+                    }
+                }
+            }
+
+            // Issue #196 pre-work: same distro plan, argv={"busybox","sh","-c",
+            // "read x"}. BusyBox ash's `read` builtin always calls poll() before
+            // its first read() from stdin, even with no timeout -- see
+            // shell/shell_common.c in the vendored busybox-1.37.0 source. musl
+            // maps poll() to the ppoll(2) syscall unconditionally on aarch64
+            // (there is no legacy SYS_poll on this arch). ppoll(2) is not
+            // implemented yet (ENOSYS), so `read` is expected to fail immediately
+            // rather than actually block on UART input -- this proves real
+            // ppoll(2) demand, not working input.
+            if (distro_plan_ready) {
+                match process_image_map_shell_read(saved_distro_plan) {
+                    ProcessImageMapResult::InvalidImage => {
+                        kernel_boot_log("shell read map: invalid image\n");
+                    }
+                    ProcessImageMapResult::OutOfMemory => {
+                        kernel_boot_log("shell read map: out of memory\n");
+                    }
+                    ProcessImageMapResult::Mapped(shell_pages) => {
+                        let (shell_heap_start, shell_heap_limit) =
+                            process_image_heap_range(shell_pages);
+                        kernel_syscall_process_configure(
+                            shell_heap_start, shell_heap_limit);
+                        let shell_status: usize = run_initial_user(
+                            process_image_entry(shell_pages),
+                            process_image_stack_pointer(shell_pages));
+                        if (shell_status == 0) {
+                            kernel_boot_log("busybox shell read exit: 0\n");
+                        } else {
+                            kernel_boot_log("busybox shell read failed\n");
+                        }
+                        let (readv_requested3, writev_requested3,
+                             ppoll_requested3, uname_requested3) =
+                            kernel_syscall_196_demand_evidence();
+                        if (ppoll_requested3) {
+                            kernel_boot_log(
+                                "issue #196 demand: ppoll(2) requested by real userspace\n");
+                        } else {
+                            kernel_boot_log(
+                                "issue #196 demand: ppoll(2) not observed\n");
+                        }
+                        process_image_unmap(shell_pages);
+                        if (process_image_window_is_clear()) {
+                            kernel_boot_log("shell read unmap: clean\n");
+                        }
+                    }
+                }
+            }
+
+            // Issue #196 pre-work: same distro plan, argv={"busybox","od",
+            // "/hello.txt"}. BusyBox's od applet reads the whole file in one
+            // fread() call, which on this pinned musl 1.2.6 build issues a
+            // single readv(2) (confirmed via a qemu-aarch64-static -strace
+            // trace with an empty environment matching this kernel's
+            // envp={}: exactly one `readv(3,...) = 16`, no lseek/fstat
+            // needed) -- not implemented yet (ENOSYS), so this proves real
+            // readv(2) demand rather than demonstrating it working. An
+            // earlier version of this scenario used `head`, which turned
+            // out not to exercise readv(2) at all: BusyBox's fgets()-based
+            // applets always request 1 byte at a time from musl's stdio,
+            // which always selects plain read(2), never readv(2).
+            if (distro_plan_ready) {
+                match process_image_map_od(saved_distro_plan) {
+                    ProcessImageMapResult::InvalidImage => {
+                        kernel_boot_log("od map: invalid image\n");
+                    }
+                    ProcessImageMapResult::OutOfMemory => {
+                        kernel_boot_log("od map: out of memory\n");
+                    }
+                    ProcessImageMapResult::Mapped(od_pages) => {
+                        let (od_heap_start, od_heap_limit) =
+                            process_image_heap_range(od_pages);
+                        kernel_syscall_process_configure(
+                            od_heap_start, od_heap_limit);
+                        let od_status: usize = run_initial_user(
+                            process_image_entry(od_pages),
+                            process_image_stack_pointer(od_pages));
+                        if (od_status == 0) {
+                            kernel_boot_log("busybox od exit: 0\n");
+                        } else {
+                            kernel_boot_log("busybox od failed\n");
+                        }
+                        let (readv_requested2, writev_requested2,
+                             ppoll_requested2, uname_requested2) =
+                            kernel_syscall_196_demand_evidence();
+                        if (readv_requested2) {
+                            kernel_boot_log(
+                                "issue #196 demand: readv(2) requested by real userspace\n");
+                        } else {
+                            kernel_boot_log(
+                                "issue #196 demand: readv(2) not observed\n");
+                        }
+                        process_image_unmap(od_pages);
+                        if (process_image_window_is_clear()) {
+                            kernel_boot_log("od unmap: clean\n");
+                        }
+                    }
+                }
+            }
+
             if (page_allocator_live_count() == 0) {
                 kernel_boot_log("resources: pages=0\n");
-            }
-        }
-    }
-
-    // Issue #196 pre-work: run the same Alpine BusyBox static-PIE image a
-    // second time, with argv={"busybox","uname","-a"} instead of
-    // {"busybox","cat","/hello.txt"}, now that every earlier boot-time
-    // fixture has already taken its own evidence. BusyBox's uname applet
-    // calls uname(2) unconditionally and then flushes its output through
-    // musl's stdio, which on this pinned musl 1.2.6 build always goes
-    // through writev(2) -- neither syscall is implemented yet (both still
-    // fall through to the generic ENOSYS return in kernel/kernel/syscall.tkb),
-    // so this is expected to exit 0 while printing nothing. It exists to
-    // demonstrate real userspace demand for issue #196 empirically before
-    // implementing it, not to demonstrate it working.
-    if (distro_plan_ready) {
-        match process_image_map_uname(saved_distro_plan) {
-            ProcessImageMapResult::InvalidImage => {
-                kernel_boot_log("uname map: invalid image\n");
-            }
-            ProcessImageMapResult::OutOfMemory => {
-                kernel_boot_log("uname map: out of memory\n");
-            }
-            ProcessImageMapResult::Mapped(uname_pages) => {
-                let (uname_heap_start, uname_heap_limit) =
-                    process_image_heap_range(uname_pages);
-                kernel_syscall_process_configure(
-                    uname_heap_start, uname_heap_limit);
-                let uname_status: usize = run_initial_user(
-                    process_image_entry(uname_pages),
-                    process_image_stack_pointer(uname_pages));
-                if (uname_status == 0) {
-                    kernel_boot_log("busybox uname exit: 0\n");
-                } else {
-                    kernel_boot_log("busybox uname failed\n");
-                }
-                let (readv_requested, writev_requested,
-                     ppoll_requested, uname_requested) =
-                    kernel_syscall_196_demand_evidence();
-                if (uname_requested && writev_requested) {
-                    kernel_boot_log(
-                        "issue #196 demand: uname(2)+writev(2) requested by real userspace\n");
-                } else if (uname_requested) {
-                    kernel_boot_log(
-                        "issue #196 demand: uname(2) requested by real userspace\n");
-                } else {
-                    kernel_boot_log(
-                        "issue #196 demand: uname(2) not observed\n");
-                }
-                process_image_unmap(uname_pages);
-                if (process_image_window_is_clear()) {
-                    kernel_boot_log("uname unmap: clean\n");
-                }
             }
         }
     }
