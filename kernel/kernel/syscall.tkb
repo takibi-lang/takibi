@@ -28,6 +28,52 @@ const LINUX_EACCES: usize = 0xFFFFFFFFFFFFFFF3;
 const LINUX_PROT_READ: usize = 1;
 const LINUX_PROT_WRITE: usize = 2;
 
+// Issue #196: ABI-facing layout structs used only for sizeof/offsetof --
+// actual field access always goes through user_read_u32/u64/
+// user_write_u16/copy_to_user against a scratch buffer or a validated
+// UserRange, never a constructed struct value, matching this codebase's
+// existing CpioNewcHeader/KernelElf64Header pattern (kernel/fs/
+// initramfs.tkb, kernel/fs/elf64.tkb).
+
+// struct utsname (aarch64 Linux ABI, <sys/utsname.h>): six 65-byte
+// (64 chars + NUL) fields, no padding between them.
+struct packed Utsname {
+    sysname: [u8; 65];
+    nodename: [u8; 65];
+    release: [u8; 65];
+    version: [u8; 65];
+    machine: [u8; 65];
+    domainname: [u8; 65];
+}
+
+// struct iovec (aarch64 Linux ABI, <sys/uio.h>).
+struct packed Iovec {
+    iov_base: usize;
+    iov_len: usize;
+}
+
+// struct pollfd (aarch64 Linux ABI, <poll.h>).
+struct packed Pollfd {
+    fd: i32;
+    events: i16;
+    revents: i16;
+}
+
+const POLLIN: usize = 0x0001;
+const POLLNVAL: usize = 0x0020;
+
+// Linux's own iovec-count cap (UIO_MAXIOV, include/uapi/linux/uio.h) --
+// keeps iovcnt*sizeof(Iovec) far below any real overflow risk even before
+// checked_mul_usize is applied, and keeps the per-iovec/pollfd validation
+// loop provably bounded for --forbid-trap. Checked as `>= IOV_MAX`
+// (rejecting the boundary value itself, not just values above it) so the
+// accepted range narrows cleanly to the refined type `{0..<IOV_MAX}`
+// with no separate lower-bound proof needed.
+const IOV_MAX: usize = 1024;
+// This kernel's own cap for pollfd arrays (not a Linux constant), same
+// rationale and same off-by-one-avoiding `>=` check.
+const POLL_MAX: usize = 1024;
+
 const KERNEL_SOCKET_FD_MAX: usize = 8;
 
 private let mut syscall_ext2_mount: Ext2Mount;
@@ -57,15 +103,10 @@ private let mut syscall_inetd_mode: bool;
 private let mut syscall_inetd_response: [u8; 1460 * TCP_CONNECTION_MAX];
 private let mut syscall_inetd_response_length: [usize; TCP_CONNECTION_MAX];
 
-// Issue #196 pre-work: none of readv/writev/ppoll/uname are implemented yet
-// (they still fall through to the generic ENOSYS return below). These flags
-// only record whether real userspace code actually asked for one, so the
-// demand can be shown empirically instead of argued from source-reading
-// alone before that issue's real implementation work starts.
-private let mut syscall_readv_requested: bool;
-private let mut syscall_writev_requested: bool;
-private let mut syscall_ppoll_requested: bool;
-private let mut syscall_uname_requested: bool;
+// Issue #196: scratch buffer for uname(2)'s struct utsname reply, sized
+// with headroom over sizeof(Utsname) (390 bytes) since array declarations
+// can't use sizeof(...) directly (SPEC.md).
+private let mut syscall_uname_buffer: [u8; 512];
 
 must_use variant KernelInetdAcceptResult { TimedOut; Accepted; }
 
@@ -522,13 +563,6 @@ fn kernel_syscall_file_evidence()
             syscall_file_write_calls, syscall_close_calls);
 }
 
-// Issue #196 pre-work evidence: which of readv/writev/ppoll/uname real
-// userspace code actually requested (see the syscall_*_requested flags).
-fn kernel_syscall_196_demand_evidence() -> (bool, bool, bool, bool) {
-    return (syscall_readv_requested, syscall_writev_requested,
-            syscall_ppoll_requested, syscall_uname_requested);
-}
-
 fn kernel_syscall_socket_evidence() -> bool {
     return syscall_socket_calls == 1 && syscall_bind_calls == 1 &&
            syscall_listen_calls == 1 && syscall_accept_calls == 2 &&
@@ -634,6 +668,148 @@ fn initial_user_load(text: borrow PageOwner[page])
     slice_copy(destination, source_bytes);
     user_code_sync(page_physical_address(text), length);
     return InitialUserLoadResult::Loaded;
+}
+
+// Issue #196: writev(2)/readv(2) per-segment results, kept distinct from
+// the underlying byte count instead of encoding "this is actually an
+// errno" via a magnitude heuristic (Linux -errno values happen to be
+// huge as unsigned usize, which would work, but a discriminated variant
+// makes the distinction a type-level fact instead of a convention every
+// call site has to remember).
+must_use variant WriteSegmentResult { Errno(usize); Written(usize); }
+must_use variant ReadSegmentResult { Errno(usize); Read(usize); }
+
+// Single-segment write, fd 1/2 (raw UART) only. Deliberately NOT shared
+// with write(64)'s own handler below (which also supports connected TCP
+// fds, BusyBox httpd's inetd-mode fd 1, and the ext2 fd 3) -- extracting
+// that already-proven-working, TCP-timing-sensitive code into a shared
+// helper was judged more regression risk than this issue's actual
+// traced scenarios (uname -a's writev to stdout) need. Broadening
+// writev/readv to the other fd kinds is natural follow-up work, not
+// done here.
+fn syscall_writev_segment(fd: usize, address: usize, length: usize)
+        -> WriteSegmentResult {
+    if (fd != 1 && fd != 2) { return WriteSegmentResult::Errno(LINUX_EBADF); }
+    if (length == 0) { return WriteSegmentResult::Written(0); }
+    match user_range_check(address, length, UserAccessMode::Read) {
+        UserRangeResult::Fault => {
+            return WriteSegmentResult::Errno(LINUX_EFAULT);
+        }
+        UserRangeResult::Ok(range) => {
+            let mut remaining: usize = length;
+            let mut offset: usize = 0;
+            while (remaining != 0) {
+                uart_putc(user_read_byte(range, offset));
+                offset = offset + 1;
+                remaining = remaining - 1;
+            }
+        }
+    }
+    return WriteSegmentResult::Written(length);
+}
+
+// Single-segment read, fd 3 (ext2) only -- same scoping rationale as
+// syscall_writev_segment above, mirroring read(63)'s own fd==3 branch.
+fn syscall_readv_segment(fd: usize, address: usize, length: usize)
+        -> ReadSegmentResult {
+    if (fd != 3 || kernel_syscall_file_is_open() == false ||
+            kernel_syscall_file_readable() == false) {
+        return ReadSegmentResult::Errno(LINUX_EBADF);
+    }
+    match ext2_read_small_file(
+            syscall_ext2_mount, kernel_syscall_file_inode(),
+            syscall_file_buffer as []u8) {
+        Ext2ReadResult::Invalid => { return ReadSegmentResult::Errno(LINUX_EINVAL); }
+        Ext2ReadResult::Read(file_length) => {
+            if (kernel_syscall_file_offset() >= file_length) {
+                return ReadSegmentResult::Read(0);
+            }
+            let available: usize = file_length - kernel_syscall_file_offset();
+            let mut amount: usize = length;
+            if (amount > available) { amount = available; }
+            let source_base: *u8 = (syscall_file_buffer as *u8) +
+                (kernel_syscall_file_offset() as isize);
+            match user_range_check(address, amount, UserAccessMode::Write) {
+                UserRangeResult::Fault => {
+                    return ReadSegmentResult::Errno(LINUX_EFAULT);
+                }
+                UserRangeResult::Ok(range) => {
+                    let copied: bool =
+                        copy_to_user_raw(range, source_base, amount);
+                }
+            }
+            if (kernel_syscall_file_set_offset(
+                    kernel_syscall_file_offset() + amount) == false) {
+                return ReadSegmentResult::Errno(LINUX_EBADF);
+            }
+            return ReadSegmentResult::Read(amount);
+        }
+    }
+}
+
+// ppoll(2) readiness for one fd: (is_valid_fd, revents). fd 0 checks the
+// real UART RX ring (kernel_uart_rx_pending()) but never blocks even if
+// the caller's timeout asks for it -- reusing the scheduler-block
+// machinery the OTHER (non-standard, TAKIBI-specific) UART-wait syscall
+// already uses would need the hw test harness to also feed real UART
+// input for this scenario's boot-time evidence to stay deterministic;
+// deliberately left as immediate-return-only for now. Connected TCP fds
+// check already-buffered data read-only (no mutation, so no risk to the
+// proven TCP send/receive paths). Everything else is POLLNVAL.
+// UART RX ring buffer: moved here from kernel/init/main.tkb (issue #196)
+// now that ppoll(2)'s fd==0 readiness check is a second real caller of
+// kernel_uart_rx_pending, alongside the existing
+// AARCH64_NR_TAKIBI_UART_RX_WAIT dispatch below -- both live in this
+// file's kernel_syscall_dispatch. kernel_uart_rx_isr/kernel_uart_rx_getc
+// (the actual ISR and consumer) stay in main.tkb, since they need
+// kernel_process_uart_wake from kernel/kernel/process.tkb, which this
+// file does not otherwise depend on.
+let mut kernel_uart_rx_buf: [u8; 64];
+let mut kernel_uart_rx_head: io usize;
+let mut kernel_uart_rx_tail: io usize;
+fn kernel_uart_rx_ring_reset() {
+    kernel_uart_rx_head = 0;
+    kernel_uart_rx_tail = 0;
+}
+
+fn kernel_uart_rx_pending() -> bool {
+    return kernel_uart_rx_tail != kernel_uart_rx_head;
+}
+
+fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
+    if (fd == 0) {
+        if (kernel_uart_rx_pending()) { return (true, POLLIN); }
+        return (true, 0);
+    }
+    if (kernel_connected_fd_is_open(fd)) {
+        match kernel_connection_fd_lookup(fd) {
+            KernelConnectionLookupResult::Missing => {
+                return (false, POLLNVAL);
+            }
+            KernelConnectionLookupResult::Found(slot) => {
+                if (syscall_connection_open[slot] &&
+                        syscall_socket_buffer_offset[slot] <
+                            syscall_socket_buffer_length[slot]) {
+                    return (true, POLLIN);
+                }
+                return (true, 0);
+            }
+        }
+    }
+    if (fd == 1 || fd == 2 || fd == 3) { return (true, 0); }
+    return (false, POLLNVAL);
+}
+
+// Issue #196: writes `value` into a fixed 65-byte struct utsname field at
+// `field_offset` within the kernel-side scratch buffer `base` points at.
+// The field was already zero-filled by the caller (see the uname(2)
+// handler below) before any field write, so a value shorter than 65
+// bytes leaves real zero padding, not leftover scratch-buffer content
+// from a previous uname(2) call.
+fn uname_write_field(base: *u8, field_offset: usize, value: []u8) !{unsafe} {
+    let field_base: *u8 = base + (field_offset as isize);
+    let field_view: []u8 = unsafe { field_base[0..<65 as isize] };
+    let copied: usize = slice_copy(field_view, value);
 }
 
 // Returns (action, value): 0 = fail-stop, 1 = resume EL0 with value in x0,
@@ -1734,20 +1910,171 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         return (1, LINUX_EACCES);
     }
     if (number == AARCH64_NR_READV) {
-        syscall_readv_requested = true;
-        return (1, LINUX_ENOSYS);
+        let fd: usize = x0;
+        let iov_address: usize = x1;
+        let raw_iovcnt: usize = x2;
+        if (raw_iovcnt == 0) { return (1, 0); }
+        if (raw_iovcnt >= 0 && raw_iovcnt < IOV_MAX) {
+            let iovcnt: {0..<IOV_MAX as usize} = raw_iovcnt;
+            let array_bytes: usize = match checked_mul_usize(iovcnt, sizeof(Iovec)) {
+                CheckedUsize::Overflow => { return (1, LINUX_EINVAL); }
+                CheckedUsize::Value(v) => { v }
+            };
+            match user_range_check(iov_address, array_bytes, UserAccessMode::Read) {
+                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Ok(array_range) => {
+                    let mut total: usize = 0;
+                    for index: usize in 0..<iovcnt {
+                        let (base_ok, iov_base) = user_read_u64(
+                            array_range,
+                            index * sizeof(Iovec) + offsetof(Iovec, iov_base));
+                        let (len_ok, iov_len) = user_read_u64(
+                            array_range,
+                            index * sizeof(Iovec) + offsetof(Iovec, iov_len));
+                        if (base_ok == false || len_ok == false) {
+                            if (total == 0) { return (1, LINUX_EFAULT); }
+                            return (1, total);
+                        }
+                        match syscall_readv_segment(
+                                fd, iov_base as usize, iov_len as usize) {
+                            ReadSegmentResult::Errno(e) => {
+                                if (total == 0) { return (1, e); }
+                                return (1, total);
+                            }
+                            ReadSegmentResult::Read(n) => {
+                                match checked_add_usize(total, n) {
+                                    CheckedUsize::Overflow => { return (1, total); }
+                                    CheckedUsize::Value(v) => { total = v; }
+                                }
+                                // A shorter-than-requested segment means EOF
+                                // was hit (ext2_read_small_file already
+                                // clamps to the file's real remaining
+                                // length) -- further segments would only
+                                // ever read 0 too.
+                                if (n == 0) { return (1, total); }
+                            }
+                        }
+                    }
+                    return (1, total);
+                }
+            }
+        }
+        return (1, LINUX_EINVAL);
     }
     if (number == AARCH64_NR_WRITEV) {
-        syscall_writev_requested = true;
-        return (1, LINUX_ENOSYS);
+        let fd: usize = x0;
+        let iov_address: usize = x1;
+        let raw_iovcnt: usize = x2;
+        if (raw_iovcnt == 0) { return (1, 0); }
+        if (raw_iovcnt >= 0 && raw_iovcnt < IOV_MAX) {
+            let iovcnt: {0..<IOV_MAX as usize} = raw_iovcnt;
+            let array_bytes: usize = match checked_mul_usize(iovcnt, sizeof(Iovec)) {
+                CheckedUsize::Overflow => { return (1, LINUX_EINVAL); }
+                CheckedUsize::Value(v) => { v }
+            };
+            match user_range_check(iov_address, array_bytes, UserAccessMode::Read) {
+                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Ok(array_range) => {
+                    let mut total: usize = 0;
+                    for index: usize in 0..<iovcnt {
+                        let (base_ok, iov_base) = user_read_u64(
+                            array_range,
+                            index * sizeof(Iovec) + offsetof(Iovec, iov_base));
+                        let (len_ok, iov_len) = user_read_u64(
+                            array_range,
+                            index * sizeof(Iovec) + offsetof(Iovec, iov_len));
+                        if (base_ok == false || len_ok == false) {
+                            if (total == 0) { return (1, LINUX_EFAULT); }
+                            return (1, total);
+                        }
+                        match syscall_writev_segment(
+                                fd, iov_base as usize, iov_len as usize) {
+                            WriteSegmentResult::Errno(e) => {
+                                if (total == 0) { return (1, e); }
+                                return (1, total);
+                            }
+                            WriteSegmentResult::Written(n) => {
+                                match checked_add_usize(total, n) {
+                                    CheckedUsize::Overflow => { return (1, total); }
+                                    CheckedUsize::Value(v) => { total = v; }
+                                }
+                            }
+                        }
+                    }
+                    return (1, total);
+                }
+            }
+        }
+        return (1, LINUX_EINVAL);
     }
     if (number == AARCH64_NR_PPOLL) {
-        syscall_ppoll_requested = true;
-        return (1, LINUX_ENOSYS);
+        let fds_address: usize = x0;
+        let raw_nfds: usize = x1;
+        // x2 = timeout (timespec*), x3 = sigmask, x4 = sigsetsize: this
+        // implementation only ever reports immediate readiness and never
+        // actually blocks, so none of the three are consulted. See
+        // syscall_poll_fd_ready's own comment for why.
+        if (raw_nfds == 0) { return (1, 0); }
+        if (raw_nfds >= 0 && raw_nfds < POLL_MAX) {
+            let nfds: {0..<POLL_MAX as usize} = raw_nfds;
+            let array_bytes: usize = match checked_mul_usize(nfds, sizeof(Pollfd)) {
+                CheckedUsize::Overflow => { return (1, LINUX_EINVAL); }
+                CheckedUsize::Value(v) => { v }
+            };
+            match user_range_check(fds_address, array_bytes, UserAccessMode::Write) {
+                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Ok(array_range) => {
+                    let mut ready_count: usize = 0;
+                    for index: usize in 0..<nfds {
+                        let (fd_ok, fd_raw) = user_read_u32(
+                            array_range,
+                            index * sizeof(Pollfd) + offsetof(Pollfd, fd));
+                        if (fd_ok == false) { return (1, LINUX_EFAULT); }
+                        let fd: usize = fd_raw as usize;
+                        let (valid, revents) = syscall_poll_fd_ready(fd);
+                        let mut final_revents: usize = revents;
+                        if (valid == false) { final_revents = POLLNVAL; }
+                        let wrote: bool = user_write_u16(
+                            array_range,
+                            index * sizeof(Pollfd) + offsetof(Pollfd, revents),
+                            final_revents);
+                        if (wrote == false) { return (1, LINUX_EFAULT); }
+                        if (final_revents != 0) { ready_count = ready_count + 1; }
+                    }
+                    return (1, ready_count);
+                }
+            }
+        }
+        return (1, LINUX_EINVAL);
     }
     if (number == AARCH64_NR_UNAME) {
-        syscall_uname_requested = true;
-        return (1, LINUX_ENOSYS);
+        match user_range_check(x0, sizeof(Utsname), UserAccessMode::Write) {
+            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Ok(range) => {
+                let base: *u8 = syscall_uname_buffer as *u8;
+                let mut zero_index: usize = 0;
+                while (zero_index < sizeof(Utsname)) {
+                    let byte: *u8 = base + (zero_index as isize);
+                    *byte = 0;
+                    zero_index = zero_index + 1;
+                }
+                uname_write_field(base, offsetof(Utsname, sysname),
+                                  "Linux" as []u8);
+                uname_write_field(base, offsetof(Utsname, nodename),
+                                  "takibi" as []u8);
+                uname_write_field(base, offsetof(Utsname, release),
+                                  "6.1.0-takibi" as []u8);
+                uname_write_field(base, offsetof(Utsname, version),
+                                  "#1" as []u8);
+                uname_write_field(base, offsetof(Utsname, machine),
+                                  "aarch64" as []u8);
+                uname_write_field(base, offsetof(Utsname, domainname),
+                                  "(none)" as []u8);
+                let source: []u8 = unsafe { base[0..<sizeof(Utsname) as isize] };
+                let ok: bool = copy_to_user(range, source);
+                return (1, 0);
+            }
+        }
     }
     return (1, LINUX_ENOSYS);
 }

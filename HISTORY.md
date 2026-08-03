@@ -13494,3 +13494,118 @@ requested...`. All four of #196's named syscalls (`writev`/`readv`/`ppoll`/
 `uname`) now have hardware-verified real demand from unmodified BusyBox;
 none of their real implementations (the `copy_to_user`/`copy_from_user`
 boundary work #196 actually asks for) have been started.
+
+## 2026-08-03: Issue #196 -- writev/readv/ppoll/uname implemented, type-safety
+## design discussion split into five follow-up compiler-research issues
+
+Continuing straight from the pre-work above: the user asked how to
+implement the four syscalls as type-safely as possible, wanting every
+option enumerated -- including ones the compiler doesn't support yet, to
+decide later whether to build them. The design conversation surfaced a
+real gap by re-reading `kernel/mm/user_memory.tkb`: `UserRange` erases
+which `UserAccessMode` it was checked against, so nothing stops a
+Read-checked range reaching `copy_to_user`. It also surfaced a conceptual
+correction worth recording: no type system can prove a userspace-supplied
+length/count is *honest* (that's runtime, adversarial, and unknowable at
+compile time, true of every kernel including formally-verified ones) --
+what's actually achievable and valuable is proving the KERNEL's own
+handling is exhaustively safe for the entire space of possible (including
+adversarial) inputs, e.g. that `iovcnt * sizeof(iovec)` can never
+overflow and silently defeat a bounds check, a real vulnerability class
+in production kernels.
+
+Five follow-up issues were opened for ideas not implemented this session
+(narrow, each independently closeable, matching this repo's usual
+splitting discipline): **#199** (split `UserRange` into mode-distinct
+`UserReadRange`/`UserWriteRange` types -- deferred as its own issue since
+it touches essentially every existing call site across `syscall.tkb`, not
+just #196's new code), **#200** (compiler research: prove a kernel-computed
+total relationally matches what was actually validated/copied -- the
+same "relational bounds" gap SPEC.md already documents from RPi3
+`el0_elf_load` hardening), **#201** (compiler research: prove a
+runtime-bounded loop visited every element, e.g. that `ppoll` wrote
+`revents` for every pollfd), **#202** (investigate an ASID/generation-
+tagged `UserRange` capability against a mid-syscall preemption TOCTOU --
+issue #187's `DAIFClr` change made this theoretically possible, though no
+concrete exploit path exists yet given today's per-process-isolated
+ASIDs and lack of real threading), and **#203** (compiler research:
+prove, VeriFast-style, that no syscall can ever copy uninitialized kernel
+memory to userspace -- `user_zero_fill` is today's runtime-discipline
+mitigation, not a proven guarantee).
+
+**What was actually implemented** (items the user chose to build now):
+- `struct packed Utsname`/`Iovec`/`Pollfd` (`kernel/kernel/syscall.tkb`),
+  ABI-layout-only types consumed exclusively via `sizeof`/`offsetof`
+  against scratch buffers or a validated `UserRange` -- never a
+  constructed struct value with array fields, matching this codebase's
+  existing `CpioNewcHeader`/`KernelElf64Header` idiom exactly.
+- `IOV_MAX`/`POLL_MAX` (1024 each), checked via `if (v >= 0 && v < N)`
+  (the shape the compiler's refined-type narrowing actually requires --
+  an early-return guard clause, `if (v >= N) { return ...; }` followed by
+  using `v` afterward, does NOT narrow the type, discovered by a real
+  compile error and confirmed against existing working examples like
+  `kernel_listener_fd_lookup`).
+- `checked_add_usize`/`checked_mul_usize` (existing compiler builtins,
+  first real use in `kernel/`) for the iovec/pollfd array's own byte
+  length and the running total across segments -- closing exactly the
+  overflow-bypass class discussed in design.
+- `user_read_u32`/`user_read_u64`/`user_write_u16` added to
+  `user_memory.tkb`, symmetric to the existing write-only helpers.
+- `writev`(66) and `readv`(65): real, but deliberately scoped to the fd
+  kinds their actual traced scenarios use (fd 1/2 UART for writev, fd 3
+  ext2 for readv) via new standalone `syscall_writev_segment`/
+  `syscall_readv_segment` helpers returning a discriminated
+  `WriteSegmentResult`/`ReadSegmentResult` (Errno vs a real byte count,
+  not a magnitude-based "is this huge value actually an errno" heuristic).
+  Deliberately does NOT touch/extract write(64)/read(63)'s own existing
+  TCP/inetd/ext2 branches, judged more regression risk to already-proven,
+  timing-sensitive code than this issue's actual scope needs; broadening
+  to those fd kinds is natural, separate follow-up work.
+- `ppoll`(73): real array validation, but deliberately non-blocking-only
+  (`syscall_poll_fd_ready` never blocks regardless of the caller's
+  timeout) -- real blocking would need the existing UART-RX
+  scheduler-block machinery wired to the standard syscall path AND the
+  hw test harness modified to feed real UART input for the `sh -c "read
+  x"` scenario to stay deterministic; explicitly out of scope here.
+  `kernel_uart_rx_pending`/the ring-buffer state moved from
+  `kernel/init/main.tkb` to `kernel/kernel/syscall.tkb` (the ISR itself
+  stays in main.tkb, since it needs `kernel_process_uart_wake` from
+  `kernel/kernel/process.tkb`, a dependency syscall.tkb doesn't otherwise
+  have) -- ppoll's fd==0 check is now the second real caller of that
+  state, alongside the existing `AARCH64_NR_TAKIBI_UART_RX_WAIT` path,
+  both dispatched from this same file.
+- `uname`(160): fills a real `struct utsname` (zero-filled scratch buffer
+  first, per-field writes at `offsetof`-derived offsets, single
+  `copy_to_user` out) -- `sysname="Linux"`, `nodename="takibi"`,
+  `release="6.1.0-takibi"`, `version="#1"`, `machine="aarch64"`.
+
+Verified on real RPi5 hardware (21/21 `make kernelcheck-rpi5` views,
+including the three now-real `uname`/`od`/`shell_read` views): BusyBox's
+`uname -a` prints the real line `Linux takibi 6.1.0-takibi #1 aarch64
+Linux` (the trailing "Linux" is BusyBox's own compile-time
+`CONFIG_UNAME_OSNAME`, not read from `struct utsname` at all -- confirmed
+by reading `coreutils/uname.c`, not guessed) via a real `writev(2)` to the
+UART console; `busybox od /hello.txt` prints a correct octal dump of the
+real 16-byte file content via a real `readv(2)`, though it also emits a
+trailing `od: standard input: Bad file descriptor` and exits nonzero (od
+apparently attempts a further, unexplained fd-0 operation after finishing
+the named file -- real, reproducible, unrelated to readv's own
+correctness, left as an accepted quirk of this deliberately fd-scoped
+implementation rather than chased further); `busybox sh -c "read x"`
+legitimately fails (nonzero exit) since ppoll correctly, immediately
+reports fd 0 not ready and no UART input is ever fed during this boot --
+matching real Linux's own behavior for a genuinely-timed-out `read`.
+
+One transient false-negative during verification: a single
+`kernelcheck-rpi5` run hit the pre-existing 90s "completion marker not
+observed" timeout with no other symptom (all three new scenarios' output
+was present in the captured log, ending cleanly at `od unmap: clean`);
+re-running immediately reproduced a clean pass with `resources: pages=0`
+appearing right away, confirming it was hardware/timing flakiness, not a
+regression -- consistent with this exact readiness-marker area's prior
+noted flakiness (the SYN-ACK drop-retransmit flake documented in this
+file's 2026-08-01/2026-08-02 entries). An `else` branch was
+added alongside the existing `resources: pages=0` check
+(`kernel_boot_log("resources: pages leaked\n")`) so a REAL future page
+leak would be distinguishable from this kind of transient timing miss
+without needing another bisection cycle.

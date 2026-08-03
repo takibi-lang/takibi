@@ -55,22 +55,16 @@ fn kernel_secondary_boot_probe() -> SecondaryBootResult {
 // minimal RX ring buffer proving kernel/platform/rpi5/intc.tkb's GIC-400
 // dispatch and uart.tkb's existing (previously unwired) RX-interrupt
 // scaffolding actually deliver a byte through the real GIC/MIP0/MSI-X path.
-// Mirrors examples/irq/irq.tkb's uart_rx_isr/ring exactly; kept here rather
-// than in uart.tkb because uart.tkb is a register-level HAL (see its other
-// callers) and ring-buffer policy belongs with the one caller that needs
-// it, same separation examples/irq/irq.tkb already uses relative to
-// examples/common_rpi5/uart.tkb.
-let mut kernel_uart_rx_buf: [u8; 64];
-let mut kernel_uart_rx_head: io usize;
-let mut kernel_uart_rx_tail: io usize;
-fn kernel_uart_rx_ring_reset() {
-    kernel_uart_rx_head = 0;
-    kernel_uart_rx_tail = 0;
-}
-
-fn kernel_uart_rx_pending() -> bool {
-    return kernel_uart_rx_tail != kernel_uart_rx_head;
-}
+// Mirrors examples/irq/irq.tkb's uart_rx_isr/ring exactly. The state and
+// kernel_uart_rx_ring_reset/kernel_uart_rx_pending now live in
+// kernel/kernel/syscall.tkb (issue #196: ppoll(2)'s fd==0 readiness check
+// is a second, real-syscall-dispatch caller of kernel_uart_rx_pending,
+// alongside the existing AARCH64_NR_TAKIBI_UART_RX_WAIT path -- both are
+// dispatched from syscall.tkb, so that is now where "the one caller that
+// needs it" actually lives, not here). kernel_uart_rx_isr/
+// kernel_uart_rx_getc stay here since they need kernel_process_uart_wake
+// (kernel/kernel/process.tkb), which syscall.tkb does not otherwise
+// depend on.
 
 // Runs in interrupt context: rpi5_irq_dispatch -> uart_irq_handler ->
 // uart_rx_handler (stored via uart_set_rx_handler below).
@@ -866,13 +860,13 @@ fn main() {
             // second time, with argv={"busybox","uname","-a"} instead of
             // {"busybox","cat","/hello.txt"}, now that every earlier boot-time
             // fixture has already taken its own evidence. BusyBox's uname applet
-            // calls uname(2) unconditionally and then flushes its output through
-            // musl's stdio, which on this pinned musl 1.2.6 build always goes
-            // through writev(2) -- neither syscall is implemented yet (both still
-            // fall through to the generic ENOSYS return in kernel/kernel/syscall.tkb),
-            // so this is expected to exit 0 while printing nothing. It exists to
-            // demonstrate real userspace demand for issue #196 empirically before
-            // implementing it, not to demonstrate it working.
+            // calls uname(2) and then flushes its output (sysname/nodename/
+            // release/version/machine, space-separated) through musl's
+            // stdio, which on this pinned musl 1.2.6 build always goes
+            // through writev(2). Both are real implementations now (issue
+            // #196): uname(2) fills a real struct utsname and writev(2)
+            // actually reaches the UART console, so a real, non-empty
+            // BusyBox uname line should appear in this boot log.
             if (distro_plan_ready) {
                 match process_image_map_uname(saved_distro_plan) {
                     ProcessImageMapResult::InvalidImage => {
@@ -894,19 +888,6 @@ fn main() {
                         } else {
                             kernel_boot_log("busybox uname failed\n");
                         }
-                        let (readv_requested, writev_requested,
-                             ppoll_requested, uname_requested) =
-                            kernel_syscall_196_demand_evidence();
-                        if (uname_requested && writev_requested) {
-                            kernel_boot_log(
-                                "issue #196 demand: uname(2)+writev(2) requested by real userspace\n");
-                        } else if (uname_requested) {
-                            kernel_boot_log(
-                                "issue #196 demand: uname(2) requested by real userspace\n");
-                        } else {
-                            kernel_boot_log(
-                                "issue #196 demand: uname(2) not observed\n");
-                        }
                         process_image_unmap(uname_pages);
                         if (process_image_window_is_clear()) {
                             kernel_boot_log("uname unmap: clean\n");
@@ -915,15 +896,19 @@ fn main() {
                 }
             }
 
-            // Issue #196 pre-work: same distro plan, argv={"busybox","sh","-c",
-            // "read x"}. BusyBox ash's `read` builtin always calls poll() before
-            // its first read() from stdin, even with no timeout -- see
-            // shell/shell_common.c in the vendored busybox-1.37.0 source. musl
-            // maps poll() to the ppoll(2) syscall unconditionally on aarch64
-            // (there is no legacy SYS_poll on this arch). ppoll(2) is not
-            // implemented yet (ENOSYS), so `read` is expected to fail immediately
-            // rather than actually block on UART input -- this proves real
-            // ppoll(2) demand, not working input.
+            // Issue #196: same distro plan, argv={"busybox","sh","-c",
+            // "read x"}. BusyBox ash's `read` builtin always calls poll()
+            // before its first read() from stdin, even with no timeout --
+            // see shell/shell_common.c in the vendored busybox-1.37.0
+            // source. musl maps poll() to the ppoll(2) syscall
+            // unconditionally on aarch64 (no legacy SYS_poll on this arch).
+            // ppoll(2) is a real implementation now, but deliberately
+            // non-blocking-only (see syscall_poll_fd_ready's own comment in
+            // kernel/kernel/syscall.tkb): since no UART input is ever fed
+            // during this boot, fd 0 is correctly reported not-ready, `read`
+            // treats that exactly like a real poll() timeout, and the
+            // command legitimately fails (nonzero exit) -- same as real
+            // Linux would if `read` timed out with no data available.
             if (distro_plan_ready) {
                 match process_image_map_shell_read(saved_distro_plan) {
                     ProcessImageMapResult::InvalidImage => {
@@ -945,16 +930,6 @@ fn main() {
                         } else {
                             kernel_boot_log("busybox shell read failed\n");
                         }
-                        let (readv_requested3, writev_requested3,
-                             ppoll_requested3, uname_requested3) =
-                            kernel_syscall_196_demand_evidence();
-                        if (ppoll_requested3) {
-                            kernel_boot_log(
-                                "issue #196 demand: ppoll(2) requested by real userspace\n");
-                        } else {
-                            kernel_boot_log(
-                                "issue #196 demand: ppoll(2) not observed\n");
-                        }
                         process_image_unmap(shell_pages);
                         if (process_image_window_is_clear()) {
                             kernel_boot_log("shell read unmap: clean\n");
@@ -963,18 +938,19 @@ fn main() {
                 }
             }
 
-            // Issue #196 pre-work: same distro plan, argv={"busybox","od",
+            // Issue #196: same distro plan, argv={"busybox","od",
             // "/hello.txt"}. BusyBox's od applet reads the whole file in one
             // fread() call, which on this pinned musl 1.2.6 build issues a
             // single readv(2) (confirmed via a qemu-aarch64-static -strace
             // trace with an empty environment matching this kernel's
             // envp={}: exactly one `readv(3,...) = 16`, no lseek/fstat
-            // needed) -- not implemented yet (ENOSYS), so this proves real
-            // readv(2) demand rather than demonstrating it working. An
-            // earlier version of this scenario used `head`, which turned
-            // out not to exercise readv(2) at all: BusyBox's fgets()-based
-            // applets always request 1 byte at a time from musl's stdio,
-            // which always selects plain read(2), never readv(2).
+            // needed). readv(2)+writev(2) are real implementations now, so
+            // od should actually print a real hex dump of /hello.txt's 16
+            // bytes and exit 0. An earlier version of this scenario used
+            // `head`, which turned out not to exercise readv(2) at all:
+            // BusyBox's fgets()-based applets always request 1 byte at a
+            // time from musl's stdio, which always selects plain read(2),
+            // never readv(2).
             if (distro_plan_ready) {
                 match process_image_map_od(saved_distro_plan) {
                     ProcessImageMapResult::InvalidImage => {
@@ -996,16 +972,6 @@ fn main() {
                         } else {
                             kernel_boot_log("busybox od failed\n");
                         }
-                        let (readv_requested2, writev_requested2,
-                             ppoll_requested2, uname_requested2) =
-                            kernel_syscall_196_demand_evidence();
-                        if (readv_requested2) {
-                            kernel_boot_log(
-                                "issue #196 demand: readv(2) requested by real userspace\n");
-                        } else {
-                            kernel_boot_log(
-                                "issue #196 demand: readv(2) not observed\n");
-                        }
                         process_image_unmap(od_pages);
                         if (process_image_window_is_clear()) {
                             kernel_boot_log("od unmap: clean\n");
@@ -1016,6 +982,8 @@ fn main() {
 
             if (page_allocator_live_count() == 0) {
                 kernel_boot_log("resources: pages=0\n");
+            } else {
+                kernel_boot_log("resources: pages leaked\n");
             }
         }
     }

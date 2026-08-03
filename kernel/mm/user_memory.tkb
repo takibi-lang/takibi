@@ -1,6 +1,16 @@
 use "kernel/mm/page.tkb";
 use "kernel/mm/address_space.tkb";
 
+// Result type for the compiler-lowered native-width checked_add_usize/
+// checked_mul_usize builtins (see SPEC.md). Declared once here since
+// issue #196's iovec/pollfd array-length arithmetic (iovcnt*sizeof(Iovec)
+// and the accumulated byte total across segments) is the first user of
+// these builtins in kernel/.
+must_use variant CheckedUsize {
+    Value(usize);
+    Overflow;
+}
+
 // The single dynamically-writable L3 window: see kernel/mm/address_space.tkb
 // (USER_TEXT_VA) and issue #159's note that today's kernel has exactly one
 // such window per address-space slot.
@@ -164,6 +174,34 @@ fn user_write_u64(range: UserRange, offset: usize, value: u64) -> bool {
     let field: *u64 = (range.address + offset) as *u64;
     *field = value;
     return true;
+}
+
+// Issue #196: read counterparts of user_write_u32/user_write_u64, needed
+// to parse user-supplied iovec/pollfd array elements (iov_base/iov_len,
+// fd) without ever dereferencing a raw user pointer directly. Bounds
+// checked the same way as the write side; the bool result distinguishes
+// "out of range" from a genuine value of 0.
+fn user_read_u32(range: UserRange, offset: usize) -> (bool, u32) {
+    if (offset + 4 > range.length || offset + 4 < offset) { return (false, 0); }
+    let field: *u32 = (range.address + offset) as *u32;
+    return (true, *field);
+}
+
+fn user_read_u64(range: UserRange, offset: usize) -> (bool, u64) {
+    if (offset + 8 > range.length || offset + 8 < offset) { return (false, 0); }
+    let field: *u64 = (range.address + offset) as *u64;
+    return (true, *field);
+}
+
+// A 2-byte write, little-endian, via two already-proven-safe byte writes
+// rather than a new *u16 helper -- ppoll's pollfd.revents field is the
+// only current caller and only ever needs small (<256) bit-flag values,
+// so this avoids introducing a signed/u16 read-write pair for one use.
+fn user_write_u16(range: UserRange, offset: usize, value: usize) -> bool {
+    if (offset + 2 > range.length || offset + 2 < offset) { return false; }
+    let low: bool = user_write_byte(range, offset, (value & 0xFF) as u8);
+    let high: bool = user_write_byte(range, offset + 1, ((value >> 8) & 0xFF) as u8);
+    return low && high;
 }
 
 fn user_zero_fill(range: UserRange) -> bool {

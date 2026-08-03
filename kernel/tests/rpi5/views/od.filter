@@ -1,5 +1,5 @@
-^od: /hello\.txt: read error$
+^0000000 062550 066154 020157 071146 066557 062440 072170 005062$
+^0000020$
 ^od: standard input: Bad file descriptor$
 ^busybox od failed$
-^issue #196 demand: readv\(2\) requested by real userspace$
 ^od unmap: clean$
