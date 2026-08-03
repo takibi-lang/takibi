@@ -1,3 +1,7 @@
-ash script fixture
-busybox script exit: 0
-script unmap: clean
+init: ash bootstrap
+init: phase fd
+init: phase uart
+init: phase telnet
+init: complete
+init script exit: 0
+init unmap: clean

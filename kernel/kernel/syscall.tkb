@@ -600,10 +600,11 @@ fn kernel_syscall_partial_write_evidence() -> bool {
     return syscall_partial_write_observed;
 }
 
-// Returns 1 for /hello.txt, 2 for /mutable.txt, 3 for index.html, and 4 for
-// /busybox-demand.sh (absolute or relative), and 0 for unsupported or invalid
-// paths. Every read goes through user_range_check()/copy_from_user() -- no raw
-// pointer cast of the user-supplied address happens in this file.
+// Returns 1 for /hello.txt, 2 for /mutable.txt, 3 for index.html, 4 for
+// /busybox-demand.sh, and 5 for /init.sh (absolute or relative), and 0 for
+// unsupported or invalid paths. Every read goes through
+// user_range_check()/copy_from_user() -- no raw pointer cast of the
+// user-supplied address happens in this file.
 fn kernel_syscall_path_kind(address: usize) -> usize {
     let path_view: []u8 = syscall_path_buffer as []u8;
     match user_range_check(address, 11, UserAccessMode::Read) {
@@ -667,6 +668,20 @@ fn kernel_syscall_path_kind(address: usize) -> usize {
                     path_view[16] == 0x73 && path_view[17] == 0x68 &&
                     path_view[18] == 0) {
                     return 4;
+                }
+            }
+        }
+    }
+    match user_range_check(address, 9, UserAccessMode::Read) {
+        UserRangeResult::Fault => {}
+        UserRangeResult::Ok(range) => {
+            if (copy_from_user(range, path_view[0..<9])) {
+                if (path_view[0] == 0x2F && path_view[1] == 0x69 &&
+                    path_view[2] == 0x6E && path_view[3] == 0x69 &&
+                    path_view[4] == 0x74 && path_view[5] == 0x2E &&
+                    path_view[6] == 0x73 && path_view[7] == 0x68 &&
+                    path_view[8] == 0) {
+                    return 5;
                 }
             }
         }
@@ -1073,6 +1088,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         if (path_kind == 2) { name = "mutable.txt" as []u8; }
         if (path_kind == 3) { name = "index.html" as []u8; }
         if (path_kind == 4) { name = "busybox-demand.sh" as []u8; }
+        if (path_kind == 5) { name = "init.sh" as []u8; }
         match ext2_lookup_root(syscall_ext2_mount, name) {
             Ext2LookupResult::Invalid => { return (1, LINUX_EINVAL); }
             Ext2LookupResult::NotFound => { return (1, LINUX_ENOENT); }
@@ -1109,6 +1125,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         if (path_kind == 2) { name = "mutable.txt" as []u8; }
         if (path_kind == 3) { name = "index.html" as []u8; }
         if (path_kind == 4) { name = "busybox-demand.sh" as []u8; }
+        if (path_kind == 5) { name = "init.sh" as []u8; }
         match ext2_lookup_root(syscall_ext2_mount, name) {
             Ext2LookupResult::Invalid => { return (1, LINUX_EINVAL); }
             Ext2LookupResult::NotFound => { return (1, LINUX_ENOENT); }
