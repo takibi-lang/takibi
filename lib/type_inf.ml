@@ -178,8 +178,8 @@ let struct_instance = function
 let rec const_type_size (senv : senv) (ty : Ast.type_expr) : int option =
   match ty with
   | Ast.TypeBool | Ast.TypeU8 | Ast.TypeI8 -> Some 1
-  | Ast.TypeU16 | Ast.TypeI16 -> Some 2
-  | Ast.TypeU32 | Ast.TypeI32 -> Some 4
+  | Ast.TypeU16 | Ast.TypeI16 | Ast.TypeU16Be -> Some 2
+  | Ast.TypeU32 | Ast.TypeI32 | Ast.TypeU32Be -> Some 4
   | Ast.TypeU64 | Ast.TypeI64 -> Some 8
   | Ast.TypeArray (elem, n) ->
       (match const_type_size senv elem with
@@ -4603,7 +4603,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         allow_implicit_static := false;
         (match ty with
          | Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
-         | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
+         | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU16Be
+         | Ast.TypeU32 | Ast.TypeU32Be | Ast.TypeU64
          | Ast.TypeIsize | Ast.TypeUsize -> ()
          | _ ->
              raise (TypeError (gloc,

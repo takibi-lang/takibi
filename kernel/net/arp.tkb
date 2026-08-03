@@ -1,30 +1,25 @@
 use "kernel/drivers/net/rp1_gem.tkb";
+use "kernel/net/wire.tkb";
 
-// Single source of truth for the ARP wire layout: offsetof(...) is
-// verified against ArpHdr's actual (packed) layout instead of being a
-// hand-maintained literal that could silently drift from the struct
-// if a field were ever reordered or resized. Fields stay `[u8; N]`
-// rather than native u16/u32 -- ARP is big-endian on the wire and this
-// target is little-endian, so a native multi-byte load would silently
-// byte-reverse the value (see arp_read_u16be/arp_write_u16be below,
-// which is why those still exist instead of direct field access).
-struct packed ArpHdr {
-    htype: [u8; 2];
-    ptype: [u8; 2];
+// GitHub issue #186: ArpHdr's multi-byte NUMERIC fields (htype/ptype/oper)
+// are typed `u16be` via the `packed be` sugar, so field access through a
+// *ArpHdr pointer performs the required byte-swap directly -- no more
+// arp_read_u16be/arp_write_u16be calls for those fields. sha/spa/tha/tpa
+// stay `[u8; N]` (MAC/IP addresses, compared/copied byte-wise, never
+// treated as a swapped numeric value) and are still reached via
+// offsetof-derived slicing, same as before.
+struct packed be ArpHdr {
+    htype: u16;
+    ptype: u16;
     hlen: u8;
     plen: u8;
-    oper: [u8; 2];
+    oper: u16;
     sha: [u8; 6];
     spa: [u8; 4];
     tha: [u8; 6];
     tpa: [u8; 4];
 }
 
-let ARP_HTYPE: usize = offsetof(ArpHdr, htype);
-let ARP_PTYPE: usize = offsetof(ArpHdr, ptype);
-let ARP_HLEN: usize = offsetof(ArpHdr, hlen);
-let ARP_PLEN: usize = offsetof(ArpHdr, plen);
-let ARP_OPER: usize = offsetof(ArpHdr, oper);
 let ARP_SHA: usize = offsetof(ArpHdr, sha);
 let ARP_SPA: usize = offsetof(ArpHdr, spa);
 let ARP_THA: usize = offsetof(ArpHdr, tha);
@@ -35,25 +30,17 @@ must_use variant KernelArpResult {
     Replied(NetRxCanAcquire);
 }
 
-fn arp_read_u16be(bytes: borrow [u8; 2..]) -> u16 {
-    return ((bytes[0] as u16) << 8) | (bytes[1] as u16);
-}
-
-fn arp_write_u16be(bytes: borrow [u8; 2..], value: u16) {
-    bytes[0] = (value >> 8) as u8;
-    bytes[1] = value as u8;
-}
-
 // Validate and rewrite one ARP request in place. The caller retains the RX
 // frame owner and chooses whether to transmit or release it, allowing TCP
 // listen loops to service neighbor discovery without a separate wait phase.
 fn arp_prepare_reply(frame: borrow [u8; 42..]) -> bool {
-    if (arp_read_u16be(frame[12..<14]) == 0x0806) {
+    let eth: *EthHdr = frame as *EthHdr;
+    if (eth.ethertype == ETHERTYPE_ARP) {
         let arp = frame[14..<42];
-        if (arp_read_u16be(arp[ARP_HTYPE..<ARP_PTYPE]) == 1 &&
-            arp_read_u16be(arp[ARP_PTYPE..<ARP_HLEN]) == 0x0800 &&
-            arp[ARP_HLEN] == 6 as u8 && arp[ARP_PLEN] == 4 as u8 &&
-            arp_read_u16be(arp[ARP_OPER..<ARP_SHA]) == 1 &&
+        let hdr: *ArpHdr = arp as *ArpHdr;
+        if (hdr.htype == 1 && hdr.ptype == ETHERTYPE_IPV4 &&
+            hdr.hlen == 6 && hdr.plen == 4 &&
+            hdr.oper == 1 &&
             slice_eq(arp[ARP_TPA..<28], OUR_IP as []u8)) {
             slice_copy(frame[0..<6], frame[6..<12]);
             slice_copy(frame[6..<12], OUR_MAC as []u8);
@@ -61,7 +48,7 @@ fn arp_prepare_reply(frame: borrow [u8; 42..]) -> bool {
             slice_copy(arp[ARP_TPA..<28], arp[ARP_SPA..<ARP_THA]);
             slice_copy(arp[ARP_SHA..<ARP_SPA], OUR_MAC as []u8);
             slice_copy(arp[ARP_SPA..<ARP_THA], OUR_IP as []u8);
-            arp_write_u16be(arp[ARP_OPER..<ARP_SHA], 2);
+            hdr.oper = 2;
             return true;
         }
     }

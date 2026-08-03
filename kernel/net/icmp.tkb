@@ -1,30 +1,25 @@
-use "kernel/net/arp.tkb";
+use "kernel/drivers/net/rp1_gem.tkb";
 use "kernel/net/checksum.tkb";
 use "kernel/net/wire.tkb";
 
-// Ipv4Hdr is kernel/net/wire.tkb's shared struct (tcp.tkb needs the
-// identical IPv4 wire layout, so it lives there rather than being
-// declared twice); IPV4_* below are this file's own offsetof(...)
-// names derived from that same struct. IcmpHdr is local to this file.
-// Fields stay `[u8; N]` rather than native u16/u32 for the same reason
-// as ArpHdr in kernel/net/arp.tkb -- see that file's comment.
-struct packed IcmpHdr {
+// Ipv4Hdr/EthHdr are kernel/net/wire.tkb's shared structs (tcp.tkb needs
+// the identical IPv4 wire layout, so it lives there rather than being
+// declared twice). IcmpHdr is local to this file. GitHub issue #186:
+// IcmpHdr's checksum field is typed `u16be` via the `packed be` sugar
+// (ty/code stay `u8`, needing no swap; rest stays a raw 4-byte payload
+// whose shape varies by ICMP type, never a single numeric value). IPV4_*
+// below only remain for src/dst -- the two IP address fields that stay
+// `[u8; 4]` and are still reached via offsetof-derived slicing, same as
+// kernel/net/arp.tkb's ArpHdr sha/spa/tha/tpa.
+struct packed be IcmpHdr {
     ty: u8;
     code: u8;
-    checksum: [u8; 2];
+    checksum: u16;
     rest: [u8; 4];
 }
 
-let IPV4_VERSION_IHL: usize = offsetof(Ipv4Hdr, version_ihl);
-let IPV4_TOTAL_LEN:   usize = offsetof(Ipv4Hdr, total_len);
-let IPV4_TTL:         usize = offsetof(Ipv4Hdr, ttl);
-let IPV4_PROTOCOL:    usize = offsetof(Ipv4Hdr, protocol);
-let IPV4_CHECKSUM:    usize = offsetof(Ipv4Hdr, checksum);
-let IPV4_SRC:         usize = offsetof(Ipv4Hdr, src);
-let IPV4_DST:         usize = offsetof(Ipv4Hdr, dst);
-let ICMP_TYPE:        usize = offsetof(IcmpHdr, ty);
-let ICMP_CODE:        usize = offsetof(IcmpHdr, code);
-let ICMP_CHECKSUM:    usize = offsetof(IcmpHdr, checksum);
+let IPV4_SRC: usize = offsetof(Ipv4Hdr, src);
+let IPV4_DST: usize = offsetof(Ipv4Hdr, dst);
 
 must_use variant KernelIcmpResult {
     TimedOut(NetRxCanAcquire);
@@ -38,17 +33,17 @@ fn icmp_build_echo_reply(ethernet: borrow [u8; 42..],
     slice_copy(ethernet[6..<12], OUR_MAC as []u8);
 
     let ipv4 = ethernet[14..<34];
+    let ip_hdr: *Ipv4Hdr = ipv4 as *Ipv4Hdr;
     slice_copy(ipv4[IPV4_DST..<20], ipv4[IPV4_SRC..<IPV4_DST]);
     slice_copy(ipv4[IPV4_SRC..<IPV4_DST], OUR_IP as []u8);
-    ipv4[IPV4_TTL] = 64 as u8;
-    arp_write_u16be(ipv4[IPV4_CHECKSUM..<IPV4_SRC], 0);
-    arp_write_u16be(ipv4[IPV4_CHECKSUM..<IPV4_SRC],
-                    inet_checksum(ipv4[0..<ihl as usize]) as u16);
+    ip_hdr.ttl = 64;
+    ip_hdr.checksum = 0;
+    ip_hdr.checksum = (inet_checksum(ipv4[0..<ihl as usize]) as u16) as u16be;
 
-    icmp[ICMP_TYPE] = 0;
-    arp_write_u16be(icmp[ICMP_CHECKSUM..<4], 0);
-    arp_write_u16be(icmp[ICMP_CHECKSUM..<4],
-                    inet_checksum(icmp) as u16);
+    let icmp_hdr: *IcmpHdr = icmp as *IcmpHdr;
+    icmp_hdr.ty = 0;
+    icmp_hdr.checksum = 0;
+    icmp_hdr.checksum = (inet_checksum(icmp) as u16) as u16be;
 }
 
 // Facts proven once by icmp_parse_ipv4 and threaded through by type
@@ -69,23 +64,26 @@ must_use variant Ipv4ParseResult {
 }
 
 fn icmp_parse_ipv4(frame: borrow [u8; 1514..], len: i32) -> Ipv4ParseResult {
-    if (len >= 42 && len <= 1514 &&
-        arp_read_u16be(frame[12..<14]) == 0x0800) {
-        let ipv4 = frame[14..<34];
-        let version: u8 = ipv4[IPV4_VERSION_IHL] >> 4;
-        let ihl: u16 = (ipv4[IPV4_VERSION_IHL] & 0x0F) as u16 * 4;
-        if (version == 4 && ihl == 20) {
-            let len16: u16 = len as u16;
-            let total_length: u16 = arp_read_u16be(ipv4[2..<4]);
-            let ipv4_bytes_in_frame: u16 = len16 - 14;
-            if (total_length <= ipv4_bytes_in_frame &&
-                total_length >= ihl &&
-                ipv4[IPV4_PROTOCOL] == 1 &&
-                inet_checksum(ipv4[0..<ihl as usize]) == 0 &&
-                slice_eq(ipv4[IPV4_DST..<20], OUR_IP as []u8)) {
-                let icmp_length: u16 = total_length - ihl;
-                let mut header: Ipv4Header = {ihl, total_length, icmp_length};
-                return Ipv4ParseResult::Parsed(header);
+    if (len >= 42 && len <= 1514) {
+        let eth: *EthHdr = frame as *EthHdr;
+        if (eth.ethertype == ETHERTYPE_IPV4) {
+            let ipv4 = frame[14..<34];
+            let ip_hdr: *Ipv4Hdr = ipv4 as *Ipv4Hdr;
+            let version: u8 = ip_hdr.version_ihl >> 4;
+            let ihl: u16 = (ip_hdr.version_ihl & 0x0F) as u16 * 4;
+            if (version == 4 && ihl == 20) {
+                let len16: u16 = len as u16;
+                let total_length: u16 = ip_hdr.total_len as u16;
+                let ipv4_bytes_in_frame: u16 = len16 - 14;
+                if (total_length <= ipv4_bytes_in_frame &&
+                    total_length >= ihl &&
+                    ip_hdr.protocol == 1 &&
+                    inet_checksum(ipv4[0..<ihl as usize]) == 0 &&
+                    slice_eq(ipv4[IPV4_DST..<20], OUR_IP as []u8)) {
+                    let icmp_length: u16 = total_length - ihl;
+                    let mut header: Ipv4Header = {ihl, total_length, icmp_length};
+                    return Ipv4ParseResult::Parsed(header);
+                }
             }
         }
     }
@@ -102,8 +100,9 @@ fn icmp_parse_echo_request(frame: borrow [u8; 1514..],
     if (icmp_length >= 8 && icmp_length <= 1480) {
         let icmp_length_index: usize = icmp_length as usize;
         let icmp = frame[34..<34 + icmp_length_index];
-        if (icmp[ICMP_TYPE] == 8 &&
-            icmp[ICMP_CODE] == 0 &&
+        let icmp_hdr: *IcmpHdr = icmp as *IcmpHdr;
+        if (icmp_hdr.ty == 8 &&
+            icmp_hdr.code == 0 &&
             inet_checksum(icmp) == 0) {
             return IcmpEchoParseResult::Parsed(icmp_length);
         }

@@ -1,36 +1,56 @@
-// Single source of truth for the IPv4/TCP wire layout: offsetof(...)
-// is verified against each struct's actual (packed) layout instead of
-// being a hand-maintained literal. Fields stay `[u8; N]` rather than
-// native u16/u32 -- these are big-endian on the wire and this target
-// is little-endian, so a native multi-byte load would silently
-// byte-reverse the value (see read_u16be/write_u16be below, which is
-// why those still exist instead of direct field access). Shared with
-// kernel/net/icmp.tkb, which `use`s this file for Ipv4Hdr rather than
-// declaring its own copy -- see that file's IPV4_* consts.
-struct packed Ipv4Hdr {
+// Single source of truth for the Ethernet/IPv4/TCP wire layout.
+//
+// GitHub issue #186: EthHdr/Ipv4Hdr/TcpHdr's multi-byte NUMERIC fields are
+// typed `u16be`/`u32be` via the `packed be` sugar, so accessing them
+// through a *EthHdr/*Ipv4Hdr/*TcpHdr pointer performs the required
+// byte-swap directly -- kernel/net/arp.tkb and icmp.tkb use this. MAC/IP
+// address fields (dst/src on EthHdr and Ipv4Hdr) stay `[u8; N]`: they are
+// compared/copied byte-wise, never treated as a swapped numeric value, so
+// a `u16be`/`u32be` type adds nothing for them (the `packed be` sugar
+// already leaves array-typed fields untouched).
+//
+// offsetof(...) constants and read_u16be/write_u16be/read_u32be/
+// write_u32be below remain exactly as they were: kernel/net/tcp.tkb still
+// uses them for its own byte-slice-based field access (not yet migrated
+// to typed fields -- a separate, larger follow-up given tcp.tkb's size and
+// its sequence-number arithmetic). Both are pure byte-offset/byte-slice
+// operations that don't name a field's type at all, so they are
+// unaffected by the struct field type changes here: offsetof computes an
+// identical byte offset whether a field is `[u8; 2]` or `u16be` (same
+// size), and read_u16be/write_u16be only ever see raw bytes.
+struct packed be EthHdr {
+    dst: [u8; 6];
+    src: [u8; 6];
+    ethertype: u16;
+}
+
+struct packed be Ipv4Hdr {
     version_ihl: u8;
     dscp_ecn: u8;
-    total_len: [u8; 2];
-    ident: [u8; 2];
-    flags_frag: [u8; 2];
+    total_len: u16;
+    ident: u16;
+    flags_frag: u16;
     ttl: u8;
     protocol: u8;
-    checksum: [u8; 2];
+    checksum: u16;
     src: [u8; 4];
     dst: [u8; 4];
 }
 
-struct packed TcpHdr {
-    src_port: [u8; 2];
-    dst_port: [u8; 2];
-    seq: [u8; 4];
-    ack: [u8; 4];
+struct packed be TcpHdr {
+    src_port: u16;
+    dst_port: u16;
+    seq: u32;
+    ack: u32;
     data_offset: u8;
     flags: u8;
-    window: [u8; 2];
-    checksum: [u8; 2];
-    urgent: [u8; 2];
+    window: u16;
+    checksum: u16;
+    urgent: u16;
 }
+
+const ETHERTYPE_ARP:  u16be = 0x0806;
+const ETHERTYPE_IPV4: u16be = 0x0800;
 
 let IP_TOTAL_LEN: usize = offsetof(Ipv4Hdr, total_len);
 let IP_TTL:       usize = offsetof(Ipv4Hdr, ttl);
