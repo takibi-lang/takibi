@@ -246,6 +246,20 @@ item:
       OwnedStructDef
         (name, kind, static_params, fields, false, None, private_fields,
          is_private, $symbolstartpos) }
+  | GENERIC STRUCT name = IDENT LPAREN tps = generic_params RPAREN
+    LBRACE fields = struct_fields RBRACE
+    (* GitHub issue #207: deliberately does NOT call
+       Type_layout.begin_struct/finish_struct (unlike struct_intro's own
+       production above) -- a field referencing a type parameter (an
+       ordinary TypeNamed placeholder at this point) has no size until
+       monomorphization substitutes a concrete type. Parser-only in this
+       build-order step: nothing consumes GenericStructDef yet. *)
+    { let field_list = List.map (fun (fname, ty, _) -> (fname, ty)) fields in
+      let private_fields =
+        List.filter_map (fun (fname, _, is_priv) ->
+          if is_priv then Some fname else None) fields in
+      GenericStructDef (name, tps, field_list, false, None, private_fields,
+                         $symbolstartpos) }
   | p = private_flag k = owned_kind VIEW name = IDENT ps = view_static_params SEMI
     { Type_layout.register_view name;
       ViewDef (name, k, ps, p, $symbolstartpos) }
@@ -303,6 +317,15 @@ owned_kind:
 
 static_params:
   | LBRACKET ps = separated_nonempty_list(COMMA, static_param) RBRACKET { ps }
+
+(* GitHub issue #207: every generic parameter is kind `type` in this first
+   build-order step -- `T: type` mirrors a generic function parameter's own
+   spelling for consistency. *)
+generic_params:
+  | ps = separated_nonempty_list(COMMA, generic_param) { ps }
+
+generic_param:
+  | name = IDENT COLON TYPE { name }
 
 view_static_params:
   | /* empty */ { [] }

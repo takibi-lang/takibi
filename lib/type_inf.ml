@@ -3703,6 +3703,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.ViewDef (n, _, _, _, _)       -> claim_toplevel_name n "view"
     | Ast.EnumDef (n, _, _, _)    -> claim_toplevel_name n "enum"
     | Ast.VariantDef (n, _, _, _)  -> claim_toplevel_name n "variant"
+    | Ast.GenericStructDef (n, _, _, _, _, _, _) ->
+        claim_toplevel_name n "generic struct"
     | Ast.UseDef _              -> ()
   ) prog;
   (* Closed enums are finite static sorts. Keep their nominal case names,
@@ -4830,7 +4832,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           Hashtbl.add seen name ()
         ) params;
         validation_static_scope := None
-    | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _ -> ()) prog;
+    | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _
+    | Ast.GenericStructDef _ -> ()) prog;
+    (* GenericStructDef (GitHub issue #207): nothing to validate here yet
+       -- its fields reference an unresolved type parameter, not a real
+       type. Monomorphize.run (once it exists) is the only pass that ever
+       elaborates one, producing an ordinary StructDef per concrete
+       instantiation that this same validation then runs on normally. *)
   (* Pass 0: collect struct and enum definitions *)
   let senv = List.fold_left (fun m -> function
     | Ast.StructDef (name, fields, is_packed, align_opt, _, _) ->
@@ -4994,6 +5002,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.EnumDef _   -> m
     | Ast.VariantDef _ -> m
     | Ast.UseDef _    -> m
+    | Ast.GenericStructDef _ -> m
+    (* GenericStructDef (GitHub issue #207): contributes no function
+       signature until an instantiation exists as an ordinary FuncDef,
+       produced by Monomorphize.run. *)
   ) StringMap.empty prog in
   (* Global mutability: plain `let` = immutable compile-time constant, `let mut` = variable.
      Reuses the same tyenv-based mutability check as local variables (Assign/AddrOf).
@@ -5017,6 +5029,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.EnumDef _                -> m
     | Ast.VariantDef _             -> m
     | Ast.UseDef _                 -> m
+    | Ast.GenericStructDef _       -> m
   ) StringMap.empty prog in
   (* Pass 2: check global initializers.
      GitHub issue #77: a plain List.iter used to be enough here, since no

@@ -4946,6 +4946,11 @@ let gen_program ?prog_types prog =
     | EnumDef _   -> ()
     | VariantDef _ -> ()
     | UseDef _    -> ()
+    | GenericStructDef _ -> ()
+    (* GitHub issue #207: an uninstantiated generic template never reaches
+       codegen. Monomorphize.run (once it exists) strips these out of prog
+       entirely before this pass runs; until then, this is just a no-op so
+       a program containing one still compiles. *)
   ) prog;
   let function_keys =
     prog
@@ -4967,6 +4972,7 @@ let gen_program ?prog_types prog =
     | EnumDef _       -> ()
     | VariantDef _    -> ()
     | UseDef _        -> ()
+    | GenericStructDef _ -> ()
   ) prog;
   (* Resolve any deferred/forward-referenced DI metadata. Must run after every
      gen_func call above, before the module is optimized or emitted to an object. *)

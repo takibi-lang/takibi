@@ -354,6 +354,19 @@ type toplevel =
      layout flags, private field names, is_private, loc. Unlike an opaque
      handle this is a first-class runtime aggregate; only its static
      parameters are erased. *)
+  | GenericStructDef of string * ident list
+      * (string * type_expr) list * bool * int option * string list * loc
+  (* GitHub issue #207: `generic struct Name(T1: type, ...) { fields }` --
+     name, type parameter names, raw fields (a field's type_expr may
+     reference a type parameter name as an ordinary TypeNamed placeholder,
+     e.g. `data: []T`), layout flags, private field names, loc. Unlike
+     StructDef, this is NEVER laid out at parse time (Type_layout.
+     begin_struct/finish_struct are deliberately not called for this
+     production -- a type parameter has no size until monomorphization
+     substitutes a concrete type for it); Monomorphize.run is the only
+     consumer, turning each concrete instantiation actually used into an
+     ordinary StructDef under a mangled name before type_inf.ml/llvm_gen.ml
+     ever see it. Never reaches type_inf.ml/llvm_gen.ml directly. *)
   | ViewDef of string * opaque_kind * static_param list * bool * loc
   (* name, affine/linear kind, erased static parameters, is_private, loc.
      A view has no fields, size, address, or runtime ABI representation. *)

@@ -6415,6 +6415,27 @@ let infer_tests = [
           return w.value;
         }");
 
+  Alcotest.test_case "generic struct Name(T: type) { ... } parses and \
+                       registers a template without breaking the rest of \
+                       the program (issue #207 build order step 3 -- \
+                       parser-only, nothing consumes it yet)" `Quick
+    (expect_codegen_ok
+       "generic struct Freelist(T: type) {
+          count: usize;
+          data: []T;
+        }
+        fn generic_struct_unused_template() -> usize {
+          let n: usize = 42;
+          return n;
+        }");
+
+  Alcotest.test_case "two generic structs with the same name are rejected \
+                       as duplicates (issue #207)" `Quick
+    (expect_type_error
+       "already defined as a generic struct"
+       "generic struct Freelist(T: type) { count: usize; }
+        generic struct Freelist(U: type) { other: usize; }");
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------
