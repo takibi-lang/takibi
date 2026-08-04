@@ -17,6 +17,20 @@ private let mut process_image_stack_lowest_l3: usize;
 private let mut process_image_stack_growth_active: bool;
 private let mut process_image_growth_page_indices: [usize; 64];
 private let mut process_image_growth_page_count: usize;
+private let mut process_image_target_root: usize = 0;
+
+fn process_image_pte_read(index: usize) -> usize {
+    return address_space_pte_read(process_image_target_root, index);
+}
+
+fn process_image_pte_write(index: usize, value: usize) {
+    address_space_pte_write(process_image_target_root, index, value);
+}
+
+fn process_image_pte_invalidate(index: usize) {
+    address_space_tlb_invalidate(process_image_target_root,
+                                 USER_TEXT_VA + index * PAGE_SIZE);
+}
 
 private linear view ProcessCloneVmOwner;
 variant ProcessCloneVmValue {
@@ -176,10 +190,12 @@ fn process_image_clone_vm_begin() -> ProcessCloneVmResult !{unsafe} {
 }
 
 fn process_image_activate_parent() {
+    process_image_target_root = 0;
     address_space_activate_root(0);
 }
 
 fn process_image_activate_child() {
+    process_image_target_root = 1;
     address_space_activate_root(1);
 }
 
@@ -476,18 +492,18 @@ fn process_image_cleanup(count: usize) {
             let l3_index: usize = image_l3_indices[i];
             let page_index: usize = image_page_indices[i];
             if (l3_index < 512 && page_index < BOOT_PAGE_COUNT) {
-                user_pte_write(l3_index, 0);
-                user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
+                process_image_pte_write(l3_index, 0);
+                process_image_pte_invalidate(l3_index);
                 page_transferred_release(page_index);
             }
         }
     }
     for l3_index: usize in PROCESS_STACK_GROWTH_FIRST_L3_INDEX..<PROCESS_STACK_L3_INDEX {
-        let pte: usize = user_pte_read(l3_index);
+        let pte: usize = process_image_pte_read(l3_index);
         if (pte != 0) {
             page_transferred_release_physical(pte & 0xFFFFFFFFFFFFF000);
-            user_pte_write(l3_index, 0);
-            user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
+            process_image_pte_write(l3_index, 0);
+            process_image_pte_invalidate(l3_index);
         }
     }
     for i: usize in 0..<process_image_growth_page_count {
@@ -526,7 +542,7 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
     }
     for l3_index: usize in fault_index..<process_image_stack_lowest_l3 {
         if (process_image_active_page_count >= BOOT_PAGE_COUNT ||
-            user_pte_read(l3_index) != 0) {
+            process_image_pte_read(l3_index) != 0) {
             return false;
         }
         match page_alloc() {
@@ -535,8 +551,8 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
                 let bytes = page_bytes(stack_page);
                 for i: usize in 0..<4096 { bytes[i] = 0; }
                 let phys: usize = page_physical_address(stack_page);
-                user_pte_write(l3_index, phys | USER_RW_XN_FLAGS);
-                user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
+                process_image_pte_write(l3_index, phys | USER_RW_XN_FLAGS);
+                process_image_pte_invalidate(l3_index);
                 let page_index = page_owner_transfer_index(stack_page);
                 process_image_record(
                     process_image_active_page_count, page_index, l3_index);
@@ -571,6 +587,7 @@ fn process_image_unmap(pages: sink ProcessImagePages[image]) {
         process_image_stack_lowest_l3 = PROCESS_STACK_L3_INDEX;
     }
     process_image_cleanup(count);
+    process_image_target_root = 0;
 }
 
 fn process_image_map_segments(plan: DistroElfLoadPlan,
@@ -605,7 +622,7 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
                 return ProcessImageSegmentsResult::OutOfMemory;
             }
             for l3_index: usize in first_page..<last_page {
-                if (user_pte_read(l3_index) != 0) {
+                if (process_image_pte_read(l3_index) != 0) {
                     process_image_cleanup(mapped);
                     return ProcessImageSegmentsResult::Invalid;
                 }
@@ -633,9 +650,8 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
                                     if (header.flags == 4) {
                                         flags = USER_RODATA_R_FLAGS;
                                     }
-                                    user_pte_write(l3_index, phys | flags);
-                                    user_tlb_invalidate(
-                                        USER_TEXT_VA + l3_index * PAGE_SIZE);
+                                    process_image_pte_write(l3_index, phys | flags);
+                                    process_image_pte_invalidate(l3_index);
                                     let page_index =
                                         page_owner_transfer_index(page);
                                     process_image_record(
@@ -690,7 +706,7 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                     }
                     let mut mapped: usize = total;
                     for l3_index: usize in heap_first_page..<heap_last_page {
-                        if (user_pte_read(l3_index) != 0) {
+                        if (process_image_pte_read(l3_index) != 0) {
                             process_image_cleanup(mapped);
                             return ProcessImagePairProbeResult::Invalid;
                         }
@@ -703,10 +719,9 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                                 let bytes = page_bytes(heap_page);
                                 for i: usize in 0..<4096 { bytes[i] = 0; }
                                 let phys: usize = page_physical_address(heap_page);
-                                user_pte_write(
+                                process_image_pte_write(
                                     l3_index, phys | USER_RW_XN_FLAGS);
-                                user_tlb_invalidate(
-                                    USER_TEXT_VA + l3_index * PAGE_SIZE);
+                                process_image_pte_invalidate(l3_index);
                                 if (mapped >= 512) {
                                     page_free(heap_page);
                                     process_image_cleanup(mapped);
@@ -724,7 +739,7 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                     // parsing a request. Keep the argument/auxv layout in the
                     // top page and map a small contiguous stack below it.
                     for l3_index: usize in PROCESS_DYNAMIC_STACK_FIRST_L3_INDEX..<PROCESS_STACK_L3_INDEX {
-                        if (user_pte_read(l3_index) != 0) {
+                        if (process_image_pte_read(l3_index) != 0) {
                             process_image_cleanup(mapped);
                             return ProcessImagePairProbeResult::Invalid;
                         }
@@ -737,8 +752,8 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                                 let bytes = page_bytes(stack_page);
                                 for i: usize in 0..<4096 { bytes[i] = 0; }
                                 let phys: usize = page_physical_address(stack_page);
-                                user_pte_write(l3_index, phys | USER_RW_XN_FLAGS);
-                                user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
+                                process_image_pte_write(l3_index, phys | USER_RW_XN_FLAGS);
+                                process_image_pte_invalidate(l3_index);
                                 if (mapped >= 512) {
                                     page_free(stack_page);
                                     process_image_cleanup(mapped);
@@ -765,14 +780,13 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                                 }
                                 ProcessImageStackResult::Ready => {
                                     let phys: usize = page_physical_address(stack);
-                                    user_pte_write(
+                                    process_image_pte_write(
                                         PROCESS_STACK_L3_INDEX,
                                         phys | USER_RW_XN_FLAGS);
-                                    user_tlb_invalidate(
-                                        USER_TEXT_VA +
-                                        PROCESS_STACK_L3_INDEX * PAGE_SIZE);
+                                    process_image_pte_invalidate(
+                                        PROCESS_STACK_L3_INDEX);
                                     if (mapped >= 512) {
-                                        user_pte_write(PROCESS_STACK_L3_INDEX, 0);
+                                        process_image_pte_write(PROCESS_STACK_L3_INDEX, 0);
                                         page_free(stack);
                                         process_image_cleanup(mapped);
                                         return ProcessImagePairProbeResult::Invalid;
@@ -812,9 +826,9 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
     }
 }
 
-fn process_image_map(plan: DistroElfLoadPlan,
-                     argv: []u8,
-                     argc: usize) -> ProcessImageMapResult {
+fn process_image_map_current(plan: DistroElfLoadPlan,
+                             argv: []u8,
+                             argc: usize) -> ProcessImageMapResult {
     process_image_stack_growth_active = false;
     process_image_active_page_count = 0;
     process_image_growth_page_count = 0;
@@ -839,7 +853,7 @@ fn process_image_map(plan: DistroElfLoadPlan,
         return ProcessImageMapResult::OutOfMemory;
     }
     for l3_index: usize in heap_first_page..<heap_last_page {
-        if (user_pte_read(l3_index) != 0) {
+        if (process_image_pte_read(l3_index) != 0) {
             process_image_cleanup(mapped);
             return ProcessImageMapResult::InvalidImage;
         }
@@ -852,15 +866,15 @@ fn process_image_map(plan: DistroElfLoadPlan,
                 let bytes = page_bytes(heap_page);
                 for i: usize in 0..<4096 { bytes[i] = 0; }
                 let phys: usize = page_physical_address(heap_page);
-                user_pte_write(l3_index, phys | USER_RW_XN_FLAGS);
-                user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
+                process_image_pte_write(l3_index, phys | USER_RW_XN_FLAGS);
+                process_image_pte_invalidate(l3_index);
                 let page_index = page_owner_transfer_index(heap_page);
                 process_image_record(mapped, page_index, l3_index);
                 mapped = mapped + 1;
             }
         }
     }
-    if (user_pte_read(PROCESS_STACK_L3_INDEX) != 0) {
+    if (process_image_pte_read(PROCESS_STACK_L3_INDEX) != 0) {
         process_image_cleanup(mapped);
         return ProcessImageMapResult::InvalidImage;
     }
@@ -878,10 +892,9 @@ fn process_image_map(plan: DistroElfLoadPlan,
                 }
                 ProcessImageStackResult::Ready => {
                     let phys: usize = page_physical_address(stack);
-                    user_pte_write(PROCESS_STACK_L3_INDEX,
-                                   phys | USER_RW_XN_FLAGS);
-                    user_tlb_invalidate(USER_TEXT_VA +
-                                        PROCESS_STACK_L3_INDEX * PAGE_SIZE);
+                    process_image_pte_write(PROCESS_STACK_L3_INDEX,
+                                             phys | USER_RW_XN_FLAGS);
+                    process_image_pte_invalidate(PROCESS_STACK_L3_INDEX);
                     let page_index = page_owner_transfer_index(stack);
                     process_image_record(mapped, page_index,
                                          PROCESS_STACK_L3_INDEX);
@@ -903,6 +916,22 @@ fn process_image_map(plan: DistroElfLoadPlan,
     process_image_active_page_count = mapped;
     process_image_stack_growth_active = true;
     return ProcessImageMapResult::Mapped(pages);
+}
+
+fn process_image_map(plan: DistroElfLoadPlan,
+                     argv: []u8,
+                     argc: usize) -> ProcessImageMapResult {
+    process_image_target_root = 0;
+    return process_image_map_current(plan, argv, argc);
+}
+
+fn process_image_map_in_root(plan: DistroElfLoadPlan,
+                             argv: []u8,
+                             argc: usize,
+                             root: usize) -> ProcessImageMapResult {
+    if (root >= 2) { return ProcessImageMapResult::InvalidImage; }
+    process_image_target_root = root;
+    return process_image_map_current(plan, argv, argc);
 }
 
 fn process_image_page_count(pages: borrow ProcessImagePages[image]) -> usize {
@@ -929,7 +958,7 @@ fn process_image_heap_range(pages: borrow ProcessImagePages[image])
 
 fn process_image_window_is_clear() -> bool {
     for i: usize in 0..<512 {
-        if (user_pte_read(i) != 0) { return false; }
+        if (process_image_pte_read(i) != 0) { return false; }
     }
     return true;
 }
@@ -939,7 +968,7 @@ fn process_image_gap_is_unmapped() -> bool {
     // page 285. Keeping this gap absent is part of the current fixture's VM
     // contract; it must not become zero-filled executable memory by accident.
     for i: usize in 266..<285 {
-        if (user_pte_read(i) != 0) { return false; }
+        if (process_image_pte_read(i) != 0) { return false; }
     }
     return true;
 }
