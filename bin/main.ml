@@ -130,6 +130,15 @@ let () =
     in
     let prog = List.concat_map snd resolved in
 
+    (* GitHub issue #207: compile-time generics. Expands every
+       `generic struct` template actually instantiated into an ordinary,
+       fully concrete StructDef under a mangled name, before type
+       inference/codegen ever run -- so everything downstream keeps seeing
+       only plain, already-monomorphic code, exactly like today. A no-op
+       (returns prog unchanged) for any program with no generic struct
+       templates at all. *)
+    let prog = Monomorphize.run prog in
+
     (* HM type inference -- catches type errors and produces resolved types *)
     let prog_types = Typechecker.infer_program prog in
 

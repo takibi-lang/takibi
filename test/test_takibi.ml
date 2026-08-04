@@ -8,8 +8,12 @@ let parse src =
   let lexbuf = Lexing.from_string src in
   Parser.program Lexer.read lexbuf
 
+(* GitHub issue #207: mirrors bin/main.ml's own pipeline order (parse ->
+   Monomorphize.run -> Type_inf.infer_program). A no-op for any program
+   with no `generic struct` template at all, so this is safe to run
+   unconditionally ahead of every existing (non-generic) test too. *)
 let infer src =
-  Type_inf.infer_program (parse src)
+  Type_inf.infer_program (Monomorphize.run (parse src))
 
 (* Parses each (filename, src) pair as if it were a distinct source file
    (Lexing.set_filename, matching bin/main.ml's own parse_file) and
@@ -26,7 +30,7 @@ let infer_files files =
     Lexing.set_filename lexbuf filename;
     Parser.program Lexer.read lexbuf
   ) files in
-  Type_inf.infer_program prog
+  Type_inf.infer_program (Monomorphize.run prog)
 
 (* Runs the full pipeline through LLVM codegen (no target machine, no
    object-file emission -- gen_program works without setup_target, see its
@@ -35,7 +39,7 @@ let infer_files files =
    module with no reset, so two test cases defining the same name would
    collide. *)
 let gen_codegen src =
-  let prog = parse src in
+  let prog = Monomorphize.run (parse src) in
   let prog_types = Type_inf.infer_program prog in
   Llvm_gen.gen_program ~prog_types prog
 
@@ -9852,6 +9856,62 @@ let codegen_tests = [
        "struct Refnum100Foo { idx: {0..<8 as usize}; }
         fn refnum100_unproven(f: *Refnum100Foo, n: usize) {
           f.idx = n;
+        }");
+
+  (* GitHub issue #207: two instantiations of the same generic struct with
+     different type arguments must each get their own, independently
+     registered, mangled-name LLVM struct type -- not share one
+     definition, and not clobber each other in Llvm_gen.struct_lltypes. *)
+  Alcotest.test_case
+    "two instantiations of a generic struct register two distinct \
+     mangled-name struct types (issue #207)" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "generic struct Boxg207(T: type) {
+            value: T;
+          }
+          fn boxg207_usize() -> usize {
+            let mut a: Boxg207(usize);
+            a.value = 1;
+            return a.value;
+          }
+          fn boxg207_u8() -> u8 {
+            let mut b: Boxg207(u8);
+            b.value = 2 as u8;
+            return b.value;
+          }"
+       in
+       let find name = match Hashtbl.find_opt Llvm_gen.struct_lltypes name with
+         | Some llty -> llty
+         | None -> Alcotest.failf "%s not registered in struct_lltypes" name
+       in
+       let usize_ty = find "Boxg207$usize" in
+       let u8_ty = find "Boxg207$u8" in
+       Alcotest.(check int) "Boxg207$usize has 1 field"
+         1 (Array.length (Llvm.struct_element_types usize_ty));
+       Alcotest.(check int) "Boxg207$u8 has 1 field"
+         1 (Array.length (Llvm.struct_element_types u8_ty));
+       Alcotest.(check bool) "the two instantiations are genuinely distinct LLVM types"
+         true (usize_ty <> u8_ty));
+
+  Alcotest.test_case
+    "a generic struct instantiated with the wrong number of type \
+     arguments is rejected (issue #207)" `Quick
+    (expect_type_error
+       "expects 1 type argument(s), got 2"
+       "generic struct Boxg207wrong(T: type) { value: T; }
+        fn boxg207wrong_use() {
+          let mut b: Boxg207wrong(usize, u8);
+        }");
+
+  Alcotest.test_case
+    "a generic struct instantiated with an unsupported type argument \
+     (a slice) is rejected with a clear error, not a crash (issue #207)" `Quick
+    (expect_type_error
+       "is not supported yet"
+       "generic struct Boxg207slice(T: type) { value: T; }
+        fn boxg207slice_use() {
+          let mut b: Boxg207slice([]u8);
         }");
 
 ]
