@@ -121,6 +121,11 @@ private let mut syscall_heap_limit: usize;
 private let mut clone_parent_inetd_mode: bool;
 private let mut clone_file_state_live: bool;
 private let mut syscall_connected_fixture_pending: bool;
+private let mut syscall_httpd_daemon_pending: bool;
+
+fn kernel_syscall_httpd_daemon_start() {
+    syscall_httpd_daemon_pending = true;
+}
 
 fn kernel_syscall_connected_fixture_start() {
     syscall_connected_fixture_pending = true;
@@ -1565,7 +1570,10 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 listen_fd, UnifiedListenerState::Listening) == false) {
             return (1, LINUX_EINVAL);
         }
-        if (syscall_connected_fixture_pending) {
+        if (syscall_httpd_daemon_pending) {
+            syscall_httpd_daemon_pending = false;
+            kernel_boot_log("httpd daemon: listener ready port=8080\n");
+        } else if (syscall_connected_fixture_pending) {
             syscall_connected_fixture_pending = false;
             kernel_boot_log("linux socket: listener ready port=8080\n");
         }

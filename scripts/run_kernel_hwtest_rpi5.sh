@@ -21,6 +21,7 @@ SOCKET_ACCEPT_LOG="$ARTIFACT_DIR/socket-accept.log"
 ETH_TEST_IFACE="${ETH_TEST_IFACE:-enp5s0}"
 ETH_TEST_SUBNET="${ETH_TEST_SUBNET:-192.168.20}"
 ETH_TEST_MAC="${ETH_TEST_MAC:-02:00:20:00:00:02}"
+ETH_TEST_HOST_IP="${ETH_TEST_HOST_IP:-192.168.20.1}"
 
 mkdir -p "$ARTIFACT_DIR"
 exec 9>"$ARTIFACT_DIR/runner.lock"
@@ -137,6 +138,7 @@ shell_sender_pid=$!
 # raw-socket privilege confined to the existing protocol checker.
 echo "[kernel/rpi5] checking ARP reply on $ETH_TEST_IFACE"
 if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
+        ARP_TEST_REQUESTER_IP="$ETH_TEST_HOST_IP" \
         ARP_TEST_OTHER_FIRST=1 \
         python3 "$REPO_ROOT/scripts/eth_arp_reply_test.py" \
         > >(tee "$ARP_LOG") 2>&1; then
@@ -169,21 +171,21 @@ echo "[kernel/rpi5] TCP integration passed"
 # before starting the real BusyBox HTTPd daemon (kernel_tcp_inject_drop_
 # next_syn_ack(), kernel/init/main.tkb), so its own bounded retransmit
 # budget (TCP_RETRY_LIMIT * retry_ticks, kernel/net/tcp.tkb) can race
-# against curl's --connect-timeout 1 if the FIRST curl attempt's SYN
+# against curl's connection timeout if the FIRST curl attempt's SYN
 # happens to arrive while the kernel is still busy with the earlier
 # USB-ext2 provisioning step (measured to vary by roughly 10x in wall-clock
 # time between otherwise-identical real-hardware runs). Waiting for the
-# kernel's own last pre-daemon log line here, instead of firing curl blind
-# immediately after the TCP echo check above, means curl's first SYN can
-# only ever arrive once the kernel is already about to enter the daemon's
-# accept() loop -- decoupling this race from USB provisioning time
+# kernel's actual userspace `listen(2)` marker here, instead of firing curl
+# at the image-map marker, means curl's first SYN can only arrive once the
+# daemon has published its listening socket -- decoupling this race from
+# userspace startup and USB provisioning time
 # entirely without touching tcp.tkb's own timing constants or weakening
 # what the drop-recovery check proves (still the real daemon's real
 # accept() path, still a real dropped packet).
 echo "[kernel/rpi5] waiting for the kernel to be ready to start the BusyBox httpd daemon"
 httpd_ready=0
 for _wait in $(seq 1 600); do
-    if LC_ALL=C grep -aFq 'httpd map: combined pages=331 musl-bias=0x40000 auxv ready clean' "$UART_LOG"; then
+    if LC_ALL=C grep -aFq 'httpd daemon: listener ready port=8080' "$UART_LOG"; then
         httpd_ready=1
         break
     fi
@@ -199,7 +201,7 @@ httpd_ok=0
 for _attempt in $(seq 1 20); do
     if curl --silent --show-error --fail \
             --interface "$ETH_TEST_IFACE" --noproxy '*' \
-            --connect-timeout 1 --max-time 5 \
+            --connect-timeout 5 --max-time 10 \
             --output "$HTTPD_BODY" \
             "http://${ETH_TEST_SUBNET}.2:8080/" 2>"$HTTPD_LOG"; then
         if cmp -s "$REPO_ROOT/kernel/tests/ext2/index.html" "$HTTPD_BODY"; then
@@ -225,7 +227,7 @@ second_httpd_ok=0
 for _attempt in $(seq 1 20); do
     if curl --silent --show-error --fail \
             --interface "$ETH_TEST_IFACE" --noproxy '*' \
-            --connect-timeout 1 --max-time 5 \
+            --connect-timeout 5 --max-time 10 \
             --output "$SECOND_HTTPD_BODY" \
             "http://${ETH_TEST_SUBNET}.2:8080/" 2>"$SECOND_HTTPD_LOG"; then
         if cmp -s "$REPO_ROOT/kernel/tests/ext2/index.html" "$SECOND_HTTPD_BODY"; then

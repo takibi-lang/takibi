@@ -41,7 +41,11 @@ _subnet_octets = [int(o) for o in SUBNET.split(".")]
 ARP_ETHERTYPE = bytes([0x08, 0x06])
 
 REQUESTER_MAC = bytes([0x02, 0x00, 0x00, 0x00, 0x00, 0x01])
-REQUESTER_IP = bytes(_subnet_octets + [55])
+_requester_ip = os.environ.get("ARP_TEST_REQUESTER_IP")
+if _requester_ip is None:
+    REQUESTER_IP = bytes(_subnet_octets + [55])
+else:
+    REQUESTER_IP = bytes(int(octet) for octet in _requester_ip.split("."))
 TARGET_IP = bytes(_subnet_octets + [2])    # must match netconfig.tkb's OUR_IP
 OTHER_IP = bytes(_subnet_octets + [200])   # some IP arp_reply does NOT own
 BROADCAST_MAC = bytes([0xff] * 6)

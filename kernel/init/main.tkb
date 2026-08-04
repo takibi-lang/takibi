@@ -655,6 +655,7 @@ fn main() {
                                                     dynamic_heap_start,
                                                     dynamic_heap_limit);
                                                 kernel_process_execution_reset();
+                                                kernel_syscall_httpd_daemon_start();
                                                 kernel_tcp_inject_drop_next_syn_ack();
                                                 kernel_tcp_inject_split_request();
                                                 let dynamic_status: usize =
