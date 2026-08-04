@@ -11,6 +11,7 @@ enum UnifiedListenerState: u8 { Closed; Created; Bound; Listening; }
 private let mut fd_kind: [UnifiedFdKind; PROCESS_FD_ENTRY_MAX];
 private let mut fd_object: [usize; PROCESS_FD_ENTRY_MAX];
 private let mut fd_generation: [usize; PROCESS_FD_ENTRY_MAX];
+private let mut fd_close_on_exec: [bool; PROCESS_FD_ENTRY_MAX];
 private let mut process_heap_break: [usize; PROCESS_CONTEXT_MAX];
 private let mut object_kind: [UnifiedFdKind; SHARED_OBJECT_MAX];
 private let mut object_generation: [usize; SHARED_OBJECT_MAX];
@@ -54,6 +55,7 @@ fn unified_fd_table_init() {
         fd_kind[entry] = UnifiedFdKind::Empty;
         fd_object[entry] = 0;
         fd_generation[entry] = 0;
+        fd_close_on_exec[entry] = false;
     }
     for object: usize in 0..<SHARED_OBJECT_MAX {
         object_kind[object] = UnifiedFdKind::Empty;
@@ -225,6 +227,46 @@ fn unified_fd_duplicate(process: usize, old_fd: usize, new_fd: usize)
     return UnifiedFdResult::Invalid;
 }
 
+fn unified_fd_set_close_on_exec(process: usize, fd: usize, value: bool)
+        -> UnifiedFdResult {
+    if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX) {
+        return UnifiedFdResult::Invalid;
+    }
+    let index_value: usize = unified_fd_index(process, fd);
+    if (index_value < PROCESS_FD_ENTRY_MAX) {
+        let index: {0..<PROCESS_FD_ENTRY_MAX as usize} = index_value;
+        if (fd_kind[index] != UnifiedFdKind::Empty) {
+            fd_close_on_exec[index] = value;
+            return UnifiedFdResult::Ok;
+        }
+    }
+    return UnifiedFdResult::Invalid;
+}
+
+fn unified_fd_close_on_exec(process: usize, fd: usize) -> bool {
+    if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX) {
+        return false;
+    }
+    let index_value: usize = unified_fd_index(process, fd);
+    if (index_value < PROCESS_FD_ENTRY_MAX) {
+        let index: {0..<PROCESS_FD_ENTRY_MAX as usize} = index_value;
+        return fd_close_on_exec[index];
+    }
+    return false;
+}
+
+fn unified_fd_close_exec_descriptors(process: usize) {
+    if (process >= PROCESS_CONTEXT_MAX) { return; }
+    for fd: usize in 0..<PROCESS_FD_MAX {
+        if (unified_fd_close_on_exec(process, fd)) {
+            match unified_fd_close(process, fd) {
+                UnifiedFdResult::Invalid => {}
+                UnifiedFdResult::Ok => {}
+            }
+        }
+    }
+}
+
 fn unified_object_references(handle: UnifiedObjectHandle) -> usize {
     if (object_generation[handle.slot] == handle.generation) {
         return object_references[handle.slot];
@@ -369,6 +411,7 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
             fd_kind[index] = object_kind[object];
             fd_object[index] = object;
             fd_generation[index] = generation;
+            fd_close_on_exec[index] = false;
             object_references[object] = object_references[object] + 1;
             return UnifiedFdResult::Ok;
         }
@@ -394,6 +437,7 @@ fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult {
             fd_kind[index] = UnifiedFdKind::Empty;
             fd_object[index] = 0;
             fd_generation[index] = 0;
+            fd_close_on_exec[index] = false;
             object_references[object] = object_references[object] - 1;
             if (object_references[object] == 0) {
                 object_kind[object] = UnifiedFdKind::Empty;
@@ -452,6 +496,7 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult {
             fd_kind[target] = fd_kind[source];
             fd_object[target] = fd_object[source];
             fd_generation[target] = fd_generation[source];
+            fd_close_on_exec[target] = fd_close_on_exec[source];
             if (fd_kind[source] != UnifiedFdKind::Empty) {
                 let value: usize = fd_object[source];
                 if (value < SHARED_OBJECT_MAX) {

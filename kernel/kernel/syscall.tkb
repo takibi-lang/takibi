@@ -1355,10 +1355,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     }
 
     if (number == AARCH64_NR_FCNTL) {
-        // The ash script loader marks its temporary descriptor close-on-exec,
-        // then moves it out of the conventional low-fd range. There is no
-        // execve surface yet, so FD_CLOEXEC has no retained state; descriptor
-        // duplication remains real and shares the open-file offset.
+        // Descriptor duplication remains real and shares the open-file offset.
         let fd: usize = x0;
         let command: usize = x1;
         if (kernel_syscall_file_is_open(fd) == false) {
@@ -1366,6 +1363,11 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         }
         if (command == LINUX_F_SETFD) {
             if (x2 != 0 && x2 != 1) { return (1, LINUX_EINVAL); }
+            match unified_fd_set_close_on_exec(
+                    kernel_syscall_process_slot(), fd, x2 != 0) {
+                UnifiedFdResult::Invalid => { return (1, LINUX_EBADF); }
+                UnifiedFdResult::Ok => {}
+            }
             return (1, 0);
         }
         if (command == LINUX_F_DUPFD || command == LINUX_F_DUPFD_CLOEXEC) {
@@ -1377,7 +1379,19 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                         UnifiedFdResult::Invalid => {
                             return (1, LINUX_EBADF);
                         }
-                        UnifiedFdResult::Ok => { return (1, new_fd); }
+                        UnifiedFdResult::Ok => {
+                            if (command == LINUX_F_DUPFD_CLOEXEC) {
+                                match unified_fd_set_close_on_exec(
+                                        kernel_syscall_process_slot(),
+                                        new_fd, true) {
+                                    UnifiedFdResult::Invalid => {
+                                        return (1, LINUX_EBADF);
+                                    }
+                                    UnifiedFdResult::Ok => {}
+                                }
+                            }
+                            return (1, new_fd);
+                        }
                     }
                 }
             }

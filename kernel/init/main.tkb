@@ -1056,6 +1056,10 @@ fn main() {
                             process_image_stack_pointer(exec_shell_pages));
                         if (exec_status == 7 &&
                             kernel_syscall_exec_pending()) {
+                            // Apply close-on-exec before releasing the old
+                            // image.  This removes ash's temporary script fd
+                            // from the replacement descriptor table.
+                            unified_fd_close_exec_descriptors(0);
                             let exec_argc: usize = kernel_syscall_exec_argc();
                             let exec_argv = kernel_syscall_exec_argv();
                             process_image_unmap(exec_shell_pages);
