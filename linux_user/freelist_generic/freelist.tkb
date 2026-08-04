@@ -1,0 +1,50 @@
+// Thin generic wrapper over freelist_core.tkb's non-generic bookkeeping
+// (GitHub issue #207, generics build order step 7 -- the real worked
+// example the whole design was aimed at). FreelistCore/FreelistOwner/
+// FreelistPopResult never mention a payload type and stay exactly as
+// build-order step 1 left them; only the parts that genuinely vary by T
+// are generic here.
+//
+// A pool's payload storage is NOT embedded in Freelist(T) -- it is the
+// caller's own [T; ..] array, handed to freelist_init once. This keeps
+// Freelist(T) itself small (one FreelistCore plus one fat-pointer slice,
+// regardless of how large T is or how many elements the caller's arrays
+// hold), matches freelist_core.tkb's own "capacity is just the backing
+// array's length" design, and was arrived at for the same DMA-alignment
+// reason a real page pool would need: the caller's own array declaration
+// (e.g. `align(4096)`) is untouched by anything here.
+
+use "linux_user/freelist_generic/freelist_core.tkb";
+
+generic struct Freelist(T: type) {
+    core: FreelistCore;
+    data: []T;
+}
+
+fn freelist_init(T: type, target: *Freelist(T),
+                  index_backing: []usize, data_backing: []T) {
+    freelist_core_init(&target.core, index_backing);
+    target.data = data_backing;
+}
+
+fn freelist_insert(T: type, target: *Freelist(T)) -> FreelistPopResult {
+    return freelist_core_pop(&target.core);
+}
+
+fn freelist_remove(T: type, target: *Freelist(T),
+                    owner: sink FreelistOwner[allocation]) {
+    freelist_core_push(&target.core, owner);
+}
+
+// Returns a pointer to T tied to owner's slot -- no copy, whatever T's
+// size. Field access through the result needs no explicit deref (e.g.
+// `freelist_ref(&target, owner).x = 1;`); a whole-T read/write does
+// (`*freelist_ref(&target, owner) = v;`), which is the expensive case
+// made to visibly look expensive, exactly as intended when this shape
+// was designed.
+fn freelist_ref(T: type, target: *Freelist(T),
+                owner: borrow FreelistOwner[allocation]) -> *T {
+    let data = target.data;
+    let index: isize = freelist_owner_index(owner) as isize;
+    return (data as *T) + index;
+}

@@ -174,7 +174,7 @@ $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_check
 # re-run that check (drop this override, rebuild, confirm the trap count
 # and file names reported) rather than trusting this comment to still be
 # accurate.
-$(LINUX_USER_DIR)/freelist_generic/freelist_generic_exe.o: $(LINUX_USER_DIR)/freelist_generic/freelist_generic.tkb $(LINUX_USER_DIR)/freelist_generic/freelist_core.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE) $(TAKIBI)
+$(LINUX_USER_DIR)/freelist_generic/freelist_generic_exe.o: $(LINUX_USER_DIR)/freelist_generic/freelist_generic.tkb $(LINUX_USER_DIR)/freelist_generic/freelist.tkb $(LINUX_USER_DIR)/freelist_generic/freelist_core.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE) $(TAKIBI)
 	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(LINUX_USER_DIR)/freelist_generic/freelist_generic.tkb --target $(LINUX_AMD64_TARGET) -o $@
 $(LINUX_USER_DIR)/ip_parse/ip_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb

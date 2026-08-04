@@ -1,6 +1,8 @@
-freelist_core
-allocated: 0 1 2
-reused (LIFO): 1 0 3
-generations: 4 5 6
-pool exhausted as expected
+usize allocated: 0 1 2
+reused (LIFO: b's slot, then a's slot): 1 0
+stale before reset (r1 sees b's old 20, r2 sees a's old 10): 20 10
+after reset: 100 200
+usize pool exhausted as expected
+points: 1,2 3,4
+point pool exhausted as expected
 done

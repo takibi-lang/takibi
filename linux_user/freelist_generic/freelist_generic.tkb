@@ -1,50 +1,53 @@
-// Exercises freelist_core.tkb directly (no generic wrapper yet -- that is
-// a later step in the approved generics plan). Same alloc/free/LIFO-reuse/
-// exhaustion shape as linux_user/freelist_pool/freelist_pool.tkb, but the
-// pool's capacity now comes purely from the backing_storage array's own length,
-// not from a POOL_COUNT constant baked into freelist_core.tkb.
+// End-to-end exerciser for the real generic Freelist(T) (GitHub issue
+// #207, generics build order step 7). Two independent pools, two
+// different payload types instantiated from the SAME template in one
+// program: a small scalar (usize) and a small struct (Point), proving
+// genericity actually works for both, not just primitives. Coverage
+// mirrors freelist_pool.tkb's own established rigor for the non-generic
+// prototype this design grew out of: allocate, LIFO-reuse-after-free,
+// the "freeing does not clear payload" property, and pool exhaustion.
 
-use "linux_user/freelist_generic/freelist_core.tkb";
+use "linux_user/freelist_generic/freelist.tkb";
 
-// Global, not a local: a slice derived from a local (stack) array is
-// rejected when passed to a retaining (non-borrow) parameter -- confirmed
-// by trying it -- exactly matching how every existing pool in this
-// codebase (boot_pages, page_pool, etc.) already backs its storage with a
-// global, not a stack local. SPEC.md's Slices section: "Global-array and
-// string-literal storage are not stack-tied."
-private let mut backing_storage: [usize; 4];
-private let mut pool_core: FreelistCore;
+struct Point {
+    x: usize;
+    y: usize;
+}
+
+private let mut usize_pool: Freelist(usize);
+private let mut usize_index_store: [usize; 3];
+private let mut usize_data_store: [usize; 3];
+
+private let mut point_pool: Freelist(Point);
+private let mut point_index_store: [usize; 2];
+private let mut point_data_store: [Point; 2];
 
 fn app_main() {
-    freelist_core_init(&pool_core, backing_storage as []usize);
-    uart_puts("freelist_core\n");
+    freelist_init(&usize_pool, usize_index_store as []usize, usize_data_store as []usize);
 
-    let a: exists sa: usize. FreelistOwner[sa] = match freelist_core_pop(&pool_core) {
-        FreelistPopResult::Empty => {
-            uart_puts("alloc a failed\n");
-            return;
-        }
+    let a: exists sa: usize. FreelistOwner[sa] = match freelist_insert(&usize_pool) {
+        FreelistPopResult::Empty => { uart_puts("alloc a failed\n"); return; }
         FreelistPopResult::Popped(o) => { o }
     };
-    let b: exists sb: usize. FreelistOwner[sb] = match freelist_core_pop(&pool_core) {
+    let b: exists sb: usize. FreelistOwner[sb] = match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => {
             uart_puts("alloc b failed\n");
-            freelist_core_push(&pool_core, a);
+            freelist_remove(&usize_pool, a);
             return;
         }
         FreelistPopResult::Popped(o) => { o }
     };
-    let c: exists sc: usize. FreelistOwner[sc] = match freelist_core_pop(&pool_core) {
+    let c: exists sc: usize. FreelistOwner[sc] = match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => {
             uart_puts("alloc c failed\n");
-            freelist_core_push(&pool_core, a);
-            freelist_core_push(&pool_core, b);
+            freelist_remove(&usize_pool, a);
+            freelist_remove(&usize_pool, b);
             return;
         }
         FreelistPopResult::Popped(o) => { o }
     };
 
-    uart_puts("allocated: ");
+    uart_puts("usize allocated: ");
     uart_print(freelist_owner_index(a));
     uart_puts(" ");
     uart_print(freelist_owner_index(b));
@@ -52,66 +55,107 @@ fn app_main() {
     uart_print(freelist_owner_index(c));
     uart_puts("\n");
 
-    freelist_core_push(&pool_core, a);
-    freelist_core_push(&pool_core, b);
+    *freelist_ref(&usize_pool, a) = 10;
+    *freelist_ref(&usize_pool, b) = 20;
+    *freelist_ref(&usize_pool, c) = 30;
 
-    let r1: exists s1: usize. FreelistOwner[s1] = match freelist_core_pop(&pool_core) {
+    freelist_remove(&usize_pool, a);
+    freelist_remove(&usize_pool, b);
+
+    let r1: exists s1: usize. FreelistOwner[s1] = match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => {
             uart_puts("reuse 1 failed\n");
-            freelist_core_push(&pool_core, c);
+            freelist_remove(&usize_pool, c);
             return;
         }
         FreelistPopResult::Popped(o) => { o }
     };
-    let r2: exists s2: usize. FreelistOwner[s2] = match freelist_core_pop(&pool_core) {
+    let r2: exists s2: usize. FreelistOwner[s2] = match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => {
             uart_puts("reuse 2 failed\n");
-            freelist_core_push(&pool_core, r1);
-            freelist_core_push(&pool_core, c);
-            return;
-        }
-        FreelistPopResult::Popped(o) => { o }
-    };
-    let r3: exists s3: usize. FreelistOwner[s3] = match freelist_core_pop(&pool_core) {
-        FreelistPopResult::Empty => {
-            uart_puts("reuse 3 failed\n");
-            freelist_core_push(&pool_core, r1);
-            freelist_core_push(&pool_core, r2);
-            freelist_core_push(&pool_core, c);
+            freelist_remove(&usize_pool, r1);
+            freelist_remove(&usize_pool, c);
             return;
         }
         FreelistPopResult::Popped(o) => { o }
     };
 
-    uart_puts("reused (LIFO): ");
+    uart_puts("reused (LIFO: b's slot, then a's slot): ");
     uart_print(freelist_owner_index(r1));
     uart_puts(" ");
     uart_print(freelist_owner_index(r2));
-    uart_puts(" ");
-    uart_print(freelist_owner_index(r3));
-    uart_puts("\ngenerations: ");
-    uart_print(freelist_owner_generation(r1));
-    uart_puts(" ");
-    uart_print(freelist_owner_generation(r2));
-    uart_puts(" ");
-    uart_print(freelist_owner_generation(r3));
     uart_puts("\n");
 
-    match freelist_core_pop(&pool_core) {
-        FreelistPopResult::Empty => {
-            uart_puts("pool exhausted as expected\n");
-        }
+    uart_puts("stale before reset (r1 sees b's old 20, r2 sees a's old 10): ");
+    uart_print(*freelist_ref(&usize_pool, r1));
+    uart_puts(" ");
+    uart_print(*freelist_ref(&usize_pool, r2));
+    uart_puts("\n");
+
+    *freelist_ref(&usize_pool, r1) = 100;
+    *freelist_ref(&usize_pool, r2) = 200;
+    uart_puts("after reset: ");
+    uart_print(*freelist_ref(&usize_pool, r1));
+    uart_puts(" ");
+    uart_print(*freelist_ref(&usize_pool, r2));
+    uart_puts("\n");
+
+    match freelist_insert(&usize_pool) {
+        FreelistPopResult::Empty => { uart_puts("usize pool exhausted as expected\n"); }
         FreelistPopResult::Popped(o) => {
-            uart_puts("unexpected extra allocation: ");
-            uart_print(freelist_owner_index(o));
-            uart_puts("\n");
-            freelist_core_push(&pool_core, o);
+            uart_puts("unexpected extra usize allocation\n");
+            freelist_remove(&usize_pool, o);
         }
     }
 
-    freelist_core_push(&pool_core, r1);
-    freelist_core_push(&pool_core, r2);
-    freelist_core_push(&pool_core, r3);
-    freelist_core_push(&pool_core, c);
+    freelist_remove(&usize_pool, r1);
+    freelist_remove(&usize_pool, r2);
+    freelist_remove(&usize_pool, c);
+
+    // Second instantiation of the same template, a struct payload -- proves
+    // genericity works beyond primitive scalars, and that field access
+    // through freelist_ref's returned pointer needs no explicit deref
+    // (the exact shape a real 4KB-page pool would rely on).
+    freelist_init(&point_pool, point_index_store as []usize, point_data_store as []Point);
+
+    let p1: exists sp1: usize. FreelistOwner[sp1] = match freelist_insert(&point_pool) {
+        FreelistPopResult::Empty => { uart_puts("alloc p1 failed\n"); return; }
+        FreelistPopResult::Popped(o) => { o }
+    };
+    let p2: exists sp2: usize. FreelistOwner[sp2] = match freelist_insert(&point_pool) {
+        FreelistPopResult::Empty => {
+            uart_puts("alloc p2 failed\n");
+            freelist_remove(&point_pool, p1);
+            return;
+        }
+        FreelistPopResult::Popped(o) => { o }
+    };
+
+    freelist_ref(&point_pool, p1).x = 1;
+    freelist_ref(&point_pool, p1).y = 2;
+    freelist_ref(&point_pool, p2).x = 3;
+    freelist_ref(&point_pool, p2).y = 4;
+
+    uart_puts("points: ");
+    uart_print(freelist_ref(&point_pool, p1).x);
+    uart_puts(",");
+    uart_print(freelist_ref(&point_pool, p1).y);
+    uart_puts(" ");
+    uart_print(freelist_ref(&point_pool, p2).x);
+    uart_puts(",");
+    uart_print(freelist_ref(&point_pool, p2).y);
+    uart_puts("\n");
+
+    match freelist_insert(&point_pool) {
+        FreelistPopResult::Empty => { uart_puts("point pool exhausted as expected\n"); }
+        FreelistPopResult::Popped(o) => {
+            uart_puts("unexpected extra point allocation\n");
+            freelist_remove(&point_pool, o);
+        }
+    }
+
+    freelist_remove(&point_pool, p1);
+    freelist_remove(&point_pool, p2);
+
     uart_puts("done\n");
 }
