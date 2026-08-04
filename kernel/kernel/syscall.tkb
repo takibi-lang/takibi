@@ -1791,7 +1791,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         // First handoff slice: only the current parent image may request an
         // exec. The child path still needs a process-owned image token and is
         // deliberately rejected until the general child lifecycle lands.
-        if (kernel_process_is_child() || syscall_exec_pending) {
+        if (syscall_exec_pending) {
             return (1, LINUX_EAGAIN);
         }
         let path_code: usize = match kernel_syscall_path_name(x0) {
@@ -1871,6 +1871,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         if (exec_path_absolute == false) { return (1, LINUX_ENOENT); }
         syscall_exec_argc = argc;
         syscall_exec_pending = true;
+        if (kernel_process_is_child()) { return (8, 8); }
         return (7, 7);
     }
 
@@ -1919,9 +1920,11 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 KernelFdReapResult::Failed => { return (0, 0); }
                 KernelFdReapResult::Reaped => { }
             }
-            match process_image_clone_vm_reap() {
-                ProcessCloneVmReapResult::Missing => { return (0, 0); }
-                ProcessCloneVmReapResult::Reaped => { }
+            if (kernel_process_child_exec_image_live() == false) {
+                match process_image_clone_vm_reap() {
+                    ProcessCloneVmReapResult::Missing => { return (0, 0); }
+                    ProcessCloneVmReapResult::Reaped => { }
+                }
             }
             return (4, kernel_process_child_exit(x0));
         }

@@ -14,6 +14,61 @@ use "kernel/arch/arm64/boot/boot_extern.tkb";
 private let mut ext2_read_fixture: [u8; 32];
 private let mut ext2_symlink_fixture: [u8; 64];
 private let mut kernel_secondary_boot_state: io usize;
+private let mut kernel_exec_plan: DistroElfLoadPlan = {0, 0, 0, 0, 0, 0, 0};
+private let mut kernel_exec_plan_ready: bool;
+private let mut kernel_child_exec_entry: usize;
+private let mut kernel_child_exec_stack: usize;
+
+fn kernel_process_child_exec_prepare() -> usize {
+    if (kernel_process_is_child() == false ||
+        kernel_exec_plan_ready == false ||
+        kernel_syscall_exec_pending() == false) {
+        return 0;
+    }
+    match process_image_clone_vm_reap() {
+        ProcessCloneVmReapResult::Missing => {
+            return 0;
+        }
+        ProcessCloneVmReapResult::Reaped => {}
+    }
+    let pages_result = process_image_map_in_root(
+        kernel_exec_plan, kernel_syscall_exec_argv(),
+        kernel_syscall_exec_argc(), 1);
+    match pages_result {
+        ProcessImageMapResult::InvalidImage => {
+            return 0;
+        }
+        ProcessImageMapResult::OutOfMemory => {
+            return 0;
+        }
+        ProcessImageMapResult::Mapped(pages) => {
+            kernel_child_exec_entry = process_image_entry(pages);
+            kernel_child_exec_stack = process_image_stack_pointer(pages);
+            if (process_image_exec_install(pages) == false) {
+                return 0;
+            }
+            process_image_activate_child();
+            kernel_process_child_exec_mark();
+            kernel_syscall_exec_clear();
+            return 1;
+        }
+    }
+}
+
+fn kernel_process_child_exec_entry() -> usize {
+    return kernel_child_exec_entry;
+}
+
+fn kernel_process_child_exec_stack() -> usize {
+    return kernel_child_exec_stack;
+}
+
+fn kernel_process_child_exec_reap() {
+    if (kernel_process_child_exec_image_live()) {
+        process_image_exec_reap();
+        kernel_process_child_exec_clear();
+    }
+}
 
 must_use variant SecondaryBootResult {
     Started;
@@ -711,6 +766,8 @@ fn main() {
                     kernel_boot_log("distro image: invalid elf\n");
                 }
                 DistroElfResult::Valid(plan) => {
+                    kernel_exec_plan = plan;
+                    kernel_exec_plan_ready = true;
                     if (plan.entry == 0x4524 && plan.load_segments == 2 &&
                         plan.extent == 0x122138) {
                         kernel_boot_log("distro image: alpine busybox static-pie\n");
@@ -1030,11 +1087,8 @@ fn main() {
                 }
             }
 
-            // Issue #209: parent-only execve handoff. The syscall returns to
-            // this EL1 owner with argv copied into a kernel buffer; the old
-            // image is then released and the same static BusyBox ELF is
-            // mapped with the requested argv. Child exec remains deferred
-            // until process-owned image tokens replace the clone fixture.
+            // Issue #209: parent execve returns to this EL1 owner, while a
+            // child execve is handled by the assembly child-frame handoff.
             if (distro_plan_ready) {
                 match process_image_map(
                         saved_distro_plan,
@@ -1062,6 +1116,7 @@ fn main() {
                             unified_fd_close_exec_descriptors(0);
                             let exec_argc: usize = kernel_syscall_exec_argc();
                             let exec_argv = kernel_syscall_exec_argv();
+                            kernel_syscall_exec_clear();
                             process_image_unmap(exec_shell_pages);
                             match process_image_map(
                                     saved_distro_plan,
@@ -1098,6 +1153,42 @@ fn main() {
                         }
                         if (process_image_window_is_clear()) {
                             kernel_boot_log("execve: image window clean\n");
+                        }
+                    }
+                }
+            }
+
+            // External applet path: the ext2 image provides /busybox and
+            // /bin/echo as symlinks, while the registered static BusyBox image supplies
+            // the executable selected by argv[0]. This exercises clone,
+            // child execve, child exit, and parent wait4 together.
+            if (distro_plan_ready) {
+                match process_image_map(
+                        saved_distro_plan,
+                        "busybox\0sh\0-c\0/bin/echo child-exec-ok\0" as []u8,
+                        4) {
+                    ProcessImageMapResult::InvalidImage => {
+                        kernel_boot_log("child exec map: invalid image\n");
+                    }
+                    ProcessImageMapResult::OutOfMemory => {
+                        kernel_boot_log("child exec map: out of memory\n");
+                    }
+                    ProcessImageMapResult::Mapped(child_shell_pages) => {
+                        let (child_heap_start, child_heap_limit) =
+                            process_image_heap_range(child_shell_pages);
+                        kernel_syscall_process_configure(
+                            child_heap_start, child_heap_limit);
+                        let child_status: usize = run_initial_user(
+                            process_image_entry(child_shell_pages),
+                            process_image_stack_pointer(child_shell_pages));
+                        if (child_status == 0) {
+                            kernel_boot_log("child exec: shell exit: 0\n");
+                        } else {
+                            kernel_boot_log("child exec: shell failed\n");
+                        }
+                        process_image_unmap(child_shell_pages);
+                        if (process_image_window_is_clear()) {
+                            kernel_boot_log("child exec: image window clean\n");
                         }
                     }
                 }

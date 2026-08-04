@@ -288,6 +288,69 @@ must_use variant ProcessImagePairProbeResult {
     Ready(exists image: usize. ProcessImagePages[image]);
 }
 
+private linear view ProcessImageExecGuard[lock: addr];
+private linear view ProcessImageExecOwner;
+variant ProcessImageExecValue {
+    Empty;
+    Ready(exists image: usize. ProcessImagePages[image]);
+}
+struct ProcessImageExecStore {
+    private mutex: i32;
+    private value: ProcessImageExecValue;
+}
+private let mut process_image_exec_store: ProcessImageExecStore;
+
+fn process_image_exec_lock(lock: *i32 @ address)
+        -> ProcessImageExecGuard[address] {
+    return view ProcessImageExecGuard[address];
+}
+
+fn process_image_exec_unlock(guard: sink ProcessImageExecGuard[address],
+                              lock: *i32 @ address) {}
+
+fn process_image_exec_install(
+        pages: sink ProcessImagePages[image]) -> bool {
+    let guard = process_image_exec_lock(&process_image_exec_store.mutex);
+    let previous: ProcessImageExecValue = stable_replace(
+        guard, &process_image_exec_store.mutex,
+        process_image_exec_store.value,
+        ProcessImageExecValue::Ready(pages));
+    match previous {
+        ProcessImageExecValue::Empty => {
+            process_image_exec_unlock(guard, &process_image_exec_store.mutex);
+            return true;
+        }
+        ProcessImageExecValue::Ready(stale) => {
+            let displaced: ProcessImageExecValue = stable_replace(
+                guard, &process_image_exec_store.mutex,
+                process_image_exec_store.value,
+                ProcessImageExecValue::Ready(stale));
+            process_image_exec_unlock(guard, &process_image_exec_store.mutex);
+            match displaced {
+                ProcessImageExecValue::Empty => {}
+                ProcessImageExecValue::Ready(incoming) => {
+                    process_image_unmap(incoming);
+                }
+            }
+            return false;
+        }
+    }
+}
+
+fn process_image_exec_reap() {
+    let guard = process_image_exec_lock(&process_image_exec_store.mutex);
+    let previous: ProcessImageExecValue = stable_replace(
+        guard, &process_image_exec_store.mutex,
+        process_image_exec_store.value, ProcessImageExecValue::Empty);
+    process_image_exec_unlock(guard, &process_image_exec_store.mutex);
+    match previous {
+        ProcessImageExecValue::Empty => {}
+        ProcessImageExecValue::Ready(pages) => {
+            process_image_unmap(pages);
+        }
+    }
+}
+
 // A flat, NUL-terminated argv blob is deliberately used instead of an array
 // of `[]u8` owners: it is plain immutable data, so one builder can consume
 // literal argv values now and a script/path-derived argv later without an

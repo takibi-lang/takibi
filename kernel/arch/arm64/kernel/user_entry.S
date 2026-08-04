@@ -439,6 +439,8 @@ el0_sync_entry:
     b.eq    .Lsyscall_wait_uart
     cmp     x6, #7
     b.eq    .Lsyscall_exec
+    cmp     x6, #8
+    b.eq    .Lsyscall_child_exec
     mov     x16, #8
     b       el1_exception_evidence
 
@@ -497,6 +499,7 @@ el0_sync_entry:
     b       el1_exception_evidence
 
 .Lsyscall_clone_parent:
+    bl      kernel_process_child_exec_reap
     cbz     x7, .Lclone_context_fail
     mov     sp, x7
     EL0_CONTEXT_RESTORE
@@ -530,6 +533,19 @@ el0_sync_entry:
     ldp     x29, x30, [sp, #80]
     add     sp, sp, #96
     ret
+
+.Lsyscall_child_exec:
+    bl      kernel_process_child_exec_prepare
+    cbz     x0, .Lsync_fail
+    bl      kernel_process_child_exec_entry
+    mov     x19, x0
+    bl      kernel_process_child_exec_stack
+    msr     sp_el0, x0
+    msr     elr_el1, x19
+    str     xzr, [sp, #EL0_CONTEXT_X0]
+    EL0_CONTEXT_RESTORE
+    add     sp, sp, #EL0_CONTEXT_SIZE
+    eret
 
 .Lsyscall_resume:
     str     x7, [sp, #EL0_CONTEXT_X0]
