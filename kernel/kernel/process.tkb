@@ -531,6 +531,7 @@ private let mut execution_child_live: bool;
 private let mut execution_clone_calls: usize;
 private let mut execution_child_exit_count: usize;
 private let mut execution_child_exit_status: usize;
+private let mut execution_child_waitable: bool;
 private let mut execution_parent_handle: ProcessHandle;
 private let mut execution_child_handle: ProcessHandle;
 private let mut execution_parent_handle_live: bool;
@@ -592,6 +593,7 @@ fn kernel_process_execution_reset() {
     execution_clone_calls = 0;
     execution_child_exit_count = 0;
     execution_child_exit_status = 0;
+    execution_child_waitable = false;
     execution_parent_handle_live = false;
     execution_child_handle_live = false;
     execution_timer_switches = 0;
@@ -880,6 +882,7 @@ fn kernel_process_current_pid() -> usize {
 fn kernel_process_child_exit(status: usize) -> usize {
     execution_child_exit_status = status;
     execution_child_exit_count = execution_child_exit_count + 1;
+    execution_child_waitable = true;
     execution_child_live = false;
     execution_process = ExecutionProcess::Parent;
     kernel_process_scheduler_disable();
@@ -912,6 +915,15 @@ fn kernel_process_child_exit(status: usize) -> usize {
         }
     }
     return 0;
+}
+
+fn kernel_process_child_waitable() -> bool {
+    return execution_child_waitable && execution_process == ExecutionProcess::Parent;
+}
+
+fn kernel_process_child_wait_status() -> usize {
+    execution_child_waitable = false;
+    return execution_child_exit_status;
 }
 
 fn kernel_process_scheduler_acceptance_evidence() -> bool {

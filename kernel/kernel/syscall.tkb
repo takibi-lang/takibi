@@ -16,6 +16,7 @@ const AARCH64_NR_EXIT: usize = 93;
 const AARCH64_NR_EXIT_GROUP: usize = 94;
 const AARCH64_NR_CLONE: usize = 220;
 const AARCH64_NR_EXECVE: usize = 221;
+const AARCH64_NR_WAIT4: usize = 260;
 const AARCH64_NR_FCNTL: usize = 25;
 const AARCH64_NR_TAKIBI_UART_RX_WAIT: usize = 451;
 const AARCH64_NR_TAKIBI_PARENT_PROGRESS: usize = 452;
@@ -26,6 +27,7 @@ const LINUX_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
 const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
 const LINUX_EAGAIN: usize = 0xFFFFFFFFFFFFFFF5;
 const LINUX_EACCES: usize = 0xFFFFFFFFFFFFFFF3;
+const LINUX_ECHILD: usize = 0xFFFFFFFFFFFFFFF6;
 
 const LINUX_F_DUPFD: usize = 0;
 const LINUX_F_SETFD: usize = 2;
@@ -1924,6 +1926,35 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             return (4, kernel_process_child_exit(x0));
         }
         return (2, x0);
+    }
+    if (number == AARCH64_NR_WAIT4) {
+        // The current one-child clone model resumes the parent directly
+        // after child exit.  Keep the completed child status until the
+        // parent's wait4 call, which is sufficient for ash's synchronous
+        // external-command path without pretending to provide a blocking
+        // multi-child scheduler yet.
+        if (kernel_process_is_child() || x0 != 0xFFFFFFFFFFFFFFFF &&
+            x0 != 2 || x2 != 0) {
+            return (1, LINUX_EINVAL);
+        }
+        if (kernel_process_child_waitable() == false) {
+            return (1, LINUX_ECHILD);
+        }
+        if (x1 != 0) {
+            match user_range_check(x1, 4, UserAccessMode::Write) {
+                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Ok(range) => {
+                    let status: usize = kernel_process_child_wait_status();
+                    if (user_write_u32(range, 0,
+                            ((status & 0xFF) << 8) as u32) == false) {
+                        return (1, LINUX_EFAULT);
+                    }
+                    return (1, 2);
+                }
+            }
+        }
+        let ignored_status: usize = kernel_process_child_wait_status();
+        return (1, 2);
     }
     if (number == 17) {
         // getcwd(): HTTPd immediately changes to its configured root; `/` is

@@ -47,6 +47,7 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 | 215 | munmap | Unsupported-by-design | the fixed short-lived process arena is reclaimed as a unit; not reachable in practice (musl never calls `munmap` in this integration) |
 | 220 | clone | Implemented | `CLONE_VM\|CLONE_VFORK` shape only, matching BusyBox httpd's own observed fork usage |
 | 221 | execve | Partial | parent-only handoff for the registered static BusyBox image; copies pathname/argv, returns to EL1 for image replacement, and intentionally rejects child exec until process-owned image tokens exist |
+| 260 | wait4 | Partial | retrieves the completed one-child clone status once; blocking multi-child wait/reap remains deferred |
 | 222 | mmap | Partial | anonymous-only (`MAP_PRIVATE\|MAP_ANONYMOUS`, `fd=-1`, no `PROT_EXEC`) via a heap-break-cursor emulation, not a real independent mapping; every real call shape musl's mallocng makes satisfies this (verified against pinned musl 1.2.6 source, see issue #175) |
 | 226 | mprotect | Partial | real permission changes for exactly one transition (`RW+XN` <-> `R+XN` on data/heap/stack, issue #174); anything else (adding `PROT_EXEC`, targeting text/rodata, mixed-class ranges) returns a real `EACCES`/`EINVAL`, never false success |
 | 451 | (Takibi-internal) UART RX wait | Implemented | not a real Linux syscall number; this kernel's own blocking-UART-RX primitive |
