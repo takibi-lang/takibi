@@ -2,8 +2,8 @@ use "kernel/mm/page.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/fs/elf64.tkb";
 
-private let mut image_page_indices: [usize; BOOT_PAGE_COUNT];
-private let mut image_l3_indices: [usize; BOOT_PAGE_COUNT];
+private let mut image_page_indices: [usize; BOOT_PAGE_COUNT * 2];
+private let mut image_l3_indices: [usize; BOOT_PAGE_COUNT * 2];
 private let mut process_image_zero_page: [u8; PAGE_SIZE];
 private let mut clone_page_indices: [usize; 512];
 private let mut clone_l3_indices: [usize; 512];
@@ -12,12 +12,44 @@ private let mut clone_last_reaped_count: usize;
 // The active static-PIE image is the only process-image user of root 0.
 // Its initial mappings are recorded at map time; pages faulted into its
 // reserved stack are appended here so process_image_unmap releases them too.
-private let mut process_image_active_page_count: usize;
-private let mut process_image_stack_lowest_l3: usize;
-private let mut process_image_stack_growth_active: bool;
-private let mut process_image_growth_page_indices: [usize; 64];
-private let mut process_image_growth_page_count: usize;
+private let mut process_image_active_page_count: [usize; 2];
+private let mut process_image_stack_lowest_l3: [usize; 2];
+private let mut process_image_stack_growth_active: [bool; 2];
+private let mut process_image_growth_page_indices: [usize; 128];
+private let mut process_image_growth_page_count: [usize; 2];
 private let mut process_image_target_root: usize = 0;
+
+fn process_image_root_index() -> {0..<2 as usize} {
+    if (process_image_target_root < 2) {
+        let root: {0..<2 as usize} = process_image_target_root;
+        return root;
+    }
+    return 0;
+}
+
+fn process_image_context_index(slot: usize)
+        -> {0..<BOOT_PAGE_COUNT * 2 as usize} {
+    if (slot < BOOT_PAGE_COUNT && process_image_target_root < 2) {
+        let index: usize = process_image_target_root * BOOT_PAGE_COUNT + slot;
+        if (index < BOOT_PAGE_COUNT * 2) {
+            let checked: {0..<BOOT_PAGE_COUNT * 2 as usize} = index;
+            return checked;
+        }
+    }
+    return 0;
+}
+
+fn process_image_growth_index(slot: usize)
+        -> {0..<128 as usize} {
+    if (slot < 64 && process_image_target_root < 2) {
+        let index: usize = process_image_target_root * 64 + slot;
+        if (index < 128) {
+            let checked: {0..<128 as usize} = index;
+            return checked;
+        }
+    }
+    return 0;
+}
 
 fn process_image_pte_read(index: usize) -> usize {
     return address_space_pte_read(process_image_target_root, index);
@@ -232,8 +264,9 @@ fn process_image_record(slot: usize,
                         page_index: {0..<BOOT_PAGE_COUNT as usize},
                         l3_index: usize) {
     if (slot < BOOT_PAGE_COUNT) {
-        image_page_indices[slot] = page_index;
-        image_l3_indices[slot] = l3_index;
+        let context_slot: usize = process_image_context_index(slot);
+        image_page_indices[context_slot] = page_index;
+        image_l3_indices[context_slot] = l3_index;
     }
 }
 
@@ -489,8 +522,9 @@ fn process_image_load_page(page: borrow PageOwner[page],
 fn process_image_cleanup(count: usize) {
     for i: usize in 0..<count {
         if (i < BOOT_PAGE_COUNT) {
-            let l3_index: usize = image_l3_indices[i];
-            let page_index: usize = image_page_indices[i];
+            let context_slot: usize = process_image_context_index(i);
+            let l3_index: usize = image_l3_indices[context_slot];
+            let page_index: usize = image_page_indices[context_slot];
             if (l3_index < 512 && page_index < BOOT_PAGE_COUNT) {
                 process_image_pte_write(l3_index, 0);
                 process_image_pte_invalidate(l3_index);
@@ -506,15 +540,17 @@ fn process_image_cleanup(count: usize) {
             process_image_pte_invalidate(l3_index);
         }
     }
-    for i: usize in 0..<process_image_growth_page_count {
+    let root: {0..<2 as usize} = process_image_root_index();
+    for i: usize in 0..<process_image_growth_page_count[root] {
         if (i < 64) {
-            let page_index: usize = process_image_growth_page_indices[i];
+            let growth_offset: {0..<128 as usize} = process_image_growth_index(i);
+            let page_index: usize = process_image_growth_page_indices[growth_offset];
             if (page_index < BOOT_PAGE_COUNT) {
                 page_transferred_release(page_index);
             }
         }
     }
-    process_image_growth_page_count = 0;
+    process_image_growth_page_count[root] = 0;
 }
 
 // Called directly from el0_sync_entry for a lower-EL data-abort translation
@@ -523,9 +559,10 @@ fn process_image_cleanup(count: usize) {
 // gap handles an ABI that subtracts a large stack frame before its first
 // store, while the guard page below the reservation remains unmapped.
 fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
+    let root: {0..<2 as usize} = process_image_root_index();
     let exception_class: usize = (esr >> 26) & 0x3F;
     let fault_status: usize = esr & 0x3F;
-    if (process_image_stack_growth_active == false ||
+    if (process_image_stack_growth_active[root] == false ||
         exception_class != 0x24 || fault_status != 0x07) {
         return false;
     }
@@ -537,11 +574,11 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
     }
     let fault_index: usize = (fault_address - USER_TEXT_VA) / PAGE_SIZE;
     if (fault_index < PROCESS_STACK_GROWTH_FIRST_L3_INDEX ||
-        fault_index >= process_image_stack_lowest_l3) {
+        fault_index >= process_image_stack_lowest_l3[root]) {
         return false;
     }
-    for l3_index: usize in fault_index..<process_image_stack_lowest_l3 {
-        if (process_image_active_page_count >= BOOT_PAGE_COUNT ||
+    for l3_index: usize in fault_index..<process_image_stack_lowest_l3[root] {
+        if (process_image_active_page_count[root] >= BOOT_PAGE_COUNT ||
             process_image_pte_read(l3_index) != 0) {
             return false;
         }
@@ -555,36 +592,36 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
                 process_image_pte_invalidate(l3_index);
                 let page_index = page_owner_transfer_index(stack_page);
                 process_image_record(
-                    process_image_active_page_count, page_index, l3_index);
-                if (process_image_growth_page_count >= 0 &&
-                    process_image_growth_page_count < 64) {
+                    process_image_active_page_count[root], page_index, l3_index);
+                if (process_image_growth_page_count[root] < 64) {
                     for growth_slot: usize in 0..<64 {
                         if (growth_slot + PROCESS_STACK_GROWTH_FIRST_L3_INDEX ==
                             l3_index) {
-                            process_image_growth_page_indices[growth_slot] =
-                                page_index;
+                            let growth_offset: {0..<128 as usize} = process_image_growth_index(growth_slot);
+                            process_image_growth_page_indices[growth_offset] = page_index;
                         }
                     }
-                    process_image_growth_page_count =
-                        process_image_growth_page_count + 1;
+                    process_image_growth_page_count[root] =
+                        process_image_growth_page_count[root] + 1;
                 }
-                process_image_active_page_count =
-                    process_image_active_page_count + 1;
+                process_image_active_page_count[root] =
+                    process_image_active_page_count[root] + 1;
             }
         }
     }
-    process_image_stack_lowest_l3 = fault_index;
+    process_image_stack_lowest_l3[root] = fault_index;
     return true;
 }
 
 fn process_image_unmap(pages: sink ProcessImagePages[image]) {
+    let root: {0..<2 as usize} = process_image_root_index();
     let mut count: usize = pages.count;
-    if (process_image_stack_growth_active ||
-        process_image_active_page_count > pages.count) {
-        count = process_image_active_page_count;
-        process_image_stack_growth_active = false;
-        process_image_active_page_count = 0;
-        process_image_stack_lowest_l3 = PROCESS_STACK_L3_INDEX;
+    if (process_image_stack_growth_active[root] ||
+        process_image_active_page_count[root] > pages.count) {
+        count = process_image_active_page_count[root];
+        process_image_stack_growth_active[root] = false;
+        process_image_active_page_count[root] = 0;
+        process_image_stack_lowest_l3[root] = PROCESS_STACK_L3_INDEX;
     }
     process_image_cleanup(count);
     process_image_target_root = 0;
@@ -829,10 +866,11 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
 fn process_image_map_current(plan: DistroElfLoadPlan,
                              argv: []u8,
                              argc: usize) -> ProcessImageMapResult {
-    process_image_stack_growth_active = false;
-    process_image_active_page_count = 0;
-    process_image_growth_page_count = 0;
-    process_image_stack_lowest_l3 = PROCESS_STACK_L3_INDEX;
+    let root: {0..<2 as usize} = process_image_root_index();
+    process_image_stack_growth_active[root] = false;
+    process_image_active_page_count[root] = 0;
+    process_image_growth_page_count[root] = 0;
+    process_image_stack_lowest_l3[root] = PROCESS_STACK_L3_INDEX;
     if (plan.extent > 0x200000) {
         return ProcessImageMapResult::OutOfMemory;
     }
@@ -913,8 +951,8 @@ fn process_image_map_current(plan: DistroElfLoadPlan,
     let mut pages: ProcessImagePages[0] = {
         image, mapped, entry, stack_pointer, heap_start, heap_limit
     };
-    process_image_active_page_count = mapped;
-    process_image_stack_growth_active = true;
+    process_image_active_page_count[root] = mapped;
+    process_image_stack_growth_active[root] = true;
     return ProcessImageMapResult::Mapped(pages);
 }
 
@@ -947,8 +985,9 @@ fn process_image_stack_pointer(pages: borrow ProcessImagePages[image]) -> usize 
 }
 
 fn process_image_stack_grew(pages: borrow ProcessImagePages[image]) -> bool {
-    return process_image_stack_growth_active &&
-           process_image_active_page_count > pages.count;
+    let root: {0..<2 as usize} = process_image_root_index();
+    return process_image_stack_growth_active[root] &&
+           process_image_active_page_count[root] > pages.count;
 }
 
 fn process_image_heap_range(pages: borrow ProcessImagePages[image])
