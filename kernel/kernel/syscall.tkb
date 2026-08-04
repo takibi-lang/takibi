@@ -15,6 +15,7 @@ const AARCH64_NR_UNAME: usize = 160;
 const AARCH64_NR_EXIT: usize = 93;
 const AARCH64_NR_EXIT_GROUP: usize = 94;
 const AARCH64_NR_CLONE: usize = 220;
+const AARCH64_NR_EXECVE: usize = 221;
 const AARCH64_NR_FCNTL: usize = 25;
 const AARCH64_NR_TAKIBI_UART_RX_WAIT: usize = 451;
 const AARCH64_NR_TAKIBI_PARENT_PROGRESS: usize = 452;
@@ -122,12 +123,20 @@ private let mut clone_parent_inetd_mode: bool;
 private let mut clone_file_state_live: bool;
 private let mut syscall_connected_fixture_pending: bool;
 private let mut syscall_httpd_daemon_pending: bool;
+private let mut syscall_exec_pending: bool;
+private let mut syscall_exec_argc: usize;
+private let mut syscall_exec_argv: [u8; 512];
 
 must_use variant SyscallPathResult { Fault; Invalid; Name(usize); }
 
 fn kernel_syscall_httpd_daemon_start() {
     syscall_httpd_daemon_pending = true;
 }
+
+fn kernel_syscall_exec_pending() -> bool { return syscall_exec_pending; }
+fn kernel_syscall_exec_argc() -> usize { return syscall_exec_argc; }
+fn kernel_syscall_exec_argv() -> []u8 { return syscall_exec_argv as []u8; }
+fn kernel_syscall_exec_clear() { syscall_exec_pending = false; }
 
 fn kernel_syscall_connected_fixture_start() {
     syscall_connected_fixture_pending = true;
@@ -238,6 +247,8 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_read_calls = 0;
     syscall_file_write_calls = 0;
     syscall_close_calls = 0;
+    syscall_exec_pending = false;
+    syscall_exec_argc = 0;
     tcp_connection_pool_init();
     for connection_index: usize in 0..<TCP_CONNECTION_MAX {
         syscall_connection_open[connection_index] = false;
@@ -1758,6 +1769,93 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
            }
           }
         }
+    }
+
+    if (number == AARCH64_NR_EXECVE) {
+        // First handoff slice: only the current parent image may request an
+        // exec. The child path still needs a process-owned image token and is
+        // deliberately rejected until the general child lifecycle lands.
+        if (kernel_process_is_child() || syscall_exec_pending) {
+            return (1, LINUX_EAGAIN);
+        }
+        let path_code: usize = match kernel_syscall_path_name(x0) {
+            SyscallPathResult::Fault => { return (1, LINUX_EFAULT); }
+            SyscallPathResult::Invalid => { return (1, LINUX_ENOENT); }
+            SyscallPathResult::Name(path) => { path }
+        };
+        let mut path_length: usize = path_code % 256;
+        let path_view: []u8 = syscall_path_buffer as []u8;
+        if (path_view[0] == 0x2F) { path_length = path_length + 1; }
+        if (path_length == 0 || x1 == 0) { return (1, LINUX_EINVAL); }
+        let exec_path_absolute: bool = path_view[0] == 0x2F;
+        let mut output_offset: usize = 0;
+        let mut argc: usize = 0;
+        let mut vector_terminated: bool = false;
+        for index: usize in 0..<8 {
+            let entry_offset: usize = index * 8;
+            let entry_address: usize = match checked_add_usize(x1, entry_offset) {
+                CheckedUsize::Overflow => { return (1, LINUX_EFAULT); }
+                CheckedUsize::Value(v) => { v }
+            };
+            match user_range_check(entry_address, 8, UserAccessMode::Read) {
+                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Ok(range) => {
+                    let (ok, string_address) = user_read_u64(range, 0);
+                    if (ok == false) { return (1, LINUX_EFAULT); }
+                    if (string_address == 0) {
+                        vector_terminated = true;
+                    } else {
+                        let string_code: usize = match kernel_syscall_path_name(
+                                string_address as usize) {
+                            SyscallPathResult::Fault => {
+                                return (1, LINUX_EFAULT);
+                            }
+                            SyscallPathResult::Invalid => {
+                                return (1, LINUX_EINVAL);
+                            }
+                            SyscallPathResult::Name(path) => { path }
+                        };
+                        let mut string_length: usize = string_code % 256;
+                        if (path_view[0] == 0x2F) {
+                            string_length = string_length + 1;
+                        }
+                        match checked_add_usize(output_offset,
+                                                string_length + 1) {
+                            CheckedUsize::Overflow => {
+                                return (1, LINUX_EINVAL);
+                            }
+                            CheckedUsize::Value(end) => {
+                                if (end > 512 || argc >= 8) {
+                                    return (1, LINUX_EINVAL);
+                                }
+                                let exec_argv_view: []u8 =
+                                    syscall_exec_argv as []u8;
+                                let copied: usize = slice_copy(
+                                    unsafe { exec_argv_view[
+                                        output_offset..<end] },
+                                    unsafe { path_view[0..<string_length + 1] });
+                                if (copied != string_length + 1) {
+                                    return (1, LINUX_EFAULT);
+                                }
+                                output_offset = end;
+                                argc = argc + 1;
+                            }
+                        }
+                    }
+                }
+            }
+            if (vector_terminated) { break; }
+        }
+        if (vector_terminated == false || argc == 0 ||
+            path_length == 0) {
+            return (1, LINUX_EINVAL);
+        }
+        // Keep the path validation explicit even though this first image
+        // registry currently contains one static BusyBox ELF.
+        if (exec_path_absolute == false) { return (1, LINUX_ENOENT); }
+        syscall_exec_argc = argc;
+        syscall_exec_pending = true;
+        return (7, 7);
     }
 
     if (number == AARCH64_NR_CLONE) {

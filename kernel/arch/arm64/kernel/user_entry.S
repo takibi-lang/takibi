@@ -437,6 +437,8 @@ el0_sync_entry:
     b.eq    .Lsyscall_block
     cmp     x6, #6
     b.eq    .Lsyscall_wait_uart
+    cmp     x6, #7
+    b.eq    .Lsyscall_exec
     mov     x16, #8
     b       el1_exception_evidence
 
@@ -515,6 +517,19 @@ el0_sync_entry:
      * between the ppoll readiness check and entering the wait. */
     wfe
     b       .Lsyscall_dispatch
+
+.Lsyscall_exec:
+    /* Return to the EL1 image owner with the pending exec request. */
+    mov     x0, x7
+    add     sp, sp, #EL0_CONTEXT_SIZE
+    ldp     x19, x20, [sp, #0]
+    ldp     x21, x22, [sp, #16]
+    ldp     x23, x24, [sp, #32]
+    ldp     x25, x26, [sp, #48]
+    ldp     x27, x28, [sp, #64]
+    ldp     x29, x30, [sp, #80]
+    add     sp, sp, #96
+    ret
 
 .Lsyscall_resume:
     str     x7, [sp, #EL0_CONTEXT_X0]

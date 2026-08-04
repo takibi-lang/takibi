@@ -275,7 +275,8 @@ fn process_image_prepare_stack(page: borrow PageOwner[page],
     // `for byte in argv` is the slice-safe iterator form: argv may later be
     // runtime data, but no unproved index is introduced while scanning it.
     for byte in argv {
-        if (arg >= argc || string_offset >= PROCESS_STACK_LAYOUT_SIZE) {
+        if (arg >= argc) { break; }
+        if (string_offset >= PROCESS_STACK_LAYOUT_SIZE) {
             return ProcessImageStackResult::Invalid;
         }
         let tail: *u8 = (physical_base + string_offset) as *u8;
