@@ -70,12 +70,14 @@ fn freelist_core_init(core: *FreelistCore, backing: []usize) {
     let n: usize = backing.len;
     let mut next_free = backing;
     for i: usize in 0..<n {
-        // GitHub issue #213: `i`'s proven range is {0..<n}, and n ==
+        // GitHub issue #215: `i`'s proven range is {0..<n}, and n ==
         // next_free.len by construction, but the checker does not know
         // those two runtime values are the same one -- a relational-bounds
         // gap, not a real safety hole (this is the only place `n` is
-        // used). Runtime trap accepted here; see this file's Makefile
-        // rule, which drops --forbid-trap for this one target.
+        // used; #215 also notes the even narrower direct case `for i in
+        // 0..<next_free.len` already traps too). Runtime trap accepted
+        // here; see this file's Makefile rule, which drops --forbid-trap
+        // for this one target.
         next_free[i] = i + 1;
     }
     core.next_free = next_free;
@@ -100,11 +102,12 @@ fn freelist_core_pop(core: *FreelistCore) -> FreelistPopResult {
 
 fn freelist_core_push(core: *FreelistCore, owner: sink FreelistOwner[allocation]) {
     let mut next_free = core.next_free;
-    // GitHub issue #213: owner.index is only ever produced by
+    // GitHub issue #216: owner.index is only ever produced by
     // freelist_core_pop from this same core's next_free, so it is always
     // in range in practice, but that fact crosses a function-call boundary
     // (a proof the checker does not carry across calls today, unlike the
-    // same-scope relational case above). Runtime trap accepted here.
+    // same-scope relational case in freelist_core_pop, fixed by #213).
+    // Runtime trap accepted here.
     next_free[owner.index] = core.free_head;
     core.free_head = owner.index;
 }
