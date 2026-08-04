@@ -39,12 +39,17 @@ fn slot_owner_new(index: {0..<POOL_COUNT as usize},
     return owner;
 }
 
+// free_head and next_generation are covered by their own global
+// initializers below and do not need to be reset here (they are only
+// ever set once, matching page_pool_core.tkb's page_pool_init, which
+// likewise never resets its own next_generation). Only next_free's
+// per-element content has no static-initializer form available (array
+// literals like `[1, 2, 3, 4]` are not supported syntax -- confirmed by
+// trying), so it is the one thing this function actually has to do.
 fn freelist_pool_init() {
     for i: usize in 0..<POOL_COUNT {
         next_free[i] = i + 1;
     }
-    free_head = 0;
-    next_generation = 1;
 }
 
 fn slot_alloc() -> SlotAllocResult {
