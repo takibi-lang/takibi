@@ -7,7 +7,7 @@
 // this is a genuinely different mechanism, not a renamed copy.
 //
 // Also demonstrates per-slot content that this caller (not
-// freelist_pool_core.tkb) decides: SlotOwner stays index+generation only
+// freelist_pool_core.tkb) decides: FreelistOwner stays index+generation only
 // (the "core" never learns what a usize payload even means), and this file
 // keeps its own [usize; POOL_COUNT] array plus payload_set/payload_get
 // accessors keyed by slot_index(owner) -- the same split page_pool_core.tkb
@@ -23,11 +23,11 @@ use "linux_user/freelist_pool/freelist_pool_core.tkb";
 
 private let mut slot_payload: [usize; POOL_COUNT];
 
-fn payload_set(owner: borrow SlotOwner[allocation], value: usize) {
+fn payload_set(owner: borrow FreelistOwner[allocation], value: usize) {
     slot_payload[slot_index(owner)] = value;
 }
 
-fn payload_get(owner: borrow SlotOwner[allocation]) -> usize {
+fn payload_get(owner: borrow FreelistOwner[allocation]) -> usize {
     return slot_payload[slot_index(owner)];
 }
 
@@ -35,29 +35,29 @@ fn app_main() {
     freelist_pool_init();
     uart_puts("freelist_pool\n");
 
-    let a: exists sa: usize. SlotOwner[sa] = match slot_alloc() {
-        SlotAllocResult::OutOfMemory => {
+    let a: exists sa: usize. FreelistOwner[sa] = match freelist_pop() {
+        FreelistPopResult::Empty => {
             uart_puts("alloc a failed\n");
             return;
         }
-        SlotAllocResult::Allocated(o) => { o }
+        FreelistPopResult::Allocated(o) => { o }
     };
-    let b: exists sb: usize. SlotOwner[sb] = match slot_alloc() {
-        SlotAllocResult::OutOfMemory => {
+    let b: exists sb: usize. FreelistOwner[sb] = match freelist_pop() {
+        FreelistPopResult::Empty => {
             uart_puts("alloc b failed\n");
-            slot_free(a);
+            freelist_push(a);
             return;
         }
-        SlotAllocResult::Allocated(o) => { o }
+        FreelistPopResult::Allocated(o) => { o }
     };
-    let c: exists sc: usize. SlotOwner[sc] = match slot_alloc() {
-        SlotAllocResult::OutOfMemory => {
+    let c: exists sc: usize. FreelistOwner[sc] = match freelist_pop() {
+        FreelistPopResult::Empty => {
             uart_puts("alloc c failed\n");
-            slot_free(a);
-            slot_free(b);
+            freelist_push(a);
+            freelist_push(b);
             return;
         }
-        SlotAllocResult::Allocated(o) => { o }
+        FreelistPopResult::Allocated(o) => { o }
     };
 
     uart_puts("allocated: ");
@@ -79,35 +79,35 @@ fn app_main() {
     uart_print(payload_get(c));
     uart_puts("\n");
 
-    slot_free(a);
-    slot_free(b);
+    freelist_push(a);
+    freelist_push(b);
 
-    let r1: exists s1: usize. SlotOwner[s1] = match slot_alloc() {
-        SlotAllocResult::OutOfMemory => {
+    let r1: exists s1: usize. FreelistOwner[s1] = match freelist_pop() {
+        FreelistPopResult::Empty => {
             uart_puts("reuse 1 failed\n");
-            slot_free(c);
+            freelist_push(c);
             return;
         }
-        SlotAllocResult::Allocated(o) => { o }
+        FreelistPopResult::Allocated(o) => { o }
     };
-    let r2: exists s2: usize. SlotOwner[s2] = match slot_alloc() {
-        SlotAllocResult::OutOfMemory => {
+    let r2: exists s2: usize. FreelistOwner[s2] = match freelist_pop() {
+        FreelistPopResult::Empty => {
             uart_puts("reuse 2 failed\n");
-            slot_free(r1);
-            slot_free(c);
+            freelist_push(r1);
+            freelist_push(c);
             return;
         }
-        SlotAllocResult::Allocated(o) => { o }
+        FreelistPopResult::Allocated(o) => { o }
     };
-    let r3: exists s3: usize. SlotOwner[s3] = match slot_alloc() {
-        SlotAllocResult::OutOfMemory => {
+    let r3: exists s3: usize. FreelistOwner[s3] = match freelist_pop() {
+        FreelistPopResult::Empty => {
             uart_puts("reuse 3 failed\n");
-            slot_free(r1);
-            slot_free(r2);
-            slot_free(c);
+            freelist_push(r1);
+            freelist_push(r2);
+            freelist_push(c);
             return;
         }
-        SlotAllocResult::Allocated(o) => { o }
+        FreelistPopResult::Allocated(o) => { o }
     };
 
     uart_puts("reused (LIFO order: b's slot, then a's slot, ");
@@ -145,21 +145,21 @@ fn app_main() {
     uart_print(payload_get(r3));
     uart_puts("\n");
 
-    match slot_alloc() {
-        SlotAllocResult::OutOfMemory => {
+    match freelist_pop() {
+        FreelistPopResult::Empty => {
             uart_puts("pool exhausted as expected\n");
         }
-        SlotAllocResult::Allocated(o) => {
+        FreelistPopResult::Allocated(o) => {
             uart_puts("unexpected extra allocation: ");
             uart_print(slot_index(o));
             uart_puts("\n");
-            slot_free(o);
+            freelist_push(o);
         }
     }
 
-    slot_free(r1);
-    slot_free(r2);
-    slot_free(r3);
-    slot_free(c);
+    freelist_push(r1);
+    freelist_push(r2);
+    freelist_push(r3);
+    freelist_push(c);
     uart_puts("done\n");
 }
