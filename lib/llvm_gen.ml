@@ -3738,7 +3738,19 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                      raise (Error (Printf.sprintf "AssignIndex: undefined variable '%s'" id))));
            (TypeVoid, const_null (i1_type context))
        | FieldGet (base_expr, fname) ->
-           let (base_ty, base_v) = gen_expr locals base_expr in
+           (* GitHub issue #211: a dereferenced-pointer field assignment's
+              base is syntactically a Deref. Evaluating it with the general
+              gen_expr (as the read path does) loads the whole struct into
+              an SSA value -- correct for a read (gen_expr's own FieldGet
+              case recovers from this with extractvalue), but an assignment
+              needs an address to store into, and a loaded value has none.
+              A dereferenced pointer's address is just the pointer itself,
+              so evaluate the pointer being dereferenced directly instead
+              of loading through it. *)
+           let (base_ty, base_v) = match base_expr.desc with
+             | Deref inner -> gen_expr locals inner
+             | _ -> gen_expr locals base_expr
+           in
            let (sname, through_io, base_ptr) = match base_ty with
              | TypeNamed s                      -> (s, false, base_v)
              | TypePtr (TypeNamed s)            -> (s, false, base_v)

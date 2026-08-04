@@ -7306,6 +7306,34 @@ let codegen_tests = [
        | None -> Alcotest.fail "function 'codegen_io_indexed_store' not found");
 
   Alcotest.test_case
+    "assigning to a field through a dereferenced struct pointer codegens \
+     a GEP on the pointer, not on a loaded struct value \
+     (regression: GitHub issue #211 -- gen_expr's Deref case loads the \
+     whole struct for a read, and the old Assign/FieldGet codegen called \
+     it unconditionally, so getelementptr ran on that loaded aggregate \
+     value instead of the pointer, which LLVM's IR verifier rejects)"
+    `Quick
+    (expect_codegen_ok
+       "struct CodegenPair { a: usize; b: usize; }
+        fn codegen_deref_field_store(p: *CodegenPair) -> usize {
+          (*p).a = 1;
+          return (*p).a;
+        }");
+
+  Alcotest.test_case
+    "assigning to an array field through a dereferenced struct pointer \
+     codegens without crashing (same regression as the scalar-field case \
+     above, GitHub issue #211, confirmed to hit the same codegen path \
+     with an aggregate array-typed field instead of a scalar one)"
+    `Quick
+    (expect_codegen_ok
+       "struct CodegenPoolState { data: [usize; 4]; head: usize; }
+        fn codegen_deref_array_field_store(p: *CodegenPoolState) -> usize {
+          (*p).head = 1;
+          return (*p).head;
+        }");
+
+  Alcotest.test_case
     "u8 loaded via array indexing compares against a u8 cast literal \
      (regression: both must be i32-widened in-flight, or LLVM's verifier \
      rejects the mismatched icmp operand widths)" `Quick
