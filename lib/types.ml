@@ -547,6 +547,14 @@ let rec of_ast_in_scope scope = function
   | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t ->
       of_ast_in_scope scope t
   | Ast.TypeAlignedPtr (n, t) -> TAlignedPtr (n, of_ast_in_scope scope t)
+  | Ast.TypeKind ->
+      raise (TypeError (Lexing.dummy_pos,
+        "'type' is only valid as a generic parameter's declared type; \
+         generics are not implemented yet (GitHub issue #207)"))
+  | Ast.TypeGenericInst (name, _) ->
+      raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+        "'%s(...)' is a generic instantiation, which is not implemented \
+         yet (GitHub issue #207)" name))
 
 let of_ast t = of_ast_in_scope (create_static_scope ()) t
 

@@ -66,6 +66,8 @@ rule read = parse
   | "sizeof"  { SIZEOF }
   | "use"     { USE }
   | "offsetof" { OFFSETOF }
+  | "type"    { TYPE }
+  | "generic" { GENERIC }
 
   | '{' { LBRACE }
   | '}' { RBRACE }

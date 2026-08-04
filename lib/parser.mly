@@ -132,6 +132,7 @@ let promote_be_field_type = function
 %token <string> IDENT
 %token <string> STRING
 %token FN INLINE RETURN CONST LET MUT EXTERN STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE
+%token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
 %token ASSIGN DOT
@@ -679,6 +680,9 @@ base_type_expr:
   | U32BE_TYPE { TypeU32Be }
   | ISIZE_TYPE { TypeIsize }
   | USIZE_TYPE { TypeUsize }
+  | TYPE       { TypeKind }
+    (* GitHub issue #207: the pseudo-type of a compile-time type value,
+       e.g. `fn freelist_init(T: type, ...)`. No runtime representation. *)
   | IO         type_expr { lift_singleton (fun t -> TypeIo t) $2 }
   | TIMES      type_expr { lift_singleton (fun t -> TypePtr t) $2 }
   | TIMES ALIGN LPAREN n = alignment_value RPAREN t = type_expr
@@ -704,6 +708,17 @@ base_type_expr:
     { TypeTuple (t1 :: t2 :: ts) }
   | name = IDENT LBRACKET args = separated_nonempty_list(COMMA, static_arg) RBRACKET
     { TypeIndexed (name, args) }
+  | name = IDENT LPAREN args = separated_nonempty_list(COMMA, type_expr) RPAREN
+    { TypeGenericInst (name, args) }
+    (* GitHub issue #207: Name(T1, T2, ...) -- a generic struct/variant
+       instantiated with concrete type arguments, e.g. `Freelist(Page)`.
+       Unambiguous against the bare `IDENT -> TypeNamed` rule below (one
+       token of lookahead: LPAREN or not) and, deliberately, against the
+       TypeIndexed bracket rule just above -- parens for type parameters
+       (need monomorphization), brackets stay reserved for today's erased
+       *value*-identity static arguments (checker-only, zero runtime
+       cost). Keeping these two visually distinct was an explicit design
+       goal, not an accident. *)
   | IDENT { TypeNamed $1 }
 
 static_arg:

@@ -66,6 +66,25 @@ type type_expr =
     (* Name[n, ...] -- a runtime named value indexed by erased static
        integers. The named value keeps its ordinary runtime layout; only
        the arguments disappear after type checking. *)
+  | TypeKind
+    (* `type` -- the pseudo-type of a compile-time type value. Valid only
+       as a generic parameter's declared type (`fn f(T: type, ...)`) or
+       (once monomorphization exists) as a generic function's return type.
+       Has no runtime representation at all; a value of this "type" never
+       exists at runtime, matching this language's zero-cost-abstraction
+       ethos -- unlike TypeIndexed's `[n, ...]` (an erased, checker-only
+       *value* identity with zero runtime cost but still a real value),
+       TypeKind parameters are resolved away entirely by monomorphization
+       before codegen ever runs. GitHub issue #207 (generics). *)
+  | TypeGenericInst of string * type_expr list
+    (* Name(T1, T2, ...) -- a generic struct/variant instantiated with
+       concrete type arguments, e.g. `Freelist(Page)`. Deliberately a
+       different grammar shape (parens, not TypeIndexed's brackets) so a
+       type parameter (needs monomorphization) and TypeIndexed's erased
+       *value*-identity static argument (checker-only, same representation
+       as the unindexed type) stay visually and structurally distinct --
+       see SPEC.md's "Indexed Runtime Owners" for the existing bracket
+       form this is deliberately NOT reusing. GitHub issue #207. *)
   | TypeSingleton of type_expr * static_arg
     (* T @ n -- a runtime integer or pointer T whose value/identity is also
        available as an erased static argument. *)

@@ -169,6 +169,9 @@ let rec show_type = function
   | Ast.TypeAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (show_type t)
   | Ast.TypeTuple ts ->
       Printf.sprintf "(%s)" (String.concat ", " (List.map show_type ts))
+  | Ast.TypeKind -> "type"
+  | Ast.TypeGenericInst (name, args) ->
+      Printf.sprintf "%s(%s)" name (String.concat ", " (List.map show_type args))
 
 let type_t : Ast.type_expr Alcotest.testable =
   Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)
@@ -6389,6 +6392,28 @@ let infer_tests = [
        "only u16be <-> u16 or u32be <-> u32 is a legal conversion"
        "struct packed WireHdr { magic: u16be; seq: u32be; }
         fn bad_cross(h: *WireHdr) -> u32be { return h.magic as u32be; }");
+
+  (* GitHub issue #207: generics grammar (`type` keyword, `Name(T)`
+     instantiation) parses today, ahead of monomorphization actually
+     existing -- both must be rejected with a clear, non-crashing error at
+     type-check time rather than silently mis-elaborating or reaching
+     codegen. *)
+  Alcotest.test_case "a `type`-typed parameter parses but is rejected \
+                       (generics not implemented yet, issue #207)" `Quick
+    (expect_type_error
+       "generics are not implemented yet"
+       "fn identity(T: type, x: usize) -> usize { return x; }
+        fn use_identity() -> usize { return identity(5); }");
+
+  Alcotest.test_case "Name(T) generic instantiation parses but is rejected \
+                       (generics not implemented yet, issue #207)" `Quick
+    (expect_type_error
+       "is a generic instantiation, which is not implemented yet"
+       "struct Widget { value: usize; }
+        fn use_widget() -> usize {
+          let mut w: Widget(usize);
+          return w.value;
+        }");
 
 ]
 

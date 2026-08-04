@@ -603,6 +603,9 @@ let rec ty_str = function
   | TypeAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (ty_str t)
   | TypeTuple ts ->
       Printf.sprintf "(%s)" (String.concat ", " (List.map ty_str ts))
+  | TypeKind -> "type"
+  | TypeGenericInst (name, args) ->
+      Printf.sprintf "%s(%s)" name (String.concat ", " (List.map ty_str args))
 
 (* ---- DWARF debug info (opt-in via -g; see enable_debug_info) ----
    Everything DI-related elsewhere in this file (gen_func / gen_stmt / gen_program)
@@ -1200,6 +1203,17 @@ let rec ltype_of_ast = function
   | TypeBorrow t | TypeSink t -> ltype_of_ast t
   | TypeBorrowMut _ -> pointer_type context
   | TypeAlignedPtr _ -> pointer_type context
+  | TypeKind ->
+      raise (Error
+        "BUG: 'type' reached codegen unresolved (should have been \
+         rejected by type_inf -- generics are not implemented yet, \
+         GitHub issue #207)")
+  | TypeGenericInst (name, _) ->
+      raise (Error (Printf.sprintf
+        "BUG: generic instantiation '%s(...)' reached codegen unresolved \
+         (should have been rejected by type_inf or resolved by \
+         monomorphization -- generics are not implemented yet, GitHub \
+         issue #207)" name))
 
 (* DWARF Attribute Type Encoding constants (DWARF5 spec section 7.8, table 7.11).
    Llvm_debuginfo has no named enum for these -- they're stable spec constants,
@@ -1430,6 +1444,12 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
                Hashtbl.remove di_struct_in_progress sname;
                Hashtbl.add di_struct_types sname struct_ty;
                struct_ty)
+       | TypeKind | TypeGenericInst _ ->
+           raise (Error (Printf.sprintf
+             "BUG: '%s' reached DWARF codegen unresolved (should have been \
+              rejected by type_inf or resolved by monomorphization -- \
+              generics are not implemented yet, GitHub issue #207)"
+             (ty_str ty)))
 
 (* True for unsigned integer types (use udiv/urem/icmp ult etc.). Recurses
    into a refined type's own base -- this is what fixes the BinOp i32/i64
@@ -1649,6 +1669,11 @@ let rec coerce v (dst : Ast.type_expr) =
   | TypeBorrow t | TypeSink t -> coerce v t
   | TypeBorrowMut _ -> v
   | TypeView _ -> v
+  | TypeKind | TypeGenericInst _ ->
+      raise (Error (Printf.sprintf
+        "BUG: '%s' reached codegen coercion unresolved (should have been \
+         rejected by type_inf or resolved by monomorphization -- generics \
+         are not implemented yet, GitHub issue #207)" (ty_str dst)))
 
 (* Normalize an index/offset value to usize width for use as a GEP index --
    used by Index/AssignIndex/SliceOf. The old path unconditionally
@@ -3911,6 +3936,12 @@ let gen_func ?prog_types fdef =
     | TypeView _ | TypeAlignedPtr _ | TypePtr _ | TypeFn _
     | TypeI8 | TypeU8 | TypeI16 | TypeU16 | TypeU16Be | TypeI32 | TypeU32 | TypeU32Be
     | TypeI64 | TypeU64 | TypeUsize | TypeIsize | TypeBool | TypeVoid -> false
+    | TypeKind | TypeGenericInst _ ->
+        (* Unreachable in practice -- ltype_of_ast already rejects these
+           before codegen gets this far (generics are not implemented yet,
+           GitHub issue #207); `false` is a harmless default rather than
+           an extra raise on a path nothing should ever take. *)
+        false
   in
 
   (* Runtime parameters use allocas as before. Erased view parameters occupy

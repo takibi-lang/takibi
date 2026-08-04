@@ -161,6 +161,10 @@ let rec size_align_of_type pos seen ty =
                        walk (offset + fsz) (max max_align falign) rest
                  in
                  walk 0 1 fields)
+  | TypeKind -> fail pos "'type' has no runtime size or alignment"
+  | TypeGenericInst (name, _) -> fail pos (Printf.sprintf
+      "generic instantiation '%s(...)' is not implemented yet \
+       (GitHub issue #207)" name)
 
 let sizeof_type pos ty =
   let (sz, _) = size_align_of_type pos [] ty in
