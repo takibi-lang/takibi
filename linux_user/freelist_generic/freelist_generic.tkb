@@ -6,6 +6,12 @@
 // mirrors freelist_pool.tkb's own established rigor for the non-generic
 // prototype this design grew out of: allocate, LIFO-reuse-after-free,
 // the "freeing does not clear payload" property, and pool exhaustion.
+//
+// Every allocation below reads `let a = match freelist_insert(&pool) {
+// ... };` with no type annotation at all -- a later issue #207 follow-up
+// made LetMatch's own `: ty` optional, inferred from what the (fully
+// explicit, no wildcard) arms `Yield`, closing the gap between this and
+// the original approved plan's own mockup.
 
 use "linux_user/freelist_generic/freelist.tkb";
 
@@ -25,11 +31,11 @@ private let mut point_data_store: [Point; 2];
 fn app_main() {
     freelist_init(&usize_pool, usize_index_store as []usize, usize_data_store as []usize);
 
-    let a: exists sa: usize. FreelistOwner[sa] = match freelist_insert(&usize_pool) {
+    let a = match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => { uart_puts("alloc a failed\n"); return; }
         FreelistPopResult::Popped(o) => { o }
     };
-    let b: exists sb: usize. FreelistOwner[sb] = match freelist_insert(&usize_pool) {
+    let b = match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => {
             uart_puts("alloc b failed\n");
             freelist_remove(&usize_pool, a);
@@ -37,7 +43,7 @@ fn app_main() {
         }
         FreelistPopResult::Popped(o) => { o }
     };
-    let c: exists sc: usize. FreelistOwner[sc] = match freelist_insert(&usize_pool) {
+    let c = match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => {
             uart_puts("alloc c failed\n");
             freelist_remove(&usize_pool, a);
@@ -62,7 +68,7 @@ fn app_main() {
     freelist_remove(&usize_pool, a);
     freelist_remove(&usize_pool, b);
 
-    let r1: exists s1: usize. FreelistOwner[s1] = match freelist_insert(&usize_pool) {
+    let r1 = match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => {
             uart_puts("reuse 1 failed\n");
             freelist_remove(&usize_pool, c);
@@ -70,7 +76,7 @@ fn app_main() {
         }
         FreelistPopResult::Popped(o) => { o }
     };
-    let r2: exists s2: usize. FreelistOwner[s2] = match freelist_insert(&usize_pool) {
+    let r2 = match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => {
             uart_puts("reuse 2 failed\n");
             freelist_remove(&usize_pool, r1);
@@ -118,11 +124,11 @@ fn app_main() {
     // (the exact shape a real 4KB-page pool would rely on).
     freelist_init(&point_pool, point_index_store as []usize, point_data_store as []Point);
 
-    let p1: exists sp1: usize. FreelistOwner[sp1] = match freelist_insert(&point_pool) {
+    let p1 = match freelist_insert(&point_pool) {
         FreelistPopResult::Empty => { uart_puts("alloc p1 failed\n"); return; }
         FreelistPopResult::Popped(o) => { o }
     };
-    let p2: exists sp2: usize. FreelistOwner[sp2] = match freelist_insert(&point_pool) {
+    let p2 = match freelist_insert(&point_pool) {
         FreelistPopResult::Empty => {
             uart_puts("alloc p2 failed\n");
             freelist_remove(&point_pool, p1);
