@@ -1,0 +1,117 @@
+// Exercises freelist_core.tkb directly (no generic wrapper yet -- that is
+// a later step in the approved generics plan). Same alloc/free/LIFO-reuse/
+// exhaustion shape as linux_user/freelist_pool/freelist_pool.tkb, but the
+// pool's capacity now comes purely from the backing_storage array's own length,
+// not from a POOL_COUNT constant baked into freelist_core.tkb.
+
+use "linux_user/freelist_generic/freelist_core.tkb";
+
+// Global, not a local: a slice derived from a local (stack) array is
+// rejected when passed to a retaining (non-borrow) parameter -- confirmed
+// by trying it -- exactly matching how every existing pool in this
+// codebase (boot_pages, page_pool, etc.) already backs its storage with a
+// global, not a stack local. SPEC.md's Slices section: "Global-array and
+// string-literal storage are not stack-tied."
+private let mut backing_storage: [usize; 4];
+private let mut pool_core: FreelistCore;
+
+fn app_main() {
+    freelist_core_init(&pool_core, backing_storage as []usize);
+    uart_puts("freelist_core\n");
+
+    let a: exists sa: usize. FreelistOwner[sa] = match freelist_core_pop(&pool_core) {
+        FreelistPopResult::Empty => {
+            uart_puts("alloc a failed\n");
+            return;
+        }
+        FreelistPopResult::Popped(o) => { o }
+    };
+    let b: exists sb: usize. FreelistOwner[sb] = match freelist_core_pop(&pool_core) {
+        FreelistPopResult::Empty => {
+            uart_puts("alloc b failed\n");
+            freelist_core_push(&pool_core, a);
+            return;
+        }
+        FreelistPopResult::Popped(o) => { o }
+    };
+    let c: exists sc: usize. FreelistOwner[sc] = match freelist_core_pop(&pool_core) {
+        FreelistPopResult::Empty => {
+            uart_puts("alloc c failed\n");
+            freelist_core_push(&pool_core, a);
+            freelist_core_push(&pool_core, b);
+            return;
+        }
+        FreelistPopResult::Popped(o) => { o }
+    };
+
+    uart_puts("allocated: ");
+    uart_print(freelist_owner_index(a));
+    uart_puts(" ");
+    uart_print(freelist_owner_index(b));
+    uart_puts(" ");
+    uart_print(freelist_owner_index(c));
+    uart_puts("\n");
+
+    freelist_core_push(&pool_core, a);
+    freelist_core_push(&pool_core, b);
+
+    let r1: exists s1: usize. FreelistOwner[s1] = match freelist_core_pop(&pool_core) {
+        FreelistPopResult::Empty => {
+            uart_puts("reuse 1 failed\n");
+            freelist_core_push(&pool_core, c);
+            return;
+        }
+        FreelistPopResult::Popped(o) => { o }
+    };
+    let r2: exists s2: usize. FreelistOwner[s2] = match freelist_core_pop(&pool_core) {
+        FreelistPopResult::Empty => {
+            uart_puts("reuse 2 failed\n");
+            freelist_core_push(&pool_core, r1);
+            freelist_core_push(&pool_core, c);
+            return;
+        }
+        FreelistPopResult::Popped(o) => { o }
+    };
+    let r3: exists s3: usize. FreelistOwner[s3] = match freelist_core_pop(&pool_core) {
+        FreelistPopResult::Empty => {
+            uart_puts("reuse 3 failed\n");
+            freelist_core_push(&pool_core, r1);
+            freelist_core_push(&pool_core, r2);
+            freelist_core_push(&pool_core, c);
+            return;
+        }
+        FreelistPopResult::Popped(o) => { o }
+    };
+
+    uart_puts("reused (LIFO): ");
+    uart_print(freelist_owner_index(r1));
+    uart_puts(" ");
+    uart_print(freelist_owner_index(r2));
+    uart_puts(" ");
+    uart_print(freelist_owner_index(r3));
+    uart_puts("\ngenerations: ");
+    uart_print(freelist_owner_generation(r1));
+    uart_puts(" ");
+    uart_print(freelist_owner_generation(r2));
+    uart_puts(" ");
+    uart_print(freelist_owner_generation(r3));
+    uart_puts("\n");
+
+    match freelist_core_pop(&pool_core) {
+        FreelistPopResult::Empty => {
+            uart_puts("pool exhausted as expected\n");
+        }
+        FreelistPopResult::Popped(o) => {
+            uart_puts("unexpected extra allocation: ");
+            uart_print(freelist_owner_index(o));
+            uart_puts("\n");
+            freelist_core_push(&pool_core, o);
+        }
+    }
+
+    freelist_core_push(&pool_core, r1);
+    freelist_core_push(&pool_core, r2);
+    freelist_core_push(&pool_core, r3);
+    freelist_core_push(&pool_core, c);
+    uart_puts("done\n");
+}

@@ -1,0 +1,86 @@
+// Non-generic bookkeeping shared by every future Freelist(T) instantiation
+// (see the approved generics plan): next_free/free_head/next_generation
+// never touch a payload type, so this file needs no generics feature at
+// all and is written and tested first, independent of it. Capacity is not
+// a parameter of this type at all -- it is simply the length of whatever
+// backing slice the caller hands to freelist_core_init, exactly matching
+// how every other slice in this language already carries its own runtime
+// length (SPEC.md's "Slices" section), so there is no separate N to keep
+// in sync with anything.
+
+variant FreelistPopResult {
+    Empty;
+    Popped(exists allocation: usize. FreelistOwner[allocation]);
+}
+
+private linear struct FreelistOwner[allocation: usize] {
+    private index: usize;
+    private generation: usize @ allocation;
+}
+
+fn freelist_owner_new(index: usize, generation: usize @ allocation)
+        -> FreelistOwner[allocation] {
+    let mut owner: FreelistOwner[allocation] = { index, generation };
+    return owner;
+}
+
+fn freelist_owner_index(owner: borrow FreelistOwner[allocation]) -> usize {
+    return owner.index;
+}
+
+fn freelist_owner_generation(owner: borrow FreelistOwner[allocation]) -> usize {
+    return owner.generation;
+}
+
+struct FreelistCore {
+    next_free: []usize;
+    free_head: usize;
+    next_generation: usize;
+}
+
+// backing.len becomes this core's capacity for its whole lifetime.
+fn freelist_core_init(core: *FreelistCore, backing: []usize) {
+    let n: usize = backing.len;
+    let mut next_free = backing;
+    for i: usize in 0..<n {
+        // GitHub issue #213: `i`'s proven range is {0..<n}, and n ==
+        // next_free.len by construction, but the checker does not know
+        // those two runtime values are the same one -- a relational-bounds
+        // gap, not a real safety hole (this is the only place `n` is
+        // used). Runtime trap accepted here; see this file's Makefile
+        // rule, which drops --forbid-trap for this one target.
+        next_free[i] = i + 1;
+    }
+    core.next_free = next_free;
+    core.free_head = 0;
+    core.next_generation = 1;
+}
+
+fn freelist_core_pop(core: *FreelistCore) -> FreelistPopResult {
+    let mut next_free = core.next_free;
+    let head: usize = core.free_head;
+    if (head >= 0 && head < next_free.len) {
+        // GitHub issue #213: `head < next_free.len` is a real runtime
+        // safety condition just checked above, but the checker cannot yet
+        // use a comparison against another slice's *runtime* .len to
+        // eliminate this index's bounds check (relational bounds --
+        // distinct from the literal/const narrowing collect_bounds and
+        // slice_len_mins already support). Runtime trap accepted here.
+        core.free_head = next_free[head];
+        let generation: usize = core.next_generation;
+        core.next_generation = generation + 1;
+        return FreelistPopResult::Popped(freelist_owner_new(head, generation));
+    }
+    return FreelistPopResult::Empty;
+}
+
+fn freelist_core_push(core: *FreelistCore, owner: sink FreelistOwner[allocation]) {
+    let mut next_free = core.next_free;
+    // GitHub issue #213: owner.index is only ever produced by
+    // freelist_core_pop from this same core's next_free, so it is always
+    // in range in practice, but that fact crosses a function-call boundary
+    // (a proof the checker does not carry across calls today, unlike the
+    // same-scope relational case above). Runtime trap accepted here.
+    next_free[owner.index] = core.free_head;
+    core.free_head = owner.index;
+}
