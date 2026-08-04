@@ -8973,6 +8973,71 @@ let codegen_tests = [
             return text;
         }");
 
+  (* GitHub issue #207 follow-up: `let [mut] id = match disc { arms };`
+     (the type annotation itself omitted, not just its content) infers
+     id's type from what the arms' Yield expressions produce, via the
+     same TVar/of_ast_opt machinery an ordinary untyped `let` already
+     uses -- reuses lm_nomut-style variants above rather than introducing
+     new ones. Deliberately narrower than the still-paused GitHub issue
+     #212 "let-else" idea: every arm below stays fully, explicitly named,
+     so no wildcard is ever introduced. *)
+  Alcotest.test_case
+    "issue #207: `let id = match disc { arms };` with the type annotation \
+     itself omitted infers id's type from the arms' Yield expressions" `Quick
+    (expect_codegen_ok
+       "must_use variant Lm207Result { OutOfMemory; Allocated(usize); }
+        fn lm207_alloc() -> Lm207Result { return Lm207Result::Allocated(42); }
+        fn lm207_use() -> usize {
+            let text = match lm207_alloc() {
+                Lm207Result::OutOfMemory => { return 0; }
+                Lm207Result::Allocated(p) => { p }
+            };
+            return text;
+        }");
+
+  Alcotest.test_case
+    "issue #207: `let mut id = match disc { arms };` (omitted annotation, \
+     with `mut`) also infers id's type correctly" `Quick
+    (expect_codegen_ok
+       "must_use variant Lm207MutResult { OutOfMemory; Allocated(usize); }
+        fn lm207mut_alloc() -> Lm207MutResult { return Lm207MutResult::Allocated(1); }
+        fn lm207mut_use() -> usize {
+            let mut text = match lm207mut_alloc() {
+                Lm207MutResult::OutOfMemory => { return 0; }
+                Lm207MutResult::Allocated(p) => { p }
+            };
+            text = text + 1;
+            return text;
+        }");
+
+  Alcotest.test_case
+    "issue #207: an omitted-annotation LetMatch whose arms never pin down \
+     a concrete type is rejected (would otherwise silently default to \
+     i32) -- the load-bearing check_undetermined_lets extension this \
+     feature needed, not something that came for free" `Quick
+    (expect_type_error "cannot determine a concrete type"
+       "must_use variant Lm207UndetResult { A; B; }
+        fn lm207undet_pick() -> Lm207UndetResult { return Lm207UndetResult::A; }
+        fn lm207undet_use() {
+            let v = match lm207undet_pick() {
+                Lm207UndetResult::A => { return; }
+                Lm207UndetResult::B => { return; }
+            };
+        }");
+
+  Alcotest.test_case
+    "issue #207: an omitted-annotation LetMatch whose arms yield genuinely \
+     incompatible types is still rejected with a clear unification error" `Quick
+    (expect_type_error "cannot unify"
+       "variant Lm207ConflictResult { A(usize); B(bool); }
+        fn lm207conflict_pick() -> Lm207ConflictResult { return Lm207ConflictResult::A(1); }
+        fn lm207conflict_use() {
+            let v = match lm207conflict_pick() {
+                Lm207ConflictResult::A(x) => { x }
+                Lm207ConflictResult::B(y) => { y }
+            };
+        }");
+
   (* Found while cleaning up kernel/mm/page.tkb's magic numbers: a refined
      type's bound could only be a bare integer literal or a single const
      name, unlike array_size (used for `[T; N]`), which already supports

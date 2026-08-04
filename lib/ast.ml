@@ -255,8 +255,8 @@ and stmt_desc =
   | Continue
   | Match of expr * match_arm list
       (* match expr { Name::Case(binding) => {...} Name::None => {...} } *)
-  | LetMatch of bool * ident * type_expr * expr * match_arm list
-      (* let [mut] id: ty = match disc { arms }; -- GitHub issue #183
+  | LetMatch of bool * ident * type_expr option * expr * match_arm list
+      (* let [mut] id [: ty] = match disc { arms }; -- GitHub issue #183
          follow-up ("Layer 1": match producing a value for a let binding,
          so a chain of fallible steps reads as flat statements instead of
          nesting one match per step), extended by issue #184's `Yield`
@@ -270,7 +270,19 @@ and stmt_desc =
          from a mut one ONLY in that infer_stmt downgrades `id` back to
          immutable in the tyenv that continues past this statement, once
          its own arms have been checked -- see type_inf.ml's LetMatch
-         case. `ty` is always required, never inferred from the arms.
+         case. GitHub issue #207 follow-up: `ty` is now `type_expr
+         option`, mirroring Ast.Let's own optional annotation -- `None`
+         means infer id's type from what the (fully explicit, no
+         wildcard) arms `Yield`, via the same TVar/unification machinery
+         an ordinary untyped `let` already uses (type_inf.ml's LetMatch
+         case seeds a fresh unification variable via Types.of_ast_opt
+         instead of the old mandatory Types.of_ast, and Assign's existing
+         rule -- reached via rewrite_letmatch_arm_bodies's Yield ->
+         `id = e;` rewrite -- unifies it against each arm's yielded
+         value). This is deliberately narrower than the still-paused
+         GitHub issue #212 "let-else" idea: every arm here stays fully,
+         explicitly named, so no wildcard is ever introduced and the
+         linear-payload-hiding concern that paused #212 does not apply.
 
          `arms` are ordinary match_arm bodies (each one's last statement
          checked structurally by the parser, not via full flow analysis

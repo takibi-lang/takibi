@@ -1758,15 +1758,21 @@ let rec collect_lets stmts =
           | ArmWild body            -> collect_lets body
           | ArmIntLit (_, body)     -> collect_lets body
         ) arms
-    | LetMatch (_, name, ty, _, arms) ->
+    | LetMatch (_, name, ty_opt, _, arms) ->
         (* Always alloca-based internally regardless of the surface
            `mut` (an arm's own `name = e;` needs a memory location to
            assign into no matter what -- see type_inf.ml's LetMatch case
            for where the surface mut/non-mut distinction is actually
            enforced), so this always contributes its own alloca entry,
            unlike Match above which only ever pre-allocates what its
-           ARMS separately declare. *)
-        (name, Some ty, s.loc, None) ::
+           ARMS separately declare. GitHub issue #207: ty_opt passed
+           straight through (rather than always wrapped in Some) mirrors
+           the plain Let case just above and the For case's own None-
+           passthrough just below -- resolve_local_ast/local_types
+           resolves the real (type-inferred) type at alloca time either
+           way, exactly the same established mechanism an unannotated
+           plain `let` already relies on. *)
+        (name, ty_opt, s.loc, None) ::
         List.concat_map (fun arm ->
           match arm with
           | ArmVariant (_, _, _, body) -> collect_lets body
@@ -4482,7 +4488,7 @@ let gen_func ?prog_types fdef =
            it open made gen_func's generic scalar fallback try to return an
            integer zero from aggregate-returning functions. *)
         if not !merge_reachable then ignore (build_unreachable builder)
-    | LetMatch (_, name, ty, disc, arms) ->
+    | LetMatch (_, name, ty_opt, disc, arms) ->
         (* GitHub issue #183 follow-up, extended by #184's `Yield`-tail
            sugar: `name`'s alloca already exists -- collect_lets (called
            once, up front, over the whole function body -- see its own
@@ -4506,7 +4512,7 @@ let gen_func ?prog_types fdef =
            so that first registration must happen here instead, or
            Assign's codegen finds no `locals` entry at all and raises
            "Undefined variable". *)
-        let ast_ty = res name (Some ty) in
+        let ast_ty = res name ty_opt in
         if is_erased_view_type ast_ty && not (Hashtbl.mem locals name) then
           Hashtbl.add locals name (Imm (ast_ty, erased_view_value ()));
         let arms = rewrite_letmatch_arm_bodies name arms in

@@ -133,8 +133,8 @@ let rec walk_stmt ~subst ~resolve_inst (s : stmt) : stmt =
     | Break -> Break
     | Continue -> Continue
     | Match (e, arms) -> Match (ex e, List.map (walk_arm ~subst ~resolve_inst) arms)
-    | LetMatch (m, name, t, e, arms) ->
-        LetMatch (m, name, ty t, ex e, List.map (walk_arm ~subst ~resolve_inst) arms)
+    | LetMatch (m, name, t_opt, e, arms) ->
+        LetMatch (m, name, Option.map ty t_opt, ex e, List.map (walk_arm ~subst ~resolve_inst) arms)
   in
   { s with desc }
 
@@ -455,10 +455,22 @@ let run (prog : toplevel list) : toplevel list =
         | Break -> Break
         | Continue -> Continue
         | Match (e, arms) -> Match (ex e, List.map (walk_arm_calls local_types) arms)
-        | LetMatch (m, name, t, e, arms) ->
-            let t = ty t in
-            Hashtbl.replace local_types name t;
-            LetMatch (m, name, t, ex e, List.map (walk_arm_calls local_types) arms)
+        | LetMatch (m, name, t_opt, e, arms) ->
+            (* GitHub issue #207: when the annotation is omitted, this
+               narrow (non-HM) forward tracker has no way to know the
+               type type_inf.ml will later infer from the arms' Yield
+               expressions, so -- exactly like an unannotated plain Let
+               just above -- it stops tracking `name` here. If a LATER
+               generic call in this same body needs `name` specifically
+               to determine a type parameter, resolve_call's own existing
+               "cannot infer type parameter" error fires (a clear compile
+               error, not silent misresolution); it just cannot happen to
+               be THIS mechanism that supplies it anymore. *)
+            let t_opt = Option.map ty t_opt in
+            (match t_opt with
+             | Some t -> Hashtbl.replace local_types name t
+             | None -> Hashtbl.remove local_types name);
+            LetMatch (m, name, t_opt, ex e, List.map (walk_arm_calls local_types) arms)
       in
       { s with desc }
     and walk_arm_calls local_types (a : match_arm) : match_arm =

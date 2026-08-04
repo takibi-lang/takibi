@@ -438,7 +438,19 @@ stmt:
        (let_rhs's own COLON-type_expr-ASSIGN-expr branch): MATCH is not a
        valid start-of-expr token, so one token of lookahead after ASSIGN
        is enough to pick this production instead. *)
-    { { desc = LetMatch (true, id, ty, disc,
+    { { desc = LetMatch (true, id, Some ty, disc,
+                          validate_arm_bodies $symbolstartpos arms);
+        loc = $symbolstartpos } }
+  | LET MUT id = IDENT ASSIGN MATCH disc = expr
+    LBRACE arms = match_arms RBRACE SEMI
+    (* let mut id = match disc { arms }; -- GitHub issue #207: the same
+       production as just above, minus the annotation, unambiguous
+       against the ordinary `LET MUT id ASSIGN expr SEMI` path
+       (let_rhs's own bare-ASSIGN-expr branch) for the identical reason:
+       MATCH is not in expr's FIRST set, so one token of lookahead after
+       ASSIGN still picks this production. type_inf.ml infers id's type
+       from what the arms `Yield`. *)
+    { { desc = LetMatch (true, id, None, disc,
                           validate_arm_bodies $symbolstartpos arms);
         loc = $symbolstartpos } }
   | LET id = IDENT COLON ty = type_expr ASSIGN MATCH disc = expr
@@ -451,7 +463,14 @@ stmt:
        (which DO need it mutable) have been checked -- so a later
        `id = ...;` outside these arms is rejected exactly like assigning
        to any other non-mut `let` would be. *)
-    { { desc = LetMatch (false, id, ty, disc,
+    { { desc = LetMatch (false, id, Some ty, disc,
+                          validate_arm_bodies $symbolstartpos arms);
+        loc = $symbolstartpos } }
+  | LET id = IDENT ASSIGN MATCH disc = expr
+    LBRACE arms = match_arms RBRACE SEMI
+    (* let id = match disc { arms }; -- GitHub issue #207, the non-mut
+       spelling of the annotation-omitted form just above. *)
+    { { desc = LetMatch (false, id, None, disc,
                           validate_arm_bodies $symbolstartpos arms);
         loc = $symbolstartpos } }
   | LBRACE first = stmt rest = stmts RBRACE

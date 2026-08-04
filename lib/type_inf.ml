@@ -3488,9 +3488,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
            (tyenv, raw_locals')
        | t -> raise (TypeError (disc.loc, Printf.sprintf
            "match requires an enum, variant, or primitive integer type, got '%s'" (to_string t))))
-  | LetMatch (is_mut, name, ty_expr, disc, arms) ->
+  | LetMatch (is_mut, name, ty_opt, disc, arms) ->
       (* GitHub issue #183 follow-up ("Layer 1", plus a later non-mut
-         extension and #184's `Yield`-tail sugar): `let [mut] name: ty =
+         extension and #184's `Yield`-tail sugar): `let [mut] name [: ty] =
          match disc { arms };`. The parser has already verified each
          arm's body ends in `Yield e` (this arm's value) or
          Return/Break/Continue (diverges). rewrite_letmatch_arm_bodies
@@ -3510,18 +3510,36 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          what continues past this whole statement -- a later
          `name = ...;` outside these arms then hits Assign's own existing
          "cannot assign to immutable variable" check, same as for any
-         other non-mut `let`. *)
+         other non-mut `let`.
+
+         GitHub issue #207: `ty_opt = None` seeds `ty` with a fresh
+         unification variable via of_ast_opt (same as an ordinary untyped
+         `let`, see the Let case above) instead of a concrete type. `ty`
+         is a mutable TVar ref cell threaded into tyenv'/raw_locals'
+         BEFORE the arms are checked below, so Assign's own `unify_at`
+         call (reached through the same Yield -> `name = e;` rewrite)
+         resolves/links it in place as each arm is checked -- no new
+         unification logic needed. Every arm stays fully, explicitly
+         named (never a wildcard), so this cannot hide a linear payload
+         obligation the way the still-paused GitHub issue #212 "let-else"
+         idea could -- see Ast.LetMatch's own comment for that
+         distinction. *)
       value_static_identities := StringMap.remove name !value_static_identities;
       invalidate_place_binding name;
-      let ty = of_ast ty_expr in
-      if contains_stable_owner_value_ty ty then
-        raise (TypeError (s.loc,
-          "stable owner container storage must be a private mutable global, not a local value"));
+      let ty = of_ast_opt ty_opt in
       let tyenv' = StringMap.add name (ty, true) tyenv in
       let raw_locals' = StringMap.add name ty raw_locals in
       let arms = rewrite_letmatch_arm_bodies name arms in
       let (tyenv'', raw_locals'') = infer_stmt senv eenv tyenv' fenv ret_ty
         raw_locals' in_loop { desc = Match (disc, arms); loc = s.loc } in
+      (* Checked after the arms (rather than immediately, as the mandatory-
+         annotation form used to) so a freshly-seeded, still-unresolved
+         TVar has had a chance to resolve first -- a no-op change for the
+         mandatory case (already concrete going in), strictly more correct
+         for the inferred case. *)
+      if contains_stable_owner_value_ty ty then
+        raise (TypeError (s.loc,
+          "stable owner container storage must be a private mutable global, not a local value"));
       let tyenv''' =
         if is_mut then tyenv'' else StringMap.add name (ty, false) tyenv''
       in
@@ -3593,18 +3611,26 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
            default an undetermined integer type" name))
     | _ -> ()
   in
-  let rec go_stmt (s : Ast.stmt) = match s.desc with
+  let rec go_arms arms = List.iter (function
+    | Ast.ArmVariant (_, _, _, b) -> List.iter go_stmt b
+    | Ast.ArmWild b            -> List.iter go_stmt b
+    | Ast.ArmIntLit (_, b)     -> List.iter go_stmt b
+  ) arms
+  and go_stmt (s : Ast.stmt) = match s.desc with
     | Ast.Let (_, name, None, _, _) -> check s.loc name
     | Ast.Let (_, _, Some _, _, _) -> ()
     | Ast.Block ss | Ast.While (_, ss) -> List.iter go_stmt ss
     | Ast.If (_, t, e) -> List.iter go_stmt t; List.iter go_stmt e
     | Ast.For (_, _, _, _, body) | Ast.ForEach (_, _, body) -> List.iter go_stmt body
-    | Ast.Match (_, arms) ->
-        List.iter (function
-          | Ast.ArmVariant (_, _, _, b) -> List.iter go_stmt b
-          | Ast.ArmWild b            -> List.iter go_stmt b
-          | Ast.ArmIntLit (_, b)     -> List.iter go_stmt b
-        ) arms
+    | Ast.Match (_, arms) -> go_arms arms
+    (* GitHub issue #207: an omitted-annotation LetMatch whose arms never
+       pin down a concrete type (e.g. every arm diverges except one whose
+       own Yield type is itself ambiguous) must be caught here too, or it
+       would silently default to i32 via Types.to_ast instead of raising
+       this "cannot determine a concrete type" error -- confirmed this is
+       NOT already covered before adding these two cases. *)
+    | Ast.LetMatch (_, name, None, _, arms) -> check s.loc name; go_arms arms
+    | Ast.LetMatch (_, _, Some _, _, arms) -> go_arms arms
     | _ -> ()
   in
   List.iter go_stmt fdef.body
@@ -4507,10 +4533,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) ->
                List.iter validate_stmt_types b) arms
      | Ast.LetMatch (_, _, ty, disc, arms) ->
-         if ast_contains_stable_owner_value ty then
-           raise (TypeError (s.loc,
-             "stable owner container storage must be a private mutable global, not a local value"));
-         validate_let_type s.loc ty;
+         Option.iter (fun t ->
+           if ast_contains_stable_owner_value t then
+             raise (TypeError (s.loc,
+               "stable owner container storage must be a private mutable global, not a local value"))
+         ) ty;
+         Option.iter (validate_let_type s.loc) ty;
          validate_expr_types disc;
          List.iter (function
            | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) ->
@@ -6344,7 +6372,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              arms from the merge, so the diverging arm's vacuous
              "consumed" state cannot leak into what continues past the
              whole statement. *)
-          var_types := StringMap.add name (resolve_declared_type ty_expr) !var_types;
+          Option.iter (fun ty ->
+            var_types := StringMap.add name (resolve_declared_type ty) !var_types)
+            ty_expr;
           let p = PVar name in
           require_no_authority_rebind s.loc declared taints name;
           set_decl_loc p s.loc;
