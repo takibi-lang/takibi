@@ -393,6 +393,7 @@ el0_sync_entry:
      * are non-blocking, and a scheduler switch cannot interpose between the
      * fault and retry. All other non-SVC exceptions retain the fail-stop
      * evidence path. */
+.Lsyscall_dispatch:
     mrs     x0, esr_el1
     lsr     x1, x0, #26
     cmp     x1, #0x24          /* Data Abort taken without a change in EL */
@@ -434,6 +435,8 @@ el0_sync_entry:
     b.eq    .Lsyscall_clone_parent
     cmp     x6, #5
     b.eq    .Lsyscall_block
+    cmp     x6, #6
+    b.eq    .Lsyscall_wait_uart
     mov     x16, #8
     b       el1_exception_evidence
 
@@ -506,6 +509,12 @@ el0_sync_entry:
     EL0_CONTEXT_RESTORE
     add     sp, sp, #EL0_CONTEXT_SIZE
     eret
+
+.Lsyscall_wait_uart:
+    /* interrupt_notify() emits SEV, so WFE retains an event that arrives
+     * between the ppoll readiness check and entering the wait. */
+    wfe
+    b       .Lsyscall_dispatch
 
 .Lsyscall_resume:
     str     x7, [sp, #EL0_CONTEXT_X0]

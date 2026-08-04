@@ -15,6 +15,8 @@ private let mut clone_last_reaped_count: usize;
 private let mut process_image_active_page_count: usize;
 private let mut process_image_stack_lowest_l3: usize;
 private let mut process_image_stack_growth_active: bool;
+private let mut process_image_growth_page_indices: [usize; 64];
+private let mut process_image_growth_page_count: usize;
 
 private linear view ProcessCloneVmOwner;
 variant ProcessCloneVmValue {
@@ -479,6 +481,23 @@ fn process_image_cleanup(count: usize) {
             }
         }
     }
+    for l3_index: usize in PROCESS_STACK_GROWTH_FIRST_L3_INDEX..<PROCESS_STACK_L3_INDEX {
+        let pte: usize = user_pte_read(l3_index);
+        if (pte != 0) {
+            page_transferred_release_physical(pte & 0xFFFFFFFFFFFFF000);
+            user_pte_write(l3_index, 0);
+            user_tlb_invalidate(USER_TEXT_VA + l3_index * PAGE_SIZE);
+        }
+    }
+    for i: usize in 0..<process_image_growth_page_count {
+        if (i < 64) {
+            let page_index: usize = process_image_growth_page_indices[i];
+            if (page_index < BOOT_PAGE_COUNT) {
+                page_transferred_release(page_index);
+            }
+        }
+    }
+    process_image_growth_page_count = 0;
 }
 
 // Called directly from el0_sync_entry for a lower-EL data-abort translation
@@ -520,6 +539,18 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
                 let page_index = page_owner_transfer_index(stack_page);
                 process_image_record(
                     process_image_active_page_count, page_index, l3_index);
+                if (process_image_growth_page_count >= 0 &&
+                    process_image_growth_page_count < 64) {
+                    for growth_slot: usize in 0..<64 {
+                        if (growth_slot + PROCESS_STACK_GROWTH_FIRST_L3_INDEX ==
+                            l3_index) {
+                            process_image_growth_page_indices[growth_slot] =
+                                page_index;
+                        }
+                    }
+                    process_image_growth_page_count =
+                        process_image_growth_page_count + 1;
+                }
                 process_image_active_page_count =
                     process_image_active_page_count + 1;
             }
@@ -531,7 +562,8 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
 
 fn process_image_unmap(pages: sink ProcessImagePages[image]) {
     let mut count: usize = pages.count;
-    if (process_image_stack_growth_active) {
+    if (process_image_stack_growth_active ||
+        process_image_active_page_count > pages.count) {
         count = process_image_active_page_count;
         process_image_stack_growth_active = false;
         process_image_active_page_count = 0;
@@ -784,6 +816,7 @@ fn process_image_map(plan: DistroElfLoadPlan,
                      argc: usize) -> ProcessImageMapResult {
     process_image_stack_growth_active = false;
     process_image_active_page_count = 0;
+    process_image_growth_page_count = 0;
     process_image_stack_lowest_l3 = PROCESS_STACK_L3_INDEX;
     if (plan.extent > 0x200000) {
         return ProcessImageMapResult::OutOfMemory;

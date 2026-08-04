@@ -90,6 +90,7 @@ private let mut syscall_open_calls: usize;
 private let mut syscall_read_calls: usize;
 private let mut syscall_file_write_calls: usize;
 private let mut syscall_close_calls: usize;
+private let mut syscall_ppoll_uart_waits: usize;
 private let mut syscall_connection_open: [bool; TCP_CONNECTION_MAX];
 private let mut syscall_socket_calls: usize;
 private let mut syscall_bind_calls: usize;
@@ -797,12 +798,11 @@ fn syscall_readv_segment(fd: usize, address: usize, length: usize)
 }
 
 // ppoll(2) readiness for one fd: (is_valid_fd, revents). fd 0 checks the
-// real UART RX ring (kernel_uart_rx_pending()) but never blocks even if
-// the caller's timeout asks for it -- reusing the scheduler-block
-// machinery the OTHER (non-standard, TAKIBI-specific) UART-wait syscall
-// already uses would need the hw test harness to also feed real UART
-// input for this scenario's boot-time evidence to stay deterministic;
-// deliberately left as immediate-return-only for now. Connected TCP fds
+// real UART RX ring (kernel_uart_rx_pending()). Its concrete BusyBox ash
+// form -- one stdin pollfd and a null timeout -- waits on the retained
+// interrupt event until the UART RX IRQ publishes a byte. Mixed fd sets and
+// finite timeouts remain out of scope for this first real wait path.
+// Connected TCP fds
 // check already-buffered data read-only (no mutation, so no risk to the
 // proven TCP send/receive paths). Everything else is POLLNVAL.
 // UART RX ring buffer: moved here from kernel/init/main.tkb (issue #196)
@@ -849,6 +849,87 @@ fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
         return (true, 0);
     }
     return (false, POLLNVAL);
+}
+
+fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
+                          timeout_address: usize, sigmask_address: usize)
+        -> (usize, usize) !{may_block} {
+    if (raw_nfds == 0) { return (1, 0); }
+    if (raw_nfds >= 0 && raw_nfds < POLL_MAX) {
+      let nfds: {0..<POLL_MAX as usize} = raw_nfds;
+      let array_bytes: usize = match checked_mul_usize(nfds, sizeof(Pollfd)) {
+        CheckedUsize::Overflow => { return (1, LINUX_EINVAL); }
+        CheckedUsize::Value(v) => { v }
+    };
+      match user_range_check(fds_address, array_bytes, UserAccessMode::Write) {
+        UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+        UserRangeResult::Ok(array_range) => {
+            let mut ready_count: usize = 0;
+            let mut uart_wait: bool = false;
+            for index: usize in 0..<nfds {
+                let (fd_ok, fd_raw) = user_read_u32(
+                    array_range,
+                    index * sizeof(Pollfd) + offsetof(Pollfd, fd));
+                let (events_ok, events_raw) = user_read_u32(
+                    array_range,
+                    index * sizeof(Pollfd) + offsetof(Pollfd, events));
+                if (fd_ok == false || events_ok == false) {
+                    return (1, LINUX_EFAULT);
+                }
+                let fd: usize = fd_raw as usize;
+                let (valid, revents) = syscall_poll_fd_ready(fd);
+                let mut final_revents: usize = revents;
+                if (valid == false) { final_revents = POLLNVAL; }
+                if (user_write_u16(
+                        array_range,
+                        index * sizeof(Pollfd) + offsetof(Pollfd, revents),
+                        final_revents) == false) {
+                    return (1, LINUX_EFAULT);
+                }
+                if (final_revents != 0) { ready_count = ready_count + 1; }
+                if (nfds == 1 && fd == 0 &&
+                    (events_raw as usize & POLLIN) != 0) {
+                    uart_wait = true;
+                }
+            }
+            if (ready_count == 0 && uart_wait && timeout_address == 0 &&
+                sigmask_address == 0) {
+                syscall_ppoll_uart_waits = syscall_ppoll_uart_waits + 1;
+                if (syscall_ppoll_uart_waits == 1) {
+                    kernel_boot_log("shell ppoll: uart blocked\n");
+                }
+                return (6, 0);
+                if (user_write_u16(
+                        array_range, offsetof(Pollfd, revents), POLLIN) == false) {
+                    return (1, LINUX_EFAULT);
+                }
+                return (1, 1);
+            }
+            return (1, ready_count);
+        }
+      }
+    }
+    return (1, LINUX_EINVAL);
+}
+
+fn syscall_read_uart(address: usize, requested: usize) -> (usize, usize) {
+    if (requested == 0) { return (1, 0); }
+    match user_range_check(address, requested, UserAccessMode::Write) {
+        UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+        UserRangeResult::Ok(range) => {
+            disable_irq();
+            if (kernel_uart_rx_pending() == false) {
+                enable_irq();
+                return (1, LINUX_EAGAIN);
+            }
+            let value: u8 = kernel_uart_rx_getc();
+            enable_irq();
+            if (user_write_byte(range, 0, value) == false) {
+                return (1, LINUX_EFAULT);
+            }
+            return (1, 1);
+        }
+    }
 }
 
 // Issue #196: writes `value` into a fixed 65-byte struct utsname field at
@@ -1167,6 +1248,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let fd: usize = x0;
         let address: usize = x1;
         let requested: usize = x2;
+        if (fd == 0) { return syscall_read_uart(address, requested); }
         if (kernel_connected_fd_is_open(fd)) {
             syscall_connected_read_calls = syscall_connected_read_calls + 1;
             let read_slot: {0..<TCP_CONNECTION_MAX as usize} =
@@ -2100,44 +2182,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         return (1, LINUX_EINVAL);
     }
     if (number == AARCH64_NR_PPOLL) {
-        let fds_address: usize = x0;
-        let raw_nfds: usize = x1;
-        // x2 = timeout (timespec*), x3 = sigmask, x4 = sigsetsize: this
-        // implementation only ever reports immediate readiness and never
-        // actually blocks, so none of the three are consulted. See
-        // syscall_poll_fd_ready's own comment for why.
-        if (raw_nfds == 0) { return (1, 0); }
-        if (raw_nfds >= 0 && raw_nfds < POLL_MAX) {
-            let nfds: {0..<POLL_MAX as usize} = raw_nfds;
-            let array_bytes: usize = match checked_mul_usize(nfds, sizeof(Pollfd)) {
-                CheckedUsize::Overflow => { return (1, LINUX_EINVAL); }
-                CheckedUsize::Value(v) => { v }
-            };
-            match user_range_check(fds_address, array_bytes, UserAccessMode::Write) {
-                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
-                UserRangeResult::Ok(array_range) => {
-                    let mut ready_count: usize = 0;
-                    for index: usize in 0..<nfds {
-                        let (fd_ok, fd_raw) = user_read_u32(
-                            array_range,
-                            index * sizeof(Pollfd) + offsetof(Pollfd, fd));
-                        if (fd_ok == false) { return (1, LINUX_EFAULT); }
-                        let fd: usize = fd_raw as usize;
-                        let (valid, revents) = syscall_poll_fd_ready(fd);
-                        let mut final_revents: usize = revents;
-                        if (valid == false) { final_revents = POLLNVAL; }
-                        let wrote: bool = user_write_u16(
-                            array_range,
-                            index * sizeof(Pollfd) + offsetof(Pollfd, revents),
-                            final_revents);
-                        if (wrote == false) { return (1, LINUX_EFAULT); }
-                        if (final_revents != 0) { ready_count = ready_count + 1; }
-                    }
-                    return (1, ready_count);
-                }
-            }
-        }
-        return (1, LINUX_EINVAL);
+        return syscall_ppoll_dispatch(x0, x1, x2, x3);
     }
     if (number == AARCH64_NR_UNAME) {
         match user_range_check(x0, sizeof(Utsname), UserAccessMode::Write) {

@@ -110,6 +110,19 @@ fn page_transferred_release(index: {0..<BOOT_PAGE_COUNT as usize}) {
     boot_page_used[index] = 0;
 }
 
+fn page_transferred_release_physical(physical: usize) {
+    let base: usize = (boot_pages as *u8) as usize;
+    let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
+    if (physical < base || physical >= base + pool_bytes ||
+        (physical - base) % PAGE_SIZE != 0) {
+        return;
+    }
+    let index: usize = (physical - base) / PAGE_SIZE;
+    if (index < BOOT_PAGE_COUNT) {
+        boot_page_used[index] = 0;
+    }
+}
+
 fn page_allocator_live_count() -> usize {
     let mut live: usize = 0;
     for i: usize in 0..<BOOT_PAGE_COUNT {

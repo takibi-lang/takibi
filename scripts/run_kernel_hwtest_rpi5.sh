@@ -23,6 +23,11 @@ ETH_TEST_SUBNET="${ETH_TEST_SUBNET:-192.168.20}"
 ETH_TEST_MAC="${ETH_TEST_MAC:-02:00:20:00:00:02}"
 
 mkdir -p "$ARTIFACT_DIR"
+exec 9>"$ARTIFACT_DIR/runner.lock"
+if ! flock -n 9; then
+    echo "FAIL kernel/rpi5: another hardware runner already owns $ARTIFACT_DIR" >&2
+    exit 1
+fi
 if [ ! -e "$SERIAL_DEV" ]; then
     echo "error: RPi5 UART device not found: $SERIAL_DEV" >&2
     exit 1
@@ -83,10 +88,15 @@ timeout 1 cat "$SERIAL_DEV" >/dev/null 2>&1 || true
 cat "$SERIAL_DEV" >"$UART_LOG" 2>/dev/null &
 reader_pid=$!
 uart_sender_pid=
+shell_sender_pid=
 cleanup() {
     if [ -n "$uart_sender_pid" ]; then
         kill "$uart_sender_pid" 2>/dev/null || true
         wait "$uart_sender_pid" 2>/dev/null || true
+    fi
+    if [ -n "$shell_sender_pid" ]; then
+        kill "$shell_sender_pid" 2>/dev/null || true
+        wait "$shell_sender_pid" 2>/dev/null || true
     fi
     kill "$reader_pid" 2>/dev/null || true
     wait "$reader_pid" 2>/dev/null || true
@@ -101,6 +111,26 @@ if ! "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$ELF" >"$LOADER_LOG" 2>&1; then
     exit 1
 fi
 echo "[kernel/rpi5] kernel loaded in $((SECONDS - load_started))s; waiting for integration completion"
+
+# Issue #205: ash's read builtin issues ppoll() before read(0). Start this
+# watcher before the sequential network checks below: the kernel can reach
+# the shell wait while the host is still exercising an earlier network
+# milestone. It sends input only after the kernel publishes the blocked
+# marker, proving a real UART block/wake cycle rather than prebuffered input.
+(
+    for _wait in $(seq 1 6000); do
+        if LC_ALL=C grep -aFq 'shell ppoll: uart blocked' "$UART_LOG"; then
+            # The RP1 UART can discard the first byte immediately after a
+            # host-side tty write. The leading sentinel is intentionally not
+            # part of the ash value; it makes the checked payload stable.
+            printf 'xashread\n' >"$SERIAL_DEV"
+            exit 0
+        fi
+        sleep 0.01
+    done
+    exit 1
+) &
+shell_sender_pid=$!
 
 # The kernel holds its affine RX readiness capability while waiting for one
 # real ARP request. Exercise the wire path immediately after resume; keep the
@@ -286,6 +316,7 @@ while [ "$capture_elapsed" -lt "$capture_deadline" ]; do
     sleep 1
     capture_elapsed=$((capture_elapsed + 1))
     if LC_ALL=C grep -aFq 'uart rx: scheduler block+wake ok' "$UART_LOG" &&
+            LC_ALL=C grep -aFq 'busybox shell read exit: 0' "$UART_LOG" &&
             LC_ALL=C grep -aFq 'resources: pages=0' "$UART_LOG"; then
         capture_complete=1
         break

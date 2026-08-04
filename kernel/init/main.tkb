@@ -902,23 +902,19 @@ fn main() {
                 }
             }
 
-            // Issue #196: same distro plan, argv={"busybox","sh","-c",
-            // "read x"}. BusyBox ash's `read` builtin always calls poll()
+            // Issue #205: same distro plan, argv={"busybox","sh","-c",
+            // "read x; echo shell read: $x"}. BusyBox ash's `read` builtin always calls poll()
             // before its first read() from stdin, even with no timeout --
             // see shell/shell_common.c in the vendored busybox-1.37.0
             // source. musl maps poll() to the ppoll(2) syscall
             // unconditionally on aarch64 (no legacy SYS_poll on this arch).
-            // ppoll(2) is a real implementation now, but deliberately
-            // non-blocking-only (see syscall_poll_fd_ready's own comment in
-            // kernel/kernel/syscall.tkb): since no UART input is ever fed
-            // during this boot, fd 0 is correctly reported not-ready, `read`
-            // treats that exactly like a real poll() timeout, and the
-            // command legitimately fails (nonzero exit) -- same as real
-            // Linux would if `read` timed out with no data available.
+            // The RPi5 runner waits for the kernel's blocked marker and
+            // injects one UART line. ppoll then retries after the RX IRQ,
+            // read(0) consumes the line, and ash echoes the proof value.
             if (distro_plan_ready) {
                 match process_image_map(
                         saved_distro_plan,
-                        "busybox\0sh\0-c\0read x\0" as []u8,
+                        "busybox\0sh\0-c\0read x; echo shell read: $x\0" as []u8,
                         4) {
                     ProcessImageMapResult::InvalidImage => {
                         kernel_boot_log("shell read map: invalid image\n");

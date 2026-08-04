@@ -1,3 +1,5 @@
-busybox shell read failed
+shell ppoll: uart blocked
+shell read: ashread
+busybox shell read exit: 0
 shell stack: demand-grown
 shell read unmap: clean
