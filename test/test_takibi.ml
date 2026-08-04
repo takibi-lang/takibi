@@ -6397,15 +6397,21 @@ let infer_tests = [
        "struct packed WireHdr { magic: u16be; seq: u32be; }
         fn bad_cross(h: *WireHdr) -> u32be { return h.magic as u32be; }");
 
-  (* GitHub issue #207: generics grammar (`type` keyword, `Name(T)`
-     instantiation) parses today, ahead of monomorphization actually
-     existing -- both must be rejected with a clear, non-crashing error at
-     type-check time rather than silently mis-elaborating or reaching
-     codegen. *)
-  Alcotest.test_case "a `type`-typed parameter parses but is rejected \
-                       (generics not implemented yet, issue #207)" `Quick
+  (* GitHub issue #207: the `type` keyword and `Name(T)` instantiation
+     syntax parse. A call to a generic function whose type argument cannot
+     be inferred (here: a bare integer literal, not a Var/&Var with a
+     locally-known type -- Monomorphize.run's narrow inference rule) is
+     rejected with a clear, specific error rather than crashing or
+     silently mis-elaborating. This test's expectation was updated once
+     generic function instantiation (build order step 5) actually landed;
+     it previously exercised the older, more generic "not implemented yet"
+     fallback that fired before any function-instantiation logic existed
+     to even attempt inference. *)
+  Alcotest.test_case "a generic function call whose type argument cannot \
+                       be inferred is rejected with a specific error \
+                       (issue #207)" `Quick
     (expect_type_error
-       "generics are not implemented yet"
+       "cannot infer type parameter 'T'"
        "fn identity(T: type, x: usize) -> usize { return x; }
         fn use_identity() -> usize { return identity(5); }");
 
@@ -9912,6 +9918,77 @@ let codegen_tests = [
        "generic struct Boxg207slice(T: type) { value: T; }
         fn boxg207slice_use() {
           let mut b: Boxg207slice([]u8);
+        }");
+
+  (* GitHub issue #207 build order step 5: generic function calls, resolved
+     via the narrow inference rule (a bare Var/&Var argument whose type is
+     already known locally). *)
+  Alcotest.test_case
+    "a generic function call with its type argument inferred from a local \
+     variable's declared type compiles and registers the mangled \
+     instantiation (issue #207)" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "generic struct Boxg207fn(T: type) {
+            value: T;
+          }
+          fn boxg207fn_get(T: type, b: *Boxg207fn(T)) -> T {
+            return b.value;
+          }
+          fn boxg207fn_use() -> usize {
+            let mut b: Boxg207fn(usize);
+            b.value = 7;
+            return boxg207fn_get(&b);
+          }"
+       in
+       match Hashtbl.find_opt Llvm_gen.functions "boxg207fn_get$usize" with
+       | Some _ -> ()
+       | None -> Alcotest.fail "boxg207fn_get$usize was not generated");
+
+  Alcotest.test_case
+    "two instantiations of the same generic function, called with \
+     different inferred types, coexist as distinct mangled functions \
+     (issue #207)" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "generic struct Boxg207fn2(T: type) {
+            value: T;
+          }
+          fn boxg207fn2_get(T: type, b: *Boxg207fn2(T)) -> T {
+            return b.value;
+          }
+          fn boxg207fn2_use_usize() -> usize {
+            let mut b: Boxg207fn2(usize);
+            b.value = 1;
+            return boxg207fn2_get(&b);
+          }
+          fn boxg207fn2_use_u8() -> u8 {
+            let mut c: Boxg207fn2(u8);
+            c.value = 2 as u8;
+            return boxg207fn2_get(&c);
+          }"
+       in
+       let has name = Hashtbl.mem Llvm_gen.functions name in
+       Alcotest.(check bool) "boxg207fn2_get$usize generated" true
+         (has "boxg207fn2_get$usize");
+       Alcotest.(check bool) "boxg207fn2_get$u8 generated" true
+         (has "boxg207fn2_get$u8"));
+
+  Alcotest.test_case
+    "a generic function call whose two arguments would bind the same type \
+     parameter to two DIFFERENT concrete types is rejected -- this is the \
+     core soundness property the whole generics design hinges on \
+     (issue #207)" `Quick
+    (expect_type_error
+       "conflicting inference for generic type parameter 'T'"
+       "generic struct Pairg207(T: type) { a: T; }
+        fn pairg207_combine(T: type, x: *Pairg207(T), y: *Pairg207(T)) -> T {
+          return x.a;
+        }
+        fn pairg207_use() {
+          let mut p1: Pairg207(usize);
+          let mut p2: Pairg207(u8);
+          pairg207_combine(&p1, &p2);
         }");
 
 ]
