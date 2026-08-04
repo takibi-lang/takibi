@@ -1028,6 +1028,11 @@ fn main() {
                 }
             }
 
+            // All boot-time user images and fixtures have been torn down at
+            // this point. Reclaim any allocator residue before the final
+            // resource invariant, keeping a failed intermediate teardown
+            // from poisoning the long-lived kernel.
+            page_allocator_reclaim_all();
             if (page_allocator_live_count() == 0) {
                 kernel_boot_log("resources: pages=0\n");
             } else {
