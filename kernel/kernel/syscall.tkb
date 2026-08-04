@@ -1944,11 +1944,13 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             match user_range_check(x1, 4, UserAccessMode::Write) {
                 UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
-                    let status: usize = kernel_process_child_wait_status();
+                    let status: usize = kernel_process_child_wait_status_peek();
                     if (user_write_u32(range, 0,
                             ((status & 0xFF) << 8) as u32) == false) {
                         return (1, LINUX_EFAULT);
                     }
+                    let consumed_status: usize =
+                        kernel_process_child_wait_status();
                     return (1, 2);
                 }
             }

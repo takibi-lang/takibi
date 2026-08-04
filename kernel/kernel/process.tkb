@@ -921,6 +921,10 @@ fn kernel_process_child_waitable() -> bool {
     return execution_child_waitable && execution_process == ExecutionProcess::Parent;
 }
 
+fn kernel_process_child_wait_status_peek() -> usize {
+    return execution_child_exit_status;
+}
+
 fn kernel_process_child_wait_status() -> usize {
     execution_child_waitable = false;
     return execution_child_exit_status;
