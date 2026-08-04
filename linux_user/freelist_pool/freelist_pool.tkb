@@ -5,8 +5,31 @@
 // the opposite of what page_pool.tkb's lowest-free-index linear scan would
 // produce from the same sequence. That divergence is the point: it proves
 // this is a genuinely different mechanism, not a renamed copy.
+//
+// Also demonstrates per-slot content that this caller (not
+// freelist_pool_core.tkb) decides: SlotOwner stays index+generation only
+// (the "core" never learns what a usize payload even means), and this file
+// keeps its own [usize; POOL_COUNT] array plus payload_set/payload_get
+// accessors keyed by slot_index(owner) -- the same split page_pool_core.tkb
+// already uses between PageOwner (identity/proof) and the separate
+// page_pool byte array (content), via page_bytes(owner). The reuse
+// sequence below also shows a consequence of that split worth knowing:
+// freeing a slot does not clear its content, so a freshly (re)allocated
+// owner can observe the previous occupant's stale payload until this file
+// explicitly overwrites it -- the free list only guarantees index/
+// generation uniqueness, never content freshness.
 
 use "linux_user/freelist_pool/freelist_pool_core.tkb";
+
+private let mut slot_payload: [usize; POOL_COUNT];
+
+fn payload_set(owner: borrow SlotOwner[allocation], value: usize) {
+    slot_payload[slot_index(owner)] = value;
+}
+
+fn payload_get(owner: borrow SlotOwner[allocation]) -> usize {
+    return slot_payload[slot_index(owner)];
+}
 
 fn app_main() {
     freelist_pool_init();
@@ -43,6 +66,17 @@ fn app_main() {
     uart_print(slot_index(b));
     uart_puts(" ");
     uart_print(slot_index(c));
+    uart_puts("\n");
+
+    payload_set(a, 100);
+    payload_set(b, 200);
+    payload_set(c, 300);
+    uart_puts("payloads: ");
+    uart_print(payload_get(a));
+    uart_puts(" ");
+    uart_print(payload_get(b));
+    uart_puts(" ");
+    uart_print(payload_get(c));
     uart_puts("\n");
 
     slot_free(a);
@@ -89,6 +123,26 @@ fn app_main() {
     uart_print(slot_generation(r2));
     uart_puts(" ");
     uart_print(slot_generation(r3));
+    uart_puts("\n");
+
+    uart_puts("stale payloads (r1 sees b's old 200, r2 sees a's old 100, ");
+    uart_puts("r3 sees a never-set slot's 0): ");
+    uart_print(payload_get(r1));
+    uart_puts(" ");
+    uart_print(payload_get(r2));
+    uart_puts(" ");
+    uart_print(payload_get(r3));
+    uart_puts("\n");
+
+    payload_set(r1, 111);
+    payload_set(r2, 222);
+    payload_set(r3, 333);
+    uart_puts("payloads after this caller resets them: ");
+    uart_print(payload_get(r1));
+    uart_puts(" ");
+    uart_print(payload_get(r2));
+    uart_puts(" ");
+    uart_print(payload_get(r3));
     uart_puts("\n");
 
     match slot_alloc() {
