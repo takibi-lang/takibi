@@ -1253,7 +1253,9 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let fd: usize = x0;
         let address: usize = x1;
         let requested: usize = x2;
-        if (fd == 0) { return syscall_read_uart(address, requested); }
+        // An accepted socket duplicated onto stdin is still a connection,
+        // not the kernel console. BusyBox httpd reads its request from fd 0,
+        // so resolve unified fd ownership before applying the UART fallback.
         if (kernel_connected_fd_is_open(fd)) {
             syscall_connected_read_calls = syscall_connected_read_calls + 1;
             let read_slot: {0..<TCP_CONNECTION_MAX as usize} =
@@ -1368,6 +1370,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
               }
             }
         }
+        if (fd == 0) { return syscall_read_uart(address, requested); }
         if (kernel_syscall_file_is_open(fd) == false ||
             kernel_syscall_file_readable(fd) == false) {
             return (1, LINUX_EBADF);
