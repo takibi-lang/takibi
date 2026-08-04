@@ -159,7 +159,7 @@ $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_check
 # GitHub issue #213: freelist_generic's capacity is a runtime slice length,
 # not a compile-time constant, so its bounds checks cannot be proven away
 # by today's checker (a relational-bounds gap, not a real safety hole --
-# see the comments at each accepted trap site in freelist_core.tkb). This
+# see the comments at each accepted trap site in freelist.tkb). This
 # overrides the shared %_exe.o pattern rule below for this one target only,
 # dropping --forbid-trap; every other linux_user/ target is unaffected.
 #
@@ -169,18 +169,20 @@ $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_check
 # variable-init-history reasoning, and a cross-function-call-boundary
 # argument), so this override still cannot be dropped.
 #
-# Coarser than ideal: freelist_generic.tkb `use`s freelist_core.tkb, and
-# both are concatenated into ONE compilation (this language has no real
+# Coarser than ideal: freelist_generic.tkb `use`s freelist.tkb, and both
+# are concatenated into ONE compilation (this language has no real
 # separate compilation yet -- see AGENTS.md's issue #55 Part B note), so
 # --forbid-trap can only be dropped for the whole unit, not just the 2
 # known sites -- confirmed by rebuilding with --forbid-trap still on and
-# checking the reported trap count stays exactly 2, all in
-# freelist_core.tkb, none in freelist_generic.tkb's own code, at the time
-# this comment was last updated. If freelist_generic.tkb's own app_main
-# code grows, re-run that check (drop this override, rebuild, confirm the
-# trap count and file names reported) rather than trusting this comment to
-# still be accurate.
-$(LINUX_USER_DIR)/freelist_generic/freelist_generic_exe.o: $(LINUX_USER_DIR)/freelist_generic/freelist_generic.tkb $(LINUX_USER_DIR)/freelist_generic/freelist.tkb $(LINUX_USER_DIR)/freelist_generic/freelist_core.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE) $(TAKIBI)
+# checking the reported trap count stays exactly 2, all in freelist.tkb's
+# non-generic freelist_core_init (its own former file, freelist_core.tkb,
+# was merged into freelist.tkb once generics were proven -- see that
+# file's own header comment), none in freelist_generic.tkb's own code, at
+# the time this comment was last updated. If freelist_generic.tkb's own
+# app_main code grows, re-run that check (drop this override, rebuild,
+# confirm the trap count and file names reported) rather than trusting
+# this comment to still be accurate.
+$(LINUX_USER_DIR)/freelist_generic/freelist_generic_exe.o: $(LINUX_USER_DIR)/freelist_generic/freelist_generic.tkb $(LINUX_USER_DIR)/freelist_generic/freelist.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE) $(TAKIBI)
 	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(LINUX_USER_DIR)/freelist_generic/freelist_generic.tkb --target $(LINUX_AMD64_TARGET) -o $@
 $(LINUX_USER_DIR)/ip_parse/ip_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
