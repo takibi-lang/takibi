@@ -60,12 +60,9 @@ fn freelist_core_pop(core: *FreelistCore) -> FreelistPopResult {
     let mut next_free = core.next_free;
     let head: usize = core.free_head;
     if (head >= 0 && head < next_free.len) {
-        // GitHub issue #213: `head < next_free.len` is a real runtime
-        // safety condition just checked above, but the checker cannot yet
-        // use a comparison against another slice's *runtime* .len to
-        // eliminate this index's bounds check (relational bounds --
-        // distinct from the literal/const narrowing collect_bounds and
-        // slice_len_mins already support). Runtime trap accepted here.
+        // GitHub issue #213 (fixed): `head < next_free.len` now proves
+        // this index against next_free's runtime length via llvm_gen.ml's
+        // slice_index_ctx relational narrowing -- no trap site remains here.
         core.free_head = next_free[head];
         let generation: usize = core.next_generation;
         core.next_generation = generation + 1;

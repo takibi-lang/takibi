@@ -912,6 +912,66 @@ let restore_narrowing_mut saved =
     | Some old -> Hashtbl.replace narrowing_ctx name old
   ) saved
 
+(* condition -> [(idx_var, slice_var)] for `v < s.len` / `s.len > v` shapes,
+   joined by &&. GitHub issue #213: neither collect_bounds_cond (literal/
+   const/refined-Var bounds only) nor slice_len_mins (narrows a slice's OWN
+   length against a literal, the opposite direction) covers "variable v is
+   bounded by ANOTHER slice s's runtime .len" -- a relational fact between
+   two runtime values. Deliberately Lt/Gt only, never Le/Ge/Eq: `v <=
+   s.len` does NOT prove v is a valid index (v = s.len is out of bounds).
+   Non-negativity needs no separate check -- every slice index is already
+   usize-typed (require_usize_index), trivially >= 0. Dedupes by idx_var
+   (last match wins) via Hashtbl, mirroring slice_len_mins's own
+   update/Hashtbl.replace merge, so each name is saved/restored exactly
+   once regardless of how many (redundant or conflicting) facts the
+   condition spells out for it. *)
+let slice_index_facts (cond : Ast.expr) : (string * string) list =
+  let acc = Hashtbl.create 4 in
+  let rec go (e : Ast.expr) = match e.desc with
+    | BinOp (And, e1, e2) -> go e1; go e2
+    | BinOp (Lt, { desc = Var v; _ }, { desc = FieldGet ({ desc = Var s; _ }, "len"); _ })
+    | BinOp (Gt, { desc = FieldGet ({ desc = Var s; _ }, "len"); _ }, { desc = Var v; _ }) ->
+        Hashtbl.replace acc v s
+    | _ -> ()
+  in
+  go cond;
+  Hashtbl.fold (fun v s l -> (v, s) :: l) acc []
+
+(* Module-level table recording "v is currently a proven-safe index into
+   slice s" for the active if-branch (GitHub issue #213). Unlike
+   narrowing_ctx, this holds regardless of whether v/s are Imm or Mut
+   bindings: the fact never changes either variable's own type, it is a
+   pure side-channel consulted only when the SPECIFICALLY NAMED slice s is
+   later indexed (see load_from_slice/store_to_slice's proven check). One
+   boolean fact per name, so a nested if that overwrites an entry needs no
+   intersect logic (unlike narrowing_ctx's numeric ranges) -- save/restore
+   around each branch is sufficient. Compilation is single-threaded, so a
+   module-level Hashtbl is safe (same precedent as narrowing_ctx above). *)
+let slice_index_ctx : (string, string) Hashtbl.t = Hashtbl.create 4
+
+(* Kill rule: invalidate a (v, s) fact if the branch body may write to
+   EITHER v or s -- a write to s can point it at different memory (or a
+   different length), invalidating "v < s.len" just as surely as writing
+   v itself would. Needs no new tracking primitive: Ast.written_names
+   already returns the FULL set of names written/aliased/rebound anywhere
+   in the body (not scoped to one candidate name), so checking both v and
+   s against the same [killed] list handles this "two-name kill" directly. *)
+let apply_slice_index_narrowing (cond : Ast.expr) (killed : string list) =
+  List.fold_left (fun saved (v, s) ->
+    if List.mem v killed || List.mem s killed then saved
+    else
+      let old = Hashtbl.find_opt slice_index_ctx v in
+      Hashtbl.replace slice_index_ctx v s;
+      (v, old) :: saved
+  ) [] (slice_index_facts cond)
+
+let restore_slice_index_narrowing saved =
+  List.iter (fun (v, old_opt) ->
+    match old_opt with
+    | None     -> Hashtbl.remove slice_index_ctx v
+    | Some old -> Hashtbl.replace slice_index_ctx v old
+  ) saved
+
 type device_barrier_kind = DmaPublish | DmaConsume | DeviceFence
 
 let starts_with s prefix =
@@ -2926,9 +2986,15 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          so hi <= min implies hi <= len). Otherwise check against the
          runtime length. *)
       let load_from_slice elem_ty min_len fat =
-        let proven = match refinement_range idx_ty with
-          | Some (lo, hi) -> lo >= 0 && hi <= min_len
-          | _ -> false
+        let proven =
+          (match refinement_range idx_ty with
+           | Some (lo, hi) -> lo >= 0 && hi <= min_len
+           | _ -> false)
+          || (match idx.desc with
+              | Var v -> (match Hashtbl.find_opt slice_index_ctx v with
+                          | Some s -> s = id
+                          | None -> false)
+              | _ -> false)
         in
         if not proven then
           emit_bounds_check_dyn e.loc idx_ty idx_v min_len (slice_len fat);
@@ -3715,9 +3781,15 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              if is_volatile then set_volatile true inst
            in
            let store_to_slice elem_ty min_len fat =
-             let proven = match refinement_range idx_ty with
-               | Some (lo, hi) -> lo >= 0 && hi <= min_len
-               | _ -> false
+             let proven =
+               (match refinement_range idx_ty with
+                | Some (lo, hi) -> lo >= 0 && hi <= min_len
+                | _ -> false)
+               || (match idx.desc with
+                   | Var v -> (match Hashtbl.find_opt slice_index_ctx v with
+                               | Some s -> s = id
+                               | None -> false)
+                   | _ -> false)
              in
              if not proven then
                emit_bounds_check_dyn idx.loc idx_ty idx_v min_len (slice_len fat);
@@ -4176,9 +4248,11 @@ let gen_func ?prog_types fdef =
         let killed    = Ast.written_names then_stmts in
         let saved     = apply_narrowing     locals cond killed in
         let saved_mut = apply_narrowing_mut locals cond killed in
+        let saved_idx = apply_slice_index_narrowing cond killed in
         List.iter gen_stmt then_stmts;
         restore_narrowing     locals saved;
         restore_narrowing_mut saved_mut;
+        restore_slice_index_narrowing saved_idx;
         if block_terminator (insertion_block builder) = None then begin
           merge_reachable := true;
           ignore (build_br merge_bb builder);

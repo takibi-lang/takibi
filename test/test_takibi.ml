@@ -7637,6 +7637,71 @@ let codegen_tests = [
           return 0 as u8;
         }");
 
+  (* -- GitHub issue #213: relational slice-length bounds narrowing
+     (`v < s.len`) -------------------------------------------------------- *)
+  (* Motivating real-world shape: linux_user/freelist_generic/freelist_core.tkb's
+     freelist_core_pop hit this exact pattern -- `if (head < next_free.len)
+     { ... next_free[head] ... }` still required a runtime check because no
+     existing mechanism relates a variable to ANOTHER value's runtime .len. *)
+
+  Alcotest.test_case
+    "relational narrowing: `if (v < s.len) { s[v] }` proves the index \
+     against s's RUNTIME length (zero trap sites) -- the freelist_core_pop shape" `Quick
+    (expect_trap_sites 0
+       "fn f213_pop_shape(s: []usize, v: usize) -> usize {
+          if (v < s.len) {
+            return s[v];
+          }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "relational narrowing is killed by writing the index variable inside \
+     the branch (same kill rule as other narrowing mechanisms)" `Quick
+    (expect_trap_sites 1
+       "fn f213_kill_v(s: []usize, v: usize) -> usize {
+          if (v < s.len) {
+            v = 0;
+            return s[v];
+          }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "relational narrowing is killed by reassigning the SLICE inside the \
+     branch (the two-name kill rule issue #213 specifically calls out: a \
+     write to s can point it at different memory, invalidating `v < s.len` \
+     just as surely as writing v itself)" `Quick
+    (expect_trap_sites 1
+       "fn f213_kill_s(s: []usize, t: []usize, v: usize) -> usize {
+          if (v < s.len) {
+            s = t;
+            return s[v];
+          }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "relational narrowing recognizes the mirrored spelling `s.len > v`" `Quick
+    (expect_trap_sites 0
+       "fn f213_mirrored(s: []usize, v: usize) -> usize {
+          if (s.len > v) {
+            return s[v];
+          }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "negative control: `v <= s.len` does NOT prove v is a valid index \
+     (v = s.len is out of bounds) -- must keep the trap" `Quick
+    (expect_trap_sites 1
+       "fn f213_le_not_proven(s: []usize, v: usize) -> usize {
+          if (v <= s.len) {
+            return s[v];
+          }
+          return 0;
+        }");
+
   Alcotest.test_case
     "constant subslice: s[2..<6] of [u8; 8..] yields [u8; 4..]; index 3 \
      within it is proven (zero sites)" `Quick
