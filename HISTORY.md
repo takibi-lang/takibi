@@ -15,6 +15,50 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-05: Deduplicate Primary/Secondary CPU Init (GitHub Issue #224)
+
+`kernel/arch/arm64/boot/entry.S`'s `_start` and `kernel_secondary_entry`
+independently performed the same EL2 configuration and EL2->EL1 drop:
+`cnthctl_el2 |= 3`, `hcr_el2 |= (1 << 31)`, `vbar_el1 = el1_vectors`,
+`sp_el1 = <own stack top>`, `spsr_el2 = 0x3c5` / `elr_el2 = <own EL1 label>`
+/ `eret`, then post-drop `cpacr_el1 |= (3 << 20)` / `isb`.
+`kernel/arch/arm64/mm/mmu.S`'s `kernel_mmu_init` and
+`kernel_mmu_init_secondary` separately duplicated `mair_el1`, `tcr_el1`,
+`ttbr0_el1` plus the `tlbi`/`dsb`/`isb` sequence, and the `sctlr_el1`
+MMU/cache-enable bits. Nothing enforced that changing one copy also changed
+the other -- the same "two paths that must agree, nothing checks it" shape
+behind the issue #209 frame bugs, on the exact path issue #222's multi-core
+scheduler work will exercise hardest.
+
+Factored the identical parts into shared subroutines, called by both paths,
+rather than adding a third divergence point later:
+
+- `entry.S` gained `el2_drop_to_el1(stack_top: x0, el1_entry: x1)` --
+  configures cnthctl_el2/hcr_el2/vbar_el1/sp_el1, sets the caller's own
+  stack as both the live EL2 SP and SP_EL1, then erets to the caller-chosen
+  EL1 label with DAIF masked. `_start` and `kernel_secondary_entry` now just
+  compute their own stack-top and post-drop label and `bl` into it; neither
+  touches an EL2 system register directly anymore. The `mov sp, x0` each
+  used to do before the drop (not itself named in the issue's register
+  list, but the same duplicated pattern) moved inside this routine too --
+  nothing between BSS-zeroing and the call touches the stack, so setting it
+  once, right before `eret`, is equivalent.
+- `entry.S` gained `el1_fpsimd_enable()` for the post-drop `cpacr_el1`
+  write, called from both `.Lel1_entry` and `.Lsecondary_el1`.
+- `mmu.S` gained `kernel_mmu_activate()` for the
+  mair_el1/tcr_el1/ttbr0_el1/sctlr_el1 sequence. `kernel_mmu_init` still
+  runs `INIT_ROOT` to build the shared page tables before tail-branching
+  (`b`, not `bl` -- both callers already reached this point via their own
+  `bl`, so LR already holds the right return address) into it;
+  `kernel_mmu_init_secondary` tail-branches straight in, so it still never
+  rebuilds or clears the primary's already-published root -- the one
+  intentional asymmetry the issue called out to preserve.
+
+No language changes needed; plain shared assembly subroutines were enough,
+matching the issue's own suggested scope. Verified on real RPi5 hardware:
+25/25 views pass, including `smp_bringup`, the one that actually exercises
+`kernel_secondary_entry`/`kernel_mmu_init_secondary`.
+
 ### 2026-08-05: One Exception-Frame Shape, FP/SIMD Included, for Every EL1 Entry (GitHub Issue #223)
 
 `kernel/arch/arm64/boot/entry.S`'s Current-EL-SPx IRQ entry -- an interrupt

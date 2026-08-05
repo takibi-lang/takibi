@@ -45,7 +45,25 @@
 kernel_mmu_init:
     INIT_ROOT kernel_l1_0, user_l2_0, user_l3_0
     INIT_ROOT kernel_l1_1, user_l2_1, user_l3_1
+    b       kernel_mmu_activate
 
+/* Install the primary's already-published kernel root on core 1. This must
+ * never rebuild or clear shared tables. */
+    .global kernel_mmu_init_secondary
+kernel_mmu_init_secondary:
+    b       kernel_mmu_activate
+
+/* kernel_mmu_activate(): the MAIR_EL1/TCR_EL1/TTBR0_EL1/SCTLR_EL1
+ * configuration shared by kernel_mmu_init and kernel_mmu_init_secondary
+ * (GitHub issue #224) -- previously duplicated register-for-register
+ * between the two, with nothing keeping them in sync. Table construction
+ * (INIT_ROOT above) stays exclusive to kernel_mmu_init: the secondary must
+ * only ever install the primary's already-published root, never rebuild or
+ * clear it, which is why it tail-branches straight here without running
+ * INIT_ROOT first. A plain `b`, not `bl`: both callers reach this via `bl`
+ * themselves, so LR already holds their own caller's return address, and
+ * this function's own `ret` returns there directly. */
+kernel_mmu_activate:
     /* Attr0 Device-nGnRnE; Attr1 Normal WB RA/WA. */
     movz    x0, #0xff00
     msr     mair_el1, x0
@@ -67,35 +85,6 @@ kernel_mmu_init:
     dsb     ish
     isb
 
-    mrs     x0, sctlr_el1
-    orr     x0, x0, #1
-    orr     x0, x0, #(1 << 2)
-    orr     x0, x0, #(1 << 12)
-    bic     x0, x0, #(1 << 1)
-    msr     sctlr_el1, x0
-    isb
-    ret
-
-/* Install the primary's already-published kernel root on core 1. This must
- * never rebuild or clear shared tables. */
-    .global kernel_mmu_init_secondary
-kernel_mmu_init_secondary:
-    movz    x0, #0xff00
-    msr     mair_el1, x0
-    movz    x0, #0x351b
-    orr     x0, x0, #(1 << 23)
-    movk    x0, #2, lsl #32
-    msr     tcr_el1, x0
-    adrp    x1, kernel_l1_0
-    add     x1, x1, :lo12:kernel_l1_0
-    mov     x2, #1
-    lsl     x2, x2, #48
-    orr     x1, x1, x2
-    msr     ttbr0_el1, x1
-    isb
-    tlbi    vmalle1
-    dsb     ish
-    isb
     mrs     x0, sctlr_el1
     orr     x0, x0, #1
     orr     x0, x0, #(1 << 2)

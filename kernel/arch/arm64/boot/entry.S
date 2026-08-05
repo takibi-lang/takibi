@@ -14,10 +14,6 @@ _start:
     and     x0, x0, #3
     cbnz    x0, .Lpark
 
-    adrp    x0, boot_stack_top
-    add     x0, x0, :lo12:boot_stack_top
-    mov     sp, x0
-
     adrp    x0, __bss_start
     add     x0, x0, :lo12:__bss_start
     adrp    x1, __bss_end
@@ -28,37 +24,13 @@ _start:
     str     xzr, [x0], #8
     b       .Lbss_loop
 .Lbss_done:
-    /* EL1 may use the physical counter/timer without trapping to EL2. */
-    mrs     x0, cnthctl_el2
-    orr     x0, x0, #3
-    msr     cnthctl_el2, x0
-
-    /* EL1 and EL0 execute AArch64; retain all unrelated inherited bits. */
-    mrs     x0, hcr_el2
-    orr     x0, x0, #(1 << 31)
-    msr     hcr_el2, x0
-
-    adrp    x0, el1_vectors
-    add     x0, x0, :lo12:el1_vectors
-    msr     vbar_el1, x0
-
     adrp    x0, boot_stack_top
     add     x0, x0, :lo12:boot_stack_top
-    msr     sp_el1, x0
-
-    mov     x0, #0x3c5         /* EL1h, DAIF masked */
-    msr     spsr_el2, x0
-    adr     x0, .Lel1_entry
-    msr     elr_el2, x0
-    isb
-    eret
+    adr     x1, .Lel1_entry
+    bl      el2_drop_to_el1
 
 .Lel1_entry:
-    /* Permit ordinary compiled code to use FP/SIMD if LLVM selects it. */
-    mrs     x0, cpacr_el1
-    orr     x0, x0, #(3 << 20)
-    msr     cpacr_el1, x0
-    isb
+    bl      el1_fpsimd_enable
     bl      kernel_mmu_init
     bl      main
 
@@ -76,34 +48,11 @@ kernel_secondary_entry:
 
     adrp    x0, secondary_stack_top
     add     x0, x0, :lo12:secondary_stack_top
-    mov     sp, x0
-
-    mrs     x0, cnthctl_el2
-    orr     x0, x0, #3
-    msr     cnthctl_el2, x0
-    mrs     x0, hcr_el2
-    orr     x0, x0, #(1 << 31)
-    msr     hcr_el2, x0
-
-    adrp    x0, el1_vectors
-    add     x0, x0, :lo12:el1_vectors
-    msr     vbar_el1, x0
-    adrp    x0, secondary_stack_top
-    add     x0, x0, :lo12:secondary_stack_top
-    msr     sp_el1, x0
-
-    mov     x0, #0x3c5
-    msr     spsr_el2, x0
-    adr     x0, .Lsecondary_el1
-    msr     elr_el2, x0
-    isb
-    eret
+    adr     x1, .Lsecondary_el1
+    bl      el2_drop_to_el1
 
 .Lsecondary_el1:
-    mrs     x0, cpacr_el1
-    orr     x0, x0, #(3 << 20)
-    msr     cpacr_el1, x0
-    isb
+    bl      el1_fpsimd_enable
     bl      kernel_mmu_init_secondary
     mov     x0, x19
     mrs     x1, mpidr_el1
@@ -112,6 +61,54 @@ kernel_secondary_entry:
 .Lsecondary_park:
     wfe
     b       .Lsecondary_park
+
+/* el2_drop_to_el1(stack_top: x0, el1_entry: x1): the EL2 configuration and
+ * drop-to-EL1 sequence shared by _start and kernel_secondary_entry (GitHub
+ * issue #224) -- previously duplicated register-for-register between the
+ * primary and secondary boot paths, with nothing keeping the two copies in
+ * sync. Configures physical counter/timer trapping, EL1/EL0 execution
+ * state, the one shared vector table, and the caller's own stack (as both
+ * the live EL2 SP and SP_EL1), then erets to el1_entry in EL1h with DAIF
+ * masked. Never returns -- the caller's `bl` return address is unused,
+ * matching how .Lel1_entry/.Lsecondary_el1 are reached below. */
+    .global el2_drop_to_el1
+    .type el2_drop_to_el1, %function
+el2_drop_to_el1:
+    mov     sp, x0
+
+    /* EL1 may use the physical counter/timer without trapping to EL2. */
+    mrs     x2, cnthctl_el2
+    orr     x2, x2, #3
+    msr     cnthctl_el2, x2
+
+    /* EL1 and EL0 execute AArch64; retain all unrelated inherited bits. */
+    mrs     x2, hcr_el2
+    orr     x2, x2, #(1 << 31)
+    msr     hcr_el2, x2
+
+    adrp    x2, el1_vectors
+    add     x2, x2, :lo12:el1_vectors
+    msr     vbar_el1, x2
+    msr     sp_el1, x0
+
+    mov     x2, #0x3c5          /* EL1h, DAIF masked */
+    msr     spsr_el2, x2
+    msr     elr_el2, x1
+    isb
+    eret
+
+/* el1_fpsimd_enable(): permit ordinary compiled code to use FP/SIMD if LLVM
+ * selects it. Shared by .Lel1_entry and .Lsecondary_el1 (GitHub issue #224)
+ * -- both used to set CPACR_EL1 separately, right after their own EL2->EL1
+ * drop. */
+    .global el1_fpsimd_enable
+    .type el1_fpsimd_enable, %function
+el1_fpsimd_enable:
+    mrs     x0, cpacr_el1
+    orr     x0, x0, #(3 << 20)
+    msr     cpacr_el1, x0
+    isb
+    ret
 
     .global psci_cpu_on
 psci_cpu_on: /* fn(target_affinity, entry, context) -> usize */
