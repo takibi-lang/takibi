@@ -784,6 +784,18 @@ size.
   (multi-core, issue #6, still Backlog): a missing memory barrier or cache-maintenance op between cores can look
   perfectly correct in QEMU and fail only on real silicon, so that kind of work should get real-hardware
   integration testing early, not just as a final check once "everything already works in QEMU."
+- **The same D-cache-bypass gap applies to postmortem debugging over SWD, not just DMA/harness I/O.**
+  `kernel/arch/arm64/boot/entry.S`'s `el1_exception_evidence` fail-stop path (see the "EL0 fail-stop"
+  entry above) records `esr_el1`/`far_el1`/`elr_el1`/`spsr_el1` into a fixed `.bss` location before
+  parking in `wfe`, intended as a postmortem evidence block readable via `openocd`'s `mdd`/`mdw`. Found
+  during the issue #209 child-exec bring-up (2026-08-05, see HISTORY.md) that these `mdd` reads can
+  return a stale, earlier-boot value while the CPU's actual writes are still dirty in D-cache -- the
+  block claimed `ESR=0, ELR=0` while the halted core's own `ESR_EL1`/`ELR_EL1` (read via `reg ESR_EL1`
+  etc., from the debug context, not RAM) showed a real, different fault. **When diagnosing a real
+  fail-stop, read the parked core's system registers directly (`reg ESR_EL1` / `ELR_EL1` / `SPSR_EL1`)
+  instead of trusting a `.bss`-written evidence block read over SWD.** A same-value-every-boot "coherence
+  check" (e.g. diffing a static struct that is written identically on every run) cannot detect this kind
+  of staleness and must not be used to argue a stale read is fresh.
 - **STM32 Ethernet driver details** (unified driver API, network config, the DMA-ordering hardware bug, TX interrupt completion) -- see `examples/common_stm32/AGENTS.md`.
 - **RISC-V has no `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` lowering yet** -- these now raise a compile
   error on RISC-V targets rather than silently falling back to a bare barrier (issue #146). AArch64 previously

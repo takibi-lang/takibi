@@ -15,6 +15,107 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-05: Ash Child Clone/Exec/Exit/Wait4 Cycle Completed, Three Frame Bugs Found via SWD Register Reads (GitHub Issue #209)
+
+The child external-command RPi5 scenario (`sh -c '/echo child-exec-ok'`,
+exercising clone + child execve + child exit + parent wait4 together) had
+never worked: every prior slice's boot log showed the child shell exiting
+nonzero without reaching the exec handoff at all. Investigation started from
+two scenario-level defects. First, the boot-time scheduler fixture allocates
+both `KERNEL_PROCESS_MAX` (=2) process-table slots via `scheduled_process_alloc()`
+and nothing ever frees them again except `kernel_process_execution_reset()`
+(which the boot sequence only calls once, before that very first fixture) --
+so every later `clone()` in the boot log unconditionally saw the pool as
+`Full` and was rejected as `ProcessCloneResult::Invalid` before the child
+ever ran. Second, `sh -c '/echo child-exec-ok'` let ash apply its
+last-simple-command tail-call exec optimization and replace itself in place,
+so even a working clone() would never have been exercised by this exact
+script. Fixed by calling `kernel_process_execution_reset()` immediately
+before this scenario in `kernel/init/main.tkb`, and by appending `; exit 0`
+to the script so ash is forced to fork a real child.
+
+That was enough to make clone() succeed for the first time at this call
+site, which immediately exposed three previously-latent frame-management
+bugs in the assembly syscall-return paths -- each one only reachable once
+the previous one was fixed, and each one silent: `kernel_syscall_dispatch`'s
+`EXECVE`/`WAIT4`/`EXIT` handling worked correctly, but the actual failures
+were in `user_entry.S`'s hand-written EL0-frame plumbing around those
+returns, which is exactly the kind of defect a compile-time-checked `.tkb`
+language exists to make rare -- these three all live in the ~585-line
+assembly file that the type system cannot see into.
+
+Diagnosis method, not just the bugs: a boot log that goes silent mid-scenario
+with the 90s "completion marker not observed" timeout is `entry.S`'s
+`el1_exception_evidence` fail-stop (see AGENTS.md's "EL0 fail-stop" entry),
+which parks the core in `wfe` after recording `esr_el1`/`far_el1`/`elr_el1`/
+`spsr_el1` into a fixed `.bss` block. Reading that block over SWD via
+`openocd`'s `mdd` turned out to be unreliable here: it showed `ESR=0, ELR=0`,
+a genuinely impossible combination for the code path involved, while the
+halted core's own debug-context registers (`reg ESR_EL1`/`ELR_EL1`/`SPSR_EL1`,
+read directly, not through RAM) showed the real fault. The CPU's writes to
+that `.bss` location were still dirty in D-cache; SWD's `mdd`/`mdw` read DRAM
+directly, the same bypass-the-D-cache gap already documented in AGENTS.md for
+OpenOCD `load_image`/`dump_image` DMA-style access, just via a debugger read
+instead of a debugger write. `.text` bytes read the same way over SWD DID
+match the ELF exactly, confirming the load-address mapping itself was correct
+and this was specifically a `.bss`/cache-staleness problem, not a general
+"don't trust SWD" conclusion. AGENTS.md's cache-coherency entry now cross-
+references this. Each of the three bugs below was found from one such
+register read after one fail-stop, then fixed, then rebuilt and rerun on
+hardware to reach the next one:
+
+1. `.Lsyscall_child_exec` published the replacement image's entry point and
+   stack pointer via `msr elr_el1, x19` / `msr sp_el0, x0`, but the very next
+   instruction was `EL0_CONTEXT_RESTORE`, whose first four instructions
+   unconditionally reload `elr_el1` and `sp_el0` from the saved frame at
+   `sp`, silently overwriting what was just set. The child resumed at the
+   *old* execve return address (still inside the pre-exec ash image's text)
+   against the *newly mapped* BusyBox-echo image, executing whatever bytes
+   happened to be there as instructions -- observed as ESR EC=0x00 (Unknown
+   reason / undefined instruction), ELR pointing at a low, non-`USER_TEXT_VA`
+   address. Fixed by writing the new entry/stack into the frame itself
+   (`str x0, [sp, #EL0_CONTEXT_SP_EL0]` / `str x19, [sp, #EL0_CONTEXT_ELR_EL1]`)
+   before `EL0_CONTEXT_RESTORE`, so the reload picks up the intended values.
+
+2. `.Lsyscall_clone_parent` kept the resumed parent's saved SP in `x7`
+   (caller-saved in this ABI) across `bl kernel_process_child_exec_reap`.
+   Every earlier boot-time clone/exit cycle never actually had a live child
+   exec image at that point, so the reap call was a cheap no-op and never
+   clobbered `x7` in practice; this scenario is the first one where a child
+   exec image really is live, so the reap reaches a real
+   `process_image_unmap`, and `x7` came back garbage before the subsequent
+   `mov sp, x7`. Fixed by moving the saved SP into `x19` (callee-saved),
+   matching the pattern `.Lsyscall_clone_child` already used one label above.
+
+3. `process_image_exec_reap()` called `process_image_unmap(pages)` for the
+   child's root-1 image, which resets `process_image_target_root` to 0 for
+   future page-table *writes* but does not touch `TTBR0_EL1` -- the MMU keeps
+   translating through whatever root was last activated. The parent resumed
+   at EL0 immediately afterward still on the just-emptied root 1, and took a
+   level-3 instruction-fetch translation fault (ESR `0x82000007`) on its own
+   very first instruction back. `process_image_clone_vm_reap()`, used by the
+   ordinary fork/exit path, already calls `process_image_activate_parent()`
+   for exactly this reason; `process_image_exec_reap()` was missing the same
+   call. Fixed by adding it.
+
+Fix commit `8db27e3`. Added a permanent `kernel/tests/rpi5/views/child_exec.*`
+view asserting `child-exec-ok` / `child exec: shell exit: 0` / `child exec:
+image window clean`, rather than leaving this scenario only eyeballed.
+`make test`, `kernelbuild-rpi5`, and the full RPi5 suite (24 views, one boot,
+`resources: pages=0`) all pass on real hardware.
+
+Known follow-up, not yet triggered by any current scenario: `kernel/mm/process_image.tkb`'s
+`process_image_clone_vm_begin()` (the plain fork/clone path, as opposed to
+`process_image_map_current()`) never initializes root 1's demand-stack
+metadata (`process_image_stack_growth_active[1]`, `process_image_stack_lowest_l3[1]`,
+etc.). A forked child that grows its stack past whatever the parent had
+already faulted in before the fork would hit `process_image_handle_data_abort`'s
+`process_image_stack_growth_active[root] == false` guard and fail-stop the
+same way the bugs above did. This slice's child execs immediately and never
+grows its own stack, so it never hit this; the interactive ash REPL and
+telnet goals still open on issue #209 both fork long-lived child
+shells/connections, the shape most likely to trigger it.
+
 ### 2026-08-02: Scheduler Ignores Ticks Until a Child Exists (GitHub Issue #195)
 
 The userspace connected-I/O fixture intermittently received no SYN-ACK after
