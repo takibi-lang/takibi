@@ -1,4 +1,2 @@
 execve: busybox echo exit: 0
 execve: image window clean
-child exec: shell exit: 0
-child exec: image window clean

@@ -15,6 +15,8 @@ const AARCH64_NR_UNAME: usize = 160;
 const AARCH64_NR_EXIT: usize = 93;
 const AARCH64_NR_EXIT_GROUP: usize = 94;
 const AARCH64_NR_CLONE: usize = 220;
+const AARCH64_NR_VFORK: usize = 58;
+const AARCH64_NR_FORK: usize = 107;
 const AARCH64_NR_EXECVE: usize = 221;
 const AARCH64_NR_WAIT4: usize = 260;
 const AARCH64_NR_FCNTL: usize = 25;
@@ -1918,8 +1920,12 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         return (7, 7);
     }
 
-    if (number == AARCH64_NR_CLONE) {
-        if (x0 != 0x11 || x1 != 0) { return (1, LINUX_EINVAL); }
+    if (number == AARCH64_NR_CLONE || number == AARCH64_NR_VFORK ||
+        number == AARCH64_NR_FORK) {
+        if ((number == AARCH64_NR_CLONE && (x0 != 0x11 || x1 != 0)) ||
+            (number != AARCH64_NR_CLONE && (x0 != 0 || x1 != 0))) {
+            return (1, LINUX_EINVAL);
+        }
         match process_image_clone_vm_begin() {
             ProcessCloneVmResult::OutOfMemory => {
                 return (1, LINUX_EAGAIN);
@@ -1935,7 +1941,13 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                     }
                     UnifiedFdResult::Ok => {}
                 }
-                match kernel_process_clone_begin(x0, x1) {
+                let mut clone_flags: usize = x0;
+                let mut clone_stack: usize = x1;
+                if (number != AARCH64_NR_CLONE) {
+                    clone_flags = 0x11;
+                    clone_stack = 0;
+                }
+                match kernel_process_clone_begin(clone_flags, clone_stack) {
                     ProcessCloneResult::Invalid => {
                         match kernel_syscall_clone_files_reap() {
                             KernelFdReapResult::Failed => { }
