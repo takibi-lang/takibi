@@ -347,6 +347,13 @@ fn process_image_exec_reap() {
         ProcessImageExecValue::Empty => {}
         ProcessImageExecValue::Ready(pages) => {
             process_image_unmap(pages);
+            // process_image_unmap only retargets later page-table writes at
+            // root 0; it leaves TTBR0 on the root it just emptied. The parent
+            // is resumed straight after this reap, so activate its root here
+            // exactly as process_image_clone_vm_reap does for the plain
+            // fork/exit path -- otherwise the parent returns to EL0 against
+            // the unmapped child root and faults on its own first instruction.
+            process_image_activate_parent();
         }
     }
 }

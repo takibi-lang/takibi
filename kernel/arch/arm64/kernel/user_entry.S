@@ -499,9 +499,15 @@ el0_sync_entry:
     b       el1_exception_evidence
 
 .Lsyscall_clone_parent:
+    /* x7 (the resumed parent's saved SP) is caller-saved, so it cannot be
+     * held across the reap call -- once a child exec image is actually live,
+     * that call reaches a deep unmap and clobbers it. Keep it in x19, which
+     * is callee-saved here and is itself restored from the parent frame by
+     * EL0_CONTEXT_RESTORE below, matching .Lsyscall_clone_child's pattern. */
+    mov     x19, x7
     bl      kernel_process_child_exec_reap
-    cbz     x7, .Lclone_context_fail
-    mov     sp, x7
+    cbz     x19, .Lclone_context_fail
+    mov     sp, x19
     EL0_CONTEXT_RESTORE
     add     sp, sp, #EL0_CONTEXT_SIZE
     eret
@@ -540,8 +546,13 @@ el0_sync_entry:
     bl      kernel_process_child_exec_entry
     mov     x19, x0
     bl      kernel_process_child_exec_stack
-    msr     sp_el0, x0
-    msr     elr_el1, x19
+    /* The replacement entry and stack must be published through the saved
+     * frame, not through msr: EL0_CONTEXT_RESTORE below reloads elr_el1 and
+     * sp_el0 from this frame, so writing the system registers directly here
+     * would be undone before the eret and resume the replaced image at the
+     * old execve return address with the old stack pointer. */
+    str     x0, [sp, #EL0_CONTEXT_SP_EL0]
+    str     x19, [sp, #EL0_CONTEXT_ELR_EL1]
     str     xzr, [sp, #EL0_CONTEXT_X0]
     EL0_CONTEXT_RESTORE
     add     sp, sp, #EL0_CONTEXT_SIZE
