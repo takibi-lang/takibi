@@ -483,17 +483,14 @@ el0_sync_entry:
     b       .Lsyscall_dispatch
 
 .Lsyscall_exec:
-    /* Return to the EL1 image owner with the pending exec request. */
+    // GitHub issue #221 Step 7: byte-identical to .Lsyscall_exit below --
+    // neither calls any kernel_process_* logic that a second competing
+    // write path could race with (unlike Steps 2-6), so there is no bug
+    // class here for a .tkb migration to make unreachable. The one real
+    // improvement available is deduplicating the two copies of this
+    // sequence, which el1_return_from_syscall below does.
     mov     x0, x7
-    add     sp, sp, #EL0_CONTEXT_SIZE
-    ldp     x19, x20, [sp, #0]
-    ldp     x21, x22, [sp, #16]
-    ldp     x23, x24, [sp, #32]
-    ldp     x25, x26, [sp, #48]
-    ldp     x27, x28, [sp, #64]
-    ldp     x29, x30, [sp, #80]
-    add     sp, sp, #96
-    ret
+    b       el1_return_from_syscall
 
 .Lsyscall_child_exec:
     // GitHub issue #221 Step 5: moved to kernel_syscall_child_exec_return
@@ -513,6 +510,16 @@ el0_sync_entry:
 
 .Lsyscall_exit:
     mov     x0, x7
+    // fall through
+
+// The single shared "return to run_initial_user's EL1 caller" tail, reached
+// by both .Lsyscall_exit (action 2: parent exit) and .Lsyscall_exec (action
+// 7: parent-only execve pending) with x0 already set to the value each wants
+// to return. Pops exactly the frame run_initial_user's own prologue pushed,
+// so this must run on the same EL1 kernel stack that call was made from,
+// which is always true here: nothing between el0_sync_entry and this point
+// ever switches away from it.
+el1_return_from_syscall:
     add     sp, sp, #EL0_CONTEXT_SIZE
     ldp     x19, x20, [sp, #0]
     ldp     x21, x22, [sp, #16]
