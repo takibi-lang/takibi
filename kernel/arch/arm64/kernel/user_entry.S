@@ -513,13 +513,11 @@ el0_sync_entry:
     eret
 
 .Lsyscall_block:
+    // GitHub issue #221 Step 2: moved to kernel_syscall_block_return (.tkb),
+    // which ends in the single shared el0_context_resume/kernel_syscall_fail_stop
+    // primitives above instead of hand-rolling the restore-and-eret sequence.
     mov     x0, sp
-    bl      kernel_process_block_uart
-    cbz     x0, .Lclone_context_fail
-    mov     sp, x0
-    EL0_CONTEXT_RESTORE
-    add     sp, sp, #EL0_CONTEXT_SIZE
-    eret
+    b       kernel_syscall_block_return
 
 .Lsyscall_wait_uart:
     /* interrupt_notify() emits SEV, so WFE retains an event that arrives
@@ -583,3 +581,31 @@ el0_sync_entry:
 el0_context_set_x0:
     str     x1, [x0, #EL0_CONTEXT_X0]
     ret
+
+// GitHub issue #221 Step 2+: the single shared consumer for every action tail
+// that resumes some already-fully-populated EL0 frame (the current frame with
+// only a few fields changed, or an entirely different process's saved frame).
+// Every `.Lsyscall_*` tail that used to hand-roll `EL0_CONTEXT_RESTORE; add sp,
+// sp, #EL0_CONTEXT_SIZE; eret` itself now instead tail-branches into a small
+// .tkb function that ends by calling this -- there is exactly one place left
+// in the whole kernel that performs this restore-and-eret sequence, so two
+// different code paths can no longer race to set elr_el1/sp_el0 and have one
+// silently undone by the other's unconditional reload (see commit 8db27e3's
+// first bug for the failure mode this replaces).
+    .global el0_context_resume
+el0_context_resume:
+    mov     sp, x0
+    EL0_CONTEXT_RESTORE
+    add     sp, sp, #EL0_CONTEXT_SIZE
+    eret
+
+// The single shared fail-stop entry, replacing every hand-written
+// `mov x16, #8; b el1_exception_evidence` pair at each .tkb-reachable action
+// tail. x16=8 matches el0_sync_entry's own vector-slot identification
+// (el1_vectors installs the lower-EL AArch64 sync slot at x16=8), so a
+// fail-stop reached this way is indistinguishable in the recorded evidence
+// from one reached directly out of el0_sync_entry.
+    .global kernel_syscall_fail_stop
+kernel_syscall_fail_stop:
+    mov     x16, #8
+    b       el1_exception_evidence

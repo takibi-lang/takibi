@@ -935,6 +935,24 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
 // `bl kernel_syscall_dispatch`); its signature is untouched so this step
 // needs no assembly changes. All real logic lives in the SyscallAction-
 // returning kernel_syscall_dispatch_action below.
+//
+// GitHub issue #221: the functions below are user_entry.S's action-tail
+// branches, migrated one at a time (each independently hardware-verified)
+// from hand-written EL0_CONTEXT_RESTORE/eret assembly into .tkb, ending in
+// the single shared el0_context_resume/kernel_syscall_fail_stop primitives
+// (kernel/arch/arm64/kernel/user_entry.S) instead of a per-branch copy of
+// that sequence.
+
+// Step 2/8: action 5 (.Lsyscall_block). Entered via a plain tail branch, not
+// `bl` -- there is no caller to return to, every path ends in a noreturn call.
+fn kernel_syscall_block_return(frame_sp: usize) {
+    let next_sp: usize = kernel_process_block_uart(frame_sp);
+    if (next_sp == 0) {
+        kernel_syscall_fail_stop();
+    }
+    el0_context_resume(next_sp);
+}
+
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize)
         -> (usize, usize) !{unsafe} {
