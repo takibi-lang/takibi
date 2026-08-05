@@ -10,6 +10,7 @@ use "kernel/platform/rpi5/usb_xhci.tkb";
 use "kernel/net/tcp.tkb";
 use "kernel/net/socket_capability.tkb";
 use "kernel/arch/arm64/boot/boot_extern.tkb";
+use "kernel/arch/arm64/kernel/fpsimd_probe_extern.tkb";
 
 private let mut ext2_read_fixture: [u8; 32];
 private let mut ext2_symlink_fixture: [u8; 64];
@@ -347,6 +348,22 @@ fn main() {
     // this is safe now that both the Current-EL-SPx and Lower-EL-AArch64
     // IRQ vector slots are wired.
     platform_irq_init();
+
+    // GitHub issue #223: the Current-EL-SPx IRQ entry used to save general
+    // registers only, so an interrupt taken while EL1 kernel code held live
+    // q registers would have destroyed them the moment anything on the
+    // dispatch path used SIMD. It now saves the same full exception frame
+    // as the EL0 entries; this fixture holds a pattern in q0-q31 and FPSR
+    // across a real interrupt whose entry path deliberately scrambles both
+    // (kernel/arch/arm64/kernel/fpsimd_probe.S), so the frame is the only
+    // thing that can restore them. Runs here, right after the interrupt
+    // path comes up, since the timer PPI it waits on is armed by
+    // platform_irq_init() above and nothing later depends on it.
+    if (fpsimd_irq_probe() == 0) {
+        kernel_boot_log("fp/simd irq: q0-q31+fpsr preserved across current-el irq\n");
+    } else {
+        kernel_boot_log("fp/simd irq: failed\n");
+    }
 
     match kernel_secondary_boot_probe() {
         SecondaryBootResult::Started => {

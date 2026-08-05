@@ -1,0 +1,15 @@
+// extern fn declaration for kernel/arch/arm64/kernel/fpsimd_probe.S's
+// FP/SIMD-across-interrupt fixture (GitHub issue #223). The probe holds a
+// known pattern in q0-q31 and FPSR, waits for a real Current-EL-SPx
+// interrupt whose entry path deliberately destroys both, and reports how
+// much of it the exception frame failed to bring back: 0 means everything
+// survived, 0xffff means no interrupt arrived at all within a second and
+// nothing was proven. Its companion hook fpsimd_irq_clobber is called from
+// assembly (entry.S) only, so it needs no declaration here.
+//
+// Split into its own file rather than declared in kernel/init/main.tkb
+// because takibi rejects a second `extern fn` declaration of the same name
+// even with an identical signature, so a future second consumer would
+// otherwise be a hard conflict.
+
+extern fn fpsimd_irq_probe() -> usize;

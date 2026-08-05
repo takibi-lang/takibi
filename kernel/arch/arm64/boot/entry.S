@@ -3,7 +3,7 @@
  * the system-register work Takibi cannot express and drops exactly once to
  * the monolithic EL1 kernel. It is not an EL2 service layer.
  */
-    .include "kernel/arch/arm64/kernel/user_context.inc"
+    .include "kernel/arch/arm64/kernel/exception_context.inc"
 
     .section .text.boot, "ax"
     .global _start
@@ -133,9 +133,11 @@ kernel_secondary_entry_address:
  * fail-stop path except slot 8 (lower-EL AArch64 sync, EL0 syscalls) and
  * slots 5/9 (Current-EL SPx IRQ and Lower-EL AArch64 IRQ). x16 identifies
  * the slot for the ones that still fail-stop. No slot silently spins at an
- * anonymous PC. Issue #188 separates the IRQ entries: slot 5 retains the
- * lightweight non-scheduling kernel frame, while slot 9 creates the same
- * complete resumable EL0 frame used by the syscall path.
+ * anonymous PC. Slots 5 and 9 stay separate entry points because only the
+ * Lower-EL one (slot 9) may select another process from its returned frame
+ * SP, but both build the single exception frame declared in
+ * kernel/arch/arm64/kernel/exception_context.inc -- the same one the
+ * syscall path uses.
  */
     .section .text.vectors, "ax"
     .align 11
@@ -201,75 +203,52 @@ disable_irq:
     msr     DAIFSet, #0x2
     ret
 
-/* Full x0-x30 + ELR_EL1/SPSR_EL1 save/restore around rpi5_irq_dispatch,
- * the Current-EL-SPx IRQ handler for GitHub issue #187. Same 272-byte frame
- * shape as examples/common_rpi5/startup.S's rpi5_irq_entry, adapted to
- * EL1's own elr_el1/spsr_el1 since this kernel (unlike examples/common_rpi5)
- * runs its own code at EL1, not EL2. */
+/* Current-EL-SPx IRQ entry (GitHub issue #187): an interrupt taken while
+ * this kernel's own EL1 code runs, e.g. during a syscall that has already
+ * unmasked DAIF.I. It saves and restores the same complete
+ * exception frame as the two EL0-facing entries below -- including q0-q31,
+ * FPSR and FPCR, which the earlier hand-written 272-byte
+ * general-registers-only frame here did not (GitHub issue #223). The
+ * interrupted EL1 code can hold live q registers, so anything this vector
+ * reaches that LLVM compiles with SIMD would otherwise corrupt them.
+ *
+ * fpsimd_irq_clobber is the fixture hook that keeps that guarantee honest:
+ * it is inert unless kernel/arch/arm64/kernel/fpsimd_probe.S's probe has
+ * armed it, and it runs here -- after the frame is saved, before any
+ * dispatch -- where no AAPCS caller/callee register contract exists yet to
+ * violate. SP_EL0 is saved and restored too; at EL1h it is not the running
+ * stack pointer, so that is a faithful round trip of the EL0 process's own
+ * value. */
     .global el1_current_irq_entry
 el1_current_irq_entry:
-    sub     sp,  sp,  #272
-    stp     x0,  x1,  [sp, #0]
-    stp     x2,  x3,  [sp, #16]
-    stp     x4,  x5,  [sp, #32]
-    stp     x6,  x7,  [sp, #48]
-    stp     x8,  x9,  [sp, #64]
-    stp     x10, x11, [sp, #80]
-    stp     x12, x13, [sp, #96]
-    stp     x14, x15, [sp, #112]
-    stp     x16, x17, [sp, #128]
-    stp     x18, x19, [sp, #144]
-    stp     x20, x21, [sp, #160]
-    stp     x22, x23, [sp, #176]
-    stp     x24, x25, [sp, #192]
-    stp     x26, x27, [sp, #208]
-    stp     x28, x29, [sp, #224]
-    stp     x30, xzr, [sp, #240]
-    mrs     x0,  elr_el1
-    mrs     x1,  spsr_el1
-    stp     x0,  x1,  [sp, #256]
+    sub     sp, sp, #EXC_CONTEXT_SIZE
+    EXC_CONTEXT_SAVE
+
+    bl      fpsimd_irq_clobber
 
     mov     x0, sp
     bl      rpi5_irq_dispatch
     mov     sp, x0
 
-    ldp     x0,  x1,  [sp, #256]
-    msr     elr_el1,  x0
-    msr     spsr_el1, x1
-    ldp     x0,  x1,  [sp, #0]
-    ldp     x2,  x3,  [sp, #16]
-    ldp     x4,  x5,  [sp, #32]
-    ldp     x6,  x7,  [sp, #48]
-    ldp     x8,  x9,  [sp, #64]
-    ldp     x10, x11, [sp, #80]
-    ldp     x12, x13, [sp, #96]
-    ldp     x14, x15, [sp, #112]
-    ldp     x16, x17, [sp, #128]
-    ldp     x18, x19, [sp, #144]
-    ldp     x20, x21, [sp, #160]
-    ldp     x22, x23, [sp, #176]
-    ldp     x24, x25, [sp, #192]
-    ldp     x26, x27, [sp, #208]
-    ldp     x28, x29, [sp, #224]
-    ldp     x30, xzr, [sp, #240]
-    add     sp,  sp,  #272
+    EXC_CONTEXT_RESTORE
+    add     sp, sp, #EXC_CONTEXT_SIZE
     eret
 
-/* Lower-EL AArch64 IRQ entry. Unlike the Current-EL path above, this frame
- * is a complete resumable EL0 context. rpi5_irq_dispatch still returns the
+/* Lower-EL AArch64 IRQ entry, the same frame again -- here it is also a
+ * complete resumable EL0 context. rpi5_irq_dispatch still returns the
  * same SP in this milestone; a later issue #188 step may select another
  * process by returning its saved frame SP. */
     .global el0_irq_entry
 el0_irq_entry:
-    sub     sp, sp, #EL0_CONTEXT_SIZE
-    EL0_CONTEXT_SAVE
+    sub     sp, sp, #EXC_CONTEXT_SIZE
+    EXC_CONTEXT_SAVE
 
     mov     x0, sp
     bl      rpi5_el0_irq_dispatch
     mov     sp, x0
 
-    EL0_CONTEXT_RESTORE
-    add     sp, sp, #EL0_CONTEXT_SIZE
+    EXC_CONTEXT_RESTORE
+    add     sp, sp, #EXC_CONTEXT_SIZE
     eret
 
     .section .bss, "aw", %nobits

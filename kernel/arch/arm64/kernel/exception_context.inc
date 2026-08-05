@@ -1,20 +1,30 @@
-/* Complete resumable EL0 context shared by syscall and Lower-EL IRQ entry.
+/* The one exception-frame shape. Every EL1 exception entry that returns to
+ * the interrupted context uses this layout: EL0 sync (syscalls), Lower-EL
+ * IRQ, and Current-EL-SPx IRQ. A saved SP_EL1 points at offset zero, and the
+ * frame contains every architectural value the scheduler must preserve before
+ * selecting a different context -- x0-x30, SP_EL0, ELR_EL1, SPSR_EL1, and the
+ * FP/SIMD state q0-q31 + FPSR + FPCR.
  *
- * Keep this layout as the single assembly ABI for issue #188. A saved SP_EL1
- * points at offset zero. The frame contains every architectural value the
- * first scheduler must preserve before selecting a different EL0 process.
+ * The FP/SIMD half is not optional for any entry, including the Current-EL
+ * one: kernel/arch/arm64/boot/entry.S enables FP/SIMD in CPACR_EL1 for
+ * ordinary compiled code, LLVM does select q registers in kernel .tkb code,
+ * and since issue #187 syscall handling runs with IRQs unmasked -- so EL1
+ * kernel code holding live q registers can be interrupted. GitHub issue #223
+ * removed the separate 272-byte general-registers-only Current-EL frame that
+ * used to exist alongside this one; a second layout is exactly what let that
+ * asymmetry go unnoticed, so there is deliberately only one now.
  */
-    .equ EL0_CONTEXT_SIZE,          0x320
-    .equ EL0_CONTEXT_X0,            0x000
-    .equ EL0_CONTEXT_X30,           0x0f0
-    .equ EL0_CONTEXT_SP_EL0,        0x0f8
-    .equ EL0_CONTEXT_ELR_EL1,       0x100
-    .equ EL0_CONTEXT_SPSR_EL1,      0x108
-    .equ EL0_CONTEXT_Q0,            0x110
-    .equ EL0_CONTEXT_FPSR,          0x310
-    .equ EL0_CONTEXT_FPCR,          0x318
+    .equ EXC_CONTEXT_SIZE,          0x320
+    .equ EXC_CONTEXT_X0,            0x000
+    .equ EXC_CONTEXT_X30,           0x0f0
+    .equ EXC_CONTEXT_SP_EL0,        0x0f8
+    .equ EXC_CONTEXT_ELR_EL1,       0x100
+    .equ EXC_CONTEXT_SPSR_EL1,      0x108
+    .equ EXC_CONTEXT_Q0,            0x110
+    .equ EXC_CONTEXT_FPSR,          0x310
+    .equ EXC_CONTEXT_FPCR,          0x318
 
-.macro EL0_CONTEXT_SAVE
+.macro EXC_CONTEXT_SAVE
     stp     x0, x1, [sp, #0x000]
     stp     x2, x3, [sp, #0x010]
     stp     x4, x5, [sp, #0x020]
@@ -31,10 +41,10 @@
     stp     x26, x27, [sp, #0x0d0]
     stp     x28, x29, [sp, #0x0e0]
     mrs     x9, sp_el0
-    stp     x30, x9, [sp, #EL0_CONTEXT_X30]
+    stp     x30, x9, [sp, #EXC_CONTEXT_X30]
     mrs     x9, elr_el1
     mrs     x10, spsr_el1
-    stp     x9, x10, [sp, #EL0_CONTEXT_ELR_EL1]
+    stp     x9, x10, [sp, #EXC_CONTEXT_ELR_EL1]
     stp     q0, q1, [sp, #0x110]
     stp     q2, q3, [sp, #0x130]
     stp     q4, q5, [sp, #0x150]
@@ -53,15 +63,15 @@
     stp     q30, q31, [sp, #0x2f0]
     mrs     x9, fpsr
     mrs     x10, fpcr
-    str     x9, [sp, #EL0_CONTEXT_FPSR]
-    str     x10, [sp, #EL0_CONTEXT_FPCR]
+    str     x9, [sp, #EXC_CONTEXT_FPSR]
+    str     x10, [sp, #EXC_CONTEXT_FPCR]
 .endm
 
-.macro EL0_CONTEXT_RESTORE
-    ldp     x9, x10, [sp, #EL0_CONTEXT_ELR_EL1]
+.macro EXC_CONTEXT_RESTORE
+    ldp     x9, x10, [sp, #EXC_CONTEXT_ELR_EL1]
     msr     elr_el1, x9
     msr     spsr_el1, x10
-    ldr     x9, [sp, #EL0_CONTEXT_SP_EL0]
+    ldr     x9, [sp, #EXC_CONTEXT_SP_EL0]
     msr     sp_el0, x9
     ldp     q0, q1, [sp, #0x110]
     ldp     q2, q3, [sp, #0x130]
@@ -79,8 +89,8 @@
     ldp     q26, q27, [sp, #0x2b0]
     ldp     q28, q29, [sp, #0x2d0]
     ldp     q30, q31, [sp, #0x2f0]
-    ldr     x9, [sp, #EL0_CONTEXT_FPSR]
-    ldr     x10, [sp, #EL0_CONTEXT_FPCR]
+    ldr     x9, [sp, #EXC_CONTEXT_FPSR]
+    ldr     x10, [sp, #EXC_CONTEXT_FPCR]
     msr     fpsr, x9
     msr     fpcr, x10
     ldp     x0, x1, [sp, #0x000]
@@ -98,5 +108,5 @@
     ldp     x24, x25, [sp, #0x0c0]
     ldp     x26, x27, [sp, #0x0d0]
     ldp     x28, x29, [sp, #0x0e0]
-    ldp     x30, xzr, [sp, #EL0_CONTEXT_X30]
+    ldp     x30, xzr, [sp, #EXC_CONTEXT_X30]
 .endm

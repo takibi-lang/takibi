@@ -15,6 +15,72 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-05: One Exception-Frame Shape, FP/SIMD Included, for Every EL1 Entry (GitHub Issue #223)
+
+`kernel/arch/arm64/boot/entry.S`'s Current-EL-SPx IRQ entry -- an interrupt
+taken while this kernel's own EL1 code runs -- saved x0-x30 + ELR_EL1 +
+SPSR_EL1 into a hand-written 272-byte frame and nothing else. The two
+EL0-facing entries (`el0_sync_entry`, `el0_irq_entry`) instead used
+`EL0_CONTEXT_SAVE` from `kernel/arch/arm64/kernel/user_context.inc`, whose
+0x320-byte frame also carries q0-q31, FPSR and FPCR. Two layouts existed,
+kept consistent only by inspection, and nothing recorded the asymmetry as
+intentional.
+
+It was not latent for a good reason. `entry.S` deliberately enables FP/SIMD
+in `CPACR_EL1` for compiled code, and LLVM does select it: disassembling the
+linked `main.o` showed `ldr/str q0`, `ldp/stp q0, q1` and `movi v0.2d` inside
+`ext2_inode_is_symlink`, `ext2_inode_mode`, `process_dynamic_prepare_stack`,
+`process_image_pair_probe` and `main`. Since issue #187 `.Lsyscall_dispatch`
+unmasks DAIF.I, so EL1 code holding live q registers genuinely can be
+interrupted through this vector. What kept it from firing was only that a
+call-graph closure from `rpi5_irq_dispatch` reached 36 functions and none of
+them happened to use SIMD -- an accident no rule enforced, and the first
+SIMD-compiled function added to or inlined into that path would have
+corrupted the interrupted code's q registers intermittently and
+data-dependently, the same failure shape the issue #209 bugs had.
+
+Fixed by deleting the second layout rather than by adding a second FP
+save/restore next to it, since the duplication is what allowed the gap.
+`user_context.inc` is now `exception_context.inc` and its `EL0_CONTEXT_*`
+names are `EXC_CONTEXT_*`: one declared frame shape, used by all three
+entries. `el1_current_irq_entry` shrank to `sub sp / EXC_CONTEXT_SAVE /
+dispatch / EXC_CONTEXT_RESTORE / add sp / eret`, the same body as
+`el0_irq_entry`. The Current-EL path now also round-trips SP_EL0, which at
+EL1h is not the running stack pointer, so saving and restoring it is a
+faithful no-op on the EL0 process's own value. The kernel stack is 64 KiB
+(`link.ld`), so the frame growing from 272 to 800 bytes is not a concern.
+Slots 5 and 9 remain separate entry points, because only the Lower-EL one
+may select another process from its returned frame SP.
+
+A fixture that merely held live q registers across an interrupt would have
+passed before this change too -- it would have measured the accidental
+absence of SIMD on the IRQ path, not the guarantee. New
+`kernel/arch/arm64/kernel/fpsimd_probe.S` supplies the missing half:
+`fpsimd_irq_clobber` stands in for the first IRQ-path function LLVM compiles
+with SIMD, overwriting all 32 q registers with all-ones and setting every
+sticky FPSR bit; `fpsimd_irq_probe` loads a per-lane-distinct pattern into
+q0-q31, clears FPSR, waits (bounded by one second of CNTPCT_EL0) for a real
+interrupt -- the timer PPI ticks every 1/64 s -- and then counts how many of
+the 64 doublewords came back wrong. It reports `0xffff` if no interrupt
+arrived at all, so a broken interrupt path fails the fixture instead of
+passing it vacuously. The whole probe is assembly because compiled code is
+free to spill q registers to the stack, where an unsaved frame would never
+have touched them. The clobber is armed only for the duration of the probe;
+outside that window it is a load, a test and a return. It is called from
+`el1_current_irq_entry` after the frame is saved and before dispatch, the
+one point where no AAPCS caller/callee register contract exists to violate
+-- calling it from compiled code would break the callee-saved lower halves
+of q8-q15.
+
+`kernel/init/main.tkb` runs the probe once, right after `platform_irq_init()`
+arms the timer PPI, and logs `fp/simd irq: q0-q31+fpsr preserved across
+current-el irq`; new view `kernel/tests/rpi5/views/fpsimd.{filter,expected}`
+holds it. Verified on real RPi5 hardware: 25/25 views pass with the fix. The
+negative control was run too -- temporarily restoring the pre-fix
+general-registers-only behavior on that one path, rebuilding, and re-running
+the suite produced exactly `fp/simd irq: failed` in that view, so the fixture
+can actually fail.
+
 ### 2026-08-05: Ash Child Clone/Exec/Exit/Wait4 Cycle Completed, Three Frame Bugs Found via SWD Register Reads (GitHub Issue #209)
 
 The child external-command RPi5 scenario (`sh -c '/echo child-exec-ok'`,

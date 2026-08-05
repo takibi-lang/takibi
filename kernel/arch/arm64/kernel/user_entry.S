@@ -2,7 +2,7 @@
  * process lifetime remain in Takibi. run_initial_user returns to its EL1
  * caller after exit, so linear VM/page owners stay live on that call frame.
  */
-    .include "kernel/arch/arm64/kernel/user_context.inc"
+    .include "kernel/arch/arm64/kernel/exception_context.inc"
 
     .section .rodata, "a"
     .align 4
@@ -377,8 +377,8 @@ run_initial_user:
     .global el0_sync_entry
     .type el0_sync_entry, %function
 el0_sync_entry:
-    sub     sp, sp, #EL0_CONTEXT_SIZE
-    EL0_CONTEXT_SAVE
+    sub     sp, sp, #EXC_CONTEXT_SIZE
+    EXC_CONTEXT_SAVE
 
     /* Lower-EL synchronous exceptions are either SVC64 syscalls or, for the
      * bounded process-image stack reservation, a translation fault. Handle
@@ -441,8 +441,8 @@ el0_sync_entry:
     mrs     x1, far_el1
     bl      process_image_handle_data_abort
     cbz     x0, .Lsync_fail
-    EL0_CONTEXT_RESTORE
-    add     sp, sp, #EL0_CONTEXT_SIZE
+    EXC_CONTEXT_RESTORE
+    add     sp, sp, #EXC_CONTEXT_SIZE
     eret
 
 .Lsync_fail:
@@ -451,7 +451,7 @@ el0_sync_entry:
 
 .Lsyscall_clone_child:
     // GitHub issue #221 Step 4: moved to kernel_syscall_clone_child_return
-    // (.tkb), which replaces the hand-written EL0_CONTEXT_SIZE-word copy
+    // (.tkb), which replaces the hand-written EXC_CONTEXT_SIZE-word copy
     // loop with slice_copy and ends by sharing kernel_syscall_resume_return.
     mov     x0, sp
     mov     x1, x7
@@ -520,7 +520,7 @@ el0_sync_entry:
 // which is always true here: nothing between el0_sync_entry and this point
 // ever switches away from it.
 el1_return_from_syscall:
-    add     sp, sp, #EL0_CONTEXT_SIZE
+    add     sp, sp, #EXC_CONTEXT_SIZE
     ldp     x19, x20, [sp, #0]
     ldp     x21, x22, [sp, #16]
     ldp     x23, x24, [sp, #32]
@@ -532,24 +532,24 @@ el1_return_from_syscall:
 
     .global el0_context_set_x0
 el0_context_set_x0:
-    str     x1, [x0, #EL0_CONTEXT_X0]
+    str     x1, [x0, #EXC_CONTEXT_X0]
     ret
 
     .global el0_context_set_elr_el1
 el0_context_set_elr_el1:
-    str     x1, [x0, #EL0_CONTEXT_ELR_EL1]
+    str     x1, [x0, #EXC_CONTEXT_ELR_EL1]
     ret
 
     .global el0_context_set_sp_el0
 el0_context_set_sp_el0:
-    str     x1, [x0, #EL0_CONTEXT_SP_EL0]
+    str     x1, [x0, #EXC_CONTEXT_SP_EL0]
     ret
 
 // GitHub issue #221 Step 2+: the single shared consumer for every action tail
 // that resumes some already-fully-populated EL0 frame (the current frame with
 // only a few fields changed, or an entirely different process's saved frame).
-// Every `.Lsyscall_*` tail that used to hand-roll `EL0_CONTEXT_RESTORE; add sp,
-// sp, #EL0_CONTEXT_SIZE; eret` itself now instead tail-branches into a small
+// Every `.Lsyscall_*` tail that used to hand-roll `EXC_CONTEXT_RESTORE; add sp,
+// sp, #EXC_CONTEXT_SIZE; eret` itself now instead tail-branches into a small
 // .tkb function that ends by calling this -- there is exactly one place left
 // in the whole kernel that performs this restore-and-eret sequence, so two
 // different code paths can no longer race to set elr_el1/sp_el0 and have one
@@ -558,8 +558,8 @@ el0_context_set_sp_el0:
     .global el0_context_resume
 el0_context_resume:
     mov     sp, x0
-    EL0_CONTEXT_RESTORE
-    add     sp, sp, #EL0_CONTEXT_SIZE
+    EXC_CONTEXT_RESTORE
+    add     sp, sp, #EXC_CONTEXT_SIZE
     eret
 
 // The single shared fail-stop entry, replacing every hand-written
