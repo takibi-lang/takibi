@@ -1020,6 +1020,23 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) {
     el0_context_resume(frame_sp);
 }
 
+// Step 6/8: action 4 (.Lsyscall_clone_parent). This is the exact bug fixed
+// in commit 8db27e3: parent_sp used to be kept in the caller-saved x7 across
+// `bl kernel_process_child_exec_reap`, safe only as long as nothing that
+// call reached ever clobbered it -- true for every boot-time clone/exit
+// cycle until a child exec image was actually live. As an ordinary .tkb
+// local, parent_sp's liveness across this call is the compiler's own
+// calling-convention problem now, the same way it already is for every
+// other .tkb function call in this file; there is no register to pick by
+// hand and therefore no way to pick the wrong one.
+fn kernel_syscall_clone_parent_return(parent_sp: usize) {
+    kernel_process_child_exec_reap();
+    if (parent_sp == 0) {
+        kernel_syscall_fail_stop();
+    }
+    el0_context_resume(parent_sp);
+}
+
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize)
         -> (usize, usize) !{unsafe} {

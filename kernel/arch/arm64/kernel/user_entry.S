@@ -462,18 +462,12 @@ el0_sync_entry:
     b       el1_exception_evidence
 
 .Lsyscall_clone_parent:
-    /* x7 (the resumed parent's saved SP) is caller-saved, so it cannot be
-     * held across the reap call -- once a child exec image is actually live,
-     * that call reaches a deep unmap and clobbers it. Keep it in x19, which
-     * is callee-saved here and is itself restored from the parent frame by
-     * EL0_CONTEXT_RESTORE below, matching .Lsyscall_clone_child's pattern. */
-    mov     x19, x7
-    bl      kernel_process_child_exec_reap
-    cbz     x19, .Lclone_context_fail
-    mov     sp, x19
-    EL0_CONTEXT_RESTORE
-    add     sp, sp, #EL0_CONTEXT_SIZE
-    eret
+    // GitHub issue #221 Step 6: moved to kernel_syscall_clone_parent_return
+    // (.tkb) -- this is the exact bug fixed in commit 8db27e3 (see that
+    // function's own comment for why keeping parent_sp as a plain .tkb local
+    // across the reap call, instead of a hand-picked register, matters).
+    mov     x0, x7
+    b       kernel_syscall_clone_parent_return
 
 .Lsyscall_block:
     // GitHub issue #221 Step 2: moved to kernel_syscall_block_return (.tkb),
