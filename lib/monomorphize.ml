@@ -99,6 +99,12 @@ let rec transform ~(subst : string -> type_expr option)
        | Some n -> TypeArray (elem, n)
        | None -> raise (Types.TypeError (Lexing.dummy_pos,
            "BUG: an unresolved symbolic array size escaped monomorphization")))
+  | TypeSliceSym (t, sz) ->
+      let elem = go t in
+      (match eval_size vsubst sz with
+       | Some n -> TypeSlice (elem, n)
+       | None -> raise (Types.TypeError (Lexing.dummy_pos,
+           "BUG: an unresolved symbolic slice minimum escaped monomorphization")))
   | TypePtr t -> TypePtr (go t)
   | TypeIo t -> TypeIo (go t)
   | TypeArray (t, n) -> TypeArray (go t, n)
@@ -150,6 +156,91 @@ and eval_size (vsubst : string -> int option) (sz : array_size_expr) : int optio
 let no_subst (_ : string) : type_expr option = None
 let no_vsubst (_ : string) : int option = None
 
+(* -- Location relocation ----------------------------------------------------
+
+   Freelist redesign follow-up: a real, confirmed bug, found by
+   disassembling an actually-miscompiled binary (the AST itself checked out
+   correct at every stage of this file -- only codegen picked the wrong
+   target). Every stmt/expr node built while expanding one concrete
+   instantiation's body is a structural copy of the TEMPLATE's own nodes
+   (transform/walk_stmt/walk_expr preserve `loc` verbatim via `{ e with
+   desc }`), so TWO DIFFERENT instantiations of the SAME template (e.g.
+   freelist_init$usize$3 and freelist_init$Point$2) end up with IDENTICAL
+   Ast.loc values on their corresponding nodes. type_inf.ml's
+   resolved_call_targets cache (lib/type_inf.ml:841, populated at Call
+   sites, consulted by llvm_gen.ml's own Call codegen in PREFERENCE to the
+   AST's own already-correct Call name) is keyed by Types.loc_key, a
+   "file:line:col" string -- so a nested generic call inside ONE
+   instantiation's body (freelist_core_init(&target.core) inside
+   freelist_init$usize$3) can get silently overwritten by a DIFFERENT
+   instantiation's resolution at the same source location
+   (freelist_init$Point$2's own freelist_core_init$2), and BOTH end up
+   codegened calling whichever one was resolved LAST. Fixed by rewriting
+   every node's own `loc.pos_fname` to be unique per instantiation (append
+   the mangled name) right after a concrete body is built -- keeps
+   line/col accurate for diagnostics (a real error still points at the
+   actual source line) while making loc_key collision-free. Only
+   stmt/expr need this: Ast.type_expr carries no loc field of its own. *)
+
+let relocate_loc (mangled : string) (loc : loc) : loc =
+  { loc with Lexing.pos_fname = loc.Lexing.pos_fname ^ "#" ^ mangled }
+
+let rec relocate_expr (mangled : string) (e : expr) : expr =
+  let ex = relocate_expr mangled in
+  let desc = match e.desc with
+    | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _ as d -> d
+    | ViewLit (name, args) -> ViewLit (name, args)
+    | Call (name, args) -> Call (name, List.map ex args)
+    | VariantCtor (vname, cname, payload) -> VariantCtor (vname, cname, ex payload)
+    | BinOp (op, a, b) -> BinOp (op, ex a, ex b)
+    | Bnot a -> Bnot (ex a)
+    | Deref a -> Deref (ex a)
+    | AddrOf a -> AddrOf (ex a)
+    | Cast (t, a) -> Cast (t, ex a)
+    | FieldGet (a, f) -> FieldGet (ex a, f)
+    | StructLit args -> StructLit (List.map ex args)
+    | TupleLit args -> TupleLit (List.map ex args)
+    | Index (id, idx) -> Index (id, ex idx)
+    | SliceOf (id, lo, hi) -> SliceOf (id, ex lo, ex hi)
+    | Unsafe a -> Unsafe (ex a)
+    | SizeOf t -> SizeOf t
+    | OffsetOf (t, f) -> OffsetOf (t, f)
+    | Assign (l, r) -> Assign (ex l, ex r)
+  in
+  { desc; loc = relocate_loc mangled e.loc }
+
+let rec relocate_stmt (mangled : string) (s : stmt) : stmt =
+  let ex = relocate_expr mangled in
+  let st = relocate_stmt mangled in
+  let sts = List.map st in
+  let desc = match s.desc with
+    | Return None -> Return None
+    | Return (Some e) -> Return (Some (ex e))
+    | Expr e -> Expr (ex e)
+    | Yield e -> Yield (ex e)
+    | Block ss -> Block (sts ss)
+    | Let (m, name, ty_opt, e_opt, align_opt) ->
+        Let (m, name, ty_opt, Option.map ex e_opt, align_opt)
+    | If (c, t, e) -> If (ex c, sts t, sts e)
+    | While (c, b) -> While (ex c, sts b)
+    | For (name, ty_opt, lo, hi, b) -> For (name, ty_opt, ex lo, ex hi, sts b)
+    | ForEach (name, e, b) -> ForEach (name, ex e, sts b)
+    | LetTuple (names, e) -> LetTuple (names, ex e)
+    | Break -> Break
+    | Continue -> Continue
+    | Match (e, arms) -> Match (ex e, List.map (relocate_arm mangled) arms)
+    | LetMatch (m, name, t_opt, e, arms) ->
+        LetMatch (m, name, t_opt, ex e, List.map (relocate_arm mangled) arms)
+  in
+  { desc; loc = relocate_loc mangled s.loc }
+
+and relocate_arm (mangled : string) (a : match_arm) : match_arm =
+  let sts = List.map (relocate_stmt mangled) in
+  match a with
+  | ArmVariant (v, c, b, ss) -> ArmVariant (v, c, b, sts ss)
+  | ArmWild ss -> ArmWild (sts ss)
+  | ArmIntLit (ns, ss) -> ArmIntLit (ns, sts ss)
+
 (* -- plain (stateless) expr/stmt/func/toplevel walkers ---------------------
 
    Only Cast/SizeOf/OffsetOf (expr) and Let/For/LetMatch (stmt) carry a
@@ -163,7 +254,23 @@ let rec walk_expr ~subst ~vsubst ~resolve_inst (e : expr) : expr =
   let ty t = transform ~subst ~vsubst ~resolve_inst t in
   let ex e = walk_expr ~subst ~vsubst ~resolve_inst e in
   let desc = match e.desc with
-    | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _ as d -> d
+    | IntLit _ | BoolLit _ | StringLit _ | EnumVariant _ as d -> d
+    | Var name ->
+        (* Freelist redesign follow-up: a generic function's own body may
+           reference a bound VALUE parameter as an ordinary runtime
+           expression (e.g. `for i: usize in 0..<N { ... }` inside
+           freelist_core_init, not just in a type-level array size) --
+           resolve it to a concrete IntLit here, mirroring `transform`'s
+           own TypeNamed/vsubst resolution exactly. Deliberately NOT
+           shadowing-aware (a local variable that happened to be named
+           the same as a value-generic-parameter would also get rewritten
+           here) -- same class of narrow, documented gap as this file's
+           other "deliberately weak inference" limitations; not expected
+           to matter in practice since value-generic-parameter names are
+           chosen by the struct/function author, not a caller. *)
+        (match vsubst name with
+         | Some v -> IntLit (Int64.of_int v)
+         | None -> Var name)
     | ViewLit (name, args) -> ViewLit (name, args)
     | Call (name, args) -> Call (name, List.map ex args)
     | VariantCtor (vname, cname, payload) -> VariantCtor (vname, cname, ex payload)
@@ -420,7 +527,8 @@ let discover_value_generic_params
          | None -> List.iter scan_ty args)
     | TypePtr t | TypeIo t | TypeBorrow t | TypeBorrowMut t | TypeSink t
     | TypeAlignedPtr (_, t) -> scan_ty t
-    | TypeArray (t, _) | TypeSlice (t, _) | TypeArraySym (t, _) -> scan_ty t
+    | TypeArray (t, _) | TypeSlice (t, _)
+    | TypeArraySym (t, _) | TypeSliceSym (t, _) -> scan_ty t
     | TypeFn (ps, r, _) -> List.iter scan_ty ps; scan_ty r
     | TypeTuple ts -> List.iter scan_ty ts
     | TypeSingleton (t, _) -> scan_ty t
@@ -489,14 +597,6 @@ let rec unify_arg (type_params : string list) (value_params : string list)
       List.iter2 u args1 args2
   | _ -> () (* structural mismatch: contributes nothing, not an error here *)
 
-let derive_arg_type (local_types : (string, type_expr) Hashtbl.t) (e : expr)
-    : type_expr option =
-  match e.desc with
-  | Var name -> Hashtbl.find_opt local_types name
-  | AddrOf { desc = Var name; _ } ->
-      Option.map (fun t -> TypePtr t) (Hashtbl.find_opt local_types name)
-  | _ -> None
-
 (* -- run ---------------------------------------------------------------------
 
    Order of operations:
@@ -533,25 +633,47 @@ let run (prog : toplevel list) : toplevel list =
   ) prog;
 
   let fn_templates : (string, fn_template) Hashtbl.t = Hashtbl.create 8 in
+  let register_fn_template f type_params value_params =
+    if Hashtbl.mem fn_templates f.name then
+      raise (Types.TypeError (f.def_loc, Printf.sprintf
+        "'%s' is already defined as a generic function" f.name));
+    let value_generic_params =
+      discover_value_generic_params struct_templates type_params
+        f.params f.ret_type
+    in
+    Hashtbl.replace fn_templates f.name
+      { fn_type_params = type_params;
+        fn_value_generic_params = value_generic_params;
+        fn_value_params = value_params;
+        fn_ret_type = f.ret_type; fn_effects = f.effects;
+        fn_body = f.body; fn_is_inline = f.is_inline;
+        fn_def_loc = f.def_loc }
+  in
   List.iter (function
     | FuncDef f ->
         (match split_fn_params f.params with
-         | None -> ()
-         | Some (type_params, value_params) ->
-             if Hashtbl.mem fn_templates f.name then
-               raise (Types.TypeError (f.def_loc, Printf.sprintf
-                 "'%s' is already defined as a generic function" f.name));
+         | Some (type_params, value_params) -> register_fn_template f type_params value_params
+         | None ->
+             (* No `T: type` parameter -- but the function may still be
+                generic purely over a value parameter, discovered
+                structurally from its own params/ret_type (e.g.
+                freelist_core_init(core: *FreelistCore(N)), Freelist
+                redesign follow-up). Registering here needs its own
+                value_params derivation (split_fn_params's own, which
+                requires an explicit type annotation on every non-type
+                param, is skipped entirely in this branch since it never
+                got past its own `is_type_param` gate). *)
              let value_generic_params =
-               discover_value_generic_params struct_templates type_params
-                 f.params f.ret_type
+               discover_value_generic_params struct_templates [] f.params f.ret_type
              in
-             Hashtbl.replace fn_templates f.name
-               { fn_type_params = type_params;
-                 fn_value_generic_params = value_generic_params;
-                 fn_value_params = value_params;
-                 fn_ret_type = f.ret_type; fn_effects = f.effects;
-                 fn_body = f.body; fn_is_inline = f.is_inline;
-                 fn_def_loc = f.def_loc })
+             if value_generic_params <> [] then
+               let value_params = List.map (fun (n, t) -> match t with
+                 | Some t -> (n, t)
+                 | None -> raise (Types.TypeError (f.def_loc, Printf.sprintf
+                     "generic function parameter '%s' needs an explicit \
+                      type annotation (GitHub issue #207)" n))
+               ) f.params in
+               register_fn_template f [] value_params)
     | _ -> ()
   ) prog;
 
@@ -567,6 +689,47 @@ let run (prog : toplevel list) : toplevel list =
       if not (Hashtbl.mem struct_requests mangled) then
         Hashtbl.replace struct_requests mangled (name, gargs);
       TypeGenericInst (name, args)
+    in
+
+    (* `Var name` / `&name` (unchanged from the original narrow-inference
+       design), PLUS `&x.field` (Freelist redesign follow-up): needed for
+       a generic function's own body calling ANOTHER generic function via
+       a field address, e.g. freelist_core_insert(&target.core) inside
+       freelist_insert's own body. Resolves x's own (already-substituted,
+       possibly TypeGenericInst-shaped) type via recursion, looks up
+       "core"'s DECLARED field type in x's struct TEMPLATE, and
+       substitutes that template's own parameter names for x's ACTUAL
+       (concrete) type arguments -- one combined `subst` table covers both
+       kinds uniformly, since a value argument's binding is already a
+       concrete type_expr (TypeIntLit) by this point, exactly like a type
+       argument's binding is (TypeNamed "usize"), so transform's existing
+       TypeNamed/subst path resolves either without needing vsubst here at
+       all. Deliberately narrow (only ONE field-access level; does not
+       recurse into `&x.a.b`) -- matches this whole mechanism's own
+       "deliberately weak inference" philosophy. *)
+    let derive_arg_type (local_types : (string, type_expr) Hashtbl.t) (e : expr)
+        : type_expr option =
+      match e.desc with
+      | Var name -> Hashtbl.find_opt local_types name
+      | AddrOf { desc = Var name; _ } ->
+          Option.map (fun t -> TypePtr t) (Hashtbl.find_opt local_types name)
+      | AddrOf { desc = FieldGet ({ desc = Var name; _ }, fname); _ } ->
+          (match Hashtbl.find_opt local_types name with
+           | Some (TypePtr (TypeGenericInst (sname, args)))
+           | Some (TypeGenericInst (sname, args)) ->
+               (match Hashtbl.find_opt struct_templates sname with
+                | Some tpl ->
+                    (match List.assoc_opt fname tpl.st_fields with
+                     | Some field_ty ->
+                         let mapping =
+                           List.combine (List.map fst tpl.st_params) args in
+                         let subst n = List.assoc_opt n mapping in
+                         Some (TypePtr (transform ~subst ~vsubst:no_vsubst
+                                          ~resolve_inst:collect_resolve field_ty))
+                     | None -> None)
+                | None -> None)
+           | _ -> None)
+      | _ -> None
     in
 
     (* Global symbol table for narrow inference: explicit-type globals and
@@ -632,11 +795,21 @@ let run (prog : toplevel list) : toplevel list =
        it also resolves generic-function calls (mutating local_types as it
        crosses each Let/For in program order) and feeds struct-instantiation
        discovery through collect_resolve for every type_expr it touches. *)
-    let rec walk_expr_calls local_types (e : expr) : expr =
-      let ty t = transform ~subst:no_subst ~vsubst:no_vsubst ~resolve_inst:collect_resolve t in
-      let ex e = walk_expr_calls local_types e in
+    let rec walk_expr_calls ~subst ~vsubst local_types (e : expr) : expr =
+      let ty t = transform ~subst ~vsubst ~resolve_inst:collect_resolve t in
+      let ex e = walk_expr_calls ~subst ~vsubst local_types e in
       let desc = match e.desc with
-        | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _ as d -> d
+        | IntLit _ | BoolLit _ | StringLit _ | EnumVariant _ as d -> d
+        | Var name ->
+            (* Same value-generic-parameter substitution as the stateless
+               walk_expr (see its own comment) -- needed here too since a
+               generic function template's body can reference ITS OWN
+               value parameter as an ordinary runtime expression while
+               ALSO containing calls to other generic functions (the
+               reason this stateful walker variant exists at all). *)
+            (match vsubst name with
+             | Some v -> IntLit (Int64.of_int v)
+             | None -> Var name)
         | ViewLit (name, args) -> ViewLit (name, args)
         | Call (name, args) ->
             let args = List.map ex args in
@@ -661,10 +834,10 @@ let run (prog : toplevel list) : toplevel list =
       in
       { e with desc }
     in
-    let rec walk_stmt_calls local_types (s : stmt) : stmt =
-      let ty t = transform ~subst:no_subst ~vsubst:no_vsubst ~resolve_inst:collect_resolve t in
-      let ex e = walk_expr_calls local_types e in
-      let st s = walk_stmt_calls local_types s in
+    let rec walk_stmt_calls ~subst ~vsubst local_types (s : stmt) : stmt =
+      let ty t = transform ~subst ~vsubst ~resolve_inst:collect_resolve t in
+      let ex e = walk_expr_calls ~subst ~vsubst local_types e in
+      let st s = walk_stmt_calls ~subst ~vsubst local_types s in
       let sts ss = List.map st ss in
       let desc = match s.desc with
         | Return None -> Return None
@@ -688,7 +861,7 @@ let run (prog : toplevel list) : toplevel list =
         | LetTuple (names, e) -> LetTuple (names, ex e)
         | Break -> Break
         | Continue -> Continue
-        | Match (e, arms) -> Match (ex e, List.map (walk_arm_calls local_types) arms)
+        | Match (e, arms) -> Match (ex e, List.map (walk_arm_calls ~subst ~vsubst local_types) arms)
         | LetMatch (m, name, t_opt, e, arms) ->
             (* GitHub issue #207: when the annotation is omitted, this
                narrow (non-HM) forward tracker has no way to know the
@@ -704,11 +877,11 @@ let run (prog : toplevel list) : toplevel list =
             (match t_opt with
              | Some t -> Hashtbl.replace local_types name t
              | None -> Hashtbl.remove local_types name);
-            LetMatch (m, name, t_opt, ex e, List.map (walk_arm_calls local_types) arms)
+            LetMatch (m, name, t_opt, ex e, List.map (walk_arm_calls ~subst ~vsubst local_types) arms)
       in
       { s with desc }
-    and walk_arm_calls local_types (a : match_arm) : match_arm =
-      let sts ss = List.map (walk_stmt_calls local_types) ss in
+    and walk_arm_calls ~subst ~vsubst local_types (a : match_arm) : match_arm =
+      let sts ss = List.map (walk_stmt_calls ~subst ~vsubst local_types) ss in
       match a with
       | ArmVariant (v, c, b, ss) -> ArmVariant (v, c, b, sts ss)
       | ArmWild ss -> ArmWild (sts ss)
@@ -723,7 +896,7 @@ let run (prog : toplevel list) : toplevel list =
       { f with
         params = List.map (fun (n, t) -> (n, Option.map ty t)) f.params;
         ret_type = Option.map ty f.ret_type;
-        body = List.map (walk_stmt_calls local_types) f.body }
+        body = List.map (walk_stmt_calls ~subst:no_subst ~vsubst:no_vsubst local_types) f.body }
     in
     let walk_toplevel_calls (t : toplevel) : toplevel =
       let ty t = transform ~subst:no_subst ~vsubst:no_vsubst ~resolve_inst:collect_resolve t in
@@ -760,7 +933,12 @@ let run (prog : toplevel list) : toplevel list =
        comment for why position matters. *)
     let is_template = function
       | GenericStructDef _ -> true
-      | FuncDef f -> split_fn_params f.params <> None
+      | FuncDef f -> Hashtbl.mem fn_templates f.name
+          (* Not split_fn_params f.params <> None: that only detects a
+             `T: type` parameter, missing a function generic purely over a
+             value parameter (e.g. freelist_core_init(core:
+             *FreelistCore(N))) -- fn_templates (built above, covering
+             both cases) is the single source of truth. *)
       | _ -> false
     in
     let item_calls_processed = List.map (fun item ->
@@ -776,40 +954,85 @@ let run (prog : toplevel list) : toplevel list =
        final assembly can group generated functions by which template
        produced them. concrete_args follows fn_requests' own fixed
        convention (type args first, then value args -- see resolve_call). *)
+    (* Fixpoint, not a single Hashtbl.iter: a generic function's own body
+       may itself call ANOTHER generic function (e.g. freelist_init(T:
+       type, target: *Freelist(T, N), ...) calling freelist_core_init
+       (core: *FreelistCore(N)), Freelist redesign follow-up -- V1 scope
+       previously never followed a template's own body for further
+       generic calls at all, see this file's header comment; that gap is
+       closed here). walk_stmt_calls/resolve_call (the STATEFUL, call-
+       resolving walker, previously only used for the top-level non-
+       template walk) discovers such a nested call and adds a NEW
+       fn_requests entry -- mutating the very table Hashtbl.iter would be
+       iterating, which is unsafe/unspecified in OCaml. A pending-work
+       fixpoint (mirroring expand_pending's own shape for struct_requests
+       just below) sidesteps that entirely. local_types is seeded from
+       global_types plus this ONE instantiation's own already-substituted
+       parameter types, exactly like walk_func_calls seeds it for
+       ordinary top-level functions. *)
     let raw_fns : (string, string * fn_template * (ident * type_expr) list * type_expr option * stmt list) Hashtbl.t
       = Hashtbl.create 8 in
-    Hashtbl.iter (fun mangled (name, gargs) ->
-      match Hashtbl.find_opt fn_templates name with
-      | None -> () (* not a known generic function; left for type_inf.ml *)
-      | Some tpl ->
-          let n_type = List.length tpl.fn_type_params in
-          let n_value = List.length tpl.fn_value_generic_params in
-          if n_type + n_value <> List.length gargs then
-            raise (Types.TypeError (tpl.fn_def_loc, Printf.sprintf
-              "generic function '%s' expects %d argument(s), got %d"
-              name (n_type + n_value) (List.length gargs)));
-          let type_gargs = List.filteri (fun i _ -> i < n_type) gargs in
-          let value_gargs = List.filteri (fun i _ -> i >= n_type) gargs in
-          let type_args = List.map (function
-            | GType t -> t
-            | GValue _ -> raise (Types.TypeError (tpl.fn_def_loc, Printf.sprintf
-                "generic function '%s': expected a type argument in a type \
-                 parameter position" name))) type_gargs in
-          let value_args = List.map (function
-            | GValue v -> v
-            | GType _ -> raise (Types.TypeError (tpl.fn_def_loc, Printf.sprintf
-                "generic function '%s': expected a value argument in a value \
-                 parameter position" name))) value_gargs in
-          let mapping = List.combine tpl.fn_type_params type_args in
-          let vmapping = List.combine tpl.fn_value_generic_params value_args in
-          let subst n = List.assoc_opt n mapping in
-          let vsubst n = List.assoc_opt n vmapping in
-          let ty t = transform ~subst ~vsubst ~resolve_inst:collect_resolve t in
-          let params = List.map (fun (n, t) -> (n, ty t)) tpl.fn_value_params in
-          let ret_type = Option.map ty tpl.fn_ret_type in
-          let body = List.map (walk_stmt ~subst ~vsubst ~resolve_inst:collect_resolve) tpl.fn_body in
-          Hashtbl.replace raw_fns mangled (name, tpl, params, ret_type, body)
-    ) fn_requests;
+    let rec expand_pending_fns () =
+      let pending = Hashtbl.fold (fun mangled req acc ->
+        if Hashtbl.mem raw_fns mangled then acc else (mangled, req) :: acc)
+        fn_requests [] in
+      if pending <> [] then begin
+        List.iter (fun (mangled, (name, gargs)) ->
+          match Hashtbl.find_opt fn_templates name with
+          | None -> () (* not a known generic function; left for type_inf.ml *)
+          | Some tpl ->
+              let n_type = List.length tpl.fn_type_params in
+              let n_value = List.length tpl.fn_value_generic_params in
+              if n_type + n_value <> List.length gargs then
+                raise (Types.TypeError (tpl.fn_def_loc, Printf.sprintf
+                  "generic function '%s' expects %d argument(s), got %d"
+                  name (n_type + n_value) (List.length gargs)));
+              let type_gargs = List.filteri (fun i _ -> i < n_type) gargs in
+              let value_gargs = List.filteri (fun i _ -> i >= n_type) gargs in
+              let type_args = List.map (function
+                | GType t -> t
+                | GValue _ -> raise (Types.TypeError (tpl.fn_def_loc, Printf.sprintf
+                    "generic function '%s': expected a type argument in a type \
+                     parameter position" name))) type_gargs in
+              let value_args = List.map (function
+                | GValue v -> v
+                | GType _ -> raise (Types.TypeError (tpl.fn_def_loc, Printf.sprintf
+                    "generic function '%s': expected a value argument in a value \
+                     parameter position" name))) value_gargs in
+              let mapping = List.combine tpl.fn_type_params type_args in
+              let vmapping = List.combine tpl.fn_value_generic_params value_args in
+              let subst n = List.assoc_opt n mapping in
+              let vsubst n = List.assoc_opt n vmapping in
+              let ty t = transform ~subst ~vsubst ~resolve_inst:collect_resolve t in
+              let params = List.map (fun (n, t) -> (n, ty t)) tpl.fn_value_params in
+              let ret_type = Option.map ty tpl.fn_ret_type in
+              let local_types = Hashtbl.copy global_types in
+              List.iter (fun (n, t) -> Hashtbl.replace local_types n t) params;
+              let body = List.map (walk_stmt_calls ~subst ~vsubst local_types) tpl.fn_body in
+              (* Relocate every stmt/expr node's own loc to be unique to
+                 THIS instantiation (see relocate_stmt's own comment) --
+                 without this, two different instantiations of the same
+                 template body share identical Ast.loc values (Monomorphize
+                 preserves the original template's loc verbatim), which
+                 collides in type_inf.ml's loc-keyed resolved_call_targets
+                 cache: a nested generic call inside one instantiation's
+                 body (e.g. freelist_core_init(&target.core) inside
+                 freelist_init$usize$3) got silently overwritten by a
+                 DIFFERENT instantiation's resolution at the SAME source
+                 location (freelist_init$Point$2's own call to
+                 freelist_core_init$2) -- a real, confirmed bug (found by
+                 disassembling the actual miscompiled binary, not by
+                 inspection: the AST itself was correct at every stage
+                 through Monomorphize.run; only llvm_gen.ml's Call codegen,
+                 which trusts call_targets over the AST's own already-
+                 correct Call name, used the wrong target). *)
+              let body = List.map (relocate_stmt mangled) body in
+              Hashtbl.replace raw_fns mangled (name, tpl, params, ret_type, body)
+        ) pending;
+        expand_pending_fns ()
+      end
+    in
+    expand_pending_fns ();
 
     (* Fixpoint: expanding one struct's field list (or, above, a function's
        params/ret/body) can introduce new TypeGenericInst occurrences (a

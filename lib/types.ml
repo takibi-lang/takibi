@@ -563,6 +563,10 @@ let rec of_ast_in_scope scope = function
       raise (TypeError (Lexing.dummy_pos,
         "BUG: a symbolic generic array size reached type inference \
          unresolved -- Monomorphize.run should have substituted it"))
+  | Ast.TypeSliceSym _ ->
+      raise (TypeError (Lexing.dummy_pos,
+        "BUG: a symbolic generic slice minimum reached type inference \
+         unresolved -- Monomorphize.run should have substituted it"))
 
 let of_ast t = of_ast_in_scope (create_static_scope ()) t
 

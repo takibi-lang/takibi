@@ -608,6 +608,7 @@ let rec ty_str = function
       Printf.sprintf "%s(%s)" name (String.concat ", " (List.map ty_str args))
   | TypeIntLit n -> string_of_int n
   | TypeArraySym (t, _) -> Printf.sprintf "[%s; <sym>]" (ty_str t)
+  | TypeSliceSym (t, _) -> Printf.sprintf "[%s; <sym>..]" (ty_str t)
 
 (* ---- DWARF debug info (opt-in via -g; see enable_debug_info) ----
    Everything DI-related elsewhere in this file (gen_func / gen_stmt / gen_program)
@@ -1387,6 +1388,10 @@ let rec ltype_of_ast = function
       raise (Error
         "BUG: a symbolic generic array size reached codegen unresolved -- \
          Monomorphize.run should have substituted it")
+  | TypeSliceSym _ ->
+      raise (Error
+        "BUG: a symbolic generic slice minimum reached codegen unresolved -- \
+         Monomorphize.run should have substituted it")
 
 (* DWARF Attribute Type Encoding constants (DWARF5 spec section 7.8, table 7.11).
    Llvm_debuginfo has no named enum for these -- they're stable spec constants,
@@ -1617,7 +1622,7 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
                Hashtbl.remove di_struct_in_progress sname;
                Hashtbl.add di_struct_types sname struct_ty;
                struct_ty)
-       | TypeKind | TypeGenericInst _ | TypeIntLit _ | TypeArraySym _ ->
+       | TypeKind | TypeGenericInst _ | TypeIntLit _ | TypeArraySym _ | TypeSliceSym _ ->
            raise (Error (Printf.sprintf
              "BUG: '%s' reached DWARF codegen unresolved (should have been \
               rejected by type_inf or resolved by monomorphization -- \
@@ -1842,7 +1847,7 @@ let rec coerce v (dst : Ast.type_expr) =
   | TypeBorrow t | TypeSink t -> coerce v t
   | TypeBorrowMut _ -> v
   | TypeView _ -> v
-  | TypeKind | TypeGenericInst _ | TypeIntLit _ | TypeArraySym _ ->
+  | TypeKind | TypeGenericInst _ | TypeIntLit _ | TypeArraySym _ | TypeSliceSym _ ->
       raise (Error (Printf.sprintf
         "BUG: '%s' reached codegen coercion unresolved (should have been \
          rejected by type_inf or resolved by monomorphization -- generics \
@@ -4127,7 +4132,7 @@ let gen_func ?prog_types fdef =
     | TypeView _ | TypeAlignedPtr _ | TypePtr _ | TypeFn _
     | TypeI8 | TypeU8 | TypeI16 | TypeU16 | TypeU16Be | TypeI32 | TypeU32 | TypeU32Be
     | TypeI64 | TypeU64 | TypeUsize | TypeIsize | TypeBool | TypeVoid -> false
-    | TypeKind | TypeGenericInst _ | TypeIntLit _ | TypeArraySym _ ->
+    | TypeKind | TypeGenericInst _ | TypeIntLit _ | TypeArraySym _ | TypeSliceSym _ ->
         (* Unreachable in practice -- ltype_of_ast already rejects these
            before codegen gets this far (generics are not implemented yet,
            GitHub issue #207); `false` is a harmless default rather than

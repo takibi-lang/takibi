@@ -140,6 +140,17 @@ type type_expr =
        with its concrete bound value and rewrites this to an ordinary
        TypeArray before type_inf.ml/llvm_gen.ml ever run -- same contract
        as TypeKind/TypeGenericInst above. *)
+  | TypeSliceSym of type_expr * array_size_expr
+    (* [T; SZ..] -- the slice-minimum counterpart of TypeArraySym: a
+       generic struct's own field whose declared MINIMUM length
+       symbolically references one of the struct's own not-yet-bound
+       value parameters (e.g. `data: [T; N..]`). Same contract as
+       TypeArraySym in every other respect (parser-gated, resolved by
+       Monomorphize.run to an ordinary TypeSlice, never reaches
+       type_inf.ml/llvm_gen.ml). Freelist redesign follow-up to GitHub
+       issue #207: lets a size-mismatched backing slice become a real
+       compile-time TSlice-subtyping error instead of silently accepting
+       any size (an unconstrained `[]T` field enforces nothing). *)
 [@@deriving show]
 
 and array_size_expr =

@@ -17,9 +17,12 @@
 //
 // The literal capacity is written exactly once per pool, as a `const` --
 // USIZE_POOL_N/POINT_POOL_N -- referenced everywhere else (the pool's own
-// type argument, and its index array's size) so a mismatched size becomes
+// type argument, and its data array's size) so a mismatched size becomes
 // an ordinary compile-time array-type error instead of something to spot
-// by hand across multiple declarations.
+// by hand across multiple declarations. Freelist redesign follow-up: the
+// index/bookkeeping array is now embedded in FreelistCore(N) itself (see
+// freelist.tkb) -- only `data` (the payload storage) is still a caller-
+// owned array here, for the alignment reasons documented there.
 
 use "linux_user/freelist_generic/freelist.tkb";
 
@@ -30,14 +33,14 @@ struct Point {
 
 const USIZE_POOL_N: usize = 3;
 private let mut usize_pool: Freelist(usize, USIZE_POOL_N);
-private let mut usize_index_store: [usize; USIZE_POOL_N];
+private let mut usize_data_store: [usize; USIZE_POOL_N];
 
 const POINT_POOL_N: usize = 2;
 private let mut point_pool: Freelist(Point, POINT_POOL_N);
-private let mut point_index_store: [usize; POINT_POOL_N];
+private let mut point_data_store: [Point; POINT_POOL_N];
 
 fn app_main() {
-    freelist_init(&usize_pool, usize_index_store as []usize);
+    freelist_init(&usize_pool, usize_data_store as []usize);
 
     let a = match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => { uart_puts("alloc a failed\n"); return; }
@@ -131,7 +134,7 @@ fn app_main() {
     // beyond primitive scalars and beyond a single fixed size, and that
     // field access through freelist_ref's returned pointer needs no
     // explicit deref (the exact shape a real 4KB-page pool would rely on).
-    freelist_init(&point_pool, point_index_store as []usize);
+    freelist_init(&point_pool, point_data_store as []Point);
 
     let p1 = match freelist_insert(&point_pool) {
         FreelistPopResult::Empty => { uart_puts("alloc p1 failed\n"); return; }

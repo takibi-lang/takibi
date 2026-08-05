@@ -253,7 +253,6 @@ item:
        ordinary TypeNamed placeholder at this point) has no size until
        monomorphization substitutes a concrete type. *)
     { let (name, tps) = intro in
-      Generic_scope.exit_scope ();
       let field_list = List.map (fun (fname, ty, _) -> (fname, ty)) fields in
       let private_fields =
         List.filter_map (fun (fname, _, is_priv) ->
@@ -314,14 +313,17 @@ owned_struct_intro:
 generic_struct_intro:
   | GENERIC STRUCT name = IDENT LPAREN tps = generic_params RPAREN
     (* Registers this generic struct's own VALUE parameter names (e.g. `N`)
-       so array_size's IDENT fallback can recognize them as symbolic while
-       parsing the field list just below -- mirrors owned_struct_intro's
-       own "register mutable parser state before the body" idiom above,
-       reduced early for the same reason (Type_layout.begin_struct there,
-       Generic_scope.enter here). Exited in the toplevel rule's own action
-       once struct_fields has been fully parsed. Const generics follow-up
-       to GitHub issue #207. *)
-    { Generic_scope.enter (List.filter_map (function
+       so array_size's IDENT fallback can recognize them as symbolic --
+       accumulates forever (Generic_scope.register, never un-registered),
+       not scoped to just this struct's own field list, since a generic
+       FUNCTION's parameter list may also need to spell a value parameter
+       symbolically (e.g. `data_backing: [T; N..]`) with no per-function
+       scope boundary the parser could reliably enter/exit around (a
+       plain `fn` has no dedicated grammar marking it generic at parse
+       time -- see lib/generic_scope.ml's own header comment). Const
+       generics follow-up to GitHub issue #207; whole-program
+       registration is the Freelist redesign's own further follow-up. *)
+    { Generic_scope.register (List.filter_map (function
         | (n, GPValue _) -> Some n | (_, GPType) -> None) tps);
       (name, tps) }
 
@@ -749,18 +751,19 @@ base_type_expr:
     { match n with
       | Ast.ASLit k -> TypeArray (t, k)
       | sym -> TypeArraySym (t, sym) }
-      (* sym is only reachable inside a generic struct's own field list
-         (Generic_scope non-empty); everywhere else array_size's IDENT
-         case already rejects an unresolved name at parse time. *)
+      (* sym is only reachable when the name is a registered generic
+         struct value-parameter somewhere in the file (Generic_scope.mem);
+         everywhere else array_size's IDENT case already rejects an
+         unresolved name at parse time. *)
   | LBRACKET RBRACKET t = type_expr { TypeSlice (t, 0) }
     (* []T -- slice with no compile-time minimum length *)
   | LBRACKET t = type_expr SEMI n = array_size DOTDOT RBRACKET
     { match n with
       | Ast.ASLit k -> TypeSlice (t, k)
-      | Ast.ASParam _ | Ast.ASAdd _ | Ast.ASSub _ | Ast.ASMul _ | Ast.ASDiv _ ->
-          raise (Types.TypeError ($symbolstartpos,
-            "a symbolic (generic-parameter-dependent) slice minimum length \
-             is not supported yet")) }
+      | sym -> TypeSliceSym (t, sym) }
+      (* sym is only reachable when the name is a registered generic
+         struct value-parameter somewhere in the file, mirroring
+         TypeArraySym's own comment at the array production just above. *)
     (* [T; N..] -- slice whose runtime length is at least N *)
   | FN effects_opt LPAREN fn_type_params RPAREN ARROW type_expr
     { TypeFn ($4, $7, $2) }

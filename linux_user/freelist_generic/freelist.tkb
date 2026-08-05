@@ -1,54 +1,37 @@
-// FreelistCore/FreelistOwner/FreelistPopResult are the non-generic pool
-// bookkeeping (GitHub issue #207's approved generics plan, build order
-// step 1): next_free/free_head/next_generation never touch a payload
-// type, so none of this needs the generics feature at all. Capacity is
-// not a parameter of this type at all -- it is simply the length of
-// whatever backing slice the caller hands to freelist_core_init, exactly
-// matching how every other slice in this language already carries its
-// own runtime length (SPEC.md's "Slices" section), so there is no
-// separate N to keep in sync with anything.
+// Freelist redesign (follow-up to the const-generics work, GitHub issue
+// #207): a long design discussion converged on a specific split of
+// responsibility between FreelistCore(N) and Freelist(T, N), driven by
+// two verified, concrete facts about this compiler:
 //
-// Freelist(T) below (build order step 7) is a thin GENERIC wrapper over
-// this bookkeeping -- only the parts that genuinely vary by T are
-// generic; FreelistCore/FreelistOwner/FreelistPopResult stay exactly as
-// build order step 1 left them. `use`-concatenation puts everything in
-// one compilation unit regardless of file boundaries, and
-// lib/monomorphize.ml only ever duplicates `generic struct`/`T: type`
-// items -- so keeping the non-generic bookkeeping and the generic
-// wrapper in a SINGLE file changes nothing about what ends up duplicated
-// in the compiled binary (confirmed empirically: freelist_core_init/
-// _pop/_push compile to exactly one copy each no matter how many
-// Freelist(T) instantiations exist; only freelist_init/freelist_insert/
-// freelist_remove/freelist_ref get one mangled copy per T). This used to
-// be two files (freelist_core.tkb / freelist.tkb) purely to de-risk
-// build order -- the core bookkeeping was written and verified before
-// the generics compiler feature existed at all, not because the
-// compiler needed a file boundary to keep it from being duplicated; now
-// that generics are proven, one file is simply easier to read.
+// 1. A struct's ARRAY-typed field decays to a raw, unchecked pointer the
+//    instant it is read via field access (confirmed: lib/type_inf.ml's
+//    FieldGet TArray case and lib/llvm_gen.ml's own TypeArray case both
+//    strip the array-ness down to a bare element pointer) -- indexing
+//    through it is not merely unproven, there is no bounds-check codegen
+//    path involved at all, not even a --forbid-trap-visible one. This is
+//    a concrete new instance of GitHub issue #15 ("Safe pointer"), which
+//    tracks it; not solved here, deliberately deferred.
+// 2. `[]T` (a genuine slice) is the only type in this language that both
+//    (a) crosses a function/struct boundary and (b) keeps real, checked/
+//    elidable indexing -- slices do not decay on field read.
 //
-// Freelist(T, N): N is a const-generic value parameter (monomorphized --
-// substituted + mangled per concrete int, exactly like T is per concrete
-// type), not a runtime slice length. This closed a real, user-found gap:
-// a caller's `usize_index_store: [usize; 3]` is ALREADY statically sized
-// at its own declaration, but the earlier `Freelist(T)` design (T only,
-// data: []T, freelist_init taking a runtime-length data_backing: []T
-// argument) threw that static information away at the generic library's
-// own API boundary, forcing runtime bounds checks inside the library even
-// though every real call site's size was compile-time-known. With N
-// const-generic, `data: [T; N]` is a genuine fixed-size array embedded
-// directly in the pool's own storage -- freelist_init no longer takes a
-// data_backing argument at all, and a caller mismatching N between its
-// index/data arrays and the pool's own declared type gets an ordinary
-// array-size type error, not a silently-erased runtime check.
+// Given those two facts: `index` (the free-list bookkeeping array,
+// next_free) has no alignment requirements and no good reason to be a
+// caller's problem, so it is embedded directly in FreelistCore(N),
+// deliberately accepting point 1's unchecked-indexing risk for it (see
+// each function below). `data` (the payload storage) DOES need caller-
+// controlled alignment (e.g. a real page pool wants align(4096) on its
+// OWN array declaration, which no per-field alignment syntax can express
+// on an embedded field) and benefits from point 2's real checking, so it
+// stays a caller-owned slice, `[T; N..]` -- a SYMBOLIC slice minimum
+// (Ast.TypeSliceSym), so a size-mismatched backing array is still a
+// genuine compile-time type error (TSlice subtyping: actual minimum must
+// be >= N), unlike an unconstrained `[]T` field, which enforces nothing.
 //
-// FreelistCore/FreelistOwner/FreelistPopResult are intentionally UNCHANGED
-// by this: `next_free` stays a runtime-length `[]usize` slice, so
-// FreelistCore itself is not parametrized by N at all. Closing issue #216
-// (freelist_core_push's owner.index bounds check, which crosses a
-// function-call boundary) would need FreelistOwner to ALSO carry N --
-// combining const-generic monomorphization with FreelistOwner's own
-// existing erased/existential bracket mechanism (allocation) -- which is
-// deliberately out of scope here; #216 stays open.
+// Naming: freelist_core_pop/_push are renamed to freelist_core_insert/
+// _remove, matching freelist_insert/freelist_remove's own already-
+// established vocabulary (mirrors freelist_init/freelist_core_init's
+// existing "same verb, core_ prefix" convention exactly).
 
 variant FreelistPopResult {
     Empty;
@@ -74,36 +57,35 @@ fn freelist_owner_generation(owner: borrow FreelistOwner[allocation]) -> usize {
     return owner.generation;
 }
 
-struct FreelistCore {
-    next_free: []usize;
+// N is this pool's capacity, embedded directly -- no caller-supplied
+// backing array for the bookkeeping index at all.
+generic struct FreelistCore(N: usize) {
+    next_free: [usize; N];
     free_head: usize;
     next_generation: usize;
 }
 
-// backing.len becomes this core's capacity for its whole lifetime.
-fn freelist_core_init(core: *FreelistCore, backing: []usize) {
-    let mut next_free = backing;
-    // GitHub issue #215 (fixed): the loop's own bound is textually
-    // `next_free.len`, which now proves the index against next_free's
-    // runtime length via llvm_gen.ml's slice_index_ctx relational
-    // narrowing (the for-loop's own per-iteration i < hi comparison IS
-    // the proof) -- no trap site remains here.
-    for i: usize in 0..<next_free.len {
-        next_free[i] = i + 1;
+fn freelist_core_init(core: *FreelistCore(N)) {
+    let next_free = core.next_free;
+    // GitHub issue #15: next_free is a struct-embedded array field, so
+    // this read decays to a raw *usize (see this file's own header
+    // comment) -- next_free[i] below is ordinary unchecked pointer
+    // arithmetic, not a runtime-checked trap site. Deliberately accepted,
+    // not proven safe. Pointer indexing needs an isize offset (unlike
+    // checked array/slice indexing, which accepts usize), hence `i:
+    // isize` here rather than usize.
+    for i: isize in 0..<N {
+        next_free[i] = i as usize + 1;
     }
-    core.next_free = next_free;
     core.free_head = 0;
     core.next_generation = 1;
 }
 
-fn freelist_core_pop(core: *FreelistCore) -> FreelistPopResult {
-    let mut next_free = core.next_free;
+fn freelist_core_insert(core: *FreelistCore(N)) -> FreelistPopResult {
+    let next_free = core.next_free;   // see freelist_core_init's #15 note
     let head: usize = core.free_head;
-    if (head >= 0 && head < next_free.len) {
-        // GitHub issue #213 (fixed): `head < next_free.len` now proves
-        // this index against next_free's runtime length via llvm_gen.ml's
-        // slice_index_ctx relational narrowing -- no trap site remains here.
-        core.free_head = next_free[head];
+    if (head >= 0 && head < N) {
+        core.free_head = next_free[head as isize];
         let generation: usize = core.next_generation;
         core.next_generation = generation + 1;
         return FreelistPopResult::Popped(freelist_owner_new(head, generation));
@@ -111,34 +93,37 @@ fn freelist_core_pop(core: *FreelistCore) -> FreelistPopResult {
     return FreelistPopResult::Empty;
 }
 
-fn freelist_core_push(core: *FreelistCore, owner: sink FreelistOwner[allocation]) {
-    let mut next_free = core.next_free;
+fn freelist_core_remove(core: *FreelistCore(N), owner: sink FreelistOwner[allocation]) {
+    let next_free = core.next_free;   // see freelist_core_init's #15 note
     // GitHub issue #216: owner.index is only ever produced by
-    // freelist_core_pop from this same core's next_free, so it is always
-    // in range in practice, but that fact crosses a function-call boundary
-    // (a proof the checker does not carry across calls today, unlike the
-    // same-scope relational case in freelist_core_pop, fixed by #213).
-    // Runtime trap accepted here.
-    next_free[owner.index] = core.free_head;
-    core.free_head = owner.index;
+    // freelist_core_insert from this same core's next_free, so it is
+    // always in range in practice, but that fact crosses a function-call
+    // boundary -- and, now that next_free is raw pointer arithmetic
+    // rather than a checked slice access (issue #15), there is no trap
+    // site here for --forbid-trap to even report; this is NOT a safety
+    // improvement over the earlier slice-based version, it is the
+    // checker no longer looking at this code at all.
+    next_free[freelist_owner_index(owner) as isize] = core.free_head;
+    core.free_head = freelist_owner_index(owner);
 }
 
 generic struct Freelist(T: type, N: usize) {
-    core: FreelistCore;
-    data: [T; N];
+    core: FreelistCore(N);
+    data: [T; N..];
 }
 
-fn freelist_init(T: type, target: *Freelist(T, N), index_backing: []usize) {
-    freelist_core_init(&target.core, index_backing);
+fn freelist_init(T: type, target: *Freelist(T, N), data_backing: [T; N..]) {
+    freelist_core_init(&target.core);
+    target.data = data_backing;
 }
 
 fn freelist_insert(T: type, target: *Freelist(T, N)) -> FreelistPopResult {
-    return freelist_core_pop(&target.core);
+    return freelist_core_insert(&target.core);
 }
 
 fn freelist_remove(T: type, target: *Freelist(T, N),
                     owner: sink FreelistOwner[allocation]) {
-    freelist_core_push(&target.core, owner);
+    freelist_core_remove(&target.core, owner);
 }
 
 // Returns a pointer to T tied to owner's slot -- no copy, whatever T's
@@ -146,12 +131,13 @@ fn freelist_remove(T: type, target: *Freelist(T, N),
 // `freelist_ref(&target, owner).x = 1;`); a whole-T read/write does
 // (`*freelist_ref(&target, owner) = v;`), which is the expensive case
 // made to visibly look expensive, exactly as intended when this shape
-// was designed. `target.data` already decays to `*T` (array field read),
-// so no `as *T` cast is needed here (the earlier []T-slice design needed
-// one; embedding a genuine [T; N] array field made it a no-op, dropped).
+// was designed. `data` is a genuine slice field here (no decay), so the
+// `as *T` cast is needed to get a raw pointer for the offset -- this
+// whole function is raw pointer arithmetic (issue #15), same as it has
+// been since the very first #207 worked example.
 fn freelist_ref(T: type, target: *Freelist(T, N),
                 owner: borrow FreelistOwner[allocation]) -> *T {
     let data = target.data;
     let index: isize = freelist_owner_index(owner) as isize;
-    return data + index;
+    return (data as *T) + index;
 }

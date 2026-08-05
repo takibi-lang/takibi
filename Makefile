@@ -156,35 +156,28 @@ $(LINUX_USER_DIR)/freelist_pool/freelist_pool_exe.o: $(LINUX_USER_DIR)/freelist_
 $(LINUX_USER_DIR)/inet_checksum/inet_checksum_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 
-# GitHub issue #213: freelist_generic's capacity is a runtime slice length,
-# not a compile-time constant, so its bounds checks cannot be proven away
-# by today's checker (a relational-bounds gap, not a real safety hole --
-# see the comments at each accepted trap site in freelist.tkb). This
-# overrides the shared %_exe.o pattern rule below for this one target only,
-# dropping --forbid-trap; every other linux_user/ target is unaffected.
-#
-# Issue #213's relational `v < s.len` narrowing and #215's sibling for-loop
-# narrowing (`for i in 0..<s.len`) together closed 2 of the 3 original
-# sites (freelist_core_pop and freelist_core_init). Only 1 remains, tracked
-# by #216 (cross-function-call-boundary owner.index provenance in
-# freelist_core_push, open research territory). This override still cannot
-# be dropped until #216 closes.
-#
-# Coarser than ideal: freelist_generic.tkb `use`s freelist.tkb, and both
-# are concatenated into ONE compilation (this language has no real
-# separate compilation yet -- see AGENTS.md's issue #55 Part B note), so
-# --forbid-trap can only be dropped for the whole unit, not just the 1
-# known site -- confirmed by rebuilding with --forbid-trap still on and
-# checking the reported trap count stays exactly 1, in freelist.tkb's
-# non-generic freelist_core_push (its own former file, freelist_core.tkb,
-# was merged into freelist.tkb once generics were proven -- see that
-# file's own header comment), none in freelist_generic.tkb's own code, at
-# the time this comment was last updated. If freelist_generic.tkb's own
-# app_main code grows, re-run that check (drop this override, rebuild,
-# confirm the trap count and file names reported) rather than trusting
-# this comment to still be accurate.
-$(LINUX_USER_DIR)/freelist_generic/freelist_generic_exe.o: $(LINUX_USER_DIR)/freelist_generic/freelist_generic.tkb $(LINUX_USER_DIR)/freelist_generic/freelist.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE) $(TAKIBI)
-	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(LINUX_USER_DIR)/freelist_generic/freelist_generic.tkb --target $(LINUX_AMD64_TARGET) -o $@
+# Freelist redesign follow-up: --forbid-trap now PASSES for this target --
+# but this is NOT a safety improvement over the earlier #213/#215-tracked
+# trap sites, and must not be read as one.
+# freelist.tkb's FreelistCore(N) now embeds its bookkeeping array
+# (next_free: [usize; N]) directly as a struct field; reading that field
+# decays to a raw, UNCHECKED pointer (lib/type_inf.ml's FieldGet TArray
+# case, lib/llvm_gen.ml's matching TypeArray case -- confirmed, and
+# tracked as a concrete instance of GitHub issue #15 "Safe pointer").
+# Unchecked pointer arithmetic never emits a bounds-check trap at all, so
+# --forbid-trap has nothing left to reject here -- the checker stopped
+# LOOKING at this code, it did not prove it safe. See freelist.tkb's own
+# per-function #15 comments (freelist_core_init/_insert/_remove) for the
+# precise accepted-risk sites. `data` (the payload storage) deliberately
+# stayed a caller-owned slice specifically to keep REAL checked/elidable
+# indexing (see freelist.tkb's own header comment) -- only the internal
+# bookkeeping array traded that away, by deliberate choice, to avoid
+# forcing collection-library callers to declare index storage themselves.
+# No override needed any more (this target now uses the default %_exe.o
+# pattern rule below, --forbid-trap included) -- only an extra
+# prerequisite on freelist.tkb, since freelist_generic.tkb `use`s it and
+# the default pattern rule doesn't know about that.
+$(LINUX_USER_DIR)/freelist_generic/freelist_generic_exe.o: $(LINUX_USER_DIR)/freelist_generic/freelist.tkb
 $(LINUX_USER_DIR)/ip_parse/ip_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 

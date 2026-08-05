@@ -171,6 +171,9 @@ let rec size_align_of_type pos seen ty =
   | TypeArraySym _ -> fail pos
       "BUG: a symbolic generic array size reached layout unresolved -- \
        Monomorphize.run should have substituted it"
+  | TypeSliceSym _ -> fail pos
+      "BUG: a symbolic generic slice minimum reached layout unresolved -- \
+       Monomorphize.run should have substituted it"
 
 let sizeof_type pos ty =
   let (sz, _) = size_align_of_type pos [] ty in

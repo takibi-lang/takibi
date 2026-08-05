@@ -178,6 +178,7 @@ let rec show_type = function
       Printf.sprintf "%s(%s)" name (String.concat ", " (List.map show_type args))
   | Ast.TypeIntLit n -> string_of_int n
   | Ast.TypeArraySym (t, _) -> Printf.sprintf "[%s; <sym>]" (show_type t)
+  | Ast.TypeSliceSym (t, _) -> Printf.sprintf "[%s; <sym>..]" (show_type t)
 
 let type_t : Ast.type_expr Alcotest.testable =
   Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)
@@ -10336,6 +10337,134 @@ let codegen_tests = [
         fn fixedbufcg6_wrongkind() {
           let mut a: FixedBufCg6(usize, usize);
         }");
+
+  (* -- Freelist redesign follow-up: symbolic slice minimum (`[T; N..]`)
+     and expression-level value-generic-parameter substitution ---------- *)
+
+  Alcotest.test_case
+    "a generic struct's slice field with a symbolic minimum length \
+     (`[T; N..]`) parses to TypeSliceSym" `Quick
+    (fun () ->
+       let items = parse
+         "generic struct FixedBufCg7(T: type, N: usize) {
+            data: [T; N..];
+          }"
+       in
+       match items with
+       | [ Ast.GenericStructDef (_, _, [ ("data", field_ty) ], _, _, _, _) ] ->
+           (match field_ty with
+            | Ast.TypeSliceSym (Ast.TypeNamed "T", Ast.ASParam "N") -> ()
+            | _ -> Alcotest.fail "expected TypeSliceSym(TypeNamed \"T\", ASParam \"N\")")
+       | _ -> Alcotest.fail "expected a single GenericStructDef with one field");
+
+  Alcotest.test_case
+    "assigning a correctly-sized array-cast-to-slice into a symbolic- \
+     minimum slice field succeeds" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "generic struct FixedBufCg8(T: type, N: usize) { data: [T; N..]; }
+          private let mut fixedbufcg8_backing: [usize; 3];
+          fn fixedbufcg8_ok() {
+            let mut a: FixedBufCg8(usize, 3);
+            a.data = fixedbufcg8_backing as []usize;
+          }"
+       in
+       ());
+
+  Alcotest.test_case
+    "assigning an UNDERSIZED array-cast-to-slice into a symbolic-minimum \
+     slice field is a compile-time type error -- the direct regression \
+     test for the freelist redesign's motivating gap (an unconstrained \
+     `[]T` field previously enforced nothing at all)" `Quick
+    (expect_type_error "cannot pass"
+       "generic struct FixedBufCg9(T: type, N: usize) { data: [T; N..]; }
+        private let mut fixedbufcg9_backing: [usize; 2];
+        fn fixedbufcg9_undersized() {
+          let mut a: FixedBufCg9(usize, 3);
+          a.data = fixedbufcg9_backing as []usize;
+        }");
+
+  Alcotest.test_case
+    "a generic function may use its own inferred value-generic-parameter \
+     as an ordinary runtime expression in its body (e.g. a for-loop \
+     bound), not just in a type-level array size -- mirrors \
+     freelist_core_init's actual shape" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "generic struct FixedBufCg10(N: usize) {
+            data: [usize; N];
+          }
+          fn fixedbufcg10_init(target: *FixedBufCg10(N)) {
+            let next = target.data;
+            for i: isize in 0..<N {
+              next[i] = i as usize;
+            }
+          }
+          fn fixedbufcg10_use() {
+            let mut a: FixedBufCg10(4);
+            fixedbufcg10_init(&a);
+          }"
+       in
+       match Hashtbl.find_opt Llvm_gen.functions "fixedbufcg10_init$4" with
+       | Some _ -> ()
+       | None -> Alcotest.fail "fixedbufcg10_init$4 was not generated");
+
+  (* GitHub issue #207 const-generics/Freelist-redesign follow-up: a real,
+     confirmed bug (found by disassembling an actually-miscompiled
+     linux_user binary, not by inspection -- the AST was correct at every
+     stage of monomorphize.ml; llvm_gen.ml's Call codegen picked the wrong
+     target). Two DIFFERENT instantiations of a template whose body calls
+     ANOTHER generic function end up with IDENTICAL Ast.loc values on the
+     corresponding Call node (Monomorphize.transform/walk_stmt/walk_expr
+     preserve the template's own loc verbatim), colliding in
+     type_inf.ml's loc-keyed resolved_call_targets cache -- so one
+     instantiation's nested call silently got resolved to the OTHER
+     instantiation's target. Fixed by relocate_stmt/relocate_expr, giving
+     each instantiation's own AST nodes a unique loc.pos_fname suffix. *)
+  Alcotest.test_case
+    "two instantiations of a generic struct (different T AND N) whose \
+     init function calls ANOTHER generic function each call their OWN \
+     matching nested instantiation, not each other's (regression test \
+     for a real miscompilation found via the freelist redesign)" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "generic struct RegrInner(N: usize) {
+            data: [usize; N];
+            dummy: usize;
+          }
+          fn regr_inner_init(target: *RegrInner(N)) {
+            let d = target.data;
+            for i: isize in 0..<N {
+              d[i] = i as usize + 1;
+            }
+            target.dummy = 0;
+          }
+          generic struct RegrOuter(T: type, N: usize) {
+            inner: RegrInner(N);
+            payload: T;
+          }
+          fn regr_outer_init(T: type, target: *RegrOuter(T, N)) {
+            regr_inner_init(&target.inner);
+          }
+          struct RegrPoint { x: usize; y: usize; }
+          private let mut regr_outer3: RegrOuter(usize, 3);
+          private let mut regr_outer2: RegrOuter(RegrPoint, 2);
+          fn regr_use() {
+            regr_outer_init(&regr_outer3);
+            regr_outer_init(&regr_outer2);
+          }"
+       in
+       let ir name = match Hashtbl.find_opt Llvm_gen.functions name with
+         | Some (_, fn) -> Llvm.string_of_llvalue fn
+         | None -> Alcotest.failf "%s was not generated" name
+       in
+       (* LLVM quotes identifiers containing '$', e.g. @"regr_inner_init$3". *)
+       Alcotest.(check bool) "regr_outer_init$usize$3 calls regr_inner_init$3, not $2"
+         true (contains_substring (ir "regr_outer_init$usize$3") "@\"regr_inner_init$3\""
+               && not (contains_substring (ir "regr_outer_init$usize$3") "@\"regr_inner_init$2\""));
+       Alcotest.(check bool) "regr_outer_init$RegrPoint$2 calls regr_inner_init$2, not $3"
+         true (contains_substring (ir "regr_outer_init$RegrPoint$2") "@\"regr_inner_init$2\""
+               && not (contains_substring (ir "regr_outer_init$RegrPoint$2") "@\"regr_inner_init$3\"")));
 
 ]
 
