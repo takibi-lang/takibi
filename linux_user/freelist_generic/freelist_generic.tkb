@@ -1,17 +1,25 @@
-// End-to-end exerciser for the real generic Freelist(T) (GitHub issue
-// #207, generics build order step 7). Two independent pools, two
-// different payload types instantiated from the SAME template in one
-// program: a small scalar (usize) and a small struct (Point), proving
-// genericity actually works for both, not just primitives. Coverage
-// mirrors freelist_pool.tkb's own established rigor for the non-generic
-// prototype this design grew out of: allocate, LIFO-reuse-after-free,
-// the "freeing does not clear payload" property, and pool exhaustion.
+// End-to-end exerciser for the real generic Freelist(T, N) (GitHub issue
+// #207, generics build order step 7; N is a later const-generics
+// follow-up -- see freelist.tkb's own header comment). Two independent
+// pools, two different payload types AND two different capacities
+// instantiated from the SAME template in one program: a small scalar
+// (usize, N=3) and a small struct (Point, N=2), proving genericity works
+// across both type and capacity, not just primitives. Coverage mirrors
+// freelist_pool.tkb's own established rigor for the non-generic prototype
+// this design grew out of: allocate, LIFO-reuse-after-free, the "freeing
+// does not clear payload" property, and pool exhaustion.
 //
 // Every allocation below reads `let a = match freelist_insert(&pool) {
 // ... };` with no type annotation at all -- a later issue #207 follow-up
 // made LetMatch's own `: ty` optional, inferred from what the (fully
 // explicit, no wildcard) arms `Yield`, closing the gap between this and
 // the original approved plan's own mockup.
+//
+// The literal capacity is written exactly once per pool, as a `const` --
+// USIZE_POOL_N/POINT_POOL_N -- referenced everywhere else (the pool's own
+// type argument, and its index array's size) so a mismatched size becomes
+// an ordinary compile-time array-type error instead of something to spot
+// by hand across multiple declarations.
 
 use "linux_user/freelist_generic/freelist.tkb";
 
@@ -20,16 +28,16 @@ struct Point {
     y: usize;
 }
 
-private let mut usize_pool: Freelist(usize);
-private let mut usize_index_store: [usize; 3];
-private let mut usize_data_store: [usize; 3];
+const USIZE_POOL_N: usize = 3;
+private let mut usize_pool: Freelist(usize, USIZE_POOL_N);
+private let mut usize_index_store: [usize; USIZE_POOL_N];
 
-private let mut point_pool: Freelist(Point);
-private let mut point_index_store: [usize; 2];
-private let mut point_data_store: [Point; 2];
+const POINT_POOL_N: usize = 2;
+private let mut point_pool: Freelist(Point, POINT_POOL_N);
+private let mut point_index_store: [usize; POINT_POOL_N];
 
 fn app_main() {
-    freelist_init(&usize_pool, usize_index_store as []usize, usize_data_store as []usize);
+    freelist_init(&usize_pool, usize_index_store as []usize);
 
     let a = match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => { uart_puts("alloc a failed\n"); return; }
@@ -118,11 +126,12 @@ fn app_main() {
     freelist_remove(&usize_pool, r2);
     freelist_remove(&usize_pool, c);
 
-    // Second instantiation of the same template, a struct payload -- proves
-    // genericity works beyond primitive scalars, and that field access
-    // through freelist_ref's returned pointer needs no explicit deref
-    // (the exact shape a real 4KB-page pool would rely on).
-    freelist_init(&point_pool, point_index_store as []usize, point_data_store as []Point);
+    // Second instantiation of the same template, a struct payload AND a
+    // different capacity (N=2 vs N=3 above) -- proves genericity works
+    // beyond primitive scalars and beyond a single fixed size, and that
+    // field access through freelist_ref's returned pointer needs no
+    // explicit deref (the exact shape a real 4KB-page pool would rely on).
+    freelist_init(&point_pool, point_index_store as []usize);
 
     let p1 = match freelist_insert(&point_pool) {
         FreelistPopResult::Empty => { uart_puts("alloc p1 failed\n"); return; }

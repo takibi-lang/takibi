@@ -165,6 +165,12 @@ let rec size_align_of_type pos seen ty =
   | TypeGenericInst (name, _) -> fail pos (Printf.sprintf
       "generic instantiation '%s(...)' is not implemented yet \
        (GitHub issue #207)" name)
+  | TypeIntLit _ -> fail pos
+      "BUG: a bare generic value argument reached layout unresolved -- \
+       Monomorphize.run should have substituted it"
+  | TypeArraySym _ -> fail pos
+      "BUG: a symbolic generic array size reached layout unresolved -- \
+       Monomorphize.run should have substituted it"
 
 let sizeof_type pos ty =
   let (sz, _) = size_align_of_type pos [] ty in

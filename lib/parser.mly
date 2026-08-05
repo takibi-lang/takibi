@@ -246,15 +246,15 @@ item:
       OwnedStructDef
         (name, kind, static_params, fields, false, None, private_fields,
          is_private, $symbolstartpos) }
-  | GENERIC STRUCT name = IDENT LPAREN tps = generic_params RPAREN
-    LBRACE fields = struct_fields RBRACE
+  | intro = generic_struct_intro LBRACE fields = struct_fields RBRACE
     (* GitHub issue #207: deliberately does NOT call
        Type_layout.begin_struct/finish_struct (unlike struct_intro's own
        production above) -- a field referencing a type parameter (an
        ordinary TypeNamed placeholder at this point) has no size until
-       monomorphization substitutes a concrete type. Parser-only in this
-       build-order step: nothing consumes GenericStructDef yet. *)
-    { let field_list = List.map (fun (fname, ty, _) -> (fname, ty)) fields in
+       monomorphization substitutes a concrete type. *)
+    { let (name, tps) = intro in
+      Generic_scope.exit_scope ();
+      let field_list = List.map (fun (fname, ty, _) -> (fname, ty)) fields in
       let private_fields =
         List.filter_map (fun (fname, _, is_priv) ->
           if is_priv then Some fname else None) fields in
@@ -311,6 +311,20 @@ owned_struct_intro:
     { Type_layout.begin_struct name;
       (name, k, ps, p) }
 
+generic_struct_intro:
+  | GENERIC STRUCT name = IDENT LPAREN tps = generic_params RPAREN
+    (* Registers this generic struct's own VALUE parameter names (e.g. `N`)
+       so array_size's IDENT fallback can recognize them as symbolic while
+       parsing the field list just below -- mirrors owned_struct_intro's
+       own "register mutable parser state before the body" idiom above,
+       reduced early for the same reason (Type_layout.begin_struct there,
+       Generic_scope.enter here). Exited in the toplevel rule's own action
+       once struct_fields has been fully parsed. Const generics follow-up
+       to GitHub issue #207. *)
+    { Generic_scope.enter (List.filter_map (function
+        | (n, GPValue _) -> Some n | (_, GPType) -> None) tps);
+      (name, tps) }
+
 owned_kind:
   | AFFINE { KindAffine }
   | LINEAR { KindLinear }
@@ -318,14 +332,16 @@ owned_kind:
 static_params:
   | LBRACKET ps = separated_nonempty_list(COMMA, static_param) RBRACKET { ps }
 
-(* GitHub issue #207: every generic parameter is kind `type` in this first
-   build-order step -- `T: type` mirrors a generic function parameter's own
-   spelling for consistency. *)
+(* GitHub issue #207 (const generics follow-up): a generic parameter is
+   either kind `type` (T: type) or a plain integer VALUE parameter
+   (N: usize), the latter monomorphized -- substituted + mangled per
+   concrete value -- exactly like a type parameter is per concrete type. *)
 generic_params:
   | ps = separated_nonempty_list(COMMA, generic_param) { ps }
 
 generic_param:
-  | name = IDENT COLON TYPE { name }
+  | name = IDENT COLON TYPE { (name, GPType) }
+  | name = IDENT COLON base = int_base_type_expr { (name, GPValue base) }
 
 view_static_params:
   | /* empty */ { [] }
@@ -729,10 +745,22 @@ base_type_expr:
   | TIMES      type_expr { lift_singleton (fun t -> TypePtr t) $2 }
   | TIMES ALIGN LPAREN n = alignment_value RPAREN t = type_expr
     { lift_singleton (fun t -> TypeAlignedPtr (n, t)) t }
-  | LBRACKET t = type_expr SEMI n = array_size RBRACKET { TypeArray (t, n) }
+  | LBRACKET t = type_expr SEMI n = array_size RBRACKET
+    { match n with
+      | Ast.ASLit k -> TypeArray (t, k)
+      | sym -> TypeArraySym (t, sym) }
+      (* sym is only reachable inside a generic struct's own field list
+         (Generic_scope non-empty); everywhere else array_size's IDENT
+         case already rejects an unresolved name at parse time. *)
   | LBRACKET RBRACKET t = type_expr { TypeSlice (t, 0) }
     (* []T -- slice with no compile-time minimum length *)
-  | LBRACKET t = type_expr SEMI n = array_size DOTDOT RBRACKET { TypeSlice (t, n) }
+  | LBRACKET t = type_expr SEMI n = array_size DOTDOT RBRACKET
+    { match n with
+      | Ast.ASLit k -> TypeSlice (t, k)
+      | Ast.ASParam _ | Ast.ASAdd _ | Ast.ASSub _ | Ast.ASMul _ | Ast.ASDiv _ ->
+          raise (Types.TypeError ($symbolstartpos,
+            "a symbolic (generic-parameter-dependent) slice minimum length \
+             is not supported yet")) }
     (* [T; N..] -- slice whose runtime length is at least N *)
   | FN effects_opt LPAREN fn_type_params RPAREN ARROW type_expr
     { TypeFn ($4, $7, $2) }
@@ -762,6 +790,13 @@ base_type_expr:
        cost). Keeping these two visually distinct was an explicit design
        goal, not an accident. *)
   | IDENT { TypeNamed $1 }
+  | n = INT { TypeIntLit (narrow_int64 $symbolstartpos "generic value argument" n) }
+    (* Const generics follow-up to GitHub issue #207: a bare integer as a
+       TypeGenericInst value argument, e.g. the `3` in `Freelist(usize,
+       3)`. Legal syntactically anywhere a type_expr is (INT starts no
+       other base_type_expr alternative, so no conflict), but semantically
+       meaningful only as a generic value-argument -- Monomorphize.run
+       rejects it anywhere else. *)
 
 static_arg:
   | name = IDENT { StaticName name }
@@ -785,28 +820,50 @@ view_static_args:
    same drift concern on the *value* side of a global let). No forward
    references: a referenced name must already be in Const_env's table (its
    `const` appeared earlier in the concatenated source). *)
+(* Returns Ast.array_size_expr, not a plain int: inside a generic struct's
+   own field list, a name may refer to one of ITS OWN not-yet-bound value
+   parameters (Generic_scope), which cannot resolve to a literal until
+   monomorphization. Every arithmetic action eagerly collapses to ASLit
+   when both operands are already ASLit, so ordinary (non-generic) code's
+   behavior is byte-for-byte identical to before this widening -- only
+   building a symbolic ASAdd/ASSub/ASMul/ASDiv node when a Generic_scope
+   name is actually involved. Const generics follow-up to GitHub issue
+   #207. *)
 array_size:
-  | n = INT   { narrow_int64 $symbolstartpos "array size" n }
+  | n = INT   { Ast.ASLit (narrow_int64 $symbolstartpos "array size" n) }
   | name = IDENT
     { match Const_env.find name with
-      | Some n -> n
+      | Some n -> Ast.ASLit n
       | None ->
-          raise (Types.TypeError ($symbolstartpos,
+          if Generic_scope.mem name then Ast.ASParam name
+          else raise (Types.TypeError ($symbolstartpos,
             Printf.sprintf
               "array size '%s' is not a known compile-time integer constant \
                (declare it earlier as `const %s: T = N;`)"
               name name)) }
   | SIZEOF LPAREN t = type_expr RPAREN
-    { Type_layout.sizeof_type $symbolstartpos t }
+    { Ast.ASLit (Type_layout.sizeof_type $symbolstartpos t) }
   | LPAREN n = array_size RPAREN { n }
-  | a = array_size PLUS  b = array_size { a + b }
-  | a = array_size MINUS b = array_size { a - b }
-  | a = array_size TIMES b = array_size { a * b }
+  | a = array_size PLUS  b = array_size
+    { match a, b with
+      | Ast.ASLit x, Ast.ASLit y -> Ast.ASLit (x + y)
+      | _ -> Ast.ASAdd (a, b) }
+  | a = array_size MINUS b = array_size
+    { match a, b with
+      | Ast.ASLit x, Ast.ASLit y -> Ast.ASLit (x - y)
+      | _ -> Ast.ASSub (a, b) }
+  | a = array_size TIMES b = array_size
+    { match a, b with
+      | Ast.ASLit x, Ast.ASLit y -> Ast.ASLit (x * y)
+      | _ -> Ast.ASMul (a, b) }
   | a = array_size DIV   b = array_size
-    { if b = 0 then
-        raise (Types.TypeError ($symbolstartpos,
-          "array size expression: division by zero"))
-      else a / b }
+    { match a, b with
+      | Ast.ASLit x, Ast.ASLit y ->
+          if y = 0 then
+            raise (Types.TypeError ($symbolstartpos,
+              "array size expression: division by zero"))
+          else Ast.ASLit (x / y)
+      | _ -> Ast.ASDiv (a, b) }
 
 alignment_value:
   | n = INT { narrow_int64 $symbolstartpos "alignment" n }

@@ -555,6 +555,14 @@ let rec of_ast_in_scope scope = function
       raise (TypeError (Lexing.dummy_pos, Printf.sprintf
         "'%s(...)' is a generic instantiation, which is not implemented \
          yet (GitHub issue #207)" name))
+  | Ast.TypeIntLit _ ->
+      raise (TypeError (Lexing.dummy_pos,
+        "BUG: a bare generic value argument reached type inference \
+         unresolved -- Monomorphize.run should have substituted it"))
+  | Ast.TypeArraySym _ ->
+      raise (TypeError (Lexing.dummy_pos,
+        "BUG: a symbolic generic array size reached type inference \
+         unresolved -- Monomorphize.run should have substituted it"))
 
 let of_ast t = of_ast_in_scope (create_static_scope ()) t
 

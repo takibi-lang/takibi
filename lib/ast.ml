@@ -123,10 +123,48 @@ type type_expr =
        wrapper like TypeBorrow/TypeSink: align(N) modifies the pointer
        sigil itself, matching the already-existing align(N) local/global
        variable and struct-level syntax. *)
+  | TypeIntLit of int
+    (* A bare integer literal, legal ONLY as a TypeGenericInst VALUE
+       argument (e.g. the `3` in `Freelist(usize, 3)`) -- const generics'
+       counterpart to a `type` argument. Never legal anywhere else a
+       type_expr can appear; Monomorphize.run unwraps it against a
+       Value-kinded generic parameter position and it never reaches
+       type_inf.ml/llvm_gen.ml, same contract as TypeKind/TypeGenericInst
+       (GitHub issue #207, const-generics follow-up). *)
+  | TypeArraySym of type_expr * array_size_expr
+    (* [T; SZ] where SZ symbolically references one of the ENCLOSING
+       `generic struct`'s own not-yet-bound value parameters (e.g.
+       `data: [T; N]` inside `generic struct Freelist(T: type, N: usize)`).
+       Only ever produced while parsing a generic struct's own field list
+       (lib/generic_scope.ml gates this); Monomorphize.run substitutes N
+       with its concrete bound value and rewrites this to an ordinary
+       TypeArray before type_inf.ml/llvm_gen.ml ever run -- same contract
+       as TypeKind/TypeGenericInst above. *)
+[@@deriving show]
+
+and array_size_expr =
+  (* Mirrors lib/parser.mly's own array_size arithmetic grammar (literal,
+     named reference, +/-/*// of those) but keeps a named reference
+     symbolic instead of resolving it via Const_env immediately -- needed
+     so a generic struct's own value parameter (not yet bound to a
+     concrete int until monomorphization) can appear in an array size. *)
+  | ASLit of int
+  | ASParam of ident
+  | ASAdd of array_size_expr * array_size_expr
+  | ASSub of array_size_expr * array_size_expr
+  | ASMul of array_size_expr * array_size_expr
+  | ASDiv of array_size_expr * array_size_expr
 [@@deriving show]
 
 type static_param = ident * type_expr
 (* Static parameter sorts are addr, primitive integers, or exhaustive enums. *)
+[@@deriving show]
+
+type generic_param_kind =
+  | GPType
+  | GPValue of type_expr
+    (* the declared base int type, e.g. TypeUsize -- const generics
+       follow-up to GitHub issue #207 *)
 [@@deriving show]
 
 type expr = expr_desc located
@@ -366,12 +404,15 @@ type toplevel =
      layout flags, private field names, is_private, loc. Unlike an opaque
      handle this is a first-class runtime aggregate; only its static
      parameters are erased. *)
-  | GenericStructDef of string * ident list
+  | GenericStructDef of string * (ident * generic_param_kind) list
       * (string * type_expr) list * bool * int option * string list * loc
   (* GitHub issue #207: `generic struct Name(T1: type, ...) { fields }` --
-     name, type parameter names, raw fields (a field's type_expr may
-     reference a type parameter name as an ordinary TypeNamed placeholder,
-     e.g. `data: []T`), layout flags, private field names, loc. Unlike
+     name, parameters (each either GPType or, since the const-generics
+     follow-up, GPValue base -- e.g. `N: usize`), raw fields (a field's
+     type_expr may reference a type parameter name as an ordinary
+     TypeNamed placeholder, e.g. `data: []T`, or a value parameter's own
+     array-size use as a TypeArraySym, e.g. `data: [T; N]`), layout
+     flags, private field names, loc. Unlike
      StructDef, this is NEVER laid out at parse time (Type_layout.
      begin_struct/finish_struct are deliberately not called for this
      production -- a type parameter has no size until monomorphization

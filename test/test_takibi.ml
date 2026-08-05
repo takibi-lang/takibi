@@ -176,6 +176,8 @@ let rec show_type = function
   | Ast.TypeKind -> "type"
   | Ast.TypeGenericInst (name, args) ->
       Printf.sprintf "%s(%s)" name (String.concat ", " (List.map show_type args))
+  | Ast.TypeIntLit n -> string_of_int n
+  | Ast.TypeArraySym (t, _) -> Printf.sprintf "[%s; <sym>]" (show_type t)
 
 let type_t : Ast.type_expr Alcotest.testable =
   Alcotest.testable (fun fmt t -> Format.pp_print_string fmt (show_type t)) (=)
@@ -10108,7 +10110,7 @@ let codegen_tests = [
     "a generic struct instantiated with the wrong number of type \
      arguments is rejected (issue #207)" `Quick
     (expect_type_error
-       "expects 1 type argument(s), got 2"
+       "expects 1 argument(s), got 2"
        "generic struct Boxg207wrong(T: type) { value: T; }
         fn boxg207wrong_use() {
           let mut b: Boxg207wrong(usize, u8);
@@ -10193,6 +10195,146 @@ let codegen_tests = [
           let mut p1: Pairg207(usize);
           let mut p2: Pairg207(u8);
           pairg207_combine(&p1, &p2);
+        }");
+
+  (* -- Const generics follow-up to GitHub issue #207: `generic struct
+     Name(T: type, N: usize)`, a plain integer VALUE parameter monomorphized
+     exactly like a type parameter is. Motivated by
+     linux_user/freelist_generic's capacity: a generic collection's own
+     array-backed storage should not have to erase a caller's already-
+     static array size into a runtime-length slice. -------------------- *)
+
+  Alcotest.test_case
+    "a generic struct with a value parameter (const generics) parses: \
+     `T: type, N: usize`" `Quick
+    (fun () ->
+       let items = parse
+         "generic struct FixedBufCgParse(T: type, N: usize) {
+            data: [T; N];
+          }"
+       in
+       match items with
+       | [ Ast.GenericStructDef (name, params, _, _, _, _, _) ] ->
+           Alcotest.(check string) "name" "FixedBufCgParse" name;
+           (match params with
+            | [ (tn, Ast.GPType); (nn, Ast.GPValue _) ] ->
+                Alcotest.(check string) "T" "T" tn;
+                Alcotest.(check string) "N" "N" nn
+            | _ -> Alcotest.fail "unexpected param shape")
+       | _ -> Alcotest.fail "expected a single GenericStructDef");
+
+  Alcotest.test_case
+    "two instantiations of the same generic struct with different N values \
+     register two distinct mangled-name struct types, each with the right \
+     array field length (const generics)" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "generic struct FixedBufCg(T: type, N: usize) {
+            data: [T; N];
+          }
+          private let mut fixedbufcg_g3: FixedBufCg(usize, 3);
+          private let mut fixedbufcg_g5: FixedBufCg(usize, 5);"
+       in
+       let find name = match Hashtbl.find_opt Llvm_gen.struct_lltypes name with
+         | Some llty -> llty
+         | None -> Alcotest.failf "%s not registered in struct_lltypes" name
+       in
+       let arr_len llty = Llvm.array_length (Llvm.struct_element_types llty).(0) in
+       let ty3 = find "FixedBufCg$usize$3" in
+       let ty5 = find "FixedBufCg$usize$5" in
+       Alcotest.(check int) "N=3 array field has length 3" 3 (arr_len ty3);
+       Alcotest.(check int) "N=5 array field has length 5" 5 (arr_len ty5);
+       Alcotest.(check bool) "the two instantiations are genuinely distinct LLVM types"
+         true (ty3 <> ty5));
+
+  Alcotest.test_case
+    "a generic struct field's array size may be a symbolic arithmetic \
+     expression over its own value parameter (`N + 1`), resolved once N is \
+     bound (const generics)" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "generic struct FixedBufCg2(T: type, N: usize) {
+            data: [T; N + 1];
+          }
+          private let mut fixedbufcg2_g: FixedBufCg2(usize, 3);"
+       in
+       let ty = match Hashtbl.find_opt Llvm_gen.struct_lltypes "FixedBufCg2$usize$3" with
+         | Some llty -> llty
+         | None -> Alcotest.fail "FixedBufCg2$usize$3 not registered"
+       in
+       Alcotest.(check int) "N + 1 = 4"
+         4 (Llvm.array_length (Llvm.struct_element_types ty).(0)));
+
+  Alcotest.test_case
+    "a generic function call infers BOTH its type parameter and its value \
+     parameter from a bare pointer argument's own declared type, with no \
+     explicit arguments at the call site (const generics)" `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "generic struct FixedBufCg3(T: type, N: usize) {
+            data: [T; N];
+          }
+          fn fixedbufcg3_get(T: type, b: *FixedBufCg3(T, N)) -> T {
+            let d = b.data;
+            return d[0];
+          }
+          private let mut fixedbufcg3_g: FixedBufCg3(usize, 3);
+          fn fixedbufcg3_use() -> usize {
+            return fixedbufcg3_get(&fixedbufcg3_g);
+          }"
+       in
+       match Hashtbl.find_opt Llvm_gen.functions "fixedbufcg3_get$usize$3" with
+       | Some _ -> ()
+       | None -> Alcotest.fail "fixedbufcg3_get$usize$3 was not generated");
+
+  Alcotest.test_case
+    "assigning a mismatched-size array into a const-generic struct's field \
+     is an ordinary type error -- no new mismatch-detection code, plain \
+     structural unification catches it once N is concrete" `Quick
+    (expect_type_error "cannot unify"
+       "generic struct FixedBufCg4(T: type, N: usize) { data: [T; N]; }
+        fn fixedbufcg4_mismatch() {
+          let mut a: FixedBufCg4(usize, 3);
+          let mut src: [usize; 5];
+          a.data = src;
+        }");
+
+  Alcotest.test_case
+    "a generic function call whose two arguments would bind the same VALUE \
+     parameter to two DIFFERENT concrete values is rejected -- the value- \
+     parameter analogue of Pairg207's own conflicting-type-inference test \
+     (const generics)" `Quick
+    (expect_type_error
+       "conflicting inference for generic value parameter 'N'"
+       "generic struct Pairg207cg(T: type, N: usize) { a: [T; N]; }
+        fn pairg207cg_combine(T: type, x: *Pairg207cg(T, N), y: *Pairg207cg(T, N)) -> T {
+          let d = x.a;
+          return d[0];
+        }
+        fn pairg207cg_use() {
+          let mut p1: Pairg207cg(usize, 3);
+          let mut p2: Pairg207cg(usize, 5);
+          pairg207cg_combine(&p1, &p2);
+        }");
+
+  Alcotest.test_case
+    "a const-generic struct instantiated with too few arguments (missing \
+     N) is rejected with a clear arity error" `Quick
+    (expect_type_error
+       "expects 2 argument(s), got 1"
+       "generic struct FixedBufCg5(T: type, N: usize) { data: [T; N]; }
+        fn fixedbufcg5_missing() {
+          let mut a: FixedBufCg5(usize);
+        }");
+
+  Alcotest.test_case
+    "a const-generic struct instantiated with a TYPE where a VALUE is \
+     expected is rejected with a clear kind-mismatch error, not a crash" `Quick
+    (expect_type_error
+       "parameter 'N' expects a value, got a type"
+       "generic struct FixedBufCg6(T: type, N: usize) { data: [T; N]; }
+        fn fixedbufcg6_wrongkind() {
+          let mut a: FixedBufCg6(usize, usize);
         }");
 
 ]
