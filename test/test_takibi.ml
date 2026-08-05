@@ -7692,6 +7692,20 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
+    "relational narrowing proves a WRITE into the same slice the guard \
+     compared against (regression test: writing s[v] inside the branch \
+     used to poison its own guard's kill set via Ast.written_names' \
+     conservative Index-write-counts-as-a-write-to-s rule -- found while \
+     implementing issue #215's write-form test, fixed by the narrower \
+     slice_rebind_names kill scan)" `Quick
+    (expect_trap_sites 0
+       "fn f213_write_self_guard(s: []usize, v: usize) {
+          if (v < s.len) {
+            s[v] = 1;
+          }
+        }");
+
+  Alcotest.test_case
     "negative control: `v <= s.len` does NOT prove v is a valid index \
      (v = s.len is out of bounds) -- must keep the trap" `Quick
     (expect_trap_sites 1
@@ -7700,6 +7714,66 @@ let codegen_tests = [
             return s[v];
           }
           return 0;
+        }");
+
+  (* -- GitHub issue #215: for-loop counter bounded by a slice's own
+     runtime .len -------------------------------------------------------- *)
+  (* Sibling of #213 but structural rather than condition-based: a
+     for-loop's own upper bound IS the proof when it's textually `s.len`,
+     no if-condition involved. Motivating real-world shape:
+     linux_user/freelist_generic/freelist.tkb's freelist_core_init loops
+     `for i in 0..<next_free.len { next_free[i] = i + 1; }`. *)
+
+  Alcotest.test_case
+    "relational for-loop narrowing: `for i in 0..<s.len { s[i] }` (read) \
+     proves the index against s's RUNTIME length (zero trap sites)" `Quick
+    (expect_trap_sites 0
+       "fn f215_read(s: []usize) -> usize {
+          let mut total: usize = 0;
+          for i: usize in 0..<s.len {
+            total = total + s[i];
+          }
+          return total;
+        }");
+
+  Alcotest.test_case
+    "relational for-loop narrowing also proves the WRITE form (matches \
+     freelist_core_init's actual shape, zero trap sites)" `Quick
+    (expect_trap_sites 0
+       "fn f215_write(s: []usize) {
+          for i: usize in 0..<s.len {
+            s[i] = i;
+          }
+        }");
+
+  Alcotest.test_case
+    "relational for-loop narrowing is killed by reassigning the SLICE \
+     inside the body (same two-name kill rule as #213 -- the counter \
+     itself needs no kill-check since it is an immutable, non-aliasable \
+     for-loop binding)" `Quick
+    (expect_trap_sites 1
+       "fn f215_kill_s(s: []usize, t: []usize) -> usize {
+          let mut total: usize = 0;
+          for i: usize in 0..<s.len {
+            s = t;
+            total = total + s[i];
+          }
+          return total;
+        }");
+
+  Alcotest.test_case
+    "negative regression guard: a SEPARATE variable merely equal in value \
+     to s.len (not textually s.len) is NOT recognized -- proves the fix \
+     does not over-reach into alias/equality reasoning (this is \
+     freelist_core_init's shape before its own rewrite)" `Quick
+    (expect_trap_sites 1
+       "fn f215_alias_not_proven(s: []usize) -> usize {
+          let n: usize = s.len;
+          let mut total: usize = 0;
+          for i: usize in 0..<n {
+            total = total + s[i];
+          }
+          return total;
         }");
 
   Alcotest.test_case

@@ -949,13 +949,92 @@ let slice_index_facts (cond : Ast.expr) : (string * string) list =
    module-level Hashtbl is safe (same precedent as narrowing_ctx above). *)
 let slice_index_ctx : (string, string) Hashtbl.t = Hashtbl.create 4
 
-(* Kill rule: invalidate a (v, s) fact if the branch body may write to
-   EITHER v or s -- a write to s can point it at different memory (or a
-   different length), invalidating "v < s.len" just as surely as writing
-   v itself would. Needs no new tracking primitive: Ast.written_names
-   already returns the FULL set of names written/aliased/rebound anywhere
-   in the body (not scoped to one candidate name), so checking both v and
-   s against the same [killed] list handles this "two-name kill" directly. *)
+(* Kill-name scan for slice_index_ctx facts specifically: names whose OWN
+   {ptr,len} VALUE may be reassigned or aliased in this statement list --
+   deliberately NARROWER than Ast.written_names. Refinement found while
+   implementing #215's write-form test: written_names' Assign/Index case
+   (`Index (n, idx) -> add n; ...`) treats writing an ELEMENT reached
+   through n (`n[i] = e;`) as a write to n itself -- correct conservatism
+   for numeric range narrowing (apply_narrowing/_mut, still using
+   Ast.written_names unchanged), but wrong here: writing n[i] does not
+   change n's own pointer or length, so it must not kill a slice_index_ctx
+   fact ABOUT n's identity. Confirmed this was already a latent gap in
+   #213's own shipped kill rule too (not just #215's new one): `if (v <
+   s.len) { s[v] = 1; }` traps today because the write being proven safe
+   poisons its own guard's kill set. Mirrors Ast.written_names' structure
+   exactly except the Assign/Index case does not add the base name (still
+   walks the index sub-expression, which may itself read other names).
+   Sync note: this is a llvm_gen.ml-only helper -- type_inf.ml never
+   consults slice_index_ctx (see #213's own confirmed finding that the
+   whole mechanism is codegen-only), so there is no cross-file copy to
+   keep in sync, unlike Ast.written_names' own sync rule with
+   type_inf.ml's narrow_from_cond. *)
+let slice_rebind_names (stmts : Ast.stmt list) : string list =
+  let acc = Hashtbl.create 8 in
+  let add n = Hashtbl.replace acc n () in
+  let rec go_expr (e : Ast.expr) = match e.desc with
+    | AddrOf { desc = Var n; _ } -> add n
+    | AddrOf e1 | Bnot e1 | Deref e1 | Cast (_, e1) | FieldGet (e1, _)
+    | Unsafe e1 ->
+        go_expr e1
+    | BinOp (_, a, b) -> go_expr a; go_expr b
+    | Call (_, args) | StructLit args | TupleLit args -> List.iter go_expr args
+    | VariantCtor (_, _, payload) -> go_expr payload
+    | Index (_, idx) -> go_expr idx
+    | SliceOf (_, lo, hi) -> go_expr lo; go_expr hi
+    | Assign (lhs, rhs) ->
+        (match lhs.desc with
+         | Var n -> add n
+         | Index (_, idx) -> go_expr idx   (* writing n[i] does not rebind n *)
+         | Deref p -> go_expr p
+         | FieldGet (b, _) -> go_expr b
+         | _ -> go_expr lhs);
+        go_expr rhs
+    | IntLit _ | BoolLit _ | StringLit _ | Var _ | ViewLit _
+    | EnumVariant _ | SizeOf _
+    | OffsetOf _ ->
+        ()
+  in
+  let rec go_stmt (s : Ast.stmt) = match s.desc with
+    | Let (_, n, _, init, _) -> add n; (match init with
+                                        | Some e -> go_expr e | None -> ())
+    | LetTuple (ns, e)       -> List.iter add ns; go_expr e
+    | Expr e | Return (Some e) | Yield e -> go_expr e
+    | Return None            -> ()
+    | Block ss               -> List.iter go_stmt ss
+    | If (c, t, el)          -> go_expr c;
+                                List.iter go_stmt t; List.iter go_stmt el
+    | While (c, b)           -> go_expr c; List.iter go_stmt b
+    | For (n, _, lo, hi, b)  -> add n; go_expr lo; go_expr hi;
+                                List.iter go_stmt b
+    | ForEach (n, se, b)     -> add n; go_expr se; List.iter go_stmt b
+    | Break | Continue       -> ()
+    | Match (d, arms)        ->
+        go_expr d;
+        List.iter (function
+          | Ast.ArmVariant (_, _, binding, b) ->
+              Option.iter (fun (name, _) -> add name) binding;
+              List.iter go_stmt b
+          | ArmWild b -> List.iter go_stmt b
+          | ArmIntLit (_, b) -> List.iter go_stmt b
+        ) arms
+    | LetMatch (_, n, _, d, arms) ->
+        add n; go_expr d;
+        List.iter (function
+          | Ast.ArmVariant (_, _, binding, b) ->
+              Option.iter (fun (name, _) -> add name) binding;
+              List.iter go_stmt b
+          | ArmWild b -> List.iter go_stmt b
+          | ArmIntLit (_, b) -> List.iter go_stmt b
+        ) arms
+  in
+  List.iter go_stmt stmts;
+  Hashtbl.fold (fun n () l -> n :: l) acc []
+
+(* Kill rule: invalidate a (v, s) fact if the branch body may REBIND
+   either v or s to a different value (see slice_rebind_names above for
+   why this is narrower than Ast.written_names -- a mere element write
+   through v or s must not kill the fact). *)
 let apply_slice_index_narrowing (cond : Ast.expr) (killed : string list) =
   List.fold_left (fun saved (v, s) ->
     if List.mem v killed || List.mem s killed then saved
@@ -971,6 +1050,30 @@ let restore_slice_index_narrowing saved =
     | None     -> Hashtbl.remove slice_index_ctx v
     | Some old -> Hashtbl.replace slice_index_ctx v old
   ) saved
+
+(* GitHub issue #215: a for-loop's own counter is structurally proven safe
+   as an index into s when hi_expr is syntactically `s.len` -- the loop's
+   own cond_bb comparison (i < hi, built every iteration) already IS the
+   bounds check; this just lets load_from_slice/store_to_slice's existing
+   proven-check (unchanged since #213) see that fact via the same
+   slice_index_ctx side-channel. No kill-check on `name` itself: the
+   counter is an Imm binding, and type_inf.ml rejects `&<immutable>`
+   outright, so it can never be written or aliased within its own body --
+   only `s` needs the slice_rebind_names kill guard (a REBIND of s can
+   repoint it at different memory/length; a mere s[i] element write, as
+   in the write-form test below, must not kill this -- same reasoning as
+   #213's own fix, see slice_rebind_names' comment). Deliberately
+   NOT SMT: hi_expr must be textually `s.len` for a bare variable s --
+   a separate variable merely equal in value to s.len (e.g. `let n =
+   s.len; for i in 0..<n`) is not recognized. *)
+let apply_for_slice_index_narrowing (name : string) (hi_expr : Ast.expr)
+    (killed : string list) =
+  match hi_expr.desc with
+  | FieldGet ({ desc = Var s; _ }, "len") when not (List.mem s killed) ->
+      let old = Hashtbl.find_opt slice_index_ctx name in
+      Hashtbl.replace slice_index_ctx name s;
+      [(name, old)]
+  | _ -> []
 
 type device_barrier_kind = DmaPublish | DmaConsume | DeviceFence
 
@@ -4245,10 +4348,11 @@ let gen_func ?prog_types fdef =
         ignore (build_cond_br cond_v then_bb else_bb builder);
 
         position_at_end then_bb builder;
-        let killed    = Ast.written_names then_stmts in
-        let saved     = apply_narrowing     locals cond killed in
-        let saved_mut = apply_narrowing_mut locals cond killed in
-        let saved_idx = apply_slice_index_narrowing cond killed in
+        let killed     = Ast.written_names then_stmts in
+        let killed_idx = slice_rebind_names then_stmts in
+        let saved      = apply_narrowing     locals cond killed in
+        let saved_mut  = apply_narrowing_mut locals cond killed in
+        let saved_idx  = apply_slice_index_narrowing cond killed_idx in
         List.iter gen_stmt then_stmts;
         restore_narrowing     locals saved;
         restore_narrowing_mut saved_mut;
@@ -4354,7 +4458,10 @@ let gen_func ?prog_types fdef =
         in
         Hashtbl.add locals name (Imm (loop_ty, i_val));
         Stack.push (exit_bb, incr_bb) loop_stack;
+        let killed_idx = slice_rebind_names body in
+        let saved_idx  = apply_for_slice_index_narrowing name hi_expr killed_idx in
         List.iter gen_stmt body;
+        restore_slice_index_narrowing saved_idx;
         ignore (Stack.pop loop_stack);
         Hashtbl.remove locals name;
         if block_terminator (insertion_block builder) = None then

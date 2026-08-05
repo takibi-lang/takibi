@@ -163,20 +163,20 @@ $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_check
 # overrides the shared %_exe.o pattern rule below for this one target only,
 # dropping --forbid-trap; every other linux_user/ target is unaffected.
 #
-# Issue #213's relational `v < s.len` narrowing landed and closed the
-# freelist_core_pop site (was 1 of the 3 original sites) -- 2 of 3 remain,
-# each tracked in its own issue now: #215 (for-loop init, needs a for-loop
-# counter bounded by a slice's own runtime .len) and #216 (cross-function-
-# call-boundary owner.index provenance, open research territory). This
-# override still cannot be dropped until both close.
+# Issue #213's relational `v < s.len` narrowing and #215's sibling for-loop
+# narrowing (`for i in 0..<s.len`) together closed 2 of the 3 original
+# sites (freelist_core_pop and freelist_core_init). Only 1 remains, tracked
+# by #216 (cross-function-call-boundary owner.index provenance in
+# freelist_core_push, open research territory). This override still cannot
+# be dropped until #216 closes.
 #
 # Coarser than ideal: freelist_generic.tkb `use`s freelist.tkb, and both
 # are concatenated into ONE compilation (this language has no real
 # separate compilation yet -- see AGENTS.md's issue #55 Part B note), so
-# --forbid-trap can only be dropped for the whole unit, not just the 2
-# known sites -- confirmed by rebuilding with --forbid-trap still on and
-# checking the reported trap count stays exactly 2, all in freelist.tkb's
-# non-generic freelist_core_init (its own former file, freelist_core.tkb,
+# --forbid-trap can only be dropped for the whole unit, not just the 1
+# known site -- confirmed by rebuilding with --forbid-trap still on and
+# checking the reported trap count stays exactly 1, in freelist.tkb's
+# non-generic freelist_core_push (its own former file, freelist_core.tkb,
 # was merged into freelist.tkb once generics were proven -- see that
 # file's own header comment), none in freelist_generic.tkb's own code, at
 # the time this comment was last updated. If freelist_generic.tkb's own
