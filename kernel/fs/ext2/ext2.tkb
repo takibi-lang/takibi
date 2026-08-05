@@ -278,6 +278,15 @@ fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
     }
 }
 
+fn ext2_inode_is_symlink(mount: Ext2Mount, inode_number: usize) -> bool {
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return false; }
+        Ext2InodeResult::Inode(inode) => {
+            return (inode.mode & 0xF000) == 0xA000;
+        }
+    }
+}
+
 fn ext2_write_small_file(mount: Ext2Mount, inode_number: usize,
                          source: []u8)
         -> Ext2WriteResult !{unsafe} {
