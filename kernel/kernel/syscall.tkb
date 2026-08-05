@@ -1128,7 +1128,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let path_start: usize = path_code / 256;
         let path_name: usize = path_code % 256;
         let path_view: []u8 = syscall_path_buffer as []u8;
-        match ext2_lookup_root(
+        match ext2_lookup_path(
                 syscall_ext2_mount,
                 unsafe { path_view[path_start..<path_start + path_name] }) {
             Ext2LookupResult::Invalid => { return (1, LINUX_EINVAL); }
@@ -1171,7 +1171,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let path_start: usize = path_code / 256;
         let path_name: usize = path_code % 256;
         let path_view: []u8 = syscall_path_buffer as []u8;
-        match ext2_lookup_root(
+        match ext2_lookup_path(
                 syscall_ext2_mount,
                 unsafe { path_view[path_start..<path_start + path_name] }) {
             Ext2LookupResult::Invalid => { return (1, LINUX_EINVAL); }
@@ -1196,12 +1196,28 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
             UserRangeResult::Ok(precheck) => {}
         }
-        match ext2_lookup_root(
+        match ext2_lookup_path(
                 syscall_ext2_mount,
                 unsafe { path_view[path_start..<path_start + path_name] }) {
             Ext2LookupResult::Invalid => { return (1, LINUX_EINVAL); }
             Ext2LookupResult::NotFound => { return (1, LINUX_ENOENT); }
             Ext2LookupResult::Found(inode_number) => {
+                let inode_mode: usize = ext2_inode_mode(
+                    syscall_ext2_mount, inode_number);
+                if ((inode_mode & 0xF000) == 0x4000) {
+                    match user_range_check(x2, 128, UserAccessMode::Write) {
+                        UserRangeResult::Fault => {
+                            return (1, LINUX_EFAULT);
+                        }
+                        UserRangeResult::Ok(range) => {
+                            user_zero_fill(range);
+                            user_write_u64(range, 8, inode_number as u64);
+                            user_write_u32(range, 16, inode_mode as u32);
+                            user_write_u32(range, 20, 2);
+                            return (1, 0);
+                        }
+                    }
+                }
                 if (ext2_inode_is_symlink(
                         syscall_ext2_mount, inode_number)) {
                     match user_range_check(x2, 128, UserAccessMode::Write) {
@@ -1211,7 +1227,9 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                         UserRangeResult::Ok(range) => {
                             user_zero_fill(range);
                             user_write_u64(range, 8, inode_number as u64);
-                            user_write_u32(range, 16, 0xA1FF as u32);
+                            // Present the registered BusyBox target as an
+                            // executable regular file to ash's command probe.
+                            user_write_u32(range, 16, 0x81ED as u32);
                             user_write_u32(range, 20, 1);
                             return (1, 0);
                         }

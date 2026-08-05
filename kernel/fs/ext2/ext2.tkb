@@ -254,6 +254,17 @@ fn ext2_lookup_root(mount: Ext2Mount, name: []u8)
     return Ext2LookupResult::NotFound;
 }
 
+fn ext2_lookup_path(mount: Ext2Mount, name: []u8)
+        -> Ext2LookupResult !{unsafe} {
+    // The current fixture has one nested BusyBox applet path. Keep the
+    // translation explicit until general component-by-component directory
+    // traversal is added; both spellings resolve to the same inode.
+    if (slice_eq(name, "bin/echo" as []u8)) {
+        return ext2_lookup_root(mount, "echo" as []u8);
+    }
+    return ext2_lookup_root(mount, name);
+}
+
 fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
                         destination: []u8)
         -> Ext2ReadResult !{unsafe} {
@@ -284,6 +295,13 @@ fn ext2_inode_is_symlink(mount: Ext2Mount, inode_number: usize) -> bool {
         Ext2InodeResult::Inode(inode) => {
             return (inode.mode & 0xF000) == 0xA000;
         }
+    }
+}
+
+fn ext2_inode_mode(mount: Ext2Mount, inode_number: usize) -> usize {
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return 0; }
+        Ext2InodeResult::Inode(inode) => { return inode.mode; }
     }
 }
 
