@@ -502,22 +502,12 @@ el0_sync_entry:
     ret
 
 .Lsyscall_child_exec:
-    bl      kernel_process_child_exec_prepare
-    cbz     x0, .Lsync_fail
-    bl      kernel_process_child_exec_entry
-    mov     x19, x0
-    bl      kernel_process_child_exec_stack
-    /* The replacement entry and stack must be published through the saved
-     * frame, not through msr: EL0_CONTEXT_RESTORE below reloads elr_el1 and
-     * sp_el0 from this frame, so writing the system registers directly here
-     * would be undone before the eret and resume the replaced image at the
-     * old execve return address with the old stack pointer. */
-    str     x0, [sp, #EL0_CONTEXT_SP_EL0]
-    str     x19, [sp, #EL0_CONTEXT_ELR_EL1]
-    str     xzr, [sp, #EL0_CONTEXT_X0]
-    EL0_CONTEXT_RESTORE
-    add     sp, sp, #EL0_CONTEXT_SIZE
-    eret
+    // GitHub issue #221 Step 5: moved to kernel_syscall_child_exec_return
+    // (.tkb) -- this is the exact bug fixed in commit 8db27e3 (see that
+    // function's own comment for why the field-write-then-resume ordering
+    // here matters).
+    mov     x0, sp
+    b       kernel_syscall_child_exec_return
 
 .Lsyscall_resume:
     // GitHub issue #221 Step 3: moved to kernel_syscall_resume_return (.tkb).
@@ -542,6 +532,16 @@ el0_sync_entry:
     .global el0_context_set_x0
 el0_context_set_x0:
     str     x1, [x0, #EL0_CONTEXT_X0]
+    ret
+
+    .global el0_context_set_elr_el1
+el0_context_set_elr_el1:
+    str     x1, [x0, #EL0_CONTEXT_ELR_EL1]
+    ret
+
+    .global el0_context_set_sp_el0
+el0_context_set_sp_el0:
+    str     x1, [x0, #EL0_CONTEXT_SP_EL0]
     ret
 
 // GitHub issue #221 Step 2+: the single shared consumer for every action tail
