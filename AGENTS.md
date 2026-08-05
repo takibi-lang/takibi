@@ -128,6 +128,39 @@ GitHub issues. This applies to all agent surfaces and all GitHub access paths,
 including `gh issue create`, `gh issue comment`, MCP tools, connectors, and
 GitHub web/API operations.
 
+### Issue Numbers Do Not Belong in Tracked Files
+
+**Status lives on the [project board](https://github.com/orgs/takibi-lang/projects/2),
+not in checked-in documentation.** Do not add "tracked in #N", "completed by
+#N", or a list of open follow-up issues to a file in this repository. Describe
+the behavior or the reason instead, and let the board carry who/when/how far.
+
+The rule exists because that kind of reference rots silently and at a rate
+nothing in the build catches. Concrete incident (2026-08-05): `kernel/README.md`
+and `kernel/SYSCALLS.md` both stated that `ppoll` "never actually blocks
+regardless of the caller's timeout" and pointed at the open issue tracking real
+blocking semantics -- one day after that issue was closed and the UART blocking
+path shipped. Two files were describing the kernel's behavior incorrectly
+because a pointer to external state was embedded in prose. `SYSCALLS.md` even
+carried an explicit same-commit maintenance rule at the time, and it still
+happened; this is a structural problem, not a discipline problem.
+
+Two deliberate exceptions:
+
+- **`HISTORY.md`** is the engineering log. It records what happened, is written
+  in the past tense, and is never updated to track current state, so an issue
+  number there is a stable historical fact rather than a live pointer.
+- **`ROADMAP.md`** is a dated, point-in-time plan and is the one file where
+  enumerating open issues is the whole purpose. It is refreshed occasionally,
+  wholesale, rather than maintained incrementally -- being out of date there is
+  visible and expected, not misleading.
+
+Everything else -- `README.md` files, `SYSCALLS.md`, `SPEC.md`, source
+comments -- should read correctly with no GitHub access at all. A source
+comment naming an issue for a design rationale that has already been settled is
+acceptable where it genuinely explains why the code looks the way it does; a
+comment naming an issue as future work is not.
+
 ## Git Workflow: Agents Commit, Humans Push
 
 Coding agents working in this repo (Claude Code, Codex, etc.) should stage and

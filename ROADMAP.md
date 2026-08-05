@@ -15,6 +15,15 @@ Written 2026-08-05 against the 52 open GitHub issues at that date. `HISTORY.md`
 remains the engineering log; `kernel/README.md` remains the description of what
 the kernel actually does today.
 
+**This is the one file in the repository where enumerating issue numbers is the
+point** (see `AGENTS.md`'s "Issue Numbers Do Not Belong in Tracked Files"). It
+is a dated snapshot, refreshed occasionally and wholesale rather than
+maintained incrementally: being visibly out of date here is expected and
+harmless, which is exactly why the same references are not allowed to leak into
+files that are read as descriptions of current behavior. Live status --
+what is in progress, what is blocked, who is on it -- lives on the
+[project board](https://github.com/orgs/takibi-lang/projects/2), not here.
+
 ## Baseline at the time of writing
 
 | Measure | Value |
@@ -213,11 +222,16 @@ None of this has been applied; it is recorded here as the recommendation.
 
 - A QEMU/AArch64 kernel target issue (M2'), which #56 and #149 then depend on.
 
-**Labels and milestones** (currently unused)
+**Project board**
 
-- `area:kernel`, `area:compiler`, `area:lang-research`, `area:infra`
-- `blocked`, `latent-bug`
-- Milestones M0 through M6 as above.
+The [project board](https://github.com/orgs/takibi-lang/projects/2) is the
+intended home for status, kept by hand. The axes above (A through G) and the
+milestones M0 through M6 map onto board fields directly; `blocked` and
+`latent-bug` are worth having as their own field or label, since both change
+what should be worked on next rather than merely describing a topic.
+
+The division of labor: the board answers "where is this now", this file answers
+"why in this order". Neither should try to answer the other's question.
 
 ## Relationship to YAGNI
 

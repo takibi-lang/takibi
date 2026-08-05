@@ -243,65 +243,46 @@ Stable operator-visible kernel status uses `kernel_boot_log`. Temporary debug
 UART messages are not accepted as expected-file evidence and are removed after
 bring-up. Host-side progress output is separate from kernel UART output.
 
-## Current limits and follow-up work
+## Current limits
 
 The passing HTTPd test is a concrete Linux compatibility milestone, not a
-claim of general Linux compatibility.
+claim of general Linux compatibility. `SYSCALLS.md` is the per-syscall
+authority and `kernel/tests/rpi5/views/*.expected` is the actual contract;
+the list below is orientation for a reader deciding whether a workload will
+run, not a specification.
 
-- [Issue #180](https://github.com/takibi-lang/takibi/issues/180) completed the
-  bounded multi-segment transmit queue, retransmission and stream-reassembly
-  behavior, exact host comparison above one MTU with a dropped segment, and
-  two independent `curl` connections in one boot.
-- [Issue #181](https://github.com/takibi-lang/takibi/issues/181) completed the
-  foreground BusyBox HTTPd daemon, eager fork VM ownership, parent/child
-  kernel stacks, descriptor references, and deterministic child reaping.
-- [Issue #182](https://github.com/takibi-lang/takibi/issues/182) tracks ext2
-  indirect blocks, multiple block groups, and nested directory operations.
-- [Issue #187](https://github.com/takibi-lang/takibi/issues/187) completed
-  the interrupt-driven device conversion: GIC-400 dispatch, RP1 UART0 RX,
-  xHCI USB disk I/O, Cadence GEM Ethernet, and the ARM generic timer tick are
-  all implemented. [Issue #192](https://github.com/takibi-lang/takibi/issues/192)
-  subsequently proved that the reported xHCI count variation was not a
-  bulk-transfer retry count: two scoped real-hardware runs completed exactly
-  6144 transfers and 2048 writes with zero phase failures, stalls, or retries.
-- [Issues #188 through #195](https://github.com/takibi-lang/takibi/issues/188)
-  completed the first bounded process/concurrency slice: a typed two-slot
-  process table, two address-space roots and ASIDs, unified per-process fd
-  tables, independent TCP connection slots, complete EL0 context switching,
-  timer-driven round-robin preemption, scheduler-aware UART blocking, PSCI
-  core-1 bring-up, and the reset/selection ordering fixes found by repeated
-  real-hardware execution. Core 1 currently proves autonomous EL1 entry and
-  shared-MMU visibility, then parks; processes still execute on core 0.
-- [Issue #174](https://github.com/takibi-lang/takibi/issues/174) completed
-  the typed user-memory boundary (`kernel/mm/user_memory.tkb`'s
-  `UserRange`/`copy_from_user`/`copy_to_user`) and per-page permission
-  classes (text RX, rodata R, data/heap/stack RW+XN), plus a real
-  `mprotect` supporting exactly one transition and a real error otherwise.
-- [Issue #175](https://github.com/takibi-lang/takibi/issues/175) completed
-  a syscall false-success audit; every recognized syscall's actual
-  behavior (Implemented/Partial/Unsupported-by-design) is tracked in
-  `SYSCALLS.md`, not this file.
-- [Issue #186](https://github.com/takibi-lang/takibi/issues/186) added
-  `u16be`/`u32be`, type-checked big-endian integer types, and migrated
-  `kernel/net/`'s wire-format handling onto them.
-- [Issue #196](https://github.com/takibi-lang/takibi/issues/196) built
-  `uname`/`writev`/`readv`/`ppoll` on the #174 boundary, with `struct
-  packed` ABI layout types and overflow-safe iovec/pollfd array
-  validation. `writev`/`readv` are scoped to the fd kinds their traced
-  BusyBox scenarios actually use (UART, ext2 file) -- extending to
-  connected TCP and inetd-mode fds is tracked in
-  [#204](https://github.com/takibi-lang/takibi/issues/204). `ppoll`
-  reports real per-fd readiness but never actually blocks regardless of
-  the caller's timeout; real blocking semantics are tracked in
-  [#205](https://github.com/takibi-lang/takibi/issues/205).
+- **Filesystem.** One ext2 block group, direct blocks only, root-directory
+  lookup and mutation, allocation bitmaps, fast symlinks. No indirect
+  blocks, no additional block groups, no nested directories.
+- **Processes.** A fixed two-slot process table, all of it on core 0. Core 1
+  proves autonomous EL1 entry and shared-MMU visibility, then parks.
+  `execve` replaces the current image for the registered static BusyBox
+  image; `wait4` retrieves one completed child's status, and blocking
+  multi-child wait/reap is deferred.
+- **Signals.** Signal state is recorded honestly, but no signal is ever
+  delivered, so an installed handler is never invoked.
+- **Memory.** `mmap` is anonymous-only through a heap-break cursor rather
+  than a real independent mapping. `mprotect` performs exactly one
+  permission transition (`RW+XN` <-> `R+XN` on data, heap, and stack) and
+  returns a real error for anything else. `munmap` is unsupported by
+  design: the process arena is reclaimed as a unit.
+- **Scatter/gather I/O.** `writev` covers the UART descriptors and `readv`
+  covers ext2 files. Neither reaches the connected-TCP or inetd-mode paths
+  that plain `write`/`read` already support.
+- **`ppoll`.** Blocks and wakes on UART RX for the single-descriptor stdin
+  shape BusyBox ash's `read` builtin uses. Any other shape reports current
+  readiness immediately, and a non-NULL timeout is never armed.
+- Unrecognized Linux calls return `-ENOSYS`.
 
-Unrecognized Linux calls return `-ENOSYS`. A few calls reached by the pinned
-userspace still have deliberately bounded compatibility behavior (notably
-signal-state calls, `mprotect`, and `ppoll`'s non-blocking-only readiness);
-see `SYSCALLS.md`'s per-syscall notes and the issues linked above for what
-replacing each with full subset semantics still needs.
 Filesystem, TCP, process, and VM features continue to be added only when an
 executable workload requires them.
+
+Planned and in-progress work is tracked on the
+[project board](https://github.com/orgs/takibi-lang/projects/2) rather than
+enumerated here, so this file stays a description of what the kernel does
+today. [`../ROADMAP.md`](../ROADMAP.md) carries the mid-term plan and the
+dependency reasoning behind it; [`../HISTORY.md`](../HISTORY.md) carries the
+per-milestone engineering record.
 
 ## Future kernel targets
 
