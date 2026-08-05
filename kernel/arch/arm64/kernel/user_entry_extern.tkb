@@ -5,3 +5,9 @@ extern fn run_initial_user(entry: usize, stack_top: usize) -> usize;
 extern fn el0_context_set_x0(frame_sp: usize, value: usize);
 extern fn el0_context_resume(frame_sp: usize) !{noreturn};
 extern fn kernel_syscall_fail_stop() !{noreturn};
+
+// Must match kernel/arch/arm64/kernel/user_context.inc's EL0_CONTEXT_SIZE
+// exactly; that .inc file remains the single source of truth for the actual
+// byte layout (EL0_CONTEXT_SAVE/EL0_CONTEXT_RESTORE), this is a mirror for
+// the .tkb code that copies a whole frame rather than one named field.
+const EL0_CONTEXT_SIZE: usize = 0x320;

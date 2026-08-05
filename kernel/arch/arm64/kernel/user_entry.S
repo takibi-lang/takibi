@@ -321,13 +321,6 @@ initial_user_payload:
 initial_user_payload_end:
 
     .section .text, "ax"
-
-    .section .bss, "aw", %nobits
-    .align 3
-clone_parent_frame:
-    .skip   8
-
-    .section .text, "ax"
     .global initial_user_payload_addr
 initial_user_payload_addr:
     adrp    x0, initial_user_payload
@@ -457,42 +450,12 @@ el0_sync_entry:
     b       el1_exception_evidence
 
 .Lsyscall_clone_child:
-    /* Preserve the parent's complete syscall frame, then give the child a
-     * process-table-owned EL1 kernel stack containing its own copy. */
-    adrp    x9, clone_parent_frame
-    add     x9, x9, :lo12:clone_parent_frame
-    mov     x14, sp
-    str     x14, [x9]
-    /* The suspended parent observes clone() == child PID whenever it is
-     * first selected; the copied child frame is changed to zero below. */
-    str     x7, [sp, #EL0_CONTEXT_X0]
-    bl      kernel_process_clone_child_stack_top
-    cbz     x0, .Lclone_context_fail
-    sub     x10, x0, #EL0_CONTEXT_SIZE
-    adrp    x9, clone_parent_frame
-    add     x9, x9, :lo12:clone_parent_frame
-    ldr     x11, [x9]
-    mov     x12, #EL0_CONTEXT_SIZE
-.Lclone_frame_copy:
-    ldr     x13, [x11], #8
-    str     x13, [x10], #8
-    subs    x12, x12, #8
-    b.ne    .Lclone_frame_copy
-    adrp    x9, clone_parent_frame
-    add     x9, x9, :lo12:clone_parent_frame
-    ldr     x0, [x9]
-    bl      kernel_process_clone_child_stack_top
-    sub     x1, x0, #EL0_CONTEXT_SIZE
-    adrp    x9, clone_parent_frame
-    add     x9, x9, :lo12:clone_parent_frame
-    ldr     x0, [x9]
-    bl      kernel_process_clone_context_install
-    cbz     x0, .Lclone_context_fail
-    mov     x19, x0
-    bl      process_image_activate_child
-    mov     sp, x19
-    mov     x7, #0
-    b       .Lsyscall_resume
+    // GitHub issue #221 Step 4: moved to kernel_syscall_clone_child_return
+    // (.tkb), which replaces the hand-written EL0_CONTEXT_SIZE-word copy
+    // loop with slice_copy and ends by sharing kernel_syscall_resume_return.
+    mov     x0, sp
+    mov     x1, x7
+    b       kernel_syscall_clone_child_return
 
 .Lclone_context_fail:
     mov     x16, #8

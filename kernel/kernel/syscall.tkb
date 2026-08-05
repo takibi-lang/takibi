@@ -965,6 +965,41 @@ fn kernel_syscall_resume_return(frame_sp: usize, value: usize) {
     el0_context_resume(resume_sp);
 }
 
+// Step 4/8: action 3 (.Lsyscall_clone_child). Replaces the hand-written
+// EL0_CONTEXT_SIZE-word copy loop with slice_copy over two raw byte views of
+// the same two addresses, and folds two redundant
+// kernel_process_clone_child_stack_top() calls (the original asm called it
+// once for the copy destination and again, unnecessarily, right before
+// install) into one. Ends by sharing kernel_syscall_resume_return -- clone's
+// return to the child is "resume with x0=0", exactly like an ordinary
+// syscall return, and must not skip the same reschedule check.
+fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
+        !{unsafe} {
+    // The suspended parent observes clone() == child PID whenever it is
+    // first selected; the copied child frame's own X0 is overwritten to 0
+    // below via kernel_syscall_resume_return.
+    el0_context_set_x0(parent_frame_sp, child_pid);
+    let child_stack_top: usize = kernel_process_clone_child_stack_top();
+    if (child_stack_top == 0) {
+        kernel_syscall_fail_stop();
+    }
+    let child_frame_sp: usize = child_stack_top - EL0_CONTEXT_SIZE;
+    let parent_frame_base: *u8 = parent_frame_sp as *u8;
+    let child_frame_base: *u8 = child_frame_sp as *u8;
+    let src: []u8 =
+        unsafe { parent_frame_base[0..<EL0_CONTEXT_SIZE as isize] };
+    let dst: []u8 =
+        unsafe { child_frame_base[0..<EL0_CONTEXT_SIZE as isize] };
+    let copied: usize = slice_copy(dst, src);
+    let installed_child_sp: usize =
+        kernel_process_clone_context_install(parent_frame_sp, child_frame_sp);
+    if (installed_child_sp == 0) {
+        kernel_syscall_fail_stop();
+    }
+    process_image_activate_child();
+    kernel_syscall_resume_return(installed_child_sp, 0);
+}
+
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize)
         -> (usize, usize) !{unsafe} {
