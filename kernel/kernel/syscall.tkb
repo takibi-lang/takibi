@@ -17,7 +17,9 @@ const AARCH64_NR_EXIT_GROUP: usize = 94;
 const AARCH64_NR_CLONE: usize = 220;
 const AARCH64_NR_VFORK: usize = 58;
 const AARCH64_NR_FORK: usize = 107;
+const AARCH64_NR_CLONE3: usize = 435;
 const AARCH64_NR_EXECVE: usize = 221;
+const AARCH64_NR_EXECVEAT: usize = 281;
 const AARCH64_NR_WAIT4: usize = 260;
 const AARCH64_NR_FCNTL: usize = 25;
 const AARCH64_NR_TAKIBI_UART_RX_WAIT: usize = 451;
@@ -1832,14 +1834,20 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         }
     }
 
-    if (number == AARCH64_NR_EXECVE) {
+    if (number == AARCH64_NR_EXECVE || number == AARCH64_NR_EXECVEAT) {
         // First handoff slice: only the current parent image may request an
         // exec. The child path still needs a process-owned image token and is
         // deliberately rejected until the general child lifecycle lands.
         if (syscall_exec_pending) {
             return (1, LINUX_EAGAIN);
         }
-        let path_code: usize = match kernel_syscall_path_name(x0) {
+        let mut path_address: usize = x0;
+        let mut argv_address: usize = x1;
+        if (number == AARCH64_NR_EXECVEAT) {
+            path_address = x1;
+            argv_address = x2;
+        }
+        let path_code: usize = match kernel_syscall_path_name(path_address) {
             SyscallPathResult::Fault => { return (1, LINUX_EFAULT); }
             SyscallPathResult::Invalid => { return (1, LINUX_ENOENT); }
             SyscallPathResult::Name(path) => { path }
@@ -1847,14 +1855,15 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let mut path_length: usize = path_code % 256;
         let path_view: []u8 = syscall_path_buffer as []u8;
         if (path_view[0] == 0x2F) { path_length = path_length + 1; }
-        if (path_length == 0 || x1 == 0) { return (1, LINUX_EINVAL); }
+        if (path_length == 0 || argv_address == 0) { return (1, LINUX_EINVAL); }
         let exec_path_absolute: bool = path_view[0] == 0x2F;
         let mut output_offset: usize = 0;
         let mut argc: usize = 0;
         let mut vector_terminated: bool = false;
         for index: usize in 0..<8 {
             let entry_offset: usize = index * 8;
-            let entry_address: usize = match checked_add_usize(x1, entry_offset) {
+            let entry_address: usize = match checked_add_usize(
+                    argv_address, entry_offset) {
                 CheckedUsize::Overflow => { return (1, LINUX_EFAULT); }
                 CheckedUsize::Value(v) => { v }
             };
@@ -1921,9 +1930,8 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     }
 
     if (number == AARCH64_NR_CLONE || number == AARCH64_NR_VFORK ||
-        number == AARCH64_NR_FORK) {
-        if ((number == AARCH64_NR_CLONE && (x0 != 0x11 || x1 != 0)) ||
-            (number != AARCH64_NR_CLONE && (x0 != 0 || x1 != 0))) {
+        number == AARCH64_NR_FORK || number == AARCH64_NR_CLONE3) {
+        if (number == AARCH64_NR_CLONE && (x0 != 0x11 || x1 != 0)) {
             return (1, LINUX_EINVAL);
         }
         match process_image_clone_vm_begin() {
