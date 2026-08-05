@@ -3720,6 +3720,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   List.iter (function
     | Ast.FuncDef fdef          -> claim_toplevel_name fdef.name "function"
     | Ast.ExternFuncDef (n, _, _, _) -> claim_toplevel_name n "function"
+    | Ast.ExternSymbolDef (n, _) -> claim_toplevel_name n "symbol"
     | Ast.ConstDef (n, _, _, _) -> claim_toplevel_name n "constant"
     | Ast.LetDef (n, _, _, _, _, _, _)  -> claim_toplevel_name n "global"
     | Ast.StructDef (n, _, _, _, _, _)  -> claim_toplevel_name n "struct"
@@ -4861,7 +4862,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         ) params;
         validation_static_scope := None
     | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _
-    | Ast.GenericStructDef _ -> ()) prog;
+    | Ast.GenericStructDef _ | Ast.ExternSymbolDef _ -> ()) prog;
     (* GenericStructDef (GitHub issue #207): nothing to validate here yet
        -- its fields reference an unresolved type parameter, not a real
        type. Monomorphize.run (once it exists) is the only pass that ever
@@ -5023,6 +5024,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add name ((key, TFun (pts, rt, call_effects)) :: old) m
     | Ast.ConstDef _ -> m
     | Ast.LetDef _    -> m
+    | Ast.ExternSymbolDef _ -> m
     | Ast.StructDef _ -> m
     | Ast.OwnedStructDef _ -> m
     | Ast.OpaqueStructDef _ -> m
@@ -5048,6 +5050,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add name (of_ast ty, false) m
     | Ast.LetDef (name, ty_opt, _, _, is_mutable, _, _) ->
         StringMap.add name (of_ast_opt ty_opt, is_mutable) m
+    | Ast.ExternSymbolDef (name, _) ->
+        (* Address-only: the bare name resolves to its own address, always
+           usize, never load-through. Not writable. *)
+        StringMap.add name (of_ast Ast.TypeUsize, false) m
     | Ast.FuncDef _                -> m
     | Ast.ExternFuncDef _          -> m
     | Ast.StructDef _              -> m

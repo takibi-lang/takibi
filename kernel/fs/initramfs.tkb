@@ -83,8 +83,8 @@ fn cpio_hex8(base: *u8, offset: usize) -> CpioNumberResult {
 }
 
 fn initramfs_entry(target: usize) -> InitramfsEntryResult {
-    let address: usize = kernel_initramfs_addr();
-    let length: usize = kernel_initramfs_len();
+    let address: usize = kernel_initramfs_start;
+    let length: usize = kernel_initramfs_end - kernel_initramfs_start;
     let mut offset: usize = 0;
     let mut ordinal: usize = 0;
     let bytes: *u8 = address as *u8;

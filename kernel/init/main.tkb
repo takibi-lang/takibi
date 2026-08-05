@@ -91,7 +91,7 @@ fn kernel_secondary_boot_probe() -> SecondaryBootResult {
     kernel_secondary_boot_state = 0;
     signal_fence();
     let status: usize = psci_cpu_on(
-        0x100, kernel_secondary_entry_address(), 0x191);
+        0x100, kernel_secondary_entry, 0x191);
     let start: i64 = read_cntpct();
     let deadline_ticks: i64 = read_cntfrq();
     while ((read_cntpct() - start) < deadline_ticks) {

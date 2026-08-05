@@ -6,6 +6,13 @@
 
     .section .rodata, "a"
     .align 4
+    /* GitHub issue #225: initial_user_payload/_end are referenced directly
+     * from .tkb via `extern symbol` (user_entry_extern.tkb) -- a bare
+     * reference to either name evaluates to its own address, replacing the
+     * former initial_user_payload_addr/_len accessor functions below the
+     * payload; that arithmetic is now ordinary .tkb in
+     * kernel/kernel/syscall.tkb's initial_user_load. */
+    .global initial_user_payload
 initial_user_payload:
     /* write(9, ..., 1) must return -EBADF. */
     adr     x1, .Luser_message
@@ -318,24 +325,10 @@ initial_user_payload:
     .ascii  "conn-B\n!"
 .Llarge_socket_response:
     .fill   1461, 1, 0x5a
+    .global initial_user_payload_end
 initial_user_payload_end:
 
     .section .text, "ax"
-    .global initial_user_payload_addr
-initial_user_payload_addr:
-    adrp    x0, initial_user_payload
-    add     x0, x0, :lo12:initial_user_payload
-    ret
-
-    .global initial_user_payload_len
-initial_user_payload_len:
-    adrp    x0, initial_user_payload
-    add     x0, x0, :lo12:initial_user_payload
-    adrp    x1, initial_user_payload_end
-    add     x1, x1, :lo12:initial_user_payload_end
-    sub     x0, x1, x0
-    ret
-
     .global user_code_sync
 user_code_sync:
     mov     x3, x0

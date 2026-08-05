@@ -120,12 +120,6 @@ psci_cpu_on: /* fn(target_affinity, entry, context) -> usize */
     smc     #0
     ret
 
-    .global kernel_secondary_entry_address
-kernel_secondary_entry_address:
-    adrp    x0, kernel_secondary_entry
-    add     x0, x0, :lo12:kernel_secondary_entry
-    ret
-
 /* All sixteen architectural vector slots lead to an evidence-preserving
  * fail-stop path except slot 8 (lower-EL AArch64 sync, EL0 syscalls) and
  * slots 5/9 (Current-EL SPx IRQ and Lower-EL AArch64 IRQ). x16 identifies

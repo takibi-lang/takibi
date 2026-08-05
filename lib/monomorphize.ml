@@ -353,6 +353,7 @@ let walk_toplevel ~subst ~vsubst ~resolve_inst (t : toplevel) : toplevel =
   | VariantDef (n, cases, mu, l) ->
       VariantDef (n, List.map (fun (cn, pt) -> (cn, Option.map ty pt)) cases, mu, l)
   | GenericStructDef _ -> t
+  | ExternSymbolDef _ -> t
       (* Handled separately by `run` below (extracted as a template, then
          stripped from the emitted program) -- never walked in place, since
          its own fields reference an unbound type parameter, not a real
@@ -918,6 +919,7 @@ let run (prog : toplevel list) : toplevel list =
       | VariantDef (n, cases, mu, l) ->
           VariantDef (n, List.map (fun (cn, pt) -> (cn, Option.map ty pt)) cases, mu, l)
       | GenericStructDef _ -> t
+      | ExternSymbolDef _ -> t
     in
 
     (* Walk every ordinary (non-template) toplevel for calls, positionally

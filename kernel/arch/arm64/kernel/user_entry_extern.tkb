@@ -1,5 +1,5 @@
-extern fn initial_user_payload_addr() -> usize;
-extern fn initial_user_payload_len() -> usize;
+extern symbol initial_user_payload;
+extern symbol initial_user_payload_end;
 extern fn user_code_sync(address: usize, length: usize);
 extern fn run_initial_user(entry: usize, stack_top: usize) -> usize;
 extern fn el0_context_set_x0(frame_sp: usize, value: usize);

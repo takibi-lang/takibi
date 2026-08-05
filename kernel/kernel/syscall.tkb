@@ -666,11 +666,11 @@ must_use variant InitialUserLoadResult { Loaded; TooLarge; }
 
 fn initial_user_load(text: borrow PageOwner[page])
         -> InitialUserLoadResult !{unsafe} {
-    let length: usize = initial_user_payload_len();
+    let length: usize = initial_user_payload_end - initial_user_payload;
     if (length > PAGE_SIZE) {
         return InitialUserLoadResult::TooLarge;
     }
-    let source: *u8 = initial_user_payload_addr() as *u8;
+    let source: *u8 = initial_user_payload as *u8;
     let source_bytes = unsafe { source[0..<length as isize] };
     let destination = page_bytes(text);
     slice_copy(destination, source_bytes);

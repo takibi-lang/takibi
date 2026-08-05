@@ -22,8 +22,8 @@ must_use variant BlockCopyResult { Invalid; Copied; }
 private let mut block_copy_buffer: [u8; KERNEL_BLOCK_SIZE];
 
 fn memory_block_device_ext2() -> KernelBlockDeviceResult {
-    let address: usize = kernel_ext2_image_addr();
-    let length: usize = kernel_ext2_image_len();
+    let address: usize = kernel_ext2_image_start;
+    let length: usize = kernel_ext2_image_end - kernel_ext2_image_start;
     if (address == 0 || length == 0 || length % KERNEL_BLOCK_SIZE != 0) {
         return KernelBlockDeviceResult::Invalid;
     }

@@ -20,6 +20,11 @@ let func_ret_ast_types : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 16
 (* Stores the parameter AST types for each function (needed for function-as-value) *)
 let func_param_ast_types : (string, Ast.type_expr list) Hashtbl.t = Hashtbl.create 16
 let noreturn_functions : (string, unit) Hashtbl.t = Hashtbl.create 8
+(* GitHub issue #225: `extern symbol name;` declarations. Stores the opaque
+   external llvalue for each; referencing the bare name in gen_expr always
+   yields its address (ptrtoint), never a load -- there is no Takibi type
+   for the pointee, only the symbol itself. *)
+let extern_symbols : (string, llvalue) Hashtbl.t = Hashtbl.create 8
 let current_program_types : Types.program_types option ref = ref None
 (* Struct type registry: name -> LLVM struct lltype *)
 let struct_lltypes : (string, lltype) Hashtbl.t = Hashtbl.create 8
@@ -2415,7 +2420,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                     in
                     (TypeFn (param_asts, ret_ast, None), f)
                 | None ->
-                    raise (Error (Printf.sprintf "Undefined variable: %s" name))))
+                    (* GitHub issue #225: `extern symbol name;` -- the bare
+                       name is always its own address, never a load. *)
+                    match Hashtbl.find_opt extern_symbols name with
+                    | Some g ->
+                        (TypeUsize, const_ptrtoint g (usize_lltype ()))
+                    | None ->
+                        raise (Error (Printf.sprintf "Undefined variable: %s" name))))
 
   | Deref e1 ->
       let (ty1, v1) = gen_expr locals e1 in
@@ -5141,6 +5152,15 @@ let gen_program ?prog_types prog =
           Hashtbl.add func_ret_ast_types name ret_ast;
           Hashtbl.add func_param_ast_types name param_ast
         end
+    | ExternSymbolDef (name, _) ->
+        if not (Hashtbl.mem extern_symbols name) then begin
+          (* Opaque i8: there is no Takibi type for the pointee, only its
+             address. declare_global (as opposed to define_global) leaves it
+             external, to be resolved against the assembly/linker-defined
+             symbol of the same name at link time. *)
+          let g = declare_global (i8_type context) name the_module in
+          Hashtbl.add extern_symbols name g
+        end
     | StructDef _ -> ()
     | OwnedStructDef _ -> ()
     | OpaqueStructDef _ -> ()
@@ -5167,6 +5187,7 @@ let gen_program ?prog_types prog =
     | ConstDef _      -> ()
     | LetDef _        -> ()
     | ExternFuncDef _ -> ()
+    | ExternSymbolDef _ -> ()
     | StructDef _     -> ()
     | OwnedStructDef _ -> ()
     | OpaqueStructDef _ -> ()

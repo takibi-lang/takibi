@@ -400,6 +400,19 @@ type toplevel =
   | ExternFuncDef of ident * (ident * type_expr option) list * type_expr option
       * ident list option
   (* extern fn name(params) -> ret !{effects}; -- body is external. *)
+  | ExternSymbolDef of ident * loc
+  (* extern symbol name; -- GitHub issue #225. Declares a symbol defined
+     elsewhere (hand-written assembly or the linker script) with no Takibi
+     type at all: there is nothing to read or write through it, only an
+     address. Referencing the bare name evaluates to that address as a
+     `usize`, replacing the `adrp x0, sym; add x0, x0, :lo12:sym; ret`
+     accessor-function pattern used throughout kernel/arch and kernel/user.
+     Deliberately NOT `extern static name: T;` with load/store semantics --
+     see the issue for why a typed read-through extern was rejected: the
+     compiler cannot verify an assembly-defined region's layout matches a
+     declared Takibi type any better than it already can't for ExternFuncDef
+     signatures, so a typed version would add surface without adding a
+     safety property it does not actually deliver. *)
   | StructDef of string * (string * type_expr) list * bool * int option * string list * loc
   (* name, fields, is_packed, align_bytes, private_field_names, loc --
      align_bytes = Some N means type-level align(N). private_field_names
