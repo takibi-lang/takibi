@@ -557,13 +557,12 @@ el0_sync_entry:
     eret
 
 .Lsyscall_resume:
-    str     x7, [sp, #EL0_CONTEXT_X0]
+    // GitHub issue #221 Step 3: moved to kernel_syscall_resume_return (.tkb).
+    // Label kept (not renamed) since .Lsyscall_clone_child also branches here
+    // directly to share the same resume-with-reschedule-check tail.
     mov     x0, sp
-    bl      kernel_process_syscall_return_schedule
-    mov     sp, x0
-    EL0_CONTEXT_RESTORE
-    add     sp, sp, #EL0_CONTEXT_SIZE
-    eret
+    mov     x1, x7
+    b       kernel_syscall_resume_return
 
 .Lsyscall_exit:
     mov     x0, x7

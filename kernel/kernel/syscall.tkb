@@ -953,6 +953,18 @@ fn kernel_syscall_block_return(frame_sp: usize) {
     el0_context_resume(next_sp);
 }
 
+// Step 3/8: action 1 (.Lsyscall_resume). The most common path -- every
+// ordinary syscall return reaches this -- and also shared directly by
+// .Lsyscall_clone_child's own tail (still raw asm at this step), which
+// branches to the .Lsyscall_resume label with x7=0 after installing the new
+// child frame, so the child's syscall-return-scheduling check is not
+// skipped just because it arrived via clone rather than an ordinary return.
+fn kernel_syscall_resume_return(frame_sp: usize, value: usize) {
+    el0_context_set_x0(frame_sp, value);
+    let resume_sp: usize = kernel_process_syscall_return_schedule(frame_sp);
+    el0_context_resume(resume_sp);
+}
+
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize)
         -> (usize, usize) !{unsafe} {
