@@ -810,16 +810,16 @@ fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
 
 fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
                           timeout_address: usize, sigmask_address: usize)
-        -> (usize, usize) !{may_block} {
-    if (raw_nfds == 0) { return (1, 0); }
+        -> SyscallAction !{may_block} {
+    if (raw_nfds == 0) { return SyscallAction::Resume(0); }
     if (raw_nfds >= 0 && raw_nfds < POLL_MAX) {
       let nfds: {0..<POLL_MAX as usize} = raw_nfds;
       let array_bytes: usize = match checked_mul_usize(nfds, sizeof(Pollfd)) {
-        CheckedUsize::Overflow => { return (1, LINUX_EINVAL); }
+        CheckedUsize::Overflow => { return SyscallAction::Resume(LINUX_EINVAL); }
         CheckedUsize::Value(v) => { v }
     };
       match user_range_check(fds_address, array_bytes, UserAccessMode::Write) {
-        UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+        UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         UserRangeResult::Ok(array_range) => {
             let mut ready_count: usize = 0;
             let mut uart_wait: bool = false;
@@ -831,7 +831,7 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
                     array_range,
                     index * sizeof(Pollfd) + offsetof(Pollfd, events));
                 if (fd_ok == false || events_ok == false) {
-                    return (1, LINUX_EFAULT);
+                    return SyscallAction::Resume(LINUX_EFAULT);
                 }
                 let fd: usize = fd_raw as usize;
                 let (valid, revents) = syscall_poll_fd_ready(fd);
@@ -841,7 +841,7 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
                         array_range,
                         index * sizeof(Pollfd) + offsetof(Pollfd, revents),
                         final_revents) == false) {
-                    return (1, LINUX_EFAULT);
+                    return SyscallAction::Resume(LINUX_EFAULT);
                 }
                 if (final_revents != 0) { ready_count = ready_count + 1; }
                 if (nfds == 1 && fd == 0 &&
@@ -855,36 +855,31 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
                 if (syscall_ppoll_uart_waits == 1) {
                     kernel_boot_log("shell ppoll: uart blocked\n");
                 }
-                return (6, 0);
-                if (user_write_u16(
-                        array_range, offsetof(Pollfd, revents), POLLIN) == false) {
-                    return (1, LINUX_EFAULT);
-                }
-                return (1, 1);
+                return SyscallAction::WaitUart;
             }
-            return (1, ready_count);
+            return SyscallAction::Resume(ready_count);
         }
       }
     }
-    return (1, LINUX_EINVAL);
+    return SyscallAction::Resume(LINUX_EINVAL);
 }
 
-fn syscall_read_uart(address: usize, requested: usize) -> (usize, usize) {
-    if (requested == 0) { return (1, 0); }
+fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
+    if (requested == 0) { return SyscallAction::Resume(0); }
     match user_range_check(address, requested, UserAccessMode::Write) {
-        UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+        UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         UserRangeResult::Ok(range) => {
             disable_irq();
             if (kernel_uart_rx_pending() == false) {
                 enable_irq();
-                return (1, LINUX_EAGAIN);
+                return SyscallAction::Resume(LINUX_EAGAIN);
             }
             let value: u8 = kernel_uart_rx_getc();
             enable_irq();
             if (user_write_byte(range, 0, value) == false) {
-                return (1, LINUX_EFAULT);
+                return SyscallAction::Resume(LINUX_EFAULT);
             }
-            return (1, 1);
+            return SyscallAction::Resume(1);
         }
     }
 }
@@ -901,35 +896,77 @@ fn uname_write_field(base: *u8, field_offset: usize, value: []u8) !{unsafe} {
     let copied: usize = slice_copy(field_view, value);
 }
 
-// Returns (action, value): 0 = fail-stop, 1 = resume EL0 with value in x0,
-// 2 = terminate and return the exit status to run_initial_user's EL1 caller,
-// 5 = block this frame and resume the scheduler-selected process.
-// Linux -errno encoding exists only here at the ABI boundary.
+// Mirrors user_entry.S's .Lsyscall_dispatch branch table exactly (action
+// numbers 0/1/2/.../8 there correspond one-to-one to the variants below,
+// via syscall_action_encode). Kept as a real sum type internally so a
+// mistyped numeric action code -- the shape of bug class this file's
+// syscall handling cannot otherwise catch at compile time -- is a type
+// error instead of a silent wrong branch at the asm boundary. The asm
+// side is untouched by this: kernel_syscall_dispatch below still returns
+// a plain (usize, usize) register pair, exactly as before.
+must_use variant SyscallAction {
+    Unreachable;         // 0: esr wasn't a real SVC; asm's own default path
+                          //    already fail-stops before this can be selected
+    Resume(usize);        // 1: resume EL0 with x0 = value
+    Exit(usize);           // 2: parent exit; return status to the EL1 caller
+    CloneChild(usize);      // 3: clone succeeded; value = child pid
+    CloneParent(usize);      // 4: child exited; value = parent's saved SP
+    Block;                    // 5: block this frame on the scheduler
+    WaitUart;                  // 6: retry after an uncontended UART wfe
+    Exec;                       // 7: parent-only execve pending
+    ChildExec;                   // 8: child execve pending
+}
+
+fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
+    match action {
+        SyscallAction::Unreachable => { return (0, 0); }
+        SyscallAction::Resume(value) => { return (1, value); }
+        SyscallAction::Exit(value) => { return (2, value); }
+        SyscallAction::CloneChild(value) => { return (3, value); }
+        SyscallAction::CloneParent(value) => { return (4, value); }
+        SyscallAction::Block => { return (5, 0); }
+        SyscallAction::WaitUart => { return (6, 0); }
+        SyscallAction::Exec => { return (7, 7); }
+        SyscallAction::ChildExec => { return (8, 8); }
+    }
+}
+
+// The only asm-facing entry point (user_entry.S calls this exact name via
+// `bl kernel_syscall_dispatch`); its signature is untouched so this step
+// needs no assembly changes. All real logic lives in the SyscallAction-
+// returning kernel_syscall_dispatch_action below.
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize)
         -> (usize, usize) !{unsafe} {
+    return syscall_action_encode(
+        kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4));
+}
+
+fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usize,
+                           x2: usize, x3: usize, x4: usize)
+        -> SyscallAction !{unsafe} {
     let exception_class: usize = (esr >> 26) & 0x3F;
-    if (exception_class != 0x15) { return (0, 0); }
+    if (exception_class != 0x15) { return SyscallAction::Unreachable; }
 
     if (number == AARCH64_NR_TAKIBI_UART_RX_WAIT) {
         disable_irq();
         if (kernel_uart_rx_pending()) {
             let value: usize = kernel_uart_rx_getc() as usize;
             enable_irq();
-            return (1, value);
+            return SyscallAction::Resume(value);
         }
-        return (5, 0);
+        return SyscallAction::Block;
     }
 
     if (number == AARCH64_NR_TAKIBI_PARENT_PROGRESS) {
         match kernel_process_uart_record_parent_progress() {
             ProcessUartProgressResult::Invalid => {
-                return (1, LINUX_EINVAL);
+                return SyscallAction::Resume(LINUX_EINVAL);
             }
             ProcessUartProgressResult::Recorded => {
                 kernel_boot_log(
                     "concurrency: parent progressed while child uart-blocked\n");
-                return (1, 0);
+                return SyscallAction::Resume(0);
             }
         }
     }
@@ -943,18 +980,18 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             syscall_connected_write_calls =
                 syscall_connected_write_calls + 1;
             if (kernel_connected_fd_is_open(fd) == false) {
-                return (1, LINUX_EBADF);
+                return SyscallAction::Resume(LINUX_EBADF);
             }
             let write_slot: {0..<TCP_CONNECTION_MAX as usize} =
                 match kernel_connection_fd_lookup(fd) {
                     KernelConnectionLookupResult::Missing => {
-                        return (1, LINUX_EBADF);
+                        return SyscallAction::Resume(LINUX_EBADF);
                     }
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
             let write_generation: usize = kernel_connection_fd_identity(fd);
             if (syscall_connection_open[write_slot] == false || length == 0) {
-                return (1, LINUX_EINVAL);
+                return SyscallAction::Resume(LINUX_EINVAL);
             }
             let mut amount: usize = length;
             if (amount > 1460) { amount = 1460; }
@@ -964,7 +1001,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             let received_length: usize = syscall_socket_buffer_length[write_slot];
             match tcp_connection_take(write_slot, write_generation) {
                 TcpConnectionTakeResult::Missing => {
-                    return (1, LINUX_EAGAIN);
+                    return SyscallAction::Resume(LINUX_EAGAIN);
                 }
                 TcpConnectionTakeResult::Ready(owner) => {
                   match network_capability_take() {
@@ -973,7 +1010,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                             TcpConnectionPutResult::Stored => {}
                             TcpConnectionPutResult::Conflict => {}
                         }
-                        return (1, LINUX_EAGAIN);
+                        return SyscallAction::Resume(LINUX_EAGAIN);
                     }
                     NetworkCapabilityTakeResult::Ready(ready) => {
                     let destination_base: *u8 =
@@ -991,7 +1028,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                 NetworkCapabilityPutResult::Stored => {}
                                 NetworkCapabilityPutResult::Conflict => {}
                             }
-                            return (1, LINUX_EFAULT);
+                            return SyscallAction::Resume(LINUX_EFAULT);
                         }
                         UserRangeResult::Ok(range) => {
                             let copied: bool = copy_from_user_raw(
@@ -1010,11 +1047,11 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                         TcpConnectionPutResult::Stored => {}
                                         TcpConnectionPutResult::Conflict => {}
                                     }
-                                    return (1, LINUX_EINVAL);
+                                    return SyscallAction::Resume(LINUX_EINVAL);
                                 }
                                 NetworkCapabilityPutResult::Conflict => {
                                     tcp_connection_free(owner);
-                                    return (1, LINUX_EINVAL);
+                                    return SyscallAction::Resume(LINUX_EINVAL);
                                 }
                             }
                         }
@@ -1022,16 +1059,16 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                             match network_capability_put(after_send) {
                                 NetworkCapabilityPutResult::Conflict => {
                                     tcp_connection_free(owner);
-                                    return (1, LINUX_EINVAL);
+                                    return SyscallAction::Resume(LINUX_EINVAL);
                                 }
                                 NetworkCapabilityPutResult::Stored => {
                                     match tcp_connection_put(owner) {
                                         TcpConnectionPutResult::Stored => {}
                                         TcpConnectionPutResult::Conflict => {
-                                            return (1, LINUX_EINVAL);
+                                            return SyscallAction::Resume(LINUX_EINVAL);
                                         }
                                     }
-                                    return (1, amount);
+                                    return SyscallAction::Resume(amount);
                                 }
                             }
                         }
@@ -1045,20 +1082,20 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             let inetd_write_slot: {0..<TCP_CONNECTION_MAX as usize} =
                 match kernel_connection_fd_lookup(fd) {
                     KernelConnectionLookupResult::Missing => {
-                        return (1, LINUX_EBADF);
+                        return SyscallAction::Resume(LINUX_EBADF);
                     }
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
             if (syscall_connection_open[inetd_write_slot] == false ||
                 length > 1460 -
                     syscall_inetd_response_length[inetd_write_slot]) {
-                return (1, LINUX_EINVAL);
+                return SyscallAction::Resume(LINUX_EINVAL);
             }
             let response_base: *u8 = (syscall_inetd_response as *u8) +
                 ((inetd_write_slot * 1460 +
                   syscall_inetd_response_length[inetd_write_slot]) as isize);
             match user_range_check(address, length, UserAccessMode::Read) {
-                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
                     let copied: bool =
                         copy_from_user_raw(range, response_base, length);
@@ -1066,20 +1103,20 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             }
             syscall_inetd_response_length[inetd_write_slot] =
                 syscall_inetd_response_length[inetd_write_slot] + length;
-            return (1, length);
+            return SyscallAction::Resume(length);
         }
         if (kernel_syscall_file_is_open(fd)) {
             syscall_file_write_calls = syscall_file_write_calls + 1;
             if (kernel_syscall_file_writable(fd) == false) {
-                return (1, LINUX_EBADF);
+                return SyscallAction::Resume(LINUX_EBADF);
             }
             if (kernel_syscall_file_offset(fd) != 0 || length == 0 ||
                 length > KERNEL_BLOCK_SIZE) {
-                return (1, LINUX_EINVAL);
+                return SyscallAction::Resume(LINUX_EINVAL);
             }
             let destination_base: *u8 = syscall_file_buffer as *u8;
             match user_range_check(address, length, UserAccessMode::Read) {
-                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
                     let copied: bool =
                         copy_from_user_raw(range, destination_base, length);
@@ -1088,18 +1125,18 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             let content = unsafe { destination_base[0..<length as isize] };
             match ext2_resize_small_file(
                     syscall_ext2_mount, kernel_syscall_file_inode(fd), content) {
-                Ext2ResizeResult::Invalid => { return (1, LINUX_EINVAL); }
+                Ext2ResizeResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
                 Ext2ResizeResult::Resized => {
                     if (kernel_syscall_file_set_offset(fd, length) == false) {
-                        return (1, LINUX_EBADF);
+                        return SyscallAction::Resume(LINUX_EBADF);
                     }
-                    return (1, length);
+                    return SyscallAction::Resume(length);
                 }
             }
         }
-        if (fd != 1 && fd != 2) { return (1, LINUX_EBADF); }
+        if (fd != 1 && fd != 2) { return SyscallAction::Resume(LINUX_EBADF); }
         match user_range_check(address, length, UserAccessMode::Read) {
-            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(range) => {
                 let mut remaining: usize = length;
                 let mut offset: usize = 0;
@@ -1110,7 +1147,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 }
             }
         }
-        return (1, length);
+        return SyscallAction::Resume(length);
     }
 
     if (number == 56) {
@@ -1118,11 +1155,11 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         // openat(dirfd, pathname, flags): only absolute root paths are in
         // scope, so dirfd is intentionally ignored.
         if (syscall_ext2_ready == false) {
-            return (1, LINUX_EBADF);
+            return SyscallAction::Resume(LINUX_EBADF);
         }
         let path_code: usize = match kernel_syscall_path_name(x1) {
-            SyscallPathResult::Fault => { return (1, LINUX_EFAULT); }
-            SyscallPathResult::Invalid => { return (1, LINUX_ENOENT); }
+            SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+            SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
             SyscallPathResult::Name(path) => { path }
         };
         let path_start: usize = path_code / 256;
@@ -1131,20 +1168,20 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         match ext2_lookup_path(
                 syscall_ext2_mount,
                 unsafe { path_view[path_start..<path_start + path_name] }) {
-            Ext2LookupResult::Invalid => { return (1, LINUX_EINVAL); }
-            Ext2LookupResult::NotFound => { return (1, LINUX_ENOENT); }
+            Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
+            Ext2LookupResult::NotFound => { return SyscallAction::Resume(LINUX_ENOENT); }
             Ext2LookupResult::Found(inode_number) => {
                 let access_mode: usize = x2 & 3;
                 match unified_fd_alloc(kernel_syscall_process_slot(), 3) {
-                    UnifiedFdAllocResult::Full => { return (1, LINUX_EBADF); }
+                    UnifiedFdAllocResult::Full => { return SyscallAction::Resume(LINUX_EBADF); }
                     UnifiedFdAllocResult::Allocated(fd) => {
                         match unified_file_open(
                                 kernel_syscall_process_slot(), fd, inode_number,
                                 access_mode != 1, access_mode != 0) {
                             UnifiedFdResult::Invalid => {
-                                return (1, LINUX_EBADF);
+                                return SyscallAction::Resume(LINUX_EBADF);
                             }
-                            UnifiedFdResult::Ok => { return (1, fd); }
+                            UnifiedFdResult::Ok => { return SyscallAction::Resume(fd); }
                         }
                     }
                 }
@@ -1159,13 +1196,13 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         // the image recipe, while this first syscall slice only needs the
         // root-directory lookup result.
         if (syscall_ext2_ready == false) {
-            return (1, LINUX_EBADF);
+            return SyscallAction::Resume(LINUX_EBADF);
         }
         let mut path_address: usize = x1;
         if (number == 21) { path_address = x0; }
         let path_code: usize = match kernel_syscall_path_name(path_address) {
-            SyscallPathResult::Fault => { return (1, LINUX_EFAULT); }
-            SyscallPathResult::Invalid => { return (1, LINUX_ENOENT); }
+            SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+            SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
             SyscallPathResult::Name(path) => { path }
         };
         let path_start: usize = path_code / 256;
@@ -1174,9 +1211,9 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         match ext2_lookup_path(
                 syscall_ext2_mount,
                 unsafe { path_view[path_start..<path_start + path_name] }) {
-            Ext2LookupResult::Invalid => { return (1, LINUX_EINVAL); }
-            Ext2LookupResult::NotFound => { return (1, LINUX_ENOENT); }
-            Ext2LookupResult::Found(inode_number) => { return (1, 0); }
+            Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
+            Ext2LookupResult::NotFound => { return SyscallAction::Resume(LINUX_ENOENT); }
+            Ext2LookupResult::Found(inode_number) => { return SyscallAction::Resume(0); }
         }
     }
 
@@ -1185,36 +1222,36 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         // regular files only. Fill the asm-generic AArch64 stat fields used
         // by BusyBox httpd after validating the complete userspace result.
         let path_code: usize = match kernel_syscall_path_name(x1) {
-            SyscallPathResult::Fault => { return (1, LINUX_EFAULT); }
-            SyscallPathResult::Invalid => { return (1, LINUX_ENOENT); }
+            SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+            SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
             SyscallPathResult::Name(path) => { path }
         };
         let path_start: usize = path_code / 256;
         let path_name: usize = path_code % 256;
         let path_view: []u8 = syscall_path_buffer as []u8;
         match user_range_check(x2, 128, UserAccessMode::Write) {
-            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(precheck) => {}
         }
         match ext2_lookup_path(
                 syscall_ext2_mount,
                 unsafe { path_view[path_start..<path_start + path_name] }) {
-            Ext2LookupResult::Invalid => { return (1, LINUX_EINVAL); }
-            Ext2LookupResult::NotFound => { return (1, LINUX_ENOENT); }
+            Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
+            Ext2LookupResult::NotFound => { return SyscallAction::Resume(LINUX_ENOENT); }
             Ext2LookupResult::Found(inode_number) => {
                 let inode_mode: usize = ext2_inode_mode(
                     syscall_ext2_mount, inode_number);
                 if ((inode_mode & 0xF000) == 0x4000) {
                     match user_range_check(x2, 128, UserAccessMode::Write) {
                         UserRangeResult::Fault => {
-                            return (1, LINUX_EFAULT);
+                            return SyscallAction::Resume(LINUX_EFAULT);
                         }
                         UserRangeResult::Ok(range) => {
                             user_zero_fill(range);
                             user_write_u64(range, 8, inode_number as u64);
                             user_write_u32(range, 16, inode_mode as u32);
                             user_write_u32(range, 20, 2);
-                            return (1, 0);
+                            return SyscallAction::Resume(0);
                         }
                     }
                 }
@@ -1222,7 +1259,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                         syscall_ext2_mount, inode_number)) {
                     match user_range_check(x2, 128, UserAccessMode::Write) {
                         UserRangeResult::Fault => {
-                            return (1, LINUX_EFAULT);
+                            return SyscallAction::Resume(LINUX_EFAULT);
                         }
                         UserRangeResult::Ok(range) => {
                             user_zero_fill(range);
@@ -1231,18 +1268,18 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                             // executable regular file to ash's command probe.
                             user_write_u32(range, 16, 0x81ED as u32);
                             user_write_u32(range, 20, 1);
-                            return (1, 0);
+                            return SyscallAction::Resume(0);
                         }
                     }
                 }
                 match ext2_read_small_file(
                         syscall_ext2_mount, inode_number,
                         syscall_file_buffer as []u8) {
-                    Ext2ReadResult::Invalid => { return (1, LINUX_EINVAL); }
+                    Ext2ReadResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
                     Ext2ReadResult::Read(file_length) => {
                         match user_range_check(x2, 128, UserAccessMode::Write) {
                             UserRangeResult::Fault => {
-                                return (1, LINUX_EFAULT);
+                                return SyscallAction::Resume(LINUX_EFAULT);
                             }
                             UserRangeResult::Ok(range) => {
                                 let zeroed: bool = user_zero_fill(range);
@@ -1258,7 +1295,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                     user_write_u32(range, 56, 1024);
                                 let wrote_blocks: bool =
                                     user_write_u64(range, 64, 2);
-                                return (1, 0);
+                                return SyscallAction::Resume(0);
                             }
                         }
                     }
@@ -1280,13 +1317,13 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             let read_slot: {0..<TCP_CONNECTION_MAX as usize} =
                 match kernel_connection_fd_lookup(fd) {
                     KernelConnectionLookupResult::Missing => {
-                        return (1, LINUX_EBADF);
+                        return SyscallAction::Resume(LINUX_EBADF);
                     }
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
             let read_generation: usize = kernel_connection_fd_identity(fd);
             if (syscall_connection_open[read_slot] == false || requested == 0) {
-                return (1, LINUX_EBADF);
+                return SyscallAction::Resume(LINUX_EBADF);
             }
             if (syscall_socket_buffer_offset[read_slot] <
                     syscall_socket_buffer_length[read_slot]) {
@@ -1298,7 +1335,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                     ((read_slot * 1460 +
                       syscall_socket_buffer_offset[read_slot]) as isize);
                 match user_range_check(address, amount, UserAccessMode::Write) {
-                    UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                    UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                     UserRangeResult::Ok(range) => {
                         let copied: bool =
                             copy_to_user_raw(range, source_base, amount);
@@ -1306,11 +1343,11 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 }
                 syscall_socket_buffer_offset[read_slot] =
                     syscall_socket_buffer_offset[read_slot] + amount;
-                return (1, amount);
+                return SyscallAction::Resume(amount);
             }
             match tcp_connection_take(read_slot, read_generation) {
               TcpConnectionTakeResult::Missing => {
-                return (1, LINUX_EAGAIN);
+                return SyscallAction::Resume(LINUX_EAGAIN);
               }
               TcpConnectionTakeResult::Ready(owner) => {
                let ready: NetRxCanAcquire = match network_capability_take() {
@@ -1319,7 +1356,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                         TcpConnectionPutResult::Stored => {}
                         TcpConnectionPutResult::Conflict => {}
                     }
-                    return (1, LINUX_EAGAIN);
+                    return SyscallAction::Resume(LINUX_EAGAIN);
                  }
                  NetworkCapabilityTakeResult::Ready(r) => { r }
                };
@@ -1335,11 +1372,11 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                 TcpConnectionPutResult::Stored => {}
                                 TcpConnectionPutResult::Conflict => {}
                             }
-                            return (1, LINUX_EAGAIN);
+                            return SyscallAction::Resume(LINUX_EAGAIN);
                         }
                         NetworkCapabilityPutResult::Conflict => {
                             tcp_connection_free(owner);
-                            return (1, LINUX_EINVAL);
+                            return SyscallAction::Resume(LINUX_EINVAL);
                         }
                     }
                 }
@@ -1361,7 +1398,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                 TcpConnectionPutResult::Stored => {}
                                 TcpConnectionPutResult::Conflict => {}
                             }
-                            return (1, LINUX_EFAULT);
+                            return SyscallAction::Resume(LINUX_EFAULT);
                         }
                         UserRangeResult::Ok(range) => {
                             let copied: bool =
@@ -1374,14 +1411,14 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                             match tcp_connection_put(owner) {
                                 TcpConnectionPutResult::Stored => {}
                                 TcpConnectionPutResult::Conflict => {
-                                    return (1, LINUX_EINVAL);
+                                    return SyscallAction::Resume(LINUX_EINVAL);
                                 }
                             }
-                            return (1, amount);
+                            return SyscallAction::Resume(amount);
                         }
                         NetworkCapabilityPutResult::Conflict => {
                             tcp_connection_free(owner);
-                            return (1, LINUX_EINVAL);
+                            return SyscallAction::Resume(LINUX_EINVAL);
                         }
                     }
                 }
@@ -1392,21 +1429,21 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         if (fd == 0) { return syscall_read_uart(address, requested); }
         if (kernel_syscall_file_is_open(fd) == false ||
             kernel_syscall_file_readable(fd) == false) {
-            return (1, LINUX_EBADF);
+            return SyscallAction::Resume(LINUX_EBADF);
         }
         match ext2_read_small_file(
                 syscall_ext2_mount, kernel_syscall_file_inode(fd),
                 syscall_file_buffer as []u8) {
-            Ext2ReadResult::Invalid => { return (1, LINUX_EINVAL); }
+            Ext2ReadResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
             Ext2ReadResult::Read(file_length) => {
-                if (kernel_syscall_file_offset(fd) >= file_length) { return (1, 0); }
+                if (kernel_syscall_file_offset(fd) >= file_length) { return SyscallAction::Resume(0); }
                 let available: usize = file_length - kernel_syscall_file_offset(fd);
                 let mut amount: usize = requested;
                 if (amount > available) { amount = available; }
                 let source_base: *u8 = (syscall_file_buffer as *u8) +
                     (kernel_syscall_file_offset(fd) as isize);
                 match user_range_check(address, amount, UserAccessMode::Write) {
-                    UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                    UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                     UserRangeResult::Ok(range) => {
                         let copied: bool =
                             copy_to_user_raw(range, source_base, amount);
@@ -1414,9 +1451,9 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 }
                 if (kernel_syscall_file_set_offset(
                         fd, kernel_syscall_file_offset(fd) + amount) == false) {
-                    return (1, LINUX_EBADF);
+                    return SyscallAction::Resume(LINUX_EBADF);
                 }
-                return (1, amount);
+                return SyscallAction::Resume(amount);
             }
         }
     }
@@ -1426,25 +1463,25 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let fd: usize = x0;
         let command: usize = x1;
         if (kernel_syscall_file_is_open(fd) == false) {
-            return (1, LINUX_EBADF);
+            return SyscallAction::Resume(LINUX_EBADF);
         }
         if (command == LINUX_F_SETFD) {
-            if (x2 != 0 && x2 != 1) { return (1, LINUX_EINVAL); }
+            if (x2 != 0 && x2 != 1) { return SyscallAction::Resume(LINUX_EINVAL); }
             match unified_fd_set_close_on_exec(
                     kernel_syscall_process_slot(), fd, x2 != 0) {
-                UnifiedFdResult::Invalid => { return (1, LINUX_EBADF); }
+                UnifiedFdResult::Invalid => { return SyscallAction::Resume(LINUX_EBADF); }
                 UnifiedFdResult::Ok => {}
             }
-            return (1, 0);
+            return SyscallAction::Resume(0);
         }
         if (command == LINUX_F_DUPFD || command == LINUX_F_DUPFD_CLOEXEC) {
             match unified_fd_alloc(kernel_syscall_process_slot(), x2) {
-                UnifiedFdAllocResult::Full => { return (1, LINUX_EBADF); }
+                UnifiedFdAllocResult::Full => { return SyscallAction::Resume(LINUX_EBADF); }
                 UnifiedFdAllocResult::Allocated(new_fd) => {
                     match unified_fd_duplicate(
                             kernel_syscall_process_slot(), fd, new_fd) {
                         UnifiedFdResult::Invalid => {
-                            return (1, LINUX_EBADF);
+                            return SyscallAction::Resume(LINUX_EBADF);
                         }
                         UnifiedFdResult::Ok => {
                             if (command == LINUX_F_DUPFD_CLOEXEC) {
@@ -1452,18 +1489,18 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                         kernel_syscall_process_slot(),
                                         new_fd, true) {
                                     UnifiedFdResult::Invalid => {
-                                        return (1, LINUX_EBADF);
+                                        return SyscallAction::Resume(LINUX_EBADF);
                                     }
                                     UnifiedFdResult::Ok => {}
                                 }
                             }
-                            return (1, new_fd);
+                            return SyscallAction::Resume(new_fd);
                         }
                     }
                 }
             }
         }
-        return (1, LINUX_ENOSYS);
+        return SyscallAction::Resume(LINUX_ENOSYS);
     }
 
     if (number == 24) {
@@ -1474,53 +1511,53 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         if (x2 != 0 || old_fd == new_fd ||
             kernel_connected_fd_is_open(old_fd) == false ||
             (new_fd != 0 && new_fd != 1)) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
         if (kernel_connected_fd_is_open(new_fd)) {
             if (kernel_connected_descriptor_release(new_fd) == false) {
-                return (1, LINUX_EAGAIN);
+                return SyscallAction::Resume(LINUX_EAGAIN);
             }
             kernel_connected_fd_clear(new_fd);
         }
         if (kernel_connected_fd_duplicate(old_fd, new_fd) == false) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
-        return (1, new_fd);
+        return SyscallAction::Resume(new_fd);
     }
 
     if (number == 57) {
         if (kernel_connected_fd_is_open(x0)) {
             if (kernel_connected_descriptor_release(x0) == false) {
-                return (1, LINUX_EAGAIN);
+                return SyscallAction::Resume(LINUX_EAGAIN);
             }
             kernel_connected_fd_clear(x0);
             syscall_connected_close_calls =
                 syscall_connected_close_calls + 1;
-            return (1, 0);
+            return SyscallAction::Resume(0);
         }
         match kernel_listener_fd_lookup(x0) {
           KernelListenerLookupResult::Missing => {}
           KernelListenerLookupResult::Found(close_listener_fd) => {
             if (kernel_listener_state(close_listener_fd) ==
                     UnifiedListenerState::Closed) {
-              return (1, LINUX_EBADF);
+              return SyscallAction::Resume(LINUX_EBADF);
             }
             match unified_fd_close(kernel_syscall_process_slot(),
                                    close_listener_fd) {
-                UnifiedFdResult::Invalid => { return (1, LINUX_EBADF); }
+                UnifiedFdResult::Invalid => { return SyscallAction::Resume(LINUX_EBADF); }
                 UnifiedFdResult::Ok => {}
             }
             syscall_socket_close_calls = syscall_socket_close_calls + 1;
-            return (1, 0);
+            return SyscallAction::Resume(0);
           }
         }
         syscall_close_calls = syscall_close_calls + 1;
         if (kernel_syscall_file_is_open(x0) == false) {
-            return (1, LINUX_EBADF);
+            return SyscallAction::Resume(LINUX_EBADF);
         }
         match unified_fd_close(kernel_syscall_process_slot(), x0) {
-            UnifiedFdResult::Invalid => { return (1, LINUX_EBADF); }
-            UnifiedFdResult::Ok => { return (1, 0); }
+            UnifiedFdResult::Invalid => { return SyscallAction::Resume(LINUX_EBADF); }
+            UnifiedFdResult::Ok => { return SyscallAction::Resume(0); }
         }
     }
 
@@ -1529,15 +1566,15 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         // accepted; only the underlying stream type is relevant here.
         syscall_socket_calls = syscall_socket_calls + 1;
         if ((x0 != 2 && x0 != 10) || (x1 & 0xF) != 1 || x2 != 0) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
         match kernel_socket_fd_alloc(4) {
-          KernelSocketFdAllocResult::Full => { return (1, LINUX_EAGAIN); }
+          KernelSocketFdAllocResult::Full => { return SyscallAction::Resume(LINUX_EAGAIN); }
           KernelSocketFdAllocResult::Allocated(created_socket_fd) => {
             match unified_listener_create(kernel_syscall_process_slot(),
                                           created_socket_fd) {
-                UnifiedFdResult::Invalid => { return (1, LINUX_EAGAIN); }
-                UnifiedFdResult::Ok => { return (1, created_socket_fd); }
+                UnifiedFdResult::Invalid => { return SyscallAction::Resume(LINUX_EAGAIN); }
+                UnifiedFdResult::Ok => { return SyscallAction::Resume(created_socket_fd); }
             }
           }
         }
@@ -1548,16 +1585,16 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let bind_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} =
             match kernel_listener_fd_lookup(x0) {
                 KernelListenerLookupResult::Missing => {
-                    return (1, LINUX_EINVAL);
+                    return SyscallAction::Resume(LINUX_EINVAL);
                 }
                 KernelListenerLookupResult::Found(found) => { found }
             };
         if (kernel_listener_state(bind_fd) != UnifiedListenerState::Created ||
-            x2 < 16) { return (1, LINUX_EINVAL); }
+            x2 < 16) { return SyscallAction::Resume(LINUX_EINVAL); }
         let mut sockaddr_len: usize = x2;
         if (sockaddr_len > 28) { sockaddr_len = 28; }
         match user_range_check(x1, sockaddr_len, UserAccessMode::Read) {
-            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(range) => {
                 let copied: bool = copy_from_user_raw(
                     range, syscall_sockaddr_buffer as *u8, sockaddr_len);
@@ -1567,15 +1604,15 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         if (address[0] == 2 && address[1] == 0) {
             if (address[4] != 0 || address[5] != 0 ||
                 address[6] != 0 || address[7] != 0) {
-                return (1, LINUX_EINVAL);
+                return SyscallAction::Resume(LINUX_EINVAL);
             }
         } else {
             if (address[0] != 10 || address[1] != 0 || x2 < 28) {
-                return (1, LINUX_EINVAL);
+                return SyscallAction::Resume(LINUX_EINVAL);
             }
             for address_index: usize in 8..<24 {
                 if (address[address_index] != 0) {
-                    return (1, LINUX_EINVAL);
+                    return SyscallAction::Resume(LINUX_EINVAL);
                 }
             }
         }
@@ -1585,9 +1622,9 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             kernel_listener_set_port(bind_fd, bind_port) == false ||
             kernel_listener_set_state(
                 bind_fd, UnifiedListenerState::Bound) == false) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
-        return (1, 0);
+        return SyscallAction::Resume(0);
     }
 
     if (number == 201) {
@@ -1595,16 +1632,16 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let listen_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} =
             match kernel_listener_fd_lookup(x0) {
                 KernelListenerLookupResult::Missing => {
-                    return (1, LINUX_EINVAL);
+                    return SyscallAction::Resume(LINUX_EINVAL);
                 }
                 KernelListenerLookupResult::Found(found) => { found }
             };
         if (kernel_listener_state(listen_fd) != UnifiedListenerState::Bound) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
         if (kernel_listener_set_state(
                 listen_fd, UnifiedListenerState::Listening) == false) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
         if (syscall_httpd_daemon_pending) {
             syscall_httpd_daemon_pending = false;
@@ -1613,7 +1650,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             syscall_connected_fixture_pending = false;
             kernel_boot_log("linux socket: listener ready port=8080\n");
         }
-        return (1, 0);
+        return SyscallAction::Resume(0);
     }
 
     if (number == 202 || number == 242) {
@@ -1625,37 +1662,37 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         // while allowing the one-boot hardware suite to continue.
         if (kernel_process_current_pid() == 1 &&
             kernel_process_child_exit_count() >= 2) {
-            return (2, 0);
+            return SyscallAction::Exit(0);
         }
         syscall_accept_calls = syscall_accept_calls + 1;
         let accept_listener_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} =
             match kernel_listener_fd_lookup(x0) {
                 KernelListenerLookupResult::Missing => {
-                    return (1, LINUX_EINVAL);
+                    return SyscallAction::Resume(LINUX_EINVAL);
                 }
                 KernelListenerLookupResult::Found(found) => { found }
             };
         if (kernel_listener_state(accept_listener_fd) !=
                 UnifiedListenerState::Listening ||
             (number == 242 && x3 != 0)) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
         let connected_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} =
             match kernel_socket_fd_alloc(5) {
                 KernelSocketFdAllocResult::Full => {
-                    return (1, LINUX_EAGAIN);
+                    return SyscallAction::Resume(LINUX_EAGAIN);
                 }
                 KernelSocketFdAllocResult::Allocated(found) => { found }
             };
         match tcp_connection_alloc() {
-          TcpConnectionAllocResult::Full => { return (1, LINUX_EAGAIN); }
+          TcpConnectionAllocResult::Full => { return SyscallAction::Resume(LINUX_EAGAIN); }
           TcpConnectionAllocResult::Allocated(owner) => {
            let slot: usize = tcp_connection_slot(owner);
            let generation: usize = tcp_connection_identity(owner);
            match network_capability_take() {
             NetworkCapabilityTakeResult::Empty => {
                 tcp_connection_free(owner);
-                return (1, LINUX_EAGAIN);
+                return SyscallAction::Resume(LINUX_EAGAIN);
             }
             NetworkCapabilityTakeResult::Ready(ready) => {
                 match kernel_tcp_accept_once(
@@ -1664,13 +1701,13 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                         match network_capability_put(next) {
                             NetworkCapabilityPutResult::Conflict => {
                                 tcp_connection_free(owner);
-                                return (1, LINUX_EINVAL);
+                                return SyscallAction::Resume(LINUX_EINVAL);
                             }
                             NetworkCapabilityPutResult::Stored => {
                                 syscall_accept_capability_roundtrips =
                                     syscall_accept_capability_roundtrips + 1;
                                 tcp_connection_free(owner);
-                                return (1, LINUX_EAGAIN);
+                                return SyscallAction::Resume(LINUX_EAGAIN);
                             }
                         }
                     }
@@ -1678,31 +1715,31 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                         match network_capability_put(next) {
                             NetworkCapabilityPutResult::Conflict => {
                                 tcp_connection_free(owner);
-                                return (1, LINUX_EINVAL);
+                                return SyscallAction::Resume(LINUX_EINVAL);
                             }
                             NetworkCapabilityPutResult::Stored => {
                                 syscall_accept_capability_roundtrips =
                                     syscall_accept_capability_roundtrips + 1;
                                 match tcp_connection_put(owner) {
                                   TcpConnectionPutResult::Conflict => {
-                                    return (1, LINUX_EINVAL);
+                                    return SyscallAction::Resume(LINUX_EINVAL);
                                   }
                                   TcpConnectionPutResult::Stored => {
                                     if (slot >= TCP_CONNECTION_MAX) {
-                                        return (1, LINUX_EINVAL);
+                                        return SyscallAction::Resume(LINUX_EINVAL);
                                     }
                                     syscall_connection_open[slot] = true;
                                     match unified_connection_create(
                                             kernel_syscall_process_slot(),
                                             connected_fd, slot, generation) {
                                         UnifiedFdResult::Invalid => {
-                                            return (1, LINUX_EAGAIN);
+                                            return SyscallAction::Resume(LINUX_EAGAIN);
                                         }
                                         UnifiedFdResult::Ok => {}
                                     }
                                     syscall_socket_buffer_length[slot] = 0;
                                     syscall_socket_buffer_offset[slot] = 0;
-                                    return (1, connected_fd);
+                                    return SyscallAction::Resume(connected_fd);
                                   }
                                 }
                             }
@@ -1726,15 +1763,15 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         if ((output_fd != 1 && output_fd != 2) ||
             kernel_syscall_file_is_open(input_fd) == false ||
             kernel_syscall_file_readable(input_fd) == false) {
-            return (1, LINUX_EBADF);
+            return SyscallAction::Resume(LINUX_EBADF);
         }
-        if (offset_address != 0) { return (1, LINUX_EINVAL); }
+        if (offset_address != 0) { return SyscallAction::Resume(LINUX_EINVAL); }
         match ext2_read_small_file(
                 syscall_ext2_mount, kernel_syscall_file_inode(input_fd),
                 syscall_file_buffer as []u8) {
-            Ext2ReadResult::Invalid => { return (1, LINUX_EINVAL); }
+            Ext2ReadResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
             Ext2ReadResult::Read(file_length) => {
-                if (kernel_syscall_file_offset(input_fd) >= file_length) { return (1, 0); }
+                if (kernel_syscall_file_offset(input_fd) >= file_length) { return SyscallAction::Resume(0); }
                 let available: usize = file_length - kernel_syscall_file_offset(input_fd);
                 let mut amount: usize = requested;
                 if (amount > available) { amount = available; }
@@ -1746,10 +1783,10 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                 }
                 if (kernel_syscall_file_set_offset(
                         input_fd, kernel_syscall_file_offset(input_fd) + amount) == false) {
-                    return (1, LINUX_EBADF);
+                    return SyscallAction::Resume(LINUX_EBADF);
                 }
                 syscall_read_calls = syscall_read_calls + 1;
-                return (1, amount);
+                return SyscallAction::Resume(amount);
             }
         }
     }
@@ -1763,7 +1800,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             let direct_shutdown_slot: {0..<TCP_CONNECTION_MAX as usize} =
                 match kernel_connection_fd_lookup(1) {
                     KernelConnectionLookupResult::Missing => {
-                        return (1, LINUX_EINVAL);
+                        return SyscallAction::Resume(LINUX_EINVAL);
                     }
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
@@ -1772,15 +1809,15 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             if (syscall_connection_open[direct_shutdown_slot] == false ||
                 kernel_connected_transport_release(
                     direct_shutdown_slot, direct_shutdown_generation) == false) {
-                return (1, LINUX_EAGAIN);
+                return SyscallAction::Resume(LINUX_EAGAIN);
             }
             syscall_connection_open[direct_shutdown_slot] = false;
-            return (1, 0);
+            return SyscallAction::Resume(0);
         }
         let inetd_shutdown_slot: {0..<TCP_CONNECTION_MAX as usize} =
             match kernel_connection_fd_lookup(1) {
                 KernelConnectionLookupResult::Missing => {
-                    return (1, LINUX_EINVAL);
+                    return SyscallAction::Resume(LINUX_EINVAL);
                 }
                 KernelConnectionLookupResult::Found(found) => { found }
             };
@@ -1788,13 +1825,13 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         if (x0 != 1 || syscall_inetd_mode == false ||
             syscall_connection_open[inetd_shutdown_slot] == false ||
             syscall_inetd_response_length[inetd_shutdown_slot] == 0) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
         let received_length: usize =
             syscall_socket_buffer_length[inetd_shutdown_slot];
         match tcp_connection_take(
                 inetd_shutdown_slot, inetd_shutdown_generation) {
-          TcpConnectionTakeResult::Missing => { return (1, LINUX_EAGAIN); }
+          TcpConnectionTakeResult::Missing => { return SyscallAction::Resume(LINUX_EAGAIN); }
           TcpConnectionTakeResult::Ready(owner) => {
            match network_capability_take() {
             NetworkCapabilityTakeResult::Empty => {
@@ -1802,7 +1839,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                     TcpConnectionPutResult::Stored => {}
                     TcpConnectionPutResult::Conflict => {}
                 }
-                return (1, LINUX_EAGAIN);
+                return SyscallAction::Resume(LINUX_EAGAIN);
             }
             NetworkCapabilityTakeResult::Ready(ready) => {
                 let response_base: {0..<1461 as usize} =
@@ -1818,14 +1855,14 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                             NetworkCapabilityPutResult::Stored => { }
                             NetworkCapabilityPutResult::Conflict => {
                                 tcp_connection_free(owner);
-                                return (1, LINUX_EINVAL);
+                                return SyscallAction::Resume(LINUX_EINVAL);
                             }
                         }
                         match tcp_connection_put(owner) {
                             TcpConnectionPutResult::Stored => {}
                             TcpConnectionPutResult::Conflict => {}
                         }
-                        return (1, LINUX_EINVAL);
+                        return SyscallAction::Resume(LINUX_EINVAL);
                     }
                     KernelTcpSendResult::Sent(after_send) => {
                         match kernel_tcp_close_stream(owner, after_send) {
@@ -1833,13 +1870,13 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                 match network_capability_put(after_close) {
                                     NetworkCapabilityPutResult::Conflict => {
                                         tcp_connection_free(owner);
-                                        return (1, LINUX_EINVAL);
+                                        return SyscallAction::Resume(LINUX_EINVAL);
                                     }
                                     NetworkCapabilityPutResult::Stored => {
                                         tcp_connection_free(owner);
                                         syscall_connection_open[
                                             inetd_shutdown_slot] = false;
-                                        return (1, 0);
+                                        return SyscallAction::Resume(0);
                                     }
                                 }
                             }
@@ -1857,7 +1894,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         // exec. The child path still needs a process-owned image token and is
         // deliberately rejected until the general child lifecycle lands.
         if (syscall_exec_pending) {
-            return (1, LINUX_EAGAIN);
+            return SyscallAction::Resume(LINUX_EAGAIN);
         }
         let mut path_address: usize = x0;
         let mut argv_address: usize = x1;
@@ -1866,14 +1903,14 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             argv_address = x2;
         }
         let path_code: usize = match kernel_syscall_path_name(path_address) {
-            SyscallPathResult::Fault => { return (1, LINUX_EFAULT); }
-            SyscallPathResult::Invalid => { return (1, LINUX_ENOENT); }
+            SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+            SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
             SyscallPathResult::Name(path) => { path }
         };
         let mut path_length: usize = path_code % 256;
         let path_view: []u8 = syscall_path_buffer as []u8;
         if (path_view[0] == 0x2F) { path_length = path_length + 1; }
-        if (path_length == 0 || argv_address == 0) { return (1, LINUX_EINVAL); }
+        if (path_length == 0 || argv_address == 0) { return SyscallAction::Resume(LINUX_EINVAL); }
         let exec_path_absolute: bool = path_view[0] == 0x2F;
         let mut output_offset: usize = 0;
         let mut argc: usize = 0;
@@ -1882,24 +1919,24 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             let entry_offset: usize = index * 8;
             let entry_address: usize = match checked_add_usize(
                     argv_address, entry_offset) {
-                CheckedUsize::Overflow => { return (1, LINUX_EFAULT); }
+                CheckedUsize::Overflow => { return SyscallAction::Resume(LINUX_EFAULT); }
                 CheckedUsize::Value(v) => { v }
             };
             match user_range_check(entry_address, 8, UserAccessMode::Read) {
-                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
                     let (ok, string_address) = user_read_u64(range, 0);
-                    if (ok == false) { return (1, LINUX_EFAULT); }
+                    if (ok == false) { return SyscallAction::Resume(LINUX_EFAULT); }
                     if (string_address == 0) {
                         vector_terminated = true;
                     } else {
                         let string_code: usize = match kernel_syscall_path_name(
                                 string_address as usize) {
                             SyscallPathResult::Fault => {
-                                return (1, LINUX_EFAULT);
+                                return SyscallAction::Resume(LINUX_EFAULT);
                             }
                             SyscallPathResult::Invalid => {
-                                return (1, LINUX_EINVAL);
+                                return SyscallAction::Resume(LINUX_EINVAL);
                             }
                             SyscallPathResult::Name(path) => { path }
                         };
@@ -1910,11 +1947,11 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                         match checked_add_usize(output_offset,
                                                 string_length + 1) {
                             CheckedUsize::Overflow => {
-                                return (1, LINUX_EINVAL);
+                                return SyscallAction::Resume(LINUX_EINVAL);
                             }
                             CheckedUsize::Value(end) => {
                                 if (end > 512 || argc >= 8) {
-                                    return (1, LINUX_EINVAL);
+                                    return SyscallAction::Resume(LINUX_EINVAL);
                                 }
                                 let exec_argv_view: []u8 =
                                     syscall_exec_argv as []u8;
@@ -1923,7 +1960,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                         output_offset..<end] },
                                     unsafe { path_view[0..<string_length + 1] });
                                 if (copied != string_length + 1) {
-                                    return (1, LINUX_EFAULT);
+                                    return SyscallAction::Resume(LINUX_EFAULT);
                                 }
                                 output_offset = end;
                                 argc = argc + 1;
@@ -1936,25 +1973,25 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         }
         if (vector_terminated == false || argc == 0 ||
             path_length == 0) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
         // Keep the path validation explicit even though this first image
         // registry currently contains one static BusyBox ELF.
-        if (exec_path_absolute == false) { return (1, LINUX_ENOENT); }
+        if (exec_path_absolute == false) { return SyscallAction::Resume(LINUX_ENOENT); }
         syscall_exec_argc = argc;
         syscall_exec_pending = true;
-        if (kernel_process_is_child()) { return (8, 8); }
-        return (7, 7);
+        if (kernel_process_is_child()) { return SyscallAction::ChildExec; }
+        return SyscallAction::Exec;
     }
 
     if (number == AARCH64_NR_CLONE || number == AARCH64_NR_VFORK ||
         number == AARCH64_NR_FORK || number == AARCH64_NR_CLONE3) {
         if (number == AARCH64_NR_CLONE && (x0 != 0x11 || x1 != 0)) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
         match process_image_clone_vm_begin() {
             ProcessCloneVmResult::OutOfMemory => {
-                return (1, LINUX_EAGAIN);
+                return SyscallAction::Resume(LINUX_EAGAIN);
             }
             ProcessCloneVmResult::Copied => {
                 match kernel_syscall_clone_files_begin() {
@@ -1963,7 +2000,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                             ProcessCloneVmReapResult::Missing => {}
                             ProcessCloneVmReapResult::Reaped => {}
                         }
-                        return (1, LINUX_EAGAIN);
+                        return SyscallAction::Resume(LINUX_EAGAIN);
                     }
                     UnifiedFdResult::Ok => {}
                 }
@@ -1983,12 +2020,12 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                             ProcessCloneVmReapResult::Missing => { }
                             ProcessCloneVmReapResult::Reaped => { }
                         }
-                        return (1, LINUX_EINVAL);
+                        return SyscallAction::Resume(LINUX_EINVAL);
                     }
                     ProcessCloneResult::ChildReady(child_pid) => {
                         // Assembly copies the complete saved parent frame to
                         // the dedicated child kernel stack and resumes x0=0.
-                        return (3, child_pid);
+                        return SyscallAction::CloneChild(child_pid);
                     }
                 }
             }
@@ -1998,18 +2035,18 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         if (kernel_process_is_child()) {
             // Restore the preserved parent frame with clone() == child PID.
             match kernel_syscall_clone_files_reap() {
-                KernelFdReapResult::Failed => { return (0, 0); }
+                KernelFdReapResult::Failed => { return SyscallAction::Unreachable; }
                 KernelFdReapResult::Reaped => { }
             }
             if (kernel_process_child_exec_image_live() == false) {
                 match process_image_clone_vm_reap() {
-                    ProcessCloneVmReapResult::Missing => { return (0, 0); }
+                    ProcessCloneVmReapResult::Missing => { return SyscallAction::Unreachable; }
                     ProcessCloneVmReapResult::Reaped => { }
                 }
             }
-            return (4, kernel_process_child_exit(x0));
+            return SyscallAction::CloneParent(kernel_process_child_exit(x0));
         }
-        return (2, x0);
+        return SyscallAction::Exit(x0);
     }
     if (number == AARCH64_NR_WAIT4) {
         // The current one-child clone model resumes the parent directly
@@ -2019,28 +2056,28 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         // multi-child scheduler yet.
         if (kernel_process_is_child() || x0 != 0xFFFFFFFFFFFFFFFF &&
             x0 != 2 || x2 != 0) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
         if (kernel_process_child_waitable() == false) {
-            return (1, LINUX_ECHILD);
+            return SyscallAction::Resume(LINUX_ECHILD);
         }
         if (x1 != 0) {
             match user_range_check(x1, 4, UserAccessMode::Write) {
-                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
                     let status: usize = kernel_process_child_wait_status_peek();
                     if (user_write_u32(range, 0,
                             ((status & 0xFF) << 8) as u32) == false) {
-                        return (1, LINUX_EFAULT);
+                        return SyscallAction::Resume(LINUX_EFAULT);
                     }
                     let consumed_status: usize =
                         kernel_process_child_wait_status();
-                    return (1, 2);
+                    return SyscallAction::Resume(2);
                 }
             }
         }
         let ignored_status: usize = kernel_process_child_wait_status();
-        return (1, 2);
+        return SyscallAction::Resume(2);
     }
     if (number == 17) {
         // getcwd(): HTTPd immediately changes to its configured root; `/` is
@@ -2053,52 +2090,52 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         // use of that value (as a length, not just a >=0 success check)
         // turned into an effectively-unbounded userspace loop with no
         // further syscalls, not a kernel-visible fault.
-        if (x1 < 2) { return (1, LINUX_EFAULT); }
+        if (x1 < 2) { return SyscallAction::Resume(LINUX_EFAULT); }
         match user_range_check(x0, 2, UserAccessMode::Write) {
-            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(range) => {
                 let wrote_slash: bool = user_write_byte(range, 0, 0x2F);
                 let wrote_nul: bool = user_write_byte(range, 1, 0);
             }
         }
-        return (1, 2);
+        return SyscallAction::Resume(2);
     }
     if (number == 49) {
         match user_range_check(x0, 2, UserAccessMode::Read) {
-            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(range) => {
                 let path_view: []u8 = syscall_path_buffer as []u8;
                 if (copy_from_user(range, path_view[0..<2]) &&
                         path_view[0] == 0x2F && path_view[1] == 0) {
-                    return (1, 0);
+                    return SyscallAction::Resume(0);
                 }
             }
         }
-        return (1, LINUX_ENOENT);
+        return SyscallAction::Resume(LINUX_ENOENT);
     }
     if (number == 103) {
         // setitimer(): HTTPd's request timeout is unnecessary for the single
         // bounded integration request. Return an all-zero previous timer.
         if (x2 != 0) {
             match user_range_check(x2, 32, UserAccessMode::Write) {
-                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
                     let zeroed: bool = user_zero_fill(range);
                 }
             }
         }
-        return (1, 0);
+        return SyscallAction::Resume(0);
     }
     if (number == 113) {
         match user_range_check(x1, 16, UserAccessMode::Write) {
-            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(range) => {
                 let wrote_seconds: bool =
                     user_write_u64(range, 0, 1700000000 as u64);
                 let wrote_nanoseconds: bool = user_write_u64(range, 8, 0);
             }
         }
-        return (1, 0);
+        return SyscallAction::Resume(0);
     }
     if (number == 134) {
         // rt_sigaction(signum, act, oldact, sigsetsize): this kernel does
@@ -2109,46 +2146,46 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let signum: usize = x0;
         let oldact: usize = x2;
         if (signum == 0 || signum == 9 || signum == 19) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
         if (oldact != 0) {
             match user_range_check(oldact, 32, UserAccessMode::Write) {
-                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
                     let zeroed: bool = user_zero_fill(range);
                 }
             }
         }
-        return (1, 0);
+        return SyscallAction::Resume(0);
     }
     if (number == 135) {
         if (x2 != 0) {
             match user_range_check(x2, 8, UserAccessMode::Write) {
-                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
                     let wrote_mask: bool = user_write_u64(range, 0, 0);
                 }
             }
         }
-        return (1, 0);
+        return SyscallAction::Resume(0);
     }
     if (number == 205) {
-        if (x0 != 0) { return (1, LINUX_EFAULT); }
+        if (x0 != 0) { return SyscallAction::Resume(LINUX_EFAULT); }
         match user_range_check(x1, 16, UserAccessMode::Write) {
-            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(peer_range) => {
                 let zeroed: bool = user_zero_fill(peer_range);
                 let wrote_family: bool = user_write_byte(peer_range, 0, 2);
             }
         }
         match user_range_check(x2, 4, UserAccessMode::Write) {
-            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(length_range) => {
                 let wrote_length: bool =
                     user_write_u32(length_range, 0, 16);
             }
         }
-        return (1, 0);
+        return SyscallAction::Resume(0);
     }
     if (number == 208) {
         // setsockopt(level, optname, optval, optlen): this kernel's
@@ -2159,29 +2196,29 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         let optlen: usize = x3;
         if (optlen != 0) {
             match user_range_check(optval, optlen, UserAccessMode::Read) {
-                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {}
             }
         }
-        return (1, 0);
+        return SyscallAction::Resume(0);
     }
     if (number == 96) {
-        return (1, kernel_process_current_pid());
+        return SyscallAction::Resume(kernel_process_current_pid());
     }
     if (number == 172 || number == 178) {
-        return (1, kernel_process_current_pid());
+        return SyscallAction::Resume(kernel_process_current_pid());
     }
     if (number == 173 || (number >= 174 && number <= 177)) {
-        return (1, 0);
+        return SyscallAction::Resume(0);
     }
     if (number == 214) {
-        if (x0 == 0) { return (1, kernel_syscall_heap_break()); }
+        if (x0 == 0) { return SyscallAction::Resume(kernel_syscall_heap_break()); }
         if (x0 >= syscall_heap_start && x0 <= syscall_heap_limit) {
             if (kernel_syscall_heap_set(x0) == false) {
-                return (1, LINUX_EINVAL);
+                return SyscallAction::Resume(LINUX_EINVAL);
             }
         }
-        return (1, kernel_syscall_heap_break());
+        return SyscallAction::Resume(kernel_syscall_heap_break());
     }
     if (number == 222) {
         let length: usize = x1;
@@ -2197,10 +2234,10 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         // growth) already satisfies this.
         if ((flags & 0x22) != 0x22 || fd != 0xFFFFFFFFFFFFFFFF ||
                 (prot & 0x4) != 0) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
         if (length == 0 || length > 0xFFFFFFFFFFFFF000) {
-            return (1, 0xFFFFFFFFFFFFFFFF);
+            return SyscallAction::Resume(0xFFFFFFFFFFFFFFFF);
         }
         let rounded: usize = (length + PAGE_SIZE - 1) & 0xFFFFFFFFFFFFF000;
         // musl uses MAP_FIXED to turn the first page of its brk arena into a
@@ -2210,42 +2247,42 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         if (x0 != 0) {
             if (x0 < syscall_heap_start || x0 > syscall_heap_limit ||
                 rounded > syscall_heap_limit - x0) {
-                return (1, 0xFFFFFFFFFFFFFFFF);
+                return SyscallAction::Resume(0xFFFFFFFFFFFFFFFF);
             }
-            return (1, x0);
+            return SyscallAction::Resume(x0);
         }
         if (rounded > syscall_heap_limit - kernel_syscall_heap_break()) {
-            return (1, 0xFFFFFFFFFFFFFFFF);
+            return SyscallAction::Resume(0xFFFFFFFFFFFFFFFF);
         }
         let result: usize = kernel_syscall_heap_break();
         if (kernel_syscall_heap_set(
                 kernel_syscall_heap_break() + rounded) == false) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
-        return (1, result);
+        return SyscallAction::Resume(result);
     }
     if (number == 215) {
         // munmap: the fixed short-lived process arena is reclaimed as a
         // unit; this does not relax load-time permissions.
-        return (1, 0);
+        return SyscallAction::Resume(0);
     }
     if (number == 226) {
         let addr: usize = x0;
         let len: usize = x1;
         let prot: usize = x2;
         if (addr % PAGE_SIZE != 0 || len == 0) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
         let (span_ok, first, last) = user_range_l3_span(addr, len);
         if (span_ok == false) {
-            return (1, LINUX_EINVAL);
+            return SyscallAction::Resume(LINUX_EINVAL);
         }
         let class: usize = user_page_class_at(first);
         let mut index: usize = first;
         while (index <= last) {
             if (index >= USER_RANGE_MAX_INDEX ||
                     user_page_class_at(index) != class) {
-                return (1, LINUX_EINVAL);
+                return SyscallAction::Resume(LINUX_EINVAL);
             }
             index = index + 1;
         }
@@ -2257,26 +2294,26 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         // error, never false success.
         if (prot == LINUX_PROT_READ && class == 3) {
             user_range_reprotect(first, last, USER_RODATA_R_FLAGS);
-            return (1, 0);
+            return SyscallAction::Resume(0);
         }
         if (prot == (LINUX_PROT_READ | LINUX_PROT_WRITE) && class == 3) {
-            return (1, 0);
+            return SyscallAction::Resume(0);
         }
-        return (1, LINUX_EACCES);
+        return SyscallAction::Resume(LINUX_EACCES);
     }
     if (number == AARCH64_NR_READV) {
         let fd: usize = x0;
         let iov_address: usize = x1;
         let raw_iovcnt: usize = x2;
-        if (raw_iovcnt == 0) { return (1, 0); }
+        if (raw_iovcnt == 0) { return SyscallAction::Resume(0); }
         if (raw_iovcnt >= 0 && raw_iovcnt < IOV_MAX) {
             let iovcnt: {0..<IOV_MAX as usize} = raw_iovcnt;
             let array_bytes: usize = match checked_mul_usize(iovcnt, sizeof(Iovec)) {
-                CheckedUsize::Overflow => { return (1, LINUX_EINVAL); }
+                CheckedUsize::Overflow => { return SyscallAction::Resume(LINUX_EINVAL); }
                 CheckedUsize::Value(v) => { v }
             };
             match user_range_check(iov_address, array_bytes, UserAccessMode::Read) {
-                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(array_range) => {
                     let mut total: usize = 0;
                     for index: usize in 0..<iovcnt {
@@ -2287,18 +2324,18 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                             array_range,
                             index * sizeof(Iovec) + offsetof(Iovec, iov_len));
                         if (base_ok == false || len_ok == false) {
-                            if (total == 0) { return (1, LINUX_EFAULT); }
-                            return (1, total);
+                            if (total == 0) { return SyscallAction::Resume(LINUX_EFAULT); }
+                            return SyscallAction::Resume(total);
                         }
                         match syscall_readv_segment(
                                 fd, iov_base as usize, iov_len as usize) {
                             ReadSegmentResult::Errno(e) => {
-                                if (total == 0) { return (1, e); }
-                                return (1, total);
+                                if (total == 0) { return SyscallAction::Resume(e); }
+                                return SyscallAction::Resume(total);
                             }
                             ReadSegmentResult::Read(n) => {
                                 match checked_add_usize(total, n) {
-                                    CheckedUsize::Overflow => { return (1, total); }
+                                    CheckedUsize::Overflow => { return SyscallAction::Resume(total); }
                                     CheckedUsize::Value(v) => { total = v; }
                                 }
                                 // A shorter-than-requested segment means EOF
@@ -2306,29 +2343,29 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                 // clamps to the file's real remaining
                                 // length) -- further segments would only
                                 // ever read 0 too.
-                                if (n == 0) { return (1, total); }
+                                if (n == 0) { return SyscallAction::Resume(total); }
                             }
                         }
                     }
-                    return (1, total);
+                    return SyscallAction::Resume(total);
                 }
             }
         }
-        return (1, LINUX_EINVAL);
+        return SyscallAction::Resume(LINUX_EINVAL);
     }
     if (number == AARCH64_NR_WRITEV) {
         let fd: usize = x0;
         let iov_address: usize = x1;
         let raw_iovcnt: usize = x2;
-        if (raw_iovcnt == 0) { return (1, 0); }
+        if (raw_iovcnt == 0) { return SyscallAction::Resume(0); }
         if (raw_iovcnt >= 0 && raw_iovcnt < IOV_MAX) {
             let iovcnt: {0..<IOV_MAX as usize} = raw_iovcnt;
             let array_bytes: usize = match checked_mul_usize(iovcnt, sizeof(Iovec)) {
-                CheckedUsize::Overflow => { return (1, LINUX_EINVAL); }
+                CheckedUsize::Overflow => { return SyscallAction::Resume(LINUX_EINVAL); }
                 CheckedUsize::Value(v) => { v }
             };
             match user_range_check(iov_address, array_bytes, UserAccessMode::Read) {
-                UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+                UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(array_range) => {
                     let mut total: usize = 0;
                     for index: usize in 0..<iovcnt {
@@ -2339,35 +2376,35 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                             array_range,
                             index * sizeof(Iovec) + offsetof(Iovec, iov_len));
                         if (base_ok == false || len_ok == false) {
-                            if (total == 0) { return (1, LINUX_EFAULT); }
-                            return (1, total);
+                            if (total == 0) { return SyscallAction::Resume(LINUX_EFAULT); }
+                            return SyscallAction::Resume(total);
                         }
                         match syscall_writev_segment(
                                 fd, iov_base as usize, iov_len as usize) {
                             WriteSegmentResult::Errno(e) => {
-                                if (total == 0) { return (1, e); }
-                                return (1, total);
+                                if (total == 0) { return SyscallAction::Resume(e); }
+                                return SyscallAction::Resume(total);
                             }
                             WriteSegmentResult::Written(n) => {
                                 match checked_add_usize(total, n) {
-                                    CheckedUsize::Overflow => { return (1, total); }
+                                    CheckedUsize::Overflow => { return SyscallAction::Resume(total); }
                                     CheckedUsize::Value(v) => { total = v; }
                                 }
                             }
                         }
                     }
-                    return (1, total);
+                    return SyscallAction::Resume(total);
                 }
             }
         }
-        return (1, LINUX_EINVAL);
+        return SyscallAction::Resume(LINUX_EINVAL);
     }
     if (number == AARCH64_NR_PPOLL) {
         return syscall_ppoll_dispatch(x0, x1, x2, x3);
     }
     if (number == AARCH64_NR_UNAME) {
         match user_range_check(x0, sizeof(Utsname), UserAccessMode::Write) {
-            UserRangeResult::Fault => { return (1, LINUX_EFAULT); }
+            UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(range) => {
                 let base: *u8 = syscall_uname_buffer as *u8;
                 let mut zero_index: usize = 0;
@@ -2390,11 +2427,11 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                                   "(none)" as []u8);
                 let source: []u8 = unsafe { base[0..<sizeof(Utsname) as isize] };
                 let ok: bool = copy_to_user(range, source);
-                return (1, 0);
+                return SyscallAction::Resume(0);
             }
         }
     }
-    return (1, LINUX_ENOSYS);
+    return SyscallAction::Resume(LINUX_ENOSYS);
 }
 
 const SYSCALL_SUBSET_PROBE_L3_INDEX: usize = 503;
