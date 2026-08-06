@@ -177,23 +177,6 @@ el1_exception_evidence:
     wfe
     b       .Levidence_park
 
-/* enable_irq()/disable_irq(): DAIF.I-only mask, matching
- * examples/common_rpi5/startup.S's spelling. kernel/platform/rpi5/intc.tkb's
- * platform_irq_init() calls enable_irq() once all GIC/MIP0/MSI-X routing for
- * every currently-handled source is configured; UART0's PL011 peripheral
- * itself stays source-masked (IMSC=0) until kernel/init/main.tkb's later
- * irq_uart_rx_unmask() call, so no UART interrupt can actually arrive before
- * then even though DAIF.I is already clear. */
-    .global enable_irq
-enable_irq:
-    msr     DAIFClr, #0x2
-    ret
-
-    .global disable_irq
-disable_irq:
-    msr     DAIFSet, #0x2
-    ret
-
 /* Current-EL-SPx IRQ entry (GitHub issue #187): an interrupt taken while
  * this kernel's own EL1 code runs, e.g. during a syscall that has already
  * unmasked DAIF.I. It saves and restores the same complete

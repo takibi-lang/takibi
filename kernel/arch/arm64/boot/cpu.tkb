@@ -1,0 +1,19 @@
+// GitHub issue #226: enable_irq/disable_irq used to be one-instruction
+// hand-written stubs in kernel/arch/arm64/boot/entry.S (a plain
+// DAIF.I-only mask, matching examples/common_rpi5/startup.S's own
+// spelling). Now ordinary .tkb built on Stage 0's msr_daifclr_irq/
+// msr_daifset_irq intrinsics, same names/signatures as before.
+//
+// kernel/platform/rpi5/intc.tkb's platform_irq_init() calls enable_irq()
+// once all GIC/MIP0/MSI-X routing for every currently-handled source is
+// configured; UART0's PL011 peripheral itself stays source-masked
+// (IMSC=0) until kernel/init/main.tkb's later irq_uart_rx_unmask() call,
+// so no UART interrupt can actually arrive before then even though
+// DAIF.I is already clear.
+fn enable_irq() {
+    msr_daifclr_irq();
+}
+
+fn disable_irq() {
+    msr_daifset_irq();
+}
