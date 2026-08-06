@@ -15,6 +15,33 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-06: Archive the Full Capture on Any Kernel View Failure (GitHub Issue #233 Follow-up)
+
+Trying to reproduce issue #233's intermittent `child_exec` failure on real hardware repeatedly lost
+the exact evidence needed: `scripts/run_kernel_hwtest_rpi5.sh`'s `$ARTIFACT_DIR` (raw `uart.log`
+included) is a single fixed path, silently overwritten by the next `make kernelcheck-rpi5`
+invocation -- exactly what happened to both of #233's original reproductions, and then again
+mid-session while deliberately hunting it (an unrelated, separate Debug Probe/CMSIS-DAP USB
+instability repeatedly interrupted the hunt itself before a real reproduction was caught).
+
+Added a small, self-contained snapshot step at the exact point a view's `cmp` already fails: before
+the existing `exit 1`, copy the whole capture (`uart.log`, the normalized transcript, every other
+`*.log`, every view's own `*.actual`) into `_build/kernel-hwtest-rpi5-failures/<UTC
+timestamp>-<failing view name>/`, a location nothing else ever writes to or overwrites. Zero
+kernel-code risk -- this only touches the harness script, and only the already-failing path (the
+success path is byte-for-byte unchanged, never reaches this code at all). The next time
+`child_exec` (or any other view) fails intermittently, whether hunted deliberately or hit by
+someone just running the suite normally, the full evidence survives regardless of what runs
+afterward -- no need to catch it live, and no need to remember to override
+`RPI5_KERNEL_HWTEST_ARTIFACT_DIR` in advance.
+
+Verified without needing real hardware (the Debug Probe was unreliable at the time -- see the
+`#233` issue thread for the CMSIS-DAP USB troubleshooting that was happening in parallel): the
+added snippet only touches shell logic reachable purely from a `cmp` mismatch, so it was exercised
+directly with fake artifact files standing in for a real failing boot, confirming the archive
+directory is created with exactly the expected contents and a `MANIFEST` naming the failing view
+and timestamp. `bash -n` confirms the full script still parses.
+
 ### 2026-08-06: BinOp Codegen Dropped Its Own expected_ty, Poisoning Wide Literal Shifts (GitHub Issue #232)
 
 Follow-up fix to the compiler bug issue #226's Stage E surfaced. `IntLit`'s own codegen (`lib/

@@ -354,6 +354,24 @@ for filter in "$VIEW_DIR"/*.filter; do
         echo "FAIL kernel/rpi5 view: $name" >&2
         diff -u "$expected" "$actual" >&2 || true
         echo "artifacts: $ARTIFACT_DIR" >&2
+        # GitHub issue #233: an intermittent view failure's own $ARTIFACT_DIR
+        # (the raw uart.log included) is silently overwritten the next time
+        # anyone runs kernelcheck-rpi5 -- exactly how #233's own first two
+        # reproductions each lost their raw UART transcript before it could
+        # be read. Snapshot the whole capture, not just this one view's
+        # already-narrow $actual, to a timestamped directory nothing else
+        # ever writes to, so the NEXT time any view fails intermittently
+        # (whether chased deliberately or hit by someone just running the
+        # suite normally) the full evidence survives regardless of what
+        # runs afterward -- no need to catch it live or preserve
+        # $RPI5_KERNEL_HWTEST_ARTIFACT_DIR by hand in advance.
+        failure_archive="$REPO_ROOT/_build/kernel-hwtest-rpi5-failures/$(date -u +%Y%m%dT%H%M%SZ)-$name"
+        mkdir -p "$failure_archive"
+        cp -p "$ARTIFACT_DIR"/*.log "$ARTIFACT_DIR"/*.actual "$ARTIFACT_DIR"/*.normalized \
+            "$failure_archive/" 2>/dev/null || true
+        echo "failing view: $name" >"$failure_archive/MANIFEST"
+        date -u +%Y-%m-%dT%H:%M:%SZ >>"$failure_archive/MANIFEST"
+        echo "archived full capture to: $failure_archive" >&2
         exit 1
     fi
     echo "PASS kernel/rpi5 view: $name"
