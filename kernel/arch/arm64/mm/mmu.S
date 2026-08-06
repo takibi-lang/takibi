@@ -5,10 +5,28 @@
  * remains in kernel/mm/address_space.tkb.
  */
     .section .text, "ax"
+/* GitHub issue #231: AP[2:1]=00 on a block/page descriptor denies EL0 data
+ * access (load/store) but says nothing about EL0 instruction fetch -- that
+ * is UXN's job, independently, and every descriptor this macro used to build
+ * left UXN (and PXN) clear. In this single-address-space kernel (TTBR0_EL1
+ * shared between EL0 and EL1), that meant any control-flow bug landing EL0
+ * execution in the kernel .text identity block (as issue #229's now-fixed
+ * eret race did) could fetch and execute ordinary kernel instructions at
+ * EL0 with no permission check at all -- confirmed on real hardware during
+ * that investigation: the CPU fetched the kernel instruction successfully
+ * and only faulted because it happened to be a privileged system-register
+ * write, UNDEFINED at EL0 (ESR EC=0x00), not because the fetch itself was
+ * denied (which would have been EC=0x20). The kernel .text block gets
+ * UXN=1/PXN=0 (EL1 still genuinely executes here); the device-MMIO blocks
+ * get UXN=1/PXN=1 (nothing should ever execute from device memory at
+ * either EL, and nothing today does). */
+    .equ UXN_BIT, (1 << 54)
+    .equ PXN_BIT, (1 << 53)
 .macro INIT_ROOT l1, l2, l3
     adrp    x1, \l1
     add     x1, x1, :lo12:\l1
     mov     x2, #0x705
+    orr     x2, x2, #UXN_BIT
     str     x2, [x1]
     adrp    x2, \l2
     add     x2, x2, :lo12:\l2
@@ -24,6 +42,7 @@
 1:
     lsl     x3, x2, #30
     mov     x4, #0x401
+    orr     x4, x4, #(UXN_BIT | PXN_BIT)
     orr     x3, x3, x4
     str     x3, [x1, x2, lsl #3]
     add     x2, x2, #1
@@ -33,6 +52,7 @@
 2:
     lsl     x3, x2, #30
     mov     x4, #0x401
+    orr     x4, x4, #(UXN_BIT | PXN_BIT)
     orr     x3, x3, x4
     str     x3, [x1, x2, lsl #3]
     add     x2, x2, #1

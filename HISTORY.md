@@ -15,6 +15,58 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-06: UXN on the Kernel Identity Block: AP Denies Data, Not Fetch (GitHub Issue #231)
+
+Side discovery from the #229 investigation, filed and fixed separately per
+this project's narrow-issue convention. `kernel/arch/arm64/mm/mmu.S`'s
+`INIT_ROOT` macro built the kernel identity block descriptor (`L1[0]`,
+covering PA/VA `[0, 1GB)`, where the kernel image itself loads at `0x200000`)
+as `0x705`: valid block, AttrIndx=1 (Normal WB), `AP[2:1]=00` (EL1
+read/write, no EL0 data access), AF=1, nG=1 -- but bits 54 (UXN) and 53
+(PXN) both clear.
+
+AArch64's Access Permission bits and UXN/PXN are independent axes: AP gates
+data access (load/store); UXN/PXN gate instruction fetch, separately.
+`AP=00` correctly denies EL0 loads/stores here (confirmed on real hardware:
+an EL0 `ldr` from `0x201000` faults with `ESR_EL1=0x9200000d`, EC=0x24,
+level-1 permission fault) -- but with `UXN=0`, EL0 could still fetch and
+execute instructions from the same block. This is exactly what explained
+one of #229's own observed facts: the EL0 program that (via #229's now-fixed
+bug) ended up with `ELR_EL1` pointing into kernel `.text` did not take an
+instruction-abort permission fault; it fetched the kernel instruction there
+successfully and only faulted because that instruction (`msr SPSR_EL1, ...`)
+is UNDEFINED at EL0 (`ESR_EL1` EC=0x00, not the EC=0x20 a denied fetch would
+report). In this single-address-space kernel (`TTBR0_EL1` shared between EL0
+and EL1, per this project's whole design), any control-flow bug landing EL0
+execution in the kernel identity block could therefore execute ordinary
+kernel instructions at EL0 with no permission check at all -- a real
+code-execution surface, not just an earlier-than-expected fault. The
+per-process user page tables already get this right
+(`kernel/mm/address_space.tkb`'s PTE construction sets UXN/PXN per page,
+proven by the passing `vm_layout` view's `vm layout: text=rx data=rw+xn
+stack=rw+xn` log line); the gap was isolated to this one static
+identity-mapped block built directly in `mmu.S` assembly.
+
+Fixed by setting UXN=1 (bit 54) on the kernel identity block (`0x705 |
+(1<<54)`, both `kernel_l1_0` and `kernel_l1_1` -- both cores), keeping
+PXN=0 since EL1 genuinely executes from this region. While in the same
+macro, the two device-MMIO 1GB block loops (`0x401`, the GIC/UART/RP1
+windows at `L1[64:65]` and `L1[124:127]`) had the identical gap; set both
+UXN and PXN there, since nothing should ever execute from device memory at
+either EL and nothing does today -- same one-line fix, same macro, no
+separate issue needed.
+
+Verified the fix takes effect precisely where intended, not just that it
+compiles: a temporary EL0 probe (`br` into `0x201000`) changed from
+fetching successfully (pre-fix) to an immediate `ESR_EL1 = 0x8200000d` --
+EC=0x20 (Instruction Abort from a lower EL), IFSC=0b001101 (permission
+fault, **level 1**, matching the L1 block descriptor this bit lives on) --
+with `ELR_EL1` landing exactly on the probed address. Removed the probe, then
+4 consecutive `make kernelcheck-rpi5` runs on real RPi5 hardware, 25/25 views
+passing every time. Unlike #229, this is a static permission-bit change, not
+a timing-dependent race, so a smaller number of clean runs is sufficient
+evidence -- there is no probabilistic window to rule out.
+
 ### 2026-08-06: Mask DAIF.I Across Every eret Window (GitHub Issue #229)
 
 `make kernelcheck-rpi5` intermittently hung after the `vm layout:` boot-log
