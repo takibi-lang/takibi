@@ -117,7 +117,11 @@ once those ports exist.
 `kernelbuild-rpi5` does not require a board. It generates the ext2 and
 initramfs fixtures, obtains the pinned Alpine packages, compiles all Takibi
 code under `--forbid-trap`, assembles the minimal AArch64 files, and links the
-ELF.
+ELF, then runs `scripts/check_kernel_asm_invariants.py` against the linked
+`kernel.elf` -- a static, hardware-free disassembly check that fails the
+build if specific past hand-written-assembly bugs (issues #229, #231) ever
+regress, without needing a board or a probabilistic real-hardware race to
+reproduce them.
 
 ## Raspberry Pi 5 hardware integration
 

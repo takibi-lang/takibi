@@ -15,6 +15,56 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-06: A Static Disassembly Check for #229/#231, After Rejecting a Bigger-Assembly Fix
+
+Recurrence-prevention follow-up to the same day's #229/#231 fixes. The first design tried for
+#231 was a permanent EL0-side regression probe: replace `kernel/init/main.tkb`'s final
+`while (true) {}` with a real EL0 program that deliberately branches into kernel `.text`, on the
+theory that both outcomes (denied fetch, or the idle loop it replaces) halt the CPU forever either
+way, so this costs nothing at runtime. Building it exposed the actual problem with the approach,
+not just a theoretical one: the payload needed to reference `el1_exception_evidence`'s real address
+from code that gets copied byte-for-byte to `USER_TEXT_VA` and executed from there, so a PC-relative
+`adr` (correct at the code's own link address) was wrong once copied. The fix -- store the absolute
+address as a `.quad` and load it through a local, copy-safe `adr`+`ldr` -- was itself typed and
+tested wrong on the first attempt: hand-decoding the emitted `adr`'s immediate encoding to check the
+math produced 14 instead of the correct 12, which was only caught by renaming the local label to a
+global symbol and letting `nm` report its real address rather than trusting a manual bit-decode.
+That whole detour -- adding hand-written assembly specifically to guard against a hand-written-
+assembly bug class, then nearly shipping a second wrong address computation in the process of
+writing it -- was the demonstration that made rejecting the approach the right call: growing `.S` to
+guard `.S` grows exactly the surface that only careful human review can verify, which is the
+premise `.tkb`'s type system exists to move away from (see AGENTS.md's M4/#227 note on the actual
+structural direction).
+
+Replaced with `scripts/check_kernel_asm_invariants.py`: disassembles the already-linked
+`kernel.elf` (no board, no QEMU, no new kernel-side code at all) and checks two exact
+instruction-level invariants:
+
+- **#231**: `kernel_mmu_init`'s disassembly must contain exactly 2 occurrences of the kernel
+  identity block's UXN-only immediate (`orr x_, x_, #0x40000000000000`) and exactly 4 occurrences
+  of the device-MMIO blocks' UXN+PXN immediate (`#0x60000000000000`) -- matching `mmu.S`'s
+  `INIT_ROOT` macro being expanded twice (both cores' roots) with one kernel-block site and two
+  device-loop sites each.
+- **#229**: every `eret` that writes `ELR_EL1` (i.e. returns to EL0, as opposed to
+  `el2_drop_to_el1`'s one-time `ELR_EL2` cold-boot drop) must have a `msr DAIFSet` somewhere in the
+  same function before it.
+
+Verified the checks actually catch the regressions they claim to, not just that they run cleanly
+against an already-correct build: temporarily restored the pre-fix `mmu.S`/`exception_context.inc`
+content (`git show` against the pre-#229/#231 commit), rebuilt, and confirmed the script reported
+all 5 expected violations (2 UXN-count mismatches, 3 unmasked `eret` sites) with the exact function
+names and addresses. The first version of the `eret` check false-passed on this exact broken build
+-- its 40-instruction backward window credited `kernel_secondary_entry`'s own unrelated one-time
+cold-boot `DAIFSet` to `el1_current_irq_entry`'s `eret`, purely because the two landed close
+together in the final linked `.text`; fixed by scoping the backward scan to same-function
+instructions only. A second, narrower miss followed: even scoped to one function,
+`EXC_CONTEXT_RESTORE`'s real body is 42 instructions from its first `msr ELR_EL1` through the
+`eret`, not the ~35 originally estimated, so the 40-instruction window was a few instructions short
+even after the function-scoping fix; widened to 64. Restored the real fix afterward and reconfirmed
+a clean pass, then wired the script into `make kernelbuild-rpi5` itself (runs on every build, no
+opt-in flag) and reran the full 25-view real-hardware suite once more to confirm nothing regressed
+from adding the Makefile step.
+
 ### 2026-08-06: UXN on the Kernel Identity Block: AP Denies Data, Not Fetch (GitHub Issue #231)
 
 Side discovery from the #229 investigation, filed and fixed separately per

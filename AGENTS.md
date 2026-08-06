@@ -834,6 +834,36 @@ size.
   (`process_image_stack_growth_active[1]`/`process_image_stack_lowest_l3[1]`), so a forked child
   that grows its stack past what the parent had already faulted in before the fork would hit this
   fail-stop path instead of growing (see HISTORY.md's issue #209 entry).
+- **Every `eret` that returns to EL0 must mask `DAIF.I` before its last `msr ELR_EL1`/`msr SPSR_EL1`,
+  with nothing but more `msr`s in between.** An interrupt taken between those two writes (or after
+  them but before the `eret`) makes the hardware overwrite both with the interrupting context's own
+  values; the `eret` then returns to the wrong place with the wrong PSTATE. This is exactly issue
+  #229 (HISTORY.md, 2026-08-06): `.Lsyscall_dispatch` unmasking `DAIF.I` for the syscall-handling
+  window (issue #187) turned every ordinary syscall return into this race, intermittently (~25-40%
+  of boots) dropping EL0 into kernel `.text`. There are six `eret`s in this codebase today, all
+  masked: three via `EXC_CONTEXT_RESTORE` itself (`kernel/arch/arm64/kernel/exception_context.inc`,
+  used by `el1_current_irq_entry`/`el0_irq_entry`/`.Ldata_abort`), and `el0_context_resume`/
+  `run_initial_user` (`kernel/arch/arm64/kernel/user_entry.S`) directly, each one instruction
+  earlier than its own first `ELR_EL1`/`SPSR_EL1`/`SP_EL0` write for the same reason `EXC_CONTEXT_
+  RESTORE` does. `el2_drop_to_el1`'s `eret` (`kernel/arch/arm64/boot/entry.S`) is the seventh and
+  is not exposed to this: it is a one-time cold-boot EL2->EL1 drop that runs before any interrupt
+  source is ever unmasked, and it sets `DAIF` masked directly in the `SPSR_EL2` value it writes.
+  When adding a new `eret` site, mask `DAIF.I` first (or route through `EXC_CONTEXT_RESTORE` if the
+  frame shape matches) before assuming this is handled. `scripts/check_kernel_asm_invariants.py`
+  (run automatically by `make kernelbuild-rpi5`) disassembles the linked `kernel.elf` and fails the
+  build if any `eret` that writes `ELR_EL1` lacks a preceding `msr DAIFSet` in the same function --
+  a real, automated, zero-hardware regression guard for this exact bug, not just a reviewer
+  reminder. A permanent EL0-side probe (deliberately branching into kernel `.text` as the kernel's
+  own final action) was tried first and reverted: building a "safety" mechanism out of MORE
+  hand-written assembly grows the exact unverified-by-the-compiler surface this whole entry is
+  about, and the first version of that probe was itself nearly shipped with a wrong address
+  computation (a PC-relative `adr` inside code that gets copied to a different execution address)
+  found only by re-deriving the encoding by hand and cross-checking against real hardware --
+  precisely the review burden a static, external, .S/.tkb-free check avoids growing further. This
+  is not something the compiler enforces at the language level, since this whole file is
+  hand-written assembly outside the `.tkb` type system's reach (see ROADMAP.md's M4/#227 for the
+  actual structural fix: declaring the
+  exception frame and vector table in `.tkb` instead).
 - **The same D-cache-bypass gap applies to postmortem debugging over SWD, not just DMA/harness I/O.**
   `kernel/arch/arm64/boot/entry.S`'s `el1_exception_evidence` fail-stop path (see the "EL0 fail-stop"
   entry above) records `esr_el1`/`far_el1`/`elr_el1`/`spsr_el1` into a fixed `.bss` location before
