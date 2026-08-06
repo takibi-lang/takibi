@@ -15,6 +15,57 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-06: `embed_file("path")`, a Compile-Time File Embed -- Language Feature Landed, Kernel Wiring Not Yet Started (GitHub Issue #230, In Progress)
+
+Issue #230's stated scope is two parts: (1) a language feature to embed a real file as a `[u8; N]`
+array at compile time, and (2) using it to delete `kernel/user/ext2_image.S`/`initramfs.S` and their
+`extern symbol start`/`end` pairs entirely, replacing the `end - start` runtime length subtraction with
+the array's own known-at-compile-time size. Only part (1) is done in this entry; the kernel-side wiring
+(part 2) has not been started -- `ext2_image.S`/`initramfs.S`/their `_extern.tkb` files are all
+untouched, and `kernel/drivers/block/memory.tkb`/`kernel/fs/initramfs.tkb` still use the old `extern
+symbol` pair.
+
+Added `embed_file("path")` (`lib/ast.ml`/`lib/lexer.mll`/`lib/parser.mly`: a new `EmbedFile of string`
+expr constructor, parsed the same primary-expression shape as `SizeOf`/`OffsetOf`). Deliberately
+restricted to exactly one position -- the direct initializer of a top-level `let`/`let mut` -- enforced
+two ways: `type_inf.ml`'s global-initializer pass (Pass 2) special-cases `EmbedFile` there (reading the
+file to determine its real byte length and unifying `[u8; N]` against the global's own declared/inferred
+type, the same shape a bare `Var` initializer already gets special-cased with just above it), while
+`infer_expr`'s own case for the constructor unconditionally raises -- so any other position (a local
+`let`, a function argument, nested inside a call) reaches that rejection instead of some more confusing
+failure. `let mut` produces a writable (`.data`-shaped) global, plain `let` a read-only (`.rodata`-
+shaped) one, reusing the mutability distinction every other global already has rather than inventing a
+new one. An explicit array-size annotation is still allowed and checked against the real file size via
+ordinary unification (a mismatch surfaces as a normal type error, `array size mismatch: 18 vs 5`) --
+the restriction that matters is POSITION, not whether an annotation is present.
+
+Codegen (`lib/llvm_gen.ml`'s `gen_global`, inside its `eval_const` compile-time-constant evaluator) reads
+the same file a second time (this module has no shared cache with `type_inf.ml` -- re-reading a build
+artifact that is typically well under a few MB is not worth the complexity of threading bytes through
+`Types.program_types` just to avoid it) and builds the initializer via `Llvm.const_string`, which -- despite
+its name -- returns an exact, non-null-terminated `[N x i8]` array constant, matching `TypeArray(TypeU8,
+n)` with no padding or terminator byte to account for.
+
+Verified: a standalone CLI smoke test confirmed all the intended cases -- an unannotated `let` infers
+its own `[u8; N]`; a correct explicit annotation is accepted; a wrong one produces a clear `array size
+mismatch` error; a missing file produces the OS's own error message wrapped in a `TypeError` with a real
+source location; `let mut` emits an LLVM `global` initializer, plain `let` a `constant` one. `dune
+runtest` gained 7 new cases (`with_embed_fixture`, a `Filename.temp_file`-based helper defined above
+`codegen_tests` -- real files are needed, and dune's test runner's own CWD is not the repo root the
+compiler's other `path resolved like use "..."` conventions assume) covering all of the above plus the
+two rejection positions. One test-writing mistake surfaced and got fixed along the way, unrelated to
+`embed_file` itself: `sink` is a reserved keyword in this language (the ownership-mode annotation,
+`fn f(x: sink T)`), so a test function literally named `sink` was a pre-existing parse error the test
+initially (and incorrectly) attributed to the new feature -- caught by isolating the exact failing
+fragment via the CLI rather than assuming.
+
+955 -> 962 tests. `kernelbuild-rpi5`/hardware verification not yet run for this entry, since no kernel
+file has been touched yet -- next step is wiring `kernel/user/ext2_image.S`/`initramfs.S`'s two call
+sites over to `embed_file`, deleting both `.S` files and their `_extern.tkb` companions, and updating
+the Makefile's `.o`-level prerequisites (`$(KERNEL_EXT2_IMAGE_O): $(KERNEL_EXT2_IMAGE_S) $(KERNEL_EXT2_IMAGE)`)
+to instead make the overall `.tkb` compilation depend on those same blob files directly, per the issue's
+own "Build-system consideration" section.
+
 ### 2026-08-06: Closing Two Gaps in the Exception-Entry Prototype -- Real Signature Checking, and a Standalone `exception_resume`, With a Real Ordering Bug Caught Before Shipping (GitHub Issue #227 Item 1 Follow-up)
 
 Direct follow-up to the item 1 prototype below, requested by the user after reviewing it: the

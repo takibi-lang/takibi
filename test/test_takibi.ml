@@ -6488,6 +6488,18 @@ let exc_frame_src =
      fpsr: usize; fpcr: usize;
    }\n"
 
+(* GitHub issue #230: writes [contents] to a real temp file, runs [f] with
+   its path, and always removes it afterward -- embed_file needs a real
+   file on disk, and dune's test runner's own CWD is not the repo root
+   the compiler's other `path resolved like use "..."` conventions assume,
+   so a path relative to anything assumed here would be fragile. *)
+let with_embed_fixture contents f =
+  let path = Filename.temp_file "takibi_embed_test" ".bin" in
+  let oc = open_out_bin path in
+  output_string oc contents;
+  close_out oc;
+  Fun.protect ~finally:(fun () -> Sys.remove path) (fun () -> f path)
+
 let codegen_tests = [
   Alcotest.test_case
     "disjoint same-name annotated locals retain their own pointer widths" `Quick
@@ -8600,6 +8612,83 @@ let codegen_tests = [
             frame: IncompleteFrame;
           }" ();
        Target_info.configure "thumbv7em-none-eabi");
+
+  (* GitHub issue #230: `embed_file("path")` reads a real file at compile
+     time and becomes a `[u8; N]` array constant, N the file's real byte
+     size -- replacing a hand-written `.S` file's `.incbin` blob (and the
+     `extern symbol start`/`end` pair + runtime `end - start` subtraction
+     that used to be needed alongside it) with no second, human-authored
+     side to keep in sync. with_embed_fixture (defined above codegen_tests,
+     alongside exc_frame_src, for the same `let ... in` list-swallowing
+     reason -- see that binding's own comment) uses a real temp file
+     rather than a path relative to some assumed CWD, since dune's test
+     runner's own working directory is not the repo root the compiler's
+     other `path resolved like use "..."` conventions assume. *)
+  Alcotest.test_case "embed_file accepts an unannotated global initializer and embeds the real bytes" `Quick
+    (fun () ->
+       with_embed_fixture "hello embed" (fun path ->
+         let _ = gen_codegen (Printf.sprintf
+           "let codegen_embed_unannotated = embed_file(\"%s\");
+            fn codegen_embed_use_unannotated() -> usize {
+              return codegen_embed_unannotated[0] as usize;
+            }" path)
+         in
+         match Hashtbl.find_opt Llvm_gen.global_vars "codegen_embed_unannotated" with
+         | None -> Alcotest.fail "codegen_embed_unannotated was not emitted"
+         | Some (_, g) ->
+             let ir = Llvm.string_of_llvalue g in
+             (* "hello embed" is exactly 11 bytes; confirms both the real
+                file content AND the inferred array length (not just that
+                *some* global was emitted). *)
+             Alcotest.(check bool) "embeds the real 11-byte file content" true
+               (contains_substring ir "[11 x i8] c\"hello embed\"")));
+
+  Alcotest.test_case "embed_file accepts a correct explicit array-size annotation" `Quick
+    (fun () ->
+       with_embed_fixture "12 bytes!!!!" (fun path ->
+         (* "12 bytes!!!!" is exactly 12 bytes. *)
+         expect_codegen_ok (Printf.sprintf
+           "let codegen_embed_annotated: [u8; 12] = embed_file(\"%s\");" path) ()));
+
+  Alcotest.test_case "embed_file rejects a wrong explicit array-size annotation" `Quick
+    (fun () ->
+       with_embed_fixture "12 bytes!!!!" (fun path ->
+         expect_type_error "array size mismatch" (Printf.sprintf
+           "let embedded: [u8; 5] = embed_file(\"%s\");" path) ()));
+
+  Alcotest.test_case "embed_file rejects a missing file with a clear error" `Quick
+    (fun () ->
+       expect_type_error "embed_file"
+         "let embedded = embed_file(\"/nonexistent/takibi_embed_test_missing.bin\");" ());
+
+  Alcotest.test_case "embed_file rejects use inside a function body" `Quick
+    (fun () ->
+       with_embed_fixture "x" (fun path ->
+         expect_type_error "top-level" (Printf.sprintf
+           "fn f() -> usize {
+              let x = embed_file(\"%s\");
+              return 0;
+            }" path) ()));
+
+  Alcotest.test_case "embed_file rejects use nested inside another expression" `Quick
+    (fun () ->
+       with_embed_fixture "x" (fun path ->
+         (* A bare `IDENT[expr]` is the only shape `Index` accepts
+            syntactically (see parser.mly), so a directly-indexed
+            `embed_file(...)[0]` is a parse error, not a case that reaches
+            this rejection -- pass it as an ordinary call argument instead,
+            which does parse and genuinely exercises the "not a global
+            let initializer" check. *)
+         expect_type_error "top-level" (Printf.sprintf
+           "fn consume(x: usize) { return; }
+            fn f() { consume(embed_file(\"%s\")); }" path) ()));
+
+  Alcotest.test_case "embed_file supports let mut for a writable embedded array" `Quick
+    (fun () ->
+       with_embed_fixture "mutable" (fun path ->
+         expect_ok (Printf.sprintf
+           "let mut embedded = embed_file(\"%s\");
+            fn f() { embedded[0] = 65; }" path) ()));
 
   (* GitHub issue #226: closed system-register/barrier/TLBI intrinsics, to
      lift kernel/arch/arm64/kernel/timer.S and most of

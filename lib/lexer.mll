@@ -50,6 +50,7 @@ rule read = parse
   | "vector_table" { VECTOR_TABLE }
   | "exception_entry" { EXCEPTION_ENTRY }
   | "exception_resume" { EXCEPTION_RESUME }
+  | "embed_file" { EMBED_FILE }
   | "struct"  { STRUCT }
   | "opaque"  { OPAQUE }
   | "affine"  { AFFINE }

@@ -188,7 +188,7 @@ let relocate_loc (mangled : string) (loc : loc) : loc =
 let rec relocate_expr (mangled : string) (e : expr) : expr =
   let ex = relocate_expr mangled in
   let desc = match e.desc with
-    | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _ as d -> d
+    | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _ | EmbedFile _ as d -> d
     | ViewLit (name, args) -> ViewLit (name, args)
     | Call (name, args) -> Call (name, List.map ex args)
     | VariantCtor (vname, cname, payload) -> VariantCtor (vname, cname, ex payload)
@@ -254,7 +254,7 @@ let rec walk_expr ~subst ~vsubst ~resolve_inst (e : expr) : expr =
   let ty t = transform ~subst ~vsubst ~resolve_inst t in
   let ex e = walk_expr ~subst ~vsubst ~resolve_inst e in
   let desc = match e.desc with
-    | IntLit _ | BoolLit _ | StringLit _ | EnumVariant _ as d -> d
+    | IntLit _ | BoolLit _ | StringLit _ | EnumVariant _ | EmbedFile _ as d -> d
     | Var name ->
         (* Freelist redesign follow-up: a generic function's own body may
            reference a bound VALUE parameter as an ordinary runtime
@@ -803,7 +803,7 @@ let run (prog : toplevel list) : toplevel list =
       let ty t = transform ~subst ~vsubst ~resolve_inst:collect_resolve t in
       let ex e = walk_expr_calls ~subst ~vsubst local_types e in
       let desc = match e.desc with
-        | IntLit _ | BoolLit _ | StringLit _ | EnumVariant _ as d -> d
+        | IntLit _ | BoolLit _ | StringLit _ | EnumVariant _ | EmbedFile _ as d -> d
         | Var name ->
             (* Same value-generic-parameter substitution as the stateless
                walk_expr (see its own comment) -- needed here too since a

@@ -227,6 +227,28 @@ and expr_desc =
   | SizeOf of type_expr        (* sizeof(T) -- compile-time size in bytes, type usize *)
   | OffsetOf of type_expr * string
       (* offsetof(T, field) -- compile-time field offset in bytes, type usize *)
+  | EmbedFile of string
+      (* embed_file("path") -- GitHub issue #230: compile-time file embed.
+         Reads the named file (path resolved the same way `use "...";`
+         resolves its own paths -- relative to the directory takibi is
+         invoked from) at compile time and becomes a `[u8; N]` array
+         constant, N the file's real byte size. Deliberately restricted to
+         exactly one position: the direct initializer of a top-level
+         `let`/`let mut` (type_inf.ml's global-initializer pass special-
+         cases it there, the same way it already special-cases a bare
+         `Var` initializer; infer_expr's own case for this constructor
+         unconditionally rejects it, so any other position -- a local
+         `let`, a function argument, nested inside another expression --
+         is a clear compile error instead of a confusing one). An explicit
+         array-size annotation on the global itself is still allowed and
+         gets verified against the real file size like any other typed
+         initializer -- the restriction is about POSITION, not annotation
+         presence. No general "embed arbitrary compile-time data"
+         facility is intended; this exists to replace `.incbin` in a
+         hand-written `.S` file with no other author, matching the same
+         "generate/embed, don't hand-author and mirror" reasoning behind
+         issue #227's exception-frame declarations, applied to blob data
+         instead of a register frame. *)
   | Assign of expr * expr
       (* lhs = rhs -- GitHub issue #184: assignment is a genuine expr (not
          a family of statement-only forms), matching Rust's own
@@ -620,7 +642,7 @@ let written_names (stmts : stmt list) : string list =
         go_expr rhs
     | IntLit _ | BoolLit _ | StringLit _ | Var _ | ViewLit _
     | EnumVariant _ | SizeOf _
-    | OffsetOf _ ->
+    | OffsetOf _ | EmbedFile _ ->
         ()
   in
   let rec go_stmt (s : stmt) = match s.desc with

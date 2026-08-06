@@ -1780,6 +1780,21 @@ at codegen time rather than silently lowering to a racy `wfi`.
   assembly or the linker script) with no Takibi type at all -- there is
   nothing to read or write through it, only an address. Referencing the
   bare name evaluates to that address as a `usize` (GitHub issue #225).
+- `embed_file("path")` (GitHub issue #230) reads a real file at compile
+  time and becomes a `[u8; N]` array constant, `N` the file's actual byte
+  size -- no `.incbin`-in-a-hand-written-`.S`-file plus `extern symbol
+  start`/`end` pair plus runtime `end - start` subtraction needed to get
+  the same data into `.tkb`. `path` resolves the same way `use "...";`
+  resolves its own paths (relative to the directory `takibi` is invoked
+  from). Restricted to exactly one position: the direct initializer of a
+  top-level `let`/`let mut` (`let mut` for a writable/`.data`-like array,
+  plain `let` for read-only/`.rodata`-like, matching how these two forms
+  already differ for any other global) -- any other position (a local
+  `let`, a function argument, nested inside another expression) is a
+  compile error. An explicit array-size annotation on the global is still
+  allowed and gets verified against the real file size like any other
+  typed initializer (a mismatch is an ordinary type error); the
+  restriction is about position, not annotation presence.
 - `vector_table { N => target; ... }` declares the target architecture's
   hardware exception vector table (GitHub issue #227): each entry names an
   architectural vector slot `N` and the `fn` or `extern symbol` branched to

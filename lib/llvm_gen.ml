@@ -1011,7 +1011,7 @@ let slice_rebind_names (stmts : Ast.stmt list) : string list =
         go_expr rhs
     | IntLit _ | BoolLit _ | StringLit _ | Var _ | ViewLit _
     | EnumVariant _ | SizeOf _
-    | OffsetOf _ ->
+    | OffsetOf _ | EmbedFile _ ->
         ()
   in
   let rec go_stmt (s : Ast.stmt) = match s.desc with
@@ -3472,6 +3472,10 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
   | StructLit _ ->
       raise (Error "BUG: StructLit must be handled in gen_stmt / gen_global, not gen_expr")
 
+  | EmbedFile _ ->
+      raise (Error "BUG: EmbedFile must be handled in gen_global, not gen_expr -- \
+                     type_inf.ml should have already rejected any other position")
+
   | TupleLit exprs ->
       (* OWNERSHIP_KERNEL.md 5.9 (GitHub issue #120): build the anonymous
          aggregate via insertvalue. When the consumer's tuple type is known
@@ -5133,6 +5137,30 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable decl_loc =
          | None -> raise (Error (Printf.sprintf
              "'%s' is not a compile-time constant (must reference an earlier \
               immutable global with a constant initializer)" name)))
+    | EmbedFile path, TypeArray (TypeU8, n) ->
+        (* GitHub issue #230: re-reads the same file type_inf.ml's global-
+           initializer pass already read once to determine `n` (this
+           module cannot share that read -- type_inf.ml has no LLVM
+           dependency, and this is the only place that needs the actual
+           bytes, not just the length). `const_string` gives exactly an
+           `[N x i8]` array (NOT null-terminated, unlike its name might
+           suggest -- see its own doc comment), matching TypeArray(TypeU8,
+           n) exactly with no padding/terminator to account for. A length
+           mismatch here means the file changed on disk between the two
+           reads (or a real internal bug); either way this cannot silently
+           produce a wrong-sized global. *)
+        let bytes =
+          let ic = open_in_bin path in
+          let len = in_channel_length ic in
+          let s = really_input_string ic len in
+          close_in ic;
+          s
+        in
+        if String.length bytes <> n then
+          raise (Error (Printf.sprintf
+            "embed_file(\"%s\"): file size changed between type-checking \
+             (%d bytes) and codegen (%d bytes)" path n (String.length bytes)));
+        const_string context bytes
     | _ -> raise (Error "global initializer: unsupported constant expression")
   in
   let init = match expr_opt with

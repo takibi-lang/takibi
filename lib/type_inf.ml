@@ -61,7 +61,7 @@ let rec count_var_occurrences name (e : Ast.expr) =
   | Ast.Assign (lhs, rhs) ->
       count_var_occurrences name lhs + count_var_occurrences name rhs
   | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.ViewLit _
-  | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.OffsetOf _ -> 0
+  | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.OffsetOf _ | Ast.EmbedFile _ -> 0
 
 (* Type environment: immutable map from variable name to (type, is_mutable) *)
 type tyenv = (ty * bool) StringMap.t
@@ -2173,6 +2173,24 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | StructLit _ ->
       raise (TypeError (e.loc,
         "struct literal requires a type annotation: `let mut x: Name = {...}`"))
+
+  | EmbedFile _ ->
+      (* GitHub issue #230: embed_file(...) is meaningful only as the
+         direct initializer of a top-level `let`/`let mut` -- handled
+         entirely by the global-initializer pass (Pass 2, below), which
+         never reaches infer_expr for it (matching how a bare `Var` global
+         initializer is also special-cased before falling through to this
+         general dispatch). Reaching this case at all means embed_file was
+         used somewhere else -- a local `let`, a function argument, nested
+         inside another expression -- which is rejected outright, the same
+         way StructLit just above requires its own special position. (An
+         explicit array-size annotation on the global itself, e.g. `let x:
+         [u8; 100] = embed_file(...)`, is fine -- Pass 2 unifies it against
+         the real file size like any other typed initializer; this
+         rejection is about POSITION, not annotation presence.) *)
+      raise (TypeError (e.loc,
+        "embed_file(...) may only be used as a top-level 'let'/'let mut' \
+         initializer, e.g. 'let x = embed_file(\"path\");'"))
 
   | TupleLit exprs ->
       (* OWNERSHIP_KERNEL.md 5.9 (GitHub issue #120): a function-local
@@ -4652,7 +4670,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               validate_static_application e.loc "view" name formals args)
      | Ast.Assign (lhs, rhs) -> validate_expr_types lhs; validate_expr_types rhs
      | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.Var _
-     | Ast.EnumVariant _ -> ())
+     | Ast.EnumVariant _ | Ast.EmbedFile _ -> ())
   and validate_stmt_types (s : Ast.stmt) =
     (match s.desc with
      | Ast.Let (_, _, ty, init, _) ->
@@ -5395,6 +5413,34 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   check_expr senv eenv genv fenv { desc = Ast.StructLit exprs; loc } expected
               | _ -> raise (TypeError (loc,
                   "literal { ... } requires a struct or array type annotation")));
+             genv
+         | Some { desc = Ast.EmbedFile path; loc } ->
+             (* GitHub issue #230: bypass infer_expr entirely (its own
+                EmbedFile case unconditionally rejects it -- see that
+                case's own comment) since this is the one position it is
+                actually valid in. Reads the file here only to determine
+                its byte length; llvm_gen.ml's gen_global re-reads it for
+                the actual bytes (this module has no LLVM dependency to
+                build a constant with, and does not need one just to learn
+                a length). unify (not a forced check) means an explicit
+                annotation is still allowed and gets verified naturally --
+                `let x: [u8; 100] = embed_file(...)` where the real file
+                is a different size is a normal unify TypeError, not a
+                special case -- while the common unannotated `let x =
+                embed_file(...)` binds the fresh type variable Pass 0
+                gave `x` in genv to the real size, exactly like ConstDef's
+                own unify call just above does for its own initializer. *)
+             let n =
+               try
+                 let ic = open_in_bin path in
+                 let len = in_channel_length ic in
+                 close_in ic;
+                 len
+               with Sys_error msg -> raise (TypeError (loc, Printf.sprintf
+                 "embed_file(\"%s\"): %s" path msg))
+             in
+             (try unify (TArray (TU8, n)) (strip_io ty)
+              with Unify_error m -> raise (TypeError (loc, m)));
              genv
          | Some { desc = Ast.Var vname; loc } ->
              (* Bypass infer_expr's ordinary Var case here: it decays array
@@ -6201,7 +6247,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           require_region_live e.loc taints moved base;
           check_expr taints (check_expr taints moved false lo) false hi
       | Ast.SizeOf _ | Ast.OffsetOf _ | Ast.IntLit _ | Ast.BoolLit _
-      | Ast.StringLit _ -> moved
+      | Ast.StringLit _ | Ast.EmbedFile _ -> moved
       | Ast.EnumVariant (vtype, _) ->
           if (Hashtbl.find_opt variant_kinds vtype = Some Ast.KindLinear
               || Hashtbl.mem must_use_variants vtype)
@@ -6791,7 +6837,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.SliceOf (_, lo, hi) -> visit_expr lo; visit_expr hi
       | Ast.Assign (lhs, rhs) -> visit_expr lhs; visit_expr rhs
       | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.Var _
-      | Ast.ViewLit _ | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.OffsetOf _ -> ()
+      | Ast.ViewLit _ | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.OffsetOf _
+      | Ast.EmbedFile _ -> ()
     and visit_stmt (s : Ast.stmt) =
       match s.desc with
       | Ast.Return (Some e) | Ast.Expr e | Ast.LetTuple (_, e) | Ast.Yield e ->
