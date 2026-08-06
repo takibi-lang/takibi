@@ -1,0 +1,97 @@
+// GitHub issue #226: the PTE read/write and root-selection functions from
+// kernel/arch/arm64/mm/mmu.S, lifted into ordinary .tkb. mmu.S's own header
+// comment already argued these were never real system-register work: each
+// one was dominated by `cbnz x0`-style root-0-vs-root-1 branching (an
+// ordinary `if`) or, in address_space_clear_root's case, a plain
+// 512-iteration zeroing loop, wrapped around one real TLBI/barrier
+// instruction at the end. Only that trailing instruction is still a
+// primitive call (Stage 0's tlbi_*/dsb_*/isb/msr_ttbr0_el1); everything
+// else here is ordinary arithmetic and control flow the type system can
+// see into.
+//
+// The six root/table regions themselves (kernel_l1_0/_1, user_l3_0/_1, plus
+// user_l2_0/_1 which only INIT_ROOT touches) still live in mmu.S's `.bss`,
+// reached here via `extern symbol` -- kernel_mmu_init/kernel_mmu_activate
+// (the actual MMU-enable sequence that builds and activates these tables)
+// stay in mmu.S for now; moving the tables themselves is that later stage's
+// job, not this one's.
+extern symbol kernel_l1_0;
+extern symbol kernel_l1_1;
+extern symbol user_l3_0;
+extern symbol user_l3_1;
+
+// user_pte_write(index, value): one 4KB PTE in the 2MB user window.
+fn user_pte_write(index: usize, value: usize) {
+    let entry: *usize = (user_l3_0 + index * 8) as *usize;
+    *entry = value;
+    dsb_ishst();
+}
+
+fn user_pte_read(index: usize) -> usize {
+    let entry: *usize = (user_l3_0 + index * 8) as *usize;
+    return *entry;
+}
+
+// user_tlb_invalidate(va): publish one changed leaf descriptor.
+fn user_tlb_invalidate(va: usize) {
+    dsb_ishst();
+    tlbi_vaae1is(va >> 12);
+    dsb_ish();
+    isb();
+}
+
+fn address_space_pte_write(slot: usize, index: usize, value: usize) {
+    let mut base: usize = user_l3_0;
+    if (slot != 0) {
+        base = user_l3_1;
+    }
+    let entry: *usize = (base + index * 8) as *usize;
+    *entry = value;
+    dsb_ishst();
+}
+
+fn address_space_pte_read(slot: usize, index: usize) -> usize {
+    let mut base: usize = user_l3_0;
+    if (slot != 0) {
+        base = user_l3_1;
+    }
+    let entry: *usize = (base + index * 8) as *usize;
+    return *entry;
+}
+
+// TTBR0_EL1's ASID field (bits [63:48]) is `slot + 1`, matching mmu.S's
+// original encoding exactly -- ASID 0 is deliberately never assigned to
+// either root, keeping it free as a "no stale TLB entries could possibly
+// match" value.
+fn address_space_activate_root(slot: usize) {
+    let mut base: usize = kernel_l1_0;
+    if (slot != 0) {
+        base = kernel_l1_1;
+    }
+    let ttbr: usize = base | ((slot + 1) << 48);
+    dsb_ish();
+    msr_ttbr0_el1(ttbr);
+    isb();
+}
+
+fn address_space_tlb_invalidate(slot: usize, va: usize) {
+    dsb_ishst();
+    tlbi_vae1is(((slot + 1) << 48) | (va >> 12));
+    dsb_ish();
+    isb();
+}
+
+fn address_space_clear_root(slot: usize) {
+    let mut base: usize = user_l3_0;
+    if (slot != 0) {
+        base = user_l3_1;
+    }
+    for i: usize in 0..<512 {
+        let entry: *usize = (base + i * 8) as *usize;
+        *entry = 0;
+    }
+    dsb_ishst();
+    tlbi_aside1is((slot + 1) << 48);
+    dsb_ish();
+    isb();
+}

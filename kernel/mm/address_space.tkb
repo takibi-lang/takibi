@@ -1,5 +1,5 @@
 use "kernel/mm/page.tkb";
-use "kernel/arch/arm64/mm/mmu_extern.tkb";
+use "kernel/arch/arm64/mm/mmu.tkb";
 
 const USER_TEXT_VA: usize = 0x40000000;
 const USER_DATA_VA: usize = 0x40001000;

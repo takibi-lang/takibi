@@ -1,8 +1,0 @@
-extern fn user_pte_write(index: usize, value: usize);
-extern fn user_pte_read(index: usize) -> usize;
-extern fn user_tlb_invalidate(va: usize);
-extern fn address_space_pte_write(slot: usize, index: usize, value: usize);
-extern fn address_space_pte_read(slot: usize, index: usize) -> usize;
-extern fn address_space_activate_root(slot: usize);
-extern fn address_space_tlb_invalidate(slot: usize, va: usize);
-extern fn address_space_clear_root(slot: usize);
