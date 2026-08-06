@@ -463,6 +463,27 @@ type toplevel =
      `run_initial_user`/`.Ldata_abort` in kernel/arch/arm64/kernel/
      user_entry.S) are deliberately out of scope for this first slice --
      see HISTORY.md's issue #227 item 1 entry. *)
+  | ExceptionResumeDef of ident * (string * string) list * loc
+  (* exception_resume name { frame: FrameStruct; } -- GitHub issue #227
+     item 1 follow-up. Generates just the restore-frame/eret half of
+     ExceptionEntryDef, for a standalone resume entry point reached via an
+     ordinary `bl`/call with the frame's own address already in x0 (AAPCS
+     first-argument register), not via a preceding save in the same
+     sequence -- exactly `el0_context_resume`'s existing shape
+     (kernel/arch/arm64/kernel/user_entry.S), the first (and, so far, only)
+     of the three sites ExceptionEntryDef's own comment named as
+     out-of-scope that actually fits this pattern: `run_initial_user`
+     constructs a synthetic resume state directly from raw entry/stack
+     arguments, never from a saved ExceptionFrame, and `.Ldata_abort` is
+     inline control flow inside el0_sync_entry's own larger dispatch body,
+     not a standalone entry point -- neither is expressible this way.
+     Reuses ExceptionEntryDef's own frame-validation (type_inf.ml) and
+     restore-codegen (lib/llvm_gen.ml). The generated symbol still needs an
+     ordinary `extern fn name(frame_sp: usize) !{noreturn};` declaration
+     alongside it for other .tkb code to call it normally (this
+     declaration only defines the raw-asm BODY, the same relationship an
+     `extern fn` normally has with its assembly-defined body -- just a
+     compiler-generated one instead of hand-written). *)
   | StructDef of string * (string * type_expr) list * bool * int option * string list * loc
   (* name, fields, is_packed, align_bytes, private_field_names, loc --
      align_bytes = Some N means type-level align(N). private_field_names

@@ -558,19 +558,19 @@ el0_context_set_sp_el0:
 // different code paths can no longer race to set elr_el1/sp_el0 and have one
 // silently undone by the other's unconditional reload (see commit 8db27e3's
 // first bug for the failure mode this replaces).
-// The DAIFSet here is one instruction earlier than the identical one
-// EXC_CONTEXT_RESTORE now starts with (GitHub issue #229): `mov sp, x0`
-// switches SP_EL1 to the frame being resumed, which on a scheduler switch is
-// a DIFFERENT process's kernel stack, and an interrupt taken in between would
-// build its own EXC_CONTEXT_SIZE frame below that one instead of below the
-// stack this syscall actually ran on.
-    .global el0_context_resume
-el0_context_resume:
-    msr     DAIFSet, #0x2
-    mov     sp, x0
-    EXC_CONTEXT_RESTORE
-    add     sp, sp, #EXC_CONTEXT_SIZE
-    eret
+//
+// el0_context_resume itself is no longer hand-written here -- GitHub issue
+// #227 item 1's follow-up generates it from kernel/arch/arm64/kernel/
+// exception_frame.tkb's `exception_resume el0_context_resume { ... }`
+// declaration (lib/llvm_gen.ml's gen_exception_resume). Its own critical
+// ordering requirement carried over exactly: `msr DAIFSet` MUST precede
+// `mov sp, x0`, not follow it -- `mov sp, x0` switches SP_EL1 to the frame
+// being resumed, which on a scheduler switch is a DIFFERENT process's
+// kernel stack, and an interrupt taken in the window before DAIF.I is
+// masked would build its own exception frame below that new stack instead
+// of below the one this syscall actually ran on. The extern fn declaration
+// below (kernel/arch/arm64/kernel/user_entry_extern.tkb) is unchanged --
+// that is still what lets ordinary .tkb code call it.
 
 // The single shared fail-stop entry, replacing every hand-written
 // `mov x0, #8; b el1_exception_evidence` pair at each .tkb-reachable action

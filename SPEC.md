@@ -1812,9 +1812,21 @@ at codegen time rather than silently lowering to a racy `wfi`.
   called with the frame's own stack address (as `usize`) after the save
   (and `before`, if given) and must return a `usize`, the frame address to
   resume from (unchanged from the hand-written convention it replaces).
-  `before` is optional. Only the uniform save -> dispatch -> restore ->
-  `eret` shape is covered; a standalone restore-only resume path (no
-  preceding save in the same sequence) is not yet expressible this way.
+  `before` is optional; both `dispatch` and `before` are checked against
+  their real signature (`fn(usize) -> usize` / `fn()`), not just existence.
+  `exception_entry` only covers the uniform save -> dispatch -> restore ->
+  `eret` shape.
+- `exception_resume name { frame: FrameStruct; }` (same issue, same
+  prototype-syntax caveat) generates just the restore-frame/`eret` half,
+  for a standalone resume entry point reached via an ordinary call with
+  the frame's own address already in the platform's first-argument
+  register (AArch64: `x0`) -- not via a preceding save in the same
+  sequence. `frame` is validated exactly like `exception_entry`'s. The
+  generated symbol still needs an ordinary `extern fn name(frame_sp:
+  usize) !{noreturn};` declaration alongside it for other `.tkb` code to
+  call it normally -- this declaration only supplies the generated raw-asm
+  BODY, the same relationship an `extern fn` normally has with a
+  hand-written assembly body.
 - `inline fn name(params) -> ret { ... }` marks a Takibi-defined function
   as an explicit inlining request. In normal optimized builds the backend
   emits LLVM's `alwaysinline` function attribute and runs the corresponding

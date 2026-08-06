@@ -6460,6 +6460,34 @@ let infer_tests = [
    test bed (that role is filled by examples/ + make qemutest, which also
    checks runtime behavior, not just "the IR verifies"). *)
 
+(* GitHub issue #227 item 1 (prototype slice): the one closed AArch64
+   exception-frame register-name field set (x0..x30/sp_el0/elr_el1/
+   spsr_el1/q0..q31/fpsr/fpcr) `exception_entry`'s tests below share --
+   factored out as a top-level `let` (not one inside codegen_tests' own
+   list literal) because `let ... in` immediately followed by `;`-separated
+   list elements greedily swallows the rest of the list as a sequence
+   instead of terminating at the next list element, found the hard way as
+   a "this expression has type unit Alcotest.test_case but... left-hand
+   side of a sequence" error while first adding these tests. *)
+let exc_frame_src =
+  "struct packed ExcFrame {
+     x0: usize; x1: usize; x2: usize; x3: usize; x4: usize; x5: usize;
+     x6: usize; x7: usize; x8: usize; x9: usize; x10: usize; x11: usize;
+     x12: usize; x13: usize; x14: usize; x15: usize; x16: usize; x17: usize;
+     x18: usize; x19: usize; x20: usize; x21: usize; x22: usize; x23: usize;
+     x24: usize; x25: usize; x26: usize; x27: usize; x28: usize; x29: usize;
+     x30: usize;
+     sp_el0: usize; elr_el1: usize; spsr_el1: usize;
+     q0: [u8;16]; q1: [u8;16]; q2: [u8;16]; q3: [u8;16]; q4: [u8;16];
+     q5: [u8;16]; q6: [u8;16]; q7: [u8;16]; q8: [u8;16]; q9: [u8;16];
+     q10: [u8;16]; q11: [u8;16]; q12: [u8;16]; q13: [u8;16]; q14: [u8;16];
+     q15: [u8;16]; q16: [u8;16]; q17: [u8;16]; q18: [u8;16]; q19: [u8;16];
+     q20: [u8;16]; q21: [u8;16]; q22: [u8;16]; q23: [u8;16]; q24: [u8;16];
+     q25: [u8;16]; q26: [u8;16]; q27: [u8;16]; q28: [u8;16]; q29: [u8;16];
+     q30: [u8;16]; q31: [u8;16];
+     fpsr: usize; fpcr: usize;
+   }\n"
+
 let codegen_tests = [
   Alcotest.test_case
     "disjoint same-name annotated locals retain their own pointer widths" `Quick
@@ -8456,6 +8484,120 @@ let codegen_tests = [
             4=>tkb_handler;5=>asm_handler;6=>tkb_handler;7=>tkb_handler;
             8=>asm_handler;9=>asm_handler;10=>tkb_handler;11=>tkb_handler;
             12=>tkb_handler;13=>tkb_handler;14=>tkb_handler;15=>tkb_handler;
+          }" ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  (* GitHub issue #227 item 1 (prototype slice): `exception_entry name {
+     frame: ...; dispatch: ...; before: ...; }` generates a save/[before]/
+     dispatch/restore/eret sequence from a `struct packed` frame
+     declaration. exc_frame_src (defined above codegen_tests) is the one
+     closed AArch64 register-name field set every test below shares. *)
+  Alcotest.test_case "exception_entry accepts a well-formed frame/dispatch/before declaration" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_ok
+         (exc_frame_src ^
+          "fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           fn my_before() {}
+           exception_entry el1_current_irq_entry {
+             frame: ExcFrame;
+             before: my_before;
+             dispatch: my_dispatch;
+           }") ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_entry rejects a dispatch target with the wrong signature" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "wrong signature"
+         (exc_frame_src ^
+          "fn bad_dispatch(a: usize, b: usize) -> usize { return a; }
+           exception_entry el1_current_irq_entry {
+             frame: ExcFrame;
+             dispatch: bad_dispatch;
+           }") ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_entry rejects a before target with the wrong signature" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "wrong signature"
+         (exc_frame_src ^
+          "fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           fn bad_before() -> usize { return 0; }
+           exception_entry el1_current_irq_entry {
+             frame: ExcFrame;
+             before: bad_before;
+             dispatch: my_dispatch;
+           }") ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_entry rejects a frame struct missing a register field" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "missing register field"
+         "struct packed IncompleteFrame { x0: usize; }
+          fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+          exception_entry el1_current_irq_entry {
+            frame: IncompleteFrame;
+            dispatch: my_dispatch;
+          }" ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_entry rejects a frame struct with a non-register-name field" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "not an AArch64 exception-frame register name"
+         (exc_frame_src ^
+          "struct packed BadFrame { x0: usize; extra: usize; }
+           fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           exception_entry el1_current_irq_entry {
+             frame: BadFrame;
+             dispatch: my_dispatch;
+           }") ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  (* GitHub issue #227 item 1 follow-up: `exception_resume name { frame:
+     ...; }` generates just the restore-frame/eret half, for a standalone
+     resume entry point reached via an ordinary call with the frame's own
+     address already in x0 -- exactly el0_context_resume's shape. Reuses
+     exception_entry's own frame validation, so only the key handling
+     (exactly one required key, "frame") gets its own tests here. *)
+  Alcotest.test_case "exception_resume accepts a well-formed frame declaration" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_ok
+         (exc_frame_src ^
+          "exception_resume el0_context_resume {
+             frame: ExcFrame;
+           }") ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_resume rejects an unknown key" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "unknown key"
+         (exc_frame_src ^
+          "exception_resume el0_context_resume {
+             frame: ExcFrame;
+             dispatch: ExcFrame;
+           }") ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_resume rejects a missing frame key" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "missing required key 'frame'"
+         "exception_resume el0_context_resume { }" ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_resume rejects a frame missing a register field, same as exception_entry" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "missing register field"
+         "struct packed IncompleteFrame { x0: usize; }
+          exception_resume el0_context_resume {
+            frame: IncompleteFrame;
           }" ();
        Target_info.configure "thumbv7em-none-eabi");
 

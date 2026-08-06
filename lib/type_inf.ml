@@ -3795,6 +3795,53 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     @ (List.init 32 (fun i -> (Printf.sprintf "q%d" i, Ast.TypeArray (Ast.TypeU8, 16))))
     @ ["fpsr", Ast.TypeUsize; "fpcr", Ast.TypeUsize]
   in
+  (* Shared by ExceptionEntryDef and ExceptionResumeDef: `frame` must name a
+     `struct packed` whose fields are EXACTLY
+     aarch64_exception_frame_register_set, one of each. Looked up directly
+     in `prog` (see the call sites' own comment on why, not
+     Type_layout.structs -- a module dependency cycle). `decl_kind` is
+     "exception_entry"/"exception_resume", only used to word error
+     messages the same way each declaration kind's other errors are
+     worded. *)
+  let validate_exception_frame decl_kind decl_name loc frame =
+    let struct_def = List.find_map (function
+      | Ast.StructDef (n, fields, is_packed, _, _, _) when n = frame ->
+          Some (fields, is_packed)
+      | Ast.OwnedStructDef (n, _, _, fields, is_packed, _, _, _, _) when n = frame ->
+          Some (fields, is_packed)
+      | _ -> None) prog
+    in
+    match struct_def with
+    | None -> raise (TypeError (loc, Printf.sprintf
+        "%s '%s' frame '%s' is not a known struct" decl_kind decl_name frame))
+    | Some (fields, is_packed) ->
+        if not is_packed then
+          raise (TypeError (loc, Printf.sprintf
+            "%s '%s' frame '%s' must be a packed struct" decl_kind decl_name frame));
+        let seen = Hashtbl.create 70 in
+        List.iter (fun (fname, fty) ->
+          match List.assoc_opt fname aarch64_exception_frame_register_set with
+          | None -> raise (TypeError (loc, Printf.sprintf
+              "%s '%s' frame '%s' has field '%s', which is not an AArch64 exception-frame register name"
+              decl_kind decl_name frame fname))
+          | Some expected_ty ->
+              if fty <> expected_ty then
+                raise (TypeError (loc, Printf.sprintf
+                  "%s '%s' frame '%s' field '%s' has the wrong type"
+                  decl_kind decl_name frame fname));
+              if Hashtbl.mem seen fname then
+                raise (TypeError (loc, Printf.sprintf
+                  "%s '%s' frame '%s' has field '%s' more than once"
+                  decl_kind decl_name frame fname));
+              Hashtbl.add seen fname ()
+        ) fields;
+        List.iter (fun (rname, _) ->
+          if not (Hashtbl.mem seen rname) then
+            raise (TypeError (loc, Printf.sprintf
+              "%s '%s' frame '%s' is missing register field '%s'"
+              decl_kind decl_name frame rname))
+        ) aarch64_exception_frame_register_set
+  in
   let claim_toplevel_name name kind =
     if name = "addr" then
       raise (TypeError (Lexing.dummy_pos,
@@ -3825,6 +3872,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.UseDef _              -> ()
     | Ast.VectorTableDef _      -> ()
     | Ast.ExceptionEntryDef (n, _, _) -> claim_toplevel_name n "function"
+    | Ast.ExceptionResumeDef (n, _, _) -> claim_toplevel_name n "function"
   ) prog;
   (* GitHub issue #227 item 2: at most one `vector_table` declaration per
      program. Unlike every other toplevel item, `vector_table` claims no
@@ -5039,49 +5087,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         in
         check_fn_target "dispatch" dispatch;
         Option.iter (check_fn_target "before") !before_name;
-        (* Look up the frame struct directly in `prog` (already in scope,
-           the very list this whole pass iterates) rather than
-           Type_layout.structs -- Type_layout already depends on Llvm_gen,
-           which depends on Type_inf, so a direct Type_layout reference
-           here would be a module dependency cycle. `prog` has everything
-           needed (fields, is_packed) with no such issue. *)
-        let struct_def = List.find_map (function
-          | Ast.StructDef (n, fields, is_packed, _, _, _) when n = frame ->
-              Some (fields, is_packed)
-          | Ast.OwnedStructDef (n, _, _, fields, is_packed, _, _, _, _) when n = frame ->
-              Some (fields, is_packed)
-          | _ -> None) prog
+        validate_exception_frame "exception_entry" name loc frame
+    | Ast.ExceptionResumeDef (name, fields, loc) ->
+        let frame_name = ref None in
+        List.iter (fun (key, value) -> match key with
+          | "frame" -> frame_name := Some value
+          | other -> raise (TypeError (loc, Printf.sprintf
+              "exception_resume '%s' has unknown key '%s' (expected frame)"
+              name other))
+        ) fields;
+        let frame = match !frame_name with
+          | Some f -> f
+          | None -> raise (TypeError (loc, Printf.sprintf
+              "exception_resume '%s' is missing required key 'frame'" name))
         in
-        (match struct_def with
-         | None -> raise (TypeError (loc, Printf.sprintf
-             "exception_entry '%s' frame '%s' is not a known struct" name frame))
-         | Some (fields, is_packed) ->
-             if not is_packed then
-               raise (TypeError (loc, Printf.sprintf
-                 "exception_entry '%s' frame '%s' must be a packed struct" name frame));
-             let seen = Hashtbl.create 70 in
-             List.iter (fun (fname, fty) ->
-               match List.assoc_opt fname aarch64_exception_frame_register_set with
-               | None -> raise (TypeError (loc, Printf.sprintf
-                   "exception_entry '%s' frame '%s' has field '%s', which is not an AArch64 exception-frame register name"
-                   name frame fname))
-               | Some expected_ty ->
-                   if fty <> expected_ty then
-                     raise (TypeError (loc, Printf.sprintf
-                       "exception_entry '%s' frame '%s' field '%s' has the wrong type"
-                       name frame fname));
-                   if Hashtbl.mem seen fname then
-                     raise (TypeError (loc, Printf.sprintf
-                       "exception_entry '%s' frame '%s' has field '%s' more than once"
-                       name frame fname));
-                   Hashtbl.add seen fname ()
-             ) fields;
-             List.iter (fun (rname, _) ->
-               if not (Hashtbl.mem seen rname) then
-                 raise (TypeError (loc, Printf.sprintf
-                   "exception_entry '%s' frame '%s' is missing register field '%s'"
-                   name frame rname))
-             ) aarch64_exception_frame_register_set)
+        validate_exception_frame "exception_resume" name loc frame
     | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _
     | Ast.GenericStructDef _ | Ast.ExternSymbolDef _ -> ()) prog;
     (* GenericStructDef (GitHub issue #207): nothing to validate here yet
@@ -5255,11 +5275,57 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.UseDef _    -> m
     | Ast.VectorTableDef _ -> m
     | Ast.ExceptionEntryDef _ -> m
+    | Ast.ExceptionResumeDef _ -> m
     | Ast.GenericStructDef _ -> m
     (* GenericStructDef (GitHub issue #207): contributes no function
        signature until an instantiation exists as an ordinary FuncDef,
        produced by Monomorphize.run. *)
   ) StringMap.empty prog in
+  (* GitHub issue #227 item 1 follow-up: exception_entry's dispatch/before
+     targets are checked for EXISTENCE in the earlier pass (before fenv
+     exists yet), but not for having the right signature -- that earlier
+     pass runs before fenv is built, and fenv cannot easily move earlier
+     since function signatures can themselves reference struct/enum names
+     that senv/eenv (built between the two passes) resolve. A second,
+     narrow pass here, now that fenv exists, closes that gap: dispatch
+     must be exactly `fn(usize) -> usize` (the frame's own address in,
+     the frame address to resume from out -- unchanged from the
+     hand-written convention this replaces), before must be exactly
+     `fn()`/`fn() -> void`. An overloaded name is rejected outright: which
+     overload a raw `bl` reaches is not overload resolution, it is
+     whatever the linker finds, so a name with more than one signature is
+     inherently ambiguous here regardless of which one might happen to
+     match. *)
+  let check_exception_entry_target_signature loc entry_name key target
+      ~want_params ~want_ret =
+    match StringMap.find_opt target fenv with
+    | None -> raise (TypeError (loc, Printf.sprintf
+        "exception_entry '%s' %s target '%s' is not defined" entry_name key target))
+    | Some [(_, TFun (pts, rt, _))] ->
+        if pts <> want_params || rt <> want_ret then
+          raise (TypeError (loc, Printf.sprintf
+            "exception_entry '%s' %s target '%s' has the wrong signature (expected %s)"
+            entry_name key target
+            (match key with
+             | "dispatch" -> "fn(usize) -> usize"
+             | _ -> "fn()")))
+    | Some _ -> raise (TypeError (loc, Printf.sprintf
+        "exception_entry '%s' %s target '%s' is overloaded, which a raw branch cannot resolve"
+        entry_name key target))
+  in
+  List.iter (function
+    | Ast.ExceptionEntryDef (entry_name, fields, loc) ->
+        List.iter (fun (key, target) -> match key with
+          | "dispatch" ->
+              check_exception_entry_target_signature loc entry_name "dispatch" target
+                ~want_params:[TUsize] ~want_ret:TUsize
+          | "before" ->
+              check_exception_entry_target_signature loc entry_name "before" target
+                ~want_params:[] ~want_ret:TVoid
+          | _ -> ()
+        ) fields
+    | _ -> ()
+  ) prog;
   (* Global mutability: plain `let` = immutable compile-time constant, `let mut` = variable.
      Reuses the same tyenv-based mutability check as local variables (Assign/AddrOf).
      GitHub issue #79 follow-up: duplicate/cross-kind global names are
@@ -5288,6 +5354,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.UseDef _                 -> m
     | Ast.VectorTableDef _         -> m
     | Ast.ExceptionEntryDef _      -> m
+    | Ast.ExceptionResumeDef _     -> m
     | Ast.GenericStructDef _       -> m
   ) StringMap.empty prog in
   (* Pass 2: check global initializers.

@@ -15,6 +15,86 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-06: Closing Two Gaps in the Exception-Entry Prototype -- Real Signature Checking, and a Standalone `exception_resume`, With a Real Ordering Bug Caught Before Shipping (GitHub Issue #227 Item 1 Follow-up)
+
+Direct follow-up to the item 1 prototype below, requested by the user after reviewing it: the
+prototype's own entry explicitly named two gaps left open (`dispatch`/`before` checked only for
+existence, not signature; the three standalone-restore call sites left hand-written). Investigating
+both changed the picture on the second one specifically.
+
+**Gap 1, closed as originally scoped.** Added a second `type_inf.ml` pass, run right after `fenv` is
+built (the earlier `ExceptionEntryDef` validation pass runs before `fenv` exists, which is why this
+couldn't be one pass), checking `dispatch` is exactly `fn(usize) -> usize` and `before` is exactly
+`fn()` against `fenv`'s real stored signature -- an overloaded target name is rejected outright, since
+which overload a raw `bl` reaches is not overload resolution, just whatever the linker finds. Four new
+`dune runtest` cases (good signature, wrong dispatch signature, wrong before signature, overloaded
+target) plus a standalone CLI check confirming the error message and source location are both correct.
+
+**Gap 2, only PARTIALLY closed -- and re-scoped after actually reading the code, not before.** The
+prototype's own comment lumped `.Ldata_abort`/`el0_context_resume`/`run_initial_user` together as "the
+standalone-restore sites." Reading all three closely found only `el0_context_resume` genuinely fits a
+declarative "restore-only" pattern: it takes a frame address in `x0` and does `mov sp, x0; RESTORE;
+eret`, nothing else. `run_initial_user` is a completely different shape -- an ordinary AAPCS-called
+function (it saves its own callee-saved `x19`-`x30`) that constructs a MINIMAL synthetic resume state
+directly from two raw arguments (`entry`, `stack_top`), setting only three fields (`sp_el0`,
+`spsr_el1`=0, `elr_el1`) via bare `msr`s, never touching a full `ExceptionFrame` at all. `.Ldata_abort`
+is inline control flow inside `el0_sync_entry`'s own larger dispatch body (a conditional branch after
+an already-in-progress save on the SAME stack), not a standalone entry point reachable any other way.
+Neither is expressible as a declarative "restore a saved frame" construct without a fundamentally
+different design each would need its own real investigation to develop -- correctly identifying this
+narrower true scope, rather than assuming all three matched, is itself the main output of this half of
+the follow-up.
+
+Added `exception_resume name { frame: FrameStruct; }` (`lib/ast.ml`/`lib/parser.mly`/`lib/lexer.mll`:
+one new keyword, reusing `exception_entry`'s own field grammar) for exactly the `el0_context_resume`
+shape. `type_inf.ml`'s frame validation was factored out of the `ExceptionEntryDef` case into a shared
+`validate_exception_frame` function so both declarations check the identical closed register set the
+same way. `lib/llvm_gen.ml` similarly factored a shared `exception_frame_offsets` (the field-offset
+computation) and `emit_exception_restore` (the restore-half instruction sequence) out of
+`gen_exception_entry`, called by both it and the new `gen_exception_resume`.
+
+**Refactoring `emit_exception_restore` to be shared surfaced a real, previously-undetected ordering
+bug in the first draft.** The natural-looking version had `emit_exception_restore` unconditionally
+emit `msr DAIFSet` as its own first instruction, with each caller responsible only for getting `sp` to
+point at the frame beforehand (`gen_exception_entry`: `mov sp, x0` from the dispatch call's return
+value; `gen_exception_resume`: `mov sp, x0` from its own incoming argument) -- symmetric, and matching
+`gen_exception_entry`'s already-hardware-verified shape exactly. But `el0_context_resume`'s OWN
+existing hand-written comment (`kernel/arch/arm64/kernel/user_entry.S`) explains why its version
+deliberately puts `msr DAIFSet` BEFORE `mov sp, x0`, not after: it is reached via the syscall path,
+which issue #187 deliberately unmasks `DAIF.I` for, so switching `SP_EL1` to a (possibly
+different-process, on a scheduler switch) resumed stack while still unmasked would let a real interrupt
+land in that exact window and build its own exception frame below the NEW stack instead of the one the
+syscall actually ran on. `gen_exception_entry`'s own `mov sp, x0`-before-`msr DAIFSet` order is safe
+ONLY because `DAIF.I` is already masked for that entire entry point's whole body (IRQ dispatch never
+unmasks it, unlike the syscall path -- confirmed by grepping for `msr_daifclr_irq`/`DAIFClr` and finding
+none in `intc.tkb`/`syscall.tkb`, only in `el0_sync_entry`'s own syscall-specific window). The two call
+sites are NOT symmetric, and a shared "just re-mask first" helper would have been wrong for one of
+them. Fixed by pulling `msr DAIFSet` OUT of the shared restore helper entirely and having each caller
+emit it at its own correct point: `gen_exception_entry` keeps `mov sp, x0` then `msr DAIFSet` (matching
+its own already-verified original); `gen_exception_resume` emits `msr DAIFSet` then `mov sp, x0`
+(matching `el0_context_resume`'s own original, and its own comment's exact reasoning). Caught before
+ever reaching real hardware, by disassembling the standalone smoke-test binary and comparing instruction
+order against `el0_context_resume`'s own comment -- not by a hardware failure, unlike issue #227 item
+3's `x0`-clobber regression, which was the same general lesson (don't assume two call sites that look
+alike share the same safety invariant) learned the more expensive way.
+
+Applied to `el0_context_resume`, replacing its hand-written body in `user_entry.S` entirely; its
+existing `extern fn el0_context_resume(frame_sp: usize) !{noreturn};` declaration (`kernel/arch/arm64/
+kernel/user_entry_extern.tkb`) is unchanged, since that is still what lets ordinary `.tkb` code
+(`kernel/kernel/syscall.tkb`) call it -- the `exception_resume` declaration only supplies the generated
+BODY, the same relationship an `extern fn` normally has with a hand-written assembly body.
+
+Verified: a standalone smoke test's disassembly showed the corrected `msr DAIFSet` / `mov sp, x0` order
+matching `el0_context_resume`'s original exactly (and confirmed `gen_exception_entry`'s own order was
+unaffected by the refactor). `dune runtest` (955/955 -- four new signature-check cases plus four new
+`exception_resume` cases: well-formed, unknown key, missing `frame` key, and a frame missing a register
+field, reusing the shared validator). `kernelbuild-rpi5`, including the automated DAIF-masking-before-
+`eret` check, which the generated `el0_context_resume` satisfies with no special-casing needed. Two
+consecutive full real-RPi5-hardware `kernelcheck-rpi5` passes (25/25 views each), specifically including
+`syscall`/`syscall_subset` (every syscall return goes through `el0_context_resume`) and `child_exec`/
+`process_lifecycle` (the scheduler-switch-to-a-different-stack scenario the ordering bug would have
+actually broken).
+
 ### 2026-08-06: A Working Prototype Generates Two Real IRQ Entry Points' Save/Dispatch/Restore/`eret` From a `.tkb` Frame Declaration (GitHub Issue #227 Item 1, Prototype Slice)
 
 Third and last of #227's three pieces to get started (items 2 and 3, below, landed first). The user's

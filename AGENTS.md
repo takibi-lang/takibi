@@ -904,16 +904,30 @@ size.
   full save/[before]/dispatch/restore/`eret` sequences (`lib/llvm_gen.ml`'s `gen_exception_entry`,
   same raw-module-asm technique as the vector table -- turned out `naked` was never needed for this,
   contrary to the original worry about spilling registers before any calling convention exists).
-  **Two things this slice deliberately does NOT cover, both real gaps to close before item 1 is
-  actually done**: (1) `dispatch`/`before` are checked only for EXISTENCE (a known `fn` name), not
-  SIGNATURE -- fenv is not built yet at the point in `type_inf.ml`'s pass ordering where this
-  validation runs, so a `dispatch` target with the wrong parameter/return shape is currently a silent
-  miscompile, not a compile error; (2) the several standalone-restore call sites (`.Ldata_abort`/
-  `el0_context_resume`/`run_initial_user` in `user_entry.S`, which reuse `exception_context.inc`'s
-  `EXC_CONTEXT_RESTORE` without a preceding save in the same sequence) are not expressible as an
-  `exception_entry` at all yet. See HISTORY.md's issue #227 item 1 entry for the design and
-  verification (real-hardware `kernelcheck-rpi5`, including the `fpsimd` view, which is exactly the
-  q0-q31/FPSR-survives-a-real-interrupt property this generated code has to get right).
+  **Both gaps the first prototype slice left open have follow-up work, one closed and one
+  re-scoped, not left as-is**: (1) `dispatch`/`before` are now checked against their REAL signature
+  (`fn(usize) -> usize` / `fn()`), not just existence -- a second `type_inf.ml` pass runs after `fenv`
+  is built specifically for this (the earlier per-item validation pass runs before `fenv` exists).
+  (2) Of the three standalone-restore call sites originally named together (`.Ldata_abort`/
+  `el0_context_resume`/`run_initial_user` in `user_entry.S`), only `el0_context_resume` actually fits a
+  declarative "restore a saved frame" pattern -- `run_initial_user` constructs a synthetic resume state
+  directly from raw entry/stack arguments (never a full saved frame), and `.Ldata_abort` is inline
+  control flow inside `el0_sync_entry`'s own larger dispatch body, not a standalone entry point; neither
+  is expressible this way without a different design each would need on its own. A new `exception_resume
+  name { frame: FrameStruct; }` declaration now generates `el0_context_resume` specifically (just the
+  restore-frame/`eret` half, entered with the frame address already in `x0`). **Refactoring the restore
+  codegen to be shared between `exception_entry` and `exception_resume` surfaced a real ordering bug
+  before it ever reached hardware**: `el0_context_resume` MUST mask `DAIF.I` before switching `sp` to the
+  resumed frame's stack (it is reached via the syscall path, which unmasks `DAIF.I` deliberately, so an
+  interrupt in that window would build its own frame below the wrong stack), while `exception_entry`'s
+  own generated code safely does it in the OPPOSITE order (mask AFTER the switch) because `DAIF.I` is
+  already masked for its entire IRQ-handler body -- the two call sites are not symmetric, and a naively
+  shared "always mask first" or "mask wherever" helper would have gotten one of them wrong. Caught by
+  reading `el0_context_resume`'s own existing comment closely while wiring the refactor up, not by a
+  hardware failure. See HISTORY.md's issue #227 item 1 entries (the original prototype and this
+  follow-up) for the full design and verification (real-hardware `kernelcheck-rpi5`, including the
+  `fpsimd` view for the q0-q31/FPSR-survives-a-real-interrupt property, and `syscall`/`child_exec` for
+  `el0_context_resume`'s own corrected ordering).
 - **The same D-cache-bypass gap applied to postmortem debugging over SWD, not just DMA/harness I/O --
   fixed for the evidence block itself by issue #227 item 3.** `el1_exception_evidence` (now ordinary
   `.tkb`, `kernel/arch/arm64/kernel/exception_evidence.tkb`, moved off hand-written assembly by
