@@ -35,7 +35,7 @@ let compiler_builtins = StringSet.of_list [
   "msr_daifclr_irq"; "msr_daifset_irq";
   "tlbi_vmalle1"; "tlbi_vaae1is"; "tlbi_vae1is"; "tlbi_aside1is";
   "dsb_ish"; "dsb_ishst"; "isb";
-  "smc4";
+  "smc4"; "svc5";
 ]
 
 let is_compiler_builtin name = StringSet.mem name compiler_builtins
@@ -2353,6 +2353,30 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            TUsize
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects four arguments: %s(x0, x1, x2, x3)" fname fname)))
+
+  | Call ("svc5" as fname, args) ->
+      (* GitHub issue #228 (dependency named by that issue: #226's own
+         raw-instruction-primitive precedent, extended to `svc`): the raw
+         Linux/AArch64 `svc #0` syscall trap, exposed as a plain 6-in/1-out
+         hardware primitive -- syscall number in x8, up to five argument
+         registers x0-x4, result in x0 (the real Linux AArch64 syscall ABI
+         convention lives in lib/llvm_gen.ml's fixed register constraints,
+         same shape as smc4's own SMCCC constraints just above). "5" names
+         the five DATA argument registers this intrinsic exposes (x0-x4),
+         matching every real Linux syscall the initial EL0 test payload
+         issues today (issue #228) -- clone(2) is the widest at five
+         (flags, stack, ptid, tls, ctid). Unused trailing arguments are
+         simply passed as 0, the same convention a real `mov x4, #0`
+         would already need in hand-written assembly for a narrower
+         syscall. *)
+      (match args with
+       | [nr; a0; a1; a2; a3; a4] ->
+           List.iter (fun arg ->
+             let t = infer_expr senv eenv tyenv fenv arg in
+             unify_at arg.loc t TUsize) [nr; a0; a1; a2; a3; a4];
+           TUsize
+       | _ -> raise (TypeError (e.loc,
+           Printf.sprintf "%s expects six arguments: %s(nr, x0, x1, x2, x3, x4)" fname fname)))
 
   | Call (("dma_prepare_tx" | "dma_prepare_rx" | "dma_finish_rx") as fname, args) ->
       let required_alignment =

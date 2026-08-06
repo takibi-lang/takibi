@@ -3615,6 +3615,30 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         "smc4.result" builder in
       (TypeUsize, result)
 
+  | Call ("svc5", [nr_e; a0_e; a1_e; a2_e; a3_e; a4_e]) ->
+      (* GitHub issue #228: the real Linux/AArch64 syscall ABI (x8 = syscall
+         number in, x0-x4 = up to five arguments in, x0 = result out) is a
+         fixed OS convention, not something a .tkb caller chooses -- same
+         named-physical-register-constraint technique as smc4 just above.
+         x0 is deliberately named twice in the constraint string (once as
+         the plain output, once as a0's own input): the real ABI reuses
+         that one register for both the first argument going in and the
+         return value coming out, exactly like smc4's own x0 already does
+         for SMCCC. *)
+      let ity = usize_lltype () in
+      let (_, vnr) = gen_expr ~expected_ty:TypeUsize locals nr_e in
+      let (_, v0) = gen_expr ~expected_ty:TypeUsize locals a0_e in
+      let (_, v1) = gen_expr ~expected_ty:TypeUsize locals a1_e in
+      let (_, v2) = gen_expr ~expected_ty:TypeUsize locals a2_e in
+      let (_, v3) = gen_expr ~expected_ty:TypeUsize locals a3_e in
+      let (_, v4) = gen_expr ~expected_ty:TypeUsize locals a4_e in
+      let fty = function_type ity [| ity; ity; ity; ity; ity; ity |] in
+      let constraints = "={x0},{x8},{x0},{x1},{x2},{x3},{x4},~{memory}" in
+      let inline = const_inline_asm fty "svc #0" constraints true false in
+      let result = build_call fty inline [| vnr; v0; v1; v2; v3; v4 |]
+        "svc5.result" builder in
+      (TypeUsize, result)
+
   | Call ("stable_replace",
           [guard_e; lock_e; { desc = FieldGet (base_e, fname); _ };
            replacement_e]) ->

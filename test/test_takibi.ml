@@ -8821,6 +8821,44 @@ let codegen_tests = [
        Alcotest.(check bool) "inputs pinned to x0-x3" true
          (contains_substring ir "{x0},{x1},{x2},{x3}"));
 
+  Alcotest.test_case "issue #228: svc5 takes six usize and returns usize"
+    `Quick
+    (fun () ->
+       expect_ok
+         "fn issue228_svc5(nr: usize, a: usize, b: usize, c: usize, d: usize, e: usize) -> usize {
+            return svc5(nr, a, b, c, d, e);
+          }" ();
+       expect_type_error "expects six arguments"
+         "fn bad_svc5(a: usize) { let r: usize = svc5(a, a, a, a, a); }" ();
+       expect_type_error "cannot unify"
+         "fn bad_svc5_type(a: i32) { let r: usize = svc5(a, a, a, a, a, a); }" ());
+
+  Alcotest.test_case "issue #228: svc5 cannot be redefined" `Quick
+    (fun () ->
+       expect_type_error "compiler builtin"
+         "fn svc5(nr: usize, a: usize, b: usize, c: usize, d: usize, e: usize) -> usize { return 0; }" ());
+
+  Alcotest.test_case "issue #228: svc5 pins the real Linux/AArch64 syscall x8/x0-x4/x0 ABI"
+    `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "fn codegen_issue228_svc5(nr: usize, a: usize, b: usize, c: usize, d: usize, e: usize)
+               -> usize {
+            return svc5(nr, a, b, c, d, e);
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_issue228_svc5" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_issue228_svc5 was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check bool) "svc instruction" true
+         (contains_substring ir "svc #0");
+       Alcotest.(check bool) "output pinned to x0" true
+         (contains_substring ir "={x0}");
+       Alcotest.(check bool) "syscall number pinned to x8, arguments to x0-x4" true
+         (contains_substring ir "{x8},{x0},{x1},{x2},{x3},{x4}"));
+
   (* GitHub issue #232: `LITERAL << N` for N >= 32, with both the shift's
      base and amount being bare integer literals, used to compute at 32-bit
      width (IntLit's own codegen defaults to i32 absent a hint, and BinOp's
