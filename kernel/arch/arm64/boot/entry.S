@@ -110,16 +110,6 @@ el1_fpsimd_enable:
     isb
     ret
 
-    .global psci_cpu_on
-psci_cpu_on: /* fn(target_affinity, entry, context) -> usize */
-    mov     x3, x2
-    mov     x2, x1
-    mov     x1, x0
-    movz    x0, #0x0003
-    movk    x0, #0xc400, lsl #16
-    smc     #0
-    ret
-
 /* All sixteen architectural vector slots lead to an evidence-preserving
  * fail-stop path except slot 8 (lower-EL AArch64 sync, EL0 syscalls) and
  * slots 5/9 (Current-EL SPx IRQ and Lower-EL AArch64 IRQ). x16 identifies

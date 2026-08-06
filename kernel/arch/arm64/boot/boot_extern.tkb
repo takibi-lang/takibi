@@ -1,3 +1,1 @@
-extern fn psci_cpu_on(target_affinity: usize, entry: usize,
-                      context: usize) -> usize;
 extern symbol kernel_secondary_entry;
