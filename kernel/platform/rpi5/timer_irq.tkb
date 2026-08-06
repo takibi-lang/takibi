@@ -5,10 +5,11 @@
 // banked per-CPU by the GIC itself, so unlike UART0/USB0's SPIs this needs
 // no RP1/MIP0 routing and no GICD_ITARGETSR write.
 //
-// kernel/arch/arm64/kernel/timer.S's set_cntp_tval/enable_cntp/disable_cntp
-// stubs were staged ahead of this work (their own header comment already
-// named "the RPi5 scheduler port" as the reason they exist) but were never
-// declared or called from any .tkb file until now.
+// kernel/arch/arm64/kernel/timer.tkb's set_cntp_tval/enable_cntp/disable_cntp
+// (GitHub issue #226; originally hand-written timer.S stubs, staged ahead
+// of this work -- their own header comment already named "the RPi5
+// scheduler port" as the reason they exist) were never called from any
+// .tkb file until now.
 //
 // This tick first existed as RP1 GEM Ethernet's periodic wake source:
 // net_rx_wait() needs it so it can use
@@ -24,9 +25,7 @@
 // syscall-return boundary, while Lower-EL ticks may select another runnable
 // context immediately.
 
-extern fn set_cntp_tval(n: i32);
-extern fn enable_cntp();
-extern fn disable_cntp();
+use "kernel/arch/arm64/kernel/timer.tkb";
 
 const RPI5_TIMER_GIC_INTID: u32 = 30;
 

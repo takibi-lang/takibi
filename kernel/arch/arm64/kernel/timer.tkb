@@ -1,0 +1,39 @@
+// GitHub issue #226: kernel/arch/arm64/kernel/timer.S used to exist only
+// because .tkb could not emit `mrs`/`msr` directly -- five functions, each
+// a single system-register access plus `ret`. Now ordinary .tkb built on
+// the closed mrs_cntfrq_el0/mrs_cntpct_el0/msr_cntp_tval_el0/
+// msr_cntp_ctl_el0 intrinsics (lib/type_inf.ml / lib/llvm_gen.ml). Same
+// names and signatures as the retired timer.S, so every existing caller
+// (kernel/platform/rpi5/pcie.tkb's delay_us/timed_out,
+// kernel/platform/rpi5/timer_irq.tkb's tick setup, kernel/init/main.tkb's
+// secondary-boot deadline loop, and every kernel/net/*.tkb timeout loop)
+// needed no change beyond switching its `extern fn` declaration to a
+// `use` of this file. timer.S's own `task_exit_stub` had zero callers
+// anywhere in kernel/ (a vestige of the examples/common_rpi3/timer_asm.S
+// lineage its header comment named) and is not ported.
+
+fn read_cntfrq() -> i64 {
+    return mrs_cntfrq_el0() as i64;
+}
+
+fn read_cntpct() -> i64 {
+    return mrs_cntpct_el0() as i64;
+}
+
+// The ARM Generic Timer physical comparator, CNTP_TVAL_EL0, is
+// architecturally a 32-bit down-counter (writes ignore the upper bits of
+// the GPR), so the sign/zero-extension `as usize` picks for a negative
+// `i32` does not matter here -- unlike a register where the upper bits are
+// meaningful.
+fn set_cntp_tval(n: i32) {
+    msr_cntp_tval_el0(n as usize);
+}
+
+fn enable_cntp() {
+    msr_cntp_ctl_el0(1);
+    isb();
+}
+
+fn disable_cntp() {
+    msr_cntp_ctl_el0(0);
+}
