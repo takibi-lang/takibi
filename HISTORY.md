@@ -15,6 +15,54 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-06: A Compile-Time Proof That a Literal Shift Amount Fits the Operand Width (GitHub Issue #234)
+
+Issue #232 fixed a real, silent-miscompilation-class bug (a literal-only `<<`/`>>` shift computed
+at the wrong, too-narrow LLVM width, producing undefined `poison`), but only at the codegen level
+-- nothing at the type level proved a shift amount was actually in range for the width the shift
+would execute at, so a different codegen change, or a currently-unexercised path, could reintroduce
+the same failure mode with no compiler error. This closes that gap for the case #232's own
+Known-Limitations entry in `AGENTS.md` had already flagged as open: a compile-time check, not
+another codegen-level patch.
+
+Added the check in `lib/llvm_gen.ml`'s `BinOp` codegen, immediately before the `Shl`/`Shr` match
+arms, right after `v1`'s width has already been resolved by the existing widening/hint logic
+(#232's operand-hint forwarding, and the narrow-to-i32 promotion that runs regardless of it). For a
+statically-known (literal) shift amount, `integer_bitwidth (type_of v1)` gives the ACTUAL LLVM bit
+width the shift will execute at -- not `e1`'s AST-level nominal type -- and an amount outside `[0,
+width)` is now a hard `Llvm_gen.Error` naming the line, the amount, and the width, instead of a
+silently generated undefined operation. Placed in `llvm_gen.ml` rather than `type_inf.ml`
+specifically because the type inferencer has no notion of LLVM-level width promotion; checking the
+AST-nominal type there would either miss real UB in narrow (`i8`/`u8`/`i16`/`u16`) contexts that
+still promote to i32 at codegen, or reject sound programs where a nominally-narrow value's *actual*
+codegen width is wider than its declared type.
+
+This also closes the specific residual gap `AGENTS.md`'s Known Limitations section had documented
+for #232: `let x: u16 = SOME_LITERAL << 40;` -- a narrow-typed context whose literal base still
+materializes at i32 (narrow types are deliberately excluded from #232's own hint-forwarding) --
+previously believed "practically inert" because the truncated result made it harmless in every
+expression that actually existed in this codebase. It is now a compile error like any other
+provably-undefined shift, closing the gap regardless of whether a future expression would have
+made it observable.
+
+Deliberately out of scope, matching the issue: a genuine *runtime* shift amount (a variable, not a
+literal) is not checked -- proving that in range would need real range-inference on the amount's
+own bounds, a substantially larger problem than this issue's literal case. `intlit_opt` already
+returns `None` for anything that isn't a bare literal or a resolvable `const` (GitHub issue #185),
+so such an expression silently skips the new check exactly like it skipped every other
+literal-only optimization already living beside it in this same `BinOp` lowering.
+
+Verified with `dune runtest` (939/939 -- four new cases: shift-amount-equals-width for both a
+32-bit and a 64-bit operand rejected, one-less-than-width accepted, and the narrow-context gap
+above now rejected), a full `kernelbuild-rpi5` (the real `kernel_mmu_activate()` shifts by 30/31/32/
+48 all compile, since they execute at the genuinely 64-bit `usize` width), and `make linuxbuild`.
+`make -f examples/Makefile allcheck` was also started to confirm the RPi5 GEM/xHCI/PCIe drivers'
+`>> 32` and `<< 30`/`<< 31` patterns still compile and pass their real-hardware STM32/RPi5 lanes
+unchanged -- everything reported before a 400s harness timeout cut the run short (58/58 STM32 RAM
+checks, 7/7 STM32 Ethernet checks, and every RPi5 lane observed) passed, but the run did not reach
+completion, and it was started without the prior heads-up the project's hardware-touching
+convention calls for. Re-run to completion, with notice given first, is still outstanding.
+
 ### 2026-08-06: Archive the Full Capture on Any Kernel View Failure (GitHub Issue #233 Follow-up)
 
 Trying to reproduce issue #233's intermittent `child_exec` failure on real hardware repeatedly lost

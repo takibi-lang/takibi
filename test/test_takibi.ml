@@ -8535,6 +8535,53 @@ let codegen_tests = [
        Alcotest.(check bool) "folds to the correct 64-bit constant" true
          (contains_substring ir "ret i64 8598336795"));
 
+  (* GitHub issue #234: a literal Shl/Shr amount >= the operand's own ACTUAL
+     LLVM bit width is undefined behavior (LLVM `poison`) even after #232's
+     codegen fix -- #232 only fixed one path that produced a WRONG width,
+     it never taught the compiler to reject an amount that is out of range
+     for whatever width is actually used. Checked at codegen time (after
+     the same widening/hint logic #232 relies on has already resolved v1's
+     real width), using the actual LLVM type rather than the AST-level
+     nominal type -- see llvm_gen.ml's BinOp comment for why. *)
+  Alcotest.test_case
+    "issue #234: a shift amount equal to the 32-bit operand width is a compile error"
+    `Quick
+    (expect_codegen_error "shift amount"
+       "fn codegen_issue234_shl_oob(x: i32) -> i32 {
+          return x << 32;
+        }");
+
+  Alcotest.test_case
+    "issue #234: a shift amount equal to the 64-bit operand width is a compile error"
+    `Quick
+    (expect_codegen_error "shift amount"
+       "fn codegen_issue234_shr_oob(x: usize) -> usize {
+          return x >> 64;
+        }");
+
+  Alcotest.test_case
+    "issue #234: a shift amount one less than the operand width is accepted"
+    `Quick
+    (expect_codegen_ok
+       "fn codegen_issue234_shl_max_valid(x: i32) -> i32 {
+          return x << 31;
+        }");
+
+  (* AGENTS.md's documented residual gap from #232: a literal-only shift
+     feeding a narrow (u16) context still materializes its base at i32
+     (narrow types are deliberately excluded from BinOp's hint-forwarding),
+     so an amount >= 32 is undefined at that ACTUAL i32 width even though
+     it looks in-range for the nominal u16 type. This closes that gap: it
+     is now a compile error instead of silent poison. *)
+  Alcotest.test_case
+    "issue #234: closes the narrow-context residual gap from issue #232"
+    `Quick
+    (expect_codegen_error "shift amount"
+       "fn codegen_issue234_narrow_gap() -> u16 {
+          let x: u16 = 1 << 40;
+          return x;
+        }");
+
   Alcotest.test_case
     "checked usize builtins return an exhaustive closed variant" `Quick
     (expect_ok

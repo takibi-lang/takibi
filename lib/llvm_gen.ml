@@ -2607,6 +2607,35 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                   | _ -> TypePtr inner)
         | t -> t
       in
+      (* GitHub issue #234: a literal Shl/Shr amount >= the operand's own bit
+         width is undefined behavior (LLVM `poison`) -- issue #232 fixed one
+         codegen path that produced this silently (a literal-only shift
+         whose base operand defaulted to the wrong width), but proved
+         nothing at the type level, so a different codegen change could
+         reintroduce the same failure mode without any compiler error. Check
+         here, after v1's width has already been resolved by the widening
+         logic above (narrow i8/u8/i16/u16 bases promoted to i32, i32/i64
+         mismatches reconciled) -- this is deliberately the ACTUAL LLVM
+         bit width the shift will execute at, not e1's AST-level nominal
+         type, so it also closes AGENTS.md's documented residual gap for
+         narrow-typed contexts (a narrow-typed literal shift still
+         materializes its base at i32 today, and a shift amount >= 32 is
+         caught here regardless of the narrow nominal type). Only literal
+         (compile-time-known) shift amounts are checked, matching the
+         issue's scope: a genuine runtime shift amount is a separate,
+         larger range-inference problem. *)
+      (match op with
+       | (Shl | Shr) ->
+           (match intlit_opt e2 with
+            | Some amt ->
+                let width = integer_bitwidth (type_of v1) in
+                if amt < 0 || amt >= width then
+                  raise (Error (Printf.sprintf
+                    "line %d: shift amount %d is out of range for the %d-bit \
+                     operand type -- undefined behavior"
+                    e.loc.Lexing.pos_lnum amt width))
+            | None -> ())
+       | _ -> ());
       (match op with
        | Add ->
            (* Pointer arithmetic: ptr + isize -> GEP. *io T = TypePtr(TypeIo T) also matches TypePtr *)

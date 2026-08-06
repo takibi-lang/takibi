@@ -772,26 +772,34 @@ size.
 
 ## Known Limitations / Deferred Design Decisions
 
-- **A literal-only `<<`/`>>` shift by an amount >= 32 could silently produce LLVM `poison` until
-  issue #232's fix; a narrow residual gap remains for `i8`/`u8`/`i16`/`u16` contexts.** `lib/
+- **A literal-only `<<`/`>>` shift by an amount >= the operand's actual bit width could silently
+  produce LLVM `poison` until issues #232 and #234's fixes; now a hard compile error.** `lib/
   llvm_gen.ml`'s `IntLit` codegen defaults a literal with no usable type hint to i32 width; `BinOp`
   used to drop its own `?expected_ty` entirely when evaluating its operands, so a literal buried
   inside a `BinOp` (e.g. `2 << 32` inside `let tcr: usize = 0x351b | (1 << 23) | (2 << 32);`)
   always fell back to that i32 guess even when the enclosing context was `usize` -- `shl i32 2, 32`
-  is undefined (shift amount >= the operand's own bit width). Fixed by forwarding the current
-  `BinOp` node's own hint into its operand recursion, restricted to i32-or-wider plain integer
-  types (`TypeI32`/`TypeI64`/`TypeU32`/`TypeU64`/`TypeIsize`/`TypeUsize`). `i8`/`u8`/`i16`/`u16`
-  are deliberately excluded: this compiler widens narrow *non-literal* operands (a loaded byte) to
-  i32 for actual bitwise arithmetic elsewhere in the same lowering, and forwarding a narrow hint
-  here would make a literal *sibling* materialize directly at i8/i16 instead of also being
-  promoted -- found by an internal LLVM-IR-verifier rejection (`shl i32 %x, i16 8`, mismatched
-  operand widths) while testing the first, unrestricted version of the fix. This means a
-  literal-only shift feeding a narrow-typed context directly (e.g. `let x: u16 = SOME_LITERAL <<
-  40;`) can still exhibit the original poison -- believed practically inert today (the result would
-  already be entirely truncated away for any real u16/u8 use, so no such expression exists in this
-  codebase), but worth knowing before extending `BinOp`'s narrow-type handling. See HISTORY.md's
-  issue #232 entry for the full diagnosis and the two real-hardware `kernel_mmu_activate()` writes
-  (`TCR_EL1`, `TTBR0_EL1`) it silently corrupted before being caught by disassembly.
+  is undefined (shift amount >= the operand's own bit width). Issue #232 fixed the specific
+  wrong-width case by forwarding the current `BinOp` node's own hint into its operand recursion,
+  restricted to i32-or-wider plain integer types (`TypeI32`/`TypeI64`/`TypeU32`/`TypeU64`/
+  `TypeIsize`/`TypeUsize`). `i8`/`u8`/`i16`/`u16` are deliberately excluded from that forwarding:
+  this compiler widens narrow *non-literal* operands (a loaded byte) to i32 for actual bitwise
+  arithmetic elsewhere in the same lowering, and forwarding a narrow hint here would make a literal
+  *sibling* materialize directly at i8/i16 instead of also being promoted -- found by an internal
+  LLVM-IR-verifier rejection (`shl i32 %x, i16 8`, mismatched operand widths) while testing the
+  first, unrestricted version of that fix. That exclusion left a residual gap: a literal-only shift
+  feeding a narrow-typed context directly (e.g. `let x: u16 = SOME_LITERAL << 40;`) could still
+  exhibit the original poison, since its base still materializes at i32.
+  Issue #234 closes this at the codegen level with a genuine compile-time proof rather than another
+  width-forwarding patch: right before `Shl`/`Shr` codegen, once `v1`'s width has already been
+  resolved by the widening/hint logic above, a statically-known (literal) shift amount is checked
+  against `integer_bitwidth (type_of v1)` -- the ACTUAL LLVM width the shift executes at, not the
+  AST-level nominal type -- and rejected as a hard `Llvm_gen.Error` if out of `[0, width)`. This
+  closes the narrow-context gap too (the i32-materialized base makes 40 >= 32 an error regardless
+  of the nominal `u16` type). A genuine *runtime* shift amount (a variable, not a literal) is
+  unchecked -- proving that in range needs real range-inference on the amount's own bounds, out of
+  scope for #234. See HISTORY.md's issue #232 and #234 entries for the full diagnosis, the two
+  real-hardware `kernel_mmu_activate()` writes (`TCR_EL1`, `TTBR0_EL1`) #232's bug silently
+  corrupted before being caught by disassembly, and #234's verification.
 - **`interrupt_wait`/`interrupt_notify` currently support ARM/AArch64 only.**
   They use the retained-event `wfe`/`sev` pair, which closes the
   check-then-sleep race. AMD64 and RISC-V code generation deliberately rejects
