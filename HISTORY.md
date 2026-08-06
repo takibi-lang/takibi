@@ -15,6 +15,87 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-06: A Closed Intrinsic Set Retires timer.S and mmu.S (GitHub Issue #226)
+
+Follow-up to the same day's #229/#231 work and the rejected EL0-probe design: those made the
+case for shrinking hand-written assembly rather than adding more of it. #226 was the issue that
+actually does the shrinking. `kernel/arch/arm64/kernel/timer.S` (64 lines) and most of
+`kernel/arch/arm64/mm/mmu.S` (237 lines) existed only because `.tkb` could not emit `mrs`/`msr`/
+`tlbi`/`dsb`/`isb`/`smc` -- but the issue's own analysis showed `mmu.S` was mostly *not* real
+system-register work at all: `INIT_ROOT`'s table construction was pure arithmetic and stores,
+and the PTE/root-selection functions were `cbnz x0`-style root-0-vs-root-1 branching (an ordinary
+`if`) or a 512-iteration zeroing loop, each wrapped around one real instruction at the end.
+Issue #209's third bug (the `TTBR0_EL1`-left-on-a-freed-root bug) lived exactly in this
+untyped-branching territory.
+
+Landed as six independently hardware-verified stages, per the issue's own explicit instruction
+not to do this as one bulk change:
+
+- **Stage 0**: 19 closed compiler intrinsics (`mrs_cntfrq_el0`, `msr_ttbr0_el1`, `tlbi_vaae1is`,
+  `dsb_ish`, `smc4`, etc.), modeled directly on the existing `dma_publish`/`interrupt_wait`
+  builtins -- one fixed asm string per name via `const_inline_asm`, registers chosen by LLVM's
+  allocator, never a user-supplied asm string (general inline `asm!` was the issue's explicit
+  non-goal: #209's second bug was a human picking the wrong register by hand). No barrier bundled
+  into any primitive -- `TTBR0_EL1` writes need different barrier sequences at different call
+  sites, so that policy stays in ordinary `.tkb`, matching `mmu.S`'s own original header comment.
+  `smc4` pins the real SMCCC ABI (x0-x3 in, x0 out) via named physical-register constraints
+  (`"={x0},{x0},{x1},{x2},{x3}"`) -- new territory for this codebase, verified by disassembling a
+  throwaway compile and confirming zero spurious `mov`s.
+- **Stage A**: `timer.S` -> `kernel/arch/arm64/kernel/timer.tkb`. `task_exit_stub` (zero callers
+  anywhere in `kernel/`, a vestige of its `examples/common_rpi3/timer_asm.S` lineage) was not
+  ported.
+- **Stage B**: `enable_irq`/`disable_irq` -> a new `kernel/arch/arm64/boot/cpu.tkb`.
+- **Stage C**: `psci_cpu_on` -> `cpu.tkb`, using `smc4`. The original register shuffle (PSCI's
+  function ID into x0, real arguments up into x1-x3) disappears entirely -- an ordinary `.tkb`
+  function call reproduces the identical shuffle automatically, verified by disassembly
+  byte-for-byte matching the retired hand-written version.
+- **Stage D**: the eight PTE/root-selection functions -> a new `kernel/arch/arm64/mm/mmu.tkb`.
+  The six `.bss` table regions stayed in `mmu.S` for this stage, reached via `extern symbol`
+  (issue #225); needed adding `.global` to four of the six (`kernel_l1_0`/`_1`, `user_l3_0`/`_1`)
+  since nothing had ever referenced them across an object-file boundary before.
+- **Stage E**: `kernel_mmu_init`/`_secondary`/`kernel_mmu_activate` and `INIT_ROOT` itself ->
+  `mmu.tkb`; `mmu.S` deleted entirely. The six table regions became ordinary `.tkb` globals
+  (matching `kernel/mm/page.tkb`'s `boot_pages`) -- an uninitialized `let mut` global lands in
+  `.bss`, and `entry.S`'s `_start` already zeroes the whole `.bss` region before calling
+  `kernel_mmu_init`, the exact guarantee the retired `.zero 4096` declarations relied on.
+  `INIT_ROOT`'s two textually-duplicated macro expansions became one real shared function
+  (`init_root`) called twice, matching the dedup preference issue #224 already established for
+  `kernel_mmu_activate` itself. `entry.S`'s existing `bl kernel_mmu_init`/
+  `bl kernel_mmu_init_secondary` needed no change -- an ordinary top-level `.tkb` `fn` is already
+  `bl`-callable from hand-written assembly, exactly like `entry.S` already calls `main`.
+
+Every stage's port was checked by disassembling the result and confirming it matched the retired
+hand-written instructions exactly (modulo LLVM's register allocator choosing a different GPR than
+a human had, or `csel` replacing a hand-written branch -- both semantically identical, harmless
+differences), not just by trusting the source-level translation. Stage D and E, the two
+highest-blast-radius stages, each got several consecutive full-suite hardware runs rather than
+one, given #209's history in this exact territory.
+
+Stage E surfaced a real, separate compiler bug (filed as issue #232, not fixed here): a `usize`
+expression built entirely from integer literals, with a `<<` shift amount >= 32, compiles at
+32-bit width and silently produces LLVM `poison` (shift amount >= the operand's own bit width) --
+caught by disassembling `kernel_mmu_activate` before ever touching real hardware with it, since
+`TCR_EL1` and `TTBR0_EL1` were both being silently written with `MAIR_EL1`'s leftover register
+value instead of their own intended values. Confirmed as a frontend/codegen issue rather than an
+optimizer artifact by reproducing it identically with `--profile-functions` (which disables the
+entire post-codegen optimization pipeline). Worked around locally in `mmu.tkb` with two
+pre-combined literal constants (verified with `python3 -c`, given how easily this exact kind of
+hand-arithmetic goes wrong -- see the ADR-encoding mistake in the same day's rejected EL0-probe
+work); the real fix belongs in `llvm_gen.ml`'s `BinOp`/`IntLit` codegen, which hardcodes i32 for
+every literal and only patches up a same-call sibling mismatch after the fact, never consulting
+the `usize` type `type_inf.ml`'s own unification had already correctly inferred.
+
+`scripts/check_kernel_asm_invariants.py` (the static build-time check added the same day for
+#229/#231) needed two of its own fixes along the way, both caught by re-running its own
+deliberately-broken-build self-test after Stage E: it originally hardcoded the exact `orr`
+instruction shape hand-written `mmu.S` always produced, which `.tkb`'s compile-time-constant
+folding legitimately replaces with a single `movk`-loaded literal; and once fixed to recognize
+either shape, it over-counted, because `UXN|PXN`'s bit pattern (`0x60 << 48`) is not unique to the
+device-MMIO descriptors -- it is also exactly `USER_RW_XN_FLAGS`, reused throughout ordinary
+user-page permission code. Fixed by reconstructing the literal bit pattern generically instead of
+matching one instruction shape, and scoping the count to instructions inside `init_root()`
+specifically.
+
 ### 2026-08-06: A Static Disassembly Check for #229/#231, After Rejecting a Bigger-Assembly Fix
 
 Recurrence-prevention follow-up to the same day's #229/#231 fixes. The first design tried for
