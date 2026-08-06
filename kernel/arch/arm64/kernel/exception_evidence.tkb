@@ -1,0 +1,34 @@
+// GitHub issue #227 (item 3): kernel/arch/arm64/boot/entry.S's
+// el1_exception_evidence used to hand-write five `mrs` reads into a fixed
+// .bss layout because .tkb could not read ESR_EL1/FAR_EL1/ELR_EL1/SPSR_EL1
+// directly. GitHub issue #226 already lifted the read-only system registers
+// this kernel touches into a closed intrinsic set (lib/type_inf.ml,
+// lib/llvm_gen.ml); extending that set with these four (same shape as
+// mrs_cntfrq_el0/mrs_cntpct_el0/mrs_sctlr_el1) moves this fail-stop evidence
+// capture into ordinary .tkb too.
+//
+// entry.S's VECTOR macro still supplies the trapped vector slot number (the
+// one value not readable from any system register) as this call's own x0
+// argument, then branches (not calls -- this never returns) straight here.
+//
+// GitHub issue #233's RPi5 SWD diagnosis found this block's raw .bss values
+// unreliable to read back over SWD: a debugger's memory read goes through
+// the data cache, and the block was never flushed after being written, so a
+// stale (pre-fault) value could be read instead of what was just stored.
+// dma_prepare_tx's CLEAN (write-back -- this core never reads the block
+// back itself, so INVALIDATE would be wrong) fixes that; it is reused here
+// purely for its cache-maintenance side effect, not because this is any
+// kind of DMA transfer.
+let mut exception_vector_slot: [usize; 5];
+
+fn el1_exception_evidence(slot: usize) {
+    exception_vector_slot[0] = slot;
+    exception_vector_slot[1] = mrs_esr_el1();
+    exception_vector_slot[2] = mrs_far_el1();
+    exception_vector_slot[3] = mrs_elr_el1();
+    exception_vector_slot[4] = mrs_spsr_el1();
+    dma_prepare_tx(exception_vector_slot as *usize, 40);
+    while (true) {
+        interrupt_wait();
+    }
+}

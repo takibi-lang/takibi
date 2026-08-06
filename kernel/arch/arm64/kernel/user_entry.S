@@ -437,7 +437,7 @@ el0_sync_entry:
     b.eq    .Lsyscall_exec
     cmp     x6, #8
     b.eq    .Lsyscall_child_exec
-    mov     x16, #8
+    mov     x0, #8
     b       el1_exception_evidence
 
 .Ldata_abort:
@@ -449,7 +449,7 @@ el0_sync_entry:
     eret
 
 .Lsync_fail:
-    mov     x16, #8
+    mov     x0, #8
     b       el1_exception_evidence
 
 .Lsyscall_clone_child:
@@ -461,7 +461,7 @@ el0_sync_entry:
     b       kernel_syscall_clone_child_return
 
 .Lclone_context_fail:
-    mov     x16, #8
+    mov     x0, #8
     b       el1_exception_evidence
 
 .Lsyscall_clone_parent:
@@ -573,12 +573,12 @@ el0_context_resume:
     eret
 
 // The single shared fail-stop entry, replacing every hand-written
-// `mov x16, #8; b el1_exception_evidence` pair at each .tkb-reachable action
-// tail. x16=8 matches el0_sync_entry's own vector-slot identification
-// (el1_vectors installs the lower-EL AArch64 sync slot at x16=8), so a
-// fail-stop reached this way is indistinguishable in the recorded evidence
-// from one reached directly out of el0_sync_entry.
+// `mov x0, #8; b el1_exception_evidence` pair at each .tkb-reachable action
+// tail. x0=8 matches el0_sync_entry's own vector-slot identification
+// (el1_vectors installs the lower-EL AArch64 sync slot at x0=8, GitHub issue
+// #227 item 3), so a fail-stop reached this way is indistinguishable in the
+// recorded evidence from one reached directly out of el0_sync_entry.
     .global kernel_syscall_fail_stop
 kernel_syscall_fail_stop:
-    mov     x16, #8
+    mov     x0, #8
     b       el1_exception_evidence

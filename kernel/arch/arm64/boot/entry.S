@@ -112,19 +112,23 @@ el1_fpsimd_enable:
 
 /* All sixteen architectural vector slots lead to an evidence-preserving
  * fail-stop path except slot 8 (lower-EL AArch64 sync, EL0 syscalls) and
- * slots 5/9 (Current-EL SPx IRQ and Lower-EL AArch64 IRQ). x16 identifies
- * the slot for the ones that still fail-stop. No slot silently spins at an
- * anonymous PC. Slots 5 and 9 stay separate entry points because only the
- * Lower-EL one (slot 9) may select another process from its returned frame
- * SP, but both build the single exception frame declared in
- * kernel/arch/arm64/kernel/exception_context.inc -- the same one the
- * syscall path uses.
+ * slots 5/9 (Current-EL SPx IRQ and Lower-EL AArch64 IRQ). x0 carries the
+ * slot number, as an ordinary first argument, for the ones that still
+ * fail-stop -- el1_exception_evidence is plain .tkb (GitHub issue #227
+ * item 3; kernel/arch/arm64/kernel/exception_evidence.tkb), reached with a
+ * tail branch (it never returns, so no link register needs preserving), not
+ * hand-written assembly reading a scratch register by convention. No slot
+ * silently spins at an anonymous PC. Slots 5 and 9 stay separate entry
+ * points because only the Lower-EL one (slot 9) may select another process
+ * from its returned frame SP, but both build the single exception frame
+ * declared in kernel/arch/arm64/kernel/exception_context.inc -- the same
+ * one the syscall path uses.
  */
     .section .text.vectors, "ax"
     .align 11
 el1_vectors:
 .macro VECTOR slot
-    mov     x16, #\slot
+    mov     x0, #\slot
     b       el1_exception_evidence
     .align  7
 .endm
@@ -137,6 +141,22 @@ el1_vectors:
     .align  7
     VECTOR 6
     VECTOR 7
+    /* Unlike every VECTOR slot above, this is not a fail-stop tail branch --
+     * el0_sync_entry's own EXC_CONTEXT_SAVE (its first instruction) saves
+     * the LIVE x0 as the interrupted EL0 process's own first syscall
+     * argument, and .Lsyscall_dispatch (kernel/arch/arm64/kernel/
+     * user_entry.S) re-reads it straight back out of the saved frame
+     * (`ldr x2, [sp, #0]`) as that argument for every syscall. Clobbering
+     * x0 here the way the VECTOR macro above now does for
+     * el1_exception_evidence's slot argument silently replaces every
+     * syscall's real first argument with the constant 8 before it is ever
+     * saved -- found the hard way, as a real-hardware hang with no compiler
+     * error (BusyBox httpd's first syscalls all silently misbehaving),
+     * root-caused with a git-stash A/B against the pre-#227 baseline. x16
+     * stays safe to overwrite here exactly as it always was: nothing in
+     * el0_sync_entry's dispatch path reads it back from the frame, only
+     * EXC_CONTEXT_RESTORE's eventual `eret` hands it back to the process
+     * unexamined, same as any other syscall-clobbered scratch register. */
     mov     x16, #8
     b       el0_sync_entry
     .align  7
@@ -150,22 +170,6 @@ el1_vectors:
     VECTOR 15
 
     .section .text, "ax"
-    .global el1_exception_evidence
-el1_exception_evidence:
-    adrp    x17, exception_vector_slot
-    add     x17, x17, :lo12:exception_vector_slot
-    str     x16, [x17]
-    mrs     x16, esr_el1
-    str     x16, [x17, #8]
-    mrs     x16, far_el1
-    str     x16, [x17, #16]
-    mrs     x16, elr_el1
-    str     x16, [x17, #24]
-    mrs     x16, spsr_el1
-    str     x16, [x17, #32]
-.Levidence_park:
-    wfe
-    b       .Levidence_park
 
 /* Current-EL-SPx IRQ entry (GitHub issue #187): an interrupt taken while
  * this kernel's own EL1 code runs, e.g. during a syscall that has already
@@ -214,9 +218,3 @@ el0_irq_entry:
     EXC_CONTEXT_RESTORE
     add     sp, sp, #EXC_CONTEXT_SIZE
     eret
-
-    .section .bss, "aw", %nobits
-    .align 3
-    .global exception_vector_slot
-exception_vector_slot:
-    .zero 40

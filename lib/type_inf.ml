@@ -26,6 +26,10 @@ let compiler_builtins = StringSet.of_list [
      ordinary, reviewable .tkb policy built on top of these raw primitives,
      not a compiler-hardcoded choice. *)
   "mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1";
+  (* GitHub issue #227 item 3: the four read-only registers
+     el1_exception_evidence's fail-stop path needs to move it into ordinary
+     .tkb, added to this same closed set. *)
+  "mrs_esr_el1"; "mrs_far_el1"; "mrs_elr_el1"; "mrs_spsr_el1";
   "msr_cntp_tval_el0"; "msr_cntp_ctl_el0"; "msr_sctlr_el1";
   "msr_mair_el1"; "msr_tcr_el1"; "msr_ttbr0_el1";
   "msr_daifclr_irq"; "msr_daifset_irq";
@@ -2284,8 +2288,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects no arguments: %s()" fname fname)))
 
-  | Call (("mrs_cntfrq_el0" | "mrs_cntpct_el0" | "mrs_sctlr_el1") as fname, args) ->
-      (* GitHub issue #226: closed system-register read intrinsics. Zero
+  | Call (("mrs_cntfrq_el0" | "mrs_cntpct_el0" | "mrs_sctlr_el1"
+          | "mrs_esr_el1" | "mrs_far_el1" | "mrs_elr_el1" | "mrs_spsr_el1") as fname, args) ->
+      (* GitHub issue #226/#227: closed system-register read intrinsics. Zero
          arguments, like dma_publish/etc. above -- a runtime value must not
          be able to select which register gets read. *)
       (match args with

@@ -846,17 +846,19 @@ size.
   perfectly correct in QEMU and fail only on real silicon, so that kind of work should get real-hardware
   integration testing early, not just as a final check once "everything already works in QEMU."
 - **EL0 fail-stop is intentional design, not a bug to route around.**
-  `kernel/arch/arm64/boot/entry.S`'s `el1_exception_evidence` is the landing site for any EL0
-  synchronous exception `kernel/arch/arm64/kernel/user_entry.S`'s `el0_sync_entry` doesn't recognize
-  as either a real SVC or its one other handled case, a translation fault from legitimate
+  `kernel/arch/arm64/kernel/exception_evidence.tkb`'s `el1_exception_evidence` (ordinary `.tkb` since
+  issue #227 item 3; previously hand-written in `kernel/arch/arm64/boot/entry.S`) is the landing site
+  for any EL0 synchronous exception `kernel/arch/arm64/kernel/user_entry.S`'s `el0_sync_entry` doesn't
+  recognize as either a real SVC or its one other handled case, a translation fault from legitimate
   process-image stack growth (`process_image_handle_data_abort`, the real growable-stack mechanism
   that replaced the original single-page-stack limitation) -- a genuine hardware fault (bad
   instruction fetch, an unhandled data abort, an instruction that is UNDEFINED at the faulting EL)
-  still records `esr_el1`/`far_el1`/`elr_el1`/`spsr_el1` into a fixed `.bss` block and parks in `wfe`
-  forever. A boot log that dispatches syscalls normally and then just stops -- no further syscall
-  log lines, no exit/failure line from `main.tkb` -- is this path, not (usually) a hung syscall
-  handler; see the SWD/D-cache entry immediately below for how to read the real fault out of a
-  parked core rather than trusting the `.bss` block. **Known gap, not yet triggered by any current
+  still records `esr_el1`/`far_el1`/`elr_el1`/`spsr_el1` into a fixed `.bss` block (`exception_vector_
+  slot`) and parks in `wfe` forever. A boot log that dispatches syscalls normally and then just stops
+  -- no further syscall log lines, no exit/failure line from `main.tkb` -- is this path, not (usually)
+  a hung syscall handler; see the SWD/D-cache entry immediately below (now fixed for this specific
+  block, verified with a real injected fault) for how to read the real fault out of a parked core.
+  **Known gap, not yet triggered by any current
   scenario:** `process_image_clone_vm_begin()` (the fork/clone path, as opposed to
   `process_image_map_current()`) never initializes root 1's demand-stack metadata
   (`process_image_stack_growth_active[1]`/`process_image_stack_lowest_l3[1]`), so a forked child
@@ -888,22 +890,35 @@ size.
   computation (a PC-relative `adr` inside code that gets copied to a different execution address)
   found only by re-deriving the encoding by hand and cross-checking against real hardware --
   precisely the review burden a static, external, .S/.tkb-free check avoids growing further. This
-  is not something the compiler enforces at the language level, since this whole file is
-  hand-written assembly outside the `.tkb` type system's reach (see ROADMAP.md's M4/#227 for the
-  actual structural fix: declaring the
-  exception frame and vector table in `.tkb` instead).
-- **The same D-cache-bypass gap applies to postmortem debugging over SWD, not just DMA/harness I/O.**
-  `kernel/arch/arm64/boot/entry.S`'s `el1_exception_evidence` fail-stop path (see the "EL0 fail-stop"
-  entry above) records `esr_el1`/`far_el1`/`elr_el1`/`spsr_el1` into a fixed `.bss` location before
-  parking in `wfe`, intended as a postmortem evidence block readable via `openocd`'s `mdd`/`mdw`. Found
-  during the issue #209 child-exec bring-up (2026-08-05, see HISTORY.md) that these `mdd` reads can
-  return a stale, earlier-boot value while the CPU's actual writes are still dirty in D-cache -- the
-  block claimed `ESR=0, ELR=0` while the halted core's own `ESR_EL1`/`ELR_EL1` (read via `reg ESR_EL1`
-  etc., from the debug context, not RAM) showed a real, different fault. **When diagnosing a real
-  fail-stop, read the parked core's system registers directly (`reg ESR_EL1` / `ELR_EL1` / `SPSR_EL1`)
-  instead of trusting a `.bss`-written evidence block read over SWD.** A same-value-every-boot "coherence
-  check" (e.g. diffing a static struct that is written identically on every run) cannot detect this kind
-  of staleness and must not be used to argue a stale read is fresh.
+  is not something the compiler enforces at the language level, since `entry.S`/`user_entry.S` remain
+  hand-written assembly outside the `.tkb` type system's reach for everything except the fail-stop
+  evidence capture itself (see ROADMAP.md's M4/#227 for the actual structural fix: declaring the
+  exception frame and vector table in `.tkb` too -- issue #227 item 3, moving `el1_exception_evidence`
+  to ordinary `.tkb`, is done; the frame-declaration and vector-table-generation items remain open).
+- **The same D-cache-bypass gap applied to postmortem debugging over SWD, not just DMA/harness I/O --
+  fixed for the evidence block itself by issue #227 item 3.** `el1_exception_evidence` (now ordinary
+  `.tkb`, `kernel/arch/arm64/kernel/exception_evidence.tkb`, moved off hand-written assembly by
+  issue #226's `mrs_esr_el1`/`mrs_far_el1`/`mrs_elr_el1`/`mrs_spsr_el1` intrinsics) records those four
+  registers plus the trapped vector slot into a fixed `exception_vector_slot` global before parking in
+  `wfe`, intended as a postmortem evidence block readable via `openocd`'s `mdw`. Found during the issue
+  #209 child-exec bring-up (2026-08-05, see HISTORY.md) that these reads could return a stale,
+  earlier-boot value while the CPU's actual writes were still dirty in D-cache -- the block claimed
+  `ESR=0, ELR=0` while the halted core's own `ESR_EL1`/`ELR_EL1` (read via `reg ESR_EL1` etc., from the
+  debug context, not RAM) showed a real, different fault. Issue #227 item 3 closes this specific gap:
+  the `.tkb` version calls `dma_prepare_tx` (a cache CLEAN/write-back, reused here purely for its
+  cache-maintenance side effect, not as a DMA operation) on the block immediately after writing it, so
+  the dirty line is flushed to memory before the `wfe` park. Verified on real RPi5 hardware
+  (2026-08-06): a deliberately injected EL1 Data Abort (write through an unmapped `0xffff...` pointer)
+  produced a `slot`/`esr_el1`/`far_el1`/`elr_el1`/`spsr_el1` block read over SWD with D-cache still
+  enabled that exactly matched the injected fault (`far_el1` == the bad pointer, `elr_el1` == the
+  faulting `str`'s own address from `llvm-objdump`, `esr_el1`'s EC/WnR/DFSC fields all consistent with
+  a same-EL write-translation-fault) -- no staleness observed. **The general guidance still stands as a
+  second, independent cross-check** (reading the parked core's live system registers directly via `reg
+  ESR_EL1`/`ELR_EL1`/`SPSR_EL1` costs nothing and catches a *different* class of bug -- e.g. a future
+  change that reintroduces an unflushed write path elsewhere), but the `exception_vector_slot` block
+  itself is no longer known to go stale. A same-value-every-boot "coherence check" (e.g. diffing a
+  static struct that is written identically on every run) still cannot detect staleness in general and
+  must not be used to argue an unverified read is fresh.
 - **STM32 Ethernet driver details** (unified driver API, network config, the DMA-ordering hardware bug, TX interrupt completion) -- see `examples/common_stm32/AGENTS.md`.
 - **RISC-V has no `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` lowering yet** -- these now raise a compile
   error on RISC-V targets rather than silently falling back to a bare barrier (issue #146). AArch64 previously

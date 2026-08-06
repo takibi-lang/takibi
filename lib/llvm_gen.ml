@@ -3512,9 +3512,10 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       emit_interrupt_event true;
       (TypeVoid, const_null (i1_type context))
 
-  | Call (("mrs_cntfrq_el0" | "mrs_cntpct_el0" | "mrs_sctlr_el1") as name, []) ->
-      (* GitHub issue #226: one `mrs` each, register chosen by LLVM's own
-         allocator via the "=r" output constraint -- never named by the
+  | Call (("mrs_cntfrq_el0" | "mrs_cntpct_el0" | "mrs_sctlr_el1"
+          | "mrs_esr_el1" | "mrs_far_el1" | "mrs_elr_el1" | "mrs_spsr_el1") as name, []) ->
+      (* GitHub issue #226/#227: one `mrs` each, register chosen by LLVM's
+         own allocator via the "=r" output constraint -- never named by the
          .tkb caller. *)
       let ity = usize_lltype () in
       let fty = function_type ity [||] in
@@ -3522,6 +3523,10 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | "mrs_cntfrq_el0" -> "cntfrq_el0"
         | "mrs_cntpct_el0" -> "cntpct_el0"
         | "mrs_sctlr_el1"  -> "sctlr_el1"
+        | "mrs_esr_el1"    -> "esr_el1"
+        | "mrs_far_el1"    -> "far_el1"
+        | "mrs_elr_el1"    -> "elr_el1"
+        | "mrs_spsr_el1"   -> "spsr_el1"
         | _ -> assert false
       in
       let inline = const_inline_asm fty

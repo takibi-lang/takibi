@@ -15,6 +15,72 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-06: `el1_exception_evidence` Moves to Ordinary `.tkb`, and a Real Register-Clobber Bug Found by Real-Hardware A/B (GitHub Issue #227 Item 3)
+
+Issue #227 bundles three separable pieces of work (declare the exception frame in `.tkb` and generate
+save/restore; generate the vector table from per-handler declarations; move `el1_exception_evidence`
+to ordinary `.tkb`). Only the third, narrowest piece is done here -- the other two are genuine new
+compiler/codegen features (raw-register-file save/restore before any calling convention exists;
+attribute-driven vector table generation) that need their own design work and stay open. Splitting
+this way follows the project's own established preference for narrow, independently-closeable issues
+over one bundle whose closing bar keeps drifting upward.
+
+`kernel/arch/arm64/boot/entry.S`'s `el1_exception_evidence` used to hand-write five `mrs` reads into a
+fixed `.bss` layout because `.tkb` could not read `ESR_EL1`/`FAR_EL1`/`ELR_EL1`/`SPSR_EL1` directly.
+Issue #226 already lifted the read-only system registers this kernel touches into a closed intrinsic
+set; extending it with these four (`mrs_esr_el1`/`mrs_far_el1`/`mrs_elr_el1`/`mrs_spsr_el1`, same shape
+as `mrs_cntfrq_el0`/`mrs_cntpct_el0`/`mrs_sctlr_el1` in `lib/type_inf.ml`/`lib/llvm_gen.ml`) let
+`el1_exception_evidence` move to a new file, `kernel/arch/arm64/kernel/exception_evidence.tkb`: a
+`let mut exception_vector_slot: [usize; 5];` global plus a function that fills it in, cache-flushes it
+with `dma_prepare_tx` (reused purely for its cache-clean side effect, not as a real DMA operation --
+this fixes the exact SWD-staleness bug issue #233's diagnosis found, see AGENTS.md's D-cache/SWD entry
+and the 2026-08-05 HISTORY.md entry), and parks in `while (true) { interrupt_wait(); }`. `entry.S`'s
+`VECTOR` macro now passes the trapped slot number as an ordinary `x0` argument and tail-branches in,
+instead of the old `mov x16, #N; b el1_exception_evidence` hand-written convention.
+
+**A real regression, found only by real-hardware A/B, not by any test suite.** The first version of
+this change also changed `mov x16, #8; b el0_sync_entry` (the actual, resumable EL0-syscall dispatch
+entry, immediately preceding `el1_exception_evidence`'s vector slots in `entry.S`) to `mov x0, #8`, for
+superficial consistency with the VECTOR macro's new convention. This was wrong in a way `dune runtest`
+(939/939), `kernelbuild-rpi5`, and even a normal successful compile could not catch: `el0_sync_entry`'s
+own first instruction, `EXC_CONTEXT_SAVE`, saves the LIVE `x0` as the interrupted EL0 process's actual
+first syscall argument, and `.Lsyscall_dispatch` (`kernel/arch/arm64/kernel/user_entry.S`) re-reads it
+straight back out of the saved frame (`ldr x2, [sp, #0]`) as that argument for every syscall. Clobbering
+`x0` to the constant 8 before the save silently replaced every syscall's real first argument --
+`el0_sync_entry` itself never reads `x0` by name, so nothing about the *assembly's own logic* looked
+wrong; the corruption only mattered because something else, one call site away, depended on `x0` still
+holding the interrupted process's own value. `x16`, used by the original code and restored here, is
+never re-read by the dispatch path at all -- only handed back to the process unexamined on `eret`, the
+same as any other syscall-clobbered scratch register, which is why it was safe all along and `x0` was
+not.
+
+Found via `make kernelcheck-rpi5` on real RPi5 hardware: the kernel booted, passed ARP/ICMP/TCP
+integration and USB/ext2 fixtures, then hung waiting for BusyBox httpd's `listener ready` marker --
+its first syscalls (all now receiving argument `8`) silently misbehaved. Root-caused with a `git stash`
+A/B against the pre-#227 baseline (same technique as issue #232's own verification): the stashed,
+unmodified baseline passed all 25 views on the identical board in the same session, isolating the
+regression to this change rather than to issue #233's known unrelated ~1-in-6-8 `child_exec` flake
+(a different, narrower symptom). Fixed by reverting only that one line to `mov x16, #8`, verified with
+two consecutive full 25-view real-hardware passes afterward.
+
+**Verified end-to-end with a deliberate real fault**, per the issue's own item-3 motivation (making the
+evidence block actually trustworthy over SWD): temporarily added `let bad: *usize = 0xffff000000000000
+as *usize; *bad = 0x4141414142424242;` as the first statement of `main()` (a plain pointer cast from a
+literal and a raw dereference-assignment, both already unsafe-free per SPEC.md's cast rules), rebuilt,
+loaded over SWD via `scripts/rpi5_jtag_load.sh`, let it fault and park, then halted with a bare
+`openocd ... -c 'mdw 0x922b90 10'` (no test-harness changes) and read back `exception_vector_slot`
+while the core's D-cache was still enabled: `slot=4` (Current-EL-SPx synchronous exception, the correct
+vector for an EL1-to-EL1 fault), `esr_el1=0x96000044` (EC=0x25 same-EL data abort, WnR=1 write,
+DFSC=translation fault level 0 -- exactly the injected store to an unmapped address), `far_el1=
+0xffff000000000000` (the exact bad pointer), `elr_el1=0x214b50` (the exact faulting `str` instruction's
+own address, cross-checked against `llvm-objdump`'s disassembly), `spsr_el1=0x800003c5` (EL1h, DAIF
+masked). No staleness observed -- the `dma_prepare_tx` cache-clean fix works. The fault-injection
+statement was then removed; it was never committed.
+
+Verified: `dune runtest` (939/939), `kernelbuild-rpi5`, `make linuxbuild`/`dune build`, and three total
+real-hardware `kernelcheck-rpi5` passes (25/25 views each) on the final, corrected state, plus the
+dedicated fault-injection pass above.
+
 ### 2026-08-06: A Compile-Time Proof That a Literal Shift Amount Fits the Operand Width (GitHub Issue #234)
 
 Issue #232 fixed a real, silent-miscompilation-class bug (a literal-only `<<`/`>>` shift computed
