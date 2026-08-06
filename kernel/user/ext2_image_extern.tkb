@@ -1,2 +1,0 @@
-extern symbol kernel_ext2_image_start;
-extern symbol kernel_ext2_image_end;

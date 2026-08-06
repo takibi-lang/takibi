@@ -1,4 +1,17 @@
-use "kernel/user/initramfs_extern.tkb";
+// GitHub issue #230: the initramfs blob is now a real compile-time file
+// embed instead of kernel/user/initramfs.S's `.incbin` plus an `extern
+// symbol start`/`end` pair. KERNEL_INITRAMFS_LEN is the current real size
+// of kernel/build/user/initramfs.cpio (busybox-static + busybox-httpd +
+// the musl loader, packed as a cpio "newc" archive) -- embed_file's own
+// compile-time check (lib/type_inf.ml) rejects the build outright if this
+// ever drifts from the file's real size instead of silently using a stale
+// value the way the old runtime `end - start` subtraction never could
+// detect either way. Update this constant (a real compile error will say
+// the correct value) if the pinned busybox/httpd/musl-loader downloads
+// this archive is built from ever change size.
+const KERNEL_INITRAMFS_LEN: usize = 1973248;
+let kernel_initramfs: [u8; KERNEL_INITRAMFS_LEN] =
+    embed_file("kernel/build/user/initramfs.cpio");
 
 // Single source of truth for the cpio "newc" ASCII-hex header layout:
 // sizeof(...)/offsetof(...) are verified against CpioNewcHeader's
@@ -83,8 +96,8 @@ fn cpio_hex8(base: *u8, offset: usize) -> CpioNumberResult {
 }
 
 fn initramfs_entry(target: usize) -> InitramfsEntryResult {
-    let address: usize = kernel_initramfs_start;
-    let length: usize = kernel_initramfs_end - kernel_initramfs_start;
+    let address: usize = (kernel_initramfs as *u8) as usize;
+    let length: usize = KERNEL_INITRAMFS_LEN;
     let mut offset: usize = 0;
     let mut ordinal: usize = 0;
     let bytes: *u8 = address as *u8;

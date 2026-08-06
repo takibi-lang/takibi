@@ -15,15 +15,12 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
-### 2026-08-06: `embed_file("path")`, a Compile-Time File Embed -- Language Feature Landed, Kernel Wiring Not Yet Started (GitHub Issue #230, In Progress)
+### 2026-08-06: `embed_file("path")`, a Compile-Time File Embed, and Deleting `ext2_image.S`/`initramfs.S` (GitHub Issue #230)
 
 Issue #230's stated scope is two parts: (1) a language feature to embed a real file as a `[u8; N]`
 array at compile time, and (2) using it to delete `kernel/user/ext2_image.S`/`initramfs.S` and their
 `extern symbol start`/`end` pairs entirely, replacing the `end - start` runtime length subtraction with
-the array's own known-at-compile-time size. Only part (1) is done in this entry; the kernel-side wiring
-(part 2) has not been started -- `ext2_image.S`/`initramfs.S`/their `_extern.tkb` files are all
-untouched, and `kernel/drivers/block/memory.tkb`/`kernel/fs/initramfs.tkb` still use the old `extern
-symbol` pair.
+the array's own known-at-compile-time size. Both parts are done.
 
 Added `embed_file("path")` (`lib/ast.ml`/`lib/lexer.mll`/`lib/parser.mly`: a new `EmbedFile of string`
 expr constructor, parsed the same primary-expression shape as `SizeOf`/`OffsetOf`). Deliberately
@@ -59,12 +56,44 @@ two rejection positions. One test-writing mistake surfaced and got fixed along t
 initially (and incorrectly) attributed to the new feature -- caught by isolating the exact failing
 fragment via the CLI rather than assuming.
 
-955 -> 962 tests. `kernelbuild-rpi5`/hardware verification not yet run for this entry, since no kernel
-file has been touched yet -- next step is wiring `kernel/user/ext2_image.S`/`initramfs.S`'s two call
-sites over to `embed_file`, deleting both `.S` files and their `_extern.tkb` companions, and updating
-the Makefile's `.o`-level prerequisites (`$(KERNEL_EXT2_IMAGE_O): $(KERNEL_EXT2_IMAGE_S) $(KERNEL_EXT2_IMAGE)`)
-to instead make the overall `.tkb` compilation depend on those same blob files directly, per the issue's
-own "Build-system consideration" section.
+955 -> 962 tests for the language feature itself.
+
+**Kernel wiring.** `kernel/drivers/block/memory.tkb`: `let mut kernel_ext2_image: [u8;
+KERNEL_EXT2_IMAGE_LEN] = embed_file("kernel/build/user/ext2.img");` (`let mut`, matching this image
+actually being written through by `block_write` -- the writable RAM-backed ext2 fixture the file's own
+header comment describes). `kernel/fs/initramfs.tkb`: `let kernel_initramfs: [u8; KERNEL_INITRAMFS_LEN]
+= embed_file("kernel/build/user/initramfs.cpio");` (plain `let`, read-only). Both named `_LEN` constants
+exist because `sizeof` takes a TYPE, not a value -- there is no way to ask "how long is this array
+variable" as an expression in this language today -- so the length usable elsewhere in each file's own
+code is the SAME const referenced in the array-size annotation, not a second independently-written
+number: `embed_file`'s own compile-time check (added in this issue's first half, above) already verifies
+that const against the real file size, so a stale value is a compile error, not a silent bug, closing the
+exact "nothing checks this stays correct" gap the issue's own motivation names for `extern symbol`.
+`KERNEL_EXT2_IMAGE_LEN` (1048576) is a genuine build-system constant -- `ext2.img`'s own build recipe
+`truncate`s it to that exact size -- while `KERNEL_INITRAMFS_LEN` (1973248) reflects the current pinned
+busybox-static/busybox-httpd/musl-loader downloads' packed cpio size and would need updating (with a
+clear compile error pointing at the right value, not a silent one) if those pinned URLs ever moved to
+a different-sized build.
+
+Deleted `kernel/user/ext2_image.S`, `kernel/user/ext2_image_extern.tkb`, `kernel/user/initramfs.S`,
+`kernel/user/initramfs_extern.tkb` entirely (the now-empty `kernel/user/` directory was removed too).
+Makefile: dropped `KERNEL_INITRAMFS_S`/`_O`/`_EXTERN` and `KERNEL_EXT2_IMAGE_S`/`_O`/`_EXTERN` (the blob
+paths themselves, `KERNEL_INITRAMFS_CPIO`/`KERNEL_EXT2_IMAGE`, stay -- their own build recipes are
+unchanged, only the `.S`-wrapping layer on top is gone); `$(KERNEL_RPI5_MAIN_O)`'s prerequisite list now
+names those same blob files directly (previously only the deleted `_EXTERN.tkb` files were listed, since
+the blobs themselves were `$(KERNEL_EXT2_IMAGE_O)`'s prerequisites, not the main compilation's); the
+final `$(LLD)` link line dropped `$(KERNEL_INITRAMFS_O) $(KERNEL_EXT2_IMAGE_O)` -- both blobs are now
+embedded directly inside `main.o`, no separate `.o` to link.
+
+Verified: `llvm-nm --print-size` on the real linked `kernel.elf` confirmed both globals at their exact
+expected sizes (`kernel_ext2_image`: `0x100000` = 1048576 bytes, section `D` (writable data, matching
+`let mut`); `kernel_initramfs`: `0x1e1c00` = 1973248 bytes, section `R` (read-only, matching plain
+`let`)). `dune runtest` (962/962, unchanged from the language-feature half), `kernelbuild-rpi5`
+(the link command no longer references either deleted `.o`), and two consecutive real-RPi5-hardware
+`kernelcheck-rpi5` passes (25/25 views each) -- specifically including `ext2` (the embedded, writable
+ext2 image read AND written through its new address), and `busybox`/`httpd_daemon`/`httpd_loader`/
+`distro_image` (busybox-static, busybox-httpd, and the musl loader all loaded from the embedded cpio
+archive) -- exercising both embedded blobs for real, not just confirming they link.
 
 ### 2026-08-06: Closing Two Gaps in the Exception-Entry Prototype -- Real Signature Checking, and a Standalone `exception_resume`, With a Real Ordering Bug Caught Before Shipping (GitHub Issue #227 Item 1 Follow-up)
 

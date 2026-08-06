@@ -1,6 +1,17 @@
-use "kernel/user/ext2_image_extern.tkb";
-
 const KERNEL_BLOCK_SIZE: usize = 1024;
+
+// GitHub issue #230: the writable RAM-backed ext2 fixture is now a real
+// compile-time file embed instead of kernel/user/ext2_image.S's `.incbin`
+// plus an `extern symbol start`/`end` pair. `let mut` (not plain `let`,
+// unlike kernel/fs/initramfs.tkb's read-only blob) matches this image
+// actually being written through by block_write below. KERNEL_EXT2_IMAGE_LEN
+// is kernel/build/user/ext2.img's real size -- fixed by its own build
+// recipe's `truncate -s 1048576`, so unlike initramfs.cpio's size this one
+// is a real build-system constant, not something that could quietly drift;
+// embed_file's own compile-time check still verifies it regardless.
+const KERNEL_EXT2_IMAGE_LEN: usize = 1048576;
+let mut kernel_ext2_image: [u8; KERNEL_EXT2_IMAGE_LEN] =
+    embed_file("kernel/build/user/ext2.img");
 
 struct KernelBlockDevice {
     // 0 = embedded memory image, 1 = USB Mass Storage. Kept as a private
@@ -22,8 +33,8 @@ must_use variant BlockCopyResult { Invalid; Copied; }
 private let mut block_copy_buffer: [u8; KERNEL_BLOCK_SIZE];
 
 fn memory_block_device_ext2() -> KernelBlockDeviceResult {
-    let address: usize = kernel_ext2_image_start;
-    let length: usize = kernel_ext2_image_end - kernel_ext2_image_start;
+    let address: usize = (kernel_ext2_image as *u8) as usize;
+    let length: usize = KERNEL_EXT2_IMAGE_LEN;
     if (address == 0 || length == 0 || length % KERNEL_BLOCK_SIZE != 0) {
         return KernelBlockDeviceResult::Invalid;
     }
