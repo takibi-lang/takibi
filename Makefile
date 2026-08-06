@@ -144,6 +144,17 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              callstack ringbuf crc8 djb2 slice foreach for loop fizzbuzz fibonacci \
                              bubblesort inet_checksum ip_parse tcp_parse wire_endian
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
+LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
+
+# Keep each %_exe.o after linking instead of GNU Make's default behavior of
+# auto-deleting pattern-rule intermediates (.tkb -> _exe.o -> .exe is a
+# chained implicit rule, so _exe.o counts as an intermediate unless listed
+# here). Kept objects still rebuild correctly when a .tkb changes -- the
+# %_exe.o pattern rule's own prerequisite on the .tkb file is unaffected by
+# .SECONDARY, which only stops the auto-delete-after-use step. `make clean`
+# already sweeps every linux_user/**/*.o (see the clean target below), so
+# nothing else needs to change to actually remove these when wanted.
+.SECONDARY: $(LINUX_USER_OBJS)
 
 # Extra prerequisites (staleness tracking only -- `use` already resolves
 # these transitively at compile time, same reasoning as examples/Makefile's
