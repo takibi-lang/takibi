@@ -772,6 +772,26 @@ size.
 
 ## Known Limitations / Deferred Design Decisions
 
+- **A literal-only `<<`/`>>` shift by an amount >= 32 could silently produce LLVM `poison` until
+  issue #232's fix; a narrow residual gap remains for `i8`/`u8`/`i16`/`u16` contexts.** `lib/
+  llvm_gen.ml`'s `IntLit` codegen defaults a literal with no usable type hint to i32 width; `BinOp`
+  used to drop its own `?expected_ty` entirely when evaluating its operands, so a literal buried
+  inside a `BinOp` (e.g. `2 << 32` inside `let tcr: usize = 0x351b | (1 << 23) | (2 << 32);`)
+  always fell back to that i32 guess even when the enclosing context was `usize` -- `shl i32 2, 32`
+  is undefined (shift amount >= the operand's own bit width). Fixed by forwarding the current
+  `BinOp` node's own hint into its operand recursion, restricted to i32-or-wider plain integer
+  types (`TypeI32`/`TypeI64`/`TypeU32`/`TypeU64`/`TypeIsize`/`TypeUsize`). `i8`/`u8`/`i16`/`u16`
+  are deliberately excluded: this compiler widens narrow *non-literal* operands (a loaded byte) to
+  i32 for actual bitwise arithmetic elsewhere in the same lowering, and forwarding a narrow hint
+  here would make a literal *sibling* materialize directly at i8/i16 instead of also being
+  promoted -- found by an internal LLVM-IR-verifier rejection (`shl i32 %x, i16 8`, mismatched
+  operand widths) while testing the first, unrestricted version of the fix. This means a
+  literal-only shift feeding a narrow-typed context directly (e.g. `let x: u16 = SOME_LITERAL <<
+  40;`) can still exhibit the original poison -- believed practically inert today (the result would
+  already be entirely truncated away for any real u16/u8 use, so no such expression exists in this
+  codebase), but worth knowing before extending `BinOp`'s narrow-type handling. See HISTORY.md's
+  issue #232 entry for the full diagnosis and the two real-hardware `kernel_mmu_activate()` writes
+  (`TCR_EL1`, `TTBR0_EL1`) it silently corrupted before being caught by disassembly.
 - **`interrupt_wait`/`interrupt_notify` currently support ARM/AArch64 only.**
   They use the retained-event `wfe`/`sev` pair, which closes the
   check-then-sleep race. AMD64 and RISC-V code generation deliberately rejects
