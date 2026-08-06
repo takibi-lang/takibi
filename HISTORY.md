@@ -15,6 +15,59 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-06: BinOp Codegen Dropped Its Own expected_ty, Poisoning Wide Literal Shifts (GitHub Issue #232)
+
+Follow-up fix to the compiler bug issue #226's Stage E surfaced. `IntLit`'s own codegen (`lib/
+llvm_gen.ml`) already picks the exact right LLVM width when handed a concrete `?expected_ty` hint
+-- a `let` binding's declared type, a call argument's parameter type, and so on. But `BinOp`'s
+operand evaluation called `gen_expr locals e1`/`gen_expr locals e2` with no hint at all, so a
+literal buried inside a `BinOp` (rather than standing alone in an already-typed position) fell
+back to `IntLit`'s own no-hint guess: i32, when the literal's own magnitude fits there. For
+`2 << 32`, both `2` and `32` guessed i32, and LLVM built `shl i32 2, 32` -- undefined per the
+LLVM LangRef (a shift amount >= the operand's own bit width), silently producing `poison` that
+surfaced as `kernel_mmu_activate`'s `TCR_EL1`/`TTBR0_EL1` writes both landing with `MAIR_EL1`'s
+leftover register value instead of their own computed ones. Confirmed as a frontend/codegen bug,
+not an optimizer artifact, by reproducing it identically with `--profile-functions` (which
+disables the entire post-codegen optimization pipeline per `run_optimizations`'s own early-return
+check).
+
+Fixed by forwarding the current `BinOp` node's own `?expected_ty` into its operand recursion --
+but only for i32-or-wider plain integer types (`TypeI32`/`TypeI64`/`TypeU32`/`TypeU64`/
+`TypeIsize`/`TypeUsize`). `type_inf.ml`'s own `Shl`/`Shr`/`Bor`/`Bxor`/`Band`/`Add`/`Sub`/`Mul`/
+`Div`/`Mod` cases already unify both operands' types with each other and transitively with
+whatever the enclosing context requires, so by the time codegen runs on an already-type-checked
+program, any concrete scalar hint reaching a `BinOp` node is provably consistent with what both
+operands actually are -- safe to hand down the same way a direct call argument or `let` binding
+already does.
+
+`i8`/`u8`/`i16`/`u16` are deliberately excluded from the forwarded set, even though `IntLit`'s own
+hint-matching handles them too -- found the hard way, by an internal LLVM-IR-verifier rejection
+in `kernel/fs/ext2/ext2.tkb`'s `ext2_u16` while testing the first, unrestricted version of this
+fix. This compiler widens narrow *non-literal* operands (e.g. a loaded byte, zext'd to i32) to i32
+for actual bitwise arithmetic elsewhere in the same `BinOp` lowering; forwarding a narrow
+`?expected_ty` hint here made a literal *sibling* of such an operand materialize directly at
+i8/i16 instead of also being promoted to i32 -- `shl i32 %x, i16 8` is itself invalid LLVM IR (two
+different-width operands to one shift), a mismatch in the opposite direction from the bug this fix
+set out to close. This is exactly why the fix went in as two iterations, verified against a
+regression test each time, rather than one blind broadening.
+
+Verified broadly, since this changes codegen for every `BinOp` in the whole compiler: `dune
+runtest` (935/935, one new case checking the exact motivating expression folds to the correct
+64-bit constant), `make langcheck`, a full `kernelbuild-rpi5` plus several consecutive real RPi5
+`kernelcheck-rpi5` hardware runs (25/25 views each), `make linuxcheck`, and a from-scratch build
+of every `examples/` target for both AArch64 (`qemubuild`) and Cortex-M7/`thumbv7em`
+(`stm32build`) -- the latter specifically because this compiler's other real target has a
+genuinely 32-bit `usize`, the case this fix's own restriction (i32-or-wider only) is meant to stay
+correct for. `kernel/arch/arm64/mm/mmu.tkb`'s `kernel_mmu_activate()` reverted to the natural
+`0x351b | (1 << 23) | (2 << 32)` / `... | (1 << 48)` expressions the pre-fix compiler could not
+handle, now that it can.
+
+One real, pre-existing, unrelated finding surfaced during this verification's unusually large
+number of consecutive hardware runs (14 total across both the pre-fix and post-fix compiler, via
+a `git stash` A/B comparison) and is deliberately not fixed here: the `child_exec` view failed
+intermittently, byte-for-byte identically, on **both** sides of the A/B comparison -- roughly 1 in
+6-8 boots. Confirmed pre-existing and unrelated to this fix; filed separately as issue #233.
+
 ### 2026-08-06: A Closed Intrinsic Set Retires timer.S and mmu.S (GitHub Issue #226)
 
 Follow-up to the same day's #229/#231 work and the rejected EL0-probe design: those made the
