@@ -15,6 +15,83 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-06: Mask DAIF.I Across Every eret Window (GitHub Issue #229)
+
+`make kernelcheck-rpi5` intermittently hung after the `vm layout:` boot-log
+line and never reached the userspace-fixture readiness marker -- roughly
+25-40% of boots, measured across both #225's tree and a `git stash` baseline,
+so pre-existing and unrelated to that work. The parked core (read via
+OpenOCD `reg`, not the `.bss` evidence block -- see the SWD/D-cache entry in
+`AGENTS.md`) reported `pc = 0x201030` (the `el1_exception_evidence` park
+loop), `ESR_EL1 = 0x02000000` (EC=0x00, an instruction UNDEFINED at the
+current EL), `SPSR_EL1` with M[3:0]=0 (the fault came from **EL0**), and
+`ELR_EL1 = 0x2018a4` -- a **kernel .text address**, nowhere near
+`USER_TEXT_VA`.
+
+`llvm-objdump` named that address exactly: `el0_context_resume + 0xc`, the
+`msr SPSR_EL1, x10` immediately after `msr ELR_EL1, x9` in
+`EXC_CONTEXT_RESTORE`. That is a one-instruction window, and the reported
+`ELR_EL1` is a fingerprint of an interrupt taken inside it:
+
+1. Since issue #187 `.Lsyscall_dispatch` unmasks DAIF.I, so every syscall
+   return runs `EXC_CONTEXT_RESTORE` with interrupts open.
+2. An IRQ arriving between the two `msr`s makes the hardware overwrite
+   `ELR_EL1` with the interrupted kernel PC (`0x2018a4`) and `SPSR_EL1` with
+   EL1h. `el1_current_irq_entry` faithfully saves and restores *those*
+   values, so the return from the IRQ hands the restore sequence back its own
+   address in `ELR_EL1`.
+3. Execution resumes at `0x2018a4`, and that instruction then installs the
+   frame's genuine EL0 `SPSR_EL1`. The final `eret` therefore drops to EL0
+   at a kernel .text address, where `msr SPSR_EL1` is UNDEFINED: EC=0x00,
+   fail-stop, park.
+
+The rest of the window is fatal too, in a second shape: an IRQ anywhere
+*after* both `msr`s leaves ELR/SPSR clobbered together, so the `eret` jumps
+back into the restore sequence at EL1h and loops on itself, re-adding
+`EXC_CONTEXT_SIZE` to `sp` each pass. Both shapes stop the boot log at the
+identical point, which is why every observed failure looked the same.
+
+Confirmed on real hardware rather than argued from the disassembly. Injecting
+a single `wfi` between the two `msr`s (so a timer IRQ is *guaranteed* to land
+in the window) turned the ~30% intermittent failure into an immediate,
+first-EL0-program fail-stop whose captured `ESR`/`SPSR` matched the original
+report exactly and whose `ELR_EL1` was, to the instruction, the address right
+after the injected `wfi`. Re-running that same forced-IRQ build *with the fix*
+below -- plus a temporary 4096 Hz tick, so the window is hit on every single
+syscall return rather than occasionally -- passed all 25 views.
+
+Fixed by masking DAIF.I for the whole restore-and-eret sequence:
+
+- `EXC_CONTEXT_RESTORE` (`exception_context.inc`) now starts with
+  `msr DAIFSet, #0x2`. Putting it in the one shared restore shape, rather
+  than at each of its three callers, is what stops a future path that unmasks
+  DAIF.I mid-handler -- exactly what #187 did -- from silently reopening the
+  window. Re-masking on the two IRQ entries, which the hardware already
+  masked, is a no-op; the `eret` restores PSTATE.DAIF from `SPSR_EL1`, so the
+  interrupted context's own interrupt state never changes.
+- `el0_context_resume` masks one instruction earlier, before its
+  `mov sp, x0`: that switches SP_EL1 to the frame being resumed, which on a
+  scheduler switch belongs to a *different* process's kernel stack.
+- `run_initial_user` has the same window (three `msr`s then `eret`) and is
+  reached with DAIF.I unmasked, since `platform_irq_init()` runs its one
+  global `enable_irq()` far earlier in boot. Masked there too. EL0's own
+  interrupt state is unaffected: it comes from the written SPSR value, not
+  from PSTATE.DAIF at the `eret`.
+
+Verified on real RPi5 hardware: 13 consecutive `make kernelcheck-rpi5` runs,
+25/25 views each. At the low end of the previously measured failure rate,
+0.75^13 puts a false-clean streak at about 2%.
+
+One separate defect surfaced during the diagnosis and is deliberately *not*
+fixed here: EL0 was able to **fetch and execute** an instruction from kernel
+.text at all. A permission fault would have reported EC=0x20; EC=0x00 means
+the fetch succeeded and only the instruction itself was undefined at EL0. A
+follow-up probe (an EL0 `ldr` from `0x201000`) confirmed EL0 *data* access to
+the same region is correctly denied -- `ESR_EL1 = 0x9200000d`, EC=0x24,
+permission fault at level 1 -- so this is an execute-permission asymmetry on
+the `mmu.S` `INIT_ROOT` kernel identity block (`0x705`, i.e. AP=0b00 but
+UXN=0), not a general mapping hole. Filed separately.
+
 ### 2026-08-05: Deduplicate Primary/Secondary CPU Init (GitHub Issue #224)
 
 `kernel/arch/arm64/boot/entry.S`'s `_start` and `kernel_secondary_entry`

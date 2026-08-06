@@ -359,6 +359,16 @@ run_initial_user:
     stp     x25, x26, [sp, #48]
     stp     x27, x28, [sp, #64]
     stp     x29, x30, [sp, #80]
+    /* GitHub issue #229: the same ELR_EL1/SPSR_EL1-vs-eret window
+     * EXC_CONTEXT_RESTORE closes exists here too, and this path is reached
+     * with DAIF.I unmasked -- kernel/platform/rpi5/intc.tkb's
+     * platform_irq_init() runs its one global enable_irq() long before
+     * kernel/init/main.tkb gets here. An interrupt between these three msr
+     * instructions and the eret would return the EL0 image to EL1h, or to a
+     * kernel .text address, instead of to x0. EL0's own interrupt state is
+     * unaffected: it comes from the SPSR value written below, not from
+     * PSTATE.DAIF at the eret. */
+    msr     DAIFSet, #0x2
     msr     sp_el0, x1
     /* EL0t with IRQ delivery enabled. The Lower-EL IRQ vector saves the
      * complete context before any scheduler decision. */
@@ -548,8 +558,15 @@ el0_context_set_sp_el0:
 // different code paths can no longer race to set elr_el1/sp_el0 and have one
 // silently undone by the other's unconditional reload (see commit 8db27e3's
 // first bug for the failure mode this replaces).
+// The DAIFSet here is one instruction earlier than the identical one
+// EXC_CONTEXT_RESTORE now starts with (GitHub issue #229): `mov sp, x0`
+// switches SP_EL1 to the frame being resumed, which on a scheduler switch is
+// a DIFFERENT process's kernel stack, and an interrupt taken in between would
+// build its own EXC_CONTEXT_SIZE frame below that one instead of below the
+// stack this syscall actually ran on.
     .global el0_context_resume
 el0_context_resume:
+    msr     DAIFSet, #0x2
     mov     sp, x0
     EXC_CONTEXT_RESTORE
     add     sp, sp, #EXC_CONTEXT_SIZE

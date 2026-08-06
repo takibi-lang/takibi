@@ -67,7 +67,35 @@
     str     x10, [sp, #EXC_CONTEXT_FPCR]
 .endm
 
+/* GitHub issue #229: DAIF.I must be masked for the whole restore-and-eret
+ * sequence. ELR_EL1/SPSR_EL1 are architectural exception-return state, not
+ * ordinary registers: taking ANY exception between loading them here and the
+ * eret overwrites both with the interrupting context's own values, and the
+ * interrupt handler's own restore puts back what IT saved -- the kernel PC
+ * and EL1h -- discarding what this sequence just loaded. The eret then
+ * returns to the wrong place. Both halves of the window are fatal:
+ *
+ *   - Interrupted between the two msr instructions below: ELR_EL1 is left
+ *     pointing at the `msr spsr_el1` instruction itself while that
+ *     instruction then goes on to install the frame's genuine EL0 SPSR, so
+ *     the eret drops to EL0 *at a kernel .text address*.
+ *   - Interrupted anywhere after both msr instructions: ELR_EL1/SPSR_EL1
+ *     both stay clobbered, so the eret jumps back into this restore sequence
+ *     at EL1h and loops on itself, re-adding EXC_CONTEXT_SIZE to sp each
+ *     pass until an unrelated EL1 fault stops it.
+ *
+ * Every entry that uses this macro reaches it with DAIF.I already masked
+ * today EXCEPT the syscall path, which unmasks it deliberately (see
+ * kernel/arch/arm64/kernel/user_entry.S's issue #187 comment) -- that is
+ * where the ~25-40%-of-boots intermittent fail-stop came from. Masking here,
+ * in the one shared restore shape rather than at each of its callers, is
+ * what keeps a future path that unmasks DAIF.I mid-handler (exactly what
+ * #187 did) from silently reopening the same window. Re-masking on the paths
+ * that were already masked is a no-op; the eret restores PSTATE.DAIF from
+ * SPSR_EL1 regardless, so this never changes the interrupted context's own
+ * interrupt state. */
 .macro EXC_CONTEXT_RESTORE
+    msr     DAIFSet, #0x2
     ldp     x9, x10, [sp, #EXC_CONTEXT_ELR_EL1]
     msr     elr_el1, x9
     msr     spsr_el1, x10
