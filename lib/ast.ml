@@ -485,8 +485,8 @@ type toplevel =
      `run_initial_user`/`.Ldata_abort` in kernel/arch/arm64/kernel/
      user_entry.S) are deliberately out of scope for this first slice --
      see HISTORY.md's issue #227 item 1 entry. *)
-  | ExceptionResumeDef of ident * (string * string) list * loc
-  (* exception_resume name { frame: FrameStruct; } -- GitHub issue #227
+  | ExceptionRestoreDef of ident * (string * string) list * loc
+  (* exception_restore name { frame: FrameStruct; } -- GitHub issue #227
      item 1 follow-up. Generates just the restore-frame/eret half of
      ExceptionEntryDef, for a standalone resume entry point reached via an
      ordinary `bl`/call with the frame's own address already in x0 (AAPCS

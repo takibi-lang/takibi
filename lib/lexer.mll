@@ -49,7 +49,7 @@ rule read = parse
   | "symbol"  { SYMBOL }
   | "vector_table" { VECTOR_TABLE }
   | "exception_entry" { EXCEPTION_ENTRY }
-  | "exception_resume" { EXCEPTION_RESUME }
+  | "exception_restore" { EXCEPTION_RESTORE }
   | "embed_file" { EMBED_FILE }
   | "struct"  { STRUCT }
   | "opaque"  { OPAQUE }

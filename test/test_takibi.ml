@@ -8569,46 +8569,46 @@ let codegen_tests = [
            }") ();
        Target_info.configure "thumbv7em-none-eabi");
 
-  (* GitHub issue #227 item 1 follow-up: `exception_resume name { frame:
+  (* GitHub issue #227 item 1 follow-up: `exception_restore name { frame:
      ...; }` generates just the restore-frame/eret half, for a standalone
      resume entry point reached via an ordinary call with the frame's own
      address already in x0 -- exactly el0_context_resume's shape. Reuses
      exception_entry's own frame validation, so only the key handling
      (exactly one required key, "frame") gets its own tests here. *)
-  Alcotest.test_case "exception_resume accepts a well-formed frame declaration" `Quick
+  Alcotest.test_case "exception_restore accepts a well-formed frame declaration" `Quick
     (fun () ->
        Target_info.configure "aarch64-none-elf";
        expect_ok
          (exc_frame_src ^
-          "exception_resume el0_context_resume {
+          "exception_restore el0_context_resume {
              frame: ExcFrame;
            }") ();
        Target_info.configure "thumbv7em-none-eabi");
 
-  Alcotest.test_case "exception_resume rejects an unknown key" `Quick
+  Alcotest.test_case "exception_restore rejects an unknown key" `Quick
     (fun () ->
        Target_info.configure "aarch64-none-elf";
        expect_type_error "unknown key"
          (exc_frame_src ^
-          "exception_resume el0_context_resume {
+          "exception_restore el0_context_resume {
              frame: ExcFrame;
              dispatch: ExcFrame;
            }") ();
        Target_info.configure "thumbv7em-none-eabi");
 
-  Alcotest.test_case "exception_resume rejects a missing frame key" `Quick
+  Alcotest.test_case "exception_restore rejects a missing frame key" `Quick
     (fun () ->
        Target_info.configure "aarch64-none-elf";
        expect_type_error "missing required key 'frame'"
-         "exception_resume el0_context_resume { }" ();
+         "exception_restore el0_context_resume { }" ();
        Target_info.configure "thumbv7em-none-eabi");
 
-  Alcotest.test_case "exception_resume rejects a frame missing a register field, same as exception_entry" `Quick
+  Alcotest.test_case "exception_restore rejects a frame missing a register field, same as exception_entry" `Quick
     (fun () ->
        Target_info.configure "aarch64-none-elf";
        expect_type_error "missing register field"
          "struct packed IncompleteFrame { x0: usize; }
-          exception_resume el0_context_resume {
+          exception_restore el0_context_resume {
             frame: IncompleteFrame;
           }" ();
        Target_info.configure "thumbv7em-none-eabi");

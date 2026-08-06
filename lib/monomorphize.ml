@@ -356,7 +356,7 @@ let walk_toplevel ~subst ~vsubst ~resolve_inst (t : toplevel) : toplevel =
   | ExternSymbolDef _ -> t
   | VectorTableDef _ -> t
   | ExceptionEntryDef _ -> t
-  | ExceptionResumeDef _ -> t
+  | ExceptionRestoreDef _ -> t
       (* Handled separately by `run` below (extracted as a template, then
          stripped from the emitted program) -- never walked in place, since
          its own fields reference an unbound type parameter, not a real
@@ -925,7 +925,7 @@ let run (prog : toplevel list) : toplevel list =
       | ExternSymbolDef _ -> t
       | VectorTableDef _ -> t
   | ExceptionEntryDef _ -> t
-  | ExceptionResumeDef _ -> t
+  | ExceptionRestoreDef _ -> t
     in
 
     (* Walk every ordinary (non-template) toplevel for calls, positionally

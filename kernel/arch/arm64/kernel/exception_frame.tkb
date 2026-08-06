@@ -58,12 +58,12 @@ exception_entry el0_irq_entry {
 // resume entry point (kernel/kernel/syscall.tkb calls it as an ordinary
 // `el0_context_resume(frame_sp)`, ELF-ABI usize argument in x0, never
 // returns), not reached via a preceding save in the same sequence the way
-// el1_current_irq_entry/el0_irq_entry above are -- exception_resume
+// el1_current_irq_entry/el0_irq_entry above are -- exception_restore
 // generates just the restore-frame/eret half for exactly that shape. Its
 // own extern fn declaration (kernel/arch/arm64/kernel/user_entry_extern.tkb)
 // is unchanged: that is still what lets ordinary .tkb code call it: this
 // declaration only supplies the generated BODY, the same relationship an
 // extern fn normally has with a hand-written assembly body.
-exception_resume el0_context_resume {
+exception_restore el0_context_resume {
     frame: ExceptionFrame;
 }

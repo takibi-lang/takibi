@@ -15,6 +15,16 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-06: Renamed `exception_resume` to `exception_restore` -- a New Keyword Collided With an Existing `examples/` Function Name
+
+Found by the user running `make -f examples/Makefile allcheck` (the daily examples/ regression check AGENTS.md's own maintenance-scope section calls for) shortly after issue #227 item 1's `exception_resume { frame: ...; }` declaration (see that entry above) landed: `examples/copy_on_write/copy_on_write.tkb` and `examples/vm_page_map/vm_page_map_core.tkb`/`vm_page_map_core_rpi5.tkb` (the RPi3 COW exception-handling design SPEC.md's own "Guard-derived pointers"/ownership sections describe) all define an ordinary function literally named `exception_resume` -- unrelated to the new kernel-only declaration, predating it by a large margin. Making `exception_resume` a reserved keyword broke every one of those files with a plain syntax error.
+
+`examples/` is explicitly not a target for new feature work or edits to accommodate `kernel/`-side changes (AGENTS.md's Maintenance Scope section) -- the new keyword was the thing that had to move, not the example. Renamed the language construct to `exception_restore` throughout (`lib/ast.ml`'s `ExceptionRestoreDef`, `lib/lexer.mll`'s `EXCEPTION_RESTORE` token, `lib/parser.mly`, `lib/type_inf.ml`, `lib/llvm_gen.ml`'s `gen_exception_restore`, `lib/monomorphize.ml`, `kernel/arch/arm64/kernel/exception_frame.tkb`'s own declaration, `test/test_takibi.ml`'s test names, `SPEC.md`) -- a name that also reads slightly better against the construct it actually generates (`EXC_CONTEXT_RESTORE`'s shape, not literally "resuming" anything itself).
+
+Checked the other three new keywords added the same day (`vector_table`, `exception_entry`, `embed_file`) for the same kind of collision across `examples/`/`kernel/`/`linux_user/` before concluding this was the only one.
+
+Verified: `dune runtest` (962/962, unchanged), `kernelbuild-rpi5`, `make linuxbuild`, and -- the actual regression surface -- `make -f examples/Makefile qemubuild`/`stm32build` (build-only, no hardware) plus a direct build of `examples/copy_on_write/kernel_rpi5.elf`/`examples/vm_page_map/kernel_rpi5.elf`/`examples/two_page_map/kernel_rpi5.elf` (the RPi5-target examples sharing the colliding file), all clean. Real-hardware `allcheck` was run by the repository owner, not from this session, per this project's hardware-notification convention.
+
 ### 2026-08-06: `embed_file("path")`, a Compile-Time File Embed, and Deleting `ext2_image.S`/`initramfs.S` (GitHub Issue #230)
 
 Issue #230's stated scope is two parts: (1) a language feature to embed a real file as a `[u8; N]`
@@ -95,7 +105,7 @@ ext2 image read AND written through its new address), and `busybox`/`httpd_daemo
 `distro_image` (busybox-static, busybox-httpd, and the musl loader all loaded from the embedded cpio
 archive) -- exercising both embedded blobs for real, not just confirming they link.
 
-### 2026-08-06: Closing Two Gaps in the Exception-Entry Prototype -- Real Signature Checking, and a Standalone `exception_resume`, With a Real Ordering Bug Caught Before Shipping (GitHub Issue #227 Item 1 Follow-up)
+### 2026-08-06: Closing Two Gaps in the Exception-Entry Prototype -- Real Signature Checking, and a Standalone `exception_restore`, With a Real Ordering Bug Caught Before Shipping (GitHub Issue #227 Item 1 Follow-up)
 
 Direct follow-up to the item 1 prototype below, requested by the user after reviewing it: the
 prototype's own entry explicitly named two gaps left open (`dispatch`/`before` checked only for
@@ -125,19 +135,19 @@ different design each would need its own real investigation to develop -- correc
 narrower true scope, rather than assuming all three matched, is itself the main output of this half of
 the follow-up.
 
-Added `exception_resume name { frame: FrameStruct; }` (`lib/ast.ml`/`lib/parser.mly`/`lib/lexer.mll`:
+Added `exception_restore name { frame: FrameStruct; }` (`lib/ast.ml`/`lib/parser.mly`/`lib/lexer.mll`:
 one new keyword, reusing `exception_entry`'s own field grammar) for exactly the `el0_context_resume`
 shape. `type_inf.ml`'s frame validation was factored out of the `ExceptionEntryDef` case into a shared
 `validate_exception_frame` function so both declarations check the identical closed register set the
 same way. `lib/llvm_gen.ml` similarly factored a shared `exception_frame_offsets` (the field-offset
 computation) and `emit_exception_restore` (the restore-half instruction sequence) out of
-`gen_exception_entry`, called by both it and the new `gen_exception_resume`.
+`gen_exception_entry`, called by both it and the new `gen_exception_restore`.
 
 **Refactoring `emit_exception_restore` to be shared surfaced a real, previously-undetected ordering
 bug in the first draft.** The natural-looking version had `emit_exception_restore` unconditionally
 emit `msr DAIFSet` as its own first instruction, with each caller responsible only for getting `sp` to
 point at the frame beforehand (`gen_exception_entry`: `mov sp, x0` from the dispatch call's return
-value; `gen_exception_resume`: `mov sp, x0` from its own incoming argument) -- symmetric, and matching
+value; `gen_exception_restore`: `mov sp, x0` from its own incoming argument) -- symmetric, and matching
 `gen_exception_entry`'s already-hardware-verified shape exactly. But `el0_context_resume`'s OWN
 existing hand-written comment (`kernel/arch/arm64/kernel/user_entry.S`) explains why its version
 deliberately puts `msr DAIFSet` BEFORE `mov sp, x0`, not after: it is reached via the syscall path,
@@ -151,7 +161,7 @@ none in `intc.tkb`/`syscall.tkb`, only in `el0_sync_entry`'s own syscall-specifi
 sites are NOT symmetric, and a shared "just re-mask first" helper would have been wrong for one of
 them. Fixed by pulling `msr DAIFSet` OUT of the shared restore helper entirely and having each caller
 emit it at its own correct point: `gen_exception_entry` keeps `mov sp, x0` then `msr DAIFSet` (matching
-its own already-verified original); `gen_exception_resume` emits `msr DAIFSet` then `mov sp, x0`
+its own already-verified original); `gen_exception_restore` emits `msr DAIFSet` then `mov sp, x0`
 (matching `el0_context_resume`'s own original, and its own comment's exact reasoning). Caught before
 ever reaching real hardware, by disassembling the standalone smoke-test binary and comparing instruction
 order against `el0_context_resume`'s own comment -- not by a hardware failure, unlike issue #227 item
@@ -161,13 +171,13 @@ alike share the same safety invariant) learned the more expensive way.
 Applied to `el0_context_resume`, replacing its hand-written body in `user_entry.S` entirely; its
 existing `extern fn el0_context_resume(frame_sp: usize) !{noreturn};` declaration (`kernel/arch/arm64/
 kernel/user_entry_extern.tkb`) is unchanged, since that is still what lets ordinary `.tkb` code
-(`kernel/kernel/syscall.tkb`) call it -- the `exception_resume` declaration only supplies the generated
+(`kernel/kernel/syscall.tkb`) call it -- the `exception_restore` declaration only supplies the generated
 BODY, the same relationship an `extern fn` normally has with a hand-written assembly body.
 
 Verified: a standalone smoke test's disassembly showed the corrected `msr DAIFSet` / `mov sp, x0` order
 matching `el0_context_resume`'s original exactly (and confirmed `gen_exception_entry`'s own order was
 unaffected by the refactor). `dune runtest` (955/955 -- four new signature-check cases plus four new
-`exception_resume` cases: well-formed, unknown key, missing `frame` key, and a frame missing a register
+`exception_restore` cases: well-formed, unknown key, missing `frame` key, and a frame missing a register
 field, reusing the shared validator). `kernelbuild-rpi5`, including the automated DAIF-masking-before-
 `eret` check, which the generated `el0_context_resume` satisfies with no special-casing needed. Two
 consecutive full real-RPi5-hardware `kernelcheck-rpi5` passes (25/25 views each), specifically including

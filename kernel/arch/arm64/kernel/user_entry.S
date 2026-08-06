@@ -561,8 +561,8 @@ el0_context_set_sp_el0:
 //
 // el0_context_resume itself is no longer hand-written here -- GitHub issue
 // #227 item 1's follow-up generates it from kernel/arch/arm64/kernel/
-// exception_frame.tkb's `exception_resume el0_context_resume { ... }`
-// declaration (lib/llvm_gen.ml's gen_exception_resume). Its own critical
+// exception_frame.tkb's `exception_restore el0_context_resume { ... }`
+// declaration (lib/llvm_gen.ml's gen_exception_restore). Its own critical
 // ordering requirement carried over exactly: `msr DAIFSet` MUST precede
 // `mov sp, x0`, not follow it -- `mov sp, x0` switches SP_EL1 to the frame
 // being resumed, which on a scheduler switch is a DIFFERENT process's

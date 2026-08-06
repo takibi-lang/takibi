@@ -3813,12 +3813,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     @ (List.init 32 (fun i -> (Printf.sprintf "q%d" i, Ast.TypeArray (Ast.TypeU8, 16))))
     @ ["fpsr", Ast.TypeUsize; "fpcr", Ast.TypeUsize]
   in
-  (* Shared by ExceptionEntryDef and ExceptionResumeDef: `frame` must name a
+  (* Shared by ExceptionEntryDef and ExceptionRestoreDef: `frame` must name a
      `struct packed` whose fields are EXACTLY
      aarch64_exception_frame_register_set, one of each. Looked up directly
      in `prog` (see the call sites' own comment on why, not
      Type_layout.structs -- a module dependency cycle). `decl_kind` is
-     "exception_entry"/"exception_resume", only used to word error
+     "exception_entry"/"exception_restore", only used to word error
      messages the same way each declaration kind's other errors are
      worded. *)
   let validate_exception_frame decl_kind decl_name loc frame =
@@ -3890,7 +3890,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.UseDef _              -> ()
     | Ast.VectorTableDef _      -> ()
     | Ast.ExceptionEntryDef (n, _, _) -> claim_toplevel_name n "function"
-    | Ast.ExceptionResumeDef (n, _, _) -> claim_toplevel_name n "function"
+    | Ast.ExceptionRestoreDef (n, _, _) -> claim_toplevel_name n "function"
   ) prog;
   (* GitHub issue #227 item 2: at most one `vector_table` declaration per
      program. Unlike every other toplevel item, `vector_table` claims no
@@ -5106,20 +5106,20 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         check_fn_target "dispatch" dispatch;
         Option.iter (check_fn_target "before") !before_name;
         validate_exception_frame "exception_entry" name loc frame
-    | Ast.ExceptionResumeDef (name, fields, loc) ->
+    | Ast.ExceptionRestoreDef (name, fields, loc) ->
         let frame_name = ref None in
         List.iter (fun (key, value) -> match key with
           | "frame" -> frame_name := Some value
           | other -> raise (TypeError (loc, Printf.sprintf
-              "exception_resume '%s' has unknown key '%s' (expected frame)"
+              "exception_restore '%s' has unknown key '%s' (expected frame)"
               name other))
         ) fields;
         let frame = match !frame_name with
           | Some f -> f
           | None -> raise (TypeError (loc, Printf.sprintf
-              "exception_resume '%s' is missing required key 'frame'" name))
+              "exception_restore '%s' is missing required key 'frame'" name))
         in
-        validate_exception_frame "exception_resume" name loc frame
+        validate_exception_frame "exception_restore" name loc frame
     | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _
     | Ast.GenericStructDef _ | Ast.ExternSymbolDef _ -> ()) prog;
     (* GenericStructDef (GitHub issue #207): nothing to validate here yet
@@ -5293,7 +5293,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.UseDef _    -> m
     | Ast.VectorTableDef _ -> m
     | Ast.ExceptionEntryDef _ -> m
-    | Ast.ExceptionResumeDef _ -> m
+    | Ast.ExceptionRestoreDef _ -> m
     | Ast.GenericStructDef _ -> m
     (* GenericStructDef (GitHub issue #207): contributes no function
        signature until an instantiation exists as an ordinary FuncDef,
@@ -5372,7 +5372,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.UseDef _                 -> m
     | Ast.VectorTableDef _         -> m
     | Ast.ExceptionEntryDef _      -> m
-    | Ast.ExceptionResumeDef _     -> m
+    | Ast.ExceptionRestoreDef _     -> m
     | Ast.GenericStructDef _       -> m
   ) StringMap.empty prog in
   (* Pass 2: check global initializers.

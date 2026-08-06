@@ -131,7 +131,7 @@ let promote_be_field_type = function
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN INLINE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESUME EMBED_FILE
+%token FN INLINE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
 %token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
@@ -233,8 +233,8 @@ item:
     { VectorTableDef (entries, $symbolstartpos) }
   | EXCEPTION_ENTRY name = IDENT LBRACE fields = exc_entry_fields RBRACE
     { ExceptionEntryDef (name, fields, $symbolstartpos) }
-  | EXCEPTION_RESUME name = IDENT LBRACE fields = exc_entry_fields RBRACE
-    { ExceptionResumeDef (name, fields, $symbolstartpos) }
+  | EXCEPTION_RESTORE name = IDENT LBRACE fields = exc_entry_fields RBRACE
+    { ExceptionRestoreDef (name, fields, $symbolstartpos) }
   | struct_intro LBRACE struct_fields RBRACE
     { let (name, is_packed, align_opt, is_be) = $1 in
       let fields = List.map (fun (fname, ty, _) ->

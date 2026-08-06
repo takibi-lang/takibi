@@ -913,10 +913,10 @@ size.
   declarative "restore a saved frame" pattern -- `run_initial_user` constructs a synthetic resume state
   directly from raw entry/stack arguments (never a full saved frame), and `.Ldata_abort` is inline
   control flow inside `el0_sync_entry`'s own larger dispatch body, not a standalone entry point; neither
-  is expressible this way without a different design each would need on its own. A new `exception_resume
+  is expressible this way without a different design each would need on its own. A new `exception_restore
   name { frame: FrameStruct; }` declaration now generates `el0_context_resume` specifically (just the
   restore-frame/`eret` half, entered with the frame address already in `x0`). **Refactoring the restore
-  codegen to be shared between `exception_entry` and `exception_resume` surfaced a real ordering bug
+  codegen to be shared between `exception_entry` and `exception_restore` surfaced a real ordering bug
   before it ever reached hardware**: `el0_context_resume` MUST mask `DAIF.I` before switching `sp` to the
   resumed frame's stack (it is reached via the syscall path, which unmasks `DAIF.I` deliberately, so an
   interrupt in that window would build its own frame below the wrong stack), while `exception_entry`'s

@@ -5274,7 +5274,7 @@ let gen_vector_table entries =
    DAIF-masking-before-ELR/SPSR shape (GitHub issue #229) is replicated
    exactly: `msr DAIFSet` first, `eret` last, nothing in between that could
    take a new exception. *)
-(* Shared by gen_exception_entry and gen_exception_resume: looks up a
+(* Shared by gen_exception_entry and gen_exception_restore: looks up a
    validated frame struct's field list and computes each register's byte
    offset from the struct's own declared order (packed, sequential). `who`
    only words the BUG-message if type_inf.ml somehow let something bad
@@ -5300,14 +5300,14 @@ let exception_frame_offsets who name frame =
   ) 0 fields in
   ((fun r -> Hashtbl.find offsets r), total)
 
-(* Shared by gen_exception_entry and gen_exception_resume: the
+(* Shared by gen_exception_entry and gen_exception_restore: the
    restore-frame/eret half, assuming sp already points at the frame AND
    DAIF.I is already masked (both are the caller's responsibility -- see
    each caller's own comment on why the masking has to happen at a
    different point relative to the sp switch in each case; `msr DAIFSet`
    is deliberately NOT emitted here, unlike an earlier version of this
    function, found wrong by inspecting el0_context_resume's own existing
-   comment on exactly this ordering hazard while wiring gen_exception_resume
+   comment on exactly this ordering hazard while wiring gen_exception_restore
    up to it). GitHub issue #229's requirement (`eret` last, nothing in
    between that could take a new exception once masked) still applies to
    everything below. x9 is the system-register shuffle scratch throughout,
@@ -5370,7 +5370,7 @@ let gen_exception_entry name frame dispatch before =
   (* mov sp, x0 (switching SP_EL1 to the dispatch-selected frame, possibly a
      DIFFERENT process's stack on a scheduler switch) happening BEFORE
      msr DAIFSet is only safe here because DAIF.I is already masked for this
-     WHOLE entry point -- unlike the syscall path (see gen_exception_resume's
+     WHOLE entry point -- unlike the syscall path (see gen_exception_restore's
      own comment), nothing between vector entry and this eret ever unmasks
      it, so no interrupt can land in this window regardless of which stack
      sp already points at. The msr DAIFSet below is then a same-behavior-
@@ -5384,13 +5384,13 @@ let gen_exception_entry name frame dispatch before =
    eret half, for a standalone resume entry point reached via an ordinary
    call with the frame's own address already in x0 (AAPCS first-argument
    register) -- exactly el0_context_resume's existing shape. *)
-let gen_exception_resume name frame =
+let gen_exception_restore name frame =
   let triple = target_triple the_module in
   if not (starts_with triple "aarch64") then
     raise (Error
-      "BUG: exception_resume codegen reached for a non-AArch64 target -- \
+      "BUG: exception_restore codegen reached for a non-AArch64 target -- \
        type_inf.ml should have already rejected this");
-  let (off, total) = exception_frame_offsets "exception_resume" name frame in
+  let (off, total) = exception_frame_offsets "exception_restore" name frame in
   let a fmt = Printf.ksprintf (Buffer.add_string raw_asm_buf) fmt in
   a "\t.section .text, \"ax\"\n\t.global %s\n%s:\n" name name;
   (* Unlike gen_exception_entry, msr DAIFSet MUST come before mov sp, x0
@@ -5568,7 +5568,7 @@ let gen_program ?prog_types prog =
     | UseDef _    -> ()
     | VectorTableDef _ -> ()
     | ExceptionEntryDef _ -> ()
-    | ExceptionResumeDef _ -> ()
+    | ExceptionRestoreDef _ -> ()
     | GenericStructDef _ -> ()
     (* GitHub issue #207: an uninstantiated generic template never reaches
        codegen. Monomorphize.run (once it exists) strips these out of prog
@@ -5605,10 +5605,10 @@ let gen_program ?prog_types prog =
           | ("before", v) -> before := Some v
           | _ -> ()) fields;
         gen_exception_entry name !frame !dispatch !before
-    | ExceptionResumeDef (name, fields, _) ->
+    | ExceptionRestoreDef (name, fields, _) ->
         let frame = ref "" in
         List.iter (function ("frame", v) -> frame := v | _ -> ()) fields;
-        gen_exception_resume name !frame
+        gen_exception_restore name !frame
     | GenericStructDef _ -> ()
   ) prog;
   if Buffer.length raw_asm_buf > 0 then

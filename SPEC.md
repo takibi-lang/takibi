@@ -1831,7 +1831,7 @@ at codegen time rather than silently lowering to a racy `wfi`.
   their real signature (`fn(usize) -> usize` / `fn()`), not just existence.
   `exception_entry` only covers the uniform save -> dispatch -> restore ->
   `eret` shape.
-- `exception_resume name { frame: FrameStruct; }` (same issue, same
+- `exception_restore name { frame: FrameStruct; }` (same issue, same
   prototype-syntax caveat) generates just the restore-frame/`eret` half,
   for a standalone resume entry point reached via an ordinary call with
   the frame's own address already in the platform's first-argument
