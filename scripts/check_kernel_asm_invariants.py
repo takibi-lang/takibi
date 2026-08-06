@@ -27,21 +27,54 @@ import sys
 
 LLVM_OBJDUMP = "llvm-objdump-19"
 
-# GitHub issue #231: kernel/arch/arm64/mm/mmu.S's INIT_ROOT macro is
-# expanded twice (kernel_l1_0, kernel_l1_1 -- both cores' page-table
-# roots). Each expansion writes the kernel .text identity block descriptor
-# once (must carry UXN, bit 54, so EL0 can never fetch kernel .text) and
-# the device-MMIO 1GB block descriptor twice, once per loop (64:65 and
-# 124:127; must carry UXN+PXN, bits 54+53, since nothing should ever
-# execute from device memory at either EL). That is 2 and 4 occurrences
-# respectively in the linked kernel.elf today -- exact counts, not just
-# "at least one", so silently dropping ONE of the four device-block sites
-# (e.g. someone "simplifies" a loop and forgets the immediate) is caught
-# too, not just losing all of them.
+# GitHub issue #231: kernel/arch/arm64/mm/mmu.tkb's init_root() (originally
+# mmu.S's INIT_ROOT macro, textually duplicated once per root) is now one
+# shared function, called twice (kernel_l1_0, kernel_l1_1 -- both cores'
+# page-table roots) rather than compiled twice -- issue #226 preferred a
+# real shared function over duplicated assembly, the same call #224 already
+# made for kernel_mmu_activate. Its BODY writes the kernel .text identity
+# block descriptor once (must carry UXN, bit 54, so EL0 can never fetch
+# kernel .text) and the device-MMIO 1GB block descriptor twice, once per
+# loop (64:65 and 124:127; must carry UXN+PXN, bits 54+53, since nothing
+# should ever execute from device memory at either EL) -- 1 and 2
+# occurrences respectively in the compiled function today (not 2 and 4:
+# that would double-count what is now shared code, not two copies). Exact
+# counts, not just "at least one", so silently dropping ONE of the two
+# device-block sites (e.g. someone "simplifies" a loop and forgets the
+# immediate) is caught too, not just losing both.
+#
+# Checked by reconstructing the full 64-bit value each `orr`/`movk`/`movz`
+# instruction contributes, not by matching one specific instruction shape:
+# issue #226 moved this construction from hand-written mmu.S (which always
+# spelled it as a separate `mov`+`orr` because that assembly was written in
+# two explicit steps) into .tkb, where `0x705 | UXN_BIT` is a compile-time
+# constant expression the compiler is free to fold into a single `movk`-
+# loaded literal instead -- an equally correct, equally intentional
+# lowering choice that a check hardcoded to expect `orr` specifically would
+# wrongly flag as a regression.
 UXN_ONLY = 1 << 54
 UXN_AND_PXN = (1 << 54) | (1 << 53)
-EXPECTED_UXN_ONLY_COUNT = 2
-EXPECTED_UXN_AND_PXN_COUNT = 4
+EXPECTED_UXN_ONLY_COUNT = 1
+EXPECTED_UXN_AND_PXN_COUNT = 2
+
+ORR_IMM_RE = re.compile(r"^orr\s+x\d+,\s*x\d+,\s*#(0x[0-9a-f]+)$")
+MOV_IMM_SHIFT_RE = re.compile(
+    r"^mov[kz]\s+x\d+,\s*#(0x[0-9a-f]+),\s*lsl\s*#(\d+)$")
+MOV_IMM_RE = re.compile(r"^mov[kz]\s+x\d+,\s*#(0x[0-9a-f]+)$")
+
+
+def contributed_bits(text):
+    """The full 64-bit value this one instruction ORs/loads in, if any."""
+    m = ORR_IMM_RE.match(text)
+    if m:
+        return int(m.group(1), 16)
+    m = MOV_IMM_SHIFT_RE.match(text)
+    if m:
+        return int(m.group(1), 16) << int(m.group(2))
+    m = MOV_IMM_RE.match(text)
+    if m:
+        return int(m.group(1), 16)
+    return None
 
 # GitHub issue #229: every eret that returns to EL0 (i.e. is preceded by a
 # write to ELR_EL1/SPSR_EL1, as opposed to el2_drop_to_el1's one-time
@@ -92,27 +125,38 @@ def parse_instructions(lines):
 
 def check_uxn(insns):
     failures = []
-    count_uxn_only = sum(
-        1 for _, text, _ in insns
-        if re.match(r"^orr\s+x\d+,\s*x\d+,\s*#0x%x$" % UXN_ONLY, text)
-    )
-    count_uxn_and_pxn = sum(
-        1 for _, text, _ in insns
-        if re.match(r"^orr\s+x\d+,\s*x\d+,\s*#0x%x$" % UXN_AND_PXN, text)
-    )
+    # Scoped to init_root() specifically: UXN+PXN together (0x60 << 48) is
+    # NOT a signature unique to the device-MMIO block descriptors -- it is
+    # also exactly USER_RW_XN_FLAGS, the ordinary read-write-execute-never
+    # permission bits kernel/mm/address_space.tkb applies to every regular
+    # user data/heap/stack page, so scanning the whole kernel.elf for that
+    # bit pattern finds it in a dozen unrelated functions (map_user_data,
+    # map_user_stack, user_page_writable, ...). Only init_root's own
+    # instructions are relevant to this check.
+    init_root_insns = [(a, t) for a, t, fn in insns if fn == "init_root"]
+    bits = [contributed_bits(t) for _, t in init_root_insns]
+    count_uxn_only = sum(1 for b in bits if b == UXN_ONLY)
+    count_uxn_and_pxn = sum(1 for b in bits if b == UXN_AND_PXN)
+    if not init_root_insns:
+        failures.append(
+            "issue #231 regression: no instructions found in a function "
+            "named 'init_root' -- kernel/arch/arm64/mm/mmu.tkb's page-table "
+            "construction function was renamed or removed, and this check "
+            "was not updated to match"
+        )
     if count_uxn_only != EXPECTED_UXN_ONLY_COUNT:
         failures.append(
-            "issue #231 regression: expected %d occurrence(s) of the kernel "
-            "identity block's UXN-only immediate (orr ..., #0x%x) in "
-            "kernel_mmu_init, found %d -- mmu.S's INIT_ROOT macro's first "
-            "descriptor (kernel .text, 0x705) must OR in UXN (bit 54)"
+            "issue #231 regression: expected %d occurrence(s) of an "
+            "instruction contributing the kernel identity block's UXN-only "
+            "bit (0x%x) inside init_root(), found %d -- init_root()'s "
+            "first descriptor (kernel .text, 0x705) must OR in UXN (bit 54)"
             % (EXPECTED_UXN_ONLY_COUNT, UXN_ONLY, count_uxn_only)
         )
     if count_uxn_and_pxn != EXPECTED_UXN_AND_PXN_COUNT:
         failures.append(
-            "issue #231 regression: expected %d occurrence(s) of the "
-            "device-MMIO block's UXN+PXN immediate (orr ..., #0x%x) in "
-            "kernel_mmu_init, found %d -- mmu.S's INIT_ROOT macro's two "
+            "issue #231 regression: expected %d occurrence(s) of an "
+            "instruction contributing the device-MMIO block's UXN+PXN bits "
+            "(0x%x) inside init_root(), found %d -- init_root()'s two "
             "device loops (0x401 descriptors) must OR in UXN+PXN (bits "
             "54+53)" % (EXPECTED_UXN_AND_PXN_COUNT, UXN_AND_PXN, count_uxn_and_pxn)
         )

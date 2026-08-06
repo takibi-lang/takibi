@@ -1,34 +1,52 @@
-// GitHub issue #226: the PTE read/write and root-selection functions from
-// kernel/arch/arm64/mm/mmu.S, lifted into ordinary .tkb. mmu.S's own header
-// comment already argued these were never real system-register work: each
-// one was dominated by `cbnz x0`-style root-0-vs-root-1 branching (an
-// ordinary `if`) or, in address_space_clear_root's case, a plain
-// 512-iteration zeroing loop, wrapped around one real TLBI/barrier
-// instruction at the end. Only that trailing instruction is still a
-// primitive call (Stage 0's tlbi_*/dsb_*/isb/msr_ttbr0_el1); everything
-// else here is ordinary arithmetic and control flow the type system can
-// see into.
+// GitHub issue #226: everything kernel/arch/arm64/mm/mmu.S used to hold.
+// None of it was real system-register work: the PTE read/write and
+// root-selection functions were `cbnz x0`-style root-0-vs-root-1 branching
+// (an ordinary `if`) or a plain 512-iteration zeroing loop, and
+// INIT_ROOT's table construction was pure arithmetic and stores. Only the
+// trailing TLBI/barrier/system-register instruction in each function is
+// still a primitive call (Stage 0's tlbi_*/dsb_*/isb/msr_mair_el1/
+// msr_tcr_el1/msr_ttbr0_el1/mrs_sctlr_el1/msr_sctlr_el1); everything else
+// here is ordinary arithmetic and control flow the type system can see
+// into. mmu.S itself is retired.
 //
-// The six root/table regions themselves (kernel_l1_0/_1, user_l3_0/_1, plus
-// user_l2_0/_1 which only INIT_ROOT touches) still live in mmu.S's `.bss`,
-// reached here via `extern symbol` -- kernel_mmu_init/kernel_mmu_activate
-// (the actual MMU-enable sequence that builds and activates these tables)
-// stay in mmu.S for now; moving the tables themselves is that later stage's
-// job, not this one's.
-extern symbol kernel_l1_0;
-extern symbol kernel_l1_1;
-extern symbol user_l3_0;
-extern symbol user_l3_1;
+// The six page-table regions are now ordinary .tkb globals, matching
+// kernel/mm/page.tkb's boot_pages -- an uninitialized `let mut` global
+// here lands in `.bss`, and kernel/arch/arm64/boot/entry.S's `_start`
+// explicitly zeroes the whole `.bss` region before calling kernel_mmu_init,
+// exactly the same guarantee the original hand-written `.zero 4096`
+// declarations relied on. Every L1 slot INIT_ROOT does not explicitly
+// write (all but indices 0, 1, 64-65, 124-127) must read back as a real
+// zero (an invalid, not-present stage-1 descriptor) for the MMU to
+// correctly translation-fault outside the deliberately mapped ranges,
+// rather than treating leftover bits as a bogus-but-valid mapping -- this
+// is not a new assumption the refactor introduces, it is the exact one the
+// retired `.bss` declarations already depended on.
+private let mut kernel_l1_0: [usize; 512] align(4096);
+private let mut user_l2_0: [usize; 512] align(4096);
+private let mut user_l3_0: [usize; 512] align(4096);
+private let mut kernel_l1_1: [usize; 512] align(4096);
+private let mut user_l2_1: [usize; 512] align(4096);
+private let mut user_l3_1: [usize; 512] align(4096);
+
+// GitHub issue #231: AP[2:1]=00 on a block/page descriptor denies EL0 data
+// access (load/store) but says nothing about EL0 instruction fetch -- that
+// is UXN's job, independently. The kernel .text identity block gets
+// UXN=1/PXN=0 (EL1 still genuinely executes here); the device-MMIO blocks
+// get UXN=1/PXN=1 (nothing should ever execute from device memory at
+// either EL, and nothing today does). See HISTORY.md's issue #231 entry
+// for the real-hardware bug this fixed.
+const UXN_BIT: usize = 0x40000000000000;
+const PXN_BIT: usize = 0x20000000000000;
 
 // user_pte_write(index, value): one 4KB PTE in the 2MB user window.
 fn user_pte_write(index: usize, value: usize) {
-    let entry: *usize = (user_l3_0 + index * 8) as *usize;
+    let entry: *usize = (((user_l3_0 as *usize) as usize) + index * 8) as *usize;
     *entry = value;
     dsb_ishst();
 }
 
 fn user_pte_read(index: usize) -> usize {
-    let entry: *usize = (user_l3_0 + index * 8) as *usize;
+    let entry: *usize = (((user_l3_0 as *usize) as usize) + index * 8) as *usize;
     return *entry;
 }
 
@@ -41,9 +59,9 @@ fn user_tlb_invalidate(va: usize) {
 }
 
 fn address_space_pte_write(slot: usize, index: usize, value: usize) {
-    let mut base: usize = user_l3_0;
+    let mut base: usize = (user_l3_0 as *usize) as usize;
     if (slot != 0) {
-        base = user_l3_1;
+        base = (user_l3_1 as *usize) as usize;
     }
     let entry: *usize = (base + index * 8) as *usize;
     *entry = value;
@@ -51,9 +69,9 @@ fn address_space_pte_write(slot: usize, index: usize, value: usize) {
 }
 
 fn address_space_pte_read(slot: usize, index: usize) -> usize {
-    let mut base: usize = user_l3_0;
+    let mut base: usize = (user_l3_0 as *usize) as usize;
     if (slot != 0) {
-        base = user_l3_1;
+        base = (user_l3_1 as *usize) as usize;
     }
     let entry: *usize = (base + index * 8) as *usize;
     return *entry;
@@ -64,9 +82,9 @@ fn address_space_pte_read(slot: usize, index: usize) -> usize {
 // either root, keeping it free as a "no stale TLB entries could possibly
 // match" value.
 fn address_space_activate_root(slot: usize) {
-    let mut base: usize = kernel_l1_0;
+    let mut base: usize = (kernel_l1_0 as *usize) as usize;
     if (slot != 0) {
-        base = kernel_l1_1;
+        base = (kernel_l1_1 as *usize) as usize;
     }
     let ttbr: usize = base | ((slot + 1) << 48);
     dsb_ish();
@@ -82,9 +100,9 @@ fn address_space_tlb_invalidate(slot: usize, va: usize) {
 }
 
 fn address_space_clear_root(slot: usize) {
-    let mut base: usize = user_l3_0;
+    let mut base: usize = (user_l3_0 as *usize) as usize;
     if (slot != 0) {
-        base = user_l3_1;
+        base = (user_l3_1 as *usize) as usize;
     }
     for i: usize in 0..<512 {
         let entry: *usize = (base + i * 8) as *usize;
@@ -93,5 +111,94 @@ fn address_space_clear_root(slot: usize) {
     dsb_ishst();
     tlbi_aside1is((slot + 1) << 48);
     dsb_ish();
+    isb();
+}
+
+// GitHub issue #226: INIT_ROOT's two textually-identical macro expansions
+// (one per root, in the retired mmu.S) are one real shared function called
+// twice here, rather than duplicated assembly text -- issue #224 already
+// established that preference for kernel_mmu_activate below, for the same
+// reason: nothing kept two hand-written copies in sync before, and an
+// ordinary .tkb function call has no such gap.
+fn init_root_entry(base: usize, index: usize, value: usize) {
+    let entry: *usize = (base + index * 8) as *usize;
+    *entry = value;
+}
+
+fn init_root(l1: usize, l2: usize, l3: usize) {
+    init_root_entry(l1, 0, 0x705 | UXN_BIT);
+    init_root_entry(l1, 1, l2 | 3);
+    init_root_entry(l2, 0, l3 | 3);
+    for i: usize in 64..<66 {
+        init_root_entry(l1, i, (i << 30) | 0x401 | UXN_BIT | PXN_BIT);
+    }
+    for i: usize in 124..<128 {
+        init_root_entry(l1, i, (i << 30) | 0x401 | UXN_BIT | PXN_BIT);
+    }
+}
+
+// GitHub issue #226: kernel_mmu_init/_secondary/_activate, lifted from
+// mmu.S -- the actual MMU-enable sequence itself. entry.S's `_start`/
+// `kernel_secondary_entry` still reach these by the exact same names via
+// plain `bl`, unchanged: an ordinary top-level .tkb `fn` is already
+// bl-callable from hand-written assembly with no special ceremony
+// (entry.S already calls `main` this way).
+fn kernel_mmu_init() {
+    init_root((kernel_l1_0 as *usize) as usize,
+              (user_l2_0 as *usize) as usize,
+              (user_l3_0 as *usize) as usize);
+    init_root((kernel_l1_1 as *usize) as usize,
+              (user_l2_1 as *usize) as usize,
+              (user_l3_1 as *usize) as usize);
+    kernel_mmu_activate();
+}
+
+// Install the primary's already-published kernel root on core 1. This must
+// never rebuild or clear shared tables -- unlike kernel_mmu_init, it never
+// calls init_root.
+fn kernel_mmu_init_secondary() {
+    kernel_mmu_activate();
+}
+
+// kernel_mmu_activate(): the MAIR_EL1/TCR_EL1/TTBR0_EL1/SCTLR_EL1
+// configuration shared by kernel_mmu_init and kernel_mmu_init_secondary
+// (GitHub issue #224) -- previously duplicated register-for-register
+// between the two hand-written copies, with nothing keeping them in sync.
+// Table construction (init_root above) stays exclusive to kernel_mmu_init;
+// the secondary only ever installs the primary's already-published root.
+fn kernel_mmu_activate() {
+    // Attr0 Device-nGnRnE; Attr1 Normal WB RA/WA.
+    msr_mair_el1(0xff00);
+
+    // 37-bit VA, 40-bit PA, 4KB granule, WB inner-shareable walks, TTBR1
+    // disabled. Written as one pre-combined literal (0x20080351b =
+    // 0x351b | (1 << 23) | (2 << 32), verified with `python3 -c` rather
+    // than by hand), not as that shift expression directly: a compiler bug
+    // found while writing this function makes `LITERAL << N` for N >= 32
+    // compute at 32-bit width and silently produce a poison/undefined
+    // result when both the base and shift amount are bare integer literals
+    // (llvm_gen.ml's BinOp codegen does not thread the surrounding usize
+    // context down into IntLit's own width selection, unlike a runtime
+    // value shifted by a literal, which an existing i32-vs-i64 mismatch
+    // check already widens correctly). Filed separately; this is a
+    // workaround, not the real fix.
+    let tcr: usize = 0x20080351b;
+    msr_tcr_el1(tcr);
+
+    // ASID 1 in bits [63:48] (matching address_space_activate_root's own
+    // `(slot + 1) << 48` for slot 0) ORed with kernel_l1_0's base address.
+    // 1 << 48 = 0x1000000000000, same bare-literal-shift issue as tcr
+    // above, same workaround.
+    let root: usize = ((kernel_l1_0 as *usize) as usize) | 0x1000000000000;
+    msr_ttbr0_el1(root);
+    isb();
+    tlbi_vmalle1();
+    dsb_ish();
+    isb();
+
+    let sctlr: usize = mrs_sctlr_el1();
+    let sctlr_enabled: usize =
+        (sctlr | 1 | (1 << 2) | (1 << 12)) & ~(1 << 1);
+    msr_sctlr_el1(sctlr_enabled);
     isb();
 }
