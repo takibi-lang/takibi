@@ -2473,8 +2473,50 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            raise (Error "& requires a variable or struct field"))
 
   | BinOp (op, e1, e2) ->
-      let (ty1, v1) = gen_expr locals e1 in
-      let (ty2, v2) = gen_expr locals e2 in
+      (* GitHub issue #232: IntLit's own codegen (see its case above) already
+         picks the exact right width when it is given a concrete scalar
+         ?expected_ty hint -- but this recursive call used to drop the
+         current node's own hint entirely, so a literal buried inside a
+         BinOp (e.g. `2 << 32` inside `let tcr: usize = 0x351b | (1 << 23)
+         | (2 << 32);`) fell back to IntLit's no-hint guess, which is i32
+         when the literal's own magnitude fits there. For a `Shl` whose
+         shift amount is itself >= 32, that guess made the shift's BASE
+         operand i32 too (both operands freshly int32-legged with nothing
+         to widen yet), so LLVM built a shift by an amount >= the operand's
+         own bit width -- undefined, and silently `poison`. Forwarding a
+         scalar hint here closes that: type_inf.ml's own Shl/Shr/Bor/Bxor/
+         Band/Add/Sub/Mul/Div/Mod cases already unify both operands' types
+         with each other (and transitively with whatever this whole BinOp
+         must ultimately be), so by the time codegen runs -- after
+         type-checking has already accepted the program -- any concrete
+         scalar hint reaching this node is known-consistent with what both
+         operands actually are, and safe to hand to each side's own
+         gen_expr the same way a direct call-argument or let-binding
+         already does.
+
+         Restricted to i32-or-wider plain integer types only (never a
+         pointer or TypeBool, matching IntLit's own hint-matching -- a
+         pointer-typed hint reaching pointer arithmetic's offset operand,
+         or a TypeBool hint reaching a comparison's numeric operands, would
+         not describe what that operand itself must be). i8/u8/i16/u16 are
+         deliberately excluded even though IntLit's own hint-matching
+         handles them too: a narrow-typed operand that is NOT a literal
+         (e.g. a loaded byte) still gets widened to i32 for the actual
+         arithmetic elsewhere in this same BinOp lowering, but a narrow
+         ?expected_ty hint here would make a LITERAL sibling materialize
+         directly at i8/i16 instead -- exactly the mismatch this fix exists
+         to prevent, just at the opposite width (found by an internal
+         LLVM-IR-verifier failure in kernel/fs/ext2/ext2.tkb's ext2_u16
+         while testing this fix: `shl i32 %x, i16 8` is itself invalid IR,
+         two different-width operands to one shift). *)
+      let operand_hint = match expected_ty with
+        | Some ((TypeI32 | TypeI64
+                | TypeU32 | TypeU64
+                | TypeIsize | TypeUsize) as t) -> Some t
+        | _ -> None
+      in
+      let (ty1, v1) = gen_expr ?expected_ty:operand_hint locals e1 in
+      let (ty2, v2) = gen_expr ?expected_ty:operand_hint locals e2 in
       (* IntLit always emits i32 in codegen, but the type inferencer may have unified it
          with usize (i64).  Widen the narrower side before binary operations so that LLVM
          does not see a type mismatch (e.g. `usize_val == 0` or `usize_val & 15`). *)

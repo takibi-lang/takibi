@@ -8494,6 +8494,47 @@ let codegen_tests = [
        Alcotest.(check bool) "inputs pinned to x0-x3" true
          (contains_substring ir "{x0},{x1},{x2},{x3}"));
 
+  (* GitHub issue #232: `LITERAL << N` for N >= 32, with both the shift's
+     base and amount being bare integer literals, used to compute at 32-bit
+     width (IntLit's own codegen defaults to i32 absent a hint, and BinOp's
+     operand recursion used to drop the current node's own ?expected_ty
+     instead of forwarding it) -- an LLVM-undefined shift-amount->=-width
+     operation, silently `poison`. Found while writing kernel/arch/arm64/mm/
+     mmu.tkb's kernel_mmu_activate() (issue #226): TCR_EL1 and TTBR0_EL1
+     were both silently written with an unrelated leftover register value
+     instead of their own intended values. Fixed by forwarding a concrete
+     scalar-integer ?expected_ty hint into BinOp's own operand recursion,
+     so a literal buried inside nested Bor/Shl nodes gets the same
+     directly-correct-width treatment a bare `let x: usize = <literal>;`
+     already got. *)
+  Alcotest.test_case
+    "issue #232: a usize-typed literal shift by >= 32 folds to the correct value"
+    `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "fn codegen_issue232_wide_literal_shift() -> usize {
+            let tcr: usize = 0x351b | (1 << 23) | (2 << 32);
+            return tcr;
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions
+                        "codegen_issue232_wide_literal_shift" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail
+             "codegen_issue232_wide_literal_shift was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       (* 0x351b | (1 << 23) | (2 << 32) = 0x20080351b = 8598336795,
+          verified with `python3 -c`, not by hand. LLVM's own constant
+          folder collapses the whole expression to this one i64 constant
+          when (and only when) every operand is correctly i64 from the
+          start -- if any sub-expression were still computed at i32, this
+          exact decimal value would not appear (either a different,
+          wrapped/poisoned value would, or the IR would still show
+          separate `shl`/`or` instructions instead of one folded return). *)
+       Alcotest.(check bool) "folds to the correct 64-bit constant" true
+         (contains_substring ir "ret i64 8598336795"));
+
   Alcotest.test_case
     "checked usize builtins return an exhaustive closed variant" `Quick
     (expect_ok

@@ -171,25 +171,16 @@ fn kernel_mmu_activate() {
     msr_mair_el1(0xff00);
 
     // 37-bit VA, 40-bit PA, 4KB granule, WB inner-shareable walks, TTBR1
-    // disabled. Written as one pre-combined literal (0x20080351b =
-    // 0x351b | (1 << 23) | (2 << 32), verified with `python3 -c` rather
-    // than by hand), not as that shift expression directly: a compiler bug
-    // found while writing this function makes `LITERAL << N` for N >= 32
-    // compute at 32-bit width and silently produce a poison/undefined
-    // result when both the base and shift amount are bare integer literals
-    // (llvm_gen.ml's BinOp codegen does not thread the surrounding usize
-    // context down into IntLit's own width selection, unlike a runtime
-    // value shifted by a literal, which an existing i32-vs-i64 mismatch
-    // check already widens correctly). Filed separately; this is a
-    // workaround, not the real fix.
-    let tcr: usize = 0x20080351b;
+    // disabled. A `LITERAL << N` (N >= 32) shift like `2 << 32` here used
+    // to silently compute at 32-bit width and produce a poison/undefined
+    // result (issue #232, fixed in lib/llvm_gen.ml -- this expression is
+    // the exact case that found it).
+    let tcr: usize = 0x351b | (1 << 23) | (2 << 32);
     msr_tcr_el1(tcr);
 
     // ASID 1 in bits [63:48] (matching address_space_activate_root's own
     // `(slot + 1) << 48` for slot 0) ORed with kernel_l1_0's base address.
-    // 1 << 48 = 0x1000000000000, same bare-literal-shift issue as tcr
-    // above, same workaround.
-    let root: usize = ((kernel_l1_0 as *usize) as usize) | 0x1000000000000;
+    let root: usize = ((kernel_l1_0 as *usize) as usize) | (1 << 48);
     msr_ttbr0_el1(root);
     isb();
     tlbi_vmalle1();
