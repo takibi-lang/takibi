@@ -3809,7 +3809,18 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.GenericStructDef (n, _, _, _, _, _, _) ->
         claim_toplevel_name n "generic struct"
     | Ast.UseDef _              -> ()
+    | Ast.VectorTableDef _      -> ()
   ) prog;
+  (* GitHub issue #227 item 2: at most one `vector_table` declaration per
+     program. Unlike every other toplevel item, `vector_table` claims no
+     name in toplevel_names above (it is anonymous -- nothing else could
+     ever reference it by name), so a second declaration would otherwise
+     go undetected here and only surface as a confusing duplicate-symbol
+     error from the linker once codegen emits `el1_vectors` twice. *)
+  (match List.filter (function Ast.VectorTableDef _ -> true | _ -> false) prog with
+   | _ :: (Ast.VectorTableDef (_, loc)) :: _ ->
+       raise (TypeError (loc, "a program may declare at most one vector_table"))
+   | _ -> ());
   (* Closed enums are finite static sorts. Keep their nominal case names,
      rather than their machine discriminants, so equal integer encodings in
      unrelated enums cannot satisfy one another's state contracts. *)
@@ -4937,6 +4948,44 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           Hashtbl.add seen name ()
         ) params;
         validation_static_scope := None
+    | Ast.VectorTableDef (entries, loc) ->
+        (* GitHub issue #227 item 2: slot range/uniqueness/exhaustiveness are
+           all checked here, against toplevel_names (built above, still in
+           scope) for target existence and Target_info for how many slots
+           this architecture actually defines -- an architecture fact, not
+           a language one (see Target_info.vector_table_contract's own
+           comment). Codegen (lib/llvm_gen.ml) trusts this pass completely:
+           it never re-checks range/uniqueness/exhaustiveness itself. *)
+        let slot_count = match Target_info.vector_table_contract () with
+          | Target_info.Fixed_slots n -> n
+          | Target_info.Unsupported ->
+              raise (TypeError (loc,
+                "vector_table is unavailable because the selected target has no exception vector table contract"))
+        in
+        let seen = Hashtbl.create slot_count in
+        List.iter (fun (slot, target) ->
+          if slot < 0 || slot >= slot_count then
+            raise (TypeError (loc, Printf.sprintf
+              "vector_table slot %d is out of range for this target (must be 0..<%d)"
+              slot slot_count));
+          if Hashtbl.mem seen slot then
+            raise (TypeError (loc, Printf.sprintf
+              "vector_table slot %d is listed more than once" slot));
+          Hashtbl.add seen slot ();
+          (match Hashtbl.find_opt toplevel_names target with
+           | Some ("function" | "symbol") -> ()
+           | Some other -> raise (TypeError (loc, Printf.sprintf
+               "vector_table target '%s' is %s %s, not a function or extern symbol"
+               target (article_for other) other))
+           | None -> raise (TypeError (loc, Printf.sprintf
+               "vector_table target '%s' is not defined" target)))
+        ) entries;
+        for slot = 0 to slot_count - 1 do
+          if not (Hashtbl.mem seen slot) then
+            raise (TypeError (loc, Printf.sprintf
+              "vector_table is missing slot %d (every slot 0..<%d must be listed exactly once)"
+              slot slot_count))
+        done
     | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _
     | Ast.GenericStructDef _ | Ast.ExternSymbolDef _ -> ()) prog;
     (* GenericStructDef (GitHub issue #207): nothing to validate here yet
@@ -5108,6 +5157,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.EnumDef _   -> m
     | Ast.VariantDef _ -> m
     | Ast.UseDef _    -> m
+    | Ast.VectorTableDef _ -> m
     | Ast.GenericStructDef _ -> m
     (* GenericStructDef (GitHub issue #207): contributes no function
        signature until an instantiation exists as an ordinary FuncDef,
@@ -5139,6 +5189,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.EnumDef _                -> m
     | Ast.VariantDef _             -> m
     | Ast.UseDef _                 -> m
+    | Ast.VectorTableDef _         -> m
     | Ast.GenericStructDef _       -> m
   ) StringMap.empty prog in
   (* Pass 2: check global initializers.

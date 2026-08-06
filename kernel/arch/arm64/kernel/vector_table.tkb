@@ -1,0 +1,43 @@
+// GitHub issue #227 item 2: declares this kernel's AArch64 hardware
+// exception vector table, replacing kernel/arch/arm64/boot/entry.S's former
+// hand-laid-out 16-line table (a `.align 11`/`.align 7` VECTOR macro whose
+// slot coverage could only be checked by eyeballing it -- see that file's
+// own comment, and HISTORY.md's issue #227 item 2 entry, for the bug this
+// closes). `lib/llvm_gen.ml`'s gen_vector_table emits the real table under
+// the exact symbol name (`el1_vectors`) entry.S's `el2_drop_to_el1` already
+// installs into VBAR_EL1, so that file needed no further change beyond
+// deleting its own copy.
+//
+// el1_current_irq_entry/el0_irq_entry/el0_sync_entry remain hand-written
+// assembly (kernel/arch/arm64/boot/entry.S, kernel/arch/arm64/kernel/
+// user_entry.S) -- issue #227 item 1 (declaring the exception frame itself
+// in .tkb and generating save/restore) is a separate, larger, still-open
+// piece of work; this declaration only replaces the TABLE, not what each
+// slot branches to. `extern symbol` (not `extern fn`) is the right
+// declaration for all three: none of them is called through an ordinary
+// .tkb calling convention, only branched to directly from the raw vector
+// slot, so there is no parameter/return signature to state.
+use "kernel/arch/arm64/kernel/exception_evidence.tkb";
+
+extern symbol el1_current_irq_entry;
+extern symbol el0_irq_entry;
+extern symbol el0_sync_entry;
+
+vector_table {
+    0 => el1_exception_evidence;
+    1 => el1_exception_evidence;
+    2 => el1_exception_evidence;
+    3 => el1_exception_evidence;
+    4 => el1_exception_evidence;
+    5 => el1_current_irq_entry;
+    6 => el1_exception_evidence;
+    7 => el1_exception_evidence;
+    8 => el0_sync_entry;
+    9 => el0_irq_entry;
+    10 => el1_exception_evidence;
+    11 => el1_exception_evidence;
+    12 => el1_exception_evidence;
+    13 => el1_exception_evidence;
+    14 => el1_exception_evidence;
+    15 => el1_exception_evidence;
+}

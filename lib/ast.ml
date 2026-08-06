@@ -413,6 +413,22 @@ type toplevel =
      declared Takibi type any better than it already can't for ExternFuncDef
      signatures, so a typed version would add surface without adding a
      safety property it does not actually deliver. *)
+  | VectorTableDef of (int * ident) list * loc
+  (* vector_table { N => target; ... } -- GitHub issue #227 item 2. Declares
+     the target-architecture hardware exception vector table: each entry
+     names the architectural vector slot N and the function or `extern
+     symbol` branched to for it. Checked in type_inf.ml for slot range,
+     uniqueness, and exhaustiveness (every slot the target architecture
+     defines must be listed exactly once -- how many slots that is is an
+     architecture fact, not a language one, so the exact count is validated
+     against Target_info, not hardcoded here). Codegen (lib/llvm_gen.ml)
+     emits the actual table -- fixed alignment/per-slot spacing that is
+     equally an architecture fact (e.g. AArch64's VBAR_ELn requiring 2KB
+     table alignment and 128-byte-spaced entries, per the Architecture
+     Reference Manual, not something LLVM's target abstractions expose) --
+     as target-specific inline assembly, replacing what used to be a
+     hand-laid-out table in kernel/arch/arm64/boot/entry.S with no
+     compiler-checked coverage. *)
   | StructDef of string * (string * type_expr) list * bool * int option * string list * loc
   (* name, fields, is_packed, align_bytes, private_field_names, loc --
      align_bytes = Some N means type-level align(N). private_field_names

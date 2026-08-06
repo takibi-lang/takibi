@@ -5169,6 +5169,55 @@ let declare_func ?prog_types fdef =
     Hashtbl.add func_param_ast_types key param_ast
   end
 
+(* GitHub issue #227 item 2: emits the target's raw hardware exception
+   vector table from a `vector_table { N => target; ... }` declaration
+   already fully validated by type_inf.ml (slot range, uniqueness,
+   exhaustiveness, and that every target name resolves to a real function or
+   `extern symbol` -- this function trusts all of that and does not
+   re-check it). AArch64-only for now (type_inf.ml's Target_info check
+   already rejects any other target before codegen ever reaches this
+   function -- the runtime check here is just defense in depth, matching
+   this codebase's usual "assert, don't trust, but do not duplicate the
+   real check" pattern for target-gated codegen).
+
+   Genuinely raw, standalone assembly, not a "function body": the table is
+   16 fixed-size (128-byte, per AArch64's VBAR_ELn architecture requirement,
+   not an LLVM concept -- see Target_info.vector_table_contract's comment)
+   slots at a 2KB-aligned base, each just a `b <target>` branch (plus a
+   `mov x0, #slot` first when the target is SHARED across more than one
+   slot, so it can identify which one fired -- el1_exception_evidence is
+   exactly this case; a target used by only one slot must not have any
+   register touched before its own frame save, the same real bug a
+   uniform "always set x0" version of this function would have reintroduced
+   -- see HISTORY.md's issue #227 item 3 entry for the real regression this
+   mirrors). Emitted via `set_module_inline_asm` -- a REPLACE, not an
+   append, so this must be the only module-level inline-asm producer in
+   this file (true today; type_inf.ml also rejects a second `vector_table`
+   declaration in the same program, so this only ever runs once per
+   compile). *)
+let gen_vector_table entries =
+  let triple = target_triple the_module in
+  if not (starts_with triple "aarch64") then
+    raise (Error
+      "BUG: vector_table codegen reached for a non-AArch64 target -- \
+       type_inf.ml's Target_info check should have already rejected this");
+  let sorted = List.sort (fun (a, _) (b, _) -> compare (a : int) b) entries in
+  let uses = Hashtbl.create 8 in
+  List.iter (fun (_, target) ->
+    let n = match Hashtbl.find_opt uses target with Some n -> n | None -> 0 in
+    Hashtbl.replace uses target (n + 1)
+  ) entries;
+  let buf = Buffer.create 512 in
+  Buffer.add_string buf
+    "\t.section .text.vectors, \"ax\"\n\t.align 11\n\t.global el1_vectors\nel1_vectors:\n";
+  List.iter (fun (slot, target) ->
+    if Hashtbl.find uses target > 1 then
+      Buffer.add_string buf (Printf.sprintf "\tmov\tx0, #%d\n" slot);
+    Buffer.add_string buf (Printf.sprintf "\tb\t%s\n\t.align 7\n" target)
+  ) sorted;
+  Buffer.add_string buf "\t.section .text, \"ax\"\n";
+  set_module_inline_asm the_module (Buffer.contents buf)
+
 let gen_program ?prog_types prog =
   current_program_types := prog_types;
   trap_sites := [];  (* fresh per compilation (and per unit test) *)
@@ -5327,6 +5376,7 @@ let gen_program ?prog_types prog =
     | EnumDef _   -> ()
     | VariantDef _ -> ()
     | UseDef _    -> ()
+    | VectorTableDef _ -> ()
     | GenericStructDef _ -> ()
     (* GitHub issue #207: an uninstantiated generic template never reaches
        codegen. Monomorphize.run (once it exists) strips these out of prog
@@ -5354,6 +5404,7 @@ let gen_program ?prog_types prog =
     | EnumDef _       -> ()
     | VariantDef _    -> ()
     | UseDef _        -> ()
+    | VectorTableDef (entries, _) -> gen_vector_table entries
     | GenericStructDef _ -> ()
   ) prog;
   (* Resolve any deferred/forward-referenced DI metadata. Must run after every

@@ -1776,6 +1776,28 @@ at codegen time rather than silently lowering to a racy `wfi`.
   (assembly-implemented) function, emitting an LLVM `declare`. `extern
   fn` is **not** overloadable -- its unmangled symbol name is an external
   ABI contract.
+- `extern symbol name;` declares a symbol defined elsewhere (hand-written
+  assembly or the linker script) with no Takibi type at all -- there is
+  nothing to read or write through it, only an address. Referencing the
+  bare name evaluates to that address as a `usize` (GitHub issue #225).
+- `vector_table { N => target; ... }` declares the target architecture's
+  hardware exception vector table (GitHub issue #227): each entry names an
+  architectural vector slot `N` and the `fn` or `extern symbol` branched to
+  for it. Every slot the target architecture defines must be listed exactly
+  once (a compile error otherwise names the missing slot); a program may
+  declare at most one `vector_table`. AArch64 is the only target with a
+  contract today -- it defines exactly 16 slots, an architecture fact (the
+  ARM Architecture Reference Manual's `VBAR_ELn` requires a 2KB-aligned
+  table of 128-byte-spaced entries), not an LLVM one, so another target
+  gets its own contract (or none, which makes `vector_table` a compile
+  error) rather than inheriting AArch64's. A target used by more than one
+  slot receives its slot number in `x0` immediately before the branch, so a
+  shared handler (e.g. a fail-stop path reached from many unhandled slots)
+  can identify which one fired; a target used by exactly one slot does not
+  -- no register is touched before that target's own entry code runs,
+  which matters for a slot whose handler resumes the interrupted context
+  rather than parking forever (see HISTORY.md's issue #227 items 2 and 3
+  for the real register-clobber bug this asymmetry exists to prevent).
 - `inline fn name(params) -> ret { ... }` marks a Takibi-defined function
   as an explicit inlining request. In normal optimized builds the backend
   emits LLVM's `alwaysinline` function attribute and runs the corresponding

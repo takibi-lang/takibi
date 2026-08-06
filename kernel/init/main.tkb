@@ -12,6 +12,7 @@ use "kernel/net/socket_capability.tkb";
 use "kernel/arch/arm64/boot/boot_extern.tkb";
 use "kernel/arch/arm64/kernel/fpsimd_probe_extern.tkb";
 use "kernel/arch/arm64/kernel/exception_evidence.tkb";
+use "kernel/arch/arm64/kernel/vector_table.tkb";
 
 private let mut ext2_read_fixture: [u8; 32];
 private let mut ext2_symlink_fixture: [u8; 64];

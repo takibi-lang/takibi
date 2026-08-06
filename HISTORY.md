@@ -15,6 +15,73 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-06: A New `vector_table { N => target; ... }` Declaration Generates AArch64's Hardware Exception Vector Table (GitHub Issue #227 Item 2)
+
+Second of #227's three separable pieces (see item 3's entry immediately below, done first). `kernel/
+arch/arm64/boot/entry.S` used to hand-lay-out `el1_vectors`: sixteen `.align 7`-spaced slots inside one
+`.align 11` block, each either a `VECTOR` macro invocation (`mov x16, #N; b el1_exception_evidence`) or
+a bare `b <handler>` for the three slots with a real, resumable handler. Nothing checked that all
+sixteen slots were actually present, or that a slot's target matched its architectural meaning --
+exactly the issue's own stated complaint, and the reason item 3's `x16`-to-`x0` regression (see below)
+was possible to introduce without any compiler noticing.
+
+Added a new top-level declaration, `vector_table { N => target; ... }` (`lib/parser.mly`/`lib/lexer.
+mll`: a new `VECTOR_TABLE` keyword and `DARROW`-separated, semicolon-terminated entry list, matching
+`struct_fields`' own recursive-list style rather than a comma-separated menhir combinator, since entries
+read more like `struct`'s field list than a literal args list). `target` may name an ordinary `fn` or an
+`extern symbol` (never `extern fn`: nothing here is called through a real `.tkb` calling convention, it
+is branched to directly off a fixed hardware vector, so there is no parameter/return signature to
+state).
+
+**Design question surfaced by the user during review: is the table's alignment/spacing an LLVM fact or
+an architecture fact?** Architecture fact, unambiguously -- `VBAR_ELn`'s low 11 bits are RES0 per the
+ARM Architecture Reference Manual, and the 128-byte-per-entry spacing (16 * 128 = 2048) is likewise
+fixed by the exception model itself, true for every AArch64 implementation, not something LLVM's
+`TargetMachine`/`DataLayout` abstractions expose (LLVM has no concept of "where an OS's interrupt
+vector table must sit" -- that is firmware/OS ABI knowledge entirely outside its scope, the same way it
+already had no opinion on `EXC_CONTEXT_SIZE`). This settled the design: `Target_info.ml` gained a
+`vector_table_contract` (`Fixed_slots of int | Unsupported`, same shape as the existing `dma_cache_
+contract`) giving *how many* slots a target defines -- checked at type-check time for exhaustiveness --
+while the *byte-level* layout (2KB align, 128-byte stride) stays a hardcoded AArch64-specific constant
+inside `lib/llvm_gen.ml`'s codegen itself, matching how `emit_aarch64_cache_range` vs `emit_cortex_m_
+cache_range` already branch per target rather than asking LLVM. AArch64 gets `Fixed_slots 16` today;
+AMD64/RISC-V get `Unsupported` (a clear compile error naming the missing contract, not a silent
+fallback), matching the issue's own Non-goal that other ports are free to declare their own later.
+
+`type_inf.ml` validation (in the same per-item pass that already checks every other toplevel
+declaration) rejects: a slot outside `0..<contract_size`, a slot listed more than once, any slot
+missing (every slot must be listed exactly once -- exhaustive, not defaulted), a target name that does
+not resolve to a known function or `extern symbol` (reusing `toplevel_names`, the same flat-namespace
+registry `claim_toplevel_name` already builds), and a second `vector_table` declaration anywhere in the
+same program (anonymous, so nothing else could catch this the way a name collision normally would).
+
+Codegen (`gen_vector_table`, `lib/llvm_gen.ml`) emits the table as genuinely raw, standalone assembly
+via `set_module_inline_asm` -- not a "function body" in the normal codegen sense, since LLVM's own
+prologue/epilogue machinery would break the table's fixed byte layout. This is where item 3's real
+regression (see below) gets mechanically prevented rather than merely fixed once: a target is only
+preceded by `mov x0, #slot` when it is referenced from MORE than one table entry (computed by counting
+each target's occurrences across all sixteen entries) -- a shared fail-stop path like `el1_exception_
+evidence` needs to identify which slot fired, but a target used by exactly one slot (`el1_current_irq_
+entry`, `el0_irq_entry`, `el0_sync_entry`) gets no `mov` at all, so there is no register left for a
+future hand-edit to accidentally clobber the way the original `x16`-to-`x0` rewrite did. `entry.S`
+keeps its `.global el1_vectors`-free `adrp x2, el1_vectors` / `msr vbar_el1, x2` reference unchanged --
+the generated table exports the identical symbol name -- and lost its own 16-line table entirely, down
+to a comment pointing at `kernel/arch/arm64/kernel/vector_table.tkb`.
+
+Verified: `dune runtest` (946/946 -- seven new type-check-level cases: missing slot, duplicate slot,
+out-of-range slot, undefined target, duplicate declaration, unsupported target, and a positive case
+mixing `fn`/`extern symbol` targets with both a shared and several single-use handlers). Actual codegen
+correctness -- the exact `mov x0`/no-`mov` split, 128-byte spacing, 2KB alignment, and that each branch
+carries the right `R_AARCH64_JUMP26` relocation -- was checked directly against `llvm-objdump -d`/`-r`
+output on a standalone smoke-test binary during development (matching the depth `dma_prepare_tx`'s own
+per-target lowering already gets in this suite: type-checked in `dune runtest`, the real target-specific
+machine code verified via the real build rather than re-asserted as an IR string), then against the real
+`kernel.elf` (`el1_vectors` correctly resolving to `el1_current_irq_entry`/`el0_irq_entry`/`el0_sync_
+entry`/`el1_exception_evidence` at their real linked addresses), then with two consecutive full
+real-RPi5-hardware `kernelcheck-rpi5` passes (25/25 views each) exercising every one of these vectors for
+real (IRQ delivery via `uart_rx_irq`/`smp_bringup`, syscalls via every userspace-facing view, and the
+fail-stop path via `child_exec`'s deliberately-invalid syscall probe).
+
 ### 2026-08-06: `el1_exception_evidence` Moves to Ordinary `.tkb`, and a Real Register-Clobber Bug Found by Real-Hardware A/B (GitHub Issue #227 Item 3)
 
 Issue #227 bundles three separable pieces of work (declare the exception frame in `.tkb` and generate

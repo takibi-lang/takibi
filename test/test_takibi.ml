@@ -8363,6 +8363,102 @@ let codegen_tests = [
          "fn f(p: *u8) { dma_finish_rx(p, 512); }" ();
        expect_ok "fn f(p: *u8) { dma_prepare_tx(p, 512); }" ());
 
+  (* GitHub issue #227 item 2: `vector_table { N => target; ... }` declares
+     the target's hardware exception vector table -- checked exhaustively
+     (every architectural slot listed exactly once) instead of the
+     eyeballed 16-line hand-written table this replaces in
+     kernel/arch/arm64/boot/entry.S. AArch64 defines exactly 16 slots
+     (Target_info.vector_table_contract), so these tests configure that
+     target explicitly and restore the ambient thumbv7em default afterward,
+     matching the DMA alignment test's own Target_info save/restore
+     discipline just above -- Target_info is process-global state shared
+     across this whole test binary. Codegen itself (the actual generated
+     `mov x0, #N; b target` sequence, and specifically that a target used by
+     only one slot gets NO `mov` -- the exact register-clobber bug issue
+     #227 item 3 found in hand-written form) is deliberately NOT re-verified
+     here: it was verified directly via the CLI against real
+     disassembly/relocations (llvm-objdump -d/-r) during development, the
+     same depth of coverage dma_prepare_tx's own AArch64-specific lowering
+     already has in this suite (type-checked here, verified for real via
+     kernelbuild-rpi5/hardware, never re-asserted at the IR-text level) --
+     see HISTORY.md's issue #227 item 2 entry. *)
+  Alcotest.test_case "vector_table requires every architectural slot listed exactly once" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "missing slot 2"
+         "fn h() { while (true) { interrupt_wait(); } }
+          vector_table { 0 => h; 1 => h; }" ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "vector_table rejects a slot listed twice" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "listed more than once"
+         "fn h() { while (true) { interrupt_wait(); } }
+          vector_table {
+            0=>h;1=>h;2=>h;3=>h;4=>h;5=>h;6=>h;7=>h;
+            8=>h;9=>h;10=>h;11=>h;12=>h;13=>h;14=>h;14=>h;
+          }" ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "vector_table rejects a slot number out of range" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "out of range"
+         "fn h() { while (true) { interrupt_wait(); } }
+          vector_table {
+            0=>h;1=>h;2=>h;3=>h;4=>h;5=>h;6=>h;7=>h;
+            8=>h;9=>h;10=>h;11=>h;12=>h;13=>h;14=>h;16=>h;
+          }" ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "vector_table rejects an undefined target name" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "not defined"
+         "vector_table {
+            0=>ghost;1=>ghost;2=>ghost;3=>ghost;4=>ghost;5=>ghost;6=>ghost;7=>ghost;
+            8=>ghost;9=>ghost;10=>ghost;11=>ghost;12=>ghost;13=>ghost;14=>ghost;15=>ghost;
+          }" ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "vector_table rejects a second declaration in the same program" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "at most one vector_table"
+         "fn h() { while (true) { interrupt_wait(); } }
+          vector_table {
+            0=>h;1=>h;2=>h;3=>h;4=>h;5=>h;6=>h;7=>h;
+            8=>h;9=>h;10=>h;11=>h;12=>h;13=>h;14=>h;15=>h;
+          }
+          vector_table {
+            0=>h;1=>h;2=>h;3=>h;4=>h;5=>h;6=>h;7=>h;
+            8=>h;9=>h;10=>h;11=>h;12=>h;13=>h;14=>h;15=>h;
+          }" ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "vector_table is unavailable on a target with no exception vector table contract" `Quick
+    (fun () ->
+       Target_info.configure "x86_64-pc-linux-gnu";
+       expect_type_error "no exception vector table contract"
+         "fn h() { while (true) { interrupt_wait(); } }
+          vector_table { 0 => h; }" ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "vector_table accepts an exhaustive, unique AArch64 declaration mixing fn and extern symbol targets" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_ok
+         "extern symbol asm_handler;
+          fn tkb_handler() { while (true) { interrupt_wait(); } }
+          vector_table {
+            0=>tkb_handler;1=>tkb_handler;2=>tkb_handler;3=>tkb_handler;
+            4=>tkb_handler;5=>asm_handler;6=>tkb_handler;7=>tkb_handler;
+            8=>asm_handler;9=>asm_handler;10=>tkb_handler;11=>tkb_handler;
+            12=>tkb_handler;13=>tkb_handler;14=>tkb_handler;15=>tkb_handler;
+          }" ();
+       Target_info.configure "thumbv7em-none-eabi");
+
   (* GitHub issue #226: closed system-register/barrier/TLBI intrinsics, to
      lift kernel/arch/arm64/kernel/timer.S and most of
      kernel/arch/arm64/mm/mmu.S into .tkb. Same coverage shape as the DMA/

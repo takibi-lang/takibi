@@ -110,64 +110,21 @@ el1_fpsimd_enable:
     isb
     ret
 
-/* All sixteen architectural vector slots lead to an evidence-preserving
- * fail-stop path except slot 8 (lower-EL AArch64 sync, EL0 syscalls) and
- * slots 5/9 (Current-EL SPx IRQ and Lower-EL AArch64 IRQ). x0 carries the
- * slot number, as an ordinary first argument, for the ones that still
- * fail-stop -- el1_exception_evidence is plain .tkb (GitHub issue #227
- * item 3; kernel/arch/arm64/kernel/exception_evidence.tkb), reached with a
- * tail branch (it never returns, so no link register needs preserving), not
- * hand-written assembly reading a scratch register by convention. No slot
- * silently spins at an anonymous PC. Slots 5 and 9 stay separate entry
- * points because only the Lower-EL one (slot 9) may select another process
- * from its returned frame SP, but both build the single exception frame
- * declared in kernel/arch/arm64/kernel/exception_context.inc -- the same
- * one the syscall path uses.
- */
-    .section .text.vectors, "ax"
-    .align 11
-el1_vectors:
-.macro VECTOR slot
-    mov     x0, #\slot
-    b       el1_exception_evidence
-    .align  7
-.endm
-    VECTOR 0
-    VECTOR 1
-    VECTOR 2
-    VECTOR 3
-    VECTOR 4
-    b       el1_current_irq_entry
-    .align  7
-    VECTOR 6
-    VECTOR 7
-    /* Unlike every VECTOR slot above, this is not a fail-stop tail branch --
-     * el0_sync_entry's own EXC_CONTEXT_SAVE (its first instruction) saves
-     * the LIVE x0 as the interrupted EL0 process's own first syscall
-     * argument, and .Lsyscall_dispatch (kernel/arch/arm64/kernel/
-     * user_entry.S) re-reads it straight back out of the saved frame
-     * (`ldr x2, [sp, #0]`) as that argument for every syscall. Clobbering
-     * x0 here the way the VECTOR macro above now does for
-     * el1_exception_evidence's slot argument silently replaces every
-     * syscall's real first argument with the constant 8 before it is ever
-     * saved -- found the hard way, as a real-hardware hang with no compiler
-     * error (BusyBox httpd's first syscalls all silently misbehaving),
-     * root-caused with a git-stash A/B against the pre-#227 baseline. x16
-     * stays safe to overwrite here exactly as it always was: nothing in
-     * el0_sync_entry's dispatch path reads it back from the frame, only
-     * EXC_CONTEXT_RESTORE's eventual `eret` hands it back to the process
-     * unexamined, same as any other syscall-clobbered scratch register. */
-    mov     x16, #8
-    b       el0_sync_entry
-    .align  7
-    b       el0_irq_entry
-    .align  7
-    VECTOR 10
-    VECTOR 11
-    VECTOR 12
-    VECTOR 13
-    VECTOR 14
-    VECTOR 15
+/* The hardware exception vector table (el1_vectors, referenced by
+ * el2_drop_to_el1's `adrp x2, el1_vectors` / `msr vbar_el1, x2` above) is no
+ * longer hand-laid-out here -- GitHub issue #227 item 2 replaced the former
+ * 16-line VECTOR-macro table (eyeballed for slot coverage, with the
+ * mov-x0-into-a-live-syscall-argument bug issue #227 item 3's own history
+ * entry describes) with a `vector_table { N => target; ... }` declaration
+ * in kernel/arch/arm64/kernel/vector_table.tkb, exhaustively checked by the
+ * compiler (every one of AArch64's 16 architectural slots must be listed
+ * exactly once) and emitted as the same shape of raw assembly this file
+ * used to contain, via lib/llvm_gen.ml's gen_vector_table -- including the
+ * exact fix for that bug: a target used by more than one slot gets
+ * `mov x0, #slot` before the branch (so el1_exception_evidence can still
+ * identify which slot fired), a target used by only one slot does not,
+ * mechanically, with no hand-picked-register mistake possible. See that
+ * file and HISTORY.md's issue #227 item 2 entry for the full design. */
 
     .section .text, "ax"
 
