@@ -131,7 +131,7 @@ let promote_be_field_type = function
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN INLINE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE
+%token FN INLINE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY
 %token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
@@ -231,6 +231,8 @@ item:
     { ExternSymbolDef ($3, $symbolstartpos) }
   | VECTOR_TABLE LBRACE entries = vector_table_entries RBRACE
     { VectorTableDef (entries, $symbolstartpos) }
+  | EXCEPTION_ENTRY name = IDENT LBRACE fields = exc_entry_fields RBRACE
+    { ExceptionEntryDef (name, fields, $symbolstartpos) }
   | struct_intro LBRACE struct_fields RBRACE
     { let (name, is_packed, align_opt, is_be) = $1 in
       let fields = List.map (fun (fname, ty, _) ->
@@ -365,6 +367,11 @@ vector_table_entries:
   | /* empty */ { [] }
   | n = INT DARROW target = IDENT SEMI rest = vector_table_entries
     { (narrow_int64 $symbolstartpos "vector table slot" n, target) :: rest }
+
+exc_entry_fields:
+  | /* empty */ { [] }
+  | key = IDENT COLON value = IDENT SEMI rest = exc_entry_fields
+    { (key, value) :: rest }
 
 enum_variants:
   | /* empty */                         { ([], false) }

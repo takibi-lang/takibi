@@ -25,6 +25,17 @@ let noreturn_functions : (string, unit) Hashtbl.t = Hashtbl.create 8
    yields its address (ptrtoint), never a load -- there is no Takibi type
    for the pointee, only the symbol itself. *)
 let extern_symbols : (string, llvalue) Hashtbl.t = Hashtbl.create 8
+(* GitHub issue #227 items 1/2: accumulates every raw, standalone
+   assembly blob this compiler generates (the vector table, exception
+   entry save/dispatch/restore sequences) into one buffer, flushed via a
+   single `set_module_inline_asm` call at the end of gen_program --
+   `set_module_inline_asm` REPLACES the module's inline asm rather than
+   appending, and this OCaml LLVM binding has no append variant, so every
+   producer of this kind of raw asm must share this one buffer rather than
+   calling `set_module_inline_asm` itself. Reset at the start of each
+   gen_program run, same as trap_sites, since Llvm_gen.the_module is a
+   single process-global module reused across every test in this binary. *)
+let raw_asm_buf = Buffer.create 512
 let current_program_types : Types.program_types option ref = ref None
 (* Struct type registry: name -> LLVM struct lltype *)
 let struct_lltypes : (string, lltype) Hashtbl.t = Hashtbl.create 8
@@ -5207,20 +5218,91 @@ let gen_vector_table entries =
     let n = match Hashtbl.find_opt uses target with Some n -> n | None -> 0 in
     Hashtbl.replace uses target (n + 1)
   ) entries;
-  let buf = Buffer.create 512 in
-  Buffer.add_string buf
+  Buffer.add_string raw_asm_buf
     "\t.section .text.vectors, \"ax\"\n\t.align 11\n\t.global el1_vectors\nel1_vectors:\n";
   List.iter (fun (slot, target) ->
     if Hashtbl.find uses target > 1 then
-      Buffer.add_string buf (Printf.sprintf "\tmov\tx0, #%d\n" slot);
-    Buffer.add_string buf (Printf.sprintf "\tb\t%s\n\t.align 7\n" target)
+      Buffer.add_string raw_asm_buf (Printf.sprintf "\tmov\tx0, #%d\n" slot);
+    Buffer.add_string raw_asm_buf (Printf.sprintf "\tb\t%s\n\t.align 7\n" target)
   ) sorted;
-  Buffer.add_string buf "\t.section .text, \"ax\"\n";
-  set_module_inline_asm the_module (Buffer.contents buf)
+  Buffer.add_string raw_asm_buf "\t.section .text, \"ax\"\n"
+
+(* GitHub issue #227 item 1 (prototype slice): generates the raw
+   save-frame/[before]/dispatch/restore-frame/eret sequence for one
+   exception vector's entry point, from a `struct packed` frame declaration
+   (type_inf.ml has already validated: frame is a packed struct with
+   EXACTLY the closed AArch64 register-name field set, one of each,
+   correctly typed; dispatch/before name real functions). Field offsets
+   come from the frame struct's OWN declared order (via struct_fields,
+   packed/sequential -- no `stp`/`ldp` pairing is attempted, since a
+   field's neighbor in that order is not guaranteed to be the adjacent
+   physical register; individual str/ldr per register trades a modest
+   instruction-count increase for not depending on declaration order,
+   correctness over micro-optimization for what is an interrupt/fail-stop
+   path, not a hot loop). x9 is used as the system-register shuffle scratch
+   throughout, safe because it is always saved/restored as an ordinary GPR
+   in the same pass (see the loops below) -- same technique exception_
+   context.inc's hand-written macros already use. The restore sequence's
+   DAIF-masking-before-ELR/SPSR shape (GitHub issue #229) is replicated
+   exactly: `msr DAIFSet` first, `eret` last, nothing in between that could
+   take a new exception. *)
+let gen_exception_entry name frame dispatch before =
+  let triple = target_triple the_module in
+  if not (starts_with triple "aarch64") then
+    raise (Error
+      "BUG: exception_entry codegen reached for a non-AArch64 target -- \
+       type_inf.ml should have already rejected this");
+  let fields = match Hashtbl.find_opt struct_fields frame with
+    | Some fs -> fs
+    | None -> raise (Error (Printf.sprintf
+        "BUG: exception_entry '%s' frame '%s' not found in struct_fields -- \
+         type_inf.ml should have already validated this" name frame))
+  in
+  let field_size = function
+    | TypeUsize -> 8
+    | TypeArray (TypeU8, 16) -> 16
+    | _ -> raise (Error (Printf.sprintf
+        "BUG: exception_entry '%s' frame '%s' has an unexpected field type -- \
+         type_inf.ml should have already rejected this" name frame))
+  in
+  let offsets : (string, int) Hashtbl.t = Hashtbl.create 70 in
+  let total = List.fold_left (fun off (fname, fty) ->
+    Hashtbl.add offsets fname off;
+    off + field_size fty
+  ) 0 fields in
+  let off r = Hashtbl.find offsets r in
+  let a fmt = Printf.ksprintf (Buffer.add_string raw_asm_buf) fmt in
+  a "\t.section .text, \"ax\"\n\t.global %s\n%s:\n\tsub\tsp, sp, #%d\n" name name total;
+  for i = 0 to 30 do
+    a "\tstr\tx%d, [sp, #%d]\n" i (off (Printf.sprintf "x%d" i))
+  done;
+  List.iter (fun sysreg -> a "\tmrs\tx9, %s\n\tstr\tx9, [sp, #%d]\n" sysreg (off sysreg))
+    ["sp_el0"; "elr_el1"; "spsr_el1"];
+  for i = 0 to 31 do
+    a "\tstr\tq%d, [sp, #%d]\n" i (off (Printf.sprintf "q%d" i))
+  done;
+  List.iter (fun sysreg -> a "\tmrs\tx9, %s\n\tstr\tx9, [sp, #%d]\n" sysreg (off sysreg))
+    ["fpsr"; "fpcr"];
+  Option.iter (fun b -> a "\tbl\t%s\n" b) before;
+  a "\tmov\tx0, sp\n\tbl\t%s\n\tmov\tsp, x0\n" dispatch;
+  a "\tmsr\tDAIFSet, #0x2\n";
+  a "\tldr\tx9, [sp, #%d]\n\tmsr\telr_el1, x9\n" (off "elr_el1");
+  a "\tldr\tx9, [sp, #%d]\n\tmsr\tspsr_el1, x9\n" (off "spsr_el1");
+  a "\tldr\tx9, [sp, #%d]\n\tmsr\tsp_el0, x9\n" (off "sp_el0");
+  for i = 0 to 31 do
+    a "\tldr\tq%d, [sp, #%d]\n" i (off (Printf.sprintf "q%d" i))
+  done;
+  a "\tldr\tx9, [sp, #%d]\n\tmsr\tfpsr, x9\n" (off "fpsr");
+  a "\tldr\tx9, [sp, #%d]\n\tmsr\tfpcr, x9\n" (off "fpcr");
+  for i = 0 to 30 do
+    a "\tldr\tx%d, [sp, #%d]\n" i (off (Printf.sprintf "x%d" i))
+  done;
+  a "\tadd\tsp, sp, #%d\n\teret\n" total
 
 let gen_program ?prog_types prog =
   current_program_types := prog_types;
   trap_sites := [];  (* fresh per compilation (and per unit test) *)
+  Buffer.clear raw_asm_buf;
   unsafe_depth := 0;
   Hashtbl.reset erased_view_names;
   Hashtbl.reset variant_defs;
@@ -5377,6 +5459,7 @@ let gen_program ?prog_types prog =
     | VariantDef _ -> ()
     | UseDef _    -> ()
     | VectorTableDef _ -> ()
+    | ExceptionEntryDef _ -> ()
     | GenericStructDef _ -> ()
     (* GitHub issue #207: an uninstantiated generic template never reaches
        codegen. Monomorphize.run (once it exists) strips these out of prog
@@ -5405,8 +5488,18 @@ let gen_program ?prog_types prog =
     | VariantDef _    -> ()
     | UseDef _        -> ()
     | VectorTableDef (entries, _) -> gen_vector_table entries
+    | ExceptionEntryDef (name, fields, _) ->
+        let frame = ref "" and dispatch = ref "" and before = ref None in
+        List.iter (function
+          | ("frame", v) -> frame := v
+          | ("dispatch", v) -> dispatch := v
+          | ("before", v) -> before := Some v
+          | _ -> ()) fields;
+        gen_exception_entry name !frame !dispatch !before
     | GenericStructDef _ -> ()
   ) prog;
+  if Buffer.length raw_asm_buf > 0 then
+    set_module_inline_asm the_module (Buffer.contents raw_asm_buf);
   (* Resolve any deferred/forward-referenced DI metadata. Must run after every
      gen_func call above, before the module is optimized or emitted to an object. *)
   (match !dibuilder_opt with

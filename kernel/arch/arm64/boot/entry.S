@@ -3,7 +3,6 @@
  * the system-register work Takibi cannot express and drops exactly once to
  * the monolithic EL1 kernel. It is not an EL2 service layer.
  */
-    .include "kernel/arch/arm64/kernel/exception_context.inc"
 
     .section .text.boot, "ax"
     .global _start
@@ -126,52 +125,14 @@ el1_fpsimd_enable:
  * mechanically, with no hand-picked-register mistake possible. See that
  * file and HISTORY.md's issue #227 item 2 entry for the full design. */
 
-    .section .text, "ax"
-
-/* Current-EL-SPx IRQ entry (GitHub issue #187): an interrupt taken while
- * this kernel's own EL1 code runs, e.g. during a syscall that has already
- * unmasked DAIF.I. It saves and restores the same complete
- * exception frame as the two EL0-facing entries below -- including q0-q31,
- * FPSR and FPCR, which the earlier hand-written 272-byte
- * general-registers-only frame here did not (GitHub issue #223). The
- * interrupted EL1 code can hold live q registers, so anything this vector
- * reaches that LLVM compiles with SIMD would otherwise corrupt them.
- *
- * fpsimd_irq_clobber is the fixture hook that keeps that guarantee honest:
- * it is inert unless kernel/arch/arm64/kernel/fpsimd_probe.S's probe has
- * armed it, and it runs here -- after the frame is saved, before any
- * dispatch -- where no AAPCS caller/callee register contract exists yet to
- * violate. SP_EL0 is saved and restored too; at EL1h it is not the running
- * stack pointer, so that is a faithful round trip of the EL0 process's own
- * value. */
-    .global el1_current_irq_entry
-el1_current_irq_entry:
-    sub     sp, sp, #EXC_CONTEXT_SIZE
-    EXC_CONTEXT_SAVE
-
-    bl      fpsimd_irq_clobber
-
-    mov     x0, sp
-    bl      rpi5_irq_dispatch
-    mov     sp, x0
-
-    EXC_CONTEXT_RESTORE
-    add     sp, sp, #EXC_CONTEXT_SIZE
-    eret
-
-/* Lower-EL AArch64 IRQ entry, the same frame again -- here it is also a
- * complete resumable EL0 context. rpi5_irq_dispatch still returns the
- * same SP in this milestone; a later issue #188 step may select another
- * process by returning its saved frame SP. */
-    .global el0_irq_entry
-el0_irq_entry:
-    sub     sp, sp, #EXC_CONTEXT_SIZE
-    EXC_CONTEXT_SAVE
-
-    mov     x0, sp
-    bl      rpi5_el0_irq_dispatch
-    mov     sp, x0
-
-    EXC_CONTEXT_RESTORE
-    add     sp, sp, #EXC_CONTEXT_SIZE
-    eret
+/* el1_current_irq_entry (Current-EL-SPx IRQ, GitHub issue #187/#223) and
+ * el0_irq_entry (Lower-EL AArch64 IRQ) are no longer hand-written here --
+ * GitHub issue #227 item 1's prototype slice generates both, save/dispatch/
+ * restore/eret in full, from kernel/arch/arm64/kernel/exception_frame.tkb's
+ * `struct packed ExceptionFrame` and `exception_entry` declarations (lib/
+ * llvm_gen.ml's gen_exception_entry), the same way item 2 above generates
+ * el1_vectors. See that file and HISTORY.md's issue #227 item 1 entry for
+ * the full design. `.Ldata_abort`/`el0_context_resume`/`run_initial_user`
+ * (kernel/arch/arm64/kernel/user_entry.S) still use exception_context.inc's
+ * EXC_CONTEXT_RESTORE directly -- restore-only, without a preceding save,
+ * is out of this first slice's scope. */

@@ -429,6 +429,40 @@ type toplevel =
      as target-specific inline assembly, replacing what used to be a
      hand-laid-out table in kernel/arch/arm64/boot/entry.S with no
      compiler-checked coverage. *)
+  | ExceptionEntryDef of ident * (string * string) list * loc
+  (* exception_entry name { frame: FrameStruct; dispatch: fn_name;
+     before: fn_name; } -- GitHub issue #227 item 1, first (prototype)
+     slice: generates the raw save-frame/dispatch/restore-frame/eret
+     sequence for ONE exception vector's entry point, from a `struct
+     packed` frame declaration instead of a hand-written .inc macro pair
+     (kernel/arch/arm64/kernel/exception_context.inc's EXC_CONTEXT_SAVE/
+     EXC_CONTEXT_RESTORE). `frame` and `dispatch` are required; `before` is
+     an optional extra call inserted between save and dispatch (the
+     fpsimd-clobber fixture hook el1_current_irq_entry needs, that
+     el0_irq_entry does not). Field keys are a closed, unordered set (order
+     in source does not matter) -- deliberately reusing struct_fields'
+     plain `IDENT COLON IDENT SEMI` shape rather than inventing new keyword
+     tokens per key, matching this project's general "no new syntax
+     surface beyond what's needed" bias. `dispatch`'s function is called
+     with the frame's own stack address (usize) and must return a usize
+     (the same or a different frame's address to resume from -- unchanged
+     shape from the hand-written version). type_inf.ml validates: `frame`
+     names a real struct whose fields are EXACTLY the closed
+     x0..x30/sp_el0/elr_el1/spsr_el1/q0..q31/fpsr/fpcr register-name set
+     (each with the one correct type), `dispatch`/`before` name real
+     functions with the right signature, and no unknown key appears.
+     Codegen (lib/llvm_gen.ml) reuses the struct's own Type_layout offsets
+     to emit the same stp/ldp/mrs/msr sequence exception_context.inc's
+     macros already do, as one self-contained raw assembly blob (same
+     `set_module_inline_asm` technique as VectorTableDef, and for the same
+     reason: this runs before any calling convention is established, so it
+     cannot be an ordinary .tkb function body). Only covers the uniform
+     SAVE -> optional before -> dispatch -> RESTORE -> eret shape; the
+     several places that call EXC_CONTEXT_RESTORE standalone (process
+     resume without a preceding save, e.g. `el0_context_resume`/
+     `run_initial_user`/`.Ldata_abort` in kernel/arch/arm64/kernel/
+     user_entry.S) are deliberately out of scope for this first slice --
+     see HISTORY.md's issue #227 item 1 entry. *)
   | StructDef of string * (string * type_expr) list * bool * int option * string list * loc
   (* name, fields, is_packed, align_bytes, private_field_names, loc --
      align_bytes = Some N means type-level align(N). private_field_names

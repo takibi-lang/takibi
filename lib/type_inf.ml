@@ -3781,6 +3781,20 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      carries no location except via `FuncDef`'s own `func.def_loc`. *)
   let toplevel_names : (string, string) Hashtbl.t = Hashtbl.create 32 in
   let article_for kind = if kind = "enum" then "an" else "a" in
+  (* GitHub issue #227 item 1 (prototype slice): the closed set of field
+     names/types an `exception_entry`'s `frame` struct must have exactly --
+     AArch64's own GPRs (x0..x30), the three EL0/EL1 exception-return
+     registers, all 32 SIMD/FP registers (as [u8;16] -- this language has
+     no 128-bit primitive type, and none is needed just to store bytes),
+     and FPSR/FPCR. Order-independent: codegen computes each register's
+     offset from whatever order the struct itself declares (packed,
+     sequential), not from this list's order. *)
+  let aarch64_exception_frame_register_set =
+    (List.init 31 (fun i -> (Printf.sprintf "x%d" i, Ast.TypeUsize)))
+    @ ["sp_el0", Ast.TypeUsize; "elr_el1", Ast.TypeUsize; "spsr_el1", Ast.TypeUsize]
+    @ (List.init 32 (fun i -> (Printf.sprintf "q%d" i, Ast.TypeArray (Ast.TypeU8, 16))))
+    @ ["fpsr", Ast.TypeUsize; "fpcr", Ast.TypeUsize]
+  in
   let claim_toplevel_name name kind =
     if name = "addr" then
       raise (TypeError (Lexing.dummy_pos,
@@ -3810,6 +3824,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         claim_toplevel_name n "generic struct"
     | Ast.UseDef _              -> ()
     | Ast.VectorTableDef _      -> ()
+    | Ast.ExceptionEntryDef (n, _, _) -> claim_toplevel_name n "function"
   ) prog;
   (* GitHub issue #227 item 2: at most one `vector_table` declaration per
      program. Unlike every other toplevel item, `vector_table` claims no
@@ -4986,6 +5001,87 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               "vector_table is missing slot %d (every slot 0..<%d must be listed exactly once)"
               slot slot_count))
         done
+    | Ast.ExceptionEntryDef (name, fields, loc) ->
+        (* GitHub issue #227 item 1 (prototype slice): frame/dispatch/before
+           are the only recognized keys. dispatch/before are only checked
+           for EXISTENCE here (not signature) -- this prototype trusts the
+           caller to match the real dispatch shape (`fn(usize) -> usize`)
+           and before shape (`fn()`); fenv (which could check that) is not
+           built until a later pass. Revisit if this graduates past
+           prototype. *)
+        let frame_name = ref None and dispatch_name = ref None
+        and before_name = ref None in
+        List.iter (fun (key, value) -> match key with
+          | "frame" -> frame_name := Some value
+          | "dispatch" -> dispatch_name := Some value
+          | "before" -> before_name := Some value
+          | other -> raise (TypeError (loc, Printf.sprintf
+              "exception_entry '%s' has unknown key '%s' (expected frame, dispatch, or before)"
+              name other))
+        ) fields;
+        let frame = match !frame_name with
+          | Some f -> f
+          | None -> raise (TypeError (loc, Printf.sprintf
+              "exception_entry '%s' is missing required key 'frame'" name))
+        in
+        let dispatch = match !dispatch_name with
+          | Some d -> d
+          | None -> raise (TypeError (loc, Printf.sprintf
+              "exception_entry '%s' is missing required key 'dispatch'" name))
+        in
+        let check_fn_target key target = match Hashtbl.find_opt toplevel_names target with
+          | Some "function" -> ()
+          | Some other -> raise (TypeError (loc, Printf.sprintf
+              "exception_entry '%s' %s target '%s' is %s %s, not a function"
+              name key target (article_for other) other))
+          | None -> raise (TypeError (loc, Printf.sprintf
+              "exception_entry '%s' %s target '%s' is not defined" name key target))
+        in
+        check_fn_target "dispatch" dispatch;
+        Option.iter (check_fn_target "before") !before_name;
+        (* Look up the frame struct directly in `prog` (already in scope,
+           the very list this whole pass iterates) rather than
+           Type_layout.structs -- Type_layout already depends on Llvm_gen,
+           which depends on Type_inf, so a direct Type_layout reference
+           here would be a module dependency cycle. `prog` has everything
+           needed (fields, is_packed) with no such issue. *)
+        let struct_def = List.find_map (function
+          | Ast.StructDef (n, fields, is_packed, _, _, _) when n = frame ->
+              Some (fields, is_packed)
+          | Ast.OwnedStructDef (n, _, _, fields, is_packed, _, _, _, _) when n = frame ->
+              Some (fields, is_packed)
+          | _ -> None) prog
+        in
+        (match struct_def with
+         | None -> raise (TypeError (loc, Printf.sprintf
+             "exception_entry '%s' frame '%s' is not a known struct" name frame))
+         | Some (fields, is_packed) ->
+             if not is_packed then
+               raise (TypeError (loc, Printf.sprintf
+                 "exception_entry '%s' frame '%s' must be a packed struct" name frame));
+             let seen = Hashtbl.create 70 in
+             List.iter (fun (fname, fty) ->
+               match List.assoc_opt fname aarch64_exception_frame_register_set with
+               | None -> raise (TypeError (loc, Printf.sprintf
+                   "exception_entry '%s' frame '%s' has field '%s', which is not an AArch64 exception-frame register name"
+                   name frame fname))
+               | Some expected_ty ->
+                   if fty <> expected_ty then
+                     raise (TypeError (loc, Printf.sprintf
+                       "exception_entry '%s' frame '%s' field '%s' has the wrong type"
+                       name frame fname));
+                   if Hashtbl.mem seen fname then
+                     raise (TypeError (loc, Printf.sprintf
+                       "exception_entry '%s' frame '%s' has field '%s' more than once"
+                       name frame fname));
+                   Hashtbl.add seen fname ()
+             ) fields;
+             List.iter (fun (rname, _) ->
+               if not (Hashtbl.mem seen rname) then
+                 raise (TypeError (loc, Printf.sprintf
+                   "exception_entry '%s' frame '%s' is missing register field '%s'"
+                   name frame rname))
+             ) aarch64_exception_frame_register_set)
     | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _
     | Ast.GenericStructDef _ | Ast.ExternSymbolDef _ -> ()) prog;
     (* GenericStructDef (GitHub issue #207): nothing to validate here yet
@@ -5158,6 +5254,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.VariantDef _ -> m
     | Ast.UseDef _    -> m
     | Ast.VectorTableDef _ -> m
+    | Ast.ExceptionEntryDef _ -> m
     | Ast.GenericStructDef _ -> m
     (* GenericStructDef (GitHub issue #207): contributes no function
        signature until an instantiation exists as an ordinary FuncDef,
@@ -5190,6 +5287,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.VariantDef _             -> m
     | Ast.UseDef _                 -> m
     | Ast.VectorTableDef _         -> m
+    | Ast.ExceptionEntryDef _      -> m
     | Ast.GenericStructDef _       -> m
   ) StringMap.empty prog in
   (* Pass 2: check global initializers.

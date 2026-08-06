@@ -1798,6 +1798,23 @@ at codegen time rather than silently lowering to a racy `wfi`.
   which matters for a slot whose handler resumes the interrupted context
   rather than parking forever (see HISTORY.md's issue #227 items 2 and 3
   for the real register-clobber bug this asymmetry exists to prevent).
+- `exception_entry name { frame: FrameStruct; dispatch: fn_name; before:
+  fn_name; }` (GitHub issue #227 item 1, prototype slice -- syntax not yet
+  final) generates a complete save-frame / optional `before` call /
+  `dispatch` call / restore-frame / `eret` sequence for one vector's entry
+  point, in place of hand-written assembly. `frame` must name a `struct
+  packed` whose fields are EXACTLY AArch64's exception-frame registers,
+  one of each, no more, no less: `x0`..`x30`, `sp_el0`, `elr_el1`,
+  `spsr_el1` (all `usize`), `q0`..`q31` (`[u8; 16]` each -- this language
+  has no 128-bit primitive type, and storing 16 raw bytes needs none),
+  `fpsr`, `fpcr` (`usize`). Field declaration order is free -- offsets are
+  computed from whatever order the struct itself declares. `dispatch` is
+  called with the frame's own stack address (as `usize`) after the save
+  (and `before`, if given) and must return a `usize`, the frame address to
+  resume from (unchanged from the hand-written convention it replaces).
+  `before` is optional. Only the uniform save -> dispatch -> restore ->
+  `eret` shape is covered; a standalone restore-only resume path (no
+  preceding save in the same sequence) is not yet expressible this way.
 - `inline fn name(params) -> ret { ... }` marks a Takibi-defined function
   as an explicit inlining request. In normal optimized builds the backend
   emits LLVM's `alwaysinline` function attribute and runs the corresponding

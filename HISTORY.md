@@ -15,6 +15,85 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-06: A Working Prototype Generates Two Real IRQ Entry Points' Save/Dispatch/Restore/`eret` From a `.tkb` Frame Declaration (GitHub Issue #227 Item 1, Prototype Slice)
+
+Third and last of #227's three pieces to get started (items 2 and 3, below, landed first). The user's
+own framing going in: don't polish syntax yet, find out concretely how much of `entry.S` can actually
+move into `.tkb`. Investigation before writing any code changed the whole risk picture -- the original
+worry was that saving raw registers before any calling convention exists would need a new "naked
+function" language primitive with uncertain LLVM AArch64 backend support. Confirmed LLVM's `naked`
+function attribute exists and works cleanly on AArch64 (a `naked` function combined with `unreachable`
+after its inline-asm body emits ZERO extra instructions: no prologue, no epilogue, no trailing `ret`),
+but then realized it was never necessary in the first place: issue #227 item 2's `gen_vector_table`
+had already proven the real technique -- genuinely raw, standalone module-level assembly text
+(`set_module_inline_asm`), referencing real `.tkb` function names by their exact linker symbol name via
+`bl`, with no LLVM-level function/calling-convention machinery involved at all. Item 1 could reuse the
+exact same approach.
+
+Added `struct packed ExceptionFrame` (`kernel/arch/arm64/kernel/exception_frame.tkb`) with one field per
+AArch64 exception-frame register -- `x0`..`x30`, `sp_el0`, `elr_el1`, `spsr_el1` as `usize`, `q0`..`q31`
+as `[u8; 16]` (this language has no 128-bit primitive type, and array-field support already covers
+storing 16 raw bytes with no new type needed), `fpsr`/`fpcr` as `usize` -- and a new `exception_entry
+name { frame: ...; before: ...; dispatch: ...; }` declaration (`lib/parser.mly`/`lib/lexer.mll`: one new
+keyword, entries reusing `struct_fields`' own `IDENT COLON IDENT SEMI` shape rather than inventing new
+per-key keyword tokens, matching the "syntax later" instruction -- `frame`/`dispatch`/`before` are
+checked as plain strings, not grammar-level keywords). `type_inf.ml` validates: `frame` is a `struct
+packed` whose fields are EXACTLY the closed register set above (one of each, correctly typed --
+looked up directly in `prog`, the AST list this whole validation pass already iterates, NOT via
+`Type_layout.structs`, because `Type_layout` already transitively depends on `Type_inf` through
+`Llvm_gen`, so a direct `Type_layout` reference from `type_inf.ml` is a module dependency cycle dune
+rejects outright); `dispatch` is required, `before` optional, both checked for existence as a known
+`fn` name.
+
+`lib/llvm_gen.ml`'s `gen_exception_entry` computes each register's byte offset by walking the frame
+struct's own field list in declaration order (packed, sequential -- no `stp`/`ldp` pairing is
+attempted, since a field's neighbor in whatever order the struct declares is not guaranteed to be its
+adjacent physical register; individual `str`/`ldr` per register trades a modest instruction-count
+increase for not depending on declaration order, correctness over micro-optimization for an
+interrupt/fail-stop path, not a hot loop), then emits: `sub sp, sp, #frame_size`, a `str`/`mrs`+`str`
+per register, the optional `before` `bl`, `mov x0, sp; bl dispatch; mov sp, x0`, the restore half
+(`msr DAIFSet` FIRST, `eret` LAST, replicating issue #229's established DAIF-masking shape exactly --
+nothing between them that could take a new maskable exception), and `add sp, sp, #frame_size; eret`.
+Multiple raw-asm producers (this and `gen_vector_table`) now share one `Buffer.t` (`raw_asm_buf`,
+reset per `gen_program` run), flushed via a single `set_module_inline_asm` call at the very end --
+that LLVM OCaml binding call REPLACES the module's inline asm rather than appending, and has no append
+variant, so every raw-asm producer in this compiler must share the one buffer.
+
+Applied to `el1_current_irq_entry` (`before: fpsimd_irq_clobber`, `dispatch: rpi5_irq_dispatch`) and
+`el0_irq_entry` (`dispatch: rpi5_el0_irq_dispatch` only), replacing both of `entry.S`'s hand-written
+bodies entirely. `fpsimd_irq_clobber` (previously assembly-only, "called from assembly only, no
+declaration needed") needed a real `extern fn fpsimd_irq_clobber();` declaration added to `kernel/
+arch/arm64/kernel/fpsimd_probe_extern.tkb`, since `exception_entry`'s `before` key is checked against
+known `.tkb` functions. `entry.S` dropped its now-unused `.include "exception_context.inc"` (the
+macros it used to need are gone from this file, though `user_entry.S` still needs that file for its
+own remaining standalone-restore call sites -- see below) and shrank from 222 to 138 lines (-38%,
+`git diff --stat` against the pre-#227 baseline) -- what remains is `_start`, `kernel_secondary_entry`,
+`el2_drop_to_el1`, and `el1_fpsimd_enable`, all genuine EL2/cold-boot system-register work this file's
+own header comment already says Takibi cannot express, not incidental hand-written scaffolding.
+
+Verified: a standalone smoke-test binary's disassembly (`llvm-objdump -d`) landed BYTE-IDENTICAL
+offsets to `exception_context.inc`'s existing hand-written layout (`0x320` total, `x0` at `0x000`
+through `fpcr` at `0x318`) purely as a consequence of declaring the struct's fields in the same order
+-- confirming the generated frame is not just internally consistent but interchangeable with the one
+every other hand-written call site in `user_entry.S` still reads. `dune runtest` (946/946, unchanged --
+this prototype slice added no new dune-runtest cases, see the two gaps below), `kernelbuild-rpi5`
+(including `scripts/check_kernel_asm_invariants.py`'s automated DAIF-masking-before-`eret` check, which
+the generated code satisfies with no special-casing needed), and two consecutive full real-RPi5-
+hardware `kernelcheck-rpi5` passes (25/25 views each) -- notably including the `fpsimd` view, the exact
+q0-q31/FPSR-survives-a-real-Current-EL-SPx-interrupt property issue #223 established and this generated
+code has to reproduce correctly, and `uart_rx_irq`/`smp_bringup`, which exercise the IRQ dispatch path
+for real.
+
+**Two gaps deliberately left open, called out explicitly rather than silently**, both flagged by the
+user for follow-up investigation: (1) `dispatch`/`before` are checked only for existence, not the real
+`fn(usize) -> usize` / `fn()` signature they need -- `fenv` is not built until later in `type_inf.ml`'s
+own pass ordering than where this validation currently runs, so a wrong-shaped target is a silent
+miscompile today, not a compile error; (2) the several standalone `EXC_CONTEXT_RESTORE`-without-a-
+preceding-save call sites in `user_entry.S` (`.Ldata_abort`, `el0_context_resume`, `run_initial_user`)
+remain hand-written -- `exception_entry` only covers the uniform save -> dispatch -> restore -> `eret`
+shape. Both are real, load-bearing scope boundaries of this prototype, not settled design decisions --
+closing either is follow-up work, not yet done.
+
 ### 2026-08-06: A New `vector_table { N => target; ... }` Declaration Generates AArch64's Hardware Exception Vector Table (GitHub Issue #227 Item 2)
 
 Second of #227's three separable pieces (see item 3's entry immediately below, done first). `kernel/

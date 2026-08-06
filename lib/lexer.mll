@@ -48,6 +48,7 @@ rule read = parse
   | "extern"  { EXTERN }
   | "symbol"  { SYMBOL }
   | "vector_table" { VECTOR_TABLE }
+  | "exception_entry" { EXCEPTION_ENTRY }
   | "struct"  { STRUCT }
   | "opaque"  { OPAQUE }
   | "affine"  { AFFINE }

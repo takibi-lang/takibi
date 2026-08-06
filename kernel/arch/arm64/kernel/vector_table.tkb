@@ -8,19 +8,18 @@
 // installs into VBAR_EL1, so that file needed no further change beyond
 // deleting its own copy.
 //
-// el1_current_irq_entry/el0_irq_entry/el0_sync_entry remain hand-written
-// assembly (kernel/arch/arm64/boot/entry.S, kernel/arch/arm64/kernel/
-// user_entry.S) -- issue #227 item 1 (declaring the exception frame itself
-// in .tkb and generating save/restore) is a separate, larger, still-open
-// piece of work; this declaration only replaces the TABLE, not what each
-// slot branches to. `extern symbol` (not `extern fn`) is the right
-// declaration for all three: none of them is called through an ordinary
-// .tkb calling convention, only branched to directly from the raw vector
-// slot, so there is no parameter/return signature to state.
+// el1_current_irq_entry/el0_irq_entry are now `exception_entry`-generated
+// (kernel/arch/arm64/kernel/exception_frame.tkb, issue #227 item 1's
+// prototype slice) rather than `extern symbol`-declared hand-written
+// assembly -- vector_table's target resolution accepts either kind
+// (anything claiming the "function" name kind in the flat top-level
+// namespace), so this needed no change beyond dropping their now-stale
+// `extern symbol` declarations. el0_sync_entry remains hand-written
+// assembly (kernel/arch/arm64/kernel/user_entry.S): its own syscall
+// dispatch body is still out of item 1's scope.
 use "kernel/arch/arm64/kernel/exception_evidence.tkb";
+use "kernel/arch/arm64/kernel/exception_frame.tkb";
 
-extern symbol el1_current_irq_entry;
-extern symbol el0_irq_entry;
 extern symbol el0_sync_entry;
 
 vector_table {

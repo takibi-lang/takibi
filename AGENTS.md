@@ -892,14 +892,28 @@ size.
   precisely the review burden a static, external, .S/.tkb-free check avoids growing further. This
   is not something the compiler enforces at the language level, since `entry.S`/`user_entry.S` remain
   hand-written assembly outside the `.tkb` type system's reach for everything except the fail-stop
-  evidence capture and the vector table itself (see ROADMAP.md's M4/#227 for the actual structural
-  fix: declaring the exception frame and vector table in `.tkb` too -- issue #227 item 3, moving
-  `el1_exception_evidence` to ordinary `.tkb`, and item 2, declaring the vector table itself as
-  `kernel/arch/arm64/kernel/vector_table.tkb`'s `vector_table { N => target; ... }` -- checked
-  exhaustively for slot coverage, replacing entry.S's former hand-laid-out, eyeballed-for-coverage
-  table -- are both done; only item 1 (generating the exception frame's own save/restore, which needs
-  a still-undesigned way to spill the raw register file before any calling convention exists) remains
-  open).
+  evidence capture, the vector table, and the two Current-EL-SPx/Lower-EL-AArch64 IRQ entry points
+  (see ROADMAP.md's M4/#227 for the actual structural fix: declaring the exception frame and vector
+  table in `.tkb` too -- issue #227 item 3, moving `el1_exception_evidence` to ordinary `.tkb`, and
+  item 2, declaring the vector table itself as `kernel/arch/arm64/kernel/vector_table.tkb`'s
+  `vector_table { N => target; ... }`, are both done). **Item 1 (declaring the exception frame and
+  generating save/restore) has a working prototype slice, not the full item**: `kernel/arch/arm64/
+  kernel/exception_frame.tkb`'s `struct packed ExceptionFrame` (a closed AArch64 register-name field
+  set, `x0`..`x30`/`sp_el0`/`elr_el1`/`spsr_el1`/`q0`..`q31`/`fpsr`/`fpcr`) plus `exception_entry el1_
+  current_irq_entry { ... }` / `exception_entry el0_irq_entry { ... }` now generate those two entries'
+  full save/[before]/dispatch/restore/`eret` sequences (`lib/llvm_gen.ml`'s `gen_exception_entry`,
+  same raw-module-asm technique as the vector table -- turned out `naked` was never needed for this,
+  contrary to the original worry about spilling registers before any calling convention exists).
+  **Two things this slice deliberately does NOT cover, both real gaps to close before item 1 is
+  actually done**: (1) `dispatch`/`before` are checked only for EXISTENCE (a known `fn` name), not
+  SIGNATURE -- fenv is not built yet at the point in `type_inf.ml`'s pass ordering where this
+  validation runs, so a `dispatch` target with the wrong parameter/return shape is currently a silent
+  miscompile, not a compile error; (2) the several standalone-restore call sites (`.Ldata_abort`/
+  `el0_context_resume`/`run_initial_user` in `user_entry.S`, which reuse `exception_context.inc`'s
+  `EXC_CONTEXT_RESTORE` without a preceding save in the same sequence) are not expressible as an
+  `exception_entry` at all yet. See HISTORY.md's issue #227 item 1 entry for the design and
+  verification (real-hardware `kernelcheck-rpi5`, including the `fpsimd` view, which is exactly the
+  q0-q31/FPSR-survives-a-real-interrupt property this generated code has to get right).
 - **The same D-cache-bypass gap applied to postmortem debugging over SWD, not just DMA/harness I/O --
   fixed for the evidence block itself by issue #227 item 3.** `el1_exception_evidence` (now ordinary
   `.tkb`, `kernel/arch/arm64/kernel/exception_evidence.tkb`, moved off hand-written assembly by

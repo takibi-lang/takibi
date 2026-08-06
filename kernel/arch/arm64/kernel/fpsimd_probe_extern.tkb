@@ -4,8 +4,7 @@
 // interrupt whose entry path deliberately destroys both, and reports how
 // much of it the exception frame failed to bring back: 0 means everything
 // survived, 0xffff means no interrupt arrived at all within a second and
-// nothing was proven. Its companion hook fpsimd_irq_clobber is called from
-// assembly (entry.S) only, so it needs no declaration here.
+// nothing was proven.
 //
 // Split into its own file rather than declared in kernel/init/main.tkb
 // because takibi rejects a second `extern fn` declaration of the same name
@@ -13,3 +12,12 @@
 // otherwise be a hard conflict.
 
 extern fn fpsimd_irq_probe() -> usize;
+
+// Its companion hook: called as the `before` step of
+// kernel/arch/arm64/kernel/exception_frame.tkb's `el1_current_irq_entry`
+// exception_entry (GitHub issue #227 item 1) between frame save and
+// dispatch, the same point entry.S's own hand-written `bl
+// fpsimd_irq_clobber` used to reach it from. Needs a real declaration now
+// (previously "called from assembly only, no declaration needed") because
+// exception_entry's `before` key is checked against known .tkb functions.
+extern fn fpsimd_irq_clobber();
