@@ -8363,6 +8363,137 @@ let codegen_tests = [
          "fn f(p: *u8) { dma_finish_rx(p, 512); }" ();
        expect_ok "fn f(p: *u8) { dma_prepare_tx(p, 512); }" ());
 
+  (* GitHub issue #226: closed system-register/barrier/TLBI intrinsics, to
+     lift kernel/arch/arm64/kernel/timer.S and most of
+     kernel/arch/arm64/mm/mmu.S into .tkb. Same coverage shape as the DMA/
+     device barrier builtins above: arity, cannot-be-redefined, and
+     IR-shape checks. *)
+  Alcotest.test_case
+    "issue #226: zero-argument register/barrier intrinsics take no arguments"
+    `Quick
+    (fun () ->
+       expect_ok
+         "fn issue226_zero_arg_calls() {
+            let f: usize = mrs_cntfrq_el0();
+            let p: usize = mrs_cntpct_el0();
+            let s: usize = mrs_sctlr_el1();
+            msr_daifclr_irq();
+            msr_daifset_irq();
+            tlbi_vmalle1();
+            dsb_ish();
+            dsb_ishst();
+            isb();
+          }" ();
+       expect_type_error "expects no arguments"
+         "fn bad_mrs_call() { let f: usize = mrs_cntfrq_el0(1); }" ();
+       expect_type_error "expects no arguments"
+         "fn bad_isb_call() { isb(1); }" ());
+
+  Alcotest.test_case
+    "issue #226: one-argument register-write/TLBI intrinsics require a usize"
+    `Quick
+    (fun () ->
+       expect_ok
+         "fn issue226_one_arg_calls(v: usize) {
+            msr_cntp_tval_el0(v);
+            msr_cntp_ctl_el0(v);
+            msr_sctlr_el1(v);
+            msr_mair_el1(v);
+            msr_tcr_el1(v);
+            msr_ttbr0_el1(v);
+            tlbi_vaae1is(v);
+            tlbi_vae1is(v);
+            tlbi_aside1is(v);
+          }" ();
+       expect_type_error "expects one argument"
+         "fn bad_msr_call() { msr_ttbr0_el1(); }" ();
+       expect_type_error "expects one argument"
+         "fn bad_tlbi_call(a: usize, b: usize) { tlbi_vae1is(a, b); }" ();
+       expect_type_error "cannot unify"
+         "fn bad_msr_type(v: i32) { msr_ttbr0_el1(v); }" ());
+
+  Alcotest.test_case "issue #226: smc4 takes four usize and returns usize"
+    `Quick
+    (fun () ->
+       expect_ok
+         "fn issue226_smc4(a: usize, b: usize, c: usize, d: usize) -> usize {
+            return smc4(a, b, c, d);
+          }" ();
+       expect_type_error "expects four arguments"
+         "fn bad_smc4(a: usize) { let r: usize = smc4(a, a, a); }" ();
+       expect_type_error "cannot unify"
+         "fn bad_smc4_type(a: i32) { let r: usize = smc4(a, a, a, a); }" ());
+
+  Alcotest.test_case
+    "issue #226: system-register/barrier/TLBI builtin names cannot be redefined"
+    `Quick
+    (fun () ->
+       List.iter (fun name ->
+         expect_type_error "compiler builtin"
+           (Printf.sprintf "fn %s() {}" name) ())
+         ["mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1";
+          "msr_daifclr_irq"; "msr_daifset_irq"; "tlbi_vmalle1";
+          "dsb_ish"; "dsb_ishst"; "isb"];
+       List.iter (fun name ->
+         expect_type_error "compiler builtin"
+           (Printf.sprintf "extern fn %s(v: usize);" name) ())
+         ["msr_cntp_tval_el0"; "msr_cntp_ctl_el0"; "msr_sctlr_el1";
+          "msr_mair_el1"; "msr_tcr_el1"; "msr_ttbr0_el1";
+          "tlbi_vaae1is"; "tlbi_vae1is"; "tlbi_aside1is"];
+       expect_type_error "compiler builtin"
+         "extern fn smc4(a: usize, b: usize, c: usize, d: usize) -> usize;" ());
+
+  Alcotest.test_case
+    "issue #226: register/barrier/TLBI intrinsics lower to the named AArch64 instruction"
+    `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "fn codegen_issue226_regs(v: usize) -> usize {
+            msr_ttbr0_el1(v);
+            tlbi_vaae1is(v);
+            dsb_ish();
+            isb();
+            msr_daifset_irq();
+            return mrs_sctlr_el1();
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_issue226_regs" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_issue226_regs was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check bool) "msr ttbr0_el1" true
+         (contains_substring ir "msr ttbr0_el1, $0");
+       Alcotest.(check bool) "tlbi vaae1is" true
+         (contains_substring ir "tlbi vaae1is, $0");
+       Alcotest.(check bool) "dsb ish" true (contains_substring ir "dsb ish");
+       Alcotest.(check bool) "isb" true (contains_substring ir "isb");
+       Alcotest.(check bool) "daifset" true
+         (contains_substring ir "msr DAIFSet, #0x2");
+       Alcotest.(check bool) "mrs sctlr_el1 with register output" true
+         (contains_substring ir "mrs $0, sctlr_el1"));
+
+  Alcotest.test_case "issue #226: smc4 pins the real SMCCC x0-x3/x0 ABI"
+    `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "fn codegen_issue226_smc4(a: usize, b: usize, c: usize, d: usize)
+               -> usize {
+            return smc4(a, b, c, d);
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_issue226_smc4" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_issue226_smc4 was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check bool) "smc instruction" true
+         (contains_substring ir "smc #0");
+       Alcotest.(check bool) "output pinned to x0" true
+         (contains_substring ir "={x0}");
+       Alcotest.(check bool) "inputs pinned to x0-x3" true
+         (contains_substring ir "{x0},{x1},{x2},{x3}"));
+
   Alcotest.test_case
     "checked usize builtins return an exhaustive closed variant" `Quick
     (expect_ok

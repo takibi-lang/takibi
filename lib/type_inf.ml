@@ -8,6 +8,30 @@ let compiler_builtins = StringSet.of_list [
   "interrupt_wait"; "interrupt_notify";
   "dma_prepare_tx"; "dma_prepare_rx"; "dma_finish_rx";
   "checked_add_usize"; "checked_mul_usize";
+  (* GitHub issue #226: a closed, enumerated set of system-register/barrier/
+     TLBI intrinsics, to lift kernel/arch/arm64/kernel/timer.S and most of
+     kernel/arch/arm64/mm/mmu.S into .tkb. Each name is exactly one AArch64
+     instruction with registers chosen by LLVM's own allocator (see
+     lib/llvm_gen.ml) -- never a user-supplied asm string or register
+     choice, unlike general inline assembly (an explicit non-goal of #226:
+     issue #209's second bug was a human picking the wrong register by
+     hand). Deliberately not one generic `msr(reg_enum, value)` primitive:
+     that would need a new base type, for no real benefit over enumerating
+     the ~15 registers this kernel actually touches as plain names, matching
+     the existing dma_publish/dma_consume/device_fence one-name-per-
+     operation precedent above. No barrier is bundled into any of these:
+     TTBR0_EL1 writes alone need different barrier sequences at different
+     call sites (a fresh MMU activation's full TLB flush vs. an ASID-tagged
+     root switch's lighter one), so which barrier follows which write stays
+     ordinary, reviewable .tkb policy built on top of these raw primitives,
+     not a compiler-hardcoded choice. *)
+  "mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1";
+  "msr_cntp_tval_el0"; "msr_cntp_ctl_el0"; "msr_sctlr_el1";
+  "msr_mair_el1"; "msr_tcr_el1"; "msr_ttbr0_el1";
+  "msr_daifclr_irq"; "msr_daifset_irq";
+  "tlbi_vmalle1"; "tlbi_vaae1is"; "tlbi_vae1is"; "tlbi_aside1is";
+  "dsb_ish"; "dsb_ishst"; "isb";
+  "smc4";
 ]
 
 let is_compiler_builtin name = StringSet.mem name compiler_builtins
@@ -2259,6 +2283,53 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | [] -> TVoid
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects no arguments: %s()" fname fname)))
+
+  | Call (("mrs_cntfrq_el0" | "mrs_cntpct_el0" | "mrs_sctlr_el1") as fname, args) ->
+      (* GitHub issue #226: closed system-register read intrinsics. Zero
+         arguments, like dma_publish/etc. above -- a runtime value must not
+         be able to select which register gets read. *)
+      (match args with
+       | [] -> TUsize
+       | _ -> raise (TypeError (e.loc,
+           Printf.sprintf "%s expects no arguments: %s()" fname fname)))
+
+  | Call (("msr_daifclr_irq" | "msr_daifset_irq" | "tlbi_vmalle1"
+          | "dsb_ish" | "dsb_ishst" | "isb") as fname, args) ->
+      (* GitHub issue #226: closed zero-argument barrier/TLBI/DAIF-immediate
+         intrinsics. *)
+      (match args with
+       | [] -> TVoid
+       | _ -> raise (TypeError (e.loc,
+           Printf.sprintf "%s expects no arguments: %s()" fname fname)))
+
+  | Call (("msr_cntp_tval_el0" | "msr_cntp_ctl_el0" | "msr_sctlr_el1"
+          | "msr_mair_el1" | "msr_tcr_el1" | "msr_ttbr0_el1"
+          | "tlbi_vaae1is" | "tlbi_vae1is" | "tlbi_aside1is") as fname, args) ->
+      (* GitHub issue #226: closed system-register write / TLBI intrinsics
+         taking the one usize value the instruction's Xt operand carries. *)
+      (match args with
+       | [v] ->
+           let vt = infer_expr senv eenv tyenv fenv v in
+           unify_at v.loc vt TUsize;
+           TVoid
+       | _ -> raise (TypeError (e.loc,
+           Printf.sprintf "%s expects one argument: %s(v)" fname fname)))
+
+  | Call ("smc4" as fname, args) ->
+      (* GitHub issue #226: the raw `smc #0` trap, exposed as a plain
+         4-in/1-out hardware primitive (the real SMCCC x0-x3 in / x0 out
+         convention lives in lib/llvm_gen.ml's fixed register constraints,
+         not in any PSCI-specific semantics here -- this intrinsic knows
+         nothing about PSCI, matching "closed set of instructions", not
+         "closed set of hypervisor calls"). *)
+      (match args with
+       | [a; b; c; d] ->
+           List.iter (fun arg ->
+             let t = infer_expr senv eenv tyenv fenv arg in
+             unify_at arg.loc t TUsize) [a; b; c; d];
+           TUsize
+       | _ -> raise (TypeError (e.loc,
+           Printf.sprintf "%s expects four arguments: %s(x0, x1, x2, x3)" fname fname)))
 
   | Call (("dma_prepare_tx" | "dma_prepare_rx" | "dma_finish_rx") as fname, args) ->
       let required_alignment =

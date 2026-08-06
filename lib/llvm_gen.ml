@@ -3441,6 +3441,89 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       emit_interrupt_event true;
       (TypeVoid, const_null (i1_type context))
 
+  | Call (("mrs_cntfrq_el0" | "mrs_cntpct_el0" | "mrs_sctlr_el1") as name, []) ->
+      (* GitHub issue #226: one `mrs` each, register chosen by LLVM's own
+         allocator via the "=r" output constraint -- never named by the
+         .tkb caller. *)
+      let ity = usize_lltype () in
+      let fty = function_type ity [||] in
+      let reg = match name with
+        | "mrs_cntfrq_el0" -> "cntfrq_el0"
+        | "mrs_cntpct_el0" -> "cntpct_el0"
+        | "mrs_sctlr_el1"  -> "sctlr_el1"
+        | _ -> assert false
+      in
+      let inline = const_inline_asm fty
+        (Printf.sprintf "mrs $0, %s" reg) "=r,~{memory}" true false in
+      let v = build_call fty inline [||] (name ^ ".result") builder in
+      (TypeUsize, v)
+
+  | Call (("msr_daifclr_irq" | "msr_daifset_irq" | "tlbi_vmalle1"
+          | "dsb_ish" | "dsb_ishst" | "isb") as name, []) ->
+      (* GitHub issue #226: zero-argument barrier/TLBI/DAIF-immediate
+         instructions, same shape as signal_fence above. *)
+      let fty = function_type (void_type context) [||] in
+      let asm = match name with
+        | "msr_daifclr_irq" -> "msr DAIFClr, #0x2"
+        | "msr_daifset_irq" -> "msr DAIFSet, #0x2"
+        | "tlbi_vmalle1"    -> "tlbi vmalle1"
+        | "dsb_ish"         -> "dsb ish"
+        | "dsb_ishst"       -> "dsb ishst"
+        | "isb"             -> "isb"
+        | _ -> assert false
+      in
+      let inline = const_inline_asm fty asm "~{memory}" true false in
+      ignore (build_call fty inline [||] "" builder);
+      (TypeVoid, const_null (i1_type context))
+
+  | Call (("msr_cntp_tval_el0" | "msr_cntp_ctl_el0" | "msr_sctlr_el1"
+          | "msr_mair_el1" | "msr_tcr_el1" | "msr_ttbr0_el1"
+          | "tlbi_vaae1is" | "tlbi_vae1is" | "tlbi_aside1is") as name,
+          [arg_e]) ->
+      (* GitHub issue #226: one instruction each, taking the caller's value
+         through an ordinary "r" input constraint -- LLVM picks which GPR,
+         same as every other call in this codebase. *)
+      let ity = usize_lltype () in
+      let (_, v) = gen_expr ~expected_ty:TypeUsize locals arg_e in
+      let fty = function_type (void_type context) [| ity |] in
+      let asm = match name with
+        | "msr_cntp_tval_el0" -> "msr cntp_tval_el0, $0"
+        | "msr_cntp_ctl_el0"  -> "msr cntp_ctl_el0, $0"
+        | "msr_sctlr_el1"     -> "msr sctlr_el1, $0"
+        | "msr_mair_el1"      -> "msr mair_el1, $0"
+        | "msr_tcr_el1"       -> "msr tcr_el1, $0"
+        | "msr_ttbr0_el1"     -> "msr ttbr0_el1, $0"
+        | "tlbi_vaae1is"      -> "tlbi vaae1is, $0"
+        | "tlbi_vae1is"       -> "tlbi vae1is, $0"
+        | "tlbi_aside1is"     -> "tlbi aside1is, $0"
+        | _ -> assert false
+      in
+      let inline = const_inline_asm fty asm "r,~{memory}" true false in
+      ignore (build_call fty inline [| v |] "" builder);
+      (TypeVoid, const_null (i1_type context))
+
+  | Call ("smc4", [a0_e; a1_e; a2_e; a3_e]) ->
+      (* GitHub issue #226: the real SMCCC ABI (x0-x3 in, x0 out) is fixed
+         hardware/firmware convention, not something a .tkb caller chooses
+         -- expressed here as named physical-register constraints so the
+         asm body is just the bare instruction, with no internal mov
+         shuffle the way emit_aarch64_cache_range's dc-loop needs (that one
+         uses scratch registers the caller's own operands must not
+         collide with; here every operand already lives in the exact
+         register the instruction needs, in and out, so there is nothing
+         to shuffle). *)
+      let ity = usize_lltype () in
+      let (_, v0) = gen_expr ~expected_ty:TypeUsize locals a0_e in
+      let (_, v1) = gen_expr ~expected_ty:TypeUsize locals a1_e in
+      let (_, v2) = gen_expr ~expected_ty:TypeUsize locals a2_e in
+      let (_, v3) = gen_expr ~expected_ty:TypeUsize locals a3_e in
+      let fty = function_type ity [| ity; ity; ity; ity |] in
+      let constraints = "={x0},{x0},{x1},{x2},{x3},~{memory}" in
+      let inline = const_inline_asm fty "smc #0" constraints true false in
+      let result = build_call fty inline [| v0; v1; v2; v3 |]
+        "smc4.result" builder in
+      (TypeUsize, result)
+
   | Call ("stable_replace",
           [guard_e; lock_e; { desc = FieldGet (base_e, fname); _ };
            replacement_e]) ->
