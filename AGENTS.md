@@ -817,6 +817,23 @@ size.
   (multi-core, issue #6, still Backlog): a missing memory barrier or cache-maintenance op between cores can look
   perfectly correct in QEMU and fail only on real silicon, so that kind of work should get real-hardware
   integration testing early, not just as a final check once "everything already works in QEMU."
+- **EL0 fail-stop is intentional design, not a bug to route around.**
+  `kernel/arch/arm64/boot/entry.S`'s `el1_exception_evidence` is the landing site for any EL0
+  synchronous exception `kernel/arch/arm64/kernel/user_entry.S`'s `el0_sync_entry` doesn't recognize
+  as either a real SVC or its one other handled case, a translation fault from legitimate
+  process-image stack growth (`process_image_handle_data_abort`, the real growable-stack mechanism
+  that replaced the original single-page-stack limitation) -- a genuine hardware fault (bad
+  instruction fetch, an unhandled data abort, an instruction that is UNDEFINED at the faulting EL)
+  still records `esr_el1`/`far_el1`/`elr_el1`/`spsr_el1` into a fixed `.bss` block and parks in `wfe`
+  forever. A boot log that dispatches syscalls normally and then just stops -- no further syscall
+  log lines, no exit/failure line from `main.tkb` -- is this path, not (usually) a hung syscall
+  handler; see the SWD/D-cache entry immediately below for how to read the real fault out of a
+  parked core rather than trusting the `.bss` block. **Known gap, not yet triggered by any current
+  scenario:** `process_image_clone_vm_begin()` (the fork/clone path, as opposed to
+  `process_image_map_current()`) never initializes root 1's demand-stack metadata
+  (`process_image_stack_growth_active[1]`/`process_image_stack_lowest_l3[1]`), so a forked child
+  that grows its stack past what the parent had already faulted in before the fork would hit this
+  fail-stop path instead of growing (see HISTORY.md's issue #209 entry).
 - **The same D-cache-bypass gap applies to postmortem debugging over SWD, not just DMA/harness I/O.**
   `kernel/arch/arm64/boot/entry.S`'s `el1_exception_evidence` fail-stop path (see the "EL0 fail-stop"
   entry above) records `esr_el1`/`far_el1`/`elr_el1`/`spsr_el1` into a fixed `.bss` location before
