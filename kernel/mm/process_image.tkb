@@ -749,16 +749,20 @@ fn process_image_cleanup(count: usize) {
             process_image_pte_invalidate(l3_index);
         }
     }
+    // Growth pages are ALREADY released by the image_page_indices loop
+    // above: process_image_handle_data_abort() records every page it faults
+    // in through process_image_record() and bumps
+    // process_image_active_page_count, which is exactly the `count` this
+    // function is called with. Releasing them a second time from
+    // process_image_growth_page_indices here was a double free -- harmless
+    // while the page allocator's release was the idempotent `used[i] = 0`,
+    // silently fatal once it became a real free list (issue #207): the same
+    // index lands on the free chain twice and two later allocations alias
+    // one physical page. The growth record itself is still needed by
+    // process_clone_vm_release_growth_pages() (the clone/reap path, whose
+    // child pages are NOT in clone_page_indices), so only the redundant
+    // release goes; the count is still reset below.
     let root: {0..<2 as usize} = process_image_root_index();
-    for i: usize in 0..<process_image_growth_page_count[root] {
-        if (i < 64) {
-            let growth_offset: {0..<128 as usize} = process_image_growth_index(i);
-            let page_index: usize = process_image_growth_page_indices[growth_offset];
-            if (page_index < BOOT_PAGE_COUNT) {
-                page_transferred_release(page_index);
-            }
-        }
-    }
     process_image_growth_page_count[root] = 0;
 }
 
@@ -802,14 +806,20 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
                 let page_index = page_owner_transfer_index(stack_page);
                 process_image_record(
                     process_image_active_page_count[root], page_index, l3_index);
+                // Appended at the next free position, NOT at a slot derived
+                // from l3_index: process_clone_vm_release_growth_pages()
+                // walks 0..<growth_page_count sequentially, and the old
+                // L3-derived placement (l3_index - PROCESS_STACK_GROWTH_
+                // FIRST_L3_INDEX) did not agree with that walk, so the
+                // release read never-written slots -- whose zero value made
+                // it release page index 0, repeatedly. That was invisible
+                // while page release was the idempotent `used[i] = 0`, and
+                // corrupts a real free list (issue #207).
                 if (process_image_growth_page_count[root] < 64) {
-                    for growth_slot: usize in 0..<64 {
-                        if (growth_slot + PROCESS_STACK_GROWTH_FIRST_L3_INDEX ==
-                            l3_index) {
-                            let growth_offset: {0..<128 as usize} = process_image_growth_index(growth_slot);
-                            process_image_growth_page_indices[growth_offset] = page_index;
-                        }
-                    }
+                    let growth_offset: {0..<128 as usize} =
+                        process_image_growth_index(
+                            process_image_growth_page_count[root]);
+                    process_image_growth_page_indices[growth_offset] = page_index;
                     process_image_growth_page_count[root] =
                         process_image_growth_page_count[root] + 1;
                 }

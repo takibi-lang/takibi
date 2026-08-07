@@ -367,6 +367,18 @@ fn main() {
         kernel_boot_log("fp/simd irq: failed\n");
     }
 
+    // GitHub issue #207: must run before any page_alloc() call, including
+    // the address-space/scheduler self-tests immediately below. The old
+    // linear-scan allocator's used[] bookkeeping was zero-initialized
+    // .bss, so a used[i] == 0 scan already meant "free" without this call
+    // ever running first -- this ordering silently worked by accident.
+    // kernel/lib/freelist.tkb's next_free[] chain has no such property: an
+    // unlinked, zero-initialized chain hands out index 0 forever (its own
+    // next_free[0] reads back 0, not 1), so every allocator using it now
+    // needs its explicit init to run first, same as any other real
+    // allocator.
+    page_allocator_init();
+
     match kernel_secondary_boot_probe() {
         SecondaryBootResult::Started => {
             kernel_boot_log("smp bringup: core1 psci+el1+takibi ok\n");
@@ -455,7 +467,6 @@ fn main() {
             }
         }
     }
-    page_allocator_init();
     match disk_initialize() {
         DiskIoResult::Err(error) => {
             kernel_boot_log("usb msc: initialization failed\n");
@@ -1224,6 +1235,21 @@ fn main() {
                         }
                     }
                 }
+            }
+
+            // GitHub issue #207: every page released across this whole boot
+            // must have been live at the time. The pre-freelist allocator
+            // made a double free an idempotent no-op, so two real ones
+            // (process_image_cleanup's redundant growth-page loop, and
+            // process_clone_vm_release_growth_pages reading slots the
+            // recording side never wrote) sat undetected until the free
+            // list turned them into aliased physical pages. Checked before
+            // the reclaim below, which resets the counter along with the
+            // pool.
+            if (page_allocator_double_free_count() == 0) {
+                kernel_boot_log("resources: no double free\n");
+            } else {
+                kernel_boot_log("resources: DOUBLE FREE\n");
             }
 
             // All boot-time user images and fixtures have been torn down at

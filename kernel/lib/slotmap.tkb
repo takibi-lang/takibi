@@ -1,0 +1,125 @@
+// A generation-validated slot pool (GitHub issue #207 follow-up), built as
+// one thin layer on top of freelist.tkb's FreelistCore(N): the same O(1)
+// free-slot engine, plus a per-slot "which generation currently occupies
+// this slot" record that FreelistCore alone does not keep once a
+// FreelistOwner has been handed off elsewhere.
+//
+// Why this exists, not just FreelistCore directly: several kernel/ call
+// sites (kernel/kernel/process.tkb's scheduled_process_matches(),
+// kernel/net/tcp.tkb's tcp_connection_matches()) need to re-validate a
+// plain (index, generation) handle against the CURRENT occupant later,
+// without holding the linear FreelistOwner proof the whole time -- e.g. a
+// handle carried across a lock/stable_replace boundary, where the linear
+// owner itself was already hastily handed off to that store. A bare
+// free-list has no notion of "who currently occupies an allocated slot";
+// it only tracks which slots are free.
+//
+// Recommended default: use SlotMap(N) for any fixed-capacity slot pool in
+// kernel/, even one that (like kernel/mm/page.tkb and kernel/mm/
+// address_space.tkb today) never calls slotmap_matches() -- one collection
+// primitive with a superset of capabilities beats deciding per call site
+// whether the plain FreelistCore(N) is "enough," at the cost of one extra
+// usize per slot. Reach for FreelistCore(N) directly only when that per-
+// slot cost genuinely matters (large N, e.g. page.tkb's BOOT_PAGE_COUNT
+// class of pool) and no call site will ever need generation re-validation.
+use "kernel/lib/freelist.tkb";
+
+generic struct SlotMap(N: usize) {
+    core: FreelistCore(N);
+    occupant_generation: [usize; N];
+    double_remove_count: usize;
+}
+
+fn slotmap_init(map: *SlotMap(N)) {
+    freelist_core_init(&map.core);
+    let occupant = map.occupant_generation;   // decays to *usize, issue #15
+    for i: isize in 0..<N {
+        occupant[i] = 0;
+    }
+    map.double_remove_count = 0;
+}
+
+fn slotmap_insert(map: *SlotMap(N)) -> FreelistPopResult {
+    match freelist_core_insert(&map.core) {
+        FreelistPopResult::Empty => { return FreelistPopResult::Empty; }
+        FreelistPopResult::Popped(owner) => {
+            let index: usize = freelist_owner_index(owner);
+            let generation: usize = freelist_owner_generation(owner);
+            let occupant = map.occupant_generation;   // issue #15, as above
+            if (index < N) {
+                occupant[index as isize] = generation;
+            }
+            return FreelistPopResult::Popped(owner);
+        }
+    }
+}
+
+// Releasing a slot that is ALREADY free is a double free. The old
+// hand-rolled `used[i] = 0` pools every kernel/ call site used before
+// issue #207 were idempotent, so a double free there was silently
+// harmless -- which means such bugs could accumulate undetected. A free
+// list is NOT idempotent: pushing the same index twice puts it on the
+// chain twice, so two later allocations hand out the SAME slot to two
+// independent owners, and one silently overwrites the other's memory.
+// That failure surfaces arbitrarily far from its cause, so this counts
+// the event at its source instead of releasing the slot a second time.
+// Callers surface the count (see kernel/mm/page.tkb's
+// page_allocator_double_free_count()); the slot itself is deliberately
+// left alone, keeping the chain well-formed so the rest of the boot stays
+// diagnosable rather than compounding the corruption.
+fn slotmap_remove(map: *SlotMap(N), owner: sink FreelistOwner[allocation]) {
+    let index: usize = freelist_owner_index(owner);
+    let occupant = map.occupant_generation;   // issue #15, as above
+    if (index >= N) {
+        freelist_owner_drop(owner);
+        return;
+    }
+    if (occupant[index as isize] == 0) {
+        map.double_remove_count = map.double_remove_count + 1;
+        freelist_owner_drop(owner);
+        return;
+    }
+    occupant[index as isize] = 0;
+    freelist_core_remove(&map.core, owner);
+}
+
+fn slotmap_double_remove_count(map: *SlotMap(N)) -> usize {
+    return map.double_remove_count;
+}
+
+// The capability FreelistCore(N) alone does not provide: does `index`
+// currently hold `generation`? No ownership proof required or consumed.
+// Rejects generation == 0 unconditionally, matching every existing
+// used[]+generation[] call site's own "used[slot] != 0" guard exactly --
+// FreelistCore's own next_generation counter starts at 1 and is
+// monotonic, so 0 can never be a live occupant's real generation, only an
+// unallocated slot's reset value or an uninitialized/garbage caller value.
+fn slotmap_matches(map: *SlotMap(N), index: usize, generation: usize) -> bool {
+    if (index >= N || generation == 0) { return false; }
+    let occupant = map.occupant_generation;   // issue #15, as above
+    return occupant[index as isize] == generation;
+}
+
+// Returns the generation currently occupying `index`, or 0 if free/out of
+// range -- for a caller that needs to recover a live occupant's identity
+// to hand elsewhere (e.g. kernel/kernel/process.tkb's
+// scheduled_process_table_clear(), which must reconstruct each occupied
+// slot's handle before tearing the whole pool down), as opposed to
+// slotmap_matches()'s yes/no check against an already-known generation.
+fn slotmap_occupant_generation(map: *SlotMap(N), index: usize) -> usize {
+    if (index >= N) { return 0; }
+    let occupant = map.occupant_generation;   // issue #15, as above
+    return occupant[index as isize];
+}
+
+// O(N) diagnostic, not a hot-path primitive -- mirrors what every ported
+// call site used to compute from its own used[] array by hand (e.g.
+// page.tkb's boot allocator's own live-page count for leak detection).
+fn slotmap_live_count(map: *SlotMap(N)) -> usize {
+    let occupant = map.occupant_generation;   // issue #15, as above
+    let mut live: usize = 0;
+    for i: isize in 0..<N {
+        if (occupant[i] != 0) { live = live + 1; }
+    }
+    return live;
+}

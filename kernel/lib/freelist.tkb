@@ -1,0 +1,159 @@
+// O(1) index-linked free-slot allocator (GitHub issue #207). Replaces the
+// repeated `for i in 0..<MAX { if used[i] == 0 ... }` linear scan that used
+// to appear independently in kernel/mm/page.tkb, kernel/kernel/process.tkb,
+// kernel/mm/address_space.tkb, and kernel/net/tcp.tkb with O(1) alloc/free,
+// while preserving each site's existing "stable owner slot + generation
+// counter" ABA-safety discipline (see SPEC.md's "Indexed Runtime Owners").
+//
+// Ported from linux_user/freelist_generic/freelist.tkb (issue #207's design
+// prototype -- see that file's own header for the two concrete compiler
+// facts that shaped the FreelistCore(N)/Freelist(T, N) split) with one
+// addition needed for kernel/ call sites that expose their OWN owner type
+// (PageOwner[page], ScheduledProcessOwner[process], etc.) rather than this
+// library's FreelistOwner directly: freelist_owner_into_parts() consumes a
+// FreelistOwner and returns its raw (index, generation) without releasing
+// the slot, so a caller can immediately rewrap them in its own owner type.
+// This mirrors page.tkb's own pre-existing page_owner_into_parts/
+// page_owner_from_parts round trip, which predates this library and is left
+// untouched -- callers reconstruct a fresh FreelistOwner via
+// freelist_owner_new() to give back to freelist_core_remove() on free,
+// which does not itself validate the generation (only affine "consumed
+// exactly once" discipline is enforced there), so this round trip weakens
+// nothing.
+//
+// Not adopted by every linear-scan call site GitHub issue #207 lists:
+// kernel/kernel/fd_table.tkb's SHARED_OBJECT_MAX pool uses a plain
+// (non-linear) reference-counted UnifiedObjectHandle, not a linear owner --
+// a fundamentally different resource-lifetime model this library's affine
+// FreelistOwner does not fit -- and several of its scans search for a slot
+// matching a key, not a free slot, which no free-list design addresses.
+// kernel/net/tcp.tkb's PENDING_TCP_MAX retry queue has no owner/generation
+// concept at all (a plain fixed retry-slot array). Both are left as
+// candidates for a follow-up issue rather than forced into this shape.
+
+variant FreelistPopResult {
+    Empty;
+    Popped(exists allocation: usize. FreelistOwner[allocation]);
+}
+
+private linear struct FreelistOwner[allocation: usize] {
+    private index: usize;
+    private generation: usize @ allocation;
+}
+
+fn freelist_owner_new(index: usize, generation: usize @ allocation)
+        -> FreelistOwner[allocation] {
+    let mut owner: FreelistOwner[allocation] = { index, generation };
+    return owner;
+}
+
+fn freelist_owner_index(owner: borrow FreelistOwner[allocation]) -> usize {
+    return owner.index;
+}
+
+fn freelist_owner_generation(owner: borrow FreelistOwner[allocation]) -> usize {
+    return owner.generation;
+}
+
+// Consumes the owner without returning its slot to the pool, for a caller
+// that immediately rewraps (index, generation) in its own owner type (see
+// this file's header comment). The paired reconstruction is
+// freelist_owner_new(index, generation) -- there is deliberately no single
+// "convert in place" primitive, since the two callers of each half (this
+// library's Popped case vs. a site's own xxx_free()) are never the same
+// call site.
+fn freelist_owner_into_parts(owner: sink FreelistOwner[allocation])
+        -> (usize, usize @ allocation) {
+    return (owner.index, owner.generation);
+}
+
+// Consumes the owner WITHOUT returning its slot to the pool. Only for a
+// caller that has already established the slot must not be pushed (see
+// kernel/lib/slotmap.tkb's double-free detection); the linear obligation
+// still has to be discharged, which is exactly what this does.
+fn freelist_owner_drop(owner: sink FreelistOwner[allocation]) {}
+
+// N is this pool's capacity, embedded directly -- no caller-supplied
+// backing array for the bookkeeping index at all.
+generic struct FreelistCore(N: usize) {
+    next_free: [usize; N];
+    free_head: usize;
+    next_generation: usize;
+}
+
+fn freelist_core_init(core: *FreelistCore(N)) {
+    let next_free = core.next_free;
+    // GitHub issue #15: next_free is a struct-embedded array field, so
+    // this read decays to a raw *usize (see this file's own header
+    // comment) -- next_free[i] below is ordinary unchecked pointer
+    // arithmetic, not a runtime-checked trap site. Deliberately accepted,
+    // not proven safe. Pointer indexing needs an isize offset (unlike
+    // checked array/slice indexing, which accepts usize), hence `i:
+    // isize` here rather than usize.
+    for i: isize in 0..<N {
+        next_free[i] = i as usize + 1;
+    }
+    core.free_head = 0;
+    core.next_generation = 1;
+}
+
+fn freelist_core_insert(core: *FreelistCore(N)) -> FreelistPopResult {
+    let next_free = core.next_free;   // see freelist_core_init's #15 note
+    let head: usize = core.free_head;
+    if (head >= 0 && head < N) {
+        core.free_head = next_free[head as isize];
+        let generation: usize = core.next_generation;
+        core.next_generation = generation + 1;
+        return FreelistPopResult::Popped(freelist_owner_new(head, generation));
+    }
+    return FreelistPopResult::Empty;
+}
+
+fn freelist_core_remove(core: *FreelistCore(N), owner: sink FreelistOwner[allocation]) {
+    let next_free = core.next_free;   // see freelist_core_init's #15 note
+    // GitHub issue #216: owner.index is only ever produced by
+    // freelist_core_insert from this same core's next_free, so it is
+    // always in range in practice, but that fact crosses a function-call
+    // boundary -- and, now that next_free is raw pointer arithmetic
+    // rather than a checked slice access (issue #15), there is no trap
+    // site here for --forbid-trap to even report; this is NOT a safety
+    // improvement over an earlier slice-based version, it is the checker
+    // no longer looking at this code at all.
+    next_free[freelist_owner_index(owner) as isize] = core.free_head;
+    core.free_head = freelist_owner_index(owner);
+}
+
+generic struct Freelist(T: type, N: usize) {
+    core: FreelistCore(N);
+    data: [T; N..];
+}
+
+fn freelist_init(T: type, target: *Freelist(T, N), data_backing: [T; N..]) {
+    freelist_core_init(&target.core);
+    target.data = data_backing;
+}
+
+fn freelist_insert(T: type, target: *Freelist(T, N)) -> FreelistPopResult {
+    return freelist_core_insert(&target.core);
+}
+
+fn freelist_remove(T: type, target: *Freelist(T, N),
+                    owner: sink FreelistOwner[allocation]) {
+    freelist_core_remove(&target.core, owner);
+}
+
+// Returns a pointer to T tied to owner's slot -- no copy, whatever T's
+// size. Field access through the result needs no explicit deref (e.g.
+// `freelist_ref(&target, owner).x = 1;`); a whole-T read/write does
+// (`*freelist_ref(&target, owner) = v;`), which is the expensive case
+// made to visibly look expensive, exactly as intended when this shape
+// was designed. `data` is a genuine slice field here (no decay), so the
+// `as *T` cast is needed to get a raw pointer for the offset -- this
+// whole function is raw pointer arithmetic (issue #15), same as it has
+// been since the very first #207 worked example.
+fn freelist_ref(T: type, target: *Freelist(T, N),
+                owner: borrow FreelistOwner[allocation]) -> *T {
+    let data = target.data;
+    let index: isize = freelist_owner_index(owner) as isize;
+    return (data as *T) + index;
+}
