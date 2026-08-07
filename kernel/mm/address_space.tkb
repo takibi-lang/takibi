@@ -1,5 +1,7 @@
 use "kernel/mm/page.tkb";
 use "kernel/arch/arm64/mm/mmu.tkb";
+use "kernel/lib/slotmap.tkb";
+use "kernel/lib/freelist.tkb";
 
 const USER_TEXT_VA: usize = 0x40000000;
 const USER_DATA_VA: usize = 0x40001000;
@@ -41,15 +43,13 @@ must_use variant ProcessAddressSpaceAllocResult {
     Allocated(exists space: usize. ProcessAddressSpaceOwner[space]);
 }
 
-private let mut process_address_space_used: [u8; PROCESS_ADDRESS_SPACE_MAX];
-private let mut process_address_space_generation:
-    [usize; PROCESS_ADDRESS_SPACE_MAX];
-private let mut process_address_space_next_generation: usize = 1;
+// Slot allocation is O(1) via kernel/lib/slotmap.tkb's SlotMap(N) (issue
+// #207) instead of a hand-rolled used[]/generation[] linear scan.
+private let mut process_address_space_pool: SlotMap(PROCESS_ADDRESS_SPACE_MAX);
 
 fn process_address_space_pool_init() {
+    slotmap_init(&process_address_space_pool);
     for slot: usize in 0..<PROCESS_ADDRESS_SPACE_MAX {
-        process_address_space_used[slot] = 0;
-        process_address_space_generation[slot] = 0;
         address_space_clear_root(slot);
     }
     address_space_activate_root(0);
@@ -65,18 +65,21 @@ fn process_address_space_owner_new(
 }
 
 fn process_address_space_alloc() -> ProcessAddressSpaceAllocResult {
-    for slot: usize in 0..<PROCESS_ADDRESS_SPACE_MAX {
-        if (process_address_space_used[slot] == 0) {
-            let generation: usize = process_address_space_next_generation;
-            process_address_space_next_generation = generation + 1;
-            process_address_space_used[slot] = 1;
-            process_address_space_generation[slot] = generation;
-            address_space_clear_root(slot);
-            return ProcessAddressSpaceAllocResult::Allocated(
-                process_address_space_owner_new(slot, generation));
+    match slotmap_insert(&process_address_space_pool) {
+        FreelistPopResult::Empty => {
+            return ProcessAddressSpaceAllocResult::Full;
+        }
+        FreelistPopResult::Popped(popped) => {
+            let (index, generation) = freelist_owner_into_parts(popped);
+            if (index < PROCESS_ADDRESS_SPACE_MAX) {
+                let slot: {0..<PROCESS_ADDRESS_SPACE_MAX as usize} = index;
+                address_space_clear_root(slot);
+                return ProcessAddressSpaceAllocResult::Allocated(
+                    process_address_space_owner_new(slot, generation));
+            }
+            return ProcessAddressSpaceAllocResult::Full;
         }
     }
-    return ProcessAddressSpaceAllocResult::Full;
 }
 
 fn process_address_space_map_rw(
@@ -158,8 +161,8 @@ fn process_address_space_read_probe(
 fn process_address_space_free(
         space: sink ProcessAddressSpaceOwner[address_space]) {
     address_space_clear_root(space.slot);
-    process_address_space_used[space.slot] = 0;
-    process_address_space_generation[space.slot] = 0;
+    slotmap_remove(&process_address_space_pool,
+                   freelist_owner_new(space.slot, space.generation));
 }
 
 fn process_address_space_probe_pages(

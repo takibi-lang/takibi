@@ -15,6 +15,8 @@ use "kernel/net/checksum.tkb";
 use "kernel/net/arp.tkb";
 use "kernel/net/wire.tkb";
 use "kernel/net/icmp.tkb";
+use "kernel/lib/slotmap.tkb";
+use "kernel/lib/freelist.tkb";
 
 let mut our_mac: [u8; 6];
 
@@ -87,9 +89,13 @@ must_use variant TcpConnectionTakeResult {
 
 must_use variant TcpConnectionPutResult { Stored; Conflict; }
 
-let mut tcp_connection_used:       [u8; TCP_CONNECTION_MAX];
-let mut tcp_connection_generation: [usize; TCP_CONNECTION_MAX];
-let mut tcp_next_generation: usize = 1;
+// Slot allocation is O(1) via kernel/lib/slotmap.tkb's SlotMap(N) (issue
+// #207) instead of a hand-rolled used[]/generation[] linear scan.
+// slotmap_matches() also covers tcp_connection_matches()'s revalidation of
+// a plain (slot, generation) pair against the current occupant, which is
+// needed because such a pair crosses the tcp_connection_store lock /
+// stable_replace boundary without the linear owner.
+let mut tcp_connection_pool: SlotMap(TCP_CONNECTION_MAX);
 let mut conn_state:       [ConnState; TCP_CONNECTION_MAX];
 let mut conn_remote_ip:   [u8; 4 * TCP_CONNECTION_MAX];
 let mut conn_remote_mac:  [u8; 6 * TCP_CONNECTION_MAX];
@@ -201,9 +207,8 @@ fn tcp_connection_unlock(guard: sink TcpConnectionGuard[address],
                          lock: *i32 @ address) {}
 
 fn tcp_connection_pool_init() {
+    slotmap_init(&tcp_connection_pool);
     for connection_index: usize in 0..<TCP_CONNECTION_MAX {
-        tcp_connection_used[connection_index] = 0;
-        tcp_connection_generation[connection_index] = 0;
         conn_state[connection_index] = ConnState::Listen;
         conn_local_port[connection_index] = TCP_ECHO_PORT;
         tcp_injected_data_slot[connection_index] = -1;
@@ -212,15 +217,17 @@ fn tcp_connection_pool_init() {
 }
 
 fn tcp_connection_alloc() -> TcpConnectionAllocResult {
-    for connection_index: usize in 0..<TCP_CONNECTION_MAX {
-        if (tcp_connection_used[connection_index] == 0) {
-            tcp_connection_used[connection_index] = 1;
-            let generation: usize = tcp_next_generation;
-            tcp_next_generation = tcp_next_generation + 1;
-            tcp_connection_generation[connection_index] = generation;
-            conn_state[connection_index] = ConnState::Listen;
-            return TcpConnectionAllocResult::Allocated(
-                tcp_connection_owner_new(connection_index, generation));
+    match slotmap_insert(&tcp_connection_pool) {
+        FreelistPopResult::Empty => { return TcpConnectionAllocResult::Full; }
+        FreelistPopResult::Popped(popped) => {
+            let (index, generation) = freelist_owner_into_parts(popped);
+            if (index < TCP_CONNECTION_MAX) {
+                let connection_index: {0..<TCP_CONNECTION_MAX as usize} = index;
+                conn_state[connection_index] = ConnState::Listen;
+                return TcpConnectionAllocResult::Allocated(
+                    tcp_connection_owner_new(connection_index, generation));
+            }
+            return TcpConnectionAllocResult::Full;
         }
     }
     return TcpConnectionAllocResult::Full;
@@ -239,8 +246,7 @@ fn tcp_connection_identity(owner: borrow TcpConnectionOwner[connection])
 fn tcp_connection_matches(owner: borrow TcpConnectionOwner[connection],
                           slot: usize, generation: usize) -> bool {
     return owner.pool_index == slot && owner.generation == generation &&
-           tcp_connection_used[owner.pool_index] != 0 &&
-           tcp_connection_generation[owner.pool_index] == generation;
+           slotmap_matches(&tcp_connection_pool, owner.pool_index, generation);
 }
 
 fn tcp_connection_put(owner: sink TcpConnectionOwner[connection])
@@ -309,9 +315,9 @@ fn tcp_connection_take(slot_value: usize, generation: usize)
 }
 
 fn tcp_connection_free(owner: sink TcpConnectionOwner[connection]) {
-    tcp_connection_used[owner.pool_index] = 0;
-    tcp_connection_generation[owner.pool_index] = 0;
     conn_state[owner.pool_index] = ConnState::Listen;
+    slotmap_remove(&tcp_connection_pool,
+                   freelist_owner_new(owner.pool_index, owner.generation));
 }
 
 fn kernel_tcp_inject_drop_next_syn_ack() {

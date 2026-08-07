@@ -1,4 +1,6 @@
 use "kernel/mm/page.tkb";
+use "kernel/lib/slotmap.tkb";
+use "kernel/lib/freelist.tkb";
 
 enum ProcessState: u8 { Ready; Running; Blocked; Exited; }
 enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
@@ -38,13 +40,18 @@ struct ScheduledProcessStore {
 private linear view ScheduledProcessGuard[lock: addr];
 private let mut scheduled_process_store:
     [ScheduledProcessStore; KERNEL_PROCESS_MAX];
-private let mut scheduled_process_used: [u8; KERNEL_PROCESS_MAX];
-private let mut scheduled_process_generation: [usize; KERNEL_PROCESS_MAX];
+// Slot allocation is O(1) via kernel/lib/slotmap.tkb's SlotMap(N) (issue
+// #207) instead of a hand-rolled used[]/generation[] linear scan.
+// slotmap_matches() also covers what the used[]+generation[] pair served
+// as: revalidating a plain ProcessHandle (index, generation) against the
+// current occupant without holding the linear ScheduledProcessOwner, which
+// is needed because a handle crosses the scheduled_process_store lock /
+// stable_replace boundary below.
+private let mut scheduled_process_pool: SlotMap(KERNEL_PROCESS_MAX);
 private let mut scheduled_process_saved_sp: [usize; KERNEL_PROCESS_MAX];
 private let mut scheduled_process_state: [ProcessSlotState; KERNEL_PROCESS_MAX];
 private let mut scheduled_process_wait_reason:
     [ProcessWaitReason; KERNEL_PROCESS_MAX];
-private let mut scheduled_process_next_generation: usize = 1;
 private let mut scheduled_process_kernel_stacks:
     [u8; KERNEL_PROCESS_MAX * KERNEL_PROCESS_STACK_SIZE] align(4096);
 
@@ -141,9 +148,8 @@ fn scheduled_process_matches(
         handle: ProcessHandle) -> bool {
     return owner.pool_index == handle.pool_index &&
            owner.generation == handle.generation &&
-           scheduled_process_used[owner.pool_index] != 0 &&
-           scheduled_process_generation[owner.pool_index] ==
-               handle.generation;
+           slotmap_matches(&scheduled_process_pool, owner.pool_index,
+                           handle.generation);
 }
 
 fn scheduled_process_identity_put(
@@ -213,9 +219,8 @@ fn scheduled_process_identity_take(handle: ProcessHandle)
 }
 
 fn scheduled_process_table_init() {
+    slotmap_init(&scheduled_process_pool);
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        scheduled_process_used[slot] = 0;
-        scheduled_process_generation[slot] = 0;
         scheduled_process_saved_sp[slot] = 0;
         scheduled_process_state[slot] = ProcessSlotState::Free;
         scheduled_process_wait_reason[slot] = ProcessWaitReason::None;
@@ -224,10 +229,10 @@ fn scheduled_process_table_init() {
 
 fn scheduled_process_table_clear() {
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        if (scheduled_process_used[slot] != 0) {
-            let mut handle: ProcessHandle = {
-                slot, scheduled_process_generation[slot]
-            };
+        let generation: usize =
+            slotmap_occupant_generation(&scheduled_process_pool, slot);
+        if (generation != 0) {
+            let mut handle: ProcessHandle = { slot, generation };
             match scheduled_process_identity_take(handle) {
                 ScheduledProcessValue::Empty => {}
                 ScheduledProcessValue::Occupied(owner) => {
@@ -235,42 +240,42 @@ fn scheduled_process_table_clear() {
                 }
             }
         }
-        scheduled_process_used[slot] = 0;
-        scheduled_process_generation[slot] = 0;
         scheduled_process_saved_sp[slot] = 0;
         scheduled_process_state[slot] = ProcessSlotState::Free;
         scheduled_process_wait_reason[slot] = ProcessWaitReason::None;
     }
+    slotmap_init(&scheduled_process_pool);
 }
 
 fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
-    for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        if (scheduled_process_used[slot] == 0) {
-            let generation: usize = scheduled_process_next_generation;
-            scheduled_process_next_generation = generation + 1;
-            scheduled_process_used[slot] = 1;
-            scheduled_process_generation[slot] = generation;
-            scheduled_process_state[slot] = ProcessSlotState::Ready;
-            let stack_base: usize = scheduled_process_kernel_stacks as usize;
-            scheduled_process_saved_sp[slot] = stack_base +
-                (slot + 1) * KERNEL_PROCESS_STACK_SIZE;
-            let mut handle: ProcessHandle = { slot, generation };
-            match scheduled_process_identity_put(
-                    scheduled_process_owner_new(slot, generation)) {
-                ScheduledProcessPutResult::Conflict => {
-                    scheduled_process_used[slot] = 0;
-                    scheduled_process_generation[slot] = 0;
-                    scheduled_process_saved_sp[slot] = 0;
-                    scheduled_process_state[slot] = ProcessSlotState::Free;
-                    return ScheduledProcessAllocResult::Full;
-                }
-                ScheduledProcessPutResult::Stored => {
-                    return ScheduledProcessAllocResult::Allocated(handle);
+    match slotmap_insert(&scheduled_process_pool) {
+        FreelistPopResult::Empty => { return ScheduledProcessAllocResult::Full; }
+        FreelistPopResult::Popped(popped) => {
+            let (index, generation) = freelist_owner_into_parts(popped);
+            if (index < KERNEL_PROCESS_MAX) {
+                let slot: {0..<KERNEL_PROCESS_MAX as usize} = index;
+                scheduled_process_state[slot] = ProcessSlotState::Ready;
+                let stack_base: usize = scheduled_process_kernel_stacks as usize;
+                scheduled_process_saved_sp[slot] = stack_base +
+                    (slot + 1) * KERNEL_PROCESS_STACK_SIZE;
+                let mut handle: ProcessHandle = { slot, generation };
+                match scheduled_process_identity_put(
+                        scheduled_process_owner_new(slot, generation)) {
+                    ScheduledProcessPutResult::Conflict => {
+                        slotmap_remove(&scheduled_process_pool,
+                                       freelist_owner_new(slot, generation));
+                        scheduled_process_saved_sp[slot] = 0;
+                        scheduled_process_state[slot] = ProcessSlotState::Free;
+                        return ScheduledProcessAllocResult::Full;
+                    }
+                    ScheduledProcessPutResult::Stored => {
+                        return ScheduledProcessAllocResult::Allocated(handle);
+                    }
                 }
             }
+            return ScheduledProcessAllocResult::Full;
         }
     }
-    return ScheduledProcessAllocResult::Full;
 }
 
 fn scheduled_process_ready_take(handle: ProcessHandle)
@@ -404,17 +409,16 @@ fn scheduled_process_reap(
         owner: sink ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Exited]) {
     scheduled_process_state_drop(state);
-    scheduled_process_used[owner.pool_index] = 0;
-    scheduled_process_generation[owner.pool_index] = 0;
+    slotmap_remove(&scheduled_process_pool,
+                   freelist_owner_new(owner.pool_index, owner.generation));
     scheduled_process_saved_sp[owner.pool_index] = 0;
     scheduled_process_state[owner.pool_index] = ProcessSlotState::Free;
     scheduled_process_wait_reason[owner.pool_index] = ProcessWaitReason::None;
 }
 
 fn scheduled_process_stack_top(handle: ProcessHandle) -> usize {
-    if (scheduled_process_used[handle.pool_index] != 0 &&
-        scheduled_process_generation[handle.pool_index] ==
-            handle.generation) {
+    if (slotmap_matches(&scheduled_process_pool, handle.pool_index,
+                        handle.generation)) {
         return scheduled_process_saved_sp[handle.pool_index];
     }
     return 0;
