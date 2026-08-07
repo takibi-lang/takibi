@@ -586,7 +586,6 @@ private let mut scheduled_process_parent: [ProcessHandle; KERNEL_PROCESS_MAX];
 private let mut scheduled_process_has_parent: [bool; KERNEL_PROCESS_MAX];
 private let mut scheduled_process_child: [ProcessHandle; KERNEL_PROCESS_MAX];
 private let mut scheduled_process_has_child: [bool; KERNEL_PROCESS_MAX];
-private let mut execution_child_live: bool;
 private let mut execution_clone_calls: usize;
 private let mut execution_child_exit_count: usize;
 private let mut execution_child_exit_status: usize;
@@ -596,7 +595,17 @@ private let mut execution_child_exit_status: usize;
 // longer names it.
 private let mut execution_last_child_pid: usize;
 private let mut execution_child_waitable: bool;
-private let mut execution_child_exec_image_live: bool;
+// GitHub issue #245 bug fix: per-slot, not the single global bool this
+// used to be. The global version stayed true for the entire lifetime of
+// an exec'd process (e.g. /user_payload, exec'd under ash) regardless of
+// what any of ITS OWN descendants did, so a grandchild that never exec'd
+// (user_payload's own plain clone()'d child) still read back "exec image
+// live" as true when IT exited -- found on real RPi5 hardware: this
+// wrongly skipped that grandchild's own process_image_clone_vm_reap(),
+// leaking its clone-vm record and leaving process_clone_vm_store's
+// single in-flight slot permanently occupied, which then made the next
+// real clone (or the exec-teardown path) hang.
+private let mut scheduled_process_exec_image_live: [bool; KERNEL_PROCESS_MAX];
 private let mut execution_reschedule_pending: bool;
 private let mut execution_timer_switches: usize;
 private let mut execution_deferred_switches: usize;
@@ -650,13 +659,11 @@ fn kernel_process_execution_reset() {
     execution_reschedule_pending = false;
     scheduled_process_table_clear();
     execution_current_live = false;
-    execution_child_live = false;
     execution_clone_calls = 0;
     execution_child_exit_count = 0;
     execution_child_exit_status = 0;
     execution_last_child_pid = 0;
     execution_child_waitable = false;
-    execution_child_exec_image_live = false;
     execution_timer_switches = 0;
     execution_deferred_switches = 0;
     execution_deferred_requests = 0;
@@ -666,6 +673,7 @@ fn kernel_process_execution_reset() {
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
         scheduled_process_has_parent[slot] = false;
         scheduled_process_has_child[slot] = false;
+        scheduled_process_exec_image_live[slot] = false;
     }
     match scheduled_process_alloc() {
         ScheduledProcessAllocResult::Full => {}
@@ -975,7 +983,6 @@ fn kernel_process_scheduler_probe() -> bool {
         scheduled_process_has_child[slot] = false;
     }
     execution_current_live = false;
-    execution_child_live = false;
     return ok;
 }
 
@@ -993,7 +1000,18 @@ fn kernel_process_scheduler_probe() -> bool {
 // any slot gets a correct child pid back, not just the original root.
 fn kernel_process_clone_begin(flags: usize, child_stack: usize)
         -> ProcessCloneResult {
-    if (flags != 0x11 || child_stack != 0 || execution_child_live ||
+    // GitHub issue #245 bug fix: this used to also check a GLOBAL
+    // execution_child_live flag, leftover from the old model where it
+    // correctly meant "the one single child is still alive". Once any
+    // slot can independently fork, that flag stays true for the entire
+    // lifetime of an OUTER ancestor's own child (e.g. ash's fork of
+    // /user_payload) regardless of what an INNER descendant does, so it
+    // wrongly rejected a real, unrelated clone deeper in the tree (found
+    // on real RPi5 hardware: user_payload's own fork always failed with
+    // -EINVAL while running as ash's forked+exec'd child). The per-slot
+    // scheduled_process_has_child[current] check below is the correct,
+    // already-scoped-to-current-only replacement.
+    if (flags != 0x11 || child_stack != 0 ||
         execution_current_live == false ||
         scheduled_process_has_child[execution_current_handle.pool_index]) {
         return ProcessCloneResult::Invalid;
@@ -1009,7 +1027,6 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             scheduled_process_parent[child.pool_index] = parent;
             scheduled_process_has_parent[child.pool_index] = true;
             execution_current_handle = child;
-            execution_child_live = true;
             execution_clone_calls = execution_clone_calls + 1;
             return ProcessCloneResult::ChildReady(child.pool_index + 1);
         }
@@ -1062,7 +1079,6 @@ fn kernel_process_clone_rollback() {
     scheduled_process_has_child[parent.pool_index] = false;
     scheduled_process_has_parent[child.pool_index] = false;
     execution_current_handle = parent;
-    execution_child_live = false;
     if (execution_clone_calls > 0) {
         execution_clone_calls = execution_clone_calls - 1;
     }
@@ -1134,7 +1150,6 @@ fn kernel_process_child_exit(status: usize) -> usize {
     execution_child_exit_status = status;
     execution_child_exit_count = execution_child_exit_count + 1;
     execution_child_waitable = true;
-    execution_child_live = false;
     kernel_process_scheduler_disable();
     if (execution_current_live == false ||
         scheduled_process_has_parent[execution_current_handle.pool_index] ==
@@ -1172,7 +1187,15 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // called kernel_process_block_wait4() before this child had exited),
     // not just Ready from an ordinary scheduler preemption -- wake it
     // first if so, since kernel_process_start_handle() below only accepts
-    // a Ready handle.
+    // a Ready handle. Bug fix found on real RPi5 hardware: waking alone
+    // is not enough, unlike kernel_process_uart_wake()'s single scalar --
+    // wait4()'s own return value (the reaped pid) and optional status-
+    // buffer write must also be delivered into the blocked frame here,
+    // via kernel_syscall_wait4_deliver() (kernel/kernel/syscall.tkb,
+    // needs user_range_check/user_write_u32 this file does not have),
+    // or the woken parent resumes with a stale/garbage x0 and no status
+    // ever written -- the original bug: it just silently never made
+    // observable progress after being woken.
     if (scheduled_process_state[parent.pool_index] ==
             ProcessSlotState::Blocked &&
         scheduled_process_wait_reason[parent.pool_index] ==
@@ -1184,6 +1207,9 @@ fn kernel_process_child_exit(status: usize) -> usize {
                 let ready = scheduled_process_wake(owner, blocked);
                 scheduled_process_wait_reason[owner.pool_index] =
                     ProcessWaitReason::None;
+                kernel_syscall_wait4_deliver(
+                    scheduled_process_saved_sp[owner.pool_index],
+                    execution_last_child_pid);
                 match scheduled_process_put(owner, ready) {
                     ScheduledProcessPutResult::Conflict => {}
                     ScheduledProcessPutResult::Stored => {}
@@ -1211,16 +1237,47 @@ fn kernel_process_child_wait_status() -> usize {
     return execution_child_exit_status;
 }
 
+fn scheduled_process_exec_narrow_slot(pid: usize)
+        -> {0..<KERNEL_PROCESS_MAX as usize} {
+    if (pid == 0) { return 0; }
+    let slot_value: usize = pid - 1;
+    if (slot_value < KERNEL_PROCESS_MAX) {
+        let slot: {0..<KERNEL_PROCESS_MAX as usize} = slot_value;
+        return slot;
+    }
+    return 0;
+}
+
+// Called from kernel_process_child_exec_prepare() right after that
+// process's own execve() succeeds -- execution_current_handle still
+// names it directly, no switch has happened yet.
 fn kernel_process_child_exec_mark() {
-    execution_child_exec_image_live = true;
+    if (execution_current_live) {
+        let slot = scheduled_process_exec_narrow_slot(
+            execution_current_handle.pool_index + 1);
+        scheduled_process_exec_image_live[slot] = true;
+    }
 }
 
-fn kernel_process_child_exec_image_live() -> bool {
-    return execution_child_exec_image_live;
+// GitHub issue #245 bug fix: this used to be a single no-argument query
+// against one global bool, called from two places that need the exec
+// status of two DIFFERENT processes -- kernel/kernel/syscall.tkb's own
+// EXIT handler asks about the process currently exiting (before
+// kernel_process_child_exit() has run), while kernel_process_child_exec_
+// reap() (kernel/init/main.tkb) asks about the child that already exited
+// (after that same call has switched execution_current_handle to the
+// parent). Taking an explicit pid removes the ambiguity instead of
+// guessing which one "current" means at the call site.
+fn kernel_process_exec_image_live_for_pid(pid: usize) -> bool {
+    if (pid == 0 || pid - 1 >= KERNEL_PROCESS_MAX) { return false; }
+    return scheduled_process_exec_image_live[
+        scheduled_process_exec_narrow_slot(pid)];
 }
 
-fn kernel_process_child_exec_clear() {
-    execution_child_exec_image_live = false;
+fn kernel_process_exec_clear_for_pid(pid: usize) {
+    if (pid == 0 || pid - 1 >= KERNEL_PROCESS_MAX) { return; }
+    scheduled_process_exec_image_live[
+        scheduled_process_exec_narrow_slot(pid)] = false;
 }
 
 // GitHub issue #245: the old execution_process == Parent conjunct asserted
@@ -1254,7 +1311,7 @@ fn kernel_process_last_child_pid() -> usize {
 // (a clone genuinely happened) without assuming how many preceded it.
 fn kernel_process_clone_evidence() -> bool {
     return execution_current_live &&
-           execution_child_live == false && execution_clone_calls >= 1 &&
+           execution_clone_calls >= 1 &&
            execution_child_exit_status == 42 &&
            scheduled_process_has_child[execution_current_handle.pool_index] ==
                false &&

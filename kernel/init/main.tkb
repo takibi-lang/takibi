@@ -130,9 +130,14 @@ fn kernel_process_child_exec_stack() -> usize {
 }
 
 fn kernel_process_child_exec_reap() {
-    if (kernel_process_child_exec_image_live()) {
+    // GitHub issue #245: this runs after kernel_process_child_exit() has
+    // already switched to the parent, so the pid to ask about is the
+    // child that just exited (kernel_process_last_child_pid()), not
+    // "current" (which is now the parent itself).
+    let exited_pid: usize = kernel_process_last_child_pid();
+    if (kernel_process_exec_image_live_for_pid(exited_pid)) {
         process_image_exec_reap();
-        kernel_process_child_exec_clear();
+        kernel_process_exec_clear_for_pid(exited_pid);
     }
 }
 

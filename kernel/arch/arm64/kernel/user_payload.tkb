@@ -106,6 +106,10 @@ fn initial_user_payload() {
     fail_if(svc5(57, 5, 0, 0, 0, 0) != 0);
     fail_if(svc5(57, 4, 0, 0, 0, 0) != 0);
 
+    /* TEMPORARY debug checkpoint (issue #241 hardware bisection). */
+    let cp1: *u8 = "cp1 closed\n" as *u8;
+    svc5(64, 1, cp1 as usize, 11, 0, 0);
+
     /* GitHub issue #241 hardware finding: SCHEDULER_PROBE_VA used to be
      * 0x40001000 (USER_DATA_VA), a page the old flat-blob mechanism's own
      * dedicated map_user_data() always reserved as rw+xn. Nothing pins
@@ -124,6 +128,9 @@ fn initial_user_payload() {
      * lifecycle is complete; the real HTTPd daemon covers fd inheritance. */
     let pid: usize = svc5(220, 0x11, 0, 0, 0, 0);
     if (pid == 0) {
+        /* TEMPORARY debug checkpoint. */
+        let cp2: *u8 = "cp2 child\n" as *u8;
+        svc5(64, 1, cp2 as usize, 10, 0, 0);
         /* The first byte must take the scheduler-aware Blocked -> Ready
          * path. Later bytes may already be in the bounded RX ring when
          * selected. */
@@ -135,25 +142,43 @@ fn initial_user_payload() {
             fail_if(c != want);
             u = u + 1;
         }
+        /* TEMPORARY debug checkpoint. */
+        let cp3: *u8 = "cp3 uart ok\n" as *u8;
+        svc5(64, 1, cp3 as usize, 12, 0, 0);
         /* Scheduler acceptance: private same-VA data plus GPR and SIMD
          * signatures must survive involuntary timer preemption. */
         fail_if(scheduler_probe_run(scheduler_probe_va, 0x22, 0x5a,
                                      SCHEDULER_CHILD_BUSY) == 0);
+        /* TEMPORARY debug checkpoint. */
+        let cp3b: *u8 = "cp3b child exiting\n" as *u8;
+        svc5(64, 1, cp3b as usize, 20, 0, 0);
         svc5(93, 42, 0, 0, 0, 0);
     } else {
+        /* TEMPORARY debug checkpoint. */
+        let cp4: *u8 = "cp4 parent\n" as *u8;
+        svc5(64, 1, cp4 as usize, 11, 0, 0);
         fail_if(pid != my_pid + 1);
         fail_if(scheduler_probe_run(scheduler_probe_va, 0x11, 0xa5,
                                      SCHEDULER_PARENT_BUSY) == 0);
+        /* TEMPORARY debug checkpoint. */
+        let cp5: *u8 = "cp5 probe ok\n" as *u8;
+        svc5(64, 1, cp5 as usize, 13, 0, 0);
 
         /* Accepted only if this parent reached the end of its compute
          * section while the child is still Blocked on UART RX. */
         fail_if(svc5(452, 0, 0, 0, 0, 0) != 0);
+        /* TEMPORARY debug checkpoint. */
+        let cp6: *u8 = "cp6 progress ok\n" as *u8;
+        svc5(64, 1, cp6 as usize, 16, 0, 0);
 
         /* Keep the independently-running parent live while the host
          * observes the progress marker and delivers UART input. Timer
          * preemption then selects the child after the IRQ changes it from
          * Blocked to Ready. */
         busy_spin(SCHEDULER_PARENT_BUSY);
+        /* TEMPORARY debug checkpoint. */
+        let cp7: *u8 = "cp7 spun\n" as *u8;
+        svc5(64, 1, cp7 as usize, 9, 0, 0);
 
         let user_message2: *u8 = "hello from userspace\n" as *u8;
         fail_if(svc5(64, 1, user_message2 as usize, 21, 0, 0) != 21);
