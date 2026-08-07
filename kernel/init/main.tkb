@@ -16,6 +16,10 @@ use "kernel/arch/arm64/kernel/vector_table.tkb";
 
 private let mut ext2_read_fixture: [u8; 32];
 private let mut ext2_symlink_fixture: [u8; 64];
+// GitHub issue #243: /large.txt is 3200 bytes (4 direct blocks: 3 full,
+// one partial), well past the single-block cap ext2_read_small_file used
+// to enforce -- proves multi-direct-block reads work on real hardware.
+private let mut ext2_large_fixture: [u8; 3200];
 private let mut kernel_secondary_boot_state: io usize;
 private let mut kernel_exec_plan: DistroElfLoadPlan = {0, 0, 0, 0, 0, 0, 0};
 private let mut kernel_exec_plan_ready: bool;
@@ -679,6 +683,41 @@ fn main() {
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // GitHub issue #243: /large.txt is 3200 bytes, spanning
+                    // 4 direct blocks (i_block[0..3]) -- the first fixture
+                    // read past the single-block cap ext2_read_small_file
+                    // used to enforce. Content is 3200 repetitions of 'A'
+                    // (0x41); checking the first byte, the last byte, and
+                    // the byte straddling the block-3/block-4 boundary
+                    // (offset 3071, the last byte of the 3rd full block)
+                    // catches an off-by-one in the per-block chunk/copy
+                    // arithmetic that checking only the first byte would
+                    // miss.
+                    match ext2_lookup_root(mount, "large.txt" as []u8) {
+                        Ext2LookupResult::Invalid => {
+                            kernel_boot_log("ext2 multi-block: invalid lookup\n");
+                        }
+                        Ext2LookupResult::NotFound => {
+                            kernel_boot_log("ext2 multi-block: not found\n");
+                        }
+                        Ext2LookupResult::Found(large_inode) => {
+                            match ext2_read_small_file(
+                                    mount, large_inode,
+                                    ext2_large_fixture as []u8) {
+                                Ext2ReadResult::Invalid => {
+                                    kernel_boot_log("ext2 multi-block: read invalid\n");
+                                }
+                                Ext2ReadResult::Read(large_length) => {
+                                    if (large_length == 3200 &&
+                                        ext2_large_fixture[0] == 0x41 &&
+                                        ext2_large_fixture[3071] == 0x41 &&
+                                        ext2_large_fixture[3199] == 0x41) {
+                                        kernel_boot_log("ext2 multi-block: /large.txt 3200 bytes ok\n");
                                     }
                                 }
                             }

@@ -2,3 +2,4 @@ ext2 mount: block=1024 inodes=128 blocks=1024
 ext2 read: /hello.txt ok
 ext2 write: /mutable.txt ok
 ext2 symlink: /latest -> hello.txt ok
+ext2 multi-block: /large.txt 3200 bytes ok

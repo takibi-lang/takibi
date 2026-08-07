@@ -2,6 +2,17 @@ use "kernel/drivers/block/memory.tkb";
 
 const EXT2_SUPERBLOCK_BLOCK: usize = 1;
 const EXT2_MAGIC: u16 = 0xEF53;
+// GitHub issue #243: i_block[0..11] are always plain direct block pointers
+// in the ext2 on-disk format (real e2fsprogs tooling never touches the
+// i_block[12] singly-indirect pointer below this size -- confirmed with
+// `debugfs stat` against files up to 12 KiB). Regular-file reads support up
+// to this many direct blocks; indirect blocks remain unsupported, and
+// directories/symlinks are unaffected (still capped at one block).
+const EXT2_MAX_DIRECT_BLOCKS: usize = 12;
+// EXT2_MAX_DIRECT_BLOCKS * KERNEL_BLOCK_SIZE (12 * 1024). Top-level const
+// initializers here don't support arithmetic over other consts, so this
+// stays a literal -- same pattern as KERNEL_USER_PAYLOAD_LEN elsewhere.
+const EXT2_MAX_FILE_SIZE: usize = 12288;
 
 private let mut ext2_metadata_block: [u8; KERNEL_BLOCK_SIZE];
 private let mut ext2_file_block: [u8; KERNEL_BLOCK_SIZE];
@@ -193,7 +204,13 @@ fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
     let size: usize = ext2_u32(inode_bytes, 4) as usize;
     let direct_block0: usize = ext2_u32(inode_bytes, 40) as usize;
     let file_type: usize = mode & 0xF000;
-    if (mode == 0 || size > KERNEL_BLOCK_SIZE ||
+    // GitHub issue #243: only regular files may span multiple direct
+    // blocks. Directories and symlinks keep the original one-block cap --
+    // ext2_lookup_root/ext2_directory_add/ext2_directory_remove all still
+    // assume a single-block root directory, unchanged by this issue.
+    let mut max_size: usize = KERNEL_BLOCK_SIZE;
+    if (file_type == 0x8000) { max_size = EXT2_MAX_FILE_SIZE; }
+    if (mode == 0 || size > max_size ||
         (file_type != 0x8000 && file_type != 0x4000 && file_type != 0xA000) ||
         ((file_type == 0x8000 || file_type == 0x4000) &&
          (direct_block0 == 0 || direct_block0 >= mount.filesystem_blocks)) ||
@@ -265,6 +282,27 @@ fn ext2_lookup_path(mount: Ext2Mount, name: []u8)
     return ext2_lookup_root(mount, name);
 }
 
+// GitHub issue #243: i_block[index] for index 0..<EXT2_MAX_DIRECT_BLOCKS,
+// re-read from the inode's own metadata block on every call rather than
+// cached, matching this file's existing pattern (e.g. ext2_resize_small_file
+// re-reading inode.table_block after writing data blocks) of never trusting
+// a stale copy of a block ext2_metadata_block may have been overwritten
+// with in between. Returns 0 (never a valid block number -- block 0 is the
+// boot block, outside any ext2 filesystem's own addressable range here)
+// for an out-of-range index or a failed read.
+fn ext2_inode_block_pointer(mount: Ext2Mount, inode: Ext2Inode,
+                            index: usize) -> usize {
+    if (index >= EXT2_MAX_DIRECT_BLOCKS) { return 0; }
+    match block_read(mount.device, inode.table_block,
+                     ext2_metadata_block as []u8) {
+        BlockIoResult::Invalid => { return 0; }
+        BlockIoResult::Ok => { }
+    }
+    let inode_pointer: *u8 =
+        (ext2_metadata_block as *u8) + (inode.table_offset as isize);
+    return ext2_u32(inode_pointer, 40 + index * 4) as usize;
+}
+
 fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
                         destination: []u8)
         -> Ext2ReadResult !{unsafe} {
@@ -275,15 +313,29 @@ fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
                 inode.size > destination.len) {
                 return Ext2ReadResult::Invalid;
             }
-            match block_read(mount.device, inode.direct_block0,
-                             ext2_file_block as []u8) {
-                BlockIoResult::Invalid => { return Ext2ReadResult::Invalid; }
-                BlockIoResult::Ok => { }
+            let block_count: usize =
+                (inode.size + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
+            let mut copied: usize = 0;
+            for block_index: usize in 0..<block_count {
+                let block_number: usize =
+                    ext2_inode_block_pointer(mount, inode, block_index);
+                if (block_number == 0 ||
+                    block_number >= mount.filesystem_blocks) {
+                    return Ext2ReadResult::Invalid;
+                }
+                match block_read(mount.device, block_number,
+                                 ext2_file_block as []u8) {
+                    BlockIoResult::Invalid => { return Ext2ReadResult::Invalid; }
+                    BlockIoResult::Ok => { }
+                }
+                let mut chunk: usize = KERNEL_BLOCK_SIZE;
+                if (inode.size - copied < chunk) { chunk = inode.size - copied; }
+                let source_pointer: *u8 = ext2_file_block as *u8;
+                let source = unsafe { source_pointer[0..<chunk as isize] };
+                let target = unsafe { destination[copied..<copied + chunk] };
+                slice_copy(target, source);
+                copied = copied + chunk;
             }
-            let source_pointer: *u8 = ext2_file_block as *u8;
-            let source = unsafe { source_pointer[0..<inode.size as isize] };
-            let target = unsafe { destination[0..<inode.size] };
-            slice_copy(target, source);
             return Ext2ReadResult::Read(inode.size);
         }
     }

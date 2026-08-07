@@ -15,6 +15,82 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-07: ext2 multi-direct-block regular-file reads (Issue #243), split off Issue #241 investigation
+
+Investigating #241 (launch `user_payload` as a real static-PIE ELF via
+ext2/init.sh) surfaced three findings before any kernel-loader code
+changed: (1) an experimental `ld.lld -pie --no-dynamic-linker` relink of
+`user_payload_tkb.o`+`user_payload_asm.o` produces a real `ET_DYN`
+static-PIE ELF with zero dynamic relocations (all writable globals were
+already removed by #228), and `kernel/fs/elf64.tkb`/`kernel/mm/
+process_image.tkb`'s general loader is fully generic over PT_LOAD count
+and per-segment permissions -- no kernel loader changes needed there; (2)
+`kernel/kernel/syscall.tkb`'s `execve`/`execveat` handler validates the
+requested path but never uses it to select an image -- every exec request
+always remaps the single registered BusyBox plan, so launching a second
+real binary by path needs a new path -> `DistroElfLoadPlan` registry
+(deferred, part of #241 proper); (3) **the real blocker**: `kernel/fs/
+ext2/ext2.tkb`'s `Ext2Inode` only ever read `i_block[0]` (`direct_block0`),
+so every ext2 file was implicitly capped at one 1024-byte block --
+invisible until now because `hello.txt`/`mutable.txt`/`index.html`/
+`init.sh` all happened to fit. The experimental PIE relink was already
+4272 bytes, well past that cap. Filed as #243 and #241 marked blocked-by
+it via GitHub's issue-dependencies API
+(`repos/.../issues/241/dependencies/blocked_by`).
+
+**#243** turned out narrower than its own title ("indirect block
+pointers") suggested: building a real ext2 image with `mke2fs`/`e2cp` and
+inspecting it with `debugfs stat` showed real e2fsprogs tooling keeps
+files under 12KB entirely within the 12 direct block pointers
+(`i_block[0..11]`) -- the singly-indirect pointer (`i_block[12]`) is
+untouched below that size (confirmed empirically with a 20000-byte file,
+which does start using `i_block[12]`). Since the only near-term need is a
+few-KB file, implemented direct-block-only support (`EXT2_MAX_DIRECT_BLOCKS
+= 12`, `EXT2_MAX_FILE_SIZE = 12288`), not indirect blocks. Also scoped to
+**read-only**: `ext2_write_small_file`/`ext2_resize_small_file`/
+`ext2_create_root_file` are never called today with more than one block's
+worth of data (the only write path in use, `/mutable.txt`, stays under
+1KB), and extending them means also handling multi-block allocate/free
+rollback under this project's linear-witness block-ownership types --
+real additional scope with no current caller to justify it, left for a
+follow-up once something actually needs to write a file bigger than one
+block.
+
+Changes: `ext2_read_inode`'s size cap is now file-type-dependent (12288
+bytes for regular files, unchanged 1024 for directories/symlinks -- `
+ext2_lookup_root`/`ext2_directory_add`/`ext2_directory_remove` still
+assume a single-block root directory, untouched by this issue). New
+`ext2_inode_block_pointer(mount, inode, index)` re-reads the inode's own
+metadata block on every call and extracts `i_block[index]` (byte offset
+`40 + 4*index`) -- matching this file's existing pattern elsewhere (e.g.
+`ext2_resize_small_file` re-reading `inode.table_block` after writing data
+blocks) of never trusting a stale copy of a block the shared
+`ext2_metadata_block` buffer may have been overwritten with in between.
+`ext2_read_small_file` now loops over `ceil(size/1024)` blocks instead of
+assuming exactly one. New fixture `kernel/tests/ext2/large.txt` (3200
+bytes of `0x41`, spanning 4 direct blocks: 3 full + 1 partial) wired into
+the `KERNEL_EXT2_IMAGE` `e2cp` rule, with a new `kernel/init/main.tkb`
+boot-log assertion checking the first byte, the byte straddling the
+block-3/block-4 boundary (offset 3071), and the last byte -- catching an
+off-by-one in the per-block chunk/copy arithmetic that checking only the
+first byte would miss.
+
+Verified in three steps before hardware, per this repo's established
+incremental-verification habit: (1) `kernelbuild-rpi5` compiles/links
+cleanly (no hardware); (2) an independent Python script parses the real
+built `kernel/build/user/ext2.img` directly (same `40 + 4*index` inode
+byte-offset arithmetic, same per-block chunking), confirming
+`/large.txt`'s `i_block[0..3]` = `[40, 41, 42, 43]` and the reconstructed
+3200 bytes match; (3) real RPi5 hardware via `kernelcheck-rpi5`, all 25
+views green including the new `"ext2 multi-block: /large.txt 3200 bytes
+ok"` line. First attempt at (3) passed without actually exercising the new
+line -- `kernel/tests/rpi5/views/ext2.filter`/`ext2.expected` hadn't been
+updated to include it, so the harness's diff-against-expected never
+checked for it. Caught before treating that as a real pass; fixed and
+re-ran hardware to get a pass that actually validates the new capability.
+
+---
+
 ### 2026-08-07: Root-1 demand-stack metadata on fork (Issue #219), O(1) free-slot/refcount collection library (Issues #207, #242)
 
 Three issues closed in one session, the second and third growing directly
