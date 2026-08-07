@@ -118,6 +118,31 @@ matching the baseline's own speed and reliability exactly -- this was a
 genuine bug, not a flake, and the fix resolved it completely rather than
 papering over a timing coincidence.
 
+**Addendum**: the exact failure mechanism was pinned down precisely after
+the fix, not just worked around empirically. `read()`'s destination-write
+goes through `kernel/mm/user_memory.tkb`'s `user_range_check(address,
+amount, UserAccessMode::Write)` -- a software-level check (issue #174's
+typed user-memory boundary) that reads the live page-table entry, not a
+bare pointer dereference. Against the RX-only flat-blob page it correctly
+and safely returned `UserRangeResult::Fault`, and the syscall handler
+returned a clean `-EFAULT` -- no CPU exception, no crash. The apparent
+"hang" was `user_payload.tkb`'s own `fail_if`/`fail_halt()` (matching the
+original hand-written asm's `.Luser_fail: b .Luser_fail` convention)
+correctly detecting `-EFAULT != 8` and spinning forever *by design*,
+exactly as it does for every other assertion failure in that fixture --
+the kernel behaved safely and correctly the entire time; the only actual
+problem was diagnosability. A static build-time guard against recurrence
+was added: `scripts/check_user_payload_no_rw_globals.py`, run right after
+`user_payload.elf` is linked (`Makefile`'s `$(KERNEL_RPI5_USER_PAYLOAD_
+ELF)` rule), fails the build if that ELF has any nonzero-size `.data`/
+`.bss` section -- confirmed to fail against a reproduction of the
+original buggy pattern and pass against the fixed code. A follow-up issue
+(#241, filed the same day) proposes eliminating this bug class
+structurally by launching `user_payload` as a real static-PIE ELF through
+the kernel's general-purpose loader instead of this custom flat-binary
+mechanism, where per-segment permissions make the mistake impossible
+rather than merely `-EFAULT`-safe-but-silent.
+
 ### 2026-08-06: Renamed `exception_resume` to `exception_restore` -- a New Keyword Collided With an Existing `examples/` Function Name
 
 Found by the user running `make -f examples/Makefile allcheck` (the daily examples/ regression check AGENTS.md's own maintenance-scope section calls for) shortly after issue #227 item 1's `exception_resume { frame: ...; }` declaration (see that entry above) landed: `examples/copy_on_write/copy_on_write.tkb` and `examples/vm_page_map/vm_page_map_core.tkb`/`vm_page_map_core_rpi5.tkb` (the RPi3 COW exception-handling design SPEC.md's own "Guard-derived pointers"/ownership sections describe) all define an ordinary function literally named `exception_resume` -- unrelated to the new kernel-only declaration, predating it by a large margin. Making `exception_resume` a reserved keyword broke every one of those files with a plain syntax error.

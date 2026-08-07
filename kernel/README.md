@@ -121,7 +121,12 @@ ELF, then runs `scripts/check_kernel_asm_invariants.py` against the linked
 `kernel.elf` -- a static, hardware-free disassembly check that fails the
 build if specific past hand-written-assembly bugs (issues #229, #231) ever
 regress, without needing a board or a probabilistic real-hardware race to
-reproduce them.
+reproduce them. It also links `kernel/arch/arm64/kernel/user_payload.tkb`/
+`user_payload_asm.S` (the EL0 syscall-ABI test payload, embedded separately
+via `embed_file`) and runs `scripts/check_user_payload_no_rw_globals.py`
+against that link -- a similar static check for a real issue #228 bug: a
+top-level mutable global in that file lands inside the flat, read+execute-
+only blob it compiles into, so writes into it silently fail at runtime.
 
 ## Raspberry Pi 5 hardware integration
 
