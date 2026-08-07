@@ -1,0 +1,14 @@
+indices: 0 1 2
+live count after 3 inserts: 3
+a matches before remove: true
+a matches wrong generation: false
+out-of-range index matches: false
+a matches after remove: false
+live count after 1 remove: 2
+double remove detected: true
+live count unchanged by double remove: 2
+reused index == a's old index: true
+reused generation != a's old generation: true
+occupant generation for b: 2 == 2
+live count after full drain: 0
+done

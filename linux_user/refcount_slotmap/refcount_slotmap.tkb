@@ -1,0 +1,159 @@
+// Fast host-native correctness test for kernel/lib/refcount_slotmap.tkb,
+// `use`d directly (not a re-prototyped copy) so this exercises the real
+// production file kernel/kernel/fd_table.tkb's SHARED_OBJECT_MAX pool
+// depends on. See linux_user/slotmap/slotmap.tkb's own header for why
+// this belongs here (issue #207/#242's double-free class of bug was only
+// found via a multi-hour real-hardware bisection; this is the fast,
+// direct coverage that was missing).
+use "kernel/lib/refcount_slotmap.tkb";
+use "kernel/lib/freelist.tkb";
+
+const POOL_N: usize = 3;
+// Deliberately small so the overflow path is reachable without a long
+// retain loop.
+const POOL_MAX_REFS: usize = 2;
+let mut pool: RefcountSlotMap(POOL_N, POOL_MAX_REFS);
+
+fn app_main() {
+    refcount_pool_init(&pool);
+
+    let mut a_index: usize = 0;
+    let mut a_generation: usize = 0;
+    match refcount_pool_alloc(&pool) {
+        RefcountAllocResult::Full => { uart_puts("a alloc failed\n"); return; }
+        RefcountAllocResult::Allocated(pair) => {
+            let (index, generation) = pair;
+            a_index = index;
+            a_generation = generation;
+        }
+    }
+    uart_puts("fresh alloc raw count: ");
+    uart_print(refcount_pool_raw_count(&pool, a_index));
+    uart_puts("\n");
+
+    // Abandon: a slot allocated but never retained must be returned to the
+    // free list, not released -- release() on an unretained slot is
+    // exactly the "refcount already 0" double-release shape tested below,
+    // not the correct API for this case.
+    let mut b_index: usize = 0;
+    let mut b_generation: usize = 0;
+    match refcount_pool_alloc(&pool) {
+        RefcountAllocResult::Full => { uart_puts("b alloc failed\n"); return; }
+        RefcountAllocResult::Allocated(pair) => {
+            let (index, generation) = pair;
+            b_index = index;
+            b_generation = generation;
+        }
+    }
+    uart_puts("abandon unretained slot: ");
+    uart_print_bool(refcount_pool_abandon(&pool, b_index, b_generation));
+    uart_puts("\n");
+    uart_puts("abandoned slot no longer matches: ");
+    uart_print_bool(refcount_pool_matches(&pool, b_index, b_generation));
+    uart_puts("\n");
+
+    // Retain up to POOL_MAX_REFS, then confirm the bound is enforced --
+    // per issue #242's design discussion, this is the part of a dynamic
+    // refcount that CAN be checked: not the value itself, but that it
+    // never exceeds the real, known maximum number of simultaneous
+    // holders.
+    match refcount_pool_retain(&pool, a_index, a_generation) {
+        RefcountRetainResult::Ok => {}
+        RefcountRetainResult::Invalid => { uart_puts("retain 1 invalid\n"); return; }
+        RefcountRetainResult::Overflow => { uart_puts("retain 1 overflow\n"); return; }
+    }
+    match refcount_pool_retain(&pool, a_index, a_generation) {
+        RefcountRetainResult::Ok => {}
+        RefcountRetainResult::Invalid => { uart_puts("retain 2 invalid\n"); return; }
+        RefcountRetainResult::Overflow => { uart_puts("retain 2 overflow\n"); return; }
+    }
+    uart_puts("count at MAX_REFS: ");
+    uart_print(refcount_pool_count(&pool, a_index, a_generation));
+    uart_puts("\n");
+    uart_puts("retain past MAX_REFS overflows: ");
+    match refcount_pool_retain(&pool, a_index, a_generation) {
+        RefcountRetainResult::Overflow => { uart_puts("true\n"); }
+        RefcountRetainResult::Ok => { uart_puts("false (wrongly allowed)\n"); }
+        RefcountRetainResult::Invalid => { uart_puts("false (wrongly rejected)\n"); }
+    }
+
+    // Stale/wrong-generation handles are rejected uniformly.
+    uart_puts("count with wrong generation: ");
+    uart_print(refcount_pool_count(&pool, a_index, a_generation + 1));
+    uart_puts("\n");
+    uart_puts("retain with wrong generation: ");
+    match refcount_pool_retain(&pool, a_index, a_generation + 1) {
+        RefcountRetainResult::Invalid => { uart_puts("invalid (expected)\n"); }
+        RefcountRetainResult::Ok => { uart_puts("wrongly allowed\n"); }
+        RefcountRetainResult::Overflow => { uart_puts("wrongly overflowed\n"); }
+    }
+
+    // Release one of two: still held.
+    match refcount_pool_release(&pool, a_index, a_generation) {
+        RefcountReleaseResult::StillHeld => { uart_puts("release 1 of 2: still held\n"); }
+        RefcountReleaseResult::Freed => { uart_puts("release 1 of 2: wrongly freed\n"); }
+        RefcountReleaseResult::Invalid => { uart_puts("release 1 of 2: wrongly invalid\n"); }
+    }
+    // Release the last one: freed, and the slot becomes reusable.
+    match refcount_pool_release(&pool, a_index, a_generation) {
+        RefcountReleaseResult::Freed => { uart_puts("release 2 of 2: freed\n"); }
+        RefcountReleaseResult::StillHeld => { uart_puts("release 2 of 2: wrongly still held\n"); }
+        RefcountReleaseResult::Invalid => { uart_puts("release 2 of 2: wrongly invalid\n"); }
+    }
+    uart_puts("matches after full release: ");
+    uart_print_bool(refcount_pool_matches(&pool, a_index, a_generation));
+    uart_puts("\n");
+
+    // Double-release detection (issue #242's actual motivating shape,
+    // mirrored from process_image.tkb's real bug: two independent release
+    // paths for the same, still-currently-allocated object). Allocate
+    // fresh (refcount starts at 0, generation is real and current) and
+    // call release() directly instead of abandon() -- this is exactly
+    // "release with a matching generation but zero holders."
+    let mut c_index: usize = 0;
+    let mut c_generation: usize = 0;
+    match refcount_pool_alloc(&pool) {
+        RefcountAllocResult::Full => { uart_puts("c alloc failed\n"); return; }
+        RefcountAllocResult::Allocated(pair) => {
+            let (index, generation) = pair;
+            c_index = index;
+            c_generation = generation;
+        }
+    }
+    let before: usize = refcount_pool_double_release_count(&pool);
+    match refcount_pool_release(&pool, c_index, c_generation) {
+        RefcountReleaseResult::Invalid => {}
+        RefcountReleaseResult::StillHeld => { uart_puts("unexpected still held\n"); }
+        RefcountReleaseResult::Freed => { uart_puts("unexpected freed\n"); }
+    }
+    uart_puts("double release detected: ");
+    uart_print_bool(refcount_pool_double_release_count(&pool) == before + 1);
+    uart_puts("\n");
+
+    // Abandon must refuse a slot that IS currently retained (refusing to
+    // guess whether the caller meant to drop the retain it forgot about
+    // or actually wanted a plain release).
+    match refcount_pool_retain(&pool, c_index, c_generation) {
+        RefcountRetainResult::Ok => {}
+        RefcountRetainResult::Invalid => { uart_puts("c retain invalid\n"); return; }
+        RefcountRetainResult::Overflow => { uart_puts("c retain overflow\n"); return; }
+    }
+    uart_puts("abandon on a retained slot refused: ");
+    uart_print_bool(refcount_pool_abandon(&pool, c_index, c_generation) == false);
+    uart_puts("\n");
+    match refcount_pool_release(&pool, c_index, c_generation) {
+        RefcountReleaseResult::Freed => {}
+        RefcountReleaseResult::StillHeld => { uart_puts("c release wrongly still held\n"); }
+        RefcountReleaseResult::Invalid => { uart_puts("c release wrongly invalid\n"); }
+    }
+
+    uart_puts("done\n");
+}
+
+fn uart_print_bool(value: bool) {
+    if (value) {
+        uart_puts("true");
+    } else {
+        uart_puts("false");
+    }
+}

@@ -1,0 +1,140 @@
+// Fast host-native correctness test for kernel/lib/slotmap.tkb, `use`d
+// directly (not a re-prototyped copy) so this actually exercises the real
+// production file. Written after issue #207: two latent double frees in
+// kernel/mm/process_image.tkb were only found via a multi-hour real-
+// hardware boot-log bisection, because nothing exercised SlotMap's own
+// double-remove detection in isolation. This is exactly that missing
+// coverage -- see AGENTS.md's "Where Should a New Test Go?" (this belongs
+// here, not test/test_takibi.ml, because it checks runtime BEHAVIOR of a
+// real algorithm, not a type-system/compile-time question).
+use "kernel/lib/slotmap.tkb";
+use "kernel/lib/freelist.tkb";
+
+const POOL_N: usize = 3;
+let mut pool: SlotMap(POOL_N);
+
+fn app_main() {
+    slotmap_init(&pool);
+
+    let a = match slotmap_insert(&pool) {
+        FreelistPopResult::Empty => { uart_puts("a insert failed\n"); return; }
+        FreelistPopResult::Popped(o) => { o }
+    };
+    let b = match slotmap_insert(&pool) {
+        FreelistPopResult::Empty => {
+            uart_puts("b insert failed\n");
+            slotmap_remove(&pool, a);
+            return;
+        }
+        FreelistPopResult::Popped(o) => { o }
+    };
+    let c = match slotmap_insert(&pool) {
+        FreelistPopResult::Empty => {
+            uart_puts("c insert failed\n");
+            slotmap_remove(&pool, a);
+            slotmap_remove(&pool, b);
+            return;
+        }
+        FreelistPopResult::Popped(o) => { o }
+    };
+    uart_puts("indices: ");
+    uart_print(freelist_owner_index(a));
+    uart_puts(" ");
+    uart_print(freelist_owner_index(b));
+    uart_puts(" ");
+    uart_print(freelist_owner_index(c));
+    uart_puts("\n");
+
+    uart_puts("live count after 3 inserts: ");
+    uart_print(slotmap_live_count(&pool));
+    uart_puts("\n");
+
+    let a_index: usize = freelist_owner_index(a);
+    let a_generation: usize = freelist_owner_generation(a);
+    uart_puts("a matches before remove: ");
+    uart_print_bool(slotmap_matches(&pool, a_index, a_generation));
+    uart_puts("\n");
+    uart_puts("a matches wrong generation: ");
+    uart_print_bool(slotmap_matches(&pool, a_index, a_generation + 1));
+    uart_puts("\n");
+    uart_puts("out-of-range index matches: ");
+    uart_print_bool(slotmap_matches(&pool, POOL_N, 1));
+    uart_puts("\n");
+
+    slotmap_remove(&pool, a);
+    uart_puts("a matches after remove: ");
+    uart_print_bool(slotmap_matches(&pool, a_index, a_generation));
+    uart_puts("\n");
+    uart_puts("live count after 1 remove: ");
+    uart_print(slotmap_live_count(&pool));
+    uart_puts("\n");
+
+    // Double-remove detection (issue #207's actual bug shape): a slot
+    // still tracked as free must NOT be pushed onto the chain a second
+    // time -- it must be counted and refused instead. freelist_owner_new
+    // fabricates a second "owner" for the index this pool already knows is
+    // free (a's, just removed above, and not yet reused by anything else),
+    // modeling the two-release-paths-for-one-page bug found in
+    // process_image.tkb without needing a second real allocation. Must run
+    // BEFORE the LIFO-reuse insert below reallocates this same index --
+    // once reused, slotmap_remove's occupant[index] != 0 check correctly
+    // treats a stale fabricated owner as removing the NEW occupant instead
+    // (a real, different gap: slotmap_remove trusts the index it is given
+    // and does not itself re-check the caller's generation, matching
+    // FreelistCore's own documented "no trap site here" contract -- callers
+    // are the ones expected to already know the generation matches, same
+    // as the linear FreelistOwner discipline everywhere else in this
+    // library assumes).
+    let before: usize = slotmap_double_remove_count(&pool);
+    slotmap_remove(&pool, freelist_owner_new(a_index, a_generation));
+    uart_puts("double remove detected: ");
+    uart_print_bool(slotmap_double_remove_count(&pool) == before + 1);
+    uart_puts("\n");
+    uart_puts("live count unchanged by double remove: ");
+    uart_print(slotmap_live_count(&pool));
+    uart_puts("\n");
+
+    // LIFO reuse: the just-freed slot (a's index) comes back first, with a
+    // NEW generation -- this is the exact property issue #207's page.tkb
+    // port needed page_allocator_init() to run before first use for (a
+    // freshly zero-initialized pool is NOT the same as an initialized
+    // empty one for a real chain).
+    let d = match slotmap_insert(&pool) {
+        FreelistPopResult::Empty => {
+            uart_puts("d insert failed\n");
+            slotmap_remove(&pool, b);
+            slotmap_remove(&pool, c);
+            return;
+        }
+        FreelistPopResult::Popped(o) => { o }
+    };
+    uart_puts("reused index == a's old index: ");
+    uart_print_bool(freelist_owner_index(d) == a_index);
+    uart_puts("\n");
+    uart_puts("reused generation != a's old generation: ");
+    uart_print_bool(freelist_owner_generation(d) != a_generation);
+    uart_puts("\n");
+
+    uart_puts("occupant generation for b: ");
+    uart_print(slotmap_occupant_generation(&pool, freelist_owner_index(b)));
+    uart_puts(" == ");
+    uart_print(freelist_owner_generation(b));
+    uart_puts("\n");
+
+    slotmap_remove(&pool, b);
+    slotmap_remove(&pool, c);
+    slotmap_remove(&pool, d);
+    uart_puts("live count after full drain: ");
+    uart_print(slotmap_live_count(&pool));
+    uart_puts("\n");
+
+    uart_puts("done\n");
+}
+
+fn uart_print_bool(value: bool) {
+    if (value) {
+        uart_puts("true");
+    } else {
+        uart_puts("false");
+    }
+}

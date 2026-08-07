@@ -1,0 +1,13 @@
+fresh alloc raw count: 0
+abandon unretained slot: true
+abandoned slot no longer matches: false
+count at MAX_REFS: 2
+retain past MAX_REFS overflows: true
+count with wrong generation: 0
+retain with wrong generation: invalid (expected)
+release 1 of 2: still held
+release 2 of 2: freed
+matches after full release: false
+double release detected: true
+abandon on a retained slot refused: true
+done

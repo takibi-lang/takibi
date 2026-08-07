@@ -136,7 +136,7 @@ COMMON_LINUX_PRINT_BASE  := $(LINUX_USER_DIR)/common/print.tkb $(LINUX_USER_DIR)
 # its own). This split-not-batched shape is the template to follow when
 # adding new linux_user/ tests for a new algorithm or data structure.
 LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump percpu page_pool \
-                             freelist_pool freelist_generic \
+                             freelist_pool freelist_generic slotmap refcount_slotmap \
                              hello print_int print_hex print_ptr mem array struct struct_refined \
                              nonexhaustive refined narrow enum align packed struct_align const_global \
                              sizeof_offsetof int64 bitops indexed_view tcp_conn_view \
@@ -190,6 +190,15 @@ $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_check
 # prerequisite on freelist.tkb, since freelist_generic.tkb `use`s it and
 # the default pattern rule doesn't know about that.
 $(LINUX_USER_DIR)/freelist_generic/freelist_generic_exe.o: $(LINUX_USER_DIR)/freelist_generic/freelist.tkb
+# slotmap/refcount_slotmap deliberately `use` kernel/lib/'s own production
+# files directly (not a re-prototyped linux_user/ copy, unlike
+# freelist_pool/freelist_generic above), so these two are genuine real
+# regression coverage of what kernel/ actually ships -- see issue #207's
+# HISTORY.md entry for why that copy-vs-use distinction mattered here (two
+# real double frees were only found via a multi-hour real-hardware boot-log
+# bisection with no fast test catching them first).
+$(LINUX_USER_DIR)/slotmap/slotmap_exe.o: kernel/lib/slotmap.tkb kernel/lib/freelist.tkb
+$(LINUX_USER_DIR)/refcount_slotmap/refcount_slotmap_exe.o: kernel/lib/refcount_slotmap.tkb kernel/lib/freelist.tkb
 $(LINUX_USER_DIR)/ip_parse/ip_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 
