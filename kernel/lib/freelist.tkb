@@ -29,7 +29,42 @@
 // matching a key, not a free slot, which no free-list design addresses.
 // kernel/net/tcp.tkb's PENDING_TCP_MAX retry queue has no owner/generation
 // concept at all (a plain fixed retry-slot array). Both are left as
-// candidates for a follow-up issue rather than forced into this shape.
+// candidates for a follow-up issue rather than forced into this shape
+// (see issue #242 for the fd_table.tkb case specifically).
+//
+// Current limitations (2026-08-07). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none, since it
+// invites relying on a guarantee that quietly stopped holding.
+// - NOT SYNCHRONIZED. FreelistCore(N)/its callers (Freelist(T, N),
+//   kernel/lib/slotmap.tkb's SlotMap(N)) do no locking of their own.
+//   Every current kernel/ instance (kernel/mm/page.tkb, kernel/kernel/
+//   process.tkb, kernel/mm/address_space.tkb, kernel/net/tcp.tkb's
+//   connection pool) is, as of this writing, reachable ONLY from
+//   syscall-dispatch context on core 0 -- never from an `!{interrupt}`
+//   handler, never from core 1 (which only proves PSCI/EL1 bring-up and
+//   parks, touching no shared kernel state). That is a fact about today's
+//   callers, not a property this file enforces or checks. The failure
+//   mode this guards against: a library that works by accident because
+//   every caller so far happened to be single-context gets adopted by a
+//   caller that isn't, and starts corrupting the free chain under
+//   concurrent access with no compiler diagnostic pointing at why --
+//   exactly the shape of bug issue #207 already found once (two
+//   sequential, single-threaded double frees silently corrupting the
+//   chain; see HISTORY.md). A genuinely concurrent caller (a future
+//   interrupt handler or core 2 user, see issue #242's design
+//   discussion) needs the SAME kind of hand-off this codebase already
+//   uses for cross-context shared state elsewhere: put the pool (or the
+//   specific field a concurrent caller touches) behind a lock/guard pair
+//   and stable_replace, the pattern kernel/kernel/process.tkb's
+//   ScheduledProcessStore, kernel/net/tcp.tkb's TcpConnectionStore, and
+//   kernel/mm/process_image.tkb's ProcessCloneVmStore already establish
+//   -- not a change to this file itself.
+// - Capacity N is fixed at compile time (a const-generic parameter), not
+//   grown or shrunk at runtime.
+// - freelist_core_init()/slotmap_init() must run before first use (see
+//   freelist_core_init's own comment) -- a pool's backing memory being
+//   zero-initialized .bss is NOT equivalent to an initialized empty pool,
+//   unlike the linear-scan allocators this replaced.
 
 variant FreelistPopResult {
     Empty;

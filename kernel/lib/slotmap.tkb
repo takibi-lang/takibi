@@ -22,6 +22,16 @@
 // usize per slot. Reach for FreelistCore(N) directly only when that per-
 // slot cost genuinely matters (large N, e.g. page.tkb's BOOT_PAGE_COUNT
 // class of pool) and no call site will ever need generation re-validation.
+//
+// Current limitations (2026-08-07): same as kernel/lib/freelist.tkb's own
+// "Current limitations" section -- SlotMap(N) has no synchronization of
+// its own either, and it embeds FreelistCore(N) directly (see the struct
+// below), so the same "not yet exercised concurrently, not proven safe
+// under it" caveat applies without change. Read that section before
+// assuming any of SlotMap(N)'s state (occupant_generation[],
+// double_remove_count) is safe to touch from more than one context at a
+// time; a plain generation counter shared across contexts without a lock
+// is exactly the kind of state a data race silently corrupts.
 use "kernel/lib/freelist.tkb";
 
 generic struct SlotMap(N: usize) {
