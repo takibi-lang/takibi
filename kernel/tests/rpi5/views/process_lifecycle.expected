@@ -5,4 +5,5 @@ initial process: ready
 process clone: parent=1 child=2 exit=42 reaped
 scheduler preempt: parent+child gpr+sp+pc+simd asid deferred ok
 vm fork: private pages=3 reclaimed
+vm fork: child stack growth ok
 resources: pages=0

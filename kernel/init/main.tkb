@@ -918,6 +918,9 @@ fn main() {
                         if (process_image_clone_vm_reaped_pages() == 3) {
                             kernel_boot_log("vm fork: private pages=3 reclaimed\n");
                         }
+                        if (process_image_clone_growth_probe()) {
+                            kernel_boot_log("vm fork: child stack growth ok\n");
+                        }
                         if (kernel_tcp_injected_data_recovered()) {
                             kernel_boot_log("httpd server: data drop retransmit ok\n");
                         }

@@ -171,6 +171,21 @@ fn process_clone_vm_rollback(count: usize) {
 fn process_image_clone_vm_begin() -> ProcessCloneVmResult !{unsafe} {
     clone_page_count = 0;
     address_space_clear_root(1);
+    // Reset root 1's demand-stack metadata before rebuilding it below, the
+    // same way process_image_map_current() resets root 0's before mapping a
+    // fresh image -- otherwise a reaped child's stale counts would leak into
+    // the next fork.
+    process_image_stack_growth_active[1] = false;
+    process_image_active_page_count[1] = 0;
+    process_image_growth_page_count[1] = 0;
+    process_image_stack_lowest_l3[1] = PROCESS_STACK_L3_INDEX;
+    // Tracks the lowest growth-region L3 index actually copied below, so the
+    // child's watermark reflects its real page table rather than the
+    // parent's own process_image_stack_lowest_l3[0] bookkeeping -- the
+    // latter is meaningless for a parent mapped through the low-level
+    // initial-process bootstrap path (address_space_new()/map_user_stack(),
+    // not process_image_map_current()), which never touches it.
+    let mut clone_stack_lowest_l3: usize = PROCESS_STACK_L3_INDEX;
     for l3_index: usize in 0..<512 {
         let parent_pte: usize = address_space_pte_read(0, l3_index);
         if (parent_pte != 0) {
@@ -202,6 +217,11 @@ fn process_image_clone_vm_begin() -> ProcessCloneVmResult !{unsafe} {
                         clone_page_indices[slot] =
                             page_owner_transfer_index(child_page);
                         clone_page_count = clone_page_count + 1;
+                        if (l3_index >= PROCESS_STACK_GROWTH_FIRST_L3_INDEX &&
+                            l3_index < PROCESS_STACK_L3_INDEX &&
+                            l3_index < clone_stack_lowest_l3) {
+                            clone_stack_lowest_l3 = l3_index;
+                        }
                     } else {
                         page_free(child_page);
                         process_clone_vm_rollback(clone_page_count);
@@ -214,11 +234,46 @@ fn process_image_clone_vm_begin() -> ProcessCloneVmResult !{unsafe} {
     if (clone_page_count == 0) {
         return ProcessCloneVmResult::OutOfMemory;
     }
+    // The copy loop above mirrors every present parent PTE (including any
+    // stack pages the parent had already demand-faulted in) into root 1, so
+    // the child gets its own demand-stack watermark derived from what was
+    // actually copied. Without this, a forked child fail-stops the instant
+    // it grows its stack past whatever was already mapped at fork time
+    // (issue #219).
+    process_image_active_page_count[1] = clone_page_count;
+    process_image_stack_growth_active[1] = true;
+    process_image_stack_lowest_l3[1] = clone_stack_lowest_l3;
     if (process_clone_vm_install(view ProcessCloneVmOwner) == false) {
         process_clone_vm_rollback(clone_page_count);
         return ProcessCloneVmResult::OutOfMemory;
     }
     return ProcessCloneVmResult::Copied;
+}
+
+// GitHub issue #219 follow-up: pages the child allocates for itself via
+// process_image_handle_data_abort() after the fork snapshot (recorded in
+// process_image_growth_page_indices' root-1 slots) are not covered by
+// process_clone_vm_rollback()'s clone_page_indices/clone_l3_indices
+// snapshot, which only knows about pages present at fork time -- without
+// this they would leak on child exit. Root 1 is hardcoded (not derived from
+// process_image_root_index()) because this runs from process_image_clone_vm_
+// reap(), which callers also reach from the still-active parent context on
+// an early clone failure, before process_image_activate_child() ever runs.
+fn process_clone_vm_release_growth_pages() {
+    for i: usize in 0..<process_image_growth_page_count[1] {
+        if (i < 64) {
+            let growth_offset_value: usize = 64 + i;
+            if (growth_offset_value < 128) {
+                let growth_offset: {0..<128 as usize} = growth_offset_value;
+                let page_index: usize =
+                    process_image_growth_page_indices[growth_offset];
+                if (page_index < BOOT_PAGE_COUNT) {
+                    page_transferred_release(page_index);
+                }
+            }
+        }
+    }
+    process_image_growth_page_count[1] = 0;
 }
 
 fn process_image_activate_parent() {
@@ -239,6 +294,7 @@ fn process_image_clone_vm_reap() -> ProcessCloneVmReapResult {
         ProcessCloneVmValue::Ready(owner) => {
             let count: usize = clone_page_count;
             process_clone_vm_rollback(count);
+            process_clone_vm_release_growth_pages();
             process_image_activate_parent();
             process_clone_vm_owner_drop(owner);
             clone_last_reaped_count = count;
@@ -249,6 +305,89 @@ fn process_image_clone_vm_reap() -> ProcessCloneVmReapResult {
 
 fn process_image_clone_vm_reaped_pages() -> usize {
     return clone_last_reaped_count;
+}
+
+// GitHub issue #219 verification: process_image_clone_vm_begin() must
+// initialize root 1's demand-stack metadata so process_image_handle_data_
+// abort() can grow the child's stack past whatever was mapped at fork
+// time, instead of fail-stopping. Exercises the real clone_vm_begin/
+// handle_data_abort/clone_vm_reap sequence directly against a synthetic
+// single-page root-0 image (bypassing the ELF loader, which nothing here
+// depends on), because neither real EL0 process that forks in this kernel
+// can exercise it: the tiny fixed-layout initial bootstrap process has a
+// whole address space smaller than one growth-region page (never meant to
+// support stack growth at all), and the pinned Alpine BusyBox binary's
+// recursion depth is not something this test controls.
+fn process_image_clone_growth_probe() -> bool !{unsafe} {
+    process_image_target_root = 0;
+    let mut root0_page_index: usize = BOOT_PAGE_COUNT;
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => { return false; }
+        PageAllocResult::Allocated(stack_page) => {
+            let phys: usize = page_physical_address(stack_page);
+            address_space_pte_write(0, PROCESS_STACK_L3_INDEX,
+                                    phys | USER_RW_XN_FLAGS);
+            address_space_tlb_invalidate(
+                0, USER_TEXT_VA + PROCESS_STACK_L3_INDEX * PAGE_SIZE);
+            root0_page_index = page_owner_transfer_index(stack_page);
+        }
+    }
+    // Mirrors exactly the metadata process_image_map_current() sets after
+    // mapping a fresh image's single top stack page: growth enabled, one
+    // page active, nothing yet grown below the top.
+    process_image_stack_growth_active[0] = true;
+    process_image_active_page_count[0] = 1;
+    process_image_growth_page_count[0] = 0;
+    process_image_stack_lowest_l3[0] = PROCESS_STACK_L3_INDEX;
+
+    let mut ok: bool = true;
+    match process_image_clone_vm_begin() {
+        ProcessCloneVmResult::OutOfMemory => { ok = false; }
+        ProcessCloneVmResult::Copied => {}
+    }
+
+    if (ok) {
+        process_image_activate_child();
+        // EC=0x24 (data abort from a lower EL), DFSC=0x07 (translation
+        // fault, level 3) -- the only ESR shape process_image_handle_data_
+        // abort() accepts as legitimate stack growth.
+        let esr: usize = 0x90000007;
+        let first_fault: usize = USER_TEXT_VA + 500 * PAGE_SIZE;
+        if (process_image_handle_data_abort(esr, first_fault) == false ||
+            address_space_pte_read(1, 500) == 0) {
+            ok = false;
+        }
+        // A second, deeper fault must map the whole newly-opened gap
+        // (495..500) in one call, not just the single faulting page --
+        // the same "ABI subtracts a large frame before its first store"
+        // shape process_image_handle_data_abort() is documented to handle.
+        let second_fault: usize = USER_TEXT_VA + 495 * PAGE_SIZE;
+        if (ok && (process_image_handle_data_abort(esr, second_fault) == false ||
+            address_space_pte_read(1, 495) == 0 ||
+            address_space_pte_read(1, 496) == 0 ||
+            address_space_pte_read(1, 497) == 0 ||
+            address_space_pte_read(1, 498) == 0 ||
+            address_space_pte_read(1, 499) == 0)) {
+            ok = false;
+        }
+        process_image_activate_parent();
+    }
+
+    match process_image_clone_vm_reap() {
+        ProcessCloneVmReapResult::Missing => {}
+        ProcessCloneVmReapResult::Reaped => {}
+    }
+    address_space_pte_write(0, PROCESS_STACK_L3_INDEX, 0);
+    address_space_tlb_invalidate(
+        0, USER_TEXT_VA + PROCESS_STACK_L3_INDEX * PAGE_SIZE);
+    if (root0_page_index < BOOT_PAGE_COUNT) {
+        page_transferred_release(root0_page_index);
+    }
+    process_image_stack_growth_active[0] = false;
+    process_image_active_page_count[0] = 0;
+    process_image_growth_page_count[0] = 0;
+    process_image_stack_lowest_l3[0] = PROCESS_STACK_L3_INDEX;
+    return ok;
 }
 
 linear struct ProcessImagePages[image: usize] {
