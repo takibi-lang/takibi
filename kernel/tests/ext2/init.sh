@@ -1,7 +1,5 @@
-# This is the temporary first userspace process. It intentionally uses ash
-# builtins only: external BusyBox applets require the later execve/child
-# lifecycle work, while this script already makes boot policy ordinary ext2
-# data instead of kernel-side argv scenarios.
+# This is the temporary first userspace process. It makes boot policy
+# ordinary ext2 data instead of kernel-side argv scenarios.
 boot_role=bootstrap
 
 case "$boot_role" in
@@ -13,6 +11,12 @@ bootstrap)
     exit 1
     ;;
 esac
+
+# GitHub issue #241: the EL0 syscall-ABI test payload (formerly launched
+# through a dedicated flat-blob mechanism straight from the kernel's own
+# boot sequence) is a real ELF in this filesystem now, launched the same
+# way any other external command here is: ash forks and execve()s it.
+/user_payload
 
 for phase in fd uart telnet; do
     echo "init: phase $phase"

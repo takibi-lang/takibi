@@ -23,13 +23,66 @@ private let mut ext2_large_fixture: [u8; 3200];
 private let mut kernel_secondary_boot_state: io usize;
 private let mut kernel_exec_plan: DistroElfLoadPlan = {0, 0, 0, 0, 0, 0, 0};
 private let mut kernel_exec_plan_ready: bool;
+// GitHub issue #241: /user_payload is a real static-PIE ELF (currently
+// 4272 bytes) placed in the ext2 fixture image and validated once at
+// boot, alongside saved_distro_plan/distro_plan_ready's own pattern for
+// BusyBox. 8192 leaves headroom over the current size without pushing
+// close to ext2's 12288-byte (#243) per-file cap.
+private let mut user_payload_image: [u8; 8192];
+private let mut saved_user_payload_plan: DistroElfLoadPlan = {0, 0, 0, 0, 0, 0, 0};
+private let mut user_payload_plan_ready: bool;
+
+// ext2_read_small_file already enforces inode.size <= destination.len
+// (8192, user_payload_image's own declared size) before ever returning
+// Ext2ReadResult::Read, so length is always in bounds in practice -- the
+// clamp below is a real runtime guard, not a formality, since that fact
+// isn't visible to the type checker across the call boundary.
+fn user_payload_image_prefix(length: usize) -> []u8 !{unsafe} {
+    let payload_bytes: []u8 = user_payload_image as []u8;
+    let mut bounded: usize = length;
+    if (bounded > payload_bytes.len) { bounded = payload_bytes.len; }
+    return unsafe { payload_bytes[0..<bounded] };
+}
 private let mut kernel_child_exec_entry: usize;
 private let mut kernel_child_exec_stack: usize;
 
+// GitHub issue #241: argv[0] is the same path ash passes to execve() for
+// an ordinary external-command invocation (no separate stored "resolved
+// path" needed -- the existing argv buffer already carries it). 64 is
+// generous headroom over "/user_payload"'s own length. argv itself is a
+// []u8 view over syscall_exec_argv's fixed 512-byte buffer, but the
+// compiler has no static bound on a slice obtained through a function
+// return, so the length checks just above are load-bearing preconditions
+// for the unsafe slicing below, the same pattern ext2_name_matches uses
+// (kernel/fs/ext2/ext2.tkb) for an analogous runtime-checked-length
+// prefix compare.
+fn kernel_syscall_exec_argv0_is(target: []u8) -> bool !{unsafe} {
+    let argv: []u8 = kernel_syscall_exec_argv();
+    if (target.len == 0 || target.len > 64 || target.len > argv.len) {
+        return false;
+    }
+    let argv_prefix = unsafe { argv[0..<target.len] };
+    if (slice_eq(argv_prefix, target) == false) { return false; }
+    if (target.len < argv.len) {
+        let mut zero_byte: [u8; 1] = {0};
+        let terminator = unsafe { argv[target.len..<target.len + 1] };
+        if (slice_eq(terminator, zero_byte as []u8) == false) { return false; }
+    }
+    return true;
+}
+
 fn kernel_process_child_exec_prepare() -> usize {
     if (kernel_process_is_child() == false ||
-        kernel_exec_plan_ready == false ||
         kernel_syscall_exec_pending() == false) {
+        return 0;
+    }
+    let mut target_plan: DistroElfLoadPlan = kernel_exec_plan;
+    let mut target_plan_ready: bool = kernel_exec_plan_ready;
+    if (kernel_syscall_exec_argv0_is("/user_payload" as []u8)) {
+        target_plan = saved_user_payload_plan;
+        target_plan_ready = user_payload_plan_ready;
+    }
+    if (target_plan_ready == false) {
         return 0;
     }
     match process_image_clone_vm_reap() {
@@ -39,7 +92,7 @@ fn kernel_process_child_exec_prepare() -> usize {
         ProcessCloneVmReapResult::Reaped => {}
     }
     let pages_result = process_image_map_in_root(
-        kernel_exec_plan, kernel_syscall_exec_argv(),
+        target_plan, kernel_syscall_exec_argv(),
         kernel_syscall_exec_argc(), 1);
     match pages_result {
         ProcessImageMapResult::InvalidImage => {
@@ -723,6 +776,44 @@ fn main() {
                             }
                         }
                     }
+                    // GitHub issue #241: validate /user_payload once, here,
+                    // the same way saved_distro_plan is validated once from
+                    // the initramfs busybox image below -- the resulting
+                    // plan is reused later whenever init.sh's ash actually
+                    // execve()s it (see kernel_process_child_exec_prepare).
+                    match ext2_lookup_root(mount, "user_payload" as []u8) {
+                        Ext2LookupResult::Invalid => {
+                            kernel_boot_log("ext2 user_payload: invalid lookup\n");
+                        }
+                        Ext2LookupResult::NotFound => {
+                            kernel_boot_log("ext2 user_payload: not found\n");
+                        }
+                        Ext2LookupResult::Found(payload_inode) => {
+                            match ext2_read_small_file(
+                                    mount, payload_inode,
+                                    user_payload_image as []u8) {
+                                Ext2ReadResult::Invalid => {
+                                    kernel_boot_log("ext2 user_payload: read invalid\n");
+                                }
+                                Ext2ReadResult::Read(payload_length) => {
+                                    let payload_address: usize =
+                                        (user_payload_image as *u8) as usize;
+                                    match distro_elf_validate(
+                                            payload_address,
+                                            user_payload_image_prefix(payload_length)) {
+                                        DistroElfResult::Invalid => {
+                                            kernel_boot_log("ext2 user_payload: invalid elf\n");
+                                        }
+                                        DistroElfResult::Valid(payload_plan) => {
+                                            saved_user_payload_plan = payload_plan;
+                                            user_payload_plan_ready = true;
+                                            kernel_boot_log("ext2 user_payload: elf valid\n");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -908,87 +999,37 @@ fn main() {
             }
         }
     }
-    // GitHub issue #180: index 1 is the middle of the EL0 fixture's 3
-    // write()s (0 = 19-byte header, 1 = 1460-byte body, 2 = final byte)
-    // -- a genuine drop within the large response, not a bookend.
-    kernel_tcp_inject_drop_data_segment(1);
-    kernel_tcp_inject_drop_next_fin();
+    // GitHub issue #241 hardware regression: shell_read (below) uses
+    // ppoll()-based UART blocking that depends on the RX handler being
+    // installed and the IRQ unmasked. Both used to happen here as an
+    // incidental side effect of arming right before the old flat-blob
+    // launch, which used to run before shell_read too. Moving that whole
+    // arming block to immediately before init.sh (see below) left
+    // shell_read running with RX IRQs still masked -- host-sent input
+    // was never delivered, and ash's ppoll() blocked forever. Installing
+    // the handler and unmasking the IRQ here (restoring the original
+    // timing) fixes that; kernel_uart_rx_ring_reset() still runs again
+    // right before init.sh, since user_payload's own UART-block scenario
+    // needs a ring clear of whatever shell_read left behind, not a
+    // re-armed handler/IRQ it already has.
     uart_set_rx_handler(kernel_uart_rx_isr);
-    kernel_uart_rx_ring_reset();
     irq_uart_rx_unmask();
     match initial_process_create() {
         ProcessCreateResult::OutOfMemory => {
             kernel_boot_log("initial process: allocation failed\n");
         }
         ProcessCreateResult::Created(resources) => {
+            // GitHub issue #241: user_payload now runs as a real ELF
+            // launched from within init.sh (see below), not through this
+            // dedicated flat-blob mechanism -- this allocation/destroy
+            // pair is a placeholder until the surrounding match itself
+            // (and InitialUserLoadResult/map_user_text/map_user_data/
+            // map_user_stack/unmap_user_*, all now dead) is removed in a
+            // follow-up cleanup pass, kept separate to verify the actual
+            // behavior change on hardware first without also re-indenting
+            // everything below in the same diff.
             let (process, text, data, stack) = resources;
-            kernel_boot_log("initial process: ready\n");
-            match initial_user_load(text) {
-                InitialUserLoadResult::TooLarge => {
-                    kernel_boot_log("initial user: image too large\n");
-                    initial_process_destroy(process, text, data, stack);
-                }
-                InitialUserLoadResult::Loaded => {
-                    let empty = address_space_new();
-                    let (text_space, text_mapping) = map_user_text(empty, text);
-                    let (data_space, data_mapping) = map_user_data(text_space, data);
-                    let (ready_space, stack_mapping) = map_user_stack(data_space, stack);
-                    if (user_layout_is_correct()) {
-                        kernel_boot_log("vm layout: text=rx data=rw+xn stack=rw+xn\n");
-                    }
-                    kernel_process_execution_reset();
-                    kernel_process_scheduler_enable();
-                    kernel_syscall_connected_fixture_start();
-                    let exit_status: usize =
-                        run_initial_user(USER_TEXT_VA, USER_STACK_VA + PAGE_SIZE);
-                    if (exit_status == 0) {
-                        kernel_boot_log("syscall write errors: ebadf efault\n");
-                        let (open_calls, read_calls, file_write_calls,
-                             close_calls) =
-                            kernel_syscall_file_evidence();
-                        if (open_calls >= 2 && read_calls >= 1 &&
-                            file_write_calls >= 1 && close_calls >= 2) {
-                            kernel_boot_log("linux file syscalls: open read write close ok\n");
-                        }
-                        if (kernel_syscall_socket_evidence()) {
-                            kernel_boot_log("linux socket syscalls: two overlapping connections fd=5,6 independent ok port=8080\n");
-                        }
-                        if (kernel_syscall_partial_write_evidence()) {
-                            kernel_boot_log("linux socket partial write: 1460+1 ok\n");
-                        }
-                        if (kernel_process_clone_evidence()) {
-                            kernel_boot_log("process clone: parent=1 child=2 exit=42 reaped\n");
-                        }
-                        if (kernel_process_scheduler_acceptance_evidence()) {
-                            kernel_boot_log("scheduler preempt: parent+child gpr+sp+pc+simd asid deferred ok\n");
-                        }
-                        if (kernel_process_uart_block_evidence()) {
-                            kernel_boot_log("uart rx: scheduler block+wake ok\n");
-                        }
-                        if (process_image_clone_vm_reaped_pages() == 3) {
-                            kernel_boot_log("vm fork: private pages=3 reclaimed\n");
-                        }
-                        if (process_image_clone_growth_probe()) {
-                            kernel_boot_log("vm fork: child stack growth ok\n");
-                        }
-                        if (kernel_tcp_injected_data_recovered()) {
-                            kernel_boot_log("httpd server: data drop retransmit ok\n");
-                        }
-                        if (kernel_tcp_injected_fin_recovered()) {
-                            kernel_boot_log("httpd server: fin drop retransmit ok\n");
-                        }
-                        kernel_boot_log("syscall exit: 0\n");
-                    }
-                    let (data_space2, stack2) =
-                        unmap_user_stack(ready_space, stack_mapping);
-                    let (text_space2, data2) =
-                        unmap_user_data(data_space2, data_mapping);
-                    let (empty2, text2) =
-                        unmap_user_text(text_space2, text_mapping);
-                    address_space_free(empty2);
-                    initial_process_destroy(process, text2, data2, stack2);
-                }
-            }
+            initial_process_destroy(process, text, data, stack);
             // Issue #196 pre-work: run the same Alpine BusyBox static-PIE image a
             // second time, with argv={"busybox","uname","-a"} instead of
             // {"busybox","cat","/hello.txt"}, now that every earlier boot-time
@@ -1127,6 +1168,30 @@ fn main() {
             // one ordinary argv invocation: shell control flow and future
             // boot policy live in init.sh, rather than in further kernel
             // per-scenario argv builders.
+            //
+            // GitHub issue #241: user_payload.tkb's own EL0 syscall-ABI
+            // fixture now runs from inside this script (as plain external
+            // command "/user_payload"; ash forks + execve()s it, resolved
+            // transparently by kernel_process_child_exec_prepare -- see
+            // above), not through the dedicated flat-blob mechanism #228
+            // built. Its own TCP-drop-injection/scheduler arming,
+            // previously set immediately before that dedicated launch, is
+            // armed here instead, immediately before the script that now
+            // actually triggers those scenarios. The UART RX handler/IRQ
+            // unmask stay at their original earlier position (see above)
+            // -- shell_read's own ppoll()-based UART wait needs them
+            // already active, not re-armed here; only the ring itself is
+            // reset again, to clear whatever shell_read left behind.
+            // GitHub issue #180: index 1 is the middle of the EL0
+            // fixture's 3 write()s (0 = 19-byte header, 1 = 1460-byte
+            // body, 2 = final byte) -- a genuine drop within the large
+            // response, not a bookend.
+            kernel_tcp_inject_drop_data_segment(1);
+            kernel_tcp_inject_drop_next_fin();
+            kernel_uart_rx_ring_reset();
+            kernel_process_execution_reset();
+            kernel_process_scheduler_enable();
+            kernel_syscall_connected_fixture_start();
             if (distro_plan_ready) {
                 match process_image_map(
                         saved_distro_plan,
@@ -1148,6 +1213,49 @@ fn main() {
                             process_image_stack_pointer(script_pages));
                         if (script_status == 0) {
                             kernel_boot_log("init script exit: 0\n");
+                            kernel_boot_log("syscall write errors: ebadf efault\n");
+                            let (open_calls, read_calls, file_write_calls,
+                                 close_calls) =
+                                kernel_syscall_file_evidence();
+                            if (open_calls >= 2 && read_calls >= 1 &&
+                                file_write_calls >= 1 && close_calls >= 2) {
+                                kernel_boot_log("linux file syscalls: open read write close ok\n");
+                            }
+                            if (kernel_syscall_socket_evidence()) {
+                                kernel_boot_log("linux socket syscalls: two overlapping connections fd=5,6 independent ok port=8080\n");
+                            }
+                            if (kernel_syscall_partial_write_evidence()) {
+                                kernel_boot_log("linux socket partial write: 1460+1 ok\n");
+                            }
+                            if (kernel_process_clone_evidence()) {
+                                // GitHub issue #241: user_payload now runs
+                                // nested under ash's own process (not as
+                                // pid 1 itself), so its own child is no
+                                // longer necessarily pid 2 specifically --
+                                // kernel_process_clone_evidence() itself
+                                // never asserted literal pid numbers, only
+                                // structural clone/exit/reap properties.
+                                kernel_boot_log("process clone: parent+child exit=42 reaped\n");
+                            }
+                            if (kernel_process_scheduler_acceptance_evidence()) {
+                                kernel_boot_log("scheduler preempt: parent+child gpr+sp+pc+simd asid deferred ok\n");
+                            }
+                            if (kernel_process_uart_block_evidence()) {
+                                kernel_boot_log("uart rx: scheduler block+wake ok\n");
+                            }
+                            if (process_image_clone_vm_reaped_pages() == 3) {
+                                kernel_boot_log("vm fork: private pages=3 reclaimed\n");
+                            }
+                            if (process_image_clone_growth_probe()) {
+                                kernel_boot_log("vm fork: child stack growth ok\n");
+                            }
+                            if (kernel_tcp_injected_data_recovered()) {
+                                kernel_boot_log("httpd server: data drop retransmit ok\n");
+                            }
+                            if (kernel_tcp_injected_fin_recovered()) {
+                                kernel_boot_log("httpd server: fin drop retransmit ok\n");
+                            }
+                            kernel_boot_log("syscall exit: 0\n");
                         } else {
                             kernel_boot_log("init script failed\n");
                         }

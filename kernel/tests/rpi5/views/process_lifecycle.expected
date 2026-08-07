@@ -1,8 +1,7 @@
 process table: slots=2 stacks=4096 generation reuse safe
 fd table: processes=2 fds=16 shared-offset refs clean
 scheduler: rr immediate=2 deferred=1 staged
-initial process: ready
-process clone: parent=1 child=2 exit=42 reaped
+process clone: parent+child exit=42 reaped
 scheduler preempt: parent+child gpr+sp+pc+simd asid deferred ok
 vm fork: private pages=3 reclaimed
 vm fork: child stack growth ok

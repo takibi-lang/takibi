@@ -662,31 +662,6 @@ fn kernel_syscall_path_name(address: usize) -> SyscallPathResult {
     return SyscallPathResult::Name(length);
 }
 
-must_use variant InitialUserLoadResult { Loaded; TooLarge; }
-
-// GitHub issue #228: this flat blob is user_payload.tkb + user_payload_asm.S
-// (the EL0 syscall-ABI test payload), linked standalone with
-// user_payload.ld and objcopied to raw binary -- see the Makefile's
-// KERNEL_USER_PAYLOAD_BIN rule. Its first byte is initial_user_payload,
-// verified by the linker script's input ordering.
-const KERNEL_USER_PAYLOAD_LEN: usize = 1766;
-let kernel_user_payload: [u8; KERNEL_USER_PAYLOAD_LEN] =
-    embed_file("kernel/build/rpi5/user_payload.bin");
-
-fn initial_user_load(text: borrow PageOwner[page])
-        -> InitialUserLoadResult !{unsafe} {
-    let length: usize = KERNEL_USER_PAYLOAD_LEN;
-    if (length > PAGE_SIZE) {
-        return InitialUserLoadResult::TooLarge;
-    }
-    let source: *u8 = kernel_user_payload as *u8;
-    let source_bytes = unsafe { source[0..<length as isize] };
-    let destination = page_bytes(text);
-    slice_copy(destination, source_bytes);
-    user_code_sync(page_physical_address(text), length);
-    return InitialUserLoadResult::Loaded;
-}
-
 // Issue #196: writev(2)/readv(2) per-segment results, kept distinct from
 // the underlying byte count instead of encoding "this is actually an
 // errno" via a magnitude heuristic (Linux -errno values happen to be
