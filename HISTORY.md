@@ -15,6 +15,109 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-07: Moved user_entry.S's EL0 Syscall-ABI Test Payload to `.tkb` (GitHub Issue #228)
+
+`user_entry.S`'s `initial_user_payload`/`initial_user_payload_end` block (321
+lines: EBADF/EFAULT checks, file open/write/close, socket bind/listen/two
+overlapping accepts, multi-segment reads/writes including a partial-write
+case, `clone()`, a UART-blocking wait, and a register-level scheduler-
+preemption probe run once per parent/child) was hand-written AArch64
+assembly outside the `.tkb` type system's reach. Before committing to the
+full migration, a minimal feasibility spike de-risked the one real unknown:
+whether a `.tkb`-compiled, standalone-linked flat binary can execute
+correctly as the raw EL0 entry point with no additional entry stub. A
+throwaway `write(1,"hi\n",3)` + `exit(0)` program using the new `svc5`
+intrinsic (see that issue's own entry) was compiled, linked with a minimal
+linker script (`ENTRY(fn); . = 0; SECTIONS { .text : {*(.text*)} ... }`),
+and objcopied to a raw binary. `llvm-objdump -r` on the linked ELF showed
+zero remaining relocations: `ld.lld`'s GOT relaxation for a fully-resolved
+static link converts the GOT-indirect addressing Takibi/LLVM emits by
+default into direct PC-relative `adr`, exactly as needed for a raw byte-
+copy-and-execute loading mechanism with no relocation processing. Swapping
+this spike binary into `user_entry.S` via a temporary `.incbin` and running
+`make kernelcheck-rpi5` on real hardware confirmed `hi` appears in the UART
+log at exactly the point `run_initial_user` hands control to it, with no
+entry stub required -- the spike was then reverted via `git checkout`.
+
+With the core assumption verified, the full payload was ported:
+
+- `kernel/arch/arm64/kernel/user_payload.tkb`: ordinary `.tkb` using `svc5`
+  for every real syscall, `for i in 0..<N` loops (not `while`, since
+  `--forbid-trap` needs a provable array-index bound) for the 1461-byte
+  fill and the UART-fixture-byte compare, and plain string literals
+  (`StringLit`'s existing `TPtr TU8` type, already a real global constant +
+  pointer, no `embed_file` needed) for every fixed message. Pointer
+  arithmetic offsets must be `isize`, not `usize` (`(base + (offset as
+  isize))`), matching the existing convention in `kernel/kernel/syscall.tkb`
+  -- not obvious from this issue alone, but consistent everywhere else in
+  the codebase. `initial_user_payload` is deliberately the FIRST function
+  defined in the file: the flat binary this compiles into has no ELF header
+  once objcopied to raw bytes, so execution always starts at byte offset 0
+  of the blob, and the compiler emits functions in source order (verified
+  by disassembling the linked object, not assumed).
+- `kernel/arch/arm64/kernel/user_payload_asm.S`: the only two pieces that
+  stayed raw assembly -- `busy_spin` (a two-instruction `subs`/`b.ne` loop,
+  kept in `.S` so its per-iteration cost stays IDENTICAL to the original
+  inline loop; this project's scheduler-preemption timing is calibrated
+  against real wall-clock cycles) and `scheduler_probe_run` (pins the exact
+  physical registers x19-x23/q8 the kernel's context-switch save/restore
+  path is responsible for -- the test's entire purpose is confirming THAT
+  path, which only means something if the registers under test are real,
+  specific physical registers, not whatever an ordinary compiled loop
+  happens to allocate). Written as a normal AAPCS callee (saves/restores
+  x19-x23/x30/q8, returns a plain `usize` 0/1) so it's callable via an
+  ordinary `extern fn` from `.tkb` with no special calling convention.
+- `kernel/arch/arm64/kernel/user_payload.ld`: `ENTRY(initial_user_payload);
+  . = 0; SECTIONS { .text : {*(.text*)} ... }`, discarding `.eh_frame`/
+  `.comment`/`.note*`. Correctness depends on listing
+  `user_payload_tkb.o` before `user_payload_asm.o` on the link line, so
+  `*(.text*)` places the `.tkb` object's (single-function) `.text` first.
+- Makefile: new `KERNEL_RPI5_USER_PAYLOAD_*` variables/rules compile+link+
+  objcopy the above into `$(KERNEL_BUILD_DIR)/user_payload.bin`,
+  independent of and never linked into `kernel.elf` itself -- it is pure
+  input data to `embed_file`.
+- `kernel/kernel/syscall.tkb`'s `initial_user_load` now embeds this blob
+  (`embed_file("kernel/build/rpi5/user_payload.bin")`) instead of reading
+  `initial_user_payload`/`initial_user_payload_end` extern-symbol
+  addresses; those two `extern symbol` lines were removed from
+  `user_entry_extern.tkb` (its remaining `extern fn` declarations, for the
+  hand-written EL1/EL0 transition mechanics that stay in `.S`, are
+  untouched). `user_entry.S` lost the entire 321-line block, net 584 ->
+  261 lines.
+
+**A real, hardware-only regression, found and fixed before this could ship:**
+the first full port used top-level `private let mut` globals for the two
+scratch buffers `read()` writes into (an 8-byte receive buffer and a
+1461-byte fill buffer). `kernelcheck-rpi5` hung indefinitely at the
+"userspace connected-I/O fixture" step -- `git stash`-ing back to the
+pre-#228 baseline passed cleanly and quickly (no retries) on the very next
+run, then the ported version failed the identical way two more times,
+ruling out this issue's own documented flake history (HISTORY.md's
+2026-08-02 issue #195/#194 entries) as the explanation. Breadcrumb
+`write(1, "X", 1)` calls at each syscall (temporary, since removed)
+localized the hang to the very first `read()` call, right after BOTH
+`accept4()` calls had already returned successfully. The root cause:
+those two globals are declared inside `user_payload.tkb`, which compiles
+into the SAME flat blob as `initial_user_payload` itself -- and that whole
+blob is mapped as a single read+execute (no write) `USER_TEXT_VA` page
+(`vm layout: text=rx` in the boot log). A write into either buffer --
+whether the kernel's own `read()` syscall handler copying received bytes
+in, or this file's own fill loop -- silently never completed, hanging the
+process, because even EL1 cannot write through a page table entry whose
+AP bits deny write access to both EL0 and EL1 alike. The original
+hand-written asm never hit this because it used `sub sp, sp, #32` --
+ordinary stack space, which lives on the separately-mapped, `rw+xn`
+`USER_STACK_VA` page. Fixed by moving both buffers to plain local (stack)
+variables inside `initial_user_payload()` -- confirmed by re-disassembling
+the compiled object (`add x0, sp, #0x5b8` in place of the earlier
+GOT-relative global load, and zero remaining relocations against either
+symbol). Three consecutive real RPi5 `make kernelcheck-rpi5` runs after
+the fix passed all 25 views (including both overlapping accepts and the
+full scheduler-preemption/UART-block-wake concurrency proof) in ~1-2s each,
+matching the baseline's own speed and reliability exactly -- this was a
+genuine bug, not a flake, and the fix resolved it completely rather than
+papering over a timing coincidence.
+
 ### 2026-08-06: Renamed `exception_resume` to `exception_restore` -- a New Keyword Collided With an Existing `examples/` Function Name
 
 Found by the user running `make -f examples/Makefile allcheck` (the daily examples/ regression check AGENTS.md's own maintenance-scope section calls for) shortly after issue #227 item 1's `exception_resume { frame: ...; }` declaration (see that entry above) landed: `examples/copy_on_write/copy_on_write.tkb` and `examples/vm_page_map/vm_page_map_core.tkb`/`vm_page_map_core_rpi5.tkb` (the RPi3 COW exception-handling design SPEC.md's own "Guard-derived pointers"/ownership sections describe) all define an ordinary function literally named `exception_resume` -- unrelated to the new kernel-only declaration, predating it by a large margin. Making `exception_resume` a reserved keyword broke every one of those files with a plain syntax error.

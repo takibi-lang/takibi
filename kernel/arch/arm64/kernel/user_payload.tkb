@@ -1,0 +1,154 @@
+/* GitHub issue #228: the EL0 syscall-ABI test payload that used to be
+ * hand-written AArch64 assembly in user_entry.S. Only the two register-level
+ * scheduler-preemption probes remain in raw asm (user_payload_asm.S), since
+ * they deliberately pin physical registers (x19-x23, q8) that an ordinary
+ * .tkb-compiled loop has no way to guarantee live across the busy-wait --
+ * the whole point of the probe is to confirm the kernel's context-switch
+ * save/restore path, not whatever registers the compiler happens to pick.
+ * Everything else here is ordinary syscall policy, so it lives in Takibi.
+ *
+ * This file is compiled standalone (with user_payload_asm.S) into a flat,
+ * position-independent binary via a dedicated linker script and embedded
+ * into the kernel image with embed_file -- see the Makefile rules for
+ * KERNEL_USER_PAYLOAD_BIN.
+ */
+
+extern fn scheduler_probe_run(asid_va: usize, asid_marker: usize,
+                               simd_pattern: usize, busy_count: usize)
+    -> usize;
+extern fn busy_spin(count: usize);
+
+const EBADF_RC: usize = 0xFFFFFFFFFFFFFFF7;
+const EFAULT_RC: usize = 0xFFFFFFFFFFFFFFF2;
+const LARGE_LEN: usize = 1461;
+const SCHEDULER_PROBE_VA: usize = 0x40001000;
+const SCHEDULER_CHILD_BUSY: usize = 0x0BEBC200;
+const SCHEDULER_PARENT_BUSY: usize = 0x17D78400;
+
+/* initial_user_payload must be the very first function emitted into this
+ * object's .text section: the flat binary this file is linked into has no
+ * ELF header once objcopied to raw bytes, so execution always starts at
+ * byte offset 0 of the blob. Keep this the first fn definition in the file
+ * -- the compiler emits functions in source order, verified by inspecting
+ * the linked object's disassembly (see HISTORY.md's #228 entry). */
+fn initial_user_payload() {
+    /* write(9, ..., 1) must return -EBADF. */
+    let user_message: *u8 = "hello from userspace\n" as *u8;
+    fail_if(svc5(64, 9, user_message as usize, 1, 0, 0) != EBADF_RC);
+
+    /* write(1, null, 1) must return -EFAULT. */
+    fail_if(svc5(64, 1, 0, 1, 0, 0) != EFAULT_RC);
+
+    /* openat/write/close /mutable.txt through the Linux file ABI. */
+    let mutable_path: *u8 = "/mutable.txt" as *u8;
+    let mutable_content: *u8 = "el0-ok\n" as *u8;
+    let fd3: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
+    fail_if(fd3 != 3);
+    fail_if(svc5(64, 3, mutable_content as usize, 7, 0, 0) != 7);
+    fail_if(svc5(57, 3, 0, 0, 0, 0) != 0);
+
+    /* socket/bind/listen/close one IPv4 stream endpoint. */
+    let mut socket_address: [u8; 16] = {
+        0x02, 0x00, 0x1f, 0x90,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00
+    };
+    let fd4: usize = svc5(198, 2, 1, 0, 0, 0);
+    fail_if(fd4 != 4);
+    fail_if(svc5(200, 4, (socket_address as *u8) as usize, 16, 0, 0) != 0);
+    fail_if(svc5(201, 4, 1, 0, 0, 0) != 0);
+
+    let fd5: usize = svc5(242, 4, 0, 0, 0, 0);
+    fail_if(fd5 != 5);
+    /* Issue #189: accept a second stream while fd 5 remains live. The
+     * bounded fd/connection pools must allocate an independent fd 6/slot. */
+    let fd6: usize = svc5(242, 4, 0, 0, 0, 0);
+    fail_if(fd6 != 6);
+
+    let connection_b_response: *u8 = "conn-B\n!" as *u8;
+    let socket_response: *u8 = "HTTP/1.0 200 OK\r\n\r\n" as *u8;
+    // GitHub issue #228 (found on real hardware): this buffer MUST be a
+    // local (stack) variable, not a global. Globals in this file land
+    // inside the flat blob mapped read+execute-only as USER_TEXT_VA (see
+    // "vm layout: text=rx" in the boot log) -- a write into a global here
+    // (by the kernel's own read() syscall handler, copying received bytes
+    // into this address) silently never completes, hanging the process.
+    // The stack (USER_STACK_VA) is mapped rw+xn, so a local here is safe.
+    let mut user_payload_rx_buf: [u8; 8];
+    let rx_base: *u8 = user_payload_rx_buf as *u8;
+
+    fail_if(svc5(63, 5, ptr_of(rx_base, 0), 8, 0, 0) != 8);
+    fail_if(svc5(63, 6, ptr_of(rx_base, 0), 8, 0, 0) != 8);
+    fail_if(svc5(64, 6, connection_b_response as usize, 8, 0, 0) != 8);
+    fail_if(svc5(63, 5, ptr_of(rx_base, 0), 8, 0, 0) != 8);
+    fail_if(svc5(64, 5, socket_response as usize, 19, 0, 0) != 19);
+
+    // Same reasoning as user_payload_rx_buf above: must be a stack local.
+    let mut user_payload_large_buf: [u8; LARGE_LEN];
+    for i in 0..<LARGE_LEN {
+        user_payload_large_buf[i] = 0x5a;
+    }
+    let large_base: *u8 = user_payload_large_buf as *u8;
+    fail_if(svc5(64, 5, ptr_of(large_base, 0), LARGE_LEN, 0, 0) != 1460);
+    fail_if(svc5(64, 5, ptr_of(large_base, 1460), 1, 0, 0) != 1);
+
+    fail_if(svc5(57, 6, 0, 0, 0, 0) != 0);
+    fail_if(svc5(57, 5, 0, 0, 0, 0) != 0);
+    fail_if(svc5(57, 4, 0, 0, 0, 0) != 0);
+
+    /* The focused context fixture clones only after its independent socket
+     * lifecycle is complete; the real HTTPd daemon covers fd inheritance. */
+    let pid: usize = svc5(220, 0x11, 0, 0, 0, 0);
+    if (pid == 0) {
+        /* The first byte must take the scheduler-aware Blocked -> Ready
+         * path. Later bytes may already be in the bounded RX ring when
+         * selected. */
+        let uart_fixture: *u8 = "irqtest\n" as *u8;
+        let mut u: usize = 0;
+        while (u < 8) {
+            let c: usize = svc5(451, 0, 0, 0, 0, 0);
+            let want: usize = (*(uart_fixture + (u as isize))) as usize;
+            fail_if(c != want);
+            u = u + 1;
+        }
+        /* Scheduler acceptance: private same-VA data plus GPR and SIMD
+         * signatures must survive involuntary timer preemption. */
+        fail_if(scheduler_probe_run(SCHEDULER_PROBE_VA, 0x22, 0x5a,
+                                     SCHEDULER_CHILD_BUSY) == 0);
+        svc5(93, 42, 0, 0, 0, 0);
+    } else {
+        fail_if(pid != 2);
+        fail_if(scheduler_probe_run(SCHEDULER_PROBE_VA, 0x11, 0xa5,
+                                     SCHEDULER_PARENT_BUSY) == 0);
+
+        /* Accepted only if this parent reached the end of its compute
+         * section while the child is still Blocked on UART RX. */
+        fail_if(svc5(452, 0, 0, 0, 0, 0) != 0);
+
+        /* Keep the independently-running parent live while the host
+         * observes the progress marker and delivers UART input. Timer
+         * preemption then selects the child after the IRQ changes it from
+         * Blocked to Ready. */
+        busy_spin(SCHEDULER_PARENT_BUSY);
+
+        let user_message2: *u8 = "hello from userspace\n" as *u8;
+        fail_if(svc5(64, 1, user_message2 as usize, 21, 0, 0) != 21);
+        svc5(93, 0, 0, 0, 0, 0);
+    }
+}
+
+fn fail_halt() {
+    while (true) {
+    }
+}
+
+fn fail_if(bad: bool) {
+    if (bad) {
+        fail_halt();
+    }
+}
+
+fn ptr_of(base: *u8, offset: usize) -> usize {
+    return (base + (offset as isize)) as usize;
+}
