@@ -7,10 +7,13 @@
  * save/restore path, not whatever registers the compiler happens to pick.
  * Everything else here is ordinary syscall policy, so it lives in Takibi.
  *
- * This file is compiled standalone (with user_payload_asm.S) into a flat,
- * position-independent binary via a dedicated linker script and embedded
- * into the kernel image with embed_file -- see the Makefile rules for
- * KERNEL_USER_PAYLOAD_BIN.
+ * This file is compiled standalone (with user_payload_asm.S) into a real
+ * static-PIE ELF (GitHub issue #241; previously a flat position-independent
+ * blob via a dedicated linker script, objcopied to raw bytes and embedded
+ * into the kernel image directly), placed in the ext2 fixture image as
+ * /user_payload, and launched from kernel/tests/ext2/init.sh like any
+ * other external command -- see the Makefile's KERNEL_RPI5_USER_PAYLOAD_ELF
+ * rule and KERNEL_EXT2_IMAGE's e2cp step.
  */
 
 extern fn scheduler_probe_run(asid_va: usize, asid_marker: usize,
@@ -25,13 +28,20 @@ const SCHEDULER_PROBE_VA: usize = 0x40001000;
 const SCHEDULER_CHILD_BUSY: usize = 0x0BEBC200;
 const SCHEDULER_PARENT_BUSY: usize = 0x17D78400;
 
-/* initial_user_payload must be the very first function emitted into this
- * object's .text section: the flat binary this file is linked into has no
- * ELF header once objcopied to raw bytes, so execution always starts at
- * byte offset 0 of the blob. Keep this the first fn definition in the file
- * -- the compiler emits functions in source order, verified by inspecting
- * the linked object's disassembly (see HISTORY.md's #228 entry). */
+/* GitHub issue #241: the real ELF this file links into carries its own
+ * e_entry (set via the linker's -e initial_user_payload), so unlike the
+ * old flat-blob mechanism, nothing depends on this being the first
+ * function in the file's .text section anymore. Named for `-e
+ * initial_user_payload` on the link line regardless. */
 fn initial_user_payload() {
+    /* GitHub issue #241: this payload used to always be the very first
+     * (pid 1) process the kernel created, so its own clone()'d child was
+     * always exactly pid 2 -- now launched as an ordinary external command
+     * from init.sh's ash, it runs at whatever pid its own fork under ash
+     * received, so the child-pid check below is relative to that instead
+     * of the literal 2 it used to be. */
+    let my_pid: usize = svc5(172, 0, 0, 0, 0, 0);
+
     /* write(9, ..., 1) must return -EBADF. */
     let user_message: *u8 = "hello from userspace\n" as *u8;
     fail_if(svc5(64, 9, user_message as usize, 1, 0, 0) != EBADF_RC);
@@ -118,7 +128,7 @@ fn initial_user_payload() {
                                      SCHEDULER_CHILD_BUSY) == 0);
         svc5(93, 42, 0, 0, 0, 0);
     } else {
-        fail_if(pid != 2);
+        fail_if(pid != my_pid + 1);
         fail_if(scheduler_probe_run(SCHEDULER_PROBE_VA, 0x11, 0xa5,
                                      SCHEDULER_PARENT_BUSY) == 0);
 
