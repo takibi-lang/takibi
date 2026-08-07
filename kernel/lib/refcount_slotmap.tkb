@@ -1,0 +1,193 @@
+// A reference-counted slot pool (GitHub issue #242, follow-up to issue
+// #207/kernel/lib/slotmap.tkb), for call sites where SlotMap's linear
+// FreelistOwner does not fit: a resource with more than one independent
+// holder, released when the last holder is done rather than by a single
+// consuming call. kernel/kernel/fd_table.tkb's SHARED_OBJECT_MAX pool
+// (UnifiedObjectHandle, a plain non-linear struct with a refcount that
+// unified_fd_install/unified_fd_close/unified_fd_clone increment and
+// decrement independently) is the motivating, and so far only, caller.
+//
+// Same underlying engine as SlotMap(N): FreelistCore(N) finds a free slot
+// in O(1). RefcountSlotMap(N, MAX_REFS) replaces SlotMap's single
+// occupant_generation record with a (generation, refcount) pair per slot,
+// and replaces the linear insert/remove pair with four operations that
+// match how a refcounted resource is actually used: alloc (find a free
+// slot, refcount starts at 0 -- nothing holds it yet), abandon (give back
+// a slot that was allocated but never retained, e.g. because installing
+// the caller's own first reference failed), retain (add a holder),
+// release (remove a holder, freeing the slot when the count reaches 0).
+//
+// Why a second const-generic parameter (MAX_REFS), not a bare `usize`
+// refcount: see issue #242's design discussion (2026-08-07 comment) for
+// the fuller reasoning. The short version -- a refcount is a genuinely
+// dynamic runtime value that cannot be lifted to a compile-time constant
+// the way single ownership can, but the MAXIMUM number of simultaneous
+// holders is usually a real, known bound (for fd_table.tkb, at most
+// PROCESS_FD_ENTRY_MAX fd-table slots can each hold one reference to the
+// same shared object). Refusing an increment past that bound, rather than
+// wrapping a bare usize, is the concrete, available-today static-adjacent
+// discipline this library commits to; it does not attempt to verify the
+// count's actual value at compile time, which no known automatic checker
+// -- takibi's included -- does for arbitrary, dynamically-many concurrent
+// holders. See kernel/lib/freelist.tkb's "Current limitations" section
+// for the underlying FreelistCore(N)/synchronization caveats, which apply
+// here unchanged (this file adds no locking of its own either).
+use "kernel/lib/freelist.tkb";
+
+generic struct RefcountSlotMap(N: usize, MAX_REFS: usize) {
+    core: FreelistCore(N);
+    generation: [usize; N];
+    refcount: [usize; N];
+    double_release_count: usize;
+}
+
+fn refcount_pool_init(pool: *RefcountSlotMap(N, MAX_REFS)) {
+    freelist_core_init(&pool.core);
+    let generation = pool.generation;   // decays to *usize, issue #15
+    let refcount = pool.refcount;       // issue #15, as above
+    for i: isize in 0..<N {
+        generation[i] = 0;
+        refcount[i] = 0;
+    }
+    pool.double_release_count = 0;
+}
+
+must_use variant RefcountAllocResult {
+    Full;
+    Allocated((usize, usize));
+}
+
+// Refcount starts at 0: allocating a slot does not by itself count as a
+// holder, mirroring fd_table.tkb's own pre-existing alloc/install split
+// (an object can be allocated and then fail to install its first fd
+// reference, at which point it must be abandoned, not released).
+fn refcount_pool_alloc(pool: *RefcountSlotMap(N, MAX_REFS))
+        -> RefcountAllocResult {
+    match freelist_core_insert(&pool.core) {
+        FreelistPopResult::Empty => { return RefcountAllocResult::Full; }
+        FreelistPopResult::Popped(owner) => {
+            let index: usize = freelist_owner_index(owner);
+            let generation_value: usize = freelist_owner_generation(owner);
+            // The linear proof's job ends here: this pool tracks liveness
+            // itself from now on via refcount, not via holding the
+            // FreelistOwner, so it is deliberately dropped rather than
+            // threaded through the rest of this pool's API.
+            freelist_owner_drop(owner);
+            if (index >= N) { return RefcountAllocResult::Full; }
+            let generation = pool.generation;
+            let refcount = pool.refcount;
+            generation[index as isize] = generation_value;
+            refcount[index as isize] = 0;
+            return RefcountAllocResult::Allocated((index, generation_value));
+        }
+    }
+}
+
+// Returns a slot allocated but never retained back to the free list.
+// Rejects (returns false, no state change) unless generation matches AND
+// the slot genuinely has zero holders -- calling this on a slot with any
+// live holder would silently orphan them, so it refuses rather than
+// guessing what was intended.
+fn refcount_pool_abandon(pool: *RefcountSlotMap(N, MAX_REFS),
+                         index: usize, generation_value: usize) -> bool {
+    if (index >= N) { return false; }
+    let generation = pool.generation;
+    let refcount = pool.refcount;
+    if (generation[index as isize] != generation_value ||
+        generation_value == 0 || refcount[index as isize] != 0) {
+        return false;
+    }
+    generation[index as isize] = 0;
+    freelist_core_remove(&pool.core, freelist_owner_new(index, generation_value));
+    return true;
+}
+
+must_use variant RefcountRetainResult { Invalid; Overflow; Ok; }
+
+fn refcount_pool_retain(pool: *RefcountSlotMap(N, MAX_REFS),
+                        index: usize, generation_value: usize)
+        -> RefcountRetainResult {
+    if (index >= N) { return RefcountRetainResult::Invalid; }
+    let generation = pool.generation;
+    if (generation[index as isize] != generation_value ||
+        generation_value == 0) {
+        return RefcountRetainResult::Invalid;
+    }
+    let refcount = pool.refcount;
+    let current: usize = refcount[index as isize];
+    if (current >= MAX_REFS) {
+        return RefcountRetainResult::Overflow;
+    }
+    refcount[index as isize] = current + 1;
+    return RefcountRetainResult::Ok;
+}
+
+must_use variant RefcountReleaseResult { Invalid; StillHeld; Freed; }
+
+// Invalid covers both a stale/mismatched generation and releasing a slot
+// that already has zero holders -- the latter is a double release. Same
+// reasoning as kernel/lib/slotmap.tkb's slotmap_remove(): the old scan-
+// based fd_table.tkb made a double release of object_references an
+// idempotent no-op (decrementing 0 wrapped were it not guarded, or with
+// the guard, silently did nothing), so this counts the event instead of
+// corrupting the free chain by pushing an already-free slot a second
+// time.
+fn refcount_pool_release(pool: *RefcountSlotMap(N, MAX_REFS),
+                         index: usize, generation_value: usize)
+        -> RefcountReleaseResult {
+    if (index >= N) { return RefcountReleaseResult::Invalid; }
+    let generation = pool.generation;
+    if (generation[index as isize] != generation_value ||
+        generation_value == 0) {
+        return RefcountReleaseResult::Invalid;
+    }
+    let refcount = pool.refcount;
+    let current: usize = refcount[index as isize];
+    if (current == 0) {
+        pool.double_release_count = pool.double_release_count + 1;
+        return RefcountReleaseResult::Invalid;
+    }
+    let next: usize = current - 1;
+    refcount[index as isize] = next;
+    if (next == 0) {
+        generation[index as isize] = 0;
+        freelist_core_remove(&pool.core,
+                             freelist_owner_new(index, generation_value));
+        return RefcountReleaseResult::Freed;
+    }
+    return RefcountReleaseResult::StillHeld;
+}
+
+fn refcount_pool_matches(pool: *RefcountSlotMap(N, MAX_REFS),
+                         index: usize, generation_value: usize) -> bool {
+    if (index >= N || generation_value == 0) { return false; }
+    let generation = pool.generation;
+    return generation[index as isize] == generation_value;
+}
+
+// 0 for a mismatched/stale handle, exactly like the object_references()
+// accessor this replaces already did by checking generation first.
+fn refcount_pool_count(pool: *RefcountSlotMap(N, MAX_REFS),
+                       index: usize, generation_value: usize) -> usize {
+    if (refcount_pool_matches(pool, index, generation_value) == false) {
+        return 0;
+    }
+    let refcount = pool.refcount;
+    return refcount[index as isize];
+}
+
+// Diagnostic/test use (e.g. an end-of-scenario "every slot truly empty"
+// check) -- unlike refcount_pool_count, does not require the caller's own
+// generation, so it also reports a leaked (allocated, still counted, but
+// otherwise-unreachable) slot's nonzero count instead of masking it as 0.
+fn refcount_pool_raw_count(pool: *RefcountSlotMap(N, MAX_REFS),
+                           index: usize) -> usize {
+    if (index >= N) { return 0; }
+    let refcount = pool.refcount;
+    return refcount[index as isize];
+}
+
+fn refcount_pool_double_release_count(pool: *RefcountSlotMap(N, MAX_REFS))
+        -> usize {
+    return pool.double_release_count;
+}
