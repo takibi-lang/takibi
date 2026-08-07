@@ -127,6 +127,10 @@ private let mut syscall_heap_start: usize;
 private let mut syscall_heap_limit: usize;
 private let mut clone_parent_inetd_mode: bool;
 private let mut clone_file_state_live: bool;
+// GitHub issue #244: set by whichever syscall handler returns
+// SyscallAction::Block, read by kernel_syscall_block_return() to decide
+// which of the two now-sharing-one-trampoline blockers to invoke.
+private let mut syscall_block_reason: ProcessWaitReason = ProcessWaitReason::None;
 // GitHub issue #245: the fd-table child slot for the clone in flight (if
 // any), stashed here because kernel_syscall_clone_files_reap() takes no
 // parameters of its own -- same pattern as kernel/mm/process_image.tkb's
@@ -945,8 +949,18 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
 
 // Step 2/8: action 5 (.Lsyscall_block). Entered via a plain tail branch, not
 // `bl` -- there is no caller to return to, every path ends in a noreturn call.
+// GitHub issue #244: this single action-5 trampoline is now shared by two
+// different blockers (the takibi UART-wait syscall and wait4()) rather
+// than adding a 9th hand-written assembly action branch for the second
+// one -- whichever syscall handler decided to return SyscallAction::Block
+// records which reason first.
 fn kernel_syscall_block_return(frame_sp: usize) {
-    let next_sp: usize = kernel_process_block_uart(frame_sp);
+    let mut next_sp: usize = 0;
+    if (syscall_block_reason == ProcessWaitReason::ChildExit) {
+        next_sp = kernel_process_block_wait4(frame_sp);
+    } else {
+        next_sp = kernel_process_block_uart(frame_sp);
+    }
     if (next_sp == 0) {
         kernel_syscall_fail_stop();
     }
@@ -1057,6 +1071,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             enable_irq();
             return SyscallAction::Resume(value);
         }
+        syscall_block_reason = ProcessWaitReason::UartRx;
         return SyscallAction::Block;
     }
 
@@ -2155,16 +2170,32 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return SyscallAction::Exit(x0);
     }
     if (number == AARCH64_NR_WAIT4) {
-        // The current one-child clone model resumes the parent directly
-        // after child exit.  Keep the completed child status until the
-        // parent's wait4 call, which is sufficient for ash's synchronous
-        // external-command path without pretending to provide a blocking
-        // multi-child scheduler yet.
+        // GitHub issue #244: x0's expected pid is the live child's own
+        // pid if it hasn't exited yet, or the last reaped child's pid if
+        // it has -- kernel_process_current_child_pid() alone would wrongly
+        // read back 0 once reaped (has_child cleared), and a fixed
+        // literal (this used to be the literal 2, the only pid the old
+        // two-process model could ever produce) is wrong for any process
+        // other than the original root.
+        let mut expected_pid: usize = kernel_process_current_child_pid();
+        if (expected_pid == 0) {
+            expected_pid = kernel_process_last_child_pid();
+        }
         if (kernel_process_is_child() || x0 != 0xFFFFFFFFFFFFFFFF &&
-            x0 != kernel_process_current_child_pid() || x2 != 0) {
+            x0 != expected_pid || x2 != 0) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
         if (kernel_process_child_waitable() == false) {
+            // GitHub issue #244: block for real instead of returning
+            // -ECHILD immediately -- only reached when the scheduler
+            // preempted the child and switched back to this parent
+            // before the child's own exit did so on its own. A parent
+            // with no child at all (never forked, or already reaped and
+            // not waited on again) still fails fast.
+            if (kernel_process_current_has_live_child()) {
+                syscall_block_reason = ProcessWaitReason::ChildExit;
+                return SyscallAction::Block;
+            }
             return SyscallAction::Resume(LINUX_ECHILD);
         }
         if (x1 != 0) {
@@ -2178,12 +2209,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     }
                     let consumed_status: usize =
                         kernel_process_child_wait_status();
-                    return SyscallAction::Resume(2);
+                    return SyscallAction::Resume(
+                        kernel_process_last_child_pid());
                 }
             }
         }
         let ignored_status: usize = kernel_process_child_wait_status();
-        return SyscallAction::Resume(2);
+        return SyscallAction::Resume(kernel_process_last_child_pid());
     }
     if (number == 17) {
         // getcwd(): HTTPd immediately changes to its configured root; `/` is

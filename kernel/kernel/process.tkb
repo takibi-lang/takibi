@@ -4,7 +4,13 @@ use "kernel/lib/freelist.tkb";
 
 enum ProcessState: u8 { Ready; Running; Blocked; Exited; }
 enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
-enum ProcessWaitReason: u8 { None; UartRx; }
+// GitHub issue #244: ChildExit lets wait4() actually block a parent whose
+// child hasn't exited yet, instead of returning -ECHILD immediately (safe
+// only when the scheduler never ran the parent before the child's own
+// exit switched back to it -- no longer true once the scheduler is
+// enabled across a fork, since a timer IRQ can preempt the child and
+// hand control to the parent early).
+enum ProcessWaitReason: u8 { None; UartRx; ChildExit; }
 
 // GitHub issue #245: 3 is the minimum that unblocks #241 (a shell forks an
 // external command, which itself forks a child: 3 concurrently scheduled
@@ -584,6 +590,11 @@ private let mut execution_child_live: bool;
 private let mut execution_clone_calls: usize;
 private let mut execution_child_exit_count: usize;
 private let mut execution_child_exit_status: usize;
+// GitHub issue #244: wait4()'s own return value is the reaped child's
+// pid, per POSIX -- captured here since by the time wait4() actually
+// runs, the child has already been reaped and scheduled_process_child no
+// longer names it.
+private let mut execution_last_child_pid: usize;
 private let mut execution_child_waitable: bool;
 private let mut execution_child_exec_image_live: bool;
 private let mut execution_reschedule_pending: bool;
@@ -643,6 +654,7 @@ fn kernel_process_execution_reset() {
     execution_clone_calls = 0;
     execution_child_exit_count = 0;
     execution_child_exit_status = 0;
+    execution_last_child_pid = 0;
     execution_child_waitable = false;
     execution_child_exec_image_live = false;
     execution_timer_switches = 0;
@@ -742,6 +754,14 @@ fn kernel_process_schedule(current_sp: usize) -> usize {
     return kernel_process_switch_to_parent(current_sp);
 }
 
+// GitHub issue #244: distinguishes "no child at all" (wait4 should fail
+// with -ECHILD immediately, same as always) from "a child exists but
+// hasn't exited yet" (wait4 should block instead).
+fn kernel_process_current_has_live_child() -> bool {
+    return execution_current_live &&
+           scheduled_process_has_child[execution_current_handle.pool_index];
+}
+
 fn kernel_process_current_has_relative() -> bool {
     if (execution_current_live == false) { return false; }
     let slot: usize = execution_current_handle.pool_index;
@@ -810,6 +830,46 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
     }
     process_image_activate_root(parent.pool_index);
     return scheduled_process_saved_sp[parent.pool_index];
+}
+
+// GitHub issue #244: the mirror image of kernel_process_block_uart() --
+// blocks current (the parent calling wait4()) and switches to current's
+// own live child instead, so the child can keep running toward its own
+// exit. Only valid when that child is Ready (yielded, not itself blocked
+// or already exited): a scheduler preemption is the only way the parent
+// reaches wait4() before the child's own kernel_process_child_exit() has
+// already switched back on its own.
+fn kernel_process_block_wait4(current_sp: usize) -> usize {
+    if (execution_current_live == false ||
+        scheduled_process_has_child[execution_current_handle.pool_index] ==
+            false) {
+        return 0;
+    }
+    let mut parent: ProcessHandle = execution_current_handle;
+    let mut child: ProcessHandle = scheduled_process_child[parent.pool_index];
+    if (scheduled_process_state[child.pool_index] != ProcessSlotState::Ready) {
+        return 0;
+    }
+    scheduled_process_saved_sp[parent.pool_index] = current_sp;
+    match scheduled_process_running_take(parent) {
+        ScheduledProcessRunningTakeResult::Missing => { return 0; }
+        ScheduledProcessRunningTakeResult::Running(resources) => {
+            let (owner, running) = resources;
+            let blocked = scheduled_process_block(owner, running);
+            scheduled_process_wait_reason[owner.pool_index] =
+                ProcessWaitReason::ChildExit;
+            match scheduled_process_put(owner, blocked) {
+                ScheduledProcessPutResult::Conflict => { return 0; }
+                ScheduledProcessPutResult::Stored => {}
+            }
+        }
+    }
+    if (kernel_process_start_handle(child) == false) {
+        return 0;
+    }
+    execution_current_handle = child;
+    process_image_activate_root(child.pool_index);
+    return scheduled_process_saved_sp[child.pool_index];
 }
 
 // The UART IRQ transfers one byte directly into the suspended syscall frame.
@@ -1083,6 +1143,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
     }
     let mut child: ProcessHandle = execution_current_handle;
     let mut parent: ProcessHandle = scheduled_process_parent[child.pool_index];
+    execution_last_child_pid = child.pool_index + 1;
     match scheduled_process_running_take(child) {
         ScheduledProcessRunningTakeResult::Missing => {}
         ScheduledProcessRunningTakeResult::Running(resources) => {
@@ -1103,6 +1164,29 @@ fn kernel_process_child_exit(status: usize) -> usize {
                                 false;
                         }
                     }
+                }
+            }
+        }
+    }
+    // GitHub issue #244: the parent may be genuinely Blocked here (wait4
+    // called kernel_process_block_wait4() before this child had exited),
+    // not just Ready from an ordinary scheduler preemption -- wake it
+    // first if so, since kernel_process_start_handle() below only accepts
+    // a Ready handle.
+    if (scheduled_process_state[parent.pool_index] ==
+            ProcessSlotState::Blocked &&
+        scheduled_process_wait_reason[parent.pool_index] ==
+            ProcessWaitReason::ChildExit) {
+        match scheduled_process_blocked_take(parent) {
+            ScheduledProcessBlockedTakeResult::Missing => {}
+            ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+                let (owner, blocked) = resources;
+                let ready = scheduled_process_wake(owner, blocked);
+                scheduled_process_wait_reason[owner.pool_index] =
+                    ProcessWaitReason::None;
+                match scheduled_process_put(owner, ready) {
+                    ScheduledProcessPutResult::Conflict => {}
+                    ScheduledProcessPutResult::Stored => {}
                 }
             }
         }
@@ -1155,6 +1239,10 @@ fn kernel_process_scheduler_acceptance_evidence() -> bool {
 
 fn kernel_process_child_exit_count() -> usize {
     return execution_child_exit_count;
+}
+
+fn kernel_process_last_child_pid() -> usize {
+    return execution_last_child_pid;
 }
 
 // GitHub issue #245: execution_clone_calls is a single counter shared by
