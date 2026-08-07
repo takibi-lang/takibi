@@ -24,7 +24,18 @@
 // freelist.tkb) -- only `data` (the payload storage) is still a caller-
 // owned array here, for the alignment reasons documented there.
 
-use "linux_user/freelist_generic/freelist.tkb";
+// `use`s kernel/lib/freelist.tkb directly, not a re-prototyped local
+// copy: this file's own local freelist.tkb WAS that copy (issue #207's
+// design-prototyping stage, per AGENTS.md's linux_user/ charter), but
+// kernel/lib/freelist.tkb has since diverged from it (freelist_owner_
+// into_parts/freelist_owner_drop, added for kernel/ call sites that
+// expose their own owner type -- see that file's own header), so testing
+// the local copy stopped being real regression coverage of what kernel/
+// actually ships. See linux_user/slotmap/'s own header for the fuller
+// story of why this matters (issue #207's real double-free bugs were
+// only found via a multi-hour hardware bisection, with no fast test
+// exercising the actual library in between).
+use "kernel/lib/freelist.tkb";
 
 struct Point {
     x: usize;
@@ -39,7 +50,62 @@ const POINT_POOL_N: usize = 2;
 private let mut point_pool: Freelist(Point, POINT_POOL_N);
 private let mut point_data_store: [Point; POINT_POOL_N];
 
+// Dedicated single-slot pool for freelist_owner_into_parts()'s own round
+// trip -- kept separate from usize_pool/point_pool below so this probe
+// cannot perturb their own already-established LIFO/exhaustion assertions.
+// Neither Freelist(T, N)'s own public API (freelist_insert/_remove/_ref)
+// nor kernel/lib/slotmap.tkb's SlotMap (which extracts index/generation
+// via the borrow-mode freelist_owner_index/_generation instead, then
+// explicitly freelist_owner_drop()s the original) ever calls into_parts,
+// so without this, kernel/lib/freelist.tkb's own addition over the
+// original design this file prototyped had zero coverage against the
+// real file -- only kernel/mm/page.tkb/kernel/kernel/process.tkb/kernel/
+// mm/address_space.tkb/kernel/net/tcp.tkb's own real (SlotMap-wrapping)
+// use of it, all only exercised by a full RPi5 hardware boot.
+const PARTS_POOL_N: usize = 1;
+private let mut parts_pool: FreelistCore(PARTS_POOL_N);
+
 fn app_main() {
+    freelist_core_init(&parts_pool);
+    let probe = match freelist_core_insert(&parts_pool) {
+        FreelistPopResult::Empty => { uart_puts("parts probe alloc failed\n"); return; }
+        FreelistPopResult::Popped(o) => { o }
+    };
+    let probe_index_before: usize = freelist_owner_index(probe);
+    let probe_generation_before: usize = freelist_owner_generation(probe);
+    let (probe_index, probe_generation) = freelist_owner_into_parts(probe);
+    uart_puts("into_parts preserves index: ");
+    uart_print_bool(probe_index == probe_index_before);
+    uart_puts("\n");
+    uart_puts("into_parts preserves generation: ");
+    uart_print_bool(probe_generation == probe_generation_before);
+    uart_puts("\n");
+    // The slot is NOT back on the free list yet -- into_parts only
+    // unwraps the linear proof, it does not release (see that function's
+    // own doc comment: the paired reconstruction is freelist_owner_new,
+    // used here exactly as kernel/mm/page.tkb's page_alloc() does with
+    // its own PageOwner).
+    uart_puts("pool still full after into_parts (no release): ");
+    match freelist_core_insert(&parts_pool) {
+        FreelistPopResult::Empty => { uart_puts("true\n"); }
+        FreelistPopResult::Popped(o) => {
+            uart_puts("false (wrongly had room)\n");
+            freelist_core_remove(&parts_pool, o);
+        }
+    }
+    // Reconstruct and release through the normal path, proving the round
+    // trip leaves the owner just as usable as the original.
+    freelist_core_remove(&parts_pool,
+                         freelist_owner_new(probe_index, probe_generation));
+    uart_puts("pool free again after releasing the reconstructed owner: ");
+    match freelist_core_insert(&parts_pool) {
+        FreelistPopResult::Empty => { uart_puts("false (wrongly still full)\n"); }
+        FreelistPopResult::Popped(o) => {
+            uart_puts("true\n");
+            freelist_core_remove(&parts_pool, o);
+        }
+    }
+
     freelist_init(&usize_pool, usize_data_store as []usize);
 
     let a = match freelist_insert(&usize_pool) {
@@ -176,4 +242,12 @@ fn app_main() {
     freelist_remove(&point_pool, p2);
 
     uart_puts("done\n");
+}
+
+fn uart_print_bool(value: bool) {
+    if (value) {
+        uart_puts("true");
+    } else {
+        uart_puts("false");
+    }
 }

@@ -1,71 +1,108 @@
-// Exercises freelist_pool_core.tkb's O(1) free list: allocate three slots,
-// free the first two in order (a, then b), then reallocate three times.
-// A free list hands back the most-recently-freed slot first (LIFO), so the
-// reuse order is b's slot, then a's slot, then the never-yet-used slot --
-// the opposite of what page_pool.tkb's lowest-free-index linear scan would
+// Exercises kernel/lib/freelist.tkb's FreelistCore(N) directly (not
+// wrapped in SlotMap/RefcountSlotMap -- see linux_user/slotmap/ and
+// linux_user/refcount_slotmap/ for those): allocate three slots, free the
+// first two in order (a, then b), then reallocate three times. A free
+// list hands back the most-recently-freed slot first (LIFO), so the reuse
+// order is b's slot, then a's slot, then the never-yet-used slot -- the
+// opposite of what page_pool.tkb's lowest-free-index linear scan would
 // produce from the same sequence. That divergence is the point: it proves
 // this is a genuinely different mechanism, not a renamed copy.
 //
 // Also demonstrates per-slot content that this caller (not
-// freelist_pool_core.tkb) decides: FreelistOwner stays index+generation only
-// (the "core" never learns what a usize payload even means), and this file
-// keeps its own [usize; POOL_COUNT] array plus payload_set/payload_get
-// accessors keyed by slot_index(owner) -- the same split page_pool_core.tkb
-// already uses between PageOwner (identity/proof) and the separate
-// page_pool byte array (content), via page_bytes(owner). The reuse
-// sequence below also shows a consequence of that split worth knowing:
-// freeing a slot does not clear its content, so a freshly (re)allocated
-// owner can observe the previous occupant's stale payload until this file
-// explicitly overwrites it -- the free list only guarantees index/
-// generation uniqueness, never content freshness.
+// kernel/lib/freelist.tkb) decides: FreelistOwner stays index+generation
+// only (FreelistCore never learns what a usize payload even means), and
+// this file keeps its own [usize; POOL_COUNT] array plus payload_set/
+// payload_get accessors keyed by freelist_owner_index(owner) -- the same
+// split page_pool_core.tkb already uses between PageOwner (identity/
+// proof) and the separate page_pool byte array (content), via
+// page_bytes(owner), and the exact pattern a real caller like
+// kernel/mm/page.tkb uses (physical page CONTENT lives in its own byte
+// array, entirely separate from FreelistCore/SlotMap's own bookkeeping).
+// The reuse sequence below also shows a consequence of that split worth
+// knowing: freeing a slot does not clear its content, so a freshly
+// (re)allocated owner can observe the previous occupant's stale payload
+// until this file explicitly overwrites it -- the free list only
+// guarantees index/generation uniqueness, never content freshness.
+//
+// History: this test originally used its own local, non-generic
+// freelist_pool_core.tkb (push/pop-named, mirroring MSVC STL's
+// stdext::freelist, GitHub issue #207's first prototype, commit 91ad10c)
+// written BEFORE const generics existed, specifically to prove the
+// ownership machinery could accommodate an index-linked list at all
+// before touching kernel/. That question was answered (yes) and
+// superseded by the real generic FreelistCore(N)/Freelist(T, N) design
+// (see linux_user/freelist_generic/'s own history) that kernel/lib/
+// freelist.tkb now is; freelist_pool_core.tkb is removed and this file
+// exercises the real, current library directly instead of a frozen
+// prototype copy, so a future regression in FreelistCore itself shows up
+// here, not just in a full kernel/ boot.
+use "kernel/lib/freelist.tkb";
 
-use "linux_user/freelist_pool/freelist_pool_core.tkb";
-
+const POOL_COUNT: usize = 4;
+private let mut pool: FreelistCore(POOL_COUNT);
 private let mut slot_payload: [usize; POOL_COUNT];
 
+// freelist_owner_index() returns a plain usize, not a refined
+// {0..<POOL_COUNT as usize} (kernel/lib/freelist.tkb's FreelistOwner.index
+// field is plain usize -- see that file's own header on FreelistCore(N)'s
+// embedded next_free array losing checked indexing to issue #15), so the
+// original design's slot_index()'s own refined return type is gone along
+// with it. Narrow explicitly, matching this codebase's usual `if (v < N)`
+// idiom -- out of range never actually happens (every owner this file
+// ever holds came from freelist_core_insert on this exact pool), but
+// --forbid-trap needs the proof spelled out regardless.
 fn payload_set(owner: borrow FreelistOwner[allocation], value: usize) {
-    slot_payload[slot_index(owner)] = value;
+    let index: usize = freelist_owner_index(owner);
+    if (index < POOL_COUNT) {
+        let checked: {0..<POOL_COUNT as usize} = index;
+        slot_payload[checked] = value;
+    }
 }
 
 fn payload_get(owner: borrow FreelistOwner[allocation]) -> usize {
-    return slot_payload[slot_index(owner)];
+    let index: usize = freelist_owner_index(owner);
+    if (index < POOL_COUNT) {
+        let checked: {0..<POOL_COUNT as usize} = index;
+        return slot_payload[checked];
+    }
+    return 0;
 }
 
 fn app_main() {
-    freelist_pool_init();
+    freelist_core_init(&pool);
     uart_puts("freelist_pool\n");
 
-    let a: exists sa: usize. FreelistOwner[sa] = match freelist_pop() {
+    let a: exists sa: usize. FreelistOwner[sa] = match freelist_core_insert(&pool) {
         FreelistPopResult::Empty => {
             uart_puts("alloc a failed\n");
             return;
         }
-        FreelistPopResult::Allocated(o) => { o }
+        FreelistPopResult::Popped(o) => { o }
     };
-    let b: exists sb: usize. FreelistOwner[sb] = match freelist_pop() {
+    let b: exists sb: usize. FreelistOwner[sb] = match freelist_core_insert(&pool) {
         FreelistPopResult::Empty => {
             uart_puts("alloc b failed\n");
-            freelist_push(a);
+            freelist_core_remove(&pool, a);
             return;
         }
-        FreelistPopResult::Allocated(o) => { o }
+        FreelistPopResult::Popped(o) => { o }
     };
-    let c: exists sc: usize. FreelistOwner[sc] = match freelist_pop() {
+    let c: exists sc: usize. FreelistOwner[sc] = match freelist_core_insert(&pool) {
         FreelistPopResult::Empty => {
             uart_puts("alloc c failed\n");
-            freelist_push(a);
-            freelist_push(b);
+            freelist_core_remove(&pool, a);
+            freelist_core_remove(&pool, b);
             return;
         }
-        FreelistPopResult::Allocated(o) => { o }
+        FreelistPopResult::Popped(o) => { o }
     };
 
     uart_puts("allocated: ");
-    uart_print(slot_index(a));
+    uart_print(freelist_owner_index(a));
     uart_puts(" ");
-    uart_print(slot_index(b));
+    uart_print(freelist_owner_index(b));
     uart_puts(" ");
-    uart_print(slot_index(c));
+    uart_print(freelist_owner_index(c));
     uart_puts("\n");
 
     payload_set(a, 100);
@@ -79,50 +116,50 @@ fn app_main() {
     uart_print(payload_get(c));
     uart_puts("\n");
 
-    freelist_push(a);
-    freelist_push(b);
+    freelist_core_remove(&pool, a);
+    freelist_core_remove(&pool, b);
 
-    let r1: exists s1: usize. FreelistOwner[s1] = match freelist_pop() {
+    let r1: exists s1: usize. FreelistOwner[s1] = match freelist_core_insert(&pool) {
         FreelistPopResult::Empty => {
             uart_puts("reuse 1 failed\n");
-            freelist_push(c);
+            freelist_core_remove(&pool, c);
             return;
         }
-        FreelistPopResult::Allocated(o) => { o }
+        FreelistPopResult::Popped(o) => { o }
     };
-    let r2: exists s2: usize. FreelistOwner[s2] = match freelist_pop() {
+    let r2: exists s2: usize. FreelistOwner[s2] = match freelist_core_insert(&pool) {
         FreelistPopResult::Empty => {
             uart_puts("reuse 2 failed\n");
-            freelist_push(r1);
-            freelist_push(c);
+            freelist_core_remove(&pool, r1);
+            freelist_core_remove(&pool, c);
             return;
         }
-        FreelistPopResult::Allocated(o) => { o }
+        FreelistPopResult::Popped(o) => { o }
     };
-    let r3: exists s3: usize. FreelistOwner[s3] = match freelist_pop() {
+    let r3: exists s3: usize. FreelistOwner[s3] = match freelist_core_insert(&pool) {
         FreelistPopResult::Empty => {
             uart_puts("reuse 3 failed\n");
-            freelist_push(r1);
-            freelist_push(r2);
-            freelist_push(c);
+            freelist_core_remove(&pool, r1);
+            freelist_core_remove(&pool, r2);
+            freelist_core_remove(&pool, c);
             return;
         }
-        FreelistPopResult::Allocated(o) => { o }
+        FreelistPopResult::Popped(o) => { o }
     };
 
     uart_puts("reused (LIFO order: b's slot, then a's slot, ");
     uart_puts("then never-used slot): ");
-    uart_print(slot_index(r1));
+    uart_print(freelist_owner_index(r1));
     uart_puts(" ");
-    uart_print(slot_index(r2));
+    uart_print(freelist_owner_index(r2));
     uart_puts(" ");
-    uart_print(slot_index(r3));
+    uart_print(freelist_owner_index(r3));
     uart_puts("\ngenerations: ");
-    uart_print(slot_generation(r1));
+    uart_print(freelist_owner_generation(r1));
     uart_puts(" ");
-    uart_print(slot_generation(r2));
+    uart_print(freelist_owner_generation(r2));
     uart_puts(" ");
-    uart_print(slot_generation(r3));
+    uart_print(freelist_owner_generation(r3));
     uart_puts("\n");
 
     uart_puts("stale payloads (r1 sees b's old 200, r2 sees a's old 100, ");
@@ -145,21 +182,61 @@ fn app_main() {
     uart_print(payload_get(r3));
     uart_puts("\n");
 
-    match freelist_pop() {
+    match freelist_core_insert(&pool) {
         FreelistPopResult::Empty => {
             uart_puts("pool exhausted as expected\n");
         }
-        FreelistPopResult::Allocated(o) => {
+        FreelistPopResult::Popped(o) => {
             uart_puts("unexpected extra allocation: ");
-            uart_print(slot_index(o));
+            uart_print(freelist_owner_index(o));
             uart_puts("\n");
-            freelist_push(o);
+            freelist_core_remove(&pool, o);
         }
     }
 
-    freelist_push(r1);
-    freelist_push(r2);
-    freelist_push(r3);
-    freelist_push(c);
+    // Real, current double-free coverage (issue #207's actual bug shape --
+    // see linux_user/slotmap/'s own header for the full story): unlike
+    // SlotMap/RefcountSlotMap, bare FreelistCore has no occupant tracking
+    // of its own to detect this, so a caller of FreelistCore directly (the
+    // shape kernel/mm/page.tkb itself uses) is exactly as exposed to it as
+    // page.tkb's own process_image.tkb bug was. Demonstrated, not asserted
+    // against a counter that does not exist at this layer: freeing c AGAIN
+    // via a fabricated owner corrupts the free chain (the same index is
+    // now reachable twice), so the FOLLOWING insert legitimately hands out
+    // c's index a second time while c's own real owner is still logically
+    // "live" from this test's perspective -- the exact aliasing shape that
+    // reached real RPi5 hardware in issue #207, reproduced here in
+    // milliseconds instead of a multi-hour hardware bisection.
+    let dup: exists sd: usize. FreelistOwner[sd] = freelist_owner_new(
+        freelist_owner_index(c), freelist_owner_generation(c));
+    freelist_core_remove(&pool, dup);
+    let aliased: exists se: usize. FreelistOwner[se] = match freelist_core_insert(&pool) {
+        FreelistPopResult::Empty => {
+            uart_puts("alias probe: unexpectedly empty\n");
+            freelist_core_remove(&pool, r1);
+            freelist_core_remove(&pool, r2);
+            freelist_core_remove(&pool, r3);
+            freelist_core_remove(&pool, c);
+            return;
+        }
+        FreelistPopResult::Popped(o) => { o }
+    };
+    uart_puts("bare FreelistCore double free aliases c's index: ");
+    uart_print_bool(freelist_owner_index(aliased) == freelist_owner_index(c));
+    uart_puts("\n");
+    freelist_core_remove(&pool, aliased);
+
+    freelist_core_remove(&pool, r1);
+    freelist_core_remove(&pool, r2);
+    freelist_core_remove(&pool, r3);
+    freelist_core_remove(&pool, c);
     uart_puts("done\n");
+}
+
+fn uart_print_bool(value: bool) {
+    if (value) {
+        uart_puts("true");
+    } else {
+        uart_puts("false");
+    }
 }

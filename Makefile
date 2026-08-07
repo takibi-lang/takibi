@@ -164,13 +164,12 @@ LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)
 $(LINUX_USER_DIR)/checked_usize/checked_usize_exe.o: $(LINUX_USER_DIR)/common/checked_usize.tkb
 $(LINUX_USER_DIR)/elf64_validate/elf64_validate_exe.o: $(LINUX_USER_DIR)/common/elf64_validate.tkb $(LINUX_USER_DIR)/common/checked_usize.tkb
 $(LINUX_USER_DIR)/page_pool/page_pool_exe.o: $(LINUX_USER_DIR)/page_pool/page_pool_core.tkb
-$(LINUX_USER_DIR)/freelist_pool/freelist_pool_exe.o: $(LINUX_USER_DIR)/freelist_pool/freelist_pool_core.tkb
 $(LINUX_USER_DIR)/inet_checksum/inet_checksum_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 
-# Freelist redesign follow-up: --forbid-trap now PASSES for this target --
-# but this is NOT a safety improvement over the earlier #213/#215-tracked
-# trap sites, and must not be read as one.
+# Freelist redesign follow-up: --forbid-trap now PASSES for the four
+# targets below -- but this is NOT a safety improvement over the earlier
+# #213/#215-tracked trap sites, and must not be read as one.
 # freelist.tkb's FreelistCore(N) now embeds its bookkeeping array
 # (next_free: [usize; N]) directly as a struct field; reading that field
 # decays to a raw, UNCHECKED pointer (lib/type_inf.ml's FieldGet TArray
@@ -185,18 +184,22 @@ $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_check
 # indexing (see freelist.tkb's own header comment) -- only the internal
 # bookkeeping array traded that away, by deliberate choice, to avoid
 # forcing collection-library callers to declare index storage themselves.
-# No override needed any more (this target now uses the default %_exe.o
-# pattern rule below, --forbid-trap included) -- only an extra
-# prerequisite on freelist.tkb, since freelist_generic.tkb `use`s it and
-# the default pattern rule doesn't know about that.
-$(LINUX_USER_DIR)/freelist_generic/freelist_generic_exe.o: $(LINUX_USER_DIR)/freelist_generic/freelist.tkb
-# slotmap/refcount_slotmap deliberately `use` kernel/lib/'s own production
-# files directly (not a re-prototyped linux_user/ copy, unlike
-# freelist_pool/freelist_generic above), so these two are genuine real
-# regression coverage of what kernel/ actually ships -- see issue #207's
-# HISTORY.md entry for why that copy-vs-use distinction mattered here (two
-# real double frees were only found via a multi-hour real-hardware boot-log
-# bisection with no fast test catching them first).
+#
+# All four of freelist_pool/freelist_generic/slotmap/refcount_slotmap
+# `use` kernel/lib/'s own production files directly (not a re-prototyped
+# linux_user/-local copy, which freelist_pool/freelist_generic originally
+# were -- issue #207's design-prototyping stage, per AGENTS.md's
+# linux_user/ charter), so these are genuine real regression coverage of
+# what kernel/ actually ships. See HISTORY.md's 2026-08-07 issue #207/
+# #242 entry for why that copy-vs-use distinction mattered here (two real
+# double frees were only found via a multi-hour real-hardware boot-log
+# bisection with no fast test catching them first). No override of the
+# default %_exe.o pattern rule needed (--forbid-trap included) -- only an
+# extra prerequisite on the kernel/lib/ files each one `use`s, since the
+# default pattern rule doesn't know about a `use` outside a test's own
+# directory.
+$(LINUX_USER_DIR)/freelist_pool/freelist_pool_exe.o: kernel/lib/freelist.tkb
+$(LINUX_USER_DIR)/freelist_generic/freelist_generic_exe.o: kernel/lib/freelist.tkb
 $(LINUX_USER_DIR)/slotmap/slotmap_exe.o: kernel/lib/slotmap.tkb kernel/lib/freelist.tkb
 $(LINUX_USER_DIR)/refcount_slotmap/refcount_slotmap_exe.o: kernel/lib/refcount_slotmap.tkb kernel/lib/freelist.tkb
 $(LINUX_USER_DIR)/ip_parse/ip_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
