@@ -2,37 +2,54 @@ use "kernel/mm/page.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/fs/elf64.tkb";
 
-private let mut image_page_indices: [usize; BOOT_PAGE_COUNT * 2];
-private let mut image_l3_indices: [usize; BOOT_PAGE_COUNT * 2];
+// GitHub issue #245: must match kernel/kernel/process.tkb's
+// KERNEL_PROCESS_MAX -- root index == that file's ProcessHandle.pool_index
+// throughout this file, so every scheduled process gets its own page-table
+// root. Kept as an independent literal (not derived from the other file's
+// constant) because top-level const initializers here cannot reference
+// another file's identifier in an arithmetic expression -- same reason
+// kernel/fs/ext2/ext2.tkb's EXT2_MAX_FILE_SIZE stayed a literal.
+const PROCESS_IMAGE_ROOT_MAX: usize = 3;
+
+private let mut image_page_indices: [usize; BOOT_PAGE_COUNT * PROCESS_IMAGE_ROOT_MAX];
+private let mut image_l3_indices: [usize; BOOT_PAGE_COUNT * PROCESS_IMAGE_ROOT_MAX];
 private let mut process_image_zero_page: [u8; PAGE_SIZE];
 private let mut clone_page_indices: [usize; 512];
 private let mut clone_l3_indices: [usize; 512];
 private let mut clone_page_count: usize;
 private let mut clone_last_reaped_count: usize;
+// GitHub issue #245: the clone in flight (if any) copies from whichever
+// root was active when process_image_clone_vm_begin() was called into an
+// explicitly chosen destination root -- both stashed here since
+// process_image_clone_vm_reap() (and the rollback/growth-release helpers
+// it calls) take no parameters of their own, matching process_clone_vm_
+// store's own single-in-flight-clone design.
+private let mut clone_source_root: usize;
+private let mut clone_dest_root: usize;
 // The active static-PIE image is the only process-image user of root 0.
 // Its initial mappings are recorded at map time; pages faulted into its
 // reserved stack are appended here so process_image_unmap releases them too.
-private let mut process_image_active_page_count: [usize; 2];
-private let mut process_image_stack_lowest_l3: [usize; 2];
-private let mut process_image_stack_growth_active: [bool; 2];
-private let mut process_image_growth_page_indices: [usize; 128];
-private let mut process_image_growth_page_count: [usize; 2];
+private let mut process_image_active_page_count: [usize; PROCESS_IMAGE_ROOT_MAX];
+private let mut process_image_stack_lowest_l3: [usize; PROCESS_IMAGE_ROOT_MAX];
+private let mut process_image_stack_growth_active: [bool; PROCESS_IMAGE_ROOT_MAX];
+private let mut process_image_growth_page_indices: [usize; 64 * PROCESS_IMAGE_ROOT_MAX];
+private let mut process_image_growth_page_count: [usize; PROCESS_IMAGE_ROOT_MAX];
 private let mut process_image_target_root: usize = 0;
 
-fn process_image_root_index() -> {0..<2 as usize} {
-    if (process_image_target_root < 2) {
-        let root: {0..<2 as usize} = process_image_target_root;
+fn process_image_root_index() -> {0..<PROCESS_IMAGE_ROOT_MAX as usize} {
+    if (process_image_target_root < PROCESS_IMAGE_ROOT_MAX) {
+        let root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} = process_image_target_root;
         return root;
     }
     return 0;
 }
 
 fn process_image_context_index(slot: usize)
-        -> {0..<BOOT_PAGE_COUNT * 2 as usize} {
-    if (slot < BOOT_PAGE_COUNT && process_image_target_root < 2) {
+        -> {0..<BOOT_PAGE_COUNT * PROCESS_IMAGE_ROOT_MAX as usize} {
+    if (slot < BOOT_PAGE_COUNT && process_image_target_root < PROCESS_IMAGE_ROOT_MAX) {
         let index: usize = process_image_target_root * BOOT_PAGE_COUNT + slot;
-        if (index < BOOT_PAGE_COUNT * 2) {
-            let checked: {0..<BOOT_PAGE_COUNT * 2 as usize} = index;
+        if (index < BOOT_PAGE_COUNT * PROCESS_IMAGE_ROOT_MAX) {
+            let checked: {0..<BOOT_PAGE_COUNT * PROCESS_IMAGE_ROOT_MAX as usize} = index;
             return checked;
         }
     }
@@ -40,11 +57,11 @@ fn process_image_context_index(slot: usize)
 }
 
 fn process_image_growth_index(slot: usize)
-        -> {0..<128 as usize} {
-    if (slot < 64 && process_image_target_root < 2) {
+        -> {0..<64 * PROCESS_IMAGE_ROOT_MAX as usize} {
+    if (slot < 64 && process_image_target_root < PROCESS_IMAGE_ROOT_MAX) {
         let index: usize = process_image_target_root * 64 + slot;
-        if (index < 128) {
-            let checked: {0..<128 as usize} = index;
+        if (index < 64 * PROCESS_IMAGE_ROOT_MAX) {
+            let checked: {0..<64 * PROCESS_IMAGE_ROOT_MAX as usize} = index;
             return checked;
         }
     }
@@ -153,14 +170,15 @@ fn process_clone_vm_take() -> ProcessCloneVmValue {
 }
 
 fn process_clone_vm_rollback(count: usize) {
+    let dest: usize = clone_dest_root;
     for i: usize in 0..<count {
         if (i < 512) {
             let l3_index: usize = clone_l3_indices[i];
             let child_page: usize = clone_page_indices[i];
             if (l3_index < 512 && child_page < BOOT_PAGE_COUNT) {
-                address_space_pte_write(1, l3_index, 0);
+                address_space_pte_write(dest, l3_index, 0);
                 address_space_tlb_invalidate(
-                    1, USER_TEXT_VA + l3_index * PAGE_SIZE);
+                    dest, USER_TEXT_VA + l3_index * PAGE_SIZE);
                 page_transferred_release(child_page);
             }
         }
@@ -168,26 +186,50 @@ fn process_clone_vm_rollback(count: usize) {
     clone_page_count = 0;
 }
 
-fn process_image_clone_vm_begin() -> ProcessCloneVmResult !{unsafe} {
+// GitHub issue #245: dest_root is the caller's choice, not a fixed "root
+// 1" -- process.tkb's kernel_process_clone_begin() allocates the child's
+// process-table slot first and passes that slot's index straight through,
+// so root index == ProcessHandle.pool_index holds everywhere. The source
+// is always process_image_target_root (whichever root is currently
+// active), not a fixed "root 0" -- a process running on any root can
+// fork, not just the one on root 0.
+fn process_image_narrow_root(value: usize) -> {0..<PROCESS_IMAGE_ROOT_MAX as usize} {
+    if (value < PROCESS_IMAGE_ROOT_MAX) {
+        let root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} = value;
+        return root;
+    }
+    return 0;
+}
+
+fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsafe} {
+    if (dest_root >= PROCESS_IMAGE_ROOT_MAX ||
+        dest_root == process_image_target_root) {
+        return ProcessCloneVmResult::OutOfMemory;
+    }
+    let dest: {0..<PROCESS_IMAGE_ROOT_MAX as usize} =
+        process_image_narrow_root(dest_root);
+    let source: usize = process_image_target_root;
+    clone_source_root = source;
+    clone_dest_root = dest_root;
     clone_page_count = 0;
-    address_space_clear_root(1);
-    // Reset root 1's demand-stack metadata before rebuilding it below, the
-    // same way process_image_map_current() resets root 0's before mapping a
-    // fresh image -- otherwise a reaped child's stale counts would leak into
-    // the next fork.
-    process_image_stack_growth_active[1] = false;
-    process_image_active_page_count[1] = 0;
-    process_image_growth_page_count[1] = 0;
-    process_image_stack_lowest_l3[1] = PROCESS_STACK_L3_INDEX;
+    address_space_clear_root(dest_root);
+    // Reset the destination root's demand-stack metadata before rebuilding
+    // it below, the same way process_image_map_current() resets its own
+    // root's before mapping a fresh image -- otherwise a reaped child's
+    // stale counts would leak into the next fork.
+    process_image_stack_growth_active[dest] = false;
+    process_image_active_page_count[dest] = 0;
+    process_image_growth_page_count[dest] = 0;
+    process_image_stack_lowest_l3[dest] = PROCESS_STACK_L3_INDEX;
     // Tracks the lowest growth-region L3 index actually copied below, so the
     // child's watermark reflects its real page table rather than the
-    // parent's own process_image_stack_lowest_l3[0] bookkeeping -- the
+    // parent's own process_image_stack_lowest_l3[source] bookkeeping -- the
     // latter is meaningless for a parent mapped through the low-level
     // initial-process bootstrap path (address_space_new()/map_user_stack(),
     // not process_image_map_current()), which never touches it.
     let mut clone_stack_lowest_l3: usize = PROCESS_STACK_L3_INDEX;
     for l3_index: usize in 0..<512 {
-        let parent_pte: usize = address_space_pte_read(0, l3_index);
+        let parent_pte: usize = address_space_pte_read(source, l3_index);
         if (parent_pte != 0) {
             match page_alloc() {
                 PageAllocResult::OutOfMemory => {
@@ -211,9 +253,9 @@ fn process_image_clone_vm_begin() -> ProcessCloneVmResult !{unsafe} {
                             page_physical_address(child_page);
                         let child_pte: usize = child_physical |
                             (parent_pte & 0xFFFFFF0000000FFF);
-                        address_space_pte_write(1, l3_index, child_pte);
+                        address_space_pte_write(dest_root, l3_index, child_pte);
                         address_space_tlb_invalidate(
-                            1, USER_TEXT_VA + l3_index * PAGE_SIZE);
+                            dest_root, USER_TEXT_VA + l3_index * PAGE_SIZE);
                         clone_page_indices[slot] =
                             page_owner_transfer_index(child_page);
                         clone_page_count = clone_page_count + 1;
@@ -235,14 +277,14 @@ fn process_image_clone_vm_begin() -> ProcessCloneVmResult !{unsafe} {
         return ProcessCloneVmResult::OutOfMemory;
     }
     // The copy loop above mirrors every present parent PTE (including any
-    // stack pages the parent had already demand-faulted in) into root 1, so
-    // the child gets its own demand-stack watermark derived from what was
-    // actually copied. Without this, a forked child fail-stops the instant
-    // it grows its stack past whatever was already mapped at fork time
-    // (issue #219).
-    process_image_active_page_count[1] = clone_page_count;
-    process_image_stack_growth_active[1] = true;
-    process_image_stack_lowest_l3[1] = clone_stack_lowest_l3;
+    // stack pages the parent had already demand-faulted in) into the
+    // destination root, so the child gets its own demand-stack watermark
+    // derived from what was actually copied. Without this, a forked child
+    // fail-stops the instant it grows its stack past whatever was already
+    // mapped at fork time (issue #219).
+    process_image_active_page_count[dest] = clone_page_count;
+    process_image_stack_growth_active[dest] = true;
+    process_image_stack_lowest_l3[dest] = clone_stack_lowest_l3;
     if (process_clone_vm_install(view ProcessCloneVmOwner) == false) {
         process_clone_vm_rollback(clone_page_count);
         return ProcessCloneVmResult::OutOfMemory;
@@ -250,40 +292,54 @@ fn process_image_clone_vm_begin() -> ProcessCloneVmResult !{unsafe} {
     return ProcessCloneVmResult::Copied;
 }
 
-// GitHub issue #219 follow-up: pages the child allocates for itself via
-// process_image_handle_data_abort() after the fork snapshot (recorded in
-// process_image_growth_page_indices' root-1 slots) are not covered by
-// process_clone_vm_rollback()'s clone_page_indices/clone_l3_indices
-// snapshot, which only knows about pages present at fork time -- without
-// this they would leak on child exit. Root 1 is hardcoded (not derived from
-// process_image_root_index()) because this runs from process_image_clone_vm_
-// reap(), which callers also reach from the still-active parent context on
-// an early clone failure, before process_image_activate_child() ever runs.
+// GitHub issue #219 follow-up, generalized by #245: pages the child
+// allocates for itself via process_image_handle_data_abort() after the
+// fork snapshot (recorded in process_image_growth_page_indices' clone_
+// dest_root slots) are not covered by process_clone_vm_rollback()'s
+// clone_page_indices/clone_l3_indices snapshot, which only knows about
+// pages present at fork time -- without this they would leak on child
+// exit. clone_dest_root (not process_image_root_index()) because this
+// runs from process_image_clone_vm_reap(), which callers also reach from
+// the still-active parent context on an early clone failure, before the
+// child's root is ever activated.
 fn process_clone_vm_release_growth_pages() {
-    for i: usize in 0..<process_image_growth_page_count[1] {
+    let dest_value: usize = clone_dest_root;
+    if (dest_value >= PROCESS_IMAGE_ROOT_MAX) { return; }
+    let dest: {0..<PROCESS_IMAGE_ROOT_MAX as usize} =
+        process_image_narrow_root(dest_value);
+    // process_image_growth_index() already proves its own return value is
+    // in {0..<64 * PROCESS_IMAGE_ROOT_MAX}, but it reads process_image_
+    // target_root, not an arbitrary parameter -- borrow it briefly here
+    // (this runs from process_image_clone_vm_reap(), which restores the
+    // real target_root itself right after) rather than duplicating the
+    // same bounds proof this function already carries.
+    let saved_root: usize = process_image_target_root;
+    process_image_target_root = dest_value;
+    for i: usize in 0..<process_image_growth_page_count[dest] {
         if (i < 64) {
-            let growth_offset_value: usize = 64 + i;
-            if (growth_offset_value < 128) {
-                let growth_offset: {0..<128 as usize} = growth_offset_value;
-                let page_index: usize =
-                    process_image_growth_page_indices[growth_offset];
-                if (page_index < BOOT_PAGE_COUNT) {
-                    page_transferred_release(page_index);
-                }
+            let growth_offset = process_image_growth_index(i);
+            let page_index: usize =
+                process_image_growth_page_indices[growth_offset];
+            if (page_index < BOOT_PAGE_COUNT) {
+                page_transferred_release(page_index);
             }
         }
     }
-    process_image_growth_page_count[1] = 0;
+    process_image_target_root = saved_root;
+    process_image_growth_page_count[dest] = 0;
 }
 
-fn process_image_activate_parent() {
-    process_image_target_root = 0;
-    address_space_activate_root(0);
-}
-
-fn process_image_activate_child() {
-    process_image_target_root = 1;
-    address_space_activate_root(1);
+// GitHub issue #245: replaces the old activate_parent()/activate_child()
+// pair, which hardcoded root 0 ("parent") and root 1 ("child") as global
+// roles. Callers now track their own parent/child root relationships
+// (process.tkb's per-slot ProcessHandle.pool_index) and pass the explicit
+// root they mean, since with more than one live clone in the tree "the
+// child" and "the parent" are relative to whoever is switching, not fixed
+// numbers.
+fn process_image_activate_root(root: usize) {
+    if (root >= PROCESS_IMAGE_ROOT_MAX) { return; }
+    process_image_target_root = root;
+    address_space_activate_root(root);
 }
 
 fn process_image_clone_vm_reap() -> ProcessCloneVmReapResult {
@@ -293,9 +349,10 @@ fn process_image_clone_vm_reap() -> ProcessCloneVmReapResult {
         }
         ProcessCloneVmValue::Ready(owner) => {
             let count: usize = clone_page_count;
+            let source: usize = clone_source_root;
             process_clone_vm_rollback(count);
             process_clone_vm_release_growth_pages();
-            process_image_activate_parent();
+            process_image_activate_root(source);
             process_clone_vm_owner_drop(owner);
             clone_last_reaped_count = count;
             return ProcessCloneVmReapResult::Reaped;
@@ -341,13 +398,13 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     process_image_stack_lowest_l3[0] = PROCESS_STACK_L3_INDEX;
 
     let mut ok: bool = true;
-    match process_image_clone_vm_begin() {
+    match process_image_clone_vm_begin(1) {
         ProcessCloneVmResult::OutOfMemory => { ok = false; }
         ProcessCloneVmResult::Copied => {}
     }
 
     if (ok) {
-        process_image_activate_child();
+        process_image_activate_root(1);
         // EC=0x24 (data abort from a lower EL), DFSC=0x07 (translation
         // fault, level 3) -- the only ESR shape process_image_handle_data_
         // abort() accepts as legitimate stack growth.
@@ -370,7 +427,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
             address_space_pte_read(1, 499) == 0)) {
             ok = false;
         }
-        process_image_activate_parent();
+        process_image_activate_root(0);
     }
 
     match process_image_clone_vm_reap() {
@@ -487,12 +544,18 @@ fn process_image_exec_reap() {
         ProcessImageExecValue::Ready(pages) => {
             process_image_unmap(pages);
             // process_image_unmap only retargets later page-table writes at
-            // root 0; it leaves TTBR0 on the root it just emptied. The parent
-            // is resumed straight after this reap, so activate its root here
-            // exactly as process_image_clone_vm_reap does for the plain
-            // fork/exit path -- otherwise the parent returns to EL0 against
-            // the unmapped child root and faults on its own first instruction.
-            process_image_activate_parent();
+            // root 0; it leaves TTBR0 on the root it just emptied. The
+            // parent is resumed straight after this reap, so activate its
+            // root here exactly as process_image_clone_vm_reap does for
+            // the plain fork/exit path -- otherwise the parent returns to
+            // EL0 against the unmapped child root and faults on its own
+            // first instruction. GitHub issue #245: this runs from
+            // kernel_syscall_clone_parent_return(), reached only via
+            // kernel_process_child_exit()'s own return value -- by
+            // construction that has already switched execution_current_
+            // handle back to the parent, so kernel_process_current_root()
+            // is already correct here, not a fixed root 0.
+            process_image_activate_root(kernel_process_current_root());
         }
     }
 }
@@ -762,7 +825,7 @@ fn process_image_cleanup(count: usize) {
     // process_clone_vm_release_growth_pages() (the clone/reap path, whose
     // child pages are NOT in clone_page_indices), so only the redundant
     // release goes; the count is still reset below.
-    let root: {0..<2 as usize} = process_image_root_index();
+    let root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} = process_image_root_index();
     process_image_growth_page_count[root] = 0;
 }
 
@@ -772,7 +835,7 @@ fn process_image_cleanup(count: usize) {
 // gap handles an ABI that subtracts a large stack frame before its first
 // store, while the guard page below the reservation remains unmapped.
 fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
-    let root: {0..<2 as usize} = process_image_root_index();
+    let root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} = process_image_root_index();
     let exception_class: usize = (esr >> 26) & 0x3F;
     let fault_status: usize = esr & 0x3F;
     if (process_image_stack_growth_active[root] == false ||
@@ -816,7 +879,7 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
                 // while page release was the idempotent `used[i] = 0`, and
                 // corrupts a real free list (issue #207).
                 if (process_image_growth_page_count[root] < 64) {
-                    let growth_offset: {0..<128 as usize} =
+                    let growth_offset: {0..<64 * PROCESS_IMAGE_ROOT_MAX as usize} =
                         process_image_growth_index(
                             process_image_growth_page_count[root]);
                     process_image_growth_page_indices[growth_offset] = page_index;
@@ -833,7 +896,7 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
 }
 
 fn process_image_unmap(pages: sink ProcessImagePages[image]) {
-    let root: {0..<2 as usize} = process_image_root_index();
+    let root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} = process_image_root_index();
     let mut count: usize = pages.count;
     if (process_image_stack_growth_active[root] ||
         process_image_active_page_count[root] > pages.count) {
@@ -1085,7 +1148,7 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
 fn process_image_map_current(plan: DistroElfLoadPlan,
                              argv: []u8,
                              argc: usize) -> ProcessImageMapResult {
-    let root: {0..<2 as usize} = process_image_root_index();
+    let root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} = process_image_root_index();
     process_image_stack_growth_active[root] = false;
     process_image_active_page_count[root] = 0;
     process_image_growth_page_count[root] = 0;
@@ -1186,7 +1249,7 @@ fn process_image_map_in_root(plan: DistroElfLoadPlan,
                              argv: []u8,
                              argc: usize,
                              root: usize) -> ProcessImageMapResult {
-    if (root >= 2) { return ProcessImageMapResult::InvalidImage; }
+    if (root >= PROCESS_IMAGE_ROOT_MAX) { return ProcessImageMapResult::InvalidImage; }
     process_image_target_root = root;
     return process_image_map_current(plan, argv, argc);
 }
@@ -1204,7 +1267,7 @@ fn process_image_stack_pointer(pages: borrow ProcessImagePages[image]) -> usize 
 }
 
 fn process_image_stack_grew(pages: borrow ProcessImagePages[image]) -> bool {
-    let root: {0..<2 as usize} = process_image_root_index();
+    let root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} = process_image_root_index();
     return process_image_stack_growth_active[root] &&
            process_image_active_page_count[root] > pages.count;
 }

@@ -1,11 +1,17 @@
 use "kernel/lib/refcount_slotmap.tkb";
 
-const PROCESS_CONTEXT_MAX: usize = 2;
+// GitHub issue #245: must match kernel/kernel/process.tkb's
+// KERNEL_PROCESS_MAX -- process index == that file's ProcessHandle.
+// pool_index throughout this file, same convention as kernel/mm/
+// process_image.tkb's address-space roots.
+const PROCESS_CONTEXT_MAX: usize = 3;
 // Ash reserves a script fd at 10 with F_DUPFD_CLOEXEC. Keep a small but real
 // per-process descriptor namespace rather than treating fd 3 as a special
-// file-only slot; two process contexts require the matching 32 table entries.
+// file-only slot; three process contexts require the matching 48 table
+// entries (PROCESS_CONTEXT_MAX * PROCESS_FD_MAX, kept as its own literal --
+// see SHARED_OBJECT_MAX_REFS's own comment for why).
 const PROCESS_FD_MAX: usize = 16;
-const PROCESS_FD_ENTRY_MAX: usize = 32;
+const PROCESS_FD_ENTRY_MAX: usize = 48;
 const SHARED_OBJECT_MAX: usize = 4;
 // Every one of PROCESS_FD_ENTRY_MAX's fd-table slots could in principle
 // hold its own reference to the same shared object (unified_fd_clone/
@@ -15,7 +21,7 @@ const SHARED_OBJECT_MAX: usize = 4;
 // for why this is passed explicitly rather than left an unbounded usize.
 // Must equal PROCESS_FD_ENTRY_MAX -- kept as its own literal because a
 // top-level const cannot be initialized from another const's identifier.
-const SHARED_OBJECT_MAX_REFS: usize = 32;
+const SHARED_OBJECT_MAX_REFS: usize = 48;
 
 enum UnifiedFdKind: u8 { Empty; OpenFile; Listener; Connection; }
 enum UnifiedListenerState: u8 { Closed; Created; Bound; Listening; }

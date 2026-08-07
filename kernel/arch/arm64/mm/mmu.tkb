@@ -27,6 +27,13 @@ private let mut user_l3_0: [usize; 512] align(4096);
 private let mut kernel_l1_1: [usize; 512] align(4096);
 private let mut user_l2_1: [usize; 512] align(4096);
 private let mut user_l3_1: [usize; 512] align(4096);
+// GitHub issue #245: a third root, so a process running on root 1 (e.g.
+// launched via execve from a fork under root 0) can itself fork a child
+// without needing the root its own parent still occupies. Must match
+// kernel/mm/process_image.tkb's PROCESS_IMAGE_ROOT_MAX.
+private let mut kernel_l1_2: [usize; 512] align(4096);
+private let mut user_l2_2: [usize; 512] align(4096);
+private let mut user_l3_2: [usize; 512] align(4096);
 
 // GitHub issue #231: AP[2:1]=00 on a block/page descriptor denies EL0 data
 // access (load/store) but says nothing about EL0 instruction fetch -- that
@@ -58,34 +65,41 @@ fn user_tlb_invalidate(va: usize) {
     isb();
 }
 
+// GitHub issue #245: three physical root sets now exist (slot 0/1/2), so
+// the old binary "slot == 0 ? table0 : table1" no longer distinguishes
+// slot 1 from slot 2 -- every root-selecting function below needs the
+// real 3-way branch. slot values other than 0/1/2 fall back to table 0.
+fn user_l3_base(slot: usize) -> usize {
+    if (slot == 1) { return (user_l3_1 as *usize) as usize; }
+    if (slot == 2) { return (user_l3_2 as *usize) as usize; }
+    return (user_l3_0 as *usize) as usize;
+}
+
+fn kernel_l1_base(slot: usize) -> usize {
+    if (slot == 1) { return (kernel_l1_1 as *usize) as usize; }
+    if (slot == 2) { return (kernel_l1_2 as *usize) as usize; }
+    return (kernel_l1_0 as *usize) as usize;
+}
+
 fn address_space_pte_write(slot: usize, index: usize, value: usize) {
-    let mut base: usize = (user_l3_0 as *usize) as usize;
-    if (slot != 0) {
-        base = (user_l3_1 as *usize) as usize;
-    }
+    let base: usize = user_l3_base(slot);
     let entry: *usize = (base + index * 8) as *usize;
     *entry = value;
     dsb_ishst();
 }
 
 fn address_space_pte_read(slot: usize, index: usize) -> usize {
-    let mut base: usize = (user_l3_0 as *usize) as usize;
-    if (slot != 0) {
-        base = (user_l3_1 as *usize) as usize;
-    }
+    let base: usize = user_l3_base(slot);
     let entry: *usize = (base + index * 8) as *usize;
     return *entry;
 }
 
 // TTBR0_EL1's ASID field (bits [63:48]) is `slot + 1`, matching mmu.S's
 // original encoding exactly -- ASID 0 is deliberately never assigned to
-// either root, keeping it free as a "no stale TLB entries could possibly
+// any root, keeping it free as a "no stale TLB entries could possibly
 // match" value.
 fn address_space_activate_root(slot: usize) {
-    let mut base: usize = (kernel_l1_0 as *usize) as usize;
-    if (slot != 0) {
-        base = (kernel_l1_1 as *usize) as usize;
-    }
+    let base: usize = kernel_l1_base(slot);
     let ttbr: usize = base | ((slot + 1) << 48);
     dsb_ish();
     msr_ttbr0_el1(ttbr);
@@ -100,10 +114,7 @@ fn address_space_tlb_invalidate(slot: usize, va: usize) {
 }
 
 fn address_space_clear_root(slot: usize) {
-    let mut base: usize = (user_l3_0 as *usize) as usize;
-    if (slot != 0) {
-        base = (user_l3_1 as *usize) as usize;
-    }
+    let base: usize = user_l3_base(slot);
     for i: usize in 0..<512 {
         let entry: *usize = (base + i * 8) as *usize;
         *entry = 0;
@@ -150,6 +161,9 @@ fn kernel_mmu_init() {
     init_root((kernel_l1_1 as *usize) as usize,
               (user_l2_1 as *usize) as usize,
               (user_l3_1 as *usize) as usize);
+    init_root((kernel_l1_2 as *usize) as usize,
+              (user_l2_2 as *usize) as usize,
+              (user_l3_2 as *usize) as usize);
     kernel_mmu_activate();
 }
 

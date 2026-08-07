@@ -6,7 +6,12 @@ enum ProcessState: u8 { Ready; Running; Blocked; Exited; }
 enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
 enum ProcessWaitReason: u8 { None; UartRx; }
 
-const KERNEL_PROCESS_MAX: usize = 2;
+// GitHub issue #245: 3 is the minimum that unblocks #241 (a shell forks an
+// external command, which itself forks a child: 3 concurrently scheduled
+// processes). Must match kernel/mm/process_image.tkb's PROCESS_IMAGE_
+// ROOT_MAX and kernel/arch/arm64/mm/mmu.tkb's physical root count -- root
+// index == this file's own ProcessHandle.pool_index everywhere.
+const KERNEL_PROCESS_MAX: usize = 3;
 const KERNEL_PROCESS_STACK_SIZE: usize = 4096;
 
 // Issue #188 Stage 2: the stable store holds one generation-indexed process
@@ -472,6 +477,10 @@ fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool {
 // proves bounded allocation, typed Ready -> Running -> Ready/Exited
 // transitions, page-aligned distinct kernel stacks, and generation-safe slot
 // reuse before later stages attach real VM/fd state to these identities.
+// GitHub issue #245: generalized from 2 to KERNEL_PROCESS_MAX (3) slots --
+// allocate to capacity, confirm the next allocation past that is Full,
+// confirm every live slot's stack is distinct and page-aligned, then
+// exercise cycle/reap/reuse on one slot before cycling the rest.
 fn scheduled_process_table_probe() -> bool {
     scheduled_process_table_init();
     match scheduled_process_alloc() {
@@ -480,46 +489,65 @@ fn scheduled_process_table_probe() -> bool {
             match scheduled_process_alloc() {
                 ScheduledProcessAllocResult::Full => { return false; }
                 ScheduledProcessAllocResult::Allocated(second) => {
-                    let mut capacity_ok: bool = false;
-                    match scheduled_process_alloc() {
-                        ScheduledProcessAllocResult::Allocated(unexpected) => {
-                            if (scheduled_process_probe_cycle(unexpected)) {}
-                        }
-                        ScheduledProcessAllocResult::Full => {
-                            capacity_ok = true;
-                        }
-                    }
-                    if (capacity_ok == false) { return false; }
-                    let first_stack: usize =
-                        scheduled_process_stack_top(first);
-                    let second_stack: usize =
-                        scheduled_process_stack_top(second);
-                    if (first_stack == 0 || second_stack == 0 ||
-                        (first_stack & 4095) != 0 ||
-                        (second_stack & 4095) != 0 ||
-                        first_stack == second_stack) {
-                        return false;
-                    }
-                    if (scheduled_process_probe_cycle(first) == false) {
-                        return false;
-                    }
                     match scheduled_process_alloc() {
                         ScheduledProcessAllocResult::Full => { return false; }
-                        ScheduledProcessAllocResult::Allocated(reused) => {
-                            if (scheduled_process_same_slot(first, reused) ==
-                                    false ||
-                                scheduled_process_same_generation(
-                                    first, reused) ||
-                                scheduled_process_stack_top(first) != 0) {
+                        ScheduledProcessAllocResult::Allocated(third) => {
+                            let mut capacity_ok: bool = false;
+                            match scheduled_process_alloc() {
+                                ScheduledProcessAllocResult::Allocated(unexpected) => {
+                                    if (scheduled_process_probe_cycle(unexpected)) {}
+                                }
+                                ScheduledProcessAllocResult::Full => {
+                                    capacity_ok = true;
+                                }
+                            }
+                            if (capacity_ok == false) { return false; }
+                            let first_stack: usize =
+                                scheduled_process_stack_top(first);
+                            let second_stack: usize =
+                                scheduled_process_stack_top(second);
+                            let third_stack: usize =
+                                scheduled_process_stack_top(third);
+                            if (first_stack == 0 || second_stack == 0 ||
+                                third_stack == 0 ||
+                                (first_stack & 4095) != 0 ||
+                                (second_stack & 4095) != 0 ||
+                                (third_stack & 4095) != 0 ||
+                                first_stack == second_stack ||
+                                first_stack == third_stack ||
+                                second_stack == third_stack) {
                                 return false;
                             }
-                            if (scheduled_process_probe_cycle(reused) ==
+                            if (scheduled_process_probe_cycle(first) ==
                                     false) {
                                 return false;
                             }
+                            match scheduled_process_alloc() {
+                                ScheduledProcessAllocResult::Full => {
+                                    return false;
+                                }
+                                ScheduledProcessAllocResult::Allocated(reused) => {
+                                    if (scheduled_process_same_slot(
+                                            first, reused) == false ||
+                                        scheduled_process_same_generation(
+                                            first, reused) ||
+                                        scheduled_process_stack_top(first) !=
+                                            0) {
+                                        return false;
+                                    }
+                                    if (scheduled_process_probe_cycle(
+                                            reused) == false) {
+                                        return false;
+                                    }
+                                }
+                            }
+                            if (scheduled_process_probe_cycle(second) ==
+                                    false) {
+                                return false;
+                            }
+                            return scheduled_process_probe_cycle(third);
                         }
                     }
-                    return scheduled_process_probe_cycle(second);
                 }
             }
         }
@@ -528,19 +556,36 @@ fn scheduled_process_table_probe() -> bool {
 
 // Existing synchronous clone fixture. Later #188 stages replace this state
 // with the table above once VM and fd state can be live concurrently.
-enum ExecutionProcess: u8 { Parent; Child; }
-
-private let mut execution_process: ExecutionProcess = ExecutionProcess::Parent;
+// GitHub issue #245: replaces the old ExecutionProcess::{Parent,Child}
+// enum plus single execution_parent_handle/execution_child_handle pair,
+// which hardcoded "current process" as one of exactly two fixed global
+// roles. A process tree deeper than two levels (#241's ash -> user_payload
+// -> user_payload's own child) has nowhere to go under that model: the
+// third scheduled_process_alloc() finds the pool Full, and there is no
+// slot for "current" to mean anything but the same two roles.
+//
+// Now: execution_current_handle is whichever slot is actually running,
+// and each slot tracks its own parent/child link (scheduled_process_
+// parent/has_parent, scheduled_process_child/has_child) instead of one
+// global pair. "Parent" and "child" become relative to whichever slot is
+// asking, not fixed identities -- kernel_process_switch_to_child()
+// switches from current to current's own child, kernel_process_switch_
+// to_parent() to current's own parent, and the same single-live-child-
+// per-parent invariant the old model enforced (kernel_process_clone_
+// begin() still rejects a second concurrent clone) still holds, just
+// per-slot instead of globally.
+private let mut execution_current_handle: ProcessHandle;
+private let mut execution_current_live: bool;
+private let mut scheduled_process_parent: [ProcessHandle; KERNEL_PROCESS_MAX];
+private let mut scheduled_process_has_parent: [bool; KERNEL_PROCESS_MAX];
+private let mut scheduled_process_child: [ProcessHandle; KERNEL_PROCESS_MAX];
+private let mut scheduled_process_has_child: [bool; KERNEL_PROCESS_MAX];
 private let mut execution_child_live: bool;
 private let mut execution_clone_calls: usize;
 private let mut execution_child_exit_count: usize;
 private let mut execution_child_exit_status: usize;
 private let mut execution_child_waitable: bool;
 private let mut execution_child_exec_image_live: bool;
-private let mut execution_parent_handle: ProcessHandle;
-private let mut execution_child_handle: ProcessHandle;
-private let mut execution_parent_handle_live: bool;
-private let mut execution_child_handle_live: bool;
 private let mut execution_reschedule_pending: bool;
 private let mut execution_timer_switches: usize;
 private let mut execution_deferred_switches: usize;
@@ -593,26 +638,28 @@ fn kernel_process_execution_reset() {
     execution_scheduler_enabled = false;
     execution_reschedule_pending = false;
     scheduled_process_table_clear();
-    execution_process = ExecutionProcess::Parent;
+    execution_current_live = false;
     execution_child_live = false;
     execution_clone_calls = 0;
     execution_child_exit_count = 0;
     execution_child_exit_status = 0;
     execution_child_waitable = false;
     execution_child_exec_image_live = false;
-    execution_parent_handle_live = false;
-    execution_child_handle_live = false;
     execution_timer_switches = 0;
     execution_deferred_switches = 0;
     execution_deferred_requests = 0;
     execution_uart_blocks = 0;
     execution_uart_wakes = 0;
     execution_uart_parent_progress = 0;
+    for slot: usize in 0..<KERNEL_PROCESS_MAX {
+        scheduled_process_has_parent[slot] = false;
+        scheduled_process_has_child[slot] = false;
+    }
     match scheduled_process_alloc() {
         ScheduledProcessAllocResult::Full => {}
-        ScheduledProcessAllocResult::Allocated(parent) => {
-            execution_parent_handle = parent;
-            execution_parent_handle_live = kernel_process_start_handle(parent);
+        ScheduledProcessAllocResult::Allocated(root) => {
+            execution_current_handle = root;
+            execution_current_live = kernel_process_start_handle(root);
         }
     }
 }
@@ -634,59 +681,78 @@ fn kernel_process_scheduler_disable() {
 }
 
 fn kernel_process_switch_to_parent(current_sp: usize) -> usize {
-    if (execution_child_handle_live == false ||
-        execution_parent_handle_live == false ||
-        scheduled_process_state[execution_parent_handle.pool_index] !=
-            ProcessSlotState::Ready) {
+    if (execution_current_live == false ||
+        scheduled_process_has_parent[execution_current_handle.pool_index] ==
+            false) {
         return current_sp;
     }
-    scheduled_process_saved_sp[execution_child_handle.pool_index] = current_sp;
-    if (kernel_process_yield_handle(execution_child_handle) == false) {
+    let mut from: ProcessHandle = execution_current_handle;
+    let mut to: ProcessHandle = scheduled_process_parent[from.pool_index];
+    if (scheduled_process_state[to.pool_index] != ProcessSlotState::Ready) {
         return current_sp;
     }
-    if (kernel_process_start_handle(execution_parent_handle) == false) {
-        if (kernel_process_start_handle(execution_child_handle)) {}
+    scheduled_process_saved_sp[from.pool_index] = current_sp;
+    if (kernel_process_yield_handle(from) == false) {
         return current_sp;
     }
-    execution_process = ExecutionProcess::Parent;
-    process_image_activate_parent();
-    return scheduled_process_saved_sp[execution_parent_handle.pool_index];
+    if (kernel_process_start_handle(to) == false) {
+        if (kernel_process_start_handle(from)) {}
+        return current_sp;
+    }
+    execution_current_handle = to;
+    process_image_activate_root(to.pool_index);
+    return scheduled_process_saved_sp[to.pool_index];
 }
 
 fn kernel_process_switch_to_child(current_sp: usize) -> usize {
-    if (execution_child_handle_live == false ||
-        execution_parent_handle_live == false ||
-        scheduled_process_state[execution_child_handle.pool_index] !=
-            ProcessSlotState::Ready) {
+    if (execution_current_live == false ||
+        scheduled_process_has_child[execution_current_handle.pool_index] ==
+            false) {
         return current_sp;
     }
-    scheduled_process_saved_sp[execution_parent_handle.pool_index] = current_sp;
-    if (kernel_process_yield_handle(execution_parent_handle) == false) {
+    let mut from: ProcessHandle = execution_current_handle;
+    let mut to: ProcessHandle = scheduled_process_child[from.pool_index];
+    if (scheduled_process_state[to.pool_index] != ProcessSlotState::Ready) {
         return current_sp;
     }
-    if (kernel_process_start_handle(execution_child_handle) == false) {
-        if (kernel_process_start_handle(execution_parent_handle)) {}
+    scheduled_process_saved_sp[from.pool_index] = current_sp;
+    if (kernel_process_yield_handle(from) == false) {
         return current_sp;
     }
-    execution_process = ExecutionProcess::Child;
-    process_image_activate_child();
-    return scheduled_process_saved_sp[execution_child_handle.pool_index];
+    if (kernel_process_start_handle(to) == false) {
+        if (kernel_process_start_handle(from)) {}
+        return current_sp;
+    }
+    execution_current_handle = to;
+    process_image_activate_root(to.pool_index);
+    return scheduled_process_saved_sp[to.pool_index];
 }
 
+// GitHub issue #245: the old two-process toggle ("if I'm the Child, go up
+// to the Parent; else go down to the Child") generalizes exactly:
+// whichever slot has a live child of its own is playing the "parent"
+// role relative to it, so switching down to that child matches the old
+// else-branch; a slot with no live child (never forked, or is itself the
+// forked leaf) matches the old if-branch, switching up to its own parent.
 fn kernel_process_schedule(current_sp: usize) -> usize {
-    let mut next_sp: usize = current_sp;
-    if (execution_process == ExecutionProcess::Child) {
-        next_sp = kernel_process_switch_to_parent(current_sp);
-    } else {
-        next_sp = kernel_process_switch_to_child(current_sp);
+    if (execution_current_live &&
+        scheduled_process_has_child[execution_current_handle.pool_index]) {
+        return kernel_process_switch_to_child(current_sp);
     }
-    return next_sp;
+    return kernel_process_switch_to_parent(current_sp);
+}
+
+fn kernel_process_current_has_relative() -> bool {
+    if (execution_current_live == false) { return false; }
+    let slot: usize = execution_current_handle.pool_index;
+    return scheduled_process_has_child[slot] ||
+           scheduled_process_has_parent[slot];
 }
 
 fn kernel_process_timer_schedule(current_sp: usize) -> usize !{interrupt} {
     if (execution_scheduler_enabled == false) { return current_sp; }
     execution_reschedule_pending = false;
-    if (execution_child_handle_live == false) { return current_sp; }
+    if (kernel_process_current_has_relative() == false) { return current_sp; }
     let next_sp: usize = kernel_process_schedule(current_sp);
     if (next_sp != current_sp) {
         execution_timer_switches = execution_timer_switches + 1;
@@ -698,7 +764,7 @@ fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {
     if (execution_scheduler_enabled == false) { return current_sp; }
     if (execution_reschedule_pending == false) { return current_sp; }
     execution_reschedule_pending = false;
-    if (execution_child_handle_live == false) { return current_sp; }
+    if (kernel_process_current_has_relative() == false) { return current_sp; }
     let next_sp: usize = kernel_process_schedule(current_sp);
     if (next_sp != current_sp) {
         execution_deferred_switches = execution_deferred_switches + 1;
@@ -710,15 +776,18 @@ fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {
 // Publishing Blocked before returning the parent's saved frame closes the
 // otherwise-lost wakeup window between checking the ring and sleeping.
 fn kernel_process_block_uart(current_sp: usize) -> usize {
-    if (execution_process != ExecutionProcess::Child ||
-        execution_child_handle_live == false ||
-        execution_parent_handle_live == false ||
-        scheduled_process_state[execution_parent_handle.pool_index] !=
-            ProcessSlotState::Ready) {
+    if (execution_current_live == false ||
+        scheduled_process_has_parent[execution_current_handle.pool_index] ==
+            false) {
         return 0;
     }
-    scheduled_process_saved_sp[execution_child_handle.pool_index] = current_sp;
-    match scheduled_process_running_take(execution_child_handle) {
+    let mut child: ProcessHandle = execution_current_handle;
+    let mut parent: ProcessHandle = scheduled_process_parent[child.pool_index];
+    if (scheduled_process_state[parent.pool_index] != ProcessSlotState::Ready) {
+        return 0;
+    }
+    scheduled_process_saved_sp[child.pool_index] = current_sp;
+    match scheduled_process_running_take(child) {
         ScheduledProcessRunningTakeResult::Missing => { return 0; }
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
@@ -731,29 +800,41 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
             }
         }
     }
-    if (kernel_process_start_handle(execution_parent_handle) == false) {
+    if (kernel_process_start_handle(parent) == false) {
         return 0;
     }
-    execution_process = ExecutionProcess::Parent;
+    execution_current_handle = parent;
     execution_uart_blocks = execution_uart_blocks + 1;
     if (execution_uart_blocks == 1) {
         kernel_boot_log("uart rx: scheduler child blocked\n");
     }
-    process_image_activate_parent();
-    return scheduled_process_saved_sp[execution_parent_handle.pool_index];
+    process_image_activate_root(parent.pool_index);
+    return scheduled_process_saved_sp[parent.pool_index];
 }
 
 // The UART IRQ transfers one byte directly into the suspended syscall frame.
 // true means the byte was consumed by a waiter and must not enter the ring.
+// GitHub issue #245: "the" blocked process used to be the single global
+// execution_child_handle; now it is whichever process is linked as
+// execution_current_handle's own child -- valid because kernel_process_
+// block_uart() always leaves execution_current_handle on the blocker's
+// parent right before this could ever run, and the parent/child link
+// itself is untouched by blocking (only exit/reap clear it).
 fn kernel_process_uart_wake(value: usize) -> bool !{interrupt} {
-    if (execution_child_handle_live == false ||
-        scheduled_process_state[execution_child_handle.pool_index] !=
+    if (execution_current_live == false ||
+        scheduled_process_has_child[execution_current_handle.pool_index] ==
+            false) {
+        return false;
+    }
+    let mut child: ProcessHandle =
+        scheduled_process_child[execution_current_handle.pool_index];
+    if (scheduled_process_state[child.pool_index] !=
             ProcessSlotState::Blocked ||
-        scheduled_process_wait_reason[execution_child_handle.pool_index] !=
+        scheduled_process_wait_reason[child.pool_index] !=
             ProcessWaitReason::UartRx) {
         return false;
     }
-    match scheduled_process_blocked_take(execution_child_handle) {
+    match scheduled_process_blocked_take(child) {
         ScheduledProcessBlockedTakeResult::Missing => { return false; }
         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
             let (owner, blocked) = resources;
@@ -774,17 +855,23 @@ fn kernel_process_uart_wake(value: usize) -> bool !{interrupt} {
 
 // This is the measurable #190 interleaving point: the parent reaches it only
 // after its compute section, and it is accepted only while the child remains
-// suspended on UART RX.
+// suspended on UART RX. "current has a live child" already implies current
+// is playing the parent role (only a parent-role slot has one), so that
+// replaces the old explicit execution_process != Parent check.
 fn kernel_process_uart_record_parent_progress()
         -> ProcessUartProgressResult {
-    if (execution_process != ExecutionProcess::Parent ||
-        execution_parent_handle_live == false ||
-        execution_child_handle_live == false ||
-        scheduled_process_state[execution_parent_handle.pool_index] !=
+    if (execution_current_live == false ||
+        scheduled_process_has_child[execution_current_handle.pool_index] ==
+            false) {
+        return ProcessUartProgressResult::Invalid;
+    }
+    let mut parent: ProcessHandle = execution_current_handle;
+    let mut child: ProcessHandle = scheduled_process_child[parent.pool_index];
+    if (scheduled_process_state[parent.pool_index] !=
             ProcessSlotState::Running ||
-        scheduled_process_state[execution_child_handle.pool_index] !=
+        scheduled_process_state[child.pool_index] !=
             ProcessSlotState::Blocked ||
-        scheduled_process_wait_reason[execution_child_handle.pool_index] !=
+        scheduled_process_wait_reason[child.pool_index] !=
             ProcessWaitReason::UartRx) {
         return ProcessUartProgressResult::Invalid;
     }
@@ -800,10 +887,11 @@ fn kernel_process_uart_block_evidence() -> bool {
 
 fn kernel_process_scheduler_probe() -> bool {
     kernel_process_execution_reset();
+    let root_pid: usize = kernel_process_current_pid();
     match kernel_process_clone_begin(0x11, 0) {
         ProcessCloneResult::Invalid => { return false; }
         ProcessCloneResult::ChildReady(child_pid) => {
-            if (child_pid != 2 ||
+            if (child_pid != root_pid + 1 ||
                 kernel_process_clone_context_install(0x1000, 0x2000) !=
                     0x2000) {
                 return false;
@@ -819,13 +907,15 @@ fn kernel_process_scheduler_probe() -> bool {
     let ok: bool = parent_sp == 0x1000 && child_sp == 0x2000 &&
         deferred_parent_sp == 0x1000 && execution_timer_switches == 2 &&
         execution_deferred_switches == 1 &&
-        execution_process == ExecutionProcess::Parent;
+        kernel_process_current_pid() == root_pid;
     kernel_process_scheduler_disable();
     scheduled_process_table_clear();
-    execution_parent_handle_live = false;
-    execution_child_handle_live = false;
+    for slot: usize in 0..<KERNEL_PROCESS_MAX {
+        scheduled_process_has_parent[slot] = false;
+        scheduled_process_has_child[slot] = false;
+    }
+    execution_current_live = false;
     execution_child_live = false;
-    execution_process = ExecutionProcess::Parent;
     return ok;
 }
 
@@ -833,56 +923,151 @@ fn kernel_process_scheduler_probe() -> bool {
 // child_tid), i.e. fork semantics. The unused pointers carry no ownership
 // without their corresponding clone flags, so this first process-control
 // boundary accepts only the observed flag and null child stack.
+//
+// GitHub issue #245: any live process may clone, not just "the" one
+// designated Parent -- the only real precondition is that current does
+// not already have a live child of its own (the same single-child-per-
+// parent invariant the old model enforced globally, now checked against
+// current's own slot). The new child's pid (its pool_index + 1) is
+// returned directly instead of the literal 2, so a process running on
+// any slot gets a correct child pid back, not just the original root.
 fn kernel_process_clone_begin(flags: usize, child_stack: usize)
         -> ProcessCloneResult {
     if (flags != 0x11 || child_stack != 0 || execution_child_live ||
-        execution_process != ExecutionProcess::Parent ||
-        execution_parent_handle_live == false) {
+        execution_current_live == false ||
+        scheduled_process_has_child[execution_current_handle.pool_index]) {
         return ProcessCloneResult::Invalid;
     }
+    let mut parent: ProcessHandle = execution_current_handle;
     match scheduled_process_alloc() {
         ScheduledProcessAllocResult::Full => {
             return ProcessCloneResult::Invalid;
         }
         ScheduledProcessAllocResult::Allocated(child) => {
-            execution_child_handle = child;
-            execution_child_handle_live = true;
+            scheduled_process_child[parent.pool_index] = child;
+            scheduled_process_has_child[parent.pool_index] = true;
+            scheduled_process_parent[child.pool_index] = parent;
+            scheduled_process_has_parent[child.pool_index] = true;
+            execution_current_handle = child;
+            execution_child_live = true;
+            execution_clone_calls = execution_clone_calls + 1;
+            return ProcessCloneResult::ChildReady(child.pool_index + 1);
         }
     }
-    execution_child_live = true;
-    execution_process = ExecutionProcess::Child;
-    execution_clone_calls = execution_clone_calls + 1;
-    return ProcessCloneResult::ChildReady(2);
 }
 
 fn kernel_process_clone_child_stack_top() -> usize {
-    if (execution_child_handle_live) {
-        return scheduled_process_stack_top(execution_child_handle);
+    if (execution_current_live) {
+        return scheduled_process_stack_top(execution_current_handle);
     }
     return 0;
 }
 
+// GitHub issue #245: undoes kernel_process_clone_begin() when a later
+// step in the same clone() syscall (VM copy, fd-table clone) fails.
+// The child slot never actually ran (kernel_process_clone_context_
+// install() hasn't happened yet), so it cannot be exited/reaped through
+// the normal Running->Exited path clone_child_exit() uses -- this drives
+// it through Ready->Running->Exited->Reap directly instead, the same
+// bookkeeping-only cycle scheduled_process_probe_cycle() uses for its own
+// self-test.
+fn kernel_process_clone_rollback() {
+    if (execution_current_live == false ||
+        scheduled_process_has_parent[execution_current_handle.pool_index] ==
+            false) {
+        return;
+    }
+    let mut child: ProcessHandle = execution_current_handle;
+    let mut parent: ProcessHandle = scheduled_process_parent[child.pool_index];
+    match scheduled_process_ready_take(child) {
+        ScheduledProcessReadyTakeResult::Missing => {}
+        ScheduledProcessReadyTakeResult::Ready(resources) => {
+            let (owner, ready) = resources;
+            let running = scheduled_process_start(owner, ready);
+            let exited = scheduled_process_exit(owner, running);
+            match scheduled_process_put(owner, exited) {
+                ScheduledProcessPutResult::Conflict => {}
+                ScheduledProcessPutResult::Stored => {
+                    match scheduled_process_exited_take(child) {
+                        ScheduledProcessExitedTakeResult::Missing => {}
+                        ScheduledProcessExitedTakeResult::Exited(done) => {
+                            let (exited_owner, exited_state) = done;
+                            scheduled_process_reap(exited_owner, exited_state);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    scheduled_process_has_child[parent.pool_index] = false;
+    scheduled_process_has_parent[child.pool_index] = false;
+    execution_current_handle = parent;
+    execution_child_live = false;
+    if (execution_clone_calls > 0) {
+        execution_clone_calls = execution_clone_calls - 1;
+    }
+}
+
+// GitHub issue #245: execution_current_handle already names the child
+// (kernel_process_clone_begin() switches to it immediately), so the
+// parent is recovered via that child's own parent link rather than a
+// separate global execution_parent_handle.
 fn kernel_process_clone_context_install(parent_sp: usize, child_sp: usize)
         -> usize {
-    if (execution_parent_handle_live == false ||
-        execution_child_handle_live == false || parent_sp == 0 ||
-        child_sp == 0 ||
-        kernel_process_yield_handle(execution_parent_handle) == false ||
-        kernel_process_start_handle(execution_child_handle) == false) {
+    if (execution_current_live == false || parent_sp == 0 || child_sp == 0 ||
+        scheduled_process_has_parent[execution_current_handle.pool_index] ==
+            false) {
         return 0;
     }
-    scheduled_process_saved_sp[execution_parent_handle.pool_index] = parent_sp;
-    scheduled_process_saved_sp[execution_child_handle.pool_index] = child_sp;
+    let mut child: ProcessHandle = execution_current_handle;
+    let mut parent: ProcessHandle = scheduled_process_parent[child.pool_index];
+    if (kernel_process_yield_handle(parent) == false ||
+        kernel_process_start_handle(child) == false) {
+        return 0;
+    }
+    scheduled_process_saved_sp[parent.pool_index] = parent_sp;
+    scheduled_process_saved_sp[child.pool_index] = child_sp;
     return child_sp;
 }
 
 fn kernel_process_is_child() -> bool {
-    return execution_process == ExecutionProcess::Child;
+    return execution_current_live &&
+           scheduled_process_has_parent[execution_current_handle.pool_index];
 }
 
 fn kernel_process_current_pid() -> usize {
-    if (execution_process == ExecutionProcess::Child) { return 2; }
+    if (execution_current_live) {
+        return execution_current_handle.pool_index + 1;
+    }
     return 1;
+}
+
+// GitHub issue #245: callers that need to (re)activate the current
+// process's own address-space root explicitly -- e.g. right after a fresh
+// clone, before process_image_activate_root() replaces the old fixed
+// process_image_activate_child() -- read it here rather than reaching
+// into execution_current_handle directly.
+fn kernel_process_current_root() -> usize {
+    if (execution_current_live) {
+        return execution_current_handle.pool_index;
+    }
+    return 0;
+}
+
+// GitHub issue #245: wait4's pid argument used to be checked against the
+// literal 2 (the only child pid the old two-process model could ever
+// produce). Current's own live child (if any) can now be any pool_index
+// + 1, so callers validating a specific wait4(pid, ...) request compare
+// against this instead of a fixed number. Returns 0 (never a valid pid --
+// pids start at 1) if current has no live child.
+fn kernel_process_current_child_pid() -> usize {
+    if (execution_current_live == false ||
+        scheduled_process_has_child[execution_current_handle.pool_index] ==
+            false) {
+        return 0;
+    }
+    return scheduled_process_child[execution_current_handle.pool_index]
+        .pool_index + 1;
 }
 
 fn kernel_process_child_exit(status: usize) -> usize {
@@ -890,41 +1075,47 @@ fn kernel_process_child_exit(status: usize) -> usize {
     execution_child_exit_count = execution_child_exit_count + 1;
     execution_child_waitable = true;
     execution_child_live = false;
-    execution_process = ExecutionProcess::Parent;
     kernel_process_scheduler_disable();
-    if (execution_child_handle_live && execution_parent_handle_live) {
-        match scheduled_process_running_take(execution_child_handle) {
-            ScheduledProcessRunningTakeResult::Missing => {}
-            ScheduledProcessRunningTakeResult::Running(resources) => {
-                let (owner, running) = resources;
-                let exited = scheduled_process_exit(owner, running);
-                match scheduled_process_put(owner, exited) {
-                    ScheduledProcessPutResult::Conflict => {}
-                    ScheduledProcessPutResult::Stored => {
-                        match scheduled_process_exited_take(
-                                execution_child_handle) {
-                            ScheduledProcessExitedTakeResult::Missing => {}
-                            ScheduledProcessExitedTakeResult::Exited(done) => {
-                                let (exited_owner, exited_state) = done;
-                                scheduled_process_reap(
-                                    exited_owner, exited_state);
-                                execution_child_handle_live = false;
-                            }
+    if (execution_current_live == false ||
+        scheduled_process_has_parent[execution_current_handle.pool_index] ==
+            false) {
+        return 0;
+    }
+    let mut child: ProcessHandle = execution_current_handle;
+    let mut parent: ProcessHandle = scheduled_process_parent[child.pool_index];
+    match scheduled_process_running_take(child) {
+        ScheduledProcessRunningTakeResult::Missing => {}
+        ScheduledProcessRunningTakeResult::Running(resources) => {
+            let (owner, running) = resources;
+            let exited = scheduled_process_exit(owner, running);
+            match scheduled_process_put(owner, exited) {
+                ScheduledProcessPutResult::Conflict => {}
+                ScheduledProcessPutResult::Stored => {
+                    match scheduled_process_exited_take(child) {
+                        ScheduledProcessExitedTakeResult::Missing => {}
+                        ScheduledProcessExitedTakeResult::Exited(done) => {
+                            let (exited_owner, exited_state) = done;
+                            scheduled_process_reap(
+                                exited_owner, exited_state);
+                            scheduled_process_has_child[parent.pool_index] =
+                                false;
+                            scheduled_process_has_parent[child.pool_index] =
+                                false;
                         }
                     }
                 }
             }
         }
-        if (kernel_process_start_handle(execution_parent_handle)) {
-            return scheduled_process_saved_sp[
-                execution_parent_handle.pool_index];
-        }
+    }
+    if (kernel_process_start_handle(parent)) {
+        execution_current_handle = parent;
+        return scheduled_process_saved_sp[parent.pool_index];
     }
     return 0;
 }
 
 fn kernel_process_child_waitable() -> bool {
-    return execution_child_waitable && execution_process == ExecutionProcess::Parent;
+    return execution_child_waitable;
 }
 
 fn kernel_process_child_wait_status_peek() -> usize {
@@ -948,11 +1139,17 @@ fn kernel_process_child_exec_clear() {
     execution_child_exec_image_live = false;
 }
 
+// GitHub issue #245: the old execution_process == Parent conjunct asserted
+// "we ended up back in the one designated root role," which no longer has
+// a single fixed meaning once any slot can be a parent relative to its
+// own child. Dropped rather than mapped onto something new: the other
+// four conditions (>=2 timer switches, a deferred request actually seen,
+// the specific exit(42) status, and the scheduler having been disabled by
+// that exit) already pin down this fixture's own completion precisely.
 fn kernel_process_scheduler_acceptance_evidence() -> bool {
     return execution_timer_switches >= 2 &&
            execution_deferred_requests != 0 &&
            execution_child_exit_status == 42 &&
-           execution_process == ExecutionProcess::Parent &&
            execution_scheduler_enabled == false;
 }
 
@@ -960,15 +1157,23 @@ fn kernel_process_child_exit_count() -> usize {
     return execution_child_exit_count;
 }
 
+// GitHub issue #245: execution_clone_calls is a single counter shared by
+// every clone() since the last kernel_process_execution_reset(), not just
+// the one this fixture cares about -- when this process itself was
+// reached via a fork+exec chain (ash forking an external command that
+// then execve()s), that outer fork already incremented it once, so
+// checking for exactly 1 undercounts. >= 1 keeps the real assertion
+// (a clone genuinely happened) without assuming how many preceded it.
 fn kernel_process_clone_evidence() -> bool {
-    return execution_process == ExecutionProcess::Parent &&
-           execution_child_live == false && execution_clone_calls == 1 &&
+    return execution_current_live &&
+           execution_child_live == false && execution_clone_calls >= 1 &&
            execution_child_exit_status == 42 &&
-           execution_parent_handle_live &&
-           execution_child_handle_live == false &&
-           scheduled_process_state[execution_parent_handle.pool_index] ==
+           scheduled_process_has_child[execution_current_handle.pool_index] ==
+               false &&
+           scheduled_process_state[execution_current_handle.pool_index] ==
                ProcessSlotState::Running &&
-           scheduled_process_saved_sp[execution_parent_handle.pool_index] != 0;
+           scheduled_process_saved_sp[execution_current_handle.pool_index] !=
+               0;
 }
 
 // Page owners travel beside this process token. Takibi intentionally forbids

@@ -127,6 +127,11 @@ private let mut syscall_heap_start: usize;
 private let mut syscall_heap_limit: usize;
 private let mut clone_parent_inetd_mode: bool;
 private let mut clone_file_state_live: bool;
+// GitHub issue #245: the fd-table child slot for the clone in flight (if
+// any), stashed here because kernel_syscall_clone_files_reap() takes no
+// parameters of its own -- same pattern as kernel/mm/process_image.tkb's
+// clone_dest_root.
+private let mut clone_child_slot: usize;
 private let mut syscall_connected_fixture_pending: bool;
 private let mut syscall_httpd_daemon_pending: bool;
 private let mut syscall_exec_pending: bool;
@@ -163,9 +168,11 @@ variant KernelListenerLookupResult {
     Found({0..<KERNEL_SOCKET_FD_MAX as usize});
 }
 
+// GitHub issue #245: fd-table process slot == process.tkb's own
+// ProcessHandle.pool_index (same convention as the address-space root),
+// so this is now a direct pass-through instead of a binary pid==2?1:0.
 fn kernel_syscall_process_slot() -> usize {
-    if (kernel_process_current_pid() == 2) { return 1; }
-    return 0;
+    return kernel_process_current_root();
 }
 
 fn kernel_syscall_file_lookup(fd: usize) -> UnifiedFileResult {
@@ -276,13 +283,22 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     clone_file_state_live = false;
 }
 
-fn kernel_syscall_clone_files_begin() -> UnifiedFdResult {
-    match unified_fd_clone(0, 1) {
+// GitHub issue #245: parent/child slots used to be the literal 0/1 (the
+// only two the old model could ever produce); child_slot is now whatever
+// pool_index kernel_process_clone_begin() actually allocated, passed in
+// by the caller once it knows it (see the CLONE syscall handler below,
+// which now calls kernel_process_clone_begin() first for exactly this).
+fn kernel_syscall_clone_files_begin(parent_slot: usize, child_slot: usize)
+        -> UnifiedFdResult {
+    match unified_fd_clone(parent_slot, child_slot) {
         UnifiedFdResult::Invalid => {
             clone_file_state_live = false;
             return UnifiedFdResult::Invalid;
         }
-        UnifiedFdResult::Ok => { clone_file_state_live = true; }
+        UnifiedFdResult::Ok => {
+            clone_file_state_live = true;
+            clone_child_slot = child_slot;
+        }
     }
     clone_parent_inetd_mode = syscall_inetd_mode;
     return UnifiedFdResult::Ok;
@@ -487,7 +503,7 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
             kernel_connected_fd_clear(fd);
         }
     }
-    match unified_fd_destroy(1) {
+    match unified_fd_destroy(clone_child_slot) {
         UnifiedFdResult::Invalid => { return KernelFdReapResult::Failed; }
         UnifiedFdResult::Ok => {}
     }
@@ -1005,7 +1021,7 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
     if (installed_child_sp == 0) {
         kernel_syscall_fail_stop();
     }
-    process_image_activate_child();
+    process_image_activate_root(kernel_process_current_root());
     kernel_syscall_resume_return(installed_child_sp, 0);
 }
 
@@ -2100,42 +2116,46 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (number == AARCH64_NR_CLONE && (x0 != 0x11 || x1 != 0)) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
-        match process_image_clone_vm_begin() {
-            ProcessCloneVmResult::OutOfMemory => {
-                return SyscallAction::Resume(LINUX_EAGAIN);
+        let mut clone_flags: usize = x0;
+        let mut clone_stack: usize = x1;
+        if (number != AARCH64_NR_CLONE) {
+            clone_flags = 0x11;
+            clone_stack = 0;
+        }
+        let parent_slot: usize = kernel_syscall_process_slot();
+        // GitHub issue #245: kernel_process_clone_begin() now runs first
+        // (it used to run last), since the address-space root and
+        // fd-table slot the VM/fd clone steps below need are the new
+        // child's own ProcessHandle.pool_index -- not fixed to root 1 /
+        // fd-slot 1 anymore, so nothing downstream can pick them without
+        // asking process.tkb for the slot it actually allocated.
+        match kernel_process_clone_begin(clone_flags, clone_stack) {
+            ProcessCloneResult::Invalid => {
+                return SyscallAction::Resume(LINUX_EINVAL);
             }
-            ProcessCloneVmResult::Copied => {
-                match kernel_syscall_clone_files_begin() {
-                    UnifiedFdResult::Invalid => {
-                        match process_image_clone_vm_reap() {
-                            ProcessCloneVmReapResult::Missing => {}
-                            ProcessCloneVmReapResult::Reaped => {}
-                        }
+            ProcessCloneResult::ChildReady(child_pid) => {
+                let child_slot: usize = kernel_process_current_root();
+                match process_image_clone_vm_begin(child_slot) {
+                    ProcessCloneVmResult::OutOfMemory => {
+                        kernel_process_clone_rollback();
                         return SyscallAction::Resume(LINUX_EAGAIN);
                     }
-                    UnifiedFdResult::Ok => {}
-                }
-                let mut clone_flags: usize = x0;
-                let mut clone_stack: usize = x1;
-                if (number != AARCH64_NR_CLONE) {
-                    clone_flags = 0x11;
-                    clone_stack = 0;
-                }
-                match kernel_process_clone_begin(clone_flags, clone_stack) {
-                    ProcessCloneResult::Invalid => {
-                        match kernel_syscall_clone_files_reap() {
-                            KernelFdReapResult::Failed => { }
-                            KernelFdReapResult::Reaped => { }
+                    ProcessCloneVmResult::Copied => {
+                        match kernel_syscall_clone_files_begin(
+                                parent_slot, child_slot) {
+                            UnifiedFdResult::Invalid => {
+                                match process_image_clone_vm_reap() {
+                                    ProcessCloneVmReapResult::Missing => {}
+                                    ProcessCloneVmReapResult::Reaped => {}
+                                }
+                                kernel_process_clone_rollback();
+                                return SyscallAction::Resume(LINUX_EAGAIN);
+                            }
+                            UnifiedFdResult::Ok => {}
                         }
-                        match process_image_clone_vm_reap() {
-                            ProcessCloneVmReapResult::Missing => { }
-                            ProcessCloneVmReapResult::Reaped => { }
-                        }
-                        return SyscallAction::Resume(LINUX_EINVAL);
-                    }
-                    ProcessCloneResult::ChildReady(child_pid) => {
-                        // Assembly copies the complete saved parent frame to
-                        // the dedicated child kernel stack and resumes x0=0.
+                        // Assembly copies the complete saved parent frame
+                        // to the dedicated child kernel stack and resumes
+                        // x0=0.
                         return SyscallAction::CloneChild(child_pid);
                     }
                 }
@@ -2166,7 +2186,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // external-command path without pretending to provide a blocking
         // multi-child scheduler yet.
         if (kernel_process_is_child() || x0 != 0xFFFFFFFFFFFFFFFF &&
-            x0 != 2 || x2 != 0) {
+            x0 != kernel_process_current_child_pid() || x2 != 0) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
         if (kernel_process_child_waitable() == false) {

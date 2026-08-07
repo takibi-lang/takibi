@@ -38,9 +38,15 @@ fn kernel_process_child_exec_prepare() -> usize {
         }
         ProcessCloneVmReapResult::Reaped => {}
     }
+    // GitHub issue #245: this used to always be root 1, the only root the
+    // old two-process model's single forked child could ever occupy. A
+    // child running deeper than one level under its own parent (e.g.
+    // user_payload's own fork of a UART-block/scheduler-preempt child)
+    // needs its own current root here instead.
+    let child_root: usize = kernel_process_current_root();
     let pages_result = process_image_map_in_root(
         kernel_exec_plan, kernel_syscall_exec_argv(),
-        kernel_syscall_exec_argc(), 1);
+        kernel_syscall_exec_argc(), child_root);
     match pages_result {
         ProcessImageMapResult::InvalidImage => {
             return 0;
@@ -54,7 +60,7 @@ fn kernel_process_child_exec_prepare() -> usize {
             if (process_image_exec_install(pages) == false) {
                 return 0;
             }
-            process_image_activate_child();
+            process_image_activate_root(child_root);
             kernel_process_child_exec_mark();
             kernel_syscall_exec_clear();
             return 1;
@@ -396,7 +402,7 @@ fn main() {
     }
 
     if (scheduled_process_table_probe()) {
-        kernel_boot_log("process table: slots=2 stacks=4096 generation reuse safe\n");
+        kernel_boot_log("process table: slots=3 stacks=4096 generation reuse safe\n");
     } else {
         kernel_boot_log("process table: failed\n");
     }
