@@ -24,7 +24,6 @@ extern fn busy_spin(count: usize);
 const EBADF_RC: usize = 0xFFFFFFFFFFFFFFF7;
 const EFAULT_RC: usize = 0xFFFFFFFFFFFFFFF2;
 const LARGE_LEN: usize = 1461;
-const SCHEDULER_PROBE_VA: usize = 0x40001000;
 const SCHEDULER_CHILD_BUSY: usize = 0x0BEBC200;
 const SCHEDULER_PARENT_BUSY: usize = 0x17D78400;
 
@@ -107,6 +106,20 @@ fn initial_user_payload() {
     fail_if(svc5(57, 5, 0, 0, 0, 0) != 0);
     fail_if(svc5(57, 4, 0, 0, 0, 0) != 0);
 
+    /* GitHub issue #241 hardware finding: SCHEDULER_PROBE_VA used to be
+     * 0x40001000 (USER_DATA_VA), a page the old flat-blob mechanism's own
+     * dedicated map_user_data() always reserved as rw+xn. Nothing pins
+     * that specific address under the general ELF loader's own layout
+     * (this real PIE ELF's PT_LOAD segments do not put anything writable
+     * there), so a stack local taken here -- before the fork below --
+     * takes its place: 0x11 requests plain fork semantics (no CLONE_VM),
+     * so parent and child each get their own COW-copied page at this
+     * same VA, exactly what the "private same-VA data" probe needs.
+     */
+    let mut scheduler_probe_slot: [u8; 8];
+    let scheduler_probe_va: usize =
+        (scheduler_probe_slot as *u8) as usize;
+
     /* The focused context fixture clones only after its independent socket
      * lifecycle is complete; the real HTTPd daemon covers fd inheritance. */
     let pid: usize = svc5(220, 0x11, 0, 0, 0, 0);
@@ -124,12 +137,12 @@ fn initial_user_payload() {
         }
         /* Scheduler acceptance: private same-VA data plus GPR and SIMD
          * signatures must survive involuntary timer preemption. */
-        fail_if(scheduler_probe_run(SCHEDULER_PROBE_VA, 0x22, 0x5a,
+        fail_if(scheduler_probe_run(scheduler_probe_va, 0x22, 0x5a,
                                      SCHEDULER_CHILD_BUSY) == 0);
         svc5(93, 42, 0, 0, 0, 0);
     } else {
         fail_if(pid != my_pid + 1);
-        fail_if(scheduler_probe_run(SCHEDULER_PROBE_VA, 0x11, 0xa5,
+        fail_if(scheduler_probe_run(scheduler_probe_va, 0x11, 0xa5,
                                      SCHEDULER_PARENT_BUSY) == 0);
 
         /* Accepted only if this parent reached the end of its compute
