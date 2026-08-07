@@ -401,7 +401,14 @@ $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_
 	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_MAIN_O) -o $@
 	python3 scripts/check_kernel_asm_invariants.py $@
 
-kernelbuild-rpi5: $(KERNEL_RPI5_ELF)
+# Pure source-text check (issues #207/#242, see HISTORY.md's 2026-08-07
+# entry) -- no build product needed, so it runs independent of and before
+# the actual compile below rather than being tied to a .o/.elf rule.
+.PHONY: kernel-lib-check
+kernel-lib-check:
+	python3 scripts/check_kernel_lib_limitations_header.py $(KERNEL_DIR)/lib
+
+kernelbuild-rpi5: kernel-lib-check $(KERNEL_RPI5_ELF)
 
 kernelbuild: kernelbuild-rpi5
 

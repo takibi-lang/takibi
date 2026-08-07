@@ -15,6 +15,145 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-07: Root-1 demand-stack metadata on fork (Issue #219), O(1) free-slot/refcount collection library (Issues #207, #242)
+
+Three issues closed in one session, the second and third growing directly
+out of debugging the first -- a concrete instance of this repo's own
+"the engine this roadmap is built around" pattern (a kernel bug exposes a
+missing building block, building it exposes another bug).
+
+**#219**: `process_image_clone_vm_begin()` copied every present parent PTE
+into root 1 (including any stack pages the parent had already demand-
+faulted in) but never initialized root 1's own
+`process_image_stack_growth_active`/`stack_lowest_l3`/active+growth page
+counts, so a forked child that grew its stack past what the parent had
+mapped at fork time hit `process_image_handle_data_abort`'s "growth not
+active" guard and fail-stopped instead of growing. Root 1's watermark is
+now derived from what the clone loop actually copies into root 1's own
+page table, not mirrored from root 0's own bookkeeping -- mirroring was
+tried first and found broken by a real RPi5 fail-stop: the only real EL0
+process that forks through the low-level initial-bootstrap path
+(`address_space_new()`/`map_user_stack()`, not
+`process_image_map_current()`) never populates root 0's own growth-active/
+lowest-L3 fields at all, so mirroring propagated meaningless zero state
+into root 1. Diagnosed via `ESR_EL1`/`FAR_EL1`/`ELR_EL1` register reads
+over SWD (`FAR_EL1` landed 1.5KB below `USER_TEXT_VA`, confirming the
+fault address fell entirely outside the mapped image -- see
+`process_image_clone_growth_probe()`, a new kernel-level unit test added
+because neither real EL0 process that forks in this kernel can exercise
+the real growth path itself: the bootstrap process's address space is
+smaller than one growth page, and the pinned Alpine BusyBox binary's
+recursion depth isn't controllable from the test harness). Also fixed a
+related page leak: pages a child allocates for itself via
+`process_image_handle_data_abort()` after the fork snapshot were never
+released on child exit (`process_clone_vm_rollback()` only knew about
+pages present at fork time); `process_clone_vm_release_growth_pages()`
+closes this. Verified on real RPi5 hardware, all 25 `kernelcheck-rpi5`
+views green, including the new `"vm fork: child stack growth ok"` line.
+
+**#207**: replaced the `for i in 0..<MAX { if used[i] == 0 ... }` linear
+free-slot scan duplicated across `kernel/mm/page.tkb` (the most acute
+case, 1024 entries scanned on every page allocation), `kernel/kernel/
+process.tkb`, `kernel/mm/address_space.tkb`, and `kernel/net/tcp.tkb`'s
+connection pool, with a new shared library: `kernel/lib/freelist.tkb`
+(`FreelistCore(N)`, an O(1) index-linked free list, ported from this
+issue's own `linux_user/freelist_generic/` design prototype) and
+`kernel/lib/slotmap.tkb` (`SlotMap(N)`, `FreelistCore(N)` plus a per-slot
+occupant-generation record, letting a plain `(index, generation)` handle
+be revalidated against the current occupant without holding the linear
+owner -- needed at two of the four sites, where such a handle crosses a
+lock/`stable_replace` boundary). `SlotMap` is the recommended default for
+any new fixed-capacity slot pool in `kernel/`.
+
+Migrating off the old `used[i] = 0` allocator (idempotent -- releasing an
+already-free slot was a harmless no-op) to a real free list (NOT
+idempotent -- the same index lands on the chain twice, and two later
+allocations alias one physical page) turned two latent double frees in
+`kernel/mm/process_image.tkb` into an immediately fatal bug: a second
+process image booted into all-zero text and fault-stopped on its own
+entry point (`ESR_EL1` EC=0, undefined instruction). Root-caused NOT by
+reading the faulting code but by bisecting five `page_allocator_double_
+free_count()`-style checkpoints through the boot log down to the one
+fixture whose presence flipped the verdict (`process_image_clone_growth_
+probe()`'s own growth-region bookkeeping). Both bugs were the same shape:
+an array written at one index scheme and read back at a different one.
+`process_image_growth_page_indices` was written at a slot derived from
+`l3_index` but walked sequentially by both release paths, so release read
+never-written (zero) slots and freed page index 0 repeatedly; separately,
+`process_image_cleanup()` released growth pages twice, once via `image_
+page_indices` (already covered by `process_image_handle_data_abort`'s own
+recording) and again via the growth array. `slotmap_remove()` now detects
+and counts a release of an already-free slot instead of corrupting the
+chain, and `kernel/init/main.tkb` asserts the count is zero at end of
+boot (`"resources: no double free"`) -- this class of bug is observable
+going forward instead of silently absorbed. A second, independent bug
+(`page_allocator_init()` ran after the address-space/scheduler self-tests
+that already called `page_alloc()`) was also found this way: the old
+scan-based allocator's `used[]` bookkeeping was zero-initialized `.bss`,
+so scanning it before `page_allocator_init()` ever ran happened to work
+by accident (`used[i] == 0` already meant free); a freshly zero-
+initialized `FreelistCore`'s `next_free` chain has no such property (an
+unlinked chain hands out index 0 forever), so this ordering had to become
+correct rather than accidentally-correct. Fixed by moving `page_allocator_
+init()` to run before any other boot-time probe. Verified: `make test`,
+`make linuxcheck`, all 25 `kernelcheck-rpi5` views green on real
+hardware.
+
+Two of #207's originally-listed five call sites were deliberately not
+ported, split into **#242**: `kernel/kernel/fd_table.tkb`'s `SHARED_
+OBJECT_MAX` pool (`UnifiedObjectHandle`) is reference-counted, not
+linearly owned -- `SlotMap`'s linear `FreelistOwner` (consumed exactly
+once) does not fit a handle multiple independent fd-table entries can
+each hold and release on their own schedule -- and several of its scans
+match a key, not a free slot, which no free-list design addresses.
+`tcp.tkb`'s `PENDING_TCP_MAX` retry queue has no owner/generation concept
+at all and was left alone.
+
+**#242** added `kernel/lib/refcount_slotmap.tkb`'s `RefcountSlotMap(N,
+MAX_REFS)`, reusing `FreelistCore(N)` as its engine but replacing
+`SlotMap`'s linear insert/remove with `alloc`/`abandon`/`retain`/
+`release`, matching how a refcounted resource is actually used (`alloc`:
+find a free slot, refcount starts at 0; `abandon`: give back a slot
+allocated but never retained, e.g. because installing the caller's first
+reference failed; `retain`/`release`: add/remove a holder, freeing at
+zero). Real design discussion (recorded as GitHub comments on #242, not
+just here) preceded implementation: a refcount is a genuinely dynamic
+runtime value no static checker -- takibi's included -- lifts to compile
+time the way single ownership can be, but the MAXIMUM number of
+simultaneous holders is usually a real, known bound (for `fd_table.tkb`,
+at most `PROCESS_FD_ENTRY_MAX` fd-table slots can each hold one
+reference to the same object), so `MAX_REFS` is a second const-generic
+parameter and `retain` refuses past it rather than silently wrapping an
+unbounded `usize` -- the concrete, available-today discipline, not an
+attempt at full verification. Concurrent Separation Logic (O'Hearn) and
+"counting permissions" (Bornat/Calcagno/O'Hearn/Parkinson) were the
+identified prior art for the harder underlying question (does static
+ownership reasoning survive a resource crossing execution contexts, e.g.
+a future interrupt handler or second core) -- real research, but Iris/
+Coq-scale, out of reach of takibi's fully-automatic checker; the concrete
+answer for when a concurrent caller actually shows up is this codebase's
+own already-working `stable_replace` + lock-guard pattern
+(`ScheduledProcessStore`/`TcpConnectionStore`/`ProcessCloneVmStore`), not
+a new primitive. `fd_table.tkb`'s three install-failure rollback sites
+now call `refcount_pool_abandon()` instead of hand-resetting `object_
+kind`/`object_generation`, and its test (`unified_fd_table_probe()`)
+switched from three explicit `unified_object_alloc(0/1/2, kind)` calls
+(the only caller bypassing the pool's own free-list bookkeeping entirely)
+to `unified_object_alloc_first(kind)`, the same path every real caller
+already used. Verified: all 25 `kernelcheck-rpi5` views green, including
+the new double-release/leak checks in `unified_fd_table_probe()`.
+
+**Process note for next time**: two fast `linux_user/` tests were added
+after the fact (`linux_user/slotmap/`, `linux_user/refcount_slotmap/`,
+`use`ing `kernel/lib/`'s real files directly rather than a re-prototyped
+copy) specifically because neither `SlotMap`'s nor `RefcountSlotMap`'s
+double-free/double-release detection had any coverage faster than a full
+RPi5 boot -- the two real bugs above were only found via a multi-hour
+real-hardware boot-log bisection. Add this kind of test WITH the library,
+not after a bug proves it was missing.
+
+---
+
 ### 2026-08-07: Moved user_entry.S's EL0 Syscall-ABI Test Payload to `.tkb` (GitHub Issue #228)
 
 `user_entry.S`'s `initial_user_payload`/`initial_user_payload_end` block (321
