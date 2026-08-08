@@ -2,14 +2,21 @@ use "kernel/mm/page.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/fs/elf64.tkb";
 
-// GitHub issue #245: must match kernel/kernel/process.tkb's
+// GitHub issue #246: must match kernel/kernel/process.tkb's
 // KERNEL_PROCESS_MAX -- root index == that file's ProcessHandle.pool_index
 // throughout this file, so every scheduled process gets its own page-table
 // root. Kept as an independent literal (not derived from the other file's
 // constant) because top-level const initializers here cannot reference
 // another file's identifier in an arithmetic expression -- same reason
-// kernel/fs/ext2/ext2.tkb's EXT2_MAX_FILE_SIZE stayed a literal.
-const PROCESS_IMAGE_ROOT_MAX: usize = 3;
+// kernel/fs/ext2/ext2.tkb's EXT2_MAX_FILE_SIZE stayed a literal. A generous
+// compile-time ceiling, not a razor-thin one (see process.tkb's own header
+// comment on KERNEL_PROCESS_MAX). Every array below is bookkeeping
+// (indices into page.tkb's shared pool, small counters/flags), not a
+// dedicated physical resource of its own -- unlike process.tkb's kernel
+// stacks or kernel/arch/arm64/mm/mmu.tkb's actual page-table memory, so
+// this stays a plain eagerly-sized array rather than a growable_pool.tkb
+// shadow pool; the real per-root physical cost lives entirely in mmu.tkb.
+const PROCESS_IMAGE_ROOT_MAX: usize = 16;
 
 private let mut image_page_indices: [usize; BOOT_PAGE_COUNT * PROCESS_IMAGE_ROOT_MAX];
 private let mut image_l3_indices: [usize; BOOT_PAGE_COUNT * PROCESS_IMAGE_ROOT_MAX];
