@@ -1025,410 +1025,402 @@ fn main() {
     // re-armed handler/IRQ it already has.
     uart_set_rx_handler(kernel_uart_rx_isr);
     irq_uart_rx_unmask();
-    match initial_process_create() {
-        ProcessCreateResult::OutOfMemory => {
-            kernel_boot_log("initial process: allocation failed\n");
+    // GitHub issue #241: user_payload now runs as a real ELF launched from
+    // within init.sh (see below), not through the old flat-blob mechanism
+    // (InitialProcess/ProcessCreateResult/initial_process_create/
+    // initial_process_destroy/process_new in kernel/kernel/process.tkb;
+    // AddressSpaceState/MappingRole/AddressSpaceOwner/MappingOwner/
+    // address_space_new/map_user_text/map_user_data/map_user_stack/
+    // unmap_user_text/unmap_user_data/unmap_user_stack/address_space_free/
+    // user_layout_is_correct in kernel/mm/address_space.tkb), all removed.
+    {
+        // Issue #196 pre-work: run the same Alpine BusyBox static-PIE image a
+        // second time, with argv={"busybox","uname","-a"} instead of
+        // {"busybox","cat","/hello.txt"}, now that every earlier boot-time
+        // fixture has already taken its own evidence. BusyBox's uname applet
+        // calls uname(2) and then flushes its output (sysname/nodename/
+        // release/version/machine, space-separated) through musl's
+        // stdio, which on this pinned musl 1.2.6 build always goes
+        // through writev(2). Both are real implementations now (issue
+        // #196): uname(2) fills a real struct utsname and writev(2)
+        // actually reaches the UART console, so a real, non-empty
+        // BusyBox uname line should appear in this boot log.
+        if (distro_plan_ready) {
+            match process_image_map(
+                    saved_distro_plan,
+                    "busybox\0uname\0-a\0" as []u8,
+                    3) {
+                ProcessImageMapResult::InvalidImage => {
+                    kernel_boot_log("uname map: invalid image\n");
+                }
+                ProcessImageMapResult::OutOfMemory => {
+                    kernel_boot_log("uname map: out of memory\n");
+                }
+                ProcessImageMapResult::Mapped(uname_pages) => {
+                    let (uname_heap_start, uname_heap_limit) =
+                        process_image_heap_range(uname_pages);
+                    kernel_syscall_process_configure(
+                        uname_heap_start, uname_heap_limit);
+                    let uname_status: usize = run_initial_user(
+                        process_image_entry(uname_pages),
+                        process_image_stack_pointer(uname_pages));
+                    if (uname_status == 0) {
+                        kernel_boot_log("busybox uname exit: 0\n");
+                    } else {
+                        kernel_boot_log("busybox uname failed\n");
+                    }
+                    process_image_unmap(uname_pages);
+                    if (process_image_window_is_clear()) {
+                        kernel_boot_log("uname unmap: clean\n");
+                    }
+                }
+            }
         }
-        ProcessCreateResult::Created(resources) => {
-            // GitHub issue #241: user_payload now runs as a real ELF
-            // launched from within init.sh (see below), not through this
-            // dedicated flat-blob mechanism -- this allocation/destroy
-            // pair is a placeholder until the surrounding match itself
-            // (and InitialUserLoadResult/map_user_text/map_user_data/
-            // map_user_stack/unmap_user_*, all now dead) is removed in a
-            // follow-up cleanup pass, kept separate to verify the actual
-            // behavior change on hardware first without also re-indenting
-            // everything below in the same diff.
-            let (process, text, data, stack) = resources;
-            initial_process_destroy(process, text, data, stack);
-            // Issue #196 pre-work: run the same Alpine BusyBox static-PIE image a
-            // second time, with argv={"busybox","uname","-a"} instead of
-            // {"busybox","cat","/hello.txt"}, now that every earlier boot-time
-            // fixture has already taken its own evidence. BusyBox's uname applet
-            // calls uname(2) and then flushes its output (sysname/nodename/
-            // release/version/machine, space-separated) through musl's
-            // stdio, which on this pinned musl 1.2.6 build always goes
-            // through writev(2). Both are real implementations now (issue
-            // #196): uname(2) fills a real struct utsname and writev(2)
-            // actually reaches the UART console, so a real, non-empty
-            // BusyBox uname line should appear in this boot log.
-            if (distro_plan_ready) {
-                match process_image_map(
-                        saved_distro_plan,
-                        "busybox\0uname\0-a\0" as []u8,
-                        3) {
-                    ProcessImageMapResult::InvalidImage => {
-                        kernel_boot_log("uname map: invalid image\n");
+
+        // Issue #205: same distro plan, argv={"busybox","sh","-c",
+        // "read x; echo shell read: ${x#x}"}. BusyBox ash's `read` builtin always calls poll()
+        // before its first read() from stdin, even with no timeout --
+        // see shell/shell_common.c in the vendored busybox-1.37.0
+        // source. musl maps poll() to the ppoll(2) syscall
+        // unconditionally on aarch64 (no legacy SYS_poll on this arch).
+        // The RPi5 runner waits for the kernel's blocked marker and
+        // injects one UART line. ppoll then retries after the RX IRQ,
+        // read(0) consumes the line, and ash strips the optional leading
+        // UART warm-up sentinel before echoing the proof value.
+        if (distro_plan_ready) {
+            match process_image_map(
+                    saved_distro_plan,
+                    "busybox\0sh\0-c\0read x; echo shell read: ${x#x}\0" as []u8,
+                    4) {
+                ProcessImageMapResult::InvalidImage => {
+                    kernel_boot_log("shell read map: invalid image\n");
+                }
+                ProcessImageMapResult::OutOfMemory => {
+                    kernel_boot_log("shell read map: out of memory\n");
+                }
+                ProcessImageMapResult::Mapped(shell_pages) => {
+                    let (shell_heap_start, shell_heap_limit) =
+                        process_image_heap_range(shell_pages);
+                    kernel_syscall_process_configure(
+                        shell_heap_start, shell_heap_limit);
+                    let shell_status: usize = run_initial_user(
+                        process_image_entry(shell_pages),
+                        process_image_stack_pointer(shell_pages));
+                    if (shell_status == 0) {
+                        kernel_boot_log("busybox shell read exit: 0\n");
+                    } else {
+                        kernel_boot_log("busybox shell read failed\n");
                     }
-                    ProcessImageMapResult::OutOfMemory => {
-                        kernel_boot_log("uname map: out of memory\n");
+                    if (process_image_stack_grew(shell_pages)) {
+                        kernel_boot_log("shell stack: demand-grown\n");
                     }
-                    ProcessImageMapResult::Mapped(uname_pages) => {
-                        let (uname_heap_start, uname_heap_limit) =
-                            process_image_heap_range(uname_pages);
-                        kernel_syscall_process_configure(
-                            uname_heap_start, uname_heap_limit);
-                        let uname_status: usize = run_initial_user(
-                            process_image_entry(uname_pages),
-                            process_image_stack_pointer(uname_pages));
-                        if (uname_status == 0) {
-                            kernel_boot_log("busybox uname exit: 0\n");
-                        } else {
-                            kernel_boot_log("busybox uname failed\n");
-                        }
-                        process_image_unmap(uname_pages);
-                        if (process_image_window_is_clear()) {
-                            kernel_boot_log("uname unmap: clean\n");
-                        }
+                    process_image_unmap(shell_pages);
+                    if (process_image_window_is_clear()) {
+                        kernel_boot_log("shell read unmap: clean\n");
                     }
                 }
             }
+        }
 
-            // Issue #205: same distro plan, argv={"busybox","sh","-c",
-            // "read x; echo shell read: ${x#x}"}. BusyBox ash's `read` builtin always calls poll()
-            // before its first read() from stdin, even with no timeout --
-            // see shell/shell_common.c in the vendored busybox-1.37.0
-            // source. musl maps poll() to the ppoll(2) syscall
-            // unconditionally on aarch64 (no legacy SYS_poll on this arch).
-            // The RPi5 runner waits for the kernel's blocked marker and
-            // injects one UART line. ppoll then retries after the RX IRQ,
-            // read(0) consumes the line, and ash strips the optional leading
-            // UART warm-up sentinel before echoing the proof value.
-            if (distro_plan_ready) {
-                match process_image_map(
-                        saved_distro_plan,
-                        "busybox\0sh\0-c\0read x; echo shell read: ${x#x}\0" as []u8,
-                        4) {
-                    ProcessImageMapResult::InvalidImage => {
-                        kernel_boot_log("shell read map: invalid image\n");
+        // Issue #196: same distro plan, argv={"busybox","od",
+        // "/hello.txt"}. BusyBox's od applet reads the whole file in one
+        // fread() call, which on this pinned musl 1.2.6 build issues a
+        // single readv(2) (confirmed via a qemu-aarch64-static -strace
+        // trace with an empty environment matching this kernel's
+        // envp={}: exactly one `readv(3,...) = 16`, no lseek/fstat
+        // needed). readv(2)+writev(2) are real implementations now, so
+        // od should actually print a real hex dump of /hello.txt's 16
+        // bytes and exit 0. An earlier version of this scenario used
+        // `head`, which turned out not to exercise readv(2) at all:
+        // BusyBox's fgets()-based applets always request 1 byte at a
+        // time from musl's stdio, which always selects plain read(2),
+        // never readv(2).
+        if (distro_plan_ready) {
+            match process_image_map(
+                    saved_distro_plan,
+                    "busybox\0od\0/hello.txt\0" as []u8,
+                    3) {
+                ProcessImageMapResult::InvalidImage => {
+                    kernel_boot_log("od map: invalid image\n");
+                }
+                ProcessImageMapResult::OutOfMemory => {
+                    kernel_boot_log("od map: out of memory\n");
+                }
+                ProcessImageMapResult::Mapped(od_pages) => {
+                    let (od_heap_start, od_heap_limit) =
+                        process_image_heap_range(od_pages);
+                    kernel_syscall_process_configure(
+                        od_heap_start, od_heap_limit);
+                    let od_status: usize = run_initial_user(
+                        process_image_entry(od_pages),
+                        process_image_stack_pointer(od_pages));
+                    if (od_status == 0) {
+                        kernel_boot_log("busybox od exit: 0\n");
+                    } else {
+                        kernel_boot_log("busybox od failed\n");
                     }
-                    ProcessImageMapResult::OutOfMemory => {
-                        kernel_boot_log("shell read map: out of memory\n");
-                    }
-                    ProcessImageMapResult::Mapped(shell_pages) => {
-                        let (shell_heap_start, shell_heap_limit) =
-                            process_image_heap_range(shell_pages);
-                        kernel_syscall_process_configure(
-                            shell_heap_start, shell_heap_limit);
-                        let shell_status: usize = run_initial_user(
-                            process_image_entry(shell_pages),
-                            process_image_stack_pointer(shell_pages));
-                        if (shell_status == 0) {
-                            kernel_boot_log("busybox shell read exit: 0\n");
-                        } else {
-                            kernel_boot_log("busybox shell read failed\n");
-                        }
-                        if (process_image_stack_grew(shell_pages)) {
-                            kernel_boot_log("shell stack: demand-grown\n");
-                        }
-                        process_image_unmap(shell_pages);
-                        if (process_image_window_is_clear()) {
-                            kernel_boot_log("shell read unmap: clean\n");
-                        }
+                    process_image_unmap(od_pages);
+                    if (process_image_window_is_clear()) {
+                        kernel_boot_log("od unmap: clean\n");
                     }
                 }
             }
+        }
 
-            // Issue #196: same distro plan, argv={"busybox","od",
-            // "/hello.txt"}. BusyBox's od applet reads the whole file in one
-            // fread() call, which on this pinned musl 1.2.6 build issues a
-            // single readv(2) (confirmed via a qemu-aarch64-static -strace
-            // trace with an empty environment matching this kernel's
-            // envp={}: exactly one `readv(3,...) = 16`, no lseek/fstat
-            // needed). readv(2)+writev(2) are real implementations now, so
-            // od should actually print a real hex dump of /hello.txt's 16
-            // bytes and exit 0. An earlier version of this scenario used
-            // `head`, which turned out not to exercise readv(2) at all:
-            // BusyBox's fgets()-based applets always request 1 byte at a
-            // time from musl's stdio, which always selects plain read(2),
-            // never readv(2).
-            if (distro_plan_ready) {
-                match process_image_map(
-                        saved_distro_plan,
-                        "busybox\0od\0/hello.txt\0" as []u8,
-                        3) {
-                    ProcessImageMapResult::InvalidImage => {
-                        kernel_boot_log("od map: invalid image\n");
-                    }
-                    ProcessImageMapResult::OutOfMemory => {
-                        kernel_boot_log("od map: out of memory\n");
-                    }
-                    ProcessImageMapResult::Mapped(od_pages) => {
-                        let (od_heap_start, od_heap_limit) =
-                            process_image_heap_range(od_pages);
-                        kernel_syscall_process_configure(
-                            od_heap_start, od_heap_limit);
-                        let od_status: usize = run_initial_user(
-                            process_image_entry(od_pages),
-                            process_image_stack_pointer(od_pages));
-                        if (od_status == 0) {
-                            kernel_boot_log("busybox od exit: 0\n");
-                        } else {
-                            kernel_boot_log("busybox od failed\n");
+        // The first userspace process is an ext2-resident ash init
+        // script. This deliberately keeps the kernel/user boundary at
+        // one ordinary argv invocation: shell control flow and future
+        // boot policy live in init.sh, rather than in further kernel
+        // per-scenario argv builders.
+        //
+        // GitHub issue #241: user_payload.tkb's own EL0 syscall-ABI
+        // fixture now runs from inside this script (as plain external
+        // command "/user_payload"; ash forks + execve()s it, resolved
+        // transparently by kernel_process_child_exec_prepare -- see
+        // above), not through the dedicated flat-blob mechanism #228
+        // built. Its own TCP-drop-injection/scheduler arming,
+        // previously set immediately before that dedicated launch, is
+        // armed here instead, immediately before the script that now
+        // actually triggers those scenarios. The UART RX handler/IRQ
+        // unmask stay at their original earlier position (see above)
+        // -- shell_read's own ppoll()-based UART wait needs them
+        // already active, not re-armed here; only the ring itself is
+        // reset again, to clear whatever shell_read left behind.
+        // GitHub issue #180: index 1 is the middle of the EL0
+        // fixture's 3 write()s (0 = 19-byte header, 1 = 1460-byte
+        // body, 2 = final byte) -- a genuine drop within the large
+        // response, not a bookend.
+        kernel_tcp_inject_drop_data_segment(1);
+        kernel_tcp_inject_drop_next_fin();
+        kernel_uart_rx_ring_reset();
+        kernel_process_execution_reset();
+        kernel_process_scheduler_enable();
+        kernel_syscall_connected_fixture_start();
+        if (distro_plan_ready) {
+            match process_image_map(
+                    saved_distro_plan,
+                    "busybox\0sh\0/init.sh\0" as []u8,
+                    3) {
+                ProcessImageMapResult::InvalidImage => {
+                    kernel_boot_log("script map: invalid image\n");
+                }
+                ProcessImageMapResult::OutOfMemory => {
+                    kernel_boot_log("script map: out of memory\n");
+                }
+                ProcessImageMapResult::Mapped(script_pages) => {
+                    let (script_heap_start, script_heap_limit) =
+                        process_image_heap_range(script_pages);
+                    kernel_syscall_process_configure(
+                        script_heap_start, script_heap_limit);
+                    let script_status: usize = run_initial_user(
+                        process_image_entry(script_pages),
+                        process_image_stack_pointer(script_pages));
+                    if (script_status == 0) {
+                        kernel_boot_log("init script exit: 0\n");
+                        kernel_boot_log("syscall write errors: ebadf efault\n");
+                        let (open_calls, read_calls, file_write_calls,
+                             close_calls) =
+                            kernel_syscall_file_evidence();
+                        if (open_calls >= 2 && read_calls >= 1 &&
+                            file_write_calls >= 1 && close_calls >= 2) {
+                            kernel_boot_log("linux file syscalls: open read write close ok\n");
                         }
-                        process_image_unmap(od_pages);
-                        if (process_image_window_is_clear()) {
-                            kernel_boot_log("od unmap: clean\n");
+                        if (kernel_syscall_socket_evidence()) {
+                            kernel_boot_log("linux socket syscalls: two overlapping connections fd=5,6 independent ok port=8080\n");
                         }
+                        if (kernel_syscall_partial_write_evidence()) {
+                            kernel_boot_log("linux socket partial write: 1460+1 ok\n");
+                        }
+                        if (kernel_process_clone_evidence()) {
+                            // GitHub issue #241: user_payload now runs
+                            // nested under ash's own process (not as
+                            // pid 1 itself), so its own child is no
+                            // longer necessarily pid 2 specifically --
+                            // kernel_process_clone_evidence() itself
+                            // never asserted literal pid numbers, only
+                            // structural clone/exit/reap properties.
+                            kernel_boot_log("process clone: parent+child exit=42 reaped\n");
+                        }
+                        if (kernel_process_scheduler_acceptance_evidence()) {
+                            kernel_boot_log("scheduler preempt: parent+child gpr+sp+pc+simd asid deferred ok\n");
+                        }
+                        if (kernel_process_uart_block_evidence()) {
+                            kernel_boot_log("uart rx: scheduler block+wake ok\n");
+                        }
+                        // GitHub issue #241: 3 was the old flat-blob
+                        // process's whole address space (text+data+
+                        // stack, one page each). user_payload is a
+                        // real ELF loaded by the general loader now,
+                        // so its fork copies the real image instead:
+                        // 3 PT_LOAD pages (vaddr 0 / 0x10340 /
+                        // 0x20998, one 4K page each) + the loader's
+                        // PROCESS_HEAP_PAGE_COUNT (128) heap pages +
+                        // 1 stack page = 132.
+                        if (process_image_clone_vm_reaped_pages() == 132) {
+                            kernel_boot_log("vm fork: private pages=132 reclaimed\n");
+                        }
+                        if (process_image_clone_growth_probe()) {
+                            kernel_boot_log("vm fork: child stack growth ok\n");
+                        }
+                        if (kernel_tcp_injected_data_recovered()) {
+                            kernel_boot_log("httpd server: data drop retransmit ok\n");
+                        }
+                        if (kernel_tcp_injected_fin_recovered()) {
+                            kernel_boot_log("httpd server: fin drop retransmit ok\n");
+                        }
+                        kernel_boot_log("syscall exit: 0\n");
+                    } else {
+                        kernel_boot_log("init script failed\n");
+                    }
+                    process_image_unmap(script_pages);
+                    if (process_image_window_is_clear()) {
+                        kernel_boot_log("init unmap: clean\n");
                     }
                 }
             }
+        }
 
-            // The first userspace process is an ext2-resident ash init
-            // script. This deliberately keeps the kernel/user boundary at
-            // one ordinary argv invocation: shell control flow and future
-            // boot policy live in init.sh, rather than in further kernel
-            // per-scenario argv builders.
-            //
-            // GitHub issue #241: user_payload.tkb's own EL0 syscall-ABI
-            // fixture now runs from inside this script (as plain external
-            // command "/user_payload"; ash forks + execve()s it, resolved
-            // transparently by kernel_process_child_exec_prepare -- see
-            // above), not through the dedicated flat-blob mechanism #228
-            // built. Its own TCP-drop-injection/scheduler arming,
-            // previously set immediately before that dedicated launch, is
-            // armed here instead, immediately before the script that now
-            // actually triggers those scenarios. The UART RX handler/IRQ
-            // unmask stay at their original earlier position (see above)
-            // -- shell_read's own ppoll()-based UART wait needs them
-            // already active, not re-armed here; only the ring itself is
-            // reset again, to clear whatever shell_read left behind.
-            // GitHub issue #180: index 1 is the middle of the EL0
-            // fixture's 3 write()s (0 = 19-byte header, 1 = 1460-byte
-            // body, 2 = final byte) -- a genuine drop within the large
-            // response, not a bookend.
-            kernel_tcp_inject_drop_data_segment(1);
-            kernel_tcp_inject_drop_next_fin();
-            kernel_uart_rx_ring_reset();
-            kernel_process_execution_reset();
-            kernel_process_scheduler_enable();
-            kernel_syscall_connected_fixture_start();
-            if (distro_plan_ready) {
-                match process_image_map(
-                        saved_distro_plan,
-                        "busybox\0sh\0/init.sh\0" as []u8,
-                        3) {
-                    ProcessImageMapResult::InvalidImage => {
-                        kernel_boot_log("script map: invalid image\n");
-                    }
-                    ProcessImageMapResult::OutOfMemory => {
-                        kernel_boot_log("script map: out of memory\n");
-                    }
-                    ProcessImageMapResult::Mapped(script_pages) => {
-                        let (script_heap_start, script_heap_limit) =
-                            process_image_heap_range(script_pages);
-                        kernel_syscall_process_configure(
-                            script_heap_start, script_heap_limit);
-                        let script_status: usize = run_initial_user(
-                            process_image_entry(script_pages),
-                            process_image_stack_pointer(script_pages));
-                        if (script_status == 0) {
-                            kernel_boot_log("init script exit: 0\n");
-                            kernel_boot_log("syscall write errors: ebadf efault\n");
-                            let (open_calls, read_calls, file_write_calls,
-                                 close_calls) =
-                                kernel_syscall_file_evidence();
-                            if (open_calls >= 2 && read_calls >= 1 &&
-                                file_write_calls >= 1 && close_calls >= 2) {
-                                kernel_boot_log("linux file syscalls: open read write close ok\n");
-                            }
-                            if (kernel_syscall_socket_evidence()) {
-                                kernel_boot_log("linux socket syscalls: two overlapping connections fd=5,6 independent ok port=8080\n");
-                            }
-                            if (kernel_syscall_partial_write_evidence()) {
-                                kernel_boot_log("linux socket partial write: 1460+1 ok\n");
-                            }
-                            if (kernel_process_clone_evidence()) {
-                                // GitHub issue #241: user_payload now runs
-                                // nested under ash's own process (not as
-                                // pid 1 itself), so its own child is no
-                                // longer necessarily pid 2 specifically --
-                                // kernel_process_clone_evidence() itself
-                                // never asserted literal pid numbers, only
-                                // structural clone/exit/reap properties.
-                                kernel_boot_log("process clone: parent+child exit=42 reaped\n");
-                            }
-                            if (kernel_process_scheduler_acceptance_evidence()) {
-                                kernel_boot_log("scheduler preempt: parent+child gpr+sp+pc+simd asid deferred ok\n");
-                            }
-                            if (kernel_process_uart_block_evidence()) {
-                                kernel_boot_log("uart rx: scheduler block+wake ok\n");
-                            }
-                            // GitHub issue #241: 3 was the old flat-blob
-                            // process's whole address space (text+data+
-                            // stack, one page each). user_payload is a
-                            // real ELF loaded by the general loader now,
-                            // so its fork copies the real image instead:
-                            // 3 PT_LOAD pages (vaddr 0 / 0x10340 /
-                            // 0x20998, one 4K page each) + the loader's
-                            // PROCESS_HEAP_PAGE_COUNT (128) heap pages +
-                            // 1 stack page = 132.
-                            if (process_image_clone_vm_reaped_pages() == 132) {
-                                kernel_boot_log("vm fork: private pages=132 reclaimed\n");
-                            }
-                            if (process_image_clone_growth_probe()) {
-                                kernel_boot_log("vm fork: child stack growth ok\n");
-                            }
-                            if (kernel_tcp_injected_data_recovered()) {
-                                kernel_boot_log("httpd server: data drop retransmit ok\n");
-                            }
-                            if (kernel_tcp_injected_fin_recovered()) {
-                                kernel_boot_log("httpd server: fin drop retransmit ok\n");
-                            }
-                            kernel_boot_log("syscall exit: 0\n");
-                        } else {
-                            kernel_boot_log("init script failed\n");
-                        }
-                        process_image_unmap(script_pages);
-                        if (process_image_window_is_clear()) {
-                            kernel_boot_log("init unmap: clean\n");
-                        }
-                    }
+        // Issue #209: parent execve returns to this EL1 owner, while a
+        // child execve is handled by the assembly child-frame handoff.
+        if (distro_plan_ready) {
+            match process_image_map(
+                    saved_distro_plan,
+                    "busybox\0sh\0-c\0exec /bin/echo exec-ok\0" as []u8,
+                    4) {
+                ProcessImageMapResult::InvalidImage => {
+                    kernel_boot_log("execve map: invalid image\n");
                 }
-            }
-
-            // Issue #209: parent execve returns to this EL1 owner, while a
-            // child execve is handled by the assembly child-frame handoff.
-            if (distro_plan_ready) {
-                match process_image_map(
-                        saved_distro_plan,
-                        "busybox\0sh\0-c\0exec /bin/echo exec-ok\0" as []u8,
-                        4) {
-                    ProcessImageMapResult::InvalidImage => {
-                        kernel_boot_log("execve map: invalid image\n");
-                    }
-                    ProcessImageMapResult::OutOfMemory => {
-                        kernel_boot_log("execve map: out of memory\n");
-                    }
-                    ProcessImageMapResult::Mapped(exec_shell_pages) => {
-                        let (exec_heap_start, exec_heap_limit) =
-                            process_image_heap_range(exec_shell_pages);
-                        kernel_syscall_process_configure(
-                            exec_heap_start, exec_heap_limit);
-                        let exec_status: usize = run_initial_user(
-                            process_image_entry(exec_shell_pages),
-                            process_image_stack_pointer(exec_shell_pages));
-                        if (exec_status == 7 &&
-                            kernel_syscall_exec_pending()) {
-                            // Apply close-on-exec before releasing the old
-                            // image.  This removes ash's temporary script fd
-                            // from the replacement descriptor table.
-                            unified_fd_close_exec_descriptors(0);
-                            let exec_argc: usize = kernel_syscall_exec_argc();
-                            let exec_argv = kernel_syscall_exec_argv();
-                            kernel_syscall_exec_clear();
-                            process_image_unmap(exec_shell_pages);
-                            match process_image_map(
-                                    saved_distro_plan,
-                                    exec_argv,
-                                    exec_argc) {
-                                ProcessImageMapResult::InvalidImage => {
-                                    kernel_boot_log("execve map: replacement invalid\n");
+                ProcessImageMapResult::OutOfMemory => {
+                    kernel_boot_log("execve map: out of memory\n");
+                }
+                ProcessImageMapResult::Mapped(exec_shell_pages) => {
+                    let (exec_heap_start, exec_heap_limit) =
+                        process_image_heap_range(exec_shell_pages);
+                    kernel_syscall_process_configure(
+                        exec_heap_start, exec_heap_limit);
+                    let exec_status: usize = run_initial_user(
+                        process_image_entry(exec_shell_pages),
+                        process_image_stack_pointer(exec_shell_pages));
+                    if (exec_status == 7 &&
+                        kernel_syscall_exec_pending()) {
+                        // Apply close-on-exec before releasing the old
+                        // image.  This removes ash's temporary script fd
+                        // from the replacement descriptor table.
+                        unified_fd_close_exec_descriptors(0);
+                        let exec_argc: usize = kernel_syscall_exec_argc();
+                        let exec_argv = kernel_syscall_exec_argv();
+                        kernel_syscall_exec_clear();
+                        process_image_unmap(exec_shell_pages);
+                        match process_image_map(
+                                saved_distro_plan,
+                                exec_argv,
+                                exec_argc) {
+                            ProcessImageMapResult::InvalidImage => {
+                                kernel_boot_log("execve map: replacement invalid\n");
+                            }
+                            ProcessImageMapResult::OutOfMemory => {
+                                kernel_boot_log("execve map: replacement out of memory\n");
+                            }
+                            ProcessImageMapResult::Mapped(replaced_pages) => {
+                                let (replacement_heap_start,
+                                     replacement_heap_limit) =
+                                    process_image_heap_range(replaced_pages);
+                                kernel_syscall_process_configure(
+                                    replacement_heap_start,
+                                    replacement_heap_limit);
+                                let replacement_status: usize =
+                                    run_initial_user(
+                                        process_image_entry(replaced_pages),
+                                        process_image_stack_pointer(replaced_pages));
+                                if (replacement_status == 0) {
+                                    kernel_boot_log("execve: busybox echo exit: 0\n");
+                                } else {
+                                    kernel_boot_log("execve: replacement failed\n");
                                 }
-                                ProcessImageMapResult::OutOfMemory => {
-                                    kernel_boot_log("execve map: replacement out of memory\n");
-                                }
-                                ProcessImageMapResult::Mapped(replaced_pages) => {
-                                    let (replacement_heap_start,
-                                         replacement_heap_limit) =
-                                        process_image_heap_range(replaced_pages);
-                                    kernel_syscall_process_configure(
-                                        replacement_heap_start,
-                                        replacement_heap_limit);
-                                    let replacement_status: usize =
-                                        run_initial_user(
-                                            process_image_entry(replaced_pages),
-                                            process_image_stack_pointer(replaced_pages));
-                                    if (replacement_status == 0) {
-                                        kernel_boot_log("execve: busybox echo exit: 0\n");
-                                    } else {
-                                        kernel_boot_log("execve: replacement failed\n");
-                                    }
-                                    process_image_unmap(replaced_pages);
-                                }
+                                process_image_unmap(replaced_pages);
                             }
-                        } else {
-                            kernel_boot_log("execve: request missing\n");
-                            process_image_unmap(exec_shell_pages);
                         }
-                        if (process_image_window_is_clear()) {
-                            kernel_boot_log("execve: image window clean\n");
-                        }
+                    } else {
+                        kernel_boot_log("execve: request missing\n");
+                        process_image_unmap(exec_shell_pages);
+                    }
+                    if (process_image_window_is_clear()) {
+                        kernel_boot_log("execve: image window clean\n");
                     }
                 }
             }
+        }
 
-            // External applet path: the ext2 image provides /busybox and
-            // /bin/echo as symlinks, while the registered static BusyBox image supplies
-            // the executable selected by argv[0]. This exercises clone,
-            // child execve, child exit, and parent wait4 together. The
-            // boot-time scheduler fixture above (issue #190) already
-            // consumed both KERNEL_PROCESS_MAX slots via scheduled_process_alloc()
-            // and never freed them (only kernel_process_execution_reset()
-            // clears the table), so clone() here would otherwise see the
-            // pool as Full and reject before the child ever runs. Reset the
-            // process/clone bookkeeping immediately before this scenario.
-            // The trailing `; exit 0` keeps ash from applying its
-            // last-command tail-call exec optimization, which would replace
-            // the shell in place instead of forking a real child.
-            kernel_process_execution_reset();
-            if (distro_plan_ready) {
-                match process_image_map(
-                        saved_distro_plan,
-                        "busybox\0sh\0-c\0/echo child-exec-ok; exit 0\0" as []u8,
-                        4) {
-                    ProcessImageMapResult::InvalidImage => {
-                        kernel_boot_log("child exec map: invalid image\n");
+        // External applet path: the ext2 image provides /busybox and
+        // /bin/echo as symlinks, while the registered static BusyBox image supplies
+        // the executable selected by argv[0]. This exercises clone,
+        // child execve, child exit, and parent wait4 together. The
+        // boot-time scheduler fixture above (issue #190) already
+        // consumed both KERNEL_PROCESS_MAX slots via scheduled_process_alloc()
+        // and never freed them (only kernel_process_execution_reset()
+        // clears the table), so clone() here would otherwise see the
+        // pool as Full and reject before the child ever runs. Reset the
+        // process/clone bookkeeping immediately before this scenario.
+        // The trailing `; exit 0` keeps ash from applying its
+        // last-command tail-call exec optimization, which would replace
+        // the shell in place instead of forking a real child.
+        kernel_process_execution_reset();
+        if (distro_plan_ready) {
+            match process_image_map(
+                    saved_distro_plan,
+                    "busybox\0sh\0-c\0/echo child-exec-ok; exit 0\0" as []u8,
+                    4) {
+                ProcessImageMapResult::InvalidImage => {
+                    kernel_boot_log("child exec map: invalid image\n");
+                }
+                ProcessImageMapResult::OutOfMemory => {
+                    kernel_boot_log("child exec map: out of memory\n");
+                }
+                ProcessImageMapResult::Mapped(child_shell_pages) => {
+                    let (child_heap_start, child_heap_limit) =
+                        process_image_heap_range(child_shell_pages);
+                    kernel_syscall_process_configure(
+                        child_heap_start, child_heap_limit);
+                    let child_status: usize = run_initial_user(
+                        process_image_entry(child_shell_pages),
+                        process_image_stack_pointer(child_shell_pages));
+                    if (child_status == 0) {
+                        kernel_boot_log("child exec: shell exit: 0\n");
+                    } else {
+                        kernel_boot_log("child exec: shell failed\n");
                     }
-                    ProcessImageMapResult::OutOfMemory => {
-                        kernel_boot_log("child exec map: out of memory\n");
-                    }
-                    ProcessImageMapResult::Mapped(child_shell_pages) => {
-                        let (child_heap_start, child_heap_limit) =
-                            process_image_heap_range(child_shell_pages);
-                        kernel_syscall_process_configure(
-                            child_heap_start, child_heap_limit);
-                        let child_status: usize = run_initial_user(
-                            process_image_entry(child_shell_pages),
-                            process_image_stack_pointer(child_shell_pages));
-                        if (child_status == 0) {
-                            kernel_boot_log("child exec: shell exit: 0\n");
-                        } else {
-                            kernel_boot_log("child exec: shell failed\n");
-                        }
-                        process_image_unmap(child_shell_pages);
-                        if (process_image_window_is_clear()) {
-                            kernel_boot_log("child exec: image window clean\n");
-                        }
+                    process_image_unmap(child_shell_pages);
+                    if (process_image_window_is_clear()) {
+                        kernel_boot_log("child exec: image window clean\n");
                     }
                 }
             }
+        }
 
-            // GitHub issue #207: every page released across this whole boot
-            // must have been live at the time. The pre-freelist allocator
-            // made a double free an idempotent no-op, so two real ones
-            // (process_image_cleanup's redundant growth-page loop, and
-            // process_clone_vm_release_growth_pages reading slots the
-            // recording side never wrote) sat undetected until the free
-            // list turned them into aliased physical pages. Checked before
-            // the reclaim below, which resets the counter along with the
-            // pool.
-            if (page_allocator_double_free_count() == 0) {
-                kernel_boot_log("resources: no double free\n");
-            } else {
-                kernel_boot_log("resources: DOUBLE FREE\n");
-            }
+        // GitHub issue #207: every page released across this whole boot
+        // must have been live at the time. The pre-freelist allocator
+        // made a double free an idempotent no-op, so two real ones
+        // (process_image_cleanup's redundant growth-page loop, and
+        // process_clone_vm_release_growth_pages reading slots the
+        // recording side never wrote) sat undetected until the free
+        // list turned them into aliased physical pages. Checked before
+        // the reclaim below, which resets the counter along with the
+        // pool.
+        if (page_allocator_double_free_count() == 0) {
+            kernel_boot_log("resources: no double free\n");
+        } else {
+            kernel_boot_log("resources: DOUBLE FREE\n");
+        }
 
-            // All boot-time user images and fixtures have been torn down at
-            // this point. Reclaim any allocator residue before the final
-            // resource invariant, keeping a failed intermediate teardown
-            // from poisoning the long-lived kernel.
-            page_allocator_reclaim_all();
-            if (page_allocator_live_count() == 0) {
-                kernel_boot_log("resources: pages=0\n");
-            } else {
-                kernel_boot_log("resources: pages leaked\n");
-            }
+        // All boot-time user images and fixtures have been torn down at
+        // this point. Reclaim any allocator residue before the final
+        // resource invariant, keeping a failed intermediate teardown
+        // from poisoning the long-lived kernel.
+        page_allocator_reclaim_all();
+        if (page_allocator_live_count() == 0) {
+            kernel_boot_log("resources: pages=0\n");
+        } else {
+            kernel_boot_log("resources: pages leaked\n");
         }
     }
 
