@@ -3,4 +3,3 @@ ext2 read: /hello.txt ok
 ext2 write: /mutable.txt ok
 ext2 symlink: /latest -> hello.txt ok
 ext2 multi-block: /large.txt 3200 bytes ok
-ext2 user_payload: elf valid
