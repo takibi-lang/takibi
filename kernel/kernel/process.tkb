@@ -647,22 +647,31 @@ private let mut scheduled_process_child: [ProcessHandle; KERNEL_PROCESS_MAX];
 private let mut scheduled_process_has_child: [bool; KERNEL_PROCESS_MAX];
 private let mut execution_clone_calls: usize;
 private let mut execution_child_exit_count: usize;
-private let mut execution_child_exit_status: usize;
-// GitHub issue #241: execution_child_exit_status above is the MOST RECENT
-// reaped child's status, which is what wait4() must report -- but with a
-// nested process tree that is no longer the same thing the boot-time
-// evidence checks want. The EL0 fixture forks a child that exits 42, then
-// exits 0 itself as ash's own child, so by the time kernel/init/main.tkb
-// reads the evidence the 42 has been overwritten by that outer 0. This
-// records the first child reaped since the last kernel_process_execution_
-// reset() instead, which is exactly the inner exit those checks are about.
+// GitHub issue #241: this is the MOST RECENT reaped child's status across
+// the WHOLE reset window -- what the boot-time evidence checks want (see
+// kernel_process_scheduler_acceptance_evidence/_clone_evidence below), NOT
+// what wait4() reports (that's the per-slot arrays just below, added for
+// issue #248). The EL0 fixture forks a child that exits 42, then exits 0
+// itself as ash's own child, so by the time kernel/init/main.tkb reads the
+// evidence the 42 has been overwritten by that outer 0 if this weren't
+// "the first child reaped since the last kernel_process_execution_reset()"
+// specifically.
 private let mut execution_first_child_exit_status: usize;
-// GitHub issue #244: wait4()'s own return value is the reaped child's
-// pid, per POSIX -- captured here since by the time wait4() actually
-// runs, the child has already been reaped and scheduled_process_child no
-// longer names it.
-private let mut execution_last_child_pid: usize;
-private let mut execution_child_waitable: bool;
+// GitHub issue #248: per-slot, not the single global scalars these three
+// used to be (execution_last_child_pid/execution_child_waitable/a second
+// use of execution_child_exit_status for wait4's own return value,
+// conflated with the whole-boot evidence copy above until this fix).
+// Indexed by the WAITING PARENT's own pool_index -- same shape and same
+// underlying reason as scheduled_process_exec_image_live below (issue
+// #245's identical fix for a different field): the old global version was
+// correct only because at most one live parent-child pair ever existed at
+// once in this kernel's history. A second, simultaneously-blocked
+// wait4() caller deeper in a chain would read/overwrite the same global
+// state meant for a different level's own child-exit event -- found while
+// building issue #246's own concurrency demo, split into #248.
+private let mut scheduled_process_last_child_pid: [usize; KERNEL_PROCESS_MAX];
+private let mut scheduled_process_child_exit_status: [usize; KERNEL_PROCESS_MAX];
+private let mut scheduled_process_child_waitable: [bool; KERNEL_PROCESS_MAX];
 // GitHub issue #245 bug fix: per-slot, not the single global bool this
 // used to be. The global version stayed true for the entire lifetime of
 // an exec'd process (e.g. /user_payload, exec'd under ash) regardless of
@@ -729,10 +738,7 @@ fn kernel_process_execution_reset() {
     execution_current_live = false;
     execution_clone_calls = 0;
     execution_child_exit_count = 0;
-    execution_child_exit_status = 0;
     execution_first_child_exit_status = 0;
-    execution_last_child_pid = 0;
-    execution_child_waitable = false;
     execution_timer_switches = 0;
     execution_deferred_switches = 0;
     execution_deferred_requests = 0;
@@ -743,6 +749,9 @@ fn kernel_process_execution_reset() {
         scheduled_process_has_parent[slot] = false;
         scheduled_process_has_child[slot] = false;
         scheduled_process_exec_image_live[slot] = false;
+        scheduled_process_last_child_pid[slot] = 0;
+        scheduled_process_child_exit_status[slot] = 0;
+        scheduled_process_child_waitable[slot] = false;
     }
     match scheduled_process_alloc() {
         ScheduledProcessAllocResult::Full => {}
@@ -1216,12 +1225,10 @@ fn kernel_process_current_child_pid() -> usize {
 }
 
 fn kernel_process_child_exit(status: usize) -> usize {
-    execution_child_exit_status = status;
     execution_child_exit_count = execution_child_exit_count + 1;
     if (execution_child_exit_count == 1) {
         execution_first_child_exit_status = status;
     }
-    execution_child_waitable = true;
     kernel_process_scheduler_disable();
     if (execution_current_live == false ||
         scheduled_process_has_parent[execution_current_handle.pool_index] ==
@@ -1230,7 +1237,13 @@ fn kernel_process_child_exit(status: usize) -> usize {
     }
     let mut child: ProcessHandle = execution_current_handle;
     let mut parent: ProcessHandle = scheduled_process_parent[child.pool_index];
-    execution_last_child_pid = child.pool_index + 1;
+    // GitHub issue #248: per-slot (indexed by the WAITING PARENT's own
+    // pool_index), not a bare global -- see these fields' own header
+    // comment for why a global here breaks a multi-level concurrent
+    // wait4() chain.
+    scheduled_process_last_child_pid[parent.pool_index] = child.pool_index + 1;
+    scheduled_process_child_exit_status[parent.pool_index] = status;
+    scheduled_process_child_waitable[parent.pool_index] = true;
     match scheduled_process_running_take(child) {
         ScheduledProcessRunningTakeResult::Missing => {}
         ScheduledProcessRunningTakeResult::Running(resources) => {
@@ -1281,7 +1294,8 @@ fn kernel_process_child_exit(status: usize) -> usize {
                     ProcessWaitReason::None;
                 kernel_syscall_wait4_deliver(
                     scheduled_process_saved_sp[owner.pool_index],
-                    execution_last_child_pid);
+                    scheduled_process_last_child_pid[owner.pool_index],
+                    owner.pool_index);
                 match scheduled_process_put(owner, ready) {
                     ScheduledProcessPutResult::Conflict => {}
                     ScheduledProcessPutResult::Stored => {}
@@ -1296,17 +1310,49 @@ fn kernel_process_child_exit(status: usize) -> usize {
     return 0;
 }
 
+// GitHub issue #248: per-slot now, indexed by whichever slot is CURRENTLY
+// running -- correct for every real caller of these four (the synchronous,
+// non-blocking wait4() return path in kernel/kernel/syscall.tkb; kernel/
+// init/main.tkb's kernel_process_child_exec_reap(), which already relies
+// on execution_current_handle being the parent by the time it runs), so
+// none of their call sites need to change. The one place that DOES need a
+// specific, non-current slot (kernel_process_child_exit's own
+// wake-a-blocked-parent step above, where execution_current_handle is
+// still the exiting CHILD, not yet switched to the parent) uses the
+// explicit _for(slot) pair further below instead.
 fn kernel_process_child_waitable() -> bool {
-    return execution_child_waitable;
+    if (execution_current_live == false) { return false; }
+    return scheduled_process_child_waitable[execution_current_handle.pool_index];
 }
 
 fn kernel_process_child_wait_status_peek() -> usize {
-    return execution_child_exit_status;
+    if (execution_current_live == false) { return 0; }
+    return scheduled_process_child_exit_status[execution_current_handle.pool_index];
 }
 
 fn kernel_process_child_wait_status() -> usize {
-    execution_child_waitable = false;
-    return execution_child_exit_status;
+    if (execution_current_live == false) { return 0; }
+    let slot: usize = execution_current_handle.pool_index;
+    scheduled_process_child_waitable[slot] = false;
+    return scheduled_process_child_exit_status[slot];
+}
+
+// Explicit-slot pair for kernel_syscall_wait4_deliver's own use (see this
+// file's kernel_process_child_exit): the one caller that needs a SPECIFIC
+// parent slot rather than "whichever slot is current."
+fn kernel_process_child_wait_status_peek_for(slot: usize) -> usize {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        return scheduled_process_child_exit_status[checked];
+    }
+    return 0;
+}
+
+fn kernel_process_child_wait_status_consume_for(slot: usize) {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        scheduled_process_child_waitable[checked] = false;
+    }
 }
 
 fn scheduled_process_exec_narrow_slot(pid: usize)
@@ -1371,7 +1417,8 @@ fn kernel_process_child_exit_count() -> usize {
 }
 
 fn kernel_process_last_child_pid() -> usize {
-    return execution_last_child_pid;
+    if (execution_current_live == false) { return 0; }
+    return scheduled_process_last_child_pid[execution_current_handle.pool_index];
 }
 
 // GitHub issue #245: execution_clone_calls is a single counter shared by

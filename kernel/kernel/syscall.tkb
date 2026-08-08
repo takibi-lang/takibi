@@ -990,7 +990,18 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
 // own saved SP -- writing x0 there, not the current frame, is exactly
 // what el0_context_set_x0 is for (it takes an arbitrary saved context,
 // not "the currently running one").
-fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize) !{unsafe} {
+//
+// GitHub issue #248: takes parent_slot explicitly (the blocked parent's
+// own pool_index) rather than reading kernel/kernel/process.tkb's
+// implicit "current" slot -- this runs from INSIDE
+// kernel_process_child_exit(), at the moment execution_current_handle is
+// still the EXITING CHILD, not yet switched to the parent being woken
+// here. Needed so a multi-level concurrent wait4() chain delivers each
+// parent's OWN child's status/pid, not whichever slot happened to be
+// "current" (irrelevant here) or a shared global (the #248 bug this
+// parameter exists to avoid).
+fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize,
+                                parent_slot: usize) !{unsafe} {
     if (syscall_wait4_status_ptr != 0) {
         match user_range_check(syscall_wait4_status_ptr, 4, UserAccessMode::Write) {
             UserRangeResult::Fault => {
@@ -998,7 +1009,8 @@ fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize) !{unsafe} {
                 return;
             }
             UserRangeResult::Ok(range) => {
-                let status: usize = kernel_process_child_wait_status_peek();
+                let status: usize =
+                    kernel_process_child_wait_status_peek_for(parent_slot);
                 if (user_write_u32(range, 0,
                         ((status & 0xFF) << 8) as u32) == false) {
                     el0_context_set_x0(frame_sp, LINUX_EFAULT);
@@ -1007,7 +1019,7 @@ fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize) !{unsafe} {
             }
         }
     }
-    let consumed_status: usize = kernel_process_child_wait_status();
+    kernel_process_child_wait_status_consume_for(parent_slot);
     el0_context_set_x0(frame_sp, reaped_pid);
 }
 
@@ -2256,7 +2268,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (expected_pid == 0) {
             expected_pid = kernel_process_last_child_pid();
         }
-        if (kernel_process_is_child() || x0 != 0xFFFFFFFFFFFFFFFF &&
+        // GitHub issue #248: no longer rejects a child-status caller here
+        // (kernel_process_is_child() used to gate this to the tree root
+        // only) -- kernel_process_current_child_pid()/_last_child_pid()
+        // above are already relative to whichever slot is calling, and
+        // kernel/kernel/process.tkb's own child-exit/wait bookkeeping is
+        // now per-slot too, so any live process may legitimately wait4()
+        // for its own live child, not just the root.
+        if (x0 != 0xFFFFFFFFFFFFFFFF &&
             x0 != expected_pid || x2 != 0) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
