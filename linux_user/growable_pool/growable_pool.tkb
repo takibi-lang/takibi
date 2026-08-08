@@ -1,22 +1,45 @@
-// End-to-end exerciser for growable_pool_core.tkb (GitHub issue #26's
-// design prototype). Two independent GrowablePool instances share one
-// fake_page_provider.tkb page pool of PAGE_COUNT=4 fake pages, mirroring
-// how several real kernel/ resource pools would all draw from
-// kernel/mm/page.tkb's one physical page pool:
+// End-to-end exerciser for growable_pool_core.tkb (design prototype for
+// GitHub issues #26 and #246). Several independent GrowablePool instances
+// share one fake_page_provider.tkb page pool of PAGE_COUNT=9 fake pages,
+// mirroring how several real kernel/ resource pools would all draw from
+// kernel/mm/page.tkb's one physical page pool. Self-directed-allocation
+// mode (#26, growable_pool_insert/_remove/_ref):
 //
 // - pool_a (SLOTS_PER_CHUNK=2, MAX_CHUNKS=3, N=6): proves zero backing
 //   storage before first insert, growth across a chunk boundary, that
 //   values written into slots living in different chunks/pages don't
 //   alias, and generation-safety across remove+reinsert plus double-free
-//   detection. Consumes 2 of the 4 fake pages.
+//   detection. Consumes 2 of the 9 fake pages.
 // - pool_c (SLOTS_PER_CHUNK=1, MAX_CHUNKS=1, N=1): proves OutOfMemory can
 //   come from THIS pool's own chunk-descriptor ceiling while the
 //   underlying page provider still has pages free. Consumes 1 more fake
-//   page (3 used, 1 remains).
-// - pool_b (SLOTS_PER_CHUNK=1, MAX_CHUNKS=5, N=5): proves OutOfMemory can
-//   instead come from the underlying page provider running out, while
-//   this pool's own ceiling (5) is nowhere close. Consumes the last fake
-//   page (4 used, 0 remain) before failing.
+//   page (3 used, 6 remain).
+// - pool_b (SLOTS_PER_CHUNK=1, MAX_CHUNKS=5, N=5): proves ordinary growth
+//   only, one insert. Consumes 1 more page (4 used, 5 remain), leaving
+//   room for the externally-indexed tests below; see pool_f for the
+//   "provider truly exhausted" case instead.
+//
+// Externally-indexed mode (#246, growable_pool_ensure/_ref_at) -- the
+// "shadow array" shape kernel/kernel/process.tkb's own per-slot arrays
+// need, where the caller already knows which index it wants:
+//
+// - pool_d (SLOTS_PER_CHUNK=2, MAX_CHUNKS=3, N=6): proves ensure() grows
+//   lazily (zero chunks active until first ensure), is idempotent (a
+//   second ensure() of an already-covered index grows nothing), crosses a
+//   chunk boundary the same way pool_a's insert()s did (ensure(0) then
+//   ensure(3)), that a freshly grown chunk's never-written slot reads
+//   back zeroed, and that ensure(index >= N) fails without touching the
+//   page provider at all. Consumes 2 of the 9 fake pages (6 used, 3
+//   remain).
+// - pool_e (SLOTS_PER_CHUNK=1, MAX_CHUNKS=3, N=3): proves ensure() grows
+//   every chunk from 0 up to and including the requested index in one
+//   call, not just the requested one -- ensure(1) alone activates chunks
+//   0 AND 1. Consumes 2 more pages (8 used, 1 remains).
+// - pool_f (SLOTS_PER_CHUNK=1, MAX_CHUNKS=3, N=3): proves ensure()'s
+//   OutOfMemory can come from the underlying page provider running out
+//   (own chunks used < own MAX_CHUNKS), the ensure-mode counterpart to
+//   pool_c/pool_b above. Consumes the last fake page (9 used, 0 remain)
+//   before failing.
 //
 // Assertions are behavioral (booleans/counts), not hardcoded slot index
 // literals: growable_pool_activate_chunk's bulk push makes each chunk's
@@ -157,8 +180,10 @@ fn app_main() {
     }
     growable_pool_remove(&pool_c, c0);
 
-    // pool_b: proves OutOfMemory can instead come from the underlying page
-    // provider running out, with this pool's own ceiling (5) nowhere close.
+    // pool_b: one ordinary growth step, leaving most of the shared page
+    // pool free for the externally-indexed tests below (see pool_f for
+    // the "underlying provider exhausted" case, now exercised via
+    // growable_pool_ensure instead).
     let mut pool_b: GrowablePool(usize, 1, 5, 5);
     growable_pool_init(&pool_b);
     let b0: exists sb0: usize. FreelistOwner[sb0] = match growable_pool_insert(&pool_b) {
@@ -168,23 +193,89 @@ fn app_main() {
         }
         GrowablePoolInsertResult::Allocated(o) => { o }
     };
-    uart_puts("pages consumed once the provider's own pool is exhausted ");
-    uart_puts("(want 4): ");
+    uart_puts("pages consumed after pool_a+pool_c+pool_b (want 4): ");
     uart_print(page_allocator_live_count());
     uart_puts("\n");
-    match growable_pool_insert(&pool_b) {
-        GrowablePoolInsertResult::OutOfMemory => {
-            uart_puts("pool_b hit the underlying page provider's ceiling, ");
-            uart_puts("not its own (own chunks used < own MAX_CHUNKS): ");
-            uart_print_bool(growable_pool_active_chunks(&pool_b) < 5);
-            uart_puts("\n");
-        }
-        GrowablePoolInsertResult::Allocated(unexpected) => {
-            uart_puts("pool_b unexpectedly grew past the shared page pool\n");
-            growable_pool_remove(&pool_b, unexpected);
-        }
-    }
     growable_pool_remove(&pool_b, b0);
+
+    // pool_d: growable_pool_ensure/_ref_at's own version of pool_a's
+    // coverage above.
+    let mut pool_d: GrowablePool(usize, 2, 3, 6);
+    growable_pool_init(&pool_d);
+    uart_puts("pool_d chunks active before first ensure (want 0): ");
+    uart_print(growable_pool_active_chunks(&pool_d));
+    uart_puts("\n");
+
+    if (growable_pool_ensure(&pool_d, 0) == false) {
+        uart_puts("pool_d ensure(0) failed\n");
+        return;
+    }
+    let chunks_after_first_ensure: usize = growable_pool_active_chunks(&pool_d);
+    if (growable_pool_ensure(&pool_d, 1) == false) {
+        uart_puts("pool_d ensure(1) failed\n");
+        return;
+    }
+    uart_puts("pool_d ensure(1) after ensure(0) grows nothing new (idempotent): ");
+    uart_print_bool(growable_pool_active_chunks(&pool_d) == chunks_after_first_ensure);
+    uart_puts("\n");
+
+    if (growable_pool_ensure(&pool_d, 3) == false) {
+        uart_puts("pool_d ensure(3) failed\n");
+        return;
+    }
+    uart_puts("pool_d chunks active after crossing a chunk boundary (want 2): ");
+    uart_print(growable_pool_active_chunks(&pool_d));
+    uart_puts("\n");
+
+    *growable_pool_ref_at(&pool_d, 0) = 111;
+    *growable_pool_ref_at(&pool_d, 3) = 333;
+    let pool_d_read0: usize = *growable_pool_ref_at(&pool_d, 0);
+    let pool_d_read2: usize = *growable_pool_ref_at(&pool_d, 2);
+    let pool_d_read3: usize = *growable_pool_ref_at(&pool_d, 3);
+    uart_puts("pool_d cross-chunk values distinct, and slot 2 (never ");
+    uart_puts("written, same fresh chunk as slot 3) reads back zeroed: ");
+    uart_print_bool(pool_d_read0 == 111 && pool_d_read2 == 0 && pool_d_read3 == 333);
+    uart_puts("\n");
+
+    uart_puts("pool_d ensure(index >= N) rejected without touching the ");
+    uart_puts("page provider: ");
+    let pages_before_pool_d_ceiling: usize = page_allocator_live_count();
+    let pool_d_ceiling_ok: bool = growable_pool_ensure(&pool_d, 6) == false;
+    uart_print_bool(
+        pool_d_ceiling_ok && page_allocator_live_count() == pages_before_pool_d_ceiling);
+    uart_puts("\n");
+
+    // pool_e: ensure() can grow straight to a target index without ever
+    // having been asked for the indices below it.
+    let mut pool_e: GrowablePool(usize, 1, 3, 3);
+    growable_pool_init(&pool_e);
+    if (growable_pool_ensure(&pool_e, 1) == false) {
+        uart_puts("pool_e ensure(1) failed\n");
+        return;
+    }
+    uart_puts("pool_e chunks active after ensure(1) alone (want 2): ");
+    uart_print(growable_pool_active_chunks(&pool_e));
+    uart_puts("\n");
+
+    // pool_f: the ensure-mode counterpart to pool_b/pool_c above -- proves
+    // OutOfMemory can come from the underlying page provider running out
+    // while this pool's own ceiling is nowhere close.
+    let mut pool_f: GrowablePool(usize, 1, 3, 3);
+    growable_pool_init(&pool_f);
+    let pages_before_pool_f: usize = page_allocator_live_count();
+    if (growable_pool_ensure(&pool_f, 0) == false) {
+        uart_puts("pool_f ensure(0) failed\n");
+        return;
+    }
+    uart_puts("pool_f ensure(0) consumed exactly one more page, now fully ");
+    uart_puts("exhausting the shared provider: ");
+    uart_print_bool(page_allocator_live_count() == pages_before_pool_f + 1);
+    uart_puts("\n");
+    let pool_f_ensure_1: bool = growable_pool_ensure(&pool_f, 1);
+    uart_puts("pool_f ensure(1) hit the underlying page provider's ");
+    uart_puts("ceiling, not its own (own chunks used < own MAX_CHUNKS): ");
+    uart_print_bool(pool_f_ensure_1 == false && growable_pool_active_chunks(&pool_f) < 3);
+    uart_puts("\n");
 
     uart_puts("done\n");
 }

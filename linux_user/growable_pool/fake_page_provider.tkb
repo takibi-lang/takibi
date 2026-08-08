@@ -11,7 +11,7 @@ use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
 
 const PAGE_SIZE: usize = 4096;
-const PAGE_COUNT: usize = 4;
+const PAGE_COUNT: usize = 9;
 
 private let mut fake_pages: [u8; PAGE_SIZE * PAGE_COUNT] align(PAGE_SIZE);
 private let mut fake_page_pool: SlotMap(PAGE_COUNT);
