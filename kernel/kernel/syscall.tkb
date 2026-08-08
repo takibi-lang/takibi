@@ -1118,8 +1118,18 @@ fn kernel_syscall_clone_parent_return(parent_sp: usize) {
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize)
         -> (usize, usize) !{unsafe} {
-    return syscall_action_encode(
+    let (action_code, action_value) = syscall_action_encode(
         kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4));
+    // GitHub issue #241/#244/#245 postmortem: action 0 (SyscallAction::
+    // Unreachable) matches no branch in user_entry.S's dispatch table and
+    // silently fail-stops with zero UART evidence. Naming the syscall
+    // number here, right before that happens, is cheap and turns a
+    // multi-hour cold-read-the-dispatch-table bisection into a one-line
+    // lookup in SYSCALLS.md.
+    if (action_code == 0) {
+        kernel_boot_log_syscall_unreachable(number);
+    }
+    return (action_code, action_value);
 }
 
 fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usize,
