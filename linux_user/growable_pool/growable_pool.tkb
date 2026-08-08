@@ -1,0 +1,198 @@
+// End-to-end exerciser for growable_pool_core.tkb (GitHub issue #26's
+// design prototype). Two independent GrowablePool instances share one
+// fake_page_provider.tkb page pool of PAGE_COUNT=4 fake pages, mirroring
+// how several real kernel/ resource pools would all draw from
+// kernel/mm/page.tkb's one physical page pool:
+//
+// - pool_a (SLOTS_PER_CHUNK=2, MAX_CHUNKS=3, N=6): proves zero backing
+//   storage before first insert, growth across a chunk boundary, that
+//   values written into slots living in different chunks/pages don't
+//   alias, and generation-safety across remove+reinsert plus double-free
+//   detection. Consumes 2 of the 4 fake pages.
+// - pool_c (SLOTS_PER_CHUNK=1, MAX_CHUNKS=1, N=1): proves OutOfMemory can
+//   come from THIS pool's own chunk-descriptor ceiling while the
+//   underlying page provider still has pages free. Consumes 1 more fake
+//   page (3 used, 1 remains).
+// - pool_b (SLOTS_PER_CHUNK=1, MAX_CHUNKS=5, N=5): proves OutOfMemory can
+//   instead come from the underlying page provider running out, while
+//   this pool's own ceiling (5) is nowhere close. Consumes the last fake
+//   page (4 used, 0 remain) before failing.
+//
+// Assertions are behavioral (booleans/counts), not hardcoded slot index
+// literals: growable_pool_activate_chunk's bulk push makes each chunk's
+// own indices available in LIFO order (freshest-pushed index popped
+// first), same as every other freelist.tkb-backed pool in this codebase,
+// so which exact index a given insert receives is an implementation
+// detail this test does not pin down.
+use "linux_user/growable_pool/growable_pool_core.tkb";
+
+fn app_main() {
+    page_allocator_init();
+    uart_puts("growable_pool\n");
+
+    uart_puts("pages consumed before first insert: ");
+    uart_print(page_allocator_live_count());
+    uart_puts("\n");
+
+    let mut pool_a: GrowablePool(usize, 2, 3, 6);
+    growable_pool_init(&pool_a);
+
+    let a0: exists s0: usize. FreelistOwner[s0] = match growable_pool_insert(&pool_a) {
+        GrowablePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_a insert 0 failed\n");
+            return;
+        }
+        GrowablePoolInsertResult::Allocated(o) => { o }
+    };
+    let a1: exists s1: usize. FreelistOwner[s1] = match growable_pool_insert(&pool_a) {
+        GrowablePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_a insert 1 failed\n");
+            growable_pool_remove(&pool_a, a0);
+            return;
+        }
+        GrowablePoolInsertResult::Allocated(o) => { o }
+    };
+
+    uart_puts("chunks active after filling one chunk (want 1): ");
+    uart_print(growable_pool_active_chunks(&pool_a));
+    uart_puts("\n");
+
+    // A third insert on a SLOTS_PER_CHUNK=2 pool must cross into a second
+    // chunk, pulling a second real page from the shared provider.
+    let a2: exists s2: usize. FreelistOwner[s2] = match growable_pool_insert(&pool_a) {
+        GrowablePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_a insert 2 failed\n");
+            growable_pool_remove(&pool_a, a0);
+            growable_pool_remove(&pool_a, a1);
+            return;
+        }
+        GrowablePoolInsertResult::Allocated(o) => { o }
+    };
+
+    uart_puts("chunks active after crossing a chunk boundary (want 2): ");
+    uart_print(growable_pool_active_chunks(&pool_a));
+    uart_puts("\n");
+    uart_puts("pages consumed by pool_a alone (want 2): ");
+    uart_print(page_allocator_live_count());
+    uart_puts("\n");
+
+    *growable_pool_ref(&pool_a, a0) = 111;
+    *growable_pool_ref(&pool_a, a1) = 222;
+    *growable_pool_ref(&pool_a, a2) = 333;
+    let read_a0: usize = *growable_pool_ref(&pool_a, a0);
+    let read_a1: usize = *growable_pool_ref(&pool_a, a1);
+    let read_a2: usize = *growable_pool_ref(&pool_a, a2);
+    uart_puts("cross-chunk values distinct and unaliased: ");
+    uart_print_bool(read_a0 == 111 && read_a1 == 222 && read_a2 == 333);
+    uart_puts("\n");
+
+    let stale_index: usize = freelist_owner_index(a1);
+    let stale_generation: usize = freelist_owner_generation(a1);
+    growable_pool_remove(&pool_a, a1);
+    uart_puts("stale handle rejected immediately after remove: ");
+    uart_print_bool(
+        growable_pool_matches(&pool_a, stale_index, stale_generation) == false);
+    uart_puts("\n");
+
+    let a1b: exists s1b: usize. FreelistOwner[s1b] = match growable_pool_insert(&pool_a) {
+        GrowablePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_a reinsert failed\n");
+            growable_pool_remove(&pool_a, a0);
+            growable_pool_remove(&pool_a, a2);
+            return;
+        }
+        GrowablePoolInsertResult::Allocated(o) => { o }
+    };
+    uart_puts("stale handle still rejected after reuse (proves generation, ");
+    uart_puts("not mere occupancy, gates the check): ");
+    uart_print_bool(
+        growable_pool_matches(&pool_a, stale_index, stale_generation) == false);
+    uart_puts("\n");
+
+    // A genuine double free: free a2 for real first (so its slot's
+    // occupant_generation really is 0), then free it again through a
+    // fabricated owner carrying the same (index, generation) -- this is
+    // what growable_pool_remove's double-free counter exists to catch (see
+    // kernel/lib/slotmap.tkb's own slotmap_remove for why: a bare free
+    // list is not idempotent, so a real double free silently hands the
+    // same slot to two independent owners without this check).
+    let a2_index: usize = freelist_owner_index(a2);
+    let a2_generation: usize = freelist_owner_generation(a2);
+    let before_double_free: usize = growable_pool_double_remove_count(&pool_a);
+    growable_pool_remove(&pool_a, a2);
+    let dup: exists sd: usize. FreelistOwner[sd] =
+        freelist_owner_new(a2_index, a2_generation);
+    growable_pool_remove(&pool_a, dup);
+    uart_puts("double free of a2's already-freed slot counted: ");
+    uart_print_bool(
+        growable_pool_double_remove_count(&pool_a) == before_double_free + 1);
+    uart_puts("\n");
+
+    growable_pool_remove(&pool_a, a0);
+    growable_pool_remove(&pool_a, a1b);
+
+    // pool_c: proves this pool's OWN MAX_CHUNKS ceiling can be the cause of
+    // OutOfMemory while the shared page provider still has pages free.
+    let mut pool_c: GrowablePool(usize, 1, 1, 1);
+    growable_pool_init(&pool_c);
+    let c0: exists sc: usize. FreelistOwner[sc] = match growable_pool_insert(&pool_c) {
+        GrowablePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_c insert 0 failed\n");
+            return;
+        }
+        GrowablePoolInsertResult::Allocated(o) => { o }
+    };
+    let pages_before_pool_c_ceiling: usize = page_allocator_live_count();
+    match growable_pool_insert(&pool_c) {
+        GrowablePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_c hit its own MAX_CHUNKS ceiling ");
+            uart_puts("while the page provider still had a page free: ");
+            uart_print_bool(pages_before_pool_c_ceiling < PAGE_COUNT);
+            uart_puts("\n");
+        }
+        GrowablePoolInsertResult::Allocated(unexpected) => {
+            uart_puts("pool_c unexpectedly grew past its own MAX_CHUNKS\n");
+            growable_pool_remove(&pool_c, unexpected);
+        }
+    }
+    growable_pool_remove(&pool_c, c0);
+
+    // pool_b: proves OutOfMemory can instead come from the underlying page
+    // provider running out, with this pool's own ceiling (5) nowhere close.
+    let mut pool_b: GrowablePool(usize, 1, 5, 5);
+    growable_pool_init(&pool_b);
+    let b0: exists sb0: usize. FreelistOwner[sb0] = match growable_pool_insert(&pool_b) {
+        GrowablePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_b insert 0 failed\n");
+            return;
+        }
+        GrowablePoolInsertResult::Allocated(o) => { o }
+    };
+    uart_puts("pages consumed once the provider's own pool is exhausted ");
+    uart_puts("(want 4): ");
+    uart_print(page_allocator_live_count());
+    uart_puts("\n");
+    match growable_pool_insert(&pool_b) {
+        GrowablePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_b hit the underlying page provider's ceiling, ");
+            uart_puts("not its own (own chunks used < own MAX_CHUNKS): ");
+            uart_print_bool(growable_pool_active_chunks(&pool_b) < 5);
+            uart_puts("\n");
+        }
+        GrowablePoolInsertResult::Allocated(unexpected) => {
+            uart_puts("pool_b unexpectedly grew past the shared page pool\n");
+            growable_pool_remove(&pool_b, unexpected);
+        }
+    }
+    growable_pool_remove(&pool_b, b0);
+
+    uart_puts("done\n");
+}
+
+fn uart_print_bool(value: bool) {
+    if (value) {
+        uart_puts("true");
+    } else {
+        uart_puts("false");
+    }
+}

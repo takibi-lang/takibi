@@ -1,0 +1,69 @@
+// Small fixed-page allocator standing in for kernel/mm/page.tkb's real
+// physical pages (not available in this host-native environment). Exposes
+// exactly the subset of that file's public API growable_pool_core.tkb
+// needs -- PageOwner[page]/PageAllocResult/page_alloc/page_allocator_init/
+// page_physical_address/page_owner_transfer_index/page_allocator_live_count,
+// same names and shapes -- so growable_pool_core.tkb's own source ports to
+// kernel/lib/growable_pool.tkb unchanged except for this file's `use` line
+// being swapped for "kernel/mm/page.tkb" (see that file for the real
+// implementation this one deliberately mirrors).
+use "kernel/lib/slotmap.tkb";
+use "kernel/lib/freelist.tkb";
+
+const PAGE_SIZE: usize = 4096;
+const PAGE_COUNT: usize = 4;
+
+private let mut fake_pages: [u8; PAGE_SIZE * PAGE_COUNT] align(PAGE_SIZE);
+private let mut fake_page_pool: SlotMap(PAGE_COUNT);
+
+linear struct PageOwner[page: usize] {
+    private index: {0..<PAGE_COUNT as usize};
+    private generation: usize @ page;
+}
+
+must_use variant PageAllocResult {
+    OutOfMemory;
+    Allocated(exists page: usize. PageOwner[page]);
+}
+
+fn page_owner_new(index: {0..<PAGE_COUNT as usize},
+                  generation: usize @ page) -> PageOwner[page] {
+    let mut owner: PageOwner[page] = { index, generation };
+    return owner;
+}
+
+fn page_allocator_init() {
+    slotmap_init(&fake_page_pool);
+}
+
+fn page_alloc() -> PageAllocResult {
+    match slotmap_insert(&fake_page_pool) {
+        FreelistPopResult::Empty => { return PageAllocResult::OutOfMemory; }
+        FreelistPopResult::Popped(slot) => {
+            let (index, generation) = freelist_owner_into_parts(slot);
+            if (index < PAGE_COUNT) {
+                let checked: {0..<PAGE_COUNT as usize} = index;
+                return PageAllocResult::Allocated(page_owner_new(checked, generation));
+            }
+            return PageAllocResult::OutOfMemory;
+        }
+    }
+}
+
+fn page_physical_address(owner: borrow PageOwner[page]) -> usize {
+    let base: usize = (fake_pages as *u8) as usize;
+    return base + owner.index * PAGE_SIZE;
+}
+
+// Transfers per-page responsibility to a coarser owner (here,
+// growable_pool_core.tkb's own chunk bookkeeping), matching page.tkb's own
+// page_owner_transfer_index -- the caller keeps only the index from this
+// point on, never the generation.
+fn page_owner_transfer_index(owner: sink PageOwner[page])
+        -> {0..<PAGE_COUNT as usize} {
+    return owner.index;
+}
+
+fn page_allocator_live_count() -> usize {
+    return slotmap_live_count(&fake_page_pool);
+}

@@ -1,0 +1,381 @@
+// A slot pool that starts with zero backing storage and grows on demand by
+// pulling one more physical page from kernel/mm/page.tkb's page_alloc()
+// whenever its current capacity fills up, carving that page into
+// SLOTS_PER_CHUNK T-sized slots and linking them into the pool's free
+// chain (GitHub issue #26). Every existing kernel/ resource pool (the
+// process table, fd table, TCP connection pool, page.tkb itself) is a
+// fixed-capacity `[T; N]` array whose N is a compile-time constant picked
+// by guesswork ahead of time -- bumping any one of them (see issue #245's
+// KERNEL_PROCESS_MAX 2 -> 3, which needed hand-editing four files across
+// kernel/kernel/, kernel/mm/, and kernel/arch/arm64/mm/) repeats that cost
+// for every future N. This primitive exists to remove that specific
+// ceiling; migrating any real pool onto it is deliberately a separate,
+// already-filed, blocked-on-this follow-up (issue #246) -- nothing in
+// kernel/kernel/, kernel/mm/, or kernel/net/ is touched by this file.
+//
+// Ported from linux_user/growable_pool/growable_pool_core.tkb (issue #26's
+// design prototype, verified there against a small fake page provider --
+// see that file's own header for the full design rationale) with only the
+// page-provider `use` line changed, from a fake page_alloc()-shaped stand-
+// in to this file's real one.
+//
+// Deliberate exception to kernel/lib/'s usual dependency-free rule: every
+// other kernel/lib/ file (freelist.tkb, slotmap.tkb, refcount_slotmap.tkb)
+// depends on nothing outside kernel/lib/ itself; kernel/mm/page.tkb is the
+// one file that has always depended on kernel/lib/, never the reverse.
+// This file inverts that for the one capability issue #26 explicitly asks
+// for (grow via the EXISTING page_alloc(), not a from-scratch physical
+// allocator) -- confirmed with the user before writing this file.
+//
+// Reuses kernel/lib/freelist.tkb's FreelistCore(N)/FreelistOwner/
+// FreelistPopResult UNMODIFIED rather than inventing new owner/pop types:
+// a GrowablePool is, underneath, one flat FreelistCore(N) sized to the
+// pool's overall compile-time ceiling (exactly like kernel/lib/slotmap.tkb's
+// SlotMap(N) already is) plus per-chunk physical-page bookkeeping. The only
+// departure from SlotMap's own init is that growable_pool_init does NOT
+// call freelist_core_init (which links the WHOLE next_free chain
+// immediately -- exactly the "pre-allocated" behavior issue #26 wants
+// gone): it instead leaves the chain empty (free_head = N, FreelistCore's
+// own existing "nothing free" sentinel -- freelist_core_insert already
+// treats any free_head >= N as Empty) and only links a chunk's
+// SLOTS_PER_CHUNK indices in, in one bulk push, the moment that chunk's
+// backing page is actually acquired. FreelistCore(N)'s fields
+// (next_free/free_head/next_generation) are not `private`, so this file
+// can legally bulk-push onto them directly without freelist.tkb itself
+// needing a new exported mutator.
+//
+// T is a genuine (if unused-in-storage) generic parameter of GrowablePool
+// itself, exactly like kernel/lib/freelist.tkb's Freelist(T, N): a pool
+// commits to one payload type at declaration time, and growable_pool_ref's
+// own `T: type` parameter is inferred from the pool argument's type at
+// every call site, never written out explicitly (this compiler has no
+// explicit-type-argument call syntax -- `T: type` parameters are only ever
+// inferred from another argument whose declared type mentions T, same as
+// every existing Freelist(T, N) call site in this codebase).
+//
+// Per kernel/net/tcp.tkb's own header comment ("Flat arrays with manual
+// slot*WIDTH offsets, not [[u8;1514];N] ... indexed writes into a nested/
+// structured target are not reliably supported"), chunk bookkeeping below
+// is two flat 1-D arrays (chunk_data_base/chunk_page_index), never an array
+// of chunk-descriptor structs and never a 2-D array.
+//
+// Per SPEC.md's "Indexed Runtime Owners" section, an indexed owner like
+// PageOwner[page] "may occur only as local values, parameters, returns,
+// and components of value tuples" -- it cannot be stored in a struct
+// field. So once a chunk's page is acquired, this file immediately
+// converts it to plain usize parts (page_physical_address, then
+// page_owner_transfer_index -- the same "hand off to a coarser owner"
+// idiom kernel/mm/process_image.tkb already uses) before storing anything.
+//
+// SLOTS_PER_CHUNK/MAX_CHUNKS/N are three separate caller-supplied literal
+// generic parameters, not two combined by arithmetic into the third:
+// `sizeof(T)` cannot appear in an array-size or generic-argument position
+// in this compiler (see kernel/kernel/syscall.tkb's own comment on its
+// Utsname buffer for precedent), so SLOTS_PER_CHUNK (normally
+// 4096 / sizeof(T)) has to be computed and hardcoded by the caller anyway;
+// requiring N == SLOTS_PER_CHUNK * MAX_CHUNKS as a caller-enforced (not
+// compiler-proven) invariant keeps every array size below a bare literal
+// or const, the same manual-consistency idiom already used elsewhere in
+// this codebase.
+//
+// Current limitations (2026-08-08). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none, since it
+// invites relying on a guarantee that quietly stopped holding.
+// - NOT SYNCHRONIZED, same caveat as kernel/lib/freelist.tkb/slotmap.tkb:
+//   no locking of its own, safe today only because nothing yet calls this
+//   from more than one execution context.
+// - Never shrinks: a chunk's page is never returned to page.tkb, even once
+//   every slot in it is freed. This is issue #26's own suggested default
+//   for this class of primitive ("real kernels often start with 'never
+//   shrink'"), not an oversight.
+// - Capacity is bounded by MAX_CHUNKS * SLOTS_PER_CHUNK == N, itself still
+//   bounded by page.tkb's own fixed BOOT_PAGE_COUNT (1024 pages / 4 MiB) --
+//   this primitive removes the "one fixed N per resource pool" ceiling,
+//   not page.tkb's own outer ceiling (real physical-RAM discovery is a
+//   separate, unblocked follow-up per issue #26's own scope note).
+// - N == SLOTS_PER_CHUNK * MAX_CHUNKS is a precondition the caller must
+//   maintain by hand; nothing here checks it.
+// - Not yet wired into any real kernel/ resource pool -- issue #246 is the
+//   already-filed follow-up for that (starting with the process table).
+use "kernel/lib/freelist.tkb";
+use "kernel/mm/page.tkb";
+
+generic struct GrowablePool(T: type, SLOTS_PER_CHUNK: usize, MAX_CHUNKS: usize, N: usize) {
+    core: FreelistCore(N);
+    occupant_generation: [usize; N];
+    double_remove_count: usize;
+    chunk_data_base: [usize; MAX_CHUNKS];
+    chunk_page_index: [usize; MAX_CHUNKS];
+    active_chunks: usize;
+}
+
+must_use variant GrowablePoolInsertResult {
+    OutOfMemory;
+    Allocated(exists allocation: usize. FreelistOwner[allocation]);
+}
+
+// Starts genuinely empty: no chunk is activated and no backing page has
+// been requested yet (contrast kernel/lib/slotmap.tkb's slotmap_init,
+// which eagerly links the whole N-sized chain via freelist_core_init).
+fn growable_pool_init(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N)) {
+    let core: *FreelistCore(N) = &pool.core;
+    core.free_head = N;
+    core.next_generation = 1;
+    let occupant = pool.occupant_generation;   // issue #15: struct-embedded
+    for i: isize in 0..<N {                    // array field decays to a
+        occupant[i] = 0;                       // raw pointer on read
+    }
+    let bases = pool.chunk_data_base;          // issue #15, as above
+    let indices = pool.chunk_page_index;       // issue #15, as above
+    for c: isize in 0..<MAX_CHUNKS {
+        bases[c] = 0;
+        indices[c] = 0;
+    }
+    pool.double_remove_count = 0;
+    pool.active_chunks = 0;
+}
+
+// Bulk-pushes one freshly acquired chunk's SLOTS_PER_CHUNK indices onto
+// the shared free chain in one step, directly manipulating FreelistCore(N)'s
+// own (non-private) next_free/free_head fields -- the "grow" half of this
+// primitive; freelist_core_insert/_remove themselves are called completely
+// unmodified everywhere else in this file.
+fn growable_pool_activate_chunk(
+        T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N), chunk: usize) {
+    let core: *FreelistCore(N) = &pool.core;
+    let next_free = core.next_free;            // issue #15, as above
+    let base_index: usize = chunk * SLOTS_PER_CHUNK;
+    for offset: isize in 0..<SLOTS_PER_CHUNK {
+        let slot: usize = base_index + (offset as usize);
+        next_free[slot as isize] = core.free_head;
+        core.free_head = slot;
+    }
+}
+
+fn growable_pool_finish_insert(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+                               owner: FreelistOwner[allocation])
+        -> GrowablePoolInsertResult {
+    let index: usize = freelist_owner_index(owner);
+    let occupant = pool.occupant_generation;   // issue #15, as above
+    if (index < N) {
+        occupant[index as isize] = freelist_owner_generation(owner);
+    }
+    return GrowablePoolInsertResult::Allocated(owner);
+}
+
+fn growable_pool_insert(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N))
+        -> GrowablePoolInsertResult {
+    match freelist_core_insert(&pool.core) {
+        FreelistPopResult::Popped(owner) => {
+            return growable_pool_finish_insert(pool, owner);
+        }
+        FreelistPopResult::Empty => {
+            if (pool.active_chunks >= MAX_CHUNKS) {
+                return GrowablePoolInsertResult::OutOfMemory;
+            }
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {
+                    return GrowablePoolInsertResult::OutOfMemory;
+                }
+                PageAllocResult::Allocated(page_owner) => {
+                    let base: usize = page_physical_address(page_owner);
+                    let page_index: usize =
+                        page_owner_transfer_index(page_owner) as usize;
+                    let chunk: usize = pool.active_chunks;
+                    let bases = pool.chunk_data_base;   // issue #15, as above
+                    let indices = pool.chunk_page_index; // issue #15, as above
+                    if (chunk < MAX_CHUNKS) {
+                        bases[chunk as isize] = base;
+                        indices[chunk as isize] = page_index;
+                    }
+                    pool.active_chunks = chunk + 1;
+                    growable_pool_activate_chunk(pool, chunk);
+                    match freelist_core_insert(&pool.core) {
+                        FreelistPopResult::Popped(owner) => {
+                            return growable_pool_finish_insert(pool, owner);
+                        }
+                        FreelistPopResult::Empty => {
+                            // Unreachable in practice: a freshly activated
+                            // chunk always contributes SLOTS_PER_CHUNK >= 1
+                            // fresh free slots. No trap site here either
+                            // way (freelist_core_insert never traps).
+                            return GrowablePoolInsertResult::OutOfMemory;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Releasing an already-free slot is a double free; see
+// kernel/lib/slotmap.tkb's slotmap_remove for why this counts the event at
+// its source instead of silently corrupting the chain a second time. Pages
+// are never returned to page.tkb (see this file's header).
+fn growable_pool_remove(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+                        owner: sink FreelistOwner[allocation]) {
+    let index: usize = freelist_owner_index(owner);
+    let occupant = pool.occupant_generation;   // issue #15, as above
+    if (index >= N) {
+        freelist_owner_drop(owner);
+        return;
+    }
+    if (occupant[index as isize] == 0) {
+        pool.double_remove_count = pool.double_remove_count + 1;
+        freelist_owner_drop(owner);
+        return;
+    }
+    occupant[index as isize] = 0;
+    freelist_core_remove(&pool.core, owner);
+}
+
+fn growable_pool_double_remove_count(
+        T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N)) -> usize {
+    return pool.double_remove_count;
+}
+
+fn growable_pool_active_chunks(
+        T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N)) -> usize {
+    return pool.active_chunks;
+}
+
+// Same capability kernel/lib/slotmap.tkb's slotmap_matches provides: does
+// `index` currently hold `generation`? No ownership proof required.
+fn growable_pool_matches(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+                         index: usize, generation: usize) -> bool {
+    if (index >= N || generation == 0) { return false; }
+    let occupant = pool.occupant_generation;   // issue #15, as above
+    return occupant[index as isize] == generation;
+}
+
+// Raw pointer into whichever chunk's page backs `owner`'s slot -- no copy,
+// whatever T's size, same accepted shape as kernel/lib/freelist.tkb's own
+// freelist_ref. `index` only ever originates from this pool's own insert,
+// so `chunk < MAX_CHUNKS` always holds in practice; chunk 0's base is the
+// documented fallback for this provably-unreachable branch (mirrors
+// kernel/mm/page.tkb's page_bytes's own accepted-fallback style).
+fn growable_pool_ref(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+                     owner: borrow FreelistOwner[allocation]) -> *T {
+    let index: usize = freelist_owner_index(owner);
+    let chunk: usize = index / SLOTS_PER_CHUNK;
+    let local: usize = index % SLOTS_PER_CHUNK;
+    let bases = pool.chunk_data_base;   // issue #15, as above
+    if (chunk < MAX_CHUNKS) {
+        let base: usize = bases[chunk as isize];
+        return (base as *T) + (local as isize);
+    }
+    let base: usize = bases[0];
+    return (base as *T) + (local as isize);
+}
+
+// Stage-local hardware evidence, mirroring kernel/kernel/process.tkb's own
+// scheduled_process_table_probe(): proves growth-on-demand (no page
+// consumed until the pool's first chunk is actually needed, a second real
+// page pulled only once the first chunk's SLOTS_PER_CHUNK slots are full),
+// cross-chunk data correctness (no aliasing between two different pages'
+// slots), generation-safe reuse after a genuine free, real double-free
+// detection, and this pool's own MAX_CHUNKS ceiling producing OutOfMemory
+// independent of page.tkb's much larger BOOT_PAGE_COUNT ceiling. Uses
+// page_allocator_live_count() deltas throughout rather than an absolute
+// value, since other probes run earlier in boot and may already have
+// live pages of their own -- and deliberately never calls
+// page_allocator_reclaim_all(), which would wipe out those probes' own
+// allocations.
+fn growable_pool_probe() -> bool {
+    let mut pool: GrowablePool(usize, 2, 3, 6);
+    growable_pool_init(&pool);
+    let live_before: usize = page_allocator_live_count();
+
+    let a0: exists s0: usize. FreelistOwner[s0] = match growable_pool_insert(&pool) {
+        GrowablePoolInsertResult::OutOfMemory => { return false; }
+        GrowablePoolInsertResult::Allocated(o) => { o }
+    };
+    if (page_allocator_live_count() != live_before + 1) {
+        growable_pool_remove(&pool, a0);
+        return false;
+    }
+    let a1: exists s1: usize. FreelistOwner[s1] = match growable_pool_insert(&pool) {
+        GrowablePoolInsertResult::OutOfMemory => {
+            growable_pool_remove(&pool, a0);
+            return false;
+        }
+        GrowablePoolInsertResult::Allocated(o) => { o }
+    };
+    if (page_allocator_live_count() != live_before + 1 ||
+        growable_pool_active_chunks(&pool) != 1) {
+        growable_pool_remove(&pool, a0);
+        growable_pool_remove(&pool, a1);
+        return false;
+    }
+    // A third insert on a SLOTS_PER_CHUNK=2 pool must cross into a second
+    // chunk, pulling a second real page from page.tkb.
+    let a2: exists s2: usize. FreelistOwner[s2] = match growable_pool_insert(&pool) {
+        GrowablePoolInsertResult::OutOfMemory => {
+            growable_pool_remove(&pool, a0);
+            growable_pool_remove(&pool, a1);
+            return false;
+        }
+        GrowablePoolInsertResult::Allocated(o) => { o }
+    };
+    if (page_allocator_live_count() != live_before + 2 ||
+        growable_pool_active_chunks(&pool) != 2) {
+        growable_pool_remove(&pool, a0);
+        growable_pool_remove(&pool, a1);
+        growable_pool_remove(&pool, a2);
+        return false;
+    }
+
+    *growable_pool_ref(&pool, a0) = 111;
+    *growable_pool_ref(&pool, a1) = 222;
+    *growable_pool_ref(&pool, a2) = 333;
+    if (*growable_pool_ref(&pool, a0) != 111 ||
+        *growable_pool_ref(&pool, a1) != 222 ||
+        *growable_pool_ref(&pool, a2) != 333) {
+        growable_pool_remove(&pool, a0);
+        growable_pool_remove(&pool, a1);
+        growable_pool_remove(&pool, a2);
+        return false;
+    }
+
+    let stale_index: usize = freelist_owner_index(a1);
+    let stale_generation: usize = freelist_owner_generation(a1);
+    growable_pool_remove(&pool, a1);
+    if (growable_pool_matches(&pool, stale_index, stale_generation)) {
+        growable_pool_remove(&pool, a0);
+        growable_pool_remove(&pool, a2);
+        return false;
+    }
+
+    let a2_index: usize = freelist_owner_index(a2);
+    let a2_generation: usize = freelist_owner_generation(a2);
+    let before_double_free: usize = growable_pool_double_remove_count(&pool);
+    growable_pool_remove(&pool, a2);
+    let dup: exists sd: usize. FreelistOwner[sd] =
+        freelist_owner_new(a2_index, a2_generation);
+    growable_pool_remove(&pool, dup);
+    if (growable_pool_double_remove_count(&pool) != before_double_free + 1) {
+        growable_pool_remove(&pool, a0);
+        return false;
+    }
+    growable_pool_remove(&pool, a0);
+
+    // This pool's own MAX_CHUNKS ceiling, independent of page.tkb's much
+    // larger BOOT_PAGE_COUNT ceiling.
+    let mut small_pool: GrowablePool(usize, 1, 1, 1);
+    growable_pool_init(&small_pool);
+    let c0: exists sc: usize. FreelistOwner[sc] = match growable_pool_insert(&small_pool) {
+        GrowablePoolInsertResult::OutOfMemory => { return false; }
+        GrowablePoolInsertResult::Allocated(o) => { o }
+    };
+    let mut ceiling_ok: bool = false;
+    match growable_pool_insert(&small_pool) {
+        GrowablePoolInsertResult::OutOfMemory => { ceiling_ok = true; }
+        GrowablePoolInsertResult::Allocated(unexpected) => {
+            growable_pool_remove(&small_pool, unexpected);
+        }
+    }
+    growable_pool_remove(&small_pool, c0);
+    if (ceiling_ok == false) { return false; }
+
+    return true;
+}

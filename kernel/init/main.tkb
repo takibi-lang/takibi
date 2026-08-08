@@ -4,6 +4,7 @@ use "kernel/fs/initramfs.tkb";
 use "kernel/fs/elf64.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/mm/process_image.tkb";
+use "kernel/lib/growable_pool.tkb";
 use "kernel/printk/log.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/platform/rpi5/usb_xhci.tkb";
@@ -490,6 +491,12 @@ fn main() {
         kernel_boot_log("scheduler: rr immediate=2 deferred=1 staged\n");
     } else {
         kernel_boot_log("scheduler: failed\n");
+    }
+    if (growable_pool_probe()) {
+        kernel_boot_log(
+            "growable pool: zero-start growth, cross-chunk data, generation-safe reuse, double-free counted, own ceiling ok\n");
+    } else {
+        kernel_boot_log("growable pool: failed\n");
     }
 
     match net_init() {
