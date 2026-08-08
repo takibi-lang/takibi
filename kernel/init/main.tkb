@@ -10,6 +10,7 @@ use "kernel/fs/ext2/ext2.tkb";
 use "kernel/platform/rpi5/usb_xhci.tkb";
 use "kernel/net/tcp.tkb";
 use "kernel/net/socket_capability.tkb";
+use "kernel/platform/rpi5/mailbox.tkb";
 use "kernel/arch/arm64/boot/boot_extern.tkb";
 use "kernel/arch/arm64/kernel/fpsimd_probe_extern.tkb";
 use "kernel/arch/arm64/kernel/exception_evidence.tkb";
@@ -481,6 +482,28 @@ fn usb_ext2_create_check(mount: Ext2Mount) -> UsbExt2CreateCheckResult {
 fn main() {
     platform_init();
     kernel_boot_log("takibi kernel: EL1\n");
+
+    // GitHub issue #247 step 1: query the VideoCore firmware's mailbox
+    // property interface for the real ARM-visible physical RAM base/size,
+    // instead of trusting kernel/mm/page.tkb's fixed 1024-page (4 MiB)
+    // reservation to reflect this board's actual installed memory.
+    // Read-only diagnostic today -- the allocator itself is not resized
+    // to match (see kernel/platform/rpi5/mailbox.tkb's header comment);
+    // that is deliberately deferred to a follow-up issue once this step's
+    // detected value has been cross-checked against real hardware.
+    match mbox_get_arm_memory() {
+        MboxMemoryResult::Detected(detected) => {
+            let (mem_base, mem_size) = detected;
+            kernel_boot_log("memory: base_bytes=");
+            uart_put_udec(mem_base as usize);
+            kernel_boot_log(" detected_mib=");
+            uart_put_udec((mem_size as usize) / (1024 * 1024));
+            kernel_boot_log("\n");
+        }
+        MboxMemoryResult::Failed => {
+            kernel_boot_log("memory: mailbox query failed\n");
+        }
+    }
 
     // GitHub issue #187: arms GIC/MIP0/MSI-X routing for UART0 and USB
     // xHCI and unmasks DAIF.I globally. UART0's own PL011 source stays

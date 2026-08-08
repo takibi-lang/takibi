@@ -15158,3 +15158,79 @@ Files: `kernel/init/main.tkb` (execve resolution rewrite),
 `kernel/tests/rpi5/views/ext2.expected`, `lib/llvm_gen.ml` (unsafe
 single-index extension), `test/test_takibi.ml` (8 new regression cases),
 `SPEC.md`, `kernel/README.md`, `kernel/SYSCALLS.md`.
+
+## 2026-08-08: GitHub Issue #247 Step 1 -- Real RAM Size Read and
+## Boot-Logged, Device Tree Confirmed Unusable Over This Project's SWD
+## Boot Path
+
+Issue #247 asks the kernel to discover real physical RAM at boot instead
+of trusting `kernel/mm/page.tkb`'s fixed `BOOT_PAGE_COUNT = 1024` (4 MiB)
+static reservation. That reservation is deeply tangled with refinement
+types (`{0..<BOOT_PAGE_COUNT}` appears throughout `page.tkb`), so the
+issue's own text already suggested scoping the first step down to just
+detecting and boot-logging the real size, leaving the allocator itself
+untouched -- confirmed with the user before starting.
+
+**Device tree investigated and rejected first, for a concrete reason, not
+by default.** The generic, portable answer for "where does firmware tell
+me how much RAM exists" is the device tree blob (DTB) pointer ARM64's own
+boot protocol passes in `x0` at kernel entry -- the same mechanism QEMU's
+`-M virt` machine and RISC-V's SBI/OpenSBI convention both use, so a real
+FDT parser would have been reusable well beyond RPi5. But this project's
+`kernel/arch/arm64/boot/entry.S` `_start` never saves incoming `x0` before
+clobbering it, and more importantly, RPi5 kernels here are never booted
+by firmware directly -- `scripts/rpi5_jtag_load.sh` injects them over SWD
+into a resident `examples/common_rpi5/jtag_stub.S` spin stub, which only
+pokes PC/SP, not `x0`. Checked for real instead of guessing: reset the
+board back into the stub with `scripts/rpi5_jtag_reset.sh
+--resident-image-unchanged` (a genuine PSCI SYSTEM_RESET, so firmware
+re-runs its own real boot chain fresh), then read-only OpenOCD `reg x0`/
+`reg x1`/`reg x2`/`reg x3` plus `mdw` at whatever `x0` pointed to. Result:
+`x0 = 0x81000000`, `x1`-`x3` all zero (superficially matching the ARM64
+boot protocol's "x0=dtb, x1-x3 reserved-zero" convention) -- but the 64
+bytes at `0x81000000` were entirely zero, not an FDT header (`0xd00dfeed`
+magic). Likely cause, not confirmed further since the practical answer
+(don't rely on this) doesn't need it: `jtag_stub.img` is a raw 8-byte
+binary with none of the standard Linux ARM64 `Image` header magic
+firmware normally keys off before staging a real DTB and constructing the
+full boot-protocol register set, and `config.txt`'s own `os_check=0`
+(already required so firmware accepts this non-Linux stub at all)
+explicitly skips that same image-format validation. Documented at the
+point future readers are most likely to reach for this again:
+`examples/common_rpi5/jtag_stub.S`'s own header comment, plus this entry.
+
+**VideoCore mailbox chosen instead, because it doesn't depend on how the
+kernel image was loaded.** `kernel/platform/rpi5/mailbox.tkb` (new) ports
+`examples/common_rpi3/mailbox.tkb`'s proven property-tag protocol
+(message layout, doorbell/channel encoding, request/response codes are
+identical across every `brcm,bcm2835-mbox`-compatible SoC, confirmed
+against Raspberry Pi's own upstream `bcm2712.dtsi`, which still declares
+`mailbox@7c013880`). Two real differences from the RPi3 file: the MMIO
+base becomes `0x107c013880` (this project's own established
+`0x10_`-prefix convention for BCM2712 physical addresses, already used by
+`kernel/platform/rpi5/pcie.tkb`/`timer_irq.tkb` -- and it lands inside L1
+index 65's existing identity-mapped 1GiB device block in
+`kernel/arch/arm64/mm/mmu.tkb`'s `init_root`, so no new MMU mapping was
+needed); and `dma_prepare_tx`/`dma_finish_rx` require `*align(64)`, not
+RPi3's `*align(32)` -- found by the compiler rejecting the RPi3 file's
+alignment verbatim, consistent with Cortex-A76's 64-byte cache line vs.
+Cortex-A53's 32-byte one.
+
+**Real hardware immediately surfaced a second, independent limitation.**
+The first working boot-log read `memory: base_bytes=0 detected_mib=1020`
+-- implausible as this board's real total (RPi5 ships 2/4/8 GiB). Tag
+`0x00010005` ("Get ARM memory") is a legacy BCM283x-era call that only
+ever reports memory below the 1 GiB boundary, a known limitation
+independently corroborated on Raspberry Pi's own forums for RPi4 8 GiB
+boards reporting exactly 1 GiB back. Getting the genuine total needs
+either decoding the board revision code (mailbox tag `0x00010002`, a
+coarse GiB-bucket SKU lookup, still mailbox-only) or the device tree's
+`/memory` node -- deferred to a follow-up issue; today's step is
+explicitly read-only/diagnostic (`kernel/mm/page.tkb`'s allocator is
+unchanged), so an approximate value is enough to close it.
+
+Hardware-verified: 26/26 `kernelcheck-rpi5` views, no regression.
+
+Files: `kernel/platform/rpi5/mailbox.tkb` (new), `kernel/init/main.tkb`
+(boot-log call), `Makefile` (build wiring),
+`examples/common_rpi5/jtag_stub.S` (DTB-unavailability note).
