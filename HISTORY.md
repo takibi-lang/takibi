@@ -15216,18 +15216,23 @@ RPi3's `*align(32)` -- found by the compiler rejecting the RPi3 file's
 alignment verbatim, consistent with Cortex-A76's 64-byte cache line vs.
 Cortex-A53's 32-byte one.
 
-**Real hardware immediately surfaced a second, independent limitation.**
-The first working boot-log read `memory: base_bytes=0 detected_mib=1020`
--- implausible as this board's real total (RPi5 ships 2/4/8 GiB). Tag
-`0x00010005` ("Get ARM memory") is a legacy BCM283x-era call that only
-ever reports memory below the 1 GiB boundary, a known limitation
-independently corroborated on Raspberry Pi's own forums for RPi4 8 GiB
-boards reporting exactly 1 GiB back. Getting the genuine total needs
-either decoding the board revision code (mailbox tag `0x00010002`, a
-coarse GiB-bucket SKU lookup, still mailbox-only) or the device tree's
-`/memory` node -- deferred to a follow-up issue; today's step is
-explicitly read-only/diagnostic (`kernel/mm/page.tkb`'s allocator is
-unchanged), so an approximate value is enough to close it.
+**Real hardware read `memory: base_bytes=0 detected_mib=1020` -- initially
+assumed implausible, corrected after checking the actual board.** The
+project's RPi5 unit is a 1 GiB model (Akizuki Denshi SC2162/product code
+131519 -- RPi5 also ships as 2/4/8/16 GiB), confirmed only after this
+entry's first draft wrongly assumed a larger, more commonly-discussed
+configuration and treated 1020 MiB as evidence of a bug rather than
+checking what this specific board actually has. 1020 MiB is in fact very
+close to this board's real total (1024 MiB nominal minus a few MiB of
+firmware/GPU reservation is normal), so tag `0x00010005` ("Get ARM
+memory") is very likely reporting correctly here. The limitation it does
+have, independently confirmed real and worth keeping documented even
+though it isn't proven to be biting THIS board: it is a legacy BCM283x-era
+call that only ever reports memory below the 1 GiB boundary, corroborated
+on Raspberry Pi's own forums by RPi4 8 GiB boards reporting exactly 1 GiB
+back. That only matters again if this project's RPi5 hardware is ever
+swapped for a bigger-RAM unit -- see issue #250, re-scoped accordingly
+once this correction was made.
 
 Hardware-verified: 26/26 `kernelcheck-rpi5` views, no regression.
 
