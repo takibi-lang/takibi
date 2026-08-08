@@ -461,7 +461,7 @@ fn main() {
     }
 
     if (scheduled_process_table_probe()) {
-        kernel_boot_log("process table: slots=3 stacks=4096 generation reuse safe\n");
+        kernel_boot_log("process table: slots=16 stacks=4096 generation reuse safe\n");
     } else {
         kernel_boot_log("process table: failed\n");
     }

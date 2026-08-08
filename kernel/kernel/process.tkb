@@ -1,6 +1,7 @@
 use "kernel/mm/page.tkb";
 use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
+use "kernel/lib/growable_pool.tkb";
 
 enum ProcessState: u8 { Ready; Running; Blocked; Exited; }
 enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
@@ -12,12 +13,25 @@ enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
 // hand control to the parent early).
 enum ProcessWaitReason: u8 { None; UartRx; ChildExit; }
 
-// GitHub issue #245: 3 is the minimum that unblocks #241 (a shell forks an
-// external command, which itself forks a child: 3 concurrently scheduled
-// processes). Must match kernel/mm/process_image.tkb's PROCESS_IMAGE_
-// ROOT_MAX and kernel/arch/arm64/mm/mmu.tkb's physical root count -- root
-// index == this file's own ProcessHandle.pool_index everywhere.
-const KERNEL_PROCESS_MAX: usize = 3;
+// GitHub issue #246: a generous compile-time ceiling, not a razor-thin one
+// bumped by hand each time a workload needs one more (see issue #245's 2
+// -> 3 bump, and this file's own header note on kernel/lib/growable_pool.
+// tkb for why "one fixed N picked by guesswork" was the actual recurring
+// cost). This is still a compile-time array size -- this compiler has no
+// runtime-unbounded array -- but 3 -> 16 moves the ceiling from "the very
+// next real workload" to "comfortably past any workload this project has
+// exercised so far," matching how kernel/mm/page.tkb's own BOOT_PAGE_COUNT
+// (1024) is large enough that nobody thinks of it as "the page limit."
+// Only kernel_stacks (below) and kernel/arch/arm64/mm/mmu.tkb's page-
+// table-root triples actually cost real per-slot memory (4096+ bytes
+// each); the plain bookkeeping arrays below cost only a few bytes per
+// slot even at this larger N, so THEY stay eagerly-sized plain arrays --
+// growable_pool.tkb's lazy, page_alloc()-backed growth is reserved for
+// the genuinely expensive per-slot resources, not applied uniformly just
+// because it exists. Must match kernel/mm/process_image.tkb's
+// PROCESS_IMAGE_ROOT_MAX and kernel/arch/arm64/mm/mmu.tkb's MAX_ROOTS --
+// root index == this file's own ProcessHandle.pool_index everywhere.
+const KERNEL_PROCESS_MAX: usize = 16;
 const KERNEL_PROCESS_STACK_SIZE: usize = 4096;
 
 // Issue #188 Stage 2: the stable store holds one generation-indexed process
@@ -63,8 +77,37 @@ private let mut scheduled_process_saved_sp: [usize; KERNEL_PROCESS_MAX];
 private let mut scheduled_process_state: [ProcessSlotState; KERNEL_PROCESS_MAX];
 private let mut scheduled_process_wait_reason:
     [ProcessWaitReason; KERNEL_PROCESS_MAX];
+// A generic type argument to GrowablePool(T, ...) can only be a primitive
+// integer type, bool, a plain struct name, or a plain pointer to one of
+// those (issue #207's generics limitation) -- an array type like
+// [u8; KERNEL_PROCESS_STACK_SIZE] is not directly usable, hence this
+// one-field wrapper struct purely to name the page's size to the type
+// system; nothing ever reads its `bytes` field, only the struct's own
+// base address (see growable_pool_ref_at's callers below).
+struct KernelStackPage {
+    bytes: [u8; KERNEL_PROCESS_STACK_SIZE];
+}
+
+// Genuinely expensive per-slot (one whole 4096-byte page each, unlike the
+// tiny bookkeeping arrays above), so this one -- unlike the others in this
+// file -- is a growable_pool.tkb "shadow" pool (issue #246):
+// growable_pool_ensure/_ref_at, keyed directly by this file's own
+// pool_index, no separate allocation of its own. Safe to use from this
+// global's plain zero-initialized .bss state with no explicit
+// growable_pool_init() call on the real (non-probe) path: the
+// ensure/_ref_at access mode only ever reads/writes active_chunks/
+// chunk_data_base/chunk_page_index, all correctly "nothing grown yet" at
+// zero already -- see kernel/lib/growable_pool.tkb's own header. Must NOT
+// be re-initialized from scheduled_process_table_clear() (called several
+// times per boot, see main.tkb): a chunk's physical page, once given to a
+// pool_index, is never returned to page.tkb (growable_pool.tkb's own
+// "never shrink" policy), so a stale generation reusing the same
+// pool_index correctly reuses the SAME physical stack page via
+// growable_pool_ensure's idempotence -- re-running growable_pool_init()
+// here instead would forget that bookkeeping and leak a fresh page on
+// every reuse.
 private let mut scheduled_process_kernel_stacks:
-    [u8; KERNEL_PROCESS_MAX * KERNEL_PROCESS_STACK_SIZE] align(4096);
+    GrowablePool(KernelStackPage, 1, KERNEL_PROCESS_MAX, KERNEL_PROCESS_MAX);
 
 must_use variant ScheduledProcessAllocResult {
     Full;
@@ -231,6 +274,7 @@ fn scheduled_process_identity_take(handle: ProcessHandle)
 
 fn scheduled_process_table_init() {
     slotmap_init(&scheduled_process_pool);
+    growable_pool_init(&scheduled_process_kernel_stacks);
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
         scheduled_process_saved_sp[slot] = 0;
         scheduled_process_state[slot] = ProcessSlotState::Free;
@@ -265,10 +309,18 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
             let (index, generation) = freelist_owner_into_parts(popped);
             if (index < KERNEL_PROCESS_MAX) {
                 let slot: {0..<KERNEL_PROCESS_MAX as usize} = index;
+                if (growable_pool_ensure(
+                        &scheduled_process_kernel_stacks, slot) == false) {
+                    slotmap_remove(&scheduled_process_pool,
+                                   freelist_owner_new(slot, generation));
+                    return ScheduledProcessAllocResult::Full;
+                }
                 scheduled_process_state[slot] = ProcessSlotState::Ready;
-                let stack_base: usize = scheduled_process_kernel_stacks as usize;
-                scheduled_process_saved_sp[slot] = stack_base +
-                    (slot + 1) * KERNEL_PROCESS_STACK_SIZE;
+                let stack_base: usize =
+                    growable_pool_ref_at(&scheduled_process_kernel_stacks, slot)
+                        as usize;
+                scheduled_process_saved_sp[slot] =
+                    stack_base + KERNEL_PROCESS_STACK_SIZE;
                 let mut handle: ProcessHandle = { slot, generation };
                 match scheduled_process_identity_put(
                         scheduled_process_owner_new(slot, generation)) {
@@ -483,81 +535,73 @@ fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool {
 // proves bounded allocation, typed Ready -> Running -> Ready/Exited
 // transitions, page-aligned distinct kernel stacks, and generation-safe slot
 // reuse before later stages attach real VM/fd state to these identities.
-// GitHub issue #245: generalized from 2 to KERNEL_PROCESS_MAX (3) slots --
-// allocate to capacity, confirm the next allocation past that is Full,
-// confirm every live slot's stack is distinct and page-aligned, then
-// exercise cycle/reap/reuse on one slot before cycling the rest.
+// GitHub issue #246: loop-based, not one named local + one copy-pasted
+// match block per slot -- practical only up to a handful of slots (this
+// shape served KERNEL_PROCESS_MAX up through 3, issue #245), impractical
+// at the larger ceiling #246 moved to. ProcessHandle is a plain struct
+// (not an indexed/existential owner type), so an array of them is legal
+// storage, unlike kernel/lib/growable_pool.tkb's own FreelistOwner values.
 fn scheduled_process_table_probe() -> bool {
     scheduled_process_table_init();
-    match scheduled_process_alloc() {
-        ScheduledProcessAllocResult::Full => { return false; }
-        ScheduledProcessAllocResult::Allocated(first) => {
-            match scheduled_process_alloc() {
-                ScheduledProcessAllocResult::Full => { return false; }
-                ScheduledProcessAllocResult::Allocated(second) => {
-                    match scheduled_process_alloc() {
-                        ScheduledProcessAllocResult::Full => { return false; }
-                        ScheduledProcessAllocResult::Allocated(third) => {
-                            let mut capacity_ok: bool = false;
-                            match scheduled_process_alloc() {
-                                ScheduledProcessAllocResult::Allocated(unexpected) => {
-                                    if (scheduled_process_probe_cycle(unexpected)) {}
-                                }
-                                ScheduledProcessAllocResult::Full => {
-                                    capacity_ok = true;
-                                }
-                            }
-                            if (capacity_ok == false) { return false; }
-                            let first_stack: usize =
-                                scheduled_process_stack_top(first);
-                            let second_stack: usize =
-                                scheduled_process_stack_top(second);
-                            let third_stack: usize =
-                                scheduled_process_stack_top(third);
-                            if (first_stack == 0 || second_stack == 0 ||
-                                third_stack == 0 ||
-                                (first_stack & 4095) != 0 ||
-                                (second_stack & 4095) != 0 ||
-                                (third_stack & 4095) != 0 ||
-                                first_stack == second_stack ||
-                                first_stack == third_stack ||
-                                second_stack == third_stack) {
-                                return false;
-                            }
-                            if (scheduled_process_probe_cycle(first) ==
-                                    false) {
-                                return false;
-                            }
-                            match scheduled_process_alloc() {
-                                ScheduledProcessAllocResult::Full => {
-                                    return false;
-                                }
-                                ScheduledProcessAllocResult::Allocated(reused) => {
-                                    if (scheduled_process_same_slot(
-                                            first, reused) == false ||
-                                        scheduled_process_same_generation(
-                                            first, reused) ||
-                                        scheduled_process_stack_top(first) !=
-                                            0) {
-                                        return false;
-                                    }
-                                    if (scheduled_process_probe_cycle(
-                                            reused) == false) {
-                                        return false;
-                                    }
-                                }
-                            }
-                            if (scheduled_process_probe_cycle(second) ==
-                                    false) {
-                                return false;
-                            }
-                            return scheduled_process_probe_cycle(third);
-                        }
-                    }
-                }
+    let mut handles: [ProcessHandle; KERNEL_PROCESS_MAX];
+    for i: usize in 0..<KERNEL_PROCESS_MAX {
+        match scheduled_process_alloc() {
+            ScheduledProcessAllocResult::Full => { return false; }
+            ScheduledProcessAllocResult::Allocated(handle) => {
+                handles[i] = handle;
             }
         }
     }
+
+    // Allocate to capacity, confirm the next allocation past that is Full.
+    let mut capacity_ok: bool = false;
+    match scheduled_process_alloc() {
+        ScheduledProcessAllocResult::Allocated(unexpected) => {
+            if (scheduled_process_probe_cycle(unexpected)) {}
+        }
+        ScheduledProcessAllocResult::Full => {
+            capacity_ok = true;
+        }
+    }
+    if (capacity_ok == false) { return false; }
+
+    // Every live slot's stack must be distinct and page-aligned. Both
+    // loops bound by the same literal (KERNEL_PROCESS_MAX), not one loop
+    // bound by the other's variable, so --forbid-trap can prove both
+    // `handles[i]`/`handles[j]` accesses in one pass (a variable inner
+    // bound like `0..<i` does not carry a provable range here).
+    for i: usize in 0..<KERNEL_PROCESS_MAX {
+        let stack: usize = scheduled_process_stack_top(handles[i]);
+        if (stack == 0 || (stack & 4095) != 0) { return false; }
+        for j: usize in 0..<KERNEL_PROCESS_MAX {
+            if (j != i && stack == scheduled_process_stack_top(handles[j])) {
+                return false;
+            }
+        }
+    }
+
+    // Exercise cycle/reap/reuse on one slot before cycling the rest.
+    let mut first: ProcessHandle = handles[0];
+    if (scheduled_process_probe_cycle(first) == false) { return false; }
+    match scheduled_process_alloc() {
+        ScheduledProcessAllocResult::Full => { return false; }
+        ScheduledProcessAllocResult::Allocated(reused) => {
+            if (scheduled_process_same_slot(first, reused) == false ||
+                scheduled_process_same_generation(first, reused) ||
+                scheduled_process_stack_top(first) != 0) {
+                return false;
+            }
+            if (scheduled_process_probe_cycle(reused) == false) {
+                return false;
+            }
+        }
+    }
+    for i: usize in 1..<KERNEL_PROCESS_MAX {
+        if (scheduled_process_probe_cycle(handles[i]) == false) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Existing synchronous clone fixture. Later #188 stages replace this state
