@@ -15,6 +15,127 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-08: Three-level process tree -- N-slot process model (#245), blocking `wait4` (#244), and `user_payload` as a real ELF launched from `init.sh` (#241)
+
+Closes all three together, because they turned out to be one problem:
+running `user_payload` as an ordinary external command under BusyBox ash
+needs a 3-level process tree (ash -> user_payload -> user_payload's own
+forked child), and *four* independent subsystems were each hardcoded to
+exactly two processes.
+
+**Why they could not be separated.** #241's own issue text listed
+"remain a self-contained image that runs before any filesystem is
+required" as a #228 non-goal to revisit. The filesystem half of that
+constraint had genuinely expired (ext2 is a proven early-boot mechanism,
+and #243 gave it multi-block reads so a real ELF fits); the *process*
+half had not. A first attempt at #241 alone reached real hardware and
+failed in a way that looked like a network bug ("no SYN-ACK reply") but
+was actually the scheduler: with `kernel_process_scheduler_enable()`
+active across a fork, a timer IRQ preempted `user_payload` mid-`accept()`
+and switched to ash, whose `wait4()` returned `-ECHILD` (it did not
+block) and so ran on as if the command had finished. That is #244. And
+even with #244 fixed, `KERNEL_PROCESS_MAX = 2` left no slot for
+`user_payload`'s own `clone()`. That is #245. Both were on #209's
+critical path independently -- an interactive ash REPL needs a blocking
+wait and more than two slots -- so they were filed and fixed on their own
+terms rather than routed around.
+
+**#245 (four subsystems, not one).** `kernel/kernel/process.tkb`'s
+`enum ExecutionProcess { Parent; Child }` plus one
+`execution_parent_handle`/`execution_child_handle` pair became
+`execution_current_handle` (whichever slot is running) plus per-slot
+parent/child links, so "parent" and "child" are relative to whichever
+slot is asking. `kernel/mm/process_image.tkb`'s COW clone hardcoded
+"copy root 0 into root 1"; it now takes an explicit `dest_root` and
+clones from whichever root is active, and `kernel/arch/arm64/mm/mmu.tkb`
+gained a third *physical* page-table root (only two existed).
+`kernel/kernel/fd_table.tkb`'s `PROCESS_CONTEXT_MAX` went 2 -> 3. The
+CLONE syscall handler now calls `kernel_process_clone_begin()` **first**
+(it used to run last) because the address-space root and fd-table slot
+the later steps need are the new child's own `pool_index`. Verified
+standalone on hardware (25/25 views) before layering #241 on top.
+
+**#244.** `kernel_process_block_wait4()` is the mirror of the existing
+`kernel_process_block_uart()`: blocks the calling parent
+(`ProcessWaitReason::ChildExit`) and switches to its live child, with
+`kernel_process_child_exit()` waking it. Wired through the existing
+action-5 `SyscallAction::Block` trampoline via a new
+`syscall_block_reason` global rather than adding a 9th hand-written
+assembly dispatch branch. One real gap found on hardware: waking is not
+enough. Unlike the UART blocker's single `el0_context_set_x0`, `wait4`
+must also deliver the reaped pid *and* honor the caller's status pointer
+-- and the Block path is a one-way tail branch with no way back into the
+syscall handler, so `x1` is stashed at block time and replayed by
+`kernel_syscall_wait4_deliver()`.
+
+**Four instances of one bug shape.** The hardest part was not the design
+but a repeated, quiet defect: a global `bool`/`usize` that correctly meant
+"the one single child" under the two-process model, left global while
+everything around it became per-slot. Each produced a different symptom:
+
+- `execution_child_live`: an outer ancestor's still-live fork kept it
+  set, so `kernel_process_clone_begin()` rejected an unrelated clone
+  deeper in the tree with `-EINVAL`. Removed entirely -- the per-slot
+  `scheduled_process_has_child[current]` check sitting next to it was
+  already the correct replacement.
+- `execution_child_exec_image_live`: `user_payload` had exec'd, so its
+  own never-exec'd child read back "exec image live" as true on exit,
+  skipping that child's `process_image_clone_vm_reap()` and leaking its
+  clone-vm record. Replaced with a per-slot array plus *explicit-pid*
+  accessors, because the two call sites need two different processes'
+  status (the one currently exiting vs. the one that already exited and
+  switched away) -- "current" was never the right question.
+- `clone_file_state_live`/`clone_parent_inetd_mode`: the inner child's
+  exit cleared the single live flag, so the outer child's own exit got
+  `KernelFdReapResult::Failed` -> `SyscallAction::Unreachable`. That
+  encodes to action 0, which matches **no** branch in `user_entry.S`'s
+  dispatch table and falls through to a silent
+  `el1_exception_evidence` fail-stop -- a completely mute hang.
+- `execution_child_exit_status`: not a hang, but the same shape. It is
+  the *most recent* reaped child's status (correct for `wait4`), so
+  `user_payload`'s own `exit(0)` overwrote its child's `exit(42)` before
+  the boot-time evidence read it. Added
+  `execution_first_child_exit_status` for the checks that mean the inner
+  exit.
+
+The silent-fail-stop one is worth remembering: an unhandled
+`SyscallAction` variant produces no diagnostic at all. It was diagnosed
+purely by mapping the boot log against the fixture line by line --
+every checkpoint in `user_payload` printed, including its final
+`write()`, and output stopped dead at its `exit(0)`, which left exactly
+one syscall path to inspect. Temporary `write(1, ...)` checkpoints in
+`user_payload.tkb` were what made that mapping possible (added and
+removed within this work).
+
+**#241 itself, once unblocked.** `user_payload.tkb` +
+`user_payload_asm.S` link as a real static-PIE ELF with `ld.lld -pie
+--no-dynamic-linker -e initial_user_payload` -- no linker script, and
+**zero dynamic relocations**, because #228 had already removed every
+writable global. It ships in the ext2 image via `e2cp` and loads through
+the ordinary `distro_elf_validate`/`process_image_map` path. Gone:
+`user_payload.ld`, the `objcopy -O binary` step, `KERNEL_USER_PAYLOAD_LEN`
+and its `embed_file`. execve dispatch needed no `syscall.tkb` change at
+all: `argv[0]` already carries the requested path, so
+`kernel_process_child_exec_prepare()` picks between the saved BusyBox
+plan and a saved `user_payload` plan.
+
+Two fixture adaptations the real loader forced, both real rather than
+cosmetic: `SCHEDULER_PROBE_VA` was `0x40001000`, the old flat-blob's
+dedicated rw+xn data page, which nothing maps under the general loader
+-- replaced with a stack local taken before the fork (plain fork
+semantics give parent and child their own COW copy at the same VA,
+exactly what the "private same-VA data" probe wants). And `vm fork:
+private pages` went 3 -> 132: 3 was the flat-blob process's entire
+address space, while the real image is 3 PT_LOAD pages + 128 heap pages
++ 1 stack page.
+
+Verified on real RPi5 hardware, 25/25 `kernelcheck-rpi5` views green,
+including `child_exec`, `process_lifecycle`, `uart_rx_irq` and the
+userspace connected-I/O client -- no regressions to any existing
+clone/exec/exit/wait4 fixture.
+
+---
+
 ### 2026-08-07: ext2 multi-direct-block regular-file reads (Issue #243), split off Issue #241 investigation
 
 Investigating #241 (launch `user_payload` as a real static-PIE ELF via
