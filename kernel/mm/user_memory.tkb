@@ -18,7 +18,7 @@ const USER_RANGE_WINDOW: usize = 0x200000;
 const USER_RANGE_MAX_INDEX: usize = 512;
 
 // Isolates AP/UXN/PXN/AF/nG attribute bits from the physical address in a
-// live PTE; same mask already used by user_layout_is_correct() below.
+// live PTE.
 const USER_PERMISSION_MASK: usize = 0xFFE0000000000FFF;
 const USER_PAGE_PHYS_MASK: usize = 0x0000FFFFFFFFF000;
 

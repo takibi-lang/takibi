@@ -33,7 +33,7 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 | 135 | rt_sigprocmask | Implemented | previous mask is honestly zeroed |
 | 160 | uname | Implemented | real `struct utsname` reply via the user-memory boundary (`sysname="Linux"`, `nodename="takibi"`, `release="6.1.0-takibi"`, `version="#1"`, `machine="aarch64"`), zero-filled scratch buffer first so no uninitialized kernel memory reaches userspace |
 | 172 | getpid | Implemented | |
-| 173 | getppid | Implemented | returns 0 (single-process-tree-root model) |
+| 173 | getppid | Implemented | always returns 0; a real parent link exists (`scheduled_process_parent`, issue #245) but nothing traced needs a real ppid, so it is not wired up |
 | 174-177 | getuid/geteuid/getgid/getegid | Implemented | return 0 (always-root model) |
 | 178 | gettid | Implemented | returns the real current pid |
 | 198 | socket | Implemented | `AF_INET`/`AF_INET6`, `SOCK_STREAM` only |
@@ -46,8 +46,8 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 | 214 | brk | Implemented | real heap-break growth within the fixed process arena |
 | 215 | munmap | Unsupported-by-design | the fixed short-lived process arena is reclaimed as a unit; not reachable in practice (musl never calls `munmap` in this integration) |
 | 220 | clone | Implemented | `CLONE_VM\|CLONE_VFORK` shape only, matching BusyBox httpd's own observed fork usage |
-| 221 | execve | Partial | parent handoff plus child-frame replacement for the registered static BusyBox image; copies pathname/argv, builds root-1 child image state, and returns child exit through the saved parent frame |
-| 260 | wait4 | Partial | retrieves the completed one-child clone status once; blocking multi-child wait/reap remains deferred |
+| 221 | execve | Partial | parent handoff plus child-frame replacement, dispatched by `argv[0]` path between the registered static BusyBox image and `/user_payload` (issue #241); copies pathname/argv, builds the child's own process-image root (whichever root it is currently scheduled on, not a fixed root), and returns child exit through the saved parent frame |
+| 260 | wait4 | Partial | blocks the caller until its live child exits (by specific pid or `-1`/`WAIT_ANY`), delivering the real reaped pid and exit status (issue #244); a process may have at most one live child at a time, so concurrent multi-child wait/reap remains out of scope |
 | 222 | mmap | Partial | anonymous-only (`MAP_PRIVATE\|MAP_ANONYMOUS`, `fd=-1`, no `PROT_EXEC`) via a heap-break-cursor emulation, not a real independent mapping; every real call shape musl's mallocng makes satisfies this (verified against the pinned musl 1.2.6 source directly) |
 | 226 | mprotect | Partial | real permission changes for exactly one transition (`RW+XN` <-> `R+XN` on data/heap/stack); anything else (adding `PROT_EXEC`, targeting text/rodata, mixed-class ranges) returns a real `EACCES`/`EINVAL`, never false success |
 | 451 | (Takibi-internal) UART RX wait | Implemented | not a real Linux syscall number; this kernel's own blocking-UART-RX primitive |

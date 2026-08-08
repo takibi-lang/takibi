@@ -77,13 +77,13 @@ fn initial_user_payload() {
 
     let connection_b_response: *u8 = "conn-B\n!" as *u8;
     let socket_response: *u8 = "HTTP/1.0 200 OK\r\n\r\n" as *u8;
-    // GitHub issue #228 (found on real hardware): this buffer MUST be a
-    // local (stack) variable, not a global. Globals in this file land
-    // inside the flat blob mapped read+execute-only as USER_TEXT_VA (see
-    // "vm layout: text=rx" in the boot log) -- a write into a global here
-    // (by the kernel's own read() syscall handler, copying received bytes
-    // into this address) silently never completes, hanging the process.
-    // The stack (USER_STACK_VA) is mapped rw+xn, so a local here is safe.
+    // GitHub issue #228 (found on real hardware), reconfirmed under the
+    // real static-PIE ELF (issue #241): this buffer MUST be a local
+    // (stack) variable, not a global. scripts/check_user_payload_no_rw_globals.py
+    // enforces zero writable globals in this ELF at build time, so a
+    // regression here is caught at compile time instead of as a runtime
+    // hang; stack locals are always safe since they live in this process's
+    // private, writable stack mapping.
     let mut user_payload_rx_buf: [u8; 8];
     let rx_base: *u8 = user_payload_rx_buf as *u8;
 

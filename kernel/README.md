@@ -122,11 +122,13 @@ ELF, then runs `scripts/check_kernel_asm_invariants.py` against the linked
 build if specific past hand-written-assembly bugs (issues #229, #231) ever
 regress, without needing a board or a probabilistic real-hardware race to
 reproduce them. It also links `kernel/arch/arm64/kernel/user_payload.tkb`/
-`user_payload_asm.S` (the EL0 syscall-ABI test payload, embedded separately
-via `embed_file`) and runs `scripts/check_user_payload_no_rw_globals.py`
-against that link -- a similar static check for a real issue #228 bug: a
-top-level mutable global in that file lands inside the flat, read+execute-
-only blob it compiles into, so writes into it silently fail at runtime.
+`user_payload_asm.S` into their own real static-PIE ELF (placed on the ext2
+fixture image as `/user_payload` and launched from `kernel/tests/ext2/init.sh`
+like any other external command, issue #241) and runs
+`scripts/check_user_payload_no_rw_globals.py` against that link -- a static
+check for a real issue #228 bug: a top-level mutable global in that file is
+not guaranteed to be writable at its runtime address, so writes into it can
+silently fail.
 
 ## Raspberry Pi 5 hardware integration
 
@@ -263,11 +265,14 @@ run, not a specification.
 - **Filesystem.** One ext2 block group, direct blocks only, root-directory
   lookup and mutation, allocation bitmaps, fast symlinks. No indirect
   blocks, no additional block groups, no nested directories.
-- **Processes.** A fixed two-slot process table, all of it on core 0. Core 1
-  proves autonomous EL1 entry and shared-MMU visibility, then parks.
-  `execve` replaces the current image for the registered static BusyBox
-  image; `wait4` retrieves one completed child's status, and blocking
-  multi-child wait/reap is deferred.
+- **Processes.** A fixed three-slot process table (issue #245), all of it on
+  core 0. Core 1 proves autonomous EL1 entry and shared-MMU visibility, then
+  parks. `execve` dispatches by `argv[0]` path between the registered static
+  BusyBox image and `/user_payload`. `wait4` blocks the caller until its
+  live child exits (by specific pid or `-1`/`WAIT_ANY`), delivering the
+  real reaped pid and exit status (issue #244); a process may have at most
+  one live child at a time, so concurrent multi-child wait/reap remains out
+  of scope.
 - **Signals.** Signal state is recorded honestly, but no signal is ever
   delivered, so an installed handler is never invoked.
 - **Memory.** `mmap` is anonymous-only through a heap-break cursor rather
