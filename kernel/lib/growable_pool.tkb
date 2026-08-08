@@ -111,10 +111,11 @@
 //   for this class of primitive ("real kernels often start with 'never
 //   shrink'"), not an oversight.
 // - Capacity is bounded by MAX_CHUNKS * SLOTS_PER_CHUNK == N, itself still
-//   bounded by page.tkb's own fixed BOOT_PAGE_COUNT (1024 pages / 4 MiB) --
+//   bounded by page.tkb's own fixed BOOT_PAGE_COUNT (204800 pages / 800
+//   MiB as of issue #251, backed by real physical RAM directly rather
+//   than a kernel-owned shadow array -- see that file's own header) --
 //   this primitive removes the "one fixed N per resource pool" ceiling,
-//   not page.tkb's own outer ceiling (real physical-RAM discovery is a
-//   separate, unblocked follow-up per issue #26's own scope note).
+//   not page.tkb's own outer ceiling.
 // - N == SLOTS_PER_CHUNK * MAX_CHUNKS is a precondition the caller must
 //   maintain by hand; nothing here checks it.
 // - A freshly acquired chunk's page is zeroed once, at grow time

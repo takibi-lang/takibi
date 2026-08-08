@@ -195,9 +195,9 @@ fn init_root(l1: usize, l2: usize, l3: usize) {
 // must not be relied on to make further progress past that point.
 // Accepted rather than engineered around: not reachable in practice at
 // MAX_ROOTS=16 (at most 48 pages total, far under page.tkb's
-// BOOT_PAGE_COUNT=1024), and growable_pool.tkb has no partial-rollback
-// primitive to unwind a successful grow on one pool after a sibling
-// pool's grow fails.
+// BOOT_PAGE_COUNT, 204800 as of issue #251), and growable_pool.tkb has no
+// partial-rollback primitive to unwind a successful grow on one pool
+// after a sibling pool's grow fails.
 fn mmu_ensure_root(slot: usize) -> bool {
     let before: usize = growable_pool_active_chunks(&kernel_l1_pool);
     if (slot < before) { return true; }

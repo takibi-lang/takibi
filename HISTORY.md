@@ -15239,3 +15239,94 @@ Hardware-verified: 26/26 `kernelcheck-rpi5` views, no regression.
 Files: `kernel/platform/rpi5/mailbox.tkb` (new), `kernel/init/main.tkb`
 (boot-log call), `Makefile` (build wiring),
 `examples/common_rpi5/jtag_stub.S` (DTB-unavailability note).
+
+## 2026-08-08: GitHub Issue #251 -- kernel/mm/page.tkb Backed by Real
+## Physical RAM Directly, Not a Kernel-Owned Shadow Array
+
+Issue #247 split off the actual "make the allocator use the detected RAM"
+work as issue #251, deliberately deferred there since it needed its own
+design pass. `BOOT_PAGE_COUNT` (1024, 4 MiB) was originally going to just
+become a bigger compile-time constant, but two things found along the way
+changed the actual design:
+
+**The `.bss`-zeroed-before-detection ordering rules out "size for a
+hypothetical bigger board."** `entry.S`'s `.Lbss_loop` zeroes the whole
+`.bss` unconditionally, before `main()` (and this board's mailbox RAM
+query) ever runs. A `BOOT_PAGE_COUNT` sized for some larger hypothetical
+board would make that zero loop write past this board's real ~1020 MiB
+(issue #247/#250), hanging at boot before the kernel even reaches the
+code that could have detected the mismatch. `BOOT_PAGE_COUNT` has to stay
+a fixed compile-time constant that's safely within this project's own
+real, known hardware -- not a "biggest plausible board" ceiling with a
+runtime-checked live count under it, the design issue #251's own text had
+originally floated as one option.
+
+**The user asked how Linux/NetBSD do this, which exposed the real
+problem.** `boot_pages: [u8; PAGE_SIZE * BOOT_PAGE_COUNT]` was a literal
+kernel-owned byte array duplicating every managed page's CONTENT inside
+the kernel's own `.bss` -- `page_physical_address()` returned `boot_pages`'s
+OWN address plus an offset, i.e. "physical RAM" was actually a shadow copy
+living inside the kernel's statically-linked image. Linux's `struct page`/
+`mem_map` and NetBSD's `vm_page` are pure METADATA (tens of bytes per
+page) addressing real physical RAM directly; the real page CONTENT is
+never duplicated into a second, kernel-owned array. That distinction, not
+compile-time-vs-boot-time timing, is what made the old design's true cost
+`PAGE_SIZE` (4096) bytes per page instead of a couple hundred.
+
+**Fix: real pages now live at `usable_ram_start` (new
+`kernel/arch/arm64/boot/link.ld` symbol, the first `PAGE_SIZE`-aligned
+physical address past every other statically-laid-out kernel region) plus
+`index * PAGE_SIZE`, accessed directly** -- `boot_pages` is deleted
+outright. This didn't need new compiler features: `kernel/mm/
+address_space.tkb` already casts an arbitrary computed address to `*u8`
+(`USER_TEXT_VA as *u8`), and `page_copy_mapped_physical` already used
+`unsafe { ptr[a..<b] }` range-slicing on a raw pointer, so `page_bytes()`
+(the one function that needs a *refined*-length `[u8; PAGE_SIZE..]`
+result, not just `[]u8`) was rewritten the same way. One real compiler
+constraint found while doing that: `lib/const_env.ml`'s `bound_value`
+only folds a bare integer literal or a bare `Var` naming a registered
+`const` -- `PAGE_SIZE as isize` (a `Cast` node) doesn't match either
+case, so the unsafe slice's bounds had to be written as the literal `0`/
+`4096` directly (commented, since it now duplicates `PAGE_SIZE`'s value)
+for the compiler to prove the `[u8; PAGE_SIZE..]` result without a
+runtime check.
+
+Only metadata now costs `BOOT_PAGE_COUNT`-scaled `.bss` space: this
+file's own `SlotMap(N)` bookkeeping (16 bytes/page) plus
+`kernel/mm/process_image.tkb`'s `image_page_indices`/`image_l3_indices`
+(`PROCESS_IMAGE_ROOT_MAX`-scaled, 128 bytes/page each -- caught by the
+user re-grepping for every real `BOOT_PAGE_COUNT` use site, not just
+`page.tkb`'s own; missing these in the first size estimate would have
+undercounted the true cost by about 34 MiB at the value finally chosen).
+Total: ~272 bytes/page metadata, not 4096 -- roughly a 16x reduction in
+per-page cost. `BOOT_PAGE_COUNT` is now `204800` (800 MiB of real page
+content), chosen with a real hardware safety margin rather than maxed out
+against the ~1020 MiB detected total: `usable_ram_start` itself lands at
+physical `0x3a4e000` (~58.4 MiB, all of it now cheap metadata plus the
+kernel's own code/data/stack), and the content region ends around
+858.5 MiB, leaving roughly 161.6 MiB of this board's real RAM
+deliberately unused as margin.
+
+`page_bytes()` becomes `!{unsafe}` as an honest consequence -- proving a
+slice is in-bounds without a runtime check needs a real, compile-time-
+sized backing array to check against, which a linker-symbol-based
+physical address is not, matching HISTORY.md's 2026-07-28 "Unsafe memory
+reasoning becomes an auditable effect" entry. Contrary to an initial
+worry, this did NOT need propagating `!{unsafe}` through
+`kernel/mm/process_image.tkb`'s seven callers: the effect only gates
+writing `unsafe { ... }` syntax inside a function's own body (an
+`unsafe_depth` counter gate, `lib/type_inf.ml`), not calling an already-
+`!{unsafe}`-marked function from an ordinary one -- ordinary callers of
+`page_bytes()` needed no changes at all.
+
+Explicitly deferred to a separate future issue (per the user's own
+direction): letting the compile-time refinement bound itself come from a
+value determined once at boot, rather than a fixed `const` -- a real
+compiler/type-system question, not resolved here.
+
+Hardware-verified: 26/26 `kernelcheck-rpi5` views, no regression.
+
+Files: `kernel/mm/page.tkb` (boot_pages removed, real-RAM addressing),
+`kernel/arch/arm64/boot/link.ld` (new `usable_ram_start` symbol),
+`kernel/lib/growable_pool.tkb`, `kernel/arch/arm64/mm/mmu.tkb` (stale
+`BOOT_PAGE_COUNT=1024` comments updated).

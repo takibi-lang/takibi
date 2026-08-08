@@ -1,8 +1,35 @@
-// Fixed bootstrap page allocator. A general allocator is deliberately deferred
-// until a real later milestone needs it; the initial process needs exactly
-// three independently-owned pages. The foreground HTTPd fork adds one eager
-// private copy of its mapped process image; 1024 pages cover the observed
-// 331-page parent and child without introducing a general allocator policy.
+// Bootstrap page allocator, backed by real physical RAM directly (GitHub
+// issue #251) rather than a kernel-owned shadow byte array. The previous
+// design's `boot_pages: [u8; PAGE_SIZE * BOOT_PAGE_COUNT]` duplicated every
+// managed page's CONTENT inside the kernel's own .bss -- unlike Linux's
+// `struct page`/`mem_map` or NetBSD's `vm_page`, which are pure metadata
+// (tens of bytes per page) addressing real physical RAM directly, not a
+// second, kernel-owned copy of it. That made BOOT_PAGE_COUNT's true cost
+// PAGE_SIZE (4096) bytes per page, capping any real-RAM-sized value well
+// below what real hardware has. Real pages now live at `usable_ram_start`
+// (kernel/arch/arm64/boot/link.ld's own symbol for the first PAGE_SIZE-
+// aligned physical address past every other statically-laid-out kernel
+// region) plus `index * PAGE_SIZE`, accessed directly -- the only
+// remaining BOOT_PAGE_COUNT-sized cost is metadata (SlotMap's own
+// bookkeeping here, plus kernel/mm/process_image.tkb's two
+// PROCESS_IMAGE_ROOT_MAX-scaled index arrays), on the order of a few
+// hundred bytes per page, not 4096. See HISTORY.md's 2026-08-08 issue
+// #251 entry for the real-kernel comparison this was modeled on.
+//
+// `page_bytes()` (and everything reached through it) now needs `!{unsafe}`
+// as an honest consequence: proving a slice is in-bounds without a runtime
+// check requires the compiler to see a real, compile-time-sized backing
+// array, which real physical RAM accessed via a linker symbol is not --
+// same tradeoff HISTORY.md's 2026-07-28 "Unsafe memory reasoning becomes
+// an auditable effect" entry already established elsewhere in this
+// kernel. `page_physical_address`/`page_transferred_release_physical`
+// stay effect-free: pure address arithmetic and comparison, no
+// dereference.
+//
+// This RPi5 unit's own real detected RAM is ~1020 MiB (HISTORY.md's
+// 2026-08-08 issue #247 entry) -- BOOT_PAGE_COUNT is chosen with generous
+// headroom below that, not maxed out, since this is the first hardware
+// verification of this redesign.
 //
 // Slot allocation itself (issue #207, the most acute of that issue's five
 // call sites: a 1024-entry scan on every single page allocation) is O(1)
@@ -16,9 +43,15 @@ use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
 
 const PAGE_SIZE: usize = 4096;
-const BOOT_PAGE_COUNT: usize = 1024;
+// 204800 pages * 4096 bytes = 800 MiB of real physical page content,
+// starting at usable_ram_start -- comfortably under this board's ~1020 MiB
+// real total even after adding usable_ram_start's own offset (kernel
+// image plus this file's and process_image.tkb's now-much-smaller
+// metadata arrays) and a real hardware safety margin.
+const BOOT_PAGE_COUNT: usize = 204800;
 
-private let mut boot_pages: [u8; PAGE_SIZE * BOOT_PAGE_COUNT] align(PAGE_SIZE);
+extern symbol usable_ram_start;
+
 private let mut boot_page_pool: SlotMap(BOOT_PAGE_COUNT);
 
 linear struct PageOwner[page: usize] {
@@ -62,7 +95,7 @@ fn page_free(owner: sink PageOwner[page]) {
 }
 
 fn page_physical_address(owner: borrow PageOwner[page]) -> usize {
-    let base: usize = (boot_pages as *u8) as usize;
+    let base: usize = usable_ram_start;
     return base + owner.index * PAGE_SIZE;
 }
 
@@ -80,13 +113,16 @@ fn page_owner_from_parts(index: {0..<BOOT_PAGE_COUNT as usize},
     return page_owner_new(index, generation);
 }
 
-fn page_bytes(owner: borrow PageOwner[page]) -> [u8; PAGE_SIZE..] @ page {
-    let offset: {0..<(BOOT_PAGE_COUNT - 1) * PAGE_SIZE + 1 as usize} =
-        owner.index * PAGE_SIZE;
-    let pool = boot_pages as [u8; PAGE_SIZE * BOOT_PAGE_COUNT..];
-    let bytes: []u8 = pool[offset..<offset + PAGE_SIZE];
-    if (bytes.len >= PAGE_SIZE) { return bytes; }
-    return pool[0..<PAGE_SIZE];
+fn page_bytes(owner: borrow PageOwner[page]) -> [u8; PAGE_SIZE..] @ page !{unsafe} {
+    let address: usize = usable_ram_start + owner.index * PAGE_SIZE;
+    let base: *u8 = address as *u8;
+    // Bare integer literals, not `PAGE_SIZE as isize`: Const_env.bound_value
+    // (lib/const_env.ml) only folds a bare IntLit or a bare Var naming a
+    // registered const, not an arbitrary expression -- a Cast node defeats
+    // it, which is what made this an unrefined []u8 on the first attempt.
+    // Must stay numerically equal to PAGE_SIZE (4096).
+    let bytes: [u8; PAGE_SIZE..] = unsafe { base[0..<4096] };
+    return bytes;
 }
 
 // Copy one page already transferred into a coarse mapping owner. The source
@@ -95,7 +131,7 @@ fn page_bytes(owner: borrow PageOwner[page]) -> [u8; PAGE_SIZE..] @ page {
 fn page_copy_mapped_physical(source_physical: usize,
                              destination: borrow PageOwner[page])
         -> bool !{unsafe} {
-    let base: usize = (boot_pages as *u8) as usize;
+    let base: usize = usable_ram_start;
     let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
     if (source_physical < base || source_physical >= base + pool_bytes ||
         (source_physical - base) % PAGE_SIZE != 0) {
@@ -103,10 +139,9 @@ fn page_copy_mapped_physical(source_physical: usize,
     }
     let source_offset: usize = source_physical - base;
     if (source_offset > pool_bytes - PAGE_SIZE) { return false; }
-    let source_base: *u8 = boot_pages as *u8;
+    let source_base: *u8 = source_physical as *u8;
     let source = unsafe {
-        source_base[source_offset as isize..<
-                    (source_offset + PAGE_SIZE) as isize]
+        source_base[0 as isize..<PAGE_SIZE as isize]
     };
     slice_copy(page_bytes(destination), source);
     return true;
@@ -130,7 +165,7 @@ fn page_transferred_release(index: {0..<BOOT_PAGE_COUNT as usize}) {
 }
 
 fn page_transferred_release_physical(physical: usize) {
-    let base: usize = (boot_pages as *u8) as usize;
+    let base: usize = usable_ram_start;
     let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
     if (physical < base || physical >= base + pool_bytes ||
         (physical - base) % PAGE_SIZE != 0) {
