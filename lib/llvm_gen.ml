@@ -3147,13 +3147,16 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                          | Some t -> t | None -> idx_ty_raw)
              | _ -> idx_ty_raw)
       in
-      (* Array load [T; N]: skip bounds check when TypeRefined proves safety *)
+      (* Array load [T; N]: skip bounds check when TypeRefined proves safety,
+         or (P4c-1, same as sub_of_slice below) when the access is wrapped
+         in unsafe -- an explicit "trust me" for an index the interval
+         machinery can't close, no trap site recorded. *)
       let load_from_array elem_ty n arr_ptr =
         let needs_check = match refinement_range idx_ty with
           | Some (lo, hi) -> lo < 0 || hi > n
           | _ -> true
         in
-        if needs_check then emit_bounds_check e.loc idx_ty idx_v n;
+        if needs_check && !unsafe_depth = 0 then emit_bounds_check e.loc idx_ty idx_v n;
         let arr_ll = array_type (ltype_of_ast elem_ty) n in
         let zero   = const_int (i32_type context) 0 in
         let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
@@ -3195,7 +3198,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (* Slice load: elide the check only when idx's range fits the slice's
          compile-time MINIMUM length (a lower bound of the runtime length,
          so hi <= min implies hi <= len). Otherwise check against the
-         runtime length. *)
+         runtime length, unless (P4c-1, same as sub_of_slice below) the
+         access is wrapped in unsafe. *)
       let load_from_slice elem_ty min_len fat =
         let proven =
           (match refinement_range idx_ty with
@@ -3207,7 +3211,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                           | None -> false)
               | _ -> false)
         in
-        if not proven then
+        if not proven && !unsafe_depth = 0 then
           emit_bounds_check_dyn e.loc idx_ty idx_v min_len (slice_len fat);
         let ep = build_gep (ltype_of_ast elem_ty) (slice_ptr fat) [|idx_v|] "idx_ptr" builder in
         let v  = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
@@ -4096,7 +4100,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                | Some (lo, hi) -> lo < 0 || hi > n
                | _ -> true
              in
-             if needs_check then emit_bounds_check idx.loc idx_ty idx_v n;
+             if needs_check && !unsafe_depth = 0 then
+               emit_bounds_check idx.loc idx_ty idx_v n;
              let arr_ll = array_type (ltype_of_ast elem_ty) n in
              let zero   = const_int (i32_type context) 0 in
              let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
@@ -4118,7 +4123,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                                | None -> false)
                    | _ -> false)
              in
-             if not proven then
+             if not proven && !unsafe_depth = 0 then
                emit_bounds_check_dyn idx.loc idx_ty idx_v min_len (slice_len fat);
              let ep = build_gep (ltype_of_ast elem_ty) (slice_ptr fat) [|idx_v|] "idx_ptr" builder in
              ignore (build_store (coerce rhs_v elem_ty) ep builder)

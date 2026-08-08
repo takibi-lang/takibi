@@ -76,16 +76,14 @@ fn kernel_exec_argv0_name() -> ExecArgv0NameResult !{unsafe} {
     if (argv.len < 2) {
         return ExecArgv0NameResult::Invalid;
     }
-    let mut slash_byte: [u8; 1] = {0x2F};
-    let first_byte = unsafe { argv[0..<1] };
-    if (slice_eq(first_byte, slash_byte as []u8) == false) {
+    let first_byte: u8 = unsafe { argv[0] };
+    if (first_byte != 0x2F) {
         return ExecArgv0NameResult::Invalid;
     }
-    let mut zero_byte: [u8; 1] = {0};
     let mut end: usize = 1;
     while (end < argv.len) {
-        let current = unsafe { argv[end..<end + 1] };
-        if (slice_eq(current, zero_byte as []u8)) { break; }
+        let current: u8 = unsafe { argv[end] };
+        if (current == 0) { break; }
         end = end + 1;
     }
     if (end >= argv.len) {
