@@ -218,6 +218,21 @@ fn mmu_ensure_root(slot: usize) -> bool {
 // bl-callable from hand-written assembly with no special ceremony
 // (entry.S already calls `main` this way).
 fn kernel_mmu_init() {
+    // kernel_mmu_init runs from entry.S's `_start`, before main() (and
+    // therefore before main()'s own page_allocator_init() call) -- but
+    // mmu_ensure_root below now needs page.tkb's pool usable immediately,
+    // since root 0 (unlike before #246) comes from page_alloc() too. An
+    // unlinked, zero-initialized free chain hands out physical page index
+    // 0 forever (its own next_free[0] reads back 0, not 1) -- exactly the
+    // failure kernel/lib/freelist.tkb's own header warns about -- which
+    // would have made kernel_l1_pool/user_l2_pool/user_l3_pool's first
+    // grow all alias the SAME physical page for root 0's three distinct
+    // tables. Confirmed on real hardware: omitting this call here hung
+    // the board before any UART output. main()'s own page_allocator_init()
+    // call is removed (see that file) -- calling it a second time here
+    // would silently free root 0's three already-in-use pages back into
+    // the pool.
+    page_allocator_init();
     // Root 0's grow is treated as infallible here, same as the original
     // (pre-#246) code never had a failure path at all for it: the very
     // first 3 pages out of page.tkb's 1024-page pool failing is not a

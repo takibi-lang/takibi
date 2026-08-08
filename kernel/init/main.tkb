@@ -436,17 +436,14 @@ fn main() {
         kernel_boot_log("fp/simd irq: failed\n");
     }
 
-    // GitHub issue #207: must run before any page_alloc() call, including
-    // the address-space/scheduler self-tests immediately below. The old
-    // linear-scan allocator's used[] bookkeeping was zero-initialized
-    // .bss, so a used[i] == 0 scan already meant "free" without this call
-    // ever running first -- this ordering silently worked by accident.
-    // kernel/lib/freelist.tkb's next_free[] chain has no such property: an
-    // unlinked, zero-initialized chain hands out index 0 forever (its own
-    // next_free[0] reads back 0, not 1), so every allocator using it now
-    // needs its explicit init to run first, same as any other real
-    // allocator.
-    page_allocator_init();
+    // GitHub issue #246: page_allocator_init() no longer runs here.
+    // kernel/arch/arm64/mm/mmu.tkb's kernel_mmu_init() -- called from
+    // entry.S's `_start`, before main() -- now calls page_alloc() itself
+    // (to back root 0's page tables), so it calls page_allocator_init()
+    // as its own first statement instead; see that function's own comment
+    // for why calling it a second time here would corrupt root 0 (it
+    // would free root 0's three already-in-use pages back into the pool
+    // while they are still this kernel's own active page tables).
 
     match kernel_secondary_boot_probe() {
         SecondaryBootResult::Started => {
