@@ -3,7 +3,7 @@ fd table: processes=2 fds=16 shared-offset refs clean
 scheduler: rr immediate=2 deferred=1 staged
 process clone: parent+child exit=42 reaped
 scheduler preempt: parent+child gpr+sp+pc+simd asid deferred ok
-vm fork: private pages=3 reclaimed
+vm fork: private pages=132 reclaimed
 vm fork: child stack growth ok
 resources: no double free
 resources: pages=0

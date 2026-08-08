@@ -1254,8 +1254,17 @@ fn main() {
                             if (kernel_process_uart_block_evidence()) {
                                 kernel_boot_log("uart rx: scheduler block+wake ok\n");
                             }
-                            if (process_image_clone_vm_reaped_pages() == 3) {
-                                kernel_boot_log("vm fork: private pages=3 reclaimed\n");
+                            // GitHub issue #241: 3 was the old flat-blob
+                            // process's whole address space (text+data+
+                            // stack, one page each). user_payload is a
+                            // real ELF loaded by the general loader now,
+                            // so its fork copies the real image instead:
+                            // 3 PT_LOAD pages (vaddr 0 / 0x10340 /
+                            // 0x20998, one 4K page each) + the loader's
+                            // PROCESS_HEAP_PAGE_COUNT (128) heap pages +
+                            // 1 stack page = 132.
+                            if (process_image_clone_vm_reaped_pages() == 132) {
+                                kernel_boot_log("vm fork: private pages=132 reclaimed\n");
                             }
                             if (process_image_clone_growth_probe()) {
                                 kernel_boot_log("vm fork: child stack growth ok\n");
