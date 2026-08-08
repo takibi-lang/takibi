@@ -317,6 +317,9 @@ KERNEL_RPI5_USER_PAYLOAD_ASM_S := $(KERNEL_DIR)/arch/arm64/kernel/user_payload_a
 KERNEL_RPI5_USER_PAYLOAD_TKB_O := $(KERNEL_BUILD_DIR)/user_payload_tkb.o
 KERNEL_RPI5_USER_PAYLOAD_ASM_O := $(KERNEL_BUILD_DIR)/user_payload_asm.o
 KERNEL_RPI5_USER_PAYLOAD_ELF := $(KERNEL_BUILD_DIR)/user_payload.elf
+KERNEL_RPI5_CLONE_CHAIN_TKB := $(KERNEL_DIR)/arch/arm64/kernel/clone_chain_payload.tkb
+KERNEL_RPI5_CLONE_CHAIN_TKB_O := $(KERNEL_BUILD_DIR)/clone_chain_payload_tkb.o
+KERNEL_RPI5_CLONE_CHAIN_ELF := $(KERNEL_BUILD_DIR)/clone_chain.elf
 KERNEL_RPI5_MAIN_O      := $(KERNEL_BUILD_DIR)/main.o
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_FD_TABLE_TKB)
@@ -352,7 +355,7 @@ $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 $(KERNEL_INITRAMFS_CPIO): $(KERNEL_BUSYBOX_STATIC) $(KERNEL_HTTPD) $(KERNEL_MUSL_LOADER)
 	cd $(KERNEL_USER_BUILD_DIR) && printf '%s\n' busybox-static busybox-httpd ld-musl-aarch64.so.1 | cpio -o -H newc > initramfs.cpio
 
-$(KERNEL_EXT2_IMAGE): $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) | $(KERNEL_USER_BUILD_DIR)
+$(KERNEL_EXT2_IMAGE): $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_EXT2_FIXTURE_DIR)/clone_chain.sh $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_RPI5_CLONE_CHAIN_ELF) | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
 	truncate -s 1048576 $@.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 1024
@@ -363,9 +366,13 @@ $(KERNEL_EXT2_IMAGE): $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/index.html $@.tmp:/index.html
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $@.tmp:/init.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $@.tmp:/large.txt
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/clone_chain.sh $@.tmp:/clone_chain.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_RPI5_USER_PAYLOAD_ELF) $@.tmp:/user_payload
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_RPI5_CLONE_CHAIN_ELF) $@.tmp:/clone_chain
 	debugfs -w -R 'set_inode_field /init.sh mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /clone_chain.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /user_payload mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /clone_chain mode 0100755' $@.tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 debugfs -w -R 'symlink /latest hello.txt' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'symlink /busybox /init.sh' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'symlink /bin/echo /busybox' $@.tmp >/dev/null 2>&1
@@ -399,6 +406,18 @@ $(KERNEL_RPI5_USER_PAYLOAD_ASM_O): $(KERNEL_RPI5_USER_PAYLOAD_ASM_S) | $(KERNEL_
 
 $(KERNEL_RPI5_USER_PAYLOAD_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
 	$(LLD) -pie --no-dynamic-linker -e initial_user_payload $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+	python3 scripts/check_user_payload_no_rw_globals.py $@
+
+# GitHub issue #246/#248: the closing-bar demonstration payload -- same
+# shape as KERNEL_RPI5_USER_PAYLOAD_ELF above (standalone static-PIE ELF,
+# no writable globals, loaded via the general-purpose ELF loader), but no
+# companion .S file: this fixture only uses svc5 (a compiler builtin) and
+# ordinary control flow, no register-pinning assembly probes.
+$(KERNEL_RPI5_CLONE_CHAIN_TKB_O): $(KERNEL_RPI5_CLONE_CHAIN_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
+	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
+
+$(KERNEL_RPI5_CLONE_CHAIN_ELF): $(KERNEL_RPI5_CLONE_CHAIN_TKB_O)
+	$(LLD) -pie --no-dynamic-linker -e initial_user_payload $(KERNEL_RPI5_CLONE_CHAIN_TKB_O) -o $@
 	python3 scripts/check_user_payload_no_rw_globals.py $@
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_GROWABLE_POOL_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_INITRAMFS_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_INITRAMFS_CPIO) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) \

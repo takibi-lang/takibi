@@ -1401,6 +1401,54 @@ fn main() {
             }
         }
 
+        // GitHub issue #246/#248: the closing-bar demonstration -- more
+        // than 3 processes concurrently scheduled (allocated, not yet
+        // reaped), not just more than 3 used one after another across the
+        // whole boot. A shell's own background-job fan-out cannot produce
+        // this (kernel_process_clone_begin rejects a second concurrent
+        // clone from one parent), so kernel/arch/arm64/kernel/
+        // clone_chain_payload.tkb is a small standalone EL0 program that
+        // recursively clone()s itself CHAIN_DEPTH times, each parent
+        // blocked in wait4() for the next level -- see that file's own
+        // header for why this is the only shape that works, and why it
+        // needed issue #248's wait4 fix first. Launched via
+        // kernel/tests/ext2/clone_chain.sh (a direct script-line exec,
+        // like /user_payload's own launch just above -- NOT `sh -c`,
+        // which hung the kernel for this exact combination before the
+        // fix was found). Fresh process/clone bookkeeping first, same
+        // reasoning as the child_exec scenario just above.
+        kernel_process_execution_reset();
+        if (distro_plan_ready) {
+            match process_image_map(
+                    saved_distro_plan,
+                    "busybox\0sh\0/clone_chain.sh\0" as []u8,
+                    3) {
+                ProcessImageMapResult::InvalidImage => {
+                    kernel_boot_log("clone chain map: invalid image\n");
+                }
+                ProcessImageMapResult::OutOfMemory => {
+                    kernel_boot_log("clone chain map: out of memory\n");
+                }
+                ProcessImageMapResult::Mapped(chain_shell_pages) => {
+                    let (chain_heap_start, chain_heap_limit) =
+                        process_image_heap_range(chain_shell_pages);
+                    kernel_syscall_process_configure(
+                        chain_heap_start, chain_heap_limit);
+                    let chain_status: usize = run_initial_user(
+                        process_image_entry(chain_shell_pages),
+                        process_image_stack_pointer(chain_shell_pages));
+                    let peak: usize = kernel_process_peak_concurrent_count();
+                    if (chain_status == 0 && peak > 3) {
+                        kernel_boot_log(
+                            "clone chain: peak concurrent processes exceeds 3\n");
+                    } else {
+                        kernel_boot_log("clone chain: failed\n");
+                    }
+                    process_image_unmap(chain_shell_pages);
+                }
+            }
+        }
+
         // GitHub issue #207: every page released across this whole boot
         // must have been live at the time. The pre-freelist allocator
         // made a double free an idempotent no-op, so two real ones

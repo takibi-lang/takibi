@@ -83,6 +83,15 @@ private let mut scheduled_process_store:
 // is needed because a handle crosses the scheduled_process_store lock /
 // stable_replace boundary below.
 private let mut scheduled_process_pool: SlotMap(KERNEL_PROCESS_MAX);
+// GitHub issue #246: how many pool_index slots are simultaneously live
+// right now, and the highest that count has ever reached since the last
+// scheduled_process_table_clear() -- the objective, directly-verifiable
+// evidence for "more than 3 concurrently live processes" (as opposed to,
+// say, 16 slots each used one after another over a whole boot, which
+// proves the ceiling grew but not that anything was ever concurrent).
+// Reset alongside everything else in scheduled_process_table_clear().
+private let mut scheduled_process_live_count: usize;
+private let mut scheduled_process_peak_live_count: usize;
 private let mut scheduled_process_saved_sp: [usize; KERNEL_PROCESS_MAX];
 private let mut scheduled_process_state: [ProcessSlotState; KERNEL_PROCESS_MAX];
 private let mut scheduled_process_wait_reason:
@@ -310,6 +319,12 @@ fn scheduled_process_table_clear() {
         scheduled_process_wait_reason[slot] = ProcessWaitReason::None;
     }
     slotmap_init(&scheduled_process_pool);
+    scheduled_process_live_count = 0;
+    scheduled_process_peak_live_count = 0;
+}
+
+fn kernel_process_peak_concurrent_count() -> usize {
+    return scheduled_process_peak_live_count;
 }
 
 fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
@@ -347,6 +362,13 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                         return ScheduledProcessAllocResult::Full;
                     }
                     ScheduledProcessPutResult::Stored => {
+                        scheduled_process_live_count =
+                            scheduled_process_live_count + 1;
+                        if (scheduled_process_live_count >
+                                scheduled_process_peak_live_count) {
+                            scheduled_process_peak_live_count =
+                                scheduled_process_live_count;
+                        }
                         return ScheduledProcessAllocResult::Allocated(handle);
                     }
                 }
@@ -492,6 +514,7 @@ fn scheduled_process_reap(
     scheduled_process_saved_sp[owner.pool_index] = 0;
     scheduled_process_state[owner.pool_index] = ProcessSlotState::Free;
     scheduled_process_wait_reason[owner.pool_index] = ProcessWaitReason::None;
+    scheduled_process_live_count = scheduled_process_live_count - 1;
 }
 
 fn scheduled_process_stack_top(handle: ProcessHandle) -> usize {
