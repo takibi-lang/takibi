@@ -15054,3 +15054,107 @@ added alongside the existing `resources: pages=0` check
 (`kernel_boot_log("resources: pages leaked\n")`) so a REAL future page
 leak would be distinguishable from this kind of transient timing miss
 without needing another bisection cycle.
+
+Note: entries for the 2026-08-06/07 arc (issues #234, #227, #230, #228)
+and the 2026-08-08 arc (issues #26, #246, #248) are not yet backfilled
+into this file -- see `MEMORY.md`'s
+`growable_pool_and_process_table_migration` note for that period's
+narrative in the interim.
+
+## 2026-08-08: GitHub Issue #249 -- execve() Resolves Arbitrary ext2
+## Paths, and unsafe Extended to Single-Element Indexing
+
+Found while building issue #248's own closing-bar demo (a >3-deep
+concurrent process chain): `kernel/init/main.tkb`'s
+`kernel_process_child_exec_prepare()` resolved `execve()`'s `argv[0]`
+through a hardcoded registry -- the static BusyBox image by default, plus
+exactly one hand-added `if` arm for `/user_payload` (issue #241's own
+addition). A path with no matching arm did not fail; it silently loaded
+BusyBox WITH that unrecognized argv[0], which reported `"<name>: applet
+not found"` and exited, looking like a real (if opaque) shell error
+rather than a kernel limitation -- this is what actually blocked #248's
+own `clone_chain.tkb` fixture, discovered only after a multi-attempt
+real-hardware hang investigation whose true cause turned out to be this
+missing registry entry, not the process/scheduler mechanism itself (see
+the `growable_pool_and_process_table_migration` memory note for that
+investigation's full detail; not duplicated here).
+
+Scope was deliberately narrowed with the user before starting: fix
+`execve()` path resolution only. `main.tkb`'s 8 existing EL0-launching
+scenarios (cat/uname/shell_read/od/init.sh/execve/child_exec/httpd) were
+left exactly as they are; collapsing them into one real single-init boot
+(each currently launches its own fresh BusyBox ash "init") was judged a
+separate, larger, higher-risk piece of work, not attempted.
+
+**Design.** A real ELF standalone lookup now runs BEFORE falling back to
+BusyBox, not instead of it: `kernel_exec_resolve_argv0()` extracts
+`argv[0]` (via a new bounded NUL-scan, `kernel_exec_argv0_name()`,
+requiring a leading `/`), looks it up with `ext2_lookup_root()`
+(root-directory-only -- no multi-component path traversal exists in this
+codebase yet, so a deeper path like `/bin/echo` simply won't match a root
+dirent), reads it into one shared `exec_resolve_image: [u8;
+EXT2_MAX_FILE_SIZE]` scratch buffer (safe to share across every future
+exec: resolution is synchronous, on the EL0 syscall-return path, never
+concurrent with another exec on today's single-core-dispatch model), and
+validates it with `distro_elf_validate()`. Any failure at any step (not
+found, read failure, invalid ELF) falls through to the BusyBox plan
+exactly as before -- the key finding that shaped this: `/echo`,
+`/bin/echo`, and `/busybox` are ext2 **symlinks** with no real ELF bytes
+behind them (the real BusyBox binary lives only in the embedded
+initramfs), so the `execve`/`child_exec` scenarios reach BusyBox's own
+argv[0]-driven multi-call applet dispatch purely via this fallback path,
+both before and after the change -- preserving it, not just avoiding
+breaking it, was the actual design constraint.
+
+`/user_payload`'s entire dedicated boot-time validation path
+(`user_payload_image`, `saved_user_payload_plan`,
+`user_payload_plan_ready`, `kernel_syscall_exec_argv0_is()`, and the
+boot-time ext2 lookup/read/validate block) was deleted outright, not kept
+alongside the generic path -- it now resolves through the exact same
+mechanism as any other ext2-resident ELF, which doubled as the
+closing-bar proof: no new demo fixture was needed, since removing its
+hand-registered entry and having `init.sh`'s existing `/user_payload`
+exec still work end-to-end, unmodified, is exactly what the issue asked
+for. `kernel/tests/rpi5/views/ext2.expected` lost its
+`ext2 user_payload: elf valid` line (that boot-time-only validation no
+longer happens). Hardware-verified: 26/26 `kernelcheck-rpi5` views, no
+regression, including `process_lifecycle`/`shell_script` (exercise
+`/user_payload` with zero hand-registered entry) and `execve`/
+`child_exec` (exercise BusyBox's multi-call fallback via `/bin/echo`,
+`/echo`).
+
+**Compiler side-quest, found while writing `kernel_exec_argv0_name()`:**
+the function needs single-byte comparisons against an unbounded `[]u8`
+(argv, whose true length the compiler can't see across the
+`kernel_syscall_exec_argv()` function-return boundary) -- exactly the
+shape `unsafe` exists for. But `unsafe { argv[0] }` (single-element
+index) still recorded a `--forbid-trap` trap site, forcing an indirect
+length-1-slice-plus-`slice_eq` workaround instead of a direct byte
+compare. Reading `lib/llvm_gen.ml` confirmed this was a genuine, narrow
+asymmetry, not a deliberate design boundary: the P4c-1 `unsafe` extension
+(see this file's P4c section) had only ever been wired into
+`sub_of_slice` (range-slicing, `s[a..<b]`), never into the four
+single-element load/store paths (`load_from_array`, `load_from_slice`,
+`store_to_array`, `store_to_slice`). Asked directly whether this deserved
+a real compiler fix rather than another documented workaround (per this
+project's established "don't declare a category permanently out of
+reach" stance -- see `AGENTS.md`), confirmed yes, and added the identical
+`unsafe_depth` guard to all four call sites, mirroring `sub_of_slice`
+exactly: same semantics (unsafe grants no new STATIC information, only
+skips emitting the runtime check and recording the trap site; no
+`type_inf.ml` change needed, same as the original P4c-1 extension).
+`kernel_exec_argv0_name()` was then simplified back to direct `unsafe {
+argv[i] } != 0x2F`-style byte comparisons, proving the fix works as
+intended. Eight new `test/test_takibi.ml` regression cases (one
+positive/negative-control pair per changed call site: slice load, array
+load, slice store, array store) confirm the extension is opt-in -- the
+un-`unsafe`'d form of each still records its trap site unchanged. 973/973
+`dune test` pass; `SPEC.md`'s `unsafe` section, `kernel/README.md`, and
+`kernel/SYSCALLS.md`'s `execve`/`wait4` rows were updated to match
+current behavior (the `wait4` row and `kernel/README.md`'s process-table
+description had also gone stale from #246/#248, fixed in the same pass).
+
+Files: `kernel/init/main.tkb` (execve resolution rewrite),
+`kernel/tests/rpi5/views/ext2.expected`, `lib/llvm_gen.ml` (unsafe
+single-index extension), `test/test_takibi.ml` (8 new regression cases),
+`SPEC.md`, `kernel/README.md`, `kernel/SYSCALLS.md`.

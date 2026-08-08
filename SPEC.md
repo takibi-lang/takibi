@@ -2069,12 +2069,18 @@ Currently gates exactly three things:
 
 - Slice construction from a raw pointer, `unsafe { p[lo..<hi] }` -- the
   length assertion at a driver boundary.
-- A slice/array-base subslice whose bounds fail the interval/same-base
-  proof (`unsafe { s[a..<b] }` when `s` is already a slice) -- skips the
-  runtime check entirely, for the rare case that is correlated in a way
-  plain interval reasoning cannot see (see HISTORY.md's P4c section for
-  the two confirmed real-world cases and why a more general relational
-  domain wasn't built for them).
+- A slice/array-base subslice OR single-element index (load or store)
+  whose bounds fail the interval/same-base proof (`unsafe { s[a..<b] }`
+  or `unsafe { s[i] }`/`unsafe { s[i] = v }`, `s` a slice or a fixed
+  array) -- skips the runtime check entirely, for the rare case that is
+  correlated in a way plain interval reasoning cannot see (see
+  HISTORY.md's P4c section for the two confirmed real-world subslice
+  cases and why a more general relational domain wasn't built for them;
+  the single-element-index form was added later, GitHub issue #249
+  follow-up, as a narrow symmetric extension of the same escape hatch --
+  `load_from_array`/`load_from_slice`/`store_to_array`/`store_to_slice`
+  in `lib/llvm_gen.ml` each check `unsafe_depth` the same way
+  `sub_of_slice` already did).
 - Casting a non-literal integer to a pointer whose pointee is an
   `affine opaque struct` or `linear opaque struct` type (GitHub issue
   #15 follow-up) -- see "Affine Values" above and HISTORY.md's issue #15

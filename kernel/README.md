@@ -27,10 +27,11 @@ and the development container verifies the response with real `curl`.
 - Ordinary kernel services do not use EL2 HVC as an internal service layer.
 - Page, mapping, process, file, socket, frame, and DMA lifetimes retain
   explicit affine or linear ownership.
-- A fixed two-slot process table gives each live process a dedicated kernel
+- A growable process table (`kernel/lib/growable_pool.tkb`-backed, up to
+  `KERNEL_PROCESS_MAX` = 16 slots) gives each live process a dedicated kernel
   stack, address-space root, ASID, and unified descriptor table. The generic
-  timer preempts EL0 round-robin once both slots are runnable; a UART RX wait
-  demonstrates a typed Blocked-to-Ready transition.
+  timer preempts EL0 round-robin once more than one slot is runnable; a UART
+  RX wait demonstrates a typed Blocked-to-Ready transition.
 - Kernel Takibi sources build with `--forbid-trap`; fallible internal
   operations return variants and convert to Linux `-errno` only at the syscall
   boundary.
@@ -265,14 +266,21 @@ run, not a specification.
 - **Filesystem.** One ext2 block group, direct blocks only, root-directory
   lookup and mutation, allocation bitmaps, fast symlinks. No indirect
   blocks, no additional block groups, no nested directories.
-- **Processes.** A fixed three-slot process table (issue #245), all of it on
-  core 0. Core 1 proves autonomous EL1 entry and shared-MMU visibility, then
-  parks. `execve` dispatches by `argv[0]` path between the registered static
-  BusyBox image and `/user_payload`. `wait4` blocks the caller until its
-  live child exits (by specific pid or `-1`/`WAIT_ANY`), delivering the
-  real reaped pid and exit status (issue #244); a process may have at most
-  one live child at a time, so concurrent multi-child wait/reap remains out
-  of scope.
+- **Processes.** A growable process table backed by `kernel/lib/growable_pool.tkb`
+  (up to `KERNEL_PROCESS_MAX` = 16 slots, issue #246), all of it on core 0.
+  Core 1 proves autonomous EL1 entry and shared-MMU visibility, then parks.
+  `execve` resolves `argv[0]` as an ext2 path directly (`ext2_lookup_root` +
+  `ext2_read_small_file` + `distro_elf_validate`), falling back to the
+  registered static BusyBox image on any resolution failure -- so its own
+  argv[0]-driven multi-call applet dispatch (`echo`, `sh`, etc.) still works
+  for names with no real ELF behind them, such as the `/echo`/`/bin/echo`
+  ext2 symlinks (issue #249; superseded the earlier closed two-entry
+  registry). `wait4` blocks the caller until its live child exits (by
+  specific pid or `-1`/`WAIT_ANY`), delivering the real reaped pid and exit
+  status, tracked per-slot so any live process (not just the tree root) can
+  wait for its own child (issues #244, #248); a process may have at most one
+  live child at a time, so concurrent multi-child wait/reap remains out of
+  scope.
 - **Signals.** Signal state is recorded honestly, but no signal is ever
   delivered, so an installed handler is never invoked.
 - **Memory.** `mmap` is anonymous-only through a heap-break cursor rather

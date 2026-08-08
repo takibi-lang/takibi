@@ -9075,6 +9075,87 @@ let codegen_tests = [
             return base[b..<b + raw];
           }" ());
 
+  (* -- P4c-1 follow-up (issue #249): unsafe extended to SINGLE-ELEMENT ---- *)
+  (* array/slice indexing, not just subslice range construction. Before
+     this, sub_of_slice (above) was the only load-bearing site checking
+     unsafe_depth; load_from_array/load_from_slice/store_to_array/
+     store_to_slice always recorded a trap site regardless of unsafe,
+     forcing callers who genuinely needed a single-byte access under
+     unsafe into an indirect 1-element-slice + slice_eq workaround. Same
+     shape as the subslice tests above: one positive (unsafe, zero trap
+     sites) paired with a negative control (same code without unsafe,
+     unchanged trap-site count -- confirming this is opt-in, not a
+     silent widening of default-mode behavior) for each of the four
+     changed call sites. *)
+
+  Alcotest.test_case
+    "unsafe on a single-element SLICE load skips the runtime check \
+     entirely (zero trap sites)" `Quick
+    (expect_trap_sites 0
+       "fn funsafe249_slice_load(s: []u8, i: usize) -> u8 !{unsafe} {
+          return unsafe { s[i] };
+        }");
+
+  Alcotest.test_case
+    "the SAME single-element slice load WITHOUT unsafe still records the \
+     one trap site it always did (opt-in, not a default-mode change)" `Quick
+    (expect_trap_sites 1
+       "fn funsafe249_slice_load_checked(s: []u8, i: usize) -> u8 {
+          return s[i];
+        }");
+
+  Alcotest.test_case
+    "unsafe on a single-element ARRAY load skips the runtime check \
+     entirely (zero trap sites)" `Quick
+    (expect_trap_sites 0
+       "let mut funsafe249_arr_a: [u8; 8];
+        fn funsafe249_array_load(i: usize) -> u8 !{unsafe} {
+          return unsafe { funsafe249_arr_a[i] };
+        }");
+
+  Alcotest.test_case
+    "the SAME single-element array load WITHOUT unsafe still records the \
+     one trap site it always did" `Quick
+    (expect_trap_sites 1
+       "let mut funsafe249_arr_b: [u8; 8];
+        fn funsafe249_array_load_checked(i: usize) -> u8 {
+          return funsafe249_arr_b[i];
+        }");
+
+  Alcotest.test_case
+    "unsafe on a single-element SLICE store skips the runtime check \
+     entirely (zero trap sites)" `Quick
+    (expect_trap_sites 0
+       "fn funsafe249_slice_store(s: []u8, i: usize) !{unsafe} {
+          unsafe { s[i] = 7 };
+        }");
+
+  Alcotest.test_case
+    "the SAME single-element slice store WITHOUT unsafe still records the \
+     one trap site it always did" `Quick
+    (expect_trap_sites 1
+       "fn funsafe249_slice_store_checked(s: []u8, i: usize) {
+          s[i] = 7;
+        }");
+
+  Alcotest.test_case
+    "unsafe on a single-element ARRAY store skips the runtime check \
+     entirely (zero trap sites)" `Quick
+    (expect_trap_sites 0
+       "let mut funsafe249_arr_c: [u8; 8];
+        fn funsafe249_array_store(i: usize) !{unsafe} {
+          unsafe { funsafe249_arr_c[i] = 7 };
+        }");
+
+  Alcotest.test_case
+    "the SAME single-element array store WITHOUT unsafe still records the \
+     one trap site it always did" `Quick
+    (expect_trap_sites 1
+       "let mut funsafe249_arr_d: [u8; 8];
+        fn funsafe249_array_store_checked(i: usize) {
+          funsafe249_arr_d[i] = 7;
+        }");
+
   (* Kept last in this group deliberately: Llvm_gen.enable_debug_info flips a
      process-global ref with no way back off (same one-way-switch pattern
      Llvm_gen.setup_target's target_data already uses), so every codegen test
