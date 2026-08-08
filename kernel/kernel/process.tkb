@@ -2,6 +2,16 @@ use "kernel/mm/page.tkb";
 use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
 use "kernel/lib/growable_pool.tkb";
+// GitHub issue #246: "root index == this file's own ProcessHandle.
+// pool_index everywhere" (see KERNEL_PROCESS_MAX's own comment above) was
+// already a cross-file convention before this `use`; now that a root is
+// no longer eagerly backed for every possible pool_index at boot,
+// scheduled_process_alloc must make it real for a genuinely NEW pool_index
+// before returning -- the single choke point every pool_index passes
+// through once, rather than trying to find every later place a root gets
+// its first real use (page-table writes and root activation happen at
+// different times, in different files, for the same new pool_index).
+use "kernel/arch/arm64/mm/mmu.tkb";
 
 enum ProcessState: u8 { Ready; Running; Blocked; Exited; }
 enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
@@ -311,6 +321,11 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                 let slot: {0..<KERNEL_PROCESS_MAX as usize} = index;
                 if (growable_pool_ensure(
                         &scheduled_process_kernel_stacks, slot) == false) {
+                    slotmap_remove(&scheduled_process_pool,
+                                   freelist_owner_new(slot, generation));
+                    return ScheduledProcessAllocResult::Full;
+                }
+                if (mmu_ensure_root(slot) == false) {
                     slotmap_remove(&scheduled_process_pool,
                                    freelist_owner_new(slot, generation));
                     return ScheduledProcessAllocResult::Full;

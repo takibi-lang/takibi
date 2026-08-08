@@ -1,3 +1,5 @@
+use "kernel/lib/growable_pool.tkb";
+
 // GitHub issue #226: everything kernel/arch/arm64/mm/mmu.S used to hold.
 // None of it was real system-register work: the PTE read/write and
 // root-selection functions were `cbnz x0`-style root-0-vs-root-1 branching
@@ -9,31 +11,51 @@
 // here is ordinary arithmetic and control flow the type system can see
 // into. mmu.S itself is retired.
 //
-// The six page-table regions are now ordinary .tkb globals, matching
-// kernel/mm/page.tkb's boot_pages -- an uninitialized `let mut` global
-// here lands in `.bss`, and kernel/arch/arm64/boot/entry.S's `_start`
-// explicitly zeroes the whole `.bss` region before calling kernel_mmu_init,
-// exactly the same guarantee the original hand-written `.zero 4096`
-// declarations relied on. Every L1 slot INIT_ROOT does not explicitly
-// write (all but indices 0, 1, 64-65, 124-127) must read back as a real
-// zero (an invalid, not-present stage-1 descriptor) for the MMU to
-// correctly translation-fault outside the deliberately mapped ranges,
-// rather than treating leftover bits as a bogus-but-valid mapping -- this
-// is not a new assumption the refactor introduces, it is the exact one the
-// retired `.bss` declarations already depended on.
-private let mut kernel_l1_0: [usize; 512] align(4096);
-private let mut user_l2_0: [usize; 512] align(4096);
-private let mut user_l3_0: [usize; 512] align(4096);
-private let mut kernel_l1_1: [usize; 512] align(4096);
-private let mut user_l2_1: [usize; 512] align(4096);
-private let mut user_l3_1: [usize; 512] align(4096);
-// GitHub issue #245: a third root, so a process running on root 1 (e.g.
-// launched via execve from a fork under root 0) can itself fork a child
-// without needing the root its own parent still occupies. Must match
-// kernel/mm/process_image.tkb's PROCESS_IMAGE_ROOT_MAX.
-private let mut kernel_l1_2: [usize; 512] align(4096);
-private let mut user_l2_2: [usize; 512] align(4096);
-private let mut user_l3_2: [usize; 512] align(4096);
+// GitHub issue #246: each root needs three DISTINCT whole 4096-byte pages
+// (L1/L2/L3), wired together by init_root()'s own specific entries
+// (kernel identity block, L2 pointer, device/MMIO blocks) -- unlike every
+// other per-process-slot array in this migration (process.tkb's
+// bookkeeping, kernel/mm/process_image.tkb's 7 arrays), this is a
+// genuinely expensive, structured per-root physical resource, so roots
+// beyond 0 are grown lazily via kernel/lib/growable_pool.tkb's
+// growable_pool_ensure/_ref_at rather than eagerly hand-named
+// kernel_l1_N/user_l2_N/user_l3_N globals (the exact per-root hand-editing
+// issue #245's 2 -> 3 root bump cost, which would only get worse at a
+// much larger MAX_ROOTS). Three separate pools (one per table kind), each
+// SLOTS_PER_CHUNK=1 since one page is exactly one table -- see
+// mmu_ensure_root below for how they're kept in lockstep. Per
+// growable_pool.tkb's own generics limitation (a `type` argument must be
+// a primitive/bool/plain struct/pointer to one, not an array type
+// directly), MmuTable names the page's shape for the type system; nothing
+// ever reads its `entries` field structurally, only the struct's own base
+// address (same MmuTable-as-`[usize;512]`-wrapper idiom as
+// kernel/kernel/process.tkb's KernelStackPage).
+//
+// Root 0 is ensured eagerly, at kernel_mmu_init() time, before any process
+// exists (both kernel_mmu_activate()'s own TTBR0_EL1 programming and
+// user_pte_write/read's boot-time single-window remapping hardcode root 0
+// specifically, unchanged from before this migration). Every other root
+// is ensured lazily by kernel/kernel/process.tkb's scheduled_process_alloc
+// the first time a given pool_index is used.
+//
+// Every L1 slot init_root does not explicitly write (all but indices 0,
+// 1, 64-65, 124-127) must read back as a real zero (an invalid,
+// not-present stage-1 descriptor) for the MMU to correctly translation-
+// fault outside the deliberately mapped ranges, rather than treating
+// leftover bits as a bogus-but-valid mapping -- previously guaranteed by
+// `.bss` zero-init on boot; now guaranteed instead by
+// growable_pool.tkb's own zero-on-grow (growable_pool_grow_one_chunk),
+// which this file relies on just as much as process.tkb's kernel stacks
+// or any other growable_pool.tkb shadow pool.
+const MAX_ROOTS: usize = 16;
+
+struct MmuTable {
+    entries: [usize; 512];
+}
+
+private let mut kernel_l1_pool: GrowablePool(MmuTable, 1, MAX_ROOTS, MAX_ROOTS);
+private let mut user_l2_pool: GrowablePool(MmuTable, 1, MAX_ROOTS, MAX_ROOTS);
+private let mut user_l3_pool: GrowablePool(MmuTable, 1, MAX_ROOTS, MAX_ROOTS);
 
 // GitHub issue #231: AP[2:1]=00 on a block/page descriptor denies EL0 data
 // access (load/store) but says nothing about EL0 instruction fetch -- that
@@ -45,15 +67,20 @@ private let mut user_l3_2: [usize; 512] align(4096);
 const UXN_BIT: usize = 0x40000000000000;
 const PXN_BIT: usize = 0x20000000000000;
 
-// user_pte_write(index, value): one 4KB PTE in the 2MB user window.
+// user_pte_write(index, value): one 4KB PTE in the 2MB user window. Always
+// root 0 (the kernel's own boot-time single-window remapping, unrelated to
+// per-process scheduling) -- root 0 is always already ensured by the time
+// this runs (see kernel_mmu_init below).
 fn user_pte_write(index: usize, value: usize) {
-    let entry: *usize = (((user_l3_0 as *usize) as usize) + index * 8) as *usize;
+    let base: usize = (growable_pool_ref_at(&user_l3_pool, 0) as usize);
+    let entry: *usize = (base + index * 8) as *usize;
     *entry = value;
     dsb_ishst();
 }
 
 fn user_pte_read(index: usize) -> usize {
-    let entry: *usize = (((user_l3_0 as *usize) as usize) + index * 8) as *usize;
+    let base: usize = (growable_pool_ref_at(&user_l3_pool, 0) as usize);
+    let entry: *usize = (base + index * 8) as *usize;
     return *entry;
 }
 
@@ -65,20 +92,23 @@ fn user_tlb_invalidate(va: usize) {
     isb();
 }
 
-// GitHub issue #245: three physical root sets now exist (slot 0/1/2), so
-// the old binary "slot == 0 ? table0 : table1" no longer distinguishes
-// slot 1 from slot 2 -- every root-selecting function below needs the
-// real 3-way branch. slot values other than 0/1/2 fall back to table 0.
+// GitHub issue #246: root-selecting functions now read straight from the
+// pools -- no per-root branch arm to hand-add anymore (that was exactly
+// issue #245's 2 -> 3 bump's own cost, now gone). `slot` must already be
+// ensured (mmu_ensure_root(slot) returned true) -- unlike
+// growable_pool_ref, growable_pool_ref_at carries no proof of that, so an
+// unensured slot silently reads chunk 0's table instead of trapping (see
+// growable_pool.tkb's own accepted-fallback style for why).
 fn user_l3_base(slot: usize) -> usize {
-    if (slot == 1) { return (user_l3_1 as *usize) as usize; }
-    if (slot == 2) { return (user_l3_2 as *usize) as usize; }
-    return (user_l3_0 as *usize) as usize;
+    return growable_pool_ref_at(&user_l3_pool, slot) as usize;
 }
 
 fn kernel_l1_base(slot: usize) -> usize {
-    if (slot == 1) { return (kernel_l1_1 as *usize) as usize; }
-    if (slot == 2) { return (kernel_l1_2 as *usize) as usize; }
-    return (kernel_l1_0 as *usize) as usize;
+    return growable_pool_ref_at(&kernel_l1_pool, slot) as usize;
+}
+
+fn user_l2_base(slot: usize) -> usize {
+    return growable_pool_ref_at(&user_l2_pool, slot) as usize;
 }
 
 fn address_space_pte_write(slot: usize, index: usize, value: usize) {
@@ -148,6 +178,39 @@ fn init_root(l1: usize, l2: usize, l3: usize) {
     }
 }
 
+// GitHub issue #246: the "grow" half -- ensures physical root `slot`
+// exists (all three of its tables allocated and wired via init_root),
+// growing as many intervening roots as growable_pool_ensure needs to
+// (its own loop may activate more than one chunk per pool in a single
+// call, if `slot` is ahead of the previous ceiling) and running init_root
+// on every root that just became active, not only `slot` itself. Called
+// eagerly for root 0 (kernel_mmu_init below, before any process exists)
+// and lazily by kernel/kernel/process.tkb's scheduled_process_alloc the
+// first time a given pool_index is used.
+//
+// Current limitations: the three pools are grown one after another, not
+// atomically -- if kernel_l1_pool's grow succeeds but user_l2_pool's or
+// user_l3_pool's then fails (page.tkb genuinely out of memory), the three
+// pools are left with mismatched active_chunks counts, and this function
+// must not be relied on to make further progress past that point.
+// Accepted rather than engineered around: not reachable in practice at
+// MAX_ROOTS=16 (at most 48 pages total, far under page.tkb's
+// BOOT_PAGE_COUNT=1024), and growable_pool.tkb has no partial-rollback
+// primitive to unwind a successful grow on one pool after a sibling
+// pool's grow fails.
+fn mmu_ensure_root(slot: usize) -> bool {
+    let before: usize = growable_pool_active_chunks(&kernel_l1_pool);
+    if (slot < before) { return true; }
+    if (growable_pool_ensure(&kernel_l1_pool, slot) == false) { return false; }
+    if (growable_pool_ensure(&user_l2_pool, slot) == false) { return false; }
+    if (growable_pool_ensure(&user_l3_pool, slot) == false) { return false; }
+    let after: usize = growable_pool_active_chunks(&kernel_l1_pool);
+    for root: usize in before..<after {
+        init_root(kernel_l1_base(root), user_l2_base(root), user_l3_base(root));
+    }
+    return true;
+}
+
 // GitHub issue #226: kernel_mmu_init/_secondary/_activate, lifted from
 // mmu.S -- the actual MMU-enable sequence itself. entry.S's `_start`/
 // `kernel_secondary_entry` still reach these by the exact same names via
@@ -155,15 +218,11 @@ fn init_root(l1: usize, l2: usize, l3: usize) {
 // bl-callable from hand-written assembly with no special ceremony
 // (entry.S already calls `main` this way).
 fn kernel_mmu_init() {
-    init_root((kernel_l1_0 as *usize) as usize,
-              (user_l2_0 as *usize) as usize,
-              (user_l3_0 as *usize) as usize);
-    init_root((kernel_l1_1 as *usize) as usize,
-              (user_l2_1 as *usize) as usize,
-              (user_l3_1 as *usize) as usize);
-    init_root((kernel_l1_2 as *usize) as usize,
-              (user_l2_2 as *usize) as usize,
-              (user_l3_2 as *usize) as usize);
+    // Root 0's grow is treated as infallible here, same as the original
+    // (pre-#246) code never had a failure path at all for it: the very
+    // first 3 pages out of page.tkb's 1024-page pool failing is not a
+    // real scenario this kernel needs to handle gracefully.
+    mmu_ensure_root(0);
     kernel_mmu_activate();
 }
 
@@ -193,8 +252,11 @@ fn kernel_mmu_activate() {
     msr_tcr_el1(tcr);
 
     // ASID 1 in bits [63:48] (matching address_space_activate_root's own
-    // `(slot + 1) << 48` for slot 0) ORed with kernel_l1_0's base address.
-    let root: usize = ((kernel_l1_0 as *usize) as usize) | (1 << 48);
+    // `(slot + 1) << 48` for slot 0) ORed with root 0's base address.
+    // Root 0 is always already ensured by the time this runs (either just
+    // now by kernel_mmu_init, or long ago, for kernel_mmu_init_secondary).
+    let root: usize = (growable_pool_ref_at(&kernel_l1_pool, 0) as usize) |
+        (1 << 48);
     msr_ttbr0_el1(root);
     isb();
     tlbi_vmalle1();
