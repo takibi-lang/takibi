@@ -3,7 +3,7 @@
 # captures the full serial output, verifying that all self-tests pass
 # without hardware dependencies.
 
-set -eu
+set -u
 
 KERNEL_ELF="${1:-kernel/build/qemu/kernel.elf}"
 TIMEOUT_SECS="${2:-30}"
@@ -14,6 +14,8 @@ if [ ! -f "$KERNEL_ELF" ]; then
 fi
 
 # Boot the kernel and capture output until it naturally halts or times out
+# Use a subshell with explicit error handling to avoid 'set -e' issues
+# with timeout's exit code (124 means timeout, which is expected)
 output=$(timeout "$TIMEOUT_SECS" qemu-system-aarch64 \
     -M virt \
     -cpu cortex-a53 \
@@ -21,7 +23,13 @@ output=$(timeout "$TIMEOUT_SECS" qemu-system-aarch64 \
     -kernel "$KERNEL_ELF" \
     -nographic \
     -serial mon:stdio \
-    2>&1) || true
+    2>&1) || exit_code=$?
+
+# exit_code 124 means timeout (expected), 0 means clean exit (also OK)
+if [ "${exit_code:-0}" != 0 ] && [ "${exit_code:-0}" != 124 ]; then
+    echo "error: QEMU exited with status $exit_code" >&2
+    exit 1
+fi
 
 echo "$output"
 
