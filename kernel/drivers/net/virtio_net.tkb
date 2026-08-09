@@ -1,0 +1,472 @@
+// QEMU `virt` machine virtio-net driver (GitHub issue #237 M4). The
+// vring/MMIO/IRQ engine below is a close port of examples/common_qemu/
+// virtio_mmio.tkb (hardware-proven -- net_echo/arp_reply/icmp_echo/
+// tcp_echo/http_server/kvs_server all run against it in that tree's own
+// QEMU test suite), NOT a fresh design: legacy virtio-mmio transport
+// (Version register reads 1, no FEATURES_OK handshake), runtime slot
+// discovery (a lone virtio-net-device is not guaranteed to land on MMIO
+// slot 0 -- see that file's own header), the same descriptor/avail/used
+// ring layout and dma_publish/dma_consume barrier placement.
+//
+// What differs from that file, deliberately: the PUBLIC function/type
+// names below match kernel/drivers/net/rp1_gem.tkb's contract exactly
+// (net_rx_validated/NetRxValidated/NetRxReplyReady/NetTxInFlight/
+// net_rx_reply_ready/net_transmit(reply)/net_transmit_ready/net_shutdown),
+// not examples/common_qemu/virtio_mmio.tkb's own (NetRxCpuOwned, a single
+// combined net_transmit(frame, len), no net_transmit_ready at all) --
+// kernel/net/{arp,icmp,tcp,socket_capability}.tkb already call the
+// rp1_gem.tkb shape (built for RPi5 first), and this driver plugs into
+// that existing call surface via the same command-line file-selection
+// convention kernel/platform/qemu/uart.tkb already uses, not a `use`
+// line any of those files need to change. NetRxCanAcquire is `linear`
+// here (not virtio_mmio.tkb's own `affine`) to match rp1_gem.tkb's
+// exact declaration, since the SAME kernel/net/ call sites (proven
+// against that stricter constraint already) consume this driver's type
+// too.
+//
+// GIC wiring is NOT self-contained the way examples/common_qemu/
+// virtio_mmio.tkb's own irq_dispatch is: this kernel's interrupt
+// dispatch lives in kernel/platform/qemu/intc.tkb (the same seam
+// kernel/platform/rpi5/intc.tkb calls kernel/drivers/net/rp1_gem.tkb's
+// gem_irq_handler() from), so this file exposes virtio_net_gic_intid
+// (discovered at runtime, unlike RPi5's fixed GIC INTID constants) and
+// virtio_net_irq_handler() for that file to call, plus
+// virtio_net_gic_enable() for platform_irq_init() to call once net_init()
+// has discovered the device's slot.
+
+use "kernel/net/netconfig.tkb";
+
+const VIRTIO_DEVICE_ID:        i32 = 0x08;
+const VIRTIO_GUEST_FEATURES:   i32 = 0x20;
+const VIRTIO_GUEST_PAGE_SIZE:  i32 = 0x28;
+const VIRTIO_QUEUE_SEL:        i32 = 0x30;
+const VIRTIO_QUEUE_NUM:        i32 = 0x38;
+const VIRTIO_QUEUE_ALIGN:      i32 = 0x3c;
+const VIRTIO_QUEUE_PFN:        i32 = 0x40;
+const VIRTIO_QUEUE_NOTIFY:     i32 = 0x50;
+const VIRTIO_INTERRUPT_STATUS: i32 = 0x60;
+const VIRTIO_INTERRUPT_ACK:    i32 = 0x64;
+const VIRTIO_STATUS:           i32 = 0x70;
+
+const VIRTIO_MAGIC_VALUE:   u32 = 0x74726976;
+const VIRTIO_DEVICE_ID_NET: u32 = 1;
+
+const STATUS_ACKNOWLEDGE: i32 = 1;
+const STATUS_DRIVER:      i32 = 2;
+const STATUS_DRIVER_OK:   i32 = 4;
+
+const VIRTIO_PAGE_SIZE: isize = 4096;
+
+const VIRTIO_MMIO_FIRST_SLOT: i32 = 0x0a000000;
+const VIRTIO_MMIO_SLOT_STRIDE: i32 = 0x200;
+const VIRTIO_MMIO_SLOT_COUNT: i32 = 32;
+// GitHub issue #237 M4: this is the first virtio-mmio slot's architectural
+// GIC INTID, NOT an SPI number needing the usual +32 conversion. QEMU
+// `virt` wires virtio-mmio slot i to GIC input 16+i, and SPIs start at
+// INTID 32, so slot i's INTID is 32+16+i = 48+i directly.
+// examples/common_qemu/virtio_mmio.tkb's own constant of the same value is
+// spelled "FIRST_SPI" but is used the same way (compared straight against
+// GICC_IAR) -- the name is what misled the first version of this driver
+// into adding a second +32, giving slot 31 an INTID of 111 instead of its
+// real 79, so kernel/platform/qemu/intc.tkb's dispatch never matched and
+// virtio_net_irq_handler() never ran (and, because the device's own
+// VIRTIO_INTERRUPT_ACK therefore never happened, the level-triggered SPI
+// re-fired forever). Renamed to _INTID here so the next reader cannot
+// repeat that.
+const VIRTIO_MMIO_FIRST_INTID: i32 = 48;
+
+const QNUM: isize = 8; // virtqueue depth for both the RX and TX queues
+
+// Names match kernel/drivers/net/rp1_gem.tkb's own declarations exactly
+// (field names differ internally -- "index" here vs. rp1_gem's "slot" --
+// but nothing outside this file ever names a field, only the type and
+// the function API around it).
+private linear struct NetRxValidated[desc: usize] {
+    private index: {0..<8 as usize} @ desc;
+    private len: i32;
+}
+private linear struct NetRxReplyReady[desc: usize] {
+    private index: {0..<8 as usize} @ desc;
+    private len: i32;
+}
+private linear struct NetTxInFlight[desc: usize] {
+    private index: {0..<8 as usize} @ desc;
+}
+private linear view NetRxCanAcquire;
+
+must_use variant NetInitResult { Failed; Ready(NetRxCanAcquire); }
+variant NetRxAcquire {
+    None(NetRxCanAcquire);
+    Acquired(exists desc: usize. NetRxValidated[desc]);
+}
+
+fn net_rx_validated(index: {0..<8 as usize} @ desc, len: i32)
+        -> NetRxValidated[desc] {
+    let mut frame: NetRxValidated[desc] = { index, len };
+    return frame;
+}
+
+struct packed VirtqDesc {
+    addr: usize;
+    len: u32;
+    flags: u16;
+    next: u16;
+}
+
+struct packed VirtqAvail {
+    flags: u16;
+    idx: u16;
+    ring: [u16; QNUM];
+}
+
+struct packed VirtqUsedElem {
+    id: u32;
+    len: u32;
+}
+
+struct packed VirtqUsed {
+    flags: u16;
+    idx: u16;
+    ring: [VirtqUsedElem; QNUM];
+}
+
+const VIRTQ_DESC_F_WRITE: i32 = 2; // device writes into this buffer (RX only)
+
+const VIRTIO_NET_F_MAC: i32 = 32; // bit 5: device exposes its MAC in Config space
+const VIRTIO_CONFIG_MAC_OFFSET: i32 = 0x100;
+
+// Discovered at runtime -- see this file's header for why (QEMU does not
+// always attach a lone virtio-net-device to slot 0).
+let mut virtio_base: i32 = 0;
+// The device's architectural GIC INTID (see VIRTIO_MMIO_FIRST_INTID
+// above). -1 until net_init() discovers the device; kernel/platform/qemu/
+// intc.tkb's dispatch guards on that sentinel so it can never match a
+// real GICC_IAR value before then.
+let mut virtio_net_gic_intid: i32 = -1;
+private let mut net_rx_initialized: i32 = 0;
+let mut virtio_rx_irq_flag: io u32;
+let mut virtio_tx_irq_flag: io u32;
+
+const RX_BUF_SIZE: isize = 1536; // 10-byte virtio_net_hdr + max 1514-byte Ethernet frame, rounded up
+const RX_BUF_SIZE_USIZE: usize = 1536;
+const VIRTIO_NET_HDR_LEN: usize = 10;
+
+let mut rx_queue_mem: [u8; 2 * VIRTIO_PAGE_SIZE] align(4096);
+let mut tx_queue_mem: [u8; 2 * VIRTIO_PAGE_SIZE] align(4096);
+let mut rx_bufs: [u8; QNUM * RX_BUF_SIZE];
+
+// GitHub issue #237 M4: rp1_gem.tkb's net_transmit_ready() sends a
+// kernel-BUILT frame (no RX buffer to piggyback the virtio_net_hdr
+// prefix on, unlike net_transmit()'s in-place reply path) -- this
+// driver's own dedicated scratch buffer for exactly that path. The
+// leading VIRTIO_NET_HDR_LEN bytes stay zero (BSS-initialized, never
+// written), matching the all-default virtio_net_hdr neither
+// examples/common_qemu/virtio_mmio.tkb's own reply path nor this one
+// ever populates (no offload features are negotiated).
+let mut tx_ready_buf: [u8; VIRTIO_NET_HDR_LEN + 1514] align(4096);
+
+let mut rx_used_seen: isize = 0;
+let mut tx_used_seen: isize = 0;
+let mut rx_avail_idx: isize = 0;
+let mut tx_avail_idx: isize = 0;
+
+fn vreg(offset: i32) -> *io i32 {
+    return (virtio_base + offset) as *io i32;
+}
+
+fn virtio_net_find() -> bool {
+    for i in 0..<VIRTIO_MMIO_SLOT_COUNT {
+        let base: i32 = VIRTIO_MMIO_FIRST_SLOT + i * VIRTIO_MMIO_SLOT_STRIDE;
+        let magic_p: *io u32 = base as *io u32;
+        if (*magic_p == VIRTIO_MAGIC_VALUE) {
+            let devid_p: *io u32 = (base + VIRTIO_DEVICE_ID) as *io u32;
+            if (*devid_p == VIRTIO_DEVICE_ID_NET) {
+                virtio_base = base;
+                virtio_net_gic_intid = VIRTIO_MMIO_FIRST_INTID + i;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Called from net_init() below, once virtio_net_find() has discovered the
+// device's slot -- NOT from kernel/platform/qemu/intc.tkb's
+// platform_irq_init(), unlike the UART/timer routing there: that runs
+// BEFORE net_init() in kernel/init/main_qemu.tkb's own boot sequence
+// (matching kernel/init/main.tkb's identical ordering), so the device's
+// GIC INTID and even whether the device exists at all are not known
+// yet at that point. Matches examples/common_qemu/virtio_mmio.tkb's own
+// net_init() calling its GIC-enable step directly, for the same reason.
+//
+// Every register below is indexed by the architectural INTID directly:
+// GICD_ISENABLER/ICPENDR are one bit per INTID (32 per 4-byte register),
+// GICD_ITARGETSR is one byte per INTID. This half was always correct even
+// while the dispatch comparison was not -- see VIRTIO_MMIO_FIRST_INTID's
+// own comment for that bug.
+fn virtio_net_gic_enable() {
+    let isenabler_n: i32 = virtio_net_gic_intid / 32;
+    let bit: i32 = virtio_net_gic_intid - isenabler_n * 32;
+    let icpendr: *io u32 = (0x08000280 + isenabler_n * 4) as *io u32;
+    *icpendr = 1 << (bit as u32);
+    let isenabler: *io u32 = (0x08000100 + isenabler_n * 4) as *io u32;
+    *isenabler = *isenabler | (1 << (bit as u32));
+    let itargetsr: *io u8 = (0x08000800 + virtio_net_gic_intid) as *io u8;
+    *itargetsr = 1 as u8;
+}
+
+// Called from kernel/platform/qemu/intc.tkb's dispatch when the GIC IAR
+// value matches virtio_net_gic_intid -- same relationship
+// kernel/platform/rpi5/intc.tkb has with rp1_gem.tkb's gem_irq_handler().
+fn virtio_net_irq_handler() !{interrupt} {
+    let status: i32 = *(vreg(VIRTIO_INTERRUPT_STATUS));
+    *(vreg(VIRTIO_INTERRUPT_ACK)) = status;
+    virtio_rx_irq_flag = 1;
+    virtio_tx_irq_flag = 1;
+    interrupt_notify();
+}
+
+fn virtio_negotiate(features: i32) {
+    *(vreg(VIRTIO_STATUS)) = 0;
+    *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE;
+    *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE | STATUS_DRIVER;
+    *(vreg(VIRTIO_GUEST_FEATURES)) = features;
+    *(vreg(VIRTIO_GUEST_PAGE_SIZE)) = VIRTIO_PAGE_SIZE as i32;
+}
+
+fn virtio_queue_setup(queue_idx: i32, queue_mem: *u8) {
+    *(vreg(VIRTIO_QUEUE_SEL)) = queue_idx;
+    *(vreg(VIRTIO_QUEUE_NUM)) = QNUM as i32;
+    *(vreg(VIRTIO_QUEUE_ALIGN)) = VIRTIO_PAGE_SIZE as i32;
+    let addr: usize = queue_mem as usize;
+    let pfn: i32 = (addr / (VIRTIO_PAGE_SIZE as usize)) as i32;
+    *(vreg(VIRTIO_QUEUE_PFN)) = pfn;
+}
+
+fn virtio_driver_ok() {
+    *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK;
+}
+
+fn virtio_notify(queue_idx: i32) {
+    *(vreg(VIRTIO_QUEUE_NOTIFY)) = queue_idx;
+}
+
+fn desc_set(queue_mem: *u8, i: isize, addr: usize, len: isize, flags: i32) {
+    let descs: *VirtqDesc = queue_mem as *VirtqDesc;
+    descs[i].addr = addr;
+    descs[i].len = len as u32;
+    descs[i].flags = flags as u16;
+}
+
+fn avail_ring_set(queue_mem: *u8, slot: isize, desc_idx: isize) {
+    let avail_off: isize = QNUM * (sizeof(VirtqDesc) as isize);
+    let ring: *u16 = (queue_mem + avail_off
+        + (offsetof(VirtqAvail, ring) as isize)) as *u16;
+    ring[slot] = desc_idx as u16;
+}
+
+fn avail_publish(queue_mem: *u8, new_idx: isize) {
+    let avail_off: isize = QNUM * (sizeof(VirtqDesc) as isize);
+    let avail: *VirtqAvail = (queue_mem + avail_off) as *VirtqAvail;
+    avail.idx = new_idx as u16;
+    dma_publish();
+}
+
+fn used_idx_get(queue_mem: *u8) -> isize {
+    let used: *io VirtqUsed = (queue_mem + VIRTIO_PAGE_SIZE) as *io VirtqUsed;
+    return used.idx as isize;
+}
+
+fn used_ring_get_id(queue_mem: *u8, slot: isize) -> isize {
+    let ring: *io VirtqUsedElem = (queue_mem + VIRTIO_PAGE_SIZE
+        + (offsetof(VirtqUsed, ring) as isize)) as *io VirtqUsedElem;
+    return ring[slot].id as isize;
+}
+
+fn used_ring_get_len(queue_mem: *u8, slot: isize) -> i32 {
+    let ring: *io VirtqUsedElem = (queue_mem + VIRTIO_PAGE_SIZE
+        + (offsetof(VirtqUsed, ring) as isize)) as *io VirtqUsedElem;
+    return ring[slot].len as i32;
+}
+
+// -- Shared driver API (matches kernel/drivers/net/rp1_gem.tkb) -------------
+
+fn net_init() -> NetInitResult {
+    if (net_rx_initialized != 0) {
+        return NetInitResult::Failed;
+    }
+    if (virtio_net_find() == false) {
+        return NetInitResult::Failed;
+    }
+    net_rx_initialized = 1;
+
+    virtio_rx_irq_flag = 0;
+    virtio_tx_irq_flag = 0;
+    virtio_net_gic_enable();
+
+    virtio_negotiate(VIRTIO_NET_F_MAC);
+    virtio_queue_setup(0, rx_queue_mem as *u8); // RX
+    virtio_queue_setup(1, tx_queue_mem as *u8); // TX
+    virtio_driver_ok();
+
+    for i in 0..<QNUM {
+        let buf_off: isize = i * RX_BUF_SIZE;
+        let buf: *u8 = rx_bufs + buf_off;
+        desc_set(rx_queue_mem as *u8, i, buf as usize, RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
+        avail_ring_set(rx_queue_mem as *u8, i, i);
+    }
+    rx_avail_idx = QNUM;
+    avail_publish(rx_queue_mem as *u8, rx_avail_idx);
+    virtio_notify(0);
+
+    return NetInitResult::Ready(view NetRxCanAcquire);
+}
+
+// GitHub issue #237 M4: exactly ONE interrupt_wait() call, not a retry
+// loop -- unlike examples/common_qemu/virtio_mmio.tkb's own net_rx_wait()
+// (which this was first copied from), this driver's callers
+// (kernel/net/{arp,icmp,tcp}.tkb) run their own CNTPCT-based deadline
+// loop around net_rx_wait(), matching kernel/drivers/net/rp1_gem.tkb's
+// net_rx_wait() exactly (see that file's own header comment and
+// kernel/platform/qemu/timer_irq.tkb's: the periodic timer tick is what
+// keeps a genuinely idle wait bounded). A loop here that only returns on
+// a REAL virtio RX interrupt would swallow every harmless timer-tick
+// wake-up the caller's own deadline check depends on, making the
+// caller's bounded wait unbounded again in practice -- found by a real
+// QEMU boot hanging well past kernel_arp_reply_once's own 15s deadline
+// with no host-side peer attached.
+fn net_rx_wait() !{may_block} {
+    if (virtio_rx_irq_flag != 0) { return; }
+    interrupt_wait();
+}
+
+fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
+    if (virtio_rx_irq_flag == 0) {
+        return NetRxAcquire::None(view NetRxCanAcquire);
+    }
+    virtio_rx_irq_flag = 0;
+    if (rx_used_seen == used_idx_get(rx_queue_mem as *u8)) {
+        return NetRxAcquire::None(view NetRxCanAcquire);
+    }
+    virtio_rx_irq_flag = 1; // drain coalesced used-ring entries
+    dma_consume();
+    let slot: isize = rx_used_seen % QNUM;
+    let index: {0..<8 as usize} =
+        max(min(used_ring_get_id(rx_queue_mem as *u8, slot), 7), 0) as usize;
+    let frame_total_len: i32 = used_ring_get_len(rx_queue_mem as *u8, slot);
+    let raw_len: i32 = frame_total_len - (VIRTIO_NET_HDR_LEN as i32);
+    let safe_len: i32 = max(min(raw_len, 1514), 0);
+    return NetRxAcquire::Acquired(net_rx_validated(index, safe_len));
+}
+
+fn net_rx_len(frame: borrow NetRxValidated[desc]) -> i32 {
+    return frame.len;
+}
+
+fn net_rx_frame(frame: borrow NetRxValidated[desc]) -> [u8; 1514..] @ desc {
+    let idx: {0..<8 as usize} = frame.index;
+    let offset: usize = idx * RX_BUF_SIZE_USIZE + VIRTIO_NET_HDR_LEN;
+    return rx_bufs[offset..<offset + 1514];
+}
+
+fn net_rx_repost(index: {0..<8 as usize} @ desc) -> NetRxCanAcquire {
+    let rx_slot: isize = rx_avail_idx % QNUM;
+    avail_ring_set(rx_queue_mem as *u8, rx_slot, index as isize);
+    rx_avail_idx = rx_avail_idx + 1;
+    avail_publish(rx_queue_mem as *u8, rx_avail_idx);
+    virtio_notify(0);
+    rx_used_seen = rx_used_seen + 1;
+    return view NetRxCanAcquire;
+}
+
+fn net_rx_release(frame: sink NetRxValidated[desc]) -> NetRxCanAcquire {
+    return net_rx_repost(frame.index);
+}
+
+fn net_rx_reply_ready(frame: sink NetRxValidated[desc], len: i32)
+        -> NetRxReplyReady[desc] {
+    let safe_len: i32 = max(min(len, 1514), 0);
+    let mut reply: NetRxReplyReady[desc] = { frame.index, safe_len };
+    return reply;
+}
+
+// In-place reply: reuses the RX buffer's own leading VIRTIO_NET_HDR_LEN
+// bytes as the TX virtio_net_hdr (matches examples/common_qemu/
+// virtio_mmio.tkb's own net_transmit -- correct because those bytes were
+// written by the device on RX with no offload fields set, i.e. already
+// effectively zero, and no offload features are negotiated on TX either).
+fn net_transmit(reply: sink NetRxReplyReady[desc]) -> NetTxInFlight[desc] {
+    let offset: isize = (reply.index as isize) * (RX_BUF_SIZE_USIZE as isize);
+    let buf: *u8 = rx_bufs + offset;
+    desc_set(tx_queue_mem as *u8, 0, buf as usize,
+        (reply.len + (VIRTIO_NET_HDR_LEN as i32)) as isize, 0);
+    avail_ring_set(tx_queue_mem as *u8, 0, 0);
+    tx_avail_idx = tx_avail_idx + 1;
+    avail_publish(tx_queue_mem as *u8, tx_avail_idx);
+    virtio_tx_irq_flag = 0;
+    virtio_notify(1);
+    let mut in_flight: NetTxInFlight[desc] = { reply.index };
+    return in_flight;
+}
+
+fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may_block} {
+    while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {
+        virtio_tx_irq_flag = 0;
+        if (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {
+            while (virtio_tx_irq_flag == 0) {
+                interrupt_wait();
+            }
+        }
+    }
+    dma_consume();
+    tx_used_seen = tx_used_seen + 1;
+    return net_rx_repost(in_flight.index);
+}
+
+fn net_rx_send_reply(reply: sink NetRxReplyReady[desc]) -> NetRxCanAcquire !{may_block} {
+    return net_tx_complete(net_transmit(reply));
+}
+
+// Kernel-built frame, no RX buffer to reuse -- copies into this driver's
+// own tx_ready_buf (leading VIRTIO_NET_HDR_LEN bytes stay zero) instead
+// of an RX slot. Matches rp1_gem.tkb's net_transmit_ready() signature and
+// blocking-completion behavior exactly (kernel/net/tcp.tkb calls this for
+// SYN-ACK/data segments/retransmissions it builds itself, not an RX echo).
+fn net_transmit_ready(ready: sink NetRxCanAcquire,
+                      bytes: borrow [u8; 1514..], len: i32)
+        -> NetRxCanAcquire !{may_block} {
+    let safe_len: i32 = max(min(len, 1514), 0);
+    let tx_ready_slice: []u8 = tx_ready_buf as []u8;
+    let payload: []u8 = tx_ready_slice[VIRTIO_NET_HDR_LEN..<VIRTIO_NET_HDR_LEN + 1514];
+    slice_copy(payload[0..<safe_len as usize], bytes[0..<safe_len as usize]);
+    dma_prepare_tx(tx_ready_buf as *u8, VIRTIO_NET_HDR_LEN + (safe_len as usize));
+    let buf: *u8 = tx_ready_buf as *u8;
+    desc_set(tx_queue_mem as *u8, 0, buf as usize,
+        (safe_len + (VIRTIO_NET_HDR_LEN as i32)) as isize, 0);
+    avail_ring_set(tx_queue_mem as *u8, 0, 0);
+    tx_avail_idx = tx_avail_idx + 1;
+    avail_publish(tx_queue_mem as *u8, tx_avail_idx);
+    virtio_tx_irq_flag = 0;
+    virtio_notify(1);
+    while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {
+        virtio_tx_irq_flag = 0;
+        if (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {
+            while (virtio_tx_irq_flag == 0) {
+                interrupt_wait();
+            }
+        }
+    }
+    dma_consume();
+    tx_used_seen = tx_used_seen + 1;
+    return view NetRxCanAcquire;
+}
+
+fn net_read_mac(mac_out: borrow [u8; 6..]) {
+    for i: usize in 0..<6 {
+        let p: *io u8 = (virtio_base + VIRTIO_CONFIG_MAC_OFFSET
+            + (i as i32)) as *io u8;
+        mac_out[i] = *p;
+    }
+}
+
+fn net_shutdown(ready: sink NetRxCanAcquire) {}

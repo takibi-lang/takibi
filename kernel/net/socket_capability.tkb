@@ -1,4 +1,11 @@
-use "kernel/drivers/net/rp1_gem.tkb";
+// GitHub issue #237 (QEMU port): no longer `use`s kernel/drivers/net/
+// rp1_gem.tkb directly -- NetRxCanAcquire and net_shutdown() come from
+// whichever kernel/drivers/net/{rp1_gem,virtio_net}.tkb is on this
+// build's compile line (same file-selection convention as
+// kernel/platform/*/uart.tkb), since both platforms' drivers define the
+// identical name. Only one may ever be listed per build: both define the
+// same top-level names, so listing both together is a compile error by
+// design.
 
 variant NetworkCapabilityValue {
     Empty;

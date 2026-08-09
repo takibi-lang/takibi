@@ -65,6 +65,13 @@ fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
 
     if (id == QEMU_UART_GIC_INTID) {
         uart_irq_handler();
+    } else if (id == (virtio_net_gic_intid as u32) && virtio_net_gic_intid >= 0) {
+        // GitHub issue #237 M4: virtio_net_gic_intid (kernel/drivers/net/
+        // virtio_net.tkb) is discovered at runtime, not a compile-time
+        // constant like QEMU_UART_GIC_INTID above -- it starts at -1 (no
+        // device found / net_init() not called yet), so the >= 0 guard
+        // keeps that sentinel from ever matching a real GICC_IAR value.
+        virtio_net_irq_handler();
     } else if (id == QEMU_TIMER_GIC_INTID) {
         timer_irq_handler();
         if (lower_el) {

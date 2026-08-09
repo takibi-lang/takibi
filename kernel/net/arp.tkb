@@ -1,4 +1,6 @@
-use "kernel/drivers/net/rp1_gem.tkb";
+// GitHub issue #237 (QEMU port): see kernel/net/socket_capability.tkb's
+// own header comment for why this no longer `use`s kernel/drivers/net/
+// rp1_gem.tkb directly.
 use "kernel/net/wire.tkb";
 
 // GitHub issue #186: ArpHdr's multi-byte NUMERIC fields (htype/ptype/oper)

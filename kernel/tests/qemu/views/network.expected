@@ -1,0 +1,5 @@
+virtio net: link ready mac=02:00:20:00:00:02
+virtio net: arp reply ok ip=192.168.20.2
+virtio net: icmp echo reply ok ip=192.168.20.2
+virtio net: tcp handshake echo close reconnect ok
+virtio net: rx capability stored for sockets

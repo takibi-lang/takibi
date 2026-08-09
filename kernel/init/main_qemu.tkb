@@ -436,6 +436,68 @@ fn main() {
         kernel_boot_log("asid pool: failed\n");
     }
 
+    // GitHub issue #237 M4: virtio-net driver + ARP/ICMP/TCP milestone.
+    // Copied from kernel/init/main.tkb's own net_init()/kernel_arp_reply_
+    // once()/kernel_icmp_reply_once()/kernel_tcp_echo_check() sequence --
+    // that logic is already platform-neutral (kernel/net/{arp,icmp,tcp}.tkb
+    // never reference RPi5 by name), only the driver underneath differs
+    // (kernel/drivers/net/virtio_net.tkb instead of rp1_gem.tkb, selected
+    // via this build's own compile-line file list, same convention as
+    // uart.tkb/intc.tkb). Log line prefix changed from "rp1 gem:" to
+    // "virtio net:" since this isn't RP1 hardware; the MAC/IP values
+    // themselves are unchanged (kernel/net/netconfig.tkb's OUR_MAC/OUR_IP
+    // are shared, not per-platform) -- the QEMU test harness pins the
+    // virtio-net-device's own MAC to match via -device ...,mac=... so
+    // this literal stays accurate without a runtime MAC-formatting
+    // helper. Every ARP/ICMP/TCP wait below has its own bounded deadline
+    // (15s/15s/30s respectively, kernel/net/{arp,icmp,tcp}.tkb's own
+    // read_cntfrq()-based loops -- unchanged), so this is safe to include
+    // even in a run with no host-side peer: it degrades to a clean
+    // "timeout" log line rather than hanging fn main() forever.
+    match net_init() {
+        NetInitResult::Failed => {
+            kernel_boot_log("virtio net: link failed\n");
+        }
+        NetInitResult::Ready(link_ready) => {
+            kernel_boot_log("virtio net: link ready mac=02:00:20:00:00:02\n");
+            match kernel_arp_reply_once(link_ready) {
+                KernelArpResult::TimedOut(arp_ready) => {
+                    kernel_boot_log("virtio net: arp timeout\n");
+                    net_shutdown(arp_ready);
+                }
+                KernelArpResult::Replied(arp_ready) => {
+                    kernel_boot_log("virtio net: arp reply ok ip=192.168.20.2\n");
+                    match kernel_icmp_reply_once(arp_ready) {
+                        KernelIcmpResult::TimedOut(icmp_ready) => {
+                            kernel_boot_log("virtio net: icmp timeout\n");
+                            net_shutdown(icmp_ready);
+                        }
+                        KernelIcmpResult::Replied(icmp_ready) => {
+                            kernel_boot_log("virtio net: icmp echo reply ok ip=192.168.20.2\n");
+                            match kernel_tcp_echo_check(icmp_ready) {
+                                KernelTcpResult::TimedOut(tcp_ready) => {
+                                    kernel_boot_log("virtio net: tcp timeout\n");
+                                    net_shutdown(tcp_ready);
+                                }
+                                KernelTcpResult::Verified(tcp_ready) => {
+                                    kernel_boot_log("virtio net: tcp handshake echo close reconnect ok\n");
+                                    match network_capability_install(tcp_ready) {
+                                        NetworkCapabilityInstallResult::Installed => {
+                                            kernel_boot_log("virtio net: rx capability stored for sockets\n");
+                                        }
+                                        NetworkCapabilityInstallResult::AlreadyInstalled(incoming) => {
+                                            net_shutdown(incoming);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // GitHub issue #237 M3: filesystem/BusyBox/HTTPd-loader milestone via
     // the memory-backed ext2 device -- kernel/init/main.tkb (RPi5) already
     // mounts memory_block_device_ext2() a SECOND time for this exact test
