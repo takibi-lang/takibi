@@ -394,13 +394,13 @@ kernel_process_execution_reset();
                                                 }
                                             }
                                             kernel_tcp_restore_stream_policy();
+                                            process_image_unmap(dynamic_pages);
                                             if (dynamic_status == 0 &&
                                                 process_image_window_is_clear()) {
                                                 kernel_boot_log("httpd server: second request ok\n");
                                             } else {
                                                 kernel_boot_log("httpd server: failed\n");
                                             }
-                                            process_image_unmap(dynamic_pages);
                                             } else {
                                                 process_image_unmap(dynamic_pages);
                                             }
