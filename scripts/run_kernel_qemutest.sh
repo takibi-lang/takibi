@@ -38,6 +38,7 @@ ARTIFACT_DIR="${KERNEL_QEMU_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest
 UART_LOG="$ARTIFACT_DIR/uart.log"
 PEER_LOG="$ARTIFACT_DIR/net-peer.log"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
+QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 # Safety net only: the run normally ends as soon as the boot's own final
 # marker (BOOT_DONE_MARKER below) appears, a few seconds in. This bound
 # only matters if the guest wedges before reaching it.
@@ -50,6 +51,7 @@ NETDEV_REMOTE_PORT="${KERNEL_QEMU_NETDEV_REMOTE_PORT:-17772}"
 BOOT_DONE_MARKER="^resources: pages=0$"
 
 mkdir -p "$ARTIFACT_DIR"
+cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 exec 9>"$ARTIFACT_DIR/runner.lock"
 if ! flock -n 9; then
     echo "FAIL kernel/qemu: another QEMU runner already owns $ARTIFACT_DIR" >&2
@@ -70,7 +72,7 @@ echo "[kernel/qemu] booting kernel.elf under QEMU"
 timeout "$TIMEOUT_SECS" qemu-system-aarch64 \
     -machine virt -cpu cortex-a53 -smp 2 -m 1024 -nographic \
     -global virtio-mmio.force-legacy=on \
-    -drive "file=$EXT2_IMAGE,if=none,format=raw,id=vd0" \
+    -drive "file=$QEMU_EXT2_IMAGE,if=none,format=raw,id=vd0" \
     -device virtio-blk-device,drive=vd0 \
     -netdev "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$NETDEV_LOCAL_PORT,remote.type=inet,remote.host=127.0.0.1,remote.port=$NETDEV_REMOTE_PORT" \
     -device virtio-net-device,netdev=net0,mac=02:00:20:00:00:02,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off \

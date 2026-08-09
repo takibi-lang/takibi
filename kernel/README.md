@@ -298,7 +298,7 @@ transcript through every `kernel/tests/qemu/views/*.filter`, comparing each
 exactly against its `.expected` file -- the identical "one boot, many
 independent contracts" pattern `kernelcheck-rpi5` uses (see "Expected-file
 integration views" below), just without the SWD reset/load dance: QEMU's
-own `-nographic` pipes the guest UART directly to the host process. Twenty
+own `-nographic` pipes the guest UART directly to the host process. Twenty-one
 views currently pass, covering:
 
 - the full hardware-independent self-test bundle (FP/SIMD-across-IRQ, a
