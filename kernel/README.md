@@ -108,15 +108,18 @@ Run these from the repository root:
 
 ```bash
 make kernelbuild-rpi5  # build kernel/build/rpi5/kernel.elf
-make kernelcheck-rpi5  # build and run the complete RPi5 integration test
+make kernelcheck-rpi5  # build and run the complete RPi5 integration test (needs real hardware)
+make kernelbuild-qemu  # build kernel/build/qemu/kernel.elf
+make kernelcheck-qemu  # build and run the complete QEMU integration test (no hardware needed)
 make kernelbuild       # build every maintained kernel target
 make kernelcheck       # build and test every maintained kernel target
 ```
 
-At present RPi5 is the only maintained kernel target, so `kernelbuild` and
-`kernelcheck` are aliases for their RPi5 counterparts. These aggregate names
-are intentionally ready to include future QEMU/AArch64 and QEMU/RISC-V ports
-once those ports exist.
+`kernelbuild`/`kernelcheck` run both the RPi5 and QEMU targets. See
+"QEMU/AArch64 integration" below for what `kernelcheck-qemu` covers and how
+it differs from the RPi5 lane -- in particular, `make kernelcheck` still
+needs real RPi5 hardware attached, even though `kernelcheck-qemu` alone does
+not.
 
 `kernelbuild-rpi5` does not require a board. It generates the ext2 and
 initramfs fixtures, obtains the pinned Alpine packages, compiles all Takibi
@@ -247,6 +250,110 @@ Default logs and projected actual files are written under
 `_build/kernel-hwtest-rpi5/`. Load, reset, UART, ARP, ICMP, TCP, curl, and
 userspace-socket evidence remain separate for diagnosis.
 
+## QEMU/AArch64 integration
+
+QEMU/AArch64 lets anyone build and boot a substantial, real integration
+suite for this kernel without RPi5 hardware, a Debug Probe, or a wired
+Ethernet link. It reuses the same architecture-generic exception/syscall,
+MMU, and scheduler code RPi5 runs -- only the earliest boot glue and the
+platform drivers (`kernel/platform/qemu/`,
+`kernel/drivers/net/virtio_net.tkb`) are QEMU-specific, selected by which
+files a given build's compile line lists, the same convention
+`kernel/platform/rpi5/` uses for its own drivers. See "Differences from
+RPi5" below for the one genuinely different piece of boot-time
+architectural setup (the EL2-to-EL1 drop).
+
+### Build and run
+
+```bash
+make kernelbuild-qemu  # build kernel/build/qemu/kernel.elf (no hardware needed)
+make kernelcheck-qemu  # build, boot, drive a host-side network peer, and verify (no hardware needed)
+```
+
+Both need `qemu-system-aarch64` (part of the compiler dependencies listed in
+the top-level README) but nothing else -- no board, no SWD, no NIC, no
+raw-socket privileges. To boot interactively (for `gdb-multiarch`
+debugging, or just watching the boot log live):
+
+```bash
+qemu-system-aarch64 -machine virt -cpu cortex-a53 -smp 2 -m 1024 -nographic \
+    -global virtio-mmio.force-legacy=on \
+    -netdev dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=17771,remote.type=inet,remote.host=127.0.0.1,remote.port=17772 \
+    -device virtio-net-device,netdev=net0,mac=02:00:20:00:00:02,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off \
+    -kernel kernel/build/qemu/kernel.elf
+```
+
+The kernel never exits (a `while (true) {}` park at the end of boot, same
+as RPi5), so stop it with `Ctrl-A X` or `kill`. Drop the `-netdev`/`-device`
+pair entirely for a boot that skips straight to a clean, bounded
+`virtio net: link failed` line instead of attempting network I/O.
+`scripts/kernel_net_test.py <local-port> <remote-port>` is the host-side
+peer `kernelcheck-qemu` drives automatically; run it by hand against an
+interactive boot (matching ports) to exercise ARP/ICMP/TCP manually.
+
+### What this verifies
+
+`kernelcheck-qemu` boots the kernel once and projects that single UART
+transcript through every `kernel/tests/qemu/views/*.filter`, comparing each
+exactly against its `.expected` file -- the identical "one boot, many
+independent contracts" pattern `kernelcheck-rpi5` uses (see "Expected-file
+integration views" below), just without the SWD reset/load dance: QEMU's
+own `-nographic` pipes the guest UART directly to the host process. Twenty
+views currently pass, covering:
+
+- the full hardware-independent self-test bundle (FP/SIMD-across-IRQ, a
+  real second-core PSCI bring-up, VM layout, user memory + root isolation,
+  syscall subset, fd table, scheduler, growable pool, ASID pool);
+- a real ext2 mount, read, write, symlink, and multi-block file read
+  against a memory-backed device;
+- the pinned Alpine BusyBox static-PIE image, loaded and run for real
+  (`cat`, `uname`, `od`, `execve`, a forked child) with real Linux syscalls;
+- real ARP, ICMP echo, and a full TCP handshake/data-echo/close/reconnect
+  sequence against a host-side Python peer (`scripts/kernel_net_test.py`)
+  over a private `-netdev dgram` transport.
+
+### Differences from RPi5
+
+QEMU is a design and regression-testing aid, not a hardware-fidelity
+replacement -- RPi5 stays the real-hardware lane, and the differences below
+are deliberate, not gaps to silently close:
+
+- **No cache-coherency modeling.** QEMU (TCG, the only mode this project
+  uses) does not model caches as physically separate from RAM, so a missing
+  cache-maintenance operation is invisible here and can only be found on
+  real hardware. A change to `kernel/arch/arm64/mm/mmu.tkb` or any DMA path
+  passing under QEMU is not evidence it is cache-safe.
+- **Boot model differs from RPi5's TF-A hand-off.** QEMU `virt` (with a
+  plain `-cpu cortex-a53`, no firmware) starts the guest directly at EL1,
+  not EL2, so `kernel/arch/arm64/boot/entry_qemu.S` skips the EL2-drop
+  sequence `entry.S` needs for RPi5's real TF-A hand-off. Its PSCI conduit
+  is HVC, not RPi5's real-firmware SMC, and its per-core MPIDR numbering
+  puts the core index in Aff0, not RPi5/BCM2712's Aff1.
+  `kernel/init/main_qemu.tkb` uses the `hvc4` compiler intrinsic where RPi5
+  uses `smc4` for exactly this reason.
+- **Storage is memory-backed, not a provisioned block device.** The QEMU
+  boot mounts `kernel/drivers/block/memory.tkb`'s in-memory ext2 image
+  directly. There is no RP1, no PCIe, and no xHCI/USB Mass Storage under
+  QEMU, so the real USB provisioning step (copying the fixture onto a
+  separate block device before mounting it) has no QEMU equivalent.
+- **RAM size is an assumed constant, not detected.** RPi5's
+  `platform_memory_detect()` queries the real VideoCore mailbox; QEMU has
+  no such firmware service, so `kernel/platform/qemu/memory.tkb` reports a
+  fixed value matching the harness's own `-m` choice. Neither platform's
+  page allocator actually consumes this value today (see "Current limits"
+  below) -- it is diagnostic boot-log output on both.
+- **The MMU device/RAM layout is inverted from RPi5's.** RPi5's real RAM
+  starts at physical address 0; QEMU `virt`'s starts at `0x40000000`, with
+  device MMIO below it -- roughly the opposite of RPi5's layout. See
+  `kernel/platform/qemu/mmu_layout.tkb`'s own header for the resulting L1
+  block-index choices, including why `USER_TEXT_VA` differs from RPi5's.
+- **The HTTPd daemon's real accept()/serve loop and the ext2-resident
+  `init.sh` script's own connected-socket fixture are not exercised.** Both
+  need a live TCP peer serving (not just replying to) a connection in a
+  shape this milestone's host-side script does not yet drive; unlike the
+  ARP/ICMP/TCP-echo peer above, they are a real follow-up, not a
+  permanent QEMU limitation.
+
 ## Expected-file integration views
 
 The hardware runner captures UART once and projects that transcript through
@@ -310,18 +417,10 @@ per-milestone engineering record.
 
 ## Future kernel targets
 
-RPi5 remains the only implemented kernel platform today.
-
-The intended next ports are:
-
-1. QEMU/AArch64, reusing the common AArch64 EL1 kernel with a QEMU boot and
-   device layer;
-2. QEMU/RISC-V, after the second AArch64 platform has made the real
-   architecture boundary concrete.
-
-No QEMU kernel Make target exists yet. When a port is implemented, document
-its build, run, debug, and integration procedure in this README and add it to
-the aggregate `kernelbuild` and `kernelcheck` targets.
+RPi5 and QEMU/AArch64 (see "QEMU/AArch64 integration" above) are both
+implemented today. The intended next port is QEMU/RISC-V, now that a second
+AArch64 platform has made the real architecture boundary (what is
+CPU-generic versus board/platform-specific) concrete in practice.
 
 ## Additional dependencies
 
