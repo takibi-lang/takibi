@@ -1,1 +1,0 @@
-syscall subset: mmap prot+fd reject, sigaction signum+oldact ok

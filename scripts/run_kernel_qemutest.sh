@@ -4,8 +4,9 @@
 # Structurally mirrors scripts/run_kernel_hwtest_rpi5.sh's "one capture,
 # several independent views" pattern (see that script's own header): a
 # single boot's UART transcript is projected through every kernel/tests/
-# qemu/views/*.filter and compared exactly against the matching
-# *.expected file. Unlike the RPi5 runner, this needs no SWD/reset/
+# common/views/*.filter plus qemu/views/*.filter are compared exactly
+# against their matching *.expected files. Platform-specific files override
+# common files with the same name. Unlike the RPi5 runner, this needs no SWD/reset/
 # external-serial-device machinery at all -- QEMU's own -nographic pipes
 # the guest UART directly to this process's stdout, so capture is a
 # single `timeout N qemu-system-aarch64 ... -kernel ... > uart.log` call.
@@ -34,6 +35,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
 VIEW_DIR="$REPO_ROOT/kernel/tests/qemu/views"
+COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ARTIFACT_DIR="${KERNEL_QEMU_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-qemu}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 PEER_LOG="$ARTIFACT_DIR/net-peer.log"
@@ -126,10 +128,24 @@ tr -d '\r' <"$UART_LOG" >"$UART_LOG.normalized"
 # One boot, several independent views -- see this file's header and
 # scripts/run_kernel_hwtest_rpi5.sh's own identical loop.
 view_count=0
-for filter in "$VIEW_DIR"/*.filter; do
-    [ -e "$filter" ] || continue
-    name="$(basename "$filter" .filter)"
-    expected="$VIEW_DIR/$name.expected"
+view_names="$(
+    for filter in "$COMMON_VIEW_DIR"/*.filter "$VIEW_DIR"/*.filter; do
+        [ -e "$filter" ] || continue
+        basename "$filter" .filter
+    done | LC_ALL=C sort -u
+)"
+while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if [ -f "$VIEW_DIR/$name.filter" ]; then
+        filter="$VIEW_DIR/$name.filter"
+    else
+        filter="$COMMON_VIEW_DIR/$name.filter"
+    fi
+    if [ -f "$VIEW_DIR/$name.expected" ]; then
+        expected="$VIEW_DIR/$name.expected"
+    else
+        expected="$COMMON_VIEW_DIR/$name.expected"
+    fi
     actual="$ARTIFACT_DIR/$name.actual"
     if [ ! -f "$expected" ]; then
         echo "error: missing expected file for kernel view $name" >&2
@@ -144,10 +160,10 @@ for filter in "$VIEW_DIR"/*.filter; do
     fi
     echo "PASS kernel/qemu view: $name"
     view_count=$((view_count + 1))
-done
+done <<<"$view_names"
 
 if [ "$view_count" -eq 0 ]; then
-    echo "error: no kernel integration views found under $VIEW_DIR" >&2
+    echo "error: no kernel integration views found under $COMMON_VIEW_DIR or $VIEW_DIR" >&2
     exit 1
 fi
 

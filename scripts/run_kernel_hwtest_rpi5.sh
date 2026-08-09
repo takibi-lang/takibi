@@ -6,6 +6,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERIAL_DEV="${RPI5_SERIAL_DEV:-$($REPO_ROOT/scripts/rpi5_uart_dev.sh)}"
 ELF="$REPO_ROOT/kernel/build/rpi5/kernel.elf"
 VIEW_DIR="$REPO_ROOT/kernel/tests/rpi5/views"
+COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ARTIFACT_DIR="${RPI5_KERNEL_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-rpi5}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 RESET_LOG="$ARTIFACT_DIR/reset.log"
@@ -336,14 +337,30 @@ cleanup
 trap - EXIT INT TERM HUP
 tr -d '\r' <"$UART_LOG" >"$UART_LOG.normalized"
 
-# One boot, several independent views. Each filter projects the shared UART
-# transcript onto one contract, whose expected file is then compared exactly.
+# One boot, several independent views. Common views are supplemented by
+# platform-specific views; a platform file overrides a common file with the
+# same name. Each filter projects the shared UART transcript onto one
+# contract, whose expected file is then compared exactly.
 # Adding a subsystem test does not require another reset/load cycle.
 view_count=0
-for filter in "$VIEW_DIR"/*.filter; do
-    [ -e "$filter" ] || continue
-    name="$(basename "$filter" .filter)"
-    expected="$VIEW_DIR/$name.expected"
+view_names="$(
+    for filter in "$COMMON_VIEW_DIR"/*.filter "$VIEW_DIR"/*.filter; do
+        [ -e "$filter" ] || continue
+        basename "$filter" .filter
+    done | LC_ALL=C sort -u
+)"
+while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if [ -f "$VIEW_DIR/$name.filter" ]; then
+        filter="$VIEW_DIR/$name.filter"
+    else
+        filter="$COMMON_VIEW_DIR/$name.filter"
+    fi
+    if [ -f "$VIEW_DIR/$name.expected" ]; then
+        expected="$VIEW_DIR/$name.expected"
+    else
+        expected="$COMMON_VIEW_DIR/$name.expected"
+    fi
     actual="$ARTIFACT_DIR/$name.actual"
     if [ ! -f "$expected" ]; then
         echo "error: missing expected file for kernel view $name" >&2
@@ -376,10 +393,10 @@ for filter in "$VIEW_DIR"/*.filter; do
     fi
     echo "PASS kernel/rpi5 view: $name"
     view_count=$((view_count + 1))
-done
+done <<<"$view_names"
 
 if [ "$view_count" -eq 0 ]; then
-    echo "error: no kernel integration views found under $VIEW_DIR" >&2
+    echo "error: no kernel integration views found under $COMMON_VIEW_DIR or $VIEW_DIR" >&2
     exit 1
 fi
 

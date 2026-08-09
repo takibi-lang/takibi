@@ -294,8 +294,8 @@ interactive boot (matching ports) to exercise ARP/ICMP/TCP manually.
 ### What this verifies
 
 `kernelcheck-qemu` boots the kernel once and projects that single UART
-transcript through every `kernel/tests/qemu/views/*.filter`, comparing each
-exactly against its `.expected` file -- the identical "one boot, many
+transcript through the common views plus the QEMU-specific views, comparing
+each exactly against its `.expected` file -- the identical "one boot, many
 independent contracts" pattern `kernelcheck-rpi5` uses (see "Expected-file
 integration views" below), just without the SWD reset/load dance: QEMU's
 own `-nographic` pipes the guest UART directly to the host process. Twenty-one
@@ -357,10 +357,13 @@ are deliberate, not gaps to silently close:
 
 ## Expected-file integration views
 
-The hardware runner captures UART once and projects that transcript through
-every `kernel/tests/rpi5/views/*.filter`. Each projection is compared exactly
-with the same-named `.expected` file. A subsystem can therefore gain a focused
-contract without adding another expensive reset and SWD load.
+The hardware runners capture UART once and project that transcript through the
+union of `kernel/tests/common/views/*.filter` and the target's
+`kernel/tests/<platform>/views/*.filter`. A platform view overrides a common
+view with the same name. Each projection is compared exactly with the
+same-named `.expected` file, using the platform file when present and otherwise
+the common file. A subsystem can therefore gain a focused contract without
+adding another expensive reset and SWD load.
 
 Stable operator-visible kernel status uses `kernel_boot_log`. Temporary debug
 UART messages are not accepted as expected-file evidence and are removed after
@@ -370,7 +373,8 @@ bring-up. Host-side progress output is separate from kernel UART output.
 
 The passing HTTPd test is a concrete Linux compatibility milestone, not a
 claim of general Linux compatibility. `SYSCALLS.md` is the per-syscall
-authority and `kernel/tests/rpi5/views/*.expected` is the actual contract;
+authority and the common/platform view `.expected` files are the actual
+contracts;
 the list below is orientation for a reader deciding whether a workload will
 run, not a specification.
 

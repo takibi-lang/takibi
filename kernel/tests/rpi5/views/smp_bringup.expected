@@ -1,1 +1,0 @@
-smp bringup: core1 psci+el1+takibi ok
