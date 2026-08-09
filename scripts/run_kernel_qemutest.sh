@@ -39,6 +39,7 @@ COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ARTIFACT_DIR="${KERNEL_QEMU_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-qemu}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 PEER_LOG="$ARTIFACT_DIR/net-peer.log"
+UART_INPUT="$ARTIFACT_DIR/uart-input"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 # Safety net only: the run normally ends as soon as the boot's own final
@@ -54,6 +55,9 @@ BOOT_DONE_MARKER="^resources: pages=0$"
 
 mkdir -p "$ARTIFACT_DIR"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
+rm -f "$UART_INPUT"
+mkfifo "$UART_INPUT"
+exec 8<>"$UART_INPUT"
 exec 9>"$ARTIFACT_DIR/runner.lock"
 if ! flock -n 9; then
     echo "FAIL kernel/qemu: another QEMU runner already owns $ARTIFACT_DIR" >&2
@@ -78,7 +82,7 @@ timeout "$TIMEOUT_SECS" qemu-system-aarch64 \
     -device virtio-blk-device,drive=vd0 \
     -netdev "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$NETDEV_LOCAL_PORT,remote.type=inet,remote.host=127.0.0.1,remote.port=$NETDEV_REMOTE_PORT" \
     -device virtio-net-device,netdev=net0,mac=02:00:20:00:00:02,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off \
-    -kernel "$ELF" >"$UART_LOG" 2>&1 &
+    -kernel "$ELF" <&8 >"$UART_LOG" 2>&1 &
 QEMU_PID=$!
 stop_qemu() {
     if [ -n "${QEMU_PID:-}" ]; then
@@ -89,6 +93,22 @@ stop_qemu() {
 }
 trap stop_qemu EXIT
 trap 'stop_qemu; exit 130' INT TERM HUP
+
+# shell_read blocks in ppoll() until the guest receives one UART line. Use the
+# same post-block input as the RPi5 harness: the leading x is a UART warm-up
+# sentinel consumed by the guest, leaving "ashread" for the shell fixture.
+uart_sender_pid=""
+(
+    for _wait in $(seq 1 "$TIMEOUT_SECS"); do
+        if LC_ALL=C grep -aFq 'shell ppoll: uart blocked' "$UART_LOG"; then
+            printf 'xashread\n' >&8
+            exit 0
+        fi
+        sleep 0.1
+    done
+    exit 1
+) &
+uart_sender_pid=$!
 
 # Host-side peer: drives ARP, ICMP, and the full TCP handshake/echo/close/
 # reconnect sequence kernel_tcp_echo_check() counts before returning
@@ -117,6 +137,12 @@ for _wait in $(seq 1 "$TIMEOUT_SECS"); do
     sleep 1
 done
 stop_qemu
+if [ -n "$uart_sender_pid" ]; then
+    kill "$uart_sender_pid" 2>/dev/null || true
+    wait "$uart_sender_pid" 2>/dev/null || true
+fi
+exec 8>&-
+rm -f "$UART_INPUT"
 trap - EXIT INT TERM HUP
 
 if [ ! -s "$UART_LOG" ]; then

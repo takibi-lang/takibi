@@ -311,6 +311,7 @@ fn kernel_test_common_probes() {
 // network/storage fixtures. All common user-space scenarios and their order live
 // in this driver.
 let mut kernel_test_rpi5_extended: bool;
+let mut kernel_test_shell_read: bool;
 
 fn kernel_test_driver_run() {
     kernel_test_common_probes();
@@ -568,7 +569,7 @@ irq_uart_rx_unmask();
         }
     }
 
-    if (kernel_test_rpi5_extended) {
+    if (kernel_test_shell_read) {
     // Issue #205: same distro plan, argv={"busybox","sh","-c",
     // "read x; echo shell read: ${x#x}"}. BusyBox ash's `read` builtin always calls poll()
     // before its first read() from stdin, even with no timeout --
