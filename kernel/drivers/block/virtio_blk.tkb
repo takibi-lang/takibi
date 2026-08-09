@@ -101,17 +101,20 @@ fn virtio_blk_submit(request_type: u32, sector: u32, buffer: *u8,
     virtio_blk_status_buf[0] = 0xff;
     let queue: *u8 = virtio_blk_queue as *u8;
     let descs: *VirtioBlkDesc = queue as *VirtioBlkDesc;
-    let mut d0: VirtioBlkDesc = { (virtio_blk_request_buf as *u8) as usize,
-        sizeof(VirtioBlkRequest) as u32, VIRTIO_BLK_DESC_F_NEXT as u16, 1 };
-    descs[0] = d0;
     let mut data_flags: i32 = 0;
     if (write == false) { data_flags = VIRTIO_BLK_DESC_F_WRITE; }
-    let mut d1: VirtioBlkDesc = { buffer as usize, 512,
-        data_flags as u16, 2 };
-    descs[1] = d1;
-    let mut d2: VirtioBlkDesc = { (virtio_blk_status_buf as *u8) as usize, 1,
-        VIRTIO_BLK_DESC_F_WRITE as u16, 0 };
-    descs[2] = d2;
+    descs[0].addr = (virtio_blk_request_buf as *u8) as usize;
+    descs[0].len = sizeof(VirtioBlkRequest) as u32;
+    descs[0].flags = VIRTIO_BLK_DESC_F_NEXT as u16;
+    descs[0].next = 1;
+    descs[1].addr = buffer as usize;
+    descs[1].len = 512;
+    descs[1].flags = data_flags as u16 | VIRTIO_BLK_DESC_F_NEXT as u16;
+    descs[1].next = 2;
+    descs[2].addr = (virtio_blk_status_buf as *u8) as usize;
+    descs[2].len = 1;
+    descs[2].flags = VIRTIO_BLK_DESC_F_WRITE as u16;
+    descs[2].next = 0;
     let avail: *VirtioBlkAvail =
         (queue + VIRTIO_QNUM * (sizeof(VirtioBlkDesc) as isize))
         as *VirtioBlkAvail;

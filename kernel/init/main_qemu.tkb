@@ -499,18 +499,10 @@ fn main() {
     }
 
     // Filesystem/BusyBox/HTTPd-loader milestone via the QEMU virtio-blk
-    // device. kernel/init/main.tkb (RPi5) already
-    // mounts memory_block_device_ext2() a SECOND time for this exact test
-    // (its own USB block above it provisions+mounts a separate USB-backed
-    // copy only for USB-specific write/resize/create coverage), so this
-    // code is copied verbatim from that second mount onward, not
-    // reinvented. Genuinely new here: kernel_syscall_ext2_configure(mount)
-    // is called against the memory-backed mount directly (RPi5 configures
-    // it against the USB-backed mount instead, from its own earlier USB
-    // block) -- whichever mount is "the root filesystem" needs to be wired
-    // into the real Linux open/read/write/close syscall layer for
-    // BusyBox's own file syscalls to work; this platform has no USB mount
-    // to prefer.
+    // device. kernel/init/main.tkb (RPi5) already mounts a separate
+    // memory-backed copy for this exact test, while this path exercises the
+    // real QEMU block transport and configures the resulting mount in the
+    // Linux open/read/write/close syscall layer.
     //
     // Deliberately NOT ported: the USB write/resize/bitmap/owner/create
     // checks (no USB hardware under QEMU); the httpd daemon's actual

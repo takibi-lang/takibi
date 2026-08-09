@@ -67,10 +67,10 @@ fn virtio_block_device_ext2() -> KernelBlockDeviceResult {
     if (sectors == 0 || sectors % 2 != 0) {
         return memory_block_device_ext2();
     }
-    let mut device: KernelBlockDevice = { 2, 0, sectors / 2 };
-    if (virtio_blk_probe() == false) {
-        return memory_block_device_ext2();
-    }
+    let mut device: KernelBlockDevice = { 0, 0, 0 };
+    device.backend = 2;
+    device.address = 0;
+    device.length = sectors * 512;
     return KernelBlockDeviceResult::Ready(device);
 }
 

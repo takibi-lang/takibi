@@ -1,1 +1,1 @@
-virtio blk: unavailable, memory fallback
+virtio blk: ext2 backend ready

@@ -305,7 +305,8 @@ views currently pass, covering:
   real second-core PSCI bring-up, VM layout, user memory + root isolation,
   syscall subset, fd table, scheduler, growable pool, ASID pool);
 - a real ext2 mount, read, write, symlink, and multi-block file read
-  against a memory-backed device;
+  against a QEMU virtio-blk device backed by the same ext2 image passed to
+  the harness;
 - the pinned Alpine BusyBox static-PIE image, loaded and run for real
   (`cat`, `uname`, `od`, `execve`, a forked child) with real Linux syscalls;
 - real ARP, ICMP echo, and a full TCP handshake/data-echo/close/reconnect
@@ -331,11 +332,11 @@ are deliberate, not gaps to silently close:
   puts the core index in Aff0, not RPi5/BCM2712's Aff1.
   `kernel/init/main_qemu.tkb` uses the `hvc4` compiler intrinsic where RPi5
   uses `smc4` for exactly this reason.
-- **Storage is memory-backed, not a provisioned block device.** The QEMU
-  boot mounts `kernel/drivers/block/memory.tkb`'s in-memory ext2 image
-  directly. There is no RP1, no PCIe, and no xHCI/USB Mass Storage under
-  QEMU, so the real USB provisioning step (copying the fixture onto a
-  separate block device before mounting it) has no QEMU equivalent.
+- **Storage uses virtio-blk, not RPi5's USB Mass Storage path.** The harness
+  attaches `kernel/build/user/ext2.img` as a legacy virtio-mmio block device,
+  and the kernel mounts it through `kernel/drivers/block/virtio_blk.tkb`.
+  There is no RP1, PCIe, or xHCI/USB Mass Storage under QEMU, so the real USB
+  provisioning and hardware-specific storage checks remain RPi5-only.
 - **RAM size is an assumed constant, not detected.** RPi5's
   `platform_memory_detect()` queries the real VideoCore mailbox; QEMU has
   no such firmware service, so `kernel/platform/qemu/memory.tkb` reports a
