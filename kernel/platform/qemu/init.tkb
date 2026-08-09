@@ -121,46 +121,7 @@ fn qemu_ext2_create_check(mount: Ext2Mount) -> bool {
     }
 }
 
-fn main() {
-    platform_init();
-    kernel_boot_log("takibi kernel: EL1\n");
-
-    match platform_memory_detect() {
-        PlatformMemoryResult::Detected(detected) => {
-            let (mem_base, mem_size) = detected;
-            kernel_boot_log("memory: base_bytes=");
-            uart_put_udec(mem_base as usize);
-            kernel_boot_log(" detected_mib=");
-            uart_put_udec((mem_size as usize) / (1024 * 1024));
-            kernel_boot_log("\n");
-        }
-        PlatformMemoryResult::Failed => {
-            kernel_boot_log("memory: mailbox query failed\n");
-        }
-    }
-
-    platform_irq_init();
-
-    if (fpsimd_irq_probe() == 0) {
-        kernel_boot_log("fp/simd irq: q0-q31+fpsr preserved across current-el irq\n");
-    } else {
-        kernel_boot_log("fp/simd irq: failed\n");
-    }
-
-    match kernel_secondary_boot_probe() {
-        SecondaryBootResult::Started => {
-            kernel_boot_log("smp bringup: core1 psci+el1+takibi ok\n");
-        }
-        SecondaryBootResult::UnexpectedStatus(status) => {
-            kernel_boot_log("smp bringup: core1 unexpected psci status\n");
-        }
-        SecondaryBootResult::NotStarted(status) => {
-            kernel_boot_log("smp bringup: core1 failed\n");
-        }
-    }
-
-    kernel_test_common_probes();
-
+fn kernel_test_platform_network() {
     match net_init() {
         NetInitResult::Failed => {
             kernel_boot_log("virtio net: link failed\n");
@@ -205,20 +166,9 @@ fn main() {
         }
     }
 
-    // Filesystem/BusyBox/HTTPd-loader milestone via the QEMU virtio-blk
-    // device. kernel/platform/rpi5/init.tkb (RPi5) already mounts a separate
-    // memory-backed copy for this exact test, while this path exercises the
-    // real QEMU block transport and configures the resulting mount in the
-    // Linux open/read/write/close syscall layer.
-    //
-    // Deliberately NOT ported: the USB write/resize/bitmap/owner/create
-    // checks (no USB hardware under QEMU); the httpd daemon's actual
-    // accept()/serve loop and shell_read's ppoll()-blocked UART read (both
-    // would block forever with no network peer or injected UART input
-    // under this milestone's headless harness); init.sh's own socket/TCP
-    // fixture (kernel_syscall_connected_fixture_start() and friends). All
-    // three are real network dependencies, planned for the M4 virtio-net
-    // milestone, not omissions.
+}
+
+fn kernel_test_platform_storage() {
     match virtio_block_device_ext2() {
         KernelBlockDeviceResult::Invalid => {
             kernel_boot_log("ext2 image: invalid\n");
@@ -394,331 +344,48 @@ fn main() {
             }
         }
     }
-    match initramfs_httpd() {
-        InitramfsFileResult::Invalid => {
-            kernel_boot_log("httpd images: invalid busybox-extras\n");
+}
+
+fn main() {
+    platform_init();
+    kernel_boot_log("takibi kernel: EL1\n");
+
+    match platform_memory_detect() {
+        PlatformMemoryResult::Detected(detected) => {
+            let (mem_base, mem_size) = detected;
+            kernel_boot_log("memory: base_bytes=");
+            uart_put_udec(mem_base as usize);
+            kernel_boot_log(" detected_mib=");
+            uart_put_udec((mem_size as usize) / (1024 * 1024));
+            kernel_boot_log("\n");
         }
-        InitramfsFileResult::File(httpd_image) => {
-            let (httpd_address, httpd_bytes) = httpd_image;
-            match distro_elf_validate(httpd_address, httpd_bytes) {
-                DistroElfResult::Invalid => {
-                    kernel_boot_log("httpd images: invalid busybox-extras elf\n");
-                }
-                DistroElfResult::Valid(httpd_plan) => {
-                    match initramfs_musl_loader() {
-                        InitramfsFileResult::Invalid => {
-                            kernel_boot_log("httpd images: invalid musl\n");
-                        }
-                        InitramfsFileResult::File(musl_image) => {
-                            let (musl_address, musl_bytes) = musl_image;
-                            match distro_elf_validate(musl_address, musl_bytes) {
-                                DistroElfResult::Invalid => {
-                                    kernel_boot_log("httpd images: invalid musl elf\n");
-                                }
-                                DistroElfResult::Valid(musl_plan) => {
-                                    if (httpd_plan.entry == 0x3700 &&
-                                        httpd_plan.load_segments == 2 &&
-                                        httpd_plan.extent == 0x304B8 &&
-                                        musl_plan.entry == 0x69DE8 &&
-                                        musl_plan.load_segments == 2 &&
-                                        musl_plan.extent == 0xC2F20) {
-                                        kernel_boot_log("httpd images: busybox-extras+musl valid\n");
-                                        match httpd_image_mapping_check(
-                                                httpd_plan, musl_plan) {
-                                            HttpdImageMapCheckResult::Invalid => {
-                                                kernel_boot_log("httpd map: invalid\n");
-                                            }
-                                            HttpdImageMapCheckResult::Verified => { }
-                                        }
-                                        // GitHub issue #237 M3: stop here, before
-                                        // kernel_syscall_httpd_daemon_start()/
-                                        // run_initial_user() -- actually running the
-                                        // daemon needs a real network peer to accept()
-                                        // a connection from (M4, virtio-net). Unmap
-                                        // immediately after the mapping-validation
-                                        // check so the final resource/leak invariant
-                                        // below still balances.
-                                        match process_image_pair_probe(
-                                                httpd_plan, musl_plan,
-                                                0x40000) {
-                                            ProcessImagePairProbeResult::Invalid => {
-                                                kernel_boot_log("httpd map: combined invalid\n");
-                                            }
-                                            ProcessImagePairProbeResult::Ready(dynamic_pages) => {
-                                                kernel_boot_log("httpd map: combined pages=331 musl-bias=0x40000 auxv ready clean\n");
-                                                process_image_unmap(dynamic_pages);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        PlatformMemoryResult::Failed => {
+            kernel_boot_log("memory: mailbox query failed\n");
         }
-    }
-    let mut saved_distro_plan: DistroElfLoadPlan = {0, 0, 0, 0, 0, 0, 0};
-    let mut distro_plan_ready: bool = false;
-    match initramfs_busybox() {
-        InitramfsFileResult::Invalid => {
-            kernel_boot_log("distro image: invalid initramfs\n");
-        }
-        InitramfsFileResult::File(image) => {
-            let (image_address, image_bytes) = image;
-            match distro_elf_validate(image_address, image_bytes) {
-                DistroElfResult::Invalid => {
-                    kernel_boot_log("distro image: invalid elf\n");
-                }
-                DistroElfResult::Valid(plan) => {
-                    kernel_exec_plan = plan;
-                    kernel_exec_plan_ready = true;
-                    if (plan.entry == 0x4524 && plan.load_segments == 2 &&
-                        plan.extent == 0x122138) {
-                        kernel_boot_log("distro image: alpine busybox static-pie\n");
-                        kernel_boot_log("distro elf: aarch64 loads=2 extent=0x122138\n");
-                        match process_image_map(
-                                plan,
-                                "busybox\0cat\0/hello.txt\0" as []u8,
-                                3) {
-                            ProcessImageMapResult::InvalidImage => {
-                                kernel_boot_log("distro map: invalid image\n");
-                            }
-                            ProcessImageMapResult::OutOfMemory => {
-                                kernel_boot_log("distro map: out of memory\n");
-                            }
-                            ProcessImageMapResult::Mapped(image_pages) => {
-                                if (process_image_page_count(image_pages) == 401) {
-                                    kernel_boot_log("distro map: pages=401 rx+rw-xn heap+stack=rw+xn\n");
-                                }
-                                if (process_image_gap_is_unmapped()) {
-                                    kernel_boot_log("distro load: file bytes match bss=zero gap=unmapped\n");
-                                }
-                                if (process_image_entry(image_pages) == 0x40004524 &&
-                                    process_image_stack_pointer(image_pages) == 0x401FFE00) {
-                                    kernel_boot_log("distro stack: argc=3 argv auxv ready\n");
-                                }
-                                let (heap_start, heap_limit) =
-                                    process_image_heap_range(image_pages);
-                                kernel_syscall_process_configure(heap_start, heap_limit);
-                                let busybox_status: usize = run_initial_user(
-                                    process_image_entry(image_pages),
-                                    process_image_stack_pointer(image_pages));
-                                if (busybox_status == 0) {
-                                    kernel_boot_log("busybox exit: 0\n");
-                                } else {
-                                    kernel_boot_log("busybox failed\n");
-                                }
-                                let (open_calls, read_calls, file_write_calls,
-                                     close_calls) =
-                                    kernel_syscall_file_evidence();
-                                if (open_calls == 0) {
-                                    kernel_boot_log("linux file syscalls: open not called\n");
-                                } else if (read_calls == 0) {
-                                    kernel_boot_log("linux file syscalls: read not called\n");
-                                } else if (close_calls == 0) {
-                                    kernel_boot_log("linux file syscalls: close not called\n");
-                                } else {
-                                    kernel_boot_log("linux file syscalls: open+read+close called\n");
-                                }
-                                process_image_unmap(image_pages);
-                                if (process_image_window_is_clear()) {
-                                    kernel_boot_log("distro unmap: clean\n");
-                                }
-                                saved_distro_plan = plan;
-                                distro_plan_ready = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if (distro_plan_ready) {
-        match process_image_map(
-                saved_distro_plan,
-                "busybox\0uname\0-a\0" as []u8,
-                3) {
-            ProcessImageMapResult::InvalidImage => {
-                kernel_boot_log("uname map: invalid image\n");
-            }
-            ProcessImageMapResult::OutOfMemory => {
-                kernel_boot_log("uname map: out of memory\n");
-            }
-            ProcessImageMapResult::Mapped(uname_pages) => {
-                let (uname_heap_start, uname_heap_limit) =
-                    process_image_heap_range(uname_pages);
-                kernel_syscall_process_configure(
-                    uname_heap_start, uname_heap_limit);
-                let uname_status: usize = run_initial_user(
-                    process_image_entry(uname_pages),
-                    process_image_stack_pointer(uname_pages));
-                if (uname_status == 0) {
-                    kernel_boot_log("busybox uname exit: 0\n");
-                } else {
-                    kernel_boot_log("busybox uname failed\n");
-                }
-                process_image_unmap(uname_pages);
-                if (process_image_window_is_clear()) {
-                    kernel_boot_log("uname unmap: clean\n");
-                }
-            }
-        }
-    }
-    // GitHub issue #237 M3: shell_read (RPi5's own next scenario here) is
-    // deliberately NOT ported -- BusyBox ash's `read` builtin blocks on a
-    // real ppoll() until a UART line arrives, which needs the RPi5
-    // hardware runner's external UART injection. Under this milestone's
-    // headless QEMU harness nothing feeds that input, so including it
-    // would hang fn main() forever at this point. od (below) needs no
-    // external input -- it fails cleanly on its own (a real, expected
-    // EBADF reading stdin after finishing the named file), so it is safe
-    // to port unchanged.
-    if (distro_plan_ready) {
-        match process_image_map(
-                saved_distro_plan,
-                "busybox\0od\0/hello.txt\0" as []u8,
-                3) {
-            ProcessImageMapResult::InvalidImage => {
-                kernel_boot_log("od map: invalid image\n");
-            }
-            ProcessImageMapResult::OutOfMemory => {
-                kernel_boot_log("od map: out of memory\n");
-            }
-            ProcessImageMapResult::Mapped(od_pages) => {
-                let (od_heap_start, od_heap_limit) =
-                    process_image_heap_range(od_pages);
-                kernel_syscall_process_configure(
-                    od_heap_start, od_heap_limit);
-                let od_status: usize = run_initial_user(
-                    process_image_entry(od_pages),
-                    process_image_stack_pointer(od_pages));
-                if (od_status == 0) {
-                    kernel_boot_log("busybox od exit: 0\n");
-                } else {
-                    kernel_boot_log("busybox od failed\n");
-                }
-                process_image_unmap(od_pages);
-                if (process_image_window_is_clear()) {
-                    kernel_boot_log("od unmap: clean\n");
-                }
-            }
-        }
-    }
-    // GitHub issue #237 M3: init.sh (RPi5's own next scenario here) is
-    // deliberately NOT ported -- it exercises a real connected-socket
-    // fixture (kernel_syscall_connected_fixture_start() and the TCP
-    // drop/retransmit injections), which needs a working network stack.
-    // Planned for the M4 virtio-net milestone.
-    if (distro_plan_ready) {
-        match process_image_map(
-                saved_distro_plan,
-                "busybox\0sh\0-c\0exec /bin/echo exec-ok\0" as []u8,
-                4) {
-            ProcessImageMapResult::InvalidImage => {
-                kernel_boot_log("execve map: invalid image\n");
-            }
-            ProcessImageMapResult::OutOfMemory => {
-                kernel_boot_log("execve map: out of memory\n");
-            }
-            ProcessImageMapResult::Mapped(exec_shell_pages) => {
-                let (exec_heap_start, exec_heap_limit) =
-                    process_image_heap_range(exec_shell_pages);
-                kernel_syscall_process_configure(
-                    exec_heap_start, exec_heap_limit);
-                let exec_status: usize = run_initial_user(
-                    process_image_entry(exec_shell_pages),
-                    process_image_stack_pointer(exec_shell_pages));
-                if (exec_status == 7 &&
-                    kernel_syscall_exec_pending()) {
-                    unified_fd_close_exec_descriptors(0);
-                    let exec_argc: usize = kernel_syscall_exec_argc();
-                    let exec_argv = kernel_syscall_exec_argv();
-                    kernel_syscall_exec_clear();
-                    process_image_unmap(exec_shell_pages);
-                    match process_image_map(
-                            saved_distro_plan,
-                            exec_argv,
-                            exec_argc) {
-                        ProcessImageMapResult::InvalidImage => {
-                            kernel_boot_log("execve map: replacement invalid\n");
-                        }
-                        ProcessImageMapResult::OutOfMemory => {
-                            kernel_boot_log("execve map: replacement out of memory\n");
-                        }
-                        ProcessImageMapResult::Mapped(replaced_pages) => {
-                            let (replacement_heap_start,
-                                 replacement_heap_limit) =
-                                process_image_heap_range(replaced_pages);
-                            kernel_syscall_process_configure(
-                                replacement_heap_start,
-                                replacement_heap_limit);
-                            let replacement_status: usize =
-                                run_initial_user(
-                                    process_image_entry(replaced_pages),
-                                    process_image_stack_pointer(replaced_pages));
-                            if (replacement_status == 0) {
-                                kernel_boot_log("execve: busybox echo exit: 0\n");
-                            } else {
-                                kernel_boot_log("execve: replacement failed\n");
-                            }
-                            process_image_unmap(replaced_pages);
-                        }
-                    }
-                } else {
-                    kernel_boot_log("execve: request missing\n");
-                    process_image_unmap(exec_shell_pages);
-                }
-                if (process_image_window_is_clear()) {
-                    kernel_boot_log("execve: image window clean\n");
-                }
-            }
-        }
-    }
-    kernel_process_execution_reset();
-    if (distro_plan_ready) {
-        match process_image_map(
-                saved_distro_plan,
-                "busybox\0sh\0-c\0/echo child-exec-ok; exit 0\0" as []u8,
-                4) {
-            ProcessImageMapResult::InvalidImage => {
-                kernel_boot_log("child exec map: invalid image\n");
-            }
-            ProcessImageMapResult::OutOfMemory => {
-                kernel_boot_log("child exec map: out of memory\n");
-            }
-            ProcessImageMapResult::Mapped(child_shell_pages) => {
-                let (child_heap_start, child_heap_limit) =
-                    process_image_heap_range(child_shell_pages);
-                kernel_syscall_process_configure(
-                    child_heap_start, child_heap_limit);
-                let child_status: usize = run_initial_user(
-                    process_image_entry(child_shell_pages),
-                    process_image_stack_pointer(child_shell_pages));
-                if (child_status == 0) {
-                    kernel_boot_log("child exec: shell exit: 0\n");
-                } else {
-                    kernel_boot_log("child exec: shell failed\n");
-                }
-                process_image_unmap(child_shell_pages);
-                if (process_image_window_is_clear()) {
-                    kernel_boot_log("child exec: image window clean\n");
-                }
-            }
-        }
-    }
-    if (page_allocator_double_free_count() == 0) {
-        kernel_boot_log("resources: no double free\n");
-    } else {
-        kernel_boot_log("resources: DOUBLE FREE\n");
-    }
-    page_allocator_reclaim_all();
-    if (page_allocator_live_count() == 0) {
-        kernel_boot_log("resources: pages=0\n");
-    } else {
-        kernel_boot_log("resources: pages leaked\n");
     }
 
+    platform_irq_init();
+
+    if (fpsimd_irq_probe() == 0) {
+        kernel_boot_log("fp/simd irq: q0-q31+fpsr preserved across current-el irq\n");
+    } else {
+        kernel_boot_log("fp/simd irq: failed\n");
+    }
+
+    match kernel_secondary_boot_probe() {
+        SecondaryBootResult::Started => {
+            kernel_boot_log("smp bringup: core1 psci+el1+takibi ok\n");
+        }
+        SecondaryBootResult::UnexpectedStatus(status) => {
+            kernel_boot_log("smp bringup: core1 unexpected psci status\n");
+        }
+        SecondaryBootResult::NotStarted(status) => {
+            kernel_boot_log("smp bringup: core1 failed\n");
+        }
+    }
+
+    kernel_test_rpi5_extended = false;
+    kernel_test_driver_run();
     platform_shutdown();
     while (true) { }
 }
