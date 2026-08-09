@@ -15330,3 +15330,103 @@ Files: `kernel/mm/page.tkb` (boot_pages removed, real-RAM addressing),
 `kernel/arch/arm64/boot/link.ld` (new `usable_ram_start` symbol),
 `kernel/lib/growable_pool.tkb`, `kernel/arch/arm64/mm/mmu.tkb` (stale
 `BOOT_PAGE_COUNT=1024` comments updated).
+
+## 2026-08-09: GitHub Issue #253 -- `process_image.tkb`'s Per-Root Page
+## Lists Deleted Outright, ~52 MiB Recovered, One Real 512-Page Ceiling
+## Found Along the Way
+
+Issue #253 started as "consolidate page bookkeeping into one struct and
+shrink it" (goal 3 of three the user set explicitly: no hardcoded
+per-process page ceiling; one `struct page`-equivalent home for per-page
+information; minimize footprint). Investigating what to consolidate
+found the real problem was somewhere else entirely, twice over.
+
+**#251 made a latent 400x over-reservation 200x worse.** Real `.bss`
+measurement: `4,660,720` bytes before #251, `55,889,392` after -- and
+99.7% of that growth (~50 MiB) was two arrays,
+`kernel/mm/process_image.tkb`'s `image_page_indices`/`image_l3_indices`,
+each `[usize; BOOT_PAGE_COUNT * PROCESS_IMAGE_ROOT_MAX]`. Raising
+`BOOT_PAGE_COUNT` 1024 -> 204800 in #251 scaled them 200x; they were an
+unnoticed ~256 KiB before. But the deeper problem predates #251 entirely:
+these are per-*process* page lists, not per-physical-page metadata (the
+"272 bytes/page" figure in this issue's original description was wrong,
+corrected in the 2026-08-09 investigation comment on the issue), and a
+process's user address space is exactly one 512-entry L3 table
+(`kernel/arch/arm64/mm/mmu.tkb`'s `init_root` wires exactly `L1[1] -> L2`
+and `L2[0] -> L3`, nothing else -- confirmed by the file's own "2MB user
+window" comment). Sizing a per-process list by `BOOT_PAGE_COUNT` instead
+of 512 was always a 400x over-reservation; #251 just made the constant
+those extra 399x multiplied against much bigger. A sibling array in the
+same file, for the identical purpose on the clone path, was already
+correctly declared `[usize; 512]` the whole time.
+
+**Fix: delete both arrays outright, derive from the L3 table directly.**
+`process_image_cleanup()` used to look up each recorded page's index/L3
+slot from the arrays; it now walks all 512 L3 entries directly
+(`process_image_pte_read`) and releases whatever is non-zero via
+`page_transferred_release_physical` -- generalizing this file's own
+existing growth-region-only version of that exact loop (previously
+scoped to `PROCESS_STACK_GROWTH_FIRST_L3_INDEX..<PROCESS_STACK_L3_INDEX`)
+to the whole table. This is not merely equivalent to the array-based
+version -- it is strictly more robust, since it no longer trusts a
+caller-supplied `count` of how many pages were really mapped; the page
+table is the only thing that was ever authoritative, and now that is the
+only thing consulted. `process_image_cleanup` lost its `count` parameter
+entirely (updated at all ~26 call sites, mechanical); `process_image_record`
+and `process_image_context_index` (the array-index-computing pair) are
+gone; every `page_owner_transfer_index(...)` call site keeps calling it
+(still what discharges the page's linear ownership obligation) but no
+longer stores the returned index anywhere. Real `.bss`: `55,889,392` ->
+`3,460,592` bytes (~52 MiB recovered); `usable_ram_start` (issue #251's
+own symbol) moved from physical `0x3a4e000` (~58.4 MiB) down to `0x84e000`
+(~8.68 MiB).
+
+Also fixed in passing, same root cause: `process_image_handle_data_abort`'s
+stack-growth guard checked `process_image_active_page_count[root] >=
+BOOT_PAGE_COUNT`, a dead check (204800 was never reachable -- a full L3
+table already stops the loop first via `process_image_pte_read(l3_index)
+!= 0`) that should have read `PROCESS_STACK_LAYOUT_SIZE` (512) all along.
+
+**Second finding, more consequential than the footprint fix: the 512-page
+ceiling is real, not just a bookkeeping artifact, and the user's first
+stated goal ("no hardcoded per-process page ceiling") is not actually met
+yet.** Measured against real workloads already in this codebase: the musl
+BusyBox httpd maps 296 pages (57.8% of 512) and `kernel/mm/page.tkb`'s own
+header comment records a 331-page parent (64.6%). Linux/NetBSD have no
+equivalent cap -- both allocate page-table levels on demand
+(`pud_alloc`/`pmd_alloc`/`pte_alloc`; NetBSD's pmap equivalently). Split
+out to issue #254 (multi-level user page tables) rather than attempted
+here, since it is a real, separate piece of design work -- and the
+derive-from-the-page-table approach chosen above generalizes to a tree
+walk unchanged when #254 lands, which an array-index-bound-fix alone
+would not have.
+
+**Design reconciliation, from the user's own stated goals:** goal 2 (one
+`struct page`-equivalent home for per-page information, explicitly
+including future fields, for human readability -- "1つのモノを管理する
+データ構造は1つに収める") directly rules out two otherwise-attractive
+footprint ideas surfaced during the investigation: bitmap-ing
+`SlotMap`'s `occupant_generation` and an intrusive free list for
+`next_free`. Both would move struct fields into separate parallel arrays
+or into the managed pages themselves -- exactly the scattering goal 2
+exists to prevent. Recorded on the issue rather than acted on. Split out
+as their own issues instead: #255 (pack refined integers to their proven
+width -- the one footprint idea that shrinks fields *inside* a struct
+rather than dissolving the struct, judged the best fit for both goals 2
+and 3 together) and #256 (whether linear typing makes the generation
+counter unnecessary -- a research question, explicitly in tension with
+goal 2, not to be acted on before that tension is resolved).
+
+Hardware-verified: 26/26 `kernelcheck-rpi5` views, no regression --
+including `growable_pool`/`process_lifecycle`/`httpd_loader`/`child_exec`/
+`execve`, which exercise process mapping, unmapping, and re-exec across
+one boot, and `main.tkb`'s own `page_allocator_double_free_count() == 0`
+boot-time check (this is exactly the class of bug issue #207/#242's
+2026-08-07 entry found the hard way, via a multi-hour hardware bisection --
+worth being deliberate about here given this touches the same teardown
+path).
+
+Files: `kernel/mm/process_image.tkb` (arrays and their two support
+functions deleted, `process_image_cleanup` rewritten as a full L3-table
+walk, `count` parameter removed from all call sites, one dead
+`BOOT_PAGE_COUNT` bound corrected to `PROCESS_STACK_LAYOUT_SIZE`).

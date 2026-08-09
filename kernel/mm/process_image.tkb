@@ -11,15 +11,29 @@ use "kernel/fs/elf64.tkb";
 // kernel/fs/ext2/ext2.tkb's EXT2_MAX_FILE_SIZE stayed a literal. A generous
 // compile-time ceiling, not a razor-thin one (see process.tkb's own header
 // comment on KERNEL_PROCESS_MAX). Every array below is bookkeeping
-// (indices into page.tkb's shared pool, small counters/flags), not a
-// dedicated physical resource of its own -- unlike process.tkb's kernel
-// stacks or kernel/arch/arm64/mm/mmu.tkb's actual page-table memory, so
-// this stays a plain eagerly-sized array rather than a growable_pool.tkb
-// shadow pool; the real per-root physical cost lives entirely in mmu.tkb.
+// (small counters/flags, not indices into page.tkb's shared pool -- see
+// GitHub issue #253's 2026-08-09 comment for why per-root page ownership
+// moved off a dedicated array), not a dedicated physical resource of its
+// own -- unlike process.tkb's kernel stacks or kernel/arch/arm64/mm/
+// mmu.tkb's actual page-table memory, so this stays a plain eagerly-sized
+// array rather than a growable_pool.tkb shadow pool; the real per-root
+// physical cost lives entirely in mmu.tkb.
 const PROCESS_IMAGE_ROOT_MAX: usize = 16;
 
-private let mut image_page_indices: [usize; BOOT_PAGE_COUNT * PROCESS_IMAGE_ROOT_MAX];
-private let mut image_l3_indices: [usize; BOOT_PAGE_COUNT * PROCESS_IMAGE_ROOT_MAX];
+// GitHub issue #253: image_page_indices/image_l3_indices (each
+// [usize; BOOT_PAGE_COUNT * PROCESS_IMAGE_ROOT_MAX], ~25 MiB apiece at
+// BOOT_PAGE_COUNT=204800) used to record which physical page and which L3
+// slot each mapped page occupied, purely so process_image_cleanup could
+// release them later. Deleted outright: a process's user address space is
+// exactly one 512-entry L3 table (PROCESS_STACK_L3_INDEX = 511, every
+// other constant/loop bound in this file already agrees), so a mapped
+// page's L3 slot always still holds its own physical address at cleanup
+// time -- process_image_cleanup now reads that back directly by walking
+// the table (0..<512), the same idiom this file already used for the
+// stack-growth region alone, generalized to the whole table. Nothing
+// computed a page's L3 slot from anything other than a literal loop
+// variable already in scope at write time, so this loses no information
+// the array wasn't itself just echoing back.
 private let mut process_image_zero_page: [u8; PAGE_SIZE];
 private let mut clone_page_indices: [usize; 512];
 private let mut clone_l3_indices: [usize; 512];
@@ -47,18 +61,6 @@ fn process_image_root_index() -> {0..<PROCESS_IMAGE_ROOT_MAX as usize} {
     if (process_image_target_root < PROCESS_IMAGE_ROOT_MAX) {
         let root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} = process_image_target_root;
         return root;
-    }
-    return 0;
-}
-
-fn process_image_context_index(slot: usize)
-        -> {0..<BOOT_PAGE_COUNT * PROCESS_IMAGE_ROOT_MAX as usize} {
-    if (slot < BOOT_PAGE_COUNT && process_image_target_root < PROCESS_IMAGE_ROOT_MAX) {
-        let index: usize = process_image_target_root * BOOT_PAGE_COUNT + slot;
-        if (index < BOOT_PAGE_COUNT * PROCESS_IMAGE_ROOT_MAX) {
-            let checked: {0..<BOOT_PAGE_COUNT * PROCESS_IMAGE_ROOT_MAX as usize} = index;
-            return checked;
-        }
     }
     return 0;
 }
@@ -462,16 +464,6 @@ linear struct ProcessImagePages[image: usize] {
     private heap_limit: usize;
 }
 
-fn process_image_record(slot: usize,
-                        page_index: {0..<BOOT_PAGE_COUNT as usize},
-                        l3_index: usize) {
-    if (slot < BOOT_PAGE_COUNT) {
-        let context_slot: usize = process_image_context_index(slot);
-        image_page_indices[context_slot] = page_index;
-        image_l3_indices[context_slot] = l3_index;
-    }
-}
-
 must_use variant ProcessImageMapResult {
     InvalidImage;
     OutOfMemory;
@@ -797,20 +789,22 @@ fn process_image_load_page(page: borrow PageOwner[page],
     return ProcessImagePageLoadResult::Loaded;
 }
 
-fn process_image_cleanup(count: usize) {
-    for i: usize in 0..<count {
-        if (i < BOOT_PAGE_COUNT) {
-            let context_slot: usize = process_image_context_index(i);
-            let l3_index: usize = image_l3_indices[context_slot];
-            let page_index: usize = image_page_indices[context_slot];
-            if (l3_index < 512 && page_index < BOOT_PAGE_COUNT) {
-                process_image_pte_write(l3_index, 0);
-                process_image_pte_invalidate(l3_index);
-                page_transferred_release(page_index);
-            }
-        }
-    }
-    for l3_index: usize in PROCESS_STACK_GROWTH_FIRST_L3_INDEX..<PROCESS_STACK_L3_INDEX {
+// GitHub issue #253: no longer takes a "how many pages did the caller
+// think it mapped" count -- that was only ever needed to bound a lookup
+// into the now-deleted image_page_indices/image_l3_indices arrays. A
+// single walk of the whole (and only) 512-entry L3 table finds exactly
+// the same real PTEs regardless of how far a partial map attempt got,
+// generalizing the growth-region-only version of this loop that already
+// existed here (kept scoped to PROCESS_STACK_GROWTH_FIRST_L3_INDEX..<
+// PROCESS_STACK_L3_INDEX) to the full table, including
+// PROCESS_STACK_L3_INDEX itself (511, the top stack page, previously
+// covered only by the array-based loop above it). This is also strictly
+// more robust than the array-based version: it cannot be wrong about how
+// many pages were really mapped, because it never trusts a caller-supplied
+// count in the first place -- it reads the page table, which is the only
+// thing that was ever authoritative.
+fn process_image_cleanup() {
+    for l3_index: usize in 0..<PROCESS_STACK_LAYOUT_SIZE {
         let pte: usize = process_image_pte_read(l3_index);
         if (pte != 0) {
             page_transferred_release_physical(pte & 0xFFFFFFFFFFFFF000);
@@ -818,19 +812,6 @@ fn process_image_cleanup(count: usize) {
             process_image_pte_invalidate(l3_index);
         }
     }
-    // Growth pages are ALREADY released by the image_page_indices loop
-    // above: process_image_handle_data_abort() records every page it faults
-    // in through process_image_record() and bumps
-    // process_image_active_page_count, which is exactly the `count` this
-    // function is called with. Releasing them a second time from
-    // process_image_growth_page_indices here was a double free -- harmless
-    // while the page allocator's release was the idempotent `used[i] = 0`,
-    // silently fatal once it became a real free list (issue #207): the same
-    // index lands on the free chain twice and two later allocations alias
-    // one physical page. The growth record itself is still needed by
-    // process_clone_vm_release_growth_pages() (the clone/reap path, whose
-    // child pages are NOT in clone_page_indices), so only the redundant
-    // release goes; the count is still reset below.
     let root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} = process_image_root_index();
     process_image_growth_page_count[root] = 0;
 }
@@ -860,7 +841,15 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
         return false;
     }
     for l3_index: usize in fault_index..<process_image_stack_lowest_l3[root] {
-        if (process_image_active_page_count[root] >= BOOT_PAGE_COUNT ||
+        // GitHub issue #253: was `>= BOOT_PAGE_COUNT`, a stale bound from
+        // when this guarded an index into the now-deleted
+        // image_page_indices/image_l3_indices arrays. The real ceiling a
+        // process's active page count can never exceed is
+        // PROCESS_STACK_LAYOUT_SIZE (512, this file's single L3 table) --
+        // BOOT_PAGE_COUNT (204800) never actually fired this guard, since
+        // process_image_pte_read(l3_index) != 0 below already stops a full
+        // table before active_page_count could reach it.
+        if (process_image_active_page_count[root] >= PROCESS_STACK_LAYOUT_SIZE ||
             process_image_pte_read(l3_index) != 0) {
             return false;
         }
@@ -873,8 +862,6 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
                 process_image_pte_write(l3_index, phys | USER_RW_XN_FLAGS);
                 process_image_pte_invalidate(l3_index);
                 let page_index = page_owner_transfer_index(stack_page);
-                process_image_record(
-                    process_image_active_page_count[root], page_index, l3_index);
                 // Appended at the next free position, NOT at a slot derived
                 // from l3_index: process_clone_vm_release_growth_pages()
                 // walks 0..<growth_page_count sequentially, and the old
@@ -902,16 +889,17 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
 }
 
 fn process_image_unmap(pages: sink ProcessImagePages[image]) {
+    // GitHub issue #253: no longer needs to compute which count to pass to
+    // process_image_cleanup (it takes none now, walking the L3 table
+    // directly) -- only the state-reset side effects below still matter.
     let root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} = process_image_root_index();
-    let mut count: usize = pages.count;
     if (process_image_stack_growth_active[root] ||
         process_image_active_page_count[root] > pages.count) {
-        count = process_image_active_page_count[root];
         process_image_stack_growth_active[root] = false;
         process_image_active_page_count[root] = 0;
         process_image_stack_lowest_l3[root] = PROCESS_STACK_L3_INDEX;
     }
-    process_image_cleanup(count);
+    process_image_cleanup();
     process_image_target_root = 0;
 }
 
@@ -920,7 +908,7 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
                               already_mapped: usize)
         -> ProcessImageSegmentsResult {
     if (plan.extent > 0x200000 || load_bias > 0x200000 - plan.extent) {
-        process_image_cleanup(already_mapped);
+        process_image_cleanup();
         return ProcessImageSegmentsResult::OutOfMemory;
     }
     let mut mapped: usize = already_mapped;
@@ -933,7 +921,7 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
             // PF_R=4 (rodata), PF_R|PF_X=5 (text), PF_R|PF_W=6 (data). A
             // writable+executable combination is never accepted.
             if (header.flags != 4 && header.flags != 5 && header.flags != 6) {
-                process_image_cleanup(mapped);
+                process_image_cleanup();
                 return ProcessImageSegmentsResult::Invalid;
             }
             let virtual_address: usize =
@@ -943,17 +931,17 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
             let last_byte: usize = virtual_address + memory_size;
             let last_page: usize = (last_byte + 4095) / PAGE_SIZE;
             if (last_page > 512) {
-                process_image_cleanup(mapped);
+                process_image_cleanup();
                 return ProcessImageSegmentsResult::OutOfMemory;
             }
             for l3_index: usize in first_page..<last_page {
                 if (process_image_pte_read(l3_index) != 0) {
-                    process_image_cleanup(mapped);
+                    process_image_cleanup();
                     return ProcessImageSegmentsResult::Invalid;
                 }
                 match page_alloc() {
                     PageAllocResult::OutOfMemory => {
-                        process_image_cleanup(mapped);
+                        process_image_cleanup();
                         return ProcessImageSegmentsResult::OutOfMemory;
                     }
                     PageAllocResult::Allocated(page) => {
@@ -962,7 +950,7 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
                                     page, plan, header, load_bias, l3_index) {
                                 ProcessImagePageLoadResult::Invalid => {
                                     page_free(page);
-                                    process_image_cleanup(mapped);
+                                    process_image_cleanup();
                                     return ProcessImageSegmentsResult::Invalid;
                                 }
                                 ProcessImagePageLoadResult::Loaded => {
@@ -977,16 +965,20 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
                                     }
                                     process_image_pte_write(l3_index, phys | flags);
                                     process_image_pte_invalidate(l3_index);
-                                    let page_index =
-                                        page_owner_transfer_index(page);
-                                    process_image_record(
-                                        mapped, page_index, l3_index);
+                                    // GitHub issue #253: the returned index no
+                                    // longer needs recording anywhere -- this
+                                    // page's own L3 PTE (just written above)
+                                    // is process_image_cleanup's only source
+                                    // of truth now. The call itself still
+                                    // matters: it is what discharges `page`'s
+                                    // linear ownership obligation.
+                                    page_owner_transfer_index(page);
                                     mapped = mapped + 1;
                                 }
                             }
                         } else {
                             page_free(page);
-                            process_image_cleanup(mapped);
+                            process_image_cleanup();
                             return ProcessImageSegmentsResult::OutOfMemory;
                         }
                     }
@@ -1026,18 +1018,18 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                         heap_first_page + PROCESS_HEAP_PAGE_COUNT;
                     if (total != 195 ||
                         heap_last_page >= PROCESS_DYNAMIC_STACK_FIRST_L3_INDEX) {
-                        process_image_cleanup(total);
+                        process_image_cleanup();
                         return ProcessImagePairProbeResult::Invalid;
                     }
                     let mut mapped: usize = total;
                     for l3_index: usize in heap_first_page..<heap_last_page {
                         if (process_image_pte_read(l3_index) != 0) {
-                            process_image_cleanup(mapped);
+                            process_image_cleanup();
                             return ProcessImagePairProbeResult::Invalid;
                         }
                         match page_alloc() {
                             PageAllocResult::OutOfMemory => {
-                                process_image_cleanup(mapped);
+                                process_image_cleanup();
                                 return ProcessImagePairProbeResult::Invalid;
                             }
                             PageAllocResult::Allocated(heap_page) => {
@@ -1049,13 +1041,13 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                                 process_image_pte_invalidate(l3_index);
                                 if (mapped >= 512) {
                                     page_free(heap_page);
-                                    process_image_cleanup(mapped);
+                                    process_image_cleanup();
                                     return ProcessImagePairProbeResult::Invalid;
                                 }
-                                let page_index =
-                                    page_owner_transfer_index(heap_page);
-                                process_image_record(
-                                    mapped, page_index, l3_index);
+                                // GitHub issue #253: see the segments-loop
+                                // call site above for why the returned index
+                                // is discarded, not recorded.
+                                page_owner_transfer_index(heap_page);
                                 mapped = mapped + 1;
                             }
                         }
@@ -1065,12 +1057,12 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                     // top page and map a small contiguous stack below it.
                     for l3_index: usize in PROCESS_DYNAMIC_STACK_FIRST_L3_INDEX..<PROCESS_STACK_L3_INDEX {
                         if (process_image_pte_read(l3_index) != 0) {
-                            process_image_cleanup(mapped);
+                            process_image_cleanup();
                             return ProcessImagePairProbeResult::Invalid;
                         }
                         match page_alloc() {
                             PageAllocResult::OutOfMemory => {
-                                process_image_cleanup(mapped);
+                                process_image_cleanup();
                                 return ProcessImagePairProbeResult::Invalid;
                             }
                             PageAllocResult::Allocated(stack_page) => {
@@ -1081,18 +1073,20 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                                 process_image_pte_invalidate(l3_index);
                                 if (mapped >= 512) {
                                     page_free(stack_page);
-                                    process_image_cleanup(mapped);
+                                    process_image_cleanup();
                                     return ProcessImagePairProbeResult::Invalid;
                                 }
-                                let page_index = page_owner_transfer_index(stack_page);
-                                process_image_record(mapped, page_index, l3_index);
+                                // GitHub issue #253: see the segments-loop
+                                // call site above for why the returned index
+                                // is discarded, not recorded.
+                                page_owner_transfer_index(stack_page);
                                 mapped = mapped + 1;
                             }
                         }
                     }
                     match page_alloc() {
                         PageAllocResult::OutOfMemory => {
-                            process_image_cleanup(mapped);
+                            process_image_cleanup();
                             return ProcessImagePairProbeResult::Invalid;
                         }
                         PageAllocResult::Allocated(stack) => {
@@ -1100,7 +1094,7 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                                     stack, primary, interpreter_bias) {
                                 ProcessImageStackResult::Invalid => {
                                     page_free(stack);
-                                    process_image_cleanup(mapped);
+                                    process_image_cleanup();
                                     return ProcessImagePairProbeResult::Invalid;
                                 }
                                 ProcessImageStackResult::Ready => {
@@ -1113,14 +1107,13 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                                     if (mapped >= 512) {
                                         process_image_pte_write(PROCESS_STACK_L3_INDEX, 0);
                                         page_free(stack);
-                                        process_image_cleanup(mapped);
+                                        process_image_cleanup();
                                         return ProcessImagePairProbeResult::Invalid;
                                     }
-                                    let page_index =
-                                        page_owner_transfer_index(stack);
-                                    process_image_record(
-                                        mapped, page_index,
-                                        PROCESS_STACK_L3_INDEX);
+                                    // GitHub issue #253: see the segments-loop
+                                    // call site above for why the returned
+                                    // index is discarded, not recorded.
+                                    page_owner_transfer_index(stack);
                                     mapped = mapped + 1;
                                 }
                             }
@@ -1143,7 +1136,7 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                         };
                         return ProcessImagePairProbeResult::Ready(pages);
                     }
-                    process_image_cleanup(mapped);
+                    process_image_cleanup();
                     return ProcessImagePairProbeResult::Invalid;
                 }
             }
@@ -1175,17 +1168,17 @@ fn process_image_map_current(plan: DistroElfLoadPlan,
     let heap_first_page: usize = (plan.extent + PAGE_SIZE - 1) / PAGE_SIZE;
     let heap_last_page: usize = heap_first_page + PROCESS_HEAP_PAGE_COUNT;
     if (heap_last_page >= PROCESS_STACK_GROWTH_FIRST_L3_INDEX) {
-        process_image_cleanup(mapped);
+        process_image_cleanup();
         return ProcessImageMapResult::OutOfMemory;
     }
     for l3_index: usize in heap_first_page..<heap_last_page {
         if (process_image_pte_read(l3_index) != 0) {
-            process_image_cleanup(mapped);
+            process_image_cleanup();
             return ProcessImageMapResult::InvalidImage;
         }
         match page_alloc() {
             PageAllocResult::OutOfMemory => {
-                process_image_cleanup(mapped);
+                process_image_cleanup();
                 return ProcessImageMapResult::OutOfMemory;
             }
             PageAllocResult::Allocated(heap_page) => {
@@ -1194,26 +1187,27 @@ fn process_image_map_current(plan: DistroElfLoadPlan,
                 let phys: usize = page_physical_address(heap_page);
                 process_image_pte_write(l3_index, phys | USER_RW_XN_FLAGS);
                 process_image_pte_invalidate(l3_index);
-                let page_index = page_owner_transfer_index(heap_page);
-                process_image_record(mapped, page_index, l3_index);
+                // GitHub issue #253: see the segments-loop call site above
+                // for why the returned index is discarded, not recorded.
+                page_owner_transfer_index(heap_page);
                 mapped = mapped + 1;
             }
         }
     }
     if (process_image_pte_read(PROCESS_STACK_L3_INDEX) != 0) {
-        process_image_cleanup(mapped);
+        process_image_cleanup();
         return ProcessImageMapResult::InvalidImage;
     }
     match page_alloc() {
         PageAllocResult::OutOfMemory => {
-            process_image_cleanup(mapped);
+            process_image_cleanup();
             return ProcessImageMapResult::OutOfMemory;
         }
         PageAllocResult::Allocated(stack) => {
             match process_image_prepare_stack(stack, plan, argv, argc) {
                 ProcessImageStackResult::Invalid => {
                     page_free(stack);
-                    process_image_cleanup(mapped);
+                    process_image_cleanup();
                     return ProcessImageMapResult::InvalidImage;
                 }
                 ProcessImageStackResult::Ready => {
@@ -1221,9 +1215,10 @@ fn process_image_map_current(plan: DistroElfLoadPlan,
                     process_image_pte_write(PROCESS_STACK_L3_INDEX,
                                              phys | USER_RW_XN_FLAGS);
                     process_image_pte_invalidate(PROCESS_STACK_L3_INDEX);
-                    let page_index = page_owner_transfer_index(stack);
-                    process_image_record(mapped, page_index,
-                                         PROCESS_STACK_L3_INDEX);
+                    // GitHub issue #253: see the segments-loop call site
+                    // above for why the returned index is discarded, not
+                    // recorded.
+                    page_owner_transfer_index(stack);
                     mapped = mapped + 1;
                 }
             }
