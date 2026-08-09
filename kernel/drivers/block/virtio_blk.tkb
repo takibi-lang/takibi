@@ -1,0 +1,161 @@
+// QEMU virtio-blk legacy MMIO backend.  This deliberately follows the
+// descriptor/avail/used layout used by kernel/drivers/net/virtio_net.tkb.
+
+const VIRTIO_BLK_MMIO_FIRST: i32 = 0x0a000000;
+const VIRTIO_BLK_MMIO_STRIDE: i32 = 0x200;
+const VIRTIO_BLK_MMIO_SLOTS: i32 = 32;
+const VIRTIO_BLK_MAGIC: u32 = 0x74726976;
+const VIRTIO_BLK_ID: u32 = 2;
+const VIRTIO_BLK_DEVICE_ID: i32 = 0x08;
+const VIRTIO_BLK_GUEST_FEATURES: i32 = 0x20;
+const VIRTIO_BLK_GUEST_PAGE_SIZE: i32 = 0x28;
+const VIRTIO_BLK_QUEUE_SEL: i32 = 0x30;
+const VIRTIO_BLK_QUEUE_NUM: i32 = 0x38;
+const VIRTIO_BLK_QUEUE_ALIGN: i32 = 0x3c;
+const VIRTIO_BLK_QUEUE_PFN: i32 = 0x40;
+const VIRTIO_BLK_QUEUE_NOTIFY: i32 = 0x50;
+const VIRTIO_BLK_STATUS: i32 = 0x70;
+const VIRTIO_BLK_PAGE_SIZE: isize = 4096;
+const VIRTIO_QNUM: isize = 8;
+const VIRTIO_BLK_DESC_F_NEXT: i32 = 1;
+const VIRTIO_BLK_DESC_F_WRITE: i32 = 2;
+const VIRTIO_BLK_T_IN: u32 = 0;
+const VIRTIO_BLK_T_OUT: u32 = 1;
+
+struct packed VirtioBlkDesc {
+    addr: usize;
+    len: u32;
+    flags: u16;
+    next: u16;
+}
+struct packed VirtioBlkAvail {
+    flags: u16;
+    idx: u16;
+    ring: [u16; VIRTIO_QNUM];
+}
+struct packed VirtioBlkUsedElem {
+    id: u32;
+    len: u32;
+}
+struct packed VirtioBlkUsed {
+    flags: u16;
+    idx: u16;
+    ring: [VirtioBlkUsedElem; VIRTIO_QNUM];
+}
+struct packed VirtioBlkRequest {
+    request_type: u32;
+    reserved: u32;
+    sector: u64;
+}
+
+let mut virtio_blk_base: i32 = 0;
+let mut virtio_blk_ready: bool;
+let mut virtio_blk_queue: [u8; 2 * VIRTIO_BLK_PAGE_SIZE] align(4096);
+let mut virtio_blk_request_buf: [u8; 16];
+let mut virtio_blk_status_buf: [u8; 1];
+let mut virtio_blk_used_seen: isize;
+
+fn virtio_blk_reg(offset: i32) -> *io i32 {
+    return (virtio_blk_base + offset) as *io i32;
+}
+
+fn virtio_blk_setup_queue() {
+    *(virtio_blk_reg(VIRTIO_BLK_QUEUE_SEL)) = 0;
+    *(virtio_blk_reg(VIRTIO_BLK_QUEUE_NUM)) = VIRTIO_QNUM as i32;
+    *(virtio_blk_reg(VIRTIO_BLK_QUEUE_ALIGN)) = VIRTIO_BLK_PAGE_SIZE as i32;
+    let address: usize = (virtio_blk_queue as *u8) as usize;
+    *(virtio_blk_reg(VIRTIO_BLK_QUEUE_PFN)) =
+        (address / (VIRTIO_BLK_PAGE_SIZE as usize)) as i32;
+}
+
+fn virtio_blk_init() -> bool {
+    if (virtio_blk_ready) { return true; }
+    for i in 0..<VIRTIO_BLK_MMIO_SLOTS {
+        let base: i32 = VIRTIO_BLK_MMIO_FIRST + i * VIRTIO_BLK_MMIO_STRIDE;
+        let magic: *io u32 = base as *io u32;
+        let device: *io u32 = (base + VIRTIO_BLK_DEVICE_ID) as *io u32;
+        if (*magic == VIRTIO_BLK_MAGIC && *device == VIRTIO_BLK_ID) {
+            virtio_blk_base = base;
+            *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 0;
+            *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 1;
+            *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 3;
+            *(virtio_blk_reg(VIRTIO_BLK_GUEST_FEATURES)) = 0;
+            *(virtio_blk_reg(VIRTIO_BLK_GUEST_PAGE_SIZE)) = VIRTIO_BLK_PAGE_SIZE as i32;
+            virtio_blk_setup_queue();
+            *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 7;
+            virtio_blk_used_seen = 0;
+            virtio_blk_ready = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn virtio_blk_submit(request_type: u32, sector: u32, buffer: *u8,
+                     write: bool) -> bool {
+    if (virtio_blk_init() == false) { return false; }
+    let request: *VirtioBlkRequest = virtio_blk_request_buf as *VirtioBlkRequest;
+    request.request_type = request_type;
+    request.reserved = 0;
+    request.sector = sector as u64;
+    virtio_blk_status_buf[0] = 0xff;
+    let queue: *u8 = virtio_blk_queue as *u8;
+    let descs: *VirtioBlkDesc = queue as *VirtioBlkDesc;
+    let mut d0: VirtioBlkDesc = { (virtio_blk_request_buf as *u8) as usize,
+        sizeof(VirtioBlkRequest) as u32, VIRTIO_BLK_DESC_F_NEXT as u16, 1 };
+    descs[0] = d0;
+    let mut data_flags: i32 = 0;
+    if (write == false) { data_flags = VIRTIO_BLK_DESC_F_WRITE; }
+    let mut d1: VirtioBlkDesc = { buffer as usize, 512,
+        data_flags as u16, 2 };
+    descs[1] = d1;
+    let mut d2: VirtioBlkDesc = { (virtio_blk_status_buf as *u8) as usize, 1,
+        VIRTIO_BLK_DESC_F_WRITE as u16, 0 };
+    descs[2] = d2;
+    let avail: *VirtioBlkAvail =
+        (queue + VIRTIO_QNUM * (sizeof(VirtioBlkDesc) as isize))
+        as *VirtioBlkAvail;
+    let slot: isize = (avail.idx as isize) % VIRTIO_QNUM;
+    let ring: *u16 = (queue + VIRTIO_QNUM *
+        (sizeof(VirtioBlkDesc) as isize) +
+        (offsetof(VirtioBlkAvail, ring) as isize))
+        as *u16;
+    ring[slot] = 0;
+    avail.idx = avail.idx + 1;
+    dma_publish();
+    *(virtio_blk_reg(VIRTIO_BLK_QUEUE_NOTIFY)) = 0;
+
+    let mut spins: isize = 0;
+    while (spins < 10000000 &&
+           virtio_blk_used_seen == ((queue + VIRTIO_BLK_PAGE_SIZE)
+                                    as *io VirtioBlkUsed).idx as isize) {
+        spins = spins + 1;
+    }
+    if (virtio_blk_used_seen == ((queue + VIRTIO_BLK_PAGE_SIZE)
+                                 as *io VirtioBlkUsed).idx as isize) {
+        return false;
+    }
+    dma_consume();
+    virtio_blk_used_seen = virtio_blk_used_seen + 1;
+    return virtio_blk_status_buf[0] == 0;
+}
+
+fn virtio_blk_read_sector(sector: u32, destination: *u8) -> bool {
+    return virtio_blk_submit(VIRTIO_BLK_T_IN, sector, destination, false);
+}
+
+fn virtio_blk_write_sector(sector: u32, source: *u8) -> bool {
+    return virtio_blk_submit(VIRTIO_BLK_T_OUT, sector, source, true);
+}
+
+fn virtio_blk_probe() -> bool {
+    let mut probe: [u8; 512];
+    return virtio_blk_read_sector(0, probe as *u8);
+}
+
+fn virtio_blk_capacity_sectors() -> usize {
+    if (virtio_blk_init() == false) { return 0; }
+    let low: *io u32 = (virtio_blk_base + 0x100) as *io u32;
+    let high: *io u32 = (virtio_blk_base + 0x104) as *io u32;
+    return ((*low as u64) | ((*high as u64) << 32)) as usize;
+}

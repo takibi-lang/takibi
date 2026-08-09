@@ -14,7 +14,8 @@ let mut kernel_ext2_image: [u8; KERNEL_EXT2_IMAGE_LEN] =
     embed_file("kernel/build/user/ext2.img");
 
 struct KernelBlockDevice {
-    // 0 = embedded memory image, 1 = USB Mass Storage. Kept as a private
+    // 0 = embedded memory image, 1 = USB Mass Storage, 2 = QEMU virtio-blk.
+    // Kept as a private
     // representation byte because the current backend rejects matching an
     // enum stored in a struct field when lowering LLVM IR.
     private backend: u8;
@@ -49,6 +50,7 @@ fn usb_mass_storage_block_device() -> KernelBlockDeviceResult {
         DiskIoResult::Err(error) => {
             return KernelBlockDeviceResult::Invalid;
         }
+
         DiskIoResult::Ok => { }
     }
     // Deliberately expose only the first 1 MiB. This is exactly the fixture
@@ -57,6 +59,18 @@ fn usb_mass_storage_block_device() -> KernelBlockDeviceResult {
     let mut device: KernelBlockDevice = {
         1, 0, 1048576
     };
+    return KernelBlockDeviceResult::Ready(device);
+}
+
+fn virtio_block_device_ext2() -> KernelBlockDeviceResult {
+    let sectors: usize = virtio_blk_capacity_sectors();
+    if (sectors == 0 || sectors % 2 != 0) {
+        return memory_block_device_ext2();
+    }
+    let mut device: KernelBlockDevice = { 2, 0, sectors / 2 };
+    if (virtio_blk_probe() == false) {
+        return memory_block_device_ext2();
+    }
     return KernelBlockDeviceResult::Ready(device);
 }
 
@@ -74,17 +88,24 @@ fn block_read(device: KernelBlockDevice, block: usize,
             };
             slice_copy(destination[0..<KERNEL_BLOCK_SIZE], source_bytes);
             return BlockIoResult::Ok;
+    } else if (device.backend == 1) {
+        let sector: u32 = (block * 2) as u32;
+        let target: *u8 = destination as *u8;
+        match disk_read(sector, target) {
+            DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
+            DiskIoResult::Ok => { }
+        }
+        match disk_read(sector + 1, target + 512) {
+            DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
+            DiskIoResult::Ok => { return BlockIoResult::Ok; }
+        }
     } else {
-            let sector: u32 = (block * 2) as u32;
-            let target: *u8 = destination as *u8;
-            match disk_read(sector, target) {
-                DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
-                DiskIoResult::Ok => { }
-            }
-            match disk_read(sector + 1, target + 512) {
-                DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
-                DiskIoResult::Ok => { return BlockIoResult::Ok; }
-            }
+        let target: *u8 = destination as *u8;
+        if (virtio_blk_read_sector((block * 2) as u32, target) == false ||
+            virtio_blk_read_sector((block * 2 + 1) as u32, target + 512) == false) {
+            return BlockIoResult::Invalid;
+        }
+        return BlockIoResult::Ok;
     }
 }
 
@@ -102,22 +123,33 @@ fn block_write(device: KernelBlockDevice, block: usize,
             };
             slice_copy(destination_bytes, source[0..<KERNEL_BLOCK_SIZE]);
             return BlockIoResult::Ok;
+    } else if (device.backend == 1) {
+        let sector: u32 = (block * 2) as u32;
+        let bytes: *u8 = source as *u8;
+        match disk_write(sector, bytes) {
+            DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
+            DiskIoResult::Ok => { }
+        }
+        match disk_write(sector + 1, bytes + 512) {
+            DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
+            DiskIoResult::Ok => { return BlockIoResult::Ok; }
+        }
     } else {
-            let sector: u32 = (block * 2) as u32;
-            let bytes: *u8 = source as *u8;
-            match disk_write(sector, bytes) {
-                DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
-                DiskIoResult::Ok => { }
-            }
-            match disk_write(sector + 1, bytes + 512) {
-                DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
-                DiskIoResult::Ok => { return BlockIoResult::Ok; }
-            }
+        let bytes: *u8 = source as *u8;
+        if (virtio_blk_write_sector((block * 2) as u32, bytes) == false ||
+            virtio_blk_write_sector((block * 2 + 1) as u32, bytes + 512) == false) {
+            return BlockIoResult::Invalid;
+        }
+        return BlockIoResult::Ok;
     }
 }
 
 fn block_count(device: KernelBlockDevice) -> usize {
     return device.length / KERNEL_BLOCK_SIZE;
+}
+
+fn block_device_is_virtio(device: KernelBlockDevice) -> bool {
+    return device.backend == 2;
 }
 
 fn block_copy(source: KernelBlockDevice, destination: KernelBlockDevice,

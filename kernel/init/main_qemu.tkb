@@ -16,8 +16,8 @@
 // kernel/tests/qemu/views/*.expected can mirror kernel/tests/rpi5/views/'s
 // content directly rather than inventing new prose.
 //
-// Milestone scope (M1, GitHub issue #237): the hardware-independent
-// self-test bundle only -- no network, no filesystem. Network (kernel/net/
+// Milestone scope (GitHub issue #237): the hardware-independent
+// self-test bundle plus QEMU virtio-net and virtio-blk storage.
 // tcp.tkb and friends) and filesystem (kernel/fs/ext2/ext2.tkb) code is
 // still part of this build's compile unit (kernel/kernel/syscall.tkb's own
 // `use` graph pulls both in unconditionally, for its own real file/socket
@@ -498,8 +498,8 @@ fn main() {
         }
     }
 
-    // GitHub issue #237 M3: filesystem/BusyBox/HTTPd-loader milestone via
-    // the memory-backed ext2 device -- kernel/init/main.tkb (RPi5) already
+    // Filesystem/BusyBox/HTTPd-loader milestone via the QEMU virtio-blk
+    // device. kernel/init/main.tkb (RPi5) already
     // mounts memory_block_device_ext2() a SECOND time for this exact test
     // (its own USB block above it provisions+mounts a separate USB-backed
     // copy only for USB-specific write/resize/create coverage), so this
@@ -520,11 +520,16 @@ fn main() {
     // fixture (kernel_syscall_connected_fixture_start() and friends). All
     // three are real network dependencies, planned for the M4 virtio-net
     // milestone, not omissions.
-    match memory_block_device_ext2() {
+    match virtio_block_device_ext2() {
         KernelBlockDeviceResult::Invalid => {
             kernel_boot_log("ext2 image: invalid\n");
         }
         KernelBlockDeviceResult::Ready(device) => {
+            if (block_device_is_virtio(device)) {
+                kernel_boot_log("virtio blk: ext2 backend ready\n");
+            } else {
+                kernel_boot_log("virtio blk: unavailable, memory fallback\n");
+            }
             match ext2_mount(device) {
                 Ext2MountResult::Invalid => {
                     kernel_boot_log("ext2 mount: invalid\n");
