@@ -1,3 +1,5 @@
 process table: slots=16 stacks=4096 generation reuse safe
 fd table: processes=2 fds=16 shared-offset refs clean
 scheduler: rr immediate=2 deferred=1 staged
+resources: no double free
+resources: pages=0
