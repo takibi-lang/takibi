@@ -45,7 +45,11 @@ the complete address space can be unmapped and reclaimed.
 The current RPi5 kernel includes:
 
 - typed page allocation, AArch64 stage-1 page tables, process images, and
-  deterministic teardown;
+  deterministic teardown, backed by real physical RAM addressed directly
+  (`kernel/mm/page.tkb`) and sized against the board's own real detected
+  RAM (`kernel/platform/rpi5/mailbox.tkb`, a VideoCore firmware query,
+  boot-logged but not yet the allocator's own live bound -- see GitHub
+  issue #247/#251/#250);
 - ELF64 validation, static PIE loading, interpreter-aware PIE plus musl
   loading, initial Linux stack and auxv construction, `brk`, and bounded
   anonymous `mmap` behavior;

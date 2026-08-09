@@ -2168,3 +2168,31 @@ investigations behind any of these, see `HISTORY.md`.
   -- exact equality? prefix? a runtime length check? -- is unresolved).
   Deferred until a concrete case needs one rather than designed
   speculatively now.
+- **Indexing (`arr[i]`, `arr[lo..<hi]`) requires a bare identifier
+  immediately before `[` -- not any general expression.**
+  `lib/parser.mly`'s `Index`/`SliceOf` productions are `id = IDENT
+  LBRACKET ...`, and `lib/ast.ml`'s `Index of ident * expr` mirrors that
+  in the AST. `s.field[i]` (a struct field, even a non-generic one) is
+  therefore a hard parser-level `Syntax error`, not a type error --
+  `s.field` has already reduced to a `FieldGet` expression by the time
+  `[` is reached, and only a bare `Var` can feed `Index`. The standard
+  workaround, used throughout `kernel/`, is `let local = s.field; local[i]`
+  (see "issue #15" comments at nearly every struct-embedded-array call
+  site) -- but note this workaround ALSO loses the field's array-ness
+  (see `Structs`' own array-field-decay note): `local` binds as `*T`, not
+  `[T; N]`, so the resulting indexing is raw-pointer (`isize`, unchecked),
+  not the checked `usize` form a real local array gets. Tracked as GitHub
+  issue #217 (which also covers the decay problem); confirmed to extend
+  at least one level further than that issue's stated acceptance
+  criterion (`s.field[i].field`, an array of structs, not just an array
+  of primitives -- see that issue's 2026-08-09 comment).
+- **A generic call's own value parameter cannot be inferred from
+  `&s.field` when `s`'s type is a plain, non-generic struct**, even
+  though the field's own declared type is already fully concrete and
+  needs no substitution. `lib/monomorphize.ml`'s `derive_arg_type` only
+  handles `&s.field` when `s` itself is a `TypeGenericInst` (substituting
+  the outer instance's concrete arguments into the field's template
+  type, e.g. `SlotMap(N)`'s `core: FreelistCore(N)`); a plain struct
+  falls through to "cannot infer", requiring the same explicit-local-
+  binding workaround as the indexing gap above, for an unrelated reason
+  (monomorphization, not parsing). Tracked as GitHub issue #259.
