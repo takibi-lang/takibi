@@ -15636,3 +15636,77 @@ Files: `kernel/mm/user_memory.tkb` (`user_va_find_free_run` added,
 `USER_PROBE_L3_INDEX` deleted, probe reworked to take a base index),
 `kernel/kernel/syscall.tkb` (`SYSCALL_SUBSET_PROBE_L3_INDEX` deleted,
 probe claims its page through the same allocator).
+
+## 2026-08-09: GitHub Issue #258 Step 2 -- Address-Space Layout Becomes
+## Per-Process Data; Four Parallel Arrays Become One Struct
+
+Step 1 removed the two probe constants by deriving free virtual pages
+from the page table. Step 2 handles the five that a scan genuinely cannot
+derive -- "the stack goes at the top" is a choice, not a discoverable
+fact -- plus a related consolidation that turned out to belong in the
+same change.
+
+**Why the parallel arrays came along.** `kernel/mm/process_image.tkb`
+already had four per-root arrays (`process_image_active_page_count`,
+`_stack_lowest_l3`, `_stack_growth_active`, `_growth_page_count`, 47 uses
+between them) describing the same thing the new layout fields would:
+per-address-space state. Adding a fifth parallel array for the layout
+would have made the scattering worse, so all seven fields now live in one
+`struct ProcessLayout`, `[ProcessLayout; PROCESS_IMAGE_ROOT_MAX]` -- the
+same "one managed thing, one struct" rule `kernel/mm/page.tkb`'s
+`PageMeta` follows (issue #253).
+
+**Constants resolved, individually.**
+- `PROCESS_STACK_L3_INDEX` = 511: **derived, not stored** -- the initial
+  stack always sits on the address space's last page, so
+  `process_stack_top_page()` returns `USER_SPACE_PAGE_COUNT - 1`. (A
+  `const` cannot express this: a top-level const initializer may not do
+  arithmetic on another file's identifier.)
+- `PROCESS_STACK_GROWTH_FIRST_L3_INDEX` = 448 and
+  `PROCESS_DYNAMIC_STACK_FIRST_L3_INDEX` = 504: these were always the
+  *same concept* -- the lowest page the stack may occupy -- spelled as
+  two globals because the static-PIE and dynamic/musl loader paths wanted
+  different values, each consulted from its own set of sites. Now one
+  field, `ProcessLayout.stack_low_page`, seeded from two named defaults
+  at the four places an address space is set up (static map, dynamic map,
+  clone, and the clone-growth probe). A clone **inherits its parent's**
+  value rather than re-reading a global, which is the point of the layout
+  being data.
+- `PROCESS_HEAP_PAGE_COUNT` = 128: became `ProcessLayout.heap_page_count`,
+  seeded from `PROCESS_HEAP_PAGES_DEFAULT` at the same four sites.
+- `USER_RANGE_MAX_INDEX` = 512: this is the address space's *extent*, a
+  property of the MMU wiring rather than of any process, so it moved to
+  `kernel/mm/address_space.tkb` as `USER_SPACE_PAGE_COUNT`, next to
+  `USER_TEXT_VA`. It had been spelled out independently in two files.
+
+**A real conflation found and fixed along the way, of my own making.**
+`PROCESS_STACK_LAYOUT_SIZE = 512` meant *bytes* (how much room at the top
+of the initial stack page is reserved for argv/envp/auxv) -- but issue
+#253 had additionally reused it as the L3 *table size* in
+`process_image_cleanup`'s new full-table walk. Two different quantities
+under one name, harmless only because both happened to be 512. Split:
+`PROCESS_STACK_LAYOUT_BYTES` for the byte meaning, `USER_SPACE_PAGE_COUNT`
+for the page meaning.
+
+**Honest note on the issue's own closing bar.** It said all seven
+constants would be "gone from `kernel/`". Three are genuinely gone
+(`PROCESS_STACK_L3_INDEX` derived, `USER_RANGE_MAX_INDEX` deduplicated,
+and step 1's two probe indices). The rest survive as *named defaults*
+consulted once each where an address space is created, rather than as
+decision points consulted from a dozen scattered sites. A layout has to
+come from somewhere -- Linux has `STACK_TOP`/`TASK_SIZE` for the same
+reason -- so treating "seeds an address space" and "is consulted as a
+scattered decision point" as the same thing would have been contorting
+the code to satisfy a literal reading of a bar I wrote myself.
+
+Hardware-verified: 26/26 `kernelcheck-rpi5` views, no regression --
+including `process_lifecycle`, `child_exec`, `httpd_loader` and
+`shell_script`, which between them exercise the static map path, the
+dynamic/musl map path, clone, and stack-growth faulting, i.e. every
+consumer of the layout fields this change introduced.
+
+Files: `kernel/mm/process_image.tkb` (ProcessLayout struct; four arrays
+and three layout constants folded into it; `PROCESS_STACK_LAYOUT_BYTES`
+renamed), `kernel/mm/address_space.tkb` (`USER_SPACE_PAGE_COUNT` added),
+`kernel/mm/user_memory.tkb` and `kernel/kernel/syscall.tkb`
+(`USER_RANGE_MAX_INDEX` replaced by it).

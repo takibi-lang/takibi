@@ -5,6 +5,21 @@ use "kernel/lib/freelist.tkb";
 
 const USER_TEXT_VA: usize = 0x40000000;
 
+// GitHub issue #258: how many pages a user address space spans -- one
+// full L3 table today (kernel/arch/arm64/mm/mmu.tkb's init_root wires
+// exactly L1[1] -> L2 and L2[0] -> L3, nothing else), i.e. 512 x 4 KiB =
+// 2 MiB. Declared here, next to USER_TEXT_VA, because it is a property of
+// that MMU wiring rather than of any one caller: kernel/mm/
+// user_memory.tkb (bounds every user range check against it) and
+// kernel/mm/process_image.tkb (walks the whole table on teardown) both
+// used to spell it out independently, as `USER_RANGE_MAX_INDEX = 512`
+// and `PROCESS_STACK_LAYOUT_SIZE = 512` respectively -- and the latter
+// ALSO means 512 BYTES elsewhere in that same file (the initial stack's
+// argv/env layout size within the top page), a conflation introduced by
+// issue #253 reusing it as a table bound. Harmless only because both
+// numbers happened to be 512. Issue #254 is what changes this value.
+const USER_SPACE_PAGE_COUNT: usize = 512;
+
 // nG is required once ASIDs distinguish the two roots: a global translation
 // would ignore the ASID and defeat same-VA isolation.
 const USER_TEXT_RX_FLAGS: usize = 0x0020000000000FC7;

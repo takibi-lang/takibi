@@ -2522,7 +2522,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let class: usize = user_page_class_at(first);
         let mut index: usize = first;
         while (index <= last) {
-            if (index >= USER_RANGE_MAX_INDEX ||
+            if (index >= USER_SPACE_PAGE_COUNT ||
                     user_page_class_at(index) != class) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
