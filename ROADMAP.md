@@ -55,7 +55,7 @@ milestones are in use.
 | C. Shrinking the assembly core | #225 -> #226 -> #227 | serial dependency, fixed by #221's completion |
 | D. Proof capability (research) | #200 #201 #203 #216 #109 #90 #13 | five research issues open in parallel |
 | E. Language ergonomics | #212 #217 #218 #155 #214 | #217/#218 were split out of #15 |
-| F. Portability / infrastructure | #50 #85 #95 #56 #149 #171 #9 #122 #123 #124 | no issue exists for a QEMU kernel target |
+| F. Portability / infrastructure | #50 #85 #95 #56 #149 #171 #9 #122 #123 #124 | #237 (QEMU kernel target) landed; #56/#149 below can now build on it |
 | G. Older backlog, needs triage | #5 #8 #17 #19 #26 #28 #36 #58 #65 #91 #103 #129 #131 #132 #15 | some promote, some park |
 
 ## The engine this roadmap is built around
@@ -116,17 +116,21 @@ multiple applets dispatch normally.
 
 ## M2': QEMU/AArch64 kernel target, then CI
 
-Runs in parallel with M1 and should be pulled forward rather than left to the
-end. **No issue tracks this yet** -- `kernel/README.md` names QEMU/AArch64 as the
-intended next port, but nothing tracks it.
+**#237 landed**: `make kernelbuild-qemu`/`kernelcheck-qemu` build and run a
+20-view integration suite (self-tests, ext2/BusyBox/HTTPd-loader, real
+ARP/ICMP/TCP against a host-side peer) with no RPi5 hardware, SWD, or NIC
+needed -- see `kernel/README.md`'s "QEMU/AArch64 integration" section. Two
+of the three problems that motivated this milestone are resolved by that
+alone (iteration no longer pays the ~one-minute SWD transfer per attempt;
+a QEMU target existing at all is the prerequisite for CI). Still open:
 
-Three unrelated problems collapse into this one:
-
-1. **#56 (CI)** becomes possible at all. Today regression detection is one
-   physical board.
-2. **#149 (GDB without JTAG)** is solved for free by a QEMU target's gdbstub.
-3. The #226/#227 iteration cycle stops paying a roughly one-minute SWD transfer
-   per attempt.
+1. **#56 (CI)** -- wiring `kernelcheck-qemu` into an actual CI runner.
+2. **#149 (GDB without JTAG)** -- `gdb-multiarch` against QEMU's gdbstub
+   works today for interactive debugging (`kernel/README.md`), but this
+   issue's own original scope may cover more than that.
+3. A virtio-blk driver, for a QEMU storage milestone closer to RPi5's real
+   USB-provisioned block device (today's QEMU lane mounts a memory-backed
+   ext2 image directly instead) -- deferred, not started.
 
 Real hardware stays the authority for anything involving cache, DMA, interrupt
 timing, or true concurrency (`AGENTS.md`'s tier-3 rule is unchanged). QEMU is a
@@ -218,9 +222,8 @@ None of this has been applied; it is recorded here as the recommendation.
   use-after-free, and address-space typing; the last is already partly real in
   `kernel/mm/user_memory.tkb`. Re-scope against what `kernel/` actually has.
 
-**Create**
-
-- A QEMU/AArch64 kernel target issue (M2'), which #56 and #149 then depend on.
+**Create** -- none outstanding; the one item this section used to list (a
+QEMU/AArch64 kernel target issue) is #237, now landed.
 
 **Project board**
 

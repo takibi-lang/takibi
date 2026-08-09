@@ -381,9 +381,11 @@ make build              # build the compiler (takibi) only (= dune build)
 make test               # run unit tests
 make langcheck          # repo-wide ASCII-only check (kernel/ + examples/ + linux_user/ + compiler)
 make kernelbuild-rpi5   # build kernel/build/rpi5/kernel.elf (no hardware needed)
-make kernelbuild        # build every maintained kernel target (currently = kernelbuild-rpi5)
-make kernelcheck-rpi5   # build and run the RPi5 hardware integration suite
-make kernelcheck        # build and test every maintained kernel target
+make kernelbuild-qemu   # build kernel/build/qemu/kernel.elf (no hardware needed)
+make kernelbuild        # build every maintained kernel target (currently rpi5 + qemu)
+make kernelcheck-rpi5   # build and run the RPi5 hardware integration suite (needs real hardware)
+make kernelcheck-qemu   # build and run the QEMU/AArch64 integration suite (no hardware needed)
+make kernelcheck        # build and test every maintained kernel target (needs real RPi5 hardware for the rpi5 half)
 make linuxbuild         # build linux_user/'s host-native Linux/AMD64 tests (no QEMU/hardware needed)
 make linuxcheck         # build and run linux_user/'s tests, diffing stdout against each .expected
 make allcheck           # langcheck + test + linuxcheck + kernelcheck together (needs real RPi5 hardware for the last one)

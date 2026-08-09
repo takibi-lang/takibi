@@ -15820,3 +15820,200 @@ and three layout constants folded into it; `PROCESS_STACK_LAYOUT_BYTES`
 renamed), `kernel/mm/address_space.tkb` (`USER_SPACE_PAGE_COUNT` added),
 `kernel/mm/user_memory.tkb` and `kernel/kernel/syscall.tkb`
 (`USER_RANGE_MAX_INDEX` replaced by it).
+
+## 2026-08-09: GitHub Issue #237 -- kernel/ Ported to QEMU/AArch64
+
+Five milestones, landed in one continuous session: `kernel/` now has a
+second, fully headless integration lane (`make kernelbuild-qemu`/
+`kernelcheck-qemu`) alongside the real-hardware RPi5 one, needing no
+board, Debug Probe, NIC, or raw-socket privileges. Motivation: MMU/paging
+work on `kernel/arch/arm64/mm/mmu.tkb` had just stalled mid-design
+(issue #254's investigation) specifically because every iteration cost a
+66-second SWD load plus a full RPi5 boot -- the only integration lane
+`kernel/` had.
+
+**M1 -- boot skeleton + hardware-independent self-test bundle.** New
+`kernel/platform/qemu/` (PL011 UART, single-level GICv2 dispatch vs
+RPi5's three-level GIC->MIP0->RP1-MSI-X routing, ARM generic timer, a
+fixed `platform_memory_detect()` since there is no VideoCore-mailbox
+equivalent) plus a QEMU-specific MMU root layout
+(`kernel/platform/qemu/mmu_layout.tkb`) and a new, separate
+`kernel/init/main_qemu.tkb`. Two real, hardware-specific findings, not
+just a mechanical port:
+
+- QEMU `virt` (plain `-cpu cortex-a53`, no firmware) starts the guest
+  directly at EL1, not EL2 -- `entry.S`'s EL2-only `el2_drop_to_el1`
+  sequence took an Undefined Instruction trap immediately when reused
+  verbatim. New `kernel/arch/arm64/boot/entry_qemu.S` skips the EL2 drop
+  entirely, matching `examples/common_qemu/startup.S`'s own independent
+  precedent (that file sets `VBAR_EL1` directly, no EL2 setup at all).
+- QEMU `virt`'s PSCI conduit is HVC, not RPi5's real-firmware SMC
+  (confirmed by dumping the guest DTB: `psci { method = "hvc"; }`), and
+  its MPIDR_EL1 numbering puts the core index in Aff0 (bits[7:0]), not
+  RPi5/BCM2712's Aff1 (bits[9:8]). A new `hvc4` compiler intrinsic
+  (`lib/type_inf.ml`, `lib/llvm_gen.ml`) mirrors the existing `smc4`
+  exactly -- identical SMCCC x0-x3/x0 ABI, `hvc #0` instead of `smc #0`
+  -- with matching unit tests in `test/test_takibi.ml`.
+
+QEMU's physical memory map is roughly inverted from RPi5's (RAM at
+`0x40000000`, not physical address 0), so `kernel/arch/arm64/mm/mmu.tkb`'s
+`init_root()` was refactored to call a per-platform
+`platform_mmu_init_device_blocks()` instead of hardcoding RPi5's device
+block table, and `kernel/mm/address_space.tkb`'s `USER_TEXT_VA` moved into
+each platform's own `mmu_layout.tkb` (RPi5 stays `0x40000000`; QEMU uses
+`0x80000000`, since `0x40000000` is where QEMU's own RAM-identity block
+has to live for the post-MMU-enable PC to keep resolving correctly with
+no explicit jump). `kernel/arch/arm64/kernel/exception_frame.tkb` no
+longer hardcodes `kernel/platform/rpi5/intc.tkb`'s `use` line or its
+`rpi5_irq_dispatch`/`rpi5_el0_irq_dispatch` names -- both platforms'
+`intc.tkb` now define the identical `platform_irq_dispatch`/
+`platform_el0_irq_dispatch` seam, selected the same way
+`kernel/platform/*/uart.tkb` already is (by which files a given target's
+Makefile rule lists on the compile line, not by `use`).
+`scripts/check_kernel_asm_invariants.py`'s UXN/PXN instruction-count
+check gained a required CLI argument (RPi5 expects 2 device-block sites,
+QEMU expects 1) since the count is genuinely platform-specific once the
+device-block construction itself became a swappable per-platform
+function. All three shared-file edits are mechanical indirection only --
+RPi5's own compiled values are unchanged, confirmed by real-hardware
+`kernelcheck-rpi5` (28/28 views, one boot, no regression) the same day.
+
+**M2 -- test harness.** `scripts/run_kernel_qemutest.sh` projects one
+QEMU boot's UART transcript through every `kernel/tests/qemu/views/
+*.filter`, exact-`cmp`'d against a `.expected` file -- the identical "one
+capture, many independent views" pattern `scripts/run_kernel_hwtest_rpi5.sh`
+already uses, just without the SWD reset/load machinery (QEMU's own
+`-nographic` pipes the guest UART straight to the host process). A
+different agent session (Claude Code + GitHub Copilot CLI) had picked
+this up first and landed a working but weaker `grep -q`-marker-based
+version through three consecutive narrow patch commits; asked to review
+it fundamentally, it was rebuilt on the filter/expected pattern instead
+(verified by deliberately corrupting an `.expected` file and confirming a
+real `FAIL` with a diff). Also fixed a real latent bug found while
+rebuilding: the QEMU invocation had no `-m` flag, leaving actual guest
+RAM at QEMU `virt`'s small default -- harmless for the self-test bundle
+alone, but inconsistent with `kernel/mm/page.tkb`'s ~800 MiB
+`BOOT_PAGE_COUNT` reservation.
+
+**M3 -- memory-backed filesystem/BusyBox/HTTPd-loader milestone.**
+`kernel/init/main.tkb` (RPi5) turned out to already mount
+`memory_block_device_ext2()` a second time, independent of its own
+USB-provisioning block -- that second, memory-backed mount is what
+`busybox`/`execve`/`uname`/`od` already run against on RPi5 too, so this
+milestone was mostly a subtraction (drop the USB block and anything
+genuinely network-dependent), not new design. One real adaptation:
+`kernel_syscall_ext2_configure(mount)` is called against the memory-backed
+mount directly here, since RPi5 configures it against its USB-backed
+mount instead. Deliberately not ported, confirmed by tracing exactly
+which boot-log lines are gated behind which call rather than guessed: the
+HTTPd daemon's actual `accept()`/serve loop and BusyBox ash's
+`ppoll()`-blocked `read` builtin (`shell_read`) would both block `fn
+main()` forever with no network peer or injected UART input under a
+headless harness; `init.sh`'s own socket/TCP fixture is real network I/O.
+One documented, non-bug platform difference: QEMU's own `USER_TEXT_VA`
+(`0x80000000`) means the busybox process's real entry/stack addresses
+differ from RPi5's, so the "distro stack: argc=3 argv auxv ready" line's
+exact-address check never fires under QEMU.
+
+**M4 -- virtio-net driver + real ARP/ICMP/TCP.** New
+`kernel/drivers/net/virtio_net.tkb` (legacy virtio-mmio, close port of
+`examples/common_qemu/virtio_mmio.tkb`'s hardware-proven vring/MMIO/IRQ
+engine), with `kernel/net/{arp,icmp,tcp}.tkb`'s existing protocol code
+running against it completely unmodified -- the public function/type
+names deliberately match `kernel/drivers/net/rp1_gem.tkb`'s contract
+instead of `virtio_mmio.tkb`'s own (two-phase `net_rx_reply_ready`/
+`net_transmit`, a separate `net_transmit_ready` for kernel-built frames,
+a `linear` not `affine` `NetRxCanAcquire`), since `kernel/net/`'s
+protocol code was written against the RPi5 driver's shape.
+`arp.tkb`/`icmp.tkb`/`socket_capability.tkb` just drop their hardcoded
+`use "kernel/drivers/net/rp1_gem.tkb"` line, same file-selection
+convention as M1's UART/GIC seam.
+
+Two real bugs, both found only by actually running it, not by review --
+and only found after a genuinely long stuck period. Hours of
+hypothesis-by-hypothesis empirical testing (net_rx_wait semantics, GIC
+ICPENDR staleness, virtio feature-negotiation flags, MMU identity-mapping
+correctness, SMP core-1 interference -- each requiring a full
+rebuild-boot-test cycle) found nothing; re-reading the diagnostic
+evidence already gathered by that point, without running a new test,
+found the first bug in one pass. Process lesson worth keeping: when
+stuck after several failed hypotheses, the highest-value next move is
+often not another empirical test but a slower re-read of the existing
+evidence against the reference implementation being ported from:
+
+1. **GIC INTID double-offset.** `examples/common_qemu/virtio_mmio.tkb`'s
+   own `VIRTIO_MMIO_FIRST_SPI = 48` is named "SPI" but is already the
+   full architectural GIC INTID -- QEMU `virt` wires virtio-mmio slot i to
+   GIC input 16+i, and SPIs start at INTID 32, so slot i is INTID 48+i
+   already, with no further +32 needed. The ported driver added that +32
+   anyway, giving slot 31 (where the device happened to land, matching
+   `examples/`'s own empirical finding) an INTID of 111 instead of 79, so
+   `kernel/platform/qemu/intc.tkb`'s dispatch comparison never matched
+   and `virtio_net_irq_handler()` never ran. Because the device's own
+   `VIRTIO_INTERRUPT_ACK` register write therefore never happened
+   either, the level-triggered SPI kept re-asserting -- visible in an
+   earlier, at-the-time-unconnected `-d int` QEMU trace as 1.14 million
+   exception-taken lines in about 20 seconds. Diagnosed by instrumenting
+   `net_rx_acquire()` to report that `virtio_rx_irq_flag` had never been
+   set even once across 200 calls, while `virtio_base` matched the known
+   slot-31 discovery exactly and every MMIO read/write otherwise worked
+   -- which isolated the bug to interrupt *delivery* specifically, not
+   the vring, the transport (confirmed separately: `examples/net_echo`
+   worked perfectly over the identical `-netdev dgram` setup), or feature
+   negotiation. Fixed by renaming the constant to
+   `VIRTIO_MMIO_FIRST_INTID` with a comment naming the exact trap, so a
+   future reader cannot repeat the misreading.
+2. **`net_rx_wait()` must issue exactly one `interrupt_wait()`, not loop
+   until a virtio RX interrupt specifically.** `virtio_mmio.tkb`'s own
+   version loops (`while (flag==0) interrupt_wait();`) because its
+   caller is an unconditional `while(true)` poll loop with no external
+   deadline. `kernel/net/{arp,icmp,tcp}.tkb` instead wrap `net_rx_wait()`
+   in their own CNTPCT-based bounded deadline loop (matching
+   `kernel/drivers/net/rp1_gem.tkb`'s own `net_rx_wait()` contract, which
+   also does exactly one wait and returns), relying on it to return once
+   per interrupt -- INCLUDING a harmless periodic timer tick -- so the
+   deadline gets re-checked regularly. A loop-until-flag version silently
+   swallows every timer-tick wake-up the caller's deadline depends on,
+   turning a bounded wait unbounded in practice; this was the very first
+   symptom found (a boot that never reached its own 15-second ARP
+   timeout), well before the INTID bug was isolated.
+
+New host-side peer `scripts/kernel_net_test.py` drives ARP, ICMP, and the
+full TCP handshake/data-echo/close/reconnect sequence
+`kernel_tcp_echo_check()` counts before returning `Verified` (>= 2
+handshakes, >= 1 echo, >= 1 close) -- the TCP half adapted from the
+proven `scripts/tcp_echo_test.py`, retargeted at `kernel/net/
+netconfig.tkb`'s own MAC/IP (`kernel/net/tcp.tkb`'s `TCP_INITIAL_SEQ`
+matches that script's own fixed server ISN exactly, confirmed before
+writing the port). The QEMU network view now matches RPi5's real
+`ethernet` view line for line:
+
+```
+virtio net: link ready mac=02:00:20:00:00:02
+virtio net: arp reply ok ip=192.168.20.2
+virtio net: icmp echo reply ok ip=192.168.20.2
+virtio net: tcp handshake echo close reconnect ok
+virtio net: rx capability stored for sockets
+```
+
+**M5 -- documentation.** `kernel/README.md` gained a "QEMU/AArch64
+integration" section (build/run commands, what the 20 views cover, and a
+concrete "Differences from RPi5" list: no cache-coherency modeling under
+QEMU/TCG, the EL1-direct/HVC-PSCI/Aff0 boot model, memory-backed storage
+instead of a provisioned block device, an assumed-not-detected RAM size,
+the inverted MMU device/RAM layout). The stale "Make targets"/"Future
+kernel targets" sections (still describing `kernelbuild`/`kernelcheck` as
+RPi5-only aliases, and QEMU/AArch64 as "intended next") were corrected in
+the same pass, along with the same stale claim in the root `AGENTS.md`'s
+own build-commands table and `ROADMAP.md`'s M2' section (which had said
+"no issue exists for a QEMU kernel target").
+
+**Explicitly deferred, not started**: a virtio-blk driver, for a QEMU
+storage milestone closer to RPi5's real USB-provisioned block device
+(the agreed scope for this pass was memory-backed storage only); the
+HTTPd daemon's real serve loop and `init.sh`'s connected-socket fixture,
+both needing a live TCP peer that *serves* a connection rather than just
+replying to one.
+
+Verified stable across repeated `kernelcheck-qemu` runs; `kernelbuild-rpi5`,
+`langcheck`, and the full unit test suite all pass unaffected throughout.
