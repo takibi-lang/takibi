@@ -691,7 +691,7 @@ fn kernel_syscall_path_name(address: usize) -> SyscallPathResult {
                 CheckedUsize::Overflow => { return SyscallPathResult::Fault; }
                 CheckedUsize::Value(v) => { v }
             };
-            match user_range_check(current, 1, UserAccessMode::Read) {
+            match user_range_check(kernel_process_current_root(), current, 1, UserAccessMode::Read) {
                 UserRangeResult::Fault => { return SyscallPathResult::Fault; }
                 UserRangeResult::Ok(range) => {
                     if (copy_from_user(range, path_view[offset..<offset + 1]) == false) {
@@ -736,7 +736,7 @@ fn syscall_writev_segment(fd: usize, address: usize, length: usize)
         -> WriteSegmentResult {
     if (fd != 1 && fd != 2) { return WriteSegmentResult::Errno(LINUX_EBADF); }
     if (length == 0) { return WriteSegmentResult::Written(0); }
-    match user_range_check(address, length, UserAccessMode::Read) {
+    match user_range_check(kernel_process_current_root(), address, length, UserAccessMode::Read) {
         UserRangeResult::Fault => {
             return WriteSegmentResult::Errno(LINUX_EFAULT);
         }
@@ -773,7 +773,7 @@ fn syscall_readv_segment(fd: usize, address: usize, length: usize)
             if (amount > available) { amount = available; }
             let source_base: *u8 = (syscall_file_buffer as *u8) +
                 (kernel_syscall_file_offset(fd) as isize);
-            match user_range_check(address, amount, UserAccessMode::Write) {
+            match user_range_check(kernel_process_current_root(), address, amount, UserAccessMode::Write) {
                 UserRangeResult::Fault => {
                     return ReadSegmentResult::Errno(LINUX_EFAULT);
                 }
@@ -855,7 +855,7 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
         CheckedUsize::Overflow => { return SyscallAction::Resume(LINUX_EINVAL); }
         CheckedUsize::Value(v) => { v }
     };
-      match user_range_check(fds_address, array_bytes, UserAccessMode::Write) {
+      match user_range_check(kernel_process_current_root(), fds_address, array_bytes, UserAccessMode::Write) {
         UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         UserRangeResult::Ok(array_range) => {
             let mut ready_count: usize = 0;
@@ -903,7 +903,7 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
 
 fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
     if (requested == 0) { return SyscallAction::Resume(0); }
-    match user_range_check(address, requested, UserAccessMode::Write) {
+    match user_range_check(kernel_process_current_root(), address, requested, UserAccessMode::Write) {
         UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         UserRangeResult::Ok(range) => {
             disable_irq();
@@ -1003,7 +1003,7 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
 fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize,
                                 parent_slot: usize) !{unsafe} {
     if (syscall_wait4_status_ptr != 0) {
-        match user_range_check(syscall_wait4_status_ptr, 4, UserAccessMode::Write) {
+        match user_range_check(kernel_process_current_root(), syscall_wait4_status_ptr, 4, UserAccessMode::Write) {
             UserRangeResult::Fault => {
                 el0_context_set_x0(frame_sp, LINUX_EFAULT);
                 return;
@@ -1221,7 +1221,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         ((write_slot * 1460) as isize);
                     let buffer_base: {0..<1461 as usize} = write_slot * 1460;
                     let socket_buffers = syscall_socket_buffer as []u8;
-                    match user_range_check(address, amount, UserAccessMode::Read) {
+                    match user_range_check(kernel_process_current_root(), address, amount, UserAccessMode::Read) {
                         UserRangeResult::Fault => {
                             match tcp_connection_put(owner) {
                                 TcpConnectionPutResult::Stored => {}
@@ -1297,7 +1297,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             let response_base: *u8 = (syscall_inetd_response as *u8) +
                 ((inetd_write_slot * 1460 +
                   syscall_inetd_response_length[inetd_write_slot]) as isize);
-            match user_range_check(address, length, UserAccessMode::Read) {
+            match user_range_check(kernel_process_current_root(), address, length, UserAccessMode::Read) {
                 UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
                     let copied: bool =
@@ -1318,7 +1318,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
             let destination_base: *u8 = syscall_file_buffer as *u8;
-            match user_range_check(address, length, UserAccessMode::Read) {
+            match user_range_check(kernel_process_current_root(), address, length, UserAccessMode::Read) {
                 UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
                     let copied: bool =
@@ -1338,7 +1338,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
         }
         if (fd != 1 && fd != 2) { return SyscallAction::Resume(LINUX_EBADF); }
-        match user_range_check(address, length, UserAccessMode::Read) {
+        match user_range_check(kernel_process_current_root(), address, length, UserAccessMode::Read) {
             UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(range) => {
                 let mut remaining: usize = length;
@@ -1432,7 +1432,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let path_start: usize = path_code / 256;
         let path_name: usize = path_code % 256;
         let path_view: []u8 = syscall_path_buffer as []u8;
-        match user_range_check(x2, 128, UserAccessMode::Write) {
+        match user_range_check(kernel_process_current_root(), x2, 128, UserAccessMode::Write) {
             UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(precheck) => {}
         }
@@ -1445,7 +1445,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 let inode_mode: usize = ext2_inode_mode(
                     syscall_ext2_mount, inode_number);
                 if ((inode_mode & 0xF000) == 0x4000) {
-                    match user_range_check(x2, 128, UserAccessMode::Write) {
+                    match user_range_check(kernel_process_current_root(), x2, 128, UserAccessMode::Write) {
                         UserRangeResult::Fault => {
                             return SyscallAction::Resume(LINUX_EFAULT);
                         }
@@ -1460,7 +1460,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
                 if (ext2_inode_is_symlink(
                         syscall_ext2_mount, inode_number)) {
-                    match user_range_check(x2, 128, UserAccessMode::Write) {
+                    match user_range_check(kernel_process_current_root(), x2, 128, UserAccessMode::Write) {
                         UserRangeResult::Fault => {
                             return SyscallAction::Resume(LINUX_EFAULT);
                         }
@@ -1480,7 +1480,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         syscall_file_buffer as []u8) {
                     Ext2ReadResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
                     Ext2ReadResult::Read(file_length) => {
-                        match user_range_check(x2, 128, UserAccessMode::Write) {
+                        match user_range_check(kernel_process_current_root(), x2, 128, UserAccessMode::Write) {
                             UserRangeResult::Fault => {
                                 return SyscallAction::Resume(LINUX_EFAULT);
                             }
@@ -1537,7 +1537,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 let source_base: *u8 = (syscall_socket_buffer as *u8) +
                     ((read_slot * 1460 +
                       syscall_socket_buffer_offset[read_slot]) as isize);
-                match user_range_check(address, amount, UserAccessMode::Write) {
+                match user_range_check(kernel_process_current_root(), address, amount, UserAccessMode::Write) {
                     UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                     UserRangeResult::Ok(range) => {
                         let copied: bool =
@@ -1591,7 +1591,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     if (amount > requested) { amount = requested; }
                     let source_base: *u8 = (syscall_socket_buffer as *u8) +
                         ((read_slot * 1460) as isize);
-                    match user_range_check(address, amount, UserAccessMode::Write) {
+                    match user_range_check(kernel_process_current_root(), address, amount, UserAccessMode::Write) {
                         UserRangeResult::Fault => {
                             match network_capability_put(next) {
                                 NetworkCapabilityPutResult::Stored => {}
@@ -1645,7 +1645,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 if (amount > available) { amount = available; }
                 let source_base: *u8 = (syscall_file_buffer as *u8) +
                     (kernel_syscall_file_offset(fd) as isize);
-                match user_range_check(address, amount, UserAccessMode::Write) {
+                match user_range_check(kernel_process_current_root(), address, amount, UserAccessMode::Write) {
                     UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                     UserRangeResult::Ok(range) => {
                         let copied: bool =
@@ -1796,7 +1796,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             x2 < 16) { return SyscallAction::Resume(LINUX_EINVAL); }
         let mut sockaddr_len: usize = x2;
         if (sockaddr_len > 28) { sockaddr_len = 28; }
-        match user_range_check(x1, sockaddr_len, UserAccessMode::Read) {
+        match user_range_check(kernel_process_current_root(), x1, sockaddr_len, UserAccessMode::Read) {
             UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(range) => {
                 let copied: bool = copy_from_user_raw(
@@ -2125,7 +2125,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 CheckedUsize::Overflow => { return SyscallAction::Resume(LINUX_EFAULT); }
                 CheckedUsize::Value(v) => { v }
             };
-            match user_range_check(entry_address, 8, UserAccessMode::Read) {
+            match user_range_check(kernel_process_current_root(), entry_address, 8, UserAccessMode::Read) {
                 UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
                     let (ok, string_address) = user_read_u64(range, 0);
@@ -2303,7 +2303,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return SyscallAction::Resume(LINUX_ECHILD);
         }
         if (x1 != 0) {
-            match user_range_check(x1, 4, UserAccessMode::Write) {
+            match user_range_check(kernel_process_current_root(), x1, 4, UserAccessMode::Write) {
                 UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
                     let status: usize = kernel_process_child_wait_status_peek();
@@ -2333,7 +2333,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // turned into an effectively-unbounded userspace loop with no
         // further syscalls, not a kernel-visible fault.
         if (x1 < 2) { return SyscallAction::Resume(LINUX_EFAULT); }
-        match user_range_check(x0, 2, UserAccessMode::Write) {
+        match user_range_check(kernel_process_current_root(), x0, 2, UserAccessMode::Write) {
             UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(range) => {
                 let wrote_slash: bool = user_write_byte(range, 0, 0x2F);
@@ -2343,7 +2343,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return SyscallAction::Resume(2);
     }
     if (number == 49) {
-        match user_range_check(x0, 2, UserAccessMode::Read) {
+        match user_range_check(kernel_process_current_root(), x0, 2, UserAccessMode::Read) {
             UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(range) => {
                 let path_view: []u8 = syscall_path_buffer as []u8;
@@ -2359,7 +2359,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // setitimer(): HTTPd's request timeout is unnecessary for the single
         // bounded integration request. Return an all-zero previous timer.
         if (x2 != 0) {
-            match user_range_check(x2, 32, UserAccessMode::Write) {
+            match user_range_check(kernel_process_current_root(), x2, 32, UserAccessMode::Write) {
                 UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
                     let zeroed: bool = user_zero_fill(range);
@@ -2369,7 +2369,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return SyscallAction::Resume(0);
     }
     if (number == 113) {
-        match user_range_check(x1, 16, UserAccessMode::Write) {
+        match user_range_check(kernel_process_current_root(), x1, 16, UserAccessMode::Write) {
             UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(range) => {
                 let wrote_seconds: bool =
@@ -2391,7 +2391,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return SyscallAction::Resume(LINUX_EINVAL);
         }
         if (oldact != 0) {
-            match user_range_check(oldact, 32, UserAccessMode::Write) {
+            match user_range_check(kernel_process_current_root(), oldact, 32, UserAccessMode::Write) {
                 UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
                     let zeroed: bool = user_zero_fill(range);
@@ -2402,7 +2402,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
     if (number == 135) {
         if (x2 != 0) {
-            match user_range_check(x2, 8, UserAccessMode::Write) {
+            match user_range_check(kernel_process_current_root(), x2, 8, UserAccessMode::Write) {
                 UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {
                     let wrote_mask: bool = user_write_u64(range, 0, 0);
@@ -2413,14 +2413,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
     if (number == 205) {
         if (x0 != 0) { return SyscallAction::Resume(LINUX_EFAULT); }
-        match user_range_check(x1, 16, UserAccessMode::Write) {
+        match user_range_check(kernel_process_current_root(), x1, 16, UserAccessMode::Write) {
             UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(peer_range) => {
                 let zeroed: bool = user_zero_fill(peer_range);
                 let wrote_family: bool = user_write_byte(peer_range, 0, 2);
             }
         }
-        match user_range_check(x2, 4, UserAccessMode::Write) {
+        match user_range_check(kernel_process_current_root(), x2, 4, UserAccessMode::Write) {
             UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(length_range) => {
                 let wrote_length: bool =
@@ -2437,7 +2437,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let optval: usize = x2;
         let optlen: usize = x3;
         if (optlen != 0) {
-            match user_range_check(optval, optlen, UserAccessMode::Read) {
+            match user_range_check(kernel_process_current_root(), optval, optlen, UserAccessMode::Read) {
                 UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(range) => {}
             }
@@ -2519,11 +2519,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (span_ok == false) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
-        let class: usize = user_page_class_at(first);
+        let class: usize = user_page_class_at(kernel_process_current_root(), first);
         let mut index: usize = first;
         while (index <= last) {
             if (index >= USER_SPACE_PAGE_COUNT ||
-                    user_page_class_at(index) != class) {
+                    user_page_class_at(kernel_process_current_root(), index) != class) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
             index = index + 1;
@@ -2535,7 +2535,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // re-widening permissions is refused rather than risked -- a real
         // error, never false success.
         if (prot == LINUX_PROT_READ && class == 3) {
-            user_range_reprotect(first, last, USER_RODATA_R_FLAGS);
+            user_range_reprotect(kernel_process_current_root(), first, last, USER_RODATA_R_FLAGS);
             return SyscallAction::Resume(0);
         }
         if (prot == (LINUX_PROT_READ | LINUX_PROT_WRITE) && class == 3) {
@@ -2554,7 +2554,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 CheckedUsize::Overflow => { return SyscallAction::Resume(LINUX_EINVAL); }
                 CheckedUsize::Value(v) => { v }
             };
-            match user_range_check(iov_address, array_bytes, UserAccessMode::Read) {
+            match user_range_check(kernel_process_current_root(), iov_address, array_bytes, UserAccessMode::Read) {
                 UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(array_range) => {
                     let mut total: usize = 0;
@@ -2606,7 +2606,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 CheckedUsize::Overflow => { return SyscallAction::Resume(LINUX_EINVAL); }
                 CheckedUsize::Value(v) => { v }
             };
-            match user_range_check(iov_address, array_bytes, UserAccessMode::Read) {
+            match user_range_check(kernel_process_current_root(), iov_address, array_bytes, UserAccessMode::Read) {
                 UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserRangeResult::Ok(array_range) => {
                     let mut total: usize = 0;
@@ -2645,7 +2645,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_ppoll_dispatch(x0, x1, x2, x3);
     }
     if (number == AARCH64_NR_UNAME) {
-        match user_range_check(x0, sizeof(Utsname), UserAccessMode::Write) {
+        match user_range_check(kernel_process_current_root(), x0, sizeof(Utsname), UserAccessMode::Write) {
             UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(range) => {
                 let base: *u8 = syscall_uname_buffer as *u8;
@@ -2726,7 +2726,7 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
 
             // rt_sigaction: a non-null oldact is zero-filled, not left as
             // whatever was already there (poison it first to prove that).
-            match user_range_check(oldact_va, 32, UserAccessMode::Write) {
+            match user_range_check(kernel_process_current_root(), oldact_va, 32, UserAccessMode::Write) {
                 UserRangeResult::Fault => { ok = false; }
                 UserRangeResult::Ok(range) => {
                     let poisoned: bool = user_write_byte(range, 0, 0xAA);
@@ -2735,7 +2735,7 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
             let (action4, value4) = kernel_syscall_dispatch(
                 SYSCALL_TRAP_ESR, 134, 1, 0, oldact_va, 0, 0);
             if (action4 != 1 || value4 != 0) { ok = false; }
-            match user_range_check(oldact_va, 1, UserAccessMode::Read) {
+            match user_range_check(kernel_process_current_root(), oldact_va, 1, UserAccessMode::Read) {
                 UserRangeResult::Fault => { ok = false; }
                 UserRangeResult::Ok(range) => {
                     if (user_read_byte(range, 0) != 0) { ok = false; }
