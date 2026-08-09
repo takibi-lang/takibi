@@ -13,24 +13,32 @@ if [ ! -f "$KERNEL_ELF" ]; then
     exit 1
 fi
 
+# Temporary file to capture QEMU output
+QEMU_OUTPUT_FILE=$(mktemp)
+trap "rm -f '$QEMU_OUTPUT_FILE'" EXIT
+
 # Boot the kernel and capture output until it naturally halts or times out
-# Use a subshell with explicit error handling to avoid 'set -e' issues
-# with timeout's exit code (124 means timeout, which is expected)
-output=$(timeout "$TIMEOUT_SECS" qemu-system-aarch64 \
+exit_code=0
+timeout "$TIMEOUT_SECS" qemu-system-aarch64 \
     -M virt \
     -cpu cortex-a53 \
     -smp 2 \
     -kernel "$KERNEL_ELF" \
     -nographic \
     -serial mon:stdio \
-    2>&1) || exit_code=$?
+    > "$QEMU_OUTPUT_FILE" 2>&1 || exit_code=$?
 
 # exit_code 124 means timeout (expected), 0 means clean exit (also OK)
-if [ "${exit_code:-0}" != 0 ] && [ "${exit_code:-0}" != 124 ]; then
+if [ "$exit_code" != 0 ] && [ "$exit_code" != 124 ]; then
     echo "error: QEMU exited with status $exit_code" >&2
+    cat "$QEMU_OUTPUT_FILE"
     exit 1
 fi
 
+# Read output from file
+output=$(cat "$QEMU_OUTPUT_FILE")
+
+# Print QEMU output
 echo "$output"
 
 # Verify expected self-test results
