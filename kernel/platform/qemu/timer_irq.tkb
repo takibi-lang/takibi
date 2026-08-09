@@ -1,0 +1,31 @@
+// ARM Generic Timer (CNTP_EL0) interrupt for QEMU's `virt` machine, PPI #30
+// -- the same architectural PPI kernel/platform/rpi5/timer_irq.tkb and
+// examples/common_qemu/gic.tkb's gic_enable_timer_ppi() both use. PPIs are
+// banked per-CPU by the GIC itself, so this needs no GICD_ITARGETSR write,
+// same as RPi5's version.
+
+use "kernel/arch/arm64/kernel/timer.tkb";
+
+const QEMU_TIMER_GIC_INTID: u32 = 30;
+
+// read_cntfrq() >> 6 matches kernel/platform/rpi5/timer_irq.tkb and
+// examples/common_qemu/timer.tkb's own scheduler-tick divisor exactly.
+fn timer_tick_rearm() {
+    set_cntp_tval((read_cntfrq() >> 6) as i32);
+}
+
+fn gic_timer_ppi_enable() {
+    let gicd_isenabler0: *io u32 = 0x08000100;
+    *gicd_isenabler0 = *gicd_isenabler0 | (1 << 30);
+}
+
+fn timer_irq_setup() {
+    gic_timer_ppi_enable();
+    timer_tick_rearm();
+    enable_cntp();
+}
+
+fn timer_irq_handler() !{interrupt} {
+    timer_tick_rearm();
+    interrupt_notify();
+}

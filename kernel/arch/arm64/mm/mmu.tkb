@@ -166,16 +166,20 @@ fn init_root_entry(base: usize, index: usize, value: usize) {
     *entry = value;
 }
 
+// GitHub issue #237 (QEMU port): the L1 index each block/table entry below
+// uses is no longer hardcoded here -- KERNEL_IDENTITY_L1_INDEX and
+// USER_TEXT_VA come from whichever kernel/platform/<target>/mmu_layout.tkb
+// is on this build's compile line (same file-selection convention as
+// uart.tkb/intc.tkb), and platform_mmu_init_device_blocks(l1) supplies
+// that platform's own device-MMIO block set. RPi5's own values are
+// unchanged (see kernel/platform/rpi5/mmu_layout.tkb's header) -- this is
+// an indirection, not a behavior change, for that platform.
 fn init_root(l1: usize, l2: usize, l3: usize) {
-    init_root_entry(l1, 0, 0x705 | UXN_BIT);
-    init_root_entry(l1, 1, l2 | 3);
+    init_root_entry(l1, KERNEL_IDENTITY_L1_INDEX,
+        (KERNEL_IDENTITY_L1_INDEX << 30) | 0x705 | UXN_BIT);
+    init_root_entry(l1, USER_TEXT_VA >> 30, l2 | 3);
     init_root_entry(l2, 0, l3 | 3);
-    for i: usize in 64..<66 {
-        init_root_entry(l1, i, (i << 30) | 0x401 | UXN_BIT | PXN_BIT);
-    }
-    for i: usize in 124..<128 {
-        init_root_entry(l1, i, (i << 30) | 0x401 | UXN_BIT | PXN_BIT);
-    }
+    platform_mmu_init_device_blocks(l1);
 }
 
 // GitHub issue #246: the "grow" half -- ensures physical root `slot`

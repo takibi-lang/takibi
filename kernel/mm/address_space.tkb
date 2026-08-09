@@ -3,7 +3,16 @@ use "kernel/arch/arm64/mm/mmu.tkb";
 use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
 
-const USER_TEXT_VA: usize = 0x40000000;
+// GitHub issue #237 (QEMU port): USER_TEXT_VA moved out of this file, into
+// whichever kernel/platform/<target>/mmu_layout.tkb is on this build's
+// compile line (same file-selection convention as uart.tkb/intc.tkb) --
+// RPi5's own value is unchanged (0x40000000, kernel/platform/rpi5/
+// mmu_layout.tkb), so this is an indirection, not a behavior change, for
+// that platform. It had to move because kernel/arch/arm64/mm/mmu.tkb's
+// init_root() (the "that MMU wiring" the comment below refers to) now
+// wires L1[USER_TEXT_VA >> 30] -> L2 per platform, and QEMU's own physical
+// memory map forces a different index than RPi5's -- see that platform's
+// own mmu_layout.tkb header for why.
 
 // GitHub issue #258: how many pages a user address space spans -- one
 // full L3 table today (kernel/arch/arm64/mm/mmu.tkb's init_root wires

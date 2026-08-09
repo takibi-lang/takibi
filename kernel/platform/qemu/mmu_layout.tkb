@@ -1,0 +1,41 @@
+// Platform-supplied L1 block-descriptor layout for
+// kernel/arch/arm64/mm/mmu.tkb's init_root(), QEMU `virt` variant.
+//
+// QEMU's physical memory map is roughly inverted from RPi5's: RAM sits at
+// PA [0x40000000, 0x40000000+ram_size) -- L1 index 1 (index = PA >> 30) --
+// while every device (GICv2 at 0x08000000, PL011 UART at 0x09000000, and
+// later virtio-mmio around 0x0a000000) sits below 1GiB -- L1 index 0.
+// kernel/platform/rpi5/mmu_layout.tkb's RAM-identity block sits at index 0
+// instead, because RPi5's RAM genuinely starts at physical address 0 --
+// the difference here is a real physical-memory-map fact, not an
+// arbitrary choice.
+//
+// This kernel enables the MMU (kernel_mmu_activate) without an explicit
+// post-enable jump: the running PC's own VA must already equal its PA at
+// that instant for execution to continue unbroken. Since kernel/arch/
+// arm64/boot/link_qemu.ld loads at PA 0x40000000 (matching QEMU `virt`'s
+// RAM base), the kernel-identity block genuinely must be index 1 for this
+// platform, not index 0 -- an identity mapping at the *wrong* index would
+// not help here, the CPU's live PC value is what has to keep resolving
+// correctly.
+//
+// kernel/mm/address_space.tkb's USER_TEXT_VA lived at 1GiB (L1 index 1) on
+// RPi5 specifically because index 1 was otherwise unused there (RPi5's own
+// RAM-identity block owns index 0). On QEMU, index 1 is exactly where the
+// kernel-identity block above needs to live, so the user-process window
+// moves to index 2 (2GiB) instead -- purely virtual territory with no
+// physical meaning on either platform, backed by process-owned L2/L3
+// pages wherever page.tkb's allocator actually hands them out (inside the
+// RAM region, not at this VA).
+const USER_TEXT_VA: usize = 0x80000000;
+
+const KERNEL_IDENTITY_L1_INDEX: usize = 1;
+
+// One 1GiB device-nGnRnE identity block covers every QEMU `virt` MMIO
+// device this kernel currently drives (GICv2, PL011, and virtio-mmio once
+// added) -- unlike RPi5's two disjoint high-index ranges (kernel/platform/
+// rpi5/mmu_layout.tkb), QEMU's device MMIO is conveniently one contiguous
+// low region.
+fn platform_mmu_init_device_blocks(l1: usize) {
+    init_root_entry(l1, 0, (0 << 30) | 0x401 | UXN_BIT | PXN_BIT);
+}

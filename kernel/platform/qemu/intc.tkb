@@ -1,0 +1,88 @@
+// kernel/ GICv2 interrupt path for QEMU's `virt` machine -- a single-level
+// GIC SPI dispatch, unlike kernel/platform/rpi5/intc.tkb's three-level
+// GIC->MIP0->RP1-MSI-X routing (QEMU's virtio-mmio/PL011 devices are
+// ordinary GIC SPIs with no companion-chip indirection to model). Register
+// addresses and the UART's SPI number match examples/common_qemu/gic.tkb
+// and gic_regs.tkb exactly (hardware-proven by that tree's own bare-metal
+// examples): GICD at 0x08000000, GICC at 0x08010000, PL011 UART on SPI #1
+// (INTID 33).
+//
+// Unlike RPi5, this kernel runs its own code at EL1 (not EL2) with EL0 user
+// processes above it -- see kernel/platform/rpi5/intc.tkb's header comment
+// for why both the Current-EL-SPx and Lower-EL-AArch64 IRQ vector slots
+// call the same dispatch pair here, and why only the Lower-EL path may
+// replace its returned frame SP to switch processes.
+//
+// Function names (platform_irq_dispatch/platform_el0_irq_dispatch) are the
+// platform-neutral seam kernel/arch/arm64/kernel/exception_frame.tkb's
+// vector-table declarations call by name -- kernel/platform/rpi5/intc.tkb
+// defines the identical two names for its own GIC/MIP0/RP1 path, so
+// exception_frame.tkb itself needs no per-platform variant, only the
+// Makefile's per-target file list needs to supply the right intc.tkb.
+
+use "kernel/platform/qemu/timer_irq.tkb";
+use "kernel/arch/arm64/boot/cpu.tkb";
+
+const QEMU_UART_GIC_INTID: u32 = 33; // SPI #1
+
+fn gic_uart_spi_setup() {
+    let gicd_isenabler1: *io u32 = 0x08000104; // INTIDs 32-63 (SPI)
+    let gicd_itargetsr8: *io u32 = 0x08000820; // INTIDs 32-35
+    let gicc_ctlr: *io u32 = 0x08010000;
+    let gicc_pmr: *io u32 = 0x08010004;
+    let gicd_ctlr: *io u32 = 0x08000000;
+
+    *gicd_itargetsr8 = 0x01010101; // route SPI #0-#3 to CPU0
+    *gicd_isenabler1 = *gicd_isenabler1 | (1 << 1); // SPI #1 (UART)
+
+    *gicd_ctlr = *gicd_ctlr | 1;
+    *gicc_pmr = 0xFF;
+    *gicc_ctlr = *gicc_ctlr | 1;
+}
+
+// GIC/timer routing for every source this build currently handles, plus
+// the one global DAIF.I unmask. Matches kernel/platform/rpi5/intc.tkb's
+// platform_irq_init() in structure and calling convention: UART's own
+// PL011 source stays masked (IMSC=0) until kernel/init/main_qemu.tkb's
+// own irq_uart_rx_unmask() call, even though GIC-level routing is armed
+// here.
+fn platform_irq_init() {
+    gic_uart_spi_setup();
+    timer_irq_setup();
+    enable_irq();
+}
+
+fn irq_uart_rx_unmask() {
+    let uart0_imsc: *io u32 = 0x09000038;
+    *uart0_imsc = (1 << 4) | (1 << 6); // RXIM | RTIM
+}
+
+fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
+        -> usize !{interrupt} {
+    let gicc_iar: *io u32 = 0x0801000C;
+    let gicc_eoir: *io u32 = 0x08010010;
+    let id: u32 = *gicc_iar;
+
+    if (id == QEMU_UART_GIC_INTID) {
+        uart_irq_handler();
+    } else if (id == QEMU_TIMER_GIC_INTID) {
+        timer_irq_handler();
+        if (lower_el) {
+            let next_sp: usize = kernel_process_timer_schedule(frame_sp);
+            *gicc_eoir = id;
+            return next_sp;
+        }
+        kernel_process_request_reschedule();
+    }
+
+    *gicc_eoir = id;
+    return frame_sp;
+}
+
+fn platform_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
+    return platform_irq_dispatch_inner(frame_sp, false);
+}
+
+fn platform_el0_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
+    return platform_irq_dispatch_inner(frame_sp, true);
+}

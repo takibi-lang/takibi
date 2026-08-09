@@ -35,7 +35,7 @@ let compiler_builtins = StringSet.of_list [
   "msr_daifclr_irq"; "msr_daifset_irq";
   "tlbi_vmalle1"; "tlbi_vaae1is"; "tlbi_vae1is"; "tlbi_aside1is";
   "dsb_ish"; "dsb_ishst"; "isb";
-  "smc4"; "svc5";
+  "smc4"; "hvc4"; "svc5";
 ]
 
 let is_compiler_builtin name = StringSet.mem name compiler_builtins
@@ -2338,13 +2338,21 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects one argument: %s(v)" fname fname)))
 
-  | Call ("smc4" as fname, args) ->
+  | Call (("smc4" | "hvc4") as fname, args) ->
       (* GitHub issue #226: the raw `smc #0` trap, exposed as a plain
          4-in/1-out hardware primitive (the real SMCCC x0-x3 in / x0 out
          convention lives in lib/llvm_gen.ml's fixed register constraints,
          not in any PSCI-specific semantics here -- this intrinsic knows
          nothing about PSCI, matching "closed set of instructions", not
-         "closed set of hypervisor calls"). *)
+         "closed set of hypervisor calls").
+         GitHub issue #237 (QEMU port): hvc4 is the same 4-in/1-out shape
+         over `hvc #0` instead of `smc #0` -- QEMU `virt`'s own guest DTB
+         reports its PSCI conduit as "hvc", not "smc" (confirmed by
+         dumping it: SMC trapped as an Undefined Instruction at EL1, since
+         this boot configuration has no EL3 to trap to at all, only EL2).
+         RPi5's real TF-A firmware uses SMC; identical SMCCC argument
+         convention either way, so this is the same type rule with one
+         more name, not a new rule. *)
       (match args with
        | [a; b; c; d] ->
            List.iter (fun arg ->

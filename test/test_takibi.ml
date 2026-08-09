@@ -8751,6 +8751,18 @@ let codegen_tests = [
        expect_type_error "cannot unify"
          "fn bad_smc4_type(a: i32) { let r: usize = smc4(a, a, a, a); }" ());
 
+  Alcotest.test_case "issue #237: hvc4 takes four usize and returns usize"
+    `Quick
+    (fun () ->
+       expect_ok
+         "fn issue237_hvc4(a: usize, b: usize, c: usize, d: usize) -> usize {
+            return hvc4(a, b, c, d);
+          }" ();
+       expect_type_error "expects four arguments"
+         "fn bad_hvc4(a: usize) { let r: usize = hvc4(a, a, a); }" ();
+       expect_type_error "cannot unify"
+         "fn bad_hvc4_type(a: i32) { let r: usize = hvc4(a, a, a, a); }" ());
+
   Alcotest.test_case
     "issue #226: system-register/barrier/TLBI builtin names cannot be redefined"
     `Quick
@@ -8768,7 +8780,9 @@ let codegen_tests = [
           "msr_mair_el1"; "msr_tcr_el1"; "msr_ttbr0_el1";
           "tlbi_vaae1is"; "tlbi_vae1is"; "tlbi_aside1is"];
        expect_type_error "compiler builtin"
-         "extern fn smc4(a: usize, b: usize, c: usize, d: usize) -> usize;" ());
+         "extern fn smc4(a: usize, b: usize, c: usize, d: usize) -> usize;" ();
+       expect_type_error "compiler builtin"
+         "extern fn hvc4(a: usize, b: usize, c: usize, d: usize) -> usize;" ());
 
   Alcotest.test_case
     "issue #226: register/barrier/TLBI intrinsics lower to the named AArch64 instruction"
@@ -8816,6 +8830,27 @@ let codegen_tests = [
        let ir = Llvm.string_of_llvalue fn in
        Alcotest.(check bool) "smc instruction" true
          (contains_substring ir "smc #0");
+       Alcotest.(check bool) "output pinned to x0" true
+         (contains_substring ir "={x0}");
+       Alcotest.(check bool) "inputs pinned to x0-x3" true
+         (contains_substring ir "{x0},{x1},{x2},{x3}"));
+
+  Alcotest.test_case "issue #237: hvc4 pins the real SMCCC x0-x3/x0 ABI over hvc"
+    `Quick
+    (fun () ->
+       let _ = gen_codegen
+         "fn codegen_issue237_hvc4(a: usize, b: usize, c: usize, d: usize)
+               -> usize {
+            return hvc4(a, b, c, d);
+          }"
+       in
+       let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_issue237_hvc4" with
+         | Some (_, fn) -> fn
+         | None -> Alcotest.fail "codegen_issue237_hvc4 was not emitted"
+       in
+       let ir = Llvm.string_of_llvalue fn in
+       Alcotest.(check bool) "hvc instruction" true
+         (contains_substring ir "hvc #0");
        Alcotest.(check bool) "output pinned to x0" true
          (contains_substring ir "={x0}");
        Alcotest.(check bool) "inputs pinned to x0-x3" true

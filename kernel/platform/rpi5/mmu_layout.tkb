@@ -1,0 +1,34 @@
+// Platform-supplied L1 block-descriptor layout for
+// kernel/arch/arm64/mm/mmu.tkb's init_root(), RPi5 variant.
+//
+// GitHub issue #237 (QEMU port): these values are unchanged from what
+// init_root() used to hardcode directly -- KERNEL_IDENTITY_L1_INDEX=0 and
+// USER_TEXT_VA=0x40000000 reproduce byte-identical L1 entries to before
+// this file existed. Extracted purely so kernel/platform/qemu/mmu_layout.tkb
+// can supply QEMU's own values (its physical memory map is roughly
+// inverted from this board's -- see that file's header) without init_root()
+// itself branching on target. See kernel/mm/address_space.tkb's own header
+// comment for why USER_TEXT_VA moved here from that file.
+//
+// L1 index 0 = RPi5's own RAM-identity block (this board's RAM genuinely
+// starts at physical address 0). L1 index 1 = the user-process window,
+// unused for anything else at this index on this board.
+const USER_TEXT_VA: usize = 0x40000000;
+
+const KERNEL_IDENTITY_L1_INDEX: usize = 0;
+
+// The two disjoint high-index device-MMIO ranges this board's real
+// physical map needs (GitHub issue #231's UXN/PXN device-block reasoning,
+// unchanged): indices 64-65 cover BCM2712 SoC peripherals including the
+// VideoCore mailbox (kernel/platform/rpi5/mailbox.tkb's own header cites
+// this range directly), indices 124-127 cover RP1's PCIe-translated
+// MMIO/BAR window (kernel/platform/rpi5/pcie.tkb, uart.tkb, usb_xhci.tkb,
+// drivers/net/rp1_gem.tkb).
+fn platform_mmu_init_device_blocks(l1: usize) {
+    for i: usize in 64..<66 {
+        init_root_entry(l1, i, (i << 30) | 0x401 | UXN_BIT | PXN_BIT);
+    }
+    for i: usize in 124..<128 {
+        init_root_entry(l1, i, (i << 30) | 0x401 | UXN_BIT | PXN_BIT);
+    }
+}

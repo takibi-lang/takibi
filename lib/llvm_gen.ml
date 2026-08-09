@@ -3619,6 +3619,24 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         "smc4.result" builder in
       (TypeUsize, result)
 
+  | Call ("hvc4", [a0_e; a1_e; a2_e; a3_e]) ->
+      (* GitHub issue #237 (QEMU port): identical to smc4 just above, one
+         instruction different (`hvc #0` instead of `smc #0`) -- see that
+         case's comment and hvc4's own type_inf.ml registration for why
+         QEMU `virt` needs this conduit instead of RPi5's real-firmware
+         SMC. *)
+      let ity = usize_lltype () in
+      let (_, v0) = gen_expr ~expected_ty:TypeUsize locals a0_e in
+      let (_, v1) = gen_expr ~expected_ty:TypeUsize locals a1_e in
+      let (_, v2) = gen_expr ~expected_ty:TypeUsize locals a2_e in
+      let (_, v3) = gen_expr ~expected_ty:TypeUsize locals a3_e in
+      let fty = function_type ity [| ity; ity; ity; ity |] in
+      let constraints = "={x0},{x0},{x1},{x2},{x3},~{memory}" in
+      let inline = const_inline_asm fty "hvc #0" constraints true false in
+      let result = build_call fty inline [| v0; v1; v2; v3 |]
+        "hvc4.result" builder in
+      (TypeUsize, result)
+
   | Call ("svc5", [nr_e; a0_e; a1_e; a2_e; a3_e; a4_e]) ->
       (* GitHub issue #228: the real Linux/AArch64 syscall ABI (x8 = syscall
          number in, x0-x4 = up to five arguments in, x0 = result out) is a

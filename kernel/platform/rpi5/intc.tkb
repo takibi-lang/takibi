@@ -294,10 +294,16 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     return frame_sp;
 }
 
-fn rpi5_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
+// GitHub issue #237 (QEMU port): renamed from rpi5_irq_dispatch/
+// rpi5_el0_irq_dispatch to the platform-neutral seam name
+// kernel/arch/arm64/kernel/exception_frame.tkb's `dispatch:` targets now
+// use -- kernel/platform/qemu/intc.tkb defines the identical two names for
+// its own GICv2 routing, so exception_frame.tkb needs no per-platform
+// variant. Pure rename, no behavior change.
+fn platform_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
     return rpi5_irq_dispatch_inner(frame_sp, false);
 }
 
-fn rpi5_el0_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
+fn platform_el0_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
     return rpi5_irq_dispatch_inner(frame_sp, true);
 }

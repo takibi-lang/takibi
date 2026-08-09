@@ -1,0 +1,390 @@
+// QEMU/AArch64 `virt` machine entry point (GitHub issue #237). A separate
+// `fn main()` from kernel/init/main.tkb (RPi5), deliberately NOT a shared
+// file with a platform branch inside it -- this language has no
+// conditional compilation, and kernel/init/main.tkb's exact control flow
+// and boot-log strings are RPi5's own hardware-verified `.expected`
+// contract (kernel/tests/rpi5/views/*.expected); touching that file's body
+// to add a QEMU branch would require a full real-hardware kernelcheck-rpi5
+// re-verification for a change whose only purpose is code-sharing. See
+// kernel/README.md's QEMU section for the full rationale.
+//
+// This file instead calls the SAME underlying shared self-test/subsystem
+// functions kernel/init/main.tkb already calls (scheduled_process_table_
+// probe(), process_address_space_probe(), etc. -- none of those are RPi5-
+// specific, only main.tkb's own *sequencing and logging* of them is being
+// duplicated here), in the same order, with the same boot-log strings, so
+// kernel/tests/qemu/views/*.expected can mirror kernel/tests/rpi5/views/'s
+// content directly rather than inventing new prose.
+//
+// Milestone scope (M1, GitHub issue #237): the hardware-independent
+// self-test bundle only -- no network, no filesystem. Network (kernel/net/
+// tcp.tkb and friends) and filesystem (kernel/fs/ext2/ext2.tkb) code is
+// still part of this build's compile unit (kernel/kernel/syscall.tkb's own
+// `use` graph pulls both in unconditionally, for its own real file/socket
+// syscall implementations), but this fn main() never calls net_init() or
+// disk_initialize() -- their real backing drivers stay RPi5's own
+// kernel/drivers/net/rp1_gem.tkb and kernel/platform/rpi5/usb_xhci.tkb,
+// linked into this QEMU image as genuinely unreachable code (their MMIO
+// addresses are RP1/RPi5-specific and are never touched, since the
+// functions that would touch them are never called). See kernel/README.md
+// for why this is an accepted, documented gap rather than new driver work
+// -- kernel/drivers/net/virtio_net.tkb (a real QEMU network driver) is
+// planned follow-up work, at which point socket_capability.tkb/arp.tkb/
+// icmp.tkb's own `use "kernel/drivers/net/rp1_gem.tkb";` lines become the
+// place a platform seam is actually needed.
+
+use "kernel/kernel/process.tkb";
+use "kernel/kernel/syscall.tkb";
+use "kernel/fs/initramfs.tkb";
+use "kernel/fs/elf64.tkb";
+use "kernel/mm/address_space.tkb";
+use "kernel/mm/process_image.tkb";
+use "kernel/lib/growable_pool.tkb";
+use "kernel/arch/arm64/mm/asid.tkb";
+use "kernel/printk/log.tkb";
+use "kernel/fs/ext2/ext2.tkb";
+use "kernel/net/tcp.tkb";
+use "kernel/net/socket_capability.tkb";
+use "kernel/arch/arm64/boot/boot_extern.tkb";
+use "kernel/arch/arm64/kernel/fpsimd_probe_extern.tkb";
+use "kernel/arch/arm64/kernel/exception_evidence.tkb";
+use "kernel/arch/arm64/kernel/vector_table.tkb";
+
+// GitHub issue #237 (QEMU port): the remaining globals/functions below,
+// through kernel_process_child_exec_reap, are copied unchanged from
+// kernel/init/main.tkb (not shared -- see this file's header comment for
+// why) because kernel/kernel/syscall.tkb's own clone/execve/wait4 syscall
+// implementations call them unconditionally; Takibi compiles every
+// top-level function in a `use`d file regardless of whether this
+// milestone's fn main() ever reaches it, so they must exist here too, even
+// though ext2_mount_ready stays permanently false in this milestone (no
+// filesystem is mounted yet -- kernel_process_child_exec_prepare's own
+// ext2_mount_ready check then makes execve resolution a safe, inert no-op,
+// exactly as it would be on RPi5 before that board's own USB provisioning
+// step runs). httpd_image_mapping_check/usb_ext2_*_check and their fixture
+// buffers (ext2_read_fixture, ext2_symlink_fixture, ext2_large_fixture)
+// are deliberately NOT copied -- nothing outside kernel/init/main.tkb's
+// own later USB/HTTPd milestone code calls them, so they are not needed
+// for this file to compile.
+private let mut kernel_exec_plan: DistroElfLoadPlan = {0, 0, 0, 0, 0, 0, 0};
+private let mut kernel_exec_plan_ready: bool;
+private let mut saved_ext2_mount: Ext2Mount;
+private let mut ext2_mount_ready: bool;
+private let mut exec_resolve_image: [u8; EXT2_MAX_FILE_SIZE];
+private let mut kernel_child_exec_entry: usize;
+private let mut kernel_child_exec_stack: usize;
+
+fn exec_resolve_image_prefix(length: usize) -> []u8 !{unsafe} {
+    let image_bytes: []u8 = exec_resolve_image as []u8;
+    let mut bounded: usize = length;
+    if (bounded > image_bytes.len) { bounded = image_bytes.len; }
+    return unsafe { image_bytes[0..<bounded] };
+}
+
+must_use variant ExecArgv0NameResult { Invalid; Name([]u8); }
+
+fn kernel_exec_argv0_name() -> ExecArgv0NameResult !{unsafe} {
+    let argv: []u8 = kernel_syscall_exec_argv();
+    if (argv.len < 2) {
+        return ExecArgv0NameResult::Invalid;
+    }
+    let first_byte: u8 = unsafe { argv[0] };
+    if (first_byte != 0x2F) {
+        return ExecArgv0NameResult::Invalid;
+    }
+    let mut end: usize = 1;
+    while (end < argv.len) {
+        let current: u8 = unsafe { argv[end] };
+        if (current == 0) { break; }
+        end = end + 1;
+    }
+    if (end >= argv.len) {
+        return ExecArgv0NameResult::Invalid;
+    }
+    let name: []u8 = unsafe { argv[1..<end] };
+    return ExecArgv0NameResult::Name(name);
+}
+
+must_use variant ExecResolveResult { NotFound; Resolved(DistroElfLoadPlan); }
+
+fn kernel_exec_resolve_argv0(mount: Ext2Mount) -> ExecResolveResult {
+    match kernel_exec_argv0_name() {
+        ExecArgv0NameResult::Invalid => { return ExecResolveResult::NotFound; }
+        ExecArgv0NameResult::Name(name) => {
+            match ext2_lookup_root(mount, name) {
+                Ext2LookupResult::Invalid => { return ExecResolveResult::NotFound; }
+                Ext2LookupResult::NotFound => { return ExecResolveResult::NotFound; }
+                Ext2LookupResult::Found(inode) => {
+                    match ext2_read_small_file(
+                            mount, inode, exec_resolve_image as []u8) {
+                        Ext2ReadResult::Invalid => {
+                            return ExecResolveResult::NotFound;
+                        }
+                        Ext2ReadResult::Read(length) => {
+                            let address: usize =
+                                (exec_resolve_image as *u8) as usize;
+                            match distro_elf_validate(
+                                    address,
+                                    exec_resolve_image_prefix(length)) {
+                                DistroElfResult::Invalid => {
+                                    return ExecResolveResult::NotFound;
+                                }
+                                DistroElfResult::Valid(plan) => {
+                                    return ExecResolveResult::Resolved(plan);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn kernel_process_child_exec_prepare() -> usize {
+    if (kernel_process_is_child() == false ||
+        kernel_syscall_exec_pending() == false) {
+        return 0;
+    }
+    let mut target_plan: DistroElfLoadPlan = kernel_exec_plan;
+    let mut target_plan_ready: bool = kernel_exec_plan_ready;
+    if (ext2_mount_ready) {
+        match kernel_exec_resolve_argv0(saved_ext2_mount) {
+            ExecResolveResult::NotFound => {}
+            ExecResolveResult::Resolved(plan) => {
+                target_plan = plan;
+                target_plan_ready = true;
+            }
+        }
+    }
+    if (target_plan_ready == false) {
+        return 0;
+    }
+    match process_image_clone_vm_reap() {
+        ProcessCloneVmReapResult::Missing => {
+            return 0;
+        }
+        ProcessCloneVmReapResult::Reaped => {}
+    }
+    let child_root: usize = kernel_process_current_root();
+    let pages_result = process_image_map_in_root(
+        target_plan, kernel_syscall_exec_argv(),
+        kernel_syscall_exec_argc(), child_root);
+    match pages_result {
+        ProcessImageMapResult::InvalidImage => {
+            return 0;
+        }
+        ProcessImageMapResult::OutOfMemory => {
+            return 0;
+        }
+        ProcessImageMapResult::Mapped(pages) => {
+            kernel_child_exec_entry = process_image_entry(pages);
+            kernel_child_exec_stack = process_image_stack_pointer(pages);
+            if (process_image_exec_install(pages) == false) {
+                return 0;
+            }
+            process_image_activate_root(child_root);
+            kernel_process_child_exec_mark();
+            kernel_syscall_exec_clear();
+            return 1;
+        }
+    }
+}
+
+fn kernel_process_child_exec_entry() -> usize {
+    return kernel_child_exec_entry;
+}
+
+fn kernel_process_child_exec_stack() -> usize {
+    return kernel_child_exec_stack;
+}
+
+fn kernel_process_child_exec_reap() {
+    let exited_pid: usize = kernel_process_last_child_pid();
+    if (kernel_process_exec_image_live_for_pid(exited_pid)) {
+        process_image_exec_reap();
+        kernel_process_exec_clear_for_pid(exited_pid);
+    }
+}
+
+must_use variant SecondaryBootResult {
+    Started;
+    UnexpectedStatus(usize);
+    NotStarted(usize);
+}
+
+private let mut kernel_secondary_boot_state: io usize;
+
+// GitHub issue #187 (unchanged from kernel/init/main.tkb, copied rather
+// than shared for the same reason this whole file is separate -- see the
+// header comment above): kernel_uart_rx_isr/kernel_uart_rx_getc live in
+// the platform-specific main file because they need kernel_process_uart_
+// wake (kernel/kernel/process.tkb), which kernel/kernel/syscall.tkb
+// (the file that owns kernel_uart_rx_head/_tail/_buf and calls
+// kernel_uart_rx_getc from its own UART-RX-wait syscall paths) does not
+// otherwise depend on. Not wired to a real interrupt in this milestone
+// (M1: self-test bundle only, no shell/BusyBox session yet) -- only
+// present so syscall.tkb's own reference to kernel_uart_rx_getc resolves.
+fn kernel_uart_rx_isr() !{} {
+    let c: u8 = uart_isr_getc();
+    if (kernel_process_uart_wake(c as usize)) {
+        interrupt_notify();
+        return;
+    }
+    let head: usize = kernel_uart_rx_head;
+    let next: usize = (head + 1) % 64;
+    if (next != kernel_uart_rx_tail) {
+        let ring: *u8 = kernel_uart_rx_buf;
+        ring[head as isize] = c;
+        signal_fence();
+        kernel_uart_rx_head = next;
+    }
+    interrupt_notify();
+}
+
+fn kernel_uart_rx_getc() -> u8 {
+    signal_fence();
+    let tail: usize = kernel_uart_rx_tail;
+    let ring: *u8 = kernel_uart_rx_buf;
+    let c: u8 = ring[tail as isize];
+    kernel_uart_rx_tail = (tail + 1) % 64;
+    return c;
+}
+
+// GitHub issue #237: QEMU `virt`'s own guest-visible PSCI conduit is HVC,
+// not RPi5's real-firmware SMC -- confirmed by dumping this machine's
+// generated DTB (`psci { method = "hvc"; ... }`), and independently by a
+// real first-boot attempt under this port: kernel/arch/arm64/boot/cpu.tkb's
+// psci_cpu_on (SMC) took an Undefined Instruction trap at EL1, since this
+// boot configuration has no EL3 for SMC to reach, only EL2 (HVC's target).
+// Not shared with cpu.tkb's psci_cpu_on: same PSCI_CPU_ON function ID and
+// SMCCC argument convention, only the trapping instruction differs
+// (hvc4 vs smc4, both in lib/llvm_gen.ml/type_inf.ml).
+fn qemu_psci_cpu_on(target_affinity: usize, entry: usize, context: usize)
+        -> usize {
+    return hvc4(0xc4000003, target_affinity, entry, context);
+}
+
+// Same PSCI CPU_ON target-affinity/context convention kernel/init/main.tkb's
+// own kernel_secondary_boot_probe uses -- kept as this file's own copy, not
+// shared, so its target_affinity constant can be tuned for this platform's
+// own MPIDR_EL1 numbering independently of RPi5's tuned value, without
+// touching main.tkb.
+fn kernel_secondary_main(context: usize, core_id: usize) {
+    if (context == 0x191 && core_id == 1) {
+        kernel_secondary_boot_state = 0x100 + core_id;
+        signal_fence();
+    }
+}
+
+fn kernel_secondary_boot_probe() -> SecondaryBootResult {
+    kernel_secondary_boot_state = 0;
+    signal_fence();
+    let status: usize = qemu_psci_cpu_on(
+        0x1, kernel_secondary_entry, 0x191);
+    let start: i64 = read_cntpct();
+    let deadline_ticks: i64 = read_cntfrq();
+    while ((read_cntpct() - start) < deadline_ticks) {
+        signal_fence();
+        if (kernel_secondary_boot_state == 0x101) {
+            if (status == 0) {
+                return SecondaryBootResult::Started;
+            }
+            return SecondaryBootResult::UnexpectedStatus(status);
+        }
+    }
+    return SecondaryBootResult::NotStarted(status);
+}
+
+fn main() {
+    platform_init();
+    kernel_boot_log("takibi kernel: EL1\n");
+
+    match platform_memory_detect() {
+        PlatformMemoryResult::Detected(detected) => {
+            let (mem_base, mem_size) = detected;
+            kernel_boot_log("memory: base_bytes=");
+            uart_put_udec(mem_base as usize);
+            kernel_boot_log(" detected_mib=");
+            uart_put_udec((mem_size as usize) / (1024 * 1024));
+            kernel_boot_log("\n");
+        }
+        PlatformMemoryResult::Failed => {
+            kernel_boot_log("memory: mailbox query failed\n");
+        }
+    }
+
+    platform_irq_init();
+
+    if (fpsimd_irq_probe() == 0) {
+        kernel_boot_log("fp/simd irq: q0-q31+fpsr preserved across current-el irq\n");
+    } else {
+        kernel_boot_log("fp/simd irq: failed\n");
+    }
+
+    match kernel_secondary_boot_probe() {
+        SecondaryBootResult::Started => {
+            kernel_boot_log("smp bringup: core1 psci+el1+takibi ok\n");
+        }
+        SecondaryBootResult::UnexpectedStatus(status) => {
+            kernel_boot_log("smp bringup: core1 unexpected psci status\n");
+        }
+        SecondaryBootResult::NotStarted(status) => {
+            kernel_boot_log("smp bringup: core1 failed\n");
+        }
+    }
+
+    if (scheduled_process_table_probe()) {
+        kernel_boot_log("process table: slots=16 stacks=4096 generation reuse safe\n");
+    } else {
+        kernel_boot_log("process table: failed\n");
+    }
+    if (process_address_space_probe()) {
+        kernel_boot_log("address spaces: roots=2 asids=1,2 same-va isolated\n");
+    } else {
+        kernel_boot_log("address spaces: failed\n");
+    }
+    if (user_memory_boundary_probe()) {
+        kernel_boot_log(
+            "user memory: overflow+cross-page+permission+mprotect enforced\n");
+    } else {
+        kernel_boot_log("user memory: failed\n");
+    }
+    if (user_memory_root_isolation_probe()) {
+        kernel_boot_log(
+            "user memory root isolation: two roots, divergent same-index mappings, each validated against its own table\n");
+    } else {
+        kernel_boot_log("user memory root isolation: failed\n");
+    }
+    if (kernel_syscall_subset_probe()) {
+        kernel_boot_log(
+            "syscall subset: mmap prot+fd reject, sigaction signum+oldact ok\n");
+    } else {
+        kernel_boot_log("syscall subset: failed\n");
+    }
+    if (unified_fd_table_probe()) {
+        kernel_boot_log("fd table: processes=2 fds=16 shared-offset refs clean\n");
+    } else {
+        kernel_boot_log("fd table: failed\n");
+    }
+    if (kernel_process_scheduler_probe()) {
+        kernel_boot_log("scheduler: rr immediate=2 deferred=1 staged\n");
+    } else {
+        kernel_boot_log("scheduler: failed\n");
+    }
+    if (growable_pool_probe()) {
+        kernel_boot_log(
+            "growable pool: zero-start growth, cross-chunk data, generation-safe reuse, double-free counted, own ceiling ok\n");
+    } else {
+        kernel_boot_log("growable pool: failed\n");
+    }
+    if (asid_pool_probe()) {
+        kernel_boot_log(
+            "asid pool: exhaustion, reuse-after-free, transfer round-trip, double-free counted ok\n");
+    } else {
+        kernel_boot_log("asid pool: failed\n");
+    }
+
+    platform_shutdown();
+    while (true) { }
+}

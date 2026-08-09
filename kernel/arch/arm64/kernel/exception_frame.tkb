@@ -1,5 +1,14 @@
-use "kernel/platform/rpi5/intc.tkb";
 use "kernel/arch/arm64/kernel/fpsimd_probe_extern.tkb";
+
+// GitHub issue #237 (QEMU port): this file no longer `use`s a specific
+// platform's intc.tkb directly. dispatch: below names platform_irq_
+// dispatch/platform_el0_irq_dispatch, a seam every kernel/platform/<target>/
+// intc.tkb defines identically (kernel/platform/rpi5/intc.tkb's GIC/MIP0/
+// RP1-MSI-X routing, kernel/platform/qemu/intc.tkb's single-level GICv2
+// routing) -- the Makefile's per-target compile-file list supplies
+// whichever one this build needs, the same file-selection convention
+// uart.tkb already uses. This file itself is now identical for both
+// targets.
 
 // GitHub issue #227 item 1 (prototype slice): the exception frame this
 // kernel's resumable Current-EL-SPx and Lower-EL-AArch64 IRQ entries use,
@@ -45,13 +54,13 @@ struct packed ExceptionFrame {
 exception_entry el1_current_irq_entry {
     frame: ExceptionFrame;
     before: fpsimd_irq_clobber;
-    dispatch: rpi5_irq_dispatch;
+    dispatch: platform_irq_dispatch;
 }
 
 // Lower-EL AArch64 IRQ entry: the same frame, no fixture hook.
 exception_entry el0_irq_entry {
     frame: ExceptionFrame;
-    dispatch: rpi5_el0_irq_dispatch;
+    dispatch: platform_el0_irq_dispatch;
 }
 
 // GitHub issue #227 item 1 follow-up: el0_context_resume is a standalone

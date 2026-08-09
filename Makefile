@@ -302,6 +302,7 @@ KERNEL_RPI5_INTC_TKB    := $(KERNEL_DIR)/platform/rpi5/intc.tkb
 KERNEL_RPI5_TIMER_IRQ_TKB := $(KERNEL_DIR)/platform/rpi5/timer_irq.tkb
 KERNEL_RPI5_USB_XHCI_TKB := $(KERNEL_DIR)/platform/rpi5/usb_xhci.tkb
 KERNEL_RPI5_MAILBOX_TKB := $(KERNEL_DIR)/platform/rpi5/mailbox.tkb
+KERNEL_RPI5_MMU_LAYOUT_TKB := $(KERNEL_DIR)/platform/rpi5/mmu_layout.tkb
 KERNEL_RPI5_GEM_TKB     := $(KERNEL_DIR)/drivers/net/rp1_gem.tkb
 KERNEL_NETCONFIG_TKB    := $(KERNEL_DIR)/net/netconfig.tkb
 KERNEL_ARP_TKB          := $(KERNEL_DIR)/net/arp.tkb
@@ -403,13 +404,73 @@ $(KERNEL_RPI5_USER_PAYLOAD_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5
 	$(LLD) -pie --no-dynamic-linker -e initial_user_payload $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
 	python3 scripts/check_user_payload_no_rw_globals.py $@
 
-$(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_GROWABLE_POOL_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_INITRAMFS_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_INITRAMFS_CPIO) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MAILBOX_TKB) \
+$(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_GROWABLE_POOL_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_INITRAMFS_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_INITRAMFS_CPIO) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MAILBOX_TKB) \
     $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_INTC_TKB) $(KERNEL_RPI5_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
+	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
 
 $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD)
 	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_MAIN_O) -o $@
-	python3 scripts/check_kernel_asm_invariants.py $@
+	python3 scripts/check_kernel_asm_invariants.py $@ 2
+
+# -- QEMU/AArch64 (GitHub issue #237) -----------------------------------------
+# Reuses the same aarch64-none-elf triple as RPi5 (no --cpu passed to
+# LLVM_MC for either target's assembly -- see KERNEL_RPI5_ENTRY_O's own
+# rule above), but a lower --cpu for the .tkb compile, matching QEMU
+# `virt`'s own -cpu cortex-a53 (examples/common_qemu/AGENTS.md).
+QEMU_TARGET := aarch64-none-elf
+QEMU_CPU    := cortex-a53
+
+KERNEL_QEMU_BUILD_DIR    := $(KERNEL_DIR)/build/qemu
+KERNEL_QEMU_ENTRY_O      := $(KERNEL_QEMU_BUILD_DIR)/entry.o
+KERNEL_QEMU_USER_ENTRY_O := $(KERNEL_QEMU_BUILD_DIR)/user_entry.o
+KERNEL_QEMU_FPSIMD_O     := $(KERNEL_QEMU_BUILD_DIR)/fpsimd_probe.o
+KERNEL_QEMU_MAIN_TKB     := $(KERNEL_DIR)/init/main_qemu.tkb
+KERNEL_QEMU_MAIN_O       := $(KERNEL_QEMU_BUILD_DIR)/main.o
+KERNEL_QEMU_LINK_LD      := $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
+KERNEL_QEMU_ELF          := $(KERNEL_QEMU_BUILD_DIR)/kernel.elf
+KERNEL_QEMU_UART_TKB     := $(KERNEL_DIR)/platform/qemu/uart.tkb
+KERNEL_QEMU_INTC_TKB     := $(KERNEL_DIR)/platform/qemu/intc.tkb
+KERNEL_QEMU_TIMER_IRQ_TKB := $(KERNEL_DIR)/platform/qemu/timer_irq.tkb
+KERNEL_QEMU_MEMORY_TKB   := $(KERNEL_DIR)/platform/qemu/memory.tkb
+KERNEL_QEMU_MMU_LAYOUT_TKB := $(KERNEL_DIR)/platform/qemu/mmu_layout.tkb
+
+$(KERNEL_QEMU_BUILD_DIR):
+	mkdir -p $@
+
+KERNEL_QEMU_ENTRY_S := $(KERNEL_DIR)/arch/arm64/boot/entry_qemu.S
+
+$(KERNEL_QEMU_ENTRY_O): $(KERNEL_QEMU_ENTRY_S) | $(KERNEL_QEMU_BUILD_DIR)
+	$(LLVM_MC) --triple=$(QEMU_TARGET) --filetype=obj $< -o $@
+
+$(KERNEL_QEMU_USER_ENTRY_O): $(KERNEL_RPI5_USER_ENTRY_S) $(KERNEL_RPI5_EXC_CONTEXT) | $(KERNEL_QEMU_BUILD_DIR)
+	$(LLVM_MC) --triple=$(QEMU_TARGET) --filetype=obj $< -o $@
+
+$(KERNEL_QEMU_FPSIMD_O): $(KERNEL_RPI5_FPSIMD_S) | $(KERNEL_QEMU_BUILD_DIR)
+	$(LLVM_MC) --triple=$(QEMU_TARGET) --filetype=obj $< -o $@
+
+# GitHub issue #237: kernel/kernel/syscall.tkb's own `use` graph
+# unconditionally reaches kernel/fs/ext2/ext2.tkb -> kernel/drivers/block/
+# memory.tkb (needs disk_read/disk_write) and kernel/net/{socket_capability,
+# arp,icmp}.tkb -> kernel/drivers/net/rp1_gem.tkb (RPi5's real Ethernet
+# driver) -- there is no QEMU storage/network driver yet (that is separate,
+# planned follow-up work, see kernel/README.md), so RPi5's own pcie.tkb/
+# usb_xhci.tkb/rp1_gem.tkb are linked here too, purely so the whole-program
+# link resolves. kernel/init/main_qemu.tkb never calls disk_initialize()/
+# net_init(), so their real RP1/RPi5 MMIO addresses are never touched --
+# this is unreachable code, not a functional dependency on RPi5 hardware.
+# kernel/platform/rpi5/uart.tkb/intc.tkb/timer_irq.tkb/mailbox.tkb/
+# mmu_layout.tkb are deliberately NOT included here: each defines a
+# platform_* name kernel/platform/qemu/'s own files already define, and a
+# duplicate top-level definition is a compile error by design.
+$(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_GROWABLE_POOL_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_INITRAMFS_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) \
+    $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) | $(KERNEL_QEMU_BUILD_DIR)
+	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --forbid-trap -o $@
+
+$(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_MAIN_O) $(KERNEL_QEMU_LINK_LD)
+	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_MAIN_O) -o $@
+	python3 scripts/check_kernel_asm_invariants.py $@ 1
+
+kernelbuild-qemu: kernel-lib-check $(KERNEL_QEMU_ELF)
 
 # Pure source-text check (issues #207/#242, see HISTORY.md's 2026-08-07
 # entry) -- no build product needed, so it runs independent of and before
@@ -420,7 +481,7 @@ kernel-lib-check:
 
 kernelbuild-rpi5: kernel-lib-check $(KERNEL_RPI5_ELF)
 
-kernelbuild: kernelbuild-rpi5
+kernelbuild: kernelbuild-rpi5 kernelbuild-qemu
 
 ## RPI5_SERIAL_DEV: empty by default, resolved at runtime by
 ## scripts/rpi5_uart_dev.sh (which picks the ttyACM device out by its

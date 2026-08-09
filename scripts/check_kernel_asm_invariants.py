@@ -52,10 +52,18 @@ LLVM_OBJDUMP = "llvm-objdump-19"
 # loaded literal instead -- an equally correct, equally intentional
 # lowering choice that a check hardcoded to expect `orr` specifically would
 # wrongly flag as a regression.
+# GitHub issue #237 (QEMU port): the device-MMIO loop(s) moved out of
+# init_root() itself into a per-platform platform_mmu_init_device_blocks()
+# (kernel/platform/<target>/mmu_layout.tkb), since RPi5 and QEMU need
+# different L1 index sets there (see that file's own header). The expected
+# occurrence count is genuinely platform-specific -- RPi5 keeps its
+# original two disjoint loops (64:65, 124:127), QEMU has one -- so it is
+# now a required CLI argument instead of a hardcoded constant; each
+# kernelbuild-<target> Makefile rule passes its own platform's count.
 UXN_ONLY = 1 << 54
 UXN_AND_PXN = (1 << 54) | (1 << 53)
 EXPECTED_UXN_ONLY_COUNT = 1
-EXPECTED_UXN_AND_PXN_COUNT = 2
+DEVICE_BLOCK_FUNCTIONS = {"init_root", "platform_mmu_init_device_blocks"}
 
 ORR_IMM_RE = re.compile(r"^orr\s+x\d+,\s*x\d+,\s*#(0x[0-9a-f]+)$")
 MOV_IMM_SHIFT_RE = re.compile(
@@ -123,26 +131,38 @@ def parse_instructions(lines):
     return insns
 
 
-def check_uxn(insns):
+def check_uxn(insns, expected_uxn_and_pxn_count):
     failures = []
-    # Scoped to init_root() specifically: UXN+PXN together (0x60 << 48) is
-    # NOT a signature unique to the device-MMIO block descriptors -- it is
-    # also exactly USER_RW_XN_FLAGS, the ordinary read-write-execute-never
-    # permission bits kernel/mm/address_space.tkb applies to every regular
-    # user data/heap/stack page, so scanning the whole kernel.elf for that
-    # bit pattern finds it in a dozen unrelated functions (map_user_data,
-    # map_user_stack, user_page_writable, ...). Only init_root's own
-    # instructions are relevant to this check.
-    init_root_insns = [(a, t) for a, t, fn in insns if fn == "init_root"]
-    bits = [contributed_bits(t) for _, t in init_root_insns]
+    # Scoped to init_root()/platform_mmu_init_device_blocks() specifically:
+    # UXN+PXN together (0x60 << 48) is NOT a signature unique to the
+    # device-MMIO block descriptors -- it is also exactly USER_RW_XN_FLAGS,
+    # the ordinary read-write-execute-never permission bits kernel/mm/
+    # address_space.tkb applies to every regular user data/heap/stack page,
+    # so scanning the whole kernel.elf for that bit pattern finds it in a
+    # dozen unrelated functions (map_user_data, map_user_stack,
+    # user_page_writable, ...). Only these two functions' own instructions
+    # are relevant to this check.
+    root_insns = [(a, t) for a, t, fn in insns if fn == "init_root"]
+    device_insns = [
+        (a, t) for a, t, fn in insns if fn in DEVICE_BLOCK_FUNCTIONS
+    ]
+    bits = [contributed_bits(t) for _, t in root_insns]
+    device_bits = [contributed_bits(t) for _, t in device_insns]
     count_uxn_only = sum(1 for b in bits if b == UXN_ONLY)
-    count_uxn_and_pxn = sum(1 for b in bits if b == UXN_AND_PXN)
-    if not init_root_insns:
+    count_uxn_and_pxn = sum(1 for b in device_bits if b == UXN_AND_PXN)
+    if not root_insns:
         failures.append(
             "issue #231 regression: no instructions found in a function "
             "named 'init_root' -- kernel/arch/arm64/mm/mmu.tkb's page-table "
             "construction function was renamed or removed, and this check "
             "was not updated to match"
+        )
+    if not device_insns:
+        failures.append(
+            "issue #231/#237 regression: no instructions found in any of %s "
+            "-- the device-MMIO block construction was renamed, removed, or "
+            "moved to a differently-named function, and this check was not "
+            "updated to match" % sorted(DEVICE_BLOCK_FUNCTIONS)
         )
     if count_uxn_only != EXPECTED_UXN_ONLY_COUNT:
         failures.append(
@@ -152,13 +172,14 @@ def check_uxn(insns):
             "first descriptor (kernel .text, 0x705) must OR in UXN (bit 54)"
             % (EXPECTED_UXN_ONLY_COUNT, UXN_ONLY, count_uxn_only)
         )
-    if count_uxn_and_pxn != EXPECTED_UXN_AND_PXN_COUNT:
+    if count_uxn_and_pxn != expected_uxn_and_pxn_count:
         failures.append(
-            "issue #231 regression: expected %d occurrence(s) of an "
+            "issue #231/#237 regression: expected %d occurrence(s) of an "
             "instruction contributing the device-MMIO block's UXN+PXN bits "
-            "(0x%x) inside init_root(), found %d -- init_root()'s two "
-            "device loops (0x401 descriptors) must OR in UXN+PXN (bits "
-            "54+53)" % (EXPECTED_UXN_AND_PXN_COUNT, UXN_AND_PXN, count_uxn_and_pxn)
+            "(0x%x) inside %s, found %d -- this platform's device block(s) "
+            "(0x401 descriptors) must OR in UXN+PXN (bits 54+53)"
+            % (expected_uxn_and_pxn_count, UXN_AND_PXN,
+               sorted(DEVICE_BLOCK_FUNCTIONS), count_uxn_and_pxn)
         )
     return failures
 
@@ -206,12 +227,19 @@ def check_eret_daif_mask(insns):
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("usage: check_kernel_asm_invariants.py <kernel.elf>", file=sys.stderr)
+    if len(sys.argv) != 3:
+        print(
+            "usage: check_kernel_asm_invariants.py <kernel.elf> "
+            "<expected_device_block_uxn_pxn_count>",
+            file=sys.stderr,
+        )
         return 1
     elf_path = sys.argv[1]
+    expected_uxn_and_pxn_count = int(sys.argv[2])
     insns = parse_instructions(objdump_lines(elf_path))
-    failures = check_uxn(insns) + check_eret_daif_mask(insns)
+    failures = (
+        check_uxn(insns, expected_uxn_and_pxn_count) + check_eret_daif_mask(insns)
+    )
     if failures:
         for f in failures:
             print("FAIL kernel/asm-invariants: %s" % f, file=sys.stderr)
