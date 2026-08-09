@@ -185,6 +185,7 @@ of each commit it creates. Use these identities:
 
 - Codex: `OpenAI Codex <codex-agent@takibi.invalid>`
 - Claude Code: `Anthropic Claude Code <claude-code-agent@takibi.invalid>`
+- GitHub Copilot CLI: `GitHub Copilot CLI <copilot-cli-agent@takibi.invalid>`
 
 Apply the identity only to the individual `git commit` invocation, for example
 by setting `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and
