@@ -5,6 +5,7 @@ use "kernel/fs/elf64.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/mm/process_image.tkb";
 use "kernel/lib/growable_pool.tkb";
+use "kernel/arch/arm64/mm/asid.tkb";
 use "kernel/printk/log.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/platform/rpi5/usb_xhci.tkb";
@@ -597,6 +598,12 @@ fn main() {
             "growable pool: zero-start growth, cross-chunk data, generation-safe reuse, double-free counted, own ceiling ok\n");
     } else {
         kernel_boot_log("growable pool: failed\n");
+    }
+    if (asid_pool_probe()) {
+        kernel_boot_log(
+            "asid pool: exhaustion, reuse-after-free, transfer round-trip, double-free counted ok\n");
+    } else {
+        kernel_boot_log("asid pool: failed\n");
     }
 
     match net_init() {

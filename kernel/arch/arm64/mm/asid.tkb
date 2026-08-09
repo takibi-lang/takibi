@@ -1,0 +1,167 @@
+// GitHub issue #254 design comment (2026-08-09): decouples ASID assignment
+// from kernel/arch/arm64/mm/mmu.tkb's array-of-roots storage slot. ASID has
+// always been derived purely as `slot + 1` wherever a root's pool slot was
+// known (mmu.tkb's address_space_activate_root/_tlb_invalidate/_clear_root),
+// with no existence independent of that slot index. This pool gives ASID a
+// genuine, independent lifetime -- a prerequisite for #254's eventual move
+// to per-process heap-owned root pages, since a heap-owned page has no
+// "slot" to derive an ASID from.
+//
+// ASID_MAX matches mmu.tkb's MAX_ROOTS (today's real per-process root
+// ceiling; a real hardware ASID-width query is a later refinement, out of
+// scope here). This pool's own index space is 0..<ASID_MAX, and every asid
+// value handed to a caller is index + 1, so ASID 0 (deliberately never
+// assigned -- see mmu.tkb's own note on why, "kept free as a guaranteed
+// non-matching TLB value") falls out of range automatically, with no
+// explicit skip needed.
+//
+// SlotMap(N), not bare FreelistCore(N): per kernel/lib/slotmap.tkb's own
+// stated default ("use SlotMap(N) for any fixed-capacity slot pool... at
+// the cost of one extra usize per slot"), and this pool is exactly the
+// small-N case that default is for (ASID_MAX = 16, matching
+// kernel/mm/address_space.tkb's own precedent of using SlotMap directly for
+// a small pool of this shape).
+//
+// This file deliberately does not yet touch mmu.tkb's function signatures
+// -- see #254's tracking comment for the phased plan. Wiring this pool into
+// address_space_activate_root/_tlb_invalidate/_clear_root happens together
+// with the per-process root-storage move (the step that gives those
+// functions a real long-lived asid value to pass in), not here, to avoid
+// editing the same call sites twice.
+//
+// Current limitations (2026-08-09):
+// - NOT SYNCHRONIZED, same caveat as kernel/lib/freelist.tkb/slotmap.tkb --
+//   this pool is reachable only from single-core boot/syscall-dispatch
+//   context today, same as every other kernel/lib-backed pool in kernel/.
+// - Capacity is fixed at ASID_MAX; a real ASID-width query (ID_AA64MMFR0_
+//   EL1.ASIDBits) is not implemented, so this assumes at least an 8-bit
+//   ASID field, which is universally true on AArch64.
+use "kernel/lib/slotmap.tkb";
+use "kernel/lib/freelist.tkb";
+
+const ASID_MAX: usize = 16;
+
+private let mut asid_pool: SlotMap(ASID_MAX);
+
+linear struct AsidOwner[asid: usize] {
+    private index: {0..<ASID_MAX as usize};
+    private generation: usize @ asid;
+}
+
+must_use variant AsidAllocResult {
+    Full;
+    Allocated(exists asid: usize. AsidOwner[asid]);
+}
+
+fn asid_owner_new(index: {0..<ASID_MAX as usize}, generation: usize @ asid)
+        -> AsidOwner[asid] {
+    let mut owner: AsidOwner[asid] = { index, generation };
+    return owner;
+}
+
+fn asid_pool_init() {
+    slotmap_init(&asid_pool);
+}
+
+fn asid_alloc() -> AsidAllocResult {
+    match slotmap_insert(&asid_pool) {
+        FreelistPopResult::Empty => { return AsidAllocResult::Full; }
+        FreelistPopResult::Popped(popped) => {
+            let (index, generation) = freelist_owner_into_parts(popped);
+            if (index < ASID_MAX) {
+                let checked: {0..<ASID_MAX as usize} = index;
+                return AsidAllocResult::Allocated(
+                    asid_owner_new(checked, generation));
+            }
+            return AsidAllocResult::Full;
+        }
+    }
+}
+
+// The real numeric ASID (1..ASID_MAX) to encode into TTBR0_EL1/TLBI --
+// mirrors kernel/mm/page.tkb's page_physical_address.
+fn asid_value(owner: borrow AsidOwner[asid]) -> usize {
+    return owner.index + 1;
+}
+
+fn asid_free(owner: sink AsidOwner[asid]) {
+    let index: usize = owner.index;
+    let generation: usize = owner.generation;
+    slotmap_remove(&asid_pool, freelist_owner_new(index, generation));
+}
+
+// Transfers responsibility for an allocated ASID into a coarser owner (a
+// future per-process struct) that will hold it as a plain usize long-term --
+// same idiom as kernel/mm/page.tkb's page_owner_transfer_index.
+fn asid_owner_transfer(owner: sink AsidOwner[asid]) -> usize {
+    return owner.index + 1;
+}
+
+// Paired release for asid_owner_transfer, same generation-agnostic
+// reasoning as kernel/mm/page.tkb's page_transferred_release: the
+// double-free check only reads whether the slot is presently marked
+// occupied, so a fabricated generation of 0 is exactly as sound here as
+// the real one would be.
+fn asid_transferred_release(asid: usize) {
+    if (asid == 0 || asid > ASID_MAX) { return; }
+    let index: usize = asid - 1;
+    slotmap_remove(&asid_pool, freelist_owner_new(index, 0));
+}
+
+fn asid_pool_double_free_count() -> usize {
+    return slotmap_double_remove_count(&asid_pool);
+}
+
+// Boot self-test: exhausts the pool, confirms Full is reported correctly,
+// frees one and re-allocates it, checks asid_value's 1..ASID_MAX mapping
+// (ASID 0 never handed out), and round-trips the transfer/release pair --
+// mirrors kernel/mm/page.tkb's / kernel/lib/growable_pool.tkb's own probe
+// style.
+fn asid_pool_probe() -> bool {
+    asid_pool_init();
+    let mut owners: [usize; ASID_MAX];
+    let mut count: usize = 0;
+    for i: usize in 0..<ASID_MAX {
+        match asid_alloc() {
+            AsidAllocResult::Full => { return false; }
+            AsidAllocResult::Allocated(owner) => {
+                let value: usize = asid_value(owner);
+                if (value == 0 || value > ASID_MAX) {
+                    asid_free(owner);
+                    return false;
+                }
+                owners[i] = asid_owner_transfer(owner);
+                count = count + 1;
+            }
+        }
+    }
+    match asid_alloc() {
+        AsidAllocResult::Full => {}
+        AsidAllocResult::Allocated(extra) => {
+            asid_free(extra);
+            return false;
+        }
+    }
+    if (count == 0) { return false; }
+    let freed_asid: usize = owners[0];
+    asid_transferred_release(freed_asid);
+    let mut reused_ok: bool = false;
+    match asid_alloc() {
+        AsidAllocResult::Full => {}
+        AsidAllocResult::Allocated(reused) => {
+            if (asid_value(reused) == freed_asid) { reused_ok = true; }
+            owners[0] = asid_owner_transfer(reused);
+        }
+    }
+    if (reused_ok == false) { return false; }
+    let before_double_free: usize = asid_pool_double_free_count();
+    asid_transferred_release(freed_asid);
+    asid_transferred_release(freed_asid);
+    if (asid_pool_double_free_count() != before_double_free + 1) {
+        return false;
+    }
+    for i: usize in 1..<ASID_MAX {
+        asid_transferred_release(owners[i]);
+    }
+    return true;
+}
