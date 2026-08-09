@@ -15403,8 +15403,9 @@ would not have.
 
 **Design reconciliation, from the user's own stated goals:** goal 2 (one
 `struct page`-equivalent home for per-page information, explicitly
-including future fields, for human readability -- "1つのモノを管理する
-データ構造は1つに収める") directly rules out two otherwise-attractive
+including future fields, for human readability -- the user's own framing
+was that one managed thing should live in one data structure) directly
+rules out two otherwise-attractive
 footprint ideas surfaced during the investigation: bitmap-ing
 `SlotMap`'s `occupant_generation` and an intrusive free list for
 `next_free`. Both would move struct fields into separate parallel arrays

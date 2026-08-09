@@ -89,19 +89,28 @@ fn mbox_call(buf: *align(64) u32, len_bytes: usize, channel: u32) -> bool {
 // [5] base (response), [6] size (response), [7] end tag (0).
 let mut mem_msg: [u32; 8] align(4096);
 
-must_use variant MboxMemoryResult {
+must_use variant PlatformMemoryResult {
     Failed;
     Detected((u32, u32));
 }
 
-// mbox_get_arm_memory: queries the VideoCore firmware for the ARM-visible
-// physical RAM base and size, exactly as Linux's raspberrypi-firmware
-// driver does before the kernel proper ever runs. Read-only diagnostic
-// today (GitHub issue #247 step 1) -- kernel/mm/page.tkb's allocator still
-// uses its own fixed BOOT_PAGE_COUNT reservation regardless of what this
-// reports; resizing the allocator to match is deliberately deferred to a
-// follow-up issue.
-fn mbox_get_arm_memory() -> MboxMemoryResult {
+// platform_memory_detect: the generic name this file's own platform_init()/
+// platform_irq_init() (kernel/platform/rpi5/uart.tkb/intc.tkb) already use
+// for a platform-specific implementation behind a platform-neutral call
+// site -- kernel/init/main.tkb calls this name, not mbox_get_arm_memory,
+// so a future QEMU/RISC-V port's own kernel/platform/<target>/memory.tkb
+// can define the same function name against a completely different
+// mechanism (device tree, most likely -- see this file's own header on
+// why DTB was rejected specifically for THIS platform's SWD boot path,
+// not in general) without main.tkb changing at all.
+//
+// Queries the VideoCore firmware for the ARM-visible physical RAM base
+// and size, exactly as Linux's raspberrypi-firmware driver does before
+// the kernel proper ever runs. Read-only diagnostic today (GitHub issue
+// #247 step 1) -- kernel/mm/page.tkb's allocator still uses its own fixed
+// BOOT_PAGE_COUNT reservation regardless of what this reports; resizing
+// the allocator to match is deliberately deferred to a follow-up issue.
+fn platform_memory_detect() -> PlatformMemoryResult {
     mem_msg[0] = 8 * 4;
     mem_msg[1] = 0;
     mem_msg[2] = 0x00010005;
@@ -111,7 +120,7 @@ fn mbox_get_arm_memory() -> MboxMemoryResult {
     mem_msg[6] = 0;
     mem_msg[7] = 0;
     if (mbox_call(mem_msg as *align(64) u32, 8 * 4, MBOX_CH_PROP) == false) {
-        return MboxMemoryResult::Failed;
+        return PlatformMemoryResult::Failed;
     }
-    return MboxMemoryResult::Detected((mem_msg[5], mem_msg[6]));
+    return PlatformMemoryResult::Detected((mem_msg[5], mem_msg[6]));
 }
