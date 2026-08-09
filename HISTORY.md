@@ -15510,3 +15510,69 @@ Hardware-verified: 26/26 `kernelcheck-rpi5` views, no regression.
 Files: `kernel/mm/page.tkb` (`SlotMap(BOOT_PAGE_COUNT)` replaced by
 `PageMeta`/`FreelistCore(BOOT_PAGE_COUNT)`; `kernel/lib/slotmap.tkb`'s
 `use` line dropped).
+
+## 2026-08-09: GitHub Issue #253, Continued Again -- `page_meta` and
+## `boot_page_core` Merged Into One `BootPagePool`, and Issue #255 Closed
+## Unopened
+
+Two threads from the same day, resolved back to back.
+
+**Issue #255 (pack refined integers to their proven storage width):
+investigated and closed without implementing.** The mechanism it asked
+for already exists: `TRefinedInt`'s LLVM width is already whatever `base`
+its explicit `{lo..<hi as base}` annotation names (`lib/types.ml`, see
+this file's own "Refinement Numerical Type" entry), so manually
+annotating a smaller base already shrinks storage with zero compiler
+risk. But applying that to the new `PageMeta` from the previous entry
+found nothing to narrow: its one field, `generation`, comes from
+`FreelistCore`'s monotonically-increasing counter, which has no
+compile-time-provable bound -- narrowing it would be an unsound
+truncation risking a wrapped-around generation aliasing a stale owner's
+(an ABA bug). The one value that IS provably bounded and narrowable in
+this pool, `FreelistCore`'s own `next_free: [usize; N]`, lives inside the
+shared primitive issue #253 already decided not to touch. Estimated
+saving (~800 KiB) judged not worth reopening that question. Closed as
+won't-implement, not deferred.
+
+**Separately, the user re-grepped and found the previous entry's "one
+struct" claim was incomplete:** `kernel/mm/page.tkb` still had TWO
+top-level `BOOT_PAGE_COUNT`-sized globals -- `page_meta` and
+`boot_page_core` -- not one. Fixed by wrapping both (plus the double-free
+counter) in a single `struct BootPagePool`, the exact shape
+`kernel/lib/slotmap.tkb`'s own `SlotMap(N)` already uses (`core:
+FreelistCore(N); occupant_generation: [usize; N]; double_remove_count:
+usize;`), applied non-generically since this file only ever needs the
+one pool.
+
+**Verified via the same host-native compile+run technique as the
+previous entry before touching kernel/, and it surfaced a real, narrower
+parser limitation than first assumed.** `boot_page_pool.meta[i].
+generation = x` (three chained accesses: struct field, then array index,
+then struct field) is a genuine `Syntax error` -- not a semantics
+question, the parser itself rejects the shape. `let meta = boot_page_pool
+.meta; meta[i].generation = x` (the existing "issue #15" struct-embedded-
+array-decays-to-a-raw-pointer idiom, already used throughout this
+codebase) works. This means the earlier concern from the first `PageMeta`
+entry -- growable_pool.tkb's header warning about "indexed writes into a
+nested/structured target" -- was about this exact three-level chain, not
+array-of-struct writes in general (a plain top-level `[PageMeta; N]`,
+this file's very first host-native test, was always fine).
+
+Two further, smaller compiler behaviors found while wiring this up, both
+resolved without any compiler change: a generic call's own type parameter
+(`FreelistCore(N)`'s `N`) cannot be inferred through a nested-field
+address (`&boot_page_pool.core` failed; a named `let core:
+*FreelistCore(BOOT_PAGE_COUNT) = &boot_page_pool.core;` first, same
+"plain local/global with an already-known type" rule the error message
+states, works) -- and once `meta`/`checked`/`index` are pointer-derived
+(`issue #15`), every index into them needs `isize`, not `usize` (raw-
+pointer offsets are always signed in this language; ordinary checked
+array/slice indexing accepts `usize`, this no longer is that).
+
+No footprint change (not the goal -- confirmed unchanged at `3,460,592`
+bytes `.bss`, same as the previous entry). Hardware-verified: 26/26
+`kernelcheck-rpi5` views, no regression.
+
+Files: `kernel/mm/page.tkb` (`page_meta`/`boot_page_core`/
+`boot_page_double_remove_count` merged into one `BootPagePool` struct and
+global).
