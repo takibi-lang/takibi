@@ -17,7 +17,8 @@
     "source=${localEnv:HOME}/claude/dot.claude,target=/home/vscode/.claude,type=bind",
     "source=${localEnv:HOME}/claude/dot.claude.json,target=/home/vscode/.claude.json,type=bind",
     "source=${localEnv:HOME}/codex/dot.codex,target=/home/vscode/.codex,type=bind",
-    "source=${localEnv:HOME}/gh-copilot/dot.copilot,target=/home/vscode/.copilot,type=bind"
+    "source=${localEnv:HOME}/github/dot.copilot,target=/home/vscode/.copilot,type=bind",
+    "source=${localEnv:HOME}/github/dot.config-gh,target=/home/vscode/.config/gh,type=bind"
   ],
   "runArgs": [
     "-v", "/dev:/dev-host:ro",
@@ -33,7 +34,6 @@
   "containerEnv": {
     "LANG": "en_US.UTF-8",
     "LC_ALL": "en_US.UTF-8",
-    "OPAMYES": "true",
-    "GH_TOKEN": "${localEnv:GH_READONLY_TOKEN}"
+    "OPAMYES": "true"
   }
 }
