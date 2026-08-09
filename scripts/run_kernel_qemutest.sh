@@ -1,79 +1,90 @@
-#!/bin/bash
-# QEMU/AArch64 kernel self-test harness: boots the kernel on QEMU and
-# captures the full serial output, verifying that all self-tests pass
-# without hardware dependencies.
+#!/usr/bin/env bash
+# Standalone-kernel QEMU/AArch64 integration runner (GitHub issue #237).
+#
+# Structurally mirrors scripts/run_kernel_hwtest_rpi5.sh's "one capture,
+# several independent views" pattern (see that script's own header): a
+# single boot's UART transcript is projected through every kernel/tests/
+# qemu/views/*.filter and compared exactly against the matching
+# *.expected file. Unlike the RPi5 runner, this needs no SWD/reset/
+# external-serial-device machinery at all -- QEMU's own -nographic pipes
+# the guest UART directly to this process's stdout, so capture is a
+# single `timeout N qemu-system-aarch64 ... -kernel ... > uart.log` call.
+#
+# -m 1024: kernel/mm/page.tkb's BOOT_PAGE_COUNT reserves ~800 MiB of real
+# physical page content starting right after the kernel image. QEMU
+# `virt`'s default RAM (much smaller than that without an explicit -m)
+# would leave part of that pool unbacked -- harmless for today's self-test
+# bundle (it never allocates anywhere near that much), but a real latent
+# bug for any future workload that does. Matches kernel/README.md's
+# documented QEMU invocation.
+set -euo pipefail
 
-set -u
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
+VIEW_DIR="$REPO_ROOT/kernel/tests/qemu/views"
+ARTIFACT_DIR="${KERNEL_QEMU_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-qemu}"
+UART_LOG="$ARTIFACT_DIR/uart.log"
+TIMEOUT_SECS="${KERNEL_QEMU_TIMEOUT:-10}"
 
-KERNEL_ELF="${1:-kernel/build/qemu/kernel.elf}"
-TIMEOUT_SECS="${2:-30}"
-
-if [ ! -f "$KERNEL_ELF" ]; then
-    echo "error: kernel ELF not found: $KERNEL_ELF" >&2
+mkdir -p "$ARTIFACT_DIR"
+exec 9>"$ARTIFACT_DIR/runner.lock"
+if ! flock -n 9; then
+    echo "FAIL kernel/qemu: another QEMU runner already owns $ARTIFACT_DIR" >&2
+    exit 1
+fi
+if [ ! -f "$ELF" ]; then
+    echo "error: kernel ELF not found: $ELF (run 'make kernelbuild-qemu' first)" >&2
     exit 1
 fi
 
-# Temporary file to capture QEMU output
-QEMU_OUTPUT_FILE=$(mktemp)
-trap "rm -f '$QEMU_OUTPUT_FILE'" EXIT
-
-# Boot the kernel and capture output until it naturally halts or times out
-exit_code=0
+echo "[kernel/qemu] booting kernel.elf under QEMU (timeout ${TIMEOUT_SECS}s)"
+# This kernel's fn main() never exits (a final `while (true) {}` park,
+# same as RPi5's) -- there is no clean-exit signal to wait for, so
+# `timeout` killing QEMU (exit 124, or 137 if SIGTERM needed a SIGKILL
+# follow-up) is the EXPECTED completion path, not a failure. Only some
+# OTHER exit status (e.g. QEMU itself rejecting an argument, or the
+# guest crashing QEMU) is a real error.
+qemu_status=0
 timeout "$TIMEOUT_SECS" qemu-system-aarch64 \
-    -M virt \
-    -cpu cortex-a53 \
-    -smp 2 \
-    -kernel "$KERNEL_ELF" \
-    -nographic \
-    -serial mon:stdio \
-    > "$QEMU_OUTPUT_FILE" 2>&1 || exit_code=$?
-
-# exit_code 124 means timeout (expected), 0 means clean exit (also OK)
-if [ "$exit_code" != 0 ] && [ "$exit_code" != 124 ]; then
-    echo "error: QEMU exited with status $exit_code" >&2
-    cat "$QEMU_OUTPUT_FILE"
+    -machine virt -cpu cortex-a53 -smp 2 -m 1024 -nographic \
+    -kernel "$ELF" >"$UART_LOG" 2>&1 || qemu_status=$?
+if [ "$qemu_status" -ne 0 ] && [ "$qemu_status" -ne 124 ] && [ "$qemu_status" -ne 137 ]; then
+    echo "error: qemu-system-aarch64 exited with status $qemu_status" >&2
+    cat "$UART_LOG" >&2
     exit 1
 fi
+if [ ! -s "$UART_LOG" ]; then
+    echo "error: no UART output captured -- kernel did not boot" >&2
+    exit 1
+fi
+tr -d '\r' <"$UART_LOG" >"$UART_LOG.normalized"
 
-# Read output from file
-output=$(cat "$QEMU_OUTPUT_FILE")
-
-# Print QEMU output
-echo "$output"
-
-# Verify expected self-test results
-expected_markers=(
-    "takibi kernel: EL1"
-    "memory: base_bytes"
-    "fp/simd irq: q0-q31+fpsr preserved"
-    "smp bringup: core1 psci"
-    "process table: slots="
-    "address spaces: roots="
-    "user memory: overflow+cross-page"
-    "user memory root isolation"
-    "syscall subset:"
-    "fd table:"
-    "scheduler:"
-    "growable pool:"
-    "asid pool:"
-)
-
-all_found=true
-for marker in "${expected_markers[@]}"; do
-    if echo "$output" | grep -q "$marker"; then
-        echo "PASS: found '$marker'"
-    else
-        echo "FAIL: missing '$marker'" >&2
-        all_found=false
+# One boot, several independent views -- see this file's header and
+# scripts/run_kernel_hwtest_rpi5.sh's own identical loop.
+view_count=0
+for filter in "$VIEW_DIR"/*.filter; do
+    [ -e "$filter" ] || continue
+    name="$(basename "$filter" .filter)"
+    expected="$VIEW_DIR/$name.expected"
+    actual="$ARTIFACT_DIR/$name.actual"
+    if [ ! -f "$expected" ]; then
+        echo "error: missing expected file for kernel view $name" >&2
+        exit 1
     fi
+    LC_ALL=C grep -E -f "$filter" "$UART_LOG.normalized" >"$actual" || true
+    if ! cmp -s "$expected" "$actual"; then
+        echo "FAIL kernel/qemu view: $name" >&2
+        diff -u "$expected" "$actual" >&2 || true
+        echo "artifacts: $ARTIFACT_DIR" >&2
+        exit 1
+    fi
+    echo "PASS kernel/qemu view: $name"
+    view_count=$((view_count + 1))
 done
 
-if [ "$all_found" = true ]; then
-    echo ""
-    echo "PASS kernel-qemu: all self-tests verified on QEMU/AArch64"
-    exit 0
-else
-    echo ""
-    echo "FAIL kernel-qemu: some self-tests missing from QEMU output" >&2
+if [ "$view_count" -eq 0 ]; then
+    echo "error: no kernel integration views found under $VIEW_DIR" >&2
     exit 1
 fi
+
+echo "PASS kernel/qemu ($view_count views, one boot)"

@@ -495,7 +495,7 @@ kernelcheck-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_kernel_hwtest_rpi5.sh
 
 kernelcheck-qemu: kernelbuild-qemu
-	@bash scripts/run_kernel_qemutest.sh $(KERNEL_QEMU_ELF)
+	@bash scripts/run_kernel_qemutest.sh
 
 kernelcheck: kernelcheck-qemu kernelcheck-rpi5
 

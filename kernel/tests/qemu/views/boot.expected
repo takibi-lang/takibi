@@ -1,0 +1,2 @@
+takibi kernel: EL1
+memory: base_bytes=1073741824 detected_mib=1024
