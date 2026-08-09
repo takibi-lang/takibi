@@ -1,0 +1,4 @@
+process clone: parent+child exit=42 reaped
+scheduler preempt: parent+child gpr+sp+pc+simd asid deferred ok
+vm fork: private pages=132 reclaimed
+vm fork: child stack growth ok
