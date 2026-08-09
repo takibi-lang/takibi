@@ -15431,3 +15431,82 @@ Files: `kernel/mm/process_image.tkb` (arrays and their two support
 functions deleted, `process_image_cleanup` rewritten as a full L3-table
 walk, `count` parameter removed from all call sites, one dead
 `BOOT_PAGE_COUNT` bound corrected to `PROCESS_STACK_LAYOUT_SIZE`).
+
+## 2026-08-09: GitHub Issue #253 Continued -- `kernel/mm/page.tkb` Gets Its
+## Own `struct PageMeta`, Off `SlotMap(N)`, Onto `FreelistCore(N)` Directly
+
+Goal 2 of #253's three user-set goals ("one `struct page`-equivalent home
+for per-page information, explicitly including future fields, since one
+managed thing should live in one data structure -- not scattered across
+however many parallel arrays a later feature happens to introduce") still
+had no concrete deliverable after the previous entry's ~52 MiB recovery:
+`kernel/mm/page.tkb` used `kernel/lib/slotmap.tkb`'s `SlotMap(N)`, a
+primitive *shared* with `kernel/kernel/process.tkb`'s process table and
+`kernel/net/tcp.tkb`'s connection pool. A future page-specific field
+cannot go on `SlotMap(N)` itself without also becoming a field every
+other pool built on it carries -- the wrong home even for readability
+alone, and the reason the previous entry deferred this rather than
+guessing at a design.
+
+**First attempt at scope estimation was wrong, caught before writing any
+code.** `SlotMap(N)`'s `occupant_generation` and its embedded
+`FreelistCore(N)`'s `next_free` are genuinely two separate fields at two
+different struct levels; truly merging them into one array-of-struct
+would mean changing `kernel/lib/freelist.tkb` itself, which
+`kernel/mm/address_space.tkb`, `kernel/net/tcp.tkb`,
+`kernel/kernel/process.tkb`, and `kernel/lib/growable_pool.tkb` (and
+everything built on it, including every MMU table pool) also depend on --
+not the "low risk, small scope" quick follow-up first described to the
+user. Caught by re-reading `kernel/lib/freelist.tkb` and grepping its
+real dependents before writing anything, not by starting the change and
+discovering the blast radius partway through.
+
+**Re-scoped, confirmed with the user: touch nothing shared.** `kernel/
+lib/slotmap.tkb`'s own header already states the exact applicability
+rule needed here: reach for `FreelistCore(N)` directly instead of
+`SlotMap(N)`'s wrapper "only when [the one extra usize/slot] genuinely
+matters (large N, e.g. page.tkb's BOOT_PAGE_COUNT class of pool) and no
+call site will ever need generation re-validation." Grepping `kernel/mm/
+page.tkb` confirmed it never called `slotmap_matches()` or
+`slotmap_occupant_generation()` -- exactly the documented case. `page.tkb`
+now defines its own `struct PageMeta { generation: usize; }`, backed by a
+plain `[PageMeta; BOOT_PAGE_COUNT]` array, and calls `kernel/lib/
+freelist.tkb`'s `FreelistCore(N)` API directly, reimplementing the same
+double-free counting `slotmap_remove` provided (this file's own
+`page_free`/`page_transferred_release`) entirely locally. `kernel/lib/
+freelist.tkb` and `slotmap.tkb` themselves are byte-for-byte unchanged --
+still the recommended default for every other kernel/ pool, per that
+file's own header, which this change does not touch or contradict.
+
+**One real compiler question resolved along the way, empirically, not by
+inference from a comment alone.** `kernel/lib/growable_pool.tkb`'s own
+header warns that "indexed writes into a nested/structured target are
+not reliably supported," citing `kernel/net/tcp.tkb`'s own experience,
+and deliberately keeps its own chunk bookkeeping as flat 1-D arrays
+rather than an array of chunk-descriptor structs. Before relying on
+`page_meta[index].generation = ...` (an array-of-struct field write) for
+kernel memory-management code, wrote a standalone host-native (x86_64,
+`linux_user`-style harness) test exercising exactly that shape --
+non-generic top-level `[PageMeta; 8]`, writes and reads through multiple
+indices in a loop -- and ran it. Compiled and produced the exact expected
+values. Concluded the cited limitation is specific to arrays embedded as
+fields *inside a generic struct* (`GrowablePool(T, ...)`'s own situation)
+or to some other narrower case, not to plain top-level array-of-struct
+globals in general -- `PageMeta`'s case. `kernelbuild-rpi5` and
+`kernelcheck-rpi5`'s full pass below is the real, load-bearing
+confirmation on the actual AArch64 target; the host-native test was only
+ever a cheap way to fail fast, before spending a real hardware cycle, if
+the concern had been founded.
+
+No footprint change (not this step's goal -- real `.bss` is unchanged at
+`3,460,592` bytes, confirmed): this is purely goal 2, giving `page.tkb`
+one real, page-specific, extensible struct in place of a shared
+primitive's own array. `SlotMap(BOOT_PAGE_COUNT)`'s one-`usize`-per-slot
+cost was already accepted as a real but small tradeoff before this --
+now the same bytes live in a home this file actually owns.
+
+Hardware-verified: 26/26 `kernelcheck-rpi5` views, no regression.
+
+Files: `kernel/mm/page.tkb` (`SlotMap(BOOT_PAGE_COUNT)` replaced by
+`PageMeta`/`FreelistCore(BOOT_PAGE_COUNT)`; `kernel/lib/slotmap.tkb`'s
+`use` line dropped).

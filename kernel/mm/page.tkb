@@ -10,11 +10,11 @@
 // (kernel/arch/arm64/boot/link.ld's own symbol for the first PAGE_SIZE-
 // aligned physical address past every other statically-laid-out kernel
 // region) plus `index * PAGE_SIZE`, accessed directly -- the only
-// remaining BOOT_PAGE_COUNT-sized cost is metadata (SlotMap's own
-// bookkeeping here, plus kernel/mm/process_image.tkb's two
-// PROCESS_IMAGE_ROOT_MAX-scaled index arrays), on the order of a few
-// hundred bytes per page, not 4096. See HISTORY.md's 2026-08-08 issue
-// #251 entry for the real-kernel comparison this was modeled on.
+// remaining BOOT_PAGE_COUNT-sized cost is metadata (this file's own
+// PageMeta below, as of GitHub issue #253), on the order of tens of
+// bytes per page, not 4096. See HISTORY.md's 2026-08-08 issue #251 entry
+// for the real-kernel comparison this was modeled on, and its 2026-08-09
+// issue #253 entry for PageMeta's own design.
 //
 // `page_bytes()` (and everything reached through it) now needs `!{unsafe}`
 // as an honest consequence: proving a slice is in-bounds without a runtime
@@ -33,13 +33,28 @@
 //
 // Slot allocation itself (issue #207, the most acute of that issue's five
 // call sites: a 1024-entry scan on every single page allocation) is O(1)
-// via kernel/lib/slotmap.tkb's SlotMap(N), not a hand-rolled scan -- see
-// that file's header for the design (SlotMap is the recommended default
-// even here, where nothing needs its generation-revalidation capability,
-// for one consistent collection primitive across kernel/). PageOwner[page]
-// stays this file's own public type (unchanged ABI/API for every
-// downstream caller); only its internal slot bookkeeping is now delegated.
-use "kernel/lib/slotmap.tkb";
+// via kernel/lib/freelist.tkb's FreelistCore(N), not a hand-rolled scan.
+//
+// GitHub issue #253 (2026-08-09): this file used kernel/lib/slotmap.tkb's
+// SlotMap(N) wrapper until now -- kernel/lib/slotmap.tkb's own header
+// explicitly recommends reaching for FreelistCore(N) directly instead
+// "only when [the one extra usize per slot] genuinely matters (large N,
+// e.g. page.tkb's BOOT_PAGE_COUNT class of pool) and no call site will
+// ever need generation re-validation" (slotmap_matches()/
+// slotmap_occupant_generation()) -- exactly this file's own situation:
+// nothing here ever called either. What SlotMap added over bare
+// FreelistCore(N) -- one generation value per slot, for double-free
+// detection -- is now PageMeta.generation below: this file's own, single,
+// extensible home for per-page metadata (GitHub issue #253's goal 2, "one
+// struct-page-equivalent, readable and ready for future fields," not met
+// by SlotMap's own occupant_generation array, which is shared with
+// kernel/kernel/process.tkb's and kernel/net/tcp.tkb's unrelated pools --
+// a future page-specific field belongs here, not on a primitive those
+// other pools also embed). Deliberately NOT a change to
+// kernel/lib/freelist.tkb/slotmap.tkb themselves (both remain exactly as
+// they were, still the recommended default for every other kernel/ pool)
+// -- a real "should FreelistCore/SlotMap's own layout change" question,
+// if one ever arises, is separate, larger work, not attempted here.
 use "kernel/lib/freelist.tkb";
 
 const PAGE_SIZE: usize = 4096;
@@ -52,7 +67,20 @@ const BOOT_PAGE_COUNT: usize = 204800;
 
 extern symbol usable_ram_start;
 
-private let mut boot_page_pool: SlotMap(BOOT_PAGE_COUNT);
+// This file's struct-page equivalent: today just the generation value
+// double-free detection needs (kernel/lib/slotmap.tkb's occupant_
+// generation[], moved here so it is page.tkb's own, not shared with
+// unrelated pools elsewhere in kernel/ -- see this file's header). Add
+// future per-page fields (reference counts, COW/shared flags, and
+// similar) here, not as a new parallel array -- keeping every managed
+// page's information in this one struct is the whole point.
+struct PageMeta {
+    generation: usize;
+}
+
+private let mut page_meta: [PageMeta; BOOT_PAGE_COUNT];
+private let mut boot_page_core: FreelistCore(BOOT_PAGE_COUNT);
+private let mut boot_page_double_remove_count: usize;
 
 linear struct PageOwner[page: usize] {
     private index: {0..<BOOT_PAGE_COUNT as usize};
@@ -71,16 +99,21 @@ fn page_owner_new(index: {0..<BOOT_PAGE_COUNT as usize},
 }
 
 fn page_allocator_init() {
-    slotmap_init(&boot_page_pool);
+    freelist_core_init(&boot_page_core);
+    for i: usize in 0..<BOOT_PAGE_COUNT {
+        page_meta[i].generation = 0;
+    }
+    boot_page_double_remove_count = 0;
 }
 
 fn page_alloc() -> PageAllocResult {
-    match slotmap_insert(&boot_page_pool) {
+    match freelist_core_insert(&boot_page_core) {
         FreelistPopResult::Empty => { return PageAllocResult::OutOfMemory; }
         FreelistPopResult::Popped(slot) => {
             let (index, generation) = freelist_owner_into_parts(slot);
             if (index < BOOT_PAGE_COUNT) {
                 let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+                page_meta[checked].generation = generation;
                 return PageAllocResult::Allocated(
                     page_owner_new(checked, generation));
             }
@@ -89,9 +122,20 @@ fn page_alloc() -> PageAllocResult {
     }
 }
 
+// Releasing a slot that is ALREADY free is a double free -- same reasoning
+// as kernel/lib/slotmap.tkb's own slotmap_remove (this function's direct
+// ancestor): a free list is not idempotent, so this counts the event at
+// its source instead of silently corrupting the chain a second time.
 fn page_free(owner: sink PageOwner[page]) {
-    slotmap_remove(&boot_page_pool,
-                   freelist_owner_new(owner.index, owner.generation));
+    let index: {0..<BOOT_PAGE_COUNT as usize} = owner.index;
+    let generation: usize = owner.generation;
+    if (page_meta[index].generation == 0) {
+        boot_page_double_remove_count = boot_page_double_remove_count + 1;
+        freelist_owner_drop(freelist_owner_new(index, generation));
+        return;
+    }
+    page_meta[index].generation = 0;
+    freelist_core_remove(&boot_page_core, freelist_owner_new(index, generation));
 }
 
 fn page_physical_address(owner: borrow PageOwner[page]) -> usize {
@@ -154,14 +198,21 @@ fn page_owner_transfer_index(owner: sink PageOwner[page])
     return owner.index;
 }
 
-// Generation-agnostic: slotmap_remove() only reads the owner's index (see
-// kernel/lib/slotmap.tkb), so a fabricated 0 is exactly as sound here as
+// Generation-agnostic: the double-free check below only reads page_meta's
+// stored generation (whether the slot is currently marked occupied), so a
+// fabricated 0 passed to freelist_owner_new is exactly as sound here as
 // the real generation would be -- this matches the un-tracked-generation
 // release this function has always offered (the coarser owner that called
 // page_owner_transfer_index only ever kept the index, never the
-// generation).
+// generation). Same double-free reasoning as page_free above.
 fn page_transferred_release(index: {0..<BOOT_PAGE_COUNT as usize}) {
-    slotmap_remove(&boot_page_pool, freelist_owner_new(index, 0));
+    if (page_meta[index].generation == 0) {
+        boot_page_double_remove_count = boot_page_double_remove_count + 1;
+        freelist_owner_drop(freelist_owner_new(index, 0));
+        return;
+    }
+    page_meta[index].generation = 0;
+    freelist_core_remove(&boot_page_core, freelist_owner_new(index, 0));
 }
 
 fn page_transferred_release_physical(physical: usize) {
@@ -173,23 +224,29 @@ fn page_transferred_release_physical(physical: usize) {
     }
     let index: usize = (physical - base) / PAGE_SIZE;
     if (index < BOOT_PAGE_COUNT) {
-        slotmap_remove(&boot_page_pool, freelist_owner_new(index, 0));
+        let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+        page_transferred_release(checked);
     }
 }
 
 fn page_allocator_live_count() -> usize {
-    return slotmap_live_count(&boot_page_pool);
+    let mut live: usize = 0;
+    for i: usize in 0..<BOOT_PAGE_COUNT {
+        if (page_meta[i].generation != 0) { live = live + 1; }
+    }
+    return live;
 }
 
 fn page_allocator_reclaim_all() {
-    slotmap_init(&boot_page_pool);
+    page_allocator_init();
 }
 
-// Number of times a page was released that was already free (see
-// kernel/lib/slotmap.tkb's slotmap_remove). Must stay 0: the old
-// scan-based allocator made such a double free silently idempotent, so
-// this is the first time kernel/ can observe one at all.
+// Number of times a page was released that was already free. Must stay 0:
+// the old scan-based allocator made such a double free silently
+// idempotent, so this was the first place kernel/ could observe one at
+// all (see kernel/lib/freelist.tkb's own header for why a free list is
+// not idempotent the way that scan was).
 fn page_allocator_double_free_count() -> usize {
-    return slotmap_double_remove_count(&boot_page_pool);
+    return boot_page_double_remove_count;
 }
 
