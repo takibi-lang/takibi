@@ -22,14 +22,22 @@
 // kernel/mm/address_space.tkb's own precedent of using SlotMap directly for
 // a small pool of this shape).
 //
-// This file deliberately does not yet touch mmu.tkb's function signatures
-// -- see #254's tracking comment for the phased plan. Wiring this pool into
-// address_space_activate_root/_tlb_invalidate/_clear_root happens together
-// with the per-process root-storage move (the step that gives those
-// functions a real long-lived asid value to pass in), not here, to avoid
-// editing the same call sites twice.
+// This file deliberately does not yet touch mmu.tkb's function signatures.
+// It is NOT "next in line" -- the root-storage move this pool was built
+// for was abandoned mid-design (see #254's 2026-08-09 comment thread and
+// HISTORY.md's entry of the same date): it turned out to be blocked on
+// #264 (no per-process struct exists anywhere in this kernel yet), and
+// that whole line of MMU/paging work is frozen behind #237 (a QEMU lane
+// for kernel/, so this class of change stops costing a 66-second SWD load
+// plus a full RPi5 boot per iteration). This file is left in place,
+// tested, and unused on purpose -- wiring it into
+// address_space_activate_root/_tlb_invalidate/_clear_root is real future
+// work, not a dangling TODO to chase without #237/#264 first.
 //
 // Current limitations (2026-08-09):
+// - Unused in production as of this writing -- see above. Its own boot
+//   self-test (asid_pool_probe) and hardware view are what keep it
+//   verified in the meantime.
 // - NOT SYNCHRONIZED, same caveat as kernel/lib/freelist.tkb/slotmap.tkb --
 //   this pool is reachable only from single-core boot/syscall-dispatch
 //   context today, same as every other kernel/lib-backed pool in kernel/.

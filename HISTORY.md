@@ -15,6 +15,116 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-09: MMU root storage -- a root-0 validation bug (#263), a decoupled ASID pool, and why per-process page-table ownership was frozen behind a QEMU lane
+
+Started as a plain question -- how does `kernel/arch/arm64/mm/mmu.tkb`
+hold L1/L2/L3 today? -- and ended by abandoning a planned refactor after
+it surfaced a blocker larger than the refactor itself. Two real changes
+landed; the third was deliberately not attempted. Recording the reasoning
+because the abandoned design is the kind that looks obviously right on a
+second encounter.
+
+**What the structure actually was.** Three
+`GrowablePool(MmuTable, 1, MAX_ROOTS, MAX_ROOTS)` pools
+(`kernel_l1_pool`/`user_l2_pool`/`user_l3_pool`), one shared integer
+`slot` per address space, with `init_root()` wiring exactly `L1[1] -> L2`
+and `L2[0] -> L3` -- one 512-entry L3 table, i.e. the 2 MiB per-process
+ceiling. Compared against Linux (`task_struct -> mm_struct -> pgd`) and
+NetBSD (`proc -> vmspace -> pmap -> pm_l0`), where the root is reached
+only via a pointer chain from per-core "current" state and the sole
+static global is the kernel-only root (`swapper_pg_dir`, `pmap_kernel()`),
+the difference is that takibi keys every root off a shared, fixed-size
+array rather than owning it per process. #246 had flagged that exact fork
+once in passing ("a new root needs its own ASID and physical L1/L2/L3
+tables, not just a slot in an array") and deferred it; no follow-up was
+ever filed.
+
+**Two findings from reading the call sites, both load-bearing.** First,
+`kernel/mm/address_space.tkb`'s entire `ProcessAddressSpaceOwner` /
+`ActiveProcessAddressSpace` / `ProcessSpaceMappingOwner` family --
+the file's linear-ownership showpiece -- is unused prototype code: its
+only caller anywhere in `kernel/` is its own boot self-test. Real
+processes get their root from `kernel/kernel/process.tkb`'s
+`scheduled_process_alloc` calling `mmu_ensure_root(slot)` directly. Its
+`PROCESS_ADDRESS_SPACE_MAX = 2` is therefore not a second production
+ceiling to reconcile with `MAX_ROOTS = 16`, as it appears to be.
+
+Second, and a genuine bug: `kernel/mm/user_memory.tkb` -- the file behind
+`user_range_check`, which ~30 real syscalls funnel through to validate
+user buffers -- read PTEs through `mmu.tkb`'s `user_pte_read`/
+`user_pte_write`, which are hardcoded to physical slot 0 regardless of
+which root the calling process actually had installed in `TTBR0_EL1`. The
+image-setup path (`process_image.tkb`'s `process_image_pte_*`) was
+correctly root-parameterized; the live syscall-validation path was not,
+and the two disagreed about whether "root" mattered at all. Filed as
+#263 and fixed by threading a `root` parameter (from
+`kernel_process_current_root()`) through `user_range_l3_span`/
+`user_range_check`/`user_page_class_at`/`user_range_reprotect` and
+switching them onto the already-root-parameterized
+`address_space_pte_read`/`_write`. The two boot probes that intentionally
+run before any process exists stayed pinned to root 0 explicitly. The
+existing 26 hardware views passed unchanged, which is itself the answer
+to "why didn't a test catch this": no current fixture issues a
+buffer-touching syscall from a non-zero root whose mapping diverges from
+root 0's at the same index.
+
+**The ASID pool.** ASID was derived purely as `slot + 1` in three places
+in `mmu.tkb`, with no existence independent of the array index -- so any
+move away from slot-indexed storage breaks ASID assignment first.
+`kernel/arch/arm64/mm/asid.tkb` gives it an independent lifetime
+(`SlotMap(16)`, `asid_alloc`/`asid_free`/`asid_value`, plus the
+`asid_owner_transfer`/`asid_transferred_release` pair mirroring
+`page.tkb`'s coarser-owner idiom). Deliberately not wired into
+`mmu.tkb`'s signatures in the same change: doing so would have meant
+adding a temporary `slot + 1` shim at ~14 call sites and rewriting them
+again one step later. It has its own boot self-test and hardware view.
+Worth noting the first run of that hardware check passed 26/26 *without*
+proving anything about the new probe -- its log line matched no existing
+view filter, so "the board booted" was all that had been verified. The
+`asid_pool` view was added and the check rerun before believing it.
+
+**Where the planned refactor died.** The intent was to move the three
+root pages into `process_image.tkb`'s `ProcessLayout` (a real per-process
+struct, and the one place #258 had already generalized for this). That
+requires `mmu.tkb` to read `process_layout`, which closes a cycle:
+`process_image.tkb -> address_space.tkb -> mmu.tkb` already exists.
+
+The cycle was a symptom, not the problem. The problem it exposed: **there
+is no process struct in this kernel.** Per-process state is scattered
+across at least four files as parallel arrays keyed by the same
+`pool_index` -- `process.tkb`'s ~15 (`scheduled_process_saved_sp`,
+`_state`, `_parent`, `_child`, ...), `process_image.tkb`'s
+`process_layout`, `mmu.tkb`'s three pools, `fd_table.tkb`'s per-process
+context. `pool_index` is the de-facto process identity, by convention
+rather than by type. That is what actually stands between here and the
+Linux/NetBSD shape, and it is cross-cutting rather than local to `mm/`
+-- which also means rewriting the virtual-paging code from scratch would
+not have reached the goal either, since a rewrite still has to key into
+whatever `process.tkb` hands out.
+
+**The design conclusion worth keeping.** `mmu.tkb` should stop seeing
+slot indices entirely and become what Linux's arch layer is: functions
+over already-resolved values (`set_pte(ptep, pte)` takes a resolved
+pointer; the walk happens above it). `address_space.tkb` -- currently
+dead code sitting at exactly the right place in the dependency graph,
+visible to both `user_memory.tkb` and `process_image.tkb` and above
+`mmu.tkb` -- is the natural home for the address-space table. With that
+split, whoever *owns* the table (array today, per-process struct later)
+becomes a change that never touches the MMU layer.
+
+**Why it was frozen rather than continued.** Every iteration on this code
+costs a 66-second SWD load plus a full boot on the one physical RPi5;
+there is no QEMU lane. QEMU emulates the AArch64 MMU accurately for
+exactly the properties this work iterates on -- TTBR0_EL1/TCR_EL1/MAIR_EL1
+programming, multi-level table walks, AP/UXN/PXN permission faults, ASID
+TLB isolation, TLBI semantics -- and structurally cannot catch the class
+that hangs the board: missing cache maintenance and barriers, since QEMU
+is coherent by construction. That is a clean split (design correctness
+cheaply, barrier correctness on hardware at the end) and it inverts the
+current cost structure, where the expensive lane pays for both. So the
+`mm/` rework was stopped here with the findings recorded, and the QEMU
+kernel target promoted ahead of it.
+
 ### 2026-08-08: Three-level process tree -- N-slot process model (#245), blocking `wait4` (#244), and `user_payload` as a real ELF launched from `init.sh` (#241)
 
 Closes all three together, because they turned out to be one problem:
