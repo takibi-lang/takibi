@@ -799,7 +799,7 @@ fn syscall_readv_segment(fd: usize, address: usize, length: usize)
 // Connected TCP fds
 // check already-buffered data read-only (no mutation, so no risk to the
 // proven TCP send/receive paths). Everything else is POLLNVAL.
-// UART RX ring buffer: moved here from kernel/init/main.tkb (issue #196)
+// UART RX ring buffer: moved here from kernel/platform/rpi5/init.tkb (issue #196)
 // now that ppoll(2)'s fd==0 readiness check is a second real caller of
 // kernel_uart_rx_pending, alongside the existing
 // AARCH64_NR_TAKIBI_UART_RX_WAIT dispatch below -- both live in this

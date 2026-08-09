@@ -43,7 +43,7 @@ fn gic_uart_spi_setup() {
 // GIC/timer routing for every source this build currently handles, plus
 // the one global DAIF.I unmask. Matches kernel/platform/rpi5/intc.tkb's
 // platform_irq_init() in structure and calling convention: UART's own
-// PL011 source stays masked (IMSC=0) until kernel/init/main_qemu.tkb's
+// PL011 source stays masked (IMSC=0) until kernel/platform/qemu/init.tkb's
 // own irq_uart_rx_unmask() call, even though GIC-level routing is armed
 // here.
 fn platform_irq_init() {

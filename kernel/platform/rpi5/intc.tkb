@@ -227,10 +227,10 @@ fn rp1_gem_msix_setup() {
 // until they are ready for ANY of these interrupts to preempt them at any
 // later point, including while an EL0 process is executing -- see this
 // file's header comment on why the Lower-EL-AArch64 IRQ slot needed to be
-// wired first. kernel/init/main.tkb calls this once, early (before
+// wired first. kernel/platform/rpi5/init.tkb calls this once, early (before
 // disk_initialize()), so USB xHCI's real disk I/O path runs
 // interrupt-driven for the rest of the boot. UART0's PL011-level source
-// stays masked (IMSC=0) until kernel/init/main.tkb's own
+// stays masked (IMSC=0) until kernel/platform/rpi5/init.tkb's own
 // irq_uart_rx_unmask() call much later -- GIC-level routing being armed
 // early is harmless as long as the peripheral itself never asserts.
 fn platform_irq_init() {

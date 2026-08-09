@@ -169,7 +169,7 @@ echo "[kernel/rpi5] TCP integration passed"
 
 # GitHub issue #187: the kernel injects a one-shot SYN-ACK drop right
 # before starting the real BusyBox HTTPd daemon (kernel_tcp_inject_drop_
-# next_syn_ack(), kernel/init/main.tkb), so its own bounded retransmit
+# next_syn_ack(), kernel/platform/rpi5/init.tkb), so its own bounded retransmit
 # budget (TCP_RETRY_LIMIT * retry_ticks, kernel/net/tcp.tkb) can race
 # against curl's connection timeout if the FIRST curl attempt's SYN
 # happens to arrive while the kernel is still busy with the earlier

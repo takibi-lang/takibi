@@ -47,7 +47,7 @@ run_initial_user:
      * EXC_CONTEXT_RESTORE closes exists here too, and this path is reached
      * with DAIF.I unmasked -- kernel/platform/rpi5/intc.tkb's
      * platform_irq_init() runs its one global enable_irq() long before
-     * kernel/init/main.tkb gets here. An interrupt between these three msr
+     * kernel/platform/rpi5/init.tkb gets here. An interrupt between these three msr
      * instructions and the eret would return the EL0 image to EL1h, or to a
      * kernel .text address, instead of to x0. EL0's own interrupt state is
      * unaffected: it comes from the SPSR value written below, not from

@@ -14,7 +14,7 @@
  * context's values back.
  *
  * The clobber is armed only for the duration of fpsimd_irq_probe(), which
- * kernel/init/main.tkb calls once during boot. Outside that window the hook
+ * kernel/platform/rpi5/init.tkb calls once during boot. Outside that window the hook
  * is three instructions (load flag, test, return) on the IRQ path.
  *
  * Everything here is assembly because the point is to hold values in the

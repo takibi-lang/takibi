@@ -193,8 +193,8 @@ fn virtio_net_find() -> bool {
 // Called from net_init() below, once virtio_net_find() has discovered the
 // device's slot -- NOT from kernel/platform/qemu/intc.tkb's
 // platform_irq_init(), unlike the UART/timer routing there: that runs
-// BEFORE net_init() in kernel/init/main_qemu.tkb's own boot sequence
-// (matching kernel/init/main.tkb's identical ordering), so the device's
+// BEFORE net_init() in kernel/platform/qemu/init.tkb's own boot sequence
+// (matching kernel/platform/rpi5/init.tkb's identical ordering), so the device's
 // GIC INTID and even whether the device exists at all are not known
 // yet at that point. Matches examples/common_qemu/virtio_mmio.tkb's own
 // net_init() calling its GIC-enable step directly, for the same reason.

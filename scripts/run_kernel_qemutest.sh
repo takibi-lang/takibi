@@ -46,7 +46,7 @@ TIMEOUT_SECS="${KERNEL_QEMU_TIMEOUT:-90}"
 PEER_TIMEOUT_SECS="${KERNEL_QEMU_PEER_TIMEOUT:-60}"
 NETDEV_LOCAL_PORT="${KERNEL_QEMU_NETDEV_LOCAL_PORT:-17771}"
 NETDEV_REMOTE_PORT="${KERNEL_QEMU_NETDEV_REMOTE_PORT:-17772}"
-# kernel/init/main_qemu.tkb's very last boot-log line before it parks in
+# kernel/platform/qemu/init.tkb's very last boot-log line before it parks in
 # `while (true) {}` -- see that file's tail.
 BOOT_DONE_MARKER="^resources: pages=0$"
 

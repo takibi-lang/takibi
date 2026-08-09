@@ -2,7 +2,7 @@
 # Host-side peer for kernel/'s QEMU virtio-net milestone (GitHub issue
 # #237 M4). Unlike examples/'s own arp_test.py/icmp_echo_test.py/
 # tcp_echo_test.py (each a fresh QEMU boot per protocol, since those are
-# separate standalone examples), kernel/init/main_qemu.tkb's fn main()
+# separate standalone examples), kernel/platform/qemu/init.tkb's fn main()
 # runs ARP then ICMP then TCP sequentially in ONE boot --
 # kernel_arp_reply_once() replies to exactly one valid request and
 # returns, then kernel_icmp_reply_once() starts waiting, then

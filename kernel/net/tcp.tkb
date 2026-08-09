@@ -334,7 +334,7 @@ fn kernel_tcp_injected_syn_ack_recovered() -> bool {
 // GitHub issue #180: drop the Nth data segment sent on this connection
 // (0-based; kernel/arch/arm64/kernel/user_entry.S's EL0 fixture sends
 // exactly 3: index 0 = the 19-byte header, 1 = the 1460-byte body, 2 =
-// the final byte -- kernel/init/main.tkb arms index 1, a genuine
+// the final byte -- kernel/platform/rpi5/init.tkb arms index 1, a genuine
 // mid-large-response drop, not a bookend). Unlike
 // kernel_tcp_inject_drop_next_data's old synchronous busy-wait-then-
 // unconditional-resend, this only skips the targeted segment's INITIAL

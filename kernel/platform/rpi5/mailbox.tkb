@@ -97,7 +97,7 @@ must_use variant PlatformMemoryResult {
 // platform_memory_detect: the generic name this file's own platform_init()/
 // platform_irq_init() (kernel/platform/rpi5/uart.tkb/intc.tkb) already use
 // for a platform-specific implementation behind a platform-neutral call
-// site -- kernel/init/main.tkb calls this name, not mbox_get_arm_memory,
+// site -- kernel/platform/rpi5/init.tkb calls this name, not mbox_get_arm_memory,
 // so a future QEMU/RISC-V port's own kernel/platform/<target>/memory.tkb
 // can define the same function name against a completely different
 // mechanism (device tree, most likely -- see this file's own header on

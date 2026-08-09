@@ -652,7 +652,7 @@ private let mut execution_child_exit_count: usize;
 // kernel_process_scheduler_acceptance_evidence/_clone_evidence below), NOT
 // what wait4() reports (that's the per-slot arrays just below, added for
 // issue #248). The EL0 fixture forks a child that exits 42, then exits 0
-// itself as ash's own child, so by the time kernel/init/main.tkb reads the
+// itself as ash's own child, so by the time kernel/platform/rpi5/init.tkb reads the
 // evidence the 42 has been overwritten by that outer 0 if this weren't
 // "the first child reaped since the last kernel_process_execution_reset()"
 // specifically.
@@ -1313,7 +1313,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
 // GitHub issue #248: per-slot now, indexed by whichever slot is CURRENTLY
 // running -- correct for every real caller of these four (the synchronous,
 // non-blocking wait4() return path in kernel/kernel/syscall.tkb; kernel/
-// init/main.tkb's kernel_process_child_exec_reap(), which already relies
+// init/test_driver.tkb's kernel_process_child_exec_reap(), which already relies
 // on execution_current_handle being the parent by the time it runs), so
 // none of their call sites need to change. The one place that DOES need a
 // specific, non-current slot (kernel_process_child_exit's own
@@ -1382,7 +1382,7 @@ fn kernel_process_child_exec_mark() {
 // status of two DIFFERENT processes -- kernel/kernel/syscall.tkb's own
 // EXIT handler asks about the process currently exiting (before
 // kernel_process_child_exit() has run), while kernel_process_child_exec_
-// reap() (kernel/init/main.tkb) asks about the child that already exited
+// reap() (kernel/platform/rpi5/init.tkb) asks about the child that already exited
 // (after that same call has switched execution_current_handle to the
 // parent). Taking an explicit pid removes the ambiguity instead of
 // guessing which one "current" means at the call site.

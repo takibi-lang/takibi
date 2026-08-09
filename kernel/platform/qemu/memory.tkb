@@ -1,7 +1,7 @@
 // platform_memory_detect() for QEMU's `virt` machine -- the same
 // platform-neutral seam name kernel/platform/rpi5/mailbox.tkb's own header
 // comment already anticipated a future QEMU port would fill in "without
-// main.tkb changing at all" (kernel/init/main_qemu.tkb calls this name
+// main.tkb changing at all" (kernel/platform/qemu/init.tkb calls this name
 // unmodified). There is no VideoCore-mailbox equivalent under QEMU and no
 // usable DTB pointer captured by kernel/arch/arm64/boot/entry.S at boot
 // (see that file -- `_start` never reads x0), so this returns a fixed

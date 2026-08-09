@@ -6,7 +6,7 @@
 // survived, 0xffff means no interrupt arrived at all within a second and
 // nothing was proven.
 //
-// Split into its own file rather than declared in kernel/init/main.tkb
+// Split into its own file rather than declared in kernel/platform/rpi5/init.tkb
 // because takibi rejects a second `extern fn` declaration of the same name
 // even with an identical signature, so a future second consumer would
 // otherwise be a hard conflict.

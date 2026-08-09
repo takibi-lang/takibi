@@ -427,7 +427,7 @@ def test_connected_large_response(client_mac: bytes) -> bool:
     # segment is TCP_RETRY_LIMIT(3) * retry_ticks(~200ms) =~ 600ms (see
     # kernel/net/tcp.tkb's kernel_tcp_accept_once comment) -- 10s covers
     # that many times over without masking a genuine hang as a slow pass.
-    # kernel/init/main.tkb also arms kernel_tcp_inject_drop_next_fin, so
+    # kernel/platform/rpi5/init.tkb also arms kernel_tcp_inject_drop_next_fin, so
     # close()'s own FIN is silently unsent on its first attempt too and
     # only reaches the wire via the same retry path -- this loop keeps
     # running past a fully-collected body specifically to see and ACK

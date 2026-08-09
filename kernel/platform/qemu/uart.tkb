@@ -3,8 +3,8 @@
 // tree's own bare-metal examples). Structured to match kernel/platform/
 // rpi5/uart.tkb's function set exactly (stored-handler RX interrupt
 // interface, uart_put_udec, platform_init/platform_shutdown) so
-// kernel/init/main_qemu.tkb needs no different calling convention than
-// kernel/init/main.tkb -- only this file (and kernel/platform/qemu/intc.tkb,
+// kernel/platform/qemu/init.tkb needs no different calling convention than
+// kernel/platform/rpi5/init.tkb -- only this file (and kernel/platform/qemu/intc.tkb,
 // which routes the interrupt here) differs, not any caller.
 //
 // Unlike RPi5's RP1 UART0, QEMU's PL011 needs no PCIe link and no baud-rate

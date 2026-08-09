@@ -79,7 +79,7 @@ kernel_secondary_entry:
      * core index in Aff0 (bits[7:0]) -- confirmed by dumping this
      * machine's own generated DTB (cpu@0 reg=0, cpu@1 reg=1) -- unlike
      * entry.S's RPi5 copy, which reads Aff1 (bits[9:8]) because BCM2712
-     * numbers cores there instead (matching kernel/init/main.tkb's own
+     * numbers cores there instead (matching kernel/platform/rpi5/init.tkb's own
      * psci_cpu_on(0x100, ...) target_affinity, Aff1=1). A first real boot
      * attempt under this port silently failed smp_bringup with this exact
      * line still copied from entry.S unchanged: PSCI reported CPU_ON

@@ -5,7 +5,7 @@
 // msr_cntp_ctl_el0 intrinsics (lib/type_inf.ml / lib/llvm_gen.ml). Same
 // names and signatures as the retired timer.S, so every existing caller
 // (kernel/platform/rpi5/pcie.tkb's delay_us/timed_out,
-// kernel/platform/rpi5/timer_irq.tkb's tick setup, kernel/init/main.tkb's
+// kernel/platform/rpi5/timer_irq.tkb's tick setup, kernel/platform/rpi5/init.tkb's
 // secondary-boot deadline loop, and every kernel/net/*.tkb timeout loop)
 // needed no change beyond switching its `extern fn` declaration to a
 // `use` of this file. timer.S's own `task_exit_stub` had zero callers

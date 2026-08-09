@@ -300,7 +300,7 @@ blocks) of never trusting a stale copy of a block the shared
 `ext2_read_small_file` now loops over `ceil(size/1024)` blocks instead of
 assuming exactly one. New fixture `kernel/tests/ext2/large.txt` (3200
 bytes of `0x41`, spanning 4 direct blocks: 3 full + 1 partial) wired into
-the `KERNEL_EXT2_IMAGE` `e2cp` rule, with a new `kernel/init/main.tkb`
+the `KERNEL_EXT2_IMAGE` `e2cp` rule, with a new `kernel/platform/rpi5/init.tkb`
 boot-log assertion checking the first byte, the byte straddling the
 block-3/block-4 boundary (offset 3071), and the last byte -- catching an
 off-by-one in the per-block chunk/copy arithmetic that checking only the
@@ -391,7 +391,7 @@ never-written (zero) slots and freed page index 0 repeatedly; separately,
 page_indices` (already covered by `process_image_handle_data_abort`'s own
 recording) and again via the growth array. `slotmap_remove()` now detects
 and counts a release of an already-free slot instead of corrupting the
-chain, and `kernel/init/main.tkb` asserts the count is zero at end of
+chain, and `kernel/platform/rpi5/init.tkb` asserts the count is zero at end of
 boot (`"resources: no double free"`) -- this class of bug is observable
 going forward instead of silently absorbed. A second, independent bug
 (`page_allocator_init()` ran after the address-space/scheduler self-tests
@@ -1183,7 +1183,7 @@ specifically.
 ### 2026-08-06: A Static Disassembly Check for #229/#231, After Rejecting a Bigger-Assembly Fix
 
 Recurrence-prevention follow-up to the same day's #229/#231 fixes. The first design tried for
-#231 was a permanent EL0-side regression probe: replace `kernel/init/main.tkb`'s final
+#231 was a permanent EL0-side regression probe: replace `kernel/platform/rpi5/init.tkb`'s final
 `while (true) {}` with a real EL0 program that deliberately branches into kernel `.text`, on the
 theory that both outcomes (denied fetch, or the idle loop it replaces) halt the CPU forever either
 way, so this costs nothing at runtime. Building it exposed the actual problem with the approach,
@@ -1460,7 +1460,7 @@ one point where no AAPCS caller/callee register contract exists to violate
 -- calling it from compiled code would break the callee-saved lower halves
 of q8-q15.
 
-`kernel/init/main.tkb` runs the probe once, right after `platform_irq_init()`
+`kernel/platform/rpi5/init.tkb` runs the probe once, right after `platform_irq_init()`
 arms the timer PPI, and logs `fp/simd irq: q0-q31+fpsr preserved across
 current-el irq`; new view `kernel/tests/rpi5/views/fpsimd.{filter,expected}`
 holds it. Verified on real RPi5 hardware: 25/25 views pass with the fix. The
@@ -1485,7 +1485,7 @@ ever ran. Second, `sh -c '/echo child-exec-ok'` let ash apply its
 last-simple-command tail-call exec optimization and replace itself in place,
 so even a working clone() would never have been exercised by this exact
 script. Fixed by calling `kernel_process_execution_reset()` immediately
-before this scenario in `kernel/init/main.tkb`, and by appending `; exit 0`
+before this scenario in `kernel/platform/rpi5/init.tkb`, and by appending `; exit 0`
 to the script so ash is forced to fork a real child.
 
 That was enough to make clone() succeed for the first time at this call
@@ -1988,7 +1988,7 @@ always uses SP_EL1 for a taken exception regardless of which EL it
 interrupted, so one generic frame-save/dispatch/restore stub correctly
 serves an interrupt arriving either while this kernel's own EL1 code runs
 or while an EL0 process (BusyBox/HTTPd) is actually executing.
-`kernel/init/main.tkb` now arms every currently-handled GIC source and
+`kernel/platform/rpi5/init.tkb` now arms every currently-handled GIC source and
 unmasks DAIF.I once, early (`platform_irq_init()`, before
 `disk_initialize()`), instead of only at the very end of the boot the way
 UART0's fixture did -- USB xHCI's disk I/O needs to be interrupt-driven for
@@ -2061,7 +2061,7 @@ slot instead of EL2's. `entry.S` gained a real `el1_irq_entry` (the same
 `enable_irq`/`disable_irq` DAIF helpers; slot 5 of `el1_vectors` now reaches
 it instead of the fail-stop path. The Lower-EL-AArch64 IRQ slot (an
 interrupt arriving while an EL0 process is executing) is deliberately left
-unhandled: `kernel/init/main.tkb` only calls `irq_uart_rx_setup()`/
+unhandled: `kernel/platform/rpi5/init.tkb` only calls `irq_uart_rx_setup()`/
 `irq_uart_rx_unmask()` after every EL0 process for the boot has already run
 and exited, so that slot can never fire in practice. The BCM2712 PCIe/GIC
 and MIP0 physical windows this needed were already present in
@@ -2071,7 +2071,7 @@ and MIP0 physical windows this needed were already present in
 
 `kernel/platform/rpi5/uart.tkb`'s existing `uart_irq_handler`/
 `uart_set_rx_handler`/`uart_isr_getc` scaffolding had no caller until now.
-`kernel/init/main.tkb` adds a small RX ring buffer and ISR (mirroring
+`kernel/platform/rpi5/init.tkb` adds a small RX ring buffer and ISR (mirroring
 `examples/irq/irq.tkb`'s own ring/ISR shape) and waits on the compiler's
 existing race-free `interrupt_wait()`/`interrupt_notify()` builtin
 (`wfe`/`sev`, ARM/AArch64-only) instead of polling, receiving one 8-byte
@@ -15123,7 +15123,7 @@ mitigation, not a proven guarantee).
   hw test harness modified to feed real UART input for the `sh -c "read
   x"` scenario to stay deterministic; explicitly out of scope here.
   `kernel_uart_rx_pending`/the ring-buffer state moved from
-  `kernel/init/main.tkb` to `kernel/kernel/syscall.tkb` (the ISR itself
+  `kernel/platform/rpi5/init.tkb` to `kernel/kernel/syscall.tkb` (the ISR itself
   stays in main.tkb, since it needs `kernel_process_uart_wake` from
   `kernel/kernel/process.tkb`, a dependency syscall.tkb doesn't otherwise
   have) -- ppoll's fd==0 check is now the second real caller of that
@@ -15175,7 +15175,7 @@ narrative in the interim.
 ## Paths, and unsafe Extended to Single-Element Indexing
 
 Found while building issue #248's own closing-bar demo (a >3-deep
-concurrent process chain): `kernel/init/main.tkb`'s
+concurrent process chain): `kernel/platform/rpi5/init.tkb`'s
 `kernel_process_child_exec_prepare()` resolved `execve()`'s `argv[0]`
 through a hardcoded registry -- the static BusyBox image by default, plus
 exactly one hand-added `if` arm for `/user_payload` (issue #241's own
@@ -15264,7 +15264,7 @@ un-`unsafe`'d form of each still records its trap site unchanged. 973/973
 current behavior (the `wait4` row and `kernel/README.md`'s process-table
 description had also gone stale from #246/#248, fixed in the same pass).
 
-Files: `kernel/init/main.tkb` (execve resolution rewrite),
+Files: `kernel/platform/rpi5/init.tkb` (execve resolution rewrite),
 `kernel/tests/rpi5/views/ext2.expected`, `lib/llvm_gen.ml` (unsafe
 single-index extension), `test/test_takibi.ml` (8 new regression cases),
 `SPEC.md`, `kernel/README.md`, `kernel/SYSCALLS.md`.
@@ -15346,7 +15346,7 @@ once this correction was made.
 
 Hardware-verified: 26/26 `kernelcheck-rpi5` views, no regression.
 
-Files: `kernel/platform/rpi5/mailbox.tkb` (new), `kernel/init/main.tkb`
+Files: `kernel/platform/rpi5/mailbox.tkb` (new), `kernel/platform/rpi5/init.tkb`
 (boot-log call), `Makefile` (build wiring),
 `examples/common_rpi5/jtag_stub.S` (DTB-unavailability note).
 
@@ -15838,7 +15838,7 @@ RPi5's three-level GIC->MIP0->RP1-MSI-X routing, ARM generic timer, a
 fixed `platform_memory_detect()` since there is no VideoCore-mailbox
 equivalent) plus a QEMU-specific MMU root layout
 (`kernel/platform/qemu/mmu_layout.tkb`) and a new, separate
-`kernel/init/main_qemu.tkb`. Two real, hardware-specific findings, not
+`kernel/platform/qemu/init.tkb`. Two real, hardware-specific findings, not
 just a mechanical port:
 
 - QEMU `virt` (plain `-cpu cortex-a53`, no firmware) starts the guest
@@ -15896,7 +15896,7 @@ alone, but inconsistent with `kernel/mm/page.tkb`'s ~800 MiB
 `BOOT_PAGE_COUNT` reservation.
 
 **M3 -- memory-backed filesystem/BusyBox/HTTPd-loader milestone.**
-`kernel/init/main.tkb` (RPi5) turned out to already mount
+`kernel/platform/rpi5/init.tkb` (RPi5) turned out to already mount
 `memory_block_device_ext2()` a second time, independent of its own
 USB-provisioning block -- that second, memory-backed mount is what
 `busybox`/`execve`/`uname`/`od` already run against on RPi5 too, so this
