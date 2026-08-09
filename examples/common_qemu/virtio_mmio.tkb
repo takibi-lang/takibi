@@ -52,7 +52,16 @@ const PAGE_SIZE: isize = 4096;
 const VIRTIO_MMIO_FIRST_SLOT: i32 = 0x0a000000;
 const VIRTIO_MMIO_SLOT_STRIDE: i32 = 0x200;
 const VIRTIO_MMIO_SLOT_COUNT: i32 = 32;
-const VIRTIO_MMIO_FIRST_SPI: i32 = 48;
+// This is the first slot's full architectural GIC INTID already, not a
+// bare SPI number still needing the usual "+32 for SPI-to-INTID"
+// conversion: QEMU `virt` wires virtio-mmio slot i to GIC input 16+i,
+// and SPIs start at INTID 32, so slot i's INTID is 32+16+i = 48+i
+// directly. Named _SPI (not _INTID) here despite that until a kernel/
+// port of this driver added the conversion anyway on top of this
+// already-final value, silently breaking interrupt delivery for the
+// device's own SPI -- see that port's own history entry for the full
+// diagnosis. Renamed so the same misreading cannot recur here either.
+const VIRTIO_MMIO_FIRST_INTID: i32 = 48;
 
 const QNUM: isize = 8; // virtqueue depth for both the RX and TX queues
 
@@ -165,7 +174,7 @@ fn virtio_net_find() -> bool {
             let devid_p: *io u32 = (base + VIRTIO_DEVICE_ID) as *io u32;
             if (*devid_p == VIRTIO_DEVICE_ID_NET) {
                 virtio_base = base;
-                virtio_gic_irq = VIRTIO_MMIO_FIRST_SPI + i;
+                virtio_gic_irq = VIRTIO_MMIO_FIRST_INTID + i;
                 return true;
             }
         }
