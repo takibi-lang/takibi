@@ -48,8 +48,7 @@ The current RPi5 kernel includes:
   deterministic teardown, backed by real physical RAM addressed directly
   (`kernel/mm/page.tkb`) and sized against the board's own real detected
   RAM (`kernel/platform/rpi5/mailbox.tkb`, a VideoCore firmware query,
-  boot-logged but not yet the allocator's own live bound -- see GitHub
-  issue #247/#251/#250);
+  boot-logged but not yet the allocator's own live bound);
 - ELF64 validation, static PIE loading, interpreter-aware PIE plus musl
   loading, initial Linux stack and auxv construction, `brk`, and bounded
   anonymous `mmap` behavior;
@@ -123,17 +122,17 @@ once those ports exist.
 initramfs fixtures, obtains the pinned Alpine packages, compiles all Takibi
 code under `--forbid-trap`, assembles the minimal AArch64 files, and links the
 ELF, then runs `scripts/check_kernel_asm_invariants.py` against the linked
-`kernel.elf` -- a static, hardware-free disassembly check that fails the
-build if specific past hand-written-assembly bugs (issues #229, #231) ever
-regress, without needing a board or a probabilistic real-hardware race to
-reproduce them. It also links `kernel/arch/arm64/kernel/user_payload.tkb`/
+`kernel.elf` -- a static, hardware-free disassembly check verifying the
+kernel identity block's UXN permission bits and the EL0 `eret` path's
+DAIF.I masking, catching a class of past hand-written-assembly regression
+without needing a board or a probabilistic real-hardware race to
+reproduce it. It also links `kernel/arch/arm64/kernel/user_payload.tkb`/
 `user_payload_asm.S` into their own real static-PIE ELF (placed on the ext2
 fixture image as `/user_payload` and launched from `kernel/tests/ext2/init.sh`
-like any other external command, issue #241) and runs
+like any other external command) and runs
 `scripts/check_user_payload_no_rw_globals.py` against that link -- a static
-check for a real issue #228 bug: a top-level mutable global in that file is
-not guaranteed to be writable at its runtime address, so writes into it can
-silently fail.
+check that a top-level mutable global in that file is not guaranteed to be
+writable at its runtime address, so writes into it can silently fail.
 
 ## Raspberry Pi 5 hardware integration
 
@@ -215,7 +214,7 @@ one-minute SWD transfer. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (25 views, one boot)
+PASS kernel/rpi5 (28 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2
@@ -271,20 +270,19 @@ run, not a specification.
   lookup and mutation, allocation bitmaps, fast symlinks. No indirect
   blocks, no additional block groups, no nested directories.
 - **Processes.** A growable process table backed by `kernel/lib/growable_pool.tkb`
-  (up to `KERNEL_PROCESS_MAX` = 16 slots, issue #246), all of it on core 0.
+  (up to `KERNEL_PROCESS_MAX` = 16 slots), all of it on core 0.
   Core 1 proves autonomous EL1 entry and shared-MMU visibility, then parks.
   `execve` resolves `argv[0]` as an ext2 path directly (`ext2_lookup_root` +
   `ext2_read_small_file` + `distro_elf_validate`), falling back to the
   registered static BusyBox image on any resolution failure -- so its own
   argv[0]-driven multi-call applet dispatch (`echo`, `sh`, etc.) still works
   for names with no real ELF behind them, such as the `/echo`/`/bin/echo`
-  ext2 symlinks (issue #249; superseded the earlier closed two-entry
-  registry). `wait4` blocks the caller until its live child exits (by
-  specific pid or `-1`/`WAIT_ANY`), delivering the real reaped pid and exit
-  status, tracked per-slot so any live process (not just the tree root) can
-  wait for its own child (issues #244, #248); a process may have at most one
-  live child at a time, so concurrent multi-child wait/reap remains out of
-  scope.
+  ext2 symlinks (superseding an earlier two-entry registry). `wait4` blocks
+  the caller until its live child exits (by specific pid or `-1`/
+  `WAIT_ANY`), delivering the real reaped pid and exit status, tracked
+  per-slot so any live process (not just the tree root) can wait for its
+  own child; a process may have at most one live child at a time, so
+  concurrent multi-child wait/reap remains out of scope.
 - **Signals.** Signal state is recorded honestly, but no signal is ever
   delivered, so an installed handler is never invoked.
 - **Memory.** `mmap` is anonymous-only through a heap-break cursor rather

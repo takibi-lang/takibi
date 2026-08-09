@@ -392,3 +392,83 @@ fn user_memory_boundary_probe_run(base: usize,
     user_tlb_invalidate(text_va);
     return ok;
 }
+
+// Regression coverage for GitHub issue #263: user_range_check/
+// user_page_class_at used to always validate against root/slot 0's page
+// table (via mmu.tkb's user_pte_read/user_pte_write) regardless of which
+// root value was actually meant, since neither took a root parameter at
+// all. Uses two real MMU roots (mmu_ensure_root, the same primitive
+// kernel/kernel/process.tkb's real scheduler calls for every live
+// process) mapped with DIFFERENT permissions at the SAME L3 index, and
+// root 0 deliberately left unmapped at that same index throughout (root 0
+// is not itself under test here, only used as the "wrong answer" a
+// regression to the old always-root-0 behavior would produce). If
+// user_range_check/user_page_class_at ever again ignore the root they are
+// given, both checks below observe root 0's empty PTE instead of their
+// own root's real mapping and fail identically, regardless of the two
+// roots' genuinely different content.
+fn user_memory_root_isolation_probe() -> bool {
+    let index: usize = match user_va_find_free_run(1) {
+        UserVaRunResult::None => { return false; }
+        UserVaRunResult::Found(found) => { found }
+    };
+    let root_a: usize = 14;
+    let root_b: usize = 15;
+    if (mmu_ensure_root(root_a) == false) { return false; }
+    if (mmu_ensure_root(root_b) == false) { return false; }
+    let va: usize = USER_TEXT_VA + index * PAGE_SIZE;
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => { return false; }
+        PageAllocResult::Allocated(page_a) => {
+            match page_alloc() {
+                PageAllocResult::OutOfMemory => {
+                    page_free(page_a);
+                    return false;
+                }
+                PageAllocResult::Allocated(page_b) => {
+                    let ok: bool = user_memory_root_isolation_probe_run(
+                        root_a, root_b, index, va, page_a, page_b);
+                    page_free(page_a);
+                    page_free(page_b);
+                    return ok;
+                }
+            }
+        }
+    }
+}
+
+fn user_memory_root_isolation_probe_run(root_a: usize, root_b: usize,
+                                        index: usize, va: usize,
+                                        page_a: borrow PageOwner[a],
+                                        page_b: borrow PageOwner[b]) -> bool {
+    let phys_a: usize = page_physical_address(page_a);
+    let phys_b: usize = page_physical_address(page_b);
+    // root_a: writable (RW+XN). root_b: read-only (rodata-R). root 0: left
+    // unmapped (0) at this same index the whole time.
+    address_space_pte_write(root_a, index, phys_a | USER_RW_XN_FLAGS);
+    address_space_tlb_invalidate(root_a, va);
+    address_space_pte_write(root_b, index, phys_b | USER_RODATA_R_FLAGS);
+    address_space_tlb_invalidate(root_b, va);
+
+    let mut ok: bool = true;
+    match user_range_check(root_a, va, 8, UserAccessMode::Write) {
+        UserRangeResult::Fault => { ok = false; }
+        UserRangeResult::Ok(writable) => {}
+    }
+    match user_range_check(root_b, va, 8, UserAccessMode::Write) {
+        UserRangeResult::Fault => {}
+        UserRangeResult::Ok(bad) => { ok = false; }
+    }
+    match user_range_check(root_b, va, 8, UserAccessMode::Read) {
+        UserRangeResult::Fault => { ok = false; }
+        UserRangeResult::Ok(readable) => {}
+    }
+    if (user_page_class_at(root_a, index) != 3) { ok = false; }
+    if (user_page_class_at(root_b, index) != 2) { ok = false; }
+
+    address_space_pte_write(root_a, index, 0);
+    address_space_tlb_invalidate(root_a, va);
+    address_space_pte_write(root_b, index, 0);
+    address_space_tlb_invalidate(root_b, va);
+    return ok;
+}

@@ -577,6 +577,12 @@ fn main() {
     } else {
         kernel_boot_log("user memory: failed\n");
     }
+    if (user_memory_root_isolation_probe()) {
+        kernel_boot_log(
+            "user memory root isolation: two roots, divergent same-index mappings, each validated against its own table\n");
+    } else {
+        kernel_boot_log("user memory root isolation: failed\n");
+    }
     if (kernel_syscall_subset_probe()) {
         kernel_boot_log(
             "syscall subset: mmap prot+fd reject, sigaction signum+oldact ok\n");
