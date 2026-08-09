@@ -15576,3 +15576,63 @@ bytes `.bss`, same as the previous entry). Hardware-verified: 26/26
 Files: `kernel/mm/page.tkb` (`page_meta`/`boot_page_core`/
 `boot_page_double_remove_count` merged into one `BootPagePool` struct and
 global).
+
+## 2026-08-09: GitHub Issue #258 Step 1 -- Boot Probes Stop Hand-Picking
+## Virtual Pages; the Page Table Answers "What's Free" Instead
+
+Auditing `git grep _MAX kernel/` while scoping #254 split its results
+into three categories, only two of which are debt: genuine hardware/
+protocol constants (`PAGE_SIZE`, `IOV_MAX`, `EXT2_MAX_DIRECT_BLOCKS`,
+...), fixed-capacity resource pools (issue #257), and **virtual
+address-space layout carved up by seven hardcoded constants across four
+files** -- this issue.
+
+**The evidence that made this present debt rather than a tidy-up.** Two
+boot-time probes had each claimed fixed virtual pages:
+`USER_PROBE_L3_INDEX = 500` (using 500-502, `kernel/mm/user_memory.tkb`)
+and `SYSCALL_SUBSET_PROBE_L3_INDEX = 503` (`kernel/kernel/syscall.tkb`).
+Both sit *inside* `kernel/mm/process_image.tkb`'s own stack-growth region
+(pages 448..510), and all three share one L3 table -- `mmu.tkb`'s
+`user_pte_*` is always root 0, and process images run on root 0 too. What
+kept them apart was:
+
+1. the constants happening not to overlap, and
+2. a hand-written prose comment in `syscall.tkb` recording the
+   deconfliction a human had performed: *"using its own throwaway page
+   (outside issue #174's own probe's L3 indices 500-502)"*, plus
+3. a separate, per-site defensive guard at each probe
+   (`if (user_pte_read(X) != 0) { return false; }`).
+
+Defensive checks written independently at each call site, plus a comment
+naming another file's constants, is the signature of a missing
+virtual-address allocator.
+
+**Fix, and it needed no new data structure at all.** The same move issue
+#253 made for `process_image.tkb`'s per-root page lists applies here: the
+live page table is already the authoritative record of which virtual
+pages are taken, so read it instead of keeping a second, hand-maintained
+answer. `user_va_find_free_run(count)` (new, `kernel/mm/user_memory.tkb`)
+returns the lowest run of `count` consecutive unmapped pages in the user
+window. Both probes now claim their pages through it. Both hardcoded
+indices, both per-site guards, and the hand-deconfliction comment are all
+gone -- and no new bookkeeping table, no new compile-time ceiling, and no
+new per-process footprint was introduced to achieve it.
+
+Worth noting against this issue's own stated caveat (a naive VMA table
+just relocates `_MAX` into `VMA_MAX_PER_PROCESS`): this step sidesteps
+that entirely. It buys the collision-safety half of the issue for zero
+structural cost. The remaining five constants
+(`PROCESS_STACK_L3_INDEX` = 511, `PROCESS_DYNAMIC_STACK_FIRST_L3_INDEX` =
+504, `PROCESS_STACK_GROWTH_FIRST_L3_INDEX` = 448,
+`PROCESS_HEAP_PAGE_COUNT` = 128, `USER_RANGE_MAX_INDEX` = 512) are the
+process layout proper -- a scan cannot derive "the stack goes at the
+top," so those genuinely need region data, which is step 2.
+
+Hardware-verified: 26/26 `kernelcheck-rpi5` views, no regression --
+including the `user_memory` and `syscall_subset` views, which are exactly
+the two probes rewritten here.
+
+Files: `kernel/mm/user_memory.tkb` (`user_va_find_free_run` added,
+`USER_PROBE_L3_INDEX` deleted, probe reworked to take a base index),
+`kernel/kernel/syscall.tkb` (`SYSCALL_SUBSET_PROBE_L3_INDEX` deleted,
+probe claims its page through the same allocator).

@@ -2676,7 +2676,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     return SyscallAction::Resume(LINUX_ENOSYS);
 }
 
-const SYSCALL_SUBSET_PROBE_L3_INDEX: usize = 503;
 const SYSCALL_TRAP_ESR: usize = 0x54000000;
 
 // Boot-time negative-test coverage for issue #175: the real BusyBox/musl
@@ -2685,20 +2684,27 @@ const SYSCALL_TRAP_ESR: usize = 0x54000000;
 // passing hardware behavior alone can't prove those reject/zero-fill paths
 // work. Exercises kernel_syscall_dispatch directly with crafted esr/args
 // (exception_class 0x15, matching the real SVC trap), using its own
-// throwaway page (outside issue #174's own probe's L3 indices 500-502) for
-// the oldact buffer.
+// throwaway page for the oldact buffer.
+//
+// GitHub issue #258: that page's virtual address is claimed via
+// user_va_find_free_run (kernel/mm/user_memory.tkb) instead of the former
+// hardcoded SYSCALL_SUBSET_PROBE_L3_INDEX = 503, whose only protection
+// against colliding with issue #174's own probe was a hand-written prose
+// comment here saying it was "outside ... L3 indices 500-502" -- both
+// sat inside process_image.tkb's stack-growth region (448..510) in the
+// same root-0 L3 table.
 fn kernel_syscall_subset_probe() -> bool !{unsafe} {
-    if (user_pte_read(SYSCALL_SUBSET_PROBE_L3_INDEX) != 0) { return false; }
+    let probe_index: usize = match user_va_find_free_run(1) {
+        UserVaRunResult::None => { return false; }
+        UserVaRunResult::Found(index) => { index }
+    };
     match page_alloc() {
         PageAllocResult::OutOfMemory => { return false; }
         PageAllocResult::Allocated(page) => {
             let phys: usize = page_physical_address(page);
-            user_pte_write(SYSCALL_SUBSET_PROBE_L3_INDEX,
-                           phys | USER_RW_XN_FLAGS);
-            user_tlb_invalidate(
-                USER_TEXT_VA + SYSCALL_SUBSET_PROBE_L3_INDEX * PAGE_SIZE);
-            let oldact_va: usize =
-                USER_TEXT_VA + SYSCALL_SUBSET_PROBE_L3_INDEX * PAGE_SIZE;
+            user_pte_write(probe_index, phys | USER_RW_XN_FLAGS);
+            user_tlb_invalidate(USER_TEXT_VA + probe_index * PAGE_SIZE);
+            let oldact_va: usize = USER_TEXT_VA + probe_index * PAGE_SIZE;
 
             let mut ok: bool = true;
 
@@ -2736,7 +2742,7 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
                 }
             }
 
-            user_pte_write(SYSCALL_SUBSET_PROBE_L3_INDEX, 0);
+            user_pte_write(probe_index, 0);
             user_tlb_invalidate(oldact_va);
             page_free(page);
             return ok;

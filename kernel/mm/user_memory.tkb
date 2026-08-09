@@ -22,10 +22,53 @@ const USER_RANGE_MAX_INDEX: usize = 512;
 const USER_PERMISSION_MASK: usize = 0xFFE0000000000FFF;
 const USER_PAGE_PHYS_MASK: usize = 0x0000FFFFFFFFF000;
 
-// L3 index used by user_memory_boundary_probe()'s own throwaway page, chosen
-// outside the live process's own layout (text starts at index 0; heap/stack
-// occupy the top of the window).
-const USER_PROBE_L3_INDEX: usize = 500;
+// GitHub issue #258: there is no longer a hardcoded L3 index for the
+// boot-time probes' own throwaway pages. `USER_PROBE_L3_INDEX = 500`
+// (this file) and `SYSCALL_SUBSET_PROBE_L3_INDEX = 503`
+// (kernel/kernel/syscall.tkb) used to pick fixed pages and then each
+// separately guard against having picked an occupied one -- with the
+// deconfliction between them done BY HAND, recorded only in a prose
+// comment in syscall.tkb ("outside issue #174's own probe's L3 indices
+// 500-502"). Both indices sat inside process_image.tkb's own
+// stack-growth region (pages 448..510) and shared one L3 table with it
+// (mmu.tkb: `user_pte_*` is always root 0, and process images run on
+// root 0 too), so nothing but that hand-maintained comment kept them
+// apart.
+//
+// user_va_find_free_run below replaces both: the live page table is
+// already the authoritative record of which virtual pages are taken, so
+// a run of free pages is found by reading it rather than by picking a
+// constant and hoping -- the same "derive it from the real structure
+// instead of keeping a second, hand-maintained one" move issue #253
+// made for kernel/mm/process_image.tkb's per-root page lists. This
+// needs no new bookkeeping table and no new compile-time ceiling.
+must_use variant UserVaRunResult { None; Found(usize); }
+
+// Lowest run of `count` consecutive unmapped pages in the user window, or
+// None. O(window x count) worst case, which is 512 x 3 here -- this runs
+// twice per boot, from probes, never on a hot path.
+fn user_va_find_free_run(count: usize) -> UserVaRunResult {
+    if (count == 0 || count > USER_RANGE_MAX_INDEX) {
+        return UserVaRunResult::None;
+    }
+    let mut first: usize = 0;
+    while (first + count <= USER_RANGE_MAX_INDEX) {
+        let mut free_run: bool = true;
+        let mut offset: usize = 0;
+        while (offset < count) {
+            if (user_pte_read(first + offset) != 0) {
+                // Restart past the occupant, not at first + 1: every start
+                // in between would re-scan the same occupied page.
+                first = first + offset + 1;
+                free_run = false;
+                break;
+            }
+            offset = offset + 1;
+        }
+        if (free_run) { return UserVaRunResult::Found(first); }
+    }
+    return UserVaRunResult::None;
+}
 
 enum UserAccessMode: u8 { Read; Write; }
 
@@ -230,17 +273,19 @@ fn user_range_reprotect(first_l3: usize, last_l3: usize, new_flags: usize) {
 }
 
 // Boot-time negative-test coverage for issue #174: overflow, cross-page,
-// wrong-permission-write, and mprotect-style downgrade/upgrade. Uses two of
-// its own throwaway pages (L3 indices 500 and 502, with 501 deliberately
-// left unmapped in between for the cross-page case) outside the live
-// process's own layout, independent of whatever process is or isn't loaded
-// elsewhere in the boot sequence. Both pages are freed before returning.
+// wrong-permission-write, and mprotect-style downgrade/upgrade. Claims a
+// run of three consecutive free pages (GitHub issue #258 --
+// user_va_find_free_run above, no longer a hardcoded index): the first
+// and third hold its two throwaway pages, the middle one is deliberately
+// left unmapped for the cross-page case. Independent of whatever process
+// is or isn't loaded elsewhere in the boot sequence, and now genuinely so
+// rather than by hand-picked constant. Both pages are freed before
+// returning.
 fn user_memory_boundary_probe() -> bool {
-    if (user_pte_read(USER_PROBE_L3_INDEX) != 0 ||
-        user_pte_read(USER_PROBE_L3_INDEX + 1) != 0 ||
-        user_pte_read(USER_PROBE_L3_INDEX + 2) != 0) {
-        return false;
-    }
+    let base: usize = match user_va_find_free_run(3) {
+        UserVaRunResult::None => { return false; }
+        UserVaRunResult::Found(index) => { index }
+    };
     match page_alloc() {
         PageAllocResult::OutOfMemory => { return false; }
         PageAllocResult::Allocated(data_page) => {
@@ -251,7 +296,7 @@ fn user_memory_boundary_probe() -> bool {
                 }
                 PageAllocResult::Allocated(text_page) => {
                     let ok: bool = user_memory_boundary_probe_run(
-                        data_page, text_page);
+                        base, data_page, text_page);
                     page_free(data_page);
                     page_free(text_page);
                     return ok;
@@ -261,16 +306,17 @@ fn user_memory_boundary_probe() -> bool {
     }
 }
 
-fn user_memory_boundary_probe_run(data_page: borrow PageOwner[data],
+fn user_memory_boundary_probe_run(base: usize,
+                                  data_page: borrow PageOwner[data],
                                   text_page: borrow PageOwner[text]) -> bool {
     let data_phys: usize = page_physical_address(data_page);
     let text_phys: usize = page_physical_address(text_page);
-    user_pte_write(USER_PROBE_L3_INDEX, data_phys | USER_RW_XN_FLAGS);
-    user_tlb_invalidate(USER_TEXT_VA + USER_PROBE_L3_INDEX * PAGE_SIZE);
-    user_pte_write(USER_PROBE_L3_INDEX + 2, text_phys | USER_TEXT_RX_FLAGS);
-    user_tlb_invalidate(USER_TEXT_VA + (USER_PROBE_L3_INDEX + 2) * PAGE_SIZE);
-    let data_va: usize = USER_TEXT_VA + USER_PROBE_L3_INDEX * PAGE_SIZE;
-    let text_va: usize = USER_TEXT_VA + (USER_PROBE_L3_INDEX + 2) * PAGE_SIZE;
+    user_pte_write(base, data_phys | USER_RW_XN_FLAGS);
+    user_tlb_invalidate(USER_TEXT_VA + base * PAGE_SIZE);
+    user_pte_write(base + 2, text_phys | USER_TEXT_RX_FLAGS);
+    user_tlb_invalidate(USER_TEXT_VA + (base + 2) * PAGE_SIZE);
+    let data_va: usize = USER_TEXT_VA + base * PAGE_SIZE;
+    let text_va: usize = USER_TEXT_VA + (base + 2) * PAGE_SIZE;
 
     let mut ok: bool = true;
 
@@ -303,7 +349,7 @@ fn user_memory_boundary_probe_run(data_page: borrow PageOwner[data],
         UserRangeResult::Fault => { ok = false; }
         UserRangeResult::Ok(writable) => {}
     }
-    user_range_reprotect(USER_PROBE_L3_INDEX, USER_PROBE_L3_INDEX,
+    user_range_reprotect(base, base,
                          USER_RODATA_R_FLAGS);
     match user_range_check(data_va, 8, UserAccessMode::Write) {
         UserRangeResult::Fault => {}
@@ -313,16 +359,16 @@ fn user_memory_boundary_probe_run(data_page: borrow PageOwner[data],
         UserRangeResult::Fault => { ok = false; }
         UserRangeResult::Ok(still_readable) => {}
     }
-    user_range_reprotect(USER_PROBE_L3_INDEX, USER_PROBE_L3_INDEX,
+    user_range_reprotect(base, base,
                          USER_RW_XN_FLAGS);
     match user_range_check(data_va, 8, UserAccessMode::Write) {
         UserRangeResult::Fault => { ok = false; }
         UserRangeResult::Ok(writable_again) => {}
     }
 
-    user_pte_write(USER_PROBE_L3_INDEX, 0);
+    user_pte_write(base, 0);
     user_tlb_invalidate(data_va);
-    user_pte_write(USER_PROBE_L3_INDEX + 2, 0);
+    user_pte_write(base + 2, 0);
     user_tlb_invalidate(text_va);
     return ok;
 }
