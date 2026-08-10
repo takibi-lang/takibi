@@ -4353,6 +4353,18 @@ let gen_func ?prog_types fdef =
 
   (* locals maps name -> local_binding *)
   let locals : (string, local_binding) Hashtbl.t = Hashtbl.create 16 in
+  (* `locals` deliberately tracks the binding currently visible at the
+     statement being generated. It is therefore not a safe registry for
+     pre-allocated mutable lets: an immutable local of the same name in an
+     earlier, disjoint branch may have replaced the visible entry by the
+     time the mutable declaration is reached. Keep the alloca identity by
+     declaration site as well as exposing the first one through `locals`;
+     the Let(true) case restores its own entry before initializing it. *)
+  let mutable_let_allocas :
+      (string, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16 in
+  let mutable_let_key loc name =
+    Printf.sprintf "%s:%s" (Types.loc_key loc) name
+  in
   let debug_immutable_allocas : (string, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16 in
   let mutable_pattern_allocas : (string, Ast.type_expr * llvalue) Hashtbl.t =
     Hashtbl.create 8 in
@@ -4422,16 +4434,18 @@ let gen_func ?prog_types fdef =
 
   (* Pre-alloca every mutable Let declared in the body *)
   List.iter (fun (name, ty_opt, let_loc, align_opt) ->
-    if not (Hashtbl.mem locals name) then begin
-      let ast_ty = res name ty_opt in
-      if not (is_erased_view_type ast_ty) then begin
-        let ptr = build_alloca (ltype_of_ast ast_ty) name builder in
-        (* An explicit `let ... align(N)` wins over the type's own struct-level
-           alignment (if any) -- same precedence as the global case (see
-           gen_global's eff_align). *)
-        (match align_opt with
-         | Some n -> set_alignment n ptr
-         | None   -> apply_struct_align ast_ty ptr);
+    let ast_ty = res name ty_opt in
+    if not (is_erased_view_type ast_ty) then begin
+      let ptr = build_alloca (ltype_of_ast ast_ty) name builder in
+      (* An explicit `let ... align(N)` wins over the type's own struct-level
+         alignment (if any) -- same precedence as the global case (see
+         gen_global's eff_align). *)
+      (match align_opt with
+       | Some n -> set_alignment n ptr
+       | None   -> apply_struct_align ast_ty ptr);
+      Hashtbl.add mutable_let_allocas
+        (mutable_let_key let_loc name) (ast_ty, ptr);
+      if not (Hashtbl.mem locals name) then begin
         Hashtbl.add locals name (Mut (ast_ty, ptr));
         if not (is_for_counter name) then
           declare_var ~is_param:false ~argno:0 ~name ~ast_ty
@@ -4552,13 +4566,14 @@ let gen_func ?prog_types fdef =
                "BUG: erased view '%s' has no initializer" name)));
           Hashtbl.replace locals name (Imm (ast_ty, erased_view_value ()))
         end else
-        (match Hashtbl.find_opt locals name with
+        (match Hashtbl.find_opt mutable_let_allocas
+                 (mutable_let_key s.loc name) with
          | None -> raise (Error (Printf.sprintf "BUG: no alloca for %s" name))
-         | Some (Mut (ast_ty, ptr)) ->
+         | Some (alloca_ty, ptr) ->
+             Hashtbl.replace locals name (Mut (alloca_ty, ptr));
              let preserve_for_debug = !debug_info_enabled && is_debug_aggregate_ty ast_ty in
              Option.iter (init_memory ~preserve_for_debug ptr ast_ty) expr_opt
-         | Some (Imm _) ->
-             raise (Error (Printf.sprintf "BUG: %s marked mutable but stored as Imm" name)))
+        )
 
     | Let (false, name, ty_opt, expr_opt, _) ->
         (* Immutable: evaluate the init expr and store the SSA value directly *)

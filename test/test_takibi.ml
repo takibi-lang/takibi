@@ -6526,6 +6526,17 @@ let with_embed_fixture contents f =
 
 let codegen_tests = [
   Alcotest.test_case
+    "mutable local restores its declaration-specific alloca after a disjoint immutable local" `Quick
+    (expect_codegen_ok
+      "fn cg_mutable_after_disjoint_immutable(flag: bool) {
+         if (flag) {
+           let copied: usize = 1;
+         }
+         let mut copied: usize = 0;
+         copied = copied + 1;
+       }");
+
+  Alcotest.test_case
     "disjoint same-name annotated locals retain their own pointer widths" `Quick
     (fun () ->
       let src =
