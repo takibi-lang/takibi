@@ -569,7 +569,12 @@ struct ProcessImageExecStore {
     private mutex: i32;
     private value: ProcessImageExecValue;
 }
-private let mut process_image_exec_store: ProcessImageExecStore;
+// An exec image remains live for the lifetime of the process that replaced
+// its fork copy. A shell can itself exec and then fork another command, so
+// this cannot be one global store: the outer shell's image must remain owned
+// while its child installs a distinct replacement image.
+private let mut process_image_exec_stores:
+    [ProcessImageExecStore; PROCESS_IMAGE_ROOT_MAX];
 
 fn process_image_exec_lock(lock: *i32 @ address)
         -> ProcessImageExecGuard[address] {
@@ -581,22 +586,27 @@ fn process_image_exec_unlock(guard: sink ProcessImageExecGuard[address],
 
 fn process_image_exec_install(
         pages: sink ProcessImagePages[image]) -> bool {
-    let guard = process_image_exec_lock(&process_image_exec_store.mutex);
+    let root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} =
+        process_image_root_index();
+    let guard = process_image_exec_lock(
+        &process_image_exec_stores[root].mutex);
     let previous: ProcessImageExecValue = stable_replace(
-        guard, &process_image_exec_store.mutex,
-        process_image_exec_store.value,
+        guard, &process_image_exec_stores[root].mutex,
+        process_image_exec_stores[root].value,
         ProcessImageExecValue::Ready(pages));
     match previous {
         ProcessImageExecValue::Empty => {
-            process_image_exec_unlock(guard, &process_image_exec_store.mutex);
+            process_image_exec_unlock(
+                guard, &process_image_exec_stores[root].mutex);
             return true;
         }
         ProcessImageExecValue::Ready(stale) => {
             let displaced: ProcessImageExecValue = stable_replace(
-                guard, &process_image_exec_store.mutex,
-                process_image_exec_store.value,
+                guard, &process_image_exec_stores[root].mutex,
+                process_image_exec_stores[root].value,
                 ProcessImageExecValue::Ready(stale));
-            process_image_exec_unlock(guard, &process_image_exec_store.mutex);
+            process_image_exec_unlock(
+                guard, &process_image_exec_stores[root].mutex);
             match displaced {
                 ProcessImageExecValue::Empty => {}
                 ProcessImageExecValue::Ready(incoming) => {
@@ -634,42 +644,48 @@ fn process_image_exec_reap_evidence() -> (usize, usize, usize) {
             process_image_exec_reap_stack_growth_count);
 }
 
-fn process_image_exec_reap() {
-    let guard = process_image_exec_lock(&process_image_exec_store.mutex);
-    let previous: ProcessImageExecValue = stable_replace(
-        guard, &process_image_exec_store.mutex,
-        process_image_exec_store.value, ProcessImageExecValue::Empty);
-    process_image_exec_unlock(guard, &process_image_exec_store.mutex);
-    match previous {
-        ProcessImageExecValue::Empty => {}
-        ProcessImageExecValue::Ready(pages) => {
-            let reaped_root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} =
-                process_image_root_index();
-            if (process_image_stack_grew(pages)) {
-                process_image_exec_reap_stack_growth_count =
-                    process_image_exec_reap_stack_growth_count + 1;
+fn process_image_exec_reap(root_index: usize) {
+    if (root_index < PROCESS_IMAGE_ROOT_MAX) {
+        let root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} = root_index;
+        process_image_target_root = root;
+        let guard = process_image_exec_lock(
+            &process_image_exec_stores[root].mutex);
+        let previous: ProcessImageExecValue = stable_replace(
+            guard, &process_image_exec_stores[root].mutex,
+            process_image_exec_stores[root].value, ProcessImageExecValue::Empty);
+        process_image_exec_unlock(
+            guard, &process_image_exec_stores[root].mutex);
+        match previous {
+            ProcessImageExecValue::Empty => {}
+            ProcessImageExecValue::Ready(pages) => {
+                let reaped_root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} =
+                    process_image_root_index();
+                if (process_image_stack_grew(pages)) {
+                    process_image_exec_reap_stack_growth_count =
+                        process_image_exec_reap_stack_growth_count + 1;
+                }
+                process_image_unmap(pages);
+                process_image_exec_reap_count =
+                    process_image_exec_reap_count + 1;
+                if (process_image_root_window_is_clear(reaped_root)) {
+                    process_image_exec_reap_clean_count =
+                        process_image_exec_reap_clean_count + 1;
+                }
+                // process_image_unmap only retargets later page-table writes at
+                // root 0; it leaves TTBR0 on the root it just emptied. The
+                // parent is resumed straight after this reap, so activate its
+                // root here exactly as process_image_clone_vm_reap does for
+                // the plain fork/exit path -- otherwise the parent returns to
+                // EL0 against the unmapped child root and faults on its own
+                // first instruction. GitHub issue #245: this runs from
+                // kernel_syscall_clone_parent_return(), reached only via
+                // kernel_process_child_exit()'s own return value -- by
+                // construction that has already switched execution_current_
+                // handle back to the parent, so kernel_process_current_root()
+                // is already correct here, not a fixed root 0.
+                process_image_activate_root(
+                    address_space_root_slot(kernel_process_current_root()));
             }
-            process_image_unmap(pages);
-            process_image_exec_reap_count =
-                process_image_exec_reap_count + 1;
-            if (process_image_root_window_is_clear(reaped_root)) {
-                process_image_exec_reap_clean_count =
-                    process_image_exec_reap_clean_count + 1;
-            }
-            // process_image_unmap only retargets later page-table writes at
-            // root 0; it leaves TTBR0 on the root it just emptied. The
-            // parent is resumed straight after this reap, so activate its
-            // root here exactly as process_image_clone_vm_reap does for
-            // the plain fork/exit path -- otherwise the parent returns to
-            // EL0 against the unmapped child root and faults on its own
-            // first instruction. GitHub issue #245: this runs from
-            // kernel_syscall_clone_parent_return(), reached only via
-            // kernel_process_child_exit()'s own return value -- by
-            // construction that has already switched execution_current_
-            // handle back to the parent, so kernel_process_current_root()
-            // is already correct here, not a fixed root 0.
-            process_image_activate_root(
-                address_space_root_slot(kernel_process_current_root()));
         }
     }
 }

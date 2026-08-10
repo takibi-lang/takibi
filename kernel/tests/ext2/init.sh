@@ -41,6 +41,17 @@ else
     echo "busybox od failed"
 fi
 
+# Keep `exit $?` after /echo so ash cannot tail-call exec the command in
+# place of its shell process. This leaves a real child execve, exit, and
+# parent wait4/reap lifecycle for the kernel to exercise.
+/busybox sh -c '/echo child-exec-ok; exit $?'
+if [ "$?" -eq 0 ]; then
+    echo "child exec: shell exit: 0"
+else
+    echo "child exec: shell failed"
+    exit 1
+fi
+
 # This stays a child shell so the fixture still exercises ash's fork/exec
 # lifecycle plus ppoll/read on UART, rather than only the PID 1 shell
 # interpreting its own builtin. The runner sends xashread after the blocked

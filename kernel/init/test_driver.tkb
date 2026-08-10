@@ -216,7 +216,7 @@ fn kernel_process_child_exec_reap() {
     // "current" (which is now the parent itself).
     let exited_pid: usize = kernel_process_last_child_pid();
     if (kernel_process_exec_image_live_for_pid(exited_pid)) {
-        process_image_exec_reap();
+        process_image_exec_reap(exited_pid - 1);
         kernel_process_exec_clear_for_pid(exited_pid);
     }
 }
@@ -718,51 +718,9 @@ kernel_process_execution_reset();
         }
     }
 
-    // External applet path: the ext2 image provides /busybox and
-    // /bin/echo as symlinks, while the registered static BusyBox image supplies
-    // the executable selected by argv[0]. This exercises clone,
-    // child execve, child exit, and parent wait4 together. The
-    // boot-time scheduler fixture above (issue #190) already
-    // consumed both KERNEL_PROCESS_MAX slots via scheduled_process_alloc()
-    // and never freed them (only kernel_process_execution_reset()
-    // clears the table), so clone() here would otherwise see the
-    // pool as Full and reject before the child ever runs. Reset the
-    // process/clone bookkeeping immediately before this scenario.
-    // The trailing `; exit 0` keeps ash from applying its
-    // last-command tail-call exec optimization, which would replace
-    // the shell in place instead of forking a real child.
-    kernel_process_execution_reset();
-    if (distro_plan_ready) {
-        match process_image_map(
-                saved_distro_plan,
-                "busybox\0sh\0-c\0/echo child-exec-ok; exit $?\0" as []u8,
-                4) {
-            ProcessImageMapResult::InvalidImage => {
-                kernel_boot_log("child exec map: invalid image\n");
-            }
-            ProcessImageMapResult::OutOfMemory => {
-                kernel_boot_log("child exec map: out of memory\n");
-            }
-            ProcessImageMapResult::Mapped(child_shell_pages) => {
-                let (child_heap_start, child_heap_limit) =
-                    process_image_heap_range(child_shell_pages);
-                kernel_syscall_process_configure(
-                    child_heap_start, child_heap_limit);
-                let child_status: usize = run_initial_user(
-                    process_image_entry(child_shell_pages),
-                    process_image_stack_pointer(child_shell_pages));
-                if (child_status == 0) {
-                    kernel_boot_log("child exec: shell exit: 0\n");
-                } else {
-                    kernel_boot_log("child exec: shell failed\n");
-                }
-                process_image_unmap(child_shell_pages);
-                if (process_image_window_is_clear()) {
-                    kernel_boot_log("child exec: image window clean\n");
-                }
-            }
-        }
-    }
+    // GitHub issue #209: init.sh now runs the BusyBox shell/echo child-exec
+    // fixture. The shared child-exec reap evidence above verifies its image
+    // cleanup alongside every other init-launched applet.
 
     // GitHub issue #207: every page released across this whole boot
     // must have been live at the time. The pre-freelist allocator

@@ -1,3 +1,3 @@
 ^child-exec-ok$
 ^child exec: shell exit: 0$
-^child exec: image window clean$
+^child exec unmap: clean$
