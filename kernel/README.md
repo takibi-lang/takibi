@@ -27,11 +27,12 @@ and the development container verifies the response with real `curl`.
 - Ordinary kernel services do not use EL2 HVC as an internal service layer.
 - Page, mapping, process, file, socket, frame, and DMA lifetimes retain
   explicit affine or linear ownership.
-- A growable process table (`kernel/lib/growable_pool.tkb`-backed, up to
-  `KERNEL_PROCESS_MAX` = 16 slots) gives each live process a dedicated kernel
-  stack, address-space root, ASID, and unified descriptor table. The generic
-  timer preempts EL0 round-robin once more than one slot is runnable; a UART
-  RX wait demonstrates a typed Blocked-to-Ready transition.
+- A fixed 16-slot scheduler table (`ProcessRecord`) gives each live process a
+  dedicated address-space root, ASID, and unified descriptor table. Kernel
+  stacks are backed lazily by a bounded `GrowablePool`; page-table pages are
+  directly owned by each address space. The generic timer preempts EL0
+  round-robin once more than one slot is runnable; a UART RX wait demonstrates
+  a typed Blocked-to-Ready transition.
 - Kernel Takibi sources build with `--forbid-trap`; fallible internal
   operations return variants and convert to Linux `-errno` only at the syscall
   boundary.
@@ -73,12 +74,13 @@ The current HTTPd milestone runs the unmodified pinned BusyBox Extras binary
 as a persistent foreground daemon: `busybox-httpd httpd -f -p 8080 -h /`.
 HTTPd creates its own IPv6 wildcard listener, accepts each connection, and
 uses the observed `clone(SIGCHLD)` fork shape. Each child receives a private
-331-page VM copy and a distinct kernel stack, aliases the accepted socket onto
-fd 0/fd 1, reads `index.html` from USB ext2, writes the response, and exits.
-The same parent accepts two sequential host `curl` requests before the bounded
-integration teardown reclaims every child page, fd, and socket reference. The
-host compares both complete 68-byte bodies with the fixture. TCP fixtures also
-split a request across segments, inject bounded drops, and exercise short
+copy-on-write view of the parent's initial 331-page VM plus a distinct kernel
+stack; it gets private pages only when it writes. It aliases the accepted
+socket onto fd 0/fd 1, reads `index.html` from USB ext2, writes the response,
+and exits. The same parent accepts two sequential host `curl` requests before
+the bounded integration teardown reclaims every child mapping, fd, and socket
+reference. The host compares both complete 68-byte bodies with the fixture.
+TCP fixtures also split a request across segments, inject bounded drops, and exercise short
 `read` plus a 1460+1 partial `write` sequence. The focused EL0 socket fixture
 also keeps connection A open while accepting connection B: a two-entry typed
 connection pool gives each stream independent TCP/retransmission/buffer state,
@@ -384,8 +386,9 @@ run, not a specification.
 - **Filesystem.** One ext2 block group, direct blocks only, root-directory
   lookup and mutation, allocation bitmaps, fast symlinks. No indirect
   blocks, no additional block groups, no nested directories.
-- **Processes.** A growable process table backed by `kernel/lib/growable_pool.tkb`
-  (up to `KERNEL_PROCESS_MAX` = 16 slots), all of it on core 0.
+- **Processes.** A fixed 16-slot `ProcessRecord` scheduler table, with lazily
+  backed kernel stacks and directly owned address-space page tables, all on
+  core 0.
   Core 1 proves autonomous EL1 entry and shared-MMU visibility, then parks.
   `execve` resolves `argv[0]` as an ext2 path directly (`ext2_lookup_root` +
   `ext2_read_small_file` + `distro_elf_validate`), falling back to the
