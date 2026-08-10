@@ -71,6 +71,13 @@ HTTP_REQUEST_PARTS = (
 HTTP_EXPECTED_BODY = (
     b"<!doctype html>\n<html><body>takibi RPi5 BusyBox httpd</body></html>\n"
 )
+INIT_SERVER_PORT = 8080
+INIT_CLIENT_PORTS = (43400, 43401)
+INIT_CLIENT_ISNS = (3000, 4000)
+INIT_SOCKET_INPUT = b"fixture!"
+INIT_SOCKET_B_RESPONSE = b"conn-B\n!"
+INIT_SOCKET_A_RESPONSE = b"HTTP/1.0 200 OK\r\n\r\n"
+INIT_LARGE_RESPONSE = b"Z" * 1461
 
 
 def checksum_add(data: bytes, sum_in: int = 0) -> int:
@@ -333,6 +340,127 @@ def recv_matching(sock: socket.socket, predicate, timeout: float = 5.0):
     return None
 
 
+def init_handshake(sock: socket.socket, client_port: int, client_isn: int):
+    syn = build_tcp_frame(client_port, client_isn, 0, FLAG_SYN,
+                          server_port=INIT_SERVER_PORT)
+    reply = None
+    for _attempt in range(RETRIES):
+        sock.sendto(syn, (QEMU_HOST, QEMU_PORT))
+        reply = recv_matching(
+            sock,
+            lambda candidate: (
+                struct.unpack("!HHIIBB", candidate[34:48])[0] ==
+                INIT_SERVER_PORT and
+                struct.unpack("!HHIIBB", candidate[34:48])[1] ==
+                client_port),
+            timeout=RETRY_TIMEOUT_SECS)
+        if reply is not None:
+            break
+    if reply is None:
+        return None
+    tcp = reply[34:]
+    src_port, dst_port, server_seq, ack, _doff_res, flags = \
+        struct.unpack("!HHIIBB", tcp[0:14])
+    if (src_port != INIT_SERVER_PORT or dst_port != client_port or
+            flags != (FLAG_SYN | FLAG_ACK) or ack != client_isn + 1):
+        return None
+    client_seq = client_isn + 1
+    server_next = server_seq + 1
+    sock.sendto(build_tcp_frame(client_port, client_seq, server_next, FLAG_ACK,
+                                server_port=INIT_SERVER_PORT),
+                (QEMU_HOST, QEMU_PORT))
+    return [client_port, client_seq, server_next, b""]
+
+
+def init_send(sock: socket.socket, state, data: bytes) -> bool:
+    client_port, client_seq, server_next, _pending = state
+    frame = build_tcp_frame(client_port, client_seq, server_next,
+                            FLAG_ACK | FLAG_PSH, data=data,
+                            server_port=INIT_SERVER_PORT)
+    expected = client_seq + len(data)
+    for _attempt in range(RETRIES):
+        sock.sendto(frame, (QEMU_HOST, QEMU_PORT))
+        reply = recv_matching(
+            sock,
+            lambda candidate: (
+                struct.unpack("!HHIIBB", candidate[34:48])[0] ==
+                INIT_SERVER_PORT and
+                struct.unpack("!HHIIBB", candidate[34:48])[1] ==
+                client_port and
+                struct.unpack("!HHIIBB", candidate[34:48])[3] >= expected),
+            timeout=RETRY_TIMEOUT_SECS)
+        if reply is not None:
+            state[1] = expected
+            return True
+    return False
+
+
+def init_receive(sock: socket.socket, state, expected: bytes) -> bool:
+    client_port, client_seq, server_next, _pending = state
+    received = bytearray(state[3])
+    state[3] = b""
+    if received:
+        sock.sendto(build_tcp_frame(
+            client_port, client_seq, server_next, FLAG_ACK,
+            server_port=INIT_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
+    deadline = time.monotonic() + 10.0
+    while len(received) < len(expected) and time.monotonic() < deadline:
+        frame = recv_matching(
+            sock,
+            lambda candidate: (
+                struct.unpack("!HHIIBB", candidate[34:48])[0] ==
+                INIT_SERVER_PORT and
+                struct.unpack("!HHIIBB", candidate[34:48])[1] ==
+                client_port),
+            timeout=0.5)
+        if frame is None:
+            continue
+        tcp = frame[34:]
+        sequence = struct.unpack("!I", tcp[4:8])[0]
+        header_len = (tcp[12] >> 4) * 4
+        payload = frame[34 + header_len:]
+        if sequence == server_next:
+            received.extend(payload)
+            server_next += len(payload)
+            sock.sendto(build_tcp_frame(
+                client_port, client_seq, server_next, FLAG_ACK,
+                server_port=INIT_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
+    state[2] = server_next
+    return bytes(received) == expected
+
+
+def init_script_fixture(sock: socket.socket) -> bool:
+    # /user_payload binds 8080, accepts both streams before reading either,
+    # reads eight bytes from each, writes conn-B on fd 6 and an HTTP status
+    # line on fd 5, then writes a 1461-byte response split by the kernel's
+    # deliberate dropped-data-segment fixture.
+    first = init_handshake(sock, INIT_CLIENT_PORTS[0], INIT_CLIENT_ISNS[0])
+    second = init_handshake(sock, INIT_CLIENT_PORTS[1], INIT_CLIENT_ISNS[1])
+    if first is None or second is None:
+        print("  init.sh: handshakes first=%s second=%s" %
+              ("ok" if first is not None else "missing",
+               "ok" if second is not None else "missing"))
+        return False
+    time.sleep(0.05)
+    second_sent = init_send(sock, second, INIT_SOCKET_INPUT)
+    # Keep the one-entry virtio RX path from overrunning while the blocked
+    # fd-5 read hands control to the fd-6 read.
+    time.sleep(0.05)
+    first_sent = init_send(sock, first, INIT_SOCKET_INPUT)
+    stages = (
+        second_sent,
+        first_sent,
+        init_receive(sock, second, INIT_SOCKET_B_RESPONSE),
+        init_receive(sock, first, INIT_SOCKET_A_RESPONSE),
+        init_receive(sock, first, INIT_LARGE_RESPONSE),
+    )
+    ok = all(stages)
+    if not ok:
+        print("  init.sh stages:", stages)
+    print("  init.sh connected I/O fixture: %s" % ("PASS" if ok else "FAIL"))
+    return ok
+
+
 def http_request(sock: socket.socket, client_port: int, client_isn: int) -> bool:
     # The daemon's first SYN-ACK is deliberately dropped by the kernel. The
     # normal retry loop in send_and_wait() therefore proves recovery rather
@@ -475,6 +603,7 @@ def main() -> int:
 
     http_ok = False
     if ok_reconnect:
+        init_ok = init_script_fixture(sock)
         print("  waiting for HTTP daemon listener")
         for _attempt in range(60):
             try:
@@ -484,7 +613,7 @@ def main() -> int:
                 del frame
             except socket.timeout:
                 break
-        http_ok = all(
+        http_ok = init_ok and all(
             http_request(sock, port, isn)
             for port, isn in zip(HTTP_CLIENT_PORTS, HTTP_CLIENT_ISNS)
         )

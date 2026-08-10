@@ -97,14 +97,24 @@ stop_qemu() {
 trap stop_qemu EXIT
 trap 'stop_qemu; exit 130' INT TERM HUP
 
-# shell_read blocks in ppoll() until the guest receives one UART line. Use the
-# same post-block input as the RPi5 harness: the leading x is a UART warm-up
-# sentinel consumed by the guest, leaving "ashread" for the shell fixture.
+# shell_read and the init.sh user_payload fixture both block in the UART
+# receive path. Feed each deterministic line after its own blocked marker.
 uart_sender_pid=""
 (
+    shell_sent=0
+    payload_sent=0
     for _wait in $(seq 1 "$TIMEOUT_SECS"); do
-        if LC_ALL=C grep -aFq 'shell ppoll: uart blocked' "$UART_LOG"; then
+        if [ "$shell_sent" -eq 0 ] &&
+           LC_ALL=C grep -aFq 'shell ppoll: uart blocked' "$UART_LOG"; then
             printf 'xashread\n' >&8
+            shell_sent=1
+        fi
+        if [ "$payload_sent" -eq 0 ] &&
+           LC_ALL=C grep -aFq 'uart rx: scheduler child blocked' "$UART_LOG"; then
+            printf 'irqtest\n' >&8
+            payload_sent=1
+        fi
+        if [ "$shell_sent" -eq 1 ] && [ "$payload_sent" -eq 1 ]; then
             exit 0
         fi
         sleep 0.1

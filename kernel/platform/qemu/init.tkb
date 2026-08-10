@@ -387,6 +387,7 @@ fn main() {
     kernel_test_rpi5_extended = false;
     kernel_test_shell_read = true;
     kernel_test_httpd_daemon = true;
+    kernel_test_init_script = true;
     kernel_test_driver_run();
     platform_shutdown();
     while (true) { }

@@ -1,0 +1,1 @@
+^(init: ash bootstrap|init: phase (fd|uart|telnet)|init: complete|init script exit: 0|init unmap: clean)$

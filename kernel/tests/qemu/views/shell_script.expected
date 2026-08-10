@@ -1,0 +1,7 @@
+init: ash bootstrap
+init: phase fd
+init: phase uart
+init: phase telnet
+init: complete
+init script exit: 0
+init unmap: clean
