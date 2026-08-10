@@ -1238,11 +1238,12 @@ fn kernel_process_current_pid() -> usize {
 // clone, before process_image_activate_root() replaces the old fixed
 // process_image_activate_child() -- read it here rather than reaching
 // into execution_current_handle directly.
-fn kernel_process_current_root() -> usize {
+fn kernel_process_current_root() -> AddressSpaceRoot {
     if (execution_current_live) {
-        return execution_current_handle.pool_index;
+        return address_space_root_for_slot(
+            execution_current_handle.pool_index);
     }
-    return 0;
+    return address_space_boot_root();
 }
 
 // GitHub issue #245: wait4's pid argument used to be checked against the

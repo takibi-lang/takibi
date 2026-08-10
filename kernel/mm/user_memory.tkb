@@ -74,7 +74,7 @@ enum UserAccessMode: u8 { Read; Write; }
 // produce one, so a syscall body can no longer manufacture a *u8 out of a
 // raw integer without going through validation first.
 struct UserRange {
-    private root: usize;
+    private root: AddressSpaceRoot;
     private address: usize;
     private length: usize;
 }
@@ -101,8 +101,8 @@ fn user_page_allows(pte: usize, mode: UserAccessMode) -> bool {
 // `root` is the address-space slot to check against -- GitHub issue #263:
 // this used to always read root 0 via user_pte_read regardless of which
 // process's buffer was actually being validated.
-fn user_page_class_at(root: usize, index: usize) -> usize {
-    let pte: usize = address_space_pte_read(root, index);
+fn user_page_class_at(root: AddressSpaceRoot, index: usize) -> usize {
+    let pte: usize = address_space_pte_read(address_space_root_slot(root), index);
     if (pte == 0) { return 0; }
     let masked: usize = pte & USER_PTE_PERMISSION_MASK;
     if (masked == USER_TEXT_RX_FLAGS) { return 1; }
@@ -126,7 +126,7 @@ fn user_range_l3_span(address: usize, length: usize) -> (bool, usize, usize) {
 // caller's currently-active root, normally `kernel_process_current_root()`
 // -- GitHub issue #263: this used to always validate against root 0's page
 // table regardless of which process issued the syscall).
-fn user_range_check(root: usize, address: usize, length: usize,
+fn user_range_check(root: AddressSpaceRoot, address: usize, length: usize,
                     mode: UserAccessMode) -> UserRangeResult {
     if (length == 0) {
         let mut range: UserRange = { root, address, length };
@@ -136,7 +136,7 @@ fn user_range_check(root: usize, address: usize, length: usize,
     if (span_ok == false) { return UserRangeResult::Fault; }
     let mut index: usize = first;
     while (index <= last) {
-        let pte: usize = address_space_pte_read(root, index);
+        let pte: usize = address_space_pte_read(address_space_root_slot(root), index);
         if (index >= USER_SPACE_PAGE_COUNT ||
             (user_page_allows(pte, mode) == false &&
              (mode != UserAccessMode::Write ||
@@ -158,9 +158,11 @@ fn user_range_resolve_cow(range: UserRange) -> bool !{unsafe} {
     if (span_ok == false) { return false; }
     let mut index: usize = first;
     while (index <= last) {
-        let pte: usize = address_space_pte_read(range.root, index);
+        let pte: usize = address_space_pte_read(
+            address_space_root_slot(range.root), index);
         if (address_space_pte_is_cow(pte) &&
-            address_space_resolve_cow(range.root, index) == false) {
+            address_space_resolve_cow(
+                address_space_root_slot(range.root), index) == false) {
             return false;
         }
         index = index + 1;
@@ -296,18 +298,19 @@ fn user_zero_fill(range: UserRange) -> bool !{unsafe} {
 // frame and replacing only the attribute bits. Used by mprotect and rodata
 // segment mapping alike. `root` per user_range_check's own note above
 // (GitHub issue #263).
-fn user_range_reprotect(root: usize, first_l3: usize, last_l3: usize,
+fn user_range_reprotect(root: AddressSpaceRoot, first_l3: usize, last_l3: usize,
                         new_flags: usize) {
     let mut index: usize = first_l3;
     while (index <= last_l3) {
-        let old_pte: usize = address_space_pte_read(root, index);
+        let root_slot: usize = address_space_root_slot(root);
+        let old_pte: usize = address_space_pte_read(root_slot, index);
         let phys: usize = old_pte & USER_PAGE_PHYS_MASK;
-        match address_space_pte_write(root, index, phys | new_flags) {
+        match address_space_pte_write(root_slot, index, phys | new_flags) {
             AddressSpacePteWriteResult::Invalid => { return; }
             AddressSpacePteWriteResult::OutOfMemory => { return; }
             AddressSpacePteWriteResult::Written => {
                 address_space_tlb_invalidate(
-                    root, USER_TEXT_VA + index * PAGE_SIZE);
+                    root_slot, USER_TEXT_VA + index * PAGE_SIZE);
             }
         }
         index = index + 1;
@@ -349,6 +352,7 @@ fn user_memory_boundary_probe() -> bool {
 fn user_memory_boundary_probe_run(base: usize,
                                   data_page: sink PageOwner[data],
                                   text_page: sink PageOwner[text]) -> bool {
+    let mut root: AddressSpaceRoot = address_space_boot_root();
     match address_space_map_page(0, base, data_page, USER_RW_XN_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             page_free(text_page);
@@ -386,46 +390,46 @@ fn user_memory_boundary_probe_run(base: usize,
 
     // Overflow: address near usize::MAX with a nonzero length must never
     // wrap around into an apparently-valid range.
-    match user_range_check(0, 0xFFFFFFFFFFFFFFF0, 32, UserAccessMode::Read) {
+    match user_range_check(root, 0xFFFFFFFFFFFFFFF0, 32, UserAccessMode::Read) {
         UserRangeResult::Fault => {}
         UserRangeResult::Ok(bad) => { ok = false; }
     }
 
     // Cross-page: a range spanning the mapped data page and the deliberately
     // unmapped page right after it must fault as a whole.
-    match user_range_check(0, data_va, PAGE_SIZE + 1, UserAccessMode::Read) {
+    match user_range_check(root, data_va, PAGE_SIZE + 1, UserAccessMode::Read) {
         UserRangeResult::Fault => {}
         UserRangeResult::Ok(bad) => { ok = false; }
     }
 
     // Wrong permission: Text-RX must reject Write while still allowing Read.
-    match user_range_check(0, text_va, 8, UserAccessMode::Read) {
+    match user_range_check(root, text_va, 8, UserAccessMode::Read) {
         UserRangeResult::Fault => { ok = false; }
         UserRangeResult::Ok(readable) => {}
     }
-    match user_range_check(0, text_va, 8, UserAccessMode::Write) {
+    match user_range_check(root, text_va, 8, UserAccessMode::Write) {
         UserRangeResult::Fault => {}
         UserRangeResult::Ok(bad) => { ok = false; }
     }
 
     // mprotect-style downgrade/upgrade on the data page.
-    match user_range_check(0, data_va, 8, UserAccessMode::Write) {
+    match user_range_check(root, data_va, 8, UserAccessMode::Write) {
         UserRangeResult::Fault => { ok = false; }
         UserRangeResult::Ok(writable) => {}
     }
-    user_range_reprotect(0, base, base,
+    user_range_reprotect(root, base, base,
                          USER_RODATA_R_FLAGS);
-    match user_range_check(0, data_va, 8, UserAccessMode::Write) {
+    match user_range_check(root, data_va, 8, UserAccessMode::Write) {
         UserRangeResult::Fault => {}
         UserRangeResult::Ok(bad) => { ok = false; }
     }
-    match user_range_check(0, data_va, 8, UserAccessMode::Read) {
+    match user_range_check(root, data_va, 8, UserAccessMode::Read) {
         UserRangeResult::Fault => { ok = false; }
         UserRangeResult::Ok(still_readable) => {}
     }
-    user_range_reprotect(0, base, base,
+    user_range_reprotect(root, base, base,
                          USER_RW_XN_FLAGS);
-    match user_range_check(0, data_va, 8, UserAccessMode::Write) {
+    match user_range_check(root, data_va, 8, UserAccessMode::Write) {
         UserRangeResult::Fault => { ok = false; }
         UserRangeResult::Ok(writable_again) => {}
     }
@@ -495,6 +499,10 @@ fn user_memory_root_isolation_probe_run(root_a: usize, root_b: usize,
                                         index: usize, va: usize,
                                         page_a: sink PageOwner[a],
                                         page_b: sink PageOwner[b]) -> bool {
+    let mut checked_root_a: AddressSpaceRoot =
+        address_space_root_for_slot(root_a);
+    let mut checked_root_b: AddressSpaceRoot =
+        address_space_root_for_slot(root_b);
     // root_a: writable (RW+XN). root_b: read-only (rodata-R). root 0: left
     // unmapped (0) at this same index the whole time.
     match address_space_map_page(root_a, index, page_a, USER_RW_XN_FLAGS) {
@@ -523,20 +531,20 @@ fn user_memory_root_isolation_probe_run(root_a: usize, root_b: usize,
     }
 
     let mut ok: bool = true;
-    match user_range_check(root_a, va, 8, UserAccessMode::Write) {
+    match user_range_check(checked_root_a, va, 8, UserAccessMode::Write) {
         UserRangeResult::Fault => { ok = false; }
         UserRangeResult::Ok(writable) => {}
     }
-    match user_range_check(root_b, va, 8, UserAccessMode::Write) {
+    match user_range_check(checked_root_b, va, 8, UserAccessMode::Write) {
         UserRangeResult::Fault => {}
         UserRangeResult::Ok(bad) => { ok = false; }
     }
-    match user_range_check(root_b, va, 8, UserAccessMode::Read) {
+    match user_range_check(checked_root_b, va, 8, UserAccessMode::Read) {
         UserRangeResult::Fault => { ok = false; }
         UserRangeResult::Ok(readable) => {}
     }
-    if (user_page_class_at(root_a, index) != 3) { ok = false; }
-    if (user_page_class_at(root_b, index) != 2) { ok = false; }
+    if (user_page_class_at(checked_root_a, index) != 3) { ok = false; }
+    if (user_page_class_at(checked_root_b, index) != 2) { ok = false; }
 
     address_space_pte_clear(root_a, index);
     address_space_tlb_invalidate(root_a, va);

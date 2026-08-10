@@ -173,7 +173,8 @@ fn kernel_process_child_exec_prepare() -> usize {
     // child running deeper than one level under its own parent (e.g.
     // user_payload's own fork of a UART-block/scheduler-preempt child)
     // needs its own current root here instead.
-    let child_root: usize = kernel_process_current_root();
+    let child_root: usize =
+        address_space_root_slot(kernel_process_current_root());
     let pages_result = process_image_map_in_root(
         target_plan, kernel_syscall_exec_argv(),
         kernel_syscall_exec_argc(), child_root);

@@ -630,7 +630,8 @@ fn process_image_exec_reap() {
             // construction that has already switched execution_current_
             // handle back to the parent, so kernel_process_current_root()
             // is already correct here, not a fixed root 0.
-            process_image_activate_root(kernel_process_current_root());
+            process_image_activate_root(
+                address_space_root_slot(kernel_process_current_root()));
         }
     }
 }

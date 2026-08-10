@@ -28,6 +28,13 @@ const USER_PAGE_PHYS_MASK: usize = 0x0000FFFFFFFFF000;
 // available to software. COW is meaningful only with a read-only user PTE.
 const USER_COW_BIT: usize = 0x0080000000000000;
 
+// Capability naming one live address-space root. Its slot is private so
+// users of the PTE and UserRange APIs cannot substitute a bare integer
+// (especially the bootstrap root 0) for the calling process's root.
+struct AddressSpaceRoot {
+    private slot: usize;
+}
+
 struct AddressSpaceBacking {
     live: bool;
     l1_physical: usize;
@@ -54,6 +61,21 @@ fn address_space_is_live(slot: usize) -> bool {
         return address_space_backing[checked].live;
     }
     return false;
+}
+
+// Process lifecycle code obtains this after selecting a scheduled process.
+// Boot-only probes use address_space_boot_root() explicitly instead.
+fn address_space_root_for_slot(slot: usize) -> AddressSpaceRoot {
+    let mut root: AddressSpaceRoot = { slot };
+    return root;
+}
+
+fn address_space_boot_root() -> AddressSpaceRoot {
+    return address_space_root_for_slot(0);
+}
+
+fn address_space_root_slot(root: AddressSpaceRoot) -> usize {
+    return root.slot;
 }
 
 fn address_space_l1_physical(slot: usize) -> usize {

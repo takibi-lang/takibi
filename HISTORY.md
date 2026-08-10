@@ -15,6 +15,30 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-10: Opaque address-space-root capability closes the root-0 validation gap (#265)
+
+Issue #263 fixed `user_range_check` reading root 0 for every syscall by
+threading a raw root-slot integer from `kernel_process_current_root()` through
+each call site. That was behaviorally correct but not a type boundary: a
+future caller could again supply literal `0` and compile cleanly.
+
+`AddressSpaceRoot` now carries the slot in a private field. The canonical
+process accessor returns that capability instead of `usize`, and
+`user_range_check`, `user_page_class_at`, and `user_range_reprotect` require
+it. A syscall therefore cannot substitute a bare integer for its active root;
+only the explicit accessors in `address_space.tkb` can create one. Boot-only
+probes name their exceptional root through `address_space_boot_root()`, while
+the two-root isolation probe makes its deliberately selected roots explicit
+through `address_space_root_for_slot()`. The PTE mechanics still consume the
+unwrapped slot internally; their lifecycle APIs deliberately remain
+slot-indexed because they create, destroy, and inspect roots independently of
+one currently executing process.
+
+This is a narrow concrete instance of #132's larger authority-propagation
+problem, not a new compiler feature. Existing QEMU and real-RPi5 syscall,
+fork/exec, and root-isolation views verify that the representation carries no
+runtime behavior change.
+
 ### 2026-08-10: Private fork copy-on-write establishes multi-mapped pages (#262)
 
 The post-#254 page-table walk is the one authoritative mapping record: a

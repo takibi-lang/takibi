@@ -181,7 +181,7 @@ variant KernelListenerLookupResult {
 // ProcessHandle.pool_index (same convention as the address-space root),
 // so this is now a direct pass-through instead of a binary pid==2?1:0.
 fn kernel_syscall_process_slot() -> usize {
-    return kernel_process_current_root();
+    return address_space_root_slot(kernel_process_current_root());
 }
 
 fn kernel_syscall_file_lookup(fd: usize) -> UnifiedFileResult {
@@ -1073,7 +1073,8 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
     if (installed_child_sp == 0) {
         kernel_syscall_fail_stop();
     }
-    process_image_activate_root(kernel_process_current_root());
+    process_image_activate_root(
+        address_space_root_slot(kernel_process_current_root()));
     kernel_syscall_resume_return(installed_child_sp, 0);
 }
 
@@ -2197,7 +2198,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
             ProcessCloneResult::ChildReady(child_pid) => {
-                let child_slot: usize = kernel_process_current_root();
+                let child_slot: usize =
+                    address_space_root_slot(kernel_process_current_root());
                 match process_image_clone_vm_begin(child_slot) {
                     ProcessCloneVmResult::OutOfMemory => {
                         kernel_process_clone_rollback();
