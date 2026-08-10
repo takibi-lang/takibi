@@ -689,9 +689,16 @@ private let mut execution_child_exit_count: usize;
 // issue #248). The EL0 fixture forks a child that exits 42, then exits 0
 // itself as ash's own child, so by the time kernel/platform/rpi5/init.tkb reads the
 // evidence the 42 has been overwritten by that outer 0 if this weren't
-// "the first child reaped since the last kernel_process_execution_reset()"
-// specifically.
-private let mut execution_first_child_exit_status: usize;
+// narrowed specifically.
+//
+// GitHub issue #209: narrowed to the first NON-ZERO status rather than the
+// literally first reaped child. Once ordinary applets are launched from the
+// init script instead of from the kernel, successful (status 0) children are
+// reaped in this same window too, and whichever one happens to run first is
+// boot-policy detail the kernel has no business depending on. Skipping zero
+// statuses expresses the original intent directly: remember the one child
+// that deliberately exited with a distinctive failure-shaped status.
+private let mut execution_first_nonzero_child_exit_status: usize;
 // GitHub issue #264 first stage keeps the #248 wait4 result fields and
 // #245 exec-image flag in the same ProcessRecord as their slot's state
 // and links. They remain indexed by the waiting/current process exactly
@@ -751,7 +758,7 @@ fn kernel_process_execution_reset() {
     execution_current_live = false;
     execution_clone_calls = 0;
     execution_child_exit_count = 0;
-    execution_first_child_exit_status = 0;
+    execution_first_nonzero_child_exit_status = 0;
     execution_timer_switches = 0;
     execution_deferred_switches = 0;
     execution_deferred_requests = 0;
@@ -789,6 +796,21 @@ fn kernel_process_scheduler_enable() {
 fn kernel_process_scheduler_disable() {
     execution_scheduler_enabled = false;
     execution_reschedule_pending = false;
+}
+
+// GitHub issue #209: how many slots could the scheduler still choose
+// between. Exited slots are excluded: they are awaiting reap, never
+// selection.
+fn kernel_process_schedulable_count() -> usize {
+    let mut live: usize = 0;
+    for slot: usize in 0..<KERNEL_PROCESS_MAX {
+        let state: ProcessSlotState = scheduled_process_record_state(slot);
+        if (state != ProcessSlotState::Free &&
+            state != ProcessSlotState::Exited) {
+            live = live + 1;
+        }
+    }
+    return live;
 }
 
 fn kernel_process_switch_to_parent(current_sp: usize) -> usize {
@@ -1265,10 +1287,25 @@ fn kernel_process_current_child_pid() -> usize {
 
 fn kernel_process_child_exit(status: usize) -> usize {
     execution_child_exit_count = execution_child_exit_count + 1;
-    if (execution_child_exit_count == 1) {
-        execution_first_child_exit_status = status;
+    if (status != 0 && execution_first_nonzero_child_exit_status == 0) {
+        execution_first_nonzero_child_exit_status = status;
     }
-    kernel_process_scheduler_disable();
+    // GitHub issue #209: a child exit used to close the scheduling gate
+    // here (kernel_process_scheduler_disable()), a leftover of the
+    // two-process model where "a child exited" really did mean "nothing
+    // is left to switch between." Under PID 1 running many children over
+    // one boot that is simply false, and because the gate could only ever
+    // close, the FIRST child to exit (init.sh's `/cat`) permanently
+    // disabled preemption for every process started afterwards. Observed
+    // exactly that way: a later fixture's child woke from UART RX (its
+    // ISR logged the byte) and was then never selected again, because no
+    // timer switch could happen at all, while its parent spun forever.
+    //
+    // Nothing takes its place: an exiting child is moved out of the
+    // selectable states below, which is what actually keeps the scheduler
+    // off a dying context. Leaving preemption on is also the prerequisite
+    // for genuinely concurrent children (a shell backgrounding a job with
+    // `&`), where a child exit must not stop the survivors from running.
     if (execution_current_live == false ||
         scheduled_process_records[execution_current_handle.pool_index]
             .has_parent ==
@@ -1447,14 +1484,19 @@ fn kernel_process_exec_clear_for_pid(pid: usize) {
 // "we ended up back in the one designated root role," which no longer has
 // a single fixed meaning once any slot can be a parent relative to its
 // own child. Dropped rather than mapped onto something new: the other
-// four conditions (>=2 timer switches, a deferred request actually seen,
-// the specific exit(42) status, and the scheduler having been disabled by
-// that exit) already pin down this fixture's own completion precisely.
+// conditions already pin down this fixture's own completion precisely.
+//
+// GitHub issue #209: the fourth conjunct used to read the raw
+// execution_scheduler_enabled flag, back when a single child exit latched
+// that flag off for the rest of the boot. That flag now tracks the live
+// process population instead (see kernel_process_child_exit), so the
+// assertion is stated directly in terms of the property it always meant:
+// every process this fixture created is gone again.
 fn kernel_process_scheduler_acceptance_evidence() -> bool {
     return execution_timer_switches >= 2 &&
            execution_deferred_requests != 0 &&
-           execution_first_child_exit_status == 42 &&
-           execution_scheduler_enabled == false;
+           execution_first_nonzero_child_exit_status == 42 &&
+           kernel_process_schedulable_count() <= 1;
 }
 
 fn kernel_process_child_exit_count() -> usize {
@@ -1477,7 +1519,7 @@ fn kernel_process_last_child_pid() -> usize {
 fn kernel_process_clone_evidence() -> bool {
     return execution_current_live &&
            execution_clone_calls >= 1 &&
-           execution_first_child_exit_status == 42 &&
+           execution_first_nonzero_child_exit_status == 42 &&
            scheduled_process_records[execution_current_handle.pool_index]
                .has_child ==
                false &&
