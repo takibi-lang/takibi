@@ -217,7 +217,7 @@ one-minute SWD transfer. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (28 views, one boot)
+PASS kernel/rpi5 (31 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2
@@ -298,7 +298,7 @@ transcript through the common views plus the QEMU-specific views, comparing
 each exactly against its `.expected` file -- the identical "one boot, many
 independent contracts" pattern `kernelcheck-rpi5` uses (see "Expected-file
 integration views" below), just without the SWD reset/load dance: QEMU's
-own `-nographic` pipes the guest UART directly to the host process. Twenty-one
+own `-nographic` pipes the guest UART directly to the host process. Thirty-one
 views currently pass, covering:
 
 - the full hardware-independent self-test bundle (FP/SIMD-across-IRQ, a
@@ -312,6 +312,11 @@ views currently pass, covering:
 - real ARP, ICMP echo, and a full TCP handshake/data-echo/close/reconnect
   sequence against a host-side Python peer (`scripts/kernel_net_test.py`)
   over a private `-netdev dgram` transport.
+- the BusyBox HTTPd accept/serve loop, split requests, retransmission
+  recovery, repeated requests, and exact `index.html` responses;
+- the ext2-resident `init.sh` scenario, including connected socket I/O,
+  overlapping connections, partial writes, UART input, and process/VM
+  lifecycle checks.
 
 ### Differences from RPi5
 
@@ -348,12 +353,10 @@ are deliberate, not gaps to silently close:
   device MMIO below it -- roughly the opposite of RPi5's layout. See
   `kernel/platform/qemu/mmu_layout.tkb`'s own header for the resulting L1
   block-index choices, including why `USER_TEXT_VA` differs from RPi5's.
-- **The HTTPd daemon's real accept()/serve loop and the ext2-resident
-  `init.sh` script's own connected-socket fixture are not exercised.** Both
-  need a live TCP peer serving (not just replying to) a connection in a
-  shape this milestone's host-side script does not yet drive; unlike the
-  ARP/ICMP/TCP-echo peer above, they are a real follow-up, not a
-  permanent QEMU limitation.
+- **The RP1 GEM Ethernet and USB Mass Storage drivers are not exercised.**
+  QEMU verifies equivalent network and storage behavior through virtio-net
+  and virtio-blk, while the RPi5 lane remains authoritative for those
+  hardware-specific drivers and their interrupt/DMA behavior.
 
 ## Expected-file integration views
 

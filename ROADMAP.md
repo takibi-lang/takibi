@@ -117,7 +117,7 @@ multiple applets dispatch normally.
 ## M2': QEMU/AArch64 kernel target, then CI
 
 **#237 landed**: `make kernelbuild-qemu`/`kernelcheck-qemu` build and run a
-20-view integration suite (self-tests, ext2/BusyBox/HTTPd-loader, real
+31-view integration suite (self-tests, ext2/BusyBox/HTTPd, init.sh, real
 ARP/ICMP/TCP against a host-side peer) with no RPi5 hardware, SWD, or NIC
 needed -- see `kernel/README.md`'s "QEMU/AArch64 integration" section. Two
 of the three problems that motivated this milestone are resolved by that
@@ -128,9 +128,8 @@ a QEMU target existing at all is the prerequisite for CI). Still open:
 2. **#149 (GDB without JTAG)** -- `gdb-multiarch` against QEMU's gdbstub
    works today for interactive debugging (`kernel/README.md`), but this
    issue's own original scope may cover more than that.
-3. A virtio-blk driver, for a QEMU storage milestone closer to RPi5's real
-   USB-provisioned block device (today's QEMU lane mounts a memory-backed
-   ext2 image directly instead) -- deferred, not started.
+3. Hardware-specific RP1 GEM and USB Mass Storage coverage remains RPi5-only;
+   QEMU covers the corresponding behavior through virtio-net and virtio-blk.
 
 Real hardware stays the authority for anything involving cache, DMA, interrupt
 timing, or true concurrency (`AGENTS.md`'s tier-3 rule is unchanged). QEMU is a
