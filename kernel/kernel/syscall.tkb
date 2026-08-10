@@ -991,7 +991,21 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
 fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize,
                                 parent_slot: usize) !{unsafe} {
     if (syscall_wait4_status_ptr != 0) {
-        match user_range_check(kernel_process_current_root(), syscall_wait4_status_ptr, 4, UserAccessMode::Write) {
+        // The status buffer belongs to the PARENT being woken, but this runs
+        // while the exiting CHILD is still current (see this function's
+        // header comment and kernel_process_child_exit). user_write_u32
+        // dereferences the user VA directly, so TTBR0_EL1 has to already
+        // name the parent's root -- and user_range_check has to validate
+        // against that same root -- before the status is written. Otherwise
+        // the write lands in the exiting child's address space, which after
+        // that child has execve'd is a completely different set of physical
+        // pages, and the woken parent goes on to read whatever uninitialised
+        // value its own status variable happened to hold. Only the BLOCKING
+        // wait4() path reaches here, which is why the synchronous
+        // already-exited path (correct address space, current is the parent)
+        // never showed this.
+        address_space_activate_root(parent_slot);
+        match user_range_check(address_space_root_for_slot(parent_slot), syscall_wait4_status_ptr, 4, UserAccessMode::Write) {
             UserRangeResult::Fault => {
                 el0_context_set_x0(frame_sp, LINUX_EFAULT);
                 return;
