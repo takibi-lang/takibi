@@ -87,3 +87,7 @@ for phase in fd uart telnet; do
 done
 
 echo "init: complete"
+
+# This is deliberately the final action: parent execve replaces PID 1, so
+# there is no shell left to continue the script after /bin/echo exits.
+exec /bin/echo exec-ok
