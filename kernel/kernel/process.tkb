@@ -682,23 +682,12 @@ private let mut execution_current_handle: ProcessHandle;
 private let mut execution_current_live: bool;
 private let mut execution_clone_calls: usize;
 private let mut execution_child_exit_count: usize;
-// GitHub issue #241: this is the MOST RECENT reaped child's status across
-// the WHOLE reset window -- what the boot-time evidence checks want (see
-// kernel_process_scheduler_acceptance_evidence/_clone_evidence below), NOT
-// what wait4() reports (that's the per-slot arrays just below, added for
-// issue #248). The EL0 fixture forks a child that exits 42, then exits 0
-// itself as ash's own child, so by the time kernel/platform/rpi5/init.tkb reads the
-// evidence the 42 has been overwritten by that outer 0 if this weren't
-// narrowed specifically.
-//
-// GitHub issue #209: narrowed to the first NON-ZERO status rather than the
-// literally first reaped child. Once ordinary applets are launched from the
-// init script instead of from the kernel, successful (status 0) children are
-// reaped in this same window too, and whichever one happens to run first is
-// boot-policy detail the kernel has no business depending on. Skipping zero
-// statuses expresses the original intent directly: remember the one child
-// that deliberately exited with a distinctive failure-shaped status.
-private let mut execution_first_nonzero_child_exit_status: usize;
+// The scheduler fixture's child deliberately exits 42. Record that fact,
+// rather than treating the first non-zero status in a boot-wide window as a
+// proxy for it: ordinary init children may legitimately fail too (BusyBox od
+// reaches the intentional stdin EBADF case), and their launch order is boot
+// policy rather than scheduler evidence.
+private let mut execution_exit_42_seen: bool;
 // GitHub issue #264 first stage keeps the #248 wait4 result fields and
 // #245 exec-image flag in the same ProcessRecord as their slot's state
 // and links. They remain indexed by the waiting/current process exactly
@@ -758,7 +747,7 @@ fn kernel_process_execution_reset() {
     execution_current_live = false;
     execution_clone_calls = 0;
     execution_child_exit_count = 0;
-    execution_first_nonzero_child_exit_status = 0;
+    execution_exit_42_seen = false;
     execution_timer_switches = 0;
     execution_deferred_switches = 0;
     execution_deferred_requests = 0;
@@ -1287,9 +1276,7 @@ fn kernel_process_current_child_pid() -> usize {
 
 fn kernel_process_child_exit(status: usize) -> usize {
     execution_child_exit_count = execution_child_exit_count + 1;
-    if (status != 0 && execution_first_nonzero_child_exit_status == 0) {
-        execution_first_nonzero_child_exit_status = status;
-    }
+    if (status == 42) { execution_exit_42_seen = true; }
     // GitHub issue #209: a child exit used to close the scheduling gate
     // here (kernel_process_scheduler_disable()), a leftover of the
     // two-process model where "a child exited" really did mean "nothing
@@ -1495,7 +1482,7 @@ fn kernel_process_exec_clear_for_pid(pid: usize) {
 fn kernel_process_scheduler_acceptance_evidence() -> bool {
     return execution_timer_switches >= 2 &&
            execution_deferred_requests != 0 &&
-           execution_first_nonzero_child_exit_status == 42 &&
+           execution_exit_42_seen &&
            kernel_process_schedulable_count() <= 1;
 }
 
@@ -1519,7 +1506,7 @@ fn kernel_process_last_child_pid() -> usize {
 fn kernel_process_clone_evidence() -> bool {
     return execution_current_live &&
            execution_clone_calls >= 1 &&
-           execution_first_nonzero_child_exit_status == 42 &&
+           execution_exit_42_seen &&
            scheduled_process_records[execution_current_handle.pool_index]
                .has_child ==
                false &&
