@@ -28,6 +28,7 @@
 import socket
 import struct
 import sys
+import time
 
 QEMU_HOST = "127.0.0.1"
 QEMU_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 17771
@@ -38,6 +39,7 @@ CLIENT_IP = bytes([192, 168, 20, 55])
 SERVER_MAC = bytes([0x02, 0x00, 0x20, 0x00, 0x00, 0x02])  # kernel/net/netconfig.tkb's OUR_MAC
 SERVER_IP = bytes([192, 168, 20, 2])                      # kernel/net/netconfig.tkb's OUR_IP
 SERVER_PORT = 7                                           # kernel/net/tcp.tkb's TCP_ECHO_PORT
+HTTP_SERVER_PORT = 8080
 # kernel/net/wire.tkb's TCP_INITIAL_SEQ -- fixed, not randomized, so every
 # post-handshake sequence number below is known in advance.
 SERVER_ISN = 0x00001000
@@ -60,6 +62,15 @@ HANDSHAKE_CLIENT_ISN = 500
 DATA_ECHO_PAYLOAD = b"Hello, TCP echo!"
 RECONNECT_CLIENT_PORT = 43211
 RECONNECT_CLIENT_ISN = 900
+HTTP_CLIENT_PORTS = (43300, 43301)
+HTTP_CLIENT_ISNS = (1200, 2200)
+HTTP_REQUEST_PARTS = (
+    b"GET / HTTP/1.0\r\n",
+    b"Host: 192.168.20.2\r\nConnection: close\r\n\r\n",
+)
+HTTP_EXPECTED_BODY = (
+    b"<!doctype html>\n<html><body>takibi RPi5 BusyBox httpd</body></html>\n"
+)
 
 
 def checksum_add(data: bytes, sum_in: int = 0) -> int:
@@ -308,6 +319,108 @@ def test_close(sock: socket.socket) -> bool:
     return silent_ok
 
 
+def recv_matching(sock: socket.socket, predicate, timeout: float = 5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        remaining = max(0.05, deadline - time.monotonic())
+        sock.settimeout(remaining)
+        try:
+            frame = sock.recvfrom(2000)[0]
+        except socket.timeout:
+            continue
+        if len(frame) >= 54 and predicate(frame):
+            return frame
+    return None
+
+
+def http_request(sock: socket.socket, client_port: int, client_isn: int) -> bool:
+    # The daemon's first SYN-ACK is deliberately dropped by the kernel. The
+    # normal retry loop in send_and_wait() therefore proves recovery rather
+    # than relying on a second, fresh connection.
+    syn = build_tcp_frame(client_port, client_isn, 0, FLAG_SYN,
+                          server_port=HTTP_SERVER_PORT)
+    reply = send_and_wait(sock, syn)
+    if reply is None:
+        print("  no HTTP SYN-ACK reply")
+        return False
+    tcp = reply[34:]
+    src_port, dst_port, server_seq, ack, _doff_res, flags = struct.unpack(
+        "!HHIIBB", tcp[0:14])
+    if (src_port != HTTP_SERVER_PORT or dst_port != client_port or
+            flags != (FLAG_SYN | FLAG_ACK) or ack != client_isn + 1):
+        print("  bad HTTP SYN-ACK")
+        return False
+
+    client_seq = client_isn + 1
+    server_next = server_seq + 1
+    sock.sendto(build_tcp_frame(client_port, client_seq, server_next, FLAG_ACK,
+                                server_port=HTTP_SERVER_PORT),
+                (QEMU_HOST, QEMU_PORT))
+
+    for part in HTTP_REQUEST_PARTS:
+        frame = build_tcp_frame(client_port, client_seq, server_next,
+                                FLAG_ACK | FLAG_PSH, data=part,
+                                server_port=HTTP_SERVER_PORT)
+        expected_ack = client_seq + len(part)
+        for _attempt in range(RETRIES):
+            sock.sendto(frame, (QEMU_HOST, QEMU_PORT))
+            ack_frame = recv_matching(
+                sock,
+                lambda candidate: (
+                    struct.unpack("!HHIIBB", candidate[34:48])[0] ==
+                    HTTP_SERVER_PORT and
+                    struct.unpack("!HHIIBB", candidate[34:48])[1] ==
+                    client_port and
+                    (struct.unpack("!HHIIBB", candidate[34:48])[5] & FLAG_ACK) and
+                    struct.unpack("!HHIIBB", candidate[34:48])[3] >= expected_ack),
+                timeout=RETRY_TIMEOUT_SECS)
+            if ack_frame is not None:
+                break
+        else:
+            print("  no HTTP request ACK")
+            return False
+        client_seq = expected_ack
+
+    body = bytearray()
+    response_end = False
+    deadline = time.monotonic() + 10.0
+    while not response_end and time.monotonic() < deadline:
+        sock.settimeout(max(0.05, deadline - time.monotonic()))
+        try:
+            frame = sock.recvfrom(2000)[0]
+        except socket.timeout:
+            continue
+        if len(frame) < 54:
+            continue
+        src_port, dst_port, sequence, acknowledgment, _doff_res, flags = \
+            struct.unpack("!HHIIBB", frame[34:48])
+        if src_port != HTTP_SERVER_PORT or dst_port != client_port:
+            continue
+        tcp_header_length = (frame[46] >> 4) * 4
+        payload = frame[34 + tcp_header_length:34 + len(frame) - 34]
+        if sequence == server_next:
+            body.extend(payload)
+            server_next += len(payload)
+        if flags & FLAG_FIN:
+            if sequence == server_next:
+                server_next += 1
+            response_end = True
+        if payload or (flags & FLAG_FIN):
+            sock.sendto(build_tcp_frame(client_port, client_seq, server_next,
+                                        FLAG_ACK, server_port=HTTP_SERVER_PORT),
+                        (QEMU_HOST, QEMU_PORT))
+    if not response_end:
+        print("  HTTP response did not close")
+        return False
+    separator = bytes(body).find(b"\r\n\r\n")
+    actual_body = bytes(body[separator + 4:]) if separator >= 0 else b""
+    ok = actual_body == HTTP_EXPECTED_BODY
+    print("  HTTP GET / body:                  %s" % ("PASS" if ok else "FAIL"))
+    if not ok:
+        print("  unexpected HTTP body:", actual_body)
+    return ok
+
+
 def send_until_reply(sock: socket.socket, frame: bytes, check) -> bool:
     for _attempt in range(RETRIES):
         sock.sendto(frame, (QEMU_HOST, QEMU_PORT))
@@ -360,8 +473,24 @@ def main() -> int:
         sock, RECONNECT_CLIENT_PORT, RECONNECT_CLIENT_ISN)
     print("  reconnect after close:              %s" % ("PASS" if ok_reconnect else "FAIL"))
 
+    http_ok = False
+    if ok_reconnect:
+        print("  waiting for HTTP daemon listener")
+        for _attempt in range(60):
+            try:
+                sock.settimeout(0.25)
+                frame = sock.recvfrom(2000)[0]
+                # No packet is expected here; discard stale dgram frames.
+                del frame
+            except socket.timeout:
+                break
+        http_ok = all(
+            http_request(sock, port, isn)
+            for port, isn in zip(HTTP_CLIENT_PORTS, HTTP_CLIENT_ISNS)
+        )
+
     sock.close()
-    return 0 if ok_reconnect else 1
+    return 0 if (ok_reconnect and http_ok) else 1
 
 
 if __name__ == "__main__":

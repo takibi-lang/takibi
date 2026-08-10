@@ -312,6 +312,7 @@ fn kernel_test_common_probes() {
 // in this driver.
 let mut kernel_test_rpi5_extended: bool;
 let mut kernel_test_shell_read: bool;
+let mut kernel_test_httpd_daemon: bool;
 
 fn kernel_test_driver_run() {
     kernel_test_common_probes();
@@ -368,7 +369,7 @@ match initramfs_httpd() {
                                             kernel_syscall_process_configure(
                                                 dynamic_heap_start,
                                                 dynamic_heap_limit);
-                                            if (kernel_test_rpi5_extended) {
+                                            if (kernel_test_httpd_daemon) {
 kernel_process_execution_reset();
                                             kernel_syscall_httpd_daemon_start();
                                             kernel_tcp_inject_drop_next_syn_ack();

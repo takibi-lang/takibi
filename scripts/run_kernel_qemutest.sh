@@ -25,8 +25,11 @@
 # (no ARP/DHCP noise, unlike -netdev user). scripts/kernel_net_test.py is
 # run against it concurrently as the host-side peer, driving ARP, ICMP,
 # and the full TCP handshake/echo/close/reconnect sequence
-# kernel_tcp_echo_check() waits for -- so, unlike the RPi5 lane, this
-# needs no physical NIC, cable, or raw-socket privileges. mac= is pinned
+# kernel_tcp_echo_check() waits for, followed by two raw-TCP HTTP GETs
+# against the BusyBox daemon on port 8080. The HTTP requests verify the
+# ext2-resident index.html body and exercise the daemon's dropped SYN-ACK
+# and split-request fixtures, analogous to the RPi5 runner. Unlike that
+# lane, this needs no physical NIC, cable, or raw-socket privileges. mac= is pinned
 # to kernel/net/netconfig.tkb's OUR_MAC so the boot log's "link ready
 # mac=..." line stays a fixed, exact-matchable string. The feature flags
 # (csum=off, mrg_rxbuf=off, ...) match run_virtio_test's own list exactly.
