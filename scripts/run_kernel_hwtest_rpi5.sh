@@ -168,6 +168,64 @@ if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
 fi
 echo "[kernel/rpi5] TCP integration passed"
 
+# GitHub issue #195: vm-layout completion is earlier than socket/bind/listen
+# and therefore is not evidence that the connected-I/O endpoint is ready.
+# Wait for the unique fixture-scoped post-listen marker. An unconditional
+# listen marker would match the earlier BusyBox daemon in the same UART log.
+echo "[kernel/rpi5] waiting for the kernel to be ready for the userspace connected-I/O fixture"
+userspace_ready=0
+for _wait in $(seq 1 600); do
+    if LC_ALL=C grep -aFq 'linux socket: listener ready port=8080' "$UART_LOG"; then
+        userspace_ready=1
+        break
+    fi
+    sleep 0.1
+done
+if [ "$userspace_ready" -ne 1 ]; then
+    echo "FAIL kernel/rpi5: kernel never reached the userspace-fixture readiness marker (see $UART_LOG)" >&2
+    exit 1
+fi
+
+# Watch concurrently with the connected-I/O client: the child reaches its
+# UART wait immediately after that socket exchange. Do not send input merely
+# because Blocked is visible: wait until the kernel has also verified that the
+# parent completed its compute section while that child remained Blocked.
+(
+    for _wait in $(seq 1 6000); do
+        if LC_ALL=C grep -aFq \
+                'concurrency: parent progressed while child uart-blocked' \
+                "$UART_LOG"; then
+            printf 'irqtest\n' >"$SERIAL_DEV"
+            exit 0
+        fi
+        sleep 0.01
+    done
+    exit 1
+) &
+uart_sender_pid=$!
+
+echo "[kernel/rpi5] checking userspace connected I/O on port 8080"
+socket_accept_ok=0
+for _attempt in $(seq 1 60); do
+    if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" \
+            ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
+            ETH_TEST_MAC="$ETH_TEST_MAC" TCP_TEST_PORT=8080 \
+            TCP_TEST_CONNECTED_IO=1 \
+            python3 "$REPO_ROOT/scripts/eth_tcp_echo_test.py" \
+            >"$SOCKET_ACCEPT_LOG" 2>&1; then
+        socket_accept_ok=1
+        cat "$SOCKET_ACCEPT_LOG"
+        break
+    fi
+    sleep 0.25
+done
+if [ "$socket_accept_ok" -ne 1 ]; then
+    cat "$SOCKET_ACCEPT_LOG" >&2
+    echo "FAIL kernel/rpi5: userspace connected I/O failed (see $SOCKET_ACCEPT_LOG)" >&2
+    exit 1
+fi
+echo "[kernel/rpi5] userspace connected I/O passed"
+
 # GitHub issue #187: the kernel injects a one-shot SYN-ACK drop right
 # before starting the real BusyBox HTTPd daemon (kernel_tcp_inject_drop_
 # next_syn_ack(), kernel/platform/rpi5/init.tkb), so its own bounded retransmit
@@ -246,63 +304,6 @@ if [ "$second_httpd_ok" -ne 1 ]; then
 fi
 echo "[kernel/rpi5] second BusyBox httpd curl passed"
 
-# GitHub issue #195: vm-layout completion is earlier than socket/bind/listen
-# and therefore is not evidence that the connected-I/O endpoint is ready.
-# Wait for the unique fixture-scoped post-listen marker. An unconditional
-# listen marker would match the earlier BusyBox daemon in the same UART log.
-echo "[kernel/rpi5] waiting for the kernel to be ready for the userspace connected-I/O fixture"
-userspace_ready=0
-for _wait in $(seq 1 600); do
-    if LC_ALL=C grep -aFq 'linux socket: listener ready port=8080' "$UART_LOG"; then
-        userspace_ready=1
-        break
-    fi
-    sleep 0.1
-done
-if [ "$userspace_ready" -ne 1 ]; then
-    echo "FAIL kernel/rpi5: kernel never reached the userspace-fixture readiness marker (see $UART_LOG)" >&2
-    exit 1
-fi
-
-# Watch concurrently with the connected-I/O client: the child reaches its
-# UART wait immediately after that socket exchange. Do not send input merely
-# because Blocked is visible: wait until the kernel has also verified that the
-# parent completed its compute section while that child remained Blocked.
-(
-    for _wait in $(seq 1 6000); do
-        if LC_ALL=C grep -aFq \
-                'concurrency: parent progressed while child uart-blocked' \
-                "$UART_LOG"; then
-            printf 'irqtest\n' >"$SERIAL_DEV"
-            exit 0
-        fi
-        sleep 0.01
-    done
-    exit 1
-) &
-uart_sender_pid=$!
-
-echo "[kernel/rpi5] checking userspace connected I/O on port 8080"
-socket_accept_ok=0
-for _attempt in $(seq 1 60); do
-    if sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" \
-            ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
-            ETH_TEST_MAC="$ETH_TEST_MAC" TCP_TEST_PORT=8080 \
-            TCP_TEST_CONNECTED_IO=1 \
-            python3 "$REPO_ROOT/scripts/eth_tcp_echo_test.py" \
-            >"$SOCKET_ACCEPT_LOG" 2>&1; then
-        socket_accept_ok=1
-        cat "$SOCKET_ACCEPT_LOG"
-        break
-    fi
-    sleep 0.25
-done
-if [ "$socket_accept_ok" -ne 1 ]; then
-    cat "$SOCKET_ACCEPT_LOG" >&2
-    echo "FAIL kernel/rpi5: userspace connected I/O failed (see $SOCKET_ACCEPT_LOG)" >&2
-    exit 1
-fi
-echo "[kernel/rpi5] userspace connected I/O passed"
 
 # USB Mass Storage may briefly report Not Ready after enumeration. Keep the
 # single capture alive through its bounded readiness loop and ext2 checks.
