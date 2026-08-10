@@ -2,4 +2,4 @@
 ^0000020$
 ^od: standard input: Bad file descriptor$
 ^busybox od failed$
-^od unmap: clean$
+^child exec unmap: clean$

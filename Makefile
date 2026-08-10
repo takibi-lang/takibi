@@ -378,6 +378,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'symlink /busybox /init.sh' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'symlink /cat /busybox' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'symlink /uname /busybox' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'symlink /od /busybox' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'symlink /bin/echo /busybox' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'symlink /echo /busybox' $@.tmp >/dev/null 2>&1
 	e2fsck -fn $@.tmp >/dev/null

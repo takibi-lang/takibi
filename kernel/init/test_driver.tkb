@@ -433,50 +433,11 @@ irq_uart_rx_unmask();
 
 }
 
-    // Issue #196: same distro plan, argv={"busybox","od",
-    // "/hello.txt"}. BusyBox's od applet reads the whole file in one
-    // fread() call, which on this pinned musl 1.2.6 build issues a
-    // single readv(2) (confirmed via a qemu-aarch64-static -strace
-    // trace with an empty environment matching this kernel's
-    // envp={}: exactly one `readv(3,...) = 16`, no lseek/fstat
-    // needed). readv(2)+writev(2) are real implementations now, so
-    // od should actually print a real hex dump of /hello.txt's 16
-    // bytes and exit 0. An earlier version of this scenario used
-    // `head`, which turned out not to exercise readv(2) at all:
-    // BusyBox's fgets()-based applets always request 1 byte at a
-    // time from musl's stdio, which always selects plain read(2),
-    // never readv(2).
-    if (distro_plan_ready) {
-        match process_image_map(
-                saved_distro_plan,
-                "busybox\0od\0/hello.txt\0" as []u8,
-                3) {
-            ProcessImageMapResult::InvalidImage => {
-                kernel_boot_log("od map: invalid image\n");
-            }
-            ProcessImageMapResult::OutOfMemory => {
-                kernel_boot_log("od map: out of memory\n");
-            }
-            ProcessImageMapResult::Mapped(od_pages) => {
-                let (od_heap_start, od_heap_limit) =
-                    process_image_heap_range(od_pages);
-                kernel_syscall_process_configure(
-                    od_heap_start, od_heap_limit);
-                let od_status: usize = run_initial_user(
-                    process_image_entry(od_pages),
-                    process_image_stack_pointer(od_pages));
-                if (od_status == 0) {
-                    kernel_boot_log("busybox od exit: 0\n");
-                } else {
-                    kernel_boot_log("busybox od failed\n");
-                }
-                process_image_unmap(od_pages);
-                if (process_image_window_is_clear()) {
-                    kernel_boot_log("od unmap: clean\n");
-                }
-            }
-        }
-    }
+    // Issue #196: BusyBox od reads /hello.txt through one musl readv(2)
+    // call, then deliberately reaches the EBADF standard-input path.
+    // GitHub issue #209: init.sh now launches it as an ordinary child,
+    // retaining that real readv/writev evidence without another
+    // kernel-side image launch.
 
     if (kernel_test_init_script) {
     // The first userspace process is an ext2-resident ash init

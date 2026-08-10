@@ -30,6 +30,17 @@ else
     exit 1
 fi
 
+# BusyBox od exercises readv(2) against /hello.txt. It then deliberately
+# attempts standard input, where this fixture has no descriptor, so its
+# non-zero result is the expected proof of the EBADF path rather than an
+# init failure.
+/od /hello.txt
+if [ "$?" -eq 0 ]; then
+    echo "busybox od exit: 0"
+else
+    echo "busybox od failed"
+fi
+
 # This exact 13 KiB file reaches i_block[12], ext2's first singly-indirect
 # entry after all twelve direct blocks. `cat` reaches sendfile(2), proving
 # the file reader streams through the indirect pointer rather than treating
