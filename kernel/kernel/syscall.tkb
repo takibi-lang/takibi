@@ -125,27 +125,15 @@ must_use variant KernelInetdAcceptResult { TimedOut; Accepted; }
 
 private let mut syscall_heap_start: usize;
 private let mut syscall_heap_limit: usize;
-// GitHub issue #245 bug fix (third instance of the same shape as
-// process.tkb's own execution_child_live / execution_child_exec_image_
-// live): both of these used to be single globals, correct only while
-// exactly one clone could ever be in flight. With a 3-level tree they
-// nest -- ash forks user_payload (fd state for slot 1), user_payload
-// then forks its own child (fd state for slot 2) -- and the inner clone
-// overwrote the outer one's. On the inner child's exit,
-// kernel_syscall_clone_files_reap() then cleared the single live flag,
-// so when the OUTER child (user_payload itself) later exited, its own
-// reap saw live == false, returned Failed, and the EXIT handler turned
-// that into SyscallAction::Unreachable -- action 0, which matches no
-// branch in user_entry.S's dispatch table and falls through to a silent
-// el1_exception_evidence fail-stop. Found on real RPi5 hardware: every
-// line of user_payload ran (including its own final write), then the
-// boot log stopped dead at its exit(0) with no further output at all.
-// Indexed by the CHILD's own fd-table slot, which is exactly what
-// kernel_syscall_process_slot() reports at the single place reap is
-// called from (the EXIT handler, before kernel_process_child_exit()
-// switches execution away to the parent).
-private let mut clone_parent_inetd_mode: [bool; PROCESS_CONTEXT_MAX];
-private let mut clone_file_state_live: [bool; PROCESS_CONTEXT_MAX];
+// GitHub issue #264 fifth stage: nested clones need separate bookkeeping for
+// each child. One record holds the values keyed by the child fd-table slot;
+// the exit handler reaps that child before switching execution to its parent.
+struct CloneFileState {
+    file_state_live: bool;
+    parent_inetd_mode: bool;
+}
+
+private let mut clone_file_state: [CloneFileState; PROCESS_CONTEXT_MAX];
 // GitHub issue #244: set by whichever syscall handler returns
 // SyscallAction::Block, read by kernel_syscall_block_return() to decide
 // which of the two now-sharing-one-trampoline blockers to invoke.
@@ -302,8 +290,8 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_partial_write_observed = false;
     syscall_inetd_mode = false;
     for context: usize in 0..<PROCESS_CONTEXT_MAX {
-        clone_file_state_live[context] = false;
-        clone_parent_inetd_mode[context] = false;
+        clone_file_state[context].file_state_live = false;
+        clone_file_state[context].parent_inetd_mode = false;
     }
 }
 
@@ -318,14 +306,14 @@ fn kernel_syscall_clone_files_begin(parent_slot: usize, child_slot: usize)
         let child: {0..<PROCESS_CONTEXT_MAX as usize} = child_slot;
         match unified_fd_clone(parent_slot, child_slot) {
             UnifiedFdResult::Invalid => {
-                clone_file_state_live[child] = false;
+                clone_file_state[child].file_state_live = false;
                 return UnifiedFdResult::Invalid;
             }
             UnifiedFdResult::Ok => {
-                clone_file_state_live[child] = true;
+                clone_file_state[child].file_state_live = true;
             }
         }
-        clone_parent_inetd_mode[child] = syscall_inetd_mode;
+        clone_file_state[child].parent_inetd_mode = syscall_inetd_mode;
         return UnifiedFdResult::Ok;
     }
     return UnifiedFdResult::Invalid;
@@ -521,13 +509,12 @@ fn kernel_connected_descriptor_release(fd: usize) -> bool {
 // Only ever called from the EXIT handler, while the exiting child is
 // still the current process -- so its own fd-table slot is exactly what
 // kernel_syscall_process_slot() reports here, and is the slot whose
-// clone state this reaps (see clone_file_state_live's own comment for
-// the nesting bug that made an explicit per-slot lookup necessary).
+// CloneFileState this reaps.
 fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
     let child_slot: usize = kernel_syscall_process_slot();
     if (child_slot < PROCESS_CONTEXT_MAX) {
         let child: {0..<PROCESS_CONTEXT_MAX as usize} = child_slot;
-        if (clone_file_state_live[child] == false) {
+        if (clone_file_state[child].file_state_live == false) {
             return KernelFdReapResult::Failed;
         }
         for fd: usize in 0..<KERNEL_SOCKET_FD_MAX {
@@ -542,8 +529,8 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
             UnifiedFdResult::Invalid => { return KernelFdReapResult::Failed; }
             UnifiedFdResult::Ok => {}
         }
-        syscall_inetd_mode = clone_parent_inetd_mode[child];
-        clone_file_state_live[child] = false;
+        syscall_inetd_mode = clone_file_state[child].parent_inetd_mode;
+        clone_file_state[child].file_state_live = false;
         return KernelFdReapResult::Reaped;
     }
     return KernelFdReapResult::Failed;

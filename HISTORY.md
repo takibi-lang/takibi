@@ -111,6 +111,15 @@ record directly instead of temporarily changing the active root; stack-fault
 recording, map/unmap resets, root switching, public signatures, and probes
 retain their existing behavior.
 
+### 2026-08-10: Per-child clone file state becomes CloneFileState (#264, fifth stage)
+
+`kernel/kernel/syscall.tkb` kept a child's cloned-FD live bit and its saved
+parent inetd mode in parallel arrays keyed by the child fd-table slot.
+`CloneFileState` now keeps those two values together in one per-slot array.
+Initialization, clone failure and success bookkeeping, and exit-time reap
+retain their prior order and behavior; all function signatures remain
+unchanged.
+
 ### 2026-08-10: Page allocator metadata keeps occupancy, not the owner generation (#256)
 
 Issue #256 investigated whether `kernel/mm/page.tkb`'s per-page generation
