@@ -337,6 +337,12 @@ match initramfs_busybox() {
                 kernel_exec_plan_ready = true;
                 if (plan.entry == 0x4524 && plan.load_segments == 2 &&
                     plan.extent == 0x122138) {
+                    // Keep the validated BusyBox plan independent of any
+                    // individual boot scenario. init.sh becomes the only
+                    // top-level EL0 process, so later migrations can remove
+                    // the old cat launch without suppressing its own launch.
+                    saved_distro_plan = plan;
+                    distro_plan_ready = true;
                     kernel_boot_log("distro image: alpine busybox static-pie\n");
                     kernel_boot_log("distro elf: aarch64 loads=2 extent=0x122138\n");
                     match process_image_map(
@@ -390,18 +396,6 @@ match initramfs_busybox() {
                             if (process_image_window_is_clear()) {
                                 kernel_boot_log("distro unmap: clean\n");
                             }
-                            // Issue #196 pre-work: the same distro plan
-                            // is reused for a second, separately-timed
-                            // run (argv={"busybox","uname","-a"}) after
-                            // every other boot-time fixture below has
-                            // already taken its own evidence -- running
-                            // a third process image through the shared
-                            // single-window process_image_map/unmap
-                            // sequence any earlier disturbed the final
-                            // EL0 fixture's cumulative
-                            // kernel_syscall_file_evidence() counts.
-                            saved_distro_plan = plan;
-                            distro_plan_ready = true;
                         }
                     }
                 }
