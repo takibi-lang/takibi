@@ -2247,6 +2247,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return SyscallAction::Exit(x0);
     }
     if (number == AARCH64_NR_WAIT4) {
+        let requested_pid: usize = x0;
+        let wait_options: usize = x2;
         // GitHub issue #244: x0's expected pid is the live child's own
         // pid if it hasn't exited yet, or the last reaped child's pid if
         // it has -- kernel_process_current_child_pid() alone would wrongly
@@ -2265,13 +2267,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // kernel/kernel/process.tkb's own child-exit/wait bookkeeping is
         // now per-slot too, so any live process may legitimately wait4()
         // for its own live child, not just the root.
-        if ((x0 != 0xFFFFFFFFFFFFFFFF &&
-             x0 != expected_pid) ||
-            (x2 != 0 && x2 != LINUX_WNOHANG)) {
+        if ((requested_pid != 0xFFFFFFFFFFFFFFFF &&
+             requested_pid != expected_pid) ||
+            (wait_options != 0 && wait_options != LINUX_WNOHANG)) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
         if (kernel_process_child_waitable() == false) {
-            if (x2 == LINUX_WNOHANG) {
+            if (wait_options == LINUX_WNOHANG) {
                 return SyscallAction::Resume(0);
             }
             // GitHub issue #244: block for real instead of returning
