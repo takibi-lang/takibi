@@ -2689,7 +2689,17 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
         PageAllocResult::OutOfMemory => { return false; }
         PageAllocResult::Allocated(page) => {
             let phys: usize = page_physical_address(page);
-            user_pte_write(probe_index, phys | USER_RW_XN_FLAGS);
+            match user_pte_write(probe_index, phys | USER_RW_XN_FLAGS) {
+                AddressSpacePteWriteResult::Invalid => {
+                    page_free(page);
+                    return false;
+                }
+                AddressSpacePteWriteResult::OutOfMemory => {
+                    page_free(page);
+                    return false;
+                }
+                AddressSpacePteWriteResult::Written => {}
+            }
             user_tlb_invalidate(USER_TEXT_VA + probe_index * PAGE_SIZE);
             let oldact_va: usize = USER_TEXT_VA + probe_index * PAGE_SIZE;
 
@@ -2729,7 +2739,7 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
                 }
             }
 
-            user_pte_write(probe_index, 0);
+            user_pte_clear(probe_index);
             user_tlb_invalidate(oldact_va);
             page_free(page);
             return ok;

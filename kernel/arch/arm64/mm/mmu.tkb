@@ -49,9 +49,31 @@ fn mmu_tlb_invalidate(asid: usize, va: usize) {
     isb();
 }
 
-fn mmu_clear_user_table(l3_physical: usize, asid: usize) {
+fn mmu_clear_user_table(l3_physical: usize) {
     mmu_table_clear(l3_physical);
+}
+
+fn mmu_user_l3_physical(l2_physical: usize, l2_index: usize) -> usize {
+    let entry: usize = mmu_table_entry_read(l2_physical, l2_index);
+    if ((entry & 3) != 3) { return 0; }
+    return entry & 0x0000FFFFFFFFF000;
+}
+
+// All allocation and lifetime decisions stay above this architecture layer.
+// These operations only construct and dismantle resolved physical links.
+fn mmu_user_l3_install(l2_physical: usize, l2_index: usize,
+                       l3_physical: usize) {
+    mmu_table_clear(l3_physical);
+    mmu_table_entry_write(l2_physical, l2_index, l3_physical | 3);
     dsb_ishst();
+}
+
+fn mmu_user_l3_remove(l2_physical: usize, l2_index: usize) {
+    mmu_table_entry_write(l2_physical, l2_index, 0);
+    dsb_ishst();
+}
+
+fn mmu_tlb_invalidate_asid(asid: usize) {
     tlbi_aside1is(asid << 48);
     dsb_ish();
     isb();
@@ -59,26 +81,26 @@ fn mmu_clear_user_table(l3_physical: usize, asid: usize) {
 
 // GitHub issue #237: the layout constants and device blocks are supplied by
 // the selected platform mmu_layout.tkb. This function is deliberately a
-// pure construction operation over its three resolved backing pages.
-fn init_root(l1_physical: usize, l2_physical: usize, l3_physical: usize) {
+// pure construction operation over its two fixed resolved backing pages.
+// User L3 pages are installed by address_space.tkb when a branch first
+// receives a mapping.
+fn init_root(l1_physical: usize, l2_physical: usize) {
     mmu_table_entry_write(
         l1_physical, KERNEL_IDENTITY_L1_INDEX,
         (KERNEL_IDENTITY_L1_INDEX << 30) | 0x705 | UXN_BIT);
     mmu_table_entry_write(l1_physical, USER_TEXT_VA >> 30,
                           l2_physical | 3);
-    mmu_table_entry_write(l2_physical, 0, l3_physical | 3);
     platform_mmu_init_device_blocks(l1_physical);
 }
 
 // A reused physical page contains arbitrary old page-table contents, unlike
-// the old growable pools' zero-on-grow pages. Clear all three tables before
-// publishing the new L1 -> L2 -> L3 wiring.
-fn mmu_init_root(l1_physical: usize, l2_physical: usize,
-                 l3_physical: usize) {
+// the old growable pools' zero-on-grow pages. Clear the fixed L1/L2 backing
+// before publishing the root; lazily allocated L3 pages are cleared by
+// mmu_user_l3_install before their L2 descriptor becomes visible.
+fn mmu_init_root(l1_physical: usize, l2_physical: usize) {
     mmu_table_clear(l1_physical);
     mmu_table_clear(l2_physical);
-    mmu_table_clear(l3_physical);
-    init_root(l1_physical, l2_physical, l3_physical);
+    init_root(l1_physical, l2_physical);
     dsb_ishst();
 }
 

@@ -265,7 +265,7 @@ fn kernel_test_common_probes() {
         kernel_boot_log("process table: failed\n");
     }
     if (process_address_space_probe()) {
-        kernel_boot_log("address spaces: root0 retained roots=2 backing+asid released same-va isolated\n");
+        kernel_boot_log("address spaces: root0 retained roots=2 dynamic-l3 boundary+isolation cleanup\n");
     } else {
         kernel_boot_log("address spaces: failed\n");
     }
@@ -355,8 +355,11 @@ match initramfs_busybox() {
                             if (process_image_gap_is_unmapped()) {
                                 kernel_boot_log("distro load: file bytes match bss=zero gap=unmapped\n");
                             }
-                            if (process_image_entry(image_pages) == 0x40004524 &&
-                                process_image_stack_pointer(image_pages) == 0x401FFE00) {
+                            if (process_image_entry(image_pages) ==
+                                    USER_TEXT_VA + 0x4524 &&
+                                process_image_stack_pointer(image_pages) ==
+                                    USER_TEXT_VA +
+                                    USER_SPACE_PAGE_COUNT * PAGE_SIZE - 512) {
                                 kernel_boot_log("distro stack: argc=3 argv auxv ready\n");
                             }
                             let (heap_start, heap_limit) =

@@ -2,9 +2,12 @@ use "kernel/mm/page.tkb";
 use "kernel/arch/arm64/mm/mmu.tkb";
 use "kernel/arch/arm64/mm/asid.tkb";
 
-// The current 2 MiB user window is one L3 table. This remains a property of
-// the platform MMU wiring, not of process_image.tkb's loader bookkeeping.
-const USER_SPACE_PAGE_COUNT: usize = 512;
+// USER_TEXT_VA occupies one L1 slot. Its fixed per-root L2 page has 512
+// branches, each lazily backed by one 512-entry L3 page, so this first
+// multi-level slice covers the complete 1 GiB L1 slot.
+const USER_L2_BRANCH_COUNT: usize = 512;
+const USER_L3_PAGE_COUNT: usize = 512;
+const USER_SPACE_PAGE_COUNT: usize = 262144;
 
 // Kept equal to process.tkb's KERNEL_PROCESS_MAX and asid.tkb's ASID_MAX.
 // This bounded table is an intentional transitional owner: callers still
@@ -22,7 +25,6 @@ struct AddressSpaceBacking {
     live: bool;
     l1_physical: usize;
     l2_physical: usize;
-    l3_physical: usize;
     asid: usize;
 }
 
@@ -67,16 +69,6 @@ fn address_space_l2_physical(slot: usize) -> usize {
     return 0;
 }
 
-fn address_space_l3_physical(slot: usize) -> usize {
-    if (slot < ADDRESS_SPACE_MAX) {
-        let checked = address_space_narrow_slot(slot);
-        if (address_space_backing[checked].live) {
-            return address_space_backing[checked].l3_physical;
-        }
-    }
-    return 0;
-}
-
 fn address_space_asid(slot: usize) -> usize {
     if (slot < ADDRESS_SPACE_MAX) {
         let checked = address_space_narrow_slot(slot);
@@ -90,23 +82,20 @@ fn address_space_asid(slot: usize) -> usize {
 fn address_space_record_backing(
         slot: {0..<ADDRESS_SPACE_MAX as usize},
         l1: sink PageOwner[l1_page], l2: sink PageOwner[l2_page],
-        l3: sink PageOwner[l3_page], asid: sink AsidOwner[asid_owner]) {
+        asid: sink AsidOwner[asid_owner]) {
     let l1_physical: usize = page_physical_address(l1);
     let l2_physical: usize = page_physical_address(l2);
-    let l3_physical: usize = page_physical_address(l3);
     let numeric_asid: usize = asid_value(asid);
 
     // Build before dropping the fine-grained owners into this coarser
     // record. mmu_init_root has no allocation or fallible operation.
-    mmu_init_root(l1_physical, l2_physical, l3_physical);
+    mmu_init_root(l1_physical, l2_physical);
     address_space_backing[slot].l1_physical = l1_physical;
     address_space_backing[slot].l2_physical = l2_physical;
-    address_space_backing[slot].l3_physical = l3_physical;
     address_space_backing[slot].asid = numeric_asid;
     address_space_backing[slot].live = true;
     page_owner_transfer_index(l1);
     page_owner_transfer_index(l2);
-    page_owner_transfer_index(l3);
     asid_owner_transfer(asid);
 }
 
@@ -124,26 +113,15 @@ fn address_space_allocate_root(slot: {0..<ADDRESS_SPACE_MAX as usize})
                     return false;
                 }
                 PageAllocResult::Allocated(l2) => {
-                    match page_alloc() {
-                        PageAllocResult::OutOfMemory => {
+                    match asid_alloc() {
+                        AsidAllocResult::Full => {
                             page_free(l2);
                             page_free(l1);
                             return false;
                         }
-                        PageAllocResult::Allocated(l3) => {
-                            match asid_alloc() {
-                                AsidAllocResult::Full => {
-                                    page_free(l3);
-                                    page_free(l2);
-                                    page_free(l1);
-                                    return false;
-                                }
-                                AsidAllocResult::Allocated(asid) => {
-                                    address_space_record_backing(
-                                        slot, l1, l2, l3, asid);
-                                    return true;
-                                }
-                            }
+                        AsidAllocResult::Allocated(asid) => {
+                            address_space_record_backing(slot, l1, l2, asid);
+                            return true;
                         }
                     }
                 }
@@ -180,17 +158,77 @@ fn address_space_activate_root(slot: usize) {
     address_space_active_slot = 0;
 }
 
-fn address_space_pte_write(slot: usize, index: usize, value: usize) {
-    let l3_physical: usize = address_space_l3_physical(slot);
+must_use variant AddressSpacePteWriteResult {
+    Invalid;
+    OutOfMemory;
+    Written;
+}
+
+fn address_space_l3_physical_for_branch(slot: usize, branch: usize) -> usize {
+    if (slot >= ADDRESS_SPACE_MAX || branch >= USER_L2_BRANCH_COUNT) {
+        return 0;
+    }
+    let checked = address_space_narrow_slot(slot);
+    if (address_space_backing[checked].live == false) { return 0; }
+    return mmu_user_l3_physical(address_space_backing[checked].l2_physical,
+                                branch);
+}
+
+fn address_space_l3_physical_for_index(slot: usize, index: usize) -> usize {
+    if (index >= USER_SPACE_PAGE_COUNT) { return 0; }
+    return address_space_l3_physical_for_branch(slot,
+                                                index / USER_L3_PAGE_COUNT);
+}
+
+// This function is intentionally the only owner of lazy L3-table
+// allocation. A caller keeps its PageOwner until Written is returned, so an
+// L3-allocation failure cannot silently discard a mapped user page.
+fn address_space_pte_write(slot: usize, index: usize, value: usize)
+        -> AddressSpacePteWriteResult {
+    if (slot >= ADDRESS_SPACE_MAX || index >= USER_SPACE_PAGE_COUNT) {
+        return AddressSpacePteWriteResult::Invalid;
+    }
+    let checked = address_space_narrow_slot(slot);
+    if (address_space_backing[checked].live == false) {
+        return AddressSpacePteWriteResult::Invalid;
+    }
+    let branch: usize = index / USER_L3_PAGE_COUNT;
+    let entry: usize = index % USER_L3_PAGE_COUNT;
+    let l2_physical: usize = address_space_backing[checked].l2_physical;
+    let mut l3_physical: usize =
+        mmu_user_l3_physical(l2_physical, branch);
+    if (l3_physical == 0) {
+        // Clearing a never-populated branch is already complete and must
+        // not spend a physical page merely to hold an all-zero table.
+        if (value == 0) { return AddressSpacePteWriteResult::Written; }
+        match page_alloc() {
+            PageAllocResult::OutOfMemory => {
+                return AddressSpacePteWriteResult::OutOfMemory;
+            }
+            PageAllocResult::Allocated(l3) => {
+                l3_physical = page_physical_address(l3);
+                mmu_user_l3_install(l2_physical, branch, l3_physical);
+                page_owner_transfer_index(l3);
+            }
+        }
+    }
+    mmu_pte_write(l3_physical, entry, value);
+    return AddressSpacePteWriteResult::Written;
+}
+
+// Clearing does not allocate. Kept separate from address_space_pte_write so
+// teardown never needs to ignore an allocation-result variant.
+fn address_space_pte_clear(slot: usize, index: usize) {
+    let l3_physical: usize = address_space_l3_physical_for_index(slot, index);
     if (l3_physical != 0) {
-        mmu_pte_write(l3_physical, index, value);
+        mmu_pte_write(l3_physical, index % USER_L3_PAGE_COUNT, 0);
     }
 }
 
 fn address_space_pte_read(slot: usize, index: usize) -> usize {
-    let l3_physical: usize = address_space_l3_physical(slot);
+    let l3_physical: usize = address_space_l3_physical_for_index(slot, index);
     if (l3_physical != 0) {
-        return mmu_pte_read(l3_physical, index);
+        return mmu_pte_read(l3_physical, index % USER_L3_PAGE_COUNT);
     }
     return 0;
 }
@@ -202,17 +240,47 @@ fn address_space_tlb_invalidate(slot: usize, va: usize) {
     }
 }
 
-fn address_space_clear_root(slot: usize) {
-    let l3_physical: usize = address_space_l3_physical(slot);
-    let asid: usize = address_space_asid(slot);
-    if (l3_physical != 0 && asid != 0) {
-        mmu_clear_user_table(l3_physical, asid);
+// Each mapped user page transferred its PageOwner when it was installed.
+// Walk the L2 branches rather than retaining a parallel page-index list:
+// the actual table is the ownership record and each populated branch also
+// owns one dynamic L3 page. This handles clone rollback, image cleanup, and
+// root destruction without a USER_SPACE_PAGE_COUNT-sized shadow array.
+fn address_space_release_user_mappings(slot: usize) {
+    if (slot >= ADDRESS_SPACE_MAX) { return; }
+    let checked = address_space_narrow_slot(slot);
+    if (address_space_backing[checked].live == false) { return; }
+    let l2_physical: usize = address_space_backing[checked].l2_physical;
+    for branch: usize in 0..<USER_L2_BRANCH_COUNT {
+        let l3_physical: usize = mmu_user_l3_physical(l2_physical, branch);
+        if (l3_physical != 0) {
+            for entry: usize in 0..<USER_L3_PAGE_COUNT {
+                let pte: usize = mmu_pte_read(l3_physical, entry);
+                if (pte != 0) {
+                    page_transferred_release_physical(
+                        pte & 0x0000FFFFFFFFF000);
+                    mmu_pte_write(l3_physical, entry, 0);
+                }
+            }
+            mmu_clear_user_table(l3_physical);
+            mmu_user_l3_remove(l2_physical, branch);
+            page_transferred_release_physical(l3_physical);
+        }
     }
+    let asid: usize = address_space_backing[checked].asid;
+    if (asid != 0) { mmu_tlb_invalidate_asid(asid); }
+}
+
+fn address_space_clear_root(slot: usize) {
+    address_space_release_user_mappings(slot);
+}
+
+fn address_space_l3_branch_physical(slot: usize, branch: usize) -> usize {
+    return address_space_l3_physical_for_branch(slot, branch);
 }
 
 // Root 0 is the early-boot TTBR0_EL1 fallback and is deliberately retained
-// across scheduler resets. All other table pages and their ASID are released
-// only after the boundary has switched away from that root.
+// across scheduler resets. All other fixed backing pages and their ASID are
+// released only after the boundary has switched away from that root.
 fn address_space_release_root(slot: usize) {
     if (slot == 0 || slot >= ADDRESS_SPACE_MAX) { return; }
     let checked = address_space_narrow_slot(slot);
@@ -222,15 +290,12 @@ fn address_space_release_root(slot: usize) {
     }
     let l1_physical: usize = address_space_backing[checked].l1_physical;
     let l2_physical: usize = address_space_backing[checked].l2_physical;
-    let l3_physical: usize = address_space_backing[checked].l3_physical;
     let asid: usize = address_space_backing[checked].asid;
-    mmu_clear_user_table(l3_physical, asid);
+    address_space_release_user_mappings(checked);
     address_space_backing[checked].live = false;
     address_space_backing[checked].l1_physical = 0;
     address_space_backing[checked].l2_physical = 0;
-    address_space_backing[checked].l3_physical = 0;
     address_space_backing[checked].asid = 0;
-    page_transferred_release_physical(l3_physical);
     page_transferred_release_physical(l2_physical);
     page_transferred_release_physical(l1_physical);
     asid_transferred_release(asid);
@@ -256,8 +321,12 @@ fn kernel_mmu_init_secondary() {
 // Root-0 compatibility helpers used by boot-only probes and the syscall
 // subset probe. The production root-qualified operations above are the
 // common path.
-fn user_pte_write(index: usize, value: usize) {
-    address_space_pte_write(0, index, value);
+fn user_pte_write(index: usize, value: usize) -> AddressSpacePteWriteResult {
+    return address_space_pte_write(0, index, value);
+}
+
+fn user_pte_clear(index: usize) {
+    address_space_pte_clear(0, index);
 }
 
 fn user_pte_read(index: usize) -> usize {
@@ -268,37 +337,50 @@ fn user_tlb_invalidate(va: usize) {
     address_space_tlb_invalidate(0, va);
 }
 
-fn process_address_space_probe_pages(
-        page1: borrow PageOwner[page1_id],
-        page2: borrow PageOwner[page2_id]) -> bool {
-    let physical1: usize = page_physical_address(page1);
-    let physical2: usize = page_physical_address(page2);
-    address_space_pte_write(1, 0, physical1 | USER_RW_XN_FLAGS);
-    address_space_tlb_invalidate(1, USER_TEXT_VA);
-    address_space_pte_write(2, 0, physical2 | USER_RW_XN_FLAGS);
-    address_space_tlb_invalidate(2, USER_TEXT_VA);
-
-    let address: *u8 = USER_TEXT_VA as *u8;
-    address_space_activate_root(1);
-    *address = 11;
-    address_space_activate_root(2);
-    *address = 22;
-    let second: u8 = *address;
-    address_space_activate_root(1);
-    let first: u8 = *address;
-    address_space_activate_root(0);
-
-    address_space_pte_write(1, 0, 0);
-    address_space_tlb_invalidate(1, USER_TEXT_VA);
-    address_space_pte_write(2, 0, 0);
-    address_space_tlb_invalidate(2, USER_TEXT_VA);
-    return first == 11 && second == 22;
+fn process_address_space_probe_map(
+        root: usize, index: usize, page: sink PageOwner[page_id]) -> bool {
+    let physical: usize = page_physical_address(page);
+    match address_space_pte_write(root, index, physical | USER_RW_XN_FLAGS) {
+        AddressSpacePteWriteResult::Invalid => {
+            page_free(page);
+            return false;
+        }
+        AddressSpacePteWriteResult::OutOfMemory => {
+            page_free(page);
+            return false;
+        }
+        AddressSpacePteWriteResult::Written => {
+            address_space_tlb_invalidate(
+                root, USER_TEXT_VA + index * PAGE_SIZE);
+            page_owner_transfer_index(page);
+            return true;
+        }
+    }
 }
 
-// Replaces the former dead ProcessAddressSpaceOwner prototype with coverage
-// of the production record: two temporary roots receive distinct backing
-// pages and ASIDs, isolate one virtual address, then release all six table
-// pages and both ASIDs before their slots can be reused.
+// Maps the 511 pages below the former one-L3 ceiling. Together with the
+// caller's page 511 and page 512 mappings, this makes root 1 contain 513
+// user pages and proves the old 512-page limit is gone without a shadow list.
+fn process_address_space_probe_fill_first_branch(root: usize) -> bool {
+    for index: usize in 0..<511 {
+        match page_alloc() {
+            PageAllocResult::OutOfMemory => { return false; }
+            PageAllocResult::Allocated(page) => {
+                if (process_address_space_probe_map(root, index, page) == false) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// Exercises production ownership with two temporary roots. Root 1 maps
+// pages 511 and 512, on opposite sides of the former one-L3/2-MiB boundary;
+// it also maps pages 0 through 510, producing 513 mapped user pages. Root 2
+// maps the same low VA to a different page. The final root releases prove
+// that the L3 pages and transferred user pages are all reclaimed by a table
+// walk rather than by a fixed 512-entry shadow list.
 fn process_address_space_probe() -> bool {
     if (address_space_is_live(1) || address_space_is_live(2)) {
         return false;
@@ -312,15 +394,12 @@ fn process_address_space_probe() -> bool {
     let backing_ok: bool =
         address_space_l1_physical(1) != 0 &&
         address_space_l2_physical(1) != 0 &&
-        address_space_l3_physical(1) != 0 &&
         address_space_l1_physical(2) != 0 &&
         address_space_l2_physical(2) != 0 &&
-        address_space_l3_physical(2) != 0 &&
-        address_space_l3_physical(1) != address_space_l3_physical(2) &&
         address_space_asid(1) != 0 &&
         address_space_asid(2) != 0 &&
         address_space_asid(1) != address_space_asid(2);
-    if (backing_ok == false || page_allocator_live_count() != before + 6) {
+    if (backing_ok == false || page_allocator_live_count() != before + 4) {
         address_space_release_root(2);
         address_space_release_root(1);
         return false;
@@ -340,16 +419,61 @@ fn process_address_space_probe() -> bool {
                     return false;
                 }
                 PageAllocResult::Allocated(page2) => {
-                    let mapped_ok: bool =
-                        process_address_space_probe_pages(page1, page2);
-                    page_free(page2);
-                    page_free(page1);
-                    address_space_release_root(2);
-                    address_space_release_root(1);
-                    return mapped_ok &&
-                           address_space_is_live(1) == false &&
-                           address_space_is_live(2) == false &&
-                           page_allocator_live_count() == before;
+                    match page_alloc() {
+                        PageAllocResult::OutOfMemory => {
+                            page_free(page2);
+                            page_free(page1);
+                            address_space_release_root(2);
+                            address_space_release_root(1);
+                            return false;
+                        }
+                        PageAllocResult::Allocated(page3) => {
+                            let first_ok: bool =
+                                process_address_space_probe_map(1, 511, page1);
+                            let second_ok: bool =
+                                process_address_space_probe_map(1, 512, page2);
+                            let third_ok: bool =
+                                process_address_space_probe_map(2, 511, page3);
+                            let filled_first_branch: bool =
+                                first_ok && second_ok && third_ok &&
+                                process_address_space_probe_fill_first_branch(1);
+                            let low_address: *u8 =
+                                (USER_TEXT_VA + 511 * PAGE_SIZE) as *u8;
+                            let high_address: *u8 =
+                                (USER_TEXT_VA + 512 * PAGE_SIZE) as *u8;
+                            let mut mapped_ok: bool =
+                                filled_first_branch &&
+                                address_space_l3_branch_physical(1, 0) != 0 &&
+                                address_space_l3_branch_physical(1, 1) != 0 &&
+                                address_space_l3_branch_physical(1, 0) !=
+                                address_space_l3_branch_physical(1, 1) &&
+                                address_space_l3_branch_physical(2, 0) != 0 &&
+                                page_allocator_live_count() == before + 521;
+                            if (mapped_ok) {
+                                address_space_activate_root(1);
+                                *low_address = 11;
+                                *high_address = 12;
+                                address_space_activate_root(2);
+                                *low_address = 22;
+                                let second_low: u8 = *low_address;
+                                let second_high_absent: bool =
+                                    address_space_pte_read(2, 512) == 0;
+                                address_space_activate_root(1);
+                                let first_low: u8 = *low_address;
+                                let first_high: u8 = *high_address;
+                                address_space_activate_root(0);
+                                mapped_ok = second_low == 22 &&
+                                    first_low == 11 && first_high == 12 &&
+                                    second_high_absent;
+                            }
+                            address_space_release_root(2);
+                            address_space_release_root(1);
+                            return mapped_ok &&
+                                   address_space_is_live(1) == false &&
+                                   address_space_is_live(2) == false &&
+                                   page_allocator_live_count() == before;
+                        }
+                    }
                 }
             }
         }

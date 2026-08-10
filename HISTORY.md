@@ -15,6 +15,45 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-10: Dynamic user L3 tables remove the 2 MiB process window (#254)
+
+Each `AddressSpaceBacking` still owns the fixed per-root L1 page, L2 page,
+and ASID established by #264. The root-storage design is intentionally
+unchanged: scheduler slots still select the backing record, and
+`kernel/arch/arm64/mm/mmu.tkb` still receives only resolved physical
+addresses and numeric ASIDs. What changed is below that boundary. The L1
+now points to an initially empty user L2; `address_space_pte_write` allocates
+and clears one physical L3 page only when a mapping first populates that L2
+branch.
+
+One L1 slot now covers 512 L2 branches times 512 L3 PTEs: 262144 user pages
+or 1 GiB from `USER_TEXT_VA`, instead of one 512-page/2 MiB L3 table.
+`AddressSpacePteWriteResult` forces every mapping path to distinguish an
+unusable root from L3 allocation exhaustion. A caller retains its
+`PageOwner` until `Written`, then transfers it; on failure it frees that
+owner rather than silently dropping it. Image loading, demand-stack growth,
+clone copying, boot probes, and the syscall probe all follow this contract.
+
+The page table is also now the sole coarse ownership record for user pages.
+Address-space cleanup walks populated L2 entries, releases each present user
+page and its dynamic L3 table, detaches the branch, and invalidates the ASID.
+This removed clone's former two `[usize; 512]` snapshots and the separate
+growth-page list: clone rollback and reap use the same table walk, including
+pages faulted into a child after the initial copy. Process-image cleanup and
+root release use it too.
+
+The production address-space probe maps 513 pages in one root (pages 0
+through 512) and maps page 511 differently in another. It verifies both L3
+branches, same-VA isolation, and that releasing both roots returns all
+dynamically allocated L3 and user pages. The QEMU integration suite remains
+the targeted execution coverage for the AArch64 page-table walk.
+
+Demand-stack expansion accepts both a level-3 translation fault for a missing
+PTE in an existing L3 table and a level-2 translation fault for an absent
+lazy-L3 branch. The clone-growth probe crosses the top two L3 branches using
+both fault statuses, preventing a valid stack expansion from reaching the
+EL1 fail-stop path at a table boundary.
+
 ### 2026-08-10: Per-slot scheduler state becomes ProcessRecord (#264, first stage)
 
 Issue #264 began with the observation that one process's state was spread
