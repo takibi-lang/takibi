@@ -372,6 +372,7 @@ $(KERNEL_EXT2_IMAGE): $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE
 	debugfs -w -R 'set_inode_field /user_payload mode 0100755' $@.tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 debugfs -w -R 'symlink /latest hello.txt' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'symlink /busybox /init.sh' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'symlink /cat /busybox' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'symlink /bin/echo /busybox' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'symlink /echo /busybox' $@.tmp >/dev/null 2>&1
 	e2fsck -fn $@.tmp >/dev/null

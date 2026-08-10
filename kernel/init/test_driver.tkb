@@ -345,59 +345,6 @@ match initramfs_busybox() {
                     distro_plan_ready = true;
                     kernel_boot_log("distro image: alpine busybox static-pie\n");
                     kernel_boot_log("distro elf: aarch64 loads=2 extent=0x122138\n");
-                    match process_image_map(
-                            plan,
-                            "busybox\0cat\0/hello.txt\0" as []u8,
-                            3) {
-                        ProcessImageMapResult::InvalidImage => {
-                            kernel_boot_log("distro map: invalid image\n");
-                        }
-                        ProcessImageMapResult::OutOfMemory => {
-                            kernel_boot_log("distro map: out of memory\n");
-                        }
-                        ProcessImageMapResult::Mapped(image_pages) => {
-                            if (process_image_page_count(image_pages) == 401) {
-                                kernel_boot_log("distro map: pages=401 rx+rw-xn heap+stack=rw+xn\n");
-                            }
-                            if (process_image_gap_is_unmapped()) {
-                                kernel_boot_log("distro load: file bytes match bss=zero gap=unmapped\n");
-                            }
-                            if (process_image_entry(image_pages) ==
-                                    USER_TEXT_VA + 0x4524 &&
-                                process_image_stack_pointer(image_pages) ==
-                                    USER_TEXT_VA +
-                                    USER_SPACE_PAGE_COUNT * PAGE_SIZE - 512) {
-                                kernel_boot_log("distro stack: argc=3 argv auxv ready\n");
-                            }
-                            let (heap_start, heap_limit) =
-                                process_image_heap_range(image_pages);
-                            kernel_syscall_process_configure(heap_start, heap_limit);
-                            let busybox_status: usize = run_initial_user(
-                                process_image_entry(image_pages),
-                                process_image_stack_pointer(image_pages));
-                            if (busybox_status == 0) {
-                                kernel_boot_log("busybox exit: 0\n");
-                            } else {
-                                kernel_boot_log("busybox failed\n");
-                            }
-                            let (open_calls, read_calls, file_write_calls,
-                                 close_calls) =
-                                kernel_syscall_file_evidence();
-                            if (open_calls == 0) {
-                                kernel_boot_log("linux file syscalls: open not called\n");
-                            } else if (read_calls == 0) {
-                                kernel_boot_log("linux file syscalls: read not called\n");
-                            } else if (close_calls == 0) {
-                                kernel_boot_log("linux file syscalls: close not called\n");
-                            } else {
-                                kernel_boot_log("linux file syscalls: open+read+close called\n");
-                            }
-                            process_image_unmap(image_pages);
-                            if (process_image_window_is_clear()) {
-                                kernel_boot_log("distro unmap: clean\n");
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -605,6 +552,19 @@ irq_uart_rx_unmask();
                 kernel_boot_log("script map: out of memory\n");
             }
             ProcessImageMapResult::Mapped(script_pages) => {
+                if (process_image_page_count(script_pages) == 401) {
+                    kernel_boot_log("distro map: pages=401 rx+rw-xn heap+stack=rw+xn\n");
+                }
+                if (process_image_gap_is_unmapped()) {
+                    kernel_boot_log("distro load: file bytes match bss=zero gap=unmapped\n");
+                }
+                if (process_image_entry(script_pages) ==
+                        USER_TEXT_VA + 0x4524 &&
+                    process_image_stack_pointer(script_pages) ==
+                        USER_TEXT_VA +
+                        USER_SPACE_PAGE_COUNT * PAGE_SIZE - 512) {
+                    kernel_boot_log("distro stack: argc=3 argv auxv ready\n");
+                }
                 let (script_heap_start, script_heap_limit) =
                     process_image_heap_range(script_pages);
                 kernel_syscall_process_configure(
@@ -618,6 +578,20 @@ irq_uart_rx_unmask();
                     let (open_calls, read_calls, file_write_calls,
                          close_calls) =
                         kernel_syscall_file_evidence();
+                    // The open/read/close half of this evidence used to be
+                    // emitted by a separate kernel-launched `busybox cat`
+                    // image. That applet now runs as an ordinary child of
+                    // the init script, so the same counters are reported
+                    // here instead of from a second top-level launch.
+                    if (open_calls == 0) {
+                        kernel_boot_log("linux file syscalls: open not called\n");
+                    } else if (read_calls == 0) {
+                        kernel_boot_log("linux file syscalls: read not called\n");
+                    } else if (close_calls == 0) {
+                        kernel_boot_log("linux file syscalls: close not called\n");
+                    } else {
+                        kernel_boot_log("linux file syscalls: open+read+close called\n");
+                    }
                     if (open_calls >= 2 && read_calls >= 1 &&
                         file_write_calls >= 1 && close_calls >= 2) {
                         kernel_boot_log("linux file syscalls: open read write close ok\n");
@@ -671,6 +645,7 @@ irq_uart_rx_unmask();
                 }
                 process_image_unmap(script_pages);
                 if (process_image_window_is_clear()) {
+                    kernel_boot_log("distro unmap: clean\n");
                     kernel_boot_log("init unmap: clean\n");
                 }
             }

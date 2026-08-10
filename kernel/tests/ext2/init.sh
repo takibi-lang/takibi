@@ -12,6 +12,16 @@ bootstrap)
     ;;
 esac
 
+# The kernel enters this ash image once. Ordinary applets run through ash's
+# child fork/execve path, not through another kernel-side image launch.
+/cat /hello.txt
+if [ "$?" -eq 0 ]; then
+    echo "busybox exit: 0"
+else
+    echo "busybox failed"
+    exit 1
+fi
+
 # GitHub issue #241: the EL0 syscall-ABI test payload (formerly launched
 # through a dedicated flat-blob mechanism straight from the kernel's own
 # boot sequence) is a real ELF in this filesystem now, launched the same

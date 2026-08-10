@@ -26,6 +26,13 @@ const EFAULT_RC: usize = 0xFFFFFFFFFFFFFFF2;
 const LARGE_LEN: usize = 1461;
 const SCHEDULER_CHILD_BUSY: usize = 0x0BEBC200;
 const SCHEDULER_PARENT_BUSY: usize = 0x17D78400;
+// GitHub issue #209: one polling slice of the parent's reap loop. Short
+// enough that the loop reacts promptly once the child exits, long enough
+// that the parent is genuinely busy (and therefore preemptible) between
+// polls rather than hammering the syscall boundary.
+const SCHEDULER_PARENT_POLL_BUSY: usize = 0x00989680;
+const WAIT_POLL_MAX: usize = 10000;
+const WNOHANG: usize = 1;
 
 /* GitHub issue #241: the real ELF this file links into carries its own
  * e_entry (set via the linker's -e initial_user_payload), so unlike the
@@ -150,11 +157,35 @@ fn initial_user_payload() {
          * section while the child is still Blocked on UART RX. */
         fail_if(svc5(452, 0, 0, 0, 0, 0) != 0);
 
-        /* Keep the independently-running parent live while the host
-         * observes the progress marker and delivers UART input. Timer
-         * preemption then selects the child after the IRQ changes it from
-         * Blocked to Ready. */
-        busy_spin(SCHEDULER_PARENT_BUSY);
+        /* GitHub issue #209: poll for the child with WNOHANG instead of
+         * either spinning for a fixed count and hoping (the original) or
+         * blocking outright in wait4.
+         *
+         * A fixed spin only PROBABLY outlasted the host's UART delivery,
+         * so whether the child got to exit before this parent did depended
+         * on how much unrelated work ran earlier in the boot -- and a
+         * parent exit disables the scheduler (kernel/kernel/process.tkb's
+         * kernel_process_child_exit), which leaves a still-blocked child
+         * permanently unrunnable. Adding anything ahead of this fixture in
+         * init.sh flipped that coin.
+         *
+         * A plain blocking wait4 fixes the ordering but destroys what this
+         * fixture measures: with the parent Blocked, the child is the only
+         * runnable process, so the timer never has two runnable processes
+         * to alternate between and the preemption evidence disappears.
+         *
+         * Polling keeps this parent genuinely RUNNABLE and busy while the
+         * child is runnable too -- which is exactly the alternating-timer
+         * condition under test -- while still refusing to proceed until
+         * the child has actually been reaped. */
+        let mut reaped: usize = 0;
+        let mut attempts: usize = 0;
+        while (reaped != pid && attempts < WAIT_POLL_MAX) {
+            busy_spin(SCHEDULER_PARENT_POLL_BUSY);
+            reaped = svc5(260, 0xFFFFFFFFFFFFFFFF, 0, WNOHANG, 0, 0);
+            attempts = attempts + 1;
+        }
+        fail_if(reaped != pid);
 
         let user_message2: *u8 = "hello from userspace\n" as *u8;
         fail_if(svc5(64, 1, user_message2 as usize, 21, 0, 0) != 21);
