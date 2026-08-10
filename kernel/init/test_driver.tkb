@@ -265,7 +265,7 @@ fn kernel_test_common_probes() {
         kernel_boot_log("process table: failed\n");
     }
     if (process_address_space_probe()) {
-        kernel_boot_log("address spaces: roots=2 asids=1,2 same-va isolated\n");
+        kernel_boot_log("address spaces: root0 retained roots=2 backing+asid released same-va isolated\n");
     } else {
         kernel_boot_log("address spaces: failed\n");
     }

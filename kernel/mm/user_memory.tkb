@@ -395,14 +395,12 @@ fn user_memory_boundary_probe_run(base: usize,
 
 // Regression coverage for GitHub issue #263: user_range_check/
 // user_page_class_at used to always validate against root/slot 0's page
-// table (via mmu.tkb's user_pte_read/user_pte_write) regardless of which
-// root value was actually meant, since neither took a root parameter at
-// all. Uses two real MMU roots (mmu_ensure_root, the same primitive
-// kernel/kernel/process.tkb's real scheduler calls for every live
-// process) mapped with DIFFERENT permissions at the SAME L3 index, and
-// root 0 deliberately left unmapped at that same index throughout (root 0
-// is not itself under test here, only used as the "wrong answer" a
-// regression to the old always-root-0 behavior would produce). If
+// table regardless of which root value was actually meant, since neither
+// took a root parameter at all. Uses two temporary production address-space
+// records, mapped with DIFFERENT permissions at the SAME L3 index, and root
+// 0 deliberately left unmapped at that same index throughout (root 0 is not
+// itself under test here, only used as the "wrong answer" a regression to
+// the old always-root-0 behavior would produce). If
 // user_range_check/user_page_class_at ever again ignore the root they are
 // given, both checks below observe root 0's empty PTE instead of their
 // own root's real mapping and fail identically, regardless of the two
@@ -414,15 +412,27 @@ fn user_memory_root_isolation_probe() -> bool {
     };
     let root_a: usize = 14;
     let root_b: usize = 15;
-    if (mmu_ensure_root(root_a) == false) { return false; }
-    if (mmu_ensure_root(root_b) == false) { return false; }
+    if (address_space_is_live(root_a) || address_space_is_live(root_b)) {
+        return false;
+    }
+    if (address_space_ensure_root(root_a) == false) { return false; }
+    if (address_space_ensure_root(root_b) == false) {
+        address_space_release_root(root_a);
+        return false;
+    }
     let va: usize = USER_TEXT_VA + index * PAGE_SIZE;
     match page_alloc() {
-        PageAllocResult::OutOfMemory => { return false; }
+        PageAllocResult::OutOfMemory => {
+            address_space_release_root(root_b);
+            address_space_release_root(root_a);
+            return false;
+        }
         PageAllocResult::Allocated(page_a) => {
             match page_alloc() {
                 PageAllocResult::OutOfMemory => {
                     page_free(page_a);
+                    address_space_release_root(root_b);
+                    address_space_release_root(root_a);
                     return false;
                 }
                 PageAllocResult::Allocated(page_b) => {
@@ -430,6 +440,8 @@ fn user_memory_root_isolation_probe() -> bool {
                         root_a, root_b, index, va, page_a, page_b);
                     page_free(page_a);
                     page_free(page_b);
+                    address_space_release_root(root_b);
+                    address_space_release_root(root_a);
                     return ok;
                 }
             }

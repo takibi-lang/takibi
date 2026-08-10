@@ -1,1 +1,1 @@
-address spaces: roots=2 asids=1,2 same-va isolated
+address spaces: root0 retained roots=2 backing+asid released same-va isolated

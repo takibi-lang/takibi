@@ -1,283 +1,107 @@
-use "kernel/lib/growable_pool.tkb";
+// The architecture layer operates only on resolved physical addresses and
+// hardware ASIDs. Address-space lifetime, including the temporary slot-keyed
+// backing table, belongs to kernel/mm/address_space.tkb above this layer.
 
-// GitHub issue #226: everything kernel/arch/arm64/mm/mmu.S used to hold.
-// None of it was real system-register work: the PTE read/write and
-// root-selection functions were `cbnz x0`-style root-0-vs-root-1 branching
-// (an ordinary `if`) or a plain 512-iteration zeroing loop, and
-// INIT_ROOT's table construction was pure arithmetic and stores. Only the
-// trailing TLBI/barrier/system-register instruction in each function is
-// still a primitive call (Stage 0's tlbi_*/dsb_*/isb/msr_mair_el1/
-// msr_tcr_el1/msr_ttbr0_el1/mrs_sctlr_el1/msr_sctlr_el1); everything else
-// here is ordinary arithmetic and control flow the type system can see
-// into. mmu.S itself is retired.
-//
-// GitHub issue #246: each root needs three DISTINCT whole 4096-byte pages
-// (L1/L2/L3), wired together by init_root()'s own specific entries
-// (kernel identity block, L2 pointer, device/MMIO blocks) -- unlike every
-// other per-process-slot array in this migration (process.tkb's
-// bookkeeping, kernel/mm/process_image.tkb's 7 arrays), this is a
-// genuinely expensive, structured per-root physical resource, so roots
-// beyond 0 are grown lazily via kernel/lib/growable_pool.tkb's
-// growable_pool_ensure/_ref_at rather than eagerly hand-named
-// kernel_l1_N/user_l2_N/user_l3_N globals (the exact per-root hand-editing
-// issue #245's 2 -> 3 root bump cost, which would only get worse at a
-// much larger MAX_ROOTS). Three separate pools (one per table kind), each
-// SLOTS_PER_CHUNK=1 since one page is exactly one table -- see
-// mmu_ensure_root below for how they're kept in lockstep. Per
-// growable_pool.tkb's own generics limitation (a `type` argument must be
-// a primitive/bool/plain struct/pointer to one, not an array type
-// directly), MmuTable names the page's shape for the type system; nothing
-// ever reads its `entries` field structurally, only the struct's own base
-// address (same MmuTable-as-`[usize;512]`-wrapper idiom as
-// kernel/kernel/process.tkb's KernelStackPage).
-//
-// Root 0 is ensured eagerly, at kernel_mmu_init() time, before any process
-// exists (both kernel_mmu_activate()'s own TTBR0_EL1 programming and
-// user_pte_write/read's boot-time single-window remapping hardcode root 0
-// specifically, unchanged from before this migration). Every other root
-// is ensured lazily by kernel/kernel/process.tkb's scheduled_process_alloc
-// the first time a given pool_index is used.
-//
-// Every L1 slot init_root does not explicitly write (all but indices 0,
-// 1, 64-65, 124-127) must read back as a real zero (an invalid,
-// not-present stage-1 descriptor) for the MMU to correctly translation-
-// fault outside the deliberately mapped ranges, rather than treating
-// leftover bits as a bogus-but-valid mapping -- previously guaranteed by
-// `.bss` zero-init on boot; now guaranteed instead by
-// growable_pool.tkb's own zero-on-grow (growable_pool_grow_one_chunk),
-// which this file relies on just as much as process.tkb's kernel stacks
-// or any other growable_pool.tkb shadow pool.
-const MAX_ROOTS: usize = 16;
-
-struct MmuTable {
-    entries: [usize; 512];
-}
-
-private let mut kernel_l1_pool: GrowablePool(MmuTable, 1, MAX_ROOTS, MAX_ROOTS);
-private let mut user_l2_pool: GrowablePool(MmuTable, 1, MAX_ROOTS, MAX_ROOTS);
-private let mut user_l3_pool: GrowablePool(MmuTable, 1, MAX_ROOTS, MAX_ROOTS);
+const MMU_TABLE_ENTRY_COUNT: usize = 512;
 
 // GitHub issue #231: AP[2:1]=00 on a block/page descriptor denies EL0 data
-// access (load/store) but says nothing about EL0 instruction fetch -- that
-// is UXN's job, independently. The kernel .text identity block gets
-// UXN=1/PXN=0 (EL1 still genuinely executes here); the device-MMIO blocks
-// get UXN=1/PXN=1 (nothing should ever execute from device memory at
-// either EL, and nothing today does). See HISTORY.md's issue #231 entry
-// for the real-hardware bug this fixed.
+// access but says nothing about EL0 instruction fetch. UXN/PXN remain
+// independent permission bits for the kernel identity and device mappings.
 const UXN_BIT: usize = 0x40000000000000;
 const PXN_BIT: usize = 0x20000000000000;
 
-// user_pte_write(index, value): one 4KB PTE in the 2MB user window. Always
-// root 0 (the kernel's own boot-time single-window remapping, unrelated to
-// per-process scheduling) -- root 0 is always already ensured by the time
-// this runs (see kernel_mmu_init below).
-fn user_pte_write(index: usize, value: usize) {
-    let base: usize = (growable_pool_ref_at(&user_l3_pool, 0) as usize);
+fn mmu_table_entry_write(base: usize, index: usize, value: usize) {
     let entry: *usize = (base + index * 8) as *usize;
     *entry = value;
-    dsb_ishst();
 }
 
-fn user_pte_read(index: usize) -> usize {
-    let base: usize = (growable_pool_ref_at(&user_l3_pool, 0) as usize);
+fn mmu_table_entry_read(base: usize, index: usize) -> usize {
     let entry: *usize = (base + index * 8) as *usize;
     return *entry;
 }
 
-// user_tlb_invalidate(va): publish one changed leaf descriptor.
-fn user_tlb_invalidate(va: usize) {
+// Platform mmu_layout.tkb files use this name to populate their selected
+// device L1 entries. Its first argument is the resolved L1 physical address,
+// never an address-space slot.
+fn init_root_entry(base: usize, index: usize, value: usize) {
+    mmu_table_entry_write(base, index, value);
+}
+
+fn mmu_table_clear(base: usize) {
+    for i: usize in 0..<MMU_TABLE_ENTRY_COUNT {
+        mmu_table_entry_write(base, i, 0);
+    }
+}
+
+fn mmu_pte_write(l3_physical: usize, index: usize, value: usize) {
+    mmu_table_entry_write(l3_physical, index, value);
     dsb_ishst();
-    tlbi_vaae1is(va >> 12);
+}
+
+fn mmu_pte_read(l3_physical: usize, index: usize) -> usize {
+    return mmu_table_entry_read(l3_physical, index);
+}
+
+fn mmu_tlb_invalidate(asid: usize, va: usize) {
+    dsb_ishst();
+    tlbi_vae1is((asid << 48) | (va >> 12));
     dsb_ish();
     isb();
 }
 
-// GitHub issue #246: root-selecting functions now read straight from the
-// pools -- no per-root branch arm to hand-add anymore (that was exactly
-// issue #245's 2 -> 3 bump's own cost, now gone). `slot` must already be
-// ensured (mmu_ensure_root(slot) returned true) -- unlike
-// growable_pool_ref, growable_pool_ref_at carries no proof of that, so an
-// unensured slot silently reads chunk 0's table instead of trapping (see
-// growable_pool.tkb's own accepted-fallback style for why).
-fn user_l3_base(slot: usize) -> usize {
-    return growable_pool_ref_at(&user_l3_pool, slot) as usize;
+fn mmu_clear_user_table(l3_physical: usize, asid: usize) {
+    mmu_table_clear(l3_physical);
+    dsb_ishst();
+    tlbi_aside1is(asid << 48);
+    dsb_ish();
+    isb();
 }
 
-fn kernel_l1_base(slot: usize) -> usize {
-    return growable_pool_ref_at(&kernel_l1_pool, slot) as usize;
+// GitHub issue #237: the layout constants and device blocks are supplied by
+// the selected platform mmu_layout.tkb. This function is deliberately a
+// pure construction operation over its three resolved backing pages.
+fn init_root(l1_physical: usize, l2_physical: usize, l3_physical: usize) {
+    mmu_table_entry_write(
+        l1_physical, KERNEL_IDENTITY_L1_INDEX,
+        (KERNEL_IDENTITY_L1_INDEX << 30) | 0x705 | UXN_BIT);
+    mmu_table_entry_write(l1_physical, USER_TEXT_VA >> 30,
+                          l2_physical | 3);
+    mmu_table_entry_write(l2_physical, 0, l3_physical | 3);
+    platform_mmu_init_device_blocks(l1_physical);
 }
 
-fn user_l2_base(slot: usize) -> usize {
-    return growable_pool_ref_at(&user_l2_pool, slot) as usize;
-}
-
-fn address_space_pte_write(slot: usize, index: usize, value: usize) {
-    let base: usize = user_l3_base(slot);
-    let entry: *usize = (base + index * 8) as *usize;
-    *entry = value;
+// A reused physical page contains arbitrary old page-table contents, unlike
+// the old growable pools' zero-on-grow pages. Clear all three tables before
+// publishing the new L1 -> L2 -> L3 wiring.
+fn mmu_init_root(l1_physical: usize, l2_physical: usize,
+                 l3_physical: usize) {
+    mmu_table_clear(l1_physical);
+    mmu_table_clear(l2_physical);
+    mmu_table_clear(l3_physical);
+    init_root(l1_physical, l2_physical, l3_physical);
     dsb_ishst();
 }
 
-fn address_space_pte_read(slot: usize, index: usize) -> usize {
-    let base: usize = user_l3_base(slot);
-    let entry: *usize = (base + index * 8) as *usize;
-    return *entry;
-}
-
-// TTBR0_EL1's ASID field (bits [63:48]) is `slot + 1`, matching mmu.S's
-// original encoding exactly -- ASID 0 is deliberately never assigned to
-// any root, keeping it free as a "no stale TLB entries could possibly
-// match" value.
-fn address_space_activate_root(slot: usize) {
-    let base: usize = kernel_l1_base(slot);
-    let ttbr: usize = base | ((slot + 1) << 48);
+// A normal process switch only changes TTBR0_EL1. The full MAIR/TCR/SCTLR
+// enable sequence below is reserved for the primary and secondary boot
+// paths, which both pass their already-resolved bootstrap root explicitly.
+fn mmu_activate_root(l1_physical: usize, asid: usize) {
+    let ttbr: usize = l1_physical | (asid << 48);
     dsb_ish();
     msr_ttbr0_el1(ttbr);
     isb();
 }
 
-fn address_space_tlb_invalidate(slot: usize, va: usize) {
-    dsb_ishst();
-    tlbi_vae1is(((slot + 1) << 48) | (va >> 12));
-    dsb_ish();
-    isb();
-}
-
-fn address_space_clear_root(slot: usize) {
-    let base: usize = user_l3_base(slot);
-    for i: usize in 0..<512 {
-        let entry: *usize = (base + i * 8) as *usize;
-        *entry = 0;
-    }
-    dsb_ishst();
-    tlbi_aside1is((slot + 1) << 48);
-    dsb_ish();
-    isb();
-}
-
-// GitHub issue #226: INIT_ROOT's two textually-identical macro expansions
-// (one per root, in the retired mmu.S) are one real shared function called
-// twice here, rather than duplicated assembly text -- issue #224 already
-// established that preference for kernel_mmu_activate below, for the same
-// reason: nothing kept two hand-written copies in sync before, and an
-// ordinary .tkb function call has no such gap.
-fn init_root_entry(base: usize, index: usize, value: usize) {
-    let entry: *usize = (base + index * 8) as *usize;
-    *entry = value;
-}
-
-// GitHub issue #237 (QEMU port): the L1 index each block/table entry below
-// uses is no longer hardcoded here -- KERNEL_IDENTITY_L1_INDEX and
-// USER_TEXT_VA come from whichever kernel/platform/<target>/mmu_layout.tkb
-// is on this build's compile line (same file-selection convention as
-// uart.tkb/intc.tkb), and platform_mmu_init_device_blocks(l1) supplies
-// that platform's own device-MMIO block set. RPi5's own values are
-// unchanged (see kernel/platform/rpi5/mmu_layout.tkb's header) -- this is
-// an indirection, not a behavior change, for that platform.
-fn init_root(l1: usize, l2: usize, l3: usize) {
-    init_root_entry(l1, KERNEL_IDENTITY_L1_INDEX,
-        (KERNEL_IDENTITY_L1_INDEX << 30) | 0x705 | UXN_BIT);
-    init_root_entry(l1, USER_TEXT_VA >> 30, l2 | 3);
-    init_root_entry(l2, 0, l3 | 3);
-    platform_mmu_init_device_blocks(l1);
-}
-
-// GitHub issue #246: the "grow" half -- ensures physical root `slot`
-// exists (all three of its tables allocated and wired via init_root),
-// growing as many intervening roots as growable_pool_ensure needs to
-// (its own loop may activate more than one chunk per pool in a single
-// call, if `slot` is ahead of the previous ceiling) and running init_root
-// on every root that just became active, not only `slot` itself. Called
-// eagerly for root 0 (kernel_mmu_init below, before any process exists)
-// and lazily by kernel/kernel/process.tkb's scheduled_process_alloc the
-// first time a given pool_index is used.
-//
-// Current limitations: the three pools are grown one after another, not
-// atomically -- if kernel_l1_pool's grow succeeds but user_l2_pool's or
-// user_l3_pool's then fails (page.tkb genuinely out of memory), the three
-// pools are left with mismatched active_chunks counts, and this function
-// must not be relied on to make further progress past that point.
-// Accepted rather than engineered around: not reachable in practice at
-// MAX_ROOTS=16 (at most 48 pages total, far under page.tkb's
-// BOOT_PAGE_COUNT, 204800 as of issue #251), and growable_pool.tkb has no
-// partial-rollback primitive to unwind a successful grow on one pool
-// after a sibling pool's grow fails.
-fn mmu_ensure_root(slot: usize) -> bool {
-    let before: usize = growable_pool_active_chunks(&kernel_l1_pool);
-    if (slot < before) { return true; }
-    if (growable_pool_ensure(&kernel_l1_pool, slot) == false) { return false; }
-    if (growable_pool_ensure(&user_l2_pool, slot) == false) { return false; }
-    if (growable_pool_ensure(&user_l3_pool, slot) == false) { return false; }
-    let after: usize = growable_pool_active_chunks(&kernel_l1_pool);
-    for root: usize in before..<after {
-        init_root(kernel_l1_base(root), user_l2_base(root), user_l3_base(root));
-    }
-    return true;
-}
-
-// GitHub issue #226: kernel_mmu_init/_secondary/_activate, lifted from
-// mmu.S -- the actual MMU-enable sequence itself. entry.S's `_start`/
-// `kernel_secondary_entry` still reach these by the exact same names via
-// plain `bl`, unchanged: an ordinary top-level .tkb `fn` is already
-// bl-callable from hand-written assembly with no special ceremony
-// (entry.S already calls `main` this way).
-fn kernel_mmu_init() {
-    // kernel_mmu_init runs from entry.S's `_start`, before main() (and
-    // therefore before main()'s own page_allocator_init() call) -- but
-    // mmu_ensure_root below now needs page.tkb's pool usable immediately,
-    // since root 0 (unlike before #246) comes from page_alloc() too. An
-    // unlinked, zero-initialized free chain hands out physical page index
-    // 0 forever (its own next_free[0] reads back 0, not 1) -- exactly the
-    // failure kernel/lib/freelist.tkb's own header warns about -- which
-    // would have made kernel_l1_pool/user_l2_pool/user_l3_pool's first
-    // grow all alias the SAME physical page for root 0's three distinct
-    // tables. Confirmed on real hardware: omitting this call here hung
-    // the board before any UART output. main()'s own page_allocator_init()
-    // call is removed (see that file) -- calling it a second time here
-    // would silently free root 0's three already-in-use pages back into
-    // the pool.
-    page_allocator_init();
-    // Root 0's grow is treated as infallible here, same as the original
-    // (pre-#246) code never had a failure path at all for it: the very
-    // first 3 pages out of page.tkb's 1024-page pool failing is not a
-    // real scenario this kernel needs to handle gracefully.
-    mmu_ensure_root(0);
-    kernel_mmu_activate();
-}
-
-// Install the primary's already-published kernel root on core 1. This must
-// never rebuild or clear shared tables -- unlike kernel_mmu_init, it never
-// calls init_root.
-fn kernel_mmu_init_secondary() {
-    kernel_mmu_activate();
-}
-
-// kernel_mmu_activate(): the MAIR_EL1/TCR_EL1/TTBR0_EL1/SCTLR_EL1
-// configuration shared by kernel_mmu_init and kernel_mmu_init_secondary
-// (GitHub issue #224) -- previously duplicated register-for-register
-// between the two hand-written copies, with nothing keeping them in sync.
-// Table construction (init_root above) stays exclusive to kernel_mmu_init;
-// the secondary only ever installs the primary's already-published root.
-fn kernel_mmu_activate() {
+fn kernel_mmu_activate(l1_physical: usize, asid: usize) {
     // Attr0 Device-nGnRnE; Attr1 Normal WB RA/WA.
     msr_mair_el1(0xff00);
 
     // 37-bit VA, 40-bit PA, 4KB granule, WB inner-shareable walks, TTBR1
-    // disabled. A `LITERAL << N` (N >= 32) shift like `2 << 32` here used
-    // to silently compute at 32-bit width and produce a poison/undefined
-    // result (issue #232, fixed in lib/llvm_gen.ml -- this expression is
-    // the exact case that found it).
+    // disabled.
     let tcr: usize = 0x351b | (1 << 23) | (2 << 32);
     msr_tcr_el1(tcr);
 
-    // ASID 1 in bits [63:48] (matching address_space_activate_root's own
-    // `(slot + 1) << 48` for slot 0) ORed with root 0's base address.
-    // Root 0 is always already ensured by the time this runs (either just
-    // now by kernel_mmu_init, or long ago, for kernel_mmu_init_secondary).
-    let root: usize = (growable_pool_ref_at(&kernel_l1_pool, 0) as usize) |
-        (1 << 48);
-    msr_ttbr0_el1(root);
-    isb();
+    mmu_activate_root(l1_physical, asid);
     tlbi_vmalle1();
     dsb_ish();
     isb();

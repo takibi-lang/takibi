@@ -553,7 +553,7 @@ fn main() {
     }
 
     // GitHub issue #246: page_allocator_init() no longer runs here.
-    // kernel/arch/arm64/mm/mmu.tkb's kernel_mmu_init() -- called from
+    // kernel/mm/address_space.tkb's kernel_mmu_init() -- called from
     // entry.S's `_start`, before main() -- now calls page_alloc() itself
     // (to back root 0's page tables), so it calls page_allocator_init()
     // as its own first statement instead; see that function's own comment

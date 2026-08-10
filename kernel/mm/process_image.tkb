@@ -14,10 +14,10 @@ use "kernel/fs/elf64.tkb";
 // (small counters/flags, not indices into page.tkb's shared pool -- see
 // GitHub issue #253's 2026-08-09 comment for why per-root page ownership
 // moved off a dedicated array), not a dedicated physical resource of its
-// own -- unlike process.tkb's kernel stacks or kernel/arch/arm64/mm/
-// mmu.tkb's actual page-table memory, so this stays a plain eagerly-sized
-// array rather than a growable_pool.tkb shadow pool; the real per-root
-// physical cost lives entirely in mmu.tkb.
+// own -- unlike process.tkb's kernel stacks or address_space.tkb's actual
+// page-table backing, so this stays a plain eagerly-sized array rather than
+// a growable_pool.tkb shadow pool; the real per-root physical cost lives in
+// address_space.tkb.
 const PROCESS_IMAGE_ROOT_MAX: usize = 16;
 
 // GitHub issue #253: image_page_indices/image_l3_indices (each
@@ -265,7 +265,8 @@ fn process_image_narrow_root(value: usize) -> {0..<PROCESS_IMAGE_ROOT_MAX as usi
 
 fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsafe} {
     if (dest_root >= PROCESS_IMAGE_ROOT_MAX ||
-        dest_root == process_image_target_root) {
+        dest_root == process_image_target_root ||
+        address_space_is_live(dest_root) == false) {
         return ProcessCloneVmResult::OutOfMemory;
     }
     let dest: {0..<PROCESS_IMAGE_ROOT_MAX as usize} =
@@ -445,9 +446,14 @@ fn process_image_clone_vm_reaped_pages() -> usize {
 // recursion depth is not something this test controls.
 fn process_image_clone_growth_probe() -> bool !{unsafe} {
     process_image_target_root = 0;
+    if (address_space_is_live(1)) { return false; }
+    if (address_space_ensure_root(1) == false) { return false; }
     let mut root0_page_index: usize = BOOT_PAGE_COUNT;
     match page_alloc() {
-        PageAllocResult::OutOfMemory => { return false; }
+        PageAllocResult::OutOfMemory => {
+            address_space_release_root(1);
+            return false;
+        }
         PageAllocResult::Allocated(stack_page) => {
             let phys: usize = page_physical_address(stack_page);
             address_space_pte_write(0, process_stack_top_page(),
@@ -515,6 +521,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     process_layout[0].active_page_count = 0;
     process_layout[0].growth_page_count = 0;
     process_layout[0].stack_lowest_l3 = process_stack_top_page();
+    address_space_release_root(1);
     return ok;
 }
 
@@ -1326,7 +1333,10 @@ fn process_image_map_in_root(plan: DistroElfLoadPlan,
                              argv: []u8,
                              argc: usize,
                              root: usize) -> ProcessImageMapResult {
-    if (root >= PROCESS_IMAGE_ROOT_MAX) { return ProcessImageMapResult::InvalidImage; }
+    if (root >= PROCESS_IMAGE_ROOT_MAX ||
+        address_space_is_live(root) == false) {
+        return ProcessImageMapResult::InvalidImage;
+    }
     process_image_target_root = root;
     return process_image_map_current(plan, argv, argc);
 }

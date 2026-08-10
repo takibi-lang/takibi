@@ -1,19 +1,11 @@
-// GitHub issue #254 design comment (2026-08-09): decouples ASID assignment
-// from kernel/arch/arm64/mm/mmu.tkb's array-of-roots storage slot. ASID has
-// always been derived purely as `slot + 1` wherever a root's pool slot was
-// known (mmu.tkb's address_space_activate_root/_tlb_invalidate/_clear_root),
-// with no existence independent of that slot index. This pool gives ASID a
-// genuine, independent lifetime -- a prerequisite for #254's eventual move
-// to per-process heap-owned root pages, since a heap-owned page has no
-// "slot" to derive an ASID from.
+// GitHub issue #254 design conclusion (2026-08-09): ASID assignment must be
+// independent of a page-table storage slot. A heap-owned page table has no
+// slot from which to derive an ASID; this pool gives it a matching lifetime.
 //
-// ASID_MAX matches mmu.tkb's MAX_ROOTS (today's real per-process root
-// ceiling; a real hardware ASID-width query is a later refinement, out of
-// scope here). This pool's own index space is 0..<ASID_MAX, and every asid
-// value handed to a caller is index + 1, so ASID 0 (deliberately never
-// assigned -- see mmu.tkb's own note on why, "kept free as a guaranteed
-// non-matching TLB value") falls out of range automatically, with no
-// explicit skip needed.
+// ASID_MAX matches address_space.tkb's current bounded process-address-space
+// table. A real hardware ASID-width query is a later refinement, out of
+// scope here. This pool's own index space is 0..<ASID_MAX, and every ASID
+// value handed to a caller is index + 1, so ASID 0 is never assigned.
 //
 // SlotMap(N), not bare FreelistCore(N): per kernel/lib/slotmap.tkb's own
 // stated default ("use SlotMap(N) for any fixed-capacity slot pool... at
@@ -22,22 +14,11 @@
 // kernel/mm/address_space.tkb's own precedent of using SlotMap directly for
 // a small pool of this shape).
 //
-// This file deliberately does not yet touch mmu.tkb's function signatures.
-// It is NOT "next in line" -- the root-storage move this pool was built
-// for was abandoned mid-design (see #254's 2026-08-09 comment thread and
-// HISTORY.md's entry of the same date): it turned out to be blocked on
-// #264 (no per-process struct exists anywhere in this kernel yet), and
-// that whole line of MMU/paging work is frozen behind #237 (a QEMU lane
-// for kernel/, so this class of change stops costing a 66-second SWD load
-// plus a full RPi5 boot per iteration). This file is left in place,
-// tested, and unused on purpose -- wiring it into
-// address_space_activate_root/_tlb_invalidate/_clear_root is real future
-// work, not a dangling TODO to chase without #237/#264 first.
+// Issue #264 now consumes this pool from kernel/mm/address_space.tkb. The
+// latter keeps the transitional bounded slot -> backing-record table and
+// passes only the resolved numeric ASID to mmu.tkb.
 //
-// Current limitations (2026-08-09):
-// - Unused in production as of this writing -- see above. Its own boot
-//   self-test (asid_pool_probe) and hardware view are what keep it
-//   verified in the meantime.
+// Current limitations:
 // - NOT SYNCHRONIZED, same caveat as kernel/lib/freelist.tkb/slotmap.tkb --
 //   this pool is reachable only from single-core boot/syscall-dispatch
 //   context today, same as every other kernel/lib-backed pool in kernel/.
@@ -120,18 +101,16 @@ fn asid_pool_double_free_count() -> usize {
     return slotmap_double_remove_count(&asid_pool);
 }
 
-// Boot self-test: exhausts the pool, confirms Full is reported correctly,
-// frees one and re-allocates it, checks asid_value's 1..ASID_MAX mapping
-// (ASID 0 never handed out), and round-trips the transfer/release pair --
-// mirrors kernel/mm/page.tkb's / kernel/lib/growable_pool.tkb's own probe
-// style.
+// Boot self-test: runs against the production pool without reinitializing it
+// (root 0's permanent bootstrap ASID is already live). It exhausts every
+// currently-free ASID, then confirms transfer/release/reuse and double-free
+// accounting without ever disturbing an address space that owns an ASID.
 fn asid_pool_probe() -> bool {
-    asid_pool_init();
     let mut owners: [usize; ASID_MAX];
     let mut count: usize = 0;
     for i: usize in 0..<ASID_MAX {
         match asid_alloc() {
-            AsidAllocResult::Full => { return false; }
+            AsidAllocResult::Full => {}
             AsidAllocResult::Allocated(owner) => {
                 let value: usize = asid_value(owner);
                 if (value == 0 || value > ASID_MAX) {
@@ -169,7 +148,9 @@ fn asid_pool_probe() -> bool {
         return false;
     }
     for i: usize in 1..<ASID_MAX {
-        asid_transferred_release(owners[i]);
+        if (i < count) {
+            asid_transferred_release(owners[i]);
+        }
     }
     return true;
 }

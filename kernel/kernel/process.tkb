@@ -2,16 +2,11 @@ use "kernel/mm/page.tkb";
 use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
 use "kernel/lib/growable_pool.tkb";
-// GitHub issue #246: "root index == this file's own ProcessHandle.
-// pool_index everywhere" (see KERNEL_PROCESS_MAX's own comment above) was
-// already a cross-file convention before this `use`; now that a root is
-// no longer eagerly backed for every possible pool_index at boot,
-// scheduled_process_alloc must make it real for a genuinely NEW pool_index
-// before returning -- the single choke point every pool_index passes
-// through once, rather than trying to find every later place a root gets
-// its first real use (page-table writes and root activation happen at
-// different times, in different files, for the same new pool_index).
-use "kernel/arch/arm64/mm/mmu.tkb";
+// A process slot remains the temporary address-space key, but process.tkb
+// owns no table details. scheduled_process_alloc/reap are the lifecycle
+// choke points for kernel/mm/address_space.tkb's backing-page and ASID
+// records; mmu.tkb itself sees only resolved physical addresses and ASIDs.
+use "kernel/mm/address_space.tkb";
 
 enum ProcessState: u8 { Ready; Running; Blocked; Exited; }
 enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
@@ -32,16 +27,16 @@ enum ProcessWaitReason: u8 { None; UartRx; ChildExit; }
 // next real workload" to "comfortably past any workload this project has
 // exercised so far," matching how kernel/mm/page.tkb's own BOOT_PAGE_COUNT
 // (1024) is large enough that nobody thinks of it as "the page limit."
-// Only kernel_stacks (below) and kernel/arch/arm64/mm/mmu.tkb's page-
-// table-root triples actually cost real per-slot memory (4096+ bytes
-// each); the plain bookkeeping arrays below cost only a few bytes per
-// slot even at this larger N, so that state stays in an eagerly-sized plain
-// record array --
+// Kernel stacks (below) cost real per-slot memory (4096+ bytes each).
+// Page-table backing is separately owned by address_space.tkb; the plain
+// bookkeeping arrays below cost only a few bytes per slot even at this
+// larger N, so that state stays in an eagerly-sized plain record array --
 // growable_pool.tkb's lazy, page_alloc()-backed growth is reserved for
 // the genuinely expensive per-slot resources, not applied uniformly just
 // because it exists. Must match kernel/mm/process_image.tkb's
-// PROCESS_IMAGE_ROOT_MAX and kernel/arch/arm64/mm/mmu.tkb's MAX_ROOTS --
-// root index == this file's own ProcessHandle.pool_index everywhere.
+// PROCESS_IMAGE_ROOT_MAX and kernel/mm/address_space.tkb's
+// ADDRESS_SPACE_MAX -- root index == this file's own
+// ProcessHandle.pool_index everywhere.
 const KERNEL_PROCESS_MAX: usize = 16;
 const KERNEL_PROCESS_STACK_SIZE: usize = 4096;
 
@@ -323,6 +318,9 @@ fn scheduled_process_table_init() {
 }
 
 fn scheduled_process_table_clear() {
+    // Reset can enter while a child root is in TTBR0_EL1. Select the
+    // permanent bootstrap root before releasing any nonzero backing record.
+    address_space_activate_root(0);
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
         let generation: usize =
             slotmap_occupant_generation(&scheduled_process_pool, slot);
@@ -335,6 +333,7 @@ fn scheduled_process_table_clear() {
                 }
             }
         }
+        address_space_release_root(slot);
         scheduled_process_records[slot].saved_sp = 0;
         scheduled_process_records[slot].state = ProcessSlotState::Free;
         scheduled_process_records[slot].wait_reason = ProcessWaitReason::None;
@@ -355,7 +354,7 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                                    freelist_owner_new(slot, generation));
                     return ScheduledProcessAllocResult::Full;
                 }
-                if (mmu_ensure_root(slot) == false) {
+                if (address_space_ensure_root(slot) == false) {
                     slotmap_remove(&scheduled_process_pool,
                                    freelist_owner_new(slot, generation));
                     return ScheduledProcessAllocResult::Full;
@@ -370,6 +369,7 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                 match scheduled_process_identity_put(
                         scheduled_process_owner_new(slot, generation)) {
                     ScheduledProcessPutResult::Conflict => {
+                        address_space_release_root(slot);
                         slotmap_remove(&scheduled_process_pool,
                                        freelist_owner_new(slot, generation));
                         scheduled_process_records[slot].saved_sp = 0;
@@ -523,6 +523,7 @@ fn scheduled_process_reap(
         owner: sink ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Exited]) {
     scheduled_process_state_drop(state);
+    address_space_release_root(owner.pool_index);
     slotmap_remove(&scheduled_process_pool,
                    freelist_owner_new(owner.pool_index, owner.generation));
     scheduled_process_records[owner.pool_index].saved_sp = 0;
@@ -1189,6 +1190,7 @@ fn kernel_process_clone_rollback() {
     scheduled_process_records[parent.pool_index].has_child = false;
     scheduled_process_records[child.pool_index].has_parent = false;
     execution_current_handle = parent;
+    address_space_activate_root(parent.pool_index);
     if (execution_clone_calls > 0) {
         execution_clone_calls = execution_clone_calls - 1;
     }
@@ -1344,6 +1346,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
     }
     if (kernel_process_start_handle(parent)) {
         execution_current_handle = parent;
+        address_space_activate_root(parent.pool_index);
         return scheduled_process_records[parent.pool_index].saved_sp;
     }
     return 0;

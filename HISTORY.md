@@ -42,6 +42,43 @@ is the prerequisite for #254's eventual Linux/NetBSD-shaped per-process page
 table ownership, not an implementation detail to hide in this first
 mechanical migration.
 
+### 2026-08-10: Production address-space backing boundary (#264, second stage)
+
+The next stage takes the dependency direction identified by #254 seriously:
+`kernel/arch/arm64/mm/mmu.tkb` no longer owns an array of roots and no longer
+accepts a process slot. It now performs page-table construction, leaf PTE
+access, TTBR activation, and TLB invalidation only from resolved L1/L2/L3
+physical addresses and a numeric hardware ASID. The platform layout remains
+in the architecture layer, but lifetime does not.
+
+`kernel/mm/address_space.tkb` now owns that lifetime in a temporary
+`AddressSpaceBacking[16]` table keyed by the existing scheduler slot. Each
+live record owns three page-allocator pages and an ASID transferred into its
+coarser record. It allocates all four resources before publishing a root,
+cleans and invalidates before release, and returns the three physical pages
+and ASID together. This is deliberately still a bounded table rather than a
+field added directly to `ProcessRecord`: it creates the ownership boundary
+first, so replacing this table later with a process-owned `mm_struct`-like
+object changes the boundary's implementation without pulling the
+architecture layer back into process bookkeeping.
+
+Root 0 remains the explicit early-boot exception. `kernel_mmu_init` and the
+secondary-core entry symbols are now implemented at the address-space
+boundary: they initialize the page and ASID pools, allocate root 0, and pass
+its resolved L1 physical address and ASID to the architecture enable path.
+Root 0 is retained as the safe TTBR fallback across scheduler resets. Every
+nonzero root is allocated by `scheduled_process_alloc` and released by
+`scheduled_process_reap` or `scheduled_process_table_clear`. Release first
+switches away from a root if needed; child exit explicitly activates the
+parent after reaping, so a released child table can never remain in TTBR0.
+
+The former `ProcessAddressSpaceOwner` prototype was removed. Its replacement
+boot probe uses two real production records, verifies same-VA isolation, and
+verifies that six backing pages and both ASIDs are returned. The existing ASID
+pool is now production state; its probe was adjusted to test only currently
+free ASIDs so it never reinitializes or invalidates root 0. `make
+kernelcheck-qemu` passed all 31 views after the change.
+
 ### 2026-08-10: Page allocator metadata keeps occupancy, not the owner generation (#256)
 
 Issue #256 investigated whether `kernel/mm/page.tkb`'s per-page generation
