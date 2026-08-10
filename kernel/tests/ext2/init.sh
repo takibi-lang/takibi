@@ -30,6 +30,18 @@ else
     exit 1
 fi
 
+# The ext2 reader currently implements its 12 direct block pointers, so this
+# exact 12 KiB file is the largest regular file it supports today. `cat`
+# reaches the sendfile(2) path; it must stream all twelve blocks rather than
+# treating the kernel's one-block staging area as a whole-file limit.
+/cat /read_max.txt
+if [ "$?" -eq 0 ]; then
+    echo "busybox max-file exit: 0"
+else
+    echo "busybox max-file failed"
+    exit 1
+fi
+
 # GitHub issue #241: the EL0 syscall-ABI test payload (formerly launched
 # through a dedicated flat-blob mechanism straight from the kernel's own
 # boot sequence) is a real ELF in this filesystem now, launched the same

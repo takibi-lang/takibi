@@ -91,18 +91,10 @@ const KERNEL_SOCKET_FD_MAX: usize = 8;
 
 private let mut syscall_ext2_mount: Ext2Mount;
 private let mut syscall_ext2_ready: bool;
-// GitHub issue #209: every file read is staged through this one buffer, so
-// its size is the largest file the kernel can hand to userspace at all. It
-// used to be exactly KERNEL_BLOCK_SIZE, which silently capped that at a
-// single ext2 block: ext2_read_small_file() rejects an inode larger than
-// the destination outright, so the moment boot policy in /init.sh grew past
-// 1024 bytes, read(2) returned EINVAL and ash exited 0 having executed
-// nothing at all -- no error, no output. ext2_read_small_file() already
-// reads block by block, so only this buffer had to grow. Writes are a
-// separate path and keep their own one-block limit, which comes from
-// ext2_resize_small_file()'s own contract rather than from this buffer.
-const KERNEL_FILE_READ_MAX: usize = 8192;
-private let mut syscall_file_buffer: [u8; KERNEL_FILE_READ_MAX];
+// A bounded one-block staging area, not a whole-file cache. ext2 reads fill
+// it one block at a time and read(2)/readv(2)/sendfile(2) stream each chunk
+// onward, so its size does not limit the file size userspace can consume.
+private let mut syscall_file_buffer: [u8; KERNEL_BLOCK_SIZE];
 private let mut syscall_path_buffer: [u8; 256];
 private let mut syscall_sockaddr_buffer: [u8; 28];
 private let mut syscall_open_calls: usize;
@@ -754,40 +746,60 @@ fn syscall_writev_segment(fd: usize, address: usize, length: usize)
 
 // Single-segment read from any open ext2 file descriptor.
 fn syscall_readv_segment(fd: usize, address: usize, length: usize)
-        -> ReadSegmentResult {
+        -> ReadSegmentResult !{unsafe} {
     if (kernel_syscall_file_is_open(fd) == false ||
             kernel_syscall_file_readable(fd) == false) {
         return ReadSegmentResult::Errno(LINUX_EBADF);
     }
-    match ext2_read_small_file(
-            syscall_ext2_mount, kernel_syscall_file_inode(fd),
-            syscall_file_buffer as []u8) {
-        Ext2ReadResult::Invalid => { return ReadSegmentResult::Errno(LINUX_EINVAL); }
-        Ext2ReadResult::Read(file_length) => {
-            if (kernel_syscall_file_offset(fd) >= file_length) {
-                return ReadSegmentResult::Read(0);
+    let mut copied: usize = 0;
+    while (copied < length) {
+        let mut chunk_limit: usize = length - copied;
+        if (chunk_limit > KERNEL_BLOCK_SIZE) {
+            chunk_limit = KERNEL_BLOCK_SIZE;
+        }
+        let staging_base: *u8 = syscall_file_buffer as *u8;
+        let staging = unsafe {
+            staging_base[0..<chunk_limit as isize]
+        };
+        match ext2_read_file_chunk(
+                syscall_ext2_mount, kernel_syscall_file_inode(fd),
+                kernel_syscall_file_offset(fd),
+                staging) {
+            Ext2ReadResult::Invalid => {
+                if (copied != 0) { return ReadSegmentResult::Read(copied); }
+                return ReadSegmentResult::Errno(LINUX_EINVAL);
             }
-            let available: usize = file_length - kernel_syscall_file_offset(fd);
-            let mut amount: usize = length;
-            if (amount > available) { amount = available; }
-            let source_base: *u8 = (syscall_file_buffer as *u8) +
-                (kernel_syscall_file_offset(fd) as isize);
-            match user_range_check(kernel_process_current_root(), address, amount, UserAccessMode::Write) {
-                UserRangeResult::Fault => {
-                    return ReadSegmentResult::Errno(LINUX_EFAULT);
+            Ext2ReadResult::Read(chunk) => {
+                if (chunk == 0) { break; }
+                let target_address: usize = match checked_add_usize(address, copied) {
+                    CheckedUsize::Overflow => {
+                        if (copied != 0) { return ReadSegmentResult::Read(copied); }
+                        return ReadSegmentResult::Errno(LINUX_EFAULT);
+                    }
+                    CheckedUsize::Value(value) => { value }
+                };
+                match user_range_check(kernel_process_current_root(),
+                                       target_address, chunk,
+                                       UserAccessMode::Write) {
+                    UserRangeResult::Fault => {
+                        if (copied != 0) { return ReadSegmentResult::Read(copied); }
+                        return ReadSegmentResult::Errno(LINUX_EFAULT);
+                    }
+                    UserRangeResult::Ok(range) => {
+                        let copied_chunk: bool = copy_to_user_raw(
+                            range, syscall_file_buffer as *u8, chunk);
+                    }
                 }
-                UserRangeResult::Ok(range) => {
-                    let copied: bool =
-                        copy_to_user_raw(range, source_base, amount);
+                if (kernel_syscall_file_set_offset(
+                        fd, kernel_syscall_file_offset(fd) + chunk) == false) {
+                    if (copied != 0) { return ReadSegmentResult::Read(copied); }
+                    return ReadSegmentResult::Errno(LINUX_EBADF);
                 }
+                copied = copied + chunk;
             }
-            if (kernel_syscall_file_set_offset(
-                    fd, kernel_syscall_file_offset(fd) + amount) == false) {
-                return ReadSegmentResult::Errno(LINUX_EBADF);
-            }
-            return ReadSegmentResult::Read(amount);
         }
     }
+    return ReadSegmentResult::Read(copied);
 }
 
 // ppoll(2) readiness for one fd: (is_valid_fd, revents). fd 0 checks the
@@ -1648,31 +1660,67 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             kernel_syscall_file_readable(fd) == false) {
             return SyscallAction::Resume(LINUX_EBADF);
         }
-        match ext2_read_small_file(
-                syscall_ext2_mount, kernel_syscall_file_inode(fd),
-                syscall_file_buffer as []u8) {
-            Ext2ReadResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
-            Ext2ReadResult::Read(file_length) => {
-                if (kernel_syscall_file_offset(fd) >= file_length) { return SyscallAction::Resume(0); }
-                let available: usize = file_length - kernel_syscall_file_offset(fd);
-                let mut amount: usize = requested;
-                if (amount > available) { amount = available; }
-                let source_base: *u8 = (syscall_file_buffer as *u8) +
-                    (kernel_syscall_file_offset(fd) as isize);
-                match user_range_check(kernel_process_current_root(), address, amount, UserAccessMode::Write) {
-                    UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
-                    UserRangeResult::Ok(range) => {
-                        let copied: bool =
-                            copy_to_user_raw(range, source_base, amount);
+        // Do not turn the requested length into a kernel allocation. Each
+        // iteration obtains one ext2 block and copies it into the next
+        // validated portion of the user range, matching the bounded
+        // page/buffer-cache transfer shape used by Unix kernels.
+        let mut copied: usize = 0;
+        while (copied < requested) {
+            let mut chunk_limit: usize = requested - copied;
+            if (chunk_limit > KERNEL_BLOCK_SIZE) {
+                chunk_limit = KERNEL_BLOCK_SIZE;
+            }
+            let staging_base: *u8 = syscall_file_buffer as *u8;
+            let staging = unsafe {
+                staging_base[0..<chunk_limit as isize]
+            };
+            match ext2_read_file_chunk(
+                    syscall_ext2_mount, kernel_syscall_file_inode(fd),
+                    kernel_syscall_file_offset(fd),
+                    staging) {
+                Ext2ReadResult::Invalid => {
+                    if (copied != 0) { return SyscallAction::Resume(copied); }
+                    return SyscallAction::Resume(LINUX_EINVAL);
+                }
+                Ext2ReadResult::Read(chunk) => {
+                    if (chunk == 0) { return SyscallAction::Resume(copied); }
+                    let target_address: usize =
+                        match checked_add_usize(address, copied) {
+                            CheckedUsize::Overflow => {
+                                if (copied != 0) {
+                                    return SyscallAction::Resume(copied);
+                                }
+                                return SyscallAction::Resume(LINUX_EFAULT);
+                            }
+                            CheckedUsize::Value(value) => { value }
+                        };
+                    match user_range_check(kernel_process_current_root(),
+                                           target_address, chunk,
+                                           UserAccessMode::Write) {
+                        UserRangeResult::Fault => {
+                            if (copied != 0) {
+                                return SyscallAction::Resume(copied);
+                            }
+                            return SyscallAction::Resume(LINUX_EFAULT);
+                        }
+                        UserRangeResult::Ok(range) => {
+                            let copied_chunk: bool = copy_to_user_raw(
+                                range, syscall_file_buffer as *u8, chunk);
+                        }
                     }
+                    if (kernel_syscall_file_set_offset(
+                            fd, kernel_syscall_file_offset(fd) + chunk) ==
+                            false) {
+                        if (copied != 0) {
+                            return SyscallAction::Resume(copied);
+                        }
+                        return SyscallAction::Resume(LINUX_EBADF);
+                    }
+                    copied = copied + chunk;
                 }
-                if (kernel_syscall_file_set_offset(
-                        fd, kernel_syscall_file_offset(fd) + amount) == false) {
-                    return SyscallAction::Resume(LINUX_EBADF);
-                }
-                return SyscallAction::Resume(amount);
             }
         }
+        return SyscallAction::Resume(copied);
     }
 
     if (number == AARCH64_NR_FCNTL) {
@@ -1983,29 +2031,47 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return SyscallAction::Resume(LINUX_EBADF);
         }
         if (offset_address != 0) { return SyscallAction::Resume(LINUX_EINVAL); }
-        match ext2_read_small_file(
-                syscall_ext2_mount, kernel_syscall_file_inode(input_fd),
-                syscall_file_buffer as []u8) {
-            Ext2ReadResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
-            Ext2ReadResult::Read(file_length) => {
-                if (kernel_syscall_file_offset(input_fd) >= file_length) { return SyscallAction::Resume(0); }
-                let available: usize = file_length - kernel_syscall_file_offset(input_fd);
-                let mut amount: usize = requested;
-                if (amount > available) { amount = available; }
-                let source: *u8 = syscall_file_buffer as *u8;
-                let mut copy_index: usize = 0;
-                while (copy_index < amount) {
-                    uart_putc(source[(kernel_syscall_file_offset(input_fd) + copy_index) as isize]);
-                    copy_index = copy_index + 1;
+        let mut copied: usize = 0;
+        while (copied < requested) {
+            let mut chunk_limit: usize = requested - copied;
+            if (chunk_limit > KERNEL_BLOCK_SIZE) {
+                chunk_limit = KERNEL_BLOCK_SIZE;
+            }
+            let staging_base: *u8 = syscall_file_buffer as *u8;
+            let staging = unsafe {
+                staging_base[0..<chunk_limit as isize]
+            };
+            match ext2_read_file_chunk(
+                    syscall_ext2_mount, kernel_syscall_file_inode(input_fd),
+                    kernel_syscall_file_offset(input_fd),
+                    staging) {
+                Ext2ReadResult::Invalid => {
+                    if (copied != 0) { return SyscallAction::Resume(copied); }
+                    return SyscallAction::Resume(LINUX_EINVAL);
                 }
-                if (kernel_syscall_file_set_offset(
-                        input_fd, kernel_syscall_file_offset(input_fd) + amount) == false) {
-                    return SyscallAction::Resume(LINUX_EBADF);
+                Ext2ReadResult::Read(chunk) => {
+                    if (chunk == 0) { return SyscallAction::Resume(copied); }
+                    let source: *u8 = syscall_file_buffer as *u8;
+                    let mut copy_index: usize = 0;
+                    while (copy_index < chunk) {
+                        uart_putc(source[copy_index as isize]);
+                        copy_index = copy_index + 1;
+                    }
+                    if (kernel_syscall_file_set_offset(
+                            input_fd,
+                            kernel_syscall_file_offset(input_fd) + chunk) ==
+                            false) {
+                        if (copied != 0) {
+                            return SyscallAction::Resume(copied);
+                        }
+                        return SyscallAction::Resume(LINUX_EBADF);
+                    }
+                    copied = copied + chunk;
                 }
-                syscall_read_calls = syscall_read_calls + 1;
-                return SyscallAction::Resume(amount);
             }
         }
+        syscall_read_calls = syscall_read_calls + 1;
+        return SyscallAction::Resume(copied);
     }
 
     if (number == 210) {

@@ -341,6 +341,57 @@ fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
     }
 }
 
+// Read at most one filesystem block at `offset` into `destination`. This is
+// deliberately separate from ext2_read_small_file(): syscall read paths must
+// not need a kernel buffer as large as the whole file. Callers repeat this
+// operation and copy each bounded block into the user buffer, like a VFS
+// page-cache/buffer-cache read path does on larger kernels.
+//
+// Regular files are still limited by EXT2_MAX_DIRECT_BLOCKS; supporting
+// larger files is the separate on-disk-format task of walking ext2 indirect
+// block pointers, not a reason to reinstate a whole-file staging limit here.
+fn ext2_read_file_chunk(mount: Ext2Mount, inode_number: usize,
+                        offset: usize, destination: []u8)
+        -> Ext2ReadResult !{unsafe} {
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return Ext2ReadResult::Invalid; }
+        Ext2InodeResult::Inode(inode) => {
+            if ((inode.mode & 0xF000) != 0x8000 ||
+                inode.size > EXT2_MAX_FILE_SIZE) {
+                return Ext2ReadResult::Invalid;
+            }
+            if (offset >= inode.size || destination.len == 0) {
+                return Ext2ReadResult::Read(0);
+            }
+            let block_index: usize = offset / KERNEL_BLOCK_SIZE;
+            let block_offset: usize = offset % KERNEL_BLOCK_SIZE;
+            let block_number: usize =
+                ext2_inode_block_pointer(mount, inode, block_index);
+            if (block_number == 0 || block_number >= mount.filesystem_blocks) {
+                return Ext2ReadResult::Invalid;
+            }
+            match block_read(mount.device, block_number,
+                             ext2_file_block as []u8) {
+                BlockIoResult::Invalid => { return Ext2ReadResult::Invalid; }
+                BlockIoResult::Ok => { }
+            }
+            let mut chunk: usize = destination.len;
+            if (chunk > KERNEL_BLOCK_SIZE - block_offset) {
+                chunk = KERNEL_BLOCK_SIZE - block_offset;
+            }
+            if (chunk > inode.size - offset) {
+                chunk = inode.size - offset;
+            }
+            let source_pointer: *u8 =
+                (ext2_file_block as *u8) + (block_offset as isize);
+            let source = unsafe { source_pointer[0..<chunk as isize] };
+            let target = unsafe { destination[0..<chunk] };
+            slice_copy(target, source);
+            return Ext2ReadResult::Read(chunk);
+        }
+    }
+}
+
 fn ext2_inode_is_symlink(mount: Ext2Mount, inode_number: usize) -> bool {
     match ext2_read_inode(mount, inode_number) {
         Ext2InodeResult::Invalid => { return false; }

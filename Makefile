@@ -356,7 +356,7 @@ $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 $(KERNEL_INITRAMFS_CPIO): $(KERNEL_BUSYBOX_STATIC) $(KERNEL_HTTPD) $(KERNEL_MUSL_LOADER)
 	cd $(KERNEL_USER_BUILD_DIR) && printf '%s\n' busybox-static busybox-httpd ld-musl-aarch64.so.1 | cpio -o -H newc > initramfs.cpio
 
-$(KERNEL_EXT2_IMAGE): $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) | $(KERNEL_USER_BUILD_DIR)
+$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
 	truncate -s 1048576 $@.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 1024
@@ -367,6 +367,10 @@ $(KERNEL_EXT2_IMAGE): $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/index.html $@.tmp:/index.html
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $@.tmp:/init.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $@.tmp:/large.txt
+	dd if=/dev/zero bs=12287 count=1 status=none | tr '\0' Z >$@.read_max.tmp
+	printf '\n' >>$@.read_max.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.read_max.tmp $@.tmp:/read_max.txt
+	rm -f $@.read_max.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_RPI5_USER_PAYLOAD_ELF) $@.tmp:/user_payload
 	debugfs -w -R 'set_inode_field /init.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /user_payload mode 0100755' $@.tmp >/dev/null 2>&1
