@@ -1,1 +1,2 @@
+linux file syscalls: open+read+close called
 linux file syscalls: open read write close ok
