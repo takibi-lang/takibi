@@ -72,9 +72,9 @@ HTTP_EXPECTED_BODY = (
     b"<!doctype html>\n<html><body>takibi RPi5 BusyBox httpd</body></html>\n"
 )
 INIT_SERVER_PORT = 8080
-INIT_CLIENT_PORTS = (43400, 43401)
-INIT_CLIENT_ISNS = (3000, 4000)
-INIT_SOCKET_INPUT = b"fixture!"
+INIT_CLIENT_PORTS = (43210, 43211)
+INIT_CLIENT_ISNS = (500, 900)
+INIT_SOCKET_B_INPUT = b"second-B"
 INIT_SOCKET_B_RESPONSE = b"conn-B\n!"
 INIT_SOCKET_A_RESPONSE = b"HTTP/1.0 200 OK\r\n\r\n"
 INIT_LARGE_RESPONSE = b"Z" * 1461
@@ -377,56 +377,9 @@ def init_send(sock: socket.socket, state, data: bytes) -> bool:
     frame = build_tcp_frame(client_port, client_seq, server_next,
                             FLAG_ACK | FLAG_PSH, data=data,
                             server_port=INIT_SERVER_PORT)
-    expected = client_seq + len(data)
-    for _attempt in range(RETRIES):
-        sock.sendto(frame, (QEMU_HOST, QEMU_PORT))
-        reply = recv_matching(
-            sock,
-            lambda candidate: (
-                struct.unpack("!HHIIBB", candidate[34:48])[0] ==
-                INIT_SERVER_PORT and
-                struct.unpack("!HHIIBB", candidate[34:48])[1] ==
-                client_port and
-                struct.unpack("!HHIIBB", candidate[34:48])[3] >= expected),
-            timeout=RETRY_TIMEOUT_SECS)
-        if reply is not None:
-            state[1] = expected
-            return True
-    return False
-
-
-def init_receive(sock: socket.socket, state, expected: bytes) -> bool:
-    client_port, client_seq, server_next, _pending = state
-    received = bytearray(state[3])
-    state[3] = b""
-    if received:
-        sock.sendto(build_tcp_frame(
-            client_port, client_seq, server_next, FLAG_ACK,
-            server_port=INIT_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
-    deadline = time.monotonic() + 10.0
-    while len(received) < len(expected) and time.monotonic() < deadline:
-        frame = recv_matching(
-            sock,
-            lambda candidate: (
-                struct.unpack("!HHIIBB", candidate[34:48])[0] ==
-                INIT_SERVER_PORT and
-                struct.unpack("!HHIIBB", candidate[34:48])[1] ==
-                client_port),
-            timeout=0.5)
-        if frame is None:
-            continue
-        tcp = frame[34:]
-        sequence = struct.unpack("!I", tcp[4:8])[0]
-        header_len = (tcp[12] >> 4) * 4
-        payload = frame[34 + header_len:]
-        if sequence == server_next:
-            received.extend(payload)
-            server_next += len(payload)
-            sock.sendto(build_tcp_frame(
-                client_port, client_seq, server_next, FLAG_ACK,
-                server_port=INIT_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
-    state[2] = server_next
-    return bytes(received) == expected
+    sock.sendto(frame, (QEMU_HOST, QEMU_PORT))
+    state[1] = client_seq + len(data)
+    return True
 
 
 def init_script_fixture(sock: socket.socket) -> bool:
@@ -437,26 +390,62 @@ def init_script_fixture(sock: socket.socket) -> bool:
     first = init_handshake(sock, INIT_CLIENT_PORTS[0], INIT_CLIENT_ISNS[0])
     second = init_handshake(sock, INIT_CLIENT_PORTS[1], INIT_CLIENT_ISNS[1])
     if first is None or second is None:
-        print("  init.sh: handshakes first=%s second=%s" %
-              ("ok" if first is not None else "missing",
-               "ok" if second is not None else "missing"))
         return False
+    # Match the proven RPi5 exchange: A's read is delivered first, then B's
+    # read after a short gap so the one-entry virtio RX path is not overrun.
+    init_send(sock, first, DATA_ECHO_PAYLOAD)
     time.sleep(0.05)
-    second_sent = init_send(sock, second, INIT_SOCKET_INPUT)
-    # Keep the one-entry virtio RX path from overrunning while the blocked
-    # fd-5 read hands control to the fd-6 read.
-    time.sleep(0.05)
-    first_sent = init_send(sock, first, INIT_SOCKET_INPUT)
-    stages = (
-        second_sent,
-        first_sent,
-        init_receive(sock, second, INIT_SOCKET_B_RESPONSE),
-        init_receive(sock, first, INIT_SOCKET_A_RESPONSE),
-        init_receive(sock, first, INIT_LARGE_RESPONSE),
-    )
-    ok = all(stages)
-    if not ok:
-        print("  init.sh stages:", stages)
+    init_send(sock, second, INIT_SOCKET_B_INPUT)
+
+    expected_b = INIT_SOCKET_B_RESPONSE
+    expected_a = INIT_SOCKET_A_RESPONSE + INIT_LARGE_RESPONSE
+    received_b = bytearray()
+    received_a = bytearray()
+    next_b = second[2]
+    next_a = first[2]
+    fin_b = False
+    fin_a = False
+    deadline = time.monotonic() + 10.0
+    while (len(received_b) < len(expected_b) or
+           len(received_a) < len(expected_a) or
+           not fin_b or not fin_a) and time.monotonic() < deadline:
+        frame = recv_matching(
+            sock,
+            lambda candidate: (
+                struct.unpack("!HHIIBB", candidate[34:48])[0] ==
+                INIT_SERVER_PORT and
+                struct.unpack("!HHIIBB", candidate[34:48])[1] in
+                INIT_CLIENT_PORTS),
+            timeout=0.5)
+        if frame is None:
+            continue
+        tcp = frame[34:]
+        src_port, dst_port, sequence, _ack, _doff, flags = \
+            struct.unpack("!HHIIBB", tcp[:14])
+        header_len = (tcp[12] >> 4) * 4
+        payload = frame[34 + header_len:]
+        if dst_port == INIT_CLIENT_PORTS[1]:
+            if sequence == next_b:
+                received_b.extend(payload)
+                next_b += len(payload)
+                if flags & FLAG_FIN:
+                    next_b += 1
+                    fin_b = True
+            sock.sendto(build_tcp_frame(
+                dst_port, second[1], next_b, FLAG_ACK,
+                server_port=INIT_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
+        else:
+            if sequence == next_a:
+                received_a.extend(payload)
+                next_a += len(payload)
+                if flags & FLAG_FIN:
+                    next_a += 1
+                    fin_a = True
+            sock.sendto(build_tcp_frame(
+                dst_port, first[1], next_a, FLAG_ACK,
+                server_port=INIT_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
+    ok = (bytes(received_b) == expected_b and
+          bytes(received_a) == expected_a)
     print("  init.sh connected I/O fixture: %s" % ("PASS" if ok else "FAIL"))
     return ok
 

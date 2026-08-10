@@ -110,7 +110,8 @@ uart_sender_pid=""
             shell_sent=1
         fi
         if [ "$payload_sent" -eq 0 ] &&
-           LC_ALL=C grep -aFq 'uart rx: scheduler child blocked' "$UART_LOG"; then
+           LC_ALL=C grep -aFq \
+               'concurrency: parent progressed while child uart-blocked' "$UART_LOG"; then
             printf 'irqtest\n' >&8
             payload_sent=1
         fi
@@ -132,7 +133,7 @@ uart_sender_pid=$!
 # aborting here would.
 echo "[kernel/qemu] driving host-side network peer (ARP/ICMP/TCP)"
 peer_status=0
-timeout "$PEER_TIMEOUT_SECS" python3 "$REPO_ROOT/scripts/kernel_net_test.py" \
+timeout "$PEER_TIMEOUT_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" >"$PEER_LOG" 2>&1 || peer_status=$?
 sed 's/^/  /' "$PEER_LOG"
 if [ "$peer_status" -ne 0 ]; then
