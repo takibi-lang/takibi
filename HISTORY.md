@@ -95,6 +95,22 @@ remain separate shared state. Clone preserves its preflight, copy, and
 retain sequence; close and destroy preserve their release behavior; public
 function signatures and the existing probe stay unchanged.
 
+### 2026-08-10: Per-root image state becomes ProcessImageRecord (#264, fourth stage)
+
+`kernel/mm/process_image.tkb` held a root's layout and live VM counters in
+`ProcessLayout[PROCESS_IMAGE_ROOT_MAX]`, but kept its demand-stack page
+indices in a separate flattened `64 * PROCESS_IMAGE_ROOT_MAX` global plus
+root-to-offset arithmetic. `ProcessImageRecord` now holds those scalar layout
+fields and one `[usize; 64]` growth-page list for each root, so persistent
+image state has one per-root home. Embedded-array access binds the list to a
+local before indexing, matching the current Takibi parser/lowering rule.
+
+Clone rollback bookkeeping remains global because it describes the one
+in-flight clone, not a root's persistent image. Reap reads the destination
+record directly instead of temporarily changing the active root; stack-fault
+recording, map/unmap resets, root switching, public signatures, and probes
+retain their existing behavior.
+
 ### 2026-08-10: Page allocator metadata keeps occupancy, not the owner generation (#256)
 
 Issue #256 investigated whether `kernel/mm/page.tkb`'s per-page generation
