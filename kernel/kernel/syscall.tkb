@@ -834,7 +834,7 @@ fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
 
 fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
                           timeout_address: usize, sigmask_address: usize)
-        -> SyscallAction !{may_block} {
+        -> SyscallAction !{unsafe} {
     if (raw_nfds == 0) { return SyscallAction::Resume(0); }
     if (raw_nfds >= 0 && raw_nfds < POLL_MAX) {
       let nfds: {0..<POLL_MAX as usize} = raw_nfds;
@@ -2688,19 +2688,16 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
     match page_alloc() {
         PageAllocResult::OutOfMemory => { return false; }
         PageAllocResult::Allocated(page) => {
-            let phys: usize = page_physical_address(page);
-            match user_pte_write(probe_index, phys | USER_RW_XN_FLAGS) {
+            match address_space_map_page(
+                    0, probe_index, page, USER_RW_XN_FLAGS) {
                 AddressSpacePteWriteResult::Invalid => {
-                    page_free(page);
                     return false;
                 }
                 AddressSpacePteWriteResult::OutOfMemory => {
-                    page_free(page);
                     return false;
                 }
                 AddressSpacePteWriteResult::Written => {}
             }
-            user_tlb_invalidate(USER_TEXT_VA + probe_index * PAGE_SIZE);
             let oldact_va: usize = USER_TEXT_VA + probe_index * PAGE_SIZE;
 
             let mut ok: bool = true;
@@ -2741,7 +2738,6 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
 
             user_pte_clear(probe_index);
             user_tlb_invalidate(oldact_va);
-            page_free(page);
             return ok;
         }
     }

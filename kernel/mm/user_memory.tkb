@@ -18,8 +18,6 @@ const USER_RANGE_WINDOW: usize = 0x40000000;
 
 // Isolates AP/UXN/PXN/AF/nG attribute bits from the physical address in a
 // live PTE.
-const USER_PERMISSION_MASK: usize = 0xFFE0000000000FFF;
-const USER_PAGE_PHYS_MASK: usize = 0x0000FFFFFFFFF000;
 
 // GitHub issue #258: there is no longer a hardcoded L3 index for the
 // boot-time probes' own throwaway pages. `USER_PROBE_L3_INDEX = 500`
@@ -76,6 +74,7 @@ enum UserAccessMode: u8 { Read; Write; }
 // produce one, so a syscall body can no longer manufacture a *u8 out of a
 // raw integer without going through validation first.
 struct UserRange {
+    private root: usize;
     private address: usize;
     private length: usize;
 }
@@ -83,12 +82,12 @@ struct UserRange {
 must_use variant UserRangeResult { Fault; Ok(UserRange); }
 
 fn user_page_writable(pte: usize) -> bool {
-    return pte != 0 && (pte & USER_PERMISSION_MASK) == USER_RW_XN_FLAGS;
+    return address_space_pte_is_writable(pte);
 }
 
 fn user_page_readable(pte: usize) -> bool {
     if (pte == 0) { return false; }
-    let masked: usize = pte & USER_PERMISSION_MASK;
+    let masked: usize = pte & USER_PTE_PERMISSION_MASK;
     return masked == USER_RW_XN_FLAGS || masked == USER_TEXT_RX_FLAGS ||
            masked == USER_RODATA_R_FLAGS;
 }
@@ -105,7 +104,7 @@ fn user_page_allows(pte: usize, mode: UserAccessMode) -> bool {
 fn user_page_class_at(root: usize, index: usize) -> usize {
     let pte: usize = address_space_pte_read(root, index);
     if (pte == 0) { return 0; }
-    let masked: usize = pte & USER_PERMISSION_MASK;
+    let masked: usize = pte & USER_PTE_PERMISSION_MASK;
     if (masked == USER_TEXT_RX_FLAGS) { return 1; }
     if (masked == USER_RODATA_R_FLAGS) { return 2; }
     if (masked == USER_RW_XN_FLAGS) { return 3; }
@@ -130,24 +129,44 @@ fn user_range_l3_span(address: usize, length: usize) -> (bool, usize, usize) {
 fn user_range_check(root: usize, address: usize, length: usize,
                     mode: UserAccessMode) -> UserRangeResult {
     if (length == 0) {
-        let mut range: UserRange = { address, length };
+        let mut range: UserRange = { root, address, length };
         return UserRangeResult::Ok(range);
     }
     let (span_ok, first, last) = user_range_l3_span(address, length);
     if (span_ok == false) { return UserRangeResult::Fault; }
     let mut index: usize = first;
     while (index <= last) {
+        let pte: usize = address_space_pte_read(root, index);
         if (index >= USER_SPACE_PAGE_COUNT ||
-            user_page_allows(address_space_pte_read(root, index), mode) == false) {
+            (user_page_allows(pte, mode) == false &&
+             (mode != UserAccessMode::Write ||
+              address_space_pte_is_cow(pte) == false))) {
             return UserRangeResult::Fault;
         }
         index = index + 1;
     }
-    let mut range: UserRange = { address, length };
+    let mut range: UserRange = { root, address, length };
     return UserRangeResult::Ok(range);
 }
 
 fn user_range_length(range: UserRange) -> usize { return range.length; }
+
+fn user_range_resolve_cow(range: UserRange) -> bool !{unsafe} {
+    if (range.length == 0) { return true; }
+    let (span_ok, first, last) =
+        user_range_l3_span(range.address, range.length);
+    if (span_ok == false) { return false; }
+    let mut index: usize = first;
+    while (index <= last) {
+        let pte: usize = address_space_pte_read(range.root, index);
+        if (address_space_pte_is_cow(pte) &&
+            address_space_resolve_cow(range.root, index) == false) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
 
 fn copy_from_user(range: UserRange, destination: []u8) -> bool !{unsafe} {
     if (destination.len > range.length) { return false; }
@@ -159,6 +178,7 @@ fn copy_from_user(range: UserRange, destination: []u8) -> bool !{unsafe} {
 
 fn copy_to_user(range: UserRange, source: []u8) -> bool !{unsafe} {
     if (source.len > range.length) { return false; }
+    if (user_range_resolve_cow(range) == false) { return false; }
     let destination_base: *u8 = range.address as *u8;
     let destination_view =
         unsafe { destination_base[0..<range.length as isize] };
@@ -185,8 +205,10 @@ fn copy_from_user_raw(range: UserRange, destination: *u8, length: usize)
     return true;
 }
 
-fn copy_to_user_raw(range: UserRange, source: *u8, length: usize) -> bool {
+fn copy_to_user_raw(range: UserRange, source: *u8, length: usize)
+        -> bool !{unsafe} {
     if (length > range.length) { return false; }
+    if (user_range_resolve_cow(range) == false) { return false; }
     let destination_base: *u8 = range.address as *u8;
     let mut index: usize = 0;
     while (index < length) {
@@ -203,22 +225,27 @@ fn user_read_byte(range: UserRange, offset: usize) -> u8 {
     return *source_byte;
 }
 
-fn user_write_byte(range: UserRange, offset: usize, value: u8) -> bool {
+fn user_write_byte(range: UserRange, offset: usize, value: u8) -> bool !{unsafe} {
     if (offset >= range.length) { return false; }
+    if (user_range_resolve_cow(range) == false) { return false; }
     let field: *u8 = (range.address + offset) as *u8;
     *field = value;
     return true;
 }
 
-fn user_write_u32(range: UserRange, offset: usize, value: u32) -> bool {
+fn user_write_u32(range: UserRange, offset: usize, value: u32)
+        -> bool !{unsafe} {
     if (offset + 4 > range.length || offset + 4 < offset) { return false; }
+    if (user_range_resolve_cow(range) == false) { return false; }
     let field: *u32 = (range.address + offset) as *u32;
     *field = value;
     return true;
 }
 
-fn user_write_u64(range: UserRange, offset: usize, value: u64) -> bool {
+fn user_write_u64(range: UserRange, offset: usize, value: u64)
+        -> bool !{unsafe} {
     if (offset + 8 > range.length || offset + 8 < offset) { return false; }
+    if (user_range_resolve_cow(range) == false) { return false; }
     let field: *u64 = (range.address + offset) as *u64;
     *field = value;
     return true;
@@ -245,14 +272,16 @@ fn user_read_u64(range: UserRange, offset: usize) -> (bool, u64) {
 // rather than a new *u16 helper -- ppoll's pollfd.revents field is the
 // only current caller and only ever needs small (<256) bit-flag values,
 // so this avoids introducing a signed/u16 read-write pair for one use.
-fn user_write_u16(range: UserRange, offset: usize, value: usize) -> bool {
+fn user_write_u16(range: UserRange, offset: usize, value: usize)
+        -> bool !{unsafe} {
     if (offset + 2 > range.length || offset + 2 < offset) { return false; }
     let low: bool = user_write_byte(range, offset, (value & 0xFF) as u8);
     let high: bool = user_write_byte(range, offset + 1, ((value >> 8) & 0xFF) as u8);
     return low && high;
 }
 
-fn user_zero_fill(range: UserRange) -> bool {
+fn user_zero_fill(range: UserRange) -> bool !{unsafe} {
+    if (user_range_resolve_cow(range) == false) { return false; }
     let base: *u8 = range.address as *u8;
     let mut index: usize = 0;
     while (index < range.length) {
@@ -310,8 +339,6 @@ fn user_memory_boundary_probe() -> bool {
                 PageAllocResult::Allocated(text_page) => {
                     let ok: bool = user_memory_boundary_probe_run(
                         base, data_page, text_page);
-                    page_free(data_page);
-                    page_free(text_page);
                     return ok;
                 }
             }
@@ -320,17 +347,20 @@ fn user_memory_boundary_probe() -> bool {
 }
 
 fn user_memory_boundary_probe_run(base: usize,
-                                  data_page: borrow PageOwner[data],
-                                  text_page: borrow PageOwner[text]) -> bool {
-    let data_phys: usize = page_physical_address(data_page);
-    let text_phys: usize = page_physical_address(text_page);
-    match user_pte_write(base, data_phys | USER_RW_XN_FLAGS) {
-        AddressSpacePteWriteResult::Invalid => { return false; }
-        AddressSpacePteWriteResult::OutOfMemory => { return false; }
+                                  data_page: sink PageOwner[data],
+                                  text_page: sink PageOwner[text]) -> bool {
+    match address_space_map_page(0, base, data_page, USER_RW_XN_FLAGS) {
+        AddressSpacePteWriteResult::Invalid => {
+            page_free(text_page);
+            return false;
+        }
+        AddressSpacePteWriteResult::OutOfMemory => {
+            page_free(text_page);
+            return false;
+        }
         AddressSpacePteWriteResult::Written => {}
     }
-    user_tlb_invalidate(USER_TEXT_VA + base * PAGE_SIZE);
-    match user_pte_write(base + 2, text_phys | USER_TEXT_RX_FLAGS) {
+    match address_space_map_page(0, base + 2, text_page, USER_TEXT_RX_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             user_pte_clear(base);
             user_tlb_invalidate(USER_TEXT_VA + base * PAGE_SIZE);
@@ -343,7 +373,6 @@ fn user_memory_boundary_probe_run(base: usize,
         }
         AddressSpacePteWriteResult::Written => {}
     }
-    user_tlb_invalidate(USER_TEXT_VA + (base + 2) * PAGE_SIZE);
     let data_va: usize = USER_TEXT_VA + base * PAGE_SIZE;
     let text_va: usize = USER_TEXT_VA + (base + 2) * PAGE_SIZE;
 
@@ -453,8 +482,6 @@ fn user_memory_root_isolation_probe() -> bool {
                 PageAllocResult::Allocated(page_b) => {
                     let ok: bool = user_memory_root_isolation_probe_run(
                         root_a, root_b, index, va, page_a, page_b);
-                    page_free(page_a);
-                    page_free(page_b);
                     address_space_release_root(root_b);
                     address_space_release_root(root_a);
                     return ok;
@@ -466,19 +493,22 @@ fn user_memory_root_isolation_probe() -> bool {
 
 fn user_memory_root_isolation_probe_run(root_a: usize, root_b: usize,
                                         index: usize, va: usize,
-                                        page_a: borrow PageOwner[a],
-                                        page_b: borrow PageOwner[b]) -> bool {
-    let phys_a: usize = page_physical_address(page_a);
-    let phys_b: usize = page_physical_address(page_b);
+                                        page_a: sink PageOwner[a],
+                                        page_b: sink PageOwner[b]) -> bool {
     // root_a: writable (RW+XN). root_b: read-only (rodata-R). root 0: left
     // unmapped (0) at this same index the whole time.
-    match address_space_pte_write(root_a, index, phys_a | USER_RW_XN_FLAGS) {
-        AddressSpacePteWriteResult::Invalid => { return false; }
-        AddressSpacePteWriteResult::OutOfMemory => { return false; }
+    match address_space_map_page(root_a, index, page_a, USER_RW_XN_FLAGS) {
+        AddressSpacePteWriteResult::Invalid => {
+            page_free(page_b);
+            return false;
+        }
+        AddressSpacePteWriteResult::OutOfMemory => {
+            page_free(page_b);
+            return false;
+        }
         AddressSpacePteWriteResult::Written => {}
     }
-    address_space_tlb_invalidate(root_a, va);
-    match address_space_pte_write(root_b, index, phys_b | USER_RODATA_R_FLAGS) {
+    match address_space_map_page(root_b, index, page_b, USER_RODATA_R_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             address_space_pte_clear(root_a, index);
             address_space_tlb_invalidate(root_a, va);
@@ -491,7 +521,6 @@ fn user_memory_root_isolation_probe_run(root_a: usize, root_b: usize,
         }
         AddressSpacePteWriteResult::Written => {}
     }
-    address_space_tlb_invalidate(root_b, va);
 
     let mut ok: bool = true;
     match user_range_check(root_a, va, 8, UserAccessMode::Write) {

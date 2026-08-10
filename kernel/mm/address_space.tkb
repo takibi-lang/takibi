@@ -20,6 +20,13 @@ const ADDRESS_SPACE_MAX: usize = 16;
 const USER_TEXT_RX_FLAGS: usize = 0x0020000000000FC7;
 const USER_RW_XN_FLAGS: usize = 0x0060000000000F47;
 const USER_RODATA_R_FLAGS: usize = 0x0060000000000FC7;
+// Excludes USER_COW_BIT: COW pages are still readable user mappings even
+// though their software marker must make them non-writable.
+const USER_PTE_PERMISSION_MASK: usize = 0xFF60000000000FFF;
+const USER_PAGE_PHYS_MASK: usize = 0x0000FFFFFFFFF000;
+// Bits 58:55 are ignored by the AArch64 stage-1 translation hardware and
+// available to software. COW is meaningful only with a read-only user PTE.
+const USER_COW_BIT: usize = 0x0080000000000000;
 
 struct AddressSpaceBacking {
     live: bool;
@@ -221,7 +228,12 @@ fn address_space_pte_write(slot: usize, index: usize, value: usize)
 fn address_space_pte_clear(slot: usize, index: usize) {
     let l3_physical: usize = address_space_l3_physical_for_index(slot, index);
     if (l3_physical != 0) {
-        mmu_pte_write(l3_physical, index % USER_L3_PAGE_COUNT, 0);
+        let entry: usize = index % USER_L3_PAGE_COUNT;
+        let pte: usize = mmu_pte_read(l3_physical, entry);
+        if (pte != 0) {
+            mmu_pte_write(l3_physical, entry, 0);
+            page_mapping_release_physical(pte & USER_PAGE_PHYS_MASK);
+        }
     }
 }
 
@@ -237,6 +249,97 @@ fn address_space_tlb_invalidate(slot: usize, va: usize) {
     let asid: usize = address_space_asid(slot);
     if (asid != 0) {
         mmu_tlb_invalidate(asid, va);
+    }
+}
+
+fn address_space_pte_is_cow(pte: usize) -> bool {
+    return (pte & USER_COW_BIT) != 0;
+}
+
+fn address_space_pte_is_writable(pte: usize) -> bool {
+    return pte != 0 &&
+           (pte & USER_PTE_PERMISSION_MASK) == USER_RW_XN_FLAGS;
+}
+
+fn address_space_pte_cow_value(pte: usize) -> usize {
+    return (pte & USER_PAGE_PHYS_MASK) | USER_RODATA_R_FLAGS | USER_COW_BIT;
+}
+
+// Installs the first mapping of a freshly allocated page. PageOwner stays
+// linear until the fallible lazy-L3 allocation has succeeded; after that
+// point page.tkb records one runtime mapping reference for the PTE.
+fn address_space_map_page(slot: usize, index: usize,
+                          page: sink PageOwner[page_id],
+                          flags: usize) -> AddressSpacePteWriteResult {
+    let physical: usize = page_physical_address(page);
+    match address_space_pte_write(slot, index, physical | flags) {
+        AddressSpacePteWriteResult::Invalid => {
+            page_free(page);
+            return AddressSpacePteWriteResult::Invalid;
+        }
+        AddressSpacePteWriteResult::OutOfMemory => {
+            page_free(page);
+            return AddressSpacePteWriteResult::OutOfMemory;
+        }
+        AddressSpacePteWriteResult::Written => {
+            page_mapping_install(page);
+            address_space_tlb_invalidate(
+                slot, USER_TEXT_VA + index * PAGE_SIZE);
+            return AddressSpacePteWriteResult::Written;
+        }
+    }
+}
+
+// Resolves one write-protected COW PTE for this root. The new mapping is
+// completely installed before the old reference is released, preserving the
+// source bytes and making an allocation failure leave the shared PTE intact.
+fn address_space_resolve_cow(slot: usize, index: usize) -> bool !{unsafe} {
+    let old_pte: usize = address_space_pte_read(slot, index);
+    if (address_space_pte_is_cow(old_pte) == false) { return false; }
+    let old_physical: usize = old_pte & USER_PAGE_PHYS_MASK;
+    // A sibling root may already have unmapped or resolved its COW view.
+    // Once this is the sole mapping again, restoring write permission needs
+    // neither a new page nor a copy, and cannot turn memory pressure into a
+    // fault for data the process already owns exclusively.
+    if (page_mapping_refcount_physical(old_physical) == 1) {
+        match address_space_pte_write(
+                slot, index, old_physical | USER_RW_XN_FLAGS) {
+            AddressSpacePteWriteResult::Invalid => { return false; }
+            AddressSpacePteWriteResult::OutOfMemory => { return false; }
+            AddressSpacePteWriteResult::Written => {
+                address_space_tlb_invalidate(
+                    slot, USER_TEXT_VA + index * PAGE_SIZE);
+                return true;
+            }
+        }
+    }
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => { return false; }
+        PageAllocResult::Allocated(page) => {
+            if (page_copy_mapped_physical(old_physical, page) == false) {
+                page_free(page);
+                return false;
+            }
+            let new_physical: usize = page_physical_address(page);
+            match address_space_pte_write(
+                    slot, index, new_physical | USER_RW_XN_FLAGS) {
+                AddressSpacePteWriteResult::Invalid => {
+                    page_free(page);
+                    return false;
+                }
+                AddressSpacePteWriteResult::OutOfMemory => {
+                    page_free(page);
+                    return false;
+                }
+                AddressSpacePteWriteResult::Written => {
+                    page_mapping_install(page);
+                    address_space_tlb_invalidate(
+                        slot, USER_TEXT_VA + index * PAGE_SIZE);
+                    page_mapping_release_physical(old_physical);
+                    return true;
+                }
+            }
+        }
     }
 }
 
@@ -256,8 +359,7 @@ fn address_space_release_user_mappings(slot: usize) {
             for entry: usize in 0..<USER_L3_PAGE_COUNT {
                 let pte: usize = mmu_pte_read(l3_physical, entry);
                 if (pte != 0) {
-                    page_transferred_release_physical(
-                        pte & 0x0000FFFFFFFFF000);
+                    page_mapping_release_physical(pte & USER_PAGE_PHYS_MASK);
                     mmu_pte_write(l3_physical, entry, 0);
                 }
             }
@@ -339,20 +441,14 @@ fn user_tlb_invalidate(va: usize) {
 
 fn process_address_space_probe_map(
         root: usize, index: usize, page: sink PageOwner[page_id]) -> bool {
-    let physical: usize = page_physical_address(page);
-    match address_space_pte_write(root, index, physical | USER_RW_XN_FLAGS) {
+    match address_space_map_page(root, index, page, USER_RW_XN_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
-            page_free(page);
             return false;
         }
         AddressSpacePteWriteResult::OutOfMemory => {
-            page_free(page);
             return false;
         }
         AddressSpacePteWriteResult::Written => {
-            address_space_tlb_invalidate(
-                root, USER_TEXT_VA + index * PAGE_SIZE);
-            page_owner_transfer_index(page);
             return true;
         }
     }

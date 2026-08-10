@@ -50,6 +50,10 @@
 use "kernel/lib/freelist.tkb";
 
 const PAGE_SIZE: usize = 4096;
+// At most ADDRESS_SPACE_MAX (16) roots can each hold every page in the
+// 262144-page user window. This is the real upper bound for one physical
+// page's user mappings, so retain rejects overflow instead of wrapping.
+const PAGE_MAP_REF_MAX: usize = 4194304;
 // 204800 pages * 4096 bytes = 800 MiB of real physical page content,
 // starting at usable_ram_start -- comfortably under this board's ~1020 MiB
 // real total even after adding usable_ram_start's own offset (kernel
@@ -66,6 +70,7 @@ extern symbol usable_ram_start;
 // here, not as a new parallel array.
 struct PageMeta {
     occupied: bool;
+    map_refcount: usize;
 }
 
 // GitHub issue #253 follow-up (2026-08-09): wraps FreelistCore(N), the
@@ -108,6 +113,7 @@ fn page_allocator_init() {
     let meta = boot_page_pool.meta;   // issue #15: struct-embedded array
     for i: isize in 0..<(BOOT_PAGE_COUNT as isize) {   // field decays to raw pointer,
         meta[i].occupied = false;           // isize index (not usize)
+        meta[i].map_refcount = 0;
     }
     boot_page_pool.double_remove_count = 0;
 }
@@ -122,6 +128,7 @@ fn page_alloc() -> PageAllocResult {
                 let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
                 let meta = boot_page_pool.meta;   // issue #15, as above
                 meta[checked as isize].occupied = true;
+                meta[checked as isize].map_refcount = 0;
                 return PageAllocResult::Allocated(
                     page_owner_new(checked, generation));
             }
@@ -143,6 +150,7 @@ fn page_free(owner: sink PageOwner[page]) {
         return;
     }
     meta[index as isize].occupied = false;
+    meta[index as isize].map_refcount = 0;
     let core: *FreelistCore(BOOT_PAGE_COUNT) = &boot_page_pool.core;
     freelist_core_remove(core,
                          freelist_owner_new(index, owner.generation));
@@ -208,6 +216,82 @@ fn page_owner_transfer_index(owner: sink PageOwner[page])
     return owner.index;
 }
 
+// A user PTE owns one mapping reference rather than a PageOwner. The first
+// successful mapping consumes the linear allocator owner; later COW mappings
+// retain by physical address after validating that this is still a mapped
+// page from this allocator.
+fn page_mapping_install(owner: sink PageOwner[page]) {
+    let index: {0..<BOOT_PAGE_COUNT as usize} = owner.index;
+    let meta = boot_page_pool.meta;
+    meta[index as isize].map_refcount = 1;
+    page_owner_transfer_index(owner);
+}
+
+fn page_mapping_retain_physical(physical: usize) -> bool {
+    let base: usize = usable_ram_start;
+    let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
+    if (physical < base || physical >= base + pool_bytes ||
+        (physical - base) % PAGE_SIZE != 0) {
+        return false;
+    }
+    let index: usize = (physical - base) / PAGE_SIZE;
+    if (index < BOOT_PAGE_COUNT) {
+        let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+        let meta = boot_page_pool.meta;
+        let current: usize = meta[checked as isize].map_refcount;
+        if (meta[checked as isize].occupied == false ||
+            current == 0 || current >= PAGE_MAP_REF_MAX) {
+            return false;
+        }
+        meta[checked as isize].map_refcount = current + 1;
+        return true;
+    }
+    return false;
+}
+
+fn page_mapping_refcount_physical(physical: usize) -> usize {
+    let base: usize = usable_ram_start;
+    let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
+    if (physical < base || physical >= base + pool_bytes ||
+        (physical - base) % PAGE_SIZE != 0) {
+        return 0;
+    }
+    let index: usize = (physical - base) / PAGE_SIZE;
+    if (index < BOOT_PAGE_COUNT) {
+        let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+        let meta = boot_page_pool.meta;
+        if (meta[checked as isize].occupied) {
+            return meta[checked as isize].map_refcount;
+        }
+    }
+    return 0;
+}
+
+fn page_mapping_release_physical(physical: usize) {
+    let base: usize = usable_ram_start;
+    let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
+    if (physical < base || physical >= base + pool_bytes ||
+        (physical - base) % PAGE_SIZE != 0) {
+        return;
+    }
+    let index: usize = (physical - base) / PAGE_SIZE;
+    if (index < BOOT_PAGE_COUNT) {
+        let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+        let meta = boot_page_pool.meta;
+        let current: usize = meta[checked as isize].map_refcount;
+        if (meta[checked as isize].occupied == false || current == 0) {
+            boot_page_pool.double_remove_count =
+                boot_page_pool.double_remove_count + 1;
+            return;
+        }
+        let next: usize = current - 1;
+        meta[checked as isize].map_refcount = next;
+        if (next == 0) {
+            page_transferred_release(checked);
+        }
+    }
+}
+
 // Generation-agnostic: the double-free check below only reads the occupancy
 // bit. The coarser owner that called page_owner_transfer_index only kept the
 // index, so a fabricated generation is still used for the free-list link.
@@ -219,6 +303,7 @@ fn page_transferred_release(index: {0..<BOOT_PAGE_COUNT as usize}) {
         return;
     }
     meta[index as isize].occupied = false;
+    meta[index as isize].map_refcount = 0;
     let core: *FreelistCore(BOOT_PAGE_COUNT) = &boot_page_pool.core;
     freelist_core_remove(core, freelist_owner_new(index, 0));
 }

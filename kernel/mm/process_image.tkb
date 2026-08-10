@@ -97,19 +97,15 @@ fn process_image_pte_invalidate(index: usize) {
 // contract; the failure arm returns the still-owned physical page directly.
 fn process_image_install_page(page: sink PageOwner[page_id],
                               index: usize, flags: usize) -> bool {
-    let physical: usize = page_physical_address(page);
-    match process_image_pte_write(index, physical | flags) {
+    match address_space_map_page(
+            process_image_target_root, index, page, flags) {
         AddressSpacePteWriteResult::Invalid => {
-            page_free(page);
             return false;
         }
         AddressSpacePteWriteResult::OutOfMemory => {
-            page_free(page);
             return false;
         }
         AddressSpacePteWriteResult::Written => {
-            process_image_pte_invalidate(index);
-            page_owner_transfer_index(page);
             return true;
         }
     }
@@ -298,48 +294,53 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
     for l3_index: usize in 0..<USER_SPACE_PAGE_COUNT {
         let parent_pte: usize = address_space_pte_read(source, l3_index);
         if (parent_pte != 0) {
-            match page_alloc() {
-                PageAllocResult::OutOfMemory => {
+            let parent_physical: usize = parent_pte & USER_PAGE_PHYS_MASK;
+            if (page_mapping_retain_physical(parent_physical) == false) {
+                process_clone_vm_rollback();
+                return ProcessCloneVmResult::OutOfMemory;
+            }
+            let mut child_pte: usize = parent_pte;
+            if (address_space_pte_is_writable(parent_pte)) {
+                child_pte = address_space_pte_cow_value(parent_pte);
+            }
+            match address_space_pte_write(dest_root, l3_index, child_pte) {
+                AddressSpacePteWriteResult::Invalid => {
+                    page_mapping_release_physical(parent_physical);
                     process_clone_vm_rollback();
                     return ProcessCloneVmResult::OutOfMemory;
                 }
-                PageAllocResult::Allocated(child_page) => {
-                    let parent_physical: usize =
-                        parent_pte & 0x000000FFFFFFF000;
-                    if (page_copy_mapped_physical(
-                            parent_physical, child_page) == false) {
-                        page_free(child_page);
-                        process_clone_vm_rollback();
-                        return ProcessCloneVmResult::OutOfMemory;
-                    }
-                    let child_physical: usize =
-                        page_physical_address(child_page);
-                    let child_pte: usize = child_physical |
-                        (parent_pte & 0xFFFFFF0000000FFF);
-                    match address_space_pte_write(
-                            dest_root, l3_index, child_pte) {
-                        AddressSpacePteWriteResult::Invalid => {
-                            page_free(child_page);
-                            process_clone_vm_rollback();
-                            return ProcessCloneVmResult::OutOfMemory;
-                        }
-                        AddressSpacePteWriteResult::OutOfMemory => {
-                            page_free(child_page);
-                            process_clone_vm_rollback();
-                            return ProcessCloneVmResult::OutOfMemory;
-                        }
-                        AddressSpacePteWriteResult::Written => {
-                            address_space_tlb_invalidate(
-                                dest_root, USER_TEXT_VA + l3_index * PAGE_SIZE);
-                            page_owner_transfer_index(child_page);
-                            clone_page_count = clone_page_count + 1;
-                            if (l3_index >=
-                                    process_image_record[clone_src].stack_low_page &&
-                                l3_index < process_stack_top_page() &&
-                                l3_index < clone_stack_lowest_l3) {
-                                clone_stack_lowest_l3 = l3_index;
+                AddressSpacePteWriteResult::OutOfMemory => {
+                    page_mapping_release_physical(parent_physical);
+                    process_clone_vm_rollback();
+                    return ProcessCloneVmResult::OutOfMemory;
+                }
+                AddressSpacePteWriteResult::Written => {
+                    address_space_tlb_invalidate(
+                        dest_root, USER_TEXT_VA + l3_index * PAGE_SIZE);
+                    if (address_space_pte_is_writable(parent_pte)) {
+                        match address_space_pte_write(
+                                source, l3_index,
+                                address_space_pte_cow_value(parent_pte)) {
+                            AddressSpacePteWriteResult::Invalid => {
+                                process_clone_vm_rollback();
+                                return ProcessCloneVmResult::OutOfMemory;
+                            }
+                            AddressSpacePteWriteResult::OutOfMemory => {
+                                process_clone_vm_rollback();
+                                return ProcessCloneVmResult::OutOfMemory;
+                            }
+                            AddressSpacePteWriteResult::Written => {
+                                address_space_tlb_invalidate(
+                                    source, USER_TEXT_VA + l3_index * PAGE_SIZE);
                             }
                         }
+                    }
+                    clone_page_count = clone_page_count + 1;
+                    if (l3_index >=
+                            process_image_record[clone_src].stack_low_page &&
+                        l3_index < process_stack_top_page() &&
+                        l3_index < clone_stack_lowest_l3) {
+                        clone_stack_lowest_l3 = l3_index;
                     }
                 }
             }
@@ -413,31 +414,23 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     process_image_target_root = 0;
     if (address_space_is_live(1)) { return false; }
     if (address_space_ensure_root(1) == false) { return false; }
-    let mut root0_page_index: usize = BOOT_PAGE_COUNT;
     match page_alloc() {
         PageAllocResult::OutOfMemory => {
             address_space_release_root(1);
             return false;
         }
         PageAllocResult::Allocated(stack_page) => {
-            let phys: usize = page_physical_address(stack_page);
-            match address_space_pte_write(
-                    0, process_stack_top_page(), phys | USER_RW_XN_FLAGS) {
+            match address_space_map_page(
+                    0, process_stack_top_page(), stack_page, USER_RW_XN_FLAGS) {
                 AddressSpacePteWriteResult::Invalid => {
-                    page_free(stack_page);
                     address_space_release_root(1);
                     return false;
                 }
                 AddressSpacePteWriteResult::OutOfMemory => {
-                    page_free(stack_page);
                     address_space_release_root(1);
                     return false;
                 }
                 AddressSpacePteWriteResult::Written => {
-                    address_space_tlb_invalidate(
-                        0, USER_TEXT_VA +
-                        process_stack_top_page() * PAGE_SIZE);
-                    root0_page_index = page_owner_transfer_index(stack_page);
                 }
             }
         }
@@ -453,6 +446,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     process_image_record[0].heap_page_count = PROCESS_HEAP_PAGES_DEFAULT;
 
     let mut ok: bool = true;
+    let mut cow_parent_physical: usize = 0;
     match process_image_clone_vm_begin(1) {
         ProcessCloneVmResult::OutOfMemory => { ok = false; }
         ProcessCloneVmResult::Copied => {}
@@ -460,6 +454,31 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
 
     if (ok) {
         process_image_activate_root(1);
+        // fork must initially share the parent's top stack page, with both
+        // PTEs marked COW. A simulated EL0 write-permission fault then gives
+        // only root 1 a private writable page while root 0 retains the
+        // original shared frame.
+        let top_page: usize = process_stack_top_page();
+        let parent_before: usize = address_space_pte_read(0, top_page);
+        let child_before: usize = address_space_pte_read(1, top_page);
+        if ((parent_before & USER_PAGE_PHYS_MASK) !=
+                    (child_before & USER_PAGE_PHYS_MASK) ||
+            address_space_pte_is_cow(parent_before) == false ||
+            address_space_pte_is_cow(child_before) == false) {
+            ok = false;
+        }
+        cow_parent_physical = parent_before & USER_PAGE_PHYS_MASK;
+        // EC=0x24, WnR=1, DFSC=0x0f: EL0 write permission fault on the
+        // child's present COW PTE.
+        let cow_esr: usize = 0x9000004F;
+        let cow_fault: usize = USER_TEXT_VA + top_page * PAGE_SIZE;
+        if (ok && (process_image_handle_data_abort(cow_esr, cow_fault) == false ||
+            address_space_pte_is_cow(address_space_pte_read(1, top_page)) ||
+            address_space_pte_is_writable(address_space_pte_read(1, top_page)) == false ||
+            (address_space_pte_read(0, top_page) & USER_PAGE_PHYS_MASK) ==
+                (address_space_pte_read(1, top_page) & USER_PAGE_PHYS_MASK))) {
+            ok = false;
+        }
         // EC=0x24 (data abort from a lower EL), DFSC=0x07 (translation
         // fault, level 3) for a missing PTE in the already-populated top
         // L3 branch.
@@ -489,12 +508,23 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         ProcessCloneVmReapResult::Missing => {}
         ProcessCloneVmReapResult::Reaped => {}
     }
+    // Once the child mapping is reaped, the parent owns its original COW
+    // page alone. Resolving it must restore write permission in place rather
+    // than allocate another page under memory pressure.
+    let parent_after_reap: usize =
+        address_space_pte_read(0, process_stack_top_page());
+    if (ok && (page_mapping_refcount_physical(cow_parent_physical) != 1 ||
+        address_space_pte_is_cow(parent_after_reap) == false ||
+        address_space_resolve_cow(0, process_stack_top_page()) == false ||
+        address_space_pte_is_writable(
+            address_space_pte_read(0, process_stack_top_page())) == false ||
+        (address_space_pte_read(0, process_stack_top_page()) &
+            USER_PAGE_PHYS_MASK) != cow_parent_physical)) {
+        ok = false;
+    }
     address_space_pte_clear(0, process_stack_top_page());
     address_space_tlb_invalidate(
         0, USER_TEXT_VA + process_stack_top_page() * PAGE_SIZE);
-    if (root0_page_index < BOOT_PAGE_COUNT) {
-        page_transferred_release(root0_page_index);
-    }
     process_image_record[0].stack_growth_active = false;
     process_image_record[0].active_page_count = 0;
     process_image_record[0].stack_lowest_l3 = process_stack_top_page();
@@ -856,6 +886,18 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
     let root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} = process_image_root_index();
     let exception_class: usize = (esr >> 26) & 0x3F;
     let fault_status: usize = esr & 0x3F;
+    // A COW write is a level-3 permission fault (0x0f). It must be handled
+    // before translation-fault stack growth: both refer to an EL0 data abort,
+    // but only the COW PTE already names a present shared physical page.
+    if (exception_class == 0x24 && fault_status == 0x0F &&
+        (esr & (1 << 6)) != 0) {
+        if (fault_address < USER_TEXT_VA ||
+            fault_address >= USER_TEXT_VA + USER_SPACE_PAGE_COUNT * PAGE_SIZE) {
+            return false;
+        }
+        let index: usize = (fault_address - USER_TEXT_VA) / PAGE_SIZE;
+        return address_space_resolve_cow(process_image_target_root, index);
+    }
     // A missing PTE inside an existing L3 is a level-3 translation fault
     // (0x07). A stack expansion into an unpopulated lazy-L3 branch faults
     // one level earlier (0x06); both are valid only after the range checks

@@ -15,6 +15,43 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-10: Private fork copy-on-write establishes multi-mapped pages (#262)
+
+The post-#254 page-table walk is the one authoritative mapping record: a
+successful initial PTE installation consumes `PageOwner`, while normal
+address-space cleanup walks L2/L3 entries and releases physical pages.
+The earlier `ProcessSpaceMappingOwner` model no longer exists, so restoring
+it would have created a second, divergent ownership record. Instead,
+`PageMeta` now carries a bounded runtime mapping-reference count beside its
+occupancy bit. `PageOwner` still protects the unique allocation-to-first-map
+transition; once a page has a PTE, `page_mapping_retain_physical` and
+`page_mapping_release_physical` validate the allocator range, occupancy, and
+nonzero count, and return the page only on the final release. The maximum
+count is the real system bound: 16 roots times 262144 user pages.
+
+`fork()` now retains every present parent physical page rather than copying
+it eagerly. Writable parent and child PTEs are both changed to read-only
+software-COW PTEs, with an ASID-local TLB invalidation for each changed VA.
+Already-read-only text and rodata pages are shared without a COW marker.
+An EL0 write permission fault resolves only a marked COW PTE: it allocates
+and copies a new page, installs that page writable in the faulting root,
+invalidates that root's VA, and drops that root's old mapping reference.
+Translation-fault stack growth remains separate. Kernel copy-to-user helpers
+perform the same resolution first, so a syscall cannot silently write the
+shared page through EL1 permissions.
+If a child has already unmapped or split its view, the remaining root's
+reference count is one; resolving its COW PTE simply restores write
+permission in place without allocating or copying. This avoids converting a
+normal write after fork-and-reap into an avoidable out-of-memory fault.
+
+The clone-growth probe now verifies the initial shared physical frame and
+both COW markers, then injects the real lower-EL write-permission syndrome
+into the child path. It requires the child to become writable on a different
+physical page while the parent retains the original. After reaping the child,
+the same probe verifies that the parent resolves in place with the same
+physical page. QEMU integration also executes ordinary forked userspace,
+which reaches the hardware fault path when forked code writes stack state.
+
 ### 2026-08-10: Dynamic user L3 tables remove the 2 MiB process window (#254)
 
 Each `AddressSpaceBacking` still owns the fixed per-root L1 page, L2 page,
