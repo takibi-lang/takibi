@@ -3941,6 +3941,30 @@ let infer_tests = [
          }
        }");
 
+  (* GitHub issue #209: an enum-typed STRUCT FIELD reached through a
+     pointer to that struct (an array element here) used to yield the
+     field POINTER typed as the enum itself, so `match` emitted
+     `switch ptr` and `== Enum::Variant` emitted a pointer-vs-integer
+     icmp -- both rejected by LLVM's verifier, crashing the compiler.
+     A plain `return` of the same field always worked (the return path
+     loads through the pointer), which is what kept this hidden. *)
+  Alcotest.test_case "enum struct field read through an array element codegens as a load" `Quick
+    (expect_codegen_ok
+      "enum Color: u8 { Red; Green; Blue; }
+       struct Item { tag: Color; value: usize; }
+       const ITEM_MAX: usize = 4;
+       let mut enum_field_items: [Item; ITEM_MAX];
+       fn enum_field_match(slot: {0..<ITEM_MAX as usize}) -> usize {
+         match enum_field_items[slot].tag {
+           Color::Red => { return 0; }
+           Color::Green => { return 1; }
+           Color::Blue => { return 2; }
+         }
+       }
+       fn enum_field_compare(slot: {0..<ITEM_MAX as usize}) -> bool {
+         return enum_field_items[slot].tag == Color::Red;
+       }");
+
   (* -- OR-pattern match arms (GitHub issue #156) ---------------------- *)
 
   Alcotest.test_case "int match OR-pattern arm type-checks, positive and negative mixed" `Quick

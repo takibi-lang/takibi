@@ -3116,6 +3116,24 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
            if through_io then set_volatile true v;
            (TypeVariant name, v)
+       | TypeNamed ename when Hashtbl.mem enum_underlying ename ->
+           (* Enum struct field reached through a POINTER to the struct
+              (an array element, a *Struct parameter) rather than an
+              in-register struct value: load the underlying integer, the
+              same distinction the array-element Index case above already
+              makes for a bare enum element. Falling through to the
+              "nested struct field" branch below returned the field
+              POINTER typed as the enum itself, which every consumer then
+              used as if it were the value: `match` emitted `switch ptr`
+              and `== Enum::Variant` emitted a pointer-vs-integer icmp,
+              both rejected by LLVM's verifier (an internal compiler
+              error rather than a miscompile). A `return` of such a field
+              happened to work anyway -- the return path coerces the
+              pointer by loading it -- which is why this stayed hidden. *)
+           let ut = Hashtbl.find enum_underlying ename in
+           let v = build_load (ltype_of_ast ut) field_ptr fname builder in
+           if through_io then set_volatile true v;
+           (field_ty, v)
        | TypeNamed _ ->
            (* Nested struct field: return the pointer as-is (same approach as array decay) *)
            (TypePtr field_ty, field_ptr)
