@@ -91,7 +91,18 @@ const KERNEL_SOCKET_FD_MAX: usize = 8;
 
 private let mut syscall_ext2_mount: Ext2Mount;
 private let mut syscall_ext2_ready: bool;
-private let mut syscall_file_buffer: [u8; KERNEL_BLOCK_SIZE];
+// GitHub issue #209: every file read is staged through this one buffer, so
+// its size is the largest file the kernel can hand to userspace at all. It
+// used to be exactly KERNEL_BLOCK_SIZE, which silently capped that at a
+// single ext2 block: ext2_read_small_file() rejects an inode larger than
+// the destination outright, so the moment boot policy in /init.sh grew past
+// 1024 bytes, read(2) returned EINVAL and ash exited 0 having executed
+// nothing at all -- no error, no output. ext2_read_small_file() already
+// reads block by block, so only this buffer had to grow. Writes are a
+// separate path and keep their own one-block limit, which comes from
+// ext2_resize_small_file()'s own contract rather than from this buffer.
+const KERNEL_FILE_READ_MAX: usize = 8192;
+private let mut syscall_file_buffer: [u8; KERNEL_FILE_READ_MAX];
 private let mut syscall_path_buffer: [u8; 256];
 private let mut syscall_sockaddr_buffer: [u8; 28];
 private let mut syscall_open_calls: usize;
