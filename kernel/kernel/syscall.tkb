@@ -36,6 +36,7 @@ const LINUX_ECHILD: usize = 0xFFFFFFFFFFFFFFF6;
 const LINUX_F_DUPFD: usize = 0;
 const LINUX_F_SETFD: usize = 2;
 const LINUX_F_DUPFD_CLOEXEC: usize = 1030;
+const LINUX_WNOHANG: usize = 1;
 
 const LINUX_PROT_READ: usize = 1;
 const LINUX_PROT_WRITE: usize = 2;
@@ -2264,11 +2265,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // kernel/kernel/process.tkb's own child-exit/wait bookkeeping is
         // now per-slot too, so any live process may legitimately wait4()
         // for its own live child, not just the root.
-        if (x0 != 0xFFFFFFFFFFFFFFFF &&
-            x0 != expected_pid || x2 != 0) {
+        if ((x0 != 0xFFFFFFFFFFFFFFFF &&
+             x0 != expected_pid) ||
+            (x2 != 0 && x2 != LINUX_WNOHANG)) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
         if (kernel_process_child_waitable() == false) {
+            if (x2 == LINUX_WNOHANG) {
+                return SyscallAction::Resume(0);
+            }
             // GitHub issue #244: block for real instead of returning
             // -ECHILD immediately -- only reached when the scheduler
             // preempted the child and switched back to this parent

@@ -866,7 +866,7 @@ kernel_process_execution_reset();
     if (distro_plan_ready) {
         match process_image_map(
                 saved_distro_plan,
-                "busybox\0sh\0-c\0/echo child-exec-ok; exit 0\0" as []u8,
+                "busybox\0sh\0-c\0/echo child-exec-ok; exit $?\0" as []u8,
                 4) {
             ProcessImageMapResult::InvalidImage => {
                 kernel_boot_log("child exec map: invalid image\n");
