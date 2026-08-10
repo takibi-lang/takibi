@@ -79,6 +79,22 @@ pool is now production state; its probe was adjusted to test only currently
 free ASIDs so it never reinitializes or invalidates root 0. `make
 kernelcheck-qemu` passed all 31 views after the change.
 
+### 2026-08-10: Per-process descriptor state becomes ProcessFdContext (#264, third stage)
+
+`kernel/kernel/fd_table.tkb` kept each process's descriptor kind, shared-object
+slot, generation, close-on-exec bit, and heap break in separate globals. Four
+of those arrays used a flat `process * PROCESS_FD_MAX + fd` index, so their
+relationship was represented only by arithmetic rather than by the data
+model.
+
+`ProcessFdContext` now owns one descriptor-sized array for each descriptor
+field plus that process's heap break, and `process_fd_context` is the sole
+per-process table. Every access first resolves the process context and then
+indexes its descriptor field. The shared object pool and its object arrays
+remain separate shared state. Clone preserves its preflight, copy, and
+retain sequence; close and destroy preserve their release behavior; public
+function signatures and the existing probe stay unchanged.
+
 ### 2026-08-10: Page allocator metadata keeps occupancy, not the owner generation (#256)
 
 Issue #256 investigated whether `kernel/mm/page.tkb`'s per-page generation
