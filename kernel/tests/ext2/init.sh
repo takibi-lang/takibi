@@ -30,15 +30,15 @@ else
     exit 1
 fi
 
-# The ext2 reader currently implements its 12 direct block pointers, so this
-# exact 12 KiB file is the largest regular file it supports today. `cat`
-# reaches the sendfile(2) path; it must stream all twelve blocks rather than
-# treating the kernel's one-block staging area as a whole-file limit.
-/cat /read_max.txt
+# This exact 13 KiB file reaches i_block[12], ext2's first singly-indirect
+# entry after all twelve direct blocks. `cat` reaches sendfile(2), proving
+# the file reader streams through the indirect pointer rather than treating
+# either direct pointers or the one-block staging area as a whole-file limit.
+/cat /read_indirect.txt
 if [ "$?" -eq 0 ]; then
-    echo "busybox max-file exit: 0"
+    echo "busybox indirect-file exit: 0"
 else
-    echo "busybox max-file failed"
+    echo "busybox indirect-file failed"
     exit 1
 fi
 

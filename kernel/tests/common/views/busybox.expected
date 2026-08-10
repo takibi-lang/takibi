@@ -1,3 +1,3 @@
 hello from ext2
 busybox exit: 0
-busybox max-file exit: 0
+busybox indirect-file exit: 0

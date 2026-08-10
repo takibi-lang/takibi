@@ -37,11 +37,12 @@ let mut ext2_mount_ready: bool;
 // GitHub issue #249: one shared scratch buffer for whichever ELF
 // execve() is currently resolving, replacing the old per-binary
 // dedicated buffer (originally just user_payload_image, sized for one
-// specific known file). Sized to ext2's own EXT2_MAX_FILE_SIZE cap
-// (kernel/fs/ext2/ext2.tkb) since ext2_read_small_file already enforces
-// inode.size <= destination.len before ever returning Read -- any
-// standalone ELF small enough to live in this filesystem fits. Safe to
-// share across every exec: distro_elf_validate stores only a raw
+// specific known file). The generic filesystem reader can now handle
+// singly-indirect files, but execve intentionally accepts only a bounded
+// ELF image until process_image_map can stream ELF segments from ext2.
+// Keep this separate from EXT2_MAX_FILE_SIZE: enlarging a global scratch
+// array would only recreate a whole-file staging limit at a much larger
+// size. Safe to share across every exec: distro_elf_validate stores only a raw
 // (address, length) pointer pair into the resulting DistroElfLoadPlan
 // (kernel/fs/elf64.tkb), but process_image_map_in_root fully copies out
 // every PT_LOAD segment from this buffer synchronously, within the same
@@ -50,7 +51,8 @@ let mut ext2_mount_ready: bool;
 // EL0 exception-return path for one specific child, never from fn
 // main()'s boot loop, never concurrent with another exec on today's
 // single-core-dispatch model).
-let mut exec_resolve_image: [u8; EXT2_MAX_FILE_SIZE];
+const EXEC_RESOLVE_IMAGE_MAX: usize = 12288;
+let mut exec_resolve_image: [u8; EXEC_RESOLVE_IMAGE_MAX];
 
 fn exec_resolve_image_prefix(length: usize) -> []u8 !{unsafe} {
     let image_bytes: []u8 = exec_resolve_image as []u8;

@@ -2,17 +2,16 @@ use "kernel/drivers/block/memory.tkb";
 
 const EXT2_SUPERBLOCK_BLOCK: usize = 1;
 const EXT2_MAGIC: u16 = 0xEF53;
-// GitHub issue #243: i_block[0..11] are always plain direct block pointers
-// in the ext2 on-disk format (real e2fsprogs tooling never touches the
-// i_block[12] singly-indirect pointer below this size -- confirmed with
-// `debugfs stat` against files up to 12 KiB). Regular-file reads support up
-// to this many direct blocks; indirect blocks remain unsupported, and
-// directories/symlinks are unaffected (still capped at one block).
+// i_block[0..11] are plain direct block pointers. i_block[12] is a
+// singly-indirect pointer block containing 256 u32 block numbers on this
+// 1 KiB ext2 volume. Directories and symlinks remain one-block-only; this
+// expansion applies exclusively to regular-file reads.
 const EXT2_MAX_DIRECT_BLOCKS: usize = 12;
-// EXT2_MAX_DIRECT_BLOCKS * KERNEL_BLOCK_SIZE (12 * 1024). Top-level const
-// initializers here don't support arithmetic over other consts, so this
-// stays a literal -- same pattern as KERNEL_USER_PAYLOAD_LEN elsewhere.
-const EXT2_MAX_FILE_SIZE: usize = 12288;
+const EXT2_SINGLE_INDIRECT_BLOCKS: usize = 256;
+// (12 + 256) * 1024. Top-level const initializers here don't support
+// arithmetic over other consts, so these remain literals.
+const EXT2_DIRECT_FILE_SIZE: usize = 12288;
+const EXT2_MAX_FILE_SIZE: usize = 274432;
 
 private let mut ext2_metadata_block: [u8; KERNEL_BLOCK_SIZE];
 private let mut ext2_file_block: [u8; KERNEL_BLOCK_SIZE];
@@ -203,6 +202,7 @@ fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
     let mode: usize = ext2_u16(inode_bytes, 0) as usize;
     let size: usize = ext2_u32(inode_bytes, 4) as usize;
     let direct_block0: usize = ext2_u32(inode_bytes, 40) as usize;
+    let indirect_block: usize = ext2_u32(inode_bytes, 88) as usize;
     let file_type: usize = mode & 0xF000;
     // GitHub issue #243: only regular files may span multiple direct
     // blocks. Directories and symlinks keep the original one-block cap --
@@ -214,6 +214,8 @@ fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
         (file_type != 0x8000 && file_type != 0x4000 && file_type != 0xA000) ||
         ((file_type == 0x8000 || file_type == 0x4000) &&
          (direct_block0 == 0 || direct_block0 >= mount.filesystem_blocks)) ||
+        (file_type == 0x8000 && size > EXT2_DIRECT_FILE_SIZE &&
+         (indirect_block == 0 || indirect_block >= mount.filesystem_blocks)) ||
         (file_type == 0xA000 && size > 60)) {
         return Ext2InodeResult::Invalid;
     }
@@ -282,17 +284,17 @@ fn ext2_lookup_path(mount: Ext2Mount, name: []u8)
     return ext2_lookup_root(mount, name);
 }
 
-// GitHub issue #243: i_block[index] for index 0..<EXT2_MAX_DIRECT_BLOCKS,
-// re-read from the inode's own metadata block on every call rather than
-// cached, matching this file's existing pattern (e.g. ext2_resize_small_file
-// re-reading inode.table_block after writing data blocks) of never trusting
-// a stale copy of a block ext2_metadata_block may have been overwritten
-// with in between. Returns 0 (never a valid block number -- block 0 is the
-// boot block, outside any ext2 filesystem's own addressable range here)
-// for an out-of-range index or a failed read.
+// Resolve a regular file's i_block[index]. The inode table is re-read on
+// every call rather than trusting a cached metadata block. Direct entries
+// reside at byte 40; i_block[12] at byte 88 names a singly-indirect block
+// of 256 little-endian u32 entries. Returns 0 (never a valid data block)
+// for an out-of-range index or any failed metadata read.
 fn ext2_inode_block_pointer(mount: Ext2Mount, inode: Ext2Inode,
                             index: usize) -> usize {
-    if (index >= EXT2_MAX_DIRECT_BLOCKS) { return 0; }
+    if (index >= EXT2_MAX_DIRECT_BLOCKS +
+                 EXT2_SINGLE_INDIRECT_BLOCKS) {
+        return 0;
+    }
     match block_read(mount.device, inode.table_block,
                      ext2_metadata_block as []u8) {
         BlockIoResult::Invalid => { return 0; }
@@ -300,7 +302,20 @@ fn ext2_inode_block_pointer(mount: Ext2Mount, inode: Ext2Inode,
     }
     let inode_pointer: *u8 =
         (ext2_metadata_block as *u8) + (inode.table_offset as isize);
-    return ext2_u32(inode_pointer, 40 + index * 4) as usize;
+    if (index < EXT2_MAX_DIRECT_BLOCKS) {
+        return ext2_u32(inode_pointer, 40 + index * 4) as usize;
+    }
+    let indirect_block: usize = ext2_u32(inode_pointer, 88) as usize;
+    if (indirect_block == 0 || indirect_block >= mount.filesystem_blocks) {
+        return 0;
+    }
+    match block_read(mount.device, indirect_block,
+                     ext2_file_block as []u8) {
+        BlockIoResult::Invalid => { return 0; }
+        BlockIoResult::Ok => { }
+    }
+    return ext2_u32(ext2_file_block as *u8,
+                    (index - EXT2_MAX_DIRECT_BLOCKS) * 4) as usize;
 }
 
 fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
@@ -347,9 +362,10 @@ fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
 // operation and copy each bounded block into the user buffer, like a VFS
 // page-cache/buffer-cache read path does on larger kernels.
 //
-// Regular files are still limited by EXT2_MAX_DIRECT_BLOCKS; supporting
-// larger files is the separate on-disk-format task of walking ext2 indirect
-// block pointers, not a reason to reinstate a whole-file staging limit here.
+// Regular files are currently limited to direct plus singly-indirect blocks.
+// Doubly/triply indirect traversal is intentionally deferred until a real
+// file needs it; that independent on-disk-format extension must not be
+// confused with a whole-file staging-memory limit.
 fn ext2_read_file_chunk(mount: Ext2Mount, inode_number: usize,
                         offset: usize, destination: []u8)
         -> Ext2ReadResult !{unsafe} {

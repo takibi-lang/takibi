@@ -367,10 +367,10 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/index.html $@.tmp:/index.html
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $@.tmp:/init.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $@.tmp:/large.txt
-	dd if=/dev/zero bs=12287 count=1 status=none | tr '\0' Z >$@.read_max.tmp
-	printf '\n' >>$@.read_max.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.read_max.tmp $@.tmp:/read_max.txt
-	rm -f $@.read_max.tmp
+	dd if=/dev/zero bs=13311 count=1 status=none | tr '\0' Z >$@.read_indirect.tmp
+	printf '\n' >>$@.read_indirect.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.read_indirect.tmp $@.tmp:/read_indirect.txt
+	rm -f $@.read_indirect.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_RPI5_USER_PAYLOAD_ELF) $@.tmp:/user_payload
 	debugfs -w -R 'set_inode_field /init.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /user_payload mode 0100755' $@.tmp >/dev/null 2>&1
