@@ -22,6 +22,14 @@ else
     exit 1
 fi
 
+/uname -a
+if [ "$?" -eq 0 ]; then
+    echo "busybox uname exit: 0"
+else
+    echo "busybox uname failed"
+    exit 1
+fi
+
 # GitHub issue #241: the EL0 syscall-ABI test payload (formerly launched
 # through a dedicated flat-blob mechanism straight from the kernel's own
 # boot sequence) is a real ELF in this filesystem now, launched the same

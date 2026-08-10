@@ -608,6 +608,30 @@ fn process_image_exec_install(
     }
 }
 
+// GitHub issue #209: an applet used to be launched by the kernel itself,
+// which then unmapped the image and checked process_image_window_is_clear()
+// on the spot. Applets are children of the init script now, so their images
+// are torn down here instead -- and process_image_unmap() retargets this
+// module at root 0 on its way out, so a caller can no longer inspect the
+// root that was just emptied. Counting both reaps and clean reaps here
+// keeps that VM-hygiene assertion, and does it for every applet at once
+// rather than one hand-written check per kernel-side launch.
+private let mut process_image_exec_reap_count: usize;
+private let mut process_image_exec_reap_clean_count: usize;
+
+fn process_image_root_window_is_clear(
+        root: {0..<PROCESS_IMAGE_ROOT_MAX as usize}) -> bool {
+    for i: usize in 0..<USER_SPACE_PAGE_COUNT {
+        if (address_space_pte_read(root, i) != 0) { return false; }
+    }
+    return true;
+}
+
+fn process_image_exec_reap_evidence() -> (usize, usize) {
+    return (process_image_exec_reap_count,
+            process_image_exec_reap_clean_count);
+}
+
 fn process_image_exec_reap() {
     let guard = process_image_exec_lock(&process_image_exec_store.mutex);
     let previous: ProcessImageExecValue = stable_replace(
@@ -617,7 +641,15 @@ fn process_image_exec_reap() {
     match previous {
         ProcessImageExecValue::Empty => {}
         ProcessImageExecValue::Ready(pages) => {
+            let reaped_root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} =
+                process_image_root_index();
             process_image_unmap(pages);
+            process_image_exec_reap_count =
+                process_image_exec_reap_count + 1;
+            if (process_image_root_window_is_clear(reaped_root)) {
+                process_image_exec_reap_clean_count =
+                    process_image_exec_reap_clean_count + 1;
+            }
             // process_image_unmap only retargets later page-table writes at
             // root 0; it leaves TTBR0 on the root it just emptied. The
             // parent is resumed straight after this reap, so activate its

@@ -374,48 +374,14 @@ irq_uart_rx_unmask();
 // unmap_user_text/unmap_user_data/unmap_user_stack/address_space_free/
 // user_layout_is_correct in kernel/mm/address_space.tkb), all removed.
 {
-    // Issue #196 pre-work: run the same Alpine BusyBox static-PIE image a
-    // second time, with argv={"busybox","uname","-a"} instead of
-    // {"busybox","cat","/hello.txt"}, now that every earlier boot-time
-    // fixture has already taken its own evidence. BusyBox's uname applet
-    // calls uname(2) and then flushes its output (sysname/nodename/
-    // release/version/machine, space-separated) through musl's
-    // stdio, which on this pinned musl 1.2.6 build always goes
-    // through writev(2). Both are real implementations now (issue
-    // #196): uname(2) fills a real struct utsname and writev(2)
-    // actually reaches the UART console, so a real, non-empty
-    // BusyBox uname line should appear in this boot log.
-    if (distro_plan_ready) {
-        match process_image_map(
-                saved_distro_plan,
-                "busybox\0uname\0-a\0" as []u8,
-                3) {
-            ProcessImageMapResult::InvalidImage => {
-                kernel_boot_log("uname map: invalid image\n");
-            }
-            ProcessImageMapResult::OutOfMemory => {
-                kernel_boot_log("uname map: out of memory\n");
-            }
-            ProcessImageMapResult::Mapped(uname_pages) => {
-                let (uname_heap_start, uname_heap_limit) =
-                    process_image_heap_range(uname_pages);
-                kernel_syscall_process_configure(
-                    uname_heap_start, uname_heap_limit);
-                let uname_status: usize = run_initial_user(
-                    process_image_entry(uname_pages),
-                    process_image_stack_pointer(uname_pages));
-                if (uname_status == 0) {
-                    kernel_boot_log("busybox uname exit: 0\n");
-                } else {
-                    kernel_boot_log("busybox uname failed\n");
-                }
-                process_image_unmap(uname_pages);
-                if (process_image_window_is_clear()) {
-                    kernel_boot_log("uname unmap: clean\n");
-                }
-            }
-        }
-    }
+    // Issue #196: BusyBox's uname applet calls uname(2) and then flushes
+    // its output (sysname/nodename/release/version/machine,
+    // space-separated) through musl's stdio, which on this pinned musl
+    // 1.2.6 build always goes through writev(2). Both are real
+    // implementations, so a real, non-empty BusyBox uname line appears in
+    // this boot log. GitHub issue #209: that applet is launched by
+    // kernel/tests/ext2/init.sh as an ordinary child now, not by a second
+    // kernel-side image launch from here.
 
     if (kernel_test_shell_read) {
     // Issue #205: same distro plan, argv={"busybox","sh","-c",
@@ -638,6 +604,17 @@ irq_uart_rx_unmask();
                     }
                     if (kernel_tcp_injected_fin_recovered()) {
                         kernel_boot_log("httpd server: fin drop retransmit ok\n");
+                    }
+                    // GitHub issue #209: every applet the init script
+                    // forked and exec'd had its image torn down through
+                    // the child-exec reap path. Each of those teardowns
+                    // used to be a kernel-side launch with its own
+                    // "<applet> unmap: clean" check right after it; this
+                    // asserts the same VM hygiene for all of them at once.
+                    let (exec_reaps, exec_reaps_clean) =
+                        process_image_exec_reap_evidence();
+                    if (exec_reaps >= 1 && exec_reaps_clean == exec_reaps) {
+                        kernel_boot_log("child exec unmap: clean\n");
                     }
                     kernel_boot_log("syscall exit: 0\n");
                 } else {
