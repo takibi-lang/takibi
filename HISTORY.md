@@ -15,6 +15,33 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-10: Page allocator metadata keeps occupancy, not the owner generation (#256)
+
+Issue #256 investigated whether `kernel/mm/page.tkb`'s per-page generation
+counter was redundant because `PageOwner` is linear. The answer is split by
+which representation is being discussed. The generation stored inside
+`PageOwner` remains necessary: it is both the region witness carried by the
+linear owner and the identity used by `FreelistCore` when a slot is returned.
+It cannot be removed without changing the owner and freelist interfaces.
+
+The copy in `PageMeta` was redundant. `page_free()` consumes a linear
+`PageOwner`, but `page_transferred_release()` and
+`page_transferred_release_physical()` intentionally accept only a page index
+or physical address after ownership has been transferred into a coarser
+owner. Those integer paths still need to distinguish an occupied page from a
+free page so a double release is counted rather than corrupting the free
+chain. They do not need to compare or recover the generation value, however.
+
+`PageMeta.generation: usize` therefore became `PageMeta.occupied: bool`.
+This preserves the double-free diagnostic and the existing live-page
+accounting while reducing the page-specific metadata from 8 bytes per page
+to a one-byte occupancy value (subject to the target's struct alignment).
+The result is the smallest sound change without redesigning the intentional
+integer ownership-transfer boundaries. A future COW/shared-page design
+(`#262`) may add reference or reverse-mapping state to the same `PageMeta`
+record; it should not reintroduce a generic generation array merely for the
+linear-owner path.
+
 ### 2026-08-09: MMU root storage -- a root-0 validation bug (#263), a decoupled ASID pool, and why per-process page-table ownership was frozen behind a QEMU lane
 
 Started as a plain question -- how does `kernel/arch/arm64/mm/mmu.tkb`
