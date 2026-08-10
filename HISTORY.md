@@ -120,6 +120,20 @@ Initialization, clone failure and success bookkeeping, and exit-time reap
 retain their prior order and behavior; all function signatures remain
 unchanged.
 
+### 2026-08-10: Address-space bootstrap avoids pre-MMU vector stores (#264)
+
+The first RPi5 hardware run after the address-space migration stopped before
+UART initialization. The retained exception evidence recorded an EL1 write
+alignment fault (`ESR_EL1=0x96000061`) at `kernel_mmu_init` while clearing
+`address_space_backing`: LLVM combined the field stores into an unaligned
+128-bit store, which the RPi5 faults while its MMU is still disabled.
+
+The explicit clearing loop was redundant because `entry.S` has already
+zeroed `.bss` before calling `kernel_mmu_init`. Removing it keeps the
+bootstrap record zero-initialized without emitting a pre-MMU aggregate
+store. This is specifically a bootstrap constraint; normal record updates
+occur after the MMU is enabled.
+
 ### 2026-08-10: Page allocator metadata keeps occupancy, not the owner generation (#256)
 
 Issue #256 investigated whether `kernel/mm/page.tkb`'s per-page generation

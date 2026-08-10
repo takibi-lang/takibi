@@ -242,14 +242,9 @@ fn address_space_release_root(slot: usize) {
 fn kernel_mmu_init() {
     page_allocator_init();
     asid_pool_init();
-    for slot: usize in 0..<ADDRESS_SPACE_MAX {
-        address_space_backing[slot].live = false;
-        address_space_backing[slot].l1_physical = 0;
-        address_space_backing[slot].l2_physical = 0;
-        address_space_backing[slot].l3_physical = 0;
-        address_space_backing[slot].asid = 0;
-    }
-    address_space_active_slot = 0;
+    // entry.S cleared .bss before entering this function. Rewriting this
+    // aggregate while the MMU is off permits LLVM to use an unaligned
+    // 128-bit store on RPi5, which faults before the bootstrap root exists.
     address_space_ensure_root(0);
     kernel_mmu_activate(address_space_l1_physical(0), address_space_asid(0));
 }
