@@ -1,1 +1,0 @@
-^httpd server: (syn-ack|split request|second request|data drop|fin drop)

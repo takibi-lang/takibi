@@ -1,1 +1,0 @@
-^ext2 (image:|mount:|lookup:|read:|write:|resize:|bitmap:|owners:|create:|symlink:|multi-block:)

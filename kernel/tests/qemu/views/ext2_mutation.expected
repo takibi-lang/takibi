@@ -1,0 +1,4 @@
+ext2 resize: truncate+extend ok
+ext2 bitmap: block+inode counts ok
+ext2 owners: block+inode owners ok
+ext2 create: create+lookup+unlink ok
