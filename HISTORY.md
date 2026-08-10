@@ -15,6 +15,33 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-10: Per-slot scheduler state becomes ProcessRecord (#264, first stage)
+
+Issue #264 began with the observation that one process's state was spread
+across parallel arrays in `process.tkb`, `process_image.tkb`, `mmu.tkb`, and
+`fd_table.tkb`, all coupled only by the convention that their indices were
+the same `ProcessHandle.pool_index`. The first migration deliberately stays
+inside `kernel/kernel/process.tkb`: moving VM, page-table, and FD state in
+the same step would cross the existing `process_image -> address_space ->
+mmu` dependency direction and turn a representation cleanup into an
+unreviewable ownership redesign.
+
+`ProcessRecord` now holds the eleven scheduler/lifecycle fields that were
+parallel `KERNEL_PROCESS_MAX` arrays: saved stack pointer, runtime state,
+wait reason, parent/child links and presence flags, wait4 result state, and
+the exec-image-live flag. `ScheduledProcessOwner` and
+`ScheduledProcessState` remain the linear protocol; the stable owner store,
+slot allocator, and lazily allocated kernel-stack pages remain separate
+resources. This preserves scheduler behavior while making one record the
+single home for the ordinary mutable state of a process slot.
+
+The next stage must be designed separately: `ProcessLayout`, FD context, and
+page-table root/ASID ownership cannot be folded into this struct directly
+without first establishing an acyclic address-space ownership boundary. That
+is the prerequisite for #254's eventual Linux/NetBSD-shaped per-process page
+table ownership, not an implementation detail to hide in this first
+mechanical migration.
+
 ### 2026-08-10: Page allocator metadata keeps occupancy, not the owner generation (#256)
 
 Issue #256 investigated whether `kernel/mm/page.tkb`'s per-page generation

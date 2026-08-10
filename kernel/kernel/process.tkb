@@ -35,7 +35,8 @@ enum ProcessWaitReason: u8 { None; UartRx; ChildExit; }
 // Only kernel_stacks (below) and kernel/arch/arm64/mm/mmu.tkb's page-
 // table-root triples actually cost real per-slot memory (4096+ bytes
 // each); the plain bookkeeping arrays below cost only a few bytes per
-// slot even at this larger N, so THEY stay eagerly-sized plain arrays --
+// slot even at this larger N, so that state stays in an eagerly-sized plain
+// record array --
 // growable_pool.tkb's lazy, page_alloc()-backed growth is reserved for
 // the genuinely expensive per-slot resources, not applied uniformly just
 // because it exists. Must match kernel/mm/process_image.tkb's
@@ -62,6 +63,25 @@ struct ProcessHandle {
     private generation: usize;
 }
 
+// GitHub issue #264 first stage: keep the scheduler/lifecycle bookkeeping
+// for one process slot together. This is deliberately a plain data struct:
+// the linear ScheduledProcessOwner/state protocol, stable store, SlotMap,
+// and growable kernel-stack pool remain separate and unchanged in this
+// behavior-preserving consolidation stage.
+struct ProcessRecord {
+    saved_sp: usize;
+    state: ProcessSlotState;
+    wait_reason: ProcessWaitReason;
+    parent: ProcessHandle;
+    has_parent: bool;
+    child: ProcessHandle;
+    has_child: bool;
+    last_child_pid: usize;
+    child_exit_status: usize;
+    child_waitable: bool;
+    exec_image_live: bool;
+}
+
 variant ScheduledProcessValue {
     Empty;
     Occupied(exists process: usize. ScheduledProcessOwner[process]);
@@ -83,10 +103,20 @@ private let mut scheduled_process_store:
 // is needed because a handle crosses the scheduled_process_store lock /
 // stable_replace boundary below.
 private let mut scheduled_process_pool: SlotMap(KERNEL_PROCESS_MAX);
-private let mut scheduled_process_saved_sp: [usize; KERNEL_PROCESS_MAX];
-private let mut scheduled_process_state: [ProcessSlotState; KERNEL_PROCESS_MAX];
-private let mut scheduled_process_wait_reason:
-    [ProcessWaitReason; KERNEL_PROCESS_MAX];
+private let mut scheduled_process_records:
+    [ProcessRecord; KERNEL_PROCESS_MAX];
+
+// Keep enum field reads in their typed result context. Direct enum reads
+// through an array-of-struct field do not yet lower a load correctly.
+fn scheduled_process_record_state(
+        slot: {0..<KERNEL_PROCESS_MAX as usize}) -> ProcessSlotState {
+    return scheduled_process_records[slot].state;
+}
+
+fn scheduled_process_record_wait_reason(
+        slot: {0..<KERNEL_PROCESS_MAX as usize}) -> ProcessWaitReason {
+    return scheduled_process_records[slot].wait_reason;
+}
 // A generic type argument to GrowablePool(T, ...) can only be a primitive
 // integer type, bool, a plain struct name, or a plain pointer to one of
 // those (issue #207's generics limitation) -- an array type like
@@ -286,9 +316,9 @@ fn scheduled_process_table_init() {
     slotmap_init(&scheduled_process_pool);
     growable_pool_init(&scheduled_process_kernel_stacks);
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        scheduled_process_saved_sp[slot] = 0;
-        scheduled_process_state[slot] = ProcessSlotState::Free;
-        scheduled_process_wait_reason[slot] = ProcessWaitReason::None;
+        scheduled_process_records[slot].saved_sp = 0;
+        scheduled_process_records[slot].state = ProcessSlotState::Free;
+        scheduled_process_records[slot].wait_reason = ProcessWaitReason::None;
     }
 }
 
@@ -305,9 +335,9 @@ fn scheduled_process_table_clear() {
                 }
             }
         }
-        scheduled_process_saved_sp[slot] = 0;
-        scheduled_process_state[slot] = ProcessSlotState::Free;
-        scheduled_process_wait_reason[slot] = ProcessWaitReason::None;
+        scheduled_process_records[slot].saved_sp = 0;
+        scheduled_process_records[slot].state = ProcessSlotState::Free;
+        scheduled_process_records[slot].wait_reason = ProcessWaitReason::None;
     }
     slotmap_init(&scheduled_process_pool);
 }
@@ -330,11 +360,11 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                                    freelist_owner_new(slot, generation));
                     return ScheduledProcessAllocResult::Full;
                 }
-                scheduled_process_state[slot] = ProcessSlotState::Ready;
+                scheduled_process_records[slot].state = ProcessSlotState::Ready;
                 let stack_base: usize =
                     growable_pool_ref_at(&scheduled_process_kernel_stacks, slot)
                         as usize;
-                scheduled_process_saved_sp[slot] =
+                scheduled_process_records[slot].saved_sp =
                     stack_base + KERNEL_PROCESS_STACK_SIZE;
                 let mut handle: ProcessHandle = { slot, generation };
                 match scheduled_process_identity_put(
@@ -342,8 +372,9 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                     ScheduledProcessPutResult::Conflict => {
                         slotmap_remove(&scheduled_process_pool,
                                        freelist_owner_new(slot, generation));
-                        scheduled_process_saved_sp[slot] = 0;
-                        scheduled_process_state[slot] = ProcessSlotState::Free;
+                        scheduled_process_records[slot].saved_sp = 0;
+                        scheduled_process_records[slot].state =
+                            ProcessSlotState::Free;
                         return ScheduledProcessAllocResult::Full;
                     }
                     ScheduledProcessPutResult::Stored => {
@@ -358,7 +389,7 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
 
 fn scheduled_process_ready_take(handle: ProcessHandle)
         -> ScheduledProcessReadyTakeResult {
-    if (scheduled_process_state[handle.pool_index] !=
+    if (scheduled_process_record_state(handle.pool_index) !=
             ProcessSlotState::Ready) {
         return ScheduledProcessReadyTakeResult::Missing;
     }
@@ -376,7 +407,7 @@ fn scheduled_process_ready_take(handle: ProcessHandle)
 
 fn scheduled_process_exited_take(handle: ProcessHandle)
         -> ScheduledProcessExitedTakeResult {
-    if (scheduled_process_state[handle.pool_index] !=
+    if (scheduled_process_record_state(handle.pool_index) !=
             ProcessSlotState::Exited) {
         return ScheduledProcessExitedTakeResult::Missing;
     }
@@ -394,7 +425,7 @@ fn scheduled_process_exited_take(handle: ProcessHandle)
 
 fn scheduled_process_running_take(handle: ProcessHandle)
         -> ScheduledProcessRunningTakeResult {
-    if (scheduled_process_state[handle.pool_index] !=
+    if (scheduled_process_record_state(handle.pool_index) !=
             ProcessSlotState::Running) {
         return ScheduledProcessRunningTakeResult::Missing;
     }
@@ -412,7 +443,7 @@ fn scheduled_process_running_take(handle: ProcessHandle)
 
 fn scheduled_process_blocked_take(handle: ProcessHandle)
         -> ScheduledProcessBlockedTakeResult {
-    if (scheduled_process_state[handle.pool_index] !=
+    if (scheduled_process_record_state(handle.pool_index) !=
             ProcessSlotState::Blocked) {
         return ScheduledProcessBlockedTakeResult::Missing;
     }
@@ -432,7 +463,8 @@ fn scheduled_process_start(
         state: sink ScheduledProcessState[process, ProcessState::Ready])
         -> ScheduledProcessState[process, ProcessState::Running] {
     scheduled_process_state_drop(state);
-    scheduled_process_state[owner.pool_index] = ProcessSlotState::Running;
+    scheduled_process_records[owner.pool_index].state =
+        ProcessSlotState::Running;
     let mut running:
         ScheduledProcessState[process, ProcessState::Running] =
         { owner.pool_index };
@@ -444,7 +476,8 @@ fn scheduled_process_yield(
         state: sink ScheduledProcessState[process, ProcessState::Running])
         -> ScheduledProcessState[process, ProcessState::Ready] {
     scheduled_process_state_drop(state);
-    scheduled_process_state[owner.pool_index] = ProcessSlotState::Ready;
+    scheduled_process_records[owner.pool_index].state =
+        ProcessSlotState::Ready;
     let mut ready: ScheduledProcessState[process, ProcessState::Ready] =
         { owner.pool_index };
     return ready;
@@ -455,7 +488,8 @@ fn scheduled_process_block(
         state: sink ScheduledProcessState[process, ProcessState::Running])
         -> ScheduledProcessState[process, ProcessState::Blocked] {
     scheduled_process_state_drop(state);
-    scheduled_process_state[owner.pool_index] = ProcessSlotState::Blocked;
+    scheduled_process_records[owner.pool_index].state =
+        ProcessSlotState::Blocked;
     let mut blocked: ScheduledProcessState[process, ProcessState::Blocked] =
         { owner.pool_index };
     return blocked;
@@ -466,7 +500,8 @@ fn scheduled_process_wake(
         state: sink ScheduledProcessState[process, ProcessState::Blocked])
         -> ScheduledProcessState[process, ProcessState::Ready] {
     scheduled_process_state_drop(state);
-    scheduled_process_state[owner.pool_index] = ProcessSlotState::Ready;
+    scheduled_process_records[owner.pool_index].state =
+        ProcessSlotState::Ready;
     let mut ready: ScheduledProcessState[process, ProcessState::Ready] =
         { owner.pool_index };
     return ready;
@@ -477,7 +512,8 @@ fn scheduled_process_exit(
         state: sink ScheduledProcessState[process, ProcessState::Running])
         -> ScheduledProcessState[process, ProcessState::Exited] {
     scheduled_process_state_drop(state);
-    scheduled_process_state[owner.pool_index] = ProcessSlotState::Exited;
+    scheduled_process_records[owner.pool_index].state =
+        ProcessSlotState::Exited;
     let mut exited: ScheduledProcessState[process, ProcessState::Exited] =
         { owner.pool_index };
     return exited;
@@ -489,15 +525,17 @@ fn scheduled_process_reap(
     scheduled_process_state_drop(state);
     slotmap_remove(&scheduled_process_pool,
                    freelist_owner_new(owner.pool_index, owner.generation));
-    scheduled_process_saved_sp[owner.pool_index] = 0;
-    scheduled_process_state[owner.pool_index] = ProcessSlotState::Free;
-    scheduled_process_wait_reason[owner.pool_index] = ProcessWaitReason::None;
+    scheduled_process_records[owner.pool_index].saved_sp = 0;
+    scheduled_process_records[owner.pool_index].state =
+        ProcessSlotState::Free;
+    scheduled_process_records[owner.pool_index].wait_reason =
+        ProcessWaitReason::None;
 }
 
 fn scheduled_process_stack_top(handle: ProcessHandle) -> usize {
     if (slotmap_matches(&scheduled_process_pool, handle.pool_index,
                         handle.generation)) {
-        return scheduled_process_saved_sp[handle.pool_index];
+        return scheduled_process_records[handle.pool_index].saved_sp;
     }
     return 0;
 }
@@ -619,8 +657,9 @@ fn scheduled_process_table_probe() -> bool {
     return true;
 }
 
-// Existing synchronous clone fixture. Later #188 stages replace this state
-// with the table above once VM and fd state can be live concurrently.
+// Existing synchronous clone fixture. GitHub issue #264's first stage keeps
+// its per-slot lifecycle state in scheduled_process_records above; later
+// stages may extend that record without reintroducing parallel arrays.
 // GitHub issue #245: replaces the old ExecutionProcess::{Parent,Child}
 // enum plus single execution_parent_handle/execution_child_handle pair,
 // which hardcoded "current process" as one of exactly two fixed global
@@ -630,8 +669,7 @@ fn scheduled_process_table_probe() -> bool {
 // slot for "current" to mean anything but the same two roles.
 //
 // Now: execution_current_handle is whichever slot is actually running,
-// and each slot tracks its own parent/child link (scheduled_process_
-// parent/has_parent, scheduled_process_child/has_child) instead of one
+// and each ProcessRecord tracks its own parent/child link instead of one
 // global pair. "Parent" and "child" become relative to whichever slot is
 // asking, not fixed identities -- kernel_process_switch_to_child()
 // switches from current to current's own child, kernel_process_switch_
@@ -641,10 +679,6 @@ fn scheduled_process_table_probe() -> bool {
 // per-slot instead of globally.
 private let mut execution_current_handle: ProcessHandle;
 private let mut execution_current_live: bool;
-private let mut scheduled_process_parent: [ProcessHandle; KERNEL_PROCESS_MAX];
-private let mut scheduled_process_has_parent: [bool; KERNEL_PROCESS_MAX];
-private let mut scheduled_process_child: [ProcessHandle; KERNEL_PROCESS_MAX];
-private let mut scheduled_process_has_child: [bool; KERNEL_PROCESS_MAX];
 private let mut execution_clone_calls: usize;
 private let mut execution_child_exit_count: usize;
 // GitHub issue #241: this is the MOST RECENT reaped child's status across
@@ -657,32 +691,10 @@ private let mut execution_child_exit_count: usize;
 // "the first child reaped since the last kernel_process_execution_reset()"
 // specifically.
 private let mut execution_first_child_exit_status: usize;
-// GitHub issue #248: per-slot, not the single global scalars these three
-// used to be (execution_last_child_pid/execution_child_waitable/a second
-// use of execution_child_exit_status for wait4's own return value,
-// conflated with the whole-boot evidence copy above until this fix).
-// Indexed by the WAITING PARENT's own pool_index -- same shape and same
-// underlying reason as scheduled_process_exec_image_live below (issue
-// #245's identical fix for a different field): the old global version was
-// correct only because at most one live parent-child pair ever existed at
-// once in this kernel's history. A second, simultaneously-blocked
-// wait4() caller deeper in a chain would read/overwrite the same global
-// state meant for a different level's own child-exit event -- found while
-// building issue #246's own concurrency demo, split into #248.
-private let mut scheduled_process_last_child_pid: [usize; KERNEL_PROCESS_MAX];
-private let mut scheduled_process_child_exit_status: [usize; KERNEL_PROCESS_MAX];
-private let mut scheduled_process_child_waitable: [bool; KERNEL_PROCESS_MAX];
-// GitHub issue #245 bug fix: per-slot, not the single global bool this
-// used to be. The global version stayed true for the entire lifetime of
-// an exec'd process (e.g. /user_payload, exec'd under ash) regardless of
-// what any of ITS OWN descendants did, so a grandchild that never exec'd
-// (user_payload's own plain clone()'d child) still read back "exec image
-// live" as true when IT exited -- found on real RPi5 hardware: this
-// wrongly skipped that grandchild's own process_image_clone_vm_reap(),
-// leaking its clone-vm record and leaving process_clone_vm_store's
-// single in-flight slot permanently occupied, which then made the next
-// real clone (or the exec-teardown path) hang.
-private let mut scheduled_process_exec_image_live: [bool; KERNEL_PROCESS_MAX];
+// GitHub issue #264 first stage keeps the #248 wait4 result fields and
+// #245 exec-image flag in the same ProcessRecord as their slot's state
+// and links. They remain indexed by the waiting/current process exactly
+// as before; only their storage layout changes.
 private let mut execution_reschedule_pending: bool;
 private let mut execution_timer_switches: usize;
 private let mut execution_deferred_switches: usize;
@@ -746,12 +758,12 @@ fn kernel_process_execution_reset() {
     execution_uart_wakes = 0;
     execution_uart_parent_progress = 0;
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        scheduled_process_has_parent[slot] = false;
-        scheduled_process_has_child[slot] = false;
-        scheduled_process_exec_image_live[slot] = false;
-        scheduled_process_last_child_pid[slot] = 0;
-        scheduled_process_child_exit_status[slot] = 0;
-        scheduled_process_child_waitable[slot] = false;
+        scheduled_process_records[slot].has_parent = false;
+        scheduled_process_records[slot].has_child = false;
+        scheduled_process_records[slot].exec_image_live = false;
+        scheduled_process_records[slot].last_child_pid = 0;
+        scheduled_process_records[slot].child_exit_status = 0;
+        scheduled_process_records[slot].child_waitable = false;
     }
     match scheduled_process_alloc() {
         ScheduledProcessAllocResult::Full => {}
@@ -780,16 +792,19 @@ fn kernel_process_scheduler_disable() {
 
 fn kernel_process_switch_to_parent(current_sp: usize) -> usize {
     if (execution_current_live == false ||
-        scheduled_process_has_parent[execution_current_handle.pool_index] ==
+        scheduled_process_records[execution_current_handle.pool_index]
+            .has_parent ==
             false) {
         return current_sp;
     }
     let mut from: ProcessHandle = execution_current_handle;
-    let mut to: ProcessHandle = scheduled_process_parent[from.pool_index];
-    if (scheduled_process_state[to.pool_index] != ProcessSlotState::Ready) {
+    let mut to: ProcessHandle =
+        scheduled_process_records[from.pool_index].parent;
+    if (scheduled_process_record_state(to.pool_index) !=
+            ProcessSlotState::Ready) {
         return current_sp;
     }
-    scheduled_process_saved_sp[from.pool_index] = current_sp;
+    scheduled_process_records[from.pool_index].saved_sp = current_sp;
     if (kernel_process_yield_handle(from) == false) {
         return current_sp;
     }
@@ -799,21 +814,24 @@ fn kernel_process_switch_to_parent(current_sp: usize) -> usize {
     }
     execution_current_handle = to;
     process_image_activate_root(to.pool_index);
-    return scheduled_process_saved_sp[to.pool_index];
+    return scheduled_process_records[to.pool_index].saved_sp;
 }
 
 fn kernel_process_switch_to_child(current_sp: usize) -> usize {
     if (execution_current_live == false ||
-        scheduled_process_has_child[execution_current_handle.pool_index] ==
+        scheduled_process_records[execution_current_handle.pool_index]
+            .has_child ==
             false) {
         return current_sp;
     }
     let mut from: ProcessHandle = execution_current_handle;
-    let mut to: ProcessHandle = scheduled_process_child[from.pool_index];
-    if (scheduled_process_state[to.pool_index] != ProcessSlotState::Ready) {
+    let mut to: ProcessHandle =
+        scheduled_process_records[from.pool_index].child;
+    if (scheduled_process_record_state(to.pool_index) !=
+            ProcessSlotState::Ready) {
         return current_sp;
     }
-    scheduled_process_saved_sp[from.pool_index] = current_sp;
+    scheduled_process_records[from.pool_index].saved_sp = current_sp;
     if (kernel_process_yield_handle(from) == false) {
         return current_sp;
     }
@@ -823,7 +841,7 @@ fn kernel_process_switch_to_child(current_sp: usize) -> usize {
     }
     execution_current_handle = to;
     process_image_activate_root(to.pool_index);
-    return scheduled_process_saved_sp[to.pool_index];
+    return scheduled_process_records[to.pool_index].saved_sp;
 }
 
 // GitHub issue #245: the old two-process toggle ("if I'm the Child, go up
@@ -834,7 +852,8 @@ fn kernel_process_switch_to_child(current_sp: usize) -> usize {
 // forked leaf) matches the old if-branch, switching up to its own parent.
 fn kernel_process_schedule(current_sp: usize) -> usize {
     if (execution_current_live &&
-        scheduled_process_has_child[execution_current_handle.pool_index]) {
+        scheduled_process_records[execution_current_handle.pool_index]
+            .has_child) {
         return kernel_process_switch_to_child(current_sp);
     }
     return kernel_process_switch_to_parent(current_sp);
@@ -845,14 +864,15 @@ fn kernel_process_schedule(current_sp: usize) -> usize {
 // hasn't exited yet" (wait4 should block instead).
 fn kernel_process_current_has_live_child() -> bool {
     return execution_current_live &&
-           scheduled_process_has_child[execution_current_handle.pool_index];
+           scheduled_process_records[execution_current_handle.pool_index]
+               .has_child;
 }
 
 fn kernel_process_current_has_relative() -> bool {
     if (execution_current_live == false) { return false; }
     let slot: usize = execution_current_handle.pool_index;
-    return scheduled_process_has_child[slot] ||
-           scheduled_process_has_parent[slot];
+    return scheduled_process_records[slot].has_child ||
+           scheduled_process_records[slot].has_parent;
 }
 
 fn kernel_process_timer_schedule(current_sp: usize) -> usize !{interrupt} {
@@ -883,22 +903,25 @@ fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {
 // otherwise-lost wakeup window between checking the ring and sleeping.
 fn kernel_process_block_uart(current_sp: usize) -> usize {
     if (execution_current_live == false ||
-        scheduled_process_has_parent[execution_current_handle.pool_index] ==
+        scheduled_process_records[execution_current_handle.pool_index]
+            .has_parent ==
             false) {
         return 0;
     }
     let mut child: ProcessHandle = execution_current_handle;
-    let mut parent: ProcessHandle = scheduled_process_parent[child.pool_index];
-    if (scheduled_process_state[parent.pool_index] != ProcessSlotState::Ready) {
+    let mut parent: ProcessHandle =
+        scheduled_process_records[child.pool_index].parent;
+    if (scheduled_process_record_state(parent.pool_index) !=
+            ProcessSlotState::Ready) {
         return 0;
     }
-    scheduled_process_saved_sp[child.pool_index] = current_sp;
+    scheduled_process_records[child.pool_index].saved_sp = current_sp;
     match scheduled_process_running_take(child) {
         ScheduledProcessRunningTakeResult::Missing => { return 0; }
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
             let blocked = scheduled_process_block(owner, running);
-            scheduled_process_wait_reason[owner.pool_index] =
+            scheduled_process_records[owner.pool_index].wait_reason =
                 ProcessWaitReason::UartRx;
             match scheduled_process_put(owner, blocked) {
                 ScheduledProcessPutResult::Conflict => { return 0; }
@@ -915,7 +938,7 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
         kernel_boot_log("uart rx: scheduler child blocked\n");
     }
     process_image_activate_root(parent.pool_index);
-    return scheduled_process_saved_sp[parent.pool_index];
+    return scheduled_process_records[parent.pool_index].saved_sp;
 }
 
 // GitHub issue #244: the mirror image of kernel_process_block_uart() --
@@ -927,22 +950,25 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
 // already switched back on its own.
 fn kernel_process_block_wait4(current_sp: usize) -> usize {
     if (execution_current_live == false ||
-        scheduled_process_has_child[execution_current_handle.pool_index] ==
+        scheduled_process_records[execution_current_handle.pool_index]
+            .has_child ==
             false) {
         return 0;
     }
     let mut parent: ProcessHandle = execution_current_handle;
-    let mut child: ProcessHandle = scheduled_process_child[parent.pool_index];
-    if (scheduled_process_state[child.pool_index] != ProcessSlotState::Ready) {
+    let mut child: ProcessHandle =
+        scheduled_process_records[parent.pool_index].child;
+    if (scheduled_process_record_state(child.pool_index) !=
+            ProcessSlotState::Ready) {
         return 0;
     }
-    scheduled_process_saved_sp[parent.pool_index] = current_sp;
+    scheduled_process_records[parent.pool_index].saved_sp = current_sp;
     match scheduled_process_running_take(parent) {
         ScheduledProcessRunningTakeResult::Missing => { return 0; }
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
             let blocked = scheduled_process_block(owner, running);
-            scheduled_process_wait_reason[owner.pool_index] =
+            scheduled_process_records[owner.pool_index].wait_reason =
                 ProcessWaitReason::ChildExit;
             match scheduled_process_put(owner, blocked) {
                 ScheduledProcessPutResult::Conflict => { return 0; }
@@ -955,7 +981,7 @@ fn kernel_process_block_wait4(current_sp: usize) -> usize {
     }
     execution_current_handle = child;
     process_image_activate_root(child.pool_index);
-    return scheduled_process_saved_sp[child.pool_index];
+    return scheduled_process_records[child.pool_index].saved_sp;
 }
 
 // The UART IRQ transfers one byte directly into the suspended syscall frame.
@@ -968,15 +994,16 @@ fn kernel_process_block_wait4(current_sp: usize) -> usize {
 // itself is untouched by blocking (only exit/reap clear it).
 fn kernel_process_uart_wake(value: usize) -> bool !{interrupt} {
     if (execution_current_live == false ||
-        scheduled_process_has_child[execution_current_handle.pool_index] ==
+        scheduled_process_records[execution_current_handle.pool_index]
+            .has_child ==
             false) {
         return false;
     }
     let mut child: ProcessHandle =
-        scheduled_process_child[execution_current_handle.pool_index];
-    if (scheduled_process_state[child.pool_index] !=
+        scheduled_process_records[execution_current_handle.pool_index].child;
+    if (scheduled_process_record_state(child.pool_index) !=
             ProcessSlotState::Blocked ||
-        scheduled_process_wait_reason[child.pool_index] !=
+        scheduled_process_record_wait_reason(child.pool_index) !=
             ProcessWaitReason::UartRx) {
         return false;
     }
@@ -985,9 +1012,9 @@ fn kernel_process_uart_wake(value: usize) -> bool !{interrupt} {
         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
             let (owner, blocked) = resources;
             el0_context_set_x0(
-                scheduled_process_saved_sp[owner.pool_index], value);
+                scheduled_process_records[owner.pool_index].saved_sp, value);
             let ready = scheduled_process_wake(owner, blocked);
-            scheduled_process_wait_reason[owner.pool_index] =
+            scheduled_process_records[owner.pool_index].wait_reason =
                 ProcessWaitReason::None;
             match scheduled_process_put(owner, ready) {
                 ScheduledProcessPutResult::Conflict => { return false; }
@@ -1007,17 +1034,19 @@ fn kernel_process_uart_wake(value: usize) -> bool !{interrupt} {
 fn kernel_process_uart_record_parent_progress()
         -> ProcessUartProgressResult {
     if (execution_current_live == false ||
-        scheduled_process_has_child[execution_current_handle.pool_index] ==
+        scheduled_process_records[execution_current_handle.pool_index]
+            .has_child ==
             false) {
         return ProcessUartProgressResult::Invalid;
     }
     let mut parent: ProcessHandle = execution_current_handle;
-    let mut child: ProcessHandle = scheduled_process_child[parent.pool_index];
-    if (scheduled_process_state[parent.pool_index] !=
+    let mut child: ProcessHandle =
+        scheduled_process_records[parent.pool_index].child;
+    if (scheduled_process_record_state(parent.pool_index) !=
             ProcessSlotState::Running ||
-        scheduled_process_state[child.pool_index] !=
+        scheduled_process_record_state(child.pool_index) !=
             ProcessSlotState::Blocked ||
-        scheduled_process_wait_reason[child.pool_index] !=
+        scheduled_process_record_wait_reason(child.pool_index) !=
             ProcessWaitReason::UartRx) {
         return ProcessUartProgressResult::Invalid;
     }
@@ -1057,8 +1086,8 @@ fn kernel_process_scheduler_probe() -> bool {
     kernel_process_scheduler_disable();
     scheduled_process_table_clear();
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        scheduled_process_has_parent[slot] = false;
-        scheduled_process_has_child[slot] = false;
+        scheduled_process_records[slot].has_parent = false;
+        scheduled_process_records[slot].has_child = false;
     }
     execution_current_live = false;
     return ok;
@@ -1087,11 +1116,12 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
     // wrongly rejected a real, unrelated clone deeper in the tree (found
     // on real RPi5 hardware: user_payload's own fork always failed with
     // -EINVAL while running as ash's forked+exec'd child). The per-slot
-    // scheduled_process_has_child[current] check below is the correct,
+    // ProcessRecord.has_child[current] check below is the correct,
     // already-scoped-to-current-only replacement.
     if (flags != 0x11 || child_stack != 0 ||
         execution_current_live == false ||
-        scheduled_process_has_child[execution_current_handle.pool_index]) {
+        scheduled_process_records[execution_current_handle.pool_index]
+            .has_child) {
         return ProcessCloneResult::Invalid;
     }
     let mut parent: ProcessHandle = execution_current_handle;
@@ -1100,10 +1130,10 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             return ProcessCloneResult::Invalid;
         }
         ScheduledProcessAllocResult::Allocated(child) => {
-            scheduled_process_child[parent.pool_index] = child;
-            scheduled_process_has_child[parent.pool_index] = true;
-            scheduled_process_parent[child.pool_index] = parent;
-            scheduled_process_has_parent[child.pool_index] = true;
+            scheduled_process_records[parent.pool_index].child = child;
+            scheduled_process_records[parent.pool_index].has_child = true;
+            scheduled_process_records[child.pool_index].parent = parent;
+            scheduled_process_records[child.pool_index].has_parent = true;
             execution_current_handle = child;
             execution_clone_calls = execution_clone_calls + 1;
             return ProcessCloneResult::ChildReady(child.pool_index + 1);
@@ -1128,12 +1158,14 @@ fn kernel_process_clone_child_stack_top() -> usize {
 // self-test.
 fn kernel_process_clone_rollback() {
     if (execution_current_live == false ||
-        scheduled_process_has_parent[execution_current_handle.pool_index] ==
+        scheduled_process_records[execution_current_handle.pool_index]
+            .has_parent ==
             false) {
         return;
     }
     let mut child: ProcessHandle = execution_current_handle;
-    let mut parent: ProcessHandle = scheduled_process_parent[child.pool_index];
+    let mut parent: ProcessHandle =
+        scheduled_process_records[child.pool_index].parent;
     match scheduled_process_ready_take(child) {
         ScheduledProcessReadyTakeResult::Missing => {}
         ScheduledProcessReadyTakeResult::Ready(resources) => {
@@ -1154,8 +1186,8 @@ fn kernel_process_clone_rollback() {
             }
         }
     }
-    scheduled_process_has_child[parent.pool_index] = false;
-    scheduled_process_has_parent[child.pool_index] = false;
+    scheduled_process_records[parent.pool_index].has_child = false;
+    scheduled_process_records[child.pool_index].has_parent = false;
     execution_current_handle = parent;
     if (execution_clone_calls > 0) {
         execution_clone_calls = execution_clone_calls - 1;
@@ -1169,24 +1201,27 @@ fn kernel_process_clone_rollback() {
 fn kernel_process_clone_context_install(parent_sp: usize, child_sp: usize)
         -> usize {
     if (execution_current_live == false || parent_sp == 0 || child_sp == 0 ||
-        scheduled_process_has_parent[execution_current_handle.pool_index] ==
+        scheduled_process_records[execution_current_handle.pool_index]
+            .has_parent ==
             false) {
         return 0;
     }
     let mut child: ProcessHandle = execution_current_handle;
-    let mut parent: ProcessHandle = scheduled_process_parent[child.pool_index];
+    let mut parent: ProcessHandle =
+        scheduled_process_records[child.pool_index].parent;
     if (kernel_process_yield_handle(parent) == false ||
         kernel_process_start_handle(child) == false) {
         return 0;
     }
-    scheduled_process_saved_sp[parent.pool_index] = parent_sp;
-    scheduled_process_saved_sp[child.pool_index] = child_sp;
+    scheduled_process_records[parent.pool_index].saved_sp = parent_sp;
+    scheduled_process_records[child.pool_index].saved_sp = child_sp;
     return child_sp;
 }
 
 fn kernel_process_is_child() -> bool {
     return execution_current_live &&
-           scheduled_process_has_parent[execution_current_handle.pool_index];
+           scheduled_process_records[execution_current_handle.pool_index]
+               .has_parent;
 }
 
 fn kernel_process_current_pid() -> usize {
@@ -1216,11 +1251,12 @@ fn kernel_process_current_root() -> usize {
 // pids start at 1) if current has no live child.
 fn kernel_process_current_child_pid() -> usize {
     if (execution_current_live == false ||
-        scheduled_process_has_child[execution_current_handle.pool_index] ==
+        scheduled_process_records[execution_current_handle.pool_index]
+            .has_child ==
             false) {
         return 0;
     }
-    return scheduled_process_child[execution_current_handle.pool_index]
+    return scheduled_process_records[execution_current_handle.pool_index].child
         .pool_index + 1;
 }
 
@@ -1231,19 +1267,22 @@ fn kernel_process_child_exit(status: usize) -> usize {
     }
     kernel_process_scheduler_disable();
     if (execution_current_live == false ||
-        scheduled_process_has_parent[execution_current_handle.pool_index] ==
+        scheduled_process_records[execution_current_handle.pool_index]
+            .has_parent ==
             false) {
         return 0;
     }
     let mut child: ProcessHandle = execution_current_handle;
-    let mut parent: ProcessHandle = scheduled_process_parent[child.pool_index];
+    let mut parent: ProcessHandle =
+        scheduled_process_records[child.pool_index].parent;
     // GitHub issue #248: per-slot (indexed by the WAITING PARENT's own
     // pool_index), not a bare global -- see these fields' own header
     // comment for why a global here breaks a multi-level concurrent
     // wait4() chain.
-    scheduled_process_last_child_pid[parent.pool_index] = child.pool_index + 1;
-    scheduled_process_child_exit_status[parent.pool_index] = status;
-    scheduled_process_child_waitable[parent.pool_index] = true;
+    scheduled_process_records[parent.pool_index].last_child_pid =
+        child.pool_index + 1;
+    scheduled_process_records[parent.pool_index].child_exit_status = status;
+    scheduled_process_records[parent.pool_index].child_waitable = true;
     match scheduled_process_running_take(child) {
         ScheduledProcessRunningTakeResult::Missing => {}
         ScheduledProcessRunningTakeResult::Running(resources) => {
@@ -1258,10 +1297,10 @@ fn kernel_process_child_exit(status: usize) -> usize {
                             let (exited_owner, exited_state) = done;
                             scheduled_process_reap(
                                 exited_owner, exited_state);
-                            scheduled_process_has_child[parent.pool_index] =
-                                false;
-                            scheduled_process_has_parent[child.pool_index] =
-                                false;
+                            scheduled_process_records[parent.pool_index]
+                                .has_child = false;
+                            scheduled_process_records[child.pool_index]
+                                .has_parent = false;
                         }
                     }
                 }
@@ -1281,20 +1320,20 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // or the woken parent resumes with a stale/garbage x0 and no status
     // ever written -- the original bug: it just silently never made
     // observable progress after being woken.
-    if (scheduled_process_state[parent.pool_index] ==
+    if (scheduled_process_record_state(parent.pool_index) ==
             ProcessSlotState::Blocked &&
-        scheduled_process_wait_reason[parent.pool_index] ==
+        scheduled_process_record_wait_reason(parent.pool_index) ==
             ProcessWaitReason::ChildExit) {
         match scheduled_process_blocked_take(parent) {
             ScheduledProcessBlockedTakeResult::Missing => {}
             ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                 let (owner, blocked) = resources;
                 let ready = scheduled_process_wake(owner, blocked);
-                scheduled_process_wait_reason[owner.pool_index] =
+                scheduled_process_records[owner.pool_index].wait_reason =
                     ProcessWaitReason::None;
                 kernel_syscall_wait4_deliver(
-                    scheduled_process_saved_sp[owner.pool_index],
-                    scheduled_process_last_child_pid[owner.pool_index],
+                    scheduled_process_records[owner.pool_index].saved_sp,
+                    scheduled_process_records[owner.pool_index].last_child_pid,
                     owner.pool_index);
                 match scheduled_process_put(owner, ready) {
                     ScheduledProcessPutResult::Conflict => {}
@@ -1305,7 +1344,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
     }
     if (kernel_process_start_handle(parent)) {
         execution_current_handle = parent;
-        return scheduled_process_saved_sp[parent.pool_index];
+        return scheduled_process_records[parent.pool_index].saved_sp;
     }
     return 0;
 }
@@ -1322,19 +1361,21 @@ fn kernel_process_child_exit(status: usize) -> usize {
 // explicit _for(slot) pair further below instead.
 fn kernel_process_child_waitable() -> bool {
     if (execution_current_live == false) { return false; }
-    return scheduled_process_child_waitable[execution_current_handle.pool_index];
+    return scheduled_process_records[execution_current_handle.pool_index]
+        .child_waitable;
 }
 
 fn kernel_process_child_wait_status_peek() -> usize {
     if (execution_current_live == false) { return 0; }
-    return scheduled_process_child_exit_status[execution_current_handle.pool_index];
+    return scheduled_process_records[execution_current_handle.pool_index]
+        .child_exit_status;
 }
 
 fn kernel_process_child_wait_status() -> usize {
     if (execution_current_live == false) { return 0; }
     let slot: usize = execution_current_handle.pool_index;
-    scheduled_process_child_waitable[slot] = false;
-    return scheduled_process_child_exit_status[slot];
+    scheduled_process_records[slot].child_waitable = false;
+    return scheduled_process_records[slot].child_exit_status;
 }
 
 // Explicit-slot pair for kernel_syscall_wait4_deliver's own use (see this
@@ -1343,7 +1384,7 @@ fn kernel_process_child_wait_status() -> usize {
 fn kernel_process_child_wait_status_peek_for(slot: usize) -> usize {
     if (slot < KERNEL_PROCESS_MAX) {
         let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        return scheduled_process_child_exit_status[checked];
+        return scheduled_process_records[checked].child_exit_status;
     }
     return 0;
 }
@@ -1351,7 +1392,7 @@ fn kernel_process_child_wait_status_peek_for(slot: usize) -> usize {
 fn kernel_process_child_wait_status_consume_for(slot: usize) {
     if (slot < KERNEL_PROCESS_MAX) {
         let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        scheduled_process_child_waitable[checked] = false;
+        scheduled_process_records[checked].child_waitable = false;
     }
 }
 
@@ -1373,7 +1414,7 @@ fn kernel_process_child_exec_mark() {
     if (execution_current_live) {
         let slot = scheduled_process_exec_narrow_slot(
             execution_current_handle.pool_index + 1);
-        scheduled_process_exec_image_live[slot] = true;
+        scheduled_process_records[slot].exec_image_live = true;
     }
 }
 
@@ -1388,14 +1429,14 @@ fn kernel_process_child_exec_mark() {
 // guessing which one "current" means at the call site.
 fn kernel_process_exec_image_live_for_pid(pid: usize) -> bool {
     if (pid == 0 || pid - 1 >= KERNEL_PROCESS_MAX) { return false; }
-    return scheduled_process_exec_image_live[
-        scheduled_process_exec_narrow_slot(pid)];
+    return scheduled_process_records[
+        scheduled_process_exec_narrow_slot(pid)].exec_image_live;
 }
 
 fn kernel_process_exec_clear_for_pid(pid: usize) {
     if (pid == 0 || pid - 1 >= KERNEL_PROCESS_MAX) { return; }
-    scheduled_process_exec_image_live[
-        scheduled_process_exec_narrow_slot(pid)] = false;
+    scheduled_process_records[
+        scheduled_process_exec_narrow_slot(pid)].exec_image_live = false;
 }
 
 // GitHub issue #245: the old execution_process == Parent conjunct asserted
@@ -1418,7 +1459,8 @@ fn kernel_process_child_exit_count() -> usize {
 
 fn kernel_process_last_child_pid() -> usize {
     if (execution_current_live == false) { return 0; }
-    return scheduled_process_last_child_pid[execution_current_handle.pool_index];
+    return scheduled_process_records[execution_current_handle.pool_index]
+        .last_child_pid;
 }
 
 // GitHub issue #245: execution_clone_calls is a single counter shared by
@@ -1432,10 +1474,13 @@ fn kernel_process_clone_evidence() -> bool {
     return execution_current_live &&
            execution_clone_calls >= 1 &&
            execution_first_child_exit_status == 42 &&
-           scheduled_process_has_child[execution_current_handle.pool_index] ==
+           scheduled_process_records[execution_current_handle.pool_index]
+               .has_child ==
                false &&
-           scheduled_process_state[execution_current_handle.pool_index] ==
+           scheduled_process_record_state(
+               execution_current_handle.pool_index) ==
                ProcessSlotState::Running &&
-           scheduled_process_saved_sp[execution_current_handle.pool_index] !=
+           scheduled_process_records[execution_current_handle.pool_index]
+               .saved_sp !=
                0;
 }
