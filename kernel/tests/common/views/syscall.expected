@@ -1,0 +1,2 @@
+syscall write errors: ebadf efault
+syscall exit: 0

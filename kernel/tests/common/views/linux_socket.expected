@@ -1,0 +1,2 @@
+linux socket syscalls: two overlapping connections fd=5,6 independent ok port=8080
+linux socket partial write: 1460+1 ok
