@@ -314,7 +314,6 @@ fn kernel_test_common_probes() {
 // network/storage fixtures. All common user-space scenarios and their order live
 // in this driver.
 let mut kernel_test_rpi5_extended: bool;
-let mut kernel_test_shell_read: bool;
 let mut kernel_test_httpd_daemon: bool;
 let mut kernel_test_init_script: bool;
 
@@ -384,54 +383,6 @@ irq_uart_rx_unmask();
     // this boot log. GitHub issue #209: that applet is launched by
     // kernel/tests/ext2/init.sh as an ordinary child now, not by a second
     // kernel-side image launch from here.
-
-    if (kernel_test_shell_read) {
-    // Issue #205: same distro plan, argv={"busybox","sh","-c",
-    // "read x; echo shell read: ${x#x}"}. BusyBox ash's `read` builtin always calls poll()
-    // before its first read() from stdin, even with no timeout --
-    // see shell/shell_common.c in the vendored busybox-1.37.0
-    // source. musl maps poll() to the ppoll(2) syscall
-    // unconditionally on aarch64 (no legacy SYS_poll on this arch).
-    // The RPi5 runner waits for the kernel's blocked marker and
-    // injects one UART line. ppoll then retries after the RX IRQ,
-    // read(0) consumes the line, and ash strips the optional leading
-    // UART warm-up sentinel before echoing the proof value.
-    if (distro_plan_ready) {
-        match process_image_map(
-                saved_distro_plan,
-                "busybox\0sh\0-c\0read x; echo shell read: ${x#x}\0" as []u8,
-                4) {
-            ProcessImageMapResult::InvalidImage => {
-                kernel_boot_log("shell read map: invalid image\n");
-            }
-            ProcessImageMapResult::OutOfMemory => {
-                kernel_boot_log("shell read map: out of memory\n");
-            }
-            ProcessImageMapResult::Mapped(shell_pages) => {
-                let (shell_heap_start, shell_heap_limit) =
-                    process_image_heap_range(shell_pages);
-                kernel_syscall_process_configure(
-                    shell_heap_start, shell_heap_limit);
-                let shell_status: usize = run_initial_user(
-                    process_image_entry(shell_pages),
-                    process_image_stack_pointer(shell_pages));
-                if (shell_status == 0) {
-                    kernel_boot_log("busybox shell read exit: 0\n");
-                } else {
-                    kernel_boot_log("busybox shell read failed\n");
-                }
-                if (process_image_stack_grew(shell_pages)) {
-                    kernel_boot_log("shell stack: demand-grown\n");
-                }
-                process_image_unmap(shell_pages);
-                if (process_image_window_is_clear()) {
-                    kernel_boot_log("shell read unmap: clean\n");
-                }
-            }
-        }
-    }
-
-}
 
     // Issue #196: BusyBox od reads /hello.txt through one musl readv(2)
     // call, then deliberately reaches the EBADF standard-input path.
@@ -574,10 +525,13 @@ irq_uart_rx_unmask();
                     // used to be a kernel-side launch with its own
                     // "<applet> unmap: clean" check right after it; this
                     // asserts the same VM hygiene for all of them at once.
-                    let (exec_reaps, exec_reaps_clean) =
+                    let (exec_reaps, exec_reaps_clean, exec_stack_growths) =
                         process_image_exec_reap_evidence();
                     if (exec_reaps >= 1 && exec_reaps_clean == exec_reaps) {
                         kernel_boot_log("child exec unmap: clean\n");
+                    }
+                    if (exec_stack_growths >= 1) {
+                        kernel_boot_log("shell stack: demand-grown\n");
                     }
                     kernel_boot_log("syscall exit: 0\n");
                 } else {

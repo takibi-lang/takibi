@@ -2,4 +2,4 @@
 ^shell read: ashread$
 ^busybox shell read exit: 0$
 ^shell stack: demand-grown$
-^shell read unmap: clean$
+^child exec unmap: clean$

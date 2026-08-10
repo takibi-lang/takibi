@@ -618,6 +618,7 @@ fn process_image_exec_install(
 // rather than one hand-written check per kernel-side launch.
 private let mut process_image_exec_reap_count: usize;
 private let mut process_image_exec_reap_clean_count: usize;
+private let mut process_image_exec_reap_stack_growth_count: usize;
 
 fn process_image_root_window_is_clear(
         root: {0..<PROCESS_IMAGE_ROOT_MAX as usize}) -> bool {
@@ -627,9 +628,10 @@ fn process_image_root_window_is_clear(
     return true;
 }
 
-fn process_image_exec_reap_evidence() -> (usize, usize) {
+fn process_image_exec_reap_evidence() -> (usize, usize, usize) {
     return (process_image_exec_reap_count,
-            process_image_exec_reap_clean_count);
+            process_image_exec_reap_clean_count,
+            process_image_exec_reap_stack_growth_count);
 }
 
 fn process_image_exec_reap() {
@@ -643,6 +645,10 @@ fn process_image_exec_reap() {
         ProcessImageExecValue::Ready(pages) => {
             let reaped_root: {0..<PROCESS_IMAGE_ROOT_MAX as usize} =
                 process_image_root_index();
+            if (process_image_stack_grew(pages)) {
+                process_image_exec_reap_stack_growth_count =
+                    process_image_exec_reap_stack_growth_count + 1;
+            }
             process_image_unmap(pages);
             process_image_exec_reap_count =
                 process_image_exec_reap_count + 1;

@@ -41,6 +41,18 @@ else
     echo "busybox od failed"
 fi
 
+# This stays a child shell so the fixture still exercises ash's fork/exec
+# lifecycle plus ppoll/read on UART, rather than only the PID 1 shell
+# interpreting its own builtin. The runner sends xashread after the blocked
+# marker; ${x#x} removes that warm-up sentinel.
+/busybox sh -c 'read x; echo shell read: ${x#x}'
+if [ "$?" -eq 0 ]; then
+    echo "busybox shell read exit: 0"
+else
+    echo "busybox shell read failed"
+    exit 1
+fi
+
 # This exact 13 KiB file reaches i_block[12], ext2's first singly-indirect
 # entry after all twelve direct blocks. `cat` reaches sendfile(2), proving
 # the file reader streams through the indirect pointer rather than treating

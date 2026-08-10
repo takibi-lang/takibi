@@ -1,5 +1,5 @@
 shell ppoll: uart blocked
 shell read: ashread
 busybox shell read exit: 0
+child exec unmap: clean
 shell stack: demand-grown
-shell read unmap: clean
