@@ -57,6 +57,7 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BCM2712_CFG="$REPO_ROOT/examples/common_rpi5/bcm2712.cfg"
+OPENOCD_TIMEOUT="${RPI5_OPENOCD_TIMEOUT:-10}"
 
 OPENOCD_ARGS=(
     -f interface/cmsis-dap.cfg
@@ -93,7 +94,7 @@ OPENOCD_ARGS=(
 RESET_ADDR=0x00100000
 PSCI_SYSTEM_RESET=0x84000009
 
-openocd "${OPENOCD_ARGS[@]}" \
+timeout --foreground "$OPENOCD_TIMEOUT" openocd "${OPENOCD_ARGS[@]}" \
     -c 'init' \
     -c 'targets bcm2712.cpu3' \
     -c 'halt' \
@@ -113,7 +114,7 @@ openocd "${OPENOCD_ARGS[@]}" \
 VERIFY_LOG=$(mktemp)
 attempt=0
 max_attempts=20
-until openocd "${OPENOCD_ARGS[@]}" \
+until timeout --foreground "$OPENOCD_TIMEOUT" openocd "${OPENOCD_ARGS[@]}" \
     -c 'init' \
     -c 'halt' \
     -c 'reg pc' \

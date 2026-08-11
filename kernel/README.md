@@ -138,6 +138,8 @@ checks; `kernelcheck-qemu` continues to run the complete network fixture.
 `kernelsh-rpi5` first performs the existing resident-image reset, so the SD
 card must already be running this project's unchanged `jtag_stub.img` before
 the target is invoked.
+The RPi5 shell prints reset and SWD-load durations and reports the same ash
+readiness marker after the UART is attached.
 
 `kernelbuild`/`kernelcheck` run both the RPi5 and QEMU targets. See
 "QEMU/AArch64 integration" below for what `kernelcheck-qemu` covers and how

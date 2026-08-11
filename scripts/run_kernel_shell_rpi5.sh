@@ -16,14 +16,23 @@ if [ -z "$SERIAL_DEV" ] || [ ! -e "$SERIAL_DEV" ]; then
 fi
 
 stty -F "$SERIAL_DEV" 115200 raw -echo
+SHELL_LAUNCH_NS="$(date +%s%N)"
 echo "[kernel/rpi5] resetting resident image before SWD load"
+reset_started="$(date +%s%N)"
 "$REPO_ROOT/scripts/rpi5_jtag_reset.sh" --resident-image-unchanged
+reset_finished="$(date +%s%N)"
+echo "[kernel/rpi5] reset completed in $(( (reset_finished - reset_started) / 1000000 )) ms"
 echo "[kernel/rpi5] loading kernel over SWD"
+load_started="$(date +%s%N)"
 "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$ELF"
+load_finished="$(date +%s%N)"
+echo "[kernel/rpi5] load completed in $(( (load_finished - load_started) / 1000000 )) ms"
 echo "[kernel/rpi5] starting UART console on $SERIAL_DEV"
 # Keep miniterm in the foreground: pyserial's Console() needs fd 0 to remain
 # the real terminal. A background miniterm inherits /dev/null as stdin under
 # non-interactive shells such as make and fails with ENOTTY. The kernel waits
 # in ash's UART read path, so starting the console after SWD injection does
 # not lose the interactive session.
-exec python3 -m serial.tools.miniterm --raw --eol LF --echo "$SERIAL_DEV" 115200
+export KERNEL_SHELL_PLATFORM=rpi5
+export KERNEL_SHELL_LAUNCH_NS="$SHELL_LAUNCH_NS"
+exec python3 "$REPO_ROOT/scripts/run_kernel_shell_console.py" "$SERIAL_DEV" 115200

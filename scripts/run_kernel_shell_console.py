@@ -11,6 +11,8 @@ from serial.tools import miniterm
 
 
 READY_MARKER = b"interactive shell: uart blocked\n"
+PLATFORM = os.environ.get("KERNEL_SHELL_PLATFORM", "qemu")
+LABEL = f"[kernel/{PLATFORM}]"
 BOOT_PHASE_MARKERS = (
     (b"takibi kernel:", "kernel entry"),
     (b"memory:", "memory detection"),
@@ -45,7 +47,7 @@ class TimingMiniterm(miniterm.Miniterm):
                     if READY_MARKER in self.pending:
                         elapsed_ms = (time.time_ns() - self.launch_ns) / 1_000_000
                         print(
-                            f"[kernel/qemu] ash readiness: {elapsed_ms:.1f} ms "
+                            f"{LABEL} ash readiness: {elapsed_ms:.1f} ms "
                             "(interactive shell UART blocked)",
                             file=sys.stderr,
                             flush=True,
@@ -67,16 +69,16 @@ class TimingMiniterm(miniterm.Miniterm):
 def main() -> int:
     port = sys.argv[1]
     baudrate = int(sys.argv[2])
-    launch_ns = int(os.environ["KERNEL_QEMU_SHELL_LAUNCH_NS"])
+    launch_ns = int(os.environ["KERNEL_SHELL_LAUNCH_NS"])
     serial_instance = serial.serial_for_url(port, baudrate, do_not_open=True)
     serial_instance.open()
     connected_ms = (time.time_ns() - launch_ns) / 1_000_000
     print(
-        f"[kernel/qemu] UART connected: {connected_ms:.1f} ms after QEMU launch",
+        f"{LABEL} UART connected: {connected_ms:.1f} ms after launch",
         file=sys.stderr,
         flush=True,
     )
-    if os.environ.get("KERNEL_QEMU_SHELL_MEASURE_ONLY") == "1":
+    if os.environ.get("KERNEL_SHELL_MEASURE_ONLY") == "1":
         pending = b""
         line_buffer = b""
         reported_phases = set()
@@ -91,7 +93,7 @@ def main() -> int:
                     if phase not in reported_phases and marker in line:
                         elapsed_ms = (time.time_ns() - launch_ns) / 1_000_000
                         print(
-                            f"[kernel/qemu] {phase}: {elapsed_ms:.1f} ms",
+                            f"{LABEL} {phase}: {elapsed_ms:.1f} ms",
                             file=sys.stderr,
                             flush=True,
                         )
@@ -101,7 +103,7 @@ def main() -> int:
                 elapsed_ms = (time.time_ns() - launch_ns) / 1_000_000
                 if "ash readiness" not in reported_phases:
                     print(
-                        f"[kernel/qemu] ash readiness: {elapsed_ms:.1f} ms "
+                        f"{LABEL} ash readiness: {elapsed_ms:.1f} ms "
                         "(interactive shell UART blocked)",
                         file=sys.stderr,
                         flush=True,
