@@ -135,9 +135,10 @@ while preserving the real network initialization path. Set
 `KERNEL_QEMU_SHELL_NETWORK_PEER=0` to reproduce the no-peer timeout behavior.
 The shell peer uses a fast mode that skips only the two negative TCP silence
 checks; `kernelcheck-qemu` continues to run the complete network fixture.
-`kernelsh-rpi5` first performs the existing resident-image reset, so the SD
-card must already be running this project's unchanged `jtag_stub.img` before
-the target is invoked.
+`kernelsh-rpi5` first performs the existing resident-image reset. The SD card
+must have booted this project's `jtag_stub.img` at least once; subsequent
+shell/check runs may reset and replace an already resident Takibi payload
+without another power cycle. Power-cycle after changing the SD-card payload.
 The RPi5 shell prints reset and SWD-load durations and reports the same ash
 readiness marker after the UART is attached. It also starts the existing
 physical-Ethernet ARP/ICMP/TCP peer after SWD load, so the kernel does not pay

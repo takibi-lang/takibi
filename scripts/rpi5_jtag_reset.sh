@@ -15,7 +15,7 @@
 # regardless of which lower EL issues the call, so an `smc` from our
 # EL2H stub/payload reaches it the same way Linux's own `reboot` does.
 # Confirmed working for CPU-local restarts (2026-07-25): reconnects
-# within ~2-3 seconds (sometimes briefly passing through a mid-boot state
+# within a few seconds (sometimes briefly passing through a mid-boot state
 # around PC 0x9c before settling), landing back in whatever
 # kernel_2712.img was ALREADY resident. Genuinely reboots the CPU/core
 # complex, unlike a plain debug halt.
@@ -37,9 +37,11 @@
 #
 # The script therefore requires an explicit --resident-image-unchanged
 # assertion. SWD cannot observe whether the SD-card file changed while the
-# firmware keeps running an older resident image. Callers that just injected
-# a RAM payload over the known spin stub can make the assertion; after any SD
-# payload replacement, physically power-cycle first.
+# firmware keeps running an older resident image. The resident image may be
+# the known spin stub or an earlier Takibi payload: both are safe to replace
+# because the same low-PC/EL2H discriminator used by rpi5_jtag_load.sh rules
+# out a live Raspberry Pi OS kernel. After changing the SD payload itself,
+# physically power-cycle first.
 #
 # WARNING: like RPi3's watchdog-based reset, this really does reboot the
 # whole SoC -- do not run this against a board you intend to keep a live
@@ -139,17 +141,23 @@ current_mode=$(grep -oE 'current mode: EL[0-9][A-Za-z]' "$VERIFY_LOG" | head -1 
 mmu_state=$(grep -oE 'MMU: (enabled|disabled)' "$VERIFY_LOG" | head -1 | awk '{print $2}')
 rm -f "$VERIFY_LOG"
 
-# jtag_stub.S's spin loop is exactly 2 instructions (wfe; b .Lspin) at
-# 0x80000/0x80004 -- either address is a valid catch point depending on
-# exactly when this reconnected, unlike an earlier version of this script
-# that only accepted the first instruction's exact address.
-if [ "$current_mode" = "EL2H" ] && [ "$mmu_state" = "disabled" ] && { [ "$halted_pc" = "0x0000000000080000" ] || [ "$halted_pc" = "0x0000000000080004" ]; }; then
-    echo "reset confirmed: back in examples/common_rpi5/jtag_stub.S's spin loop (PC=$halted_pc)"
+# Accept the resident spin stub and any previously injected Takibi payload.
+# Both execute from the low physical window below 32 MiB; a normal VHE Linux
+# kernel is at a canonical high virtual address. MMU state is diagnostic only:
+# a prior Takibi payload may have enabled its MMU before entering its park.
+RPI5_SAFE_PC_MAX_HEX="0000000002000000"
+halted_pc_hex="${halted_pc#0x}"
+halted_pc_hex="$(printf '%s' "$halted_pc_hex" | tr 'A-F' 'a-f')"
+if [ "${#halted_pc_hex}" -ne 16 ]; then
+    echo "error: unexpected PC format after reset: $halted_pc" >&2
+    exit 1
+fi
+if [ "$current_mode" = "EL2H" ] &&
+        [ "$halted_pc_hex" < "$RPI5_SAFE_PC_MAX_HEX" ]; then
+    echo "reset confirmed: resident Takibi image is safe to replace (PC=$halted_pc mode=$current_mode MMU=$mmu_state)"
 else
     echo "warning: reset halted, but PC=$halted_pc mode=$current_mode MMU=$mmu_state does not look" \
-         "like the spin stub -- either the reset did not reboot the SoC (in which case this" \
-         "just halted whatever was already running -- possibly a live Raspberry Pi OS, see" \
-         "scripts/rpi5_jtag_load.sh's header comment on VHE), or kernel_2712.img on the SD card" \
-         "is not examples/common_rpi5/jtag_stub.img" >&2
+         "like a resident Takibi image -- refusing to inject into a possible live" \
+         "Raspberry Pi OS (see scripts/rpi5_jtag_load.sh's VHE safety check)" >&2
     exit 1
 fi
