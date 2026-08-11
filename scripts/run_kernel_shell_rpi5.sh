@@ -16,16 +16,12 @@ if [ -z "$SERIAL_DEV" ] || [ ! -e "$SERIAL_DEV" ]; then
 fi
 
 stty -F "$SERIAL_DEV" 115200 raw -echo
-echo "[kernel/rpi5] starting UART console on $SERIAL_DEV"
-python3 -m serial.tools.miniterm --raw "$SERIAL_DEV" 115200 &
-CONSOLE_PID=$!
-cleanup() {
-    kill "$CONSOLE_PID" 2>/dev/null || true
-    wait "$CONSOLE_PID" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM HUP
-
 echo "[kernel/rpi5] loading kernel over SWD"
 "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$ELF"
-echo "[kernel/rpi5] interactive UART session (Ctrl-] exits miniterm)"
-wait "$CONSOLE_PID"
+echo "[kernel/rpi5] starting UART console on $SERIAL_DEV"
+# Keep miniterm in the foreground: pyserial's Console() needs fd 0 to remain
+# the real terminal. A background miniterm inherits /dev/null as stdin under
+# non-interactive shells such as make and fails with ENOTTY. The kernel waits
+# in ash's UART read path, so starting the console after SWD injection does
+# not lose the interactive session.
+exec python3 -m serial.tools.miniterm --raw "$SERIAL_DEV" 115200
