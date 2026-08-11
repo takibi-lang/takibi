@@ -168,62 +168,20 @@ fn block_copy(source: KernelBlockDevice, destination: KernelBlockDevice,
             if (batch > KERNEL_BLOCK_BATCH) {
                 batch = KERNEL_BLOCK_BATCH;
             }
-            for offset: usize in 0..<batch {
-                match block_read(source, first_block + offset,
-                                 block_copy_buffer as []u8) {
-                    BlockIoResult::Invalid => {
-                        return BlockCopyResult::Invalid;
+            for offset: usize in 0..<KERNEL_BLOCK_BATCH {
+                if (offset < batch) {
+                    match block_read(source, first_block + offset,
+                                     block_copy_buffer as []u8) {
+                        BlockIoResult::Invalid => {
+                            return BlockCopyResult::Invalid;
+                        }
+                        BlockIoResult::Ok => { }
                     }
-                    BlockIoResult::Ok => { }
-                }
-                if (offset == 0) {
-                    slice_copy(block_copy_batch_buffer[0..<1024],
-                               block_copy_buffer as []u8);
-                } else if (offset == 1) {
-                    slice_copy(block_copy_batch_buffer[1024..<2048],
-                               block_copy_buffer as []u8);
-                } else if (offset == 2) {
-                    slice_copy(block_copy_batch_buffer[2048..<3072],
-                               block_copy_buffer as []u8);
-                } else if (offset == 3) {
-                    slice_copy(block_copy_batch_buffer[3072..<4096],
-                               block_copy_buffer as []u8);
-                } else if (offset == 4) {
-                    slice_copy(block_copy_batch_buffer[4096..<5120],
-                               block_copy_buffer as []u8);
-                } else if (offset == 5) {
-                    slice_copy(block_copy_batch_buffer[5120..<6144],
-                               block_copy_buffer as []u8);
-                } else if (offset == 6) {
-                    slice_copy(block_copy_batch_buffer[6144..<7168],
-                               block_copy_buffer as []u8);
-                } else if (offset == 7) {
-                    slice_copy(block_copy_batch_buffer[7168..<8192],
-                               block_copy_buffer as []u8);
-                } else if (offset == 8) {
-                    slice_copy(block_copy_batch_buffer[8192..<9216],
-                               block_copy_buffer as []u8);
-                } else if (offset == 9) {
-                    slice_copy(block_copy_batch_buffer[9216..<10240],
-                               block_copy_buffer as []u8);
-                } else if (offset == 10) {
-                    slice_copy(block_copy_batch_buffer[10240..<11264],
-                               block_copy_buffer as []u8);
-                } else if (offset == 11) {
-                    slice_copy(block_copy_batch_buffer[11264..<12288],
-                               block_copy_buffer as []u8);
-                } else if (offset == 12) {
-                    slice_copy(block_copy_batch_buffer[12288..<13312],
-                               block_copy_buffer as []u8);
-                } else if (offset == 13) {
-                    slice_copy(block_copy_batch_buffer[13312..<14336],
-                               block_copy_buffer as []u8);
-                } else if (offset == 14) {
-                    slice_copy(block_copy_batch_buffer[14336..<15360],
-                               block_copy_buffer as []u8);
-                } else {
-                    slice_copy(block_copy_batch_buffer[15360..<16384],
-                               block_copy_buffer as []u8);
+                    let base: usize = offset * KERNEL_BLOCK_SIZE;
+                    slice_copy(
+                        block_copy_batch_buffer[
+                            base..<base + KERNEL_BLOCK_SIZE],
+                        block_copy_buffer as []u8);
                 }
             }
             let bytes: *u8 = block_copy_batch_buffer as *u8;
