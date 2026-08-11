@@ -122,10 +122,9 @@ make kernelsh-rpi5     # load RPi5 over SWD and use the Debug Probe UART as the 
 ```
 
 The two `kernelsh-*` targets are deliberately interactive and do not run the
-automated view/network checks. `kernelsh-rpi5` uses pyserial's `miniterm`; on
+automated view/network checks. Both use pyserial's `miniterm`; on
 Debian/Ubuntu install it with `sudo apt-get install python3-serial`. Press
-Ctrl-] to leave the RPi5 console. QEMU uses its standard `-nographic` escape,
-Ctrl-a x, to exit.
+Ctrl-] to leave either console.
 
 `kernelbuild`/`kernelcheck` run both the RPi5 and QEMU targets. See
 "QEMU/AArch64 integration" below for what `kernelcheck-qemu` covers and how
