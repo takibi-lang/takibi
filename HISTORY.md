@@ -15,6 +15,21 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-11: RPi5 USB rootfs WRITE(10) batching reached the 128-sector boundary
+
+The RPi5 USB rootfs provision path was changed from one WRITE(10) per 512-byte
+sector to bounded contiguous multi-sector commands. Hardware experiments with
+the same full `kernelcheck-rpi5` suite established 128 sectors (64 KiB) as the
+largest reliable transfer: 32, 64, and 128 sectors completed all 31 integration
+views, while 192 and 256 sectors stalled during the initial rootfs provision
+before the userspace readiness marker. The production limit was therefore set
+to 128 sectors, reducing the 4 MiB rootfs provision from roughly 8192 USB write
+commands to 64. The single-sector path remains available as a fallback when a
+completed multi-sector command reports a transport or device error. The ext2
+layer still intentionally performs one-filesystem-block operations; coalescing
+there would require proving contiguous physical block pointers and adding a
+larger scratch-buffer path.
+
 ### 2026-08-11: Human-operated BusyBox ash consoles for QEMU and RPi5
 
 The kernel's existing UART ash REPL coverage was script-driven: the QEMU

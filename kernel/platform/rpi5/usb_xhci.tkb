@@ -204,6 +204,13 @@ let mut msc_scratch_buf: [u8; 512] align(64);
 // Bouncing through a buffer that is 64-byte aligned AND a whole number
 // of cache lines long removes the caller-alignment requirement entirely,
 // which is why disk_read/disk_write below take a plain `*u8`.
+// Empirical RPi5 limit for this driver: 128 sectors (64 KiB) succeeds
+// through rootfs provisioning and the complete kernelcheck-rpi5 suite.
+// 192 and 256 sectors stalled during the first rootfs WRITE(10), before
+// the userspace readiness marker. Keep the bounded command below that
+// observed XHCI/device boundary; disk_write_sectors() still falls back to
+// single-sector commands when a completed multi-sector command reports an
+// ordinary transport/device error.
 const MSC_MAX_TRANSFER_SECTORS: usize = 128;
 const MSC_SECTOR_SIZE: usize = 512;
 let mut msc_bounce_buf: [u8; MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE] align(64);

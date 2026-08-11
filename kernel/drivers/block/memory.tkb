@@ -1,4 +1,7 @@
 const KERNEL_BLOCK_SIZE: usize = 1024;
+// 64 1 KiB filesystem blocks = 128 USB sectors = 64 KiB. This is the
+// largest contiguous rootfs batch validated on the RPi5 device; larger
+// 192/256-sector commands stalled during provisioning.
 const KERNEL_BLOCK_BATCH: usize = 64;
 
 // GitHub issue #230: the writable RAM-backed ext2 fixture is now a real

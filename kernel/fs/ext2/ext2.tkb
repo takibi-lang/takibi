@@ -422,6 +422,12 @@ fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
 // not need a kernel buffer as large as the whole file. Callers repeat this
 // operation and copy each bounded block into the user buffer, like a VFS
 // page-cache/buffer-cache read path does on larger kernels.
+// The USB backend supports bounded multi-sector transfers, but this API
+// intentionally remains one-block-at-a-time: a larger read would need to
+// prove contiguous physical ext2 block pointers and retain a correspondingly
+// large scratch buffer. The current ext2 write paths likewise update single
+// metadata/data blocks, so they do not yet have a safe contiguous range to
+// coalesce.
 //
 // The supported range is derived from the 12 direct pointers and the
 // single- and double-indirect pointer fanout of this filesystem's block size.
