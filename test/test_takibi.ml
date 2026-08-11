@@ -8187,6 +8187,26 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
+    "constant-stride batch subslices stay trap-free under a runtime batch guard: \
+     the loop proves offset, the constant stride proves the end bound, and \
+     the guard only controls how many entries are copied" `Quick
+    (expect_trap_sites 0
+       "const FTRAP_BATCH: usize = 8;
+        const FTRAP_STRIDE: usize = 4;
+        let mut ftrap_batch_dst: [u8; FTRAP_BATCH * FTRAP_STRIDE];
+        let mut ftrap_batch_src: [u8; FTRAP_STRIDE];
+        fn ftrap_batch_copy(count: usize) {
+          for offset: usize in 0..<FTRAP_BATCH {
+            if (offset < count) {
+              let base: usize = offset * FTRAP_STRIDE;
+              slice_copy(
+                  ftrap_batch_dst[base..<base + FTRAP_STRIDE],
+                  ftrap_batch_src as []u8);
+            }
+          }
+        }");
+
+  Alcotest.test_case
     "the P4 probe: http_server's full guard chain -- device-length clamp, \
      ihl equality, total_len vs frame room, segment view of runtime \
      length, options skip at runtime offset -- proven end to end with \

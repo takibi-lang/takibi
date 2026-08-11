@@ -127,6 +127,7 @@ the kernel's normal network initialization path from timing out; QEMU uses a
 fast peer mode, while RPi5 runs the existing physical-Ethernet checks. Both
 use pyserial's `miniterm`; on Debian/Ubuntu install it with `sudo apt-get
 install python3-serial`. Press Ctrl-] to leave either console.
+Exiting this way also restores the host terminal settings.
 
 The QEMU shell also reports the elapsed time from QEMU launch to the kernel's
 explicit `interactive shell: uart blocked` readiness marker. This is the
@@ -315,7 +316,7 @@ raw-socket privileges. To use the BusyBox ash prompt from a terminal, run
 `make kernelsh-qemu`. It launches QEMU with the complete virtio block/network
 configuration and connects its UART to pyserial miniterm over a local TCP
 chardev; this preserves LF input and local echo. Press Ctrl-] to leave the
-console.
+console and restore the host terminal settings.
 
 The kernel never exits (a `while (true) {}` park at the end of boot, same as
 RPi5). `scripts/kernel_net_test.py <local-port> <remote-port>` is the host-side
