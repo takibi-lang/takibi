@@ -218,15 +218,15 @@ fn kernel_syscall_connected_fixture_start() {
 
 must_use variant KernelFdReapResult { Failed; Reaped; }
 must_use variant KernelDaemonTeardownResult { Invalid; Reclaimed; }
-variant KernelConnectionLookupResult {
+must_use variant KernelConnectionLookupResult {
     Missing;
     Found({0..<TCP_CONNECTION_MAX as usize});
 }
-variant KernelSocketFdAllocResult {
+must_use variant KernelSocketFdAllocResult {
     Full;
     Allocated({0..<KERNEL_SOCKET_FD_MAX as usize});
 }
-variant KernelListenerLookupResult {
+must_use variant KernelListenerLookupResult {
     Missing;
     Found({0..<KERNEL_SOCKET_FD_MAX as usize});
 }

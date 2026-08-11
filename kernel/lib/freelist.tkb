@@ -66,7 +66,7 @@
 //   zero-initialized .bss is NOT equivalent to an initialized empty pool,
 //   unlike the linear-scan allocators this replaced.
 
-variant FreelistPopResult {
+must_use variant FreelistPopResult {
     Empty;
     Popped(exists allocation: usize. FreelistOwner[allocation]);
 }
