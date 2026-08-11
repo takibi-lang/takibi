@@ -122,9 +122,11 @@ make kernelsh-rpi5     # load RPi5 over SWD and use the Debug Probe UART as the 
 ```
 
 The two `kernelsh-*` targets are deliberately interactive and do not run the
-automated view/network checks. Both use pyserial's `miniterm`; on
-Debian/Ubuntu install it with `sudo apt-get install python3-serial`. Press
-Ctrl-] to leave either console.
+automated view suite. They do start the host-side network peer needed to keep
+the kernel's normal network initialization path from timing out; QEMU uses a
+fast peer mode, while RPi5 runs the existing physical-Ethernet checks. Both
+use pyserial's `miniterm`; on Debian/Ubuntu install it with `sudo apt-get
+install python3-serial`. Press Ctrl-] to leave either console.
 
 The QEMU shell also reports the elapsed time from QEMU launch to the kernel's
 explicit `interactive shell: uart blocked` readiness marker. This is the
