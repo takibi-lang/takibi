@@ -1,4 +1,5 @@
 const KERNEL_BLOCK_SIZE: usize = 1024;
+const KERNEL_BLOCK_BATCH: usize = 4;
 
 // GitHub issue #230: the writable RAM-backed ext2 fixture is now a real
 // compile-time file embed instead of kernel/user/ext2_image.S's `.incbin`
@@ -30,6 +31,8 @@ must_use variant BlockIoResult { Invalid; Ok; }
 must_use variant BlockCopyResult { Invalid; Copied; }
 
 private let mut block_copy_buffer: [u8; KERNEL_BLOCK_SIZE];
+private let mut block_copy_batch_buffer:
+    [u8; KERNEL_BLOCK_SIZE * KERNEL_BLOCK_BATCH];
 
 fn memory_block_device_ext2() -> KernelBlockDeviceResult {
     let address: usize = (kernel_ext2_image as *u8) as usize;
@@ -153,6 +156,75 @@ fn block_copy(source: KernelBlockDevice, destination: KernelBlockDevice,
     if (count == 0 || count > block_count(source) ||
         count > block_count(destination)) {
         return BlockCopyResult::Invalid;
+    }
+    if (destination.backend == 1) {
+        // The USB path has a bounded multi-sector WRITE(10) operation. Fill
+        // a complete batch from the source, then issue one command for the
+        // contiguous destination range. The tail remains safe through the
+        // same path with a smaller transfer count.
+        let mut first_block: usize = 0;
+        while (first_block < count) {
+            let mut batch: usize = count - first_block;
+            if (batch > KERNEL_BLOCK_BATCH) {
+                batch = KERNEL_BLOCK_BATCH;
+            }
+            for offset: usize in 0..<batch {
+                match block_read(source, first_block + offset,
+                                 block_copy_buffer as []u8) {
+                    BlockIoResult::Invalid => {
+                        return BlockCopyResult::Invalid;
+                    }
+                    BlockIoResult::Ok => { }
+                }
+                if (offset == 0) {
+                    slice_copy(block_copy_batch_buffer[0..<1024],
+                               block_copy_buffer as []u8);
+                } else if (offset == 1) {
+                    slice_copy(block_copy_batch_buffer[1024..<2048],
+                               block_copy_buffer as []u8);
+                } else if (offset == 2) {
+                    slice_copy(block_copy_batch_buffer[2048..<3072],
+                               block_copy_buffer as []u8);
+                } else {
+                    slice_copy(block_copy_batch_buffer[3072..<4096],
+                               block_copy_buffer as []u8);
+                }
+            }
+            let bytes: *u8 = block_copy_batch_buffer as *u8;
+            match disk_write_sectors((first_block * 2) as u32,
+                                     bytes, batch * 2) {
+                DiskIoResult::Err(error) => {
+                    // Some devices reject a multi-sector WRITE(10), or a
+                    // transport can fail only for the larger transfer.
+                    // Reuse the already-filled bytes through the proven
+                    // single-sector path before reporting the copy failed.
+                    for offset: usize in 0..<batch {
+                        let block_offset: isize =
+                            (offset * KERNEL_BLOCK_SIZE) as isize;
+                        let block_bytes: *u8 = bytes +
+                            block_offset;
+                        match disk_write((first_block * 2 + offset * 2) as u32,
+                                         block_bytes) {
+                            DiskIoResult::Err(single_error) => {
+                                return BlockCopyResult::Invalid;
+                            }
+                            DiskIoResult::Ok => { }
+                        }
+                        match disk_write(
+                                (first_block * 2 + offset * 2 + 1) as u32,
+                                block_bytes + 512) {
+                            DiskIoResult::Err(single_error) => {
+                                return BlockCopyResult::Invalid;
+                            }
+                            DiskIoResult::Ok => { }
+                        }
+                    }
+                }
+                DiskIoResult::Ok => { }
+            }
+            first_block = first_block + batch;
+        }
+        return BlockCopyResult::Copied;
     }
     for block: usize in 0..<count {
         match block_read(source, block, block_copy_buffer as []u8) {

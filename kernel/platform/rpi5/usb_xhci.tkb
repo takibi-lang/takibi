@@ -187,7 +187,7 @@ let mut msc_csw_buf: [u8; 64] align(64);
 // into the caller's own buffer instead, via msc_run_command's data_base
 // parameter.
 let mut msc_scratch_buf: [u8; 512] align(64);
-// Every 512-byte disk_read/disk_write DMAs through this instead of the
+// Every disk_read/disk_write_sectors DMA goes through this instead of the
 // caller's own buffer. Not an optimization -- a correctness requirement.
 // This CPU's cache line is 64 bytes. DMA receive buffers are whole,
 // cache-line-aligned allocations so dma_prepare_rx/dma_finish_rx can safely
@@ -204,7 +204,9 @@ let mut msc_scratch_buf: [u8; 512] align(64);
 // Bouncing through a buffer that is 64-byte aligned AND a whole number
 // of cache lines long removes the caller-alignment requirement entirely,
 // which is why disk_read/disk_write below take a plain `*u8`.
-let mut msc_bounce_buf: [u8; 512] align(64);
+const MSC_MAX_TRANSFER_SECTORS: usize = 8;
+const MSC_SECTOR_SIZE: usize = 512;
+let mut msc_bounce_buf: [u8; MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE] align(64);
 let mut msc_tag: u32 = 0;
 
 let mut xhci_ready: bool = false;
@@ -642,9 +644,9 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
 
     if (data_len > 0) {
         if (dir_in) {
-            dma_prepare_rx(data, 512);
+            dma_prepare_rx(data, data_len as usize);
         } else {
-            dma_prepare_tx(data as *u8, 512);
+            dma_prepare_tx(data as *u8, data_len as usize);
         }
         // Short Packet (13) is a normal, successful outcome for a
         // device that had less data than we offered to read. Any other
@@ -659,7 +661,7 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
             return 2;
         }
         if (dir_in) {
-            dma_finish_rx(data, 512);
+            dma_finish_rx(data, data_len as usize);
         }
     }
 
@@ -1381,9 +1383,9 @@ fn disk_status() -> DiskIoResult {
 
 // READ(10)/WRITE(10) share the same CDB shape: opcode | flags(0) |
 // LBA(4, big-endian) | group number(0) | transfer length(2, big-endian,
-// always 1 block here) | control(0). msc_cbw_header() must already have
+// bounded by MSC_MAX_TRANSFER_SECTORS) | control(0). msc_cbw_header() must already have
 // been called to build the CBW header and zero this CDB region.
-fn msc_scsi_lba_cdb(op: u8, sector: u32) {
+fn msc_scsi_lba_cdb(op: u8, sector: u32, sectors: usize) {
     let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
     let op_ptr: *u8 = (cbw_base + 15) as *u8;
     *op_ptr = op;
@@ -1395,8 +1397,10 @@ fn msc_scsi_lba_cdb(op: u8, sector: u32) {
     *lba_1_ptr = ((sector >> 8) & 0xFF) as u8;
     let lba_lo_ptr: *u8 = (cbw_base + 20) as *u8;
     *lba_lo_ptr = (sector & 0xFF) as u8;
-    let len_ptr: *u8 = (cbw_base + 23) as *u8;
-    *len_ptr = 1;
+    let len_hi_ptr: *u8 = (cbw_base + 22) as *u8;
+    *len_hi_ptr = ((sectors >> 8) & 0xFF) as u8;
+    let len_lo_ptr: *u8 = (cbw_base + 23) as *u8;
+    *len_lo_ptr = (sectors & 0xFF) as u8;
 }
 
 // Same retry policy as RPi3's own disk_read/disk_write: one attempt, and
@@ -1411,12 +1415,12 @@ fn disk_read(sector: u32, buf: *u8) -> DiskIoResult {
     }
     let bounce: usize = (msc_bounce_buf as *u8) as usize;
     msc_cbw_header(512, true, 10);
-    msc_scsi_lba_cdb(0x28, sector);
+    msc_scsi_lba_cdb(0x28, sector, 1);
     let mut rc: u32 = msc_run_command(512, true, msc_bounce_buf as *align(64) u8);
     if (rc != 0) {
         msc_recover_transport();
         msc_cbw_header(512, true, 10);
-        msc_scsi_lba_cdb(0x28, sector);
+        msc_scsi_lba_cdb(0x28, sector, 1);
         rc = msc_run_command(512, true, msc_bounce_buf as *align(64) u8);
     }
     if (rc != 0) {
@@ -1430,29 +1434,44 @@ fn disk_read(sector: u32, buf: *u8) -> DiskIoResult {
 }
 
 fn disk_write(sector: u32, buf: *u8) -> DiskIoResult {
+    return disk_write_sectors(sector, buf, 1);
+}
+
+// Write a bounded contiguous run with one WRITE(10). The bounce buffer is
+// cache-line aligned and sized for the complete DMA range, so callers may
+// provide ordinary, unaligned byte storage. A failed write is replayed once
+// with the same bytes and LBA range, preserving the existing single-sector
+// recovery policy.
+fn disk_write_sectors(sector: u32, buf: *u8, sectors: usize) -> DiskIoResult {
     if (disk_io_ok(disk_status()) == false) {
         return DiskIoResult::Err(-1);
     }
+    if (sectors == 0 || sectors > MSC_MAX_TRANSFER_SECTORS) {
+        return DiskIoResult::Err(-1);
+    }
+    let length: usize = sectors * MSC_SECTOR_SIZE;
     let bounce: usize = (msc_bounce_buf as *u8) as usize;
-    for i: isize in 0..<512 {
+    for i: isize in 0..<length as isize {
         let dst: *u8 = (bounce as *u8);
         dst[i] = buf[i];
     }
-    msc_cbw_header(512, false, 10);
-    msc_scsi_lba_cdb(0x2A, sector);
-    let rc1: u32 = msc_run_command(512, false, msc_bounce_buf as *align(64) u8);
+    msc_cbw_header(length as u32, false, 10);
+    msc_scsi_lba_cdb(0x2A, sector, sectors);
+    let rc1: u32 = msc_run_command(length as u32, false,
+                                    msc_bounce_buf as *align(64) u8);
     if (rc1 == 0) {
         return DiskIoResult::Ok;
     }
     msc_recover_transport();
     // This is deliberately limited to one replay of the exact same
-    // single-block WRITE(10). If the first command reached media before
+    // WRITE(10) range. If the first command reached media before
     // its CSW was lost, repeating identical bytes to the identical LBA
     // is content-idempotent; no general write-command retry policy is
     // implied.
-    msc_cbw_header(512, false, 10);
-    msc_scsi_lba_cdb(0x2A, sector);
-    let rc2: u32 = msc_run_command(512, false, msc_bounce_buf as *align(64) u8);
+    msc_cbw_header(length as u32, false, 10);
+    msc_scsi_lba_cdb(0x2A, sector, sectors);
+    let rc2: u32 = msc_run_command(length as u32,
+                                    false, msc_bounce_buf as *align(64) u8);
     if (rc2 != 0) {
         return DiskIoResult::Err(-1);
     }
