@@ -502,11 +502,16 @@ kernelbuild: kernelbuild-rpi5 kernelbuild-qemu
 ## /dev/serial/by-id label). Override only if the auto-detected device is
 ## wrong.
 RPI5_SERIAL_DEV ?=
+# The connected Debug Probe/board has been validated at 30 MHz SWD. Keep this
+# override at the maintained kernel target boundary so historical examples'
+# hardware lanes retain their existing default; use RPI5_SWD_SPEED=1000 when
+# a different probe/cable needs the conservative speed.
+RPI5_SWD_SPEED ?= 30000
 
 # A compile is not an integration pass. This deliberately fails until the
 # first observable RPi5 EL1 milestone connects its real-hardware harness.
 kernelcheck-rpi5: kernelbuild-rpi5
-	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_kernel_hwtest_rpi5.sh
+	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_hwtest_rpi5.sh
 
 kernelcheck-qemu: kernelbuild-qemu
 	@bash scripts/run_kernel_qemutest.sh
@@ -520,7 +525,7 @@ kernelsh-qemu: kernelbuild-qemu
 ## terminal to the RPi5 Debug Probe UART. Requires python3-serial (the Debian
 ## package is python3-serial); exit miniterm with Ctrl-].
 kernelsh-rpi5: kernelbuild-rpi5
-	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_kernel_shell_rpi5.sh
+	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_shell_rpi5.sh
 
 kernelcheck: kernelcheck-qemu kernelcheck-rpi5
 

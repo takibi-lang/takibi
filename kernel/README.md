@@ -146,9 +146,10 @@ its normal no-peer protocol timeout before reaching ash. This requires a
 passwordless `sudo` capability for raw Ethernet access; set
 `KERNEL_RPI5_SHELL_NETWORK_PEER=0` to disable it. Configure the peer with the
 same `ETH_TEST_IFACE`, `ETH_TEST_SUBNET`, `ETH_TEST_MAC`, and
-`ETH_TEST_HOST_IP` variables used by `kernelcheck-rpi5`. The OpenOCD/SWD
-default remains 1 MHz; set `RPI5_SWD_SPEED=<kHz>` to measure a higher adapter
-speed on a particular board/probe without changing the safe default.
+`ETH_TEST_HOST_IP` variables used by `kernelcheck-rpi5`. The maintained kernel
+targets default to 30 MHz SWD on the validated Debug Probe/board setup; set
+`RPI5_SWD_SPEED=<kHz>` to use a more conservative speed for another probe or
+cable, for example `RPI5_SWD_SPEED=1000`.
 
 `kernelbuild`/`kernelcheck` run both the RPi5 and QEMU targets. See
 "QEMU/AArch64 integration" below for what `kernelcheck-qemu` covers and how
