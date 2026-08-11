@@ -125,6 +125,9 @@ The two `kernelsh-*` targets are deliberately interactive and do not run the
 automated view/network checks. Both use pyserial's `miniterm`; on
 Debian/Ubuntu install it with `sudo apt-get install python3-serial`. Press
 Ctrl-] to leave either console.
+`kernelsh-rpi5` first performs the existing resident-image reset, so the SD
+card must already be running this project's unchanged `jtag_stub.img` before
+the target is invoked.
 
 `kernelbuild`/`kernelcheck` run both the RPi5 and QEMU targets. See
 "QEMU/AArch64 integration" below for what `kernelcheck-qemu` covers and how
@@ -282,25 +285,17 @@ make kernelcheck-qemu  # build, boot, drive a host-side network peer, and verify
 ```
 
 Both need `qemu-system-aarch64` (part of the compiler dependencies listed in
-the top-level README) but nothing else -- no board, no SWD, no NIC, no
-raw-socket privileges. To boot interactively (for `gdb-multiarch`
-debugging, or just watching the boot log live):
+the top-level README) but nothing else -- no board, no SWD, no NIC, or
+raw-socket privileges. To use the BusyBox ash prompt from a terminal, run
+`make kernelsh-qemu`. It launches QEMU with the complete virtio block/network
+configuration and connects its UART to pyserial miniterm over a local TCP
+chardev; this preserves LF input and local echo. Press Ctrl-] to leave the
+console.
 
-```bash
-qemu-system-aarch64 -machine virt -cpu cortex-a53 -smp 2 -m 1024 -nographic \
-    -global virtio-mmio.force-legacy=on \
-    -netdev dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=17771,remote.type=inet,remote.host=127.0.0.1,remote.port=17772 \
-    -device virtio-net-device,netdev=net0,mac=02:00:20:00:00:02,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off \
-    -kernel kernel/build/qemu/kernel.elf
-```
-
-The kernel never exits (a `while (true) {}` park at the end of boot, same
-as RPi5), so stop it with `Ctrl-A X` or `kill`. Drop the `-netdev`/`-device`
-pair entirely for a boot that skips straight to a clean, bounded
-`virtio net: link failed` line instead of attempting network I/O.
-`scripts/kernel_net_test.py <local-port> <remote-port>` is the host-side
-peer `kernelcheck-qemu` drives automatically; run it by hand against an
-interactive boot (matching ports) to exercise ARP/ICMP/TCP manually.
+The kernel never exits (a `while (true) {}` park at the end of boot, same as
+RPi5). `scripts/kernel_net_test.py <local-port> <remote-port>` is the host-side
+peer `kernelcheck-qemu` drives automatically; use the automated runner rather
+than an interactive console when exercising its ARP/ICMP/TCP contracts.
 
 ### What this verifies
 
@@ -407,7 +402,7 @@ run, not a specification.
   to the ext2-resident static BusyBox image on any resolution failure -- so its own
   argv[0]-driven multi-call applet dispatch (`echo`, `sh`, etc.) still works
   for names with no real ELF behind them, such as the `/echo`/`/bin/echo`
-  ext2 symlinks (superseding an earlier two-entry registry). `wait4` blocks
+  ext2 hard links (superseding an earlier two-entry registry). `wait4` blocks
   the caller until its live child exits (by specific pid or `-1`/
   `WAIT_ANY`), delivering the real reaped pid and exit status, tracked
   per-slot so any live process (not just the tree root) can wait for its

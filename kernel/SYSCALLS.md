@@ -18,13 +18,14 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 | 49 | chdir | Implemented | succeeds only for `/` (`ENOENT` otherwise) -- honest, since the one real cwd never actually changes |
 | 56 | openat | Implemented | generic NUL-terminated absolute pathname lookup, including the rootfs's bounded nested directories, against the ext2 mount; `dirfd` ignored |
 | 57 | close | Implemented | |
+| 61 | getdents64 | Unsupported-by-design | directory FD state and ext2 directory enumeration are not implemented; the syscall falls through to `ENOSYS`, so BusyBox `ls` is not yet supported |
 | 63 | read | Implemented | connected-socket, ext2-file, and UART-fallback paths, all through the typed user-memory boundary (`kernel/mm/user_memory.tkb`); an empty UART RX path blocks and wakes on received input, as exercised by the foreground interactive ash REPL |
 | 64 | write | Implemented | same three paths as `read`, plus the inetd-response path |
 | 65 | readv | Partial | fd 3 (ext2 file) only, via a standalone segment helper not shared with `read`(64)'s TCP/inetd branches. Each iovec entry validated and copied individually through the user-memory boundary (`struct packed Iovec`, `IOV_MAX`-bounded, `checked_mul_usize`/`checked_add_usize`-guarded array-length and running-total arithmetic). Connected-TCP and inetd-mode fds are not supported |
 | 66 | writev | Partial | fd 1/2 (UART) only -- same scoping and same fd-kind gap as `readv` above |
 | 71 | sendfile | Implemented | fd 3 (ext2 file) -> fd 1/2 (UART) only, offset must be 0 |
 | 73 | ppoll | Partial | real pollfd array validation (`struct packed Pollfd`, `POLL_MAX`-bounded) and real per-fd readiness (UART RX pending, connected-TCP buffered data). Really blocks and wakes on UART RX for exactly one shape: `nfds == 1`, fd 0, `POLLIN` requested, nothing ready, NULL timeout and NULL sigmask -- the shape BusyBox ash's `read` builtin uses. Every other shape returns current readiness immediately, so a non-NULL timeout is never armed and no multi-fd wait exists |
-| 79 | newfstatat | Implemented | generic ext2 pathname lookup plus fixed asm-generic AArch64 `stat` fields for regular files, directories, and BusyBox applet symlinks |
+| 79 | newfstatat | Implemented | generic ext2 pathname lookup plus fixed asm-generic AArch64 `stat` fields for regular files, directories, and symlinks |
 | 93/94 | exit/exit_group | Implemented | real child-vs-parent teardown via the process/fd/VM-clone machinery |
 | 96 | set_tid_address | Implemented | returns the real current pid (single-threaded-per-process model) |
 | 103 | setitimer | Partial | previous timer is honestly zeroed; no real itimer is armed (this kernel's bounded single-request integration scope never needs `SIGALRM` to actually fire) |
