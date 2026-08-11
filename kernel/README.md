@@ -139,7 +139,13 @@ checks; `kernelcheck-qemu` continues to run the complete network fixture.
 card must already be running this project's unchanged `jtag_stub.img` before
 the target is invoked.
 The RPi5 shell prints reset and SWD-load durations and reports the same ash
-readiness marker after the UART is attached.
+readiness marker after the UART is attached. It also starts the existing
+physical-Ethernet ARP/ICMP/TCP peer after SWD load, so the kernel does not pay
+its normal no-peer protocol timeout before reaching ash. This requires a
+passwordless `sudo` capability for raw Ethernet access; set
+`KERNEL_RPI5_SHELL_NETWORK_PEER=0` to disable it. Configure the peer with the
+same `ETH_TEST_IFACE`, `ETH_TEST_SUBNET`, `ETH_TEST_MAC`, and
+`ETH_TEST_HOST_IP` variables used by `kernelcheck-rpi5`.
 
 `kernelbuild`/`kernelcheck` run both the RPi5 and QEMU targets. See
 "QEMU/AArch64 integration" below for what `kernelcheck-qemu` covers and how
