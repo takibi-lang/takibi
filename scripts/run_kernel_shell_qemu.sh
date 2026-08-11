@@ -20,6 +20,7 @@ fi
 
 QEMU_SERIAL_PORT="${KERNEL_QEMU_SHELL_SERIAL_PORT:-17773}"
 echo "[kernel/qemu] interactive UART session (Ctrl-] exits miniterm)"
+QEMU_LAUNCH_NS="$(date +%s%N)"
 QEMU_COMMAND=(
     qemu-system-aarch64 \
     -machine virt -cpu cortex-a53 -smp 2 -m 1024 -nographic \
@@ -33,6 +34,7 @@ QEMU_COMMAND=(
     -kernel "$ELF"
 )
 
+export KERNEL_QEMU_SHELL_LAUNCH_NS="$QEMU_LAUNCH_NS"
 "${QEMU_COMMAND[@]}" &
 QEMU_PID=$!
 cleanup() {
@@ -41,8 +43,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
-# pyserial's socket:// backend gives miniterm the same LF and local-echo
-# behavior as the RPi5 Debug Probe console, while QEMU remains independent of
-# make's recipe stdin handling.
-exec python3 -m serial.tools.miniterm --raw --eol LF --echo \
+# The wrapper keeps the complete UART stream in the terminal and reports the
+# first explicit ash readiness marker without adding a second TCP consumer.
+python3 "$REPO_ROOT/scripts/run_kernel_shell_console.py" \
     "socket://127.0.0.1:$QEMU_SERIAL_PORT" 115200

@@ -125,6 +125,11 @@ The two `kernelsh-*` targets are deliberately interactive and do not run the
 automated view/network checks. Both use pyserial's `miniterm`; on
 Debian/Ubuntu install it with `sudo apt-get install python3-serial`. Press
 Ctrl-] to leave either console.
+
+The QEMU shell also reports the elapsed time from QEMU launch to the kernel's
+explicit `interactive shell: uart blocked` readiness marker. This is the
+point at which ash is waiting for input, rather than merely the point at which
+the QEMU process or UART socket exists.
 `kernelsh-rpi5` first performs the existing resident-image reset, so the SD
 card must already be running this project's unchanged `jtag_stub.img` before
 the target is invoked.
