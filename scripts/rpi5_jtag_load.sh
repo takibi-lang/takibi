@@ -106,11 +106,16 @@ OPENOCD_ARGS=(
     -f interface/cmsis-dap.cfg
     -f "$BCM2712_CFG"
 )
+OPENOCD_SPEED_ARGS=()
+if [ -n "${RPI5_SWD_SPEED:-}" ]; then
+    OPENOCD_SPEED_ARGS=(-c "adapter speed $RPI5_SWD_SPEED")
+    echo "SWD adapter speed override: ${RPI5_SWD_SPEED} kHz"
+fi
 
 # Pass 1: halt, read PC + current exception level, resume immediately --
 # read-only, same reasoning as rpi3_jtag_load.sh's own check pass.
 CHECK_LOG=$(mktemp)
-if ! openocd "${OPENOCD_ARGS[@]}" \
+if ! openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" \
     -c 'init' \
     -c 'halt' \
     -c 'reg pc' \
@@ -198,7 +203,7 @@ LOAD_COMMANDS+=(
     -c 'resume'
     -c 'shutdown'
 )
-if ! openocd "${OPENOCD_ARGS[@]}" "${LOAD_COMMANDS[@]}" > "$LOG" 2>&1
+if ! openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" "${LOAD_COMMANDS[@]}" > "$LOG" 2>&1
 then
     echo "error: openocd failed during injection -- log follows" >&2
     cat "$LOG" >&2

@@ -63,6 +63,10 @@ OPENOCD_ARGS=(
     -f interface/cmsis-dap.cfg
     -f "$BCM2712_CFG"
 )
+OPENOCD_SPEED_ARGS=()
+if [ -n "${RPI5_SWD_SPEED:-}" ]; then
+    OPENOCD_SPEED_ARGS=(-c "adapter speed $RPI5_SWD_SPEED")
+fi
 
 # PSCI SYSTEM_RESET (function ID 0x84000009) via `smc #0` (encoding
 # 0xd4000003), immediately followed by `b .` (0x14000000) as a landing
@@ -94,7 +98,7 @@ OPENOCD_ARGS=(
 RESET_ADDR=0x00100000
 PSCI_SYSTEM_RESET=0x84000009
 
-timeout --foreground "$OPENOCD_TIMEOUT" openocd "${OPENOCD_ARGS[@]}" \
+timeout --foreground "$OPENOCD_TIMEOUT" openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" \
     -c 'init' \
     -c 'targets bcm2712.cpu3' \
     -c 'halt' \
@@ -114,7 +118,7 @@ timeout --foreground "$OPENOCD_TIMEOUT" openocd "${OPENOCD_ARGS[@]}" \
 VERIFY_LOG=$(mktemp)
 attempt=0
 max_attempts=20
-until timeout --foreground "$OPENOCD_TIMEOUT" openocd "${OPENOCD_ARGS[@]}" \
+until timeout --foreground "$OPENOCD_TIMEOUT" openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" \
     -c 'init' \
     -c 'halt' \
     -c 'reg pc' \
