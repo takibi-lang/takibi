@@ -1,5 +1,5 @@
 const KERNEL_BLOCK_SIZE: usize = 1024;
-const KERNEL_BLOCK_BATCH: usize = 4;
+const KERNEL_BLOCK_BATCH: usize = 8;
 
 // GitHub issue #230: the writable RAM-backed ext2 fixture is now a real
 // compile-time file embed instead of kernel/user/ext2_image.S's `.incbin`
@@ -185,8 +185,20 @@ fn block_copy(source: KernelBlockDevice, destination: KernelBlockDevice,
                 } else if (offset == 2) {
                     slice_copy(block_copy_batch_buffer[2048..<3072],
                                block_copy_buffer as []u8);
-                } else {
+                } else if (offset == 3) {
                     slice_copy(block_copy_batch_buffer[3072..<4096],
+                               block_copy_buffer as []u8);
+                } else if (offset == 4) {
+                    slice_copy(block_copy_batch_buffer[4096..<5120],
+                               block_copy_buffer as []u8);
+                } else if (offset == 5) {
+                    slice_copy(block_copy_batch_buffer[5120..<6144],
+                               block_copy_buffer as []u8);
+                } else if (offset == 6) {
+                    slice_copy(block_copy_batch_buffer[6144..<7168],
+                               block_copy_buffer as []u8);
+                } else {
+                    slice_copy(block_copy_batch_buffer[7168..<8192],
                                block_copy_buffer as []u8);
                 }
             }
