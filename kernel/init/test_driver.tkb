@@ -71,11 +71,7 @@ must_use variant ExecArgv0NameResult { Invalid; Name([]u8); }
 // this function needs, from kernel_syscall_exec_argv() (the existing
 // argv buffer already carries it). Requires a leading
 // '/' (relative paths unsupported, same as every existing scenario) and
-// returns the name with that slash stripped, ready for
-// ext2_lookup_root() -- which only searches ext2's root directory, no
-// multi-component traversal exists yet, so a deeper path like
-// "/bin/echo" simply won't match any root dirent and correctly falls
-// through to BusyBox below, exactly as it already does today.
+// returns the name with that slash stripped, ready for ext2_lookup_path().
 fn kernel_exec_argv0_name() -> ExecArgv0NameResult !{unsafe} {
     let argv: []u8 = kernel_syscall_exec_argv();
     if (argv.len < 2) {
@@ -169,7 +165,7 @@ fn kernel_exec_resolve_argv0(mount: Ext2Mount) -> ExecResolveResult {
     match kernel_exec_argv0_name() {
         ExecArgv0NameResult::Invalid => { return ExecResolveResult::NotFound; }
         ExecArgv0NameResult::Name(name) => {
-            match ext2_lookup_root(mount, name) {
+            match ext2_lookup_path(mount, name) {
                 Ext2LookupResult::Invalid => { return ExecResolveResult::NotFound; }
                 Ext2LookupResult::NotFound => { return ExecResolveResult::NotFound; }
                 Ext2LookupResult::Found(inode) => {

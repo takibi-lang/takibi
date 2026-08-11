@@ -232,33 +232,34 @@ fn ext2_name_matches(entry: borrow *u8, entry_length: usize,
     return slice_eq(entry_name, name);
 }
 
-fn ext2_lookup_root(mount: Ext2Mount, name: []u8)
-        -> Ext2LookupResult !{unsafe} {
+fn ext2_lookup_directory(mount: Ext2Mount, directory_inode: usize,
+                         name: []u8) -> Ext2LookupResult !{unsafe} {
     if (name.len == 0 || name.len > 255) {
         return Ext2LookupResult::Invalid;
     }
-    match ext2_read_inode(mount, 2) {
+    match ext2_read_inode(mount, directory_inode) {
         Ext2InodeResult::Invalid => { return Ext2LookupResult::Invalid; }
-        Ext2InodeResult::Inode(root) => {
-            if ((root.mode & 0xF000) != 0x4000 || root.size < 8) {
+        Ext2InodeResult::Inode(directory) => {
+            if ((directory.mode & 0xF000) != 0x4000 ||
+                directory.size < 8 || directory.size > KERNEL_BLOCK_SIZE) {
                 return Ext2LookupResult::Invalid;
             }
-            match block_read(mount.device, root.direct_block0,
+            match block_read(mount.device, directory.direct_block0,
                              ext2_file_block as []u8) {
                 BlockIoResult::Invalid => { return Ext2LookupResult::Invalid; }
                 BlockIoResult::Ok => { }
             }
             let base: *u8 = ext2_file_block as *u8;
             let mut cursor: usize = 0;
-            while (cursor < root.size) {
-                if (cursor > root.size - 8) {
+            while (cursor < directory.size) {
+                if (cursor > directory.size - 8) {
                     return Ext2LookupResult::Invalid;
                 }
                 let entry: *u8 = base + (cursor as isize);
                 let inode_number: usize = ext2_u32(entry, 0) as usize;
                 let record_length: usize = ext2_u16(entry, 4) as usize;
                 let name_length: usize = entry[6] as usize;
-                if (record_length < 8 || record_length > root.size - cursor ||
+                if (record_length < 8 || record_length > directory.size - cursor ||
                     name_length > record_length - 8) {
                     return Ext2LookupResult::Invalid;
                 }
@@ -273,15 +274,40 @@ fn ext2_lookup_root(mount: Ext2Mount, name: []u8)
     return Ext2LookupResult::NotFound;
 }
 
+fn ext2_lookup_root(mount: Ext2Mount, name: []u8)
+        -> Ext2LookupResult !{unsafe} {
+    return ext2_lookup_directory(mount, 2, name);
+}
+
 fn ext2_lookup_path(mount: Ext2Mount, name: []u8)
         -> Ext2LookupResult !{unsafe} {
-    // The current fixture has one nested BusyBox applet path. Keep the
-    // translation explicit until general component-by-component directory
-    // traversal is added; both spellings resolve to the same inode.
-    if (slice_eq(name, "bin/echo" as []u8)) {
-        return ext2_lookup_root(mount, "echo" as []u8);
+    if (name.len == 0 || name.len > 255) {
+        return Ext2LookupResult::Invalid;
     }
-    return ext2_lookup_root(mount, name);
+    let mut current_inode: usize = 2;
+    let mut cursor: usize = 0;
+    while (cursor < name.len) {
+        let component_start: usize = cursor;
+        while (cursor < name.len && unsafe { name[cursor] } != 0x2F) {
+            cursor = cursor + 1;
+        }
+        if (cursor == component_start) {
+            return Ext2LookupResult::Invalid;
+        }
+        let component = unsafe { name[component_start..<cursor] };
+        match ext2_lookup_directory(mount, current_inode, component) {
+            Ext2LookupResult::Invalid => { return Ext2LookupResult::Invalid; }
+            Ext2LookupResult::NotFound => { return Ext2LookupResult::NotFound; }
+            Ext2LookupResult::Found(inode) => { current_inode = inode; }
+        }
+        if (cursor < name.len) {
+            cursor = cursor + 1;
+            if (cursor == name.len) {
+                return Ext2LookupResult::Invalid;
+            }
+        }
+    }
+    return Ext2LookupResult::Found(current_inode);
 }
 
 // Resolve a regular file's i_block[index]. The inode table is re-read on
