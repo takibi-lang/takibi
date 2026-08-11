@@ -382,8 +382,9 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'link /bin/busybox /uname' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox /od' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox /bin/echo' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox /bin/ls' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox /echo' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/busybox links_count 7' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/busybox links_count 8' $@.tmp >/dev/null 2>&1
 	e2fsck -fn $@.tmp >/dev/null
 	mv $@.tmp $@
 

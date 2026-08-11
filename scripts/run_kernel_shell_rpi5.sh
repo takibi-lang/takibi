@@ -16,6 +16,8 @@ if [ -z "$SERIAL_DEV" ] || [ ! -e "$SERIAL_DEV" ]; then
 fi
 
 stty -F "$SERIAL_DEV" 115200 raw -echo
+echo "[kernel/rpi5] resetting resident image before SWD load"
+"$REPO_ROOT/scripts/rpi5_jtag_reset.sh" --resident-image-unchanged
 echo "[kernel/rpi5] loading kernel over SWD"
 "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$ELF"
 echo "[kernel/rpi5] starting UART console on $SERIAL_DEV"

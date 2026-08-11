@@ -1,5 +1,6 @@
 # This is the temporary first userspace process. It makes boot policy
 # ordinary ext2 data instead of kernel-side argv scenarios.
+PATH=/bin:/usr/bin
 boot_role=bootstrap
 
 case "$boot_role" in
