@@ -192,28 +192,60 @@ fn block_copy(source: KernelBlockDevice, destination: KernelBlockDevice,
                                      bytes, batch * 2) {
                 DiskIoResult::Err(error) => {
                     // Some devices reject a multi-sector WRITE(10), or a
-                    // transport can fail only for the larger transfer.
-                    // Reuse the already-filled bytes through the proven
-                    // single-sector path before reporting the copy failed.
-                    for offset: usize in 0..<batch {
+                    // transport can fail only for the larger transfer. Do
+                    // not immediately fall all the way back to one sector:
+                    // retry the same bytes in progressively smaller runs so
+                    // a device with a lower practical maximum keeps most of
+                    // the batching benefit. Replaying a failed range is
+                    // content-idempotent, and the final one-block case uses
+                    // the established single-sector path.
+                    let mut fallback_offset: usize = 0;
+                    let mut fallback_blocks: usize = batch / 2;
+                    if (fallback_blocks == 0) {
+                        fallback_blocks = 1;
+                    }
+                    while (fallback_offset < batch) {
+                        let mut transfer_blocks: usize = fallback_blocks;
+                        if (transfer_blocks > batch - fallback_offset) {
+                            transfer_blocks = batch - fallback_offset;
+                        }
                         let block_offset: isize =
-                            (offset * KERNEL_BLOCK_SIZE) as isize;
+                            (fallback_offset * KERNEL_BLOCK_SIZE) as isize;
                         let block_bytes: *u8 = bytes +
                             block_offset;
-                        match disk_write((first_block * 2 + offset * 2) as u32,
-                                         block_bytes) {
-                            DiskIoResult::Err(single_error) => {
-                                return BlockCopyResult::Invalid;
+                        if (transfer_blocks == 1) {
+                            match disk_write(
+                                    ((first_block + fallback_offset) * 2) as u32,
+                                    block_bytes) {
+                                DiskIoResult::Err(single_error) => {
+                                    return BlockCopyResult::Invalid;
+                                }
+                                DiskIoResult::Ok => { }
                             }
-                            DiskIoResult::Ok => { }
-                        }
-                        match disk_write(
-                                (first_block * 2 + offset * 2 + 1) as u32,
-                                block_bytes + 512) {
-                            DiskIoResult::Err(single_error) => {
-                                return BlockCopyResult::Invalid;
+                            match disk_write(
+                                    ((first_block + fallback_offset) * 2 + 1) as u32,
+                                    block_bytes + 512) {
+                                DiskIoResult::Err(single_error) => {
+                                    return BlockCopyResult::Invalid;
+                                }
+                                DiskIoResult::Ok => { }
                             }
-                            DiskIoResult::Ok => { }
+                            fallback_offset = fallback_offset + 1;
+                        } else {
+                            match disk_write_sectors(
+                                    ((first_block + fallback_offset) * 2) as u32,
+                                    block_bytes, transfer_blocks * 2) {
+                                DiskIoResult::Err(smaller_error) => {
+                                    fallback_blocks = transfer_blocks / 2;
+                                    if (fallback_blocks == 0) {
+                                        fallback_blocks = 1;
+                                    }
+                                }
+                                DiskIoResult::Ok => {
+                                    fallback_offset = fallback_offset +
+                                                       transfer_blocks;
+                                }
+                            }
                         }
                     }
                 }
