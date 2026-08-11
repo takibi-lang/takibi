@@ -248,8 +248,9 @@ make kernelcheck
 ```
 
 The runner performs one reset and one SWD load, then runs all integration
-checks in that boot. Host progress remains visible during the approximately
-one-minute SWD transfer. A successful run includes:
+checks in that boot. Host progress remains visible during the SWD transfer;
+the duration depends substantially on `RPI5_SWD_SPEED` and the attached
+probe/board setup. A successful run includes:
 
 ```text
 [kernel/rpi5] BusyBox httpd curl passed
