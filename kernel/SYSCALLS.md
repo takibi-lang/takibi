@@ -18,7 +18,7 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 | 49 | chdir | Implemented | succeeds only for `/` (`ENOENT` otherwise) -- honest, since the one real cwd never actually changes |
 | 56 | openat | Implemented | generic NUL-terminated single-component absolute/relative root lookup against the USB ext2 mount; `dirfd` ignored |
 | 57 | close | Implemented | |
-| 63 | read | Implemented | connected-socket, ext2-file, and UART-fallback paths, all through the typed user-memory boundary (`kernel/mm/user_memory.tkb`) |
+| 63 | read | Implemented | connected-socket, ext2-file, and UART-fallback paths, all through the typed user-memory boundary (`kernel/mm/user_memory.tkb`); an empty UART RX path blocks and wakes on received input, as exercised by the foreground interactive ash REPL |
 | 64 | write | Implemented | same three paths as `read`, plus the inetd-response path |
 | 65 | readv | Partial | fd 3 (ext2 file) only, via a standalone segment helper not shared with `read`(64)'s TCP/inetd branches. Each iovec entry validated and copied individually through the user-memory boundary (`struct packed Iovec`, `IOV_MAX`-bounded, `checked_mul_usize`/`checked_add_usize`-guarded array-length and running-total arithmetic). Connected-TCP and inetd-mode fds are not supported |
 | 66 | writev | Partial | fd 1/2 (UART) only -- same scoping and same fd-kind gap as `readv` above |

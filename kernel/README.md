@@ -57,8 +57,8 @@ The current RPi5 kernel includes:
   socket workloads, plus a typed user-memory boundary (`kernel/mm/
   user_memory.tkb`) enforcing non-RWX process mappings -- see `SYSCALLS.md`
   for the full per-syscall support matrix;
-- a block-device boundary shared by an in-memory fixture and RPi5 USB Mass
-  Storage;
+- a block-device boundary shared by the embedded memory fixture, QEMU
+  virtio-blk, and RPi5 USB Mass Storage;
 - a bounded ext2 implementation with direct-block small files, root directory
   mutation, allocation bitmaps, and fast symlinks;
 - RP1 PCIe, xHCI/USB Mass Storage, Cadence GEM Ethernet, ARP, IPv4, ICMP, and
@@ -383,9 +383,12 @@ contracts;
 the list below is orientation for a reader deciding whether a workload will
 run, not a specification.
 
-- **Filesystem.** One ext2 block group, direct blocks only, root-directory
-  lookup and mutation, allocation bitmaps, fast symlinks. No indirect
-  blocks, no additional block groups, no nested directories.
+- **Filesystem.** One ext2 block group, root-directory lookup and mutation,
+  allocation bitmaps, and fast symlinks. Regular-file reads cover twelve
+  direct blocks plus 256 singly-indirect blocks (up to 268 KiB with this
+  1-KiB filesystem); writes and truncates remain limited to one direct
+  block. Directories and symlinks remain one block, and there are no
+  additional block groups or nested-directory traversal.
 - **Processes.** A fixed 16-slot `ProcessRecord` scheduler table, with lazily
   backed kernel stacks and directly owned address-space page tables, all on
   core 0.
@@ -400,7 +403,9 @@ run, not a specification.
   `WAIT_ANY`), delivering the real reaped pid and exit status, tracked
   per-slot so any live process (not just the tree root) can wait for its
   own child; a process may have at most one live child at a time, so
-  concurrent multi-child wait/reap remains out of scope.
+  concurrent multi-child wait/reap remains out of scope. UART `read(2)`
+  blocks and wakes on received input, sufficient for the foreground
+  interactive BusyBox ash REPL; there is no controlling-TTY job control.
 - **Signals.** Signal state is recorded honestly, but no signal is ever
   delivered, so an installed handler is never invoked.
 - **Memory.** `mmap` is anonymous-only through a heap-break cursor rather
