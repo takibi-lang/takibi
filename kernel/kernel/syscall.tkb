@@ -45,8 +45,7 @@ const LINUX_PROT_WRITE: usize = 2;
 // actual field access always goes through user_read_u32/u64/
 // user_write_u16/copy_to_user against a scratch buffer or a validated
 // UserRange, never a constructed struct value, matching this codebase's
-// existing CpioNewcHeader/KernelElf64Header pattern (kernel/fs/
-// initramfs.tkb, kernel/fs/elf64.tkb).
+// existing KernelElf64Header pattern (kernel/fs/elf64.tkb).
 
 // struct utsname (aarch64 Linux ABI, <sys/utsname.h>): six 65-byte
 // (64 chars + NUL) fields, no padding between them.

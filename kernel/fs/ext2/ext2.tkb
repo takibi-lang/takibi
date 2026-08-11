@@ -2,16 +2,19 @@ use "kernel/drivers/block/memory.tkb";
 
 const EXT2_SUPERBLOCK_BLOCK: usize = 1;
 const EXT2_MAGIC: u16 = 0xEF53;
-// i_block[0..11] are plain direct block pointers. i_block[12] is a
-// singly-indirect pointer block containing 256 u32 block numbers on this
-// 1 KiB ext2 volume. Directories and symlinks remain one-block-only; this
-// expansion applies exclusively to regular-file reads.
+// i_block[0..11] are direct pointers; i_block[12] and i_block[13] are
+// singly/doubly indirect. Regular-file capacity is derived from geometry.
 const EXT2_MAX_DIRECT_BLOCKS: usize = 12;
-const EXT2_SINGLE_INDIRECT_BLOCKS: usize = 256;
-// (12 + 256) * 1024. Top-level const initializers here don't support
-// arithmetic over other consts, so these remain literals.
-const EXT2_DIRECT_FILE_SIZE: usize = 12288;
-const EXT2_MAX_FILE_SIZE: usize = 274432;
+
+fn ext2_pointer_count() -> usize { return KERNEL_BLOCK_SIZE / 4; }
+fn ext2_direct_file_size() -> usize {
+    return EXT2_MAX_DIRECT_BLOCKS * KERNEL_BLOCK_SIZE;
+}
+fn ext2_max_regular_file_size() -> usize {
+    let pointers: usize = ext2_pointer_count();
+    return (EXT2_MAX_DIRECT_BLOCKS + pointers + pointers * pointers) *
+           KERNEL_BLOCK_SIZE;
+}
 
 private let mut ext2_metadata_block: [u8; KERNEL_BLOCK_SIZE];
 private let mut ext2_file_block: [u8; KERNEL_BLOCK_SIZE];
@@ -203,19 +206,25 @@ fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
     let size: usize = ext2_u32(inode_bytes, 4) as usize;
     let direct_block0: usize = ext2_u32(inode_bytes, 40) as usize;
     let indirect_block: usize = ext2_u32(inode_bytes, 88) as usize;
+    let double_indirect_block: usize = ext2_u32(inode_bytes, 92) as usize;
     let file_type: usize = mode & 0xF000;
     // GitHub issue #243: only regular files may span multiple direct
     // blocks. Directories and symlinks keep the original one-block cap --
     // ext2_lookup_root/ext2_directory_add/ext2_directory_remove all still
     // assume a single-block root directory, unchanged by this issue.
     let mut max_size: usize = KERNEL_BLOCK_SIZE;
-    if (file_type == 0x8000) { max_size = EXT2_MAX_FILE_SIZE; }
+    if (file_type == 0x8000) { max_size = ext2_max_regular_file_size(); }
     if (mode == 0 || size > max_size ||
         (file_type != 0x8000 && file_type != 0x4000 && file_type != 0xA000) ||
         ((file_type == 0x8000 || file_type == 0x4000) &&
          (direct_block0 == 0 || direct_block0 >= mount.filesystem_blocks)) ||
-        (file_type == 0x8000 && size > EXT2_DIRECT_FILE_SIZE &&
+        (file_type == 0x8000 && size > ext2_direct_file_size() &&
          (indirect_block == 0 || indirect_block >= mount.filesystem_blocks)) ||
+        (file_type == 0x8000 &&
+         size > ext2_direct_file_size() +
+               ext2_pointer_count() * KERNEL_BLOCK_SIZE &&
+         (double_indirect_block == 0 ||
+          double_indirect_block >= mount.filesystem_blocks)) ||
         (file_type == 0xA000 && size > 60)) {
         return Ext2InodeResult::Invalid;
     }
@@ -317,8 +326,8 @@ fn ext2_lookup_path(mount: Ext2Mount, name: []u8)
 // for an out-of-range index or any failed metadata read.
 fn ext2_inode_block_pointer(mount: Ext2Mount, inode: Ext2Inode,
                             index: usize) -> usize {
-    if (index >= EXT2_MAX_DIRECT_BLOCKS +
-                 EXT2_SINGLE_INDIRECT_BLOCKS) {
+    let pointers: usize = ext2_pointer_count();
+    if (index >= EXT2_MAX_DIRECT_BLOCKS + pointers + pointers * pointers) {
         return 0;
     }
     match block_read(mount.device, inode.table_block,
@@ -331,17 +340,43 @@ fn ext2_inode_block_pointer(mount: Ext2Mount, inode: Ext2Inode,
     if (index < EXT2_MAX_DIRECT_BLOCKS) {
         return ext2_u32(inode_pointer, 40 + index * 4) as usize;
     }
+    let single_index: usize = index - EXT2_MAX_DIRECT_BLOCKS;
     let indirect_block: usize = ext2_u32(inode_pointer, 88) as usize;
-    if (indirect_block == 0 || indirect_block >= mount.filesystem_blocks) {
+    if (single_index < pointers) {
+        if (indirect_block == 0 || indirect_block >= mount.filesystem_blocks) {
+            return 0;
+        }
+        match block_read(mount.device, indirect_block,
+                         ext2_file_block as []u8) {
+            BlockIoResult::Invalid => { return 0; }
+            BlockIoResult::Ok => { }
+        }
+        return ext2_u32(ext2_file_block as *u8,
+                        single_index * 4) as usize;
+    }
+    let double_block: usize = ext2_u32(inode_pointer, 92) as usize;
+    if (double_block == 0 || double_block >= mount.filesystem_blocks) {
         return 0;
     }
-    match block_read(mount.device, indirect_block,
+    let double_index: usize = single_index - pointers;
+    match block_read(mount.device, double_block,
+                     ext2_metadata_block as []u8) {
+        BlockIoResult::Invalid => { return 0; }
+        BlockIoResult::Ok => { }
+    }
+    let second_level: usize = ext2_u32(
+        ext2_metadata_block as *u8, (double_index / pointers) * 4) as usize;
+    if (second_level == 0 || second_level >= mount.filesystem_blocks) {
+        return 0;
+    }
+    match block_read(mount.device, second_level,
                      ext2_file_block as []u8) {
         BlockIoResult::Invalid => { return 0; }
         BlockIoResult::Ok => { }
     }
-    return ext2_u32(ext2_file_block as *u8,
-                    (index - EXT2_MAX_DIRECT_BLOCKS) * 4) as usize;
+    let resolved: usize = ext2_u32(ext2_file_block as *u8,
+                    (double_index % pointers) * 4) as usize;
+    return resolved;
 }
 
 fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
@@ -388,10 +423,9 @@ fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
 // operation and copy each bounded block into the user buffer, like a VFS
 // page-cache/buffer-cache read path does on larger kernels.
 //
-// Regular files are currently limited to direct plus singly-indirect blocks.
-// Doubly/triply indirect traversal is intentionally deferred until a real
-// file needs it; that independent on-disk-format extension must not be
-// confused with a whole-file staging-memory limit.
+// The supported range is derived from the 12 direct pointers and the
+// single- and double-indirect pointer fanout of this filesystem's block size.
+// Triple-indirect traversal remains outside the present rootfs requirement.
 fn ext2_read_file_chunk(mount: Ext2Mount, inode_number: usize,
                         offset: usize, destination: []u8)
         -> Ext2ReadResult !{unsafe} {
@@ -399,7 +433,7 @@ fn ext2_read_file_chunk(mount: Ext2Mount, inode_number: usize,
         Ext2InodeResult::Invalid => { return Ext2ReadResult::Invalid; }
         Ext2InodeResult::Inode(inode) => {
             if ((inode.mode & 0xF000) != 0x8000 ||
-                inode.size > EXT2_MAX_FILE_SIZE) {
+                inode.size > ext2_max_regular_file_size()) {
                 return Ext2ReadResult::Invalid;
             }
             if (offset >= inode.size || destination.len == 0) {

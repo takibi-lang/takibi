@@ -2,12 +2,10 @@ const KERNEL_BLOCK_SIZE: usize = 1024;
 
 // GitHub issue #230: the writable RAM-backed ext2 fixture is now a real
 // compile-time file embed instead of kernel/user/ext2_image.S's `.incbin`
-// plus an `extern symbol start`/`end` pair. `let mut` (not plain `let`,
-// unlike kernel/fs/initramfs.tkb's read-only blob) matches this image
+// plus an `extern symbol start`/`end` pair. `let mut` matches this image
 // actually being written through by block_write below. KERNEL_EXT2_IMAGE_LEN
 // is kernel/build/user/ext2.img's real size -- fixed by its own build
-// recipe's `truncate -s 4194304`, so unlike initramfs.cpio's size this one
-// is a real build-system constant, not something that could quietly drift;
+// recipe's `truncate -s 4194304`, so it is a real build-system constant;
 // embed_file's own compile-time check still verifies it regardless.
 const KERNEL_EXT2_IMAGE_LEN: usize = 4194304;
 let mut kernel_ext2_image: [u8; KERNEL_EXT2_IMAGE_LEN] =

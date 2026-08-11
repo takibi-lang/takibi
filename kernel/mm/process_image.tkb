@@ -8,8 +8,7 @@ use "kernel/fs/ext2/ext2.tkb";
 // throughout this file, so every scheduled process gets its own page-table
 // root. Kept as an independent literal (not derived from the other file's
 // constant) because top-level const initializers here cannot reference
-// another file's identifier in an arithmetic expression -- same reason
-// kernel/fs/ext2/ext2.tkb's EXT2_MAX_FILE_SIZE stayed a literal. A generous
+// another file's identifier in an arithmetic expression. A generous
 // compile-time ceiling, not a razor-thin one (see process.tkb's own header
 // comment on KERNEL_PROCESS_MAX). Every array below is bookkeeping
 // (small counters/flags, not indices into page.tkb's shared pool -- see
@@ -33,6 +32,13 @@ private let mut process_image_ext2_mount: Ext2Mount;
 private let mut process_image_ext2_inode: usize;
 private let mut process_image_ext2_length: usize;
 private let mut process_image_ext2_block: [u8; KERNEL_BLOCK_SIZE];
+// A dynamic ELF pair changes backing files between the application's and
+// interpreter's PT_LOAD passes. These fields carry that second source only
+// for the synchronous pair mapper below.
+private let mut process_image_pair_ext2_active: bool;
+private let mut process_image_pair_ext2_mount: Ext2Mount;
+private let mut process_image_pair_ext2_inode: usize;
+private let mut process_image_pair_ext2_length: usize;
 
 fn process_image_ext2_source(mount: Ext2Mount, inode: usize,
                              length: usize) {
@@ -46,6 +52,20 @@ fn process_image_ext2_source_clear() {
     process_image_ext2_active = false;
     process_image_ext2_inode = 0;
     process_image_ext2_length = 0;
+}
+
+fn process_image_pair_ext2_source(mount: Ext2Mount, inode: usize,
+                                  length: usize) {
+    process_image_pair_ext2_mount = mount;
+    process_image_pair_ext2_inode = inode;
+    process_image_pair_ext2_length = length;
+    process_image_pair_ext2_active = true;
+}
+
+fn process_image_pair_ext2_source_clear() {
+    process_image_pair_ext2_active = false;
+    process_image_pair_ext2_inode = 0;
+    process_image_pair_ext2_length = 0;
 }
 private let mut clone_page_count: usize;
 private let mut clone_last_reaped_count: usize;
@@ -989,6 +1009,12 @@ fn process_image_load_page_ext2(page: borrow PageOwner[page],
     if (copy_start < segment_start) { copy_start = segment_start; }
     let mut copy_end: usize = page_end;
     if (copy_end > file_end) { copy_end = file_end; }
+    if (copy_start >= copy_end) {
+        if (slice_eq(bytes, process_image_zero_page as []u8)) {
+            return ProcessImagePageLoadResult::Loaded;
+        }
+        return ProcessImagePageLoadResult::Invalid;
+    }
     if (copy_start < copy_end) {
         let mut destination_offset: usize = copy_start - page_start;
         let mut source_offset: usize = (header.offset as usize) +
@@ -1222,6 +1248,12 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
             return ProcessImagePairProbeResult::Invalid;
         }
         ProcessImageSegmentsResult::Mapped(primary_count) => {
+            if (process_image_pair_ext2_active) {
+                process_image_ext2_source(
+                    process_image_pair_ext2_mount,
+                    process_image_pair_ext2_inode,
+                    process_image_pair_ext2_length);
+            }
             match process_image_map_segments(
                     interpreter, interpreter_bias, primary_count) {
                 ProcessImageSegmentsResult::Invalid => {
@@ -1369,6 +1401,39 @@ fn process_image_pair_map_in_root(primary: DistroElfLoadPlan,
     process_image_target_root = root;
     return process_image_pair_probe(
         primary, interpreter, interpreter_bias, argv, argc);
+}
+
+// Map a dynamic application/interpreter pair whose two backing files both
+// reside on ext2. Metadata plans retain their separate header windows while
+// PT_LOAD bytes switch from primary_inode to interpreter_inode between the
+// two segment passes.
+fn process_image_pair_map_ext2_in_root(
+        primary: DistroElfLoadPlan,
+        primary_mount: Ext2Mount,
+        primary_inode: usize,
+        primary_length: usize,
+        interpreter: DistroElfLoadPlan,
+        interpreter_mount: Ext2Mount,
+        interpreter_inode: usize,
+        interpreter_length: usize,
+        interpreter_bias: usize,
+        argv: []u8,
+        argc: usize,
+        root: usize) -> ProcessImagePairProbeResult {
+    if (root >= PROCESS_IMAGE_ROOT_MAX ||
+        address_space_is_live(root) == false) {
+        return ProcessImagePairProbeResult::Invalid;
+    }
+    process_image_target_root = root;
+    process_image_ext2_source(
+        primary_mount, primary_inode, primary_length);
+    process_image_pair_ext2_source(
+        interpreter_mount, interpreter_inode, interpreter_length);
+    let result = process_image_pair_probe(
+        primary, interpreter, interpreter_bias, argv, argc);
+    process_image_pair_ext2_source_clear();
+    process_image_ext2_source_clear();
+    return result;
 }
 
 fn process_image_map_current(plan: DistroElfLoadPlan,

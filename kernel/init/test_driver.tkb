@@ -3,7 +3,6 @@
 
 use "kernel/kernel/process.tkb";
 use "kernel/kernel/syscall.tkb";
-use "kernel/fs/initramfs.tkb";
 use "kernel/fs/elf64.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/mm/process_image.tkb";
@@ -24,8 +23,6 @@ let mut ext2_symlink_fixture: [u8; 64];
 // one partial), well past the single-block cap ext2_read_small_file used
 // to enforce -- proves multi-direct-block reads work on real hardware.
 let mut ext2_large_fixture: [u8; 3200];
-let mut kernel_exec_plan: DistroElfLoadPlan = {0, 0, 0, 0, 0, 0, 0};
-let mut kernel_exec_plan_ready: bool;
 // GitHub issue #249: the mounted ext2 filesystem, saved once at boot
 // (wherever fn main() already successfully mounts it) so
 // kernel_exec_resolve_argv0() below -- which runs later, on a syscall's
@@ -34,35 +31,30 @@ let mut kernel_exec_plan_ready: bool;
 // hand-registered list.
 let mut saved_ext2_mount: Ext2Mount;
 let mut ext2_mount_ready: bool;
-// GitHub issue #249: one shared scratch buffer for whichever ELF
-// execve() is currently resolving, replacing the old per-binary
-// dedicated buffer (originally just user_payload_image, sized for one
-// specific known file). The generic filesystem reader can now handle
-// singly-indirect files, but execve intentionally accepts only a bounded
-// ELF image until process_image_map can stream ELF segments from ext2.
-// Keep this separate from EXT2_MAX_FILE_SIZE: enlarging a global scratch
-// array would only recreate a whole-file staging limit at a much larger
-// size. Safe to share across every exec: distro_elf_validate stores only a raw
-// (address, length) pointer pair into the resulting DistroElfLoadPlan
-// (kernel/fs/elf64.tkb), but process_image_map_in_root fully copies out
-// every PT_LOAD segment from this buffer synchronously, within the same
-// kernel_process_child_exec_prepare() call, before this function
-// returns -- and execve() resolution is itself synchronous (runs on the
-// EL0 exception-return path for one specific child, never from fn
-// main()'s boot loop, never concurrent with another exec on today's
-// single-core-dispatch model).
-const EXEC_RESOLVE_IMAGE_MAX: usize = 12288;
-let mut exec_resolve_image: [u8; EXEC_RESOLVE_IMAGE_MAX];
+// ELF validation needs only the header and program table. The rootfs image
+// keeps a persistent window because its saved plan outlives every child exec;
+// ordinary exec has one reusable window, while a dynamic application/
+// interpreter pair needs two concurrent windows. PT_LOAD data itself always
+// streams from ext2.
+const EXEC_METADATA_SIZE: usize = 1024;
+let mut rootfs_metadata: [u8; EXEC_METADATA_SIZE];
+let mut exec_resolve_image: [u8; EXEC_METADATA_SIZE];
+let mut dynamic_primary_metadata: [u8; EXEC_METADATA_SIZE];
+let mut dynamic_interpreter_metadata: [u8; EXEC_METADATA_SIZE];
 
-fn exec_resolve_image_prefix(length: usize) -> []u8 !{unsafe} {
-    let image_bytes: []u8 = exec_resolve_image as []u8;
+fn exec_metadata_prefix(address: usize, length: usize) -> []u8 !{unsafe} {
     let mut bounded: usize = length;
-    if (bounded > image_bytes.len) { bounded = image_bytes.len; }
-    return unsafe { image_bytes[0..<bounded] };
+    if (bounded > EXEC_METADATA_SIZE) { bounded = EXEC_METADATA_SIZE; }
+    let pointer: *u8 = address as *u8;
+    return unsafe { pointer[0..<bounded as isize] };
 }
 let mut kernel_child_exec_entry: usize;
 let mut kernel_child_exec_stack: usize;
 let mut kernel_init_socket_evidence: bool;
+let mut saved_rootfs_plan: DistroElfLoadPlan = {0, 0, 0, 0, 0, 0, 0};
+let mut rootfs_plan_ready: bool;
+let mut saved_rootfs_inode: usize;
+let mut saved_rootfs_length: usize;
 
 must_use variant ExecArgv0NameResult { Invalid; Name([]u8); }
 
@@ -100,60 +92,15 @@ struct Ext2ExecImage {
     file_length: usize;
 }
 must_use variant ExecResolveResult { NotFound; Resolved(Ext2ExecImage); }
-struct DynamicExecPlans {
-    primary: DistroElfLoadPlan;
-    interpreter: DistroElfLoadPlan;
+struct DynamicExt2ExecImages {
+    primary: Ext2ExecImage;
+    interpreter: Ext2ExecImage;
 }
 must_use variant DynamicExecResolveResult {
-    NotFound;
-    Resolved(DynamicExecPlans);
+    NotRequested;
+    Invalid;
+    Resolved(DynamicExt2ExecImages);
 }
-
-// The initramfs's dynamic application/interpreter pair is the fallback only
-// after ordinary ext2 exec-path resolution. Its argv remains entirely the
-// caller's execve data, so this resolver has no application-name policy.
-fn kernel_exec_resolve_dynamic_initramfs() -> DynamicExecResolveResult {
-    if (kernel_syscall_exec_path_matches(
-            "/busybox-httpd" as []u8) == false) {
-        return DynamicExecResolveResult::NotFound;
-    }
-    match initramfs_httpd() {
-        InitramfsFileResult::Invalid => {
-            return DynamicExecResolveResult::NotFound;
-        }
-        InitramfsFileResult::File(httpd_image) => {
-            let (httpd_address, httpd_bytes) = httpd_image;
-            match distro_elf_validate(httpd_address, httpd_bytes) {
-                DistroElfResult::Invalid => {
-                    return DynamicExecResolveResult::NotFound;
-                }
-                DistroElfResult::Valid(primary) => {
-                    match initramfs_musl_loader() {
-                        InitramfsFileResult::Invalid => {
-                            return DynamicExecResolveResult::NotFound;
-                        }
-                        InitramfsFileResult::File(musl_image) => {
-                            let (musl_address, musl_bytes) = musl_image;
-                            match distro_elf_validate(musl_address, musl_bytes) {
-                                DistroElfResult::Invalid => {
-                                    return DynamicExecResolveResult::NotFound;
-                                }
-                                DistroElfResult::Valid(interpreter) => {
-                                    let mut plans: DynamicExecPlans = {
-                                        primary, interpreter
-                                    };
-                                    return DynamicExecResolveResult::Resolved(
-                                        plans);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 // GitHub issue #249: genuine execve() path resolution -- looks up
 // argv[0] (minus its leading slash) directly against the mounted ext2
 // filesystem. Only the ELF header/program-table window is read into the
@@ -161,7 +108,8 @@ fn kernel_exec_resolve_dynamic_initramfs() -> DynamicExecResolveResult {
 // process_image_map_ext2_in_root(). Any failure at any step (name not
 // found, read failure, invalid ELF -- e.g. argv[0] names a symlink like
 // /echo or /bin/echo) returns NotFound and preserves the BusyBox fallback.
-fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: []u8)
+fn kernel_exec_resolve_ext2_name_at(mount: Ext2Mount, name: []u8,
+                                    metadata_address: usize)
         -> ExecResolveResult !{unsafe} {
     match ext2_lookup_path(mount, name) {
                 Ext2LookupResult::Invalid => { return ExecResolveResult::NotFound; }
@@ -169,20 +117,23 @@ fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: []u8)
                 Ext2LookupResult::Found(inode) => {
                     let file_length: usize =
                         ext2_regular_file_size(mount, inode);
-                    if (file_length == 0 || file_length > EXT2_MAX_FILE_SIZE) {
+                    if (file_length == 0 ||
+                        file_length > ext2_max_regular_file_size()) {
                         return ExecResolveResult::NotFound;
                     }
-                    let metadata = unsafe { exec_resolve_image[0..<1024] };
+                    let metadata_pointer: *u8 = metadata_address as *u8;
+                    let metadata = unsafe {
+                        metadata_pointer[0..<EXEC_METADATA_SIZE as isize]
+                    };
                     match ext2_read_file_chunk(mount, inode, 0, metadata) {
                         Ext2ReadResult::Invalid => {
                             return ExecResolveResult::NotFound;
                         }
                         Ext2ReadResult::Read(length) => {
-                            let address: usize =
-                                (exec_resolve_image as *u8) as usize;
                             match distro_elf_validate_with_length(
-                                    address,
-                                    exec_resolve_image_prefix(length),
+                                    metadata_address,
+                                    exec_metadata_prefix(
+                                        metadata_address, length),
                                     file_length) {
                                 DistroElfResult::Invalid => {
                                     return ExecResolveResult::NotFound;
@@ -201,6 +152,47 @@ fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: []u8)
             }
 }
 
+fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: []u8)
+        -> ExecResolveResult !{unsafe} {
+    return kernel_exec_resolve_ext2_name_at(
+        mount, name, (exec_resolve_image as *u8) as usize);
+}
+
+fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount)
+        -> DynamicExecResolveResult !{unsafe} {
+    match kernel_exec_resolve_ext2_name_at(
+            mount, "busybox-httpd" as []u8,
+            (dynamic_primary_metadata as *u8) as usize) {
+        ExecResolveResult::NotFound => {
+            return DynamicExecResolveResult::Invalid;
+        }
+        ExecResolveResult::Resolved(primary) => {
+            match kernel_exec_resolve_ext2_name_at(
+                    mount, "lib/ld-musl-aarch64.so.1" as []u8,
+                    (dynamic_interpreter_metadata as *u8) as usize) {
+                ExecResolveResult::NotFound => {
+                    return DynamicExecResolveResult::Invalid;
+                }
+                ExecResolveResult::Resolved(interpreter) => {
+                    let mut images: DynamicExt2ExecImages = {
+                        primary, interpreter
+                    };
+                    return DynamicExecResolveResult::Resolved(images);
+                }
+            }
+        }
+    }
+}
+
+fn kernel_exec_resolve_dynamic_ext2(mount: Ext2Mount)
+        -> DynamicExecResolveResult !{unsafe} {
+    if (kernel_syscall_exec_path_matches(
+            "/busybox-httpd" as []u8) == false) {
+        return DynamicExecResolveResult::NotRequested;
+    }
+    return kernel_exec_resolve_dynamic_ext2_images(mount);
+}
+
 fn kernel_exec_resolve_argv0(mount: Ext2Mount) -> ExecResolveResult !{unsafe} {
     match kernel_exec_argv0_name() {
         ExecArgv0NameResult::Invalid => { return ExecResolveResult::NotFound; }
@@ -213,8 +205,12 @@ fn kernel_exec_resolve_argv0(mount: Ext2Mount) -> ExecResolveResult !{unsafe} {
 fn kernel_process_child_exec_map_result(
         pages_result: ProcessImageMapResult, child_root: usize) -> usize {
     match pages_result {
-        ProcessImageMapResult::InvalidImage => { return 0; }
-        ProcessImageMapResult::OutOfMemory => { return 0; }
+        ProcessImageMapResult::InvalidImage => {
+            return 0;
+        }
+        ProcessImageMapResult::OutOfMemory => {
+            return 0;
+        }
         ProcessImageMapResult::Mapped(pages) => {
             kernel_child_exec_entry = process_image_entry(pages);
             kernel_child_exec_stack = process_image_stack_pointer(pages);
@@ -251,17 +247,20 @@ fn kernel_process_child_exec_prepare() -> usize {
         kernel_syscall_exec_pending() == false) {
         return 0;
     }
-    let mut target_plan: DistroElfLoadPlan = kernel_exec_plan;
-    let mut target_plan_ready: bool = false;
-    let mut target_ext2_ready: bool = false;
-    let mut target_ext2_inode: usize = 0;
-    let mut target_ext2_length: usize = 0;
+    // BusyBox is the rootfs interpreter/fallback for paths that ash asks the
+    // kernel to execute but that are not separate regular files in this
+    // small image. Keep the fallback on ext2 too: the plan describes the
+    // saved rootfs BusyBox metadata, while process_image_map_ext2_in_root()
+    // streams its PT_LOAD bytes from the saved inode.
+    let mut target_plan: DistroElfLoadPlan = saved_rootfs_plan;
+    let mut target_ext2_ready: bool = rootfs_plan_ready;
+    let mut target_ext2_inode: usize = saved_rootfs_inode;
+    let mut target_ext2_length: usize = saved_rootfs_length;
     if (ext2_mount_ready) {
         match kernel_exec_resolve_argv0(saved_ext2_mount) {
             ExecResolveResult::NotFound => {}
             ExecResolveResult::Resolved(image) => {
                 target_plan = image.plan;
-                target_plan_ready = true;
                 target_ext2_ready = true;
                 target_ext2_inode = image.inode;
                 target_ext2_length = image.file_length;
@@ -281,41 +280,52 @@ fn kernel_process_child_exec_prepare() -> usize {
     // needs its own current root here instead.
     let child_root: usize =
         address_space_root_slot(kernel_process_current_root());
-    if (target_ext2_ready == false) {
-    match kernel_exec_resolve_dynamic_initramfs() {
-        DynamicExecResolveResult::NotFound => {}
-        DynamicExecResolveResult::Resolved(plans) => {
-            match process_image_pair_map_in_root(
-                    plans.primary, plans.interpreter, 0x40000,
-                    kernel_syscall_exec_argv(), kernel_syscall_exec_argc(),
-                    child_root) {
-                ProcessImagePairProbeResult::Invalid => { return 0; }
-                ProcessImagePairProbeResult::Ready(pages) => {
-                    kernel_child_exec_entry = process_image_entry(pages);
-                    kernel_child_exec_stack =
-                        process_image_stack_pointer(pages);
-                    let (heap_start, heap_limit) =
-                        process_image_heap_range(pages);
-                    if (process_image_exec_install(pages) == false) {
-                        return 0;
+    if (ext2_mount_ready) {
+        match kernel_exec_resolve_dynamic_ext2(saved_ext2_mount) {
+            DynamicExecResolveResult::NotRequested => {}
+            DynamicExecResolveResult::Invalid => { return 0; }
+            DynamicExecResolveResult::Resolved(images) => {
+                match process_image_pair_map_ext2_in_root(
+                        images.primary.plan,
+                        saved_ext2_mount,
+                        images.primary.inode,
+                        images.primary.file_length,
+                        images.interpreter.plan,
+                        saved_ext2_mount,
+                        images.interpreter.inode,
+                        images.interpreter.file_length,
+                        0x40000,
+                        kernel_syscall_exec_argv(),
+                        kernel_syscall_exec_argc(),
+                        child_root) {
+                    ProcessImagePairProbeResult::Invalid => { return 0; }
+                    ProcessImagePairProbeResult::Ready(pages) => {
+                        kernel_child_exec_entry = process_image_entry(pages);
+                        kernel_child_exec_stack =
+                            process_image_stack_pointer(pages);
+                        let (heap_start, heap_limit) =
+                            process_image_heap_range(pages);
+                        if (process_image_exec_install(pages) == false) {
+                            return 0;
+                        }
+                        kernel_syscall_process_configure_current(
+                            heap_start, heap_limit);
+                        kernel_init_socket_evidence =
+                            kernel_syscall_socket_evidence();
+                        kernel_syscall_foreground_server_start();
+                        kernel_tcp_inject_drop_next_syn_ack();
+                        kernel_tcp_inject_split_request();
+                        process_image_activate_root(child_root);
+                        kernel_process_child_exec_mark();
+                        kernel_syscall_exec_clear();
+                        return 1;
                     }
-                    kernel_syscall_process_configure_current(
-                        heap_start, heap_limit);
-                    kernel_init_socket_evidence = kernel_syscall_socket_evidence();
-                    kernel_syscall_foreground_server_start();
-                    kernel_tcp_inject_drop_next_syn_ack();
-                    kernel_tcp_inject_split_request();
-                    process_image_activate_root(child_root);
-                    kernel_process_child_exec_mark();
-                    kernel_syscall_exec_clear();
-                    return 1;
                 }
             }
         }
     }
-    }
-    if (target_plan_ready == false) {
-        target_plan_ready = kernel_exec_plan_ready;
+    if (target_ext2_ready == false) {
+        return 0;
     }
     if (target_ext2_ready) {
         return kernel_process_child_exec_map_result(
@@ -430,10 +440,12 @@ fn kernel_init_script_success_evidence(include_file_evidence: bool) {
 
 must_use variant HttpdImageMapCheckResult { Invalid; Verified; }
 
-fn httpd_image_mapping_check(httpd_plan: DistroElfLoadPlan,
-                             musl_plan: DistroElfLoadPlan)
+fn httpd_image_mapping_check(httpd: Ext2ExecImage,
+                             musl: Ext2ExecImage)
         -> HttpdImageMapCheckResult {
-    match process_image_map(httpd_plan, "check\0" as []u8, 1) {
+    match process_image_map_ext2(
+            httpd.plan, saved_ext2_mount, httpd.inode, httpd.file_length,
+            "check\0" as []u8, 1) {
         ProcessImageMapResult::InvalidImage => {
             return HttpdImageMapCheckResult::Invalid;
         }
@@ -449,7 +461,9 @@ fn httpd_image_mapping_check(httpd_plan: DistroElfLoadPlan,
             kernel_boot_log("httpd map: pie pages=157 clean\n");
         }
     }
-    match process_image_map(musl_plan, "check\0" as []u8, 1) {
+    match process_image_map_ext2(
+            musl.plan, saved_ext2_mount, musl.inode, musl.file_length,
+            "check\0" as []u8, 1) {
         ProcessImageMapResult::InvalidImage => {
             return HttpdImageMapCheckResult::Invalid;
         }
@@ -528,43 +542,13 @@ fn kernel_test_driver_run() {
     kernel_test_common_probes();
     kernel_test_platform_network();
     kernel_test_platform_storage();
-let mut saved_distro_plan: DistroElfLoadPlan = {0, 0, 0, 0, 0, 0, 0};
-let mut distro_plan_ready: bool = false;
-let mut saved_rootfs_plan: DistroElfLoadPlan = {0, 0, 0, 0, 0, 0, 0};
-let mut rootfs_plan_ready: bool = false;
-let mut saved_rootfs_inode: usize = 0;
-let mut saved_rootfs_length: usize = 0;
-match initramfs_busybox() {
-    InitramfsFileResult::Invalid => {
-        kernel_boot_log("distro image: invalid initramfs\n");
-    }
-    InitramfsFileResult::File(image) => {
-        let (image_address, image_bytes) = image;
-        match distro_elf_validate(image_address, image_bytes) {
-            DistroElfResult::Invalid => {
-                kernel_boot_log("distro image: invalid elf\n");
-            }
-            DistroElfResult::Valid(plan) => {
-                kernel_exec_plan = plan;
-                kernel_exec_plan_ready = true;
-                if (plan.entry == 0x4524 && plan.load_segments == 2 &&
-                    plan.extent == 0x122138) {
-                    // Keep the validated BusyBox plan independent of any
-                    // individual boot scenario. init.sh becomes the only
-                    // top-level EL0 process, so later migrations can remove
-                    // the old cat launch without suppressing its own launch.
-                    saved_distro_plan = plan;
-                    distro_plan_ready = true;
-                    kernel_boot_log("distro image: alpine busybox static-pie\n");
-                    kernel_boot_log("distro elf: aarch64 loads=2 extent=0x122138\n");
-                }
-            }
-        }
-    }
-}
+rootfs_plan_ready = false;
+saved_rootfs_inode = 0;
+saved_rootfs_length = 0;
 if (ext2_mount_ready) {
-    match kernel_exec_resolve_ext2_name(
-            saved_ext2_mount, "bin/busybox" as []u8) {
+    match kernel_exec_resolve_ext2_name_at(
+            saved_ext2_mount, "bin/busybox" as []u8,
+            (rootfs_metadata as *u8) as usize) {
         ExecResolveResult::NotFound => {
             kernel_boot_log("rootfs image: /bin/busybox not found\n");
         }
@@ -646,11 +630,11 @@ irq_uart_rx_unmask();
     kernel_process_execution_reset();
     kernel_process_scheduler_enable();
     kernel_syscall_connected_fixture_start();
-    if (distro_plan_ready || rootfs_plan_ready) {
+    if (rootfs_plan_ready) {
         match kernel_initial_process_map(
                 rootfs_plan_ready, saved_rootfs_plan,
                 saved_rootfs_inode, saved_rootfs_length,
-                saved_distro_plan,
+                saved_rootfs_plan,
                 "busybox\0sh\0/init.sh\0" as []u8,
                 3) {
             ProcessImageMapResult::InvalidImage => {
@@ -698,8 +682,10 @@ irq_uart_rx_unmask();
                     let exec_argv = kernel_syscall_exec_argv();
                     kernel_syscall_exec_clear();
                     process_image_unmap(script_pages);
-                    match process_image_map(
-                            saved_distro_plan, exec_argv, exec_argc) {
+                    match process_image_map_ext2(
+                            saved_rootfs_plan, saved_ext2_mount,
+                            saved_rootfs_inode, saved_rootfs_length,
+                            exec_argv, exec_argc) {
                         ProcessImageMapResult::InvalidImage => {
                             kernel_boot_log("execve map: replacement invalid\n");
                         }
@@ -749,68 +735,47 @@ irq_uart_rx_unmask();
 
     }
 
-match initramfs_httpd() {
-    InitramfsFileResult::Invalid => {
-        kernel_boot_log("httpd images: invalid busybox-extras\n");
-    }
-    InitramfsFileResult::File(httpd_image) => {
-        let (httpd_address, httpd_bytes) = httpd_image;
-        match distro_elf_validate(httpd_address, httpd_bytes) {
-            DistroElfResult::Invalid => {
-                kernel_boot_log("httpd images: invalid busybox-extras elf\n");
-            }
-            DistroElfResult::Valid(httpd_plan) => {
-                match initramfs_musl_loader() {
-                    InitramfsFileResult::Invalid => {
-                        kernel_boot_log("httpd images: invalid musl\n");
+if (ext2_mount_ready) {
+    match kernel_exec_resolve_dynamic_ext2_images(saved_ext2_mount) {
+        DynamicExecResolveResult::NotRequested => {}
+        DynamicExecResolveResult::Invalid => {
+            kernel_boot_log("httpd images: invalid ext2 pair\n");
+        }
+        DynamicExecResolveResult::Resolved(images) => {
+            if (images.primary.plan.entry == 0x3700 &&
+                images.primary.plan.load_segments == 2 &&
+                images.primary.plan.extent == 0x304B8 &&
+                images.interpreter.plan.entry == 0x69DE8 &&
+                images.interpreter.plan.load_segments == 2 &&
+                images.interpreter.plan.extent == 0xC2F20) {
+                kernel_boot_log("httpd images: busybox-extras+musl valid\n");
+                match httpd_image_mapping_check(
+                        images.primary, images.interpreter) {
+                    HttpdImageMapCheckResult::Invalid => {
+                        kernel_boot_log("httpd map: invalid\n");
                     }
-                    InitramfsFileResult::File(musl_image) => {
-                        let (musl_address, musl_bytes) = musl_image;
-                        match distro_elf_validate(musl_address, musl_bytes) {
-                            DistroElfResult::Invalid => {
-                                kernel_boot_log("httpd images: invalid musl elf\n");
-                            }
-                            DistroElfResult::Valid(musl_plan) => {
-                                if (httpd_plan.entry == 0x3700 &&
-                                    httpd_plan.load_segments == 2 &&
-                                    httpd_plan.extent == 0x304B8 &&
-                                    musl_plan.entry == 0x69DE8 &&
-                                    musl_plan.load_segments == 2 &&
-                                    musl_plan.extent == 0xC2F20) {
-                                    kernel_boot_log("httpd images: busybox-extras+musl valid\n");
-                                    match httpd_image_mapping_check(
-                                            httpd_plan, musl_plan) {
-                                        HttpdImageMapCheckResult::Invalid => {
-                                            kernel_boot_log("httpd map: invalid\n");
-                                        }
-                                        HttpdImageMapCheckResult::Verified => { }
-                                    }
-                                    match process_image_pair_probe(
-                                            httpd_plan, musl_plan,
-                                            0x40000, "check\0" as []u8, 1) {
-                                        ProcessImagePairProbeResult::Invalid => {
-                                            kernel_boot_log("httpd map: combined invalid\n");
-                                        }
-                                        ProcessImagePairProbeResult::Ready(dynamic_pages) => {
-                                            kernel_boot_log("httpd map: combined pages=331 musl-bias=0x40000 auxv ready clean\n");
-                                            let (dynamic_heap_start,
-                                                 dynamic_heap_limit) =
-                                                process_image_heap_range(
-                                                    dynamic_pages);
-                                            kernel_syscall_process_configure(
-                                                dynamic_heap_start,
-                                                dynamic_heap_limit);
-                                            // The real daemon is now started
-                                            // by init.sh as an ash child.
-                                            // Keep this boot-time pair-map
-                                            // probe only as a loader-layout
-                                            // regression check.
-                                            process_image_unmap(dynamic_pages);
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    HttpdImageMapCheckResult::Verified => {}
+                }
+                match process_image_pair_map_ext2_in_root(
+                        images.primary.plan,
+                        saved_ext2_mount,
+                        images.primary.inode,
+                        images.primary.file_length,
+                        images.interpreter.plan,
+                        saved_ext2_mount,
+                        images.interpreter.inode,
+                        images.interpreter.file_length,
+                        0x40000, "check\0" as []u8, 1, 0) {
+                    ProcessImagePairProbeResult::Invalid => {
+                        kernel_boot_log("httpd map: combined invalid\n");
+                    }
+                    ProcessImagePairProbeResult::Ready(dynamic_pages) => {
+                        kernel_boot_log("httpd map: combined pages=331 musl-bias=0x40000 auxv ready clean\n");
+                        let (dynamic_heap_start, dynamic_heap_limit) =
+                            process_image_heap_range(dynamic_pages);
+                        kernel_syscall_process_configure(
+                            dynamic_heap_start, dynamic_heap_limit);
+                        process_image_unmap(dynamic_pages);
                     }
                 }
             }

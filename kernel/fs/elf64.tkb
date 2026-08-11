@@ -66,9 +66,8 @@ let mut ELF_IDENT_MAGIC: [u8; 7] = {0x7F, 0x45, 0x4C, 0x46, 2, 1, 1};
 // (DistroElfLoadPlan.image_address, still consumed as a raw address by
 // kernel/mm/process_image.tkb) -- "authority-derived value ... cannot
 // be stored in a struct value". That's not a loophole being dodged:
-// the address was never the thing this change was making safe (see
-// kernel/fs/initramfs.tkb's InitramfsFileResult::File comment for
-// where address and image are paired up).
+// the address was never the thing this change was making safe. The caller
+// pairs it with the same checked metadata window supplied as `image`.
 fn distro_elf_validate_with_length(address: usize, image: borrow []u8,
                                    logical_length: usize) -> DistroElfResult {
     // `image.len >= 7` is redundant with `>= ELF_HEADER_SIZE` (always

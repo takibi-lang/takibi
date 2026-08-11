@@ -59,14 +59,16 @@ The current RPi5 kernel includes:
   for the full per-syscall support matrix;
 - a block-device boundary shared by the embedded memory fixture, QEMU
   virtio-blk, and RPi5 USB Mass Storage;
-- a bounded ext2 implementation with direct-block small files, root directory
+- a bounded ext2 implementation with direct, single-indirect, and
+  double-indirect regular-file reads, nested path lookup, root directory
   mutation, allocation bitmaps, and fast symlinks;
 - RP1 PCIe, xHCI/USB Mass Storage, Cadence GEM Ethernet, ARP, IPv4, ICMP, and
   a bounded TCP slice with in-order stream reconstruction, short reads,
   partial writes, duplicate/out-of-order acknowledgement, and timed SYN/ACK,
   data, and FIN retransmission;
-- an initramfs containing reproducibly pinned Alpine BusyBox, BusyBox Extras,
-  and the matching musl interpreter without committing those GPL binaries;
+- an ext2 root filesystem containing reproducibly pinned Alpine BusyBox,
+  BusyBox Extras, and the matching musl interpreter without committing those
+  GPL binaries;
 - one-boot integration views that independently compare boot, VM, process,
   syscall, filesystem, USB, Ethernet, BusyBox, and HTTPd evidence.
 
@@ -123,8 +125,8 @@ it differs from the RPi5 lane -- in particular, `make kernelcheck` still
 needs real RPi5 hardware attached, even though `kernelcheck-qemu` alone does
 not.
 
-`kernelbuild-rpi5` does not require a board. It generates the ext2 and
-initramfs fixtures, obtains the pinned Alpine packages, compiles all Takibi
+`kernelbuild-rpi5` does not require a board. It generates the ext2 root
+fixture, obtains the pinned Alpine packages, compiles all Takibi
 code under `--forbid-trap`, assembles the minimal AArch64 files, and links the
 ELF, then runs `scripts/check_kernel_asm_invariants.py` against the linked
 `kernel.elf` -- a static, hardware-free disassembly check verifying the
@@ -383,19 +385,19 @@ contracts;
 the list below is orientation for a reader deciding whether a workload will
 run, not a specification.
 
-- **Filesystem.** One ext2 block group, root-directory lookup and mutation,
-  allocation bitmaps, and fast symlinks. Regular-file reads cover twelve
-  direct blocks plus 256 singly-indirect blocks (up to 268 KiB with this
-  1-KiB filesystem); writes and truncates remain limited to one direct
-  block. Directories and symlinks remain one block, and there are no
-  additional block groups or nested-directory traversal.
+- **Filesystem.** One ext2 block group, nested path lookup, root-directory
+  mutation, allocation bitmaps, and fast symlinks. Regular-file reads cover
+  twelve direct blocks plus single- and double-indirect blocks; the maximum
+  is derived from the 1-KiB block geometry rather than a file-size literal.
+  Writes and truncates remain limited to one direct block. Directories and
+  symlinks remain one block, and there are no additional block groups.
 - **Processes.** A fixed 16-slot `ProcessRecord` scheduler table, with lazily
   backed kernel stacks and directly owned address-space page tables, all on
   core 0.
   Core 1 proves autonomous EL1 entry and shared-MMU visibility, then parks.
-  `execve` resolves `argv[0]` as an ext2 path directly (`ext2_lookup_root` +
-  `ext2_read_small_file` + `distro_elf_validate`), falling back to the
-  registered static BusyBox image on any resolution failure -- so its own
+  `execve` resolves `argv[0]` as an ext2 path, validates a bounded ELF
+  metadata window, and streams each PT_LOAD page from the file. It falls back
+  to the ext2-resident static BusyBox image on any resolution failure -- so its own
   argv[0]-driven multi-call applet dispatch (`echo`, `sh`, etc.) still works
   for names with no real ELF behind them, such as the `/echo`/`/bin/echo`
   ext2 symlinks (superseding an earlier two-entry registry). `wait4` blocks

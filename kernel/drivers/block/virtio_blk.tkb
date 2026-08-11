@@ -51,9 +51,20 @@ struct packed VirtioBlkRequest {
 let mut virtio_blk_base: i32 = 0;
 let mut virtio_blk_ready: bool;
 let mut virtio_blk_queue: [u8; 2 * VIRTIO_BLK_PAGE_SIZE] align(4096);
-let mut virtio_blk_request_buf: [u8; 16];
-let mut virtio_blk_status_buf: [u8; 1];
-let mut virtio_blk_used_seen: isize;
+// Every sector DMA goes through one driver-owned cache-line-aligned buffer.
+// dma_prepare_rx/dma_finish_rx operate on whole cache lines; on the RPi5
+// Cortex-A76 the cache line is 64 bytes (the same contract documented by the
+// mailbox, USB, and GEM DMA buffers). Callers are allowed to supply ordinary
+// pointers, whose alignment and surrounding cache-line ownership are unknown.
+// The synchronous queue has only one request in flight, so one scratch sector
+// is sufficient.
+let mut virtio_blk_data_buf: [u8; 512] align(64);
+let mut virtio_blk_request_buf: [u8; 16] align(64);
+let mut virtio_blk_status_buf: [u8; 1] align(64);
+// Virtio's avail/used idx fields are free-running u16 counters. Keep the
+// driver shadow at the same width so equality remains valid across the
+// mandatory 65535 -> 0 wrap after long streams of synchronous requests.
+let mut virtio_blk_used_seen: u16;
 
 fn virtio_blk_reg(offset: i32) -> *io i32 {
     return (virtio_blk_base + offset) as *io i32;
@@ -92,8 +103,12 @@ fn virtio_blk_init() -> bool {
 }
 
 fn virtio_blk_submit(request_type: u32, sector: u32, buffer: *u8,
-                     write: bool) -> bool {
+                     write: bool) -> bool !{unsafe} {
     if (virtio_blk_init() == false) { return false; }
+    if (write) {
+        let source = unsafe { buffer[0..<512] };
+        slice_copy(virtio_blk_data_buf as []u8, source);
+    }
     let request: *VirtioBlkRequest = virtio_blk_request_buf as *VirtioBlkRequest;
     request.request_type = request_type;
     request.reserved = 0;
@@ -107,7 +122,7 @@ fn virtio_blk_submit(request_type: u32, sector: u32, buffer: *u8,
     descs[0].len = sizeof(VirtioBlkRequest) as u32;
     descs[0].flags = VIRTIO_BLK_DESC_F_NEXT as u16;
     descs[0].next = 1;
-    descs[1].addr = buffer as usize;
+    descs[1].addr = (virtio_blk_data_buf as *u8) as usize;
     descs[1].len = 512;
     descs[1].flags = data_flags as u16 | VIRTIO_BLK_DESC_F_NEXT as u16;
     descs[1].next = 2;
@@ -115,6 +130,14 @@ fn virtio_blk_submit(request_type: u32, sector: u32, buffer: *u8,
     descs[2].len = 1;
     descs[2].flags = VIRTIO_BLK_DESC_F_WRITE as u16;
     descs[2].next = 0;
+    dma_prepare_tx(virtio_blk_request_buf as *u8,
+                   sizeof(VirtioBlkRequest));
+    dma_prepare_rx(virtio_blk_status_buf as *align(64) u8, 1);
+    if (write) {
+        dma_prepare_tx(virtio_blk_data_buf as *u8, 512);
+    } else {
+        dma_prepare_rx(virtio_blk_data_buf as *align(64) u8, 512);
+    }
     let avail: *VirtioBlkAvail =
         (queue + VIRTIO_QNUM * (sizeof(VirtioBlkDesc) as isize))
         as *VirtioBlkAvail;
@@ -131,16 +154,27 @@ fn virtio_blk_submit(request_type: u32, sector: u32, buffer: *u8,
     let mut spins: isize = 0;
     while (spins < 10000000 &&
            virtio_blk_used_seen == ((queue + VIRTIO_BLK_PAGE_SIZE)
-                                    as *io VirtioBlkUsed).idx as isize) {
+                                    as *io VirtioBlkUsed).idx) {
         spins = spins + 1;
     }
     if (virtio_blk_used_seen == ((queue + VIRTIO_BLK_PAGE_SIZE)
-                                 as *io VirtioBlkUsed).idx as isize) {
+                                 as *io VirtioBlkUsed).idx) {
         return false;
     }
     dma_consume();
-    virtio_blk_used_seen = virtio_blk_used_seen + 1;
-    return virtio_blk_status_buf[0] == 0;
+    if (virtio_blk_used_seen == 0xFFFF) {
+        virtio_blk_used_seen = 0;
+    } else {
+        virtio_blk_used_seen = virtio_blk_used_seen + 1;
+    }
+    dma_finish_rx(virtio_blk_status_buf as *align(64) u8, 1);
+    if (virtio_blk_status_buf[0] != 0) { return false; }
+    if (write == false) {
+        dma_finish_rx(virtio_blk_data_buf as *align(64) u8, 512);
+        let destination = unsafe { buffer[0..<512] };
+        slice_copy(destination, virtio_blk_data_buf as []u8);
+    }
+    return true;
 }
 
 fn virtio_blk_read_sector(sector: u32, destination: *u8) -> bool {
