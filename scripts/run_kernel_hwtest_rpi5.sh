@@ -244,7 +244,7 @@ echo "[kernel/rpi5] userspace connected I/O passed"
 echo "[kernel/rpi5] waiting for the kernel to be ready to start the BusyBox httpd daemon"
 httpd_ready=0
 for _wait in $(seq 1 600); do
-    if LC_ALL=C grep -aFq 'httpd daemon: listener ready port=8080' "$UART_LOG"; then
+    if LC_ALL=C grep -aFq 'foreground server: listener ready port=8080' "$UART_LOG"; then
         httpd_ready=1
         break
     fi
