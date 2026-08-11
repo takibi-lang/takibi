@@ -386,6 +386,8 @@ make kernelbuild        # build every maintained kernel target (currently rpi5 +
 make kernelcheck-rpi5   # build and run the RPi5 hardware integration suite (needs real hardware)
 make kernelcheck-qemu   # build and run the QEMU/AArch64 integration suite (no hardware needed)
 make kernelcheck        # build and test every maintained kernel target (needs real RPi5 hardware for the rpi5 half)
+make kernelsh-qemu      # boot QEMU and attach the current terminal to the ash UART
+make kernelsh-rpi5      # load RPi5 over SWD and attach the Debug Probe UART to the ash shell
 make linuxbuild         # build linux_user/'s host-native Linux/AMD64 tests (no QEMU/hardware needed)
 make linuxcheck         # build and run linux_user/'s tests, diffing stdout against each .expected
 make allcheck           # langcheck + test + linuxcheck + kernelcheck together (needs real RPi5 hardware for the last one)

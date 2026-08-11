@@ -35,7 +35,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelcheck-rpi5 kernelcheck-qemu langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelcheck-rpi5 kernelcheck-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -509,6 +509,17 @@ kernelcheck-rpi5: kernelbuild-rpi5
 
 kernelcheck-qemu: kernelbuild-qemu
 	@bash scripts/run_kernel_qemutest.sh
+
+## kernelsh-qemu: boot the standalone kernel and attach the current terminal
+## to its UART. Exit QEMU with Ctrl-a x (QEMU's standard -nographic escape).
+kernelsh-qemu: kernelbuild-qemu
+	@bash scripts/run_kernel_shell_qemu.sh
+
+## kernelsh-rpi5: inject the standalone kernel over SWD and attach the current
+## terminal to the RPi5 Debug Probe UART. Requires python3-serial (the Debian
+## package is python3-serial); exit miniterm with Ctrl-].
+kernelsh-rpi5: kernelbuild-rpi5
+	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_kernel_shell_rpi5.sh
 
 kernelcheck: kernelcheck-qemu kernelcheck-rpi5
 

@@ -117,7 +117,15 @@ make kernelbuild-qemu  # build kernel/build/qemu/kernel.elf
 make kernelcheck-qemu  # build and run the complete QEMU integration test (no hardware needed)
 make kernelbuild       # build every maintained kernel target
 make kernelcheck       # build and test every maintained kernel target
+make kernelsh-qemu     # boot QEMU and use the current terminal as the ash UART console
+make kernelsh-rpi5     # load RPi5 over SWD and use the Debug Probe UART as the ash console
 ```
+
+The two `kernelsh-*` targets are deliberately interactive and do not run the
+automated view/network checks. `kernelsh-rpi5` uses pyserial's `miniterm`; on
+Debian/Ubuntu install it with `sudo apt-get install python3-serial`. Press
+Ctrl-] to leave the RPi5 console. QEMU uses its standard `-nographic` escape,
+Ctrl-a x, to exit.
 
 `kernelbuild`/`kernelcheck` run both the RPi5 and QEMU targets. See
 "QEMU/AArch64 integration" below for what `kernelcheck-qemu` covers and how
