@@ -97,7 +97,7 @@ stop_qemu() {
 trap stop_qemu EXIT
 trap 'stop_qemu; exit 130' INT TERM HUP
 
-# shell_read and the init.sh user_payload fixture both block in the UART
+# interactive ash and the init.sh user_payload fixture both block in the UART
 # receive path. Feed each deterministic line after its own blocked marker.
 uart_sender_pid=""
 (
@@ -105,8 +105,8 @@ uart_sender_pid=""
     payload_sent=0
     for _wait in $(seq 1 "$TIMEOUT_SECS"); do
         if [ "$shell_sent" -eq 0 ] &&
-           LC_ALL=C grep -aFq 'shell ppoll: uart blocked' "$UART_LOG"; then
-            printf 'xashread\n' >&8
+           LC_ALL=C grep -aFq 'interactive shell: uart blocked' "$UART_LOG"; then
+            printf 'x=; echo repl-ok; exit\n' >&8
             shell_sent=1
         fi
         if [ "$payload_sent" -eq 0 ] &&

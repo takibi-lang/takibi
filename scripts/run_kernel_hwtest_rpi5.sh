@@ -121,11 +121,11 @@ echo "[kernel/rpi5] kernel loaded in $((SECONDS - load_started))s; waiting for i
 # marker, proving a real UART block/wake cycle rather than prebuffered input.
 (
     for _wait in $(seq 1 6000); do
-        if LC_ALL=C grep -aFq 'shell ppoll: uart blocked' "$UART_LOG"; then
+        if LC_ALL=C grep -aFq 'interactive shell: uart blocked' "$UART_LOG"; then
             # The RP1 UART can discard the first byte immediately after a
-            # host-side tty write. The leading sentinel is intentionally not
-            # part of the ash value; it makes the checked payload stable.
-            printf 'xashread\n' >"$SERIAL_DEV"
+            # host-side tty write. The leading assignment absorbs it without
+            # changing the following interactive command.
+            printf 'x=; echo repl-ok; exit\n' >"$SERIAL_DEV"
             exit 0
         fi
         sleep 0.01
@@ -320,7 +320,7 @@ while [ "$capture_elapsed" -lt "$capture_deadline" ]; do
     sleep 1
     capture_elapsed=$((capture_elapsed + 1))
     if LC_ALL=C grep -aFq 'uart rx: scheduler block+wake ok' "$UART_LOG" &&
-            LC_ALL=C grep -aFq 'busybox shell read exit: 0' "$UART_LOG" &&
+            LC_ALL=C grep -aFq 'busybox interactive shell exit: 0' "$UART_LOG" &&
             LC_ALL=C grep -aFq 'resources: pages=0' "$UART_LOG"; then
         capture_complete=1
         break

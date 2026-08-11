@@ -102,6 +102,7 @@ private let mut syscall_read_calls: usize;
 private let mut syscall_file_write_calls: usize;
 private let mut syscall_close_calls: usize;
 private let mut syscall_ppoll_uart_waits: usize;
+private let mut syscall_read_uart_waits: usize;
 private let mut syscall_connection_open: [bool; TCP_CONNECTION_MAX];
 private let mut syscall_socket_calls: usize;
 private let mut syscall_bind_calls: usize;
@@ -345,6 +346,7 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     }
     syscall_open_calls = 0;
     syscall_read_calls = 0;
+    syscall_read_uart_waits = 0;
     syscall_file_write_calls = 0;
     syscall_close_calls = 0;
     syscall_exec_pending = false;
@@ -994,7 +996,11 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
             disable_irq();
             if (kernel_uart_rx_pending() == false) {
                 enable_irq();
-                return SyscallAction::Resume(LINUX_EAGAIN);
+                syscall_read_uart_waits = syscall_read_uart_waits + 1;
+                if (syscall_read_uart_waits == 1) {
+                    kernel_boot_log("\ninteractive shell: uart blocked\n");
+                }
+                return SyscallAction::WaitUart;
             }
             let value: u8 = kernel_uart_rx_getc();
             enable_irq();

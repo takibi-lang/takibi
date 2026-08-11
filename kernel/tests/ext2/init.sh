@@ -52,15 +52,14 @@ else
     exit 1
 fi
 
-# This stays a child shell so the fixture still exercises ash's fork/exec
-# lifecycle plus ppoll/read on UART, rather than only the PID 1 shell
-# interpreting its own builtin. The runner sends xashread after the blocked
-# marker; ${x#x} removes that warm-up sentinel.
-/busybox sh -c 'read x; echo shell read: ${x#x}'
+# This remains a child shell, but now exercises an actual interactive ash
+# read/eval loop over UART. The runner sends a harmless leading assignment,
+# then an observable command and exit after ppoll publishes the blocked marker.
+/busybox sh -i
 if [ "$?" -eq 0 ]; then
-    echo "busybox shell read exit: 0"
+    echo "busybox interactive shell exit: 0"
 else
-    echo "busybox shell read failed"
+    echo "busybox interactive shell failed"
     exit 1
 fi
 

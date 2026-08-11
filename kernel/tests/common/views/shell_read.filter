@@ -1,5 +1,5 @@
-^shell ppoll: uart blocked$
-^shell read: ashread$
-^busybox shell read exit: 0$
+^interactive shell: uart blocked$
+^repl-ok$
+^busybox interactive shell exit: 0$
 ^shell stack: demand-grown$
 ^child exec unmap: clean$
