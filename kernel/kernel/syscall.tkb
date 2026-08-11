@@ -127,8 +127,6 @@ private let mut syscall_uname_buffer: [u8; 512];
 
 must_use variant KernelInetdAcceptResult { TimedOut; Accepted; }
 
-private let mut syscall_heap_start: usize;
-private let mut syscall_heap_limit: usize;
 // GitHub issue #264 fifth stage: nested clones need separate bookkeeping for
 // each child. One record holds the values keyed by the child fd-table slot;
 // the exit handler reaps that child before switching execution to its parent.
@@ -146,21 +144,73 @@ private let mut syscall_block_reason: ProcessWaitReason = ProcessWaitReason::Non
 // block/wake gap -- see kernel_syscall_wait4_deliver()'s own comment.
 private let mut syscall_wait4_status_ptr: usize;
 private let mut syscall_connected_fixture_pending: bool;
-private let mut syscall_httpd_daemon_pending: bool;
+// Test-driver-controlled foreground-server lifecycle. This is process and
+// socket state only: the syscall layer does not identify an application or
+// interpret its wire protocol.
+private let mut syscall_foreground_server_pending: bool;
+private let mut syscall_foreground_server_active: bool;
+private let mut syscall_foreground_server_exit_count_start: usize;
+private let mut syscall_foreground_server_completed_children: usize;
+private let mut syscall_foreground_server_reaped_pages: usize;
 private let mut syscall_exec_pending: bool;
 private let mut syscall_exec_argc: usize;
 private let mut syscall_exec_argv: [u8; 512];
+private let mut syscall_exec_path: [u8; 256];
 
 must_use variant SyscallPathResult { Fault; Invalid; Name(usize); }
 
-fn kernel_syscall_httpd_daemon_start() {
-    syscall_httpd_daemon_pending = true;
+fn kernel_syscall_foreground_server_start() {
+    // The preceding init.sh fixture has completed all of its socket I/O
+    // before starting HTTPD. Reinitialize only reusable TCP/socket scratch
+    // state; unlike kernel_syscall_process_configure(), this must not clear
+    // PID 1's descriptors or the HTTPD child's clone-reap record.
+    tcp_connection_pool_init();
+    for connection_index: usize in 0..<TCP_CONNECTION_MAX {
+        syscall_connection_open[connection_index] = false;
+        syscall_socket_buffer_length[connection_index] = 0;
+        syscall_socket_buffer_offset[connection_index] = 0;
+        syscall_inetd_response_length[connection_index] = 0;
+    }
+    syscall_inetd_mode = false;
+    syscall_foreground_server_pending = true;
+    syscall_foreground_server_active = true;
+    syscall_foreground_server_exit_count_start =
+        kernel_process_child_exit_count();
+    syscall_foreground_server_completed_children = 0;
+    syscall_foreground_server_reaped_pages = 0;
+}
+
+fn kernel_syscall_foreground_server_children() -> usize {
+    return syscall_foreground_server_completed_children;
+}
+
+fn kernel_syscall_foreground_server_reaped_pages() -> usize {
+    return syscall_foreground_server_reaped_pages;
 }
 
 fn kernel_syscall_exec_pending() -> bool { return syscall_exec_pending; }
 fn kernel_syscall_exec_argc() -> usize { return syscall_exec_argc; }
 fn kernel_syscall_exec_argv() -> []u8 { return syscall_exec_argv as []u8; }
 fn kernel_syscall_exec_clear() { syscall_exec_pending = false; }
+
+// execve's pathname is distinct from argv[0]. Preserve it for generic image
+// source selection; userspace remains free to choose a different argv[0].
+fn kernel_syscall_exec_path_matches(name: []u8) -> bool !{unsafe} {
+    let path: []u8 = syscall_exec_path as []u8;
+    if (name.len > path.len) { return false; }
+    let mut index: usize = 0;
+    for byte in name {
+        if (byte == 0) { return true; }
+        if (index < 256) {
+            let bounded: {0..<256 as usize} = index;
+            if (path[bounded] != byte) { return false; }
+        } else {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
 
 fn kernel_syscall_connected_fixture_start() {
     syscall_connected_fixture_pending = true;
@@ -261,11 +311,35 @@ fn kernel_syscall_heap_set(value: usize) -> bool {
     }
 }
 
+fn kernel_syscall_heap_start() -> usize {
+    match unified_process_heap_start(kernel_syscall_process_slot()) {
+        UnifiedOffsetResult::Missing => { return 0; }
+        UnifiedOffsetResult::Found(value) => { return value; }
+    }
+}
+
+fn kernel_syscall_heap_limit() -> usize {
+    match unified_process_heap_limit(kernel_syscall_process_slot()) {
+        UnifiedOffsetResult::Missing => { return 0; }
+        UnifiedOffsetResult::Found(value) => { return value; }
+    }
+}
+
+// Exec replaces only the calling process's image. Its brk/mmap arena must
+// therefore be replaced in the same FD-context slot without resetting the
+// parent shell's descriptors or global TCP state.
+fn kernel_syscall_process_configure_current(
+        heap_start: usize, heap_limit: usize) {
+    match unified_process_heap_range_configure(
+            kernel_syscall_process_slot(), heap_start, heap_limit) {
+        UnifiedFdResult::Invalid => {}
+        UnifiedFdResult::Ok => {}
+    }
+}
+
 fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
-    syscall_heap_start = heap_start;
-    syscall_heap_limit = heap_limit;
     unified_fd_table_init();
-    match unified_process_heap_configure(0, heap_start) {
+    match unified_process_heap_range_configure(0, heap_start, heap_limit) {
         UnifiedFdResult::Invalid => {}
         UnifiedFdResult::Ok => {}
     }
@@ -275,6 +349,7 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_close_calls = 0;
     syscall_exec_pending = false;
     syscall_exec_argc = 0;
+    for path_index: usize in 0..<256 { syscall_exec_path[path_index] = 0; }
     tcp_connection_pool_init();
     for connection_index: usize in 0..<TCP_CONNECTION_MAX {
         syscall_connection_open[connection_index] = false;
@@ -700,7 +775,6 @@ fn kernel_syscall_path_name(address: usize) -> SyscallPathResult {
         return SyscallPathResult::Invalid;
     }
     if (path_view[0] == 0x2F) {
-        if (length == 1) { return SyscallPathResult::Invalid; }
         return SyscallPathResult::Name(256 + length - 1);
     }
     return SyscallPathResult::Name(length);
@@ -717,7 +791,7 @@ must_use variant ReadSegmentResult { Errno(usize); Read(usize); }
 
 // Single-segment write, fd 1/2 (raw UART) only. Deliberately NOT shared
 // with write(64)'s own handler below (which also supports connected TCP
-// fds, BusyBox httpd's inetd-mode fd 1, and the ext2 fd 3) -- extracting
+// fds, descriptor duplication, and ext2 files) -- extracting
 // that already-proven-working, TCP-timing-sensitive code into a shared
 // helper was judged more regression risk than this issue's actual
 // traced scenarios (uname -a's writev to stdout) need. Broadening
@@ -979,6 +1053,36 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
     }
 }
 
+// A process may be ended either by exit(2) itself or by a bounded test
+// daemon's completed-work condition.  Both routes must preserve the same
+// clone-owned FD/VM teardown and return through the parent frame; returning
+// SyscallAction::Exit directly is valid only for the root EL0 process.
+fn kernel_syscall_exit_current_process(status: usize) -> SyscallAction {
+    if (kernel_process_is_child()) {
+        match kernel_syscall_clone_files_reap() {
+            KernelFdReapResult::Failed => { return SyscallAction::Unreachable; }
+            KernelFdReapResult::Reaped => { }
+        }
+        if (kernel_process_exec_image_live_for_pid(
+                kernel_process_current_pid()) == false) {
+            match process_image_clone_vm_reap() {
+                ProcessCloneVmReapResult::Missing => {
+                    return SyscallAction::Unreachable;
+                }
+                ProcessCloneVmReapResult::Reaped => { }
+            }
+        }
+        if (syscall_foreground_server_active) {
+            let reaped_pages: usize = process_image_clone_vm_reaped_pages();
+            if (reaped_pages > syscall_foreground_server_reaped_pages) {
+                syscall_foreground_server_reaped_pages = reaped_pages;
+            }
+        }
+        return SyscallAction::CloneParent(kernel_process_child_exit(status));
+    }
+    return SyscallAction::Exit(status);
+}
+
 // The only asm-facing entry point (user_entry.S calls this exact name via
 // `bl kernel_syscall_dispatch`); its signature is untouched so this step
 // needs no assembly changes. All real logic lives in the SyscallAction-
@@ -1175,7 +1279,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         -> SyscallAction !{unsafe} {
     let exception_class: usize = (esr >> 26) & 0x3F;
     if (exception_class != 0x15) { return SyscallAction::Unreachable; }
-
     if (number == AARCH64_NR_TAKIBI_UART_RX_WAIT) {
         disable_irq();
         if (kernel_uart_rx_pending()) {
@@ -1448,8 +1551,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
 
     if (number == 79) {
         // newfstatat(AT_FDCWD, path, stat, flags): the current ext2 root has
-        // regular files only. Fill the asm-generic AArch64 stat fields used
-        // by BusyBox httpd after validating the complete userspace result.
+        // regular files only. Fill the asm-generic AArch64 stat fields after
+        // validating the complete userspace result.
         let path_code: usize = match kernel_syscall_path_name(x1) {
             SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
@@ -1539,8 +1642,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let address: usize = x1;
         let requested: usize = x2;
         // An accepted socket duplicated onto stdin is still a connection,
-        // not the kernel console. BusyBox httpd reads its request from fd 0,
-        // so resolve unified fd ownership before applying the UART fallback.
+        // not the kernel console. Resolve unified fd ownership before the
+        // UART fallback.
         if (kernel_connected_fd_is_open(fd)) {
             syscall_connected_read_calls = syscall_connected_read_calls + 1;
             let read_slot: {0..<TCP_CONNECTION_MAX as usize} =
@@ -1908,9 +2011,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 listen_fd, UnifiedListenerState::Listening) == false) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
-        if (syscall_httpd_daemon_pending) {
-            syscall_httpd_daemon_pending = false;
-            kernel_boot_log("httpd daemon: listener ready port=8080\n");
+        if (syscall_foreground_server_pending) {
+            syscall_foreground_server_pending = false;
+            kernel_boot_log("foreground server: listener ready port=8080\n");
         } else if (syscall_connected_fixture_pending) {
             syscall_connected_fixture_pending = false;
             kernel_boot_log("linux socket: listener ready port=8080\n");
@@ -1922,12 +2025,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // accept4(): hold the sole physical RX capability across the
         // blocking TCP handshake, then restore it before publishing the
         // new connection owner and returning its allocated descriptor.
-        // The integration daemon is stopped only after it has reaped two
-        // children and returned to its third accept, proving persistence
-        // while allowing the one-boot hardware suite to continue.
-        if (kernel_process_current_pid() == 1 &&
-            kernel_process_child_exit_count() >= 2) {
-            return SyscallAction::Exit(0);
+        // The test driver may bound its foreground server after two
+        // completed child sessions so the one-boot suite can continue.
+        if (syscall_foreground_server_active &&
+            kernel_process_child_exit_count() >=
+            syscall_foreground_server_exit_count_start + 2) {
+            syscall_foreground_server_completed_children =
+                kernel_process_child_exit_count() -
+                syscall_foreground_server_exit_count_start;
+            return kernel_syscall_exit_current_process(0);
         }
         syscall_accept_calls = syscall_accept_calls + 1;
         let accept_listener_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} =
@@ -1941,6 +2047,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 UnifiedListenerState::Listening ||
             (number == 242 && x3 != 0)) {
             return SyscallAction::Resume(LINUX_EINVAL);
+        }
+        // A foreground server child owns the only RX capability while it
+        // reads and writes the accepted stream.  Do not let the listener
+        // parent enter another blocking accept and monopolize that capability;
+        // return the normal retryable result and schedule the worker instead.
+        if (kernel_process_current_has_live_child()) {
+            kernel_process_request_reschedule();
+            return SyscallAction::Resume(LINUX_EAGAIN);
         }
         let connected_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} =
             match kernel_socket_fd_alloc(5) {
@@ -2075,9 +2189,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 210) {
-        // shutdown(1, SHUT_WR) is BusyBox httpd's end-of-response boundary
-        // in inetd mode. Its header/body writes are coalesced in the kernel
-        // response buffer and transmitted independently of RX ownership.
+        // shutdown(1, SHUT_WR) is a connected stream's end-of-response
+        // boundary. Its writes are transmitted independently of RX ownership.
         if (x0 == 1 && syscall_inetd_mode == false &&
             kernel_connected_fd_is_open(1) && x1 == 1) {
             let direct_shutdown_slot: {0..<TCP_CONNECTION_MAX as usize} =
@@ -2195,6 +2308,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (path_view[0] == 0x2F) { path_length = path_length + 1; }
         if (path_length == 0 || argv_address == 0) { return SyscallAction::Resume(LINUX_EINVAL); }
         let exec_path_absolute: bool = path_view[0] == 0x2F;
+        if (path_length > 256) { return SyscallAction::Resume(LINUX_EINVAL); }
+        let exec_path: []u8 = syscall_exec_path as []u8;
+        let saved_path: usize = slice_copy(
+            unsafe { exec_path[0..<path_length] },
+            unsafe { path_view[0..<path_length] });
+        if (saved_path != path_length) {
+            return SyscallAction::Resume(LINUX_EFAULT);
+        }
         let mut output_offset: usize = 0;
         let mut argc: usize = 0;
         let mut vector_terminated: bool = false;
@@ -2320,22 +2441,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
     }
     if (number == AARCH64_NR_EXIT || number == AARCH64_NR_EXIT_GROUP) {
-        if (kernel_process_is_child()) {
-            // Restore the preserved parent frame with clone() == child PID.
-            match kernel_syscall_clone_files_reap() {
-                KernelFdReapResult::Failed => { return SyscallAction::Unreachable; }
-                KernelFdReapResult::Reaped => { }
-            }
-            if (kernel_process_exec_image_live_for_pid(
-                    kernel_process_current_pid()) == false) {
-                match process_image_clone_vm_reap() {
-                    ProcessCloneVmReapResult::Missing => { return SyscallAction::Unreachable; }
-                    ProcessCloneVmReapResult::Reaped => { }
-                }
-            }
-            return SyscallAction::CloneParent(kernel_process_child_exit(x0));
-        }
-        return SyscallAction::Exit(x0);
+        return kernel_syscall_exit_current_process(x0);
     }
     if (number == AARCH64_NR_WAIT4) {
         let requested_pid: usize = x0;
@@ -2468,8 +2574,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
     if (number == 134) {
         // rt_sigaction(signum, act, oldact, sigsetsize): this kernel does
-        // not deliver signals, but musl's signal() (SIGPIPE/SIGALRM/SIGCHLD/
-        // SIGHUP in BusyBox httpd) always passes a non-null oldact expecting
+        // not deliver signals, but a libc signal() call may pass a non-null
+        // oldact expecting
         // the previous struct sigaction (32 bytes on aarch64: handler,
         // flags, restorer, 2-word mask) to be filled, not left untouched.
         let signum: usize = x0;
@@ -2542,7 +2648,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
     if (number == 214) {
         if (x0 == 0) { return SyscallAction::Resume(kernel_syscall_heap_break()); }
-        if (x0 >= syscall_heap_start && x0 <= syscall_heap_limit) {
+        if (x0 >= kernel_syscall_heap_start() &&
+            x0 <= kernel_syscall_heap_limit()) {
             if (kernel_syscall_heap_set(x0) == false) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
@@ -2557,8 +2664,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // This kernel has no file-backed or shared mapping and no
         // executable anonymous memory (issue #174's W^X story): only a
         // private anonymous request with fd=-1 and no PROT_EXEC is
-        // supported. musl's mallocng is the only real caller reached by
-        // BusyBox httpd and every one of its three call shapes (fixed
+        // supported. mallocng's call shapes (fixed
         // MAP_FIXED guard page, PROT_NONE meta-area pool, PROT_READ|WRITE
         // growth) already satisfies this.
         if ((flags & 0x22) != 0x22 || fd != 0xFFFFFFFFFFFFFFFF ||
@@ -2574,13 +2680,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // eagerly mapped process arena, so preserve the requested address
         // without consuming space from the independent anonymous-map cursor.
         if (x0 != 0) {
-            if (x0 < syscall_heap_start || x0 > syscall_heap_limit ||
-                rounded > syscall_heap_limit - x0) {
+            if (x0 < kernel_syscall_heap_start() ||
+                x0 > kernel_syscall_heap_limit() ||
+                rounded > kernel_syscall_heap_limit() - x0) {
                 return SyscallAction::Resume(0xFFFFFFFFFFFFFFFF);
             }
             return SyscallAction::Resume(x0);
         }
-        if (rounded > syscall_heap_limit - kernel_syscall_heap_break()) {
+        if (rounded > kernel_syscall_heap_limit() -
+                kernel_syscall_heap_break()) {
             return SyscallAction::Resume(0xFFFFFFFFFFFFFFFF);
         }
         let result: usize = kernel_syscall_heap_break();

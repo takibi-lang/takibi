@@ -786,8 +786,11 @@ fn process_image_prepare_stack(page: borrow PageOwner[page],
 
 fn process_dynamic_prepare_stack(page: borrow PageOwner[page],
                                  application: DistroElfLoadPlan,
-                                 interpreter_bias: usize)
+                                 interpreter_bias: usize,
+                                 argv: []u8,
+                                 argc: usize)
         -> ProcessImageStackResult !{unsafe} {
+    if (argc == 0 || argc > 32) { return ProcessImageStackResult::Invalid; }
     let bytes = page_bytes(page);
     for i: usize in 0..<4096 { bytes[i] = 0; }
 
@@ -796,59 +799,77 @@ fn process_dynamic_prepare_stack(page: borrow PageOwner[page],
     let virtual_base: usize = USER_TEXT_VA +
                               process_stack_top_page() * PAGE_SIZE +
                               PAGE_SIZE - PROCESS_STACK_LAYOUT_BYTES;
-    let random_address: usize = virtual_base + 304;
-    let argv0_address: usize = virtual_base + 320;
     let words: *u64 = physical_base as *u64;
+    let auxv_start: usize = argc + 3;
+    let random_offset: usize = (auxv_start + 28) * 8;
+    let mut string_offset: usize = random_offset + 16;
+    if (string_offset > PROCESS_STACK_LAYOUT_BYTES) {
+        return ProcessImageStackResult::Invalid;
+    }
+    let random_address: usize = virtual_base + random_offset;
+    words[0] = argc as u64;
+    let mut arg: usize = 0;
+    words[1] = (virtual_base + string_offset) as u64;
+    for byte in argv {
+        if (arg >= argc) { break; }
+        if (string_offset >= PROCESS_STACK_LAYOUT_BYTES) {
+            return ProcessImageStackResult::Invalid;
+        }
+        let tail: *u8 = (physical_base + string_offset) as *u8;
+        tail[0] = byte;
+        string_offset = string_offset + 1;
+        if (byte == 0) {
+            arg = arg + 1;
+            if (arg < argc) {
+                words[(arg + 1) as isize] =
+                    (virtual_base + string_offset) as u64;
+            }
+        }
+    }
+    if (arg != argc) { return ProcessImageStackResult::Invalid; }
+    words[(argc + 1) as isize] = 0;
+    words[(argc + 2) as isize] = 0;
+    words[auxv_start as isize] = AT_PAGESZ as u64;
+    words[(auxv_start + 1) as isize] = PAGE_SIZE as u64;
+    words[(auxv_start + 2) as isize] = AT_PHDR as u64;
+    words[(auxv_start + 3) as isize] =
+        (USER_TEXT_VA + application.program_offset) as u64;
+    words[(auxv_start + 4) as isize] = AT_PHENT as u64;
+    words[(auxv_start + 5) as isize] = ELF_PROGRAM_HEADER_SIZE as u64;
+    words[(auxv_start + 6) as isize] = AT_PHNUM as u64;
+    words[(auxv_start + 7) as isize] = application.program_count as u64;
+    words[(auxv_start + 8) as isize] = AT_BASE as u64;
+    words[(auxv_start + 9) as isize] = (USER_TEXT_VA + interpreter_bias) as u64;
+    words[(auxv_start + 10) as isize] = AT_ENTRY as u64;
+    words[(auxv_start + 11) as isize] = (USER_TEXT_VA + application.entry) as u64;
+    words[(auxv_start + 12) as isize] = AT_RANDOM as u64;
+    words[(auxv_start + 13) as isize] = random_address as u64;
+    words[(auxv_start + 14) as isize] = AT_SECURE as u64;
+    words[(auxv_start + 15) as isize] = 0;
+    words[(auxv_start + 16) as isize] = AT_UID as u64;
+    words[(auxv_start + 17) as isize] = 0;
+    words[(auxv_start + 18) as isize] = AT_EUID as u64;
+    words[(auxv_start + 19) as isize] = 0;
+    words[(auxv_start + 20) as isize] = AT_GID as u64;
+    words[(auxv_start + 21) as isize] = 0;
+    words[(auxv_start + 22) as isize] = AT_EGID as u64;
+    words[(auxv_start + 23) as isize] = 0;
+    words[(auxv_start + 24) as isize] = AT_EXECFN as u64;
+    words[(auxv_start + 25) as isize] = words[1];
+    words[(auxv_start + 26) as isize] = 0;
+    words[(auxv_start + 27) as isize] = 0;
+    let random: *u8 = (physical_base + random_offset) as *u8;
+    for i: usize in 0..<16 { random[i as isize] = (0x5A ^ i) as u8; }
 
-    // Persistent foreground daemon: HTTPd creates/listens/accepts itself.
-    // argv={"busybox-httpd","httpd","-f","-p","8080","-h","/"}
-    words[0] = 7;
-    words[1] = argv0_address as u64;
-    words[2] = (virtual_base + 336) as u64;
-    words[3] = (virtual_base + 344) as u64;
-    words[4] = (virtual_base + 352) as u64;
-    words[5] = (virtual_base + 360) as u64;
-    words[6] = (virtual_base + 368) as u64;
-    words[7] = (virtual_base + 376) as u64;
-    words[8] = 0;
-    words[9] = 0;
-
-    words[10] = AT_PAGESZ as u64; words[11] = PAGE_SIZE as u64;
-    words[12] = AT_PHDR as u64;
-    words[13] = (USER_TEXT_VA + application.program_offset) as u64;
-    words[14] = AT_PHENT as u64;
-    words[15] = ELF_PROGRAM_HEADER_SIZE as u64;
-    words[16] = AT_PHNUM as u64; words[17] = application.program_count as u64;
-    words[18] = AT_BASE as u64;
-    words[19] = (USER_TEXT_VA + interpreter_bias) as u64;
-    words[20] = AT_ENTRY as u64;
-    words[21] = (USER_TEXT_VA + application.entry) as u64;
-    words[22] = AT_RANDOM as u64; words[23] = random_address as u64;
-    words[24] = AT_SECURE as u64; words[25] = 0;
-    words[26] = AT_UID as u64; words[27] = 0;
-    words[28] = AT_EUID as u64; words[29] = 0;
-    words[30] = AT_GID as u64; words[31] = 0;
-    words[32] = AT_EGID as u64; words[33] = 0;
-    words[34] = AT_EXECFN as u64; words[35] = argv0_address as u64;
-    words[36] = 0; words[37] = 0;
-
-    let tail: *u8 = (physical_base + 304) as *u8;
-    for i: usize in 0..<16 { tail[i as isize] = (0x5A ^ i) as u8; }
-    slice_copy(unsafe { tail[16 as isize..<30 as isize] },
-               "busybox-httpd\0" as []u8);
-    slice_copy(unsafe { tail[32 as isize..<38 as isize] }, "httpd\0" as []u8);
-    slice_copy(unsafe { tail[40 as isize..<43 as isize] }, "-f\0" as []u8);
-    slice_copy(unsafe { tail[48 as isize..<51 as isize] }, "-p\0" as []u8);
-    slice_copy(unsafe { tail[56 as isize..<61 as isize] }, "8080\0" as []u8);
-    slice_copy(unsafe { tail[64 as isize..<67 as isize] }, "-h\0" as []u8);
-    slice_copy(unsafe { tail[72 as isize..<74 as isize] }, "/\0" as []u8);
-
-    if (words[0] != 7 || words[8] != 0 || words[9] != 0 ||
-        words[13] != (USER_TEXT_VA + application.program_offset) as u64 ||
-        words[19] != (USER_TEXT_VA + interpreter_bias) as u64 ||
-        words[21] != (USER_TEXT_VA + application.entry) as u64 ||
-        words[35] != argv0_address as u64 || words[36] != 0 ||
-        tail[29] != 0 || tail[37] != 0 || tail[73] != 0) {
+    if (words[0] != argc as u64 ||
+        words[(argc + 1) as isize] != 0 || words[(argc + 2) as isize] != 0 ||
+        words[(auxv_start + 3) as isize] !=
+            (USER_TEXT_VA + application.program_offset) as u64 ||
+        words[(auxv_start + 9) as isize] !=
+            (USER_TEXT_VA + interpreter_bias) as u64 ||
+        words[(auxv_start + 11) as isize] !=
+            (USER_TEXT_VA + application.entry) as u64 ||
+        words[(auxv_start + 27) as isize] != 0) {
         return ProcessImageStackResult::Invalid;
     }
     return ProcessImageStackResult::Ready;
@@ -1087,7 +1108,9 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
 
 fn process_image_pair_probe(primary: DistroElfLoadPlan,
                             interpreter: DistroElfLoadPlan,
-                            interpreter_bias: usize)
+                            interpreter_bias: usize,
+                            argv: []u8,
+                            argc: usize)
         -> ProcessImagePairProbeResult {
     // GitHub issue #258 step 2: this path's own layout, seeded before any
     // consumer reads it. Its stack floor is higher than the static path's
@@ -1189,7 +1212,8 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                         }
                         PageAllocResult::Allocated(stack) => {
                             match process_dynamic_prepare_stack(
-                                    stack, primary, interpreter_bias) {
+                                    stack, primary, interpreter_bias,
+                                    argv, argc) {
                                 ProcessImageStackResult::Invalid => {
                                     page_free(stack);
                                     process_image_cleanup();
@@ -1222,6 +1246,8 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                             image, mapped, entry, stack_pointer,
                             heap_start, heap_limit
                         };
+                        process_image_record[root].active_page_count = mapped;
+                        process_image_record[root].stack_growth_active = true;
                         return ProcessImagePairProbeResult::Ready(pages);
                     }
                     process_image_cleanup();
@@ -1230,6 +1256,25 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
             }
         }
     }
+}
+
+// Dynamic ELF exec needs the same root-scoped mapping path as static ELF
+// exec. The pair mapper deliberately preserves process_image_pair_probe's
+// stack/heap layout and only selects the child root before it runs.
+fn process_image_pair_map_in_root(primary: DistroElfLoadPlan,
+                                  interpreter: DistroElfLoadPlan,
+                                  interpreter_bias: usize,
+                                  argv: []u8,
+                                  argc: usize,
+                                  root: usize)
+        -> ProcessImagePairProbeResult {
+    if (root >= PROCESS_IMAGE_ROOT_MAX ||
+        address_space_is_live(root) == false) {
+        return ProcessImagePairProbeResult::Invalid;
+    }
+    process_image_target_root = root;
+    return process_image_pair_probe(
+        primary, interpreter, interpreter_bias, argv, argc);
 }
 
 fn process_image_map_current(plan: DistroElfLoadPlan,

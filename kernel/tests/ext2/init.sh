@@ -82,6 +82,10 @@ fi
 # way any other external command here is: ash forks and execve()s it.
 /user_payload
 
+# This foreground daemon is an ordinary ash child. Its dynamic BusyBox/musl
+# image is selected by the command name, while the shell remains PID 1.
+/busybox-httpd httpd -f -p 8080 -h /
+
 for phase in fd uart telnet; do
     echo "init: phase $phase"
 done

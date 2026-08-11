@@ -22,6 +22,7 @@
 let mut exception_vector_slot: [usize; 5];
 
 fn el1_exception_evidence(slot: usize) {
+    kernel_boot_log("exception: fail-stop\n");
     exception_vector_slot[0] = slot;
     exception_vector_slot[1] = mrs_esr_el1();
     exception_vector_slot[2] = mrs_far_el1();

@@ -35,6 +35,8 @@ struct ProcessFdContext {
     fd_generation: [usize; PROCESS_FD_MAX];
     fd_close_on_exec: [bool; PROCESS_FD_MAX];
     heap_break: usize;
+    heap_start: usize;
+    heap_limit: usize;
 }
 private let mut process_fd_context:
     [ProcessFdContext; PROCESS_CONTEXT_MAX];
@@ -116,7 +118,21 @@ fn unified_fd_table_init() {
             fd_close_on_exec[fd] = false;
         }
         process_fd_context[process].heap_break = 0;
+        process_fd_context[process].heap_start = 0;
+        process_fd_context[process].heap_limit = 0;
     }
+}
+
+fn unified_process_heap_range_configure(
+        process: usize, start: usize, limit: usize) -> UnifiedFdResult {
+    if (process < PROCESS_CONTEXT_MAX && start <= limit) {
+        let index: {0..<PROCESS_CONTEXT_MAX as usize} = process;
+        process_fd_context[index].heap_start = start;
+        process_fd_context[index].heap_limit = limit;
+        process_fd_context[index].heap_break = start;
+        return UnifiedFdResult::Ok;
+    }
+    return UnifiedFdResult::Invalid;
 }
 
 fn unified_process_heap_configure(process: usize, value: usize)
@@ -133,6 +149,22 @@ fn unified_process_heap_break(process: usize) -> UnifiedOffsetResult {
     if (process < PROCESS_CONTEXT_MAX) {
         let index: {0..<PROCESS_CONTEXT_MAX as usize} = process;
         return UnifiedOffsetResult::Found(process_fd_context[index].heap_break);
+    }
+    return UnifiedOffsetResult::Missing;
+}
+
+fn unified_process_heap_start(process: usize) -> UnifiedOffsetResult {
+    if (process < PROCESS_CONTEXT_MAX) {
+        let index: {0..<PROCESS_CONTEXT_MAX as usize} = process;
+        return UnifiedOffsetResult::Found(process_fd_context[index].heap_start);
+    }
+    return UnifiedOffsetResult::Missing;
+}
+
+fn unified_process_heap_limit(process: usize) -> UnifiedOffsetResult {
+    if (process < PROCESS_CONTEXT_MAX) {
+        let index: {0..<PROCESS_CONTEXT_MAX as usize} = process;
+        return UnifiedOffsetResult::Found(process_fd_context[index].heap_limit);
     }
     return UnifiedOffsetResult::Missing;
 }
@@ -515,6 +547,10 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult {
     }
     process_fd_context[child_index].heap_break =
         process_fd_context[parent_index].heap_break;
+    process_fd_context[child_index].heap_start =
+        process_fd_context[parent_index].heap_start;
+    process_fd_context[child_index].heap_limit =
+        process_fd_context[parent_index].heap_limit;
     for fd: usize in 0..<PROCESS_FD_MAX {
         child_fd_kind[fd as isize] = parent_fd_kind[fd as isize];
         child_fd_object[fd as isize] = parent_fd_object[fd as isize];
