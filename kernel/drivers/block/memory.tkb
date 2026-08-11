@@ -1,5 +1,5 @@
 const KERNEL_BLOCK_SIZE: usize = 1024;
-const KERNEL_BLOCK_BATCH: usize = 16;
+const KERNEL_BLOCK_BATCH: usize = 64;
 
 // GitHub issue #230: the writable RAM-backed ext2 fixture is now a real
 // compile-time file embed instead of kernel/user/ext2_image.S's `.incbin`
