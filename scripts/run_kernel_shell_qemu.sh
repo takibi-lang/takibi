@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Boot the standalone QEMU kernel with its guest UART attached to this tty.
-# This intentionally does not run the automated network peer or compare views:
-# the point of this target is a human session in the BusyBox ash shell.
+# This does not compare automated views: the point of this target is a human
+# session in the BusyBox ash shell.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,9 +37,22 @@ QEMU_COMMAND=(
 export KERNEL_QEMU_SHELL_LAUNCH_NS="$QEMU_LAUNCH_NS"
 "${QEMU_COMMAND[@]}" &
 QEMU_PID=$!
+NETWORK_PEER_PID=""
+if [ "${KERNEL_QEMU_SHELL_NETWORK_PEER:-1}" = 1 ]; then
+    # The kernel runs its normal ARP/ICMP/TCP fixture before reaching ext2 and
+    # ash. Without the peer, the interactive shell pays the full protocol
+    # timeout even though the human console does not need to test the peer.
+    python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" 17771 17772 \
+        >"${KERNEL_QEMU_SHELL_NETWORK_LOG:-/tmp/takibi-kernel-qemu-network.log}" 2>&1 &
+    NETWORK_PEER_PID=$!
+fi
 cleanup() {
     kill "$QEMU_PID" 2>/dev/null || true
     wait "$QEMU_PID" 2>/dev/null || true
+    if [ -n "$NETWORK_PEER_PID" ]; then
+        kill "$NETWORK_PEER_PID" 2>/dev/null || true
+        wait "$NETWORK_PEER_PID" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT INT TERM HUP
 

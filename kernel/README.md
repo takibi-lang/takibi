@@ -129,7 +129,10 @@ Ctrl-] to leave either console.
 The QEMU shell also reports the elapsed time from QEMU launch to the kernel's
 explicit `interactive shell: uart blocked` readiness marker. This is the
 point at which ash is waiting for input, rather than merely the point at which
-the QEMU process or UART socket exists.
+the QEMU process or UART socket exists. It starts the existing host-side
+network peer automatically, avoiding the kernel's normal protocol timeout
+while preserving the real network initialization path. Set
+`KERNEL_QEMU_SHELL_NETWORK_PEER=0` to reproduce the no-peer timeout behavior.
 `kernelsh-rpi5` first performs the existing resident-image reset, so the SD
 card must already be running this project's unchanged `jtag_stub.img` before
 the target is invoked.

@@ -11,6 +11,15 @@ from serial.tools import miniterm
 
 
 READY_MARKER = b"interactive shell: uart blocked\n"
+BOOT_PHASE_MARKERS = (
+    (b"takibi kernel:", "kernel entry"),
+    (b"memory:", "memory detection"),
+    (b"smp bringup:", "SMP bringup"),
+    (b"virtio net: link", "virtio-net init"),
+    (b"virtio blk: ext2 backend", "virtio-blk/ext2 init"),
+    (b"rootfs image:", "rootfs image resolve"),
+    (b"interactive shell: uart blocked", "ash readiness"),
+)
 
 
 class TimingMiniterm(miniterm.Miniterm):
@@ -64,19 +73,34 @@ def main() -> int:
     )
     if os.environ.get("KERNEL_QEMU_SHELL_MEASURE_ONLY") == "1":
         pending = b""
+        line_buffer = b""
+        reported_phases = set()
         while True:
             data = serial_instance.read(serial_instance.in_waiting or 1)
             if not data:
                 continue
+            line_buffer += data
+            while b"\n" in line_buffer:
+                line, line_buffer = line_buffer.split(b"\n", 1)
+                for marker, phase in BOOT_PHASE_MARKERS:
+                    if phase not in reported_phases and marker in line:
+                        elapsed_ms = (time.time_ns() - launch_ns) / 1_000_000
+                        print(
+                            f"[kernel/qemu] {phase}: {elapsed_ms:.1f} ms",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        reported_phases.add(phase)
             pending = (pending + data)[-len(READY_MARKER):]
             if READY_MARKER in pending:
                 elapsed_ms = (time.time_ns() - launch_ns) / 1_000_000
-                print(
-                    f"[kernel/qemu] ash readiness: {elapsed_ms:.1f} ms "
-                    "(interactive shell UART blocked)",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                if "ash readiness" not in reported_phases:
+                    print(
+                        f"[kernel/qemu] ash readiness: {elapsed_ms:.1f} ms "
+                        "(interactive shell UART blocked)",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 return 0
     terminal = TimingMiniterm(serial_instance, launch_ns)
     terminal.raw = True
