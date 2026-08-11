@@ -1,1 +1,2 @@
 virtio blk: ext2 backend ready
+virtio blk: used index wrap ok

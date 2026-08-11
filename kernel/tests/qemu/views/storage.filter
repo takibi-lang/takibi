@@ -1,1 +1,1 @@
-^virtio blk: (ext2 backend ready|unavailable, memory fallback)$
+^virtio blk: (ext2 backend ready|unavailable, memory fallback|used index wrap ok|used index wrap failed)$

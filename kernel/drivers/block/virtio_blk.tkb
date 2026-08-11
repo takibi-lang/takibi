@@ -66,6 +66,22 @@ let mut virtio_blk_status_buf: [u8; 1] align(64);
 // mandatory 65535 -> 0 wrap after long streams of synchronous requests.
 let mut virtio_blk_used_seen: u16;
 
+fn virtio_blk_index_next(index: u16) -> u16 {
+    if (index == 0xFFFF) { return 0; }
+    return index + 1;
+}
+
+// Keep the 16-bit ring-counter boundary independently testable: a normal
+// BusyBox rootfs boot crosses it through real block I/O, while this small
+// probe makes that coverage explicit even if a future fixture becomes smaller.
+fn virtio_blk_index_wrap_probe() -> bool {
+    let mut index: u16 = 0;
+    for step: usize in 0..<65536 {
+        index = virtio_blk_index_next(index);
+    }
+    return index == 0 && virtio_blk_index_next(0xFFFF) == 0;
+}
+
 fn virtio_blk_reg(offset: i32) -> *io i32 {
     return (virtio_blk_base + offset) as *io i32;
 }
@@ -147,7 +163,7 @@ fn virtio_blk_submit(request_type: u32, sector: u32, buffer: *u8,
         (offsetof(VirtioBlkAvail, ring) as isize))
         as *u16;
     ring[slot] = 0;
-    avail.idx = avail.idx + 1;
+    avail.idx = virtio_blk_index_next(avail.idx);
     dma_publish();
     *(virtio_blk_reg(VIRTIO_BLK_QUEUE_NOTIFY)) = 0;
 
@@ -162,11 +178,7 @@ fn virtio_blk_submit(request_type: u32, sector: u32, buffer: *u8,
         return false;
     }
     dma_consume();
-    if (virtio_blk_used_seen == 0xFFFF) {
-        virtio_blk_used_seen = 0;
-    } else {
-        virtio_blk_used_seen = virtio_blk_used_seen + 1;
-    }
+    virtio_blk_used_seen = virtio_blk_index_next(virtio_blk_used_seen);
     dma_finish_rx(virtio_blk_status_buf as *align(64) u8, 1);
     if (virtio_blk_status_buf[0] != 0) { return false; }
     if (write == false) {

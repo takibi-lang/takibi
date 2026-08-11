@@ -165,10 +165,18 @@ let mut rx_bufs: [u8; QNUM * RX_BUF_SIZE];
 // ever populates (no offload features are negotiated).
 let mut tx_ready_buf: [u8; VIRTIO_NET_HDR_LEN + 1514] align(4096);
 
-let mut rx_used_seen: isize = 0;
-let mut tx_used_seen: isize = 0;
-let mut rx_avail_idx: isize = 0;
-let mut tx_avail_idx: isize = 0;
+// Virtio queue indices are free-running u16 counters. Keeping every guest
+// shadow at that width preserves equality across the required 65535 -> 0
+// wrap instead of treating a wrapped device index as an old completion.
+let mut rx_used_seen: u16 = 0;
+let mut tx_used_seen: u16 = 0;
+let mut rx_avail_idx: u16 = 0;
+let mut tx_avail_idx: u16 = 0;
+
+fn virtio_net_index_next(index: u16) -> u16 {
+    if (index == 0xFFFF) { return 0; }
+    return index + 1;
+}
 
 fn vreg(offset: i32) -> *io i32 {
     return (virtio_base + offset) as *io i32;
@@ -265,16 +273,16 @@ fn avail_ring_set(queue_mem: *u8, slot: isize, desc_idx: isize) {
     ring[slot] = desc_idx as u16;
 }
 
-fn avail_publish(queue_mem: *u8, new_idx: isize) {
+fn avail_publish(queue_mem: *u8, new_idx: u16) {
     let avail_off: isize = QNUM * (sizeof(VirtqDesc) as isize);
     let avail: *VirtqAvail = (queue_mem + avail_off) as *VirtqAvail;
-    avail.idx = new_idx as u16;
+    avail.idx = new_idx;
     dma_publish();
 }
 
-fn used_idx_get(queue_mem: *u8) -> isize {
+fn used_idx_get(queue_mem: *u8) -> u16 {
     let used: *io VirtqUsed = (queue_mem + VIRTIO_PAGE_SIZE) as *io VirtqUsed;
-    return used.idx as isize;
+    return used.idx;
 }
 
 fn used_ring_get_id(queue_mem: *u8, slot: isize) -> isize {
@@ -315,7 +323,7 @@ fn net_init() -> NetInitResult {
         desc_set(rx_queue_mem as *u8, i, buf as usize, RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
         avail_ring_set(rx_queue_mem as *u8, i, i);
     }
-    rx_avail_idx = QNUM;
+    rx_avail_idx = QNUM as u16;
     avail_publish(rx_queue_mem as *u8, rx_avail_idx);
     virtio_notify(0);
 
@@ -350,7 +358,7 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
     }
     virtio_rx_irq_flag = 1; // drain coalesced used-ring entries
     dma_consume();
-    let slot: isize = rx_used_seen % QNUM;
+    let slot: isize = (rx_used_seen as isize) % QNUM;
     let index: {0..<8 as usize} =
         max(min(used_ring_get_id(rx_queue_mem as *u8, slot), 7), 0) as usize;
     let frame_total_len: i32 = used_ring_get_len(rx_queue_mem as *u8, slot);
@@ -370,12 +378,12 @@ fn net_rx_frame(frame: borrow NetRxValidated[desc]) -> [u8; 1514..] @ desc {
 }
 
 fn net_rx_repost(index: {0..<8 as usize} @ desc) -> NetRxCanAcquire {
-    let rx_slot: isize = rx_avail_idx % QNUM;
+    let rx_slot: isize = (rx_avail_idx as isize) % QNUM;
     avail_ring_set(rx_queue_mem as *u8, rx_slot, index as isize);
-    rx_avail_idx = rx_avail_idx + 1;
+    rx_avail_idx = virtio_net_index_next(rx_avail_idx);
     avail_publish(rx_queue_mem as *u8, rx_avail_idx);
     virtio_notify(0);
-    rx_used_seen = rx_used_seen + 1;
+    rx_used_seen = virtio_net_index_next(rx_used_seen);
     return view NetRxCanAcquire;
 }
 
@@ -401,7 +409,7 @@ fn net_transmit(reply: sink NetRxReplyReady[desc]) -> NetTxInFlight[desc] {
     desc_set(tx_queue_mem as *u8, 0, buf as usize,
         (reply.len + (VIRTIO_NET_HDR_LEN as i32)) as isize, 0);
     avail_ring_set(tx_queue_mem as *u8, 0, 0);
-    tx_avail_idx = tx_avail_idx + 1;
+    tx_avail_idx = virtio_net_index_next(tx_avail_idx);
     avail_publish(tx_queue_mem as *u8, tx_avail_idx);
     virtio_tx_irq_flag = 0;
     virtio_notify(1);
@@ -419,7 +427,7 @@ fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may
         }
     }
     dma_consume();
-    tx_used_seen = tx_used_seen + 1;
+    tx_used_seen = virtio_net_index_next(tx_used_seen);
     return net_rx_repost(in_flight.index);
 }
 
@@ -444,7 +452,7 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
     desc_set(tx_queue_mem as *u8, 0, buf as usize,
         (safe_len + (VIRTIO_NET_HDR_LEN as i32)) as isize, 0);
     avail_ring_set(tx_queue_mem as *u8, 0, 0);
-    tx_avail_idx = tx_avail_idx + 1;
+    tx_avail_idx = virtio_net_index_next(tx_avail_idx);
     avail_publish(tx_queue_mem as *u8, tx_avail_idx);
     virtio_tx_irq_flag = 0;
     virtio_notify(1);
@@ -457,7 +465,7 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
         }
     }
     dma_consume();
-    tx_used_seen = tx_used_seen + 1;
+    tx_used_seen = virtio_net_index_next(tx_used_seen);
     return view NetRxCanAcquire;
 }
 

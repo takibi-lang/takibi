@@ -542,6 +542,11 @@ fn kernel_test_driver_run() {
     kernel_test_common_probes();
     kernel_test_platform_network();
     kernel_test_platform_storage();
+    if (virtio_blk_index_wrap_probe()) {
+        kernel_boot_log("virtio blk: used index wrap ok\n");
+    } else {
+        kernel_boot_log("virtio blk: used index wrap failed\n");
+    }
 rootfs_plan_ready = false;
 saved_rootfs_inode = 0;
 saved_rootfs_length = 0;
