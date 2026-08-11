@@ -64,9 +64,14 @@ class TimingMiniterm(miniterm.Miniterm):
                         text = transformation.rx(text)
                     self.console.write(text)
         except serial.SerialException:
-            self.alive = False
-            self.console.cancel()
-            raise
+            # socket:// transports do not implement cancel_read(). During
+            # normal shutdown the main thread closes the socket to wake this
+            # select(); that expected exception must not turn cleanup into a
+            # traceback or leave the reader state looking live.
+            if self.alive:
+                self.alive = False
+                self.console.cancel()
+                raise
 
 
 def main() -> int:
@@ -132,8 +137,13 @@ def main() -> int:
         terminal.stop()
     finally:
         terminal.stop()
-        terminal.join()
         terminal.close()
+        # Miniterm's join() waits for the receiver thread, but pyserial's
+        # socket:// backend has no cancel_read() and its reader may be blocked
+        # in select(). Closing the socket above is sufficient; the reader is
+        # a daemon thread and the shutdown path must not wait forever for it.
+        terminal.join(True)
+        terminal.console.cleanup()
     return 0
 
 
