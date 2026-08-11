@@ -69,14 +69,18 @@ let mut ELF_IDENT_MAGIC: [u8; 7] = {0x7F, 0x45, 0x4C, 0x46, 2, 1, 1};
 // the address was never the thing this change was making safe (see
 // kernel/fs/initramfs.tkb's InitramfsFileResult::File comment for
 // where address and image are paired up).
-fn distro_elf_validate(address: usize, image: borrow []u8) -> DistroElfResult {
+fn distro_elf_validate_with_length(address: usize, image: borrow []u8,
+                                   logical_length: usize) -> DistroElfResult {
     // `image.len >= 7` is redundant with `>= ELF_HEADER_SIZE` (always
     // 64) at runtime, but ELF_HEADER_SIZE is a `let` (sizeof-derived,
     // not a const literal), so the type checker cannot fold it into a
     // provable bound for the image[0..<7] ident slice below; the
     // literal conjunct is what actually narrows.
     if (image.len >= ELF_HEADER_SIZE && image.len >= 7) {
-        let length: usize = image.len;
+        // `image` contains the ELF header and program table. A streaming
+        // source may keep the rest of the file on ext2, so its logical file
+        // length can be larger than this metadata window.
+        let length: usize = logical_length;
         let header: *KernelElf64Header = image as *KernelElf64Header;
         if (slice_eq(image[0..<7], ELF_IDENT_MAGIC as []u8) == false) {
             return DistroElfResult::Invalid;
@@ -126,4 +130,8 @@ fn distro_elf_validate(address: usize, image: borrow []u8) -> DistroElfResult {
         return DistroElfResult::Valid(plan);
     }
     return DistroElfResult::Invalid;
+}
+
+fn distro_elf_validate(address: usize, image: borrow []u8) -> DistroElfResult {
+    return distro_elf_validate_with_length(address, image, image.len);
 }

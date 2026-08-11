@@ -1,6 +1,7 @@
 use "kernel/mm/page.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/fs/elf64.tkb";
+use "kernel/fs/ext2/ext2.tkb";
 
 // GitHub issue #246: must match kernel/kernel/process.tkb's
 // KERNEL_PROCESS_MAX -- root index == that file's ProcessHandle.pool_index
@@ -24,6 +25,28 @@ const PROCESS_IMAGE_ROOT_MAX: usize = 16;
 // cleanup walks populated L2 branches and their L3 PTEs, so neither image
 // mappings nor clone rollback needs an enormous per-page shadow array.
 private let mut process_image_zero_page: [u8; PAGE_SIZE];
+// Streaming ELF source selected only for the ext2-backed map entry point.
+// The metadata window still contains the ELF header/program table; file
+// bytes for PT_LOAD pages are fetched one filesystem block at a time.
+private let mut process_image_ext2_active: bool;
+private let mut process_image_ext2_mount: Ext2Mount;
+private let mut process_image_ext2_inode: usize;
+private let mut process_image_ext2_length: usize;
+private let mut process_image_ext2_block: [u8; KERNEL_BLOCK_SIZE];
+
+fn process_image_ext2_source(mount: Ext2Mount, inode: usize,
+                             length: usize) {
+    process_image_ext2_mount = mount;
+    process_image_ext2_inode = inode;
+    process_image_ext2_length = length;
+    process_image_ext2_active = true;
+}
+
+fn process_image_ext2_source_clear() {
+    process_image_ext2_active = false;
+    process_image_ext2_inode = 0;
+    process_image_ext2_length = 0;
+}
 private let mut clone_page_count: usize;
 private let mut clone_last_reaped_count: usize;
 // GitHub issue #245: the clone in flight (if any) copies from whichever
@@ -881,6 +904,10 @@ fn process_image_load_page(page: borrow PageOwner[page],
                            load_bias: usize,
                            l3_index: usize)
         -> ProcessImagePageLoadResult !{unsafe} {
+    if (process_image_ext2_active) {
+        return process_image_load_page_ext2(
+            page, plan, header, load_bias, l3_index);
+    }
     let bytes = page_bytes(page);
     for i: usize in 0..<4096 { bytes[i] = 0; }
 
@@ -933,6 +960,73 @@ fn process_image_load_page(page: borrow PageOwner[page],
     let prefix = unsafe { bytes[0..<destination_offset] };
     let zero_prefix = unsafe { zeros[0..<destination_offset] };
     let suffix_start: usize = destination_offset + copy_length;
+    let suffix = unsafe { bytes[suffix_start..<PAGE_SIZE] };
+    let zero_suffix = unsafe { zeros[suffix_start..<PAGE_SIZE] };
+    if (slice_eq(prefix, zero_prefix) == false ||
+        slice_eq(suffix, zero_suffix) == false) {
+        return ProcessImagePageLoadResult::Invalid;
+    }
+    return ProcessImagePageLoadResult::Loaded;
+}
+
+// Ext2-backed counterpart to process_image_load_page(). It deliberately
+// reads at most one filesystem block per ext2_read_file_chunk() call; the
+// ELF itself never has to fit in a kernel scratch buffer.
+fn process_image_load_page_ext2(page: borrow PageOwner[page],
+                                plan: DistroElfLoadPlan,
+                                header: *KernelElf64ProgramHeader,
+                                load_bias: usize,
+                                l3_index: usize)
+        -> ProcessImagePageLoadResult !{unsafe} {
+    let bytes = page_bytes(page);
+    for i: usize in 0..<4096 { bytes[i] = 0; }
+    let page_start: usize = l3_index * PAGE_SIZE;
+    let page_end: usize = page_start + PAGE_SIZE;
+    let segment_start: usize = (header.virtual_address as usize) + load_bias;
+    let file_size: usize = header.file_size as usize;
+    let file_end: usize = segment_start + file_size;
+    let mut copy_start: usize = page_start;
+    if (copy_start < segment_start) { copy_start = segment_start; }
+    let mut copy_end: usize = page_end;
+    if (copy_end > file_end) { copy_end = file_end; }
+    if (copy_start < copy_end) {
+        let mut destination_offset: usize = copy_start - page_start;
+        let mut source_offset: usize = (header.offset as usize) +
+                                       (copy_start - segment_start);
+        let mut remaining: usize = copy_end - copy_start;
+        while (remaining != 0) {
+            if (source_offset >= process_image_ext2_length) {
+                return ProcessImagePageLoadResult::Invalid;
+            }
+            match ext2_read_file_chunk(
+                    process_image_ext2_mount, process_image_ext2_inode,
+                    source_offset, process_image_ext2_block as []u8) {
+                Ext2ReadResult::Invalid => {
+                    return ProcessImagePageLoadResult::Invalid;
+                }
+                Ext2ReadResult::Read(read_length) => {
+                    if (read_length == 0) {
+                        return ProcessImagePageLoadResult::Invalid;
+                    }
+                    let mut take: usize = read_length;
+                    if (take > remaining) { take = remaining; }
+                    let block_bytes = process_image_ext2_block as []u8;
+                    let source = unsafe { block_bytes[0..<take] };
+                    let destination = unsafe {
+                        bytes[destination_offset..<destination_offset + take]
+                    };
+                    slice_copy(destination, source);
+                    destination_offset = destination_offset + take;
+                    source_offset = source_offset + take;
+                    remaining = remaining - take;
+                }
+            }
+        }
+    }
+    let zeros = process_image_zero_page as []u8;
+    let prefix = unsafe { bytes[0..<copy_start - page_start] };
+    let zero_prefix = unsafe { zeros[0..<copy_start - page_start] };
+    let suffix_start: usize = copy_end - page_start;
     let suffix = unsafe { bytes[suffix_start..<PAGE_SIZE] };
     let zero_suffix = unsafe { zeros[suffix_start..<PAGE_SIZE] };
     if (slice_eq(prefix, zero_prefix) == false ||
@@ -1377,6 +1471,41 @@ fn process_image_map(plan: DistroElfLoadPlan,
                      argc: usize) -> ProcessImageMapResult {
     process_image_target_root = 0;
     return process_image_map_current(plan, argv, argc);
+}
+
+// Map a validated ELF whose bytes live in an ext2 regular file. `plan` must
+// point at a metadata window containing the ELF header and program table;
+// PT_LOAD contents are fetched through ext2_read_file_chunk() while pages
+// are being built.
+fn process_image_map_ext2(plan: DistroElfLoadPlan,
+                          mount: Ext2Mount,
+                          inode: usize,
+                          file_length: usize,
+                          argv: []u8,
+                          argc: usize) -> ProcessImageMapResult {
+    process_image_target_root = 0;
+    process_image_ext2_source(mount, inode, file_length);
+    let result = process_image_map_current(plan, argv, argc);
+    process_image_ext2_source_clear();
+    return result;
+}
+
+fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
+                                  mount: Ext2Mount,
+                                  inode: usize,
+                                  file_length: usize,
+                                  argv: []u8,
+                                  argc: usize,
+                                  root: usize) -> ProcessImageMapResult {
+    if (root >= PROCESS_IMAGE_ROOT_MAX ||
+        address_space_is_live(root) == false) {
+        return ProcessImageMapResult::InvalidImage;
+    }
+    process_image_target_root = root;
+    process_image_ext2_source(mount, inode, file_length);
+    let result = process_image_map_current(plan, argv, argc);
+    process_image_ext2_source_clear();
+    return result;
 }
 
 fn process_image_map_in_root(plan: DistroElfLoadPlan,

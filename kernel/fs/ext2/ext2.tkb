@@ -443,6 +443,16 @@ fn ext2_inode_is_symlink(mount: Ext2Mount, inode_number: usize) -> bool {
     }
 }
 
+fn ext2_regular_file_size(mount: Ext2Mount, inode_number: usize) -> usize {
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return 0; }
+        Ext2InodeResult::Inode(inode) => {
+            if ((inode.mode & 0xF000) != 0x8000) { return 0; }
+            return inode.size;
+        }
+    }
+}
+
 fn ext2_inode_mode(mount: Ext2Mount, inode_number: usize) -> usize {
     match ext2_read_inode(mount, inode_number) {
         Ext2InodeResult::Invalid => { return 0; }

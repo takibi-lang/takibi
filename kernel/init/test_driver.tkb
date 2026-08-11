@@ -94,7 +94,12 @@ fn kernel_exec_argv0_name() -> ExecArgv0NameResult !{unsafe} {
     return ExecArgv0NameResult::Name(name);
 }
 
-must_use variant ExecResolveResult { NotFound; Resolved(DistroElfLoadPlan); }
+struct Ext2ExecImage {
+    plan: DistroElfLoadPlan;
+    inode: usize;
+    file_length: usize;
+}
+must_use variant ExecResolveResult { NotFound; Resolved(Ext2ExecImage); }
 struct DynamicExecPlans {
     primary: DistroElfLoadPlan;
     interpreter: DistroElfLoadPlan;
@@ -151,17 +156,12 @@ fn kernel_exec_resolve_dynamic_initramfs() -> DynamicExecResolveResult {
 
 // GitHub issue #249: genuine execve() path resolution -- looks up
 // argv[0] (minus its leading slash) directly against the mounted ext2
-// filesystem, reads it into the shared exec_resolve_image scratch
-// buffer, and validates it as a standalone ELF, instead of matching a
-// closed, hand-registered list. Any failure at any step (name not
+// filesystem. Only the ELF header/program-table window is read into the
+// shared scratch buffer; PT_LOAD bytes are streamed later by
+// process_image_map_ext2_in_root(). Any failure at any step (name not
 // found, read failure, invalid ELF -- e.g. argv[0] names a symlink like
-// /echo or /bin/echo, which are real ext2 dirents but have no ELF bytes
-// behind them, since the real BusyBox binary lives only in the embedded
-// initramfs) returns NotFound; the caller falls through to the BusyBox
-// plan exactly as it already does today, which is what makes BusyBox's
-// own argv[0]-driven multi-call applet dispatch (echo, sh, etc.) keep
-// working unchanged.
-fn kernel_exec_resolve_argv0(mount: Ext2Mount) -> ExecResolveResult {
+// /echo or /bin/echo) returns NotFound and preserves the BusyBox fallback.
+fn kernel_exec_resolve_argv0(mount: Ext2Mount) -> ExecResolveResult !{unsafe} {
     match kernel_exec_argv0_name() {
         ExecArgv0NameResult::Invalid => { return ExecResolveResult::NotFound; }
         ExecArgv0NameResult::Name(name) => {
@@ -169,28 +169,59 @@ fn kernel_exec_resolve_argv0(mount: Ext2Mount) -> ExecResolveResult {
                 Ext2LookupResult::Invalid => { return ExecResolveResult::NotFound; }
                 Ext2LookupResult::NotFound => { return ExecResolveResult::NotFound; }
                 Ext2LookupResult::Found(inode) => {
-                    match ext2_read_small_file(
-                            mount, inode, exec_resolve_image as []u8) {
+                    let file_length: usize =
+                        ext2_regular_file_size(mount, inode);
+                    if (file_length == 0 || file_length > EXT2_MAX_FILE_SIZE) {
+                        return ExecResolveResult::NotFound;
+                    }
+                    let metadata = unsafe { exec_resolve_image[0..<1024] };
+                    match ext2_read_file_chunk(mount, inode, 0, metadata) {
                         Ext2ReadResult::Invalid => {
                             return ExecResolveResult::NotFound;
                         }
                         Ext2ReadResult::Read(length) => {
                             let address: usize =
                                 (exec_resolve_image as *u8) as usize;
-                            match distro_elf_validate(
+                            match distro_elf_validate_with_length(
                                     address,
-                                    exec_resolve_image_prefix(length)) {
+                                    exec_resolve_image_prefix(length),
+                                    file_length) {
                                 DistroElfResult::Invalid => {
                                     return ExecResolveResult::NotFound;
                                 }
-                                DistroElfResult::Valid(plan) => {
-                                    return ExecResolveResult::Resolved(plan);
+                                DistroElfResult::Valid(mut plan) => {
+                                    plan.image_length = file_length;
+                                    let mut image: Ext2ExecImage = {
+                                        plan, inode, file_length
+                                    };
+                                    return ExecResolveResult::Resolved(image);
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+fn kernel_process_child_exec_map_result(
+        pages_result: ProcessImageMapResult, child_root: usize) -> usize {
+    match pages_result {
+        ProcessImageMapResult::InvalidImage => { return 0; }
+        ProcessImageMapResult::OutOfMemory => { return 0; }
+        ProcessImageMapResult::Mapped(pages) => {
+            kernel_child_exec_entry = process_image_entry(pages);
+            kernel_child_exec_stack = process_image_stack_pointer(pages);
+            let (heap_start, heap_limit) = process_image_heap_range(pages);
+            if (process_image_exec_install(pages) == false) {
+                return 0;
+            }
+            kernel_syscall_process_configure_current(heap_start, heap_limit);
+            process_image_activate_root(child_root);
+            kernel_process_child_exec_mark();
+            kernel_syscall_exec_clear();
+            return 1;
         }
     }
 }
@@ -202,12 +233,18 @@ fn kernel_process_child_exec_prepare() -> usize {
     }
     let mut target_plan: DistroElfLoadPlan = kernel_exec_plan;
     let mut target_plan_ready: bool = false;
+    let mut target_ext2_ready: bool = false;
+    let mut target_ext2_inode: usize = 0;
+    let mut target_ext2_length: usize = 0;
     if (ext2_mount_ready) {
         match kernel_exec_resolve_argv0(saved_ext2_mount) {
             ExecResolveResult::NotFound => {}
-            ExecResolveResult::Resolved(plan) => {
-                target_plan = plan;
+            ExecResolveResult::Resolved(image) => {
+                target_plan = image.plan;
                 target_plan_ready = true;
+                target_ext2_ready = true;
+                target_ext2_inode = image.inode;
+                target_ext2_length = image.file_length;
             }
         }
     }
@@ -258,29 +295,17 @@ fn kernel_process_child_exec_prepare() -> usize {
     if (target_plan_ready == false) {
         target_plan_ready = kernel_exec_plan_ready;
     }
-    let pages_result = process_image_map_in_root(
-        target_plan, kernel_syscall_exec_argv(),
-        kernel_syscall_exec_argc(), child_root);
-    match pages_result {
-        ProcessImageMapResult::InvalidImage => {
-            return 0;
-        }
-        ProcessImageMapResult::OutOfMemory => {
-            return 0;
-        }
-        ProcessImageMapResult::Mapped(pages) => {
-            kernel_child_exec_entry = process_image_entry(pages);
-            kernel_child_exec_stack = process_image_stack_pointer(pages);
-            let (heap_start, heap_limit) = process_image_heap_range(pages);
-            if (process_image_exec_install(pages) == false) {
-                return 0;
-            }
-            kernel_syscall_process_configure_current(heap_start, heap_limit);
-            process_image_activate_root(child_root);
-            kernel_process_child_exec_mark();
-            kernel_syscall_exec_clear();
-            return 1;
-        }
+    if (target_ext2_ready) {
+        return kernel_process_child_exec_map_result(
+            process_image_map_ext2_in_root(
+            target_plan, saved_ext2_mount, target_ext2_inode,
+            target_ext2_length, kernel_syscall_exec_argv(),
+            kernel_syscall_exec_argc(), child_root), child_root);
+    } else {
+        return kernel_process_child_exec_map_result(
+            process_image_map_in_root(
+            target_plan, kernel_syscall_exec_argv(),
+            kernel_syscall_exec_argc(), child_root), child_root);
     }
 }
 
