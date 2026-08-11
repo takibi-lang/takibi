@@ -50,8 +50,11 @@ QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 # only matters if the guest wedges before reaching it.
 TIMEOUT_SECS="${KERNEL_QEMU_TIMEOUT:-90}"
 PEER_TIMEOUT_SECS="${KERNEL_QEMU_PEER_TIMEOUT:-60}"
-NETDEV_LOCAL_PORT="${KERNEL_QEMU_NETDEV_LOCAL_PORT:-17771}"
-NETDEV_REMOTE_PORT="${KERNEL_QEMU_NETDEV_REMOTE_PORT:-17772}"
+# Keep the maintained kernel lane away from the historical examples' QEMU
+# datagram ports. A stale or concurrent legacy runner on 17771/17772 can
+# otherwise consume frames and make unrelated kernel views fail.
+NETDEV_LOCAL_PORT="${KERNEL_QEMU_NETDEV_LOCAL_PORT:-17871}"
+NETDEV_REMOTE_PORT="${KERNEL_QEMU_NETDEV_REMOTE_PORT:-17872}"
 # kernel/platform/qemu/init.tkb's very last boot-log line before it parks in
 # `while (true) {}` -- see that file's tail.
 BOOT_DONE_MARKER="^resources: pages=0$"
