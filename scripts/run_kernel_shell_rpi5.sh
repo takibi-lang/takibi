@@ -24,4 +24,4 @@ echo "[kernel/rpi5] starting UART console on $SERIAL_DEV"
 # non-interactive shells such as make and fails with ENOTTY. The kernel waits
 # in ash's UART read path, so starting the console after SWD injection does
 # not lose the interactive session.
-exec python3 -m serial.tools.miniterm --raw "$SERIAL_DEV" 115200
+exec python3 -m serial.tools.miniterm --raw --eol LF --echo "$SERIAL_DEV" 115200
