@@ -34,6 +34,17 @@ The provision path also performs a bounded 64 KiB read-back comparison of all
 4096 filesystem blocks before mounting the USB image; a read failure or byte
 mismatch stops the storage test instead of mounting unverified media.
 
+### 2026-08-11: Interactive shell exit now restores the host terminal
+
+After a human used `make kernelsh-qemu` for a while, Ctrl-] stopped the
+writer side but could leave the socket-backed pyserial reader blocked in
+`read()`. The runner then waited forever in `join()`, so miniterm never
+reached its terminal cleanup and the host keyboard remained in raw mode.
+The shutdown path now closes the serial transport before joining the reader,
+treats the resulting socket exception as normal shutdown, and explicitly
+restores miniterm's terminal state. This was reproduced before the fix and
+verified afterward with repeated interactive exits.
+
 ### 2026-08-11: Human-operated BusyBox ash consoles for QEMU and RPi5
 
 The kernel's existing UART ash REPL coverage was script-driven: the QEMU
