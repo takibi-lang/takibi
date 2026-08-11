@@ -1490,7 +1490,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (number == 56) {
         syscall_open_calls = syscall_open_calls + 1;
         // openat(dirfd, pathname, flags): only absolute root paths are in
-        // scope, so dirfd is intentionally ignored.
+        // scope, so dirfd is intentionally ignored. ext2_lookup_path()
+        // handles the rootfs's bounded nested directory layout.
         if (syscall_ext2_ready == false) {
             return SyscallAction::Resume(LINUX_EBADF);
         }
@@ -1529,7 +1530,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (number == 21 || number == 48 || number == 439) {
         // faccessat(dirfd, pathname, mode): ash probes an external command
         // before fork/exec. The ext2 fixture deliberately permits the
-        // registered BusyBox applet symlinks; permission bits are enforced by
+        // ext2-resident BusyBox applet links; permission bits are enforced by
         // the image recipe, while this first syscall slice only needs the
         // root-directory lookup result.
         if (syscall_ext2_ready == false) {
@@ -1555,9 +1556,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 79) {
-        // newfstatat(AT_FDCWD, path, stat, flags): the current ext2 root has
-        // regular files only. Fill the asm-generic AArch64 stat fields after
-        // validating the complete userspace result.
+        // newfstatat(AT_FDCWD, path, stat, flags): return the bounded ext2
+        // file, directory, or applet-link shape after validating the complete
+        // userspace result.
         let path_code: usize = match kernel_syscall_path_name(x1) {
             SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
@@ -1601,7 +1602,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         UserRangeResult::Ok(range) => {
                             user_zero_fill(range);
                             user_write_u64(range, 8, inode_number as u64);
-                            // Present the registered BusyBox target as an
+                            // Present the ext2-resident BusyBox target as an
                             // executable regular file to ash's command probe.
                             user_write_u32(range, 16, 0x81ED as u32);
                             user_write_u32(range, 20, 1);

@@ -1,1 +1,2 @@
+^rootfs image: ext2 /bin/busybox ready$
 ^distro (image:|elf:|map:|load:|stack:|unmap:)

@@ -448,7 +448,7 @@ workflows use:
 ```text
 llvm-mc-19 and ld.lld-19
 openocd and gdb-multiarch
-cpio and curl
+curl
 e2fsprogs and e2tools
 Python 3 and host raw-socket access
 ```
