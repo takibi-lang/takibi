@@ -23,12 +23,16 @@ the same full `kernelcheck-rpi5` suite established 128 sectors (64 KiB) as the
 largest reliable transfer: 32, 64, and 128 sectors completed all 31 integration
 views, while 192 and 256 sectors stalled during the initial rootfs provision
 before the userspace readiness marker. The production limit was therefore set
-to 128 sectors, reducing the 4 MiB rootfs provision from roughly 8192 USB write
-commands to 64. The single-sector path remains available as a fallback when a
-completed multi-sector command reports a transport or device error. The ext2
-layer still intentionally performs one-filesystem-block operations; coalescing
-there would require proving contiguous physical block pointers and adding a
-larger scratch-buffer path.
+to 128 sectors. A direct same-device measurement of the 4 MiB provision changed
+from 8192 WRITE(10) commands and 11236 ms to 64 commands and 121 ms on the
+validated RPi5 setup. The single-sector path remains available as a fallback;
+failed batches now degrade through smaller contiguous runs before reaching
+single-sector writes. The ext2 layer still intentionally performs
+one-filesystem-block operations; coalescing there would require proving
+contiguous physical block pointers and adding a larger scratch-buffer path.
+The provision path also performs a bounded 64 KiB read-back comparison of all
+4096 filesystem blocks before mounting the USB image; a read failure or byte
+mismatch stops the storage test instead of mounting unverified media.
 
 ### 2026-08-11: Human-operated BusyBox ash consoles for QEMU and RPi5
 

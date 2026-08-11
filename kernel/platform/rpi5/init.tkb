@@ -245,12 +245,39 @@ fn kernel_test_platform_storage() {
                             kernel_boot_log("usb ext2: device invalid\n");
                         }
                         KernelBlockDeviceResult::Ready(usb_device) => {
+                            disk_reset_write10_command_count();
+                            let provision_start: i64 = read_cntpct();
                             match block_copy(source_device, usb_device, 4096) {
                                 BlockCopyResult::Invalid => {
                                     kernel_boot_log("usb ext2: provision failed\n");
                                 }
                                 BlockCopyResult::Copied => {
                                                     kernel_boot_log("usb ext2: provisioned blocks=4096\n");
+                                    let provision_ticks: i64 =
+                                        read_cntpct() - provision_start;
+                                    let provision_frequency: i64 = read_cntfrq();
+                                    kernel_boot_log(
+                                        "usb provision metrics: write10_commands=");
+                                    uart_put_udec(disk_write10_command_count());
+                                    kernel_boot_log(" elapsed_ms=");
+                                    uart_put_udec(
+                                        (provision_ticks * 1000 /
+                                         provision_frequency) as usize);
+                                    kernel_boot_log("\n");
+                                    match block_compare_usb(source_device,
+                                                             usb_device, 4096) {
+                                        BlockCompareResult::Invalid => {
+                                            kernel_boot_log("usb ext2: provision verify failed\n");
+                                            return;
+                                        }
+                                        BlockCompareResult::Different => {
+                                            kernel_boot_log("usb ext2: provision verify mismatch\n");
+                                            return;
+                                        }
+                                        BlockCompareResult::Equal => {
+                                            kernel_boot_log("usb ext2: provision verify byte-equal\n");
+                                        }
+                                    }
                                     match ext2_mount(usb_device) {
                                         Ext2MountResult::Invalid => {
                                             kernel_boot_log("usb ext2: mount failed\n");

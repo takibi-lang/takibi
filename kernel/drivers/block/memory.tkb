@@ -267,3 +267,53 @@ fn block_copy(source: KernelBlockDevice, destination: KernelBlockDevice,
     }
     return BlockCopyResult::Copied;
 }
+
+must_use variant BlockCompareResult { Invalid; Different; Equal; }
+
+// Verify a USB provision in bounded multi-sector reads. The source is read
+// through the normal block interface, while the USB destination is read in
+// the same 64 KiB maximum ranges used by the provision writer. This keeps the
+// acceptance check byte-for-byte without issuing 8192 single-sector reads.
+fn block_compare_usb(source: KernelBlockDevice,
+                     destination: KernelBlockDevice,
+                     count: usize) -> BlockCompareResult {
+    if (destination.backend != 1 || count == 0 ||
+        count > block_count(source) || count > block_count(destination)) {
+        return BlockCompareResult::Invalid;
+    }
+    let mut first_block: usize = 0;
+    while (first_block < count) {
+        let mut batch: usize = count - first_block;
+        if (batch > KERNEL_BLOCK_BATCH) {
+            batch = KERNEL_BLOCK_BATCH;
+        }
+        let bytes: *u8 = block_copy_batch_buffer as *u8;
+        match disk_read_sectors((first_block * 2) as u32,
+                                bytes, batch * 2) {
+            DiskIoResult::Err(error) => {
+                return BlockCompareResult::Invalid;
+            }
+            DiskIoResult::Ok => { }
+        }
+        for offset: usize in 0..<KERNEL_BLOCK_BATCH {
+            if (offset < batch) {
+                match block_read(source, first_block + offset,
+                                 block_copy_buffer as []u8) {
+                    BlockIoResult::Invalid => {
+                        return BlockCompareResult::Invalid;
+                    }
+                    BlockIoResult::Ok => { }
+                }
+                let base: usize = offset * KERNEL_BLOCK_SIZE;
+                if (slice_eq(
+                        block_copy_batch_buffer[
+                            base..<base + KERNEL_BLOCK_SIZE],
+                        block_copy_buffer as []u8) == false) {
+                    return BlockCompareResult::Different;
+                }
+            }
+        }
+        first_block = first_block + batch;
+    }
+    return BlockCompareResult::Equal;
+}

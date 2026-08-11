@@ -215,6 +215,7 @@ const MSC_MAX_TRANSFER_SECTORS: usize = 128;
 const MSC_SECTOR_SIZE: usize = 512;
 let mut msc_bounce_buf: [u8; MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE] align(64);
 let mut msc_tag: u32 = 0;
+private let mut msc_write10_command_count: usize = 0;
 
 let mut xhci_ready: bool = false;
 
@@ -1388,6 +1389,14 @@ fn disk_status() -> DiskIoResult {
     return DiskIoResult::Err(-1);
 }
 
+fn disk_reset_write10_command_count() {
+    msc_write10_command_count = 0;
+}
+
+fn disk_write10_command_count() -> usize {
+    return msc_write10_command_count;
+}
+
 // READ(10)/WRITE(10) share the same CDB shape: opcode | flags(0) |
 // LBA(4, big-endian) | group number(0) | transfer length(2, big-endian,
 // bounded by MSC_MAX_TRANSFER_SECTORS) | control(0). msc_cbw_header() must already have
@@ -1416,28 +1425,38 @@ fn msc_scsi_lba_cdb(op: u8, sector: u32, sectors: usize) {
 // retry of the same, side-effect-free-to-repeat command. Not attempted
 // more than once -- a transport that fails twice in a row needs a caller
 // decision, not a longer retry loop.
-fn disk_read(sector: u32, buf: *u8) -> DiskIoResult {
+fn disk_read_sectors(sector: u32, buf: *u8, sectors: usize) -> DiskIoResult {
     if (disk_io_ok(disk_status()) == false) {
         return DiskIoResult::Err(-1);
     }
+    if (sectors == 0 || sectors > MSC_MAX_TRANSFER_SECTORS) {
+        return DiskIoResult::Err(-1);
+    }
+    let length: usize = sectors * MSC_SECTOR_SIZE;
     let bounce: usize = (msc_bounce_buf as *u8) as usize;
-    msc_cbw_header(512, true, 10);
-    msc_scsi_lba_cdb(0x28, sector, 1);
-    let mut rc: u32 = msc_run_command(512, true, msc_bounce_buf as *align(64) u8);
+    msc_cbw_header(length as u32, true, 10);
+    msc_scsi_lba_cdb(0x28, sector, sectors);
+    let mut rc: u32 = msc_run_command(length as u32, true,
+                                       msc_bounce_buf as *align(64) u8);
     if (rc != 0) {
         msc_recover_transport();
-        msc_cbw_header(512, true, 10);
-        msc_scsi_lba_cdb(0x28, sector, 1);
-        rc = msc_run_command(512, true, msc_bounce_buf as *align(64) u8);
+        msc_cbw_header(length as u32, true, 10);
+        msc_scsi_lba_cdb(0x28, sector, sectors);
+        rc = msc_run_command(length as u32, true,
+                             msc_bounce_buf as *align(64) u8);
     }
     if (rc != 0) {
         return DiskIoResult::Err(-1);
     }
-    for i: isize in 0..<512 {
+    for i: isize in 0..<length as isize {
         let src: *u8 = (bounce as *u8);
         buf[i] = src[i];
     }
     return DiskIoResult::Ok;
+}
+
+fn disk_read(sector: u32, buf: *u8) -> DiskIoResult {
+    return disk_read_sectors(sector, buf, 1);
 }
 
 fn disk_write(sector: u32, buf: *u8) -> DiskIoResult {
@@ -1464,6 +1483,7 @@ fn disk_write_sectors(sector: u32, buf: *u8, sectors: usize) -> DiskIoResult {
     }
     msc_cbw_header(length as u32, false, 10);
     msc_scsi_lba_cdb(0x2A, sector, sectors);
+    msc_write10_command_count = msc_write10_command_count + 1;
     let rc1: u32 = msc_run_command(length as u32, false,
                                     msc_bounce_buf as *align(64) u8);
     if (rc1 == 0) {
@@ -1477,6 +1497,7 @@ fn disk_write_sectors(sector: u32, buf: *u8, sectors: usize) -> DiskIoResult {
     // implied.
     msc_cbw_header(length as u32, false, 10);
     msc_scsi_lba_cdb(0x2A, sector, sectors);
+    msc_write10_command_count = msc_write10_command_count + 1;
     let rc2: u32 = msc_run_command(length as u32,
                                     false, msc_bounce_buf as *align(64) u8);
     if (rc2 != 0) {

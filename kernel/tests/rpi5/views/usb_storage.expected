@@ -1,5 +1,6 @@
 usb msc: ready sector=512
 usb ext2: provisioned blocks=4096
+usb ext2: provision verify byte-equal
 usb ext2: write /mutable.txt ok
 usb ext2: resize truncate+extend ok
 usb ext2: block+inode bitmap counts ok
