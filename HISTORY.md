@@ -15,6 +15,32 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-11: Human-operated BusyBox ash consoles for QEMU and RPi5
+
+The kernel's existing UART ash REPL coverage was script-driven: the QEMU
+runner fed a FIFO and the RPi5 runner wrote complete lines to the Debug Probe
+UART after observing the blocked-RX marker. That proved the kernel's
+block/wake path, but did not provide a reliable terminal for a human to use
+the same shell.
+
+Two maintained interactive targets were added. `make kernelsh-rpi5` reset the
+resident project stub, injected the standalone kernel through the existing SWD
+loader, and attached pyserial miniterm to the Debug Probe UART. `make
+kernelsh-qemu` exposed QEMU's PL011 through a local TCP chardev and attached
+the same miniterm client. Both used LF line endings and local echo. The QEMU
+TCP path was deliberate: GNU Make's parallel recipe execution detached stdin,
+and direct `-nographic` terminal input did not provide the line behavior the
+ash UART path required. The deterministic FIFO path remained the automated
+QEMU integration transport; it was not silently treated as equivalent to the
+human-terminal transport.
+
+The ext2 fixture gained `PATH=/bin:/usr/bin` and BusyBox hard links including
+`/bin/ls`. Interactive use then exposed the next real boundary: the kernel has
+no directory-FD state or `getdents64(2)`, so directory listing is not yet a
+supported BusyBox operation. The observed shell error text was not assumed to
+identify that syscall; the concrete directory-enumeration work was recorded
+as GitHub issue #277.
+
 ### 2026-08-10: Opaque address-space-root capability closes the root-0 validation gap (#265)
 
 Issue #263 fixed `user_range_check` reading root 0 for every syscall by
