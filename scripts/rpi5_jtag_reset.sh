@@ -153,7 +153,7 @@ if [ "${#halted_pc_hex}" -ne 16 ]; then
     exit 1
 fi
 if [ "$current_mode" = "EL2H" ] &&
-        [ "$halted_pc_hex" < "$RPI5_SAFE_PC_MAX_HEX" ]; then
+        [[ "$halted_pc_hex" < "$RPI5_SAFE_PC_MAX_HEX" ]]; then
     echo "reset confirmed: resident Takibi image is safe to replace (PC=$halted_pc mode=$current_mode MMU=$mmu_state)"
 else
     echo "warning: reset halted, but PC=$halted_pc mode=$current_mode MMU=$mmu_state does not look" \
