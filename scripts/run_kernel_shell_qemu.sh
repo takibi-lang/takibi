@@ -42,7 +42,7 @@ if [ "${KERNEL_QEMU_SHELL_NETWORK_PEER:-1}" = 1 ]; then
     # The kernel runs its normal ARP/ICMP/TCP fixture before reaching ext2 and
     # ash. Without the peer, the interactive shell pays the full protocol
     # timeout even though the human console does not need to test the peer.
-    python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" 17771 17772 \
+    python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" 17771 17772 --fast \
         >"${KERNEL_QEMU_SHELL_NETWORK_LOG:-/tmp/takibi-kernel-qemu-network.log}" 2>&1 &
     NETWORK_PEER_PID=$!
 fi

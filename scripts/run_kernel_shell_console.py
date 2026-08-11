@@ -16,7 +16,12 @@ BOOT_PHASE_MARKERS = (
     (b"memory:", "memory detection"),
     (b"smp bringup:", "SMP bringup"),
     (b"virtio net: link", "virtio-net init"),
+    (b"virtio net: arp reply", "ARP fixture"),
+    (b"virtio net: icmp echo", "ICMP fixture"),
+    (b"virtio net: tcp handshake", "TCP fixture"),
+    (b"virtio net: rx capability", "network capability"),
     (b"virtio blk: ext2 backend", "virtio-blk/ext2 init"),
+    (b"ext2 mount:", "ext2 mount"),
     (b"rootfs image:", "rootfs image resolve"),
     (b"interactive shell: uart blocked", "ash readiness"),
 )

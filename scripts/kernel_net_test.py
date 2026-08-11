@@ -31,8 +31,10 @@ import sys
 import time
 
 QEMU_HOST = "127.0.0.1"
-QEMU_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 17771
-LOCAL_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 17772
+POSITIONAL_ARGS = [arg for arg in sys.argv[1:] if arg != "--fast"]
+FAST_MODE = "--fast" in sys.argv[1:]
+QEMU_PORT = int(POSITIONAL_ARGS[0]) if len(POSITIONAL_ARGS) > 0 else 17771
+LOCAL_PORT = int(POSITIONAL_ARGS[1]) if len(POSITIONAL_ARGS) > 1 else 17772
 
 CLIENT_MAC = bytes([0x02, 0x00, 0x00, 0x00, 0x00, 0x01])
 CLIENT_IP = bytes([192, 168, 20, 55])
@@ -570,11 +572,17 @@ def main() -> int:
 
     # kernel_tcp_echo_check() only starts listening once ICMP has replied,
     # so every TCP step below depends on the two above.
-    ok_wrong_port = icmp_ok and test_syn_wrong_port_silent(sock)
-    print("  SYN to wrong port (silent):         %s" % ("PASS" if ok_wrong_port else "FAIL"))
+    ok_wrong_port = (icmp_ok if FAST_MODE else
+                     icmp_ok and test_syn_wrong_port_silent(sock))
+    wrong_port_result = "SKIP (fast shell mode)" if FAST_MODE else (
+        "PASS" if ok_wrong_port else "FAIL")
+    print("  SYN to wrong port (silent):         %s" % wrong_port_result)
 
-    ok_bad_csum = ok_wrong_port and test_syn_bad_checksum_silent(sock)
-    print("  SYN with bad TCP checksum (silent): %s" % ("PASS" if ok_bad_csum else "FAIL"))
+    ok_bad_csum = (ok_wrong_port if FAST_MODE else
+                   ok_wrong_port and test_syn_bad_checksum_silent(sock))
+    bad_csum_result = "SKIP (fast shell mode)" if FAST_MODE else (
+        "PASS" if ok_bad_csum else "FAIL")
+    print("  SYN with bad TCP checksum (silent): %s" % bad_csum_result)
 
     ok_handshake = ok_bad_csum and do_handshake(
         sock, HANDSHAKE_CLIENT_PORT, HANDSHAKE_CLIENT_ISN)

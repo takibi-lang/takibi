@@ -133,6 +133,8 @@ the QEMU process or UART socket exists. It starts the existing host-side
 network peer automatically, avoiding the kernel's normal protocol timeout
 while preserving the real network initialization path. Set
 `KERNEL_QEMU_SHELL_NETWORK_PEER=0` to reproduce the no-peer timeout behavior.
+The shell peer uses a fast mode that skips only the two negative TCP silence
+checks; `kernelcheck-qemu` continues to run the complete network fixture.
 `kernelsh-rpi5` first performs the existing resident-image reset, so the SD
 card must already be running this project's unchanged `jtag_stub.img` before
 the target is invoked.
