@@ -143,10 +143,10 @@ writable at its runtime address, so writes into it can silently fail.
 
 ### Destructive-test warning
 
-`make kernelcheck-rpi5` overwrites the first 1 MiB of the USB Mass Storage
+`make kernelcheck-rpi5` overwrites the first 4 MiB of the USB Mass Storage
 device attached to the RPi5 with its generated ext2 fixture. Attach only the
 project's dedicated sacrificial test drive. The kernel block adapter exposes
-only the first 1024 1-KiB blocks, which bounds this test independently of the
+only the first 4096 1-KiB blocks, which bounds this test independently of the
 physical device's capacity.
 
 ### Equipment

@@ -356,10 +356,10 @@ $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 $(KERNEL_INITRAMFS_CPIO): $(KERNEL_BUSYBOX_STATIC) $(KERNEL_HTTPD) $(KERNEL_MUSL_LOADER)
 	cd $(KERNEL_USER_BUILD_DIR) && printf '%s\n' busybox-static busybox-httpd ld-musl-aarch64.so.1 | cpio -o -H newc > initramfs.cpio
 
-$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) | $(KERNEL_USER_BUILD_DIR)
+$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSYBOX_STATIC) | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
-	truncate -s 1048576 $@.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 1024
+	truncate -s 4194304 $@.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 4096
 	debugfs -w -R 'mkdir /etc' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'mkdir /bin' $@.tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $@.tmp:/hello.txt
@@ -367,21 +367,23 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/index.html $@.tmp:/index.html
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $@.tmp:/init.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $@.tmp:/large.txt
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSYBOX_STATIC) $@.tmp:/bin/busybox
 	dd if=/dev/zero bs=13311 count=1 status=none | tr '\0' Z >$@.read_indirect.tmp
 	printf '\n' >>$@.read_indirect.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.read_indirect.tmp $@.tmp:/read_indirect.txt
 	rm -f $@.read_indirect.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_RPI5_USER_PAYLOAD_ELF) $@.tmp:/user_payload
+	debugfs -w -R 'set_inode_field /bin/busybox mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /init.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /user_payload mode 0100755' $@.tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 debugfs -w -R 'symlink /latest hello.txt' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'symlink /busybox /init.sh' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'symlink /busybox /bin/busybox' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'symlink /cat /busybox' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'symlink /uname /busybox' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'symlink /od /busybox' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'symlink /busybox-httpd /busybox' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'symlink /bin/echo /busybox' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'symlink /echo /busybox' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'symlink /busybox-httpd /bin/busybox' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'symlink /bin/echo /bin/busybox' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'symlink /echo /bin/busybox' $@.tmp >/dev/null 2>&1
 	e2fsck -fn $@.tmp >/dev/null
 	mv $@.tmp $@
 

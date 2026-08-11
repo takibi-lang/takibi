@@ -6,10 +6,10 @@ const KERNEL_BLOCK_SIZE: usize = 1024;
 // unlike kernel/fs/initramfs.tkb's read-only blob) matches this image
 // actually being written through by block_write below. KERNEL_EXT2_IMAGE_LEN
 // is kernel/build/user/ext2.img's real size -- fixed by its own build
-// recipe's `truncate -s 1048576`, so unlike initramfs.cpio's size this one
+// recipe's `truncate -s 4194304`, so unlike initramfs.cpio's size this one
 // is a real build-system constant, not something that could quietly drift;
 // embed_file's own compile-time check still verifies it regardless.
-const KERNEL_EXT2_IMAGE_LEN: usize = 1048576;
+const KERNEL_EXT2_IMAGE_LEN: usize = 4194304;
 let mut kernel_ext2_image: [u8; KERNEL_EXT2_IMAGE_LEN] =
     embed_file("kernel/build/user/ext2.img");
 
@@ -53,12 +53,10 @@ fn usb_mass_storage_block_device() -> KernelBlockDeviceResult {
 
         DiskIoResult::Ok => { }
     }
-    // Deliberately expose only the first 1 MiB. This is exactly the fixture
+    // Deliberately expose only the first 4 MiB. This is exactly the fixture
     // extent and bounds every destructive write far below the real medium's
     // capacity until partition/device ownership policy exists.
-    let mut device: KernelBlockDevice = {
-        1, 0, 1048576
-    };
+    let mut device: KernelBlockDevice = { 1, 0, 4194304 };
     return KernelBlockDeviceResult::Ready(device);
 }
 

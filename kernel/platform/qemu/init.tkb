@@ -188,7 +188,7 @@ fn kernel_test_platform_storage() {
                     ext2_mount_ready = true;
                     kernel_syscall_ext2_configure(mount);
                     if (ext2_fixture_geometry_is_expected(mount)) {
-                        kernel_boot_log("ext2 mount: block=1024 inodes=128 blocks=1024\n");
+                        kernel_boot_log("ext2 mount: block=1024 inodes=1024 blocks=4096\n");
                     }
                     match ext2_lookup_root(mount, "hello.txt" as []u8) {
                         Ext2LookupResult::Invalid => {
