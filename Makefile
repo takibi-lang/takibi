@@ -35,7 +35,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelcheck-rpi5 kernelcheck-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelcheck-rpi5 kernelcheck-qemu kernelcheck-qemu-ash kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -515,6 +515,10 @@ kernelcheck-rpi5: kernelbuild-rpi5
 
 kernelcheck-qemu: kernelbuild-qemu
 	@bash scripts/run_kernel_qemutest.sh
+	@bash scripts/run_kernel_ash_qemutest.sh
+
+kernelcheck-qemu-ash: kernelbuild-qemu
+	@bash scripts/run_kernel_ash_qemutest.sh
 
 ## kernelsh-qemu: boot the standalone kernel and attach the current terminal
 ## to its UART. Exit QEMU with Ctrl-a x (QEMU's standard -nographic escape).

@@ -22,7 +22,7 @@ const SHARED_OBJECT_MAX: usize = 4;
 // const's identifier in an arithmetic expression.
 const SHARED_OBJECT_MAX_REFS: usize = 256;
 
-enum UnifiedFdKind: u8 { Empty; OpenFile; Listener; Connection; }
+enum UnifiedFdKind: u8 { Empty; OpenFile; Directory; Listener; Connection; }
 enum UnifiedListenerState: u8 { Closed; Created; Bound; Listening; }
 // GitHub issue #264 third stage: descriptor state and the process heap break
 // share one record, so a process slot has one local FD context rather than
@@ -178,6 +178,29 @@ fn unified_file_open(process: usize, fd: usize, inode: usize,
             object_inode[handle.slot] = inode;
             object_readable[handle.slot] = readable;
             object_writable[handle.slot] = writable;
+            match unified_fd_install(process, fd, handle.slot,
+                                     handle.generation) {
+                UnifiedFdResult::Invalid => {
+                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    refcount_pool_abandon(&object_pool, handle.slot,
+                                         handle.generation);
+                    return UnifiedFdResult::Invalid;
+                }
+                UnifiedFdResult::Ok => { return UnifiedFdResult::Ok; }
+            }
+        }
+    }
+}
+
+fn unified_directory_open(process: usize, fd: usize, inode: usize)
+        -> UnifiedFdResult {
+    match unified_object_alloc_first(UnifiedFdKind::Directory) {
+        UnifiedObjectResult::Invalid => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Full => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Allocated(handle) => {
+            object_inode[handle.slot] = inode;
+            object_readable[handle.slot] = true;
+            object_writable[handle.slot] = false;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
                 UnifiedFdResult::Invalid => {
@@ -439,6 +462,41 @@ fn unified_file_inode(handle: UnifiedObjectHandle) -> usize {
     return 0;
 }
 
+must_use variant UnifiedDirectoryResult { Missing; Found(UnifiedObjectHandle); }
+
+fn unified_directory_lookup(process: usize, fd: usize)
+        -> UnifiedDirectoryResult {
+    if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX) {
+        return UnifiedDirectoryResult::Missing;
+    }
+    let process_index = unified_fd_narrow_process(process);
+    let fd_kind = process_fd_context[process_index].fd_kind;
+    let fd_object = process_fd_context[process_index].fd_object;
+    let fd_generation = process_fd_context[process_index].fd_generation;
+    let object_value: usize = fd_object[fd as isize];
+    if (fd_kind[fd as isize] == UnifiedFdKind::Directory &&
+        object_value < SHARED_OBJECT_MAX) {
+        let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
+        if (object_kind[object] == UnifiedFdKind::Directory &&
+            refcount_pool_matches(&object_pool, object,
+                                  fd_generation[fd as isize])) {
+            let mut handle: UnifiedObjectHandle = {
+                object, fd_generation[fd as isize]
+            };
+            return UnifiedDirectoryResult::Found(handle);
+        }
+    }
+    return UnifiedDirectoryResult::Missing;
+}
+
+fn unified_directory_inode(handle: UnifiedObjectHandle) -> usize {
+    if (object_kind[handle.slot] == UnifiedFdKind::Directory &&
+        refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
+        return object_inode[handle.slot];
+    }
+    return 0;
+}
+
 fn unified_file_is_readable(handle: UnifiedObjectHandle) -> bool {
     return object_kind[handle.slot] == UnifiedFdKind::OpenFile &&
            refcount_pool_matches(&object_pool, handle.slot, handle.generation) &&
@@ -589,10 +647,12 @@ fn unified_fd_set_offset(process: usize, fd: usize, offset: usize)
     let fd_object = process_fd_context[process_index].fd_object;
     let fd_generation = process_fd_context[process_index].fd_generation;
     let object_value: usize = fd_object[fd as isize];
-    if (fd_kind[fd as isize] == UnifiedFdKind::OpenFile &&
+    if ((fd_kind[fd as isize] == UnifiedFdKind::OpenFile ||
+         fd_kind[fd as isize] == UnifiedFdKind::Directory) &&
         object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        if (object_kind[object] == UnifiedFdKind::OpenFile &&
+        if ((object_kind[object] == UnifiedFdKind::OpenFile ||
+             object_kind[object] == UnifiedFdKind::Directory) &&
             refcount_pool_matches(&object_pool, object,
                                   fd_generation[fd as isize])) {
             object_offset[object] = offset;
@@ -611,10 +671,12 @@ fn unified_fd_offset(process: usize, fd: usize) -> UnifiedOffsetResult {
     let fd_object = process_fd_context[process_index].fd_object;
     let fd_generation = process_fd_context[process_index].fd_generation;
     let object_value: usize = fd_object[fd as isize];
-    if (fd_kind[fd as isize] == UnifiedFdKind::OpenFile &&
+    if ((fd_kind[fd as isize] == UnifiedFdKind::OpenFile ||
+         fd_kind[fd as isize] == UnifiedFdKind::Directory) &&
         object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        if (object_kind[object] == UnifiedFdKind::OpenFile &&
+        if ((object_kind[object] == UnifiedFdKind::OpenFile ||
+             object_kind[object] == UnifiedFdKind::Directory) &&
             refcount_pool_matches(&object_pool, object,
                                   fd_generation[fd as isize])) {
             return UnifiedOffsetResult::Found(object_offset[object]);

@@ -208,12 +208,11 @@ fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
     let indirect_block: usize = ext2_u32(inode_bytes, 88) as usize;
     let double_indirect_block: usize = ext2_u32(inode_bytes, 92) as usize;
     let file_type: usize = mode & 0xF000;
-    // GitHub issue #243: only regular files may span multiple direct
-    // blocks. Directories and symlinks keep the original one-block cap --
-    // ext2_lookup_root/ext2_directory_add/ext2_directory_remove all still
-    // assume a single-block root directory, unchanged by this issue.
+    // Regular files and directories may span their direct block pointers.
+    // Symlinks retain the inline fast-symlink limit.
     let mut max_size: usize = KERNEL_BLOCK_SIZE;
     if (file_type == 0x8000) { max_size = ext2_max_regular_file_size(); }
+    if (file_type == 0x4000) { max_size = ext2_direct_file_size(); }
     if (mode == 0 || size > max_size ||
         (file_type != 0x8000 && file_type != 0x4000 && file_type != 0xA000) ||
         ((file_type == 0x8000 || file_type == 0x4000) &&
@@ -250,25 +249,34 @@ fn ext2_lookup_directory(mount: Ext2Mount, directory_inode: usize,
         Ext2InodeResult::Invalid => { return Ext2LookupResult::Invalid; }
         Ext2InodeResult::Inode(directory) => {
             if ((directory.mode & 0xF000) != 0x4000 ||
-                directory.size < 8 || directory.size > KERNEL_BLOCK_SIZE) {
+                directory.size < 8 || directory.size > ext2_direct_file_size()) {
                 return Ext2LookupResult::Invalid;
             }
-            match block_read(mount.device, directory.direct_block0,
-                             ext2_file_block as []u8) {
-                BlockIoResult::Invalid => { return Ext2LookupResult::Invalid; }
-                BlockIoResult::Ok => { }
-            }
-            let base: *u8 = ext2_file_block as *u8;
             let mut cursor: usize = 0;
             while (cursor < directory.size) {
                 if (cursor > directory.size - 8) {
                     return Ext2LookupResult::Invalid;
                 }
-                let entry: *u8 = base + (cursor as isize);
+                let block_offset: usize = cursor % KERNEL_BLOCK_SIZE;
+                if (block_offset == 0) {
+                    match block_read(mount.device,
+                                     ext2_inode_block_pointer(
+                                         mount, directory,
+                                         cursor / KERNEL_BLOCK_SIZE),
+                                     ext2_file_block as []u8) {
+                        BlockIoResult::Invalid => {
+                            return Ext2LookupResult::Invalid;
+                        }
+                        BlockIoResult::Ok => { }
+                    }
+                }
+                let entry: *u8 = (ext2_file_block as *u8) +
+                                 (block_offset as isize);
                 let inode_number: usize = ext2_u32(entry, 0) as usize;
                 let record_length: usize = ext2_u16(entry, 4) as usize;
                 let name_length: usize = entry[6] as usize;
                 if (record_length < 8 || record_length > directory.size - cursor ||
+                    record_length > KERNEL_BLOCK_SIZE - block_offset ||
                     name_length > record_length - 8) {
                     return Ext2LookupResult::Invalid;
                 }
@@ -288,12 +296,15 @@ fn ext2_lookup_root(mount: Ext2Mount, name: []u8)
     return ext2_lookup_directory(mount, 2, name);
 }
 
-fn ext2_lookup_path(mount: Ext2Mount, name: []u8)
+fn ext2_lookup_path_from(mount: Ext2Mount, start_inode: usize, name: []u8)
         -> Ext2LookupResult !{unsafe} {
     if (name.len == 0 || name.len > 255) {
         return Ext2LookupResult::Invalid;
     }
-    let mut current_inode: usize = 2;
+    if (name.len == 1 && unsafe { name[0] } == 0x2E) {
+        return Ext2LookupResult::Found(start_inode);
+    }
+    let mut current_inode: usize = start_inode;
     let mut cursor: usize = 0;
     while (cursor < name.len) {
         let component_start: usize = cursor;
@@ -304,6 +315,16 @@ fn ext2_lookup_path(mount: Ext2Mount, name: []u8)
             return Ext2LookupResult::Invalid;
         }
         let component = unsafe { name[component_start..<cursor] };
+        if (component.len == 1 && unsafe { component[0] } == 0x2E) {
+            if (cursor < name.len) { cursor = cursor + 1; }
+            continue;
+        }
+        if (component.len == 2 && unsafe { component[0] } == 0x2E &&
+            unsafe { component[1] } == 0x2E) {
+            current_inode = 2;
+            if (cursor < name.len) { cursor = cursor + 1; }
+            continue;
+        }
         match ext2_lookup_directory(mount, current_inode, component) {
             Ext2LookupResult::Invalid => { return Ext2LookupResult::Invalid; }
             Ext2LookupResult::NotFound => { return Ext2LookupResult::NotFound; }
@@ -317,6 +338,11 @@ fn ext2_lookup_path(mount: Ext2Mount, name: []u8)
         }
     }
     return Ext2LookupResult::Found(current_inode);
+}
+
+fn ext2_lookup_path(mount: Ext2Mount, name: []u8)
+        -> Ext2LookupResult !{unsafe} {
+    return ext2_lookup_path_from(mount, 2, name);
 }
 
 // Resolve a regular file's i_block[index]. The inode table is re-read on
@@ -474,6 +500,48 @@ fn ext2_read_file_chunk(mount: Ext2Mount, inode_number: usize,
     }
 }
 
+fn ext2_read_directory_chunk(mount: Ext2Mount, inode_number: usize,
+                             offset: usize, destination: []u8)
+        -> Ext2ReadResult !{unsafe} {
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return Ext2ReadResult::Invalid; }
+        Ext2InodeResult::Inode(inode) => {
+            if ((inode.mode & 0xF000) != 0x4000 ||
+                inode.size > ext2_direct_file_size()) {
+                return Ext2ReadResult::Invalid;
+            }
+            if (offset >= inode.size || destination.len == 0) {
+                return Ext2ReadResult::Read(0);
+            }
+            let block_index: usize = offset / KERNEL_BLOCK_SIZE;
+            let block_offset: usize = offset % KERNEL_BLOCK_SIZE;
+            let block_number: usize =
+                ext2_inode_block_pointer(mount, inode, block_index);
+            if (block_number == 0 || block_number >= mount.filesystem_blocks) {
+                return Ext2ReadResult::Invalid;
+            }
+            match block_read(mount.device, block_number,
+                             ext2_file_block as []u8) {
+                BlockIoResult::Invalid => { return Ext2ReadResult::Invalid; }
+                BlockIoResult::Ok => { }
+            }
+            let mut chunk: usize = destination.len;
+            if (chunk > KERNEL_BLOCK_SIZE - block_offset) {
+                chunk = KERNEL_BLOCK_SIZE - block_offset;
+            }
+            if (chunk > inode.size - offset) {
+                chunk = inode.size - offset;
+            }
+            let source_pointer: *u8 =
+                (ext2_file_block as *u8) + (block_offset as isize);
+            let source = unsafe { source_pointer[0..<chunk as isize] };
+            let target = unsafe { destination[0..<chunk] };
+            slice_copy(target, source);
+            return Ext2ReadResult::Read(chunk);
+        }
+    }
+}
+
 fn ext2_inode_is_symlink(mount: Ext2Mount, inode_number: usize) -> bool {
     match ext2_read_inode(mount, inode_number) {
         Ext2InodeResult::Invalid => { return false; }
@@ -497,6 +565,13 @@ fn ext2_inode_mode(mount: Ext2Mount, inode_number: usize) -> usize {
     match ext2_read_inode(mount, inode_number) {
         Ext2InodeResult::Invalid => { return 0; }
         Ext2InodeResult::Inode(inode) => { return inode.mode; }
+    }
+}
+
+fn ext2_inode_size(mount: Ext2Mount, inode_number: usize) -> usize {
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return 0; }
+        Ext2InodeResult::Inode(inode) => { return inode.size; }
     }
 }
 

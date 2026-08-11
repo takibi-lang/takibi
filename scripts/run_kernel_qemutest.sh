@@ -106,7 +106,7 @@ uart_sender_pid=""
     for _wait in $(seq 1 "$TIMEOUT_SECS"); do
         if [ "$shell_sent" -eq 0 ] &&
            LC_ALL=C grep -aFq 'interactive shell: uart blocked' "$UART_LOG"; then
-            printf 'x=; echo repl-ok; exit\n' >&8
+            printf 'x=; /bin/ls; /bin/ls -a; /bin/ls /bin; echo repl-ok; exit\n' >&8
             shell_sent=1
         fi
         if [ "$payload_sent" -eq 0 ] &&
