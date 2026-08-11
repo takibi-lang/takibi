@@ -161,11 +161,9 @@ fn kernel_exec_resolve_dynamic_initramfs() -> DynamicExecResolveResult {
 // process_image_map_ext2_in_root(). Any failure at any step (name not
 // found, read failure, invalid ELF -- e.g. argv[0] names a symlink like
 // /echo or /bin/echo) returns NotFound and preserves the BusyBox fallback.
-fn kernel_exec_resolve_argv0(mount: Ext2Mount) -> ExecResolveResult !{unsafe} {
-    match kernel_exec_argv0_name() {
-        ExecArgv0NameResult::Invalid => { return ExecResolveResult::NotFound; }
-        ExecArgv0NameResult::Name(name) => {
-            match ext2_lookup_path(mount, name) {
+fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: []u8)
+        -> ExecResolveResult !{unsafe} {
+    match ext2_lookup_path(mount, name) {
                 Ext2LookupResult::Invalid => { return ExecResolveResult::NotFound; }
                 Ext2LookupResult::NotFound => { return ExecResolveResult::NotFound; }
                 Ext2LookupResult::Found(inode) => {
@@ -201,6 +199,13 @@ fn kernel_exec_resolve_argv0(mount: Ext2Mount) -> ExecResolveResult !{unsafe} {
                     }
                 }
             }
+}
+
+fn kernel_exec_resolve_argv0(mount: Ext2Mount) -> ExecResolveResult !{unsafe} {
+    match kernel_exec_argv0_name() {
+        ExecArgv0NameResult::Invalid => { return ExecResolveResult::NotFound; }
+        ExecArgv0NameResult::Name(name) => {
+            return kernel_exec_resolve_ext2_name(mount, name);
         }
     }
 }
@@ -224,6 +229,21 @@ fn kernel_process_child_exec_map_result(
             return 1;
         }
     }
+}
+
+fn kernel_initial_process_map(rootfs_ready: bool,
+                              rootfs_plan: DistroElfLoadPlan,
+                              rootfs_inode: usize,
+                              rootfs_length: usize,
+                              fallback_plan: DistroElfLoadPlan,
+                              argv: []u8,
+                              argc: usize) -> ProcessImageMapResult {
+    if (rootfs_ready) {
+        return process_image_map_ext2(
+            rootfs_plan, saved_ext2_mount, rootfs_inode, rootfs_length,
+            argv, argc);
+    }
+    return process_image_map(fallback_plan, argv, argc);
 }
 
 fn kernel_process_child_exec_prepare() -> usize {
@@ -261,6 +281,7 @@ fn kernel_process_child_exec_prepare() -> usize {
     // needs its own current root here instead.
     let child_root: usize =
         address_space_root_slot(kernel_process_current_root());
+    if (target_ext2_ready == false) {
     match kernel_exec_resolve_dynamic_initramfs() {
         DynamicExecResolveResult::NotFound => {}
         DynamicExecResolveResult::Resolved(plans) => {
@@ -291,6 +312,7 @@ fn kernel_process_child_exec_prepare() -> usize {
                 }
             }
         }
+    }
     }
     if (target_plan_ready == false) {
         target_plan_ready = kernel_exec_plan_ready;
@@ -508,6 +530,10 @@ fn kernel_test_driver_run() {
     kernel_test_platform_storage();
 let mut saved_distro_plan: DistroElfLoadPlan = {0, 0, 0, 0, 0, 0, 0};
 let mut distro_plan_ready: bool = false;
+let mut saved_rootfs_plan: DistroElfLoadPlan = {0, 0, 0, 0, 0, 0, 0};
+let mut rootfs_plan_ready: bool = false;
+let mut saved_rootfs_inode: usize = 0;
+let mut saved_rootfs_length: usize = 0;
 match initramfs_busybox() {
     InitramfsFileResult::Invalid => {
         kernel_boot_log("distro image: invalid initramfs\n");
@@ -533,6 +559,21 @@ match initramfs_busybox() {
                     kernel_boot_log("distro elf: aarch64 loads=2 extent=0x122138\n");
                 }
             }
+        }
+    }
+}
+if (ext2_mount_ready) {
+    match kernel_exec_resolve_ext2_name(
+            saved_ext2_mount, "bin/busybox" as []u8) {
+        ExecResolveResult::NotFound => {
+            kernel_boot_log("rootfs image: /bin/busybox not found\n");
+        }
+        ExecResolveResult::Resolved(image) => {
+            saved_rootfs_plan = image.plan;
+            saved_rootfs_inode = image.inode;
+            saved_rootfs_length = image.file_length;
+            rootfs_plan_ready = true;
+            kernel_boot_log("rootfs image: ext2 /bin/busybox ready\n");
         }
     }
 }
@@ -605,8 +646,10 @@ irq_uart_rx_unmask();
     kernel_process_execution_reset();
     kernel_process_scheduler_enable();
     kernel_syscall_connected_fixture_start();
-    if (distro_plan_ready) {
-        match process_image_map(
+    if (distro_plan_ready || rootfs_plan_ready) {
+        match kernel_initial_process_map(
+                rootfs_plan_ready, saved_rootfs_plan,
+                saved_rootfs_inode, saved_rootfs_length,
                 saved_distro_plan,
                 "busybox\0sh\0/init.sh\0" as []u8,
                 3) {

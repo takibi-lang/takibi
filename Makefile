@@ -377,13 +377,14 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'set_inode_field /init.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /user_payload mode 0100755' $@.tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 debugfs -w -R 'symlink /latest hello.txt' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'symlink /busybox /bin/busybox' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'symlink /cat /busybox' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'symlink /uname /busybox' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'symlink /od /busybox' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'symlink /busybox-httpd /bin/busybox' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'symlink /bin/echo /bin/busybox' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'symlink /echo /bin/busybox' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox /busybox' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox /cat' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox /uname' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox /od' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox /busybox-httpd' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox /bin/echo' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox /echo' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/busybox links_count 8' $@.tmp >/dev/null 2>&1
 	e2fsck -fn $@.tmp >/dev/null
 	mv $@.tmp $@
 
