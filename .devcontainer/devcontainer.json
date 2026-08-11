@@ -30,7 +30,7 @@
     "--cap-add=NET_ADMIN",
     "--cap-add=NET_RAW"
   ],
-  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo apt-get update && sudo apt-get install -y cmake llvm-19-dev libzstd-dev lld-19 qemu-system-arm gdb-multiarch openocd stlink-tools bubblewrap mtools cpio e2fsprogs e2tools iputils-arping ethtool tshark tcpdump && sudo usermod -aG plugdev,dialout vscode && sudo npm install -g @openai/codex && sudo npm install -g @github/copilot && opam update && opam install -y ppx_deriving llvm",
+  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo apt-get update && sudo apt-get install -y cmake llvm-19-dev libzstd-dev lld-19 qemu-system-arm gdb-multiarch openocd stlink-tools bubblewrap mtools cpio e2fsprogs e2tools iputils-arping ethtool tshark tcpdump python3-serial && sudo usermod -aG plugdev,dialout vscode && sudo npm install -g @openai/codex && sudo npm install -g @github/copilot && opam update && opam install -y ppx_deriving llvm",
   "containerEnv": {
     "LANG": "en_US.UTF-8",
     "LC_ALL": "en_US.UTF-8",
