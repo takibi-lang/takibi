@@ -359,7 +359,11 @@ else
 fi
 cleanup
 trap - EXIT INT TERM HUP
-tr -d '\r' <"$UART_LOG" >"$UART_LOG.normalized"
+# The real UART echoes a shell command immediately after the prompt, so a
+# command's short output can arrive as `/ # repl-ok` rather than as a separate
+# line. Views describe semantic output, not the interactive prompt; normalize
+# that prefix before projecting the shared capture.
+sed -e 's|^/ # ||' <"$UART_LOG" | tr -d '\r' >"$UART_LOG.normalized"
 
 # Ash smoke contract: keep this in the maintained hardware lane so the same
 # command sequence that exercises QEMU's socket client is also exercised on
