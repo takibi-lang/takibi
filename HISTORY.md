@@ -52,8 +52,6 @@ line means that all transient workload pages returned to that stable baseline.
 
 ### 2026-08-11: RPi5 USB rootfs WRITE(10) batching reached the 128-sector boundary
 
-### 2026-08-11: RPi5 USB rootfs WRITE(10) batching reached the 128-sector boundary
-
 The RPi5 USB rootfs provision path was changed from one WRITE(10) per 512-byte
 sector to bounded contiguous multi-sector commands. Hardware experiments with
 the same full `kernelcheck-rpi5` suite established 128 sectors (64 KiB) as the

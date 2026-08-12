@@ -8647,6 +8647,19 @@ let codegen_tests = [
            }") ();
        Target_info.configure "thumbv7em-none-eabi");
 
+  Alcotest.test_case "exception_restore emits a restore of the thread pointer" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       ignore (gen_codegen
+         (exc_frame_src ^
+          "exception_restore el0_context_resume {
+             frame: ExcFrame;
+           }"));
+       let asm = Buffer.contents Llvm_gen.raw_asm_buf in
+       Alcotest.(check bool) "thread pointer restored" true
+         (contains_substring asm "msr\ttpidr_el0, x9");
+       Target_info.configure "thumbv7em-none-eabi");
+
   Alcotest.test_case "exception_restore rejects an unknown key" `Quick
     (fun () ->
        Target_info.configure "aarch64-none-elf";

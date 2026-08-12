@@ -15,7 +15,8 @@ use "kernel/arch/arm64/kernel/fpsimd_probe_extern.tkb";
 // declared once in .tkb instead of kernel/arch/arm64/kernel/
 // exception_context.inc's hand-written EXC_CONTEXT_SAVE/EXC_CONTEXT_RESTORE
 // macro pair. Field order matches that .inc file's byte layout exactly
-// (x0..x30, sp_el0, elr_el1, spsr_el1, q0..q31, fpsr, fpcr) so this struct's
+// (x0..x30, sp_el0, elr_el1, spsr_el1, q0..q31, fpsr, fpcr, tpidr_el0) so
+// this struct's
 // own computed layout is byte-identical to the frame every existing
 // .Ldata_abort/el0_context_resume/run_initial_user hand-written call site
 // (kernel/arch/arm64/kernel/user_entry.S) still reads and writes via that
