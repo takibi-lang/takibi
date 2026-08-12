@@ -10,7 +10,11 @@ const PROCESS_CONTEXT_MAX: usize = 16;
 // per-process descriptor namespace rather than treating fd 3 as a special
 // file-only slot.
 const PROCESS_FD_MAX: usize = 16;
-const SHARED_OBJECT_MAX: usize = 4;
+// A daemon child keeps its inherited shell descriptors while opening its
+// listener, accepted streams, and /dev/null redirection. Keep the shared
+// object pool at the same fixed capacity as the per-process descriptor
+// namespace so the interactive path does not have a smaller hidden limit.
+const SHARED_OBJECT_MAX: usize = 16;
 // Every descriptor slot could in principle
 // hold its own reference to the same shared object (unified_fd_clone/
 // unified_fd_duplicate both create independent references to an existing
@@ -22,7 +26,14 @@ const SHARED_OBJECT_MAX: usize = 4;
 // const's identifier in an arithmetic expression.
 const SHARED_OBJECT_MAX_REFS: usize = 256;
 
-enum UnifiedFdKind: u8 { Empty; OpenFile; Directory; Listener; Connection; }
+enum UnifiedFdKind: u8 {
+    Empty;
+    Terminal;
+    OpenFile;
+    Directory;
+    Listener;
+    Connection;
+}
 enum UnifiedListenerState: u8 { Closed; Created; Bound; Listening; }
 // GitHub issue #264 third stage: descriptor state and the process heap break
 // share one record, so a process slot has one local FD context rather than
@@ -213,6 +224,72 @@ fn unified_directory_open(process: usize, fd: usize, inode: usize)
             }
         }
     }
+}
+
+// Standard input/output/error are ordinary inherited descriptors, even
+// though their backing object is the kernel UART rather than ext2 or TCP.
+// Keeping them in the same table makes close(0) followed by openat() select
+// fd 0, which is the Unix redirection contract used by ash background jobs.
+fn unified_terminal_stdio_open(process: usize) -> UnifiedFdResult {
+    match unified_object_alloc_first(UnifiedFdKind::Terminal) {
+        UnifiedObjectResult::Invalid => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Full => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Allocated(handle) => {
+            match unified_fd_install(process, 0, handle.slot,
+                                     handle.generation) {
+                UnifiedFdResult::Invalid => {
+                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    refcount_pool_abandon(&object_pool, handle.slot,
+                                         handle.generation);
+                    return UnifiedFdResult::Invalid;
+                }
+                UnifiedFdResult::Ok => {}
+            }
+            match unified_fd_duplicate(process, 0, 1) {
+                UnifiedFdResult::Invalid => {
+                    match unified_fd_close(process, 0) {
+                        UnifiedFdResult::Invalid => {}
+                        UnifiedFdResult::Ok => {}
+                    }
+                    return UnifiedFdResult::Invalid;
+                }
+                UnifiedFdResult::Ok => {}
+            }
+            match unified_fd_duplicate(process, 0, 2) {
+                UnifiedFdResult::Invalid => {
+                    match unified_fd_close(process, 1) {
+                        UnifiedFdResult::Invalid => {}
+                        UnifiedFdResult::Ok => {}
+                    }
+                    match unified_fd_close(process, 0) {
+                        UnifiedFdResult::Invalid => {}
+                        UnifiedFdResult::Ok => {}
+                    }
+                    return UnifiedFdResult::Invalid;
+                }
+                UnifiedFdResult::Ok => { return UnifiedFdResult::Ok; }
+            }
+        }
+    }
+}
+
+fn unified_terminal_is_open(process: usize, fd: usize) -> bool {
+    if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX) {
+        return false;
+    }
+    let process_index = unified_fd_narrow_process(process);
+    let fd_kind = process_fd_context[process_index].fd_kind;
+    let fd_object = process_fd_context[process_index].fd_object;
+    let fd_generation = process_fd_context[process_index].fd_generation;
+    let object_value: usize = fd_object[fd as isize];
+    if (fd_kind[fd as isize] == UnifiedFdKind::Terminal &&
+        object_value < SHARED_OBJECT_MAX) {
+        let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
+        return object_kind[object] == UnifiedFdKind::Terminal &&
+               refcount_pool_matches(&object_pool, object,
+                                     fd_generation[fd as isize]);
+    }
+    return false;
 }
 
 fn unified_object_alloc_first(kind: UnifiedFdKind) -> UnifiedObjectResult {
@@ -718,6 +795,29 @@ fn unified_fd_probe_install(fd: usize, result: UnifiedObjectResult) -> bool {
 fn unified_fd_table_probe() -> bool {
     unified_fd_table_init();
     process_fd_context[0].heap_break = 0x50000000;
+    match unified_terminal_stdio_open(0) {
+        UnifiedFdResult::Invalid => { return false; }
+        UnifiedFdResult::Ok => {}
+    }
+    if (unified_terminal_is_open(0, 0) == false ||
+        unified_terminal_is_open(0, 1) == false ||
+        unified_terminal_is_open(0, 2) == false) {
+        return false;
+    }
+    match unified_fd_close(0, 0) {
+        UnifiedFdResult::Invalid => { return false; }
+        UnifiedFdResult::Ok => {}
+    }
+    match unified_fd_alloc(0, 0) {
+        UnifiedFdAllocResult::Full => { return false; }
+        UnifiedFdAllocResult::Allocated(fd) => {
+            if (fd != 0 || unified_fd_probe_install(
+                    fd, unified_object_alloc_first(
+                        UnifiedFdKind::OpenFile)) == false) {
+                return false;
+            }
+        }
+    }
     if (unified_fd_probe_install(
             3, unified_object_alloc_first(UnifiedFdKind::OpenFile)) == false ||
         unified_fd_probe_install(

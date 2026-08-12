@@ -1820,9 +1820,11 @@ at codegen time rather than silently lowering to a racy `wfi`.
   point, in place of hand-written assembly. `frame` must name a `struct
   packed` whose fields are EXACTLY AArch64's exception-frame registers,
   one of each, no more, no less: `x0`..`x30`, `sp_el0`, `elr_el1`,
-  `spsr_el1` (all `usize`), `q0`..`q31` (`[u8; 16]` each -- this language
-  has no 128-bit primitive type, and storing 16 raw bytes needs none),
-  `fpsr`, `fpcr` (`usize`). Field declaration order is free -- offsets are
+  `spsr_el1`, `tpidr_el0` (all `usize`), `q0`..`q31` (`[u8; 16]` each --
+  this language has no 128-bit primitive type, and storing 16 raw bytes
+  needs none), `fpsr`, `fpcr` (`usize`). The generated stack allocation is
+  rounded up to preserve AArch64's 16-byte SP alignment. Field declaration
+  order is free -- offsets are
   computed from whatever order the struct itself declares. `dispatch` is
   called with the frame's own stack address (as `usize`) after the save
   (and `before`, if given) and must return a `usize`, the frame address to

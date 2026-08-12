@@ -310,11 +310,23 @@ fn kernel_process_child_exec_prepare() -> usize {
                         }
                         kernel_syscall_process_configure_current(
                             heap_start, heap_limit);
-                        kernel_init_socket_evidence =
-                            kernel_syscall_socket_evidence();
-                        kernel_syscall_foreground_server_start();
-                        kernel_tcp_inject_drop_next_syn_ack();
-                        kernel_tcp_inject_split_request();
+                        // Only the init script's direct child is the
+                        // bounded integration fixture.  An HTTPd started
+                        // from the interactive ash is a grandchild of PID 1
+                        // and must retain a normal daemon lifetime; applying
+                        // the fixture state there made its accept loop stop
+                        // after the fixture's two requests.
+                        if (kernel_process_parent_is_root() &&
+                            kernel_syscall_interactive_httpd_shell_active() ==
+                                false) {
+                            kernel_init_socket_evidence =
+                                kernel_syscall_socket_evidence();
+                            kernel_syscall_foreground_server_start();
+                            kernel_tcp_inject_drop_next_syn_ack();
+                            kernel_tcp_inject_split_request();
+                        } else {
+                            kernel_syscall_daemon_start();
+                        }
                         process_image_activate_root(child_root);
                         kernel_process_child_exec_mark();
                         kernel_syscall_exec_clear();
@@ -538,8 +550,49 @@ let mut kernel_test_rpi5_extended: bool;
 let mut kernel_test_httpd_daemon: bool;
 let mut kernel_test_init_script: bool;
 
+// The bounded suite deliberately tears every userspace image down and proves
+// that its page count reaches zero first. Only then is a fresh interactive ash
+// installed as the terminal demo workload. It intentionally does not return:
+// the background HTTPd launched from this shell is the persistent service the
+// user can continue exercising after the automated checks finish.
+fn kernel_interactive_httpd_shell_run() {
+    if (rootfs_plan_ready == false) { return; }
+    kernel_uart_rx_ring_reset();
+    kernel_process_execution_reset();
+    kernel_process_scheduler_enable();
+    match kernel_initial_process_map(
+            rootfs_plan_ready, saved_rootfs_plan,
+            saved_rootfs_inode, saved_rootfs_length,
+            saved_rootfs_plan,
+            "busybox\0sh\0/etc/httpd-demo.sh\0" as []u8, 3) {
+        ProcessImageMapResult::InvalidImage => {
+            kernel_boot_log("interactive httpd shell: invalid image\n");
+        }
+        ProcessImageMapResult::OutOfMemory => {
+            kernel_boot_log("interactive httpd shell: out of memory\n");
+        }
+        ProcessImageMapResult::Mapped(shell_pages) => {
+            let (heap_start, heap_limit) =
+                process_image_heap_range(shell_pages);
+            kernel_syscall_process_configure(heap_start, heap_limit);
+            kernel_syscall_interactive_httpd_shell_start();
+            let shell_status: usize = run_initial_user(
+                process_image_entry(shell_pages),
+                process_image_stack_pointer(shell_pages));
+            kernel_boot_log("interactive httpd shell: exited\n");
+            process_image_unmap(shell_pages);
+        }
+    }
+}
+
 fn kernel_test_driver_run() {
     kernel_test_common_probes();
+    // Root 0 permanently owns its L1/L2 backing pages, while the process-stack
+    // and growable-pool probes deliberately retain their lazily allocated
+    // backing pages for reuse. Record that stable kernel baseline after those
+    // probes so the final pages=0 verdict means zero transient workload pages,
+    // without reinitializing the allocator and falsely freeing either class.
+    let page_baseline: usize = page_allocator_live_count();
     kernel_test_platform_network();
     kernel_test_platform_storage();
     if (virtio_blk_index_wrap_probe()) {
@@ -806,16 +859,15 @@ if (ext2_mount_ready) {
         kernel_boot_log("resources: DOUBLE FREE\n");
     }
 
-    // All boot-time user images and fixtures have been torn down at
-    // this point. Reclaim any allocator residue before the final
-    // resource invariant, keeping a failed intermediate teardown
-    // from poisoning the long-lived kernel.
-    page_allocator_reclaim_all();
-    if (page_allocator_live_count() == 0) {
+    // All bounded-suite user images and fixtures have been torn down at this
+    // point. The permanent root-0 pages remain live; equality with the boot
+    // baseline proves that no transient page leaked before the terminal demo.
+    if (page_allocator_live_count() == page_baseline) {
         kernel_boot_log("resources: pages=0\n");
     } else {
         kernel_boot_log("resources: pages leaked\n");
     }
+    kernel_interactive_httpd_shell_run();
 }
 
 }
@@ -823,9 +875,13 @@ if (ext2_mount_ready) {
 // Shared UART RX bridge used by syscall wait paths on both platforms.
 fn kernel_uart_rx_isr() !{} {
     let c: u8 = uart_isr_getc();
-    if (kernel_process_uart_wake(c as usize)) {
-        interrupt_notify();
-        return;
+    match kernel_process_uart_wake(c as usize) {
+        ProcessUartWakeResult::Missing => {}
+        ProcessUartWakeResult::Consumed => {
+            interrupt_notify();
+            return;
+        }
+        ProcessUartWakeResult::RetryRead => {}
     }
     let head: usize = kernel_uart_rx_head;
     let next: usize = (head + 1) % 64;

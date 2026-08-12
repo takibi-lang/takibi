@@ -1,5 +1,4 @@
 ^0000000 062550 066154 020157 071146 066557 062440 072170 005062$
 ^0000020$
-^od: standard input: Bad file descriptor$
-^busybox od failed$
+^busybox od exit: 0$
 ^child exec unmap: clean$

@@ -29,10 +29,23 @@ import socket
 import struct
 import sys
 import time
+from pathlib import Path
 
 QEMU_HOST = "127.0.0.1"
-POSITIONAL_ARGS = [arg for arg in sys.argv[1:] if arg != "--fast"]
-FAST_MODE = "--fast" in sys.argv[1:]
+MODE_FLAGS = {"--fast"}
+RAW_ARGS = sys.argv[1:]
+FAST_MODE = "--fast" in RAW_ARGS
+INTERACTIVE_READY_FILE = None
+if "--interactive-ready-file" in RAW_ARGS:
+    ready_index = RAW_ARGS.index("--interactive-ready-file")
+    if ready_index + 1 >= len(RAW_ARGS):
+        raise SystemExit("--interactive-ready-file requires a path")
+    INTERACTIVE_READY_FILE = Path(RAW_ARGS[ready_index + 1])
+POSITIONAL_ARGS = [
+    arg for index, arg in enumerate(RAW_ARGS)
+    if arg not in MODE_FLAGS and arg != "--interactive-ready-file" and
+    not (index > 0 and RAW_ARGS[index - 1] == "--interactive-ready-file")
+]
 QEMU_PORT = int(POSITIONAL_ARGS[0]) if len(POSITIONAL_ARGS) > 0 else 17771
 LOCAL_PORT = int(POSITIONAL_ARGS[1]) if len(POSITIONAL_ARGS) > 1 else 17772
 
@@ -453,9 +466,9 @@ def init_script_fixture(sock: socket.socket) -> bool:
 
 
 def http_request(sock: socket.socket, client_port: int, client_isn: int) -> bool:
-    # The daemon's first SYN-ACK is deliberately dropped by the kernel. The
-    # normal retry loop in send_and_wait() therefore proves recovery rather
-    # than relying on a second, fresh connection.
+    # The bounded boot fixture deliberately drops the first SYN-ACK; the
+    # interactive daemon does not. The same retry loop correctly covers both
+    # lifecycles without making the interactive test inherit fixture state.
     syn = build_tcp_frame(client_port, client_isn, 0, FLAG_SYN,
                           server_port=HTTP_SERVER_PORT)
     reply = send_and_wait(sock, syn)
@@ -472,6 +485,7 @@ def http_request(sock: socket.socket, client_port: int, client_isn: int) -> bool
 
     client_seq = client_isn + 1
     server_next = server_seq + 1
+    early_response_frames = []
     sock.sendto(build_tcp_frame(client_port, client_seq, server_next, FLAG_ACK,
                                 server_port=HTTP_SERVER_PORT),
                 (QEMU_HOST, QEMU_PORT))
@@ -498,17 +512,23 @@ def http_request(sock: socket.socket, client_port: int, client_isn: int) -> bool
         else:
             print("  no HTTP request ACK")
             return False
+        tcp_header_length = (ack_frame[46] >> 4) * 4
+        if len(ack_frame) > 34 + tcp_header_length:
+            early_response_frames.append(ack_frame)
         client_seq = expected_ack
 
     body = bytearray()
     response_end = False
     deadline = time.monotonic() + 10.0
     while not response_end and time.monotonic() < deadline:
-        sock.settimeout(max(0.05, deadline - time.monotonic()))
-        try:
-            frame = sock.recvfrom(2000)[0]
-        except socket.timeout:
-            continue
+        if early_response_frames:
+            frame = early_response_frames.pop(0)
+        else:
+            sock.settimeout(max(0.05, deadline - time.monotonic()))
+            try:
+                frame = sock.recvfrom(2000)[0]
+            except socket.timeout:
+                continue
         if len(frame) < 54:
             continue
         src_port, dst_port, sequence, acknowledgment, _doff_res, flags = \
@@ -615,8 +635,27 @@ def main() -> int:
             for port, isn in zip(HTTP_CLIENT_PORTS, HTTP_CLIENT_ISNS)
         )
 
+    normal_ok = ok_reconnect and http_ok
+    if (normal_ok and INTERACTIVE_READY_FILE is not None):
+        deadline = time.monotonic() + 90.0
+        while not INTERACTIVE_READY_FILE.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if not INTERACTIVE_READY_FILE.exists():
+            print("  interactive HTTPd never became ready")
+            sock.close()
+            return 1
+        arp_ok = send_until_reply(
+            sock, build_arp_request(SERVER_IP), check_arp_reply)
+        print("  ARP while HTTPd is listening:       %s" %
+              ("PASS" if arp_ok else "FAIL"))
+        interactive_ok = arp_ok and all(
+            http_request(sock, port, isn)
+            for port, isn in zip(HTTP_CLIENT_PORTS, HTTP_CLIENT_ISNS))
+        sock.close()
+        return 0 if interactive_ok else 1
+
     sock.close()
-    return 0 if (ok_reconnect and http_ok) else 1
+    return 0 if normal_ok else 1
 
 
 if __name__ == "__main__":

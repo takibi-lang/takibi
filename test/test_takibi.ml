@@ -6486,7 +6486,7 @@ let infer_tests = [
 
 (* GitHub issue #227 item 1 (prototype slice): the one closed AArch64
    exception-frame register-name field set (x0..x30/sp_el0/elr_el1/
-   spsr_el1/q0..q31/fpsr/fpcr) `exception_entry`'s tests below share --
+   spsr_el1/tpidr_el0/q0..q31/fpsr/fpcr) `exception_entry`'s tests below share --
    factored out as a top-level `let` (not one inside codegen_tests' own
    list literal) because `let ... in` immediately followed by `;`-separated
    list elements greedily swallows the rest of the list as a sequence
@@ -6509,7 +6509,7 @@ let exc_frame_src =
      q20: [u8;16]; q21: [u8;16]; q22: [u8;16]; q23: [u8;16]; q24: [u8;16];
      q25: [u8;16]; q26: [u8;16]; q27: [u8;16]; q28: [u8;16]; q29: [u8;16];
      q30: [u8;16]; q31: [u8;16];
-     fpsr: usize; fpcr: usize;
+     fpsr: usize; fpcr: usize; tpidr_el0: usize;
    }\n"
 
 (* GitHub issue #230: writes [contents] to a real temp file, runs [f] with
@@ -8562,7 +8562,7 @@ let codegen_tests = [
   Alcotest.test_case "exception_entry accepts a well-formed frame/dispatch/before declaration" `Quick
     (fun () ->
        Target_info.configure "aarch64-none-elf";
-       expect_ok
+       ignore (gen_codegen
          (exc_frame_src ^
           "fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
            fn my_before() {}
@@ -8570,7 +8570,14 @@ let codegen_tests = [
              frame: ExcFrame;
              before: my_before;
              dispatch: my_dispatch;
-           }") ();
+           }"));
+       let asm = Buffer.contents Llvm_gen.raw_asm_buf in
+       Alcotest.(check bool) "thread pointer saved" true
+         (contains_substring asm "mrs\tx9, tpidr_el0");
+       Alcotest.(check bool) "thread pointer restored" true
+         (contains_substring asm "msr\ttpidr_el0, x9");
+       Alcotest.(check bool) "frame remains stack aligned" true
+         (contains_substring asm "sub\tsp, sp, #816");
        Target_info.configure "thumbv7em-none-eabi");
 
   Alcotest.test_case "exception_entry rejects a dispatch target with the wrong signature" `Quick

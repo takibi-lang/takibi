@@ -31,10 +31,9 @@ else
     exit 1
 fi
 
-# BusyBox od exercises readv(2) against /hello.txt. It then deliberately
-# attempts standard input, where this fixture has no descriptor, so its
-# non-zero result is the expected proof of the EBADF path rather than an
-# init failure.
+# BusyBox od exercises readv(2) against /hello.txt. Standard input is now a
+# real inherited UART descriptor, matching the shell's other standard fds;
+# the named input file therefore completes normally.
 /od /hello.txt
 if [ "$?" -eq 0 ]; then
     echo "busybox od exit: 0"

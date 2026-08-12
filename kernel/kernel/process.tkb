@@ -320,7 +320,7 @@ fn scheduled_process_table_init() {
 fn scheduled_process_table_clear() {
     // Reset can enter while a child root is in TTBR0_EL1. Select the
     // permanent bootstrap root before releasing any nonzero backing record.
-    address_space_activate_root(0);
+    process_image_activate_root(0);
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
         let generation: usize =
             slotmap_occupant_generation(&scheduled_process_pool, slot);
@@ -700,6 +700,10 @@ private let mut execution_deferred_requests: usize;
 private let mut execution_uart_blocks: usize;
 private let mut execution_uart_wakes: usize;
 private let mut execution_uart_parent_progress: usize;
+// Evidence is boot-scoped, unlike the per-workload counters above. The final
+// interactive shell starts after another execution_reset(), but must not make
+// the same one-time integration marker appear twice in a shared UART capture.
+private let mut execution_uart_block_logged: bool;
 
 must_use variant ProcessUartProgressResult { Invalid; Recorded; }
 
@@ -911,13 +915,55 @@ fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {
 }
 
 // Called with IRQ delivery masked after the UART ring's final empty check.
-// Publishing Blocked before returning the parent's saved frame closes the
-// otherwise-lost wakeup window between checking the ring and sleeping.
+// Publishing Blocked before returning the next runnable frame closes the
+// otherwise-lost wakeup window between checking the ring and sleeping.  The
+// current process may itself have a live child (interactive ash with a
+// background job), in which case the child must run while the shell waits;
+// the old implementation always switched to the current process's parent,
+// starving this nested child before its exec could reach listen().
 fn kernel_process_block_uart(current_sp: usize) -> usize {
-    if (execution_current_live == false ||
-        scheduled_process_records[execution_current_handle.pool_index]
-            .has_parent ==
-            false) {
+    if (execution_current_live == false) {
+        return 0;
+    }
+
+    if (scheduled_process_records[execution_current_handle.pool_index]
+            .has_child) {
+        let mut parent: ProcessHandle = execution_current_handle;
+        let mut child: ProcessHandle =
+            scheduled_process_records[parent.pool_index].child;
+        if (scheduled_process_record_state(child.pool_index) !=
+                ProcessSlotState::Ready) {
+            return 0;
+        }
+        scheduled_process_records[parent.pool_index].saved_sp = current_sp;
+        match scheduled_process_running_take(parent) {
+            ScheduledProcessRunningTakeResult::Missing => { return 0; }
+            ScheduledProcessRunningTakeResult::Running(resources) => {
+                let (owner, running) = resources;
+                let blocked = scheduled_process_block(owner, running);
+                scheduled_process_records[owner.pool_index].wait_reason =
+                    ProcessWaitReason::UartRx;
+                match scheduled_process_put(owner, blocked) {
+                    ScheduledProcessPutResult::Conflict => { return 0; }
+                    ScheduledProcessPutResult::Stored => {}
+                }
+            }
+        }
+        if (kernel_process_start_handle(child) == false) {
+            return 0;
+        }
+        execution_current_handle = child;
+        execution_uart_blocks = execution_uart_blocks + 1;
+        if (execution_uart_block_logged == false) {
+            execution_uart_block_logged = true;
+            kernel_boot_log("uart rx: scheduler child blocked\n");
+        }
+        process_image_activate_root(child.pool_index);
+        return scheduled_process_records[child.pool_index].saved_sp;
+    }
+
+    if (scheduled_process_records[execution_current_handle.pool_index]
+            .has_parent == false) {
         return 0;
     }
     let mut child: ProcessHandle = execution_current_handle;
@@ -946,7 +992,8 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
     }
     execution_current_handle = parent;
     execution_uart_blocks = execution_uart_blocks + 1;
-    if (execution_uart_blocks == 1) {
+    if (execution_uart_block_logged == false) {
+        execution_uart_block_logged = true;
         kernel_boot_log("uart rx: scheduler child blocked\n");
     }
     process_image_activate_root(parent.pool_index);
@@ -998,44 +1045,76 @@ fn kernel_process_block_wait4(current_sp: usize) -> usize {
 
 // The UART IRQ transfers one byte directly into the suspended syscall frame.
 // true means the byte was consumed by a waiter and must not enter the ring.
-// GitHub issue #245: "the" blocked process used to be the single global
-// execution_child_handle; now it is whichever process is linked as
-// execution_current_handle's own child -- valid because kernel_process_
-// block_uart() always leaves execution_current_handle on the blocker's
-// parent right before this could ever run, and the parent/child link
-// itself is untouched by blocking (only exit/reap clear it).
-fn kernel_process_uart_wake(value: usize) -> bool !{interrupt} {
-    if (execution_current_live == false ||
+// The waiter can be either the current process's blocked child (the original
+// root-shell shape) or the current process's blocked parent (nested ash with
+// a background child).
+must_use variant ProcessUartWakeResult { Missing; Consumed; RetryRead; }
+
+fn kernel_process_uart_wake(value: usize)
+        -> ProcessUartWakeResult !{interrupt} {
+    if (execution_current_live == false) {
+        return ProcessUartWakeResult::Missing;
+    }
+    let mut waiter: ProcessHandle = execution_current_handle;
+    let mut found: bool = false;
+    if (scheduled_process_records[execution_current_handle.pool_index]
+            .has_child) {
+        let mut candidate: ProcessHandle = scheduled_process_records[
+            execution_current_handle.pool_index].child;
+        if (scheduled_process_record_state(candidate.pool_index) ==
+                ProcessSlotState::Blocked &&
+            scheduled_process_record_wait_reason(candidate.pool_index) ==
+                ProcessWaitReason::UartRx) {
+            waiter = candidate;
+            found = true;
+        }
+    }
+    // A middle process can have both relatives (ash -> listener -> worker).
+    // Its child normally is not the UART waiter, so keep looking upward
+    // instead of dropping the byte before checking the blocked ash parent.
+    if (found == false &&
         scheduled_process_records[execution_current_handle.pool_index]
-            .has_child ==
-            false) {
-        return false;
+            .has_parent) {
+        let mut candidate: ProcessHandle = scheduled_process_records[
+            execution_current_handle.pool_index].parent;
+        if (scheduled_process_record_state(candidate.pool_index) ==
+                ProcessSlotState::Blocked &&
+            scheduled_process_record_wait_reason(candidate.pool_index) ==
+                ProcessWaitReason::UartRx) {
+            waiter = candidate;
+            found = true;
+        }
     }
-    let mut child: ProcessHandle =
-        scheduled_process_records[execution_current_handle.pool_index].child;
-    if (scheduled_process_record_state(child.pool_index) !=
-            ProcessSlotState::Blocked ||
-        scheduled_process_record_wait_reason(child.pool_index) !=
-            ProcessWaitReason::UartRx) {
-        return false;
+    if (found == false) {
+        return ProcessUartWakeResult::Missing;
     }
-    match scheduled_process_blocked_take(child) {
-        ScheduledProcessBlockedTakeResult::Missing => { return false; }
+    let mut retry_read: bool = false;
+    match scheduled_process_blocked_take(waiter) {
+        ScheduledProcessBlockedTakeResult::Missing => {
+            return ProcessUartWakeResult::Missing;
+        }
         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
             let (owner, blocked) = resources;
-            el0_context_set_x0(
-                scheduled_process_records[owner.pool_index].saved_sp, value);
+            match kernel_syscall_uart_deliver(
+                    scheduled_process_records[owner.pool_index].saved_sp,
+                    owner.pool_index, value) {
+                KernelUartDeliveryResult::Consumed => {}
+                KernelUartDeliveryResult::RetryRead => { retry_read = true; }
+            }
             let ready = scheduled_process_wake(owner, blocked);
             scheduled_process_records[owner.pool_index].wait_reason =
                 ProcessWaitReason::None;
             match scheduled_process_put(owner, ready) {
-                ScheduledProcessPutResult::Conflict => { return false; }
+                ScheduledProcessPutResult::Conflict => {
+                    return ProcessUartWakeResult::Missing;
+                }
                 ScheduledProcessPutResult::Stored => {}
             }
         }
     }
     execution_uart_wakes = execution_uart_wakes + 1;
-    return true;
+    if (retry_read) { return ProcessUartWakeResult::RetryRead; }
+    return ProcessUartWakeResult::Consumed;
 }
 
 // This is the measurable #190 interleaving point: the parent reaches it only
@@ -1201,7 +1280,7 @@ fn kernel_process_clone_rollback() {
     scheduled_process_records[parent.pool_index].has_child = false;
     scheduled_process_records[child.pool_index].has_parent = false;
     execution_current_handle = parent;
-    address_space_activate_root(parent.pool_index);
+    process_image_activate_root(parent.pool_index);
     if (execution_clone_calls > 0) {
         execution_clone_calls = execution_clone_calls - 1;
     }
@@ -1235,6 +1314,20 @@ fn kernel_process_is_child() -> bool {
     return execution_current_live &&
            scheduled_process_records[execution_current_handle.pool_index]
                .has_parent;
+}
+
+// The boot-time HTTPd fixture is launched directly by PID 1.  A manually
+// started HTTPd from the interactive ash is one level deeper (ash -> httpd)
+// and must not inherit the fixture's bounded foreground-server lifecycle.
+fn kernel_process_parent_is_root() -> bool {
+    if (execution_current_live == false ||
+        scheduled_process_records[execution_current_handle.pool_index]
+            .has_parent == false) {
+        return false;
+    }
+    let mut parent: ProcessHandle =
+        scheduled_process_records[execution_current_handle.pool_index].parent;
+    return parent.pool_index == 0;
 }
 
 fn kernel_process_current_pid() -> usize {
@@ -1371,7 +1464,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
     }
     if (kernel_process_start_handle(parent)) {
         execution_current_handle = parent;
-        address_space_activate_root(parent.pool_index);
+        process_image_activate_root(parent.pool_index);
         return scheduled_process_records[parent.pool_index].saved_sp;
     }
     return 0;

@@ -54,6 +54,10 @@ run_initial_user:
      * PSTATE.DAIF at the eret. */
     msr     DAIFSet, #0x2
     msr     sp_el0, x1
+    /* A new image must not inherit thread-local state from whichever EL0
+     * image last returned through this shared entry path. Its C runtime
+     * installs its own thread pointer during startup. */
+    msr     tpidr_el0, xzr
     /* EL0t with IRQ delivery enabled. The Lower-EL IRQ vector saves the
      * complete context before any scheduler decision. */
     mov     x2, #0
@@ -230,6 +234,18 @@ el0_context_set_elr_el1:
     .global el0_context_set_sp_el0
 el0_context_set_sp_el0:
     str     x1, [x0, #EXC_CONTEXT_SP_EL0]
+    ret
+
+    .global el0_context_set_tpidr_el0
+el0_context_set_tpidr_el0:
+    str     x1, [x0, #EXC_CONTEXT_TPIDR_EL0]
+    ret
+
+    .global el0_context_retry_syscall
+el0_context_retry_syscall:
+    ldr     x1, [x0, #EXC_CONTEXT_ELR_EL1]
+    sub     x1, x1, #4
+    str     x1, [x0, #EXC_CONTEXT_ELR_EL1]
     ret
 
 // GitHub issue #221 Step 2+: the single shared consumer for every action tail

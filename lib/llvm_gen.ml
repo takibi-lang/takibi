@@ -5374,10 +5374,15 @@ let exception_frame_offsets who name frame =
          type_inf.ml should have already rejected this" who name frame))
   in
   let offsets : (string, int) Hashtbl.t = Hashtbl.create 70 in
-  let total = List.fold_left (fun off (fname, fty) ->
+  let fields_size = List.fold_left (fun off (fname, fty) ->
     Hashtbl.add offsets fname off;
     off + field_size fty
   ) 0 fields in
+  (* AArch64 requires SP to remain 16-byte aligned at every public call
+     boundary. The packed register struct may end after one 8-byte system
+     register, so reserve anonymous tail padding in the stack frame without
+     making padding part of the language-visible register set. *)
+  let total = ((fields_size + 15) / 16) * 16 in
   ((fun r -> Hashtbl.find offsets r), total)
 
 (* Shared by gen_exception_entry and gen_exception_restore: the
@@ -5404,6 +5409,7 @@ let emit_exception_restore off total =
   a "\tldr\tx9, [sp, #%d]\n\tmsr\telr_el1, x9\n" (off "elr_el1");
   a "\tldr\tx9, [sp, #%d]\n\tmsr\tspsr_el1, x9\n" (off "spsr_el1");
   a "\tldr\tx9, [sp, #%d]\n\tmsr\tsp_el0, x9\n" (off "sp_el0");
+  a "\tldr\tx9, [sp, #%d]\n\tmsr\ttpidr_el0, x9\n" (off "tpidr_el0");
   for i = 0 to 31 do
     a "\tldr\tq%d, [sp, #%d]\n" i (off (Printf.sprintf "q%d" i))
   done;
@@ -5440,7 +5446,7 @@ let gen_exception_entry name frame dispatch before =
     a "\tstr\tx%d, [sp, #%d]\n" i (off (Printf.sprintf "x%d" i))
   done;
   List.iter (fun sysreg -> a "\tmrs\tx9, %s\n\tstr\tx9, [sp, #%d]\n" sysreg (off sysreg))
-    ["sp_el0"; "elr_el1"; "spsr_el1"];
+    ["sp_el0"; "elr_el1"; "spsr_el1"; "tpidr_el0"];
   for i = 0 to 31 do
     a "\tstr\tq%d, [sp, #%d]\n" i (off (Printf.sprintf "q%d" i))
   done;

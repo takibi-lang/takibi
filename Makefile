@@ -351,21 +351,26 @@ $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 	tar -xOzf $< lib/ld-musl-aarch64.so.1 > $@
 	chmod +x $@
 
-$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_HTTPD) $(KERNEL_MUSL_LOADER) | $(KERNEL_USER_BUILD_DIR)
+$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd-demo.sh $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_HTTPD) $(KERNEL_MUSL_LOADER) | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
 	truncate -s 4194304 $@.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 4096
 	debugfs -w -R 'mkdir /etc' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'mkdir /bin' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'mkdir /lib' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'mkdir /dev' $@.tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $@.tmp:/hello.txt
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $@.tmp:/mutable.txt
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/index.html $@.tmp:/index.html
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $@.tmp:/init.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/httpd-demo.sh $@.tmp:/etc/httpd-demo.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $@.tmp:/large.txt
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSYBOX_STATIC) $@.tmp:/bin/busybox
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_HTTPD) $@.tmp:/busybox-httpd
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_MUSL_LOADER) $@.tmp:/lib/ld-musl-aarch64.so.1
+	truncate -s 0 $@.devnull.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.devnull.tmp $@.tmp:/dev/null
+	rm -f $@.devnull.tmp
 	dd if=/dev/zero bs=13311 count=1 status=none | tr '\0' Z >$@.read_indirect.tmp
 	printf '\n' >>$@.read_indirect.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.read_indirect.tmp $@.tmp:/read_indirect.txt

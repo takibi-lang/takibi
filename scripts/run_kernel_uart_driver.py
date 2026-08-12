@@ -3,9 +3,19 @@
 
 import argparse
 import difflib
+from pathlib import Path
 import time
 
 import serial
+
+
+def write_uart_line(connection, line: bytes) -> None:
+    # The kernel UART ISR currently drains one byte per interrupt. Pace the
+    # synthetic console like typed input so a command longer than a 16-byte
+    # hardware FIFO cannot lose its trailing newline in one host-side burst.
+    for byte in line + b"\n":
+        connection.write(bytes((byte,)))
+        time.sleep(0.01)
 
 
 def main() -> int:
@@ -23,7 +33,19 @@ def main() -> int:
     parser.add_argument("--payload", default="irqtest")
     parser.add_argument("--ash-only", action="store_true")
     parser.add_argument("--validate-ash", action="store_true")
+    parser.add_argument("--interactive-httpd-ready-file")
+    parser.add_argument("--interactive-httpd-done-file")
     args = parser.parse_args()
+
+    interactive_httpd = args.interactive_httpd_ready_file is not None
+    if interactive_httpd != (args.interactive_httpd_done_file is not None):
+        raise RuntimeError("interactive HTTPd ready/done files must be paired")
+    httpd_ready_file = (Path(args.interactive_httpd_ready_file)
+                        if interactive_httpd else None)
+    httpd_done_file = (Path(args.interactive_httpd_done_file)
+                       if interactive_httpd else None)
+    if httpd_ready_file is not None:
+        httpd_ready_file.unlink(missing_ok=True)
 
     commands = [line.rstrip("\n") for line in open(args.stdin, encoding="ascii")
                 if line.strip() and not line.startswith("#")]
@@ -52,6 +74,11 @@ def main() -> int:
     output = bytearray()
     shell_step = 0
     payload_sent = False
+    httpd_shell_probe_sent = False
+    httpd_sent = False
+    httpd_probe_sent = False
+    httpd_ready = False
+    httpd_done_seen_at = None
     try:
         with open(args.log, "wb") as capture:
             while time.monotonic() < deadline:
@@ -77,11 +104,46 @@ def main() -> int:
                     connection.write((args.payload + "\n").encode("ascii"))
                     payload_sent = True
 
+                if (interactive_httpd and not httpd_shell_probe_sent and
+                        b"interactive httpd shell: uart blocked\n" in output):
+                    write_uart_line(connection, b"echo httpd-shell-ready")
+                    httpd_shell_probe_sent = True
+                if httpd_shell_probe_sent and not httpd_sent:
+                    text = output.decode(
+                        "utf-8", errors="replace").replace("\r", "")
+                    if any(line.removeprefix("/ # ") ==
+                           "httpd-shell-ready" for line in text.splitlines()):
+                        write_uart_line(
+                            connection,
+                            b"/busybox-httpd httpd -f -p 8080 -h / &")
+                        print("[kernel/uart] sent interactive HTTPd command",
+                              flush=True)
+                        httpd_sent = True
+                if (httpd_sent and not httpd_probe_sent and
+                        b"interactive server: listener ready port=8080\n"
+                        in output):
+                    write_uart_line(connection, b"echo httpd-background-ok")
+                    httpd_probe_sent = True
+                if httpd_probe_sent and not httpd_ready:
+                    text = output.decode(
+                        "utf-8", errors="replace").replace("\r", "")
+                    if any(line.removeprefix("/ # ") ==
+                           "httpd-background-ok" for line in text.splitlines()):
+                        httpd_ready_file.touch()
+                        httpd_ready = True
+
+                if httpd_ready and httpd_done_file.exists():
+                    if httpd_done_seen_at is None:
+                        httpd_done_seen_at = time.monotonic()
+                    elif time.monotonic() - httpd_done_seen_at >= 0.5:
+                        break
+
                 if args.ash_only:
                     if (payload_sent and
                             b"busybox interactive shell exit: 0" in output):
                         break
-                elif args.stop_marker.encode() in output:
+                elif (not interactive_httpd and
+                      args.stop_marker.encode() in output):
                     break
     finally:
         connection.close()
@@ -104,6 +166,18 @@ def main() -> int:
             raise RuntimeError("ash output differs from expected:\n" + diff)
         if any(line.startswith("ls: ") for line in actual):
             raise RuntimeError("directory enumeration command reported an ls error")
+    if interactive_httpd:
+        if not httpd_sent:
+            raise RuntimeError("final interactive HTTPd shell was not observed")
+        if not httpd_ready:
+            raise RuntimeError("background HTTPd did not leave ash responsive")
+        if not httpd_done_file.exists():
+            raise RuntimeError("host HTTP checks did not complete")
+        for forbidden in ("can't open '/dev/null'", "sh: can't fork",
+                          "exception: fail-stop"):
+            if forbidden in text:
+                raise RuntimeError(
+                    f"interactive HTTPd emitted an error: {forbidden}")
     return 0
 
 

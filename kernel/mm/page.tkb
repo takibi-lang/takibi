@@ -331,10 +331,6 @@ fn page_allocator_live_count() -> usize {
     return live;
 }
 
-fn page_allocator_reclaim_all() {
-    page_allocator_init();
-}
-
 // Number of times a page was released that was already free. Must stay 0:
 // the old scan-based allocator made such a double free silently
 // idempotent, so this was the first place kernel/ could observe one at

@@ -3834,14 +3834,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   (* GitHub issue #227 item 1 (prototype slice): the closed set of field
      names/types an `exception_entry`'s `frame` struct must have exactly --
      AArch64's own GPRs (x0..x30), the three EL0/EL1 exception-return
-     registers, all 32 SIMD/FP registers (as [u8;16] -- this language has
-     no 128-bit primitive type, and none is needed just to store bytes),
-     and FPSR/FPCR. Order-independent: codegen computes each register's
-     offset from whatever order the struct itself declares (packed,
-     sequential), not from this list's order. *)
+     registers, the EL0 thread pointer, all 32 SIMD/FP registers (as
+     [u8;16] -- this language has no 128-bit primitive type, and none is
+     needed just to store bytes), and FPSR/FPCR. Order-independent: codegen
+     computes each register's offset from whatever order the struct itself
+     declares (packed, sequential), not from this list's order. *)
   let aarch64_exception_frame_register_set =
     (List.init 31 (fun i -> (Printf.sprintf "x%d" i, Ast.TypeUsize)))
-    @ ["sp_el0", Ast.TypeUsize; "elr_el1", Ast.TypeUsize; "spsr_el1", Ast.TypeUsize]
+    @ ["sp_el0", Ast.TypeUsize; "elr_el1", Ast.TypeUsize;
+       "spsr_el1", Ast.TypeUsize; "tpidr_el0", Ast.TypeUsize]
     @ (List.init 32 (fun i -> (Printf.sprintf "q%d" i, Ast.TypeArray (Ast.TypeU8, 16))))
     @ ["fpsr", Ast.TypeUsize; "fpcr", Ast.TypeUsize]
   in

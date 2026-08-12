@@ -2,6 +2,7 @@ bin
 busybox
 busybox-httpd
 cat
+dev
 echo
 etc
 hello.txt
@@ -23,6 +24,7 @@ bin
 busybox
 busybox-httpd
 cat
+dev
 echo
 etc
 hello.txt

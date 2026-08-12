@@ -27,7 +27,9 @@ use "kernel/arch/arm64/kernel/fpsimd_probe_extern.tkb";
 //
 // q0..q31 are [u8; 16]: this language has no 128-bit primitive type, and
 // storing 16 raw bytes needs none -- SPEC.md's own array-field support
-// already covers it exactly.
+// already covers it exactly. TPIDR_EL0 is process context too: musl derives
+// errno from it, so restoring an ash frame with its HTTPd child's thread
+// pointer sends errno writes into an unrelated mapping.
 struct packed ExceptionFrame {
     x0: usize; x1: usize; x2: usize; x3: usize; x4: usize; x5: usize;
     x6: usize; x7: usize; x8: usize; x9: usize; x10: usize; x11: usize;
@@ -43,7 +45,7 @@ struct packed ExceptionFrame {
     q20: [u8; 16]; q21: [u8; 16]; q22: [u8; 16]; q23: [u8; 16]; q24: [u8; 16];
     q25: [u8; 16]; q26: [u8; 16]; q27: [u8; 16]; q28: [u8; 16]; q29: [u8; 16];
     q30: [u8; 16]; q31: [u8; 16];
-    fpsr: usize; fpcr: usize;
+    fpsr: usize; fpcr: usize; tpidr_el0: usize;
 }
 
 // Current-EL-SPx IRQ entry (GitHub issue #187 originally; #223 widened the

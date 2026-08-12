@@ -2,8 +2,8 @@
  * the interrupted context uses this layout: EL0 sync (syscalls), Lower-EL
  * IRQ, and Current-EL-SPx IRQ. A saved SP_EL1 points at offset zero, and the
  * frame contains every architectural value the scheduler must preserve before
- * selecting a different context -- x0-x30, SP_EL0, ELR_EL1, SPSR_EL1, and the
- * FP/SIMD state q0-q31 + FPSR + FPCR.
+ * selecting a different context -- x0-x30, SP_EL0, ELR_EL1, SPSR_EL1,
+ * TPIDR_EL0, and the FP/SIMD state q0-q31 + FPSR + FPCR.
  *
  * The FP/SIMD half is not optional for any entry, including the Current-EL
  * one: kernel/arch/arm64/boot/entry.S enables FP/SIMD in CPACR_EL1 for
@@ -14,7 +14,7 @@
  * used to exist alongside this one; a second layout is exactly what let that
  * asymmetry go unnoticed, so there is deliberately only one now.
  */
-    .equ EXC_CONTEXT_SIZE,          0x320
+    .equ EXC_CONTEXT_SIZE,          0x330
     .equ EXC_CONTEXT_X0,            0x000
     .equ EXC_CONTEXT_X30,           0x0f0
     .equ EXC_CONTEXT_SP_EL0,        0x0f8
@@ -23,6 +23,7 @@
     .equ EXC_CONTEXT_Q0,            0x110
     .equ EXC_CONTEXT_FPSR,          0x310
     .equ EXC_CONTEXT_FPCR,          0x318
+    .equ EXC_CONTEXT_TPIDR_EL0,     0x320
 
 .macro EXC_CONTEXT_SAVE
     stp     x0, x1, [sp, #0x000]
@@ -65,6 +66,8 @@
     mrs     x10, fpcr
     str     x9, [sp, #EXC_CONTEXT_FPSR]
     str     x10, [sp, #EXC_CONTEXT_FPCR]
+    mrs     x9, tpidr_el0
+    str     x9, [sp, #EXC_CONTEXT_TPIDR_EL0]
 .endm
 
 /* GitHub issue #229: DAIF.I must be masked for the whole restore-and-eret
@@ -121,6 +124,8 @@
     ldr     x10, [sp, #EXC_CONTEXT_FPCR]
     msr     fpsr, x9
     msr     fpcr, x10
+    ldr     x9, [sp, #EXC_CONTEXT_TPIDR_EL0]
+    msr     tpidr_el0, x9
     ldp     x0, x1, [sp, #0x000]
     ldp     x2, x3, [sp, #0x010]
     ldp     x4, x5, [sp, #0x020]

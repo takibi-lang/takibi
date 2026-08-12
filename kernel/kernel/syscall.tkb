@@ -143,6 +143,8 @@ private let mut syscall_block_reason: ProcessWaitReason = ProcessWaitReason::Non
 // GitHub issue #244: wait4()'s own x1 (status pointer), stashed across the
 // block/wake gap -- see kernel_syscall_wait4_deliver()'s own comment.
 private let mut syscall_wait4_status_ptr: usize;
+enum UartBlockDelivery: u8 { Scalar; Read; }
+private let mut syscall_uart_block_delivery: [UartBlockDelivery; PROCESS_CONTEXT_MAX];
 private let mut syscall_connected_fixture_pending: bool;
 // Test-driver-controlled foreground-server lifecycle. This is process and
 // socket state only: the syscall layer does not identify an application or
@@ -152,6 +154,10 @@ private let mut syscall_foreground_server_active: bool;
 private let mut syscall_foreground_server_exit_count_start: usize;
 private let mut syscall_foreground_server_completed_children: usize;
 private let mut syscall_foreground_server_reaped_pages: usize;
+// Set only for the terminal demo shell launched after the bounded suite has
+// completed. Its direct HTTPd child is a normal daemon even though that shell
+// occupies PID 1, which otherwise identifies the bounded init.sh fixture.
+private let mut syscall_interactive_httpd_shell: bool;
 private let mut syscall_exec_pending: bool;
 private let mut syscall_exec_argc: usize;
 private let mut syscall_exec_argv: [u8; 512];
@@ -159,11 +165,12 @@ private let mut syscall_exec_path: [u8; 256];
 
 must_use variant SyscallPathResult { Fault; Invalid; Name(usize); }
 
-fn kernel_syscall_foreground_server_start() {
-    // The preceding init.sh fixture has completed all of its socket I/O
-    // before starting HTTPD. Reinitialize only reusable TCP/socket scratch
-    // state; unlike kernel_syscall_process_configure(), this must not clear
-    // PID 1's descriptors or the HTTPD child's clone-reap record.
+fn kernel_syscall_daemon_start() {
+    // Reinitialize only reusable TCP/socket scratch state; unlike
+    // kernel_syscall_process_configure(), this must not clear the parent
+    // shell's descriptors or the HTTPD child's clone-reap record. Interactive
+    // HTTPd uses this same handoff, but does not opt into the bounded test
+    // lifecycle below.
     tcp_connection_pool_init();
     for connection_index: usize in 0..<TCP_CONNECTION_MAX {
         syscall_connection_open[connection_index] = false;
@@ -172,12 +179,27 @@ fn kernel_syscall_foreground_server_start() {
         syscall_inetd_response_length[connection_index] = 0;
     }
     syscall_inetd_mode = false;
+    syscall_connected_fixture_pending = false;
+    syscall_foreground_server_pending = false;
+    syscall_foreground_server_active = false;
+}
+
+fn kernel_syscall_foreground_server_start() {
+    kernel_syscall_daemon_start();
     syscall_foreground_server_pending = true;
     syscall_foreground_server_active = true;
     syscall_foreground_server_exit_count_start =
         kernel_process_child_exit_count();
     syscall_foreground_server_completed_children = 0;
     syscall_foreground_server_reaped_pages = 0;
+}
+
+fn kernel_syscall_interactive_httpd_shell_start() {
+    syscall_interactive_httpd_shell = true;
+}
+
+fn kernel_syscall_interactive_httpd_shell_active() -> bool {
+    return syscall_interactive_httpd_shell;
 }
 
 fn kernel_syscall_foreground_server_children() -> usize {
@@ -263,6 +285,10 @@ fn kernel_syscall_file_is_open(fd: usize) -> bool {
         UnifiedFileResult::Missing => { return false; }
         UnifiedFileResult::Found(handle) => { return true; }
     }
+}
+
+fn kernel_syscall_terminal_is_open(fd: usize) -> bool {
+    return unified_terminal_is_open(kernel_syscall_process_slot(), fd);
 }
 
 fn kernel_syscall_file_readable(fd: usize) -> bool {
@@ -355,6 +381,10 @@ fn kernel_syscall_process_configure_current(
 
 fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     unified_fd_table_init();
+    match unified_terminal_stdio_open(0) {
+        UnifiedFdResult::Invalid => {}
+        UnifiedFdResult::Ok => {}
+    }
     match unified_process_heap_range_configure(0, heap_start, heap_limit) {
         UnifiedFdResult::Invalid => {}
         UnifiedFdResult::Ok => {}
@@ -366,6 +396,10 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_close_calls = 0;
     syscall_exec_pending = false;
     syscall_exec_argc = 0;
+    syscall_interactive_httpd_shell = false;
+    for process_slot: usize in 0..<PROCESS_CONTEXT_MAX {
+        syscall_uart_block_delivery[process_slot] = UartBlockDelivery::Scalar;
+    }
     for path_index: usize in 0..<256 { syscall_exec_path[path_index] = 0; }
     tcp_connection_pool_init();
     for connection_index: usize in 0..<TCP_CONNECTION_MAX {
@@ -531,6 +565,31 @@ fn kernel_connected_fd_duplicate(old_fd: usize, new_fd: usize) -> bool {
         }
     }
     return false;
+}
+
+// Keep ordinary file/terminal descriptor duplication separate from connected
+// socket ownership. dup3 uses this path when replacing a standard descriptor
+// with another non-socket object.
+fn kernel_regular_fd_duplicate(old_fd: usize, new_fd: usize) -> bool {
+    if (old_fd >= PROCESS_FD_MAX || new_fd >= PROCESS_FD_MAX ||
+        (kernel_syscall_terminal_is_open(old_fd) == false &&
+         kernel_syscall_file_is_open(old_fd) == false &&
+         kernel_syscall_directory_is_open(old_fd) == false)) {
+        return false;
+    }
+    if (old_fd == new_fd) { return true; }
+    if (kernel_syscall_terminal_is_open(new_fd) ||
+        kernel_syscall_file_is_open(new_fd) ||
+        kernel_syscall_directory_is_open(new_fd)) {
+        match unified_fd_close(kernel_syscall_process_slot(), new_fd) {
+            UnifiedFdResult::Invalid => { return false; }
+            UnifiedFdResult::Ok => {}
+        }
+    }
+    match unified_fd_duplicate(kernel_syscall_process_slot(), old_fd, new_fd) {
+        UnifiedFdResult::Invalid => { return false; }
+        UnifiedFdResult::Ok => { return true; }
+    }
 }
 
 fn kernel_connection_fd_identity(fd: usize) -> usize {
@@ -819,7 +878,9 @@ must_use variant ReadSegmentResult { Errno(usize); Read(usize); }
 // done here.
 fn syscall_writev_segment(fd: usize, address: usize, length: usize)
         -> WriteSegmentResult {
-    if (fd != 1 && fd != 2) { return WriteSegmentResult::Errno(LINUX_EBADF); }
+    if (kernel_syscall_terminal_is_open(fd) == false) {
+        return WriteSegmentResult::Errno(LINUX_EBADF);
+    }
     if (length == 0) { return WriteSegmentResult::Written(0); }
     match user_range_check(kernel_process_current_root(), address, length, UserAccessMode::Read) {
         UserRangeResult::Fault => {
@@ -925,7 +986,7 @@ fn kernel_uart_rx_pending() -> bool {
 }
 
 fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
-    if (fd == 0) {
+    if (fd == 0 && kernel_syscall_terminal_is_open(fd)) {
         if (kernel_uart_rx_pending()) { return (true, POLLIN); }
         return (true, 0);
     }
@@ -944,7 +1005,8 @@ fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
             }
         }
     }
-    if (fd == 1 || fd == 2 || kernel_syscall_file_is_open(fd)) {
+    if (kernel_syscall_terminal_is_open(fd) ||
+        kernel_syscall_file_is_open(fd)) {
         return (true, 0);
     }
     return (false, POLLNVAL);
@@ -1016,7 +1078,25 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
                 enable_irq();
                 syscall_read_uart_waits = syscall_read_uart_waits + 1;
                 if (syscall_read_uart_waits == 1) {
-                    kernel_boot_log("\ninteractive shell: uart blocked\n");
+                    if (syscall_interactive_httpd_shell) {
+                        kernel_boot_log(
+                            "\ninteractive httpd shell: uart blocked\n");
+                    } else {
+                        kernel_boot_log(
+                            "\ninteractive shell: uart blocked\n");
+                    }
+                }
+                if (kernel_process_current_has_live_child()) {
+                    let process_slot: usize = kernel_syscall_process_slot();
+                    if (process_slot >= 0 &&
+                        process_slot < PROCESS_CONTEXT_MAX) {
+                        let slot: {0..<PROCESS_CONTEXT_MAX as usize} =
+                            process_slot;
+                        syscall_uart_block_delivery[slot] =
+                            UartBlockDelivery::Read;
+                        syscall_block_reason = ProcessWaitReason::UartRx;
+                        return SyscallAction::Block;
+                    }
                 }
                 return SyscallAction::WaitUart;
             }
@@ -1155,7 +1235,7 @@ fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize,
         // wait4() path reaches here, which is why the synchronous
         // already-exited path (correct address space, current is the parent)
         // never showed this.
-        address_space_activate_root(parent_slot);
+        process_image_activate_root(parent_slot);
         match user_range_check(address_space_root_for_slot(parent_slot), syscall_wait4_status_ptr, 4, UserAccessMode::Write) {
             UserRangeResult::Fault => {
                 el0_context_set_x0(frame_sp, LINUX_EFAULT);
@@ -1176,6 +1256,46 @@ fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize,
     el0_context_set_x0(frame_sp, reaped_pid);
 }
 
+must_use variant KernelUartDeliveryResult { Consumed; RetryRead; }
+
+// A blocked Linux read(0, buf, ...) must retry its SVC after the IRQ places
+// the byte in the kernel UART ring; only the Takibi scalar wait consumes the
+// byte directly into x0. Keeping the IRQ path away from user memory also
+// preserves its no-unsafe effect contract.
+fn kernel_syscall_uart_deliver(frame_sp: usize, process_slot: usize,
+                               value: usize)
+        -> KernelUartDeliveryResult !{interrupt} {
+    if (process_slot >= 0 && process_slot < PROCESS_CONTEXT_MAX) {
+        let slot: {0..<PROCESS_CONTEXT_MAX as usize} = process_slot;
+        match syscall_uart_block_delivery[slot] {
+            UartBlockDelivery::Scalar => {
+                el0_context_set_x0(frame_sp, value);
+                return KernelUartDeliveryResult::Consumed;
+            }
+            UartBlockDelivery::Read => {
+                syscall_uart_block_delivery[slot] =
+                    UartBlockDelivery::Scalar;
+                return KernelUartDeliveryResult::RetryRead;
+            }
+        }
+    }
+    el0_context_set_x0(frame_sp, LINUX_EFAULT);
+    return KernelUartDeliveryResult::Consumed;
+}
+
+fn kernel_syscall_uart_block_prepare(frame_sp: usize) {
+    let process_slot: usize = kernel_syscall_process_slot();
+    if (process_slot >= 0 && process_slot < PROCESS_CONTEXT_MAX) {
+        let slot: {0..<PROCESS_CONTEXT_MAX as usize} = process_slot;
+        match syscall_uart_block_delivery[slot] {
+            UartBlockDelivery::Scalar => {}
+            UartBlockDelivery::Read => {
+                el0_context_retry_syscall(frame_sp);
+            }
+        }
+    }
+}
+
 // Step 2/8: action 5 (.Lsyscall_block). Entered via a plain tail branch, not
 // `bl` -- there is no caller to return to, every path ends in a noreturn call.
 // GitHub issue #244: this single action-5 trampoline is now shared by two
@@ -1188,6 +1308,7 @@ fn kernel_syscall_block_return(frame_sp: usize) {
     if (syscall_block_reason == ProcessWaitReason::ChildExit) {
         next_sp = kernel_process_block_wait4(frame_sp);
     } else {
+        kernel_syscall_uart_block_prepare(frame_sp);
         next_sp = kernel_process_block_uart(frame_sp);
     }
     if (next_sp == 0) {
@@ -1260,6 +1381,9 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) {
     let stack: usize = kernel_process_child_exec_stack();
     el0_context_set_sp_el0(frame_sp, stack);
     el0_context_set_elr_el1(frame_sp, entry);
+    // exec starts a new runtime image. Do not expose the previous image's
+    // TLS base until that runtime installs its own TPIDR_EL0.
+    el0_context_set_tpidr_el0(frame_sp, 0);
     el0_context_set_x0(frame_sp, 0);
     el0_context_resume(frame_sp);
 }
@@ -1490,7 +1614,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
             }
         }
-        if (fd != 1 && fd != 2) { return SyscallAction::Resume(LINUX_EBADF); }
+        if (kernel_syscall_terminal_is_open(fd) == false) {
+            return SyscallAction::Resume(LINUX_EBADF);
+        }
         match user_range_check(kernel_process_current_root(), address, length, UserAccessMode::Read) {
             UserRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserRangeResult::Ok(range) => {
@@ -1508,9 +1634,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
 
     if (number == 56) {
         syscall_open_calls = syscall_open_calls + 1;
-        // openat(dirfd, pathname, flags): only absolute root paths are in
-        // scope, so dirfd is intentionally ignored. ext2_lookup_path()
-        // handles the rootfs's bounded nested directory layout.
+        // openat(dirfd, pathname, flags): absolute paths start at the ext2
+        // root; relative paths use an open directory fd (or AT_FDCWD, whose
+        // unsigned value lies outside the descriptor namespace).
         if (syscall_ext2_ready == false) {
             return SyscallAction::Resume(LINUX_EBADF);
         }
@@ -1530,17 +1656,19 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             lookup_inode = kernel_syscall_directory_inode(x0);
         }
         match ext2_lookup_path_from(
-                syscall_ext2_mount,
-                lookup_inode,
-                unsafe { path_view[path_start..<path_start + path_name] }) {
+            syscall_ext2_mount,
+            lookup_inode,
+            unsafe { path_view[path_start..<path_start + path_name] }) {
             Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
             Ext2LookupResult::NotFound => {
                 return SyscallAction::Resume(LINUX_ENOENT);
             }
             Ext2LookupResult::Found(inode_number) => {
                 let access_mode: usize = x2 & 3;
-                match unified_fd_alloc(kernel_syscall_process_slot(), 3) {
-                    UnifiedFdAllocResult::Full => { return SyscallAction::Resume(LINUX_EBADF); }
+                match unified_fd_alloc(kernel_syscall_process_slot(), 0) {
+                    UnifiedFdAllocResult::Full => {
+                        return SyscallAction::Resume(LINUX_EBADF);
+                    }
                     UnifiedFdAllocResult::Allocated(fd) => {
                         let inode_mode: usize = ext2_inode_mode(
                             syscall_ext2_mount, inode_number);
@@ -1929,7 +2057,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
               }
             }
         }
-        if (fd == 0) { return syscall_read_uart(address, requested); }
+        if (fd == 0 && kernel_syscall_terminal_is_open(fd)) {
+            return syscall_read_uart(address, requested);
+        }
         if (kernel_syscall_file_is_open(fd) == false ||
             kernel_syscall_file_readable(fd) == false) {
             return SyscallAction::Resume(LINUX_EBADF);
@@ -2001,7 +2131,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // Descriptor duplication remains real and shares the open-file offset.
         let fd: usize = x0;
         let command: usize = x1;
-        if (kernel_syscall_file_is_open(fd) == false) {
+        if (kernel_syscall_terminal_is_open(fd) == false &&
+            kernel_syscall_file_is_open(fd) == false &&
+            kernel_syscall_directory_is_open(fd) == false) {
             return SyscallAction::Resume(LINUX_EBADF);
         }
         if (command == LINUX_F_SETFD) {
@@ -2043,14 +2175,30 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 24) {
-        // dup3() forms exactly the accepted-fd -> stdin -> stdout aliases
-        // used by the traced daemon child.
+        // dup3() forms the accepted-fd -> stdin -> stdout aliases used by
+        // HTTPd and lets ash preserve its terminal on a private descriptor
+        // across background-job stdin redirection.
         let old_fd: usize = x0;
         let new_fd: usize = x1;
         if (x2 != 0 || old_fd == new_fd ||
-            kernel_connected_fd_is_open(old_fd) == false ||
-            (new_fd != 0 && new_fd != 1)) {
+            new_fd >= PROCESS_FD_MAX) {
             return SyscallAction::Resume(LINUX_EINVAL);
+        }
+        if (kernel_connected_fd_is_open(old_fd) == false) {
+            if (kernel_regular_fd_duplicate(old_fd, new_fd) == false) {
+                return SyscallAction::Resume(LINUX_EBADF);
+            }
+            return SyscallAction::Resume(new_fd);
+        }
+        if (kernel_syscall_terminal_is_open(new_fd) ||
+            kernel_syscall_file_is_open(new_fd) ||
+            kernel_syscall_directory_is_open(new_fd)) {
+            match unified_fd_close(kernel_syscall_process_slot(), new_fd) {
+                UnifiedFdResult::Invalid => {
+                    return SyscallAction::Resume(LINUX_EBADF);
+                }
+                UnifiedFdResult::Ok => {}
+            }
         }
         if (kernel_connected_fd_is_open(new_fd)) {
             if (kernel_connected_descriptor_release(new_fd) == false) {
@@ -2091,7 +2239,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
           }
         }
         syscall_close_calls = syscall_close_calls + 1;
-        if (kernel_syscall_file_is_open(x0) == false &&
+        if (kernel_syscall_terminal_is_open(x0) == false &&
+            kernel_syscall_file_is_open(x0) == false &&
             kernel_syscall_directory_is_open(x0) == false) {
             return SyscallAction::Resume(LINUX_EBADF);
         }
@@ -2189,6 +2338,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         } else if (syscall_connected_fixture_pending) {
             syscall_connected_fixture_pending = false;
             kernel_boot_log("linux socket: listener ready port=8080\n");
+        } else {
+            kernel_boot_log("interactive server: listener ready port=8080\n");
         }
         return SyscallAction::Resume(0);
     }

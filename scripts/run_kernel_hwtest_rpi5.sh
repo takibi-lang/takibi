@@ -19,6 +19,9 @@ HTTPD_LOG="$ARTIFACT_DIR/httpd-curl.log"
 HTTPD_BODY="$ARTIFACT_DIR/httpd-body.actual"
 SECOND_HTTPD_LOG="$ARTIFACT_DIR/httpd-curl-second.log"
 SECOND_HTTPD_BODY="$ARTIFACT_DIR/httpd-body-second.actual"
+INTERACTIVE_ARP_LOG="$ARTIFACT_DIR/interactive-httpd-arp.log"
+INTERACTIVE_HTTPD_READY="$ARTIFACT_DIR/interactive-httpd.ready"
+INTERACTIVE_HTTPD_DONE="$ARTIFACT_DIR/interactive-httpd.done"
 SOCKET_ACCEPT_LOG="$ARTIFACT_DIR/socket-accept.log"
 ETH_TEST_IFACE="${ETH_TEST_IFACE:-enp5s0}"
 ETH_TEST_SUBNET="${ETH_TEST_SUBNET:-192.168.20}"
@@ -26,6 +29,7 @@ ETH_TEST_MAC="${ETH_TEST_MAC:-02:00:20:00:00:02}"
 ETH_TEST_HOST_IP="${ETH_TEST_HOST_IP:-192.168.20.1}"
 
 mkdir -p "$ARTIFACT_DIR"
+rm -f "$INTERACTIVE_HTTPD_READY" "$INTERACTIVE_HTTPD_DONE"
 exec 9>"$ARTIFACT_DIR/runner.lock"
 if ! flock -n 9; then
     echo "FAIL kernel/rpi5: another hardware runner already owns $ARTIFACT_DIR" >&2
@@ -101,7 +105,10 @@ timeout 1 cat "$SERIAL_DEV" >/dev/null 2>&1 || true
 python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --port "$SERIAL_DEV" --log "$UART_LOG" --timeout 180 \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
-    --stop-marker 'resources: pages=0' --validate-ash &
+    --stop-marker 'resources: pages=0' \
+    --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
+    --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
+    --validate-ash &
 uart_driver_pid=$!
 cleanup() {
     if [ -n "${uart_driver_pid:-}" ]; then
@@ -302,6 +309,72 @@ if [ "$capture_complete" -eq 1 ]; then
 else
     echo "[kernel/rpi5] completion marker not observed before ${capture_deadline}s deadline" >&2
 fi
+
+# The bounded userspace suite is now complete and has recorded pages=0. The
+# same boot installs one final interactive ash; the UART driver backgrounds a
+# normal-lifetime HTTPd there and proves the shell still runs a builtin.
+interactive_ready=0
+for _wait in $(seq 1 600); do
+    if [ -f "$INTERACTIVE_HTTPD_READY" ]; then
+        interactive_ready=1
+        break
+    fi
+    if ! kill -0 "$uart_driver_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+if [ "$interactive_ready" -ne 1 ]; then
+    echo "FAIL kernel/rpi5: interactive background HTTPd did not become ready" >&2
+    exit 1
+fi
+
+echo "[kernel/rpi5] checking ARP while interactive HTTPd is listening"
+if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
+        ARP_TEST_REQUESTER_IP="$ETH_TEST_HOST_IP" \
+        ARP_TEST_OTHER_FIRST=1 \
+        python3 "$REPO_ROOT/scripts/eth_arp_reply_test.py" \
+        > >(tee "$INTERACTIVE_ARP_LOG") 2>&1; then
+    echo "FAIL kernel/rpi5: interactive HTTPd ARP check failed" >&2
+    exit 1
+fi
+
+for request_number in 1 2; do
+    interactive_body="$ARTIFACT_DIR/interactive-httpd-body-$request_number.actual"
+    interactive_log="$ARTIFACT_DIR/interactive-httpd-curl-$request_number.log"
+    echo "[kernel/rpi5] curling interactive background HTTPd ($request_number/2)"
+    interactive_httpd_ok=0
+    for _attempt in $(seq 1 20); do
+        if curl --silent --show-error --fail \
+                --interface "$ETH_TEST_IFACE" --noproxy '*' \
+                --connect-timeout 5 --max-time 10 \
+                --output "$interactive_body" \
+                "http://${ETH_TEST_SUBNET}.2:8080/" 2>"$interactive_log"; then
+            if cmp -s "$REPO_ROOT/kernel/tests/ext2/index.html" \
+                    "$interactive_body"; then
+                interactive_httpd_ok=1
+                break
+            fi
+            echo 'unexpected response body' >"$interactive_log"
+            break
+        fi
+        sleep 0.25
+    done
+    if [ "$interactive_httpd_ok" -ne 1 ]; then
+        echo "FAIL kernel/rpi5: interactive HTTPd curl $request_number failed (see $interactive_log)" >&2
+        exit 1
+    fi
+done
+touch "$INTERACTIVE_HTTPD_DONE"
+uart_driver_status=0
+wait "$uart_driver_pid" || uart_driver_status=$?
+uart_driver_pid=""
+if [ "$uart_driver_status" -ne 0 ]; then
+    echo "FAIL kernel/rpi5: interactive HTTPd UART validation failed" >&2
+    exit 1
+fi
+echo "[kernel/rpi5] interactive background HTTPd passed"
+
 cleanup
 trap - EXIT INT TERM HUP
 # The real UART echoes a shell command immediately after the prompt, so a

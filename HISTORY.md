@@ -15,6 +15,43 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-12: Interactive ash can keep a normal BusyBox HTTPd alive on QEMU and RPi5
+
+The maintained kernel suite now ends by launching a fresh interactive BusyBox
+ash from the ext2 rootfs and driving `/busybox-httpd httpd -f -p 8080 -h / &`
+through the UART. The parent shell stays runnable while its child waits for
+UART input, and the shell proves that it remains responsive after the daemon
+has published its listener. QEMU keeps one datagram peer open from the
+ordinary network checks through this final phase; RPi5 exercises the real
+Ethernet path. Both targets verify ARP plus two HTTP GETs against the
+background daemon in the same boot.
+
+This exposed three missing Unix-process details. Standard input/output/error
+are now explicit terminal descriptors, `/dev/null` is present in the ext2
+fixture, and dup3 can duplicate ordinary descriptors as well as accepted TCP
+connections. This lets ash preserve its terminal on fd 3 before its normal
+background-job stdin redirection. The descriptor and shared-object pools are
+fixed at 16 entries for the current bounded scheduler model; the actual ash
+workload needs the larger namespace because it reserves a script descriptor
+at fd 10.
+
+The final daemon also exposed an independent context-switch bug. musl derives
+`errno` from `TPIDR_EL0`; after a child exec, restoring the parent frame while
+leaving the child's thread pointer live made the parent attempt an errno write
+into its read-only BusyBox mapping. `TPIDR_EL0` is now a required field of an
+AArch64 exception frame, is saved/restored by both generated and hand-written
+exception paths, is inherited by fork through the copied frame, and is reset
+before a new exec or initial image starts. The frame allocation is rounded to
+16-byte stack alignment. The compiler's exception-frame validation and
+code-generation test cover this register too.
+
+The final resource check no longer reinitializes the physical-page allocator:
+root page tables and growable-pool backing are intentionally persistent. It
+records the post-probe baseline instead, so the usual `resources: pages=0`
+line means that all transient workload pages returned to that stable baseline.
+
+### 2026-08-11: RPi5 USB rootfs WRITE(10) batching reached the 128-sector boundary
+
 ### 2026-08-11: RPi5 USB rootfs WRITE(10) batching reached the 128-sector boundary
 
 The RPi5 USB rootfs provision path was changed from one WRITE(10) per 512-byte
