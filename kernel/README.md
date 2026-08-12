@@ -332,7 +332,10 @@ each exactly against its `.expected` file -- the identical "one boot, many
 independent contracts" pattern `kernelcheck-rpi5` uses (see "Expected-file
 integration views" below), just without the SWD reset/load dance: QEMU's
 TCP-backed serial chardev is read by the shared pyserial driver. Thirty-one
-views currently pass, covering:
+views currently pass. The target then runs a separate ash smoke lane using
+the same pyserial driver and the shared `kernel/tests/common/ash/ash.stdin`
+and `ash.expected` fixtures; the RPi5 runner drives those fixtures during its
+one boot as well. The 31 views cover:
 
 - the full hardware-independent self-test bundle (FP/SIMD-across-IRQ, a
   real second-core PSCI bring-up, VM layout, user memory + root isolation,
