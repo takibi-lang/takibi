@@ -7,6 +7,7 @@ SERIAL_DEV="${RPI5_SERIAL_DEV:-$($REPO_ROOT/scripts/rpi5_uart_dev.sh)}"
 ELF="$REPO_ROOT/kernel/build/rpi5/kernel.elf"
 VIEW_DIR="$REPO_ROOT/kernel/tests/rpi5/views"
 COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
+ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
 ARTIFACT_DIR="${RPI5_KERNEL_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-rpi5}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 RESET_LOG="$ARTIFACT_DIR/reset.log"
@@ -99,7 +100,8 @@ timeout 1 cat "$SERIAL_DEV" >/dev/null 2>&1 || true
 # driver alive through the entire load; it owns both capture and ash input.
 python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --port "$SERIAL_DEV" --log "$UART_LOG" --timeout 180 \
-    --stop-marker 'resources: pages=0' &
+    --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
+    --stop-marker 'resources: pages=0' --validate-ash &
 uart_driver_pid=$!
 cleanup() {
     if [ -n "${uart_driver_pid:-}" ]; then
@@ -307,21 +309,6 @@ trap - EXIT INT TERM HUP
 # line. Views describe semantic output, not the interactive prompt; normalize
 # that prefix before projecting the shared capture.
 sed -e 's|^/ # ||' <"$UART_LOG" | tr -d '\r' >"$UART_LOG.normalized"
-
-# Ash smoke contract: keep this in the maintained hardware lane so the same
-# command sequence that exercises QEMU's socket client is also exercised on
-# the real UART. The multi-block fixture must expose its final entry, and an
-# applet error must fail the lane before view projection can hide it.
-for marker in 'busybox interactive shell exit: 0' 'repl-ok' 'entry-19'; do
-    if ! LC_ALL=C grep -aFq "$marker" "$UART_LOG.normalized"; then
-        echo "FAIL kernel/rpi5 ash smoke: missing UART marker: $marker" >&2
-        exit 1
-    fi
-done
-if LC_ALL=C grep -aEq '^ls: ' "$UART_LOG.normalized"; then
-    echo "FAIL kernel/rpi5 ash smoke: directory enumeration reported an ls error" >&2
-    exit 1
-fi
 
 # One boot, several independent views. Common views are supplemented by
 # platform-specific views; a platform file overrides a common file with the

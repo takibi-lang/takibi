@@ -39,6 +39,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
 VIEW_DIR="$REPO_ROOT/kernel/tests/qemu/views"
 COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
+ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
 ARTIFACT_DIR="${KERNEL_QEMU_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-qemu}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 PEER_LOG="$ARTIFACT_DIR/net-peer.log"
@@ -99,7 +100,9 @@ trap 'stop_qemu; exit 130' INT TERM HUP
 
 python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --port "socket://127.0.0.1:$SERIAL_PORT" --log "$UART_LOG" \
-    --timeout "$TIMEOUT_SECS" --stop-marker 'resources: pages=0' &
+    --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
+    --timeout "$TIMEOUT_SECS" --stop-marker 'resources: pages=0' \
+    --validate-ash &
 uart_driver_pid=$!
 
 # Host-side peer: drives ARP, ICMP, and the full TCP handshake/echo/close/
@@ -140,17 +143,6 @@ if [ ! -s "$UART_LOG" ]; then
     exit 1
 fi
 sed -e 's|^/ # ||' <"$UART_LOG" | tr -d '\r' >"$UART_LOG.normalized"
-
-for marker in 'busybox interactive shell exit: 0' 'repl-ok'; do
-    if ! LC_ALL=C grep -aFq "$marker" "$UART_LOG.normalized"; then
-        echo "FAIL kernel/qemu ash FIFO smoke: missing UART marker: $marker" >&2
-        exit 1
-    fi
-done
-if LC_ALL=C grep -aEq '^ls: ' "$UART_LOG.normalized"; then
-    echo "FAIL kernel/qemu ash FIFO smoke: directory enumeration reported an ls error" >&2
-    exit 1
-fi
 
 # One boot, several independent views -- see this file's header and
 # scripts/run_kernel_hwtest_rpi5.sh's own identical loop.

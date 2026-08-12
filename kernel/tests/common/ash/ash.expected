@@ -1,0 +1,5 @@
+interactive shell: uart blocked
+entry-19
+repl-ok
+busybox interactive shell exit: 0
+concurrency: parent progressed while child uart-blocked

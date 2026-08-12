@@ -1,0 +1,7 @@
+# The assignment absorbs the first byte that can be lost by the RP1 UART.
+x=; /bin/ls
+/bin/ls -a
+/bin/ls /bin
+/bin/ls /many
+echo repl-ok
+exit
