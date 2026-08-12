@@ -120,12 +120,35 @@ echo "[kernel/rpi5] kernel loaded in $((SECONDS - load_started))s; waiting for i
 # milestone. It sends input only after the kernel publishes the blocked
 # marker, proving a real UART block/wake cycle rather than prebuffered input.
 (
+    shell_step=0
     for _wait in $(seq 1 6000); do
-        if LC_ALL=C grep -aFq 'interactive shell: uart blocked' "$UART_LOG"; then
+        prompt_count="$(LC_ALL=C grep -aoF '/ # ' "$UART_LOG" | wc -l || true)"
+        if [ "$shell_step" -eq 0 ] &&
+           LC_ALL=C grep -aFq 'interactive shell: uart blocked' "$UART_LOG"; then
             # The RP1 UART can discard the first byte immediately after a
-            # host-side tty write. The leading assignment absorbs it without
-            # changing the following interactive command.
-            printf 'x=; echo repl-ok; exit\n' >"$SERIAL_DEV"
+            # host-side tty write. The leading assignment absorbs it.
+            printf 'x=; /bin/ls\n' >"$SERIAL_DEV"
+            shell_step=1
+        elif [ "$shell_step" -eq 1 ] &&
+             [ "$prompt_count" -ge 2 ]; then
+            printf '/bin/ls -a\n' >"$SERIAL_DEV"
+            shell_step=2
+        elif [ "$shell_step" -eq 2 ] && [ "$prompt_count" -ge 3 ]; then
+            printf '/bin/ls /bin\n' >"$SERIAL_DEV"
+            shell_step=3
+        elif [ "$shell_step" -eq 3 ] && [ "$prompt_count" -ge 4 ]; then
+            printf '/bin/ls /many\n' >"$SERIAL_DEV"
+            shell_step=4
+        elif [ "$shell_step" -eq 4 ] && [ "$prompt_count" -ge 5 ]; then
+            printf 'echo repl-ok\n' >"$SERIAL_DEV"
+            shell_step=5
+        elif [ "$shell_step" -eq 5 ] &&
+             LC_ALL=C grep -aFq 'repl-ok' "$UART_LOG" &&
+             [ "$prompt_count" -ge 6 ]; then
+            printf 'exit\n' >"$SERIAL_DEV"
+            shell_step=6
+        elif [ "$shell_step" -eq 6 ] &&
+             LC_ALL=C grep -aFq 'busybox interactive shell exit: 0' "$UART_LOG"; then
             exit 0
         fi
         sleep 0.01
@@ -337,6 +360,21 @@ fi
 cleanup
 trap - EXIT INT TERM HUP
 tr -d '\r' <"$UART_LOG" >"$UART_LOG.normalized"
+
+# Ash smoke contract: keep this in the maintained hardware lane so the same
+# command sequence that exercises QEMU's socket client is also exercised on
+# the real UART. The multi-block fixture must expose its final entry, and an
+# applet error must fail the lane before view projection can hide it.
+for marker in 'busybox interactive shell exit: 0' 'repl-ok' 'entry-19'; do
+    if ! LC_ALL=C grep -aFq "$marker" "$UART_LOG.normalized"; then
+        echo "FAIL kernel/rpi5 ash smoke: missing UART marker: $marker" >&2
+        exit 1
+    fi
+done
+if LC_ALL=C grep -aEq '^ls: ' "$UART_LOG.normalized"; then
+    echo "FAIL kernel/rpi5 ash smoke: directory enumeration reported an ls error" >&2
+    exit 1
+fi
 
 # One boot, several independent views. Common views are supplemented by
 # platform-specific views; a platform file overrides a common file with the

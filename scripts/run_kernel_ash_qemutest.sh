@@ -5,6 +5,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
+ARTIFACT_DIR="${KERNEL_QEMU_ASH_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-qemu-ash}"
+QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 SERIAL_PORT="${KERNEL_QEMU_ASH_SERIAL_PORT:-17774}"
 NETDEV_LOCAL_PORT="${KERNEL_QEMU_ASH_NETDEV_LOCAL_PORT:-17775}"
 NETDEV_REMOTE_PORT="${KERNEL_QEMU_ASH_NETDEV_REMOTE_PORT:-17776}"
@@ -14,6 +16,9 @@ if [ ! -f "$ELF" ] || [ ! -f "$EXT2_IMAGE" ]; then
     echo "error: kernel build products are missing; run 'make kernelbuild-qemu' first" >&2
     exit 1
 fi
+
+mkdir -p "$ARTIFACT_DIR"
+cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 
 QEMU_PID=""
 PEER_PID=""
@@ -35,7 +40,7 @@ qemu-system-aarch64 \
     -monitor none \
     -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=off" \
     -global virtio-mmio.force-legacy=on \
-    -drive "file=$EXT2_IMAGE,if=none,format=raw,id=vd0" \
+    -drive "file=$QEMU_EXT2_IMAGE,if=none,format=raw,id=vd0" \
     -device virtio-blk-device,drive=vd0 \
     -netdev "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$NETDEV_LOCAL_PORT,remote.type=inet,remote.host=127.0.0.1,remote.port=$NETDEV_REMOTE_PORT" \
     -device virtio-net-device,netdev=net0,mac=02:00:20:00:00:02,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off \

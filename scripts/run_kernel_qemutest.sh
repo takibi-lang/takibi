@@ -53,8 +53,8 @@ PEER_TIMEOUT_SECS="${KERNEL_QEMU_PEER_TIMEOUT:-60}"
 # Keep the maintained kernel lane away from the historical examples' QEMU
 # datagram ports. A stale or concurrent legacy runner on 17771/17772 can
 # otherwise consume frames and make unrelated kernel views fail.
-NETDEV_LOCAL_PORT="${KERNEL_QEMU_NETDEV_LOCAL_PORT:-17871}"
-NETDEV_REMOTE_PORT="${KERNEL_QEMU_NETDEV_REMOTE_PORT:-17872}"
+NETDEV_LOCAL_PORT="${KERNEL_QEMU_NETDEV_LOCAL_PORT:-18671}"
+NETDEV_REMOTE_PORT="${KERNEL_QEMU_NETDEV_REMOTE_PORT:-18672}"
 # kernel/platform/qemu/init.tkb's very last boot-log line before it parks in
 # `while (true) {}` -- see that file's tail.
 BOOT_DONE_MARKER="^resources: pages=0$"
@@ -105,6 +105,7 @@ trap 'stop_qemu; exit 130' INT TERM HUP
 uart_sender_pid=""
 (
     shell_sent=0
+    shell_done=0
     payload_sent=0
     for _wait in $(seq 1 "$TIMEOUT_SECS"); do
         if [ "$shell_sent" -eq 0 ] &&
@@ -112,13 +113,17 @@ uart_sender_pid=""
             printf 'x=; /bin/ls; /bin/ls -a; /bin/ls /bin; echo repl-ok; exit\n' >&8
             shell_sent=1
         fi
+        if [ "$shell_sent" -eq 1 ] &&
+             LC_ALL=C grep -aFq 'busybox interactive shell exit: 0' "$UART_LOG"; then
+            shell_done=1
+        fi
         if [ "$payload_sent" -eq 0 ] &&
            LC_ALL=C grep -aFq \
                'concurrency: parent progressed while child uart-blocked' "$UART_LOG"; then
             printf 'irqtest\n' >&8
             payload_sent=1
         fi
-        if [ "$shell_sent" -eq 1 ] && [ "$payload_sent" -eq 1 ]; then
+        if [ "$shell_done" -eq 1 ] && [ "$payload_sent" -eq 1 ]; then
             exit 0
         fi
         sleep 0.1
@@ -167,6 +172,17 @@ if [ ! -s "$UART_LOG" ]; then
     exit 1
 fi
 tr -d '\r' <"$UART_LOG" >"$UART_LOG.normalized"
+
+for marker in 'busybox interactive shell exit: 0' 'repl-ok'; do
+    if ! LC_ALL=C grep -aFq "$marker" "$UART_LOG.normalized"; then
+        echo "FAIL kernel/qemu ash FIFO smoke: missing UART marker: $marker" >&2
+        exit 1
+    fi
+done
+if LC_ALL=C grep -aEq '^ls: ' "$UART_LOG.normalized"; then
+    echo "FAIL kernel/qemu ash FIFO smoke: directory enumeration reported an ls error" >&2
+    exit 1
+fi
 
 # One boot, several independent views -- see this file's header and
 # scripts/run_kernel_hwtest_rpi5.sh's own identical loop.

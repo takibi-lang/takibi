@@ -35,7 +35,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelcheck-rpi5 kernelcheck-qemu kernelcheck-qemu-ash kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelcheck-rpi5 kernelcheck-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -384,7 +384,12 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'link /bin/busybox /bin/echo' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox /bin/ls' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox /echo' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/busybox links_count 8' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'mkdir /many' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'expand /many' $@.tmp >/dev/null 2>&1
+	for index in $$(seq -w 0 19); do \
+		debugfs -w -R "link /bin/busybox /many/entry-$$index" $@.tmp >/dev/null 2>&1; \
+	done
+	debugfs -w -R 'set_inode_field /bin/busybox links_count 28' $@.tmp >/dev/null 2>&1
 	e2fsck -fn $@.tmp >/dev/null
 	mv $@.tmp $@
 
@@ -515,9 +520,6 @@ kernelcheck-rpi5: kernelbuild-rpi5
 
 kernelcheck-qemu: kernelbuild-qemu
 	@bash scripts/run_kernel_qemutest.sh
-	@bash scripts/run_kernel_ash_qemutest.sh
-
-kernelcheck-qemu-ash: kernelbuild-qemu
 	@bash scripts/run_kernel_ash_qemutest.sh
 
 ## kernelsh-qemu: boot the standalone kernel and attach the current terminal

@@ -25,7 +25,7 @@ def main() -> int:
 
     connection.settimeout(0.5)
     output = bytearray()
-    command_sent = False
+    shell_step = 0
     try:
         while time.monotonic() < deadline:
             try:
@@ -35,14 +35,29 @@ def main() -> int:
             if not chunk:
                 break
             output.extend(chunk)
-            if (not command_sent and
+            prompt_count = output.count(b"/ # ")
+            if (shell_step == 0 and
                     b"interactive shell: uart blocked\n" in output):
-                connection.sendall(
-                    b"busybox; /bin/ls; /bin/ls -a; /bin/ls /bin; "
-                    b"echo repl-ok; exit\n"
-                )
-                command_sent = True
-            if (command_sent and
+                connection.sendall(b"/bin/ls\n")
+                shell_step = 1
+            elif (shell_step == 1 and
+                  prompt_count >= 2):
+                connection.sendall(b"/bin/ls -a\n")
+                shell_step = 2
+            elif shell_step == 2 and prompt_count >= 3:
+                connection.sendall(b"/bin/ls /bin\n")
+                shell_step = 3
+            elif shell_step == 3 and prompt_count >= 4:
+                connection.sendall(b"/bin/ls /many\n")
+                shell_step = 4
+            elif shell_step == 4 and prompt_count >= 5:
+                connection.sendall(b"echo repl-ok\n")
+                shell_step = 5
+            elif (shell_step == 5 and b"repl-ok" in output and
+                  prompt_count >= 6):
+                connection.sendall(b"exit\n")
+                shell_step = 6
+            if (shell_step == 6 and
                     b"busybox interactive shell exit: 0" in output and
                     b"concurrency: parent progressed while child uart-blocked" in output):
                 break
@@ -51,10 +66,10 @@ def main() -> int:
 
     text = output.decode("utf-8", errors="replace").replace("\r", "")
     print(text, end="")
-    if not command_sent:
+    if shell_step == 0:
         raise RuntimeError("ash readiness marker was not observed")
     required = (
-        "BusyBox",
+        "entry-19",
         "repl-ok",
         "busybox interactive shell exit: 0",
         "concurrency: parent progressed while child uart-blocked",
@@ -62,7 +77,7 @@ def main() -> int:
     missing = [marker for marker in required if marker not in text]
     if missing:
         raise RuntimeError("missing UART markers: " + ", ".join(missing))
-    if "ls: " in text:
+    if any(line.startswith("ls: ") for line in text.splitlines()):
         raise RuntimeError("directory enumeration command reported an ls error")
     return 0
 
