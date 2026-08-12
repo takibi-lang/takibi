@@ -2,6 +2,7 @@
 """Capture a kernel UART and drive the shared BusyBox ash smoke scenario."""
 
 import argparse
+import difflib
 import time
 
 import serial
@@ -76,10 +77,9 @@ def main() -> int:
                     connection.write((args.payload + "\n").encode("ascii"))
                     payload_sent = True
 
-                expected_seen = all(marker.encode("ascii") in output
-                                    for marker in expected)
                 if args.ash_only:
-                    if expected_seen and payload_sent:
+                    if (payload_sent and
+                            b"busybox interactive shell exit: 0" in output):
                         break
                 elif args.stop_marker.encode() in output:
                     break
@@ -88,10 +88,21 @@ def main() -> int:
 
     text = output.decode("utf-8", errors="replace").replace("\r", "")
     if args.validate_ash:
-        missing = [marker for marker in expected if marker not in text]
-        if missing:
-            raise RuntimeError("missing UART markers: " + ", ".join(missing))
-        if any(line.startswith("ls: ") for line in text.splitlines()):
+        lines = text.splitlines()
+        try:
+            start = lines.index("interactive shell: uart blocked") + 1
+            end = next(index for index in range(start, len(lines))
+                       if "busybox interactive shell exit: 0" in lines[index])
+        except (ValueError, StopIteration) as error:
+            raise RuntimeError("ash transcript boundaries were not observed") from error
+        actual = [line.removeprefix("/ # ") for line in lines[start:end + 1]]
+        if actual != expected:
+            diff = "".join(difflib.unified_diff(
+                [line + "\n" for line in expected],
+                [line + "\n" for line in actual],
+                fromfile=args.expected, tofile="ash.actual"))
+            raise RuntimeError("ash output differs from expected:\n" + diff)
+        if any(line.startswith("ls: ") for line in actual):
             raise RuntimeError("directory enumeration command reported an ls error")
     return 0
 
