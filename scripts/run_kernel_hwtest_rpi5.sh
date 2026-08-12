@@ -38,13 +38,16 @@ if [ ! -f "$ELF" ]; then
     echo "error: kernel ELF not found: $ELF" >&2
     exit 1
 fi
+if ! python3 -c 'import serial' >/dev/null 2>&1; then
+    echo "error: pyserial is required; install it with: sudo apt-get install python3-serial" >&2
+    exit 1
+fi
 
 # A killed test runner cannot execute its EXIT trap. In that case its
-# background `cat SERIAL_DEV` survives under PID 1 and competes with the next
-# run for bytes from the same tty; each reader then receives only fragments,
-# and the orphan can also keep writing into a truncated uart.log at its old
-# file offset. Remove only this script's exact, same-user orphan shape. Never
-# take the device away from an interactive terminal or another program.
+# background pyserial driver can survive under PID 1 and compete with the next
+# run for bytes from the same tty; each reader then receives only fragments.
+# Remove only this script's exact, same-user orphan shape. Never take the
+# device away from an interactive terminal or another program.
 for holder_pid in $(fuser "$SERIAL_DEV" 2>/dev/null || true); do
     [ -r "/proc/$holder_pid/cmdline" ] || continue
     if [ "$(stat -c %u "/proc/$holder_pid" 2>/dev/null || echo -1)" != "$(id -u)" ]; then
@@ -52,9 +55,17 @@ for holder_pid in $(fuser "$SERIAL_DEV" 2>/dev/null || true); do
         exit 1
     fi
     mapfile -d '' -t holder_argv <"/proc/$holder_pid/cmdline"
-    if [ "${#holder_argv[@]}" -eq 2 ] &&
+    holder_cmdline="$(tr '\0' ' ' <"/proc/$holder_pid/cmdline")"
+    stale_driver=0
+    if [[ "$holder_cmdline" == *run_kernel_uart_driver.py* &&
+          "$holder_cmdline" == *"--port $SERIAL_DEV"* ]]; then
+        stale_driver=1
+    elif [ "${#holder_argv[@]}" -eq 2 ] &&
             [ "${holder_argv[0]##*/}" = cat ] &&
-            [ "${holder_argv[1]}" = "$SERIAL_DEV" ] &&
+            [ "${holder_argv[1]}" = "$SERIAL_DEV" ]; then
+        stale_driver=1
+    fi
+    if [ "$stale_driver" -eq 1 ] &&
             [ "$(awk '/^PPid:/{print $2}' "/proc/$holder_pid/status" 2>/dev/null || echo -1)" = 1 ]; then
         kill "$holder_pid"
         for _wait in $(seq 1 100); do
@@ -84,24 +95,17 @@ fi
 timeout 1 cat "$SERIAL_DEV" >/dev/null 2>&1 || true
 
 : >"$UART_LOG"
-# SWD load time grows with embedded initramfs images. Keep the reader alive
-# through the entire load instead of imposing a deadline that can expire
-# before the CPU is resumed; cleanup below bounds the post-load capture.
-cat "$SERIAL_DEV" >"$UART_LOG" 2>/dev/null &
-reader_pid=$!
-uart_sender_pid=
-shell_sender_pid=
+# SWD load time grows with embedded initramfs images. Keep the common pyserial
+# driver alive through the entire load; it owns both capture and ash input.
+python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
+    --port "$SERIAL_DEV" --log "$UART_LOG" --timeout 180 \
+    --stop-marker 'resources: pages=0' &
+uart_driver_pid=$!
 cleanup() {
-    if [ -n "$uart_sender_pid" ]; then
-        kill "$uart_sender_pid" 2>/dev/null || true
-        wait "$uart_sender_pid" 2>/dev/null || true
+    if [ -n "${uart_driver_pid:-}" ]; then
+        kill "$uart_driver_pid" 2>/dev/null || true
+        wait "$uart_driver_pid" 2>/dev/null || true
     fi
-    if [ -n "$shell_sender_pid" ]; then
-        kill "$shell_sender_pid" 2>/dev/null || true
-        wait "$shell_sender_pid" 2>/dev/null || true
-    fi
-    kill "$reader_pid" 2>/dev/null || true
-    wait "$reader_pid" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM HUP
 
@@ -113,49 +117,6 @@ if ! "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$ELF" >"$LOADER_LOG" 2>&1; then
     exit 1
 fi
 echo "[kernel/rpi5] kernel loaded in $((SECONDS - load_started))s; waiting for integration completion"
-
-# Issue #205: ash's read builtin issues ppoll() before read(0). Start this
-# watcher before the sequential network checks below: the kernel can reach
-# the shell wait while the host is still exercising an earlier network
-# milestone. It sends input only after the kernel publishes the blocked
-# marker, proving a real UART block/wake cycle rather than prebuffered input.
-(
-    shell_step=0
-    for _wait in $(seq 1 6000); do
-        prompt_count="$(LC_ALL=C grep -aoF '/ # ' "$UART_LOG" | wc -l || true)"
-        if [ "$shell_step" -eq 0 ] &&
-           LC_ALL=C grep -aFq 'interactive shell: uart blocked' "$UART_LOG"; then
-            # The RP1 UART can discard the first byte immediately after a
-            # host-side tty write. The leading assignment absorbs it.
-            printf 'x=; /bin/ls\n' >"$SERIAL_DEV"
-            shell_step=1
-        elif [ "$shell_step" -eq 1 ] &&
-             [ "$prompt_count" -ge 2 ]; then
-            printf '/bin/ls -a\n' >"$SERIAL_DEV"
-            shell_step=2
-        elif [ "$shell_step" -eq 2 ] && [ "$prompt_count" -ge 3 ]; then
-            printf '/bin/ls /bin\n' >"$SERIAL_DEV"
-            shell_step=3
-        elif [ "$shell_step" -eq 3 ] && [ "$prompt_count" -ge 4 ]; then
-            printf '/bin/ls /many\n' >"$SERIAL_DEV"
-            shell_step=4
-        elif [ "$shell_step" -eq 4 ] && [ "$prompt_count" -ge 5 ]; then
-            printf 'echo repl-ok\n' >"$SERIAL_DEV"
-            shell_step=5
-        elif [ "$shell_step" -eq 5 ] &&
-             LC_ALL=C grep -aFq 'repl-ok' "$UART_LOG" &&
-             [ "$prompt_count" -ge 6 ]; then
-            printf 'exit\n' >"$SERIAL_DEV"
-            shell_step=6
-        elif [ "$shell_step" -eq 6 ] &&
-             LC_ALL=C grep -aFq 'busybox interactive shell exit: 0' "$UART_LOG"; then
-            exit 0
-        fi
-        sleep 0.01
-    done
-    exit 1
-) &
-shell_sender_pid=$!
 
 # The kernel holds its affine RX readiness capability while waiting for one
 # real ARP request. Exercise the wire path immediately after resume; keep the
@@ -208,24 +169,6 @@ if [ "$userspace_ready" -ne 1 ]; then
     echo "FAIL kernel/rpi5: kernel never reached the userspace-fixture readiness marker (see $UART_LOG)" >&2
     exit 1
 fi
-
-# Watch concurrently with the connected-I/O client: the child reaches its
-# UART wait immediately after that socket exchange. Do not send input merely
-# because Blocked is visible: wait until the kernel has also verified that the
-# parent completed its compute section while that child remained Blocked.
-(
-    for _wait in $(seq 1 6000); do
-        if LC_ALL=C grep -aFq \
-                'concurrency: parent progressed while child uart-blocked' \
-                "$UART_LOG"; then
-            printf 'irqtest\n' >"$SERIAL_DEV"
-            exit 0
-        fi
-        sleep 0.01
-    done
-    exit 1
-) &
-uart_sender_pid=$!
 
 echo "[kernel/rpi5] checking userspace connected I/O on port 8080"
 socket_accept_ok=0

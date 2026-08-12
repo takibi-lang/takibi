@@ -7,9 +7,9 @@
 # common/views/*.filter plus qemu/views/*.filter are compared exactly
 # against their matching *.expected files. Platform-specific files override
 # common files with the same name. Unlike the RPi5 runner, this needs no SWD/reset/
-# external-serial-device machinery at all -- QEMU's own -nographic pipes
-# the guest UART directly to this process's stdout, so capture is a
-# single `timeout N qemu-system-aarch64 ... -kernel ... > uart.log` call.
+# external-serial-device machinery at all -- QEMU's TCP serial chardev is
+# opened by the same pyserial driver used for the RPi5 UART, so capture and
+# ash input share one transport implementation.
 #
 # -m 1024: kernel/mm/page.tkb's BOOT_PAGE_COUNT reserves ~800 MiB of real
 # physical page content starting right after the kernel image. QEMU
@@ -42,9 +42,9 @@ COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ARTIFACT_DIR="${KERNEL_QEMU_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-qemu}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 PEER_LOG="$ARTIFACT_DIR/net-peer.log"
-UART_INPUT="$ARTIFACT_DIR/uart-input"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
+SERIAL_PORT="${KERNEL_QEMU_SERIAL_PORT:-18673}"
 # Safety net only: the run normally ends as soon as the boot's own final
 # marker (BOOT_DONE_MARKER below) appears, a few seconds in. This bound
 # only matters if the guest wedges before reaching it.
@@ -61,9 +61,6 @@ BOOT_DONE_MARKER="^resources: pages=0$"
 
 mkdir -p "$ARTIFACT_DIR"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
-rm -f "$UART_INPUT"
-mkfifo "$UART_INPUT"
-exec 8<>"$UART_INPUT"
 exec 9>"$ARTIFACT_DIR/runner.lock"
 if ! flock -n 9; then
     echo "FAIL kernel/qemu: another QEMU runner already owns $ARTIFACT_DIR" >&2
@@ -80,15 +77,15 @@ echo "[kernel/qemu] booting kernel.elf under QEMU"
 # final marker appears -- there is no clean-exit signal to wait for. It
 # also has to be backgrounded regardless, so the host-side network peer
 # below can talk to it while it runs.
-: >"$UART_LOG"
 timeout "$TIMEOUT_SECS" qemu-system-aarch64 \
-    -machine virt -cpu cortex-a53 -smp 2 -m 1024 -nographic \
+    -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
+    -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=off" \
     -global virtio-mmio.force-legacy=on \
     -drive "file=$QEMU_EXT2_IMAGE,if=none,format=raw,id=vd0" \
     -device virtio-blk-device,drive=vd0 \
     -netdev "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$NETDEV_LOCAL_PORT,remote.type=inet,remote.host=127.0.0.1,remote.port=$NETDEV_REMOTE_PORT" \
     -device virtio-net-device,netdev=net0,mac=02:00:20:00:00:02,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off \
-    -kernel "$ELF" <&8 >"$UART_LOG" 2>&1 &
+    -kernel "$ELF" >"$ARTIFACT_DIR/qemu.log" 2>&1 &
 QEMU_PID=$!
 stop_qemu() {
     if [ -n "${QEMU_PID:-}" ]; then
@@ -100,37 +97,10 @@ stop_qemu() {
 trap stop_qemu EXIT
 trap 'stop_qemu; exit 130' INT TERM HUP
 
-# interactive ash and the init.sh user_payload fixture both block in the UART
-# receive path. Feed each deterministic line after its own blocked marker.
-uart_sender_pid=""
-(
-    shell_sent=0
-    shell_done=0
-    payload_sent=0
-    for _wait in $(seq 1 "$TIMEOUT_SECS"); do
-        if [ "$shell_sent" -eq 0 ] &&
-           LC_ALL=C grep -aFq 'interactive shell: uart blocked' "$UART_LOG"; then
-            printf 'x=; /bin/ls; /bin/ls -a; /bin/ls /bin; echo repl-ok; exit\n' >&8
-            shell_sent=1
-        fi
-        if [ "$shell_sent" -eq 1 ] &&
-             LC_ALL=C grep -aFq 'busybox interactive shell exit: 0' "$UART_LOG"; then
-            shell_done=1
-        fi
-        if [ "$payload_sent" -eq 0 ] &&
-           LC_ALL=C grep -aFq \
-               'concurrency: parent progressed while child uart-blocked' "$UART_LOG"; then
-            printf 'irqtest\n' >&8
-            payload_sent=1
-        fi
-        if [ "$shell_done" -eq 1 ] && [ "$payload_sent" -eq 1 ]; then
-            exit 0
-        fi
-        sleep 0.1
-    done
-    exit 1
-) &
-uart_sender_pid=$!
+python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
+    --port "socket://127.0.0.1:$SERIAL_PORT" --log "$UART_LOG" \
+    --timeout "$TIMEOUT_SECS" --stop-marker 'resources: pages=0' &
+uart_driver_pid=$!
 
 # Host-side peer: drives ARP, ICMP, and the full TCP handshake/echo/close/
 # reconnect sequence kernel_tcp_echo_check() counts before returning
@@ -159,19 +129,17 @@ for _wait in $(seq 1 "$TIMEOUT_SECS"); do
     sleep 1
 done
 stop_qemu
-if [ -n "$uart_sender_pid" ]; then
-    kill "$uart_sender_pid" 2>/dev/null || true
-    wait "$uart_sender_pid" 2>/dev/null || true
+if [ -n "${uart_driver_pid:-}" ]; then
+    kill "$uart_driver_pid" 2>/dev/null || true
+    wait "$uart_driver_pid" 2>/dev/null || true
 fi
-exec 8>&-
-rm -f "$UART_INPUT"
 trap - EXIT INT TERM HUP
 
 if [ ! -s "$UART_LOG" ]; then
     echo "error: no UART output captured -- kernel did not boot" >&2
     exit 1
 fi
-tr -d '\r' <"$UART_LOG" >"$UART_LOG.normalized"
+sed -e 's|^/ # ||' <"$UART_LOG" | tr -d '\r' >"$UART_LOG.normalized"
 
 for marker in 'busybox interactive shell exit: 0' 'repl-ok'; do
     if ! LC_ALL=C grep -aFq "$marker" "$UART_LOG.normalized"; then

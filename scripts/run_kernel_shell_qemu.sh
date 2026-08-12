@@ -23,8 +23,7 @@ echo "[kernel/qemu] interactive UART session (Ctrl-] exits miniterm)"
 QEMU_LAUNCH_NS="$(date +%s%N)"
 QEMU_COMMAND=(
     qemu-system-aarch64 \
-    -machine virt -cpu cortex-a53 -smp 2 -m 1024 -nographic \
-    -monitor none \
+    -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
     -serial "tcp:127.0.0.1:$QEMU_SERIAL_PORT,server=on,wait=off" \
     -global virtio-mmio.force-legacy=on \
     -drive "file=$EXT2_IMAGE,if=none,format=raw,id=vd0" \

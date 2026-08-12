@@ -311,8 +311,9 @@ make kernelcheck-qemu  # build, boot, drive a host-side network peer, and verify
 ```
 
 Both need `qemu-system-aarch64` (part of the compiler dependencies listed in
-the top-level README) but nothing else -- no board, no SWD, no NIC, or
-raw-socket privileges. To use the BusyBox ash prompt from a terminal, run
+the top-level README) and Python's `pyserial` package for the shared UART
+driver, but no board, no SWD, no NIC, or raw-socket privileges. To use the
+BusyBox ash prompt from a terminal, run
 `make kernelsh-qemu`. It launches QEMU with the complete virtio block/network
 configuration and connects its UART to pyserial miniterm over a local TCP
 chardev; this preserves LF input and local echo. Press Ctrl-] to leave the
@@ -330,7 +331,7 @@ transcript through the common views plus the QEMU-specific views, comparing
 each exactly against its `.expected` file -- the identical "one boot, many
 independent contracts" pattern `kernelcheck-rpi5` uses (see "Expected-file
 integration views" below), just without the SWD reset/load dance: QEMU's
-own `-nographic` pipes the guest UART directly to the host process. Thirty-one
+TCP-backed serial chardev is read by the shared pyserial driver. Thirty-one
 views currently pass, covering:
 
 - the full hardware-independent self-test bundle (FP/SIMD-across-IRQ, a

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Automated BusyBox ash integration over QEMU's TCP-attached UART.
+# Automated BusyBox ash integration over the shared pyserial UART driver.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,8 +36,7 @@ trap cleanup EXIT INT TERM HUP
 
 echo "[kernel/qemu] starting automated ash UART test"
 qemu-system-aarch64 \
-    -machine virt -cpu cortex-a53 -smp 2 -m 1024 -nographic \
-    -monitor none \
+    -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
     -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=off" \
     -global virtio-mmio.force-legacy=on \
     -drive "file=$QEMU_EXT2_IMAGE,if=none,format=raw,id=vd0" \
@@ -52,6 +51,8 @@ python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" "$NETDEV_LOCAL_PORT" "$NETDEV
     >"${KERNEL_QEMU_ASH_NETWORK_LOG:-/tmp/takibi-kernel-qemu-ash-network.log}" 2>&1 &
 PEER_PID=$!
 
-python3 "$REPO_ROOT/scripts/run_kernel_ash_qemutest.py" \
-    --port "$SERIAL_PORT" --timeout "$TIMEOUT_SECS"
+python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
+    --port "socket://127.0.0.1:$SERIAL_PORT" \
+    --log "${KERNEL_QEMU_ASH_UART_LOG:-$ARTIFACT_DIR/uart.log}" \
+    --timeout "$TIMEOUT_SECS" --ash-only --validate-ash
 echo "PASS kernel/qemu ash TCP integration"

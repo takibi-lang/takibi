@@ -523,7 +523,7 @@ kernelcheck-qemu: kernelbuild-qemu
 	@bash scripts/run_kernel_ash_qemutest.sh
 
 ## kernelsh-qemu: boot the standalone kernel and attach the current terminal
-## to its UART. Exit QEMU with Ctrl-a x (QEMU's standard -nographic escape).
+## to its TCP-backed UART console. Exit miniterm with Ctrl-].
 kernelsh-qemu: kernelbuild-qemu
 	@bash scripts/run_kernel_shell_qemu.sh
 
