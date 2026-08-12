@@ -122,22 +122,24 @@ make kernelsh-rpi5     # load RPi5 over SWD and use the Debug Probe UART as the 
 ```
 
 The two `kernelsh-*` targets are deliberately interactive and do not run the
-automated view suite. They do start the host-side network peer needed to keep
-the kernel's normal network initialization path from timing out; QEMU uses a
-fast peer mode, while RPi5 runs the existing physical-Ethernet checks. Both
-use pyserial's `miniterm`; on Debian/Ubuntu install it with `sudo apt-get
-install python3-serial`. Press Ctrl-] to leave either console.
+automated view suite. RPi5 starts the physical-Ethernet peer needed to keep
+the kernel's normal network initialization path from timing out. QEMU instead
+uses its user-mode network so that BusyBox httpd started at the ash prompt can
+be opened from the host browser. Both use pyserial's
+`miniterm`; on Debian/Ubuntu install it with `sudo apt-get install
+python3-serial`. Press Ctrl-] to leave either console.
 Exiting this way also restores the host terminal settings.
 
 The QEMU shell also reports the elapsed time from QEMU launch to the kernel's
 explicit `interactive shell: uart blocked` readiness marker. This is the
 point at which ash is waiting for input, rather than merely the point at which
-the QEMU process or UART socket exists. It starts the existing host-side
-network peer automatically, avoiding the kernel's normal protocol timeout
-while preserving the real network initialization path. Set
-`KERNEL_QEMU_SHELL_NETWORK_PEER=0` to reproduce the no-peer timeout behavior.
-The shell peer uses a fast mode that skips only the two negative TCP silence
-checks; `kernelcheck-qemu` continues to run the complete network fixture.
+the QEMU process or UART socket exists. Its user-mode network forwards
+`http://127.0.0.1:18080/` to the kernel's fixed `192.168.20.2:8080`; after
+the `interactive shell: uart blocked` marker, start BusyBox httpd with
+`/busybox-httpd httpd -f -p 8080 -h / &` and open that URL in Firefox. Set
+`KERNEL_QEMU_SHELL_HTTP_PORT` to choose another host port. The
+automated `kernelcheck-qemu` lane remains on its deterministic raw-Ethernet
+peer and continues to run the complete network fixture.
 `kernelsh-rpi5` first performs the existing resident-image reset. The SD card
 must have booted this project's `jtag_stub.img` at least once; subsequent
 shell/check runs may reset and replace an already resident Takibi payload

@@ -131,21 +131,48 @@ fn kernel_test_platform_network() {
             match kernel_arp_reply_once(link_ready) {
                 KernelArpResult::TimedOut(arp_ready) => {
                     kernel_boot_log("virtio net: arp timeout\n");
-                    net_shutdown(arp_ready);
+                    // The ARP/ICMP/TCP exchange above is a bounded boot
+                    // diagnostic, not a prerequisite for serving later
+                    // socket traffic. QEMU's interactive user-mode network
+                    // has no raw fixture peer at this point, but it will
+                    // deliver ARP and TCP once a user starts httpd from ash.
+                    // Keep the one RX capability for that real workload.
+                    match network_capability_install(arp_ready) {
+                        NetworkCapabilityInstallResult::Installed => {
+                            kernel_boot_log("virtio net: rx capability stored after arp timeout\n");
+                        }
+                        NetworkCapabilityInstallResult::AlreadyInstalled(incoming) => {
+                            net_shutdown(incoming);
+                        }
+                    }
                 }
                 KernelArpResult::Replied(arp_ready) => {
                     kernel_boot_log("virtio net: arp reply ok ip=192.168.20.2\n");
                     match kernel_icmp_reply_once(arp_ready) {
                         KernelIcmpResult::TimedOut(icmp_ready) => {
                             kernel_boot_log("virtio net: icmp timeout\n");
-                            net_shutdown(icmp_ready);
+                            match network_capability_install(icmp_ready) {
+                                NetworkCapabilityInstallResult::Installed => {
+                                    kernel_boot_log("virtio net: rx capability stored after icmp timeout\n");
+                                }
+                                NetworkCapabilityInstallResult::AlreadyInstalled(incoming) => {
+                                    net_shutdown(incoming);
+                                }
+                            }
                         }
                         KernelIcmpResult::Replied(icmp_ready) => {
                             kernel_boot_log("virtio net: icmp echo reply ok ip=192.168.20.2\n");
                             match kernel_tcp_echo_check(icmp_ready) {
                                 KernelTcpResult::TimedOut(tcp_ready) => {
                                     kernel_boot_log("virtio net: tcp timeout\n");
-                                    net_shutdown(tcp_ready);
+                                    match network_capability_install(tcp_ready) {
+                                        NetworkCapabilityInstallResult::Installed => {
+                                            kernel_boot_log("virtio net: rx capability stored after tcp timeout\n");
+                                        }
+                                        NetworkCapabilityInstallResult::AlreadyInstalled(incoming) => {
+                                            net_shutdown(incoming);
+                                        }
+                                    }
                                 }
                                 KernelTcpResult::Verified(tcp_ready) => {
                                     kernel_boot_log("virtio net: tcp handshake echo close reconnect ok\n");

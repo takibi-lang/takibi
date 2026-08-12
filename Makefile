@@ -527,8 +527,9 @@ kernelcheck-qemu: kernelbuild-qemu
 	@bash scripts/run_kernel_qemutest.sh
 	@bash scripts/run_kernel_ash_qemutest.sh
 
-## kernelsh-qemu: boot the standalone kernel and attach the current terminal
-## to its TCP-backed UART console. Exit miniterm with Ctrl-].
+## kernelsh-qemu: boot the standalone kernel, attach the current terminal to
+## its TCP-backed UART console, and forward localhost:18080 to guest httpd.
+## Exit miniterm with Ctrl-].
 kernelsh-qemu: kernelbuild-qemu
 	@bash scripts/run_kernel_shell_qemu.sh
 
