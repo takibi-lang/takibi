@@ -133,13 +133,41 @@ Exiting this way also restores the host terminal settings.
 The QEMU shell also reports the elapsed time from QEMU launch to the kernel's
 explicit `interactive shell: uart blocked` readiness marker. This is the
 point at which ash is waiting for input, rather than merely the point at which
-the QEMU process or UART socket exists. Its user-mode network forwards
-`http://127.0.0.1:18080/` to the kernel's fixed `192.168.20.2:8080`; after
-the `interactive shell: uart blocked` marker, start BusyBox httpd with
-`/busybox-httpd httpd -f -p 8080 -h / &` and open that URL in Firefox. Set
-`KERNEL_QEMU_SHELL_HTTP_PORT` to choose another host port. The
+the QEMU process or UART socket exists.
+
+### Publish a page from interactive ash
+
+Both shell targets provide the same BusyBox HTTPd command. Wait for the
+`interactive shell: uart blocked` marker and its `/ #` prompt, then run:
+
+```sh
+/busybox-httpd httpd -f -p 8080 -h / &
+```
+
+For QEMU, start the shell and open the forwarded loopback URL in a browser:
+
+```bash
+make kernelsh-qemu
+```
+
+Open `http://127.0.0.1:18080/` in Firefox. QEMU user-mode networking forwards
+that host port to the kernel's fixed `192.168.20.2:8080`; set
+`KERNEL_QEMU_SHELL_HTTP_PORT` to choose another host port. When the browser is
+outside the development container, forward that container port first. The
 automated `kernelcheck-qemu` lane remains on its deterministic raw-Ethernet
 peer and continues to run the complete network fixture.
+
+For RPi5, connect the host Ethernet interface as described in [Host Ethernet
+setup](#host-ethernet-setup), then start the shell:
+
+```bash
+make kernelsh-rpi5
+```
+
+Open `http://192.168.20.2:8080/` in Firefox. The host interface must be on
+`192.168.20.1/24` (or use the corresponding configured subnet); the default
+kernel address is `192.168.20.2`.
+
 `kernelsh-rpi5` first performs the existing resident-image reset. The SD card
 must have booted this project's `jtag_stub.img` at least once; subsequent
 shell/check runs may reset and replace an already resident Takibi payload
