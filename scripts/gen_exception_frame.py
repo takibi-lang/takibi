@@ -52,7 +52,21 @@ def parse_struct_fields(tkb_path):
     return fields
 
 def calculate_offsets(fields):
-    """Calculate byte offsets for each field, respecting alignment rules."""
+    """Calculate byte offsets for each field: packed, sequential in struct
+    declaration order, matching lib/llvm_gen.ml's exception_frame_offsets
+    (the compiler's own codegen for `exception_entry`/`exception_restore`
+    .tkb declarations) field-for-field. That OCaml function does NOT
+    16-byte-align q0 mid-struct -- it only rounds the FINAL total up for
+    stack-pointer alignment -- because AArch64 `str`/`ldr` on a Q register
+    has no natural-alignment requirement, so there is no correctness reason
+    to insert padding before q0. An earlier version of this script added
+    that padding anyway "for safety"; it was a no-op for today's field set
+    (which already lands q0 on a 16-byte boundary by coincidence) but was a
+    real, if latent, divergence risk against the compiler's actual
+    algorithm for any future struct shape where the two would have computed
+    different offsets for the same fields. Keeping both implementations
+    doing the same simple, branch-free sum is what keeps that risk small.
+    """
     offsets = {}
     current_offset = 0
 
@@ -60,8 +74,6 @@ def calculate_offsets(fields):
         is_q_array = '[u8;' in field_type and '16' in field_type
 
         if is_q_array:
-            if name == 'q0' and current_offset % 16 != 0:
-                current_offset = ((current_offset + 15) // 16) * 16
             offsets[name] = current_offset
             current_offset += 16
         elif field_type == 'usize':
