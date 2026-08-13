@@ -364,8 +364,9 @@ The kernelcheck-oops-qemu target is a focused QEMU regression for the terminal
 exception path. GDB changes one ordinary EL0 instruction to BRK #0, then
 detaches; the kernel itself saves the Lower-EL exception frame, emits the
 UART oops report, retains CrashSnapshot, and parks the CPU. The test also
-uses scripts/kernel_crash_snapshot.gdb's read-only takibi-oops command to
-inspect that retained record. The helper reads the snapshot's fixed record
+sources the compiler-generated _build/kernel-crash-snapshot-layout.gdb and
+then scripts/kernel_crash_snapshot.gdb's read-only takibi-oops command to
+inspect that retained record. The helper reads the snapshot's generated layout
 only; it does not reproduce the exception-frame ABI.
 
 ### What this verifies

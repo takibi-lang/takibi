@@ -1284,6 +1284,30 @@ fn kernel_process_scheduler_probe() -> bool {
     return ok;
 }
 
+// Regression for the diagnostic ring itself. This runs only in the boot
+// self-test, then resets the process model again, so no artificial event can
+// appear in a later production fail-stop trace.
+fn kernel_process_crash_trace_ring_probe() -> bool {
+    kernel_process_execution_reset();
+    for event: usize in 1..<11 {
+        kernel_process_crash_trace_record(event, event + 100, event + 200);
+    }
+    let mut copied: [usize; KERNEL_CRASH_TRACE_WORDS];
+    let count: usize = kernel_process_crash_trace_copy(copied as *usize);
+    let mut ok: bool = count == KERNEL_CRASH_TRACE_EVENTS;
+    for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
+        let base: usize = item * 3;
+        let expected: usize = item + 3;
+        if (copied[base] != expected ||
+            copied[base + 1] != expected + 100 ||
+            copied[base + 2] != expected + 200) {
+            ok = false;
+        }
+    }
+    kernel_process_execution_reset();
+    return ok;
+}
+
 // The pinned Alpine BusyBox HTTPd uses clone(SIGCHLD, NULL, NULL, tls,
 // child_tid), i.e. fork semantics. The unused pointers carry no ownership
 // without their corresponding clone flags, so this first process-control

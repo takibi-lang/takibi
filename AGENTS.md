@@ -499,7 +499,7 @@ lib/
   llvm_gen.ml     -- LLVM IR generation and object file output
   use_resolver.ml -- resolves `use "path/to/file.tkb";` into the flat file list (issue #55)
 bin/
-  main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--forbid-trap] [--forbid-unsafe] [--version]`)
+  main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--forbid-trap] [--forbid-unsafe] [--emit-struct-layout <StructName>] [--version]`)
                      Multiple .tkb files are concatenated (flat global namespace) before compilation.
                      -g emits full DWARF debug info. QEMU/GDB source-level regression coverage lives in
                      examples/dwarf_debug and scripts/run_qemutest.sh; the PC-sampling profiler is a
@@ -867,8 +867,9 @@ size.
   allocation-free and recursively faults only into a minimal UART fallback plus park. Use
   kernelcheck-oops-qemu for the deterministic EL0-BRK regression; GDB injects the instruction
   and reads the retained object only, while the kernel produces the diagnostic. For an interactive
-  post-mortem, source scripts/kernel_crash_snapshot.gdb in gdb-multiarch and run takibi-oops;
-  it reads the fixed snapshot record rather than duplicating the ExceptionFrame ABI.
+  post-mortem, source _build/kernel-crash-snapshot-layout.gdb and then
+  scripts/kernel_crash_snapshot.gdb in gdb-multiarch and run takibi-oops; it reads the
+  compiler-generated snapshot layout rather than duplicating the ExceptionFrame ABI.
   **Known gap, not yet triggered by any current
   scenario:** `process_image_clone_vm_begin()` (the fork/clone path, as opposed to
   `process_image_map_current()`) never initializes root 1's demand-stack metadata

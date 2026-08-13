@@ -540,6 +540,11 @@ fn kernel_test_common_probes() {
     } else {
         kernel_boot_log("scheduler: failed\n");
     }
+    if (kernel_process_crash_trace_ring_probe()) {
+        kernel_boot_log("crash trace: ring wrap oldest-to-newest ok\n");
+    } else {
+        kernel_boot_log("crash trace: failed\n");
+    }
     if (growable_pool_probe()) {
         kernel_boot_log("growable pool: zero-start growth, cross-chunk data, generation-safe reuse, double-free counted, own ceiling ok\n");
     } else {

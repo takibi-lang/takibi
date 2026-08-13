@@ -1,4 +1,5 @@
 ^process table:
 ^fd table:
 ^scheduler:
+^crash trace:
 ^resources:

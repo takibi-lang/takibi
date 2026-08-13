@@ -9379,6 +9379,22 @@ let codegen_tests = [
        Alcotest.(check bool) "slice fat-value members are present"
          true (contains_substring ir "!DIDerivedType(tag: DW_TAG_member, name: \"len\""));
 
+  Alcotest.test_case
+    "struct_layout reports LLVM target offsets and tail padding for arbitrary structs" `Quick
+    (fun () ->
+       ignore (gen_codegen
+         "struct LayoutProbe {
+            first: u8;
+            second: usize;
+            third: u16;
+          }");
+       let (fields, total) = Llvm_gen.struct_layout "LayoutProbe" in
+       let offset field = List.assoc field fields in
+       Alcotest.(check int64) "first offset" 0L (offset "first");
+       Alcotest.(check int64) "usize alignment" 8L (offset "second");
+       Alcotest.(check int64) "third offset" 16L (offset "third");
+       Alcotest.(check int64) "tail padding" 24L total);
+
   (* Companion to the test above, covering the parts of ditype_of_ast
      (lib/llvm_gen.ml) that one only exercises with a pointer-to-struct
      parameter, a struct-typed local, and an array-typed local: the i32

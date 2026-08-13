@@ -5385,6 +5385,28 @@ let exception_frame_offsets who name frame =
   let total = ((fields_size + 15) / 16) * 16 in
   ((fun r -> Hashtbl.find offsets r), total)
 
+(* Public layout query for generated debugger/assembly consumers. Unlike the
+   exception-frame helper above this accepts every already type-checked struct
+   and delegates both field offsets and total size to LLVM's target data
+   layout, so a second tool never has to reimplement Takibi's padding rules. *)
+let struct_layout name =
+  let fields = match Hashtbl.find_opt struct_fields name with
+    | Some fs -> fs
+    | None -> raise (Error (Printf.sprintf "struct '%s' not found" name))
+  in
+  let dl = match !target_data with
+    | Some dl -> dl
+    | None -> raise (Error "struct_layout: target data layout not initialized")
+  in
+  let llty = ltype_of_ast (TypeNamed name) in
+  let offsets =
+    List.mapi (fun index (field, _) ->
+      (field, Llvm_target.DataLayout.offset_of_element llty index dl)
+    ) fields
+  in
+  let total = Llvm_target.DataLayout.abi_size llty dl in
+  (offsets, total)
+
 (* Shared by gen_exception_entry and gen_exception_restore: the
    restore-frame/eret half, assuming sp already points at the frame AND
    DAIF.I is already masked (both are the caller's responsibility -- see

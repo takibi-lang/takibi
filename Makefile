@@ -267,6 +267,7 @@ KERNEL_RPI5_EXC_CONTEXT := $(KERNEL_DIR)/arch/arm64/kernel/exception_context.inc
 # --emit-exception-frame-offsets flag (see the file rule below), not a
 # separate script.
 KERNEL_EXC_CONTEXT_OFFSETS := $(KERNEL_DIR)/arch/arm64/kernel/exception_context_offsets.inc
+KERNEL_CRASH_SNAPSHOT_LAYOUT := _build/kernel-crash-snapshot-layout.gdb
 KERNEL_RPI5_FPSIMD_S     := $(KERNEL_DIR)/arch/arm64/kernel/fpsimd_probe.S
 KERNEL_RPI5_FPSIMD_O     := $(KERNEL_BUILD_DIR)/fpsimd_probe.o
 KERNEL_RPI5_FPSIMD_EXTERN := $(KERNEL_DIR)/arch/arm64/kernel/fpsimd_probe_extern.tkb
@@ -536,6 +537,10 @@ kernel-lib-check:
 $(KERNEL_EXC_CONTEXT_OFFSETS): $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(KERNEL_EXT2_IMAGE) $(TAKIBI)
 	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-exception-frame-offsets ExceptionFrame -o $@
 
+$(KERNEL_CRASH_SNAPSHOT_LAYOUT): $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(TAKIBI)
+	@mkdir -p $(dir $@)
+	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-struct-layout CrashSnapshot -o $@
+
 ## Verify that exception-frame offsets are consistent and the hand-written
 ## SAVE/RESTORE macros contain real assembly, not placeholder/empty bodies.
 .PHONY: kernel-verify-exception-frame
@@ -568,8 +573,9 @@ kernelcheck-qemu: kernelbuild-qemu
 
 ## Focused terminal-path check.  This is deliberately separate from the
 ## ordinary QEMU suite because its expected result is a parked fail-stop.
-kernelcheck-oops-qemu: kernelbuild-qemu
+kernelcheck-oops-qemu: kernelbuild-qemu $(KERNEL_CRASH_SNAPSHOT_LAYOUT)
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_oops_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=data_abort_write KERNEL_QEMU_OOPS_GDB_PORT=18675 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-data-abort" bash scripts/run_kernel_oops_qemutest.sh
 
 ## kernelsh-qemu: boot the standalone kernel, attach the current terminal to
 ## its TCP-backed UART console, and forward localhost:18080 to guest httpd.
