@@ -787,7 +787,6 @@ const ProcessTraceReap: usize = 9;
 const ProcessTraceAddressSpaceActivate: usize = 10;
 private let mut kernel_crash_trace: [usize; KERNEL_CRASH_TRACE_WORDS];
 private let mut kernel_crash_trace_next: usize;
-private let mut kernel_crash_trace_count: usize;
 // A debugger-owned boot-test switch. Production BSS leaves this false, while
 // a test may set it before the first process reset to retain a real workload's
 // tail without adding UART traffic or a production control surface.
@@ -821,9 +820,6 @@ fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
     kernel_crash_trace[base + 9] = root;
     kernel_crash_trace[base + 10] = saved_sp;
     kernel_crash_trace[base + 11] = aux;
-    if (kernel_crash_trace_count < KERNEL_CRASH_TRACE_EVENTS) {
-        kernel_crash_trace_count = kernel_crash_trace_count + 1;
-    }
     kernel_crash_trace[base] = sequence;
 }
 
@@ -883,27 +879,43 @@ fn kernel_process_trace_handle(event: usize, subject: ProcessHandle,
 // Copies oldest-to-newest into the caller-owned fixed array. This gives the
 // crash report a stable chronological tail even after the ring wrapped.
 fn kernel_process_crash_trace_copy(output: *usize) -> usize {
-    let count: usize = kernel_crash_trace_count;
-    let mut first: usize = 0;
-    if (count == KERNEL_CRASH_TRACE_EVENTS) {
-        first = kernel_crash_trace_next % KERNEL_CRASH_TRACE_EVENTS;
+    // `next` is reserved before a writer fills its slot, so an IRQ may see a
+    // newer completed record while its interrupted predecessor still has
+    // sequence zero. Never derive chronology from a racy count: validate each
+    // slot's commit sequence against its expected position and skip an
+    // in-flight hole. This is safe for the current single CPU + IRQ producer
+    // and is the same validation a future per-CPU reader will retain.
+    let latest: usize = kernel_crash_trace_next;
+    let mut first: usize = 1;
+    if (latest > KERNEL_CRASH_TRACE_EVENTS) {
+        first = latest - KERNEL_CRASH_TRACE_EVENTS + 1;
     }
+    let mut copied: usize = 0;
     for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
-        let output_base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
-        if (item < count) {
-            let source: usize = (first + item) % KERNEL_CRASH_TRACE_EVENTS;
+        let sequence: usize = first + item;
+        if (sequence <= latest) {
+            let source: usize = (sequence - 1) % KERNEL_CRASH_TRACE_EVENTS;
             let source_base: usize = source * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
-            for word: usize in 0..<KERNEL_PROCESS_TRACE_WORDS_PER_EVENT {
-                *(output + output_base + word) =
-                    kernel_crash_trace[source_base + word];
-            }
-        } else {
-            for word: usize in 0..<KERNEL_PROCESS_TRACE_WORDS_PER_EVENT {
-                *(output + output_base + word) = 0;
+            if (kernel_crash_trace[source_base] == sequence) {
+                let output_base: usize =
+                    copied * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+                for word: usize in 0..<KERNEL_PROCESS_TRACE_WORDS_PER_EVENT {
+                    *(output + (output_base as isize) + (word as isize)) =
+                        kernel_crash_trace[source_base + word];
+                }
+                copied = copied + 1;
             }
         }
     }
-    return count;
+    for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
+        if (item >= copied) {
+            let output_base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+            for word: usize in 0..<KERNEL_PROCESS_TRACE_WORDS_PER_EVENT {
+                *(output + (output_base as isize) + (word as isize)) = 0;
+            }
+        }
+    }
+    return copied;
 }
 
 must_use variant ProcessUartProgressResult { Invalid; Recorded; }
@@ -961,7 +973,6 @@ fn kernel_process_execution_reset() {
     execution_uart_parent_progress = 0;
     kernel_process_trace_enabled = kernel_process_trace_boot_enabled;
     kernel_crash_trace_next = 0;
-    kernel_crash_trace_count = 0;
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
         scheduled_process_records[slot].has_parent = false;
         scheduled_process_records[slot].has_child = false;
@@ -1449,7 +1460,6 @@ fn kernel_process_crash_trace_ring_probe() -> bool {
     // This probe owns its synthetic ring contents, so start its wrap proof at
     // sequence one regardless of that external diagnostic policy.
     kernel_crash_trace_next = 0;
-    kernel_crash_trace_count = 0;
     for event: usize in 1..<11 {
         kernel_process_trace_record(event, event + 100, event + 1000,
                                     event + 200, event + 2000, 3, 2,
