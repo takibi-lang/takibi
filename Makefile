@@ -75,22 +75,24 @@ $(TAKIBI): FORCE
 # safe against two concurrent dune invocations racing to create it
 # (observed: "Unexpected contents of build directory global lock file").
 test: build
-	dune test
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" dune test
 
 ## langcheck: verify that all source files contain only ASCII characters.
 ## Repo-wide (kernel/, examples/, the compiler itself), so this is the one
 ## canonical implementation; examples/Makefile's own `langcheck` target
 ## just forwards here via `$(MAKE) -C .. langcheck`.
 langcheck:
-	@echo "Checking for non-ASCII characters in source files..."
-	@if LC_ALL=C grep -rnP '[^\x00-\x7F]' --exclude-dir=_build \
-	       --include="*.ml" --include="*.mll" --include="*.mly" \
-	       --include="*.tkb" --include="*.S" --include="*.md" \
-	       --include="*.sh" --include="*.ld" --include="*.py" \
-	       . Makefile examples/Makefile 2>/dev/null; then \
-	    echo "ERROR: non-ASCII characters found (see above)"; exit 1; \
-	fi
-	@echo "OK: all files are ASCII-clean"
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash -c ' \
+		echo "Checking for non-ASCII characters in source files..."; \
+		if LC_ALL=C grep -rnP "[^\x00-\x7F]" --exclude-dir=_build \
+		       --include="*.ml" --include="*.mll" --include="*.mly" \
+		       --include="*.tkb" --include="*.S" --include="*.md" \
+		       --include="*.sh" --include="*.ld" --include="*.py" \
+		       . Makefile examples/Makefile 2>/dev/null; then \
+		    echo "ERROR: non-ASCII characters found (see above)"; exit 1; \
+		fi; \
+		echo "OK: all files are ASCII-clean" \
+	'
 
 # -- linux_user/ (host-native Linux/AMD64 environment-independent tests) -----
 # See AGENTS.md's "Where Should a New Test Go?": this directory holds
@@ -233,20 +235,22 @@ linuxbuild: $(LINUX_USER_BINS)
 
 ## linuxcheck: run linux_user/'s tests natively and diff stdout against each .expected
 linuxcheck: linuxbuild
-	@fail=0; \
-	for e in $(LINUX_USER_EXAMPLES); do \
-	    got=$$($(LINUX_USER_DIR)/$$e/$$e.exe); \
-	    exp=$$(cat $(LINUX_USER_DIR)/$$e/$$e.expected); \
-	    if [ "$$got" = "$$exp" ]; then \
-	        echo "PASS  $$e (linux amd64)"; \
-	    else \
-	        echo "FAIL  $$e (linux amd64)"; \
-	        echo "  expected: $$exp"; \
-	        echo "  got:      $$got"; \
-	        fail=1; \
-	    fi; \
-	done; \
-	exit $$fail
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash -c ' \
+		fail=0; \
+		for e in $(LINUX_USER_EXAMPLES); do \
+		    got=$$($(LINUX_USER_DIR)/$$e/$$e.exe); \
+		    exp=$$(cat $(LINUX_USER_DIR)/$$e/$$e.expected); \
+		    if [ "$$got" = "$$exp" ]; then \
+		        echo "PASS  $$e (linux amd64)"; \
+		    else \
+		        echo "FAIL  $$e (linux amd64)"; \
+		        echo "  expected: $$exp"; \
+		        echo "  got:      $$got"; \
+		        fail=1; \
+		    fi; \
+		done; \
+		exit $$fail \
+	'
 
 # -- Raspberry Pi 5 (BCM2712) -------------------------------------------------
 RPI5_TARGET := aarch64-none-elf
@@ -604,7 +608,22 @@ kernelcheck: kernelcheck-qemu kernelcheck-oops-qemu kernelcheck-rpi5
 ## $(TAKIBI) prerequisite, which Make's own dependency tracking runs (and
 ## therefore serializes `dune build`) at most once regardless of how many
 ## targets reach it concurrently -- see "Known dune footgun" above for why
-## that invariant matters and must not be bypassed by a future change.
+## that invariant matters and must not be bypassed by a future change. In
+## particular, do NOT split this single `$(MAKE) langcheck test linuxcheck
+## kernelcheck` call into several separate `$(MAKE) <target>` invocations
+## (e.g. one recursive make per lane) to add output locking -- that was
+## tried (issue #295 session) and each lane became an independent make
+## process with its own view of $(TAKIBI), so up to four genuinely
+## concurrent `dune build` invocations raced on dune's build-directory
+## lock file and hung (multiple `dune build` processes stuck at 0% CPU
+## for 15-29+ minutes, twice, both requiring a manual kill) -- exactly the
+## footgun this comment warns about, just one level removed. langcheck/
+## test/linuxcheck/kernelcheck's own recipes now route their OWN output
+## through the same line lock (KERNEL_CHECK_OUTPUT_LOCK, scripts/
+## run_line_locked.sh) that kernelcheck's sub-targets already used, fixing
+## the original interleaved/garbled-output report without spawning any
+## new recursive make process or touching this target's single `$(MAKE)`
+## call.
 .PHONY: allcheck
 allcheck:
 	@status=0; $(MAKE) langcheck test linuxcheck kernelcheck || status=$$?; \
