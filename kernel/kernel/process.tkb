@@ -556,6 +556,10 @@ fn scheduled_process_exit(
 fn scheduled_process_reap(
         owner: sink ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Exited]) {
+    kernel_process_trace_record(
+        ProcessTraceReap, owner.pool_index + 1, owner.generation,
+        0, 0, 4, 0, owner.pool_index,
+        scheduled_process_records[owner.pool_index].saved_sp, 0);
     scheduled_process_state_drop(state);
     address_space_release_root(owner.pool_index);
     slotmap_remove(&scheduled_process_pool,
@@ -739,33 +743,120 @@ private let mut execution_uart_parent_progress: usize;
 // the same one-time integration marker appear twice in a shared UART capture.
 private let mut execution_uart_block_logged: bool;
 
-// Fixed-size scheduler/process tail for fail-stop diagnostics. Each entry is
-// (event, from_pid, to_pid); it is best-effort on SMP, not a claim of a
-// globally atomic scheduler history. Writers are ordinary scheduler paths,
-// while a fatal CPU merely copies the already-retained tail.
+// Fixed-size scheduler/process tail for fail-stop diagnostics.  This first
+// implementation has one producer CPU: core 1 is brought up only to prove
+// EL1 entry and then parks, while all process execution remains on core 0.
+// The ABI nevertheless reserves cpu and a local sequence number now, so SMP
+// can grow this into one independently-written ring per CPU.  It must not be
+// replaced by a shared SMP ring: a global order would need atomic reservation
+// and would still not describe causality between concurrent CPUs honestly.
+//
+// Tracing is opt-in.  A record is allocation-free and never prints from a
+// scheduler or IRQ path.  A later SMP writer must publish each record with a
+// commit sequence after its fields are written; the present single-writer
+// implementation deliberately keeps the same field ABI and copy interface.
 const KERNEL_CRASH_TRACE_EVENTS: usize = 8;
-const KERNEL_CRASH_TRACE_WORDS: usize = 24;
-const CrashTraceClone: usize = 1;
-const CrashTraceToParent: usize = 2;
-const CrashTraceToChild: usize = 3;
-const CrashTraceUartBlock: usize = 4;
-const CrashTraceChildExit: usize = 5;
-const CrashTraceStart: usize = 6;
+const KERNEL_PROCESS_TRACE_WORDS_PER_EVENT: usize = 12;
+const KERNEL_CRASH_TRACE_WORDS: usize = 96;
+const ProcessTraceFork: usize = 1;
+const ProcessTraceExecPrepare: usize = 2;
+const ProcessTraceExecCommit: usize = 3;
+const ProcessTraceSchedule: usize = 4;
+const ProcessTraceBlock: usize = 5;
+const ProcessTraceWake: usize = 6;
+const ProcessTraceResume: usize = 7;
+const ProcessTraceExit: usize = 8;
+const ProcessTraceReap: usize = 9;
+const ProcessTraceAddressSpaceActivate: usize = 10;
 private let mut kernel_crash_trace: [usize; KERNEL_CRASH_TRACE_WORDS];
 private let mut kernel_crash_trace_next: usize;
 private let mut kernel_crash_trace_count: usize;
+private let mut kernel_process_trace_enabled: bool;
 
-fn kernel_process_crash_trace_record(event: usize, from_pid: usize,
-                                     to_pid: usize) {
-    let slot: usize = kernel_crash_trace_next % KERNEL_CRASH_TRACE_EVENTS;
-    let base: usize = slot * 3;
-    kernel_crash_trace[base] = event;
-    kernel_crash_trace[base + 1] = from_pid;
-    kernel_crash_trace[base + 2] = to_pid;
-    kernel_crash_trace_next = kernel_crash_trace_next + 1;
+// Layout: local sequence, cpu, kind, subject pid/generation, peer
+// pid/generation, state, wait reason, root, saved SP, event-specific aux.
+fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
+                               peer_pid: usize, peer_generation: usize,
+                               state: usize, wait_reason: usize, root: usize,
+                               saved_sp: usize, aux: usize) {
+    if (kernel_process_trace_enabled == false) { return; }
+    // Publish the reservation before touching the entry. An IRQ that arrives
+    // while ordinary EL1 code is recording therefore receives the next slot,
+    // rather than interleaving words into this one. `sequence` is written
+    // last; zero means an exception observed an in-progress entry.
+    let sequence: usize = kernel_crash_trace_next + 1;
+    kernel_crash_trace_next = sequence;
+    let slot: usize = (sequence - 1) % KERNEL_CRASH_TRACE_EVENTS;
+    let base: usize = slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+    kernel_crash_trace[base] = 0;
+    kernel_crash_trace[base + 1] = 0; // core 0; SMP becomes per-CPU rings.
+    kernel_crash_trace[base + 2] = event;
+    kernel_crash_trace[base + 3] = pid;
+    kernel_crash_trace[base + 4] = generation;
+    kernel_crash_trace[base + 5] = peer_pid;
+    kernel_crash_trace[base + 6] = peer_generation;
+    kernel_crash_trace[base + 7] = state;
+    kernel_crash_trace[base + 8] = wait_reason;
+    kernel_crash_trace[base + 9] = root;
+    kernel_crash_trace[base + 10] = saved_sp;
+    kernel_crash_trace[base + 11] = aux;
     if (kernel_crash_trace_count < KERNEL_CRASH_TRACE_EVENTS) {
         kernel_crash_trace_count = kernel_crash_trace_count + 1;
     }
+    kernel_crash_trace[base] = sequence;
+}
+
+fn kernel_process_trace_enable() { kernel_process_trace_enabled = true; }
+fn kernel_process_trace_disable() { kernel_process_trace_enabled = false; }
+
+fn kernel_process_trace_current(event: usize, peer: ProcessHandle,
+                                aux: usize) {
+    if (execution_current_live == false) { return; }
+    let mut current: ProcessHandle = execution_current_handle;
+    let state: usize = kernel_process_crash_state();
+    let reason: usize = kernel_process_crash_wait_reason();
+    kernel_process_trace_record(
+        event, current.pool_index + 1, current.generation,
+        peer.pool_index + 1, peer.generation, state, reason,
+        current.pool_index, scheduled_process_records[current.pool_index].saved_sp,
+        aux);
+}
+
+fn kernel_process_trace_address_space_activate(root: usize) {
+    if (execution_current_live == false) { return; }
+    let mut current: ProcessHandle = execution_current_handle;
+    kernel_process_trace_record(
+        ProcessTraceAddressSpaceActivate, current.pool_index + 1,
+        current.generation, 0, 0, kernel_process_crash_state(),
+        kernel_process_crash_wait_reason(), root,
+        scheduled_process_records[current.pool_index].saved_sp, 0);
+}
+
+fn kernel_process_trace_exec_prepare() {
+    if (execution_current_live == false) { return; }
+    let mut current: ProcessHandle = execution_current_handle;
+    kernel_process_trace_record(
+        ProcessTraceExecPrepare, current.pool_index + 1, current.generation,
+        0, 0, kernel_process_crash_state(), kernel_process_crash_wait_reason(),
+        current.pool_index, scheduled_process_records[current.pool_index].saved_sp,
+        0);
+}
+
+fn kernel_process_trace_handle(event: usize, subject: ProcessHandle,
+                               peer: ProcessHandle, aux: usize) {
+    let state: ProcessSlotState = scheduled_process_record_state(
+        subject.pool_index);
+    let reason: ProcessWaitReason = scheduled_process_record_wait_reason(
+        subject.pool_index);
+    let state_u8: u8 = state as u8;
+    let reason_u8: u8 = reason as u8;
+    let state_code: usize = state_u8 as usize;
+    let reason_code: usize = reason_u8 as usize;
+    kernel_process_trace_record(
+        event, subject.pool_index + 1, subject.generation,
+        peer.pool_index + 1, peer.generation, state_code, reason_code,
+        subject.pool_index, scheduled_process_records[subject.pool_index].saved_sp,
+        aux);
 }
 
 // Copies oldest-to-newest into the caller-owned fixed array. This gives the
@@ -777,17 +868,18 @@ fn kernel_process_crash_trace_copy(output: *usize) -> usize {
         first = kernel_crash_trace_next % KERNEL_CRASH_TRACE_EVENTS;
     }
     for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
-        let output_base: usize = item * 3;
+        let output_base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
         if (item < count) {
             let source: usize = (first + item) % KERNEL_CRASH_TRACE_EVENTS;
-            let source_base: usize = source * 3;
-            *(output + output_base) = kernel_crash_trace[source_base];
-            *(output + output_base + 1) = kernel_crash_trace[source_base + 1];
-            *(output + output_base + 2) = kernel_crash_trace[source_base + 2];
+            let source_base: usize = source * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+            for word: usize in 0..<KERNEL_PROCESS_TRACE_WORDS_PER_EVENT {
+                *(output + output_base + word) =
+                    kernel_crash_trace[source_base + word];
+            }
         } else {
-            *(output + output_base) = 0;
-            *(output + output_base + 1) = 0;
-            *(output + output_base + 2) = 0;
+            for word: usize in 0..<KERNEL_PROCESS_TRACE_WORDS_PER_EVENT {
+                *(output + output_base + word) = 0;
+            }
         }
     }
     return count;
@@ -846,6 +938,7 @@ fn kernel_process_execution_reset() {
     execution_uart_blocks = 0;
     execution_uart_wakes = 0;
     execution_uart_parent_progress = 0;
+    kernel_process_trace_enabled = false;
     kernel_crash_trace_next = 0;
     kernel_crash_trace_count = 0;
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
@@ -861,10 +954,6 @@ fn kernel_process_execution_reset() {
         ScheduledProcessAllocResult::Allocated(root) => {
             execution_current_handle = root;
             execution_current_live = kernel_process_start_handle(root);
-            if (execution_current_live) {
-                kernel_process_crash_trace_record(
-                    CrashTraceStart, 0, root.pool_index + 1);
-            }
         }
     }
 }
@@ -923,9 +1012,9 @@ fn kernel_process_switch_to_parent(current_sp: usize) -> usize {
         return current_sp;
     }
     execution_current_handle = to;
-    kernel_process_crash_trace_record(
-        CrashTraceToParent, from.pool_index + 1, to.pool_index + 1);
+    kernel_process_trace_handle(ProcessTraceSchedule, to, from, 0);
     process_image_activate_root(to.pool_index);
+    kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
     return scheduled_process_records[to.pool_index].saved_sp;
 }
 
@@ -952,9 +1041,9 @@ fn kernel_process_switch_to_child(current_sp: usize) -> usize {
         return current_sp;
     }
     execution_current_handle = to;
-    kernel_process_crash_trace_record(
-        CrashTraceToChild, from.pool_index + 1, to.pool_index + 1);
+    kernel_process_trace_handle(ProcessTraceSchedule, to, from, 0);
     process_image_activate_root(to.pool_index);
+    kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
     return scheduled_process_records[to.pool_index].saved_sp;
 }
 
@@ -1045,20 +1134,21 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
                     ScheduledProcessPutResult::Conflict => { return 0; }
                     ScheduledProcessPutResult::Stored => {}
                 }
+                kernel_process_trace_handle(ProcessTraceBlock, parent, child,
+                                            1);
             }
         }
         if (kernel_process_start_handle(child) == false) {
             return 0;
         }
         execution_current_handle = child;
-        kernel_process_crash_trace_record(
-            CrashTraceUartBlock, parent.pool_index + 1, child.pool_index + 1);
         execution_uart_blocks = execution_uart_blocks + 1;
         if (execution_uart_block_logged == false) {
             execution_uart_block_logged = true;
             kernel_boot_log("uart rx: scheduler child blocked\n");
         }
         process_image_activate_root(child.pool_index);
+        kernel_process_trace_handle(ProcessTraceResume, child, parent, 0);
         return scheduled_process_records[child.pool_index].saved_sp;
     }
 
@@ -1085,6 +1175,8 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
                 ScheduledProcessPutResult::Conflict => { return 0; }
                 ScheduledProcessPutResult::Stored => {}
             }
+            kernel_process_trace_handle(ProcessTraceBlock, child, parent,
+                                        1);
         }
     }
     if (kernel_process_start_handle(parent) == false) {
@@ -1097,6 +1189,7 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
         kernel_boot_log("uart rx: scheduler child blocked\n");
     }
     process_image_activate_root(parent.pool_index);
+    kernel_process_trace_handle(ProcessTraceResume, parent, child, 0);
     return scheduled_process_records[parent.pool_index].saved_sp;
 }
 
@@ -1133,6 +1226,8 @@ fn kernel_process_block_wait4(current_sp: usize) -> usize {
                 ScheduledProcessPutResult::Conflict => { return 0; }
                 ScheduledProcessPutResult::Stored => {}
             }
+            kernel_process_trace_handle(ProcessTraceBlock, parent, child,
+                                        2);
         }
     }
     if (kernel_process_start_handle(child) == false) {
@@ -1140,6 +1235,7 @@ fn kernel_process_block_wait4(current_sp: usize) -> usize {
     }
     execution_current_handle = child;
     process_image_activate_root(child.pool_index);
+    kernel_process_trace_handle(ProcessTraceResume, child, parent, 0);
     return scheduled_process_records[child.pool_index].saved_sp;
 }
 
@@ -1210,6 +1306,8 @@ fn kernel_process_uart_wake(value: usize)
                 }
                 ScheduledProcessPutResult::Stored => {}
             }
+            kernel_process_trace_handle(ProcessTraceWake, waiter,
+                                        execution_current_handle, value);
         }
     }
     execution_uart_wakes = execution_uart_wakes + 1;
@@ -1253,6 +1351,7 @@ fn kernel_process_uart_block_evidence() -> bool {
 
 fn kernel_process_scheduler_probe() -> bool {
     kernel_process_execution_reset();
+    kernel_process_trace_enable();
     let root_pid: usize = kernel_process_current_pid();
     match kernel_process_clone_begin(0x11, 0) {
         ProcessCloneResult::Invalid => { return false; }
@@ -1270,10 +1369,26 @@ fn kernel_process_scheduler_probe() -> bool {
     kernel_process_request_reschedule();
     let deferred_parent_sp: usize =
         kernel_process_syscall_return_schedule(0x2000);
+    let mut trace: [usize; KERNEL_CRASH_TRACE_WORDS];
+    let trace_count: usize = kernel_process_crash_trace_copy(trace as *usize);
+    let mut saw_fork: bool = false;
+    let mut saw_schedule: bool = false;
+    let mut saw_resume: bool = false;
+    let mut saw_activate: bool = false;
+    for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
+        if (item < trace_count) {
+            let kind: usize = trace[item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT + 2];
+            if (kind == ProcessTraceFork) { saw_fork = true; }
+            if (kind == ProcessTraceSchedule) { saw_schedule = true; }
+            if (kind == ProcessTraceResume) { saw_resume = true; }
+            if (kind == ProcessTraceAddressSpaceActivate) { saw_activate = true; }
+        }
+    }
     let ok: bool = parent_sp == 0x1000 && child_sp == 0x2000 &&
         deferred_parent_sp == 0x1000 && execution_timer_switches == 2 &&
         execution_deferred_switches == 1 &&
-        kernel_process_current_pid() == root_pid;
+        kernel_process_current_pid() == root_pid && saw_fork && saw_schedule &&
+        saw_resume && saw_activate;
     kernel_process_scheduler_disable();
     scheduled_process_table_clear();
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
@@ -1289,18 +1404,28 @@ fn kernel_process_scheduler_probe() -> bool {
 // appear in a later production fail-stop trace.
 fn kernel_process_crash_trace_ring_probe() -> bool {
     kernel_process_execution_reset();
+    kernel_process_trace_enable();
     for event: usize in 1..<11 {
-        kernel_process_crash_trace_record(event, event + 100, event + 200);
+        kernel_process_trace_record(event, event + 100, event + 1000,
+                                    event + 200, event + 2000, 3, 2,
+                                    7, event + 300, event + 400);
     }
     let mut copied: [usize; KERNEL_CRASH_TRACE_WORDS];
     let count: usize = kernel_process_crash_trace_copy(copied as *usize);
     let mut ok: bool = count == KERNEL_CRASH_TRACE_EVENTS;
     for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
-        let base: usize = item * 3;
+        let base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
         let expected: usize = item + 3;
         if (copied[base] != expected ||
-            copied[base + 1] != expected + 100 ||
-            copied[base + 2] != expected + 200) {
+            copied[base + 1] != 0 ||
+            copied[base + 2] != expected ||
+            copied[base + 3] != expected + 100 ||
+            copied[base + 4] != expected + 1000 ||
+            copied[base + 5] != expected + 200 ||
+            copied[base + 6] != expected + 2000 ||
+            copied[base + 7] != 3 || copied[base + 8] != 2 ||
+            copied[base + 9] != 7 || copied[base + 10] != expected + 300 ||
+            copied[base + 11] != expected + 400) {
             ok = false;
         }
     }
@@ -1351,8 +1476,11 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             scheduled_process_records[child.pool_index].has_parent = true;
             execution_current_handle = child;
             execution_clone_calls = execution_clone_calls + 1;
-            kernel_process_crash_trace_record(
-                CrashTraceClone, parent.pool_index + 1, child.pool_index + 1);
+            kernel_process_trace_record(
+                ProcessTraceFork, child.pool_index + 1, child.generation,
+                parent.pool_index + 1, parent.generation, 1, 0,
+                child.pool_index, scheduled_process_records[child.pool_index].saved_sp,
+                flags);
             return ProcessCloneResult::ChildReady(child.pool_index + 1);
         }
     }
@@ -1568,8 +1696,10 @@ fn kernel_process_child_exit(status: usize) -> usize {
     let mut child: ProcessHandle = execution_current_handle;
     let mut parent: ProcessHandle =
         scheduled_process_records[child.pool_index].parent;
-    kernel_process_crash_trace_record(
-        CrashTraceChildExit, child.pool_index + 1, parent.pool_index + 1);
+    kernel_process_trace_record(
+        ProcessTraceExit, child.pool_index + 1, child.generation,
+        parent.pool_index + 1, parent.generation, 2, 0, child.pool_index,
+        scheduled_process_records[child.pool_index].saved_sp, status);
     // GitHub issue #248: per-slot (indexed by the WAITING PARENT's own
     // pool_index), not a bare global -- see these fields' own header
     // comment for why a global here breaks a multi-level concurrent
@@ -1634,12 +1764,15 @@ fn kernel_process_child_exit(status: usize) -> usize {
                     ScheduledProcessPutResult::Conflict => {}
                     ScheduledProcessPutResult::Stored => {}
                 }
+                kernel_process_trace_handle(ProcessTraceWake, parent, child,
+                                            status);
             }
         }
     }
     if (kernel_process_start_handle(parent)) {
         execution_current_handle = parent;
         process_image_activate_root(parent.pool_index);
+        kernel_process_trace_handle(ProcessTraceResume, parent, child, 0);
         return scheduled_process_records[parent.pool_index].saved_sp;
     }
     return 0;
@@ -1711,6 +1844,12 @@ fn kernel_process_child_exec_mark() {
         let slot = scheduled_process_exec_narrow_slot(
             execution_current_handle.pool_index + 1);
         scheduled_process_records[slot].exec_image_live = true;
+        let mut current: ProcessHandle = execution_current_handle;
+        kernel_process_trace_record(
+            ProcessTraceExecCommit, current.pool_index + 1, current.generation,
+            0, 0, kernel_process_crash_state(), kernel_process_crash_wait_reason(),
+            current.pool_index, scheduled_process_records[current.pool_index].saved_sp,
+            0);
     }
 }
 

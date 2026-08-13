@@ -21,8 +21,8 @@ define takibi-oops
     printf "takibi-oops: trace count=%lu\n", $snapshot[$takibi_crashsnapshot_trace_count / 8]
     set $trace_item = 0
     while $trace_item < $snapshot[$takibi_crashsnapshot_trace_count / 8]
-      set $trace_base = $trace_item * 3
-      printf "takibi-oops: trace event=%lu from=%lu to=%lu\n", $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base], $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base + 1], $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base + 2]
+      set $trace_base = $trace_item * 12
+      printf "takibi-oops: trace seq=%lu cpu=%lu event=%lu pid=%lu gen=%lu peer=%lu peer-gen=%lu state=%lu wait=%lu root=%lu sp=0x%016lx aux=0x%016lx\n", $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base], $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base + 1], $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base + 2], $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base + 3], $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base + 4], $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base + 5], $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base + 6], $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base + 7], $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base + 8], $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base + 9], $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base + 10], $snapshot[$takibi_crashsnapshot_trace / 8 + $trace_base + 11]
       set $trace_item = $trace_item + 1
     end
   end

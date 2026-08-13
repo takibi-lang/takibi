@@ -1,4 +1,5 @@
 use "kernel/mm/page.tkb";
+use "kernel/kernel/process.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/fs/elf64.tkb";
 use "kernel/fs/ext2/ext2.tkb";
@@ -428,6 +429,7 @@ fn process_image_activate_root(root: usize) {
     if (root >= PROCESS_IMAGE_ROOT_MAX) { return; }
     process_image_target_root = root;
     address_space_activate_root(root);
+    kernel_process_trace_address_space_activate(root);
 }
 
 fn process_image_clone_vm_reap() -> ProcessCloneVmReapResult {

@@ -31,7 +31,7 @@ struct CrashSnapshot {
     saved_spsr_el1: usize;
     saved_tpidr_el0: usize;
     trace_count: usize;
-    trace: [usize; 24];
+    trace: [usize; KERNEL_CRASH_TRACE_WORDS];
 }
 
 let mut crash_snapshot: CrashSnapshot;
@@ -105,15 +105,33 @@ fn crash_snapshot_render() !{unsafe} {
     uart_put_udec(crash_snapshot.trace_count);
     kernel_boot_log("\n");
     let trace_pointer: *usize = crash_snapshot.trace as *usize;
-    let trace = unsafe { trace_pointer[0..<24 as isize] };
+    let trace = unsafe { trace_pointer[0..<KERNEL_CRASH_TRACE_WORDS as isize] };
     for item: usize in 0..<crash_snapshot.trace_count {
-        let base: usize = item * 3;
-        kernel_boot_log("oops: trace event=");
+        let base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+        kernel_boot_log("oops: trace seq=");
         uart_put_udec(unsafe { trace[base] });
-        kernel_boot_log(" from=");
+        kernel_boot_log(" cpu=");
         uart_put_udec(unsafe { trace[base + 1] });
-        kernel_boot_log(" to=");
+        kernel_boot_log(" event=");
         uart_put_udec(unsafe { trace[base + 2] });
+        kernel_boot_log(" pid=");
+        uart_put_udec(unsafe { trace[base + 3] });
+        kernel_boot_log(" gen=");
+        uart_put_udec(unsafe { trace[base + 4] });
+        kernel_boot_log(" peer=");
+        uart_put_udec(unsafe { trace[base + 5] });
+        kernel_boot_log(" peer-gen=");
+        uart_put_udec(unsafe { trace[base + 6] });
+        kernel_boot_log(" state=");
+        uart_put_udec(unsafe { trace[base + 7] });
+        kernel_boot_log(" wait=");
+        uart_put_udec(unsafe { trace[base + 8] });
+        kernel_boot_log(" root=");
+        uart_put_udec(unsafe { trace[base + 9] });
+        kernel_boot_log(" sp=");
+        crash_snapshot_put_hex(unsafe { trace[base + 10] });
+        kernel_boot_log(" aux=");
+        crash_snapshot_put_hex(unsafe { trace[base + 11] });
         kernel_boot_log("\n");
     }
 }

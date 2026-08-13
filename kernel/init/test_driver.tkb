@@ -247,6 +247,7 @@ fn kernel_process_child_exec_prepare() -> usize {
         kernel_syscall_exec_pending() == false) {
         return 0;
     }
+    kernel_process_trace_exec_prepare();
     // BusyBox is the rootfs interpreter/fallback for paths that ash asks the
     // kernel to execute but that are not separate regular files in this
     // small image. Keep the fallback on ext2 too: the plan describes the
