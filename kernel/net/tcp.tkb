@@ -465,6 +465,21 @@ fn pending_tcp_reset_all(connection_slot: {0..<TCP_CONNECTION_MAX as usize}) {
 // usize return would leave every caller's use of the result unprovable
 // under --forbid-trap, no matter how the while loop that produced it
 // looks -- the refinement has to be carried on the type itself.
+//
+// GitHub issue #295: the slot-0 fallback above is not merely "no free
+// slot reported" -- pending_tcp_record's caller unconditionally
+// overwrites whatever occupies the returned slot, so this silently
+// clobbers slot 0's still-unacknowledged retransmission record with the
+// new segment's. That segment then never gets retransmitted if its own
+// ACK is lost, surfacing later as an inexplicable stall or wrong-data
+// retransmit, not as a resource-limit symptom -- the audit's "not yet
+// audited" PENDING_TCP_MAX item confirmed this is real, not just a
+// hypothetical off-by-one. Logged here rather than changed: refusing to
+// queue the new segment (or evicting differently) would alter this
+// subsystem's actual retransmission behavior, which needs the same care
+// TCP_CONNECTION_MAX exhaustion's own fix took given this file's history
+// of retry-timing flakes -- so only the diagnostic was added, not the
+// control flow.
 fn pending_tcp_find_free_slot(
         connection_slot: {0..<TCP_CONNECTION_MAX as usize})
         -> {0..<4 as usize} {
@@ -481,6 +496,8 @@ fn pending_tcp_find_free_slot(
         }
         pending_slot = pending_slot + 1;
     }
+    kernel_boot_log_resource_exhausted(
+        "TCP pending-retransmit queue" as *u8, PENDING_TCP_MAX);
     return 0;
 }
 
