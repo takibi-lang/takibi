@@ -855,14 +855,20 @@ size.
   issue #227 item 3; previously hand-written in `kernel/arch/arm64/boot/entry.S`) is the landing site
   for any EL0 synchronous exception `kernel/arch/arm64/kernel/user_entry.S`'s `el0_sync_entry` doesn't
   recognize as either a real SVC or its one other handled case, a translation fault from legitimate
-  process-image stack growth (`process_image_handle_data_abort`, the real growable-stack mechanism
+  process-image stack growth (process_image_handle_data_abort, the real growable-stack mechanism
   that replaced the original single-page-stack limitation) -- a genuine hardware fault (bad
   instruction fetch, an unhandled data abort, an instruction that is UNDEFINED at the faulting EL)
-  still records `esr_el1`/`far_el1`/`elr_el1`/`spsr_el1` into a fixed `.bss` block (`exception_vector_
-  slot`) and parks in `wfe` forever. A boot log that dispatches syscalls normally and then just stops
-  -- no further syscall log lines, no exit/failure line from `main.tkb` -- is this path, not (usually)
-  a hung syscall handler; see the SWD/D-cache entry immediately below (now fixed for this specific
-  block, verified with a real injected fault) for how to read the real fault out of a parked core.
+  captures a fixed .bss CrashSnapshot and then parks in wfe forever. The UART oops report names
+  ESR/FAR/ELR/SPSR, decoded data-abort access when applicable, live SP_EL0/TPIDR_EL0/TTBR0,
+  process/parent/state/wait/image/root/ASID, the matching saved ExceptionFrame fields when a
+  Lower-EL frame exists, and a bounded local process/scheduler trace. Current-EL vector faults
+  explicitly report that no saved frame exists. valid is written last and sequence changes per
+  capture, so a debugger can distinguish a retained crash from zeroed/stale storage. Capture is
+  allocation-free and recursively faults only into a minimal UART fallback plus park. Use
+  kernelcheck-oops-qemu for the deterministic EL0-BRK regression; GDB injects the instruction
+  and reads the retained object only, while the kernel produces the diagnostic. For an interactive
+  post-mortem, source scripts/kernel_crash_snapshot.gdb in gdb-multiarch and run takibi-oops;
+  it reads the fixed snapshot record rather than duplicating the ExceptionFrame ABI.
   **Known gap, not yet triggered by any current
   scenario:** `process_image_clone_vm_begin()` (the fork/clone path, as opposed to
   `process_image_map_current()`) never initializes root 1's demand-stack metadata
@@ -946,12 +952,13 @@ size.
   those macros do byte-range-complete save/restore of every struct field (not just a fixed list), catching
   both a placeholder/empty macro body and a field silently left uncovered by a future struct edit. See
   HISTORY.md's 2026-08-13 entry for the full incident this hardening responds to.
-- **The same D-cache-bypass gap applied to postmortem debugging over SWD, not just DMA/harness I/O --
-  fixed for the evidence block itself by issue #227 item 3.** `el1_exception_evidence` (now ordinary
+- **The same D-cache-bypass gap applies to postmortem debugging over SWD, not just DMA/harness I/O --
+  and is closed for CrashSnapshot itself.** `el1_exception_evidence` (now ordinary
   `.tkb`, `kernel/arch/arm64/kernel/exception_evidence.tkb`, moved off hand-written assembly by
   issue #226's `mrs_esr_el1`/`mrs_far_el1`/`mrs_elr_el1`/`mrs_spsr_el1` intrinsics) records those four
-  registers plus the trapped vector slot into a fixed `exception_vector_slot` global before parking in
-  `wfe`, intended as a postmortem evidence block readable via `openocd`'s `mdw`. Found during the issue
+  registers, process context, saved-frame summary, bounded trace, and the trapped vector slot into a fixed
+  `CrashSnapshot` global before parking in `wfe`, intended as a postmortem evidence block readable via
+  `openocd` or scripts/kernel_crash_snapshot.gdb. Found during the issue
   #209 child-exec bring-up (2026-08-05, see HISTORY.md) that these reads could return a stale,
   earlier-boot value while the CPU's actual writes were still dirty in D-cache -- the block claimed
   `ESR=0, ELR=0` while the halted core's own `ESR_EL1`/`ELR_EL1` (read via `reg ESR_EL1` etc., from the
@@ -966,7 +973,7 @@ size.
   a same-EL write-translation-fault) -- no staleness observed. **The general guidance still stands as a
   second, independent cross-check** (reading the parked core's live system registers directly via `reg
   ESR_EL1`/`ELR_EL1`/`SPSR_EL1` costs nothing and catches a *different* class of bug -- e.g. a future
-  change that reintroduces an unflushed write path elsewhere), but the `exception_vector_slot` block
+  change that reintroduces an unflushed write path elsewhere), but the `CrashSnapshot` block
   itself is no longer known to go stale. A same-value-every-boot "coherence check" (e.g. diffing a
   static struct that is written identically on every run) still cannot detect staleness in general and
   must not be used to argue an unverified read is fresh.

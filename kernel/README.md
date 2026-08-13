@@ -118,6 +118,7 @@ make kernelbuild-rpi5  # build kernel/build/rpi5/kernel.elf
 make kernelcheck-rpi5  # build and run the complete RPi5 integration test (needs real hardware)
 make kernelbuild-qemu  # build kernel/build/qemu/kernel.elf
 make kernelcheck-qemu  # build and run the complete QEMU integration test (no hardware needed)
+make kernelcheck-oops-qemu  # inject one QEMU EL0 fault and verify the parked oops record
 make kernelbuild       # build every maintained kernel target
 make kernelcheck       # build and test every maintained kernel target
 make kernelsh-qemu     # boot QEMU and use the current terminal as the ash UART console
@@ -356,6 +357,16 @@ The kernel never exits (a `while (true) {}` park at the end of boot, same as
 RPi5). `scripts/kernel_net_test.py <local-port> <remote-port>` is the host-side
 peer `kernelcheck-qemu` drives automatically; use the automated runner rather
 than an interactive console when exercising its ARP/ICMP/TCP contracts.
+
+### Terminal fail-stop diagnostic
+
+The kernelcheck-oops-qemu target is a focused QEMU regression for the terminal
+exception path. GDB changes one ordinary EL0 instruction to BRK #0, then
+detaches; the kernel itself saves the Lower-EL exception frame, emits the
+UART oops report, retains CrashSnapshot, and parks the CPU. The test also
+uses scripts/kernel_crash_snapshot.gdb's read-only takibi-oops command to
+inspect that retained record. The helper reads the snapshot's fixed record
+only; it does not reproduce the exception-frame ABI.
 
 ### What this verifies
 

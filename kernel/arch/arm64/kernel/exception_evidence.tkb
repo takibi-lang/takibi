@@ -153,7 +153,7 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     crash_snapshot.valid = 1;
     // Write back the exact structured record before UART output or a debugger
     // observes it.  This is cache maintenance only, never a DMA submission.
-    dma_prepare_tx(&crash_snapshot as *usize, 392);
+    dma_prepare_tx(&crash_snapshot as *usize, sizeof(CrashSnapshot));
     crash_snapshot_render();
     while (true) { interrupt_wait(); }
 }
