@@ -15,6 +15,103 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-13: Every fixed kernel resource pool got an explicit exhaustion result and a boundary test (issue #295)
+
+The 2026-08-12 entry above already named the root cause: "the descriptor and
+shared-object pools are fixed at 16 entries... the actual ash workload needs
+the larger namespace." That workload succeeded once the capacity was raised,
+but the underlying failure mode -- exhaustion reported as a generic `EBADF`
+indistinguishable from a genuinely bad argument -- was never fixed, only
+outgrown. Issue #295 asked for every fixed-capacity pool in `kernel/` to be
+audited, made diagnosable, and boundary-tested, closing that root cause
+directly instead of leaving it to recur at the next capacity a workload
+happens to reach.
+
+`kernel/RESOURCE_LIMITS.md` is the resulting single-authoritative inventory:
+every `_MAX`/`_COUNT` pool with its scope, allocation/release path, and
+current exhaustion behavior. Nine diagnosability gaps were found and fixed,
+across four rounds -- each round was reached by asking "any remaining
+gaps?" again and getting a genuinely fresh answer, not a reflexive "no,"
+which is itself the process lesson worth keeping here: a repeat "are you
+sure" is worth actually re-deriving the answer against the issue's literal
+text, not restating the previous answer.
+
+Two of the nine were real bugs, not just missing labels, found only because
+tracing *why* a `bool`/fallback collapsed several causes led somewhere
+worse than a missing label:
+
+1. **`unified_fd_clone()` (fork's fd-table copy) leaked on partial
+   failure.** A mid-loop `RefcountRetainResult::Overflow` returned
+   immediately with no rollback -- every fd already retained before the
+   failure point kept its incremented shared-object refcount forever, and
+   the failing fd itself was left with its kind copied but never retained.
+   Fixed with a new `unified_fd_clone_rollback()` helper mirroring
+   `scheduled_process_alloc`'s existing rollback discipline. Notably, this
+   class of bug is exactly what this compiler's own `linear` type already
+   proves absent elsewhere (see "Compiler-side lessons" below) --
+   `kernel/lib/refcount_slotmap.tkb`'s retain/release pair was never given
+   a linear per-holder token, so the type system had nothing to check here.
+2. **`pending_tcp_find_free_slot()` silently overwrote a different, live
+   segment's retransmission record on exhaustion.** The function's own
+   pre-existing comment already admitted the fallback ("shouldn't happen...
+   not a new regression"), which is what made it findable by reading
+   rather than testing. Fixed by returning `-1` ("not tracked") instead of
+   a wrong slot to overwrite, matching this file's own pre-existing
+   `-1`-means-none idiom; both send-path callers had to be taught to treat
+   an untracked segment as "send it anyway, just don't arm the deliberate-
+   drop test injection against it," since arming that injection against
+   slot -1 would have introduced a new bug (the frame never sent at all).
+
+The other seven: shared-object pool exhaustion (the literal #295 failure
+mode) now returns `LINUX_ENFILE` instead of `EBADF`; per-process fd
+exhaustion returns `LINUX_EMFILE`; `growable_pool_ensure` and
+`address_space_ensure_root` stopped collapsing multiple failure causes into
+one `bool`; `KERNEL_SOCKET_FD_MAX` turned out to have no backing storage of
+its own -- a bare, unexplained, too-small (8) numeric ceiling under the real
+16-wide fd table -- and was raised to match; and `PAGE_MAP_REF_MAX`'s
+mapping-retain path stopped conflating a real invariant violation with its
+(practically unreachable) actual ceiling.
+
+Every pool, including the two whose ceiling first looked impractical to
+reach (`PAGE_MAP_REF_MAX` at ~4.2M, `SHARED_OBJECT_MAX_REFS` at 256), ended
+up with a dedicated boundary test -- that "impractical" judgment was wrong
+both times: `SHARED_OBJECT_MAX_REFS` only needed a real 256-iteration
+retain loop, and `PAGE_MAP_REF_MAX`'s boundary *check* (not its increment
+mechanism) could be proven by writing the pool's own private `map_refcount`
+field directly from a probe living in the same file, without looping 4.2
+million times. New probes: `unified_object_pool_exhaustion_probe`,
+`unified_fd_table_exhaustion_probe`, `tcp_connection_pool_exhaustion_probe`,
+`pending_tcp_exhaustion_probe`, `unified_object_ref_ceiling_probe`,
+`page_mapping_ref_ceiling_probe` -- all wired into
+`kernel_test_common_probes()` with their own
+`kernel/tests/common/views/*.filter`+`*.expected` pairs. The QEMU/RPi5 view
+count grew from 31 to 37 across this issue.
+
+**Compiler-side lesson.** This compiler already has the exact mechanism
+that would have caught bug 1 at compile time: a `linear` value's release
+obligation is checked at every early return (`test/test_takibi.ml`'s
+"linear: a pending obligation at an early return is a compile error").
+`kernel/lib/refcount_slotmap.tkb`'s `retain`/`release` pair is a bare
+`usize` counter increment/decrement with no such token, almost certainly
+because this language does not yet support arrays of linear/affine values
+well (confirmed independently while writing this issue's own
+`tcp_connection_pool_exhaustion_probe`, which had to use two named locals
+instead of an array for exactly that reason) -- and `fd_table.tkb`'s
+per-process descriptor arrays are precisely an N-slots-holding-a-reference
+shape that would need that support. Filed as a real, narrow compiler
+enhancement candidate rather than fixed in this pass: either array/struct-
+field support for linear values, or a smaller "resource-scope" construct
+that statically balances retain/release counts on every exit path.
+Separately, this pass also hit the refinement-narrower's known scope limit
+firsthand (`if (found < 0 || found >= 4) { return -1; }` does not narrow
+`found` afterward; only the wrapping `if (v >= 0 && v < 4) { ... }` form
+does, per `test_takibi.ml`'s own deliberate scope tests) -- not a bug, but
+worth a future narrow issue since it cost a real compile-error round trip
+during this pass.
+
+Verified on both `kernelbuild-qemu`/`kernelcheck-qemu` and
+`kernelcheck-rpi5` after every round, including two clean rebuilds.
+
 ### 2026-08-13: The exception-frame offset duplication (issue #286) was eliminated in three passes, one of which broke EL0 entry along the way
 
 The 2026-08-12 entry above fixed a missing `TPIDR_EL0` field but left the

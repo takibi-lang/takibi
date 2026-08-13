@@ -291,7 +291,7 @@ probe/board setup. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (31 views, one boot)
+PASS kernel/rpi5 (37 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2
@@ -376,11 +376,12 @@ transcript through the common views plus the QEMU-specific views, comparing
 each exactly against its `.expected` file -- the identical "one boot, many
 independent contracts" pattern `kernelcheck-rpi5` uses (see "Expected-file
 integration views" below), just without the SWD reset/load dance: QEMU's
-TCP-backed serial chardev is read by the shared pyserial driver. Thirty-one
-views currently pass. The target then runs a separate ash smoke lane using
-the same pyserial driver and the shared `kernel/tests/common/ash/ash.stdin`
-and `ash.expected` fixtures; the RPi5 runner drives those fixtures during its
-one boot as well. The 31 views cover:
+TCP-backed serial chardev is read by the shared pyserial driver.
+Thirty-seven views currently pass. The target then runs a separate ash smoke
+lane using the same pyserial driver and the shared
+`kernel/tests/common/ash/ash.stdin` and `ash.expected` fixtures; the RPi5
+runner drives those fixtures during its one boot as well. The 37 views
+cover:
 
 - the full hardware-independent self-test bundle (FP/SIMD-across-IRQ, a
   real second-core PSCI bring-up, VM layout, user memory + root isolation,
@@ -397,7 +398,13 @@ one boot as well. The 31 views cover:
   recovery, repeated requests, and exact `index.html` responses;
 - the ext2-resident `init.sh` scenario, including connected socket I/O,
   overlapping connections, partial writes, UART input, and process/VM
-  lifecycle checks.
+  lifecycle checks;
+- resource-limit boundary probes (issue #295): each fixed-capacity pool
+  (shared object pool, TCP connections, per-process fd table, the
+  pending-TCP retransmit queue, and the two large reference-count
+  ceilings) is driven to exactly its documented capacity, proving the
+  returned variant/error and that a clean rollback/reuse follows --
+  `RESOURCE_LIMITS.md` is the full inventory these probes cover.
 
 ### Differences from RPi5
 
@@ -457,10 +464,12 @@ bring-up. Host-side progress output is separate from kernel UART output.
 
 The passing HTTPd test is a concrete Linux compatibility milestone, not a
 claim of general Linux compatibility. `SYSCALLS.md` is the per-syscall
-authority and the common/platform view `.expected` files are the actual
-contracts;
-the list below is orientation for a reader deciding whether a workload will
-run, not a specification.
+authority, `RESOURCE_LIMITS.md` is the per-resource-pool authority (every
+fixed-capacity pool -- process slots, descriptors, shared objects,
+connections, pages, and more -- with its exhaustion behavior and boundary
+test), and the common/platform view `.expected` files are the actual
+contracts; the list below is orientation for a reader deciding whether a
+workload will run, not a specification.
 
 - **Filesystem.** One ext2 block group, nested path lookup, root-directory
   mutation, allocation bitmaps, and fast symlinks. Regular-file reads cover
