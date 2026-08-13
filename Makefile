@@ -462,6 +462,9 @@ KERNEL_QEMU_MEMORY_TKB   := $(KERNEL_DIR)/platform/qemu/memory.tkb
 KERNEL_QEMU_MMU_LAYOUT_TKB := $(KERNEL_DIR)/platform/qemu/mmu_layout.tkb
 KERNEL_QEMU_VIRTIO_NET_TKB := $(KERNEL_DIR)/drivers/net/virtio_net.tkb
 KERNEL_VIRTIO_BLK_TKB     := $(KERNEL_DIR)/drivers/block/virtio_blk.tkb
+# A shared relay lock for concurrent kernel integration runners. It is only
+# held while printing one complete line, never while a test itself runs.
+KERNEL_CHECK_OUTPUT_LOCK  := $(CURDIR)/_build/kernelcheck-output.lock
 
 $(KERNEL_QEMU_BUILD_DIR):
 	mkdir -p $@
@@ -557,16 +560,16 @@ RPI5_SWD_SPEED ?= 30000
 # A compile is not an integration pass. This deliberately fails until the
 # first observable RPi5 EL1 milestone connects its real-hardware harness.
 kernelcheck-rpi5: kernelbuild-rpi5
-	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_hwtest_rpi5.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_hwtest_rpi5.sh
 
 kernelcheck-qemu: kernelbuild-qemu
-	@bash scripts/run_kernel_qemutest.sh
-	@bash scripts/run_kernel_ash_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_ash_qemutest.sh
 
 ## Focused terminal-path check.  This is deliberately separate from the
 ## ordinary QEMU suite because its expected result is a parked fail-stop.
 kernelcheck-oops-qemu: kernelbuild-qemu
-	@bash scripts/run_kernel_oops_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_oops_qemutest.sh
 
 ## kernelsh-qemu: boot the standalone kernel, attach the current terminal to
 ## its TCP-backed UART console, and forward localhost:18080 to guest httpd.
