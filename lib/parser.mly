@@ -208,7 +208,7 @@ items:
 
 item:
   | func_def { FuncDef $1 }
-  | CONST name = IDENT COLON ty = type_expr ASSIGN n = INT SEMI
+  | CONST name = IDENT COLON ty = type_expr ASSIGN n = array_size SEMI
     { let loc = $symbolstartpos in
       if Const_env.is_builtin name then
         raise (Types.TypeError (loc,
@@ -216,7 +216,36 @@ item:
             "'%s' is a compiler-supplied target constant and cannot be redefined"
             name));
       check_const_type loc ty;
-      let e = { desc = IntLit n; loc } in
+      (* Reuses array_size's own IDENT/+/-/*// grammar (GitHub issue #295
+         follow-up) instead of only a bare INT: array_size's own IDENT case
+         already resolves a previously-declared const by name via
+         Const_env.find (the SAME ordering guarantee this const declaration
+         itself relies on -- "no forward references", enforced by
+         lib/use_resolver.ml's post-order file DFS), and eagerly collapses
+         any +/-/*// of two already-resolved operands to a literal. A
+         top-level const initializer is never inside a Generic_scope (that
+         only exists while parsing a generic struct/function's own body),
+         so array_size's ASParam arm -- returned only when a name is
+         neither a known Const_env constant nor a Generic_scope value
+         parameter -- can never be reached from here; array_size's IDENT
+         case raises its own TypeError directly for an unknown name before
+         ever returning ASParam in that case. This lets e.g.
+         `const KERNEL_SOCKET_FD_MAX: usize = PROCESS_FD_MAX;` or
+         `const SHARED_OBJECT_MAX_REFS: usize = PROCESS_CONTEXT_MAX *
+         PROCESS_FD_MAX;` replace a manually-duplicated literal that can
+         silently drift from what it was meant to equal -- exactly the
+         KERNEL_SOCKET_FD_MAX vs PROCESS_FD_MAX drift issue #295's audit
+         found. *)
+      let literal = match n with
+        | Ast.ASLit v -> v
+        | Ast.ASParam _ | Ast.ASAdd _ | Ast.ASSub _
+        | Ast.ASMul _ | Ast.ASDiv _ ->
+            raise (Types.TypeError (loc,
+              Printf.sprintf
+                "const '%s' initializer is not a fully resolved compile-time \
+                 integer constant" name))
+      in
+      let e = { desc = IntLit (Int64.of_int literal); loc } in
       Const_env.define_if_literal name (Some e);
       ConstDef (name, ty, e, loc) }
   | p = private_flag LET m = mut_flag IDENT let_rhs SEMI

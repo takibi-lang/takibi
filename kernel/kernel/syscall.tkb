@@ -114,19 +114,22 @@ const IOV_MAX: usize = 1024;
 // rationale and same off-by-one-avoiding `>=` check.
 const POLL_MAX: usize = 1024;
 
-// GitHub issue #295: this used to be 8, an arbitrary ceiling with no backing
-// storage of its own -- kernel_socket_fd_alloc/kernel_listener_fd_lookup/etc.
-// only ever range-check against it and then delegate the real work to
-// unified_fd_alloc/unified_socket_lookup, which are sized by fd_table.tkb's
-// own PROCESS_FD_MAX. A process whose first 8 descriptors were already busy
-// (inherited terminal fds, a background job's /dev/null redirection, ...)
-// could see socket()/accept() report resource exhaustion while fd_table.tkb's
-// real 16-wide table still had free slots at fd>=8 -- exactly the kind of
-// hidden, misleading exhaustion issue #295 was filed over. Kept as its own
-// literal (not `= PROCESS_FD_MAX`) because a top-level const initializer here
-// cannot reference another file's identifier; must equal PROCESS_FD_MAX
-// (kernel/kernel/fd_table.tkb) so this ceiling never sits below the real one.
-const KERNEL_SOCKET_FD_MAX: usize = 16;
+// GitHub issue #295: this used to be a literal 8, an arbitrary ceiling with
+// no backing storage of its own -- kernel_socket_fd_alloc/
+// kernel_listener_fd_lookup/etc. only ever range-check against it and then
+// delegate the real work to unified_fd_alloc/unified_socket_lookup, which
+// are sized by fd_table.tkb's own PROCESS_FD_MAX. A process whose first 8
+// descriptors were already busy (inherited terminal fds, a background
+// job's /dev/null redirection, ...) could see socket()/accept() report
+// resource exhaustion while fd_table.tkb's real 16-wide table still had
+// free slots at fd>=8 -- exactly the kind of hidden, misleading exhaustion
+// issue #295 was filed over. First raised to a literal 16 (a duplicated
+// literal kept in sync by hand, since top-level const initializers could
+// not yet reference another const at all), then changed to a REAL
+// reference once the compiler grammar gained array_size-style const
+// arithmetic (same issue, follow-up pass) -- this can now never silently
+// drift below fd_table.tkb's own PROCESS_FD_MAX again.
+const KERNEL_SOCKET_FD_MAX: usize = PROCESS_FD_MAX;
 
 private let mut syscall_ext2_mount: Ext2Mount;
 private let mut syscall_ext2_ready: bool;

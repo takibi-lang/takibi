@@ -484,6 +484,55 @@ let parser_tests = [
     | _ -> Alcotest.fail "expected ConstDef"
   );
 
+  (* GitHub issue #295 follow-up: a const initializer now reuses
+     array_size's own IDENT/+/-/*// grammar instead of accepting only a
+     bare INT literal, so a duplicated-literal-kept-in-sync-by-hand const
+     (exactly the KERNEL_SOCKET_FD_MAX/PROCESS_FD_MAX drift issue #295's
+     audit found) can instead be a real reference. Both forms still fully
+     resolve to a plain IntLit at parse time -- Const_env has no notion of
+     a "symbolic" const, only ever a concrete recorded int -- so a later
+     const referencing this one, or an array size, sees an ordinary
+     literal either way. *)
+  Alcotest.test_case "const initializer may reference an earlier const \
+                       by name" `Quick (fun () ->
+    match parse "const N: usize = 4; const M: usize = N;" with
+    | [Ast.ConstDef ("N", _, { desc = Ast.IntLit 4L; _ }, _);
+       Ast.ConstDef ("M", _, { desc = Ast.IntLit 4L; _ }, _)] -> ()
+    | _ -> Alcotest.fail "expected M's ConstDef to resolve to IntLit 4L"
+  );
+
+  Alcotest.test_case "const initializer supports +/-/*// between earlier \
+                       consts, matching array_size's own arithmetic" `Quick
+    (fun () ->
+      match parse "const A: usize = 4; const B: usize = 16; \
+                    const P: usize = A * B; const S: usize = A + B; \
+                    const D: usize = B / A; const M: usize = B - A;" with
+      | [Ast.ConstDef _; Ast.ConstDef _;
+         Ast.ConstDef ("P", _, { desc = Ast.IntLit 64L; _ }, _);
+         Ast.ConstDef ("S", _, { desc = Ast.IntLit 20L; _ }, _);
+         Ast.ConstDef ("D", _, { desc = Ast.IntLit 4L; _ }, _);
+         Ast.ConstDef ("M", _, { desc = Ast.IntLit 12L; _ }, _)] -> ()
+      | _ -> Alcotest.fail "expected P/S/D/M resolved to 64/20/4/12"
+  );
+
+  Alcotest.test_case "const initializer referencing an undefined name is \
+                       a compile error (same message shape as an array \
+                       size referencing one)" `Quick (fun () ->
+    match parse "const N: usize = UNDEFINED_CONST;" with
+    | _ -> Alcotest.fail "expected an error, but parsing succeeded"
+    | exception Types.TypeError (_, msg) ->
+        Alcotest.(check bool) "mentions the unknown name" true
+          (contains_substring msg "UNDEFINED_CONST")
+  );
+
+  Alcotest.test_case "const initializer referencing a mutable global (not \
+                       a const) is a compile error, same as array_size" `Quick
+    (fun () ->
+      match parse "let mut N: i32 = 4; const M: usize = N;" with
+      | _ -> Alcotest.fail "expected an error, but parsing succeeded"
+      | exception Types.TypeError (_, _) -> ()
+  );
+
   Alcotest.test_case "const rejects non-integer types" `Quick (fun () ->
     List.iter (fun src ->
       match parse src with
