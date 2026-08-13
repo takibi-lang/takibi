@@ -14,6 +14,9 @@
 *.cpio
 *.apk
 
+# Generated files
+kernel/arch/arm64/kernel/exception_context.inc
+
 # Downloaded at build time (Makefile's COMMON_AARCH64_BUSYBOX_APK rule,
 # GitHub issue #156) -- a real, GPL-2.0, third-party binary fetched
 # fresh, deliberately never vendored/committed.

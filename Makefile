@@ -575,5 +575,6 @@ allcheck: langcheck test linuxcheck kernelcheck
 clean:
 	dune clean
 	find kernel/build -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.img' \) -delete 2>/dev/null || true
+	rm -f kernel/arch/arm64/kernel/exception_context.inc
 	rm -rf $(LINUX_USER_BUILD_DIR)
 	find $(LINUX_USER_DIR) -type f \( -name '*.o' -o -name '*.exe' \) -delete 2>/dev/null || true
