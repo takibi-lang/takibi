@@ -933,6 +933,19 @@ size.
   follow-up) for the full design and verification (real-hardware `kernelcheck-rpi5`, including the
   `fpsimd` view for the q0-q31/FPSR-survives-a-real-interrupt property, and `syscall`/`child_exec` for
   `el0_context_resume`'s own corrected ordering).
+  **(3) 2026-08-13, issue #286: the frame's OFFSET constants are no longer hand-maintained either.**
+  `bin/main.ml`'s `--emit-exception-frame-offsets <StructName>` flag calls the compiler's own
+  `Llvm_gen.exception_frame_offsets` -- the same function `exception_entry`/`exception_restore` codegen
+  already uses -- and writes GAS `.equ` constants directly, generating `kernel/arch/arm64/kernel/
+  exception_context_offsets.inc` (gitignored), which the hand-written, git-tracked `exception_context.inc`
+  `.include`s. A prior version of this generation step lived in a separate Python script that
+  independently re-parsed the struct's `.tkb` syntax and reimplemented the same layout algorithm; that
+  duplication caused a real (if latent) bug before being replaced by this compiler flag. The
+  SAVE/RESTORE macro BODIES in `exception_context.inc` remain hand-written -- that is what "prototype
+  slice, not the full item" above still refers to -- but `scripts/verify_exception_frame.py` now checks
+  those macros do byte-range-complete save/restore of every struct field (not just a fixed list), catching
+  both a placeholder/empty macro body and a field silently left uncovered by a future struct edit. See
+  HISTORY.md's 2026-08-13 entry for the full incident this hardening responds to.
 - **The same D-cache-bypass gap applied to postmortem debugging over SWD, not just DMA/harness I/O --
   fixed for the evidence block itself by issue #227 item 3.** `el1_exception_evidence` (now ordinary
   `.tkb`, `kernel/arch/arm64/kernel/exception_evidence.tkb`, moved off hand-written assembly by

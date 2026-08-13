@@ -38,8 +38,11 @@ and the development container verifies the response with real `curl`.
   boundary.
 
 The EL0 exception frame preserves general-purpose registers, q0-q31, FPSR,
-and FPCR across syscalls. Process exit returns to the owning EL1 call frame so
-the complete address space can be unmapped and reclaimed.
+FPCR, and the TPIDR_EL0 thread pointer across syscalls -- musl derives errno
+from TPIDR_EL0, so a context switch that leaves another process's thread
+pointer live sends the next errno write into an unrelated mapping. Process
+exit returns to the owning EL1 call frame so the complete address space can be
+unmapped and reclaimed.
 
 ## Implemented system slices
 

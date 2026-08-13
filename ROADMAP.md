@@ -162,8 +162,10 @@ proceed in parallel with M1-M3. Serial internally:
    intrinsics, each carrying its mandatory barrier. Explicitly *not* general
    inline assembly. Lifts `timer.S` and most of `mmu.S`.
 3. **#227** -- declare the exception frame and vector table in `.tkb` and
-   generate save/restore, removing the hand-maintained `EL0_CONTEXT_SIZE`
-   duplicate and the two-divergent-frame-layouts condition that allowed #223.
+   generate save/restore. The frame's offset constants (`EXC_CONTEXT_SIZE` and
+   friends) are compiler-emitted now, not hand-maintained; the SAVE/RESTORE
+   macro bodies themselves (`kernel/arch/arm64/kernel/exception_context.inc`)
+   remain hand-written assembly, which is most of what keeps this item open.
 
 Done when: `kernel/arch/arm64` assembly drops from 1,300 lines to under ~300,
 and the remaining lines are genuine instruction emissions. Unlike most of this

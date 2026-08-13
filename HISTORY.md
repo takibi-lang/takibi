@@ -15,6 +15,77 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-13: The exception-frame offset duplication (issue #286) was eliminated in three passes, one of which broke EL0 entry along the way
+
+The 2026-08-12 entry above fixed a missing `TPIDR_EL0` field but left the
+underlying cause open: `kernel/arch/arm64/kernel/exception_context.inc`
+hand-maintained its `.equ EXC_CONTEXT_*` offset constants independently of
+`exception_frame.tkb`'s `ExceptionFrame` struct, so the two could diverge
+silently whenever a register was added, removed, or reordered.
+
+The first fix attempt made `exception_context.inc` itself a generated,
+gitignored file, with a Python script (`scripts/gen_exception_frame.py`)
+"preserving" the hand-written `EXC_CONTEXT_SAVE`/`EXC_CONTEXT_RESTORE` macro
+bodies by reading them back out of whatever content already happened to be on
+disk. This was a real regression: `make clean` deletes that file, and a fresh
+worktree never had it (gitignored means git never restores it), so the
+generator's fallback path silently wrote placeholder `/* TODO: implement */`
+macro bodies with no build error. The resulting kernel saved and restored
+nothing across an exception boundary; the first EL0 entry (the busybox/init
+userspace fixture) faulted immediately. Confirmed via QEMU's gdbstub reading
+`ESR_EL1`/`FAR_EL1`/`ELR_EL1` out of `el1_exception_evidence`'s evidence
+block (an Instruction Abort / Permission Fault at the entry point -- exactly
+what an all-garbage restored register/page-table state produces) and via
+`git worktree` bisection across the commit range, which showed the exact
+commit that gitignored the file was where the QEMU integration suite first
+started failing.
+
+The fix: split the file. `exception_context.inc` went back to being an
+ordinary, hand-written, git-tracked source file holding the SAVE/RESTORE
+macros; a new `exception_context_offsets.inc` (gitignored) holds ONLY the
+`.equ` offset constants and is `.include`d by the former. A follow-up pass
+found the macros still addressed most of `x0`-`x29`/`q0`-`q31` via raw hex
+literals instead of the generated `EXC_CONTEXT_*` symbols -- a second,
+subtler desync risk if the struct's field order ever changed -- and
+converted every offset reference to its symbol; disassembling `user_entry.o`
+before and after confirmed byte-identical machine code on both QEMU and
+RPi5. `scripts/verify_exception_frame.py` was then extended to check the
+macros' actual instruction coverage: it resolves every `stp`/`ldp`/`str`/
+`ldr` in each macro through the generated offsets and confirms the union of
+covered byte ranges equals the whole frame, catching both a placeholder body
+and a field silently left unsaved -- re-injecting the original TPIDR_EL0
+omission is now caught as "does not save/restore byte offset(s) 0x320"
+instead of a production context-switch failure.
+
+A third pass addressed a genuinely independent risk: `lib/llvm_gen.ml`'s
+`exception_frame_offsets` (used by `exception_entry`/`exception_restore`
+`.tkb` codegen) computes the same struct's offsets via its own, separate
+algorithm from the Python generator -- and the two had already diverged
+once, silently: the Python side added an unnecessary 16-byte alignment step
+before `q0` that the OCaml side never had, a no-op for today's field order
+purely by coincidence (the GPR/system-register prefix already totals exactly
+0x110). Removing that step made both implementations do the identical
+branch-free sequential sum. A regression test (`test/test_takibi.ml`) pins
+this by reordering `tpidr_el0` to just after `spsr_el1` -- a legal
+permutation per `validate_exception_frame`'s field-order independence -- which
+pushes the prefix to 280 bytes (not 16-aligned) and asserts the compiler
+places `q0` at the correct unaligned offset, not a wrongly-realigned one.
+
+Finally, `scripts/gen_exception_frame.py` was retired outright.
+`bin/main.ml` gained a `--emit-exception-frame-offsets <StructName>` flag
+that calls `Llvm_gen.exception_frame_offsets` directly and writes GAS `.equ`
+constants -- the exact function `exception_entry`/`exception_restore`
+codegen already uses, not a second reimplementation (which had also been
+independently re-parsing the struct's `.tkb` syntax via regex). There is now
+exactly one implementation of the frame's offset-layout algorithm. The
+SAVE/RESTORE macro bodies themselves remain hand-written assembly, protected
+by `verify_exception_frame.py`'s coverage check rather than generated;
+moving them into the compiler too is deferred until a future register-
+save/restore bug in this area makes that investment concrete rather than
+speculative.
+
+---
+
 ### 2026-08-12: Interactive ash can keep a normal BusyBox HTTPd alive on QEMU and RPi5
 
 The maintained kernel suite now ends by launching a fresh interactive BusyBox
