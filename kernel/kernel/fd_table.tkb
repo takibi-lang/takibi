@@ -787,6 +787,58 @@ fn unified_fd_destroy(process: usize) -> UnifiedFdResult {
     return UnifiedFdResult::Ok;
 }
 
+// GitHub issue #295 boundary test: exhausts the shared SHARED_OBJECT_MAX
+// object pool directly (bypassing per-process fd installation, which this
+// file's unified_fd_table_probe already covers functionally but never runs
+// to this pool's own boundary) and confirms UnifiedObjectResult::Full is
+// reported at exactly capacity, then that a freed slot is reused -- mirrors
+// kernel/arch/arm64/mm/asid.tkb's asid_pool_probe structure for its own
+// same-shape SlotMap-backed pool.
+fn unified_object_pool_exhaustion_probe() -> bool {
+    unified_fd_table_init();
+    let mut handles: [UnifiedObjectHandle; SHARED_OBJECT_MAX];
+    for i: usize in 0..<SHARED_OBJECT_MAX {
+        match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
+            UnifiedObjectResult::Invalid => { return false; }
+            UnifiedObjectResult::Full => { return false; }
+            UnifiedObjectResult::Allocated(handle) => { handles[i] = handle; }
+        }
+    }
+
+    let mut capacity_ok: bool = false;
+    match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
+        UnifiedObjectResult::Full => { capacity_ok = true; }
+        UnifiedObjectResult::Invalid => {}
+        UnifiedObjectResult::Allocated(extra) => {
+            refcount_pool_abandon(&object_pool, extra.slot, extra.generation);
+        }
+    }
+    if (capacity_ok == false) { return false; }
+
+    let freed_slot: {0..<SHARED_OBJECT_MAX as usize} = handles[0].slot;
+    let freed_generation: usize = handles[0].generation;
+    refcount_pool_abandon(&object_pool, freed_slot, freed_generation);
+    object_kind[freed_slot] = UnifiedFdKind::Empty;
+    let mut reused_ok: bool = false;
+    match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
+        UnifiedObjectResult::Full => {}
+        UnifiedObjectResult::Invalid => {}
+        UnifiedObjectResult::Allocated(reused) => {
+            if (reused.slot == freed_slot) { reused_ok = true; }
+            handles[0] = reused;
+        }
+    }
+    if (reused_ok == false) { return false; }
+
+    for i: usize in 0..<SHARED_OBJECT_MAX {
+        refcount_pool_abandon(&object_pool, handles[i].slot,
+                              handles[i].generation);
+        object_kind[handles[i].slot] = UnifiedFdKind::Empty;
+    }
+    unified_fd_table_init();
+    return true;
+}
+
 fn unified_fd_probe_install(fd: usize, result: UnifiedObjectResult) -> bool {
     match result {
         UnifiedObjectResult::Invalid => { return false; }

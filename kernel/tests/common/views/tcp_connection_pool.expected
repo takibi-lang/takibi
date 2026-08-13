@@ -1,0 +1,1 @@
+tcp connection pool: exhaustion at capacity=2, reuse-after-free ok

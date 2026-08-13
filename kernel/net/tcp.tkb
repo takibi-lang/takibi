@@ -320,6 +320,59 @@ fn tcp_connection_free(owner: sink TcpConnectionOwner[connection]) {
                    freelist_owner_new(owner.pool_index, owner.generation));
 }
 
+// GitHub issue #295 boundary test: TCP_CONNECTION_MAX is deliberately tiny
+// (2, issue #189), so unlike kernel/arch/arm64/mm/asid.tkb's asid_pool_probe
+// this test names each held owner explicitly instead of transferring into a
+// plain array -- there is no transfer-to-usize helper for TcpConnectionOwner
+// and two named locals cover this pool's whole capacity. Proves the pool
+// reports Full exactly at TCP_CONNECTION_MAX concurrently held connections
+// (not just sequentially, which the QEMU network fixture's own
+// open/close/reconnect coverage already exercises) and that a freed slot is
+// reused, mirroring asid_pool_probe's structure.
+fn tcp_connection_pool_exhaustion_probe() -> bool {
+    tcp_connection_pool_init();
+    let owner_a: exists connection: usize. TcpConnectionOwner[connection] =
+            match tcp_connection_alloc() {
+        TcpConnectionAllocResult::Full => { return false; }
+        TcpConnectionAllocResult::Allocated(owner) => { owner }
+    };
+    let owner_b: exists connection2: usize. TcpConnectionOwner[connection2] =
+            match tcp_connection_alloc() {
+        TcpConnectionAllocResult::Full => {
+            tcp_connection_free(owner_a);
+            return false;
+        }
+        TcpConnectionAllocResult::Allocated(owner) => { owner }
+    };
+
+    let mut capacity_ok: bool = false;
+    match tcp_connection_alloc() {
+        TcpConnectionAllocResult::Full => { capacity_ok = true; }
+        TcpConnectionAllocResult::Allocated(extra) => {
+            tcp_connection_free(extra);
+        }
+    }
+    if (capacity_ok == false) {
+        tcp_connection_free(owner_a);
+        tcp_connection_free(owner_b);
+        return false;
+    }
+
+    let freed_slot: usize = tcp_connection_slot(owner_a);
+    tcp_connection_free(owner_a);
+    let mut reused_ok: bool = false;
+    match tcp_connection_alloc() {
+        TcpConnectionAllocResult::Full => {}
+        TcpConnectionAllocResult::Allocated(reused) => {
+            if (tcp_connection_slot(reused) == freed_slot) { reused_ok = true; }
+            tcp_connection_free(reused);
+        }
+    }
+    tcp_connection_free(owner_b);
+    tcp_connection_pool_init();
+    return reused_ok;
+}
+
 fn kernel_tcp_inject_drop_next_syn_ack() {
     tcp_drop_next_syn_ack = true;
     tcp_injected_syn_pending = false;
