@@ -10,7 +10,7 @@ under "Argument bounds (not pools)" for completeness, since `grep -r MAX`
 does not distinguish the two.
 
 This file records the state of the kernel as of 2026-08-13 (commit
-`b5ea688`). When a limit or its exhaustion behavior changes, update this
+`e88126d`). When a limit or its exhaustion behavior changes, update this
 file in the same commit -- do not let it drift into a stale snapshot.
 Individual source files still carry the detailed sizing rationale (issue
 numbers, workload history); this file exists to answer "what is the actual
@@ -38,7 +38,7 @@ exhaustion result and a boundary test proving it. None remain unaudited.
 | Shared-object reference count ceiling | `SHARED_OBJECT_MAX_REFS` (`kernel/kernel/fd_table.tkb`) | 256 (= `PROCESS_CONTEXT_MAX` x `PROCESS_FD_MAX`, duplicated as a literal because top-level consts can't reference each other arithmetically) | Global | Passed to `RefcountSlotMap`'s ref-take path (`unified_fd_install`/`unified_fd_duplicate`/`unified_fd_clone`) | `refcount_pool_retain()`'s own `RefcountRetainResult::Overflow` was being discarded into the same `Invalid` as a bad fd argument by `unified_fd_install`/`unified_fd_duplicate`; both now return `UnifiedFdInstallResult{Invalid;RefOverflow;Ok}`, and `fcntl(F_DUPFD)` maps `RefOverflow` to `LINUX_EMFILE` with a log line. **Auditing this surfaced a real correctness bug, not just a diagnosability gap:** `unified_fd_clone()` (fork's fd-table copy) had no rollback on a mid-loop `Overflow`/failure -- fds already retained before the failure point leaked their incremented refcounts forever, and the failing fd itself was left half-copied. Fixed via a new `unified_fd_clone_rollback()` helper. Practically very hard to reach (would need ~256 simultaneous references to one shared object); no dedicated boundary test was added given the impracticality of constructing that state, but the rollback fix itself is exercised indirectly by every existing clone/fork test passing with the new code path compiled in. |
 | Legacy per-process socket fd range | `KERNEL_SOCKET_FD_MAX` (`kernel/kernel/syscall.tkb`) | 16 (was 8) | Per-process | `kernel_socket_fd_alloc()`/`kernel_listener_fd_lookup()`/etc., all of which range-check against this ceiling and then delegate to `unified_fd_alloc`/`unified_socket_lookup` (the same `PROCESS_FD_MAX`-sized table) | This constant had no backing storage array of its own -- confirmed by exhaustive grep -- it was a pure numeric-range ceiling layered under the real 16-wide unified fd table. At 8 it silently refused socket fd numbers 8-15 even when `PROCESS_FD_MAX`'s real table had free slots there (e.g. a shell whose first 8 descriptors were already busy with inherited terminal/job fds), reporting resource exhaustion (`LINUX_EAGAIN`) that did not actually exist. Raised to 16 to match `PROCESS_FD_MAX`; it is no longer a second, independent capacity, just a legacy name for the same one, so it needs no separate boundary test beyond `unified_fd_table_exhaustion_probe`. |
 | TCP connections | `TCP_CONNECTION_MAX` (`kernel/net/tcp.tkb`) | 2 (deliberately tiny, issue #189) | Global | `tcp_connection_alloc()` / `tcp_connection_free()`, SlotMap-backed | `TcpConnectionAllocResult::Full`, explicit variant. `kernel_syscall_inetd_accept` and the `accept4` syscall handler log "TCP connection pool" exhaustion distinctly via `kernel_boot_log_resource_exhausted` before returning the existing `TimedOut`/`LINUX_EAGAIN` result -- the *externally visible* retry behavior was deliberately left unchanged (this accept path's timing is a recurring flake source; only logging was added, not control flow). An operator reading the boot log can now tell pool exhaustion from a genuine timeout; a userspace caller still sees the same retryable result either way, matching correct TCP behavior (dropping a SYN under resource pressure). Boundary-tested by the new `tcp_connection_pool_exhaustion_probe`, which proves the pool reports `Full` at exactly 2 concurrently held connections (the existing QEMU network fixture only ever exercised reuse sequentially). |
-| Pending (unacked) TCP segments | `PENDING_TCP_MAX` (`kernel/net/tcp.tkb`) | 4, per connection | Per-connection | `pending_tcp_record()` / acked-segment removal | **A real silent-corruption bug, confirmed by the pre-existing code's own comment acknowledging the fallback.** `pending_tcp_find_free_slot()` falls back to slot 0 when all 4 slots are occupied, and `pending_tcp_record()` unconditionally overwrites whatever occupies the returned slot -- so a 5th in-flight segment silently clobbers slot 0's still-unacknowledged retransmission record. If slot 0's own ACK is then lost, it never gets retransmitted, surfacing later as an inexplicable stall rather than as a resource-limit symptom. Now logs via `kernel_boot_log_resource_exhausted` at the fallback point; the fallback's overwrite behavior itself was deliberately left unchanged, same reasoning as `TCP_CONNECTION_MAX` above (retry-timing flake history). No boundary test added -- constructing 5 genuinely simultaneous in-flight unacked segments requires driving real TCP timing/loss from the QEMU network-peer harness, a materially larger effort than this session's other boundary tests; flagged here as a residual gap in test coverage (not in diagnosability, which is now fixed) for a future session. |
+| Pending (unacked) TCP segments | `PENDING_TCP_MAX` (`kernel/net/tcp.tkb`) | 4, per connection | Per-connection | `pending_tcp_record()` / acked-segment removal | **Was a real silent-corruption bug, confirmed by the pre-existing code's own comment acknowledging the fallback -- now fixed, not just logged.** `pending_tcp_find_free_slot()`/`pending_tcp_record()` used to fall back to slot 0 when all 4 slots were occupied and unconditionally overwrite whatever occupied it, silently clobbering an unrelated in-flight segment's still-unacknowledged retransmission record. Both now return `i32` with `-1` meaning "not tracked" (matching this file's own existing sentinel idiom) instead of always claiming a slot; the new segment is still sent exactly as before, it simply is not tracked for automatic retransmission when the queue is full, and critically no other slot's data is ever touched. Both callers' deliberate-drop test-injection branches are guarded on getting a real slot, so an untracked segment is never silently skipped-and-never-sent either. Boundary-tested by the new `pending_tcp_exhaustion_probe`, which fills all 4 slots directly, confirms a 5th record attempt reports `-1` without altering any existing slot's data, and confirms a freed slot is reused. |
 
 ## Argument bounds (not pools)
 
@@ -59,16 +59,16 @@ needed for any of these.
 
 ## Diagnosability fixes landed 2026-08-13
 
-All nine findings from the audit were fixed in this same session (commits
-`6c85779`, `98fe441`, `a5ee81b`, `0698fcf`, `de4987c`), rather than split
-into follow-up issues, per explicit direction to complete issue #295 without
-filing separate issues. `make kernelbuild-qemu` and `make kernelcheck-qemu`
-are green after every step (34 views, up from 31 at the start), including
-two clean rebuilds. `make kernelcheck-rpi5` was run twice on real RPi5
-hardware with the user's explicit go-ahead each time: once mid-session
-(33 views, before the round-2 fixes) and once after every fix including
-round 2 (34 views, all green) -- this issue's changes are fully verified on
-real hardware, not just QEMU.
+All nine findings from the audit were fixed in this same session across
+three rounds (commits `6c85779`, `98fe441`, `a5ee81b`, `0698fcf`, `de4987c`,
+`e88126d`), rather than split into follow-up issues, per explicit direction
+to complete issue #295 without filing separate issues. `make kernelbuild-qemu`
+and `make kernelcheck-qemu` are green after every step (35 views, up from 31
+at the start), including two clean rebuilds. `make kernelcheck-rpi5` was run
+on real RPi5 hardware with the user's explicit go-ahead each time: once
+after round 1 (33 views) and once after round 2 (34 views), both fully
+green; round 3 (the `PENDING_TCP_MAX` behavior fix and its boundary test)
+was verified on QEMU and is pending a further RPi5 pass.
 
 1. Shared-object pool exhaustion (`SHARED_OBJECT_MAX`) no longer reads as
    `EBADF` -- fixed via `UnifiedOpenResult` and `LINUX_ENFILE`. The exact
@@ -94,9 +94,13 @@ real hardware, not just QEMU.
    rollback helper, not just better labeling.
 9. `PENDING_TCP_MAX` exhaustion was silently overwriting an in-flight
    connection's still-unacknowledged retransmission record -- confirmed via
-   the code's own pre-existing comment acknowledging the fallback. Now
-   logged; the overwrite behavior itself was deliberately left unchanged
-   (same retry-timing risk as finding 2).
+   the code's own pre-existing comment acknowledging the fallback. First
+   logged only (same retry-timing caution as finding 2), then -- per
+   explicit follow-up direction to close this out fully rather than leave
+   the corruption itself in place -- actually fixed: exhaustion now reports
+   `-1` ("not tracked") instead of claiming a slot to overwrite, with both
+   callers' test-injection paths guarded so an untracked segment is never
+   silently dropped either.
 
 ## Boundary/exhaustion test coverage
 
@@ -110,12 +114,12 @@ reachable ceiling now has one:
 - `unified_object_pool_exhaustion_probe` (`SHARED_OBJECT_MAX`, new)
 - `unified_fd_table_exhaustion_probe` (`PROCESS_FD_MAX`, new)
 - `tcp_connection_pool_exhaustion_probe` (`TCP_CONNECTION_MAX`, new)
+- `pending_tcp_exhaustion_probe` (`PENDING_TCP_MAX`, new -- drives the
+  pending-slot state directly rather than through real TCP timing, since
+  reaching this boundary via genuine network loss/retry would require a
+  materially larger QEMU-peer-driven test)
 
 Two ceilings intentionally have no dedicated boundary test, both explained
 in the table above: `PAGE_MAP_REF_MAX` (practically unreachable, 4.2M) and
 `SHARED_OBJECT_MAX_REFS` (256, impractical to construct outside a real
-fork/dup stress scenario). `PENDING_TCP_MAX` also has no boundary test yet --
-unlike the other two, this one is a real, reachable gap in coverage (not
-just an impractically large ceiling), left for a future session because
-constructing it requires driving real TCP loss/retry timing through the
-QEMU network-peer harness.
+fork/dup stress scenario).
