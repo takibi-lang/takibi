@@ -1434,6 +1434,11 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) {
     if (kernel_process_child_exec_prepare() == 0) {
         kernel_syscall_fail_stop(frame_sp);
     }
+    // Default-false debugger test switch: stop after the real prepare+commit
+    // path without affecting ordinary exec or adding a userspace interface.
+    if (kernel_process_trace_fail_after_exec_requested()) {
+        kernel_syscall_fail_stop(frame_sp);
+    }
     let entry: usize = kernel_process_child_exec_entry();
     let stack: usize = kernel_process_child_exec_stack();
     el0_context_set_sp_el0(frame_sp, stack);

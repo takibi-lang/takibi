@@ -780,9 +780,11 @@ private let mut kernel_process_trace_probe_child_frame:
 // scheduler or IRQ path.  A later SMP writer must publish each record with a
 // commit sequence after its fields are written; the present single-writer
 // implementation deliberately keeps the same field ABI and copy interface.
-const KERNEL_CRASH_TRACE_EVENTS: usize = 8;
+// Sixteen records retain the complete first fork+exec handoff in the QEMU
+// fail-stop regression while remaining a small fixed 1536-byte object.
+const KERNEL_CRASH_TRACE_EVENTS: usize = 16;
 const KERNEL_PROCESS_TRACE_WORDS_PER_EVENT: usize = 12;
-const KERNEL_CRASH_TRACE_WORDS: usize = 96;
+const KERNEL_CRASH_TRACE_WORDS: usize = 192;
 const ProcessTraceFork: usize = 1;
 const ProcessTraceExecPrepare: usize = 2;
 const ProcessTraceExecCommit: usize = 3;
@@ -799,6 +801,10 @@ private let mut kernel_crash_trace_next: usize;
 // a test may set it before the first process reset to retain a real workload's
 // tail without adding UART traffic or a production control surface.
 private let mut kernel_process_trace_boot_enabled: bool;
+// Debugger-owned test configuration only. It makes the QEMU oops regression
+// stop immediately after a real child exec commit, proving one lifecycle tail
+// contains fork, exec prepare, and exec commit. Normal boot leaves it false.
+private let mut kernel_process_trace_fail_after_exec: bool;
 private let mut kernel_process_trace_enabled: bool;
 
 // Layout: local sequence, cpu, kind, subject pid/generation, peer
@@ -833,6 +839,10 @@ fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
 
 fn kernel_process_trace_enable() { kernel_process_trace_enabled = true; }
 fn kernel_process_trace_disable() { kernel_process_trace_enabled = false; }
+
+fn kernel_process_trace_fail_after_exec_requested() -> bool {
+    return kernel_process_trace_fail_after_exec;
+}
 
 fn kernel_process_trace_current(event: usize, peer: ProcessHandle,
                                 aux: usize) {
@@ -1528,7 +1538,7 @@ fn kernel_process_crash_trace_ring_probe() -> bool {
     // This probe owns its synthetic ring contents, so start its wrap proof at
     // sequence one regardless of that external diagnostic policy.
     kernel_crash_trace_next = 0;
-    for event: usize in 1..<11 {
+    for event: usize in 1..<19 {
         kernel_process_trace_record(event, event + 100, event + 1000,
                                     event + 200, event + 2000, 3, 2,
                                     7, event + 300, event + 400);
