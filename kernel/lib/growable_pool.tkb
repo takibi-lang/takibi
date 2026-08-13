@@ -143,6 +143,16 @@ must_use variant GrowablePoolInsertResult {
     Allocated(exists allocation: usize. FreelistOwner[allocation]);
 }
 
+// GitHub issue #295: growable_pool_grow_one_chunk's two failure causes are
+// unrelated in scope -- ChunkLimitReached is this one pool's own configured
+// MAX_CHUNKS ceiling, while OutOfMemory is kernel/mm/page.tkb's single
+// GLOBAL physical page allocator (BOOT_PAGE_COUNT) having nothing left for
+// ANY subsystem. Callers that only ever saw a bare `bool` (growable_pool_
+// ensure, before this issue) could not tell "this pool's own bound" from
+// "the whole kernel is out of memory," which is exactly the kind of
+// resource-exhaustion ambiguity issue #295 was filed to remove.
+must_use variant GrowablePoolGrowResult { ChunkLimitReached; OutOfMemory; Grown; }
+
 // Starts genuinely empty: no chunk is activated and no backing page has
 // been requested yet (contrast kernel/lib/slotmap.tkb's slotmap_init,
 // which eagerly links the whole N-sized chain via freelist_core_init).
@@ -214,10 +224,15 @@ fn growable_pool_zero_page(base: usize) {
 // wasted work for that mode. Returns false if this pool's own MAX_CHUNKS
 // ceiling is reached or page.tkb is out of memory.
 fn growable_pool_grow_one_chunk(
-        T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N)) -> bool {
-    if (pool.active_chunks >= MAX_CHUNKS) { return false; }
+        T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N))
+        -> GrowablePoolGrowResult {
+    if (pool.active_chunks >= MAX_CHUNKS) {
+        return GrowablePoolGrowResult::ChunkLimitReached;
+    }
     match page_alloc() {
-        PageAllocResult::OutOfMemory => { return false; }
+        PageAllocResult::OutOfMemory => {
+            return GrowablePoolGrowResult::OutOfMemory;
+        }
         PageAllocResult::Allocated(page_owner) => {
             let base: usize = page_physical_address(page_owner);
             let page_index: usize =
@@ -231,7 +246,7 @@ fn growable_pool_grow_one_chunk(
             }
             growable_pool_zero_page(base);
             pool.active_chunks = chunk + 1;
-            return true;
+            return GrowablePoolGrowResult::Grown;
         }
     }
 }
@@ -244,8 +259,14 @@ fn growable_pool_insert(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHU
         }
         FreelistPopResult::Empty => {
             let chunk: usize = pool.active_chunks;
-            if (growable_pool_grow_one_chunk(pool) == false) {
-                return GrowablePoolInsertResult::OutOfMemory;
+            match growable_pool_grow_one_chunk(pool) {
+                GrowablePoolGrowResult::ChunkLimitReached => {
+                    return GrowablePoolInsertResult::OutOfMemory;
+                }
+                GrowablePoolGrowResult::OutOfMemory => {
+                    return GrowablePoolInsertResult::OutOfMemory;
+                }
+                GrowablePoolGrowResult::Grown => {}
             }
             growable_pool_activate_chunk(pool, chunk);
             match freelist_core_insert(&pool.core) {
@@ -273,13 +294,33 @@ fn growable_pool_insert(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHU
 // identity/generation tracking (see this file's header) rather than this
 // pool's own -- there is deliberately no owner/generation here at all,
 // unlike growable_pool_insert/_remove.
+// GitHub issue #295: reports which of the three independent reasons this
+// call did not reach `index` -- a caller bug (index outside this pool's own
+// compile-time N), this pool's own MAX_CHUNKS ceiling, or the global page
+// allocator being out of memory -- instead of collapsing all three into one
+// `bool false` the way this function did before this issue.
+must_use variant GrowablePoolEnsureResult {
+    IndexOutOfRange;
+    ChunkLimitReached;
+    OutOfMemory;
+    Ok;
+}
+
 fn growable_pool_ensure(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
-                        index: usize) -> bool {
-    if (index >= N) { return false; }
+                        index: usize) -> GrowablePoolEnsureResult {
+    if (index >= N) { return GrowablePoolEnsureResult::IndexOutOfRange; }
     while (index >= pool.active_chunks * SLOTS_PER_CHUNK) {
-        if (growable_pool_grow_one_chunk(pool) == false) { return false; }
+        match growable_pool_grow_one_chunk(pool) {
+            GrowablePoolGrowResult::ChunkLimitReached => {
+                return GrowablePoolEnsureResult::ChunkLimitReached;
+            }
+            GrowablePoolGrowResult::OutOfMemory => {
+                return GrowablePoolEnsureResult::OutOfMemory;
+            }
+            GrowablePoolGrowResult::Grown => {}
+        }
     }
-    return true;
+    return GrowablePoolEnsureResult::Ok;
 }
 
 // Releasing an already-free slot is a double free; see
@@ -482,13 +523,28 @@ fn growable_pool_probe() -> bool {
     growable_pool_init(&shadow_pool);
     if (growable_pool_active_chunks(&shadow_pool) != 0) { return false; }
 
-    if (growable_pool_ensure(&shadow_pool, 0) == false) { return false; }
+    match growable_pool_ensure(&shadow_pool, 0) {
+        GrowablePoolEnsureResult::Ok => {}
+        GrowablePoolEnsureResult::IndexOutOfRange => { return false; }
+        GrowablePoolEnsureResult::ChunkLimitReached => { return false; }
+        GrowablePoolEnsureResult::OutOfMemory => { return false; }
+    }
     let chunks_after_first_ensure: usize = growable_pool_active_chunks(&shadow_pool);
-    if (growable_pool_ensure(&shadow_pool, 1) == false) { return false; }
+    match growable_pool_ensure(&shadow_pool, 1) {
+        GrowablePoolEnsureResult::Ok => {}
+        GrowablePoolEnsureResult::IndexOutOfRange => { return false; }
+        GrowablePoolEnsureResult::ChunkLimitReached => { return false; }
+        GrowablePoolEnsureResult::OutOfMemory => { return false; }
+    }
     if (growable_pool_active_chunks(&shadow_pool) != chunks_after_first_ensure) {
         return false;
     }
-    if (growable_pool_ensure(&shadow_pool, 3) == false) { return false; }
+    match growable_pool_ensure(&shadow_pool, 3) {
+        GrowablePoolEnsureResult::Ok => {}
+        GrowablePoolEnsureResult::IndexOutOfRange => { return false; }
+        GrowablePoolEnsureResult::ChunkLimitReached => { return false; }
+        GrowablePoolEnsureResult::OutOfMemory => { return false; }
+    }
     if (growable_pool_active_chunks(&shadow_pool) != 2) { return false; }
 
     *growable_pool_ref_at(&shadow_pool, 0) = 111;
@@ -500,7 +556,12 @@ fn growable_pool_probe() -> bool {
     }
 
     let shadow_live_before_ceiling: usize = page_allocator_live_count();
-    if (growable_pool_ensure(&shadow_pool, 6)) { return false; }
+    match growable_pool_ensure(&shadow_pool, 6) {
+        GrowablePoolEnsureResult::IndexOutOfRange => {}
+        GrowablePoolEnsureResult::Ok => { return false; }
+        GrowablePoolEnsureResult::ChunkLimitReached => { return false; }
+        GrowablePoolEnsureResult::OutOfMemory => { return false; }
+    }
     if (page_allocator_live_count() != shadow_live_before_ceiling) { return false; }
 
     return true;

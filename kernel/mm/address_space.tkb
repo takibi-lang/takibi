@@ -128,29 +128,45 @@ fn address_space_record_backing(
     asid_owner_transfer(asid);
 }
 
+// GitHub issue #295: address_space_allocate_root/_ensure_root used to return
+// a bare bool, collapsing three unrelated failure causes into one signal --
+// this pool's own slot-range check, kernel/mm/page.tkb's global physical
+// page allocator (shared by every other subsystem, not specific to address
+// spaces), and kernel/arch/arm64/mm/asid.tkb's separate, equally-sized ASID
+// pool. A caller such as scheduled_process_alloc could not tell "the process
+// table is genuinely full" from "the kernel is out of physical memory" --
+// exactly the kind of misdiagnosis issue #295 was filed over.
+must_use variant AddressSpaceAllocateResult {
+    OutOfMemory;
+    AsidExhausted;
+    Ok;
+}
+
 // Allocate one complete root atomically from the caller's perspective. Any
 // partial page allocation is returned before reporting failure, so a failed
 // process-slot allocation cannot leave an unreachable table or ASID live.
 fn address_space_allocate_root(slot: {0..<ADDRESS_SPACE_MAX as usize})
-        -> bool {
+        -> AddressSpaceAllocateResult {
     match page_alloc() {
-        PageAllocResult::OutOfMemory => { return false; }
+        PageAllocResult::OutOfMemory => {
+            return AddressSpaceAllocateResult::OutOfMemory;
+        }
         PageAllocResult::Allocated(l1) => {
             match page_alloc() {
                 PageAllocResult::OutOfMemory => {
                     page_free(l1);
-                    return false;
+                    return AddressSpaceAllocateResult::OutOfMemory;
                 }
                 PageAllocResult::Allocated(l2) => {
                     match asid_alloc() {
                         AsidAllocResult::Full => {
                             page_free(l2);
                             page_free(l1);
-                            return false;
+                            return AddressSpaceAllocateResult::AsidExhausted;
                         }
                         AsidAllocResult::Allocated(asid) => {
                             address_space_record_backing(slot, l1, l2, asid);
-                            return true;
+                            return AddressSpaceAllocateResult::Ok;
                         }
                     }
                 }
@@ -159,14 +175,33 @@ fn address_space_allocate_root(slot: {0..<ADDRESS_SPACE_MAX as usize})
     }
 }
 
+must_use variant AddressSpaceEnsureResult {
+    SlotOutOfRange;
+    OutOfMemory;
+    AsidExhausted;
+    Ok;
+}
+
 // Idempotent because root 0 is first made real before any ProcessHandle
 // exists, then adopted by the initial scheduler slot. Every nonzero slot is
 // made real by scheduled_process_alloc and released when that slot is reaped.
-fn address_space_ensure_root(slot: usize) -> bool {
-    if (slot >= ADDRESS_SPACE_MAX) { return false; }
+fn address_space_ensure_root(slot: usize) -> AddressSpaceEnsureResult {
+    if (slot >= ADDRESS_SPACE_MAX) {
+        return AddressSpaceEnsureResult::SlotOutOfRange;
+    }
     let checked = address_space_narrow_slot(slot);
-    if (address_space_backing[checked].live) { return true; }
-    return address_space_allocate_root(checked);
+    if (address_space_backing[checked].live) {
+        return AddressSpaceEnsureResult::Ok;
+    }
+    match address_space_allocate_root(checked) {
+        AddressSpaceAllocateResult::OutOfMemory => {
+            return AddressSpaceEnsureResult::OutOfMemory;
+        }
+        AddressSpaceAllocateResult::AsidExhausted => {
+            return AddressSpaceEnsureResult::AsidExhausted;
+        }
+        AddressSpaceAllocateResult::Ok => { return AddressSpaceEnsureResult::Ok; }
+    }
 }
 
 fn address_space_activate_root(slot: usize) {
@@ -434,7 +469,12 @@ fn kernel_mmu_init() {
     // entry.S cleared .bss before entering this function. Rewriting this
     // aggregate while the MMU is off permits LLVM to use an unaligned
     // 128-bit store on RPi5, which faults before the bootstrap root exists.
-    address_space_ensure_root(0);
+    match address_space_ensure_root(0) {
+        AddressSpaceEnsureResult::SlotOutOfRange => {}
+        AddressSpaceEnsureResult::OutOfMemory => {}
+        AddressSpaceEnsureResult::AsidExhausted => {}
+        AddressSpaceEnsureResult::Ok => {}
+    }
     kernel_mmu_activate(address_space_l1_physical(0), address_space_asid(0));
 }
 
@@ -504,10 +544,26 @@ fn process_address_space_probe() -> bool {
         return false;
     }
     let before: usize = page_allocator_live_count();
-    if (address_space_ensure_root(1) == false) { return false; }
-    if (address_space_ensure_root(2) == false) {
-        address_space_release_root(1);
-        return false;
+    match address_space_ensure_root(1) {
+        AddressSpaceEnsureResult::Ok => {}
+        AddressSpaceEnsureResult::SlotOutOfRange => { return false; }
+        AddressSpaceEnsureResult::OutOfMemory => { return false; }
+        AddressSpaceEnsureResult::AsidExhausted => { return false; }
+    }
+    match address_space_ensure_root(2) {
+        AddressSpaceEnsureResult::Ok => {}
+        AddressSpaceEnsureResult::SlotOutOfRange => {
+            address_space_release_root(1);
+            return false;
+        }
+        AddressSpaceEnsureResult::OutOfMemory => {
+            address_space_release_root(1);
+            return false;
+        }
+        AddressSpaceEnsureResult::AsidExhausted => {
+            address_space_release_root(1);
+            return false;
+        }
     }
     let backing_ok: bool =
         address_space_l1_physical(1) != 0 &&

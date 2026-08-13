@@ -19,3 +19,19 @@ fn kernel_boot_log_syscall_unreachable(number: usize) {
     uart_put_udec(number);
     uart_puts("\n" as *u8);
 }
+
+// GitHub issue #295: a fixed-capacity pool returning "full" at its call site
+// otherwise looks identical to any other rejection (bad argument, timeout,
+// EBADF) once it crosses the syscall boundary -- the interactive BusyBox
+// HTTPd milestone's shared-object/descriptor exhaustion was visible only as
+// an opaque shell/child startup failure until this file was hand-traced.
+// Every pool-exhaustion branch this issue addresses logs through here so the
+// resource name and its configured capacity always reach the operator, same
+// as kernel_boot_log_syscall_unreachable does for an unreachable dispatch.
+fn kernel_boot_log_resource_exhausted(resource: *u8, capacity: usize) {
+    uart_puts("resource exhausted: " as *u8);
+    uart_puts(resource);
+    uart_puts(" capacity=" as *u8);
+    uart_put_udec(capacity);
+    uart_puts("\n" as *u8);
+}

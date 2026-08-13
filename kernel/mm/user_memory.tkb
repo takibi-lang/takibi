@@ -463,10 +463,26 @@ fn user_memory_root_isolation_probe() -> bool {
     if (address_space_is_live(root_a) || address_space_is_live(root_b)) {
         return false;
     }
-    if (address_space_ensure_root(root_a) == false) { return false; }
-    if (address_space_ensure_root(root_b) == false) {
-        address_space_release_root(root_a);
-        return false;
+    match address_space_ensure_root(root_a) {
+        AddressSpaceEnsureResult::Ok => {}
+        AddressSpaceEnsureResult::SlotOutOfRange => { return false; }
+        AddressSpaceEnsureResult::OutOfMemory => { return false; }
+        AddressSpaceEnsureResult::AsidExhausted => { return false; }
+    }
+    match address_space_ensure_root(root_b) {
+        AddressSpaceEnsureResult::Ok => {}
+        AddressSpaceEnsureResult::SlotOutOfRange => {
+            address_space_release_root(root_a);
+            return false;
+        }
+        AddressSpaceEnsureResult::OutOfMemory => {
+            address_space_release_root(root_a);
+            return false;
+        }
+        AddressSpaceEnsureResult::AsidExhausted => {
+            address_space_release_root(root_a);
+            return false;
+        }
     }
     let va: usize = USER_TEXT_VA + index * PAGE_SIZE;
     match page_alloc() {

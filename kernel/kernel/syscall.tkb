@@ -32,6 +32,13 @@ const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
 const LINUX_EAGAIN: usize = 0xFFFFFFFFFFFFFFF5;
 const LINUX_EACCES: usize = 0xFFFFFFFFFFFFFFF3;
 const LINUX_ECHILD: usize = 0xFFFFFFFFFFFFFFF6;
+// GitHub issue #295: distinct errno for fixed-pool exhaustion, previously
+// collapsed into LINUX_EBADF (which real Linux reserves for an actually bad
+// descriptor argument) at every fd-allocating syscall handler below.
+// EMFILE = this process's own PROCESS_FD_MAX descriptor table is full;
+// ENFILE = the global SHARED_OBJECT_MAX object pool is full.
+const LINUX_EMFILE: usize = 0xFFFFFFFFFFFFFFE8;
+const LINUX_ENFILE: usize = 0xFFFFFFFFFFFFFFE9;
 
 const LINUX_F_DUPFD: usize = 0;
 const LINUX_F_SETFD: usize = 2;
@@ -86,7 +93,19 @@ const IOV_MAX: usize = 1024;
 // rationale and same off-by-one-avoiding `>=` check.
 const POLL_MAX: usize = 1024;
 
-const KERNEL_SOCKET_FD_MAX: usize = 8;
+// GitHub issue #295: this used to be 8, an arbitrary ceiling with no backing
+// storage of its own -- kernel_socket_fd_alloc/kernel_listener_fd_lookup/etc.
+// only ever range-check against it and then delegate the real work to
+// unified_fd_alloc/unified_socket_lookup, which are sized by fd_table.tkb's
+// own PROCESS_FD_MAX. A process whose first 8 descriptors were already busy
+// (inherited terminal fds, a background job's /dev/null redirection, ...)
+// could see socket()/accept() report resource exhaustion while fd_table.tkb's
+// real 16-wide table still had free slots at fd>=8 -- exactly the kind of
+// hidden, misleading exhaustion issue #295 was filed over. Kept as its own
+// literal (not `= PROCESS_FD_MAX`) because a top-level const initializer here
+// cannot reference another file's identifier; must equal PROCESS_FD_MAX
+// (kernel/kernel/fd_table.tkb) so this ceiling never sits below the real one.
+const KERNEL_SOCKET_FD_MAX: usize = 16;
 
 private let mut syscall_ext2_mount: Ext2Mount;
 private let mut syscall_ext2_ready: bool;
@@ -382,8 +401,12 @@ fn kernel_syscall_process_configure_current(
 fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     unified_fd_table_init();
     match unified_terminal_stdio_open(0) {
-        UnifiedFdResult::Invalid => {}
-        UnifiedFdResult::Ok => {}
+        UnifiedOpenResult::Invalid => {}
+        UnifiedOpenResult::Full => {
+            kernel_boot_log_resource_exhausted(
+                "shared object pool" as *u8, SHARED_OBJECT_MAX);
+        }
+        UnifiedOpenResult::Ok => {}
     }
     match unified_process_heap_range_configure(0, heap_start, heap_limit) {
         UnifiedFdResult::Invalid => {}
@@ -715,6 +738,8 @@ fn kernel_syscall_inetd_accept(port: u16)
         -> KernelInetdAcceptResult !{may_block} {
     match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => {
+            kernel_boot_log_resource_exhausted(
+                "TCP connection pool" as *u8, TCP_CONNECTION_MAX);
             return KernelInetdAcceptResult::TimedOut;
         }
         TcpConnectionAllocResult::Allocated(owner) => {
@@ -755,10 +780,16 @@ fn kernel_syscall_inetd_accept(port: u16)
                                             match unified_connection_create(
                                                     kernel_syscall_process_slot(),
                                                     0, slot, generation) {
-                                                UnifiedFdResult::Invalid => {
+                                                UnifiedOpenResult::Invalid => {
                                                     return KernelInetdAcceptResult::TimedOut;
                                                 }
-                                                UnifiedFdResult::Ok => {}
+                                                UnifiedOpenResult::Full => {
+                                                    kernel_boot_log_resource_exhausted(
+                                                        "shared object pool" as *u8,
+                                                        SHARED_OBJECT_MAX);
+                                                    return KernelInetdAcceptResult::TimedOut;
+                                                }
+                                                UnifiedOpenResult::Ok => {}
                                             }
                                             match unified_fd_duplicate(
                                                     kernel_syscall_process_slot(),
@@ -1667,7 +1698,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 let access_mode: usize = x2 & 3;
                 match unified_fd_alloc(kernel_syscall_process_slot(), 0) {
                     UnifiedFdAllocResult::Full => {
-                        return SyscallAction::Resume(LINUX_EBADF);
+                        kernel_boot_log_resource_exhausted(
+                            "process fd table" as *u8, PROCESS_FD_MAX);
+                        return SyscallAction::Resume(LINUX_EMFILE);
                     }
                     UnifiedFdAllocResult::Allocated(fd) => {
                         let inode_mode: usize = ext2_inode_mode(
@@ -1676,10 +1709,16 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             match unified_directory_open(
                                     kernel_syscall_process_slot(), fd,
                                     inode_number) {
-                                UnifiedFdResult::Invalid => {
+                                UnifiedOpenResult::Invalid => {
                                     return SyscallAction::Resume(LINUX_EBADF);
                                 }
-                                UnifiedFdResult::Ok => {
+                                UnifiedOpenResult::Full => {
+                                    kernel_boot_log_resource_exhausted(
+                                        "shared object pool" as *u8,
+                                        SHARED_OBJECT_MAX);
+                                    return SyscallAction::Resume(LINUX_ENFILE);
+                                }
+                                UnifiedOpenResult::Ok => {
                                     return SyscallAction::Resume(fd);
                                 }
                             }
@@ -1687,10 +1726,16 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         match unified_file_open(
                                 kernel_syscall_process_slot(), fd, inode_number,
                                 access_mode != 1, access_mode != 0) {
-                            UnifiedFdResult::Invalid => {
+                            UnifiedOpenResult::Invalid => {
                                 return SyscallAction::Resume(LINUX_EBADF);
                             }
-                            UnifiedFdResult::Ok => { return SyscallAction::Resume(fd); }
+                            UnifiedOpenResult::Full => {
+                                kernel_boot_log_resource_exhausted(
+                                    "shared object pool" as *u8,
+                                    SHARED_OBJECT_MAX);
+                                return SyscallAction::Resume(LINUX_ENFILE);
+                            }
+                            UnifiedOpenResult::Ok => { return SyscallAction::Resume(fd); }
                         }
                     }
                 }
@@ -2147,7 +2192,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         if (command == LINUX_F_DUPFD || command == LINUX_F_DUPFD_CLOEXEC) {
             match unified_fd_alloc(kernel_syscall_process_slot(), x2) {
-                UnifiedFdAllocResult::Full => { return SyscallAction::Resume(LINUX_EBADF); }
+                UnifiedFdAllocResult::Full => {
+                    kernel_boot_log_resource_exhausted(
+                        "process fd table" as *u8, PROCESS_FD_MAX);
+                    return SyscallAction::Resume(LINUX_EMFILE);
+                }
                 UnifiedFdAllocResult::Allocated(new_fd) => {
                     match unified_fd_duplicate(
                             kernel_syscall_process_slot(), fd, new_fd) {
@@ -2258,12 +2307,21 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return SyscallAction::Resume(LINUX_EINVAL);
         }
         match kernel_socket_fd_alloc(4) {
-          KernelSocketFdAllocResult::Full => { return SyscallAction::Resume(LINUX_EAGAIN); }
+          KernelSocketFdAllocResult::Full => {
+            kernel_boot_log_resource_exhausted(
+                "process fd table" as *u8, PROCESS_FD_MAX);
+            return SyscallAction::Resume(LINUX_EAGAIN);
+          }
           KernelSocketFdAllocResult::Allocated(created_socket_fd) => {
             match unified_listener_create(kernel_syscall_process_slot(),
                                           created_socket_fd) {
-                UnifiedFdResult::Invalid => { return SyscallAction::Resume(LINUX_EAGAIN); }
-                UnifiedFdResult::Ok => { return SyscallAction::Resume(created_socket_fd); }
+                UnifiedOpenResult::Invalid => { return SyscallAction::Resume(LINUX_EAGAIN); }
+                UnifiedOpenResult::Full => {
+                    kernel_boot_log_resource_exhausted(
+                        "shared object pool" as *u8, SHARED_OBJECT_MAX);
+                    return SyscallAction::Resume(LINUX_EAGAIN);
+                }
+                UnifiedOpenResult::Ok => { return SyscallAction::Resume(created_socket_fd); }
             }
           }
         }
@@ -2382,12 +2440,18 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let connected_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} =
             match kernel_socket_fd_alloc(5) {
                 KernelSocketFdAllocResult::Full => {
+                    kernel_boot_log_resource_exhausted(
+                        "process fd table" as *u8, PROCESS_FD_MAX);
                     return SyscallAction::Resume(LINUX_EAGAIN);
                 }
                 KernelSocketFdAllocResult::Allocated(found) => { found }
             };
         match tcp_connection_alloc() {
-          TcpConnectionAllocResult::Full => { return SyscallAction::Resume(LINUX_EAGAIN); }
+          TcpConnectionAllocResult::Full => {
+            kernel_boot_log_resource_exhausted(
+                "TCP connection pool" as *u8, TCP_CONNECTION_MAX);
+            return SyscallAction::Resume(LINUX_EAGAIN);
+          }
           TcpConnectionAllocResult::Allocated(owner) => {
            let slot: usize = tcp_connection_slot(owner);
            let generation: usize = tcp_connection_identity(owner);
@@ -2434,10 +2498,16 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                     match unified_connection_create(
                                             kernel_syscall_process_slot(),
                                             connected_fd, slot, generation) {
-                                        UnifiedFdResult::Invalid => {
+                                        UnifiedOpenResult::Invalid => {
                                             return SyscallAction::Resume(LINUX_EAGAIN);
                                         }
-                                        UnifiedFdResult::Ok => {}
+                                        UnifiedOpenResult::Full => {
+                                            kernel_boot_log_resource_exhausted(
+                                                "shared object pool" as *u8,
+                                                SHARED_OBJECT_MAX);
+                                            return SyscallAction::Resume(LINUX_EAGAIN);
+                                        }
+                                        UnifiedOpenResult::Ok => {}
                                     }
                                     syscall_socket_buffer_length[slot] = 0;
                                     syscall_socket_buffer_offset[slot] = 0;

@@ -456,7 +456,12 @@ fn process_image_clone_vm_reaped_pages() -> usize {
 fn process_image_clone_growth_probe() -> bool !{unsafe} {
     process_image_target_root = 0;
     if (address_space_is_live(1)) { return false; }
-    if (address_space_ensure_root(1) == false) { return false; }
+    match address_space_ensure_root(1) {
+        AddressSpaceEnsureResult::Ok => {}
+        AddressSpaceEnsureResult::SlotOutOfRange => { return false; }
+        AddressSpaceEnsureResult::OutOfMemory => { return false; }
+        AddressSpaceEnsureResult::AsidExhausted => { return false; }
+    }
     match page_alloc() {
         PageAllocResult::OutOfMemory => {
             address_space_release_root(1);

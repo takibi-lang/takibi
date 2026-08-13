@@ -81,6 +81,14 @@ fn unified_fd_narrow_process(value: usize)
 }
 
 must_use variant UnifiedFdResult { Invalid; Ok; }
+// GitHub issue #295: a narrower result for the object-creating entry points
+// below (unified_file_open/unified_directory_open/unified_terminal_stdio_open/
+// unified_listener_create/unified_connection_create) whose only source of
+// failure beyond a bad argument is UnifiedObjectResult::Full -- the shared
+// SHARED_OBJECT_MAX pool being exhausted. Kept distinct from UnifiedFdResult
+// (used by ~40 other call sites with no such distinction to make) so this
+// change stays scoped to the functions that can actually distinguish it.
+must_use variant UnifiedOpenResult { Invalid; Full; Ok; }
 struct UnifiedObjectHandle {
     private slot: {0..<SHARED_OBJECT_MAX as usize};
     private generation: usize;
@@ -181,10 +189,10 @@ fn unified_process_heap_limit(process: usize) -> UnifiedOffsetResult {
 }
 
 fn unified_file_open(process: usize, fd: usize, inode: usize,
-                     readable: bool, writable: bool) -> UnifiedFdResult {
+                     readable: bool, writable: bool) -> UnifiedOpenResult {
     match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
-        UnifiedObjectResult::Invalid => { return UnifiedFdResult::Invalid; }
-        UnifiedObjectResult::Full => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
+        UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
             object_inode[handle.slot] = inode;
             object_readable[handle.slot] = readable;
@@ -195,19 +203,19 @@ fn unified_file_open(process: usize, fd: usize, inode: usize,
                     object_kind[handle.slot] = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
-                    return UnifiedFdResult::Invalid;
+                    return UnifiedOpenResult::Invalid;
                 }
-                UnifiedFdResult::Ok => { return UnifiedFdResult::Ok; }
+                UnifiedFdResult::Ok => { return UnifiedOpenResult::Ok; }
             }
         }
     }
 }
 
 fn unified_directory_open(process: usize, fd: usize, inode: usize)
-        -> UnifiedFdResult {
+        -> UnifiedOpenResult {
     match unified_object_alloc_first(UnifiedFdKind::Directory) {
-        UnifiedObjectResult::Invalid => { return UnifiedFdResult::Invalid; }
-        UnifiedObjectResult::Full => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
+        UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
             object_inode[handle.slot] = inode;
             object_readable[handle.slot] = true;
@@ -218,9 +226,9 @@ fn unified_directory_open(process: usize, fd: usize, inode: usize)
                     object_kind[handle.slot] = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
-                    return UnifiedFdResult::Invalid;
+                    return UnifiedOpenResult::Invalid;
                 }
-                UnifiedFdResult::Ok => { return UnifiedFdResult::Ok; }
+                UnifiedFdResult::Ok => { return UnifiedOpenResult::Ok; }
             }
         }
     }
@@ -230,10 +238,10 @@ fn unified_directory_open(process: usize, fd: usize, inode: usize)
 // though their backing object is the kernel UART rather than ext2 or TCP.
 // Keeping them in the same table makes close(0) followed by openat() select
 // fd 0, which is the Unix redirection contract used by ash background jobs.
-fn unified_terminal_stdio_open(process: usize) -> UnifiedFdResult {
+fn unified_terminal_stdio_open(process: usize) -> UnifiedOpenResult {
     match unified_object_alloc_first(UnifiedFdKind::Terminal) {
-        UnifiedObjectResult::Invalid => { return UnifiedFdResult::Invalid; }
-        UnifiedObjectResult::Full => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
+        UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
             match unified_fd_install(process, 0, handle.slot,
                                      handle.generation) {
@@ -241,7 +249,7 @@ fn unified_terminal_stdio_open(process: usize) -> UnifiedFdResult {
                     object_kind[handle.slot] = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
-                    return UnifiedFdResult::Invalid;
+                    return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdResult::Ok => {}
             }
@@ -251,7 +259,7 @@ fn unified_terminal_stdio_open(process: usize) -> UnifiedFdResult {
                         UnifiedFdResult::Invalid => {}
                         UnifiedFdResult::Ok => {}
                     }
-                    return UnifiedFdResult::Invalid;
+                    return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdResult::Ok => {}
             }
@@ -265,9 +273,9 @@ fn unified_terminal_stdio_open(process: usize) -> UnifiedFdResult {
                         UnifiedFdResult::Invalid => {}
                         UnifiedFdResult::Ok => {}
                     }
-                    return UnifiedFdResult::Invalid;
+                    return UnifiedOpenResult::Invalid;
                 }
-                UnifiedFdResult::Ok => { return UnifiedFdResult::Ok; }
+                UnifiedFdResult::Ok => { return UnifiedOpenResult::Ok; }
             }
         }
     }
@@ -352,10 +360,10 @@ fn unified_socket_lookup(process: usize, fd: usize,
     return UnifiedSocketResult::Missing;
 }
 
-fn unified_listener_create(process: usize, fd: usize) -> UnifiedFdResult {
+fn unified_listener_create(process: usize, fd: usize) -> UnifiedOpenResult {
     match unified_object_alloc_first(UnifiedFdKind::Listener) {
-        UnifiedObjectResult::Invalid => { return UnifiedFdResult::Invalid; }
-        UnifiedObjectResult::Full => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
+        UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
             object_listener_state[handle.slot] = UnifiedListenerState::Created;
             object_port[handle.slot] = 0;
@@ -365,9 +373,9 @@ fn unified_listener_create(process: usize, fd: usize) -> UnifiedFdResult {
                     object_kind[handle.slot] = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
-                    return UnifiedFdResult::Invalid;
+                    return UnifiedOpenResult::Invalid;
                 }
-                UnifiedFdResult::Ok => { return UnifiedFdResult::Ok; }
+                UnifiedFdResult::Ok => { return UnifiedOpenResult::Ok; }
             }
         }
     }
@@ -376,10 +384,10 @@ fn unified_listener_create(process: usize, fd: usize) -> UnifiedFdResult {
 fn unified_connection_create(process: usize, fd: usize,
                              transport_slot: usize,
                              transport_generation: usize)
-        -> UnifiedFdResult {
+        -> UnifiedOpenResult {
     match unified_object_alloc_first(UnifiedFdKind::Connection) {
-        UnifiedObjectResult::Invalid => { return UnifiedFdResult::Invalid; }
-        UnifiedObjectResult::Full => { return UnifiedFdResult::Invalid; }
+        UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
+        UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
             object_transport_slot[handle.slot] = transport_slot;
             object_transport_generation[handle.slot] = transport_generation;
@@ -389,9 +397,9 @@ fn unified_connection_create(process: usize, fd: usize,
                     object_kind[handle.slot] = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
-                    return UnifiedFdResult::Invalid;
+                    return UnifiedOpenResult::Invalid;
                 }
-                UnifiedFdResult::Ok => { return UnifiedFdResult::Ok; }
+                UnifiedFdResult::Ok => { return UnifiedOpenResult::Ok; }
             }
         }
     }
@@ -796,8 +804,9 @@ fn unified_fd_table_probe() -> bool {
     unified_fd_table_init();
     process_fd_context[0].heap_break = 0x50000000;
     match unified_terminal_stdio_open(0) {
-        UnifiedFdResult::Invalid => { return false; }
-        UnifiedFdResult::Ok => {}
+        UnifiedOpenResult::Invalid => { return false; }
+        UnifiedOpenResult::Full => { return false; }
+        UnifiedOpenResult::Ok => {}
     }
     if (unified_terminal_is_open(0, 0) == false ||
         unified_terminal_is_open(0, 1) == false ||
