@@ -118,7 +118,7 @@ make kernelbuild-rpi5  # build kernel/build/rpi5/kernel.elf
 make kernelcheck-rpi5  # build and run the complete RPi5 integration test (needs real hardware)
 make kernelbuild-qemu  # build kernel/build/qemu/kernel.elf
 make kernelcheck-qemu  # build and run the complete QEMU integration test (no hardware needed)
-make kernelcheck-oops-qemu  # inject one QEMU EL0 fault and verify the parked oops record
+make kernelcheck-oops-qemu  # verify parked QEMU oops records and the retained lifecycle trace
 make kernelbuild       # build every maintained kernel target
 make kernelcheck       # build and test every maintained kernel target
 make kernelsh-qemu     # boot QEMU and use the current terminal as the ash UART console
@@ -361,13 +361,27 @@ than an interactive console when exercising its ARP/ICMP/TCP contracts.
 ### Terminal fail-stop diagnostic
 
 The kernelcheck-oops-qemu target is a focused QEMU regression for the terminal
-exception path. GDB changes one ordinary EL0 instruction to BRK #0, then
-detaches; the kernel itself saves the Lower-EL exception frame, emits the
-UART oops report, retains CrashSnapshot, and parks the CPU. The test also
-sources the compiler-generated _build/kernel-crash-snapshot-layout.gdb and
-then scripts/kernel_crash_snapshot.gdb's read-only takibi-oops command to
-inspect that retained record. The helper reads the snapshot's generated layout
-only; it does not reproduce the exception-frame ABI.
+exception path. It checks an injected EL0 BRK, an injected EL0 data abort, and
+a fail-stop immediately after a real child exec commit. GDB only arms the
+fault or the default-false test switch, then detaches; the kernel itself saves
+the Lower-EL exception frame, emits the UART oops report, retains
+CrashSnapshot, and parks the CPU. The test also sources the compiler-generated
+_build/kernel-crash-snapshot-layout.gdb and then
+scripts/kernel_crash_snapshot.gdb's read-only takibi-oops command to inspect
+that retained record. The helper reads the snapshot's generated layout only;
+it does not reproduce the exception-frame ABI.
+
+When enabled for a boot test, the process layer records a fixed 16-entry,
+allocation-free lifecycle ring: fork, exec prepare/commit, schedule, block,
+wake, resume, exit, reap, and address-space activation. Each numeric record
+contains a local sequence, CPU, process and peer identities, state, wait
+reason, root, saved SP, and event-specific auxiliary value. Writers never
+print; a record publishes its sequence last, so a fail-stop copy skips an
+IRQ-interrupted in-progress record and presents committed entries oldest to
+newest. Ordinary boots leave tracing disabled. The current scheduler runs only
+on core 0; when real SMP scheduling is introduced, this ABI is intended to
+become one independently written ring per CPU rather than a false shared
+global order.
 
 ### What this verifies
 

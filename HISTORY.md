@@ -15,6 +15,34 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-13: A bounded lifecycle trace made terminal process failures inspectable (issue #288)
+
+The scheduler and process layer gained an opt-in, fixed 16-record trace that
+keeps the causal tail before a fail-stop without turning IRQ or scheduler paths
+into a UART log. Every record stores its local sequence, CPU, event kind,
+process and peer identity, process state, wait reason, address-space root,
+saved SP, and one event-specific value. It covers fork, exec prepare, exec
+commit, schedule, block, wake, resume, exit, reap, and address-space
+activation.
+
+The ring publishes its sequence last. A crash copy validates that publication
+word rather than deriving order from a racy count, skips an IRQ-interrupted
+in-progress entry, and copies committed records in chronological order into
+CrashSnapshot. The fail-stop UART report and the existing generated-layout GDB
+command both expose that same retained trace.
+
+The kernel remains single scheduler CPU: core 1 proves EL1 entry and parks.
+The trace already carries CPU plus a CPU-local sequence; real SMP work should
+create independently written per-CPU rings, not claim a shared global ordering
+that concurrent CPUs cannot establish honestly. QEMU regressions now prove
+deterministic wraparound, schedule/root activation, UART block/wake state, and
+an actual child-exec fail-stop retaining fork, exec prepare, and exec commit.
+
+The new failure mode also found an observability boundary: an 8-record ring
+lost the fork immediately before the complete child-exec handoff. Increasing
+the still-bounded ring to 16 records made that causal sequence inspectable and
+kept the separate wraparound test meaningful.
+
 ### 2026-08-13: Every fixed kernel resource pool got an explicit exhaustion result and a boundary test (issue #295)
 
 The 2026-08-12 entry above already named the root cause: "the descriptor and
