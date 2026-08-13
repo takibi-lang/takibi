@@ -509,8 +509,15 @@ kernel-lib-check:
 # Silent by default (prints only on changes); verbosity controlled by script
 # content-change detection.
 .PHONY: kernel-gen-exception-frame
-kernel-gen-exception-frame:
+KERNEL_EXCEPTION_CONTEXT_INC := kernel/arch/arm64/kernel/exception_context.inc
+KERNEL_EXCEPTION_FRAME_TKB := kernel/arch/arm64/kernel/exception_frame.tkb
+
+# Create .inc from .tkb struct definition as an explicit Make rule
+# (so parallel builds respect the dependency)
+$(KERNEL_EXCEPTION_CONTEXT_INC): $(KERNEL_EXCEPTION_FRAME_TKB)
 	@python3 scripts/gen_exception_frame.py
+
+kernel-gen-exception-frame: $(KERNEL_EXCEPTION_CONTEXT_INC)
 
 ## Verify that exception-frame offsets are consistent across struct, assembly,
 ## and macros. Catches silent divergence before it causes bugs. Silent by default.
