@@ -11,6 +11,15 @@ Checks:
    this is the check that would have caught issue #286's own regression,
    where a deleted generated file silently produced empty macros and the
    kernel faulted the instant it returned to EL0 with a garbage frame.
+4. Every `[sp, #...]` offset in those macros is a symbolic EXC_CONTEXT_*
+   reference, never a bare hex literal -- a raw literal does not move if
+   the struct's field order changes, so it would silently keep addressing
+   the OLD slot after a regeneration that updated every other consumer.
+   This is the second, subtler gap found in the same 2026-08-13 post-mortem:
+   the macros were hand-written with hex literals for most of x0-x29 and
+   q0-q31 even after offsets became generated, so a field reorder would
+   have desynced them with nothing to catch it. Routing every offset
+   through its symbol makes the assembler the enforcement mechanism.
 """
 
 import re
@@ -88,6 +97,17 @@ def verify_macros(exc_frame_inc):
             errors.append(
                 f"{macro_name} does not reference tpidr_el0 (GitHub issue #227's "
                 f"original omission -- must never regress)"
+            )
+
+        # Every [sp, #...] offset must be symbolic (EXC_CONTEXT_*), never a
+        # bare hex literal -- see module docstring check 4.
+        raw_hex_offsets = re.findall(r'\[sp,\s*#(0x[0-9a-fA-F]+)\]', body)
+        if raw_hex_offsets:
+            errors.append(
+                f"{macro_name} has {len(raw_hex_offsets)} raw hex [sp, #...] "
+                f"offset(s) instead of EXC_CONTEXT_* symbols (e.g. "
+                f"{raw_hex_offsets[0]}) -- these silently desync from the "
+                f"struct if a field is ever reordered"
             )
 
     return errors
