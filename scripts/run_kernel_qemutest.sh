@@ -75,10 +75,12 @@ echo "[kernel/qemu] booting kernel.elf under QEMU"
 # same as RPi5's), so QEMU is backgrounded and killed once the boot's own
 # final marker appears -- there is no clean-exit signal to wait for. It
 # also has to be backgrounded regardless, so the host-side network peer
-# below can talk to it while it runs.
+# below can talk to it while it runs.  Do not let the guest start until the
+# capture client owns the UART: with wait=off, a fast boot can emit early
+# self-test evidence before run_kernel_uart_driver.py connects.
 timeout "$TIMEOUT_SECS" qemu-system-aarch64 \
     -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
-    -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=off" \
+    -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=on" \
     -global virtio-mmio.force-legacy=on \
     -drive "file=$QEMU_EXT2_IMAGE,if=none,format=raw,id=vd0" \
     -device virtio-blk-device,drive=vd0 \
