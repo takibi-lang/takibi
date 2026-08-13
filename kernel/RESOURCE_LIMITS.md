@@ -64,11 +64,12 @@ three rounds (commits `6c85779`, `98fe441`, `a5ee81b`, `0698fcf`, `de4987c`,
 `e88126d`), rather than split into follow-up issues, per explicit direction
 to complete issue #295 without filing separate issues. `make kernelbuild-qemu`
 and `make kernelcheck-qemu` are green after every step (35 views, up from 31
-at the start), including two clean rebuilds. `make kernelcheck-rpi5` was run
-on real RPi5 hardware with the user's explicit go-ahead each time: once
-after round 1 (33 views) and once after round 2 (34 views), both fully
-green; round 3 (the `PENDING_TCP_MAX` behavior fix and its boundary test)
-was verified on QEMU and is pending a further RPi5 pass.
+at the start), including two clean rebuilds. `make kernelcheck-rpi5` /
+`make kernelcheck` were run on real RPi5 hardware with the user's explicit
+go-ahead each time: after round 1 (33 views), after round 2 (34 views), and
+after round 3 (`PENDING_TCP_MAX`'s behavior fix and its `pending_tcp_queue`
+boundary test, 35 views) -- all fully green. Every fix in this file is
+verified on both QEMU and real RPi5 hardware, not QEMU alone.
 
 1. Shared-object pool exhaustion (`SHARED_OBJECT_MAX`) no longer reads as
    `EBADF` -- fixed via `UnifiedOpenResult` and `LINUX_ENFILE`. The exact
