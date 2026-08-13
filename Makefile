@@ -506,15 +506,17 @@ kernel-lib-check:
 # Generate AArch64 exception-frame offsets from the struct definition
 # (GitHub issue #286). Run before each kernel build to ensure struct changes
 # are detected and offsets stay synchronized between .tkb and assembly.
+# Silent by default (prints only on changes); verbosity controlled by script
+# content-change detection.
 .PHONY: kernel-gen-exception-frame
 kernel-gen-exception-frame:
-	python3 scripts/gen_exception_frame.py
+	@python3 scripts/gen_exception_frame.py
 
 ## Verify that exception-frame offsets are consistent across struct, assembly,
-## and macros. Catches silent divergence before it causes bugs.
+## and macros. Catches silent divergence before it causes bugs. Silent by default.
 .PHONY: kernel-verify-exception-frame
 kernel-verify-exception-frame: kernel-gen-exception-frame
-	python3 scripts/verify_exception_frame.py
+	@python3 scripts/verify_exception_frame.py
 
 kernelbuild-rpi5: kernel-lib-check kernel-verify-exception-frame $(KERNEL_RPI5_ELF)
 

@@ -180,15 +180,18 @@ def main():
         # Generate assembly content (preserving existing macros)
         inc_content = generate_inc_file(fields, offsets, total_size, inc_path)
 
+        # Check if file exists and has same content (skip write if unchanged)
+        if inc_path.exists():
+            existing_content = inc_path.read_text()
+            if existing_content == inc_content + '\n':
+                # File is already up-to-date; silently succeed
+                sys.exit(0)
+
         # Write output
         inc_path.write_text(inc_content + '\n')
 
+        # Print status only on actual changes (not every build)
         print(f"Generated {inc_path}")
-        print(f"Total exception frame size: 0x{total_size:x} bytes")
-        print(f"Field offsets:")
-        for name, _ in fields:
-            offset = offsets[name]
-            print(f"  {name:15} = 0x{offset:03x}")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

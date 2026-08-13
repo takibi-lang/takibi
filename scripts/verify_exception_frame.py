@@ -158,7 +158,7 @@ def main():
             print(f"  - {error}", file=sys.stderr)
         sys.exit(1)
 
-    print("Exception-frame offsets verified: OK")
+    # Silent on success (no output unless error)
     sys.exit(0)
 
 if __name__ == "__main__":
