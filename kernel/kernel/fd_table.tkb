@@ -951,6 +951,82 @@ fn unified_object_pool_exhaustion_probe() -> bool {
     return true;
 }
 
+// GitHub issue #295 boundary test: SHARED_OBJECT_MAX_REFS (256) is one
+// object's own maximum simultaneous holder count, independent of
+// SHARED_OBJECT_MAX (the object pool's own capacity, exercised above) --
+// this drives refcount_pool_retain/_release directly on a single allocated
+// object rather than installing 256 real fd-table entries across every
+// process slot, which this kernel's PROCESS_CONTEXT_MAX*PROCESS_FD_MAX
+// shape cannot even construct simultaneously (that product, 256, IS
+// SHARED_OBJECT_MAX_REFS -- see this constant's own definition comment).
+fn unified_object_ref_ceiling_probe() -> bool {
+    unified_fd_table_init();
+    match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
+        UnifiedObjectResult::Invalid => { return false; }
+        UnifiedObjectResult::Full => { return false; }
+        UnifiedObjectResult::Allocated(handle) => {
+            // refcount_pool_alloc's own doc comment: a freshly allocated
+            // slot's refcount starts at 0, so SHARED_OBJECT_MAX_REFS
+            // successful retains below bring it to exactly the ceiling.
+            let mut retained: usize = 0;
+            while (retained < SHARED_OBJECT_MAX_REFS) {
+                match refcount_pool_retain(&object_pool, handle.slot,
+                                           handle.generation) {
+                    RefcountRetainResult::Ok => {}
+                    RefcountRetainResult::Invalid => { return false; }
+                    RefcountRetainResult::Overflow => { return false; }
+                }
+                retained = retained + 1;
+            }
+
+            let mut ceiling_ok: bool = false;
+            match refcount_pool_retain(&object_pool, handle.slot,
+                                       handle.generation) {
+                RefcountRetainResult::Overflow => { ceiling_ok = true; }
+                RefcountRetainResult::Invalid => {}
+                RefcountRetainResult::Ok => {
+                    // Unexpected success past the ceiling: release it so
+                    // the cleanup loop below still brings the count back
+                    // to exactly zero before this probe reports failure.
+                    match refcount_pool_release(&object_pool, handle.slot,
+                                                handle.generation) {
+                        RefcountReleaseResult::Invalid => {}
+                        RefcountReleaseResult::StillHeld => {}
+                        RefcountReleaseResult::Freed => {}
+                    }
+                }
+            }
+            if (ceiling_ok == false) {
+                let mut cleanup: usize = 0;
+                while (cleanup < retained) {
+                    match refcount_pool_release(&object_pool, handle.slot,
+                                                handle.generation) {
+                        RefcountReleaseResult::Invalid => {}
+                        RefcountReleaseResult::StillHeld => {}
+                        RefcountReleaseResult::Freed => {}
+                    }
+                    cleanup = cleanup + 1;
+                }
+                unified_fd_table_init();
+                return false;
+            }
+
+            let mut released: usize = 0;
+            while (released < SHARED_OBJECT_MAX_REFS) {
+                match refcount_pool_release(&object_pool, handle.slot,
+                                            handle.generation) {
+                    RefcountReleaseResult::Invalid => { return false; }
+                    RefcountReleaseResult::StillHeld => {}
+                    RefcountReleaseResult::Freed => {}
+                }
+                released = released + 1;
+            }
+            unified_fd_table_init();
+            return true;
+        }
+    }
+}
+
 // GitHub issue #295 boundary test: exhausts one process's own PROCESS_FD_MAX
 // descriptor namespace, distinct from unified_object_pool_exhaustion_probe
 // above (SHARED_OBJECT_MAX, the global object pool) -- unified_fd_table_probe

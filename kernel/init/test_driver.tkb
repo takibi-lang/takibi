@@ -530,6 +530,16 @@ fn kernel_test_common_probes() {
     } else {
         kernel_boot_log("shared object pool: failed\n");
     }
+    if (unified_object_ref_ceiling_probe()) {
+        kernel_boot_log("shared object refcount ceiling: exact boundary at capacity=256 ok\n");
+    } else {
+        kernel_boot_log("shared object refcount ceiling: failed\n");
+    }
+    if (page_mapping_ref_ceiling_probe()) {
+        kernel_boot_log("page mapping refcount ceiling: exact boundary at capacity=4194304 ok\n");
+    } else {
+        kernel_boot_log("page mapping refcount ceiling: failed\n");
+    }
     if (unified_fd_table_exhaustion_probe()) {
         kernel_boot_log("process fd table: exhaustion at capacity=16, reuse-after-free ok\n");
     } else {

@@ -267,6 +267,59 @@ fn page_mapping_retain_physical(physical: usize) -> PageMappingRetainResult {
     return PageMappingRetainResult::NotMapped;
 }
 
+// GitHub issue #295 boundary test: PAGE_MAP_REF_MAX (4194304) is too large
+// to reach by actually looping page_mapping_retain_physical that many
+// times in a boot-time probe, but the issue's own design constraints still
+// require a reviewed-and-kept static bound's "limit and exhaustion
+// behavior" to be "explicit and covered by tests." Since this probe lives
+// in the same file as the pool, it writes boot_page_pool.meta's own
+// map_refcount field directly to place a real, allocator-owned page one
+// below and exactly at the ceiling, proving the boundary check itself
+// (not the increment loop, which the SHARED_OBJECT_MAX_REFS-equivalent
+// probe already exercises via genuine repeated retains) fires at exactly
+// PAGE_MAP_REF_MAX and not one off in either direction.
+fn page_mapping_ref_ceiling_probe() -> bool {
+    match page_alloc() {
+        PageAllocResult::OutOfMemory => { return false; }
+        PageAllocResult::Allocated(owner) => {
+            let physical: usize = page_physical_address(owner);
+            let index: {0..<BOOT_PAGE_COUNT as usize} = owner.index;
+            let meta = boot_page_pool.meta;
+
+            meta[index as isize].map_refcount = PAGE_MAP_REF_MAX;
+            let mut ceiling_ok: bool = false;
+            match page_mapping_retain_physical(physical) {
+                PageMappingRetainResult::RefCeilingReached => {
+                    ceiling_ok = true;
+                }
+                PageMappingRetainResult::NotMapped => {}
+                PageMappingRetainResult::Retained => {}
+            }
+            if (ceiling_ok == false ||
+                    meta[index as isize].map_refcount != PAGE_MAP_REF_MAX) {
+                page_free(owner);
+                return false;
+            }
+
+            meta[index as isize].map_refcount = PAGE_MAP_REF_MAX - 1;
+            let mut below_ceiling_ok: bool = false;
+            match page_mapping_retain_physical(physical) {
+                PageMappingRetainResult::Retained => { below_ceiling_ok = true; }
+                PageMappingRetainResult::NotMapped => {}
+                PageMappingRetainResult::RefCeilingReached => {}
+            }
+            if (below_ceiling_ok == false ||
+                    meta[index as isize].map_refcount != PAGE_MAP_REF_MAX) {
+                page_free(owner);
+                return false;
+            }
+
+            page_free(owner);
+            return true;
+        }
+    }
+}
+
 fn page_mapping_refcount_physical(physical: usize) -> usize {
     let base: usize = usable_ram_start;
     let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
