@@ -1,11 +1,13 @@
 # -- Configuration ------------------------------------------------------------
 # Parallel by default, overridable per-invocation: `make -j1 kernelcheck`
 # forces serial execution back, e.g. when a build error needs to be read one
-# recipe at a time. Deliberately not paired with -Otarget: that buffers each
-# recipe's output until the recipe finishes, so progress isn't visible
-# line-by-line while jobs are still running -- worse for watching a long
-# build than the occasional interleaved line.
+# recipe at a time. `-Oline` keeps independent long-running lanes visibly
+# streaming while making each completed line atomic at the terminal. `-Otarget`
+# remains unsuitable here: it hides all progress until a long recipe finishes.
+ifeq ($(MAKELEVEL),0)
 MAKEFLAGS += -j$(shell nproc)
+endif
+MAKEFLAGS += -Oline --no-print-directory
 
 # Invoke the built binary directly rather than "dune exec takibi --": dune
 # exec re-checks/re-locks the workspace on every call, which serializes
@@ -603,15 +605,19 @@ kernelcheck: kernelcheck-qemu kernelcheck-oops-qemu kernelcheck-rpi5
 ## targets reach it concurrently -- see "Known dune footgun" above for why
 ## that invariant matters and must not be bypassed by a future change.
 .PHONY: allcheck
-allcheck: langcheck test linuxcheck kernelcheck
-	@echo "PASS allcheck: langcheck + compiler unit + linux_user + QEMU + QEMU oops + RPi5 integration"
+allcheck:
+	@status=0; $(MAKE) langcheck test linuxcheck kernelcheck || status=$$?; \
+	if [ $$status -eq 0 ]; then \
+		echo "PASS allcheck: langcheck + compiler unit + linux_user + QEMU + QEMU oops + RPi5 integration"; \
+	else \
+		echo "FAIL allcheck: one or more checks failed (see the lane output above)" >&2; \
+		exit $$status; \
+	fi
 
-# allcheck prerequisites intentionally fan out in parallel. Compiler unit
-# tests print almost a thousand lines, so without an outer receipt it was too
-# easy to mistake that visible stream for the whole target and overlook the
-# later QEMU/RPi5 integration runners. Make prints this only for a direct
-# allcheck invocation, before it schedules recipes; the success receipt above
-# is reached only after every prerequisite has succeeded.
+# allcheck's recursive Make invocation intentionally fans out the independent
+# lanes in parallel. It is wrapped in one shell recipe so a failing lane still
+# produces a final, unmistakable allcheck failure receipt after Make has
+# waited for the other scheduled jobs.
 ifneq (,$(filter allcheck,$(MAKECMDGOALS)))
 $(info [allcheck] includes: langcheck, compiler unit tests, linux_user, QEMU integration, QEMU oops, and RPi5 integration)
 endif

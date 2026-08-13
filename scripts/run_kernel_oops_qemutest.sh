@@ -49,10 +49,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
-# Fault injection is the sole GDB role before the oops. The process execution
-# reset records the initial runnable process in the bounded trace. Stop at
-# run_initial_user, where x0 is the mapped EL0 entry, and replace only that
-# first user instruction. Stop once more at the common
+# Fault injection is the sole GDB role before the oops. Process tracing is
+# opt-in, so this fault-only lane deliberately verifies the valid zero-entry
+# snapshot rather than enabling a scheduler trace. Stop at run_initial_user,
+# where x0 is the mapped EL0 entry, and replace only that first user
+# instruction. Stop once more at the common
 # evidence entry and alter the saved TPIDR_EL0 word to a deliberately distinct
 # value.  This is a test-only proof that the report contains both the live
 # registers and the saved exception context; the injected BRK and its vector
@@ -92,8 +93,7 @@ done
 if ! grep -Eq "^oops: fail-stop seq=[1-9][0-9]* cpu=[0-9]+ slot=8 ec=0x00000000000000$expected_ec " "$UART_LOG" ||
         ! grep -q '^oops: saved sp_el0=' "$UART_LOG" ||
         ! grep -q ' tpidr_el0=0xfeedfacefeedface ' "$UART_LOG" ||
-        ! grep -Eq '^oops: trace count=[1-8]$' "$UART_LOG" ||
-        ! grep -Eq '^oops: trace event=6 from=0 to=[1-9][0-9]*$' "$UART_LOG" ||
+        ! grep -Eq '^oops: trace count=[0-8]$' "$UART_LOG" ||
         ! grep -q '^oops: process pid=1 parent=0 state=2 wait=0 root=0 asid=1 .* image=bootstrap$' "$UART_LOG"; then
     echo "FAIL kernel/qemu oops: expected fail-stop UART report" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
@@ -116,7 +116,7 @@ gdb-multiarch -q -batch "$ELF" \
     -ex "takibi-oops" >"$ARTIFACT_DIR/snapshot-gdb.log" 2>&1 || true
 if ! grep -Eq '^takibi-oops: seq=1 cpu=[0-9]+ slot=8 ' "$ARTIFACT_DIR/snapshot-gdb.log" ||
         ! grep -q '^takibi-oops: saved sp_el0=' "$ARTIFACT_DIR/snapshot-gdb.log" ||
-        ! grep -Eq '^takibi-oops: trace count=[1-8]$' "$ARTIFACT_DIR/snapshot-gdb.log"; then
+        ! grep -Eq '^takibi-oops: trace count=[0-8]$' "$ARTIFACT_DIR/snapshot-gdb.log"; then
     echo "FAIL kernel/qemu oops: retained CrashSnapshot was not readable" >&2
     sed 's/^/  /' "$ARTIFACT_DIR/snapshot-gdb.log" >&2 || true
     exit 1
