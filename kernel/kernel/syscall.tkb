@@ -7,6 +7,27 @@ use "kernel/net/socket_capability.tkb";
 use "kernel/net/tcp.tkb";
 use "kernel/kernel/fd_table.tkb";
 
+// Current limitations (2026-08-13, issue #295). Keep this list current as
+// call sites change; a limitation that goes stale here is worse than
+// none. This file is the Linux syscall dispatch/policy layer, so its own
+// scope is inherently broad -- `kernel/README.md`'s "Current limits"
+// section is the authoritative per-syscall-family list (mmap/mprotect/
+// munmap scope, signal delivery, scatter/gather I/O coverage, ppoll
+// shape, and more); this note only covers what is specific to THIS
+// file's own dispatch mechanics, not every syscall it implements.
+// - NOT SYNCHRONIZED, single-core dispatch only -- every syscall handler
+//   here assumes it runs to completion on core 0 with no concurrent
+//   dispatch from another core.
+// - Every fixed-capacity pool a syscall handler here allocates from
+//   (process slots, fd table, shared objects, TCP connections, address
+//   spaces) is documented once, authoritatively, in
+//   `kernel/RESOURCE_LIMITS.md` -- do not re-derive a pool's exhaustion
+//   behavior from a single call site here without checking that file
+//   first, since the errno mapping at a given call site is meant to
+//   match its pool's documented contract exactly (`LINUX_EMFILE` for
+//   per-process fd exhaustion, `LINUX_ENFILE` for the global shared-
+//   object pool, etc.).
+//
 const AARCH64_NR_WRITE: usize = 64;
 const AARCH64_NR_READV: usize = 65;
 const AARCH64_NR_WRITEV: usize = 66;

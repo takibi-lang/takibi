@@ -8,6 +8,23 @@ use "kernel/lib/growable_pool.tkb";
 // records; mmu.tkb itself sees only resolved physical addresses and ASIDs.
 use "kernel/mm/address_space.tkb";
 
+// Current limitations (2026-08-13, issue #295). Keep this list current as
+// call sites change; a limitation that goes stale here is worse than
+// none.
+// - NOT SYNCHRONIZED, single-core scheduler: only core 0 ever runs the
+//   scheduler/dispatches syscalls. Core 1 proves autonomous EL1 entry and
+//   shared-MMU visibility via PSCI CPU_ON, then parks permanently.
+// - KERNEL_PROCESS_MAX=16 fixed scheduler-table capacity; kernel stacks
+//   are lazily backed via growable_pool.tkb and never returned to the
+//   physical page allocator once grown. See `kernel/RESOURCE_LIMITS.md`
+//   for the full exhaustion-result/boundary-test contract for this and
+//   every other backing resource scheduled_process_alloc() touches
+//   (address-space roots, ASIDs, physical pages).
+// - A process may have at most one live child at a time; wait4()
+//   concurrent multi-child wait/reap is out of scope (kernel/README.md's
+//   "Current limits" section is authoritative for this and other
+//   syscall-visible process-model constraints).
+//
 enum ProcessState: u8 { Ready; Running; Blocked; Exited; }
 enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
 // GitHub issue #244: ChildExit lets wait4() actually block a parent whose

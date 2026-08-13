@@ -9,8 +9,29 @@
 // This concrete bound removes the relational payload slice that the broader
 // prototype implementation needed to mark unsafe, keeping this path free
 // of unsafe blocks and clean under the kernel's --forbid-trap build.
-
-
+//
+// Current limitations (2026-08-13, issue #295). Keep this list current as
+// call sites change; a limitation that goes stale here is worse than
+// none.
+// - NOT SYNCHRONIZED, single-core only, same as every kernel/lib/-backed
+//   pool this file uses (SlotMap for tcp_connection_pool).
+// - TCP_CONNECTION_MAX=2, PENDING_TCP_MAX=4 (per connection): see
+//   `kernel/RESOURCE_LIMITS.md` for the exhaustion-result/boundary-test
+//   contract for both. Exhaustion is logged via
+//   kernel_boot_log_resource_exhausted at both find_free_slot call sites.
+// - Exactly one physical RX capability (NetRxCanAcquire,
+//   kernel/net/socket_capability.tkb) exists for the whole kernel; every
+//   connection's send/receive path borrows and returns it sequentially --
+//   there is no real concurrent packet processing across connections.
+// - No congestion control or window scaling; retransmission is a fixed,
+//   bounded retry count (TCP_RETRY_LIMIT), not RTT-adaptive.
+// - This subsystem's retry/retransmit timing has been a recurring source
+//   of flaky-test regressions (see git history around GEM/USB interrupt-
+//   driven transitions) -- treat any change to retry/deadline logic here
+//   as higher-risk than an equivalent change elsewhere, and prefer
+//   logging-only fixes over control-flow changes when diagnosing an
+//   exhaustion/edge case that isn't the actual bug being fixed.
+//
 use "kernel/net/checksum.tkb";
 use "kernel/net/arp.tkb";
 use "kernel/net/wire.tkb";

@@ -1,5 +1,9 @@
 // Single source of truth for the Ethernet/IPv4/TCP wire layout.
 //
+// Current limitations (2026-08-13, issue #295): none of substance -- this
+// file only defines wire-format structs and byte-offset constants, with
+// no shared mutable state and nothing to synchronize.
+//
 // GitHub issue #186 (CLOSED): EthHdr/Ipv4Hdr/TcpHdr's multi-byte NUMERIC
 // fields are typed `u16be`/`u32be` via the `packed be` sugar, so accessing
 // them through a *EthHdr/*Ipv4Hdr/*TcpHdr pointer performs the required

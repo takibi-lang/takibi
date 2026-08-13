@@ -1,5 +1,24 @@
 use "kernel/lib/refcount_slotmap.tkb";
 
+// Current limitations (2026-08-13, issue #295). Keep this list current as
+// call sites change; a limitation that goes stale here is worse than
+// none, since it invites relying on a guarantee that quietly stopped
+// holding.
+// - NOT SYNCHRONIZED. Reachable only from single-core boot/syscall-
+//   dispatch context today, same as every kernel/lib/-backed pool this
+//   file builds on (RefcountSlotMap).
+// - refcount_pool_retain()/_release() (kernel/lib/refcount_slotmap.tkb)
+//   are a bare counter increment/decrement, not linear-tracked: nothing
+//   in the type system proves a caller's retains and releases stay
+//   balanced. unified_fd_clone() leaked exactly this way on a mid-loop
+//   failure (fixed via unified_fd_clone_rollback(), issue #295) --
+//   every NEW multi-retain call site must roll back its own already-
+//   retained references by hand on any failure path; the compiler will
+//   not catch a forgotten one.
+// - Fixed capacities (PROCESS_FD_MAX=16, SHARED_OBJECT_MAX=16,
+//   SHARED_OBJECT_MAX_REFS=256): see `kernel/RESOURCE_LIMITS.md` for the
+//   authoritative exhaustion-result/boundary-test contract for each.
+//
 // GitHub issues #246 and #264: process index == kernel/kernel/process.tkb's
 // ProcessHandle.pool_index. One ProcessFdContext keeps the descriptor and
 // heap state for that process together, instead of coupling parallel globals

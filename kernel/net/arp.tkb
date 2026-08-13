@@ -3,6 +3,13 @@
 // rp1_gem.tkb directly.
 use "kernel/net/wire.tkb";
 
+// Current limitations (2026-08-13, issue #295): NOT SYNCHRONIZED,
+// single-core only. No ARP cache/table -- every reply is generated
+// synchronously against the single request just parsed, not stored for
+// later reuse. Only the kernel's own fixed OUR_MAC/OUR_IP
+// (kernel/net/netconfig.tkb) is ever a valid target address; there is no
+// support for a second local address or VLAN/subinterface.
+//
 // GitHub issue #186: ArpHdr's multi-byte NUMERIC fields (htype/ptype/oper)
 // are typed `u16be` via the `packed be` sugar, so field access through a
 // *ArpHdr pointer performs the required byte-swap directly -- no more

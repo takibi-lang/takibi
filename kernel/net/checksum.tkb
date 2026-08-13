@@ -1,3 +1,7 @@
+// Current limitations (2026-08-13, issue #295): none of substance -- this
+// file is a pure, stateless RFC 1071 checksum algorithm (no shared
+// mutable state, no fixed capacity, no synchronization concerns).
+//
 // RFC 1071 one's-complement checksum shared by IPv4 and transport layers.
 fn checksum_add(data: borrow []u8, sum_in: i32) -> i32 {
     let mut sum: i32 = sum_in;

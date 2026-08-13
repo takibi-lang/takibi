@@ -1,3 +1,8 @@
+// Current limitations (2026-08-13, issue #295): a single hardcoded
+// point-to-point address pair, no DHCP, no runtime reconfiguration, and
+// no ARP-probe/conflict detection -- correct only for the dedicated
+// integration-test link topology below.
+//
 // Dedicated point-to-point RPi5 kernel integration link.
 let OUR_MAC: [u8; 6] = {0x02, 0x00, 0x20, 0x00, 0x00, 0x02};
 let OUR_IP: [u8; 4] = {192, 168, 20, 2};

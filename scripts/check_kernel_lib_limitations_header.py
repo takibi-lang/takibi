@@ -16,6 +16,20 @@
 # in a memory/habit quietly stops being followed the moment someone is
 # in a hurry; this makes forgetting it a build failure instead.
 #
+# Extended 2026-08-13 (issue #295) to also cover kernel/kernel/ and
+# kernel/net/: the two real bugs issue #295 found (a leaked refcount in
+# kernel/kernel/fd_table.tkb, a silently-clobbered retransmit slot in
+# kernel/net/tcp.tkb) were both findable by READING an existing "shouldn't
+# happen" comment rather than by testing, which is exactly what this
+# convention is for -- confining it to kernel/lib/ meant the two files
+# that actually mattered here were never covered. Deliberately NOT yet
+# extended to every kernel/ subdirectory in one pass (kernel/mm/,
+# kernel/fs/, kernel/arch/, kernel/drivers/, kernel/platform/ remain
+# uncovered) -- extend the DIRS list below incrementally as those
+# directories' own files get a real header written for them, not by
+# flipping this check on for a directory with no headers yet (that would
+# just turn every file in it into an immediate, undifferentiated FAIL).
+#
 # This check is deliberately shallow -- it only confirms the marker
 # phrase is PRESENT somewhere in the file's leading comment block, not
 # that the content is accurate or current. Staying accurate is still a
@@ -38,9 +52,9 @@ MARKER = "Current limitations"
 LEADING_LINES = 150
 
 
-def files_missing_header(lib_dir):
+def files_missing_header(directory):
     missing = []
-    for path in sorted(lib_dir.glob("*.tkb")):
+    for path in sorted(directory.glob("*.tkb")):
         lines = path.read_text().splitlines()[:LEADING_LINES]
         if not any(MARKER in line for line in lines):
             missing.append(path)
@@ -48,32 +62,44 @@ def files_missing_header(lib_dir):
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("usage: check_kernel_lib_limitations_header.py <kernel/lib dir>",
-              file=sys.stderr)
+    if len(sys.argv) < 2:
+        print(
+            "usage: check_kernel_lib_limitations_header.py <dir> [<dir> ...]",
+            file=sys.stderr,
+        )
         return 1
-    lib_dir = Path(sys.argv[1])
-    if not lib_dir.is_dir():
-        print("error: %s is not a directory" % lib_dir, file=sys.stderr)
-        return 1
-    missing = files_missing_header(lib_dir)
+    directories = [Path(arg) for arg in sys.argv[1:]]
+    for directory in directories:
+        if not directory.is_dir():
+            print("error: %s is not a directory" % directory, file=sys.stderr)
+            return 1
+
+    missing = []
+    checked_count = 0
+    for directory in directories:
+        dir_missing = files_missing_header(directory)
+        missing.extend(dir_missing)
+        checked_count += len(list(directory.glob("*.tkb")))
+
     if missing:
         for path in missing:
             print(
-                "FAIL kernel-lib/limitations-header: %s has no '%s' "
-                "section in its first %d lines -- every kernel/lib/ file "
-                "must document what today's callers happen to guarantee "
-                "(e.g. single-execution-context access) that the file "
-                "itself does not enforce (see HISTORY.md's 2026-08-07 "
-                "issue #207/#242 entry, and kernel/lib/freelist.tkb's own "
-                "header for the expected shape)."
+                "FAIL kernel-limitations-header: %s has no '%s' "
+                "section in its first %d lines -- every file in a checked "
+                "directory must document what today's callers happen to "
+                "guarantee (e.g. single-execution-context access) that "
+                "the file itself does not enforce (see HISTORY.md's "
+                "2026-08-07 issue #207/#242 entry and 2026-08-13 issue "
+                "#295 entry, and kernel/lib/freelist.tkb's own header for "
+                "the expected shape)."
                 % (path, MARKER, LEADING_LINES),
                 file=sys.stderr,
             )
         return 1
     print(
-        "PASS kernel-lib/limitations-header: every kernel/lib/*.tkb file "
-        "documents its current limitations"
+        "PASS kernel-limitations-header: every *.tkb file in %s "
+        "documents its current limitations (%d files)"
+        % (", ".join(str(d) for d in directories), checked_count)
     )
     return 0
 

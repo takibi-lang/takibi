@@ -4,6 +4,11 @@
 use "kernel/net/checksum.tkb";
 use "kernel/net/wire.tkb";
 
+// Current limitations (2026-08-13, issue #295): NOT SYNCHRONIZED,
+// single-core only. Only Echo Request/Reply is handled; no fragmentation
+// reassembly, no other ICMP type (Destination Unreachable, Time
+// Exceeded, etc.) is generated or interpreted.
+//
 // Ipv4Hdr/EthHdr are kernel/net/wire.tkb's shared structs (tcp.tkb needs
 // the identical IPv4 wire layout, so it lives there rather than being
 // declared twice). IcmpHdr is local to this file. GitHub issue #186:

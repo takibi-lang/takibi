@@ -512,7 +512,7 @@ kernelbuild-qemu: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_E
 # the actual compile below rather than being tied to a .o/.elf rule.
 .PHONY: kernel-lib-check
 kernel-lib-check:
-	python3 scripts/check_kernel_lib_limitations_header.py $(KERNEL_DIR)/lib
+	python3 scripts/check_kernel_lib_limitations_header.py $(KERNEL_DIR)/lib $(KERNEL_DIR)/kernel $(KERNEL_DIR)/net
 
 # Generate AArch64 exception-frame offset constants from the struct
 # definition (GitHub issue #286). This is a REAL file-based Make rule (not

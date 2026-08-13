@@ -7,6 +7,15 @@
 // same top-level names, so listing both together is a compile error by
 // design.
 
+// Current limitations (2026-08-13, issue #295): the "mutex"/lock here
+// (NetworkCapabilityGuard) is a linear type-state token, not a real
+// spinlock -- it enforces exclusive borrow-and-return discipline at
+// compile time but performs no runtime synchronization, correct only
+// because this whole kernel is NOT SYNCHRONIZED / single-core. There is
+// exactly one NetRxCanAcquire capability for the whole kernel: no
+// multi-NIC support, and every network-facing syscall path serializes
+// through this single store.
+//
 variant NetworkCapabilityValue {
     Empty;
     Ready(NetRxCanAcquire);
