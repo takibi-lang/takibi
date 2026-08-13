@@ -1363,6 +1363,20 @@ fn kernel_process_scheduler_probe() -> bool {
             }
         }
     }
+    // Fork is deliberately checked before the later scheduler tail wraps it
+    // out. The ring's job is to retain the most recent causal history, not
+    // to promise that an older lifecycle event survives arbitrary switches.
+    let mut fork_trace: [usize; KERNEL_CRASH_TRACE_WORDS];
+    let fork_trace_count: usize =
+        kernel_process_crash_trace_copy(fork_trace as *usize);
+    let mut saw_fork: bool = false;
+    for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
+        if (item < fork_trace_count &&
+            fork_trace[item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT + 2] ==
+                ProcessTraceFork) {
+            saw_fork = true;
+        }
+    }
     kernel_process_scheduler_enable();
     let parent_sp: usize = kernel_process_timer_schedule(0x2000);
     let child_sp: usize = kernel_process_timer_schedule(0x1000);
@@ -1371,14 +1385,12 @@ fn kernel_process_scheduler_probe() -> bool {
         kernel_process_syscall_return_schedule(0x2000);
     let mut trace: [usize; KERNEL_CRASH_TRACE_WORDS];
     let trace_count: usize = kernel_process_crash_trace_copy(trace as *usize);
-    let mut saw_fork: bool = false;
     let mut saw_schedule: bool = false;
     let mut saw_resume: bool = false;
     let mut saw_activate: bool = false;
     for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
         if (item < trace_count) {
             let kind: usize = trace[item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT + 2];
-            if (kind == ProcessTraceFork) { saw_fork = true; }
             if (kind == ProcessTraceSchedule) { saw_schedule = true; }
             if (kind == ProcessTraceResume) { saw_resume = true; }
             if (kind == ProcessTraceAddressSpaceActivate) { saw_activate = true; }
