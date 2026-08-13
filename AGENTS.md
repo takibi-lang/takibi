@@ -128,6 +128,9 @@ GitHub issues. This applies to all agent surfaces and all GitHub access paths,
 including `gh issue create`, `gh issue comment`, MCP tools, connectors, and
 GitHub web/API operations.
 
+Use the `gh` CLI for every GitHub operation. Do not use GitHub connectors or
+MCP GitHub tools: this environment is intentionally configured only for `gh`.
+
 ### Issue Numbers Do Not Belong in Tracked Files
 
 **Status lives on the [project board](https://github.com/orgs/takibi-lang/projects/2),
