@@ -484,6 +484,24 @@ This is also why `examples/Makefile`'s own `build`/`test`/`$(TAKIBI)` targets do
 themselves: they forward to `make -f Makefile build`/`test` in the root Makefile instead, so the
 invariant holds even though the two Makefiles are separate `make` invocations.
 
+**This predicted flake actually recurred (2026-08-13, `allcheck` output-locking attempt)**: a fix
+for `allcheck`'s interleaved/garbled terminal output split its single `$(MAKE) langcheck test
+linuxcheck kernelcheck` call into four separate recursive `$(MAKE) <target>` invocations (one per
+lane), each piped through `scripts/run_line_locked.sh` for output locking. That looked harmless --
+still one `allcheck` target, still parallel -- but each `$(MAKE) <target>` now starts its own
+independent `make` process with its own dependency graph, so `$(TAKIBI)`'s "runs at most once"
+guarantee (which depends on all four lanes sharing ONE graph) no longer held: up to four genuinely
+concurrent `dune build` invocations raced on `_build/.lock`, and instead of the usual fast
+non-deterministic failure, this manifested as a hard hang (`dune build` processes stuck at 0% CPU
+for 15-29+ minutes, twice, both requiring a manual kill). **Fix that keeps the invariant**: don't
+change `allcheck`'s call shape at all; instead make the leaf targets (`langcheck`, `test`,
+`linuxcheck`) route their own recipe's underlying command (not a new `$(MAKE)` call) through the
+shared output lock, e.g. `test: build` / `@bash scripts/run_line_locked.sh "$(LOCK)" dune test` --
+`build` stays a normal prerequisite in the one shared graph, only the leaf command's output gets
+locked. Lesson for output-interleaving fixes generally: locking output and preserving a shared
+`make` dependency graph are two different problems: fix the first by wrapping the *underlying
+command* in a recipe, never by adding a *new recursive `$(MAKE)` call* around it.
+
 ## Directory Layout
 
 ```
