@@ -60,17 +60,15 @@ needed for any of these.
 ## Diagnosability fixes landed 2026-08-13
 
 All nine findings from the audit were fixed in this same session (commits
-`6c85779`, `98fe441`, `beb6c3b`, `ccc39cc`, `b5ea688`), rather than split
+`6c85779`, `98fe441`, `a5ee81b`, `0698fcf`, `de4987c`), rather than split
 into follow-up issues, per explicit direction to complete issue #295 without
 filing separate issues. `make kernelbuild-qemu` and `make kernelcheck-qemu`
 are green after every step (34 views, up from 31 at the start), including
-two clean rebuilds. `make kernelcheck-rpi5` was also run once (with the
-user's explicit go-ahead) partway through and was green on real RPi5
-hardware at that point (33 views); it was not re-run after the later
-round-2 fixes -- RPi5 hardware in this environment is shared and must be
-asked about fresh each time (see the project's hardware-notification
-guidance), so re-verification on real hardware is still recommended before
-treating this as fully hardware-verified.
+two clean rebuilds. `make kernelcheck-rpi5` was run twice on real RPi5
+hardware with the user's explicit go-ahead each time: once mid-session
+(33 views, before the round-2 fixes) and once after every fix including
+round 2 (34 views, all green) -- this issue's changes are fully verified on
+real hardware, not just QEMU.
 
 1. Shared-object pool exhaustion (`SHARED_OBJECT_MAX`) no longer reads as
    `EBADF` -- fixed via `UnifiedOpenResult` and `LINUX_ENFILE`. The exact
