@@ -60,11 +60,9 @@ All six gaps found by the initial audit pass were fixed in this same session
 (commits `6c85779`, `98fe441`), rather than split into follow-up issues, per
 explicit direction to complete issue #295 without filing separate issues.
 `make kernelbuild-qemu` and `make kernelcheck-qemu` (33 views, up from 31)
-are green after every step, including a clean rebuild. RPi5 hardware
-verification was intentionally **not** run this session (deferred per the
-project's hardware-notification rule) -- run `make kernelcheck-rpi5` (or
-`kernelcheck`, which includes it) before treating this as verified on real
-hardware.
+are green after every step, including a clean rebuild. `make kernelcheck-rpi5`
+was also run (with the user's explicit go-ahead) and is green on real RPi5
+hardware: 33 views, including both new boundary-test views.
 
 1. Shared-object pool exhaustion (`SHARED_OBJECT_MAX`) no longer reads as
    `EBADF` -- fixed via `UnifiedOpenResult` and `LINUX_ENFILE`.
