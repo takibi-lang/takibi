@@ -455,34 +455,28 @@ fn pending_tcp_reset_all(connection_slot: {0..<TCP_CONNECTION_MAX as usize}) {
     tcp_data_segment_counter[connection_slot] = 0;
 }
 
-// Finds a free (PendingTcpKind::None) slot and returns its index. If
-// every slot is genuinely occupied (shouldn't happen at
-// PENDING_TCP_MAX=4 against the 3-segment EL0 fixture this was sized
-// for), falls back to slot 0 -- the same single-slot behavior this file
-// always had, not a new regression. Refined return type (matching
-// examples/common/http_server_common.tkb's idx: {0..<MAX_CONNS as
-// usize} convention for its own MAX_CONNS-wide flat arrays): a plain
-// usize return would leave every caller's use of the result unprovable
-// under --forbid-trap, no matter how the while loop that produced it
-// looks -- the refinement has to be carried on the type itself.
+// Finds a free (PendingTcpKind::None) slot and returns its index, or -1 if
+// every slot is genuinely occupied (shouldn't happen at PENDING_TCP_MAX=4
+// against the 3-segment EL0 fixture this was sized for, and
+// pending_tcp_service_once already opportunistically reclaims any
+// already-acked slot right before every call here -- see this function's
+// one caller). i32, not a refined usize: -1 is a real, valid "not found"
+// result here (unlike this file's other {0..<N as usize} slot types),
+// matching this file's own existing sentinel idiom (tcp_drop_data_segment_
+// index, tcp_injected_data_slot/tcp_injected_fin_slot all use i32 -1 for
+// "none").
 //
-// GitHub issue #295: the slot-0 fallback above is not merely "no free
-// slot reported" -- pending_tcp_record's caller unconditionally
-// overwrites whatever occupies the returned slot, so this silently
-// clobbers slot 0's still-unacknowledged retransmission record with the
-// new segment's. That segment then never gets retransmitted if its own
-// ACK is lost, surfacing later as an inexplicable stall or wrong-data
-// retransmit, not as a resource-limit symptom -- the audit's "not yet
-// audited" PENDING_TCP_MAX item confirmed this is real, not just a
-// hypothetical off-by-one. Logged here rather than changed: refusing to
-// queue the new segment (or evicting differently) would alter this
-// subsystem's actual retransmission behavior, which needs the same care
-// TCP_CONNECTION_MAX exhaustion's own fix took given this file's history
-// of retry-timing flakes -- so only the diagnostic was added, not the
-// control flow.
+// GitHub issue #295: this used to fall back to slot 0 on exhaustion, and
+// pending_tcp_record's caller unconditionally overwrote whatever occupied
+// the returned slot -- silently clobbering slot 0's still-unacknowledged
+// retransmission record with the new segment's. That segment then never
+// got retransmitted if its own ACK was lost, surfacing later as an
+// inexplicable stall or wrong-data retransmit, not as a resource-limit
+// symptom. Now reports -1 instead of guessing a victim slot to corrupt;
+// pending_tcp_record's own doc comment explains what -1 means for the new
+// segment itself.
 fn pending_tcp_find_free_slot(
-        connection_slot: {0..<TCP_CONNECTION_MAX as usize})
-        -> {0..<4 as usize} {
+        connection_slot: {0..<TCP_CONNECTION_MAX as usize}) -> i32 {
     let mut pending_slot: usize = 0;
     while (pending_slot < 4) {
         if (pending_slot < 4) {
@@ -490,7 +484,7 @@ fn pending_tcp_find_free_slot(
                 connection_slot * PENDING_TCP_MAX + pending_slot;
             if (pending_index < PENDING_TCP_MAX * TCP_CONNECTION_MAX) {
                 if (pending_tcp_kind[pending_index] == PendingTcpKind::None) {
-                return pending_slot;
+                return pending_slot as i32;
                 }
             }
         }
@@ -498,39 +492,111 @@ fn pending_tcp_find_free_slot(
     }
     kernel_boot_log_resource_exhausted(
         "TCP pending-retransmit queue" as *u8, PENDING_TCP_MAX);
-    return 0;
+    return -1;
 }
 
+// GitHub issue #295: returns -1 (not i32 min: this file's own "no slot"
+// sentinel, see pending_tcp_find_free_slot) instead of always claiming a
+// slot, when PENDING_TCP_MAX is exhausted for this connection. The new
+// segment is still sent by both callers below regardless of this return
+// value -- what -1 means is narrower: this specific segment will not be
+// automatically retransmitted by pending_tcp_service_once if its own ACK
+// is lost (no worse than every prior segment's reliability was already
+// bounded by PENDING_TCP_MAX concurrent tracking), and no OTHER segment's
+// still-live tracking record is touched. Both callers guard their
+// test-injection branch (which otherwise arms a deliberate drop-and-
+// verify-retransmit check) on this being a real slot, since arming that
+// check against slot -1 would mean the frame is never transmitted at all.
 fn pending_tcp_record(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
-                      kind: PendingTcpKind, frame_length: usize)
-        -> {0..<4 as usize} {
-    let slot: {0..<4 as usize} = pending_tcp_find_free_slot(connection_slot);
-    let pending_index: usize = connection_slot * PENDING_TCP_MAX + slot;
-    // Same-base subslice rule (see pending_tcp_ack_matches's identical
-    // comment): "slot * 1514" computed twice would not itself prove in
-    // range, so it is bound once into `base` and both the write loop
-    // below and any later `base..<base + N` subslice reference that one
-    // local instead of recomputing the multiply.
-    let base: usize = pending_index * 1514;
-    let frame_dest = pending_tcp_frame as []u8;
-    let stream_base: usize = connection_slot * 1514;
-    let stream_frames = tcp_stream_tx_frame as []u8;
-    slice_copy(frame_dest[base..<base + 1514],
-               stream_frames[stream_base..<stream_base + 1514]);
-    pending_tcp_kind[pending_index] = kind;
-    pending_tcp_frame_length[pending_index] = frame_length;
-    pending_tcp_expected_ack[pending_index] = conn_snd_nxt[connection_slot];
-    let ip_base: usize = pending_index * 4;
-    let conn_ip_base: usize = connection_slot * 4;
-    let remote_ip_bytes = pending_tcp_remote_ip as []u8;
-    let conn_ip_bytes = conn_remote_ip as []u8;
-    slice_copy(remote_ip_bytes[ip_base..<ip_base + 4],
-               conn_ip_bytes[conn_ip_base..<conn_ip_base + 4]);
-    pending_tcp_remote_port[pending_index] = conn_remote_port[connection_slot];
-    pending_tcp_local_port[pending_index] = conn_local_port[connection_slot];
-    pending_tcp_sent_at[pending_index] = read_cntpct();
-    pending_tcp_retries[pending_index] = 0;
-    return slot;
+                      kind: PendingTcpKind, frame_length: usize) -> i32 {
+    let found: i32 = pending_tcp_find_free_slot(connection_slot);
+    if (found >= 0 && found < 4) {
+        let slot: {0..<4 as usize} = found as usize;
+        let pending_index: usize = connection_slot * PENDING_TCP_MAX + slot;
+        // Same-base subslice rule (see pending_tcp_ack_matches's identical
+        // comment): "slot * 1514" computed twice would not itself prove in
+        // range, so it is bound once into `base` and both the write loop
+        // below and any later `base..<base + N` subslice reference that one
+        // local instead of recomputing the multiply.
+        let base: usize = pending_index * 1514;
+        let frame_dest = pending_tcp_frame as []u8;
+        let stream_base: usize = connection_slot * 1514;
+        let stream_frames = tcp_stream_tx_frame as []u8;
+        slice_copy(frame_dest[base..<base + 1514],
+                   stream_frames[stream_base..<stream_base + 1514]);
+        pending_tcp_kind[pending_index] = kind;
+        pending_tcp_frame_length[pending_index] = frame_length;
+        pending_tcp_expected_ack[pending_index] = conn_snd_nxt[connection_slot];
+        let ip_base: usize = pending_index * 4;
+        let conn_ip_base: usize = connection_slot * 4;
+        let remote_ip_bytes = pending_tcp_remote_ip as []u8;
+        let conn_ip_bytes = conn_remote_ip as []u8;
+        slice_copy(remote_ip_bytes[ip_base..<ip_base + 4],
+                   conn_ip_bytes[conn_ip_base..<conn_ip_base + 4]);
+        pending_tcp_remote_port[pending_index] = conn_remote_port[connection_slot];
+        pending_tcp_local_port[pending_index] = conn_local_port[connection_slot];
+        pending_tcp_sent_at[pending_index] = read_cntpct();
+        pending_tcp_retries[pending_index] = 0;
+        return slot as i32;
+    }
+    return -1;
+}
+
+// GitHub issue #295 boundary test: fills connection slot 0's PENDING_TCP_MAX
+// (4) retransmit-tracking slots directly (bypassing the real send path,
+// which this probe has no network peer to drive), then proves
+// pending_tcp_record reports exhaustion via -1 rather than corrupting an
+// existing slot's still-unacknowledged frame_length -- the actual bug this
+// issue's audit found and fixed. Also proves a freed slot is reused.
+fn pending_tcp_exhaustion_probe() -> bool {
+    let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = 0;
+    pending_tcp_reset_all(connection_slot);
+    let base_index: usize = connection_slot * PENDING_TCP_MAX;
+    for i: usize in 0..<PENDING_TCP_MAX {
+        let pending_index: usize = base_index + i;
+        if (pending_index < PENDING_TCP_MAX * TCP_CONNECTION_MAX) {
+            pending_tcp_kind[pending_index] = PendingTcpKind::Data;
+            // Distinct per-slot sentinel: slot i's own frame_length, so a
+            // corrupted-by-the-wrong-slot overwrite (not just any write)
+            // would be caught below, not just "something changed".
+            pending_tcp_frame_length[pending_index] = 1000 + i;
+        }
+    }
+
+    let untracked: i32 = pending_tcp_record(connection_slot,
+                                            PendingTcpKind::Fin, 9999);
+    if (untracked != -1) { return false; }
+    for i: usize in 0..<PENDING_TCP_MAX {
+        let pending_index: usize = base_index + i;
+        if (pending_index < PENDING_TCP_MAX * TCP_CONNECTION_MAX) {
+            if (pending_tcp_kind[pending_index] != PendingTcpKind::Data ||
+                pending_tcp_frame_length[pending_index] != 1000 + i) {
+                return false;
+            }
+        }
+    }
+
+    let free_index: usize = base_index + 2;
+    if (free_index < PENDING_TCP_MAX * TCP_CONNECTION_MAX) {
+        pending_tcp_kind[free_index] = PendingTcpKind::None;
+    }
+    let reused: i32 = pending_tcp_record(connection_slot,
+                                         PendingTcpKind::Fin, 9999);
+    if (reused != 2) { return false; }
+    for i: usize in 0..<PENDING_TCP_MAX {
+        if (i != 2) {
+            let pending_index: usize = base_index + i;
+            if (pending_index < PENDING_TCP_MAX * TCP_CONNECTION_MAX) {
+                if (pending_tcp_kind[pending_index] != PendingTcpKind::Data ||
+                    pending_tcp_frame_length[pending_index] != 1000 + i) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    pending_tcp_reset_all(connection_slot);
+    return true;
 }
 
 // slot: {0..<4 as usize} (not plain usize + an internal `if (slot >= 4)
@@ -1484,16 +1550,23 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
         let this_index: usize = tcp_data_segment_counter[connection_slot];
         tcp_data_segment_counter[connection_slot] =
             tcp_data_segment_counter[connection_slot] + 1;
-        let this_slot: usize = pending_tcp_record(
+        let this_slot: i32 = pending_tcp_record(
             connection_slot, PendingTcpKind::Data, frame_length);
-        if (this_index as i32 == tcp_drop_data_segment_index) {
+        // GitHub issue #295: this_slot == -1 means PENDING_TCP_MAX was
+        // exhausted (pending_tcp_record's own doc comment) -- there is no
+        // tracked slot to ever retransmit from, so the deliberate-drop
+        // test injection below must not arm in that case, or this segment
+        // would never be transmitted at all (skipped here, and never
+        // retried since nothing tracks it). Fall through to the real send.
+        if (this_slot >= 0 &&
+                this_index as i32 == tcp_drop_data_segment_index) {
             // Skip only this segment's initial transmit -- it stays
             // queued (pending_tcp_record already ran above), so its
             // first REAL transmission, and the recovery-observed flag,
             // both come from pending_tcp_service_once's real timeout+
             // peer-ack path, the same one every other segment uses.
             tcp_drop_data_segment_index = -1;
-            tcp_injected_data_slot[connection_slot] = this_slot as i32;
+            tcp_injected_data_slot[connection_slot] = this_slot;
             return KernelTcpSendResult::Sent(serviced);
         }
         return KernelTcpSendResult::Sent(net_transmit_ready(
@@ -1557,11 +1630,15 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
     tcp_hdr.urgent = 0;
     fix_tcp_checksum(ip, tcp);
     conn_snd_nxt[connection_slot] = conn_snd_nxt[connection_slot] + 1;
-    let fin_slot: usize = pending_tcp_record(
+    let fin_slot: i32 = pending_tcp_record(
         connection_slot, PendingTcpKind::Fin, 54);
-    if (tcp_drop_next_fin) {
+    // GitHub issue #295: same reasoning as the Data-segment send site --
+    // fin_slot == -1 means nothing tracks this FIN, so the deliberate-drop
+    // injection must not arm (that would skip the only transmission this
+    // FIN would ever get). Falls through to the real send instead.
+    if (tcp_drop_next_fin && fin_slot >= 0) {
         tcp_drop_next_fin = false;
-        tcp_injected_fin_slot[connection_slot] = fin_slot as i32;
+        tcp_injected_fin_slot[connection_slot] = fin_slot;
     } else {
         ready = net_transmit_ready(ready, frame, 54);
     }

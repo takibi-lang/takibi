@@ -1,0 +1,1 @@
+tcp pending-retransmit queue: exhaustion at capacity=4, no corruption, reuse-after-free ok
