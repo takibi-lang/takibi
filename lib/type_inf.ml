@@ -3079,6 +3079,54 @@ let narrow_from_cond tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
       | None -> env
   ) env (Ast.slice_len_mins ~resolve_const:Const_env.find cond)
 
+(* Logical negation of a condition expression, for narrowing the
+   fallthrough path after an early-return guard (`if (cond) { return
+   ...; }` with no else -- see stmt_list_always_returns/narrow_from_cond
+   below). De Morgan's laws for And/Or, flipped relational operators for
+   comparisons. Deliberately conservative: any condition shape not
+   listed (function calls, field/index access used as a bool, anything
+   this file's own `collect_bounds` would not have understood on the
+   POSITIVE side either) returns None rather than guessing, matching
+   collect_bounds' own "only known shapes contribute a bound" philosophy
+   just above. Only ever applied to a condition already accepted by
+   check_cond as boolean, so no further validation is needed here. *)
+let rec negate_cond (e : Ast.expr) : Ast.expr option =
+  match e.desc with
+  | BinOp (And, a, b) ->
+      (match negate_cond a, negate_cond b with
+       | Some na, Some nb -> Some { e with desc = BinOp (Or, na, nb) }
+       | _ -> None)
+  | BinOp (Or, a, b) ->
+      (match negate_cond a, negate_cond b with
+       | Some na, Some nb -> Some { e with desc = BinOp (And, na, nb) }
+       | _ -> None)
+  | BinOp (Lt, a, b) -> Some { e with desc = BinOp (Ge, a, b) }
+  | BinOp (Ge, a, b) -> Some { e with desc = BinOp (Lt, a, b) }
+  | BinOp (Le, a, b) -> Some { e with desc = BinOp (Gt, a, b) }
+  | BinOp (Gt, a, b) -> Some { e with desc = BinOp (Le, a, b) }
+  | BinOp (Eq, a, b) -> Some { e with desc = BinOp (Ne, a, b) }
+  | BinOp (Ne, a, b) -> Some { e with desc = BinOp (Eq, a, b) }
+  | _ -> None
+
+(* Purely syntactic "does this statement list always return" check, local
+   to the range-narrowing pass (kept separate from the resource-flow
+   checker's own always_terminates further down in this file -- same
+   name, independently scoped, deliberately not shared: this one only
+   needs to answer "is the fallthrough path after this branch dead",
+   not the resource-flow checker's fuller noreturn-function/Match
+   handling, and duplicating a five-line conservative check is lower
+   risk than threading a shared helper across two otherwise-unrelated
+   passes). Conservative in the safe direction, same as its namesake:
+   a loop is never treated as a terminator, and any statement shape not
+   explicitly listed returns false. *)
+let rec stmt_always_returns (s : Ast.stmt) : bool = match s.desc with
+  | Ast.Return _ -> true
+  | Ast.If (_, yes, no) ->
+      no <> [] && stmt_list_always_returns yes && stmt_list_always_returns no
+  | Ast.Block body -> stmt_list_always_returns body
+  | _ -> false
+and stmt_list_always_returns stmts = List.exists stmt_always_returns stmts
+
 (* GitHub issue #184: LetMatch's arms end in `Yield e` (this arm's value)
    or a diverging statement -- but LetMatch's own infer_stmt/check_stmt
    cases reuse `Match`'s ~300-line exhaustiveness/linear-payload engine
@@ -3315,7 +3363,68 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
         (tyenv, rl1) else_s
       in
-      (tyenv, rl2)
+      (* Early-return-guard narrowing: when the then-branch always
+         returns, the code after this WHOLE if/else is reached only on
+         the path where `cond` was false -- i.e. exactly the else
+         branch's own path, whether else_s is empty (including an
+         explicit but empty `else {}`, indistinguishable from "no else"
+         both at the AST level and semantically), non-empty, or absent
+         entirely (else_s = [] either way). narrow_from_cond's kill
+         source is else_s itself, not then_s and not [] unconditionally
+         -- exactly mirroring then_tyenv's own kill discipline just
+         above, so a write inside a real else branch still correctly
+         invalidates the proof for whatever follows, the same way a
+         write inside `then_s` already invalidates then_tyenv's proof
+         for code inside the then-branch. negate_cond returning None
+         (an unrecognized condition shape, or one whose negation lands
+         on an Or -- see collect_bounds' own header -- this refinement
+         system has no single-interval representation for a disjoint
+         union of ranges, so an And-shaped guard's negated Or cannot
+         narrow anything) falls back to today's exact behavior.
+
+         MUT-ONLY restriction, found the hard way against real kernel
+         code (kernel/drivers/net/virtio_net.tkb's `if (initialized !=
+         0) { return Failed; } initialized = 1;` init-guard idiom broke
+         on the first whole-kernel build after this feature was added):
+         then_tyenv's own narrowing above is safe because it is used
+         ONLY for checking statements inside then_s itself, in the same
+         List.fold_left that naturally re-threads the environment after
+         each statement -- a write anywhere inside then_s is checked
+         against then_s's own kill set first. This continuation
+         environment is different in kind: it survives into arbitrarily
+         many SIBLING statements after this whole if, which this `If`
+         case has no visibility into (infer_stmt/the enclosing Block's
+         fold processes one statement at a time), so a later plain
+         assignment to a narrowed MUTABLE variable would otherwise be
+         checked against the stale narrowed type instead of its
+         declared type -- exactly virtio_net.tkb's `initialized = 1;`
+         after `initialized` had just been narrowed to {0..<1} by the
+         guard above it, rejecting the plainly-valid assignment.
+         Restricting this to IMMUTABLE bindings only sidesteps the
+         problem by construction: a `let` (not `let mut`) binding can
+         never be reassigned (enforced above at the "cannot assign to
+         immutable variable" check), so no later sibling statement can
+         ever invalidate an immutable narrowing this way. A full fix for
+         mutable variables would need the enclosing block's own
+         statement-list fold to know what its LATER statements write
+         before trusting a narrowing this far ahead -- a real, separate,
+         higher-risk change to the shared statement-list-processing
+         pattern used throughout this file, not attempted here. *)
+      let only_immutable_narrowing env =
+        StringMap.mapi (fun name entry ->
+          match StringMap.find_opt name tyenv with
+          | Some ((_, true) as original) when entry <> original -> original
+          | _ -> entry
+        ) env
+      in
+      let continuation_tyenv =
+        if stmt_list_always_returns then_s then
+          match negate_cond cond with
+          | Some neg -> only_immutable_narrowing (narrow_from_cond tyenv neg else_s)
+          | None -> tyenv
+        else tyenv
+      in
+      (continuation_tyenv, rl2)
   | While (cond, body) ->
       let ct = infer_expr senv eenv tyenv fenv cond in
       check_cond cond.loc ct;

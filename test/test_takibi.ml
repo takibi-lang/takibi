@@ -3663,6 +3663,131 @@ let infer_tests = [
       "fn foo(i: {0..<8 as i32}) {} \
        fn f(v: i32) { if (0 <= v && v < 8) { foo(v); } }");
 
+  (* GitHub issue #295 follow-up: an early-return guard narrows the
+     FALLTHROUGH path (code after the if, not a `then`/`else` body) via
+     the condition's own logical negation, when the guarded branch always
+     returns and there is no else. Found while writing kernel/net/tcp.tkb's
+     pending_tcp_record: `if (found < 0 || found >= 4) { return -1; }`
+     followed by code needing found: {0..<4} previously had no way to
+     prove that range short of restructuring into the already-supported
+     wrapping-if form.
+
+     IMMUTABLE ONLY: found the hard way against real kernel code
+     (kernel/drivers/net/virtio_net.tkb's `if (initialized != 0) {
+     return Failed; } initialized = 1;` init-guard idiom broke on the
+     first whole-kernel build after an unrestricted version of this
+     feature was added -- the narrowed {0..<1} type for `initialized`
+     survived into the very next statement, an ordinary assignment of 1
+     to it, and rejected a plainly valid write). Restricted to immutable
+     `let` bindings, which can never be reassigned, sidestepping that
+     failure mode entirely rather than attempting to track every
+     possible later write across an unbounded number of sibling
+     statements this `If` case cannot see. This means an ordinary,
+     non-`mut` function PARAMETER -- assignable by default in this
+     language even without a `mut` keyword on the parameter itself, see
+     the "does NOT narrow a mutable parameter" test below -- is not
+     narrowed either; every positive test below therefore copies the
+     guarded parameter into an immutable local first (`let n: i32 = v;`),
+     matching the shape pending_tcp_record itself used. *)
+  Alcotest.test_case "early-return guard (De Morgan of ||) narrows the \
+                       fallthrough path for an immutable local" `Quick
+    (expect_ok
+      "fn foo(i: {0..<4 as i32}) {} \
+       fn f(v: i32) -> i32 { \
+         let n: i32 = v; \
+         if (n < 0 || n >= 4) { return -1; } \
+         foo(n); \
+         return 0; \
+       }");
+
+  Alcotest.test_case "early-return guard does NOT narrow a mutable \
+                       function parameter (only immutable bindings are \
+                       narrowed -- see this test block's header comment)" `Quick
+    (expect_type_error "unproven i32"
+      "fn foo(i: {0..<4 as i32}) {} \
+       fn f(v: i32) -> i32 { \
+         if (v < 0 || v >= 4) { return -1; } \
+         foo(v); \
+         return 0; \
+       }");
+
+  (* An And-conjunction guard negates to an Or via De Morgan
+     (negate_cond (And a b) = Or (negate a) (negate b)), and
+     collect_bounds only ever recurses into And, not Or (same
+     conservative scope the positive wrapping-if form already has) --
+     so an And-shaped guard's fallthrough is deliberately NOT narrowed,
+     unlike this file's Or-shaped guard above whose negation lands back
+     on the supported And shape. Documents the boundary, not a defect. *)
+  Alcotest.test_case "early-return guard (And form) does NOT narrow the \
+                       fallthrough path (negates to an unsupported Or)" `Quick
+    (expect_type_error "unproven i32"
+      "fn foo(i: {0..<4 as i32}) {} \
+       fn f(v: i32) -> i32 { \
+         let n: i32 = v; \
+         if (n >= 4 && n < 0) { return -1; } \
+         foo(n); \
+         return 0; \
+       }");
+
+  Alcotest.test_case "early-return guard: a single-sided bound still \
+                       does not narrow (matches the wrapping-if form's \
+                       own same limitation)" `Quick
+    (expect_type_error "unproven i32"
+      "fn foo(i: {0..<4 as i32}) {} \
+       fn f(v: i32) -> i32 { \
+         let n: i32 = v; \
+         if (n < 0) { return -1; } \
+         foo(n); \
+         return 0; \
+       }");
+
+  Alcotest.test_case "early-return guard: an empty (or absent) else \
+                       branch narrows the fallthrough identically -- \
+                       the two are indistinguishable, both at the AST \
+                       level and semantically" `Quick
+    (expect_ok
+      "fn foo(i: {0..<4 as i32}) {} \
+       fn f(v: i32) -> i32 { \
+         let n: i32 = v; \
+         if (n < 0 || n >= 4) { return -1; } else {} \
+         foo(n); \
+         return 0; \
+       }");
+
+  Alcotest.test_case "early-return guard: a non-empty else branch that \
+                       does not write n still narrows the fallthrough" `Quick
+    (expect_ok
+      "fn foo(i: {0..<4 as i32}) {} \
+       fn bar() {} \
+       fn f(v: i32) -> i32 { \
+         let n: i32 = v; \
+         if (n < 0 || n >= 4) { return -1; } else { bar(); } \
+         foo(n); \
+         return 0; \
+       }");
+
+  Alcotest.test_case "early-return guard: a branch that does not always \
+                       return disables the fallthrough narrowing" `Quick
+    (expect_type_error "unproven i32"
+      "fn foo(i: {0..<4 as i32}) {} \
+       fn f(v: i32) -> i32 { \
+         if (v < 0 || v >= 4) {} \
+         foo(v); \
+         return 0; \
+       }");
+
+  Alcotest.test_case "early-return guard: an unrecognized condition \
+                       shape (function call) does not narrow (negate_cond \
+                       returns None, falls back to today's behavior)" `Quick
+    (expect_type_error "unproven i32"
+      "fn foo(i: {0..<4 as i32}) {} \
+       fn cond(v: i32) -> bool { return v < 0; } \
+       fn f(v: i32) -> i32 { \
+         if (cond(v)) { return -1; } \
+         foo(v); \
+         return 0; \
+       }");
+
   (* -- Step 3.5 for loop: for i in lo..<hi ----------------------------------- *)
 
   Alcotest.test_case "for loop parses and type-checks" `Quick
