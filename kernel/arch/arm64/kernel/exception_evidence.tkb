@@ -1,35 +1,145 @@
-// GitHub issue #227 (item 3): kernel/arch/arm64/boot/entry.S's
-// el1_exception_evidence used to hand-write five `mrs` reads into a fixed
-// .bss layout because .tkb could not read ESR_EL1/FAR_EL1/ELR_EL1/SPSR_EL1
-// directly. GitHub issue #226 already lifted the read-only system registers
-// this kernel touches into a closed intrinsic set (lib/type_inf.ml,
-// lib/llvm_gen.ml); extending that set with these four (same shape as
-// mrs_cntfrq_el0/mrs_cntpct_el0/mrs_sctlr_el1) moves this fail-stop evidence
-// capture into ordinary .tkb too.
-//
-// entry.S's VECTOR macro still supplies the trapped vector slot number (the
-// one value not readable from any system register) as this call's own x0
-// argument, then branches (not calls -- this never returns) straight here.
-//
-// GitHub issue #233's RPi5 SWD diagnosis found this block's raw .bss values
-// unreliable to read back over SWD: a debugger's memory read goes through
-// the data cache, and the block was never flushed after being written, so a
-// stale (pre-fault) value could be read instead of what was just stored.
-// dma_prepare_tx's CLEAN (write-back -- this core never reads the block
-// back itself, so INVALIDATE would be wrong) fixes that; it is reused here
-// purely for its cache-maintenance side effect, not because this is any
-// kind of DMA transfer.
-let mut exception_vector_slot: [usize; 5];
+use "kernel/kernel/process.tkb";
+use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
 
-fn el1_exception_evidence(slot: usize) {
-    kernel_boot_log("exception: fail-stop\n");
-    exception_vector_slot[0] = slot;
-    exception_vector_slot[1] = mrs_esr_el1();
-    exception_vector_slot[2] = mrs_far_el1();
-    exception_vector_slot[3] = mrs_elr_el1();
-    exception_vector_slot[4] = mrs_spsr_el1();
-    dma_prepare_tx(exception_vector_slot as *usize, 40);
+// Stable, fixed-size fail-stop payload.  `valid` is written last, and
+// `sequence` changes before every capture, so a debugger cannot mistake an
+// all-zero or partial record for a fresh crash.  All fields are machine words
+// to keep this ABI straightforward for UART, GDB, and OpenOCD consumers.
+struct CrashSnapshot {
+    valid: usize;
+    sequence: usize;
+    cpu: usize;
+    vector_slot: usize;
+    esr_el1: usize;
+    far_el1: usize;
+    elr_el1: usize;
+    spsr_el1: usize;
+    sp_el0: usize;
+    tpidr_el0: usize;
+    ttbr0_el1: usize;
+    process_pid: usize;
+    parent_pid: usize;
+    process_state: usize;
+    wait_reason: usize;
+    root_slot: usize;
+    root_l1: usize;
+    root_asid: usize;
+    saved_frame_available: usize;
+    saved_sp_el0: usize;
+    saved_elr_el1: usize;
+    saved_spsr_el1: usize;
+    saved_tpidr_el0: usize;
+}
+
+let mut crash_snapshot: CrashSnapshot;
+let mut crash_snapshot_capturing: bool;
+
+fn crash_snapshot_put_hex(value: usize) {
+    kernel_boot_log("0x");
+    let mut shift: usize = 60;
     while (true) {
-        interrupt_wait();
+        let digit: usize = (value >> shift) & 0xF;
+        if (digit < 10) { uart_putc((digit as u8) + 48); }
+        else { uart_putc((digit as u8) + 87); }
+        if (shift == 0) { return; }
+        shift = shift - 4;
     }
+}
+
+fn crash_snapshot_put_data_abort(esr: usize) {
+    let ec: usize = (esr >> 26) & 0x3F;
+    if (ec == 0x20 || ec == 0x21) {
+        kernel_boot_log("oops: access=instruction-fetch\n");
+        return;
+    }
+    if (ec == 0x24 || ec == 0x25) {
+        kernel_boot_log("oops: data-abort dfsc=");
+        crash_snapshot_put_hex(esr & 0x3F);
+        kernel_boot_log(" access=");
+        if ((esr & (1 << 6)) != 0) { kernel_boot_log("write\n"); }
+        else { kernel_boot_log("read\n"); }
+    }
+}
+
+fn crash_snapshot_render() {
+    kernel_boot_log("oops: fail-stop seq=");
+    uart_put_udec(crash_snapshot.sequence);
+    kernel_boot_log(" cpu=");
+    uart_put_udec(crash_snapshot.cpu & 0xFF);
+    kernel_boot_log(" slot=");
+    uart_put_udec(crash_snapshot.vector_slot);
+    kernel_boot_log(" ec=");
+    crash_snapshot_put_hex((crash_snapshot.esr_el1 >> 26) & 0x3F);
+    kernel_boot_log(" esr="); crash_snapshot_put_hex(crash_snapshot.esr_el1);
+    kernel_boot_log(" far="); crash_snapshot_put_hex(crash_snapshot.far_el1);
+    kernel_boot_log(" elr="); crash_snapshot_put_hex(crash_snapshot.elr_el1);
+    kernel_boot_log("\n");
+    crash_snapshot_put_data_abort(crash_snapshot.esr_el1);
+    kernel_boot_log("oops: live sp_el0="); crash_snapshot_put_hex(crash_snapshot.sp_el0);
+    kernel_boot_log(" tpidr_el0="); crash_snapshot_put_hex(crash_snapshot.tpidr_el0);
+    kernel_boot_log(" ttbr0="); crash_snapshot_put_hex(crash_snapshot.ttbr0_el1);
+    kernel_boot_log("\n");
+    kernel_boot_log("oops: process pid="); uart_put_udec(crash_snapshot.process_pid);
+    kernel_boot_log(" parent="); uart_put_udec(crash_snapshot.parent_pid);
+    kernel_boot_log(" state="); uart_put_udec(crash_snapshot.process_state);
+    kernel_boot_log(" wait="); uart_put_udec(crash_snapshot.wait_reason);
+    kernel_boot_log(" root="); uart_put_udec(crash_snapshot.root_slot);
+    kernel_boot_log(" asid="); uart_put_udec(crash_snapshot.root_asid);
+    kernel_boot_log(" l1="); crash_snapshot_put_hex(crash_snapshot.root_l1);
+    kernel_boot_log("\n");
+    if (crash_snapshot.saved_frame_available != 0) {
+        kernel_boot_log("oops: saved sp_el0="); crash_snapshot_put_hex(crash_snapshot.saved_sp_el0);
+        kernel_boot_log(" tpidr_el0="); crash_snapshot_put_hex(crash_snapshot.saved_tpidr_el0);
+        kernel_boot_log(" elr="); crash_snapshot_put_hex(crash_snapshot.saved_elr_el1);
+        kernel_boot_log(" spsr="); crash_snapshot_put_hex(crash_snapshot.saved_spsr_el1);
+        kernel_boot_log("\n");
+    } else {
+        kernel_boot_log("oops: saved-frame=unavailable\n");
+    }
+    kernel_boot_log("oops: scheduler-trace=unavailable\n");
+}
+
+fn crash_snapshot_capture(slot: usize, frame_sp: usize) {
+    if (crash_snapshot_capturing) {
+        kernel_boot_log("oops: recursive exception; parking\n");
+        while (true) { interrupt_wait(); }
+    }
+    crash_snapshot_capturing = true;
+    crash_snapshot.valid = 0;
+    crash_snapshot.sequence = crash_snapshot.sequence + 1;
+    crash_snapshot.cpu = crash_snapshot_read_mpidr_el1();
+    crash_snapshot.vector_slot = slot;
+    crash_snapshot.esr_el1 = mrs_esr_el1();
+    crash_snapshot.far_el1 = mrs_far_el1();
+    crash_snapshot.elr_el1 = mrs_elr_el1();
+    crash_snapshot.spsr_el1 = mrs_spsr_el1();
+    crash_snapshot.sp_el0 = crash_snapshot_read_sp_el0();
+    crash_snapshot.tpidr_el0 = crash_snapshot_read_tpidr_el0();
+    crash_snapshot.ttbr0_el1 = crash_snapshot_read_ttbr0_el1();
+    crash_snapshot.process_pid = kernel_process_current_pid();
+    crash_snapshot.parent_pid = kernel_process_crash_parent_pid();
+    crash_snapshot.process_state = kernel_process_crash_state();
+    crash_snapshot.wait_reason = kernel_process_crash_wait_reason();
+    crash_snapshot.root_slot = kernel_process_crash_root_slot();
+    crash_snapshot.root_l1 = address_space_l1_physical(crash_snapshot.root_slot);
+    crash_snapshot.root_asid = address_space_asid(crash_snapshot.root_slot);
+    crash_snapshot.saved_frame_available = 0;
+    if (frame_sp != 0) {
+        crash_snapshot_copy_saved_frame(frame_sp, &crash_snapshot.saved_sp_el0);
+        crash_snapshot.saved_frame_available = 1;
+    }
+    crash_snapshot.valid = 1;
+    // Write back the exact structured record before UART output or a debugger
+    // observes it.  This is cache maintenance only, never a DMA submission.
+    dma_prepare_tx(&crash_snapshot as *usize, 184);
+    crash_snapshot_render();
+    while (true) { interrupt_wait(); }
+}
+
+// Vector-table targets have no universally valid saved ExceptionFrame.
+fn el1_exception_evidence(slot: usize) { crash_snapshot_capture(slot, 0); }
+
+// EL0 synchronous exceptions have EXC_CONTEXT_SAVE's frame at this SP.
+fn el1_exception_evidence_from_frame(slot: usize, frame_sp: usize) {
+    crash_snapshot_capture(slot, frame_sp);
 }

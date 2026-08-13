@@ -8,6 +8,16 @@ extern fn el0_context_retry_syscall(frame_sp: usize);
 extern fn el0_context_resume(frame_sp: usize) !{noreturn};
 extern fn kernel_syscall_fail_stop() !{noreturn};
 
+// The fail-stop snapshot deliberately keeps these architectural reads in the
+// kernel's existing AArch64 assembly boundary.  They are not general language
+// intrinsics: the only caller is exception_evidence.tkb while interrupts are
+// masked on the terminal path.
+extern fn crash_snapshot_read_sp_el0() -> usize;
+extern fn crash_snapshot_read_tpidr_el0() -> usize;
+extern fn crash_snapshot_read_ttbr0_el1() -> usize;
+extern fn crash_snapshot_read_mpidr_el1() -> usize;
+extern fn crash_snapshot_copy_saved_frame(frame_sp: usize, output: *usize);
+
 // Must match kernel/arch/arm64/kernel/exception_context.inc's EXC_CONTEXT_SIZE
 // exactly; that .inc file remains the single source of truth for the actual
 // byte layout (EXC_CONTEXT_SAVE/EXC_CONTEXT_RESTORE), this is a mirror for

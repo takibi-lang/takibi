@@ -126,7 +126,8 @@ el0_sync_entry:
     cmp     x6, #8
     b.eq    .Lsyscall_child_exec
     mov     x0, #8
-    b       el1_exception_evidence
+    mov     x1, sp
+    b       el1_exception_evidence_from_frame
 
 .Ldata_abort:
     mrs     x1, far_el1
@@ -138,7 +139,8 @@ el0_sync_entry:
 
 .Lsync_fail:
     mov     x0, #8
-    b       el1_exception_evidence
+    mov     x1, sp
+    b       el1_exception_evidence_from_frame
 
 .Lsyscall_clone_child:
     // GitHub issue #221 Step 4: moved to kernel_syscall_clone_child_return
@@ -282,3 +284,39 @@ el0_context_retry_syscall:
 kernel_syscall_fail_stop:
     mov     x0, #8
     b       el1_exception_evidence
+
+    .global crash_snapshot_read_sp_el0
+crash_snapshot_read_sp_el0:
+    mrs     x0, sp_el0
+    ret
+
+    .global crash_snapshot_read_tpidr_el0
+crash_snapshot_read_tpidr_el0:
+    mrs     x0, tpidr_el0
+    ret
+
+    .global crash_snapshot_read_ttbr0_el1
+crash_snapshot_read_ttbr0_el1:
+    mrs     x0, ttbr0_el1
+    ret
+
+    .global crash_snapshot_read_mpidr_el1
+crash_snapshot_read_mpidr_el1:
+    mrs     x0, mpidr_el1
+    ret
+
+// output[0..4] = ExceptionFrame's SP_EL0, ELR_EL1, SPSR_EL1, TPIDR_EL0.
+// The offsets come from exception_context.inc's compiler-generated .equ
+// constants, so this copies only the existing frame ABI rather than defining
+// a second layout for debugger consumers.
+    .global crash_snapshot_copy_saved_frame
+crash_snapshot_copy_saved_frame:
+    ldr     x2, [x0, #EXC_CONTEXT_SP_EL0]
+    str     x2, [x1, #0]
+    ldr     x2, [x0, #EXC_CONTEXT_ELR_EL1]
+    str     x2, [x1, #8]
+    ldr     x2, [x0, #EXC_CONTEXT_SPSR_EL1]
+    str     x2, [x1, #16]
+    ldr     x2, [x0, #EXC_CONTEXT_TPIDR_EL0]
+    str     x2, [x1, #24]
+    ret

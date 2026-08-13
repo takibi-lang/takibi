@@ -35,7 +35,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelcheck-rpi5 kernelcheck-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelcheck-rpi5 kernelcheck-qemu kernelcheck-oops-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -563,6 +563,11 @@ kernelcheck-qemu: kernelbuild-qemu
 	@bash scripts/run_kernel_qemutest.sh
 	@bash scripts/run_kernel_ash_qemutest.sh
 
+## Focused terminal-path check.  This is deliberately separate from the
+## ordinary QEMU suite because its expected result is a parked fail-stop.
+kernelcheck-oops-qemu: kernelbuild-qemu
+	@bash scripts/run_kernel_oops_qemutest.sh
+
 ## kernelsh-qemu: boot the standalone kernel, attach the current terminal to
 ## its TCP-backed UART console, and forward localhost:18080 to guest httpd.
 ## Exit miniterm with Ctrl-].
@@ -575,7 +580,7 @@ kernelsh-qemu: kernelbuild-qemu
 kernelsh-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_shell_rpi5.sh
 
-kernelcheck: kernelcheck-qemu kernelcheck-rpi5
+kernelcheck: kernelcheck-qemu kernelcheck-oops-qemu kernelcheck-rpi5
 
 ## allcheck: run every check this Makefile knows about -- langcheck, test,
 ## linuxcheck, kernelcheck -- so a single command surfaces a failure
