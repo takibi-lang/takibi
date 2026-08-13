@@ -262,6 +262,10 @@ KERNEL_RPI5_USER_ENTRY_S := $(KERNEL_DIR)/arch/arm64/kernel/user_entry.S
 KERNEL_RPI5_USER_ENTRY_O := $(KERNEL_BUILD_DIR)/user_entry.o
 KERNEL_RPI5_USER_EXTERN  := $(KERNEL_DIR)/arch/arm64/kernel/user_entry_extern.tkb
 KERNEL_RPI5_EXC_CONTEXT := $(KERNEL_DIR)/arch/arm64/kernel/exception_context.inc
+# Generated (GitHub issue #286, gitignored) -- offset constants only,
+# `.include`d by the hand-written file above. See scripts/gen_exception_frame.py.
+KERNEL_EXC_CONTEXT_OFFSETS := $(KERNEL_DIR)/arch/arm64/kernel/exception_context_offsets.inc
+KERNEL_EXC_CONTEXT_TKB     := $(KERNEL_DIR)/arch/arm64/kernel/exception_frame.tkb
 KERNEL_RPI5_FPSIMD_S     := $(KERNEL_DIR)/arch/arm64/kernel/fpsimd_probe.S
 KERNEL_RPI5_FPSIMD_O     := $(KERNEL_BUILD_DIR)/fpsimd_probe.o
 KERNEL_RPI5_FPSIMD_EXTERN := $(KERNEL_DIR)/arch/arm64/kernel/fpsimd_probe_extern.tkb
@@ -401,7 +405,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 $(KERNEL_RPI5_ENTRY_O): $(KERNEL_RPI5_ENTRY_S) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
-$(KERNEL_RPI5_USER_ENTRY_O): $(KERNEL_RPI5_USER_ENTRY_S) $(KERNEL_RPI5_EXC_CONTEXT) | $(KERNEL_BUILD_DIR)
+$(KERNEL_RPI5_USER_ENTRY_O): $(KERNEL_RPI5_USER_ENTRY_S) $(KERNEL_RPI5_EXC_CONTEXT) $(KERNEL_EXC_CONTEXT_OFFSETS) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(KERNEL_RPI5_FPSIMD_O): $(KERNEL_RPI5_FPSIMD_S) | $(KERNEL_BUILD_DIR)
@@ -466,7 +470,7 @@ KERNEL_QEMU_ENTRY_S := $(KERNEL_DIR)/arch/arm64/boot/entry_qemu.S
 $(KERNEL_QEMU_ENTRY_O): $(KERNEL_QEMU_ENTRY_S) | $(KERNEL_QEMU_BUILD_DIR)
 	$(LLVM_MC) --triple=$(QEMU_TARGET) --filetype=obj $< -o $@
 
-$(KERNEL_QEMU_USER_ENTRY_O): $(KERNEL_RPI5_USER_ENTRY_S) $(KERNEL_RPI5_EXC_CONTEXT) | $(KERNEL_QEMU_BUILD_DIR)
+$(KERNEL_QEMU_USER_ENTRY_O): $(KERNEL_RPI5_USER_ENTRY_S) $(KERNEL_RPI5_EXC_CONTEXT) $(KERNEL_EXC_CONTEXT_OFFSETS) | $(KERNEL_QEMU_BUILD_DIR)
 	$(LLVM_MC) --triple=$(QEMU_TARGET) --filetype=obj $< -o $@
 
 $(KERNEL_QEMU_FPSIMD_O): $(KERNEL_RPI5_FPSIMD_S) | $(KERNEL_QEMU_BUILD_DIR)
@@ -503,26 +507,23 @@ kernelbuild-qemu: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_E
 kernel-lib-check:
 	python3 scripts/check_kernel_lib_limitations_header.py $(KERNEL_DIR)/lib
 
-# Generate AArch64 exception-frame offsets from the struct definition
-# (GitHub issue #286). Run before each kernel build to ensure struct changes
-# are detected and offsets stay synchronized between .tkb and assembly.
-# Silent by default (prints only on changes); verbosity controlled by script
-# content-change detection.
-.PHONY: kernel-gen-exception-frame
-KERNEL_EXCEPTION_CONTEXT_INC := kernel/arch/arm64/kernel/exception_context.inc
-KERNEL_EXCEPTION_FRAME_TKB := kernel/arch/arm64/kernel/exception_frame.tkb
-
-# Create .inc from .tkb struct definition as an explicit Make rule
-# (so parallel builds respect the dependency)
-$(KERNEL_EXCEPTION_CONTEXT_INC): $(KERNEL_EXCEPTION_FRAME_TKB)
+# Generate AArch64 exception-frame offset constants from the struct
+# definition (GitHub issue #286). This is a REAL file-based Make rule (not
+# .PHONY) so parallel builds and `user_entry.o`'s own prerequisite on this
+# file both see a correct dependency graph -- a stale or missing generated
+# file is regenerated before anything tries to assemble against it, and a
+# rebuild is skipped entirely when the struct hasn't changed. The generator
+# only ever writes offset constants, never hand-written assembly macro
+# bodies (those live in the ordinary, git-tracked exception_context.inc),
+# so there is no placeholder/fallback path that could silently emit broken
+# assembly the way an earlier version of this rule once did.
+$(KERNEL_EXC_CONTEXT_OFFSETS): $(KERNEL_EXC_CONTEXT_TKB)
 	@python3 scripts/gen_exception_frame.py
 
-kernel-gen-exception-frame: $(KERNEL_EXCEPTION_CONTEXT_INC)
-
-## Verify that exception-frame offsets are consistent across struct, assembly,
-## and macros. Catches silent divergence before it causes bugs. Silent by default.
+## Verify that exception-frame offsets are consistent and the hand-written
+## SAVE/RESTORE macros contain real assembly, not placeholder/empty bodies.
 .PHONY: kernel-verify-exception-frame
-kernel-verify-exception-frame: kernel-gen-exception-frame
+kernel-verify-exception-frame: $(KERNEL_EXC_CONTEXT_OFFSETS)
 	@python3 scripts/verify_exception_frame.py
 
 kernelbuild-rpi5: kernel-lib-check kernel-verify-exception-frame $(KERNEL_RPI5_ELF)
@@ -584,6 +585,6 @@ allcheck: langcheck test linuxcheck kernelcheck
 clean:
 	dune clean
 	find kernel/build -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.img' \) -delete 2>/dev/null || true
-	rm -f kernel/arch/arm64/kernel/exception_context.inc
+	rm -f kernel/arch/arm64/kernel/exception_context_offsets.inc
 	rm -rf $(LINUX_USER_BUILD_DIR)
 	find $(LINUX_USER_DIR) -type f \( -name '*.o' -o -name '*.exe' \) -delete 2>/dev/null || true

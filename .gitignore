@@ -14,8 +14,10 @@
 *.cpio
 *.apk
 
-# Generated files
-kernel/arch/arm64/kernel/exception_context.inc
+# Generated files (GitHub issue #286): offset constants only, `.include`d by
+# the ordinary, git-tracked kernel/arch/arm64/kernel/exception_context.inc,
+# which holds the hand-written SAVE/RESTORE macro bodies and is NOT gitignored.
+kernel/arch/arm64/kernel/exception_context_offsets.inc
 
 # Downloaded at build time (Makefile's COMMON_AARCH64_BUSYBOX_APK rule,
 # GitHub issue #156) -- a real, GPL-2.0, third-party binary fetched
