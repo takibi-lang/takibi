@@ -739,6 +739,59 @@ private let mut execution_uart_parent_progress: usize;
 // the same one-time integration marker appear twice in a shared UART capture.
 private let mut execution_uart_block_logged: bool;
 
+// Fixed-size scheduler/process tail for fail-stop diagnostics. Each entry is
+// (event, from_pid, to_pid); it is best-effort on SMP, not a claim of a
+// globally atomic scheduler history. Writers are ordinary scheduler paths,
+// while a fatal CPU merely copies the already-retained tail.
+const KERNEL_CRASH_TRACE_EVENTS: usize = 8;
+const KERNEL_CRASH_TRACE_WORDS: usize = 24;
+const CrashTraceClone: usize = 1;
+const CrashTraceToParent: usize = 2;
+const CrashTraceToChild: usize = 3;
+const CrashTraceUartBlock: usize = 4;
+const CrashTraceChildExit: usize = 5;
+private let mut kernel_crash_trace: [usize; KERNEL_CRASH_TRACE_WORDS];
+private let mut kernel_crash_trace_next: usize;
+private let mut kernel_crash_trace_count: usize;
+
+fn kernel_process_crash_trace_record(event: usize, from_pid: usize,
+                                     to_pid: usize) {
+    let slot: usize = kernel_crash_trace_next % KERNEL_CRASH_TRACE_EVENTS;
+    let base: usize = slot * 3;
+    kernel_crash_trace[base] = event;
+    kernel_crash_trace[base + 1] = from_pid;
+    kernel_crash_trace[base + 2] = to_pid;
+    kernel_crash_trace_next = kernel_crash_trace_next + 1;
+    if (kernel_crash_trace_count < KERNEL_CRASH_TRACE_EVENTS) {
+        kernel_crash_trace_count = kernel_crash_trace_count + 1;
+    }
+}
+
+// Copies oldest-to-newest into the caller-owned fixed array. This gives the
+// crash report a stable chronological tail even after the ring wrapped.
+fn kernel_process_crash_trace_copy(output: *usize) -> usize {
+    let count: usize = kernel_crash_trace_count;
+    let mut first: usize = 0;
+    if (count == KERNEL_CRASH_TRACE_EVENTS) {
+        first = kernel_crash_trace_next % KERNEL_CRASH_TRACE_EVENTS;
+    }
+    for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
+        let output_base: usize = item * 3;
+        if (item < count) {
+            let source: usize = (first + item) % KERNEL_CRASH_TRACE_EVENTS;
+            let source_base: usize = source * 3;
+            *(output + output_base) = kernel_crash_trace[source_base];
+            *(output + output_base + 1) = kernel_crash_trace[source_base + 1];
+            *(output + output_base + 2) = kernel_crash_trace[source_base + 2];
+        } else {
+            *(output + output_base) = 0;
+            *(output + output_base + 1) = 0;
+            *(output + output_base + 2) = 0;
+        }
+    }
+    return count;
+}
+
 must_use variant ProcessUartProgressResult { Invalid; Recorded; }
 
 fn kernel_process_start_handle(handle: ProcessHandle) -> bool {
@@ -792,6 +845,8 @@ fn kernel_process_execution_reset() {
     execution_uart_blocks = 0;
     execution_uart_wakes = 0;
     execution_uart_parent_progress = 0;
+    kernel_crash_trace_next = 0;
+    kernel_crash_trace_count = 0;
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
         scheduled_process_records[slot].has_parent = false;
         scheduled_process_records[slot].has_child = false;
@@ -863,6 +918,8 @@ fn kernel_process_switch_to_parent(current_sp: usize) -> usize {
         return current_sp;
     }
     execution_current_handle = to;
+    kernel_process_crash_trace_record(
+        CrashTraceToParent, from.pool_index + 1, to.pool_index + 1);
     process_image_activate_root(to.pool_index);
     return scheduled_process_records[to.pool_index].saved_sp;
 }
@@ -890,6 +947,8 @@ fn kernel_process_switch_to_child(current_sp: usize) -> usize {
         return current_sp;
     }
     execution_current_handle = to;
+    kernel_process_crash_trace_record(
+        CrashTraceToChild, from.pool_index + 1, to.pool_index + 1);
     process_image_activate_root(to.pool_index);
     return scheduled_process_records[to.pool_index].saved_sp;
 }
@@ -987,6 +1046,8 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
             return 0;
         }
         execution_current_handle = child;
+        kernel_process_crash_trace_record(
+            CrashTraceUartBlock, parent.pool_index + 1, child.pool_index + 1);
         execution_uart_blocks = execution_uart_blocks + 1;
         if (execution_uart_block_logged == false) {
             execution_uart_block_logged = true;
@@ -1261,6 +1322,8 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             scheduled_process_records[child.pool_index].has_parent = true;
             execution_current_handle = child;
             execution_clone_calls = execution_clone_calls + 1;
+            kernel_process_crash_trace_record(
+                CrashTraceClone, parent.pool_index + 1, child.pool_index + 1);
             return ProcessCloneResult::ChildReady(child.pool_index + 1);
         }
     }
@@ -1411,6 +1474,13 @@ fn kernel_process_crash_root_slot() -> usize {
     return execution_current_handle.pool_index;
 }
 
+fn kernel_process_crash_image_kind() -> usize {
+    if (execution_current_live == false) { return 0; }
+    let slot: usize = execution_current_handle.pool_index;
+    if (scheduled_process_records[slot].exec_image_live) { return 1; }
+    return 0;
+}
+
 // GitHub issue #245: callers that need to (re)activate the current
 // process's own address-space root explicitly -- e.g. right after a fresh
 // clone, before process_image_activate_root() replaces the old fixed
@@ -1469,6 +1539,8 @@ fn kernel_process_child_exit(status: usize) -> usize {
     let mut child: ProcessHandle = execution_current_handle;
     let mut parent: ProcessHandle =
         scheduled_process_records[child.pool_index].parent;
+    kernel_process_crash_trace_record(
+        CrashTraceChildExit, child.pool_index + 1, parent.pool_index + 1);
     // GitHub issue #248: per-slot (indexed by the WAITING PARENT's own
     // pool_index), not a bare global -- see these fields' own header
     // comment for why a global here breaks a multi-level concurrent

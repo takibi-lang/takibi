@@ -151,8 +151,9 @@ el0_sync_entry:
     b       kernel_syscall_clone_child_return
 
 .Lclone_context_fail:
+    mov     x1, sp
     mov     x0, #8
-    b       el1_exception_evidence
+    b       el1_exception_evidence_from_frame
 
 .Lsyscall_clone_parent:
     // GitHub issue #221 Step 6: moved to kernel_syscall_clone_parent_return
@@ -276,14 +277,16 @@ el0_context_retry_syscall:
 
 // The single shared fail-stop entry, replacing every hand-written
 // `mov x0, #8; b el1_exception_evidence` pair at each .tkb-reachable action
-// tail. x0=8 matches el0_sync_entry's own vector-slot identification
+// tail.  The .tkb ABI supplies its saved ExceptionFrame in x0; retain it in
+// x1 while x0 becomes the vector slot. x0=8 matches el0_sync_entry's own vector-slot identification
 // (el1_vectors installs the lower-EL AArch64 sync slot at x0=8, GitHub issue
 // #227 item 3), so a fail-stop reached this way is indistinguishable in the
 // recorded evidence from one reached directly out of el0_sync_entry.
     .global kernel_syscall_fail_stop
 kernel_syscall_fail_stop:
+    mov     x1, x0
     mov     x0, #8
-    b       el1_exception_evidence
+    b       el1_exception_evidence_from_frame
 
     .global crash_snapshot_read_sp_el0
 crash_snapshot_read_sp_el0:

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Deterministic fail-stop regression: stop QEMU at reset, use GDB only to
-# replace one otherwise ordinary kernel instruction with BRK #0, then verify
-# both the UART oops record and retained structured CrashSnapshot while the
-# kernel itself has parked the CPU.
+# replace the first ordinary EL0 instruction with BRK #0, then verify both
+# the UART oops record and retained structured CrashSnapshot while the kernel
+# itself has parked the CPU.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,17 +28,26 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
-# Fault injection is the sole GDB role before the oops.  Patch the first
-# instruction of the existing test driver while the guest is stopped at
-# reset; no kernel test flag or special code path exists.  Detach then resumes
-# the guest, so the subsequent UART transcript is produced by the kernel
-# alone -- GDB neither handles the exception nor formats any diagnostic
-# output.
+# Fault injection is the sole GDB role before the oops. Stop at the existing
+# run_initial_user assembly boundary, where x0 is the mapped EL0 entry point,
+# and replace only that first user instruction.  Stop once more at the common
+# evidence entry and alter the saved TPIDR_EL0 word to a deliberately distinct
+# value.  This is a test-only proof that the report contains both the live
+# registers and the saved exception context; the injected BRK and its vector
+# path are otherwise the ordinary kernel path.  Detach then it records:
+# the normal Lower-EL synchronous vector saves a real ExceptionFrame before
+# the kernel produces its UART report. No kernel test flag or special path
+# exists, and GDB neither handles the exception nor formats its diagnostic.
 armed=false
 for _ in $(seq 1 50); do
     if gdb-multiarch -q -batch "$ELF" \
         -ex "target remote :$GDB_PORT" \
-        -ex "set {int}&kernel_test_driver_run = 0xd4200000" \
+        -ex "break run_initial_user" \
+        -ex "continue" \
+        -ex "set {int}\$x0 = 0xd4200000" \
+        -ex "break el1_exception_evidence_from_frame" \
+        -ex "continue" \
+        -ex "set {long}(\$x1 + 0x320) = 0xfeedfacefeedface" \
         -ex "detach" >"$ARTIFACT_DIR/arm-gdb.log" 2>&1; then
         armed=true
         break
@@ -52,15 +61,17 @@ if [ "$armed" != true ]; then
 fi
 
 for _ in $(seq 1 50); do
-    if grep -q '^oops: saved-frame=unavailable$' "$UART_LOG"; then
+    if grep -q '^oops: saved sp_el0=' "$UART_LOG"; then
         break
     fi
     sleep 0.1
 done
 
-if ! grep -Eq '^oops: fail-stop seq=[1-9][0-9]* cpu=[0-9]+ slot=4 ec=0x000000000000003c ' "$UART_LOG" ||
-        ! grep -q '^oops: saved-frame=unavailable$' "$UART_LOG" ||
-        ! grep -q '^oops: scheduler-trace=unavailable$' "$UART_LOG"; then
+if ! grep -Eq '^oops: fail-stop seq=[1-9][0-9]* cpu=[0-9]+ slot=8 ec=0x000000000000003c ' "$UART_LOG" ||
+        ! grep -q '^oops: saved sp_el0=' "$UART_LOG" ||
+        ! grep -q ' tpidr_el0=0xfeedfacefeedface ' "$UART_LOG" ||
+        ! grep -q '^oops: trace count=0$' "$UART_LOG" ||
+        ! grep -q '^oops: process pid=1 parent=0 state=2 wait=0 root=0 asid=1 .* image=bootstrap$' "$UART_LOG"; then
     echo "FAIL kernel/qemu oops: expected fail-stop UART report" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
@@ -75,7 +86,7 @@ gdb-multiarch -q -batch "$ELF" \
     -ex "interrupt" \
     -ex "x/4gx &crash_snapshot" >"$ARTIFACT_DIR/snapshot-gdb.log" 2>&1 || true
 if ! grep -Eq 'crash_snapshot>.*0x0000000000000001.*0x0000000000000001' "$ARTIFACT_DIR/snapshot-gdb.log" ||
-        ! grep -Eq 'crash_snapshot\+16.*0x0000000000000004' "$ARTIFACT_DIR/snapshot-gdb.log"; then
+        ! grep -Eq 'crash_snapshot\+16.*0x0000000000000008' "$ARTIFACT_DIR/snapshot-gdb.log"; then
     echo "FAIL kernel/qemu oops: retained CrashSnapshot was not readable" >&2
     sed 's/^/  /' "$ARTIFACT_DIR/snapshot-gdb.log" >&2 || true
     exit 1

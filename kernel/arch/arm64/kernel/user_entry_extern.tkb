@@ -6,7 +6,11 @@ extern fn el0_context_set_sp_el0(frame_sp: usize, value: usize);
 extern fn el0_context_set_tpidr_el0(frame_sp: usize, value: usize);
 extern fn el0_context_retry_syscall(frame_sp: usize);
 extern fn el0_context_resume(frame_sp: usize) !{noreturn};
-extern fn kernel_syscall_fail_stop() !{noreturn};
+// Every .tkb-reachable terminal path already owns the EL0 ExceptionFrame it
+// was about to resume.  Preserve that pointer so the oops can compare live
+// architectural state against the saved context instead of reporting only
+// one half of a context-restore failure.
+extern fn kernel_syscall_fail_stop(frame_sp: usize) !{noreturn};
 
 // The fail-stop snapshot deliberately keeps these architectural reads in the
 // kernel's existing AArch64 assembly boundary.  They are not general language

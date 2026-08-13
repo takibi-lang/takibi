@@ -24,11 +24,14 @@ struct CrashSnapshot {
     root_slot: usize;
     root_l1: usize;
     root_asid: usize;
+    image_kind: usize;
     saved_frame_available: usize;
     saved_sp_el0: usize;
     saved_elr_el1: usize;
     saved_spsr_el1: usize;
     saved_tpidr_el0: usize;
+    trace_count: usize;
+    trace: [usize; 24];
 }
 
 let mut crash_snapshot: CrashSnapshot;
@@ -61,7 +64,7 @@ fn crash_snapshot_put_data_abort(esr: usize) {
     }
 }
 
-fn crash_snapshot_render() {
+fn crash_snapshot_render() !{unsafe} {
     kernel_boot_log("oops: fail-stop seq=");
     uart_put_udec(crash_snapshot.sequence);
     kernel_boot_log(" cpu=");
@@ -86,7 +89,9 @@ fn crash_snapshot_render() {
     kernel_boot_log(" root="); uart_put_udec(crash_snapshot.root_slot);
     kernel_boot_log(" asid="); uart_put_udec(crash_snapshot.root_asid);
     kernel_boot_log(" l1="); crash_snapshot_put_hex(crash_snapshot.root_l1);
-    kernel_boot_log("\n");
+    kernel_boot_log(" image=");
+    if (crash_snapshot.image_kind == 1) { kernel_boot_log("exec\n"); }
+    else { kernel_boot_log("bootstrap\n"); }
     if (crash_snapshot.saved_frame_available != 0) {
         kernel_boot_log("oops: saved sp_el0="); crash_snapshot_put_hex(crash_snapshot.saved_sp_el0);
         kernel_boot_log(" tpidr_el0="); crash_snapshot_put_hex(crash_snapshot.saved_tpidr_el0);
@@ -96,10 +101,24 @@ fn crash_snapshot_render() {
     } else {
         kernel_boot_log("oops: saved-frame=unavailable\n");
     }
-    kernel_boot_log("oops: scheduler-trace=unavailable\n");
+    kernel_boot_log("oops: trace count=");
+    uart_put_udec(crash_snapshot.trace_count);
+    kernel_boot_log("\n");
+    let trace_pointer: *usize = crash_snapshot.trace as *usize;
+    let trace = unsafe { trace_pointer[0..<24 as isize] };
+    for item: usize in 0..<crash_snapshot.trace_count {
+        let base: usize = item * 3;
+        kernel_boot_log("oops: trace event=");
+        uart_put_udec(unsafe { trace[base] });
+        kernel_boot_log(" from=");
+        uart_put_udec(unsafe { trace[base + 1] });
+        kernel_boot_log(" to=");
+        uart_put_udec(unsafe { trace[base + 2] });
+        kernel_boot_log("\n");
+    }
 }
 
-fn crash_snapshot_capture(slot: usize, frame_sp: usize) {
+fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     if (crash_snapshot_capturing) {
         kernel_boot_log("oops: recursive exception; parking\n");
         while (true) { interrupt_wait(); }
@@ -123,23 +142,26 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) {
     crash_snapshot.root_slot = kernel_process_crash_root_slot();
     crash_snapshot.root_l1 = address_space_l1_physical(crash_snapshot.root_slot);
     crash_snapshot.root_asid = address_space_asid(crash_snapshot.root_slot);
+    crash_snapshot.image_kind = kernel_process_crash_image_kind();
     crash_snapshot.saved_frame_available = 0;
     if (frame_sp != 0) {
         crash_snapshot_copy_saved_frame(frame_sp, &crash_snapshot.saved_sp_el0);
         crash_snapshot.saved_frame_available = 1;
     }
+    crash_snapshot.trace_count = kernel_process_crash_trace_copy(
+        crash_snapshot.trace as *usize);
     crash_snapshot.valid = 1;
     // Write back the exact structured record before UART output or a debugger
     // observes it.  This is cache maintenance only, never a DMA submission.
-    dma_prepare_tx(&crash_snapshot as *usize, 184);
+    dma_prepare_tx(&crash_snapshot as *usize, 392);
     crash_snapshot_render();
     while (true) { interrupt_wait(); }
 }
 
 // Vector-table targets have no universally valid saved ExceptionFrame.
-fn el1_exception_evidence(slot: usize) { crash_snapshot_capture(slot, 0); }
+fn el1_exception_evidence(slot: usize) !{unsafe} { crash_snapshot_capture(slot, 0); }
 
 // EL0 synchronous exceptions have EXC_CONTEXT_SAVE's frame at this SP.
-fn el1_exception_evidence_from_frame(slot: usize, frame_sp: usize) {
+fn el1_exception_evidence_from_frame(slot: usize, frame_sp: usize) !{unsafe} {
     crash_snapshot_capture(slot, frame_sp);
 }
