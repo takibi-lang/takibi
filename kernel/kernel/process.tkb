@@ -759,6 +759,14 @@ private let mut execution_uart_parent_progress: usize;
 // interactive shell starts after another execution_reset(), but must not make
 // the same one-time integration marker appear twice in a shared UART capture.
 private let mut execution_uart_block_logged: bool;
+// Probe-only stand-ins for the two saved exception frames.  The real UART
+// wake path writes x0 into the blocked child's frame, so using valid fixed
+// storage here proves that path without touching a raw numeric address.
+const KERNEL_PROCESS_TRACE_PROBE_FRAME_WORDS: usize = 128;
+private let mut kernel_process_trace_probe_parent_frame:
+    [usize; KERNEL_PROCESS_TRACE_PROBE_FRAME_WORDS];
+private let mut kernel_process_trace_probe_child_frame:
+    [usize; KERNEL_PROCESS_TRACE_PROBE_FRAME_WORDS];
 
 // Fixed-size scheduler/process tail for fail-stop diagnostics.  This first
 // implementation has one producer CPU: core 1 is brought up only to prove
@@ -1385,6 +1393,66 @@ fn kernel_process_uart_block_evidence() -> bool {
     return execution_uart_blocks != 0 &&
            execution_uart_wakes == execution_uart_blocks &&
            execution_uart_parent_progress == 1;
+}
+
+// #288's directed state-pair regression. It exercises the actual UART block
+// and IRQ wake transition, then checks the retained records rather than only
+// the final counters: child Blocked/UartRx while parent is runnable, followed
+// by that same child Ready after wake.  Suppress the one human-facing UART
+// progress line locally; this is a structural probe, not a boot milestone.
+fn kernel_process_trace_block_wake_probe() -> bool {
+    kernel_process_execution_reset();
+    kernel_process_trace_enable();
+    execution_uart_block_logged = true;
+    let parent_frame: usize =
+        (kernel_process_trace_probe_parent_frame as *usize) as usize;
+    let child_frame: usize =
+        (kernel_process_trace_probe_child_frame as *usize) as usize;
+    let mut setup_ok: bool = false;
+    match kernel_process_clone_begin(0x11, 0) {
+        ProcessCloneResult::Invalid => {}
+        ProcessCloneResult::ChildReady(child_pid) => {
+            if (child_pid == 2 &&
+                kernel_process_clone_context_install(parent_frame, child_frame) ==
+                    child_frame &&
+                kernel_process_block_uart(child_frame) == parent_frame) {
+                match kernel_process_uart_record_parent_progress() {
+                    ProcessUartProgressResult::Invalid => {}
+                    ProcessUartProgressResult::Recorded => {
+                        match kernel_process_uart_wake(0x41) {
+                            ProcessUartWakeResult::Missing => {}
+                            ProcessUartWakeResult::Consumed => { setup_ok = true; }
+                            ProcessUartWakeResult::RetryRead => { setup_ok = true; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut trace: [usize; KERNEL_CRASH_TRACE_WORDS];
+    let trace_count: usize = kernel_process_crash_trace_copy(trace as *usize);
+    let mut saw_block: bool = false;
+    let mut saw_wake: bool = false;
+    for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
+        if (item < trace_count) {
+            let base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+            let kind: usize = trace[base + 2];
+            if (kind == ProcessTraceBlock && trace[base + 3] == 2 &&
+                trace[base + 5] == 1 && trace[base + 7] == 3 &&
+                trace[base + 8] == 1) {
+                saw_block = true;
+            }
+            if (kind == ProcessTraceWake && trace[base + 3] == 2 &&
+                trace[base + 5] == 1 && trace[base + 7] == 1 &&
+                trace[base + 8] == 0) {
+                saw_wake = true;
+            }
+        }
+    }
+    kernel_process_execution_reset();
+    kernel_process_trace_disable();
+    execution_uart_block_logged = false;
+    return setup_ok && saw_block && saw_wake;
 }
 
 fn kernel_process_scheduler_probe() -> bool {
