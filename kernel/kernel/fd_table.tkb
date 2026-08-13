@@ -951,6 +951,67 @@ fn unified_object_pool_exhaustion_probe() -> bool {
     return true;
 }
 
+// GitHub issue #295 boundary test: exhausts one process's own PROCESS_FD_MAX
+// descriptor namespace, distinct from unified_object_pool_exhaustion_probe
+// above (SHARED_OBJECT_MAX, the global object pool) -- unified_fd_table_probe
+// exercises fd installation functionally but never fills a process's table
+// to its own capacity. Every fd here duplicates the SAME one shared object
+// (unified_fd_duplicate only bumps its refcount, well under
+// SHARED_OBJECT_MAX_REFS) so this isolates PROCESS_FD_MAX's own boundary
+// rather than conflating it with the object pool's.
+fn unified_fd_table_exhaustion_probe() -> bool {
+    unified_fd_table_init();
+    match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
+        UnifiedObjectResult::Invalid => { return false; }
+        UnifiedObjectResult::Full => { return false; }
+        UnifiedObjectResult::Allocated(handle) => {
+            match unified_fd_install(0, 0, handle.slot, handle.generation) {
+                UnifiedFdInstallResult::Invalid => { return false; }
+                UnifiedFdInstallResult::RefOverflow => { return false; }
+                UnifiedFdInstallResult::Ok => {}
+            }
+        }
+    }
+    for fd: usize in 1..<PROCESS_FD_MAX {
+        match unified_fd_duplicate(0, 0, fd) {
+            UnifiedFdInstallResult::Invalid => { return false; }
+            UnifiedFdInstallResult::RefOverflow => { return false; }
+            UnifiedFdInstallResult::Ok => {}
+        }
+    }
+
+    let mut capacity_ok: bool = false;
+    match unified_fd_alloc(0, 0) {
+        UnifiedFdAllocResult::Full => { capacity_ok = true; }
+        UnifiedFdAllocResult::Allocated(unexpected) => {
+            if (unexpected == 0) {}
+        }
+    }
+    if (capacity_ok == false) { return false; }
+
+    match unified_fd_close(0, 0) {
+        UnifiedFdResult::Invalid => { return false; }
+        UnifiedFdResult::Ok => {}
+    }
+    let mut reused_ok: bool = false;
+    match unified_fd_alloc(0, 0) {
+        UnifiedFdAllocResult::Full => {}
+        UnifiedFdAllocResult::Allocated(reused_fd) => {
+            if (reused_fd == 0) { reused_ok = true; }
+        }
+    }
+    if (reused_ok == false) { return false; }
+
+    for fd: usize in 1..<PROCESS_FD_MAX {
+        match unified_fd_close(0, fd) {
+            UnifiedFdResult::Invalid => {}
+            UnifiedFdResult::Ok => {}
+        }
+    }
+    unified_fd_table_init();
+    return true;
+}
+
 fn unified_fd_probe_install(fd: usize, result: UnifiedObjectResult) -> bool {
     match result {
         UnifiedObjectResult::Invalid => { return false; }
