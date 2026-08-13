@@ -494,7 +494,7 @@ $(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_
 	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_MAIN_O) -o $@
 	python3 scripts/check_kernel_asm_invariants.py $@ 1
 
-kernelbuild-qemu: kernel-lib-check $(KERNEL_QEMU_ELF)
+kernelbuild-qemu: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_ELF)
 
 # Pure source-text check (issues #207/#242, see HISTORY.md's 2026-08-07
 # entry) -- no build product needed, so it runs independent of and before
@@ -503,7 +503,20 @@ kernelbuild-qemu: kernel-lib-check $(KERNEL_QEMU_ELF)
 kernel-lib-check:
 	python3 scripts/check_kernel_lib_limitations_header.py $(KERNEL_DIR)/lib
 
-kernelbuild-rpi5: kernel-lib-check $(KERNEL_RPI5_ELF)
+# Generate AArch64 exception-frame offsets from the struct definition
+# (GitHub issue #286). Run before each kernel build to ensure struct changes
+# are detected and offsets stay synchronized between .tkb and assembly.
+.PHONY: kernel-gen-exception-frame
+kernel-gen-exception-frame:
+	python3 scripts/gen_exception_frame.py
+
+## Verify that exception-frame offsets are consistent across struct, assembly,
+## and macros. Catches silent divergence before it causes bugs.
+.PHONY: kernel-verify-exception-frame
+kernel-verify-exception-frame: kernel-gen-exception-frame
+	python3 scripts/verify_exception_frame.py
+
+kernelbuild-rpi5: kernel-lib-check kernel-verify-exception-frame $(KERNEL_RPI5_ELF)
 
 kernelbuild: kernelbuild-rpi5 kernelbuild-qemu
 
