@@ -604,6 +604,17 @@ kernelcheck: kernelcheck-qemu kernelcheck-oops-qemu kernelcheck-rpi5
 ## that invariant matters and must not be bypassed by a future change.
 .PHONY: allcheck
 allcheck: langcheck test linuxcheck kernelcheck
+	@echo "PASS allcheck: langcheck + compiler unit + linux_user + QEMU + QEMU oops + RPi5 integration"
+
+# allcheck prerequisites intentionally fan out in parallel. Compiler unit
+# tests print almost a thousand lines, so without an outer receipt it was too
+# easy to mistake that visible stream for the whole target and overlook the
+# later QEMU/RPi5 integration runners. Make prints this only for a direct
+# allcheck invocation, before it schedules recipes; the success receipt above
+# is reached only after every prerequisite has succeeded.
+ifneq (,$(filter allcheck,$(MAKECMDGOALS)))
+$(info [allcheck] includes: langcheck, compiler unit tests, linux_user, QEMU integration, QEMU oops, and RPi5 integration)
+endif
 
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts, kernel/ link outputs, and linux_user/
