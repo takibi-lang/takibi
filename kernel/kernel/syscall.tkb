@@ -583,8 +583,9 @@ fn kernel_connected_fd_duplicate(old_fd: usize, new_fd: usize) -> bool {
         new_fd >= 0 && new_fd < KERNEL_SOCKET_FD_MAX) {
         match unified_fd_duplicate(kernel_syscall_process_slot(), old_fd,
                                    new_fd) {
-            UnifiedFdResult::Invalid => { return false; }
-            UnifiedFdResult::Ok => { return true; }
+            UnifiedFdInstallResult::Invalid => { return false; }
+            UnifiedFdInstallResult::RefOverflow => { return false; }
+            UnifiedFdInstallResult::Ok => { return true; }
         }
     }
     return false;
@@ -610,8 +611,9 @@ fn kernel_regular_fd_duplicate(old_fd: usize, new_fd: usize) -> bool {
         }
     }
     match unified_fd_duplicate(kernel_syscall_process_slot(), old_fd, new_fd) {
-        UnifiedFdResult::Invalid => { return false; }
-        UnifiedFdResult::Ok => { return true; }
+        UnifiedFdInstallResult::Invalid => { return false; }
+        UnifiedFdInstallResult::RefOverflow => { return false; }
+        UnifiedFdInstallResult::Ok => { return true; }
     }
 }
 
@@ -794,10 +796,13 @@ fn kernel_syscall_inetd_accept(port: u16)
                                             match unified_fd_duplicate(
                                                     kernel_syscall_process_slot(),
                                                     0, 1) {
-                                                UnifiedFdResult::Invalid => {
+                                                UnifiedFdInstallResult::Invalid => {
                                                     return KernelInetdAcceptResult::TimedOut;
                                                 }
-                                                UnifiedFdResult::Ok => {}
+                                                UnifiedFdInstallResult::RefOverflow => {
+                                                    return KernelInetdAcceptResult::TimedOut;
+                                                }
+                                                UnifiedFdInstallResult::Ok => {}
                                             }
                                             syscall_socket_buffer_length[slot] = 0;
                                             syscall_socket_buffer_offset[slot] = 0;
@@ -2200,10 +2205,16 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 UnifiedFdAllocResult::Allocated(new_fd) => {
                     match unified_fd_duplicate(
                             kernel_syscall_process_slot(), fd, new_fd) {
-                        UnifiedFdResult::Invalid => {
+                        UnifiedFdInstallResult::Invalid => {
                             return SyscallAction::Resume(LINUX_EBADF);
                         }
-                        UnifiedFdResult::Ok => {
+                        UnifiedFdInstallResult::RefOverflow => {
+                            kernel_boot_log_resource_exhausted(
+                                "shared object reference count" as *u8,
+                                SHARED_OBJECT_MAX_REFS);
+                            return SyscallAction::Resume(LINUX_EMFILE);
+                        }
+                        UnifiedFdInstallResult::Ok => {
                             if (command == LINUX_F_DUPFD_CLOEXEC) {
                                 match unified_fd_set_close_on_exec(
                                         kernel_syscall_process_slot(),

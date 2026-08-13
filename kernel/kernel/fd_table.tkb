@@ -89,6 +89,17 @@ must_use variant UnifiedFdResult { Invalid; Ok; }
 // (used by ~40 other call sites with no such distinction to make) so this
 // change stays scoped to the functions that can actually distinguish it.
 must_use variant UnifiedOpenResult { Invalid; Full; Ok; }
+// GitHub issue #295: unified_fd_install/unified_fd_duplicate's only source
+// of failure beyond a bad argument is refcount_pool_retain's own
+// RefcountRetainResult::Overflow -- SHARED_OBJECT_MAX_REFS (256, this
+// kernel's own PROCESS_CONTEXT_MAX * PROCESS_FD_MAX) reached. That already
+// had its own distinct variant one layer down; this file used to discard it
+// into the same UnifiedFdResult::Invalid as a genuinely bad fd/process
+// argument. Realistically reachable only via unified_fd_duplicate (dup()/
+// dup2()/fcntl(F_DUPFD)) -- the five *_open/*_create callers below install a
+// freshly allocated object whose refcount starts at 0, so RefOverflow is
+// unreachable there, but is still handled explicitly rather than assumed.
+must_use variant UnifiedFdInstallResult { Invalid; RefOverflow; Ok; }
 struct UnifiedObjectHandle {
     private slot: {0..<SHARED_OBJECT_MAX as usize};
     private generation: usize;
@@ -199,13 +210,22 @@ fn unified_file_open(process: usize, fd: usize, inode: usize,
             object_writable[handle.slot] = writable;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
-                UnifiedFdResult::Invalid => {
+                UnifiedFdInstallResult::Invalid => {
                     object_kind[handle.slot] = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
-                UnifiedFdResult::Ok => { return UnifiedOpenResult::Ok; }
+                // Unreachable: object_pool just allocated this slot fresh,
+                // so its refcount is 0 -- see UnifiedFdInstallResult's own
+                // header comment. Handled the same as Invalid for totality.
+                UnifiedFdInstallResult::RefOverflow => {
+                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    refcount_pool_abandon(&object_pool, handle.slot,
+                                         handle.generation);
+                    return UnifiedOpenResult::Invalid;
+                }
+                UnifiedFdInstallResult::Ok => { return UnifiedOpenResult::Ok; }
             }
         }
     }
@@ -222,13 +242,19 @@ fn unified_directory_open(process: usize, fd: usize, inode: usize)
             object_writable[handle.slot] = false;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
-                UnifiedFdResult::Invalid => {
+                UnifiedFdInstallResult::Invalid => {
                     object_kind[handle.slot] = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
-                UnifiedFdResult::Ok => { return UnifiedOpenResult::Ok; }
+                UnifiedFdInstallResult::RefOverflow => {
+                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    refcount_pool_abandon(&object_pool, handle.slot,
+                                         handle.generation);
+                    return UnifiedOpenResult::Invalid;
+                }
+                UnifiedFdInstallResult::Ok => { return UnifiedOpenResult::Ok; }
             }
         }
     }
@@ -245,26 +271,39 @@ fn unified_terminal_stdio_open(process: usize) -> UnifiedOpenResult {
         UnifiedObjectResult::Allocated(handle) => {
             match unified_fd_install(process, 0, handle.slot,
                                      handle.generation) {
-                UnifiedFdResult::Invalid => {
+                UnifiedFdInstallResult::Invalid => {
                     object_kind[handle.slot] = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
-                UnifiedFdResult::Ok => {}
+                UnifiedFdInstallResult::RefOverflow => {
+                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    refcount_pool_abandon(&object_pool, handle.slot,
+                                         handle.generation);
+                    return UnifiedOpenResult::Invalid;
+                }
+                UnifiedFdInstallResult::Ok => {}
             }
             match unified_fd_duplicate(process, 0, 1) {
-                UnifiedFdResult::Invalid => {
+                UnifiedFdInstallResult::Invalid => {
                     match unified_fd_close(process, 0) {
                         UnifiedFdResult::Invalid => {}
                         UnifiedFdResult::Ok => {}
                     }
                     return UnifiedOpenResult::Invalid;
                 }
-                UnifiedFdResult::Ok => {}
+                UnifiedFdInstallResult::RefOverflow => {
+                    match unified_fd_close(process, 0) {
+                        UnifiedFdResult::Invalid => {}
+                        UnifiedFdResult::Ok => {}
+                    }
+                    return UnifiedOpenResult::Invalid;
+                }
+                UnifiedFdInstallResult::Ok => {}
             }
             match unified_fd_duplicate(process, 0, 2) {
-                UnifiedFdResult::Invalid => {
+                UnifiedFdInstallResult::Invalid => {
                     match unified_fd_close(process, 1) {
                         UnifiedFdResult::Invalid => {}
                         UnifiedFdResult::Ok => {}
@@ -275,7 +314,18 @@ fn unified_terminal_stdio_open(process: usize) -> UnifiedOpenResult {
                     }
                     return UnifiedOpenResult::Invalid;
                 }
-                UnifiedFdResult::Ok => { return UnifiedOpenResult::Ok; }
+                UnifiedFdInstallResult::RefOverflow => {
+                    match unified_fd_close(process, 1) {
+                        UnifiedFdResult::Invalid => {}
+                        UnifiedFdResult::Ok => {}
+                    }
+                    match unified_fd_close(process, 0) {
+                        UnifiedFdResult::Invalid => {}
+                        UnifiedFdResult::Ok => {}
+                    }
+                    return UnifiedOpenResult::Invalid;
+                }
+                UnifiedFdInstallResult::Ok => { return UnifiedOpenResult::Ok; }
             }
         }
     }
@@ -369,13 +419,19 @@ fn unified_listener_create(process: usize, fd: usize) -> UnifiedOpenResult {
             object_port[handle.slot] = 0;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
-                UnifiedFdResult::Invalid => {
+                UnifiedFdInstallResult::Invalid => {
                     object_kind[handle.slot] = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
-                UnifiedFdResult::Ok => { return UnifiedOpenResult::Ok; }
+                UnifiedFdInstallResult::RefOverflow => {
+                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    refcount_pool_abandon(&object_pool, handle.slot,
+                                         handle.generation);
+                    return UnifiedOpenResult::Invalid;
+                }
+                UnifiedFdInstallResult::Ok => { return UnifiedOpenResult::Ok; }
             }
         }
     }
@@ -393,30 +449,36 @@ fn unified_connection_create(process: usize, fd: usize,
             object_transport_generation[handle.slot] = transport_generation;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
-                UnifiedFdResult::Invalid => {
+                UnifiedFdInstallResult::Invalid => {
                     object_kind[handle.slot] = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
-                UnifiedFdResult::Ok => { return UnifiedOpenResult::Ok; }
+                UnifiedFdInstallResult::RefOverflow => {
+                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    refcount_pool_abandon(&object_pool, handle.slot,
+                                         handle.generation);
+                    return UnifiedOpenResult::Invalid;
+                }
+                UnifiedFdInstallResult::Ok => { return UnifiedOpenResult::Ok; }
             }
         }
     }
 }
 
 fn unified_fd_duplicate(process: usize, old_fd: usize, new_fd: usize)
-        -> UnifiedFdResult {
+        -> UnifiedFdInstallResult {
     if (process >= PROCESS_CONTEXT_MAX || old_fd >= PROCESS_FD_MAX ||
         new_fd >= PROCESS_FD_MAX || old_fd == new_fd) {
-        return UnifiedFdResult::Invalid;
+        return UnifiedFdInstallResult::Invalid;
     }
     let process_index = unified_fd_narrow_process(process);
     let fd_kind = process_fd_context[process_index].fd_kind;
     let fd_object = process_fd_context[process_index].fd_object;
     let fd_generation = process_fd_context[process_index].fd_generation;
     if (fd_kind[old_fd as isize] == UnifiedFdKind::Empty) {
-        return UnifiedFdResult::Invalid;
+        return UnifiedFdInstallResult::Invalid;
     }
     return unified_fd_install(process, new_fd, fd_object[old_fd as isize],
                               fd_generation[old_fd as isize]);
@@ -595,10 +657,10 @@ fn unified_file_is_writable(handle: UnifiedObjectHandle) -> bool {
 }
 
 fn unified_fd_install(process: usize, fd: usize, object_value: usize,
-                      generation: usize) -> UnifiedFdResult {
+                      generation: usize) -> UnifiedFdInstallResult {
     if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX ||
         object_value >= SHARED_OBJECT_MAX) {
-        return UnifiedFdResult::Invalid;
+        return UnifiedFdInstallResult::Invalid;
     }
     let process_index = unified_fd_narrow_process(process);
     let fd_kind = process_fd_context[process_index].fd_kind;
@@ -609,20 +671,20 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
         if (fd_kind[fd as isize] != UnifiedFdKind::Empty ||
             object_kind[object] == UnifiedFdKind::Empty) {
-            return UnifiedFdResult::Invalid;
+            return UnifiedFdInstallResult::Invalid;
         }
         match refcount_pool_retain(&object_pool, object, generation) {
-            RefcountRetainResult::Invalid => { return UnifiedFdResult::Invalid; }
-            RefcountRetainResult::Overflow => { return UnifiedFdResult::Invalid; }
+            RefcountRetainResult::Invalid => { return UnifiedFdInstallResult::Invalid; }
+            RefcountRetainResult::Overflow => { return UnifiedFdInstallResult::RefOverflow; }
             RefcountRetainResult::Ok => {}
         }
         fd_kind[fd as isize] = object_kind[object];
         fd_object[fd as isize] = object;
         fd_generation[fd as isize] = generation;
         fd_close_on_exec[fd as isize] = false;
-        return UnifiedFdResult::Ok;
+        return UnifiedFdInstallResult::Ok;
     }
-    return UnifiedFdResult::Invalid;
+    return UnifiedFdInstallResult::Invalid;
 }
 
 fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult {
@@ -653,6 +715,35 @@ fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult {
         return UnifiedFdResult::Ok;
     }
     return UnifiedFdResult::Invalid;
+}
+
+// GitHub issue #295: shared undo for unified_fd_clone's copy+retain loop --
+// releases every reference already retained among child fds 0..<limit and
+// resets those slots back to Empty. Re-derives the child's array bindings
+// from child_index rather than taking them as pointer parameters, matching
+// this file's existing idiom (see e.g. unified_fd_table_init).
+fn unified_fd_clone_rollback(
+        child_index: {0..<PROCESS_CONTEXT_MAX as usize}, limit: usize) {
+    let child_fd_kind = process_fd_context[child_index].fd_kind;
+    let child_fd_object = process_fd_context[child_index].fd_object;
+    let child_fd_generation = process_fd_context[child_index].fd_generation;
+    for undo: usize in 0..<limit {
+        if (child_fd_kind[undo as isize] != UnifiedFdKind::Empty) {
+            let undo_value: usize = child_fd_object[undo as isize];
+            if (undo_value < SHARED_OBJECT_MAX) {
+                let undo_object: {0..<SHARED_OBJECT_MAX as usize} = undo_value;
+                match refcount_pool_release(&object_pool, undo_object,
+                                            child_fd_generation[undo as isize]) {
+                    RefcountReleaseResult::Invalid => {}
+                    RefcountReleaseResult::StillHeld => {}
+                    RefcountReleaseResult::Freed => {
+                        object_kind[undo_object] = UnifiedFdKind::Empty;
+                    }
+                }
+            }
+            child_fd_kind[undo as isize] = UnifiedFdKind::Empty;
+        }
+    }
 }
 
 fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult {
@@ -694,6 +785,18 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult {
         process_fd_context[parent_index].heap_start;
     process_fd_context[child_index].heap_limit =
         process_fd_context[parent_index].heap_limit;
+    // GitHub issue #295: the first (read-only) loop above already proves
+    // every non-Empty parent fd's object is live and kind-matched, so
+    // RefcountRetainResult::Invalid below is provably unreachable -- the
+    // one real failure mode this loop can hit is ::Overflow
+    // (SHARED_OBJECT_MAX_REFS exceeded, e.g. a heavily dup()'d fd shared
+    // across many fd-table slots). Before this fix, a failure at fd=k left
+    // fds 0..k already retained (their refcounts incremented, never
+    // released) and fd=k itself half-copied (child_fd_kind set but its
+    // refcount never bumped) -- exactly the "partially linked descriptor
+    // state" issue #295's Required Behavior section prohibits on a failed
+    // clone. Each failure branch below now undoes fds 0..fd before
+    // returning, matching scheduled_process_alloc's own rollback discipline.
     for fd: usize in 0..<PROCESS_FD_MAX {
         child_fd_kind[fd as isize] = parent_fd_kind[fd as isize];
         child_fd_object[fd as isize] = parent_fd_object[fd as isize];
@@ -708,13 +811,22 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult {
                                            parent_fd_generation[fd as isize]) {
                     RefcountRetainResult::Ok => {}
                     RefcountRetainResult::Invalid => {
+                        child_fd_kind[fd as isize] = UnifiedFdKind::Empty;
+                        unified_fd_clone_rollback(child_index, fd);
                         return UnifiedFdResult::Invalid;
                     }
                     RefcountRetainResult::Overflow => {
+                        kernel_boot_log_resource_exhausted(
+                            "shared object reference count" as *u8,
+                            SHARED_OBJECT_MAX_REFS);
+                        child_fd_kind[fd as isize] = UnifiedFdKind::Empty;
+                        unified_fd_clone_rollback(child_index, fd);
                         return UnifiedFdResult::Invalid;
                     }
                 }
             } else {
+                child_fd_kind[fd as isize] = UnifiedFdKind::Empty;
+                unified_fd_clone_rollback(child_index, fd);
                 return UnifiedFdResult::Invalid;
             }
         }
@@ -845,8 +957,9 @@ fn unified_fd_probe_install(fd: usize, result: UnifiedObjectResult) -> bool {
         UnifiedObjectResult::Full => { return false; }
         UnifiedObjectResult::Allocated(handle) => {
             match unified_fd_install(0, fd, handle.slot, handle.generation) {
-                UnifiedFdResult::Invalid => { return false; }
-                UnifiedFdResult::Ok => { return true; }
+                UnifiedFdInstallResult::Invalid => { return false; }
+                UnifiedFdInstallResult::RefOverflow => { return false; }
+                UnifiedFdInstallResult::Ok => { return true; }
             }
         }
     }

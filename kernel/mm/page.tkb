@@ -227,26 +227,44 @@ fn page_mapping_install(owner: sink PageOwner[page]) {
     page_owner_transfer_index(owner);
 }
 
-fn page_mapping_retain_physical(physical: usize) -> bool {
+// GitHub issue #295: `occupied == false`/`current == 0` mean the caller
+// asked to retain a mapping for a physical page this allocator does not
+// consider live -- an internal invariant violation (a real kernel bug, if
+// ever hit), not a resource limit. `current >= PAGE_MAP_REF_MAX` is the
+// actual ceiling (ADDRESS_SPACE_MAX * USER_SPACE_PAGE_COUNT, practically
+// unreachable by any real fork/COW fan-out). Both used to collapse into one
+// `bool false`, so the one caller (process_image.tkb's clone path) could
+// not tell "this hit a documented ceiling" from "page metadata is
+// corrupted" -- exactly the kind of misdiagnosis this issue is about, even
+// though the ceiling itself is not expected to be hit by any real workload.
+must_use variant PageMappingRetainResult {
+    NotMapped;
+    RefCeilingReached;
+    Retained;
+}
+
+fn page_mapping_retain_physical(physical: usize) -> PageMappingRetainResult {
     let base: usize = usable_ram_start;
     let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
     if (physical < base || physical >= base + pool_bytes ||
         (physical - base) % PAGE_SIZE != 0) {
-        return false;
+        return PageMappingRetainResult::NotMapped;
     }
     let index: usize = (physical - base) / PAGE_SIZE;
     if (index < BOOT_PAGE_COUNT) {
         let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
         let meta = boot_page_pool.meta;
         let current: usize = meta[checked as isize].map_refcount;
-        if (meta[checked as isize].occupied == false ||
-            current == 0 || current >= PAGE_MAP_REF_MAX) {
-            return false;
+        if (meta[checked as isize].occupied == false || current == 0) {
+            return PageMappingRetainResult::NotMapped;
+        }
+        if (current >= PAGE_MAP_REF_MAX) {
+            return PageMappingRetainResult::RefCeilingReached;
         }
         meta[checked as isize].map_refcount = current + 1;
-        return true;
+        return PageMappingRetainResult::Retained;
     }
-    return false;
+    return PageMappingRetainResult::NotMapped;
 }
 
 fn page_mapping_refcount_physical(physical: usize) -> usize {

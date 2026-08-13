@@ -338,9 +338,18 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
         let parent_pte: usize = address_space_pte_read(source, l3_index);
         if (parent_pte != 0) {
             let parent_physical: usize = parent_pte & USER_PAGE_PHYS_MASK;
-            if (page_mapping_retain_physical(parent_physical) == false) {
-                process_clone_vm_rollback();
-                return ProcessCloneVmResult::OutOfMemory;
+            match page_mapping_retain_physical(parent_physical) {
+                PageMappingRetainResult::Retained => {}
+                PageMappingRetainResult::NotMapped => {
+                    process_clone_vm_rollback();
+                    return ProcessCloneVmResult::OutOfMemory;
+                }
+                PageMappingRetainResult::RefCeilingReached => {
+                    kernel_boot_log_resource_exhausted(
+                        "page mapping refcount" as *u8, PAGE_MAP_REF_MAX);
+                    process_clone_vm_rollback();
+                    return ProcessCloneVmResult::OutOfMemory;
+                }
             }
             let mut child_pte: usize = parent_pte;
             if (address_space_pte_is_writable(parent_pte)) {
