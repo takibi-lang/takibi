@@ -750,6 +750,7 @@ const CrashTraceToParent: usize = 2;
 const CrashTraceToChild: usize = 3;
 const CrashTraceUartBlock: usize = 4;
 const CrashTraceChildExit: usize = 5;
+const CrashTraceStart: usize = 6;
 private let mut kernel_crash_trace: [usize; KERNEL_CRASH_TRACE_WORDS];
 private let mut kernel_crash_trace_next: usize;
 private let mut kernel_crash_trace_count: usize;
@@ -860,6 +861,10 @@ fn kernel_process_execution_reset() {
         ScheduledProcessAllocResult::Allocated(root) => {
             execution_current_handle = root;
             execution_current_live = kernel_process_start_handle(root);
+            if (execution_current_live) {
+                kernel_process_crash_trace_record(
+                    CrashTraceStart, 0, root.pool_index + 1);
+            }
         }
     }
 }
