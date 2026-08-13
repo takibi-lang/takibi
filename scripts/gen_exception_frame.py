@@ -89,25 +89,82 @@ def calculate_offsets(fields):
     return offsets, total_size
 
 def extract_macros(inc_path):
-    """Extract existing macro definitions from the current .inc file."""
-    try:
+    """Extract existing macro definitions from the current .inc file (or git HEAD if deleted)."""
+    content = None
+
+    # Try reading from disk first
+    if inc_path.exists():
         with open(inc_path, 'r') as f:
             content = f.read()
+    else:
+        # If file is deleted, try getting it from git
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['git', 'show', f'HEAD:{inc_path}'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=inc_path.parent.parent.parent
+            )
+            if result.returncode == 0:
+                content = result.stdout
+        except Exception:
+            pass
 
-        # Find all macros (.macro/.endm blocks), including the .endm line
-        macro_pattern = r'\.macro\s+(\w+).*?\.endm'
-        macros = {}
-        for match in re.finditer(macro_pattern, content, re.DOTALL):
-            macro_name = match.group(1)
-            macro_body = content[match.start():match.end()]
-            macros[macro_name] = macro_body
+    if content is None:
+        return {}, None
 
-        return macros
-    except FileNotFoundError:
-        return {}
+    # Find all macros (.macro/.endm blocks), including the .endm line
+    macro_pattern = r'\.macro\s+(\w+).*?\.endm'
+    macros = {}
+    issue_229_comment = None
+
+    # Look for GitHub issue #229 comment block (appears between SAVE and RESTORE)
+    issue_229_pattern = r'/\*.*?GitHub issue #229.*?\*/'
+    comment_match = re.search(issue_229_pattern, content, re.DOTALL)
+    if comment_match:
+        issue_229_comment = comment_match.group(0)
+
+    for match in re.finditer(macro_pattern, content, re.DOTALL):
+        macro_name = match.group(1)
+        macro_body = content[match.start():match.end()]
+        macros[macro_name] = macro_body
+
+    return macros, issue_229_comment
 
 def generate_inc_file(fields, offsets, total_size, inc_path):
     """Generate the assembly .inc file content."""
+    # GitHub issue #229: Critical comment about DAIF.I masking
+    # This MUST be preserved between SAVE and RESTORE macros
+    ISSUE_229_COMMENT = """/* GitHub issue #229: DAIF.I must be masked for the whole restore-and-eret
+ * sequence. ELR_EL1/SPSR_EL1 are architectural exception-return state, not
+ * ordinary registers: taking ANY exception between loading them here and the
+ * eret overwrites both with the interrupting context's own values, and the
+ * interrupt handler's own restore puts back what IT saved -- the kernel PC
+ * and EL1h -- discarding what this sequence just loaded. The eret then
+ * returns to the wrong place. Both halves of the window are fatal:
+ *
+ *   - Interrupted between the two msr instructions below: ELR_EL1 is left
+ *     pointing at the `msr spsr_el1` instruction itself while that
+ *     instruction then goes on to install the frame's genuine EL0 SPSR, so
+ *     the eret drops to EL0 *at a kernel .text address*.
+ *   - Interrupted anywhere after both msr instructions: ELR_EL1/SPSR_EL1
+ *     both stay clobbered, so the eret jumps back into this restore sequence
+ *     at EL1h and loops on itself, re-adding EXC_CONTEXT_SIZE to sp each
+ *     pass until an unrelated EL1 fault stops it.
+ *
+ * Every entry that uses this macro reaches it with DAIF.I already masked
+ * today EXCEPT the syscall path, which unmasks it deliberately (see
+ * kernel/arch/arm64/kernel/user_entry.S's issue #187 comment) -- that is
+ * where the ~25-40%-of-boots intermittent fail-stop came from. Masking here,
+ * in the one shared restore shape rather than at each of its callers, is
+ * what keeps a future path that unmasks DAIF.I mid-handler (exactly what
+ * #187 did) from silently reopening the same window. Re-masking on the paths
+ * that were already masked is a no-op; the eret restores PSTATE.DAIF from
+ * SPSR_EL1 regardless, so this never changes the interrupted context's own
+ * interrupt state. */"""
+
     lines = [
         "/* The one exception-frame shape. Every EL1 exception entry that returns to",
         " * the interrupted context uses this layout: EL0 sync (syscalls), Lower-EL",
@@ -138,12 +195,28 @@ def generate_inc_file(fields, offsets, total_size, inc_path):
     lines.append("")
 
     # Extract existing macros from current file to preserve hand-written logic
-    macros = extract_macros(inc_path)
-    if macros:
+    # IMPORTANT: Keep macros in original order (SAVE before RESTORE) to preserve
+    # GitHub issue #229 commentary structure and DAIF.I masking semantics.
+    macros, issue_229_comment = extract_macros(inc_path)
+
+    # Ensure macros are included (from file or as fallback)
+    # Always output macros in the correct order: SAVE, then comment, then RESTORE
+    if 'EXC_CONTEXT_SAVE' in macros:
+        lines.append(macros['EXC_CONTEXT_SAVE'])
+    elif macros:
+        # File has macros but not SAVE - still try to preserve what we have
         for macro_name in sorted(macros.keys()):
-            lines.append(macros[macro_name])
-            if macro_name != list(macros.keys())[-1]:
-                lines.append("")
+            if macro_name != 'EXC_CONTEXT_RESTORE':
+                lines.append(macros[macro_name])
+    # Always include the critical GitHub issue #229 comment
+    if True:
+        lines.append("")
+        lines.append(ISSUE_229_COMMENT)
+
+    # Always output RESTORE macro
+    if macros and 'EXC_CONTEXT_RESTORE' in macros:
+        lines.append("")
+        lines.append(macros['EXC_CONTEXT_RESTORE'])
     else:
         # Fallback: add placeholder if no macros found
         lines.append(".macro EXC_CONTEXT_SAVE")
