@@ -8660,6 +8660,66 @@ let codegen_tests = [
          (contains_substring asm "msr\ttpidr_el0, x9");
        Target_info.configure "thumbv7em-none-eabi");
 
+  (* 2026-08-13 post-mortem on issue #286: exception_frame_offsets (this
+     function's own generator, lib/llvm_gen.ml) computes each field's byte
+     offset by summing field sizes strictly in the struct's own declared
+     order, with NO realignment before q0 -- only the frame's FINAL total is
+     rounded up to 16 bytes for SP alignment. This is deliberate (AArch64
+     `ldr`/`str` on a Q register has no natural-alignment requirement), but
+     it was found to have silently diverged from scripts/gen_exception_frame.py's
+     independent Python reimplementation of this same algorithm, which added
+     an unnecessary q0-specific 16-byte-alignment step. Both sides now agree
+     (see that script's own history), but nothing previously pinned this
+     compiler function's actual behavior against a future accidental change
+     (e.g., someone "helpfully" adding q0 alignment back here) reopening the
+     exact same divergence.
+     validate_exception_frame is explicitly field-order-independent (any
+     permutation of the closed 69-field set is accepted), so moving
+     tpidr_el0 to right after spsr_el1 (instead of its usual place after
+     fpcr) is a legal frame that pushes the GPR/system-register prefix to
+     35 fields * 8 bytes = 280 (0x118) before q0 -- NOT a multiple of 16,
+     unlike the field order exc_frame_src normally uses (where the prefix
+     happens to total exactly 0x110, 16-aligned, so it could never exercise
+     this branch). A realignment regression would move q0 to 0x120 (288)
+     instead of the correct, unaligned 0x118 (280); this test pins the
+     latter. *)
+  Alcotest.test_case
+    "exception_restore does not 16-byte-align q0 when a struct field reorder \
+     leaves its prefix unaligned" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       let reordered_frame_src =
+         "struct packed ExcFrameReordered {
+            x0: usize; x1: usize; x2: usize; x3: usize; x4: usize; x5: usize;
+            x6: usize; x7: usize; x8: usize; x9: usize; x10: usize; x11: usize;
+            x12: usize; x13: usize; x14: usize; x15: usize; x16: usize; x17: usize;
+            x18: usize; x19: usize; x20: usize; x21: usize; x22: usize; x23: usize;
+            x24: usize; x25: usize; x26: usize; x27: usize; x28: usize; x29: usize;
+            x30: usize;
+            sp_el0: usize; elr_el1: usize; spsr_el1: usize; tpidr_el0: usize;
+            q0: [u8;16]; q1: [u8;16]; q2: [u8;16]; q3: [u8;16]; q4: [u8;16];
+            q5: [u8;16]; q6: [u8;16]; q7: [u8;16]; q8: [u8;16]; q9: [u8;16];
+            q10: [u8;16]; q11: [u8;16]; q12: [u8;16]; q13: [u8;16]; q14: [u8;16];
+            q15: [u8;16]; q16: [u8;16]; q17: [u8;16]; q18: [u8;16]; q19: [u8;16];
+            q20: [u8;16]; q21: [u8;16]; q22: [u8;16]; q23: [u8;16]; q24: [u8;16];
+            q25: [u8;16]; q26: [u8;16]; q27: [u8;16]; q28: [u8;16]; q29: [u8;16];
+            q30: [u8;16]; q31: [u8;16];
+            fpsr: usize; fpcr: usize;
+          }\n"
+       in
+       ignore (gen_codegen
+         (reordered_frame_src ^
+          "exception_restore el0_context_resume {
+             frame: ExcFrameReordered;
+           }"));
+       let asm = Buffer.contents Llvm_gen.raw_asm_buf in
+       Alcotest.(check bool) "q0 restored at the unaligned offset 280 (0x118)" true
+         (contains_substring asm "ldr\tq0, [sp, #280]");
+       Alcotest.(check bool)
+         "q0 is NOT restored at the wrongly-realigned offset 288 (0x120)" false
+         (contains_substring asm "ldr\tq0, [sp, #288]");
+       Target_info.configure "thumbv7em-none-eabi");
+
   Alcotest.test_case "exception_restore rejects an unknown key" `Quick
     (fun () ->
        Target_info.configure "aarch64-none-elf";
