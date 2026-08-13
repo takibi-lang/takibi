@@ -788,6 +788,10 @@ const ProcessTraceAddressSpaceActivate: usize = 10;
 private let mut kernel_crash_trace: [usize; KERNEL_CRASH_TRACE_WORDS];
 private let mut kernel_crash_trace_next: usize;
 private let mut kernel_crash_trace_count: usize;
+// A debugger-owned boot-test switch. Production BSS leaves this false, while
+// a test may set it before the first process reset to retain a real workload's
+// tail without adding UART traffic or a production control surface.
+private let mut kernel_process_trace_boot_enabled: bool;
 private let mut kernel_process_trace_enabled: bool;
 
 // Layout: local sequence, cpu, kind, subject pid/generation, peer
@@ -955,7 +959,7 @@ fn kernel_process_execution_reset() {
     execution_uart_blocks = 0;
     execution_uart_wakes = 0;
     execution_uart_parent_progress = 0;
-    kernel_process_trace_enabled = false;
+    kernel_process_trace_enabled = kernel_process_trace_boot_enabled;
     kernel_crash_trace_next = 0;
     kernel_crash_trace_count = 0;
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
@@ -971,6 +975,12 @@ fn kernel_process_execution_reset() {
         ScheduledProcessAllocResult::Allocated(root) => {
             execution_current_handle = root;
             execution_current_live = kernel_process_start_handle(root);
+            if (execution_current_live) {
+                kernel_process_trace_record(
+                    ProcessTraceResume, root.pool_index + 1, root.generation,
+                    0, 0, 2, 0, root.pool_index,
+                    scheduled_process_records[root.pool_index].saved_sp, 0);
+            }
         }
     }
 }
@@ -1425,6 +1435,7 @@ fn kernel_process_scheduler_probe() -> bool {
         scheduled_process_records[slot].has_child = false;
     }
     execution_current_live = false;
+    kernel_process_trace_disable();
     return ok;
 }
 
@@ -1434,6 +1445,11 @@ fn kernel_process_scheduler_probe() -> bool {
 fn kernel_process_crash_trace_ring_probe() -> bool {
     kernel_process_execution_reset();
     kernel_process_trace_enable();
+    // The optional boot trace may have recorded this reset's initial resume.
+    // This probe owns its synthetic ring contents, so start its wrap proof at
+    // sequence one regardless of that external diagnostic policy.
+    kernel_crash_trace_next = 0;
+    kernel_crash_trace_count = 0;
     for event: usize in 1..<11 {
         kernel_process_trace_record(event, event + 100, event + 1000,
                                     event + 200, event + 2000, 3, 2,
@@ -1459,6 +1475,7 @@ fn kernel_process_crash_trace_ring_probe() -> bool {
         }
     }
     kernel_process_execution_reset();
+    kernel_process_trace_disable();
     return ok;
 }
 
