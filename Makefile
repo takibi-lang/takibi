@@ -263,9 +263,10 @@ KERNEL_RPI5_USER_ENTRY_O := $(KERNEL_BUILD_DIR)/user_entry.o
 KERNEL_RPI5_USER_EXTERN  := $(KERNEL_DIR)/arch/arm64/kernel/user_entry_extern.tkb
 KERNEL_RPI5_EXC_CONTEXT := $(KERNEL_DIR)/arch/arm64/kernel/exception_context.inc
 # Generated (GitHub issue #286, gitignored) -- offset constants only,
-# `.include`d by the hand-written file above. See scripts/gen_exception_frame.py.
+# `.include`d by the hand-written file above. Emitted by $(TAKIBI)'s own
+# --emit-exception-frame-offsets flag (see the file rule below), not a
+# separate script.
 KERNEL_EXC_CONTEXT_OFFSETS := $(KERNEL_DIR)/arch/arm64/kernel/exception_context_offsets.inc
-KERNEL_EXC_CONTEXT_TKB     := $(KERNEL_DIR)/arch/arm64/kernel/exception_frame.tkb
 KERNEL_RPI5_FPSIMD_S     := $(KERNEL_DIR)/arch/arm64/kernel/fpsimd_probe.S
 KERNEL_RPI5_FPSIMD_O     := $(KERNEL_BUILD_DIR)/fpsimd_probe.o
 KERNEL_RPI5_FPSIMD_EXTERN := $(KERNEL_DIR)/arch/arm64/kernel/fpsimd_probe_extern.tkb
@@ -512,13 +513,25 @@ kernel-lib-check:
 # .PHONY) so parallel builds and `user_entry.o`'s own prerequisite on this
 # file both see a correct dependency graph -- a stale or missing generated
 # file is regenerated before anything tries to assemble against it, and a
-# rebuild is skipped entirely when the struct hasn't changed. The generator
-# only ever writes offset constants, never hand-written assembly macro
-# bodies (those live in the ordinary, git-tracked exception_context.inc),
-# so there is no placeholder/fallback path that could silently emit broken
-# assembly the way an earlier version of this rule once did.
-$(KERNEL_EXC_CONTEXT_OFFSETS): $(KERNEL_EXC_CONTEXT_TKB)
-	@python3 scripts/gen_exception_frame.py
+# rebuild is skipped entirely when the struct hasn't changed.
+#
+# 2026-08-13 follow-up: this used to shell out to scripts/gen_exception_frame.py,
+# a Python script that independently re-parsed exception_frame.tkb's struct
+# syntax (via regex) and reimplemented the same packed-layout algorithm
+# lib/llvm_gen.ml's exception_frame_offsets already computes for exception_
+# entry/exception_restore codegen. That duplication caused a real bug (a
+# q0-specific alignment step this Python reimplementation added but the
+# compiler's own algorithm never had -- see HISTORY.md's 2026-08-13 entry).
+# The compiler's `--emit-exception-frame-offsets <StructName>` flag now
+# dumps the SAME computation exception_entry/exception_restore already use
+# internally, as GAS `.equ` constants, so there is exactly one
+# implementation of "how to lay out this struct" left, not two kept in
+# sync by hand. This still only ever writes offset constants, never
+# hand-written assembly macro bodies (those remain the ordinary,
+# git-tracked exception_context.inc) -- so there is still no placeholder/
+# fallback path that could silently emit broken assembly.
+$(KERNEL_EXC_CONTEXT_OFFSETS): $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(KERNEL_EXT2_IMAGE) $(TAKIBI)
+	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-exception-frame-offsets ExceptionFrame -o $@
 
 ## Verify that exception-frame offsets are consistent and the hand-written
 ## SAVE/RESTORE macros contain real assembly, not placeholder/empty bodies.
