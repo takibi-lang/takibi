@@ -67,10 +67,9 @@ direction to complete issue #295 without filing separate issues.
 step (37 views, up from 31 at the start), including two clean rebuilds.
 `make kernelcheck-rpi5` / `make kernelcheck` were run on real RPi5 hardware
 with the user's explicit go-ahead each time: after round 1 (33 views), round
-2 (34 views), and round 3 (35 views) -- all fully green. Round 4 (the two
-boundary tests below) was verified on QEMU only, since the RPi5 board was in
-active use elsewhere at the time; a further RPi5 pass is recommended before
-treating round 4 as hardware-verified.
+2 (34 views), round 3 (35 views), and round 4 (37 views) -- all fully green.
+Every fix and every boundary test in this file is verified on both QEMU and
+real RPi5 hardware.
 
 1. Shared-object pool exhaustion (`SHARED_OBJECT_MAX`) no longer reads as
    `EBADF` -- fixed via `UnifiedOpenResult` and `LINUX_ENFILE`. The exact
