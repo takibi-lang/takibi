@@ -4347,19 +4347,28 @@ let gen_func ?prog_types fdef =
     match di_ctx with
     | None -> ()
     | Some (dib, file, sp) ->
-        let ty = ditype_of_ast dib file ast_ty in
-        let flags = Llvm_debuginfo.diflags_get Llvm_debuginfo.DIFlag.Zero in
-        let var_di =
-          if is_param
-          then Llvm_debuginfo.dibuild_create_parameter_variable dib
-                 ~scope:sp ~name ~argno ~file ~line ~ty ~always_preserve:true flags
-          else Llvm_debuginfo.dibuild_create_auto_variable dib
-                 ~scope:sp ~name ~file ~line ~ty ~always_preserve:true flags ~align_in_bits:0
-        in
-        let loc = Llvm_debuginfo.dibuild_create_debug_location context ~line ~column:1 ~scope:sp in
-        ignore (Llvm_debuginfo.dibuild_insert_declare_at_end dib
-                  ~storage:ptr ~var_info:var_di ~expr:(Llvm_debuginfo.dibuild_expression dib [||])
-                  ~location:loc ~block:entry_bb)
+        (* A local-variable DIE requires a real DIType.  ditype_of_ast
+           deliberately returns null for source constructs with no v1 DWARF
+           representation (notably tagged variants); emitting dbg.declare
+           with that null type produces malformed metadata that LLVM's DWARF
+           backend can crash on while lowering a large module. *)
+        (match ast_ty with
+         | TypeVariant _ | TypeTuple _ | TypeView _ | TypeVoid -> ()
+         | TypeNamed sname when Hashtbl.mem variant_lltypes sname -> ()
+         | _ ->
+             let ty = ditype_of_ast dib file ast_ty in
+             let flags = Llvm_debuginfo.diflags_get Llvm_debuginfo.DIFlag.Zero in
+             let var_di =
+               if is_param
+               then Llvm_debuginfo.dibuild_create_parameter_variable dib
+                      ~scope:sp ~name ~argno ~file ~line ~ty ~always_preserve:true flags
+               else Llvm_debuginfo.dibuild_create_auto_variable dib
+                      ~scope:sp ~name ~file ~line ~ty ~always_preserve:true flags ~align_in_bits:0
+             in
+             let loc = Llvm_debuginfo.dibuild_create_debug_location context ~line ~column:1 ~scope:sp in
+             ignore (Llvm_debuginfo.dibuild_insert_declare_at_end dib
+                       ~storage:ptr ~var_info:var_di ~expr:(Llvm_debuginfo.dibuild_expression dib [||])
+                       ~location:loc ~block:entry_bb))
   in
   (* for-loop counters ("__for_<name>") are an internal implementation detail
      with a mangled name that doesn't correspond to any `let mut` the user

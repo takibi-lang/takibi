@@ -9635,22 +9635,27 @@ let codegen_tests = [
 
   Alcotest.test_case
     "DWARF debug info (-g): a variant parameter and immutable local with a \
-     payload-binding match produce verifier-accepted IR even though Slice 3 \
-     deliberately defers source-level tagged-union DIType metadata"
+     payload-binding match produce verifier-accepted IR without emitting \
+     malformed typeless local-variable metadata"
     `Quick
-    (expect_codegen_ok
-       "variant DwarfVariantResult {
+    (fun () ->
+       expect_codegen_ok
+         "variant DwarfVariantResult {
           Empty;
           Value(i32);
         }
 
         fn codegen_debug_info_variant(input: DwarfVariantResult) -> i32 {
-          let current: DwarfVariantResult = input;
-          match current {
+          let dwarf_variant_unrepresented: DwarfVariantResult = input;
+          match dwarf_variant_unrepresented {
             DwarfVariantResult::Empty => { return 0; }
             DwarfVariantResult::Value(value) => { return value; }
           }
-        }");
+        }" ();
+       let ir = Llvm.string_of_llmodule Llvm_gen.the_module in
+       Alcotest.(check bool) "variant local has no typeless DILocalVariable"
+         false (contains_substring ir
+           "DILocalVariable(name: \"dwarf_variant_unrepresented\""));
 
   (* Distinct from the plain-parameter variant test just above: a
      stable_replace() result's inferred type reaches ditype_of_ast as a
