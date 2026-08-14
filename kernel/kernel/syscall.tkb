@@ -6,6 +6,7 @@ use "kernel/fs/ext2/ext2.tkb";
 use "kernel/net/socket_capability.tkb";
 use "kernel/net/tcp.tkb";
 use "kernel/kernel/fd_table.tkb";
+use "kernel/kernel/syscall_test_evidence.tkb";
 
 // Current limitations (2026-08-13, issue #295). Keep this list current as
 // call sites change; a limitation that goes stale here is worse than
@@ -139,23 +140,7 @@ private let mut syscall_ext2_ready: bool;
 private let mut syscall_file_buffer: [u8; KERNEL_BLOCK_SIZE];
 private let mut syscall_path_buffer: [u8; 256];
 private let mut syscall_sockaddr_buffer: [u8; 28];
-private let mut syscall_open_calls: usize;
-private let mut syscall_read_calls: usize;
-private let mut syscall_file_write_calls: usize;
-private let mut syscall_close_calls: usize;
-private let mut syscall_ppoll_uart_waits: usize;
-private let mut syscall_read_uart_waits: usize;
 private let mut syscall_connection_open: [bool; TCP_CONNECTION_MAX];
-private let mut syscall_socket_calls: usize;
-private let mut syscall_bind_calls: usize;
-private let mut syscall_listen_calls: usize;
-private let mut syscall_socket_close_calls: usize;
-private let mut syscall_accept_calls: usize;
-private let mut syscall_accept_capability_roundtrips: usize;
-private let mut syscall_connected_close_calls: usize;
-private let mut syscall_connected_read_calls: usize;
-private let mut syscall_connected_write_calls: usize;
-private let mut syscall_partial_write_observed: bool;
 private let mut syscall_socket_buffer: [u8; 1460 * TCP_CONNECTION_MAX];
 private let mut syscall_socket_buffer_length: [usize; TCP_CONNECTION_MAX];
 private let mut syscall_socket_buffer_offset: [usize; TCP_CONNECTION_MAX];
@@ -203,7 +188,8 @@ private let mut syscall_persistent_shell: bool;
 // instead of a single generic timeout. `_child_pid` is the pending target
 // for the one-shot "child selected" checkpoint (0 = none/consumed); the
 // four checkpoint-printed booleans are one-shot guards, mirroring the
-// existing `syscall_read_uart_waits == 1` idiom just below. Each checkpoint
+// existing `syscall_test_evidence_record_read_uart_wait()` return-true-
+// once idiom (kernel/kernel/syscall_test_evidence.tkb). Each checkpoint
 // is its own named function (not inlined) so a QEMU regression can skip one
 // via a GDB breakpoint + `return`, without any dedicated test-only switch.
 private let mut syscall_persistent_shell_child_pid: usize;
@@ -505,11 +491,8 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
         UnifiedFdResult::Invalid => {}
         UnifiedFdResult::Ok => {}
     }
-    syscall_open_calls = 0;
-    syscall_read_calls = 0;
-    syscall_read_uart_waits = 0;
-    syscall_file_write_calls = 0;
-    syscall_close_calls = 0;
+    syscall_test_evidence_reset_file_counters();
+    syscall_test_evidence_reset_read_uart_waits();
     syscall_exec_pending = false;
     syscall_exec_argc = 0;
     syscall_persistent_shell = false;
@@ -524,16 +507,7 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
         syscall_socket_buffer_offset[connection_index] = 0;
         syscall_inetd_response_length[connection_index] = 0;
     }
-    syscall_socket_calls = 0;
-    syscall_bind_calls = 0;
-    syscall_listen_calls = 0;
-    syscall_socket_close_calls = 0;
-    syscall_accept_calls = 0;
-    syscall_accept_capability_roundtrips = 0;
-    syscall_connected_close_calls = 0;
-    syscall_connected_read_calls = 0;
-    syscall_connected_write_calls = 0;
-    syscall_partial_write_observed = false;
+    syscall_test_evidence_reset_socket_counters();
     syscall_inetd_mode = false;
     for context: usize in 0..<PROCESS_CONTEXT_MAX {
         clone_file_state[context].file_state_live = false;
@@ -825,7 +799,7 @@ fn kernel_syscall_daemon_teardown() -> KernelDaemonTeardownResult {
         }
         UnifiedFdResult::Ok => {}
     }
-    syscall_socket_close_calls = syscall_socket_close_calls + 1;
+    syscall_test_evidence_record_socket_close();
     return KernelDaemonTeardownResult::Reclaimed;
 }
 
@@ -916,37 +890,35 @@ fn kernel_syscall_inetd_accept(port: u16)
 fn kernel_syscall_ext2_configure(mount: Ext2Mount) {
     syscall_ext2_mount = mount;
     syscall_ext2_ready = true;
-    syscall_open_calls = 0;
-    syscall_read_calls = 0;
-    syscall_file_write_calls = 0;
-    syscall_close_calls = 0;
+    syscall_test_evidence_reset_file_counters();
 }
 
 fn kernel_syscall_file_evidence()
         -> (usize, usize, usize, usize) {
-    return (syscall_open_calls, syscall_read_calls,
-            syscall_file_write_calls, syscall_close_calls);
+    return syscall_test_evidence_file_counts();
 }
 
 fn kernel_syscall_socket_evidence() -> bool {
-    return syscall_socket_calls == 1 && syscall_bind_calls == 1 &&
-           syscall_listen_calls == 1 && syscall_accept_calls == 2 &&
-           syscall_accept_capability_roundtrips == 2 &&
+    return syscall_test_evidence_socket_calls() == 1 &&
+           syscall_test_evidence_bind_calls() == 1 &&
+           syscall_test_evidence_listen_calls() == 1 &&
+           syscall_test_evidence_accept_calls() == 2 &&
+           syscall_test_evidence_accept_capability_roundtrips() == 2 &&
            syscall_connection_open[0] == false &&
            kernel_connected_fd_is_open(0) == false &&
            kernel_connected_fd_is_open(1) == false &&
            kernel_connected_fd_is_open(5) == false &&
            syscall_connection_open[1] == false &&
            kernel_connected_fd_is_open(6) == false &&
-           syscall_connected_close_calls == 2 &&
-           syscall_connected_read_calls == 3 &&
-           syscall_connected_write_calls == 4 &&
-           syscall_socket_close_calls == 1 &&
+           syscall_test_evidence_connected_close_calls() == 2 &&
+           syscall_test_evidence_connected_read_calls() == 3 &&
+           syscall_test_evidence_connected_write_calls() == 4 &&
+           syscall_test_evidence_socket_close_calls() == 1 &&
            kernel_listener_state(4) == UnifiedListenerState::Closed;
 }
 
 fn kernel_syscall_partial_write_evidence() -> bool {
-    return syscall_partial_write_observed;
+    return syscall_test_evidence_partial_write_observed();
 }
 
 // Copy one NUL-terminated pathname through the user-memory boundary. Only a
@@ -1184,8 +1156,7 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
             }
             if (ready_count == 0 && uart_wait && timeout_address == 0 &&
                 sigmask_address == 0) {
-                syscall_ppoll_uart_waits = syscall_ppoll_uart_waits + 1;
-                if (syscall_ppoll_uart_waits == 1) {
+                if (syscall_test_evidence_record_ppoll_uart_wait()) {
                     kernel_boot_log("shell ppoll: uart blocked\n");
                 }
                 return SyscallAction::WaitUart;
@@ -1205,8 +1176,7 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
             disable_irq();
             if (kernel_uart_rx_pending() == false) {
                 enable_irq();
-                syscall_read_uart_waits = syscall_read_uart_waits + 1;
-                if (syscall_read_uart_waits == 1) {
+                if (syscall_test_evidence_record_read_uart_wait()) {
                     if (syscall_persistent_shell) {
                         kernel_boot_log(
                             "\npersistent shell: uart blocked\n");
@@ -1601,8 +1571,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let length: usize = x2;
         if (kernel_connected_fd_is_open(fd) &&
             (fd != 1 || syscall_inetd_mode == false)) {
-            syscall_connected_write_calls =
-                syscall_connected_write_calls + 1;
+            syscall_test_evidence_record_connected_write();
             if (kernel_connected_fd_is_open(fd) == false) {
                 return SyscallAction::Resume(LINUX_EBADF);
             }
@@ -1620,7 +1589,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             let mut amount: usize = length;
             if (amount > 1460) { amount = 1460; }
             if (amount < length) {
-                syscall_partial_write_observed = true;
+                syscall_test_evidence_record_partial_write();
             }
             let received_length: usize = syscall_socket_buffer_length[write_slot];
             match tcp_connection_take(write_slot, write_generation) {
@@ -1730,7 +1699,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return SyscallAction::Resume(length);
         }
         if (kernel_syscall_file_is_open(fd)) {
-            syscall_file_write_calls = syscall_file_write_calls + 1;
+            syscall_test_evidence_record_file_write();
             if (kernel_syscall_file_writable(fd) == false) {
                 return SyscallAction::Resume(LINUX_EBADF);
             }
@@ -1777,7 +1746,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 56) {
-        syscall_open_calls = syscall_open_calls + 1;
+        syscall_test_evidence_record_open();
         // openat(dirfd, pathname, flags): absolute paths start at the ext2
         // root; relative paths use an open directory fd (or AT_FDCWD, whose
         // unsigned value lies outside the descriptor namespace).
@@ -2094,7 +2063,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 63) {
-        syscall_read_calls = syscall_read_calls + 1;
+        syscall_test_evidence_record_read();
         let fd: usize = x0;
         let address: usize = x1;
         let requested: usize = x2;
@@ -2102,7 +2071,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // not the kernel console. Resolve unified fd ownership before the
         // UART fallback.
         if (kernel_connected_fd_is_open(fd)) {
-            syscall_connected_read_calls = syscall_connected_read_calls + 1;
+            syscall_test_evidence_record_connected_read();
             let read_slot: {0..<TCP_CONNECTION_MAX as usize} =
                 match kernel_connection_fd_lookup(fd) {
                     KernelConnectionLookupResult::Missing => {
@@ -2386,8 +2355,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return SyscallAction::Resume(LINUX_EAGAIN);
             }
             kernel_connected_fd_clear(x0);
-            syscall_connected_close_calls =
-                syscall_connected_close_calls + 1;
+            syscall_test_evidence_record_connected_close();
             return SyscallAction::Resume(0);
         }
         match kernel_listener_fd_lookup(x0) {
@@ -2402,11 +2370,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 UnifiedFdResult::Invalid => { return SyscallAction::Resume(LINUX_EBADF); }
                 UnifiedFdResult::Ok => {}
             }
-            syscall_socket_close_calls = syscall_socket_close_calls + 1;
+            syscall_test_evidence_record_socket_close();
             return SyscallAction::Resume(0);
           }
         }
-        syscall_close_calls = syscall_close_calls + 1;
+        syscall_test_evidence_record_close();
         if (kernel_syscall_terminal_is_open(x0) == false &&
             kernel_syscall_file_is_open(x0) == false &&
             kernel_syscall_directory_is_open(x0) == false) {
@@ -2421,7 +2389,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (number == 198) {
         // socket(AF_INET, SOCK_STREAM, 0). Flags in the high type bits are
         // accepted; only the underlying stream type is relevant here.
-        syscall_socket_calls = syscall_socket_calls + 1;
+        syscall_test_evidence_record_socket();
         if ((x0 != 2 && x0 != 10) || (x1 & 0xF) != 1 || x2 != 0) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
@@ -2447,7 +2415,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 200) {
-        syscall_bind_calls = syscall_bind_calls + 1;
+        syscall_test_evidence_record_bind();
         let bind_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} =
             match kernel_listener_fd_lookup(x0) {
                 KernelListenerLookupResult::Missing => {
@@ -2494,7 +2462,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 201) {
-        syscall_listen_calls = syscall_listen_calls + 1;
+        syscall_test_evidence_record_listen();
         let listen_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} =
             match kernel_listener_fd_lookup(x0) {
                 KernelListenerLookupResult::Missing => {
@@ -2535,7 +2503,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 syscall_foreground_server_exit_count_start;
             return kernel_syscall_exit_current_process(0);
         }
-        syscall_accept_calls = syscall_accept_calls + 1;
+        syscall_test_evidence_record_accept();
         let accept_listener_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} =
             match kernel_listener_fd_lookup(x0) {
                 KernelListenerLookupResult::Missing => {
@@ -2589,8 +2557,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 return SyscallAction::Resume(LINUX_EINVAL);
                             }
                             NetworkCapabilityPutResult::Stored => {
-                                syscall_accept_capability_roundtrips =
-                                    syscall_accept_capability_roundtrips + 1;
+                                syscall_test_evidence_record_accept_capability_roundtrip();
                                 tcp_connection_free(owner);
                                 return SyscallAction::Resume(LINUX_EAGAIN);
                             }
@@ -2603,8 +2570,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 return SyscallAction::Resume(LINUX_EINVAL);
                             }
                             NetworkCapabilityPutResult::Stored => {
-                                syscall_accept_capability_roundtrips =
-                                    syscall_accept_capability_roundtrips + 1;
+                                syscall_test_evidence_record_accept_capability_roundtrip();
                                 match tcp_connection_put(owner) {
                                   TcpConnectionPutResult::Conflict => {
                                     return SyscallAction::Resume(LINUX_EINVAL);
@@ -2696,7 +2662,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
             }
         }
-        syscall_read_calls = syscall_read_calls + 1;
+        syscall_test_evidence_record_read();
         return SyscallAction::Resume(copied);
     }
 

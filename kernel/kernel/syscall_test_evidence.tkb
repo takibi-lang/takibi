@@ -1,0 +1,192 @@
+// Part of #294 (consolidate kernel runtime state behind explicit owners),
+// same split as issue #303 applied to kernel/kernel/process.tkb. These
+// sixteen syscall.tkb counters/flags are read only by
+// kernel_syscall_file_evidence()/kernel_syscall_socket_evidence()/
+// kernel_syscall_partial_write_evidence() and by two log-once UART-wait
+// boot messages -- never by real syscall dispatch decisions, unlike
+// syscall_connection_open (per-connection open state, stays in
+// syscall.tkb) or the test-driver-bounded foreground-server/persistent-
+// shell lifecycle state (real control-flow branches on those; a separate,
+// later split out of #294).
+//
+// Current limitations: single-writer, matching kernel/kernel/syscall.tkb's
+// own "NOT SYNCHRONIZED, single-core dispatch only" limitation -- every
+// record_*() call here assumes it runs to completion on core 0 with no
+// concurrent syscall dispatch from another core.
+
+struct SyscallTestEvidence {
+    open_calls: usize;
+    read_calls: usize;
+    file_write_calls: usize;
+    close_calls: usize;
+    ppoll_uart_waits: usize;
+    read_uart_waits: usize;
+    socket_calls: usize;
+    bind_calls: usize;
+    listen_calls: usize;
+    socket_close_calls: usize;
+    accept_calls: usize;
+    accept_capability_roundtrips: usize;
+    connected_close_calls: usize;
+    connected_read_calls: usize;
+    connected_write_calls: usize;
+    partial_write_observed: bool;
+}
+
+private let mut syscall_test_evidence: SyscallTestEvidence;
+
+// Matches kernel_syscall_process_configure()'s and
+// kernel_syscall_ext2_configure()'s shared subset (open/read/write/close),
+// kept separate from reset_socket_counters() because ext2_configure()
+// resets only these four.
+fn syscall_test_evidence_reset_file_counters() {
+    syscall_test_evidence.open_calls = 0;
+    syscall_test_evidence.read_calls = 0;
+    syscall_test_evidence.file_write_calls = 0;
+    syscall_test_evidence.close_calls = 0;
+}
+
+fn syscall_test_evidence_reset_read_uart_waits() {
+    syscall_test_evidence.read_uart_waits = 0;
+}
+
+fn syscall_test_evidence_reset_socket_counters() {
+    syscall_test_evidence.socket_calls = 0;
+    syscall_test_evidence.bind_calls = 0;
+    syscall_test_evidence.listen_calls = 0;
+    syscall_test_evidence.socket_close_calls = 0;
+    syscall_test_evidence.accept_calls = 0;
+    syscall_test_evidence.accept_capability_roundtrips = 0;
+    syscall_test_evidence.connected_close_calls = 0;
+    syscall_test_evidence.connected_read_calls = 0;
+    syscall_test_evidence.connected_write_calls = 0;
+    syscall_test_evidence.partial_write_observed = false;
+}
+
+fn syscall_test_evidence_record_open() {
+    syscall_test_evidence.open_calls = syscall_test_evidence.open_calls + 1;
+}
+
+fn syscall_test_evidence_record_read() {
+    syscall_test_evidence.read_calls = syscall_test_evidence.read_calls + 1;
+}
+
+fn syscall_test_evidence_record_file_write() {
+    syscall_test_evidence.file_write_calls =
+        syscall_test_evidence.file_write_calls + 1;
+}
+
+fn syscall_test_evidence_record_close() {
+    syscall_test_evidence.close_calls = syscall_test_evidence.close_calls + 1;
+}
+
+fn syscall_test_evidence_file_counts() -> (usize, usize, usize, usize) {
+    return (syscall_test_evidence.open_calls,
+            syscall_test_evidence.read_calls,
+            syscall_test_evidence.file_write_calls,
+            syscall_test_evidence.close_calls);
+}
+
+// Returns true only the first time since the last
+// syscall_test_evidence_reset_read_uart_waits() -- callers use that to gate
+// a one-time boot log line, mirroring
+// process_test_evidence_record_uart_block()'s own pattern.
+fn syscall_test_evidence_record_ppoll_uart_wait() -> bool {
+    syscall_test_evidence.ppoll_uart_waits =
+        syscall_test_evidence.ppoll_uart_waits + 1;
+    return syscall_test_evidence.ppoll_uart_waits == 1;
+}
+
+fn syscall_test_evidence_record_read_uart_wait() -> bool {
+    syscall_test_evidence.read_uart_waits =
+        syscall_test_evidence.read_uart_waits + 1;
+    return syscall_test_evidence.read_uart_waits == 1;
+}
+
+fn syscall_test_evidence_record_socket() {
+    syscall_test_evidence.socket_calls =
+        syscall_test_evidence.socket_calls + 1;
+}
+
+fn syscall_test_evidence_socket_calls() -> usize {
+    return syscall_test_evidence.socket_calls;
+}
+
+fn syscall_test_evidence_record_bind() {
+    syscall_test_evidence.bind_calls = syscall_test_evidence.bind_calls + 1;
+}
+
+fn syscall_test_evidence_bind_calls() -> usize {
+    return syscall_test_evidence.bind_calls;
+}
+
+fn syscall_test_evidence_record_listen() {
+    syscall_test_evidence.listen_calls =
+        syscall_test_evidence.listen_calls + 1;
+}
+
+fn syscall_test_evidence_listen_calls() -> usize {
+    return syscall_test_evidence.listen_calls;
+}
+
+fn syscall_test_evidence_record_socket_close() {
+    syscall_test_evidence.socket_close_calls =
+        syscall_test_evidence.socket_close_calls + 1;
+}
+
+fn syscall_test_evidence_socket_close_calls() -> usize {
+    return syscall_test_evidence.socket_close_calls;
+}
+
+fn syscall_test_evidence_record_accept() {
+    syscall_test_evidence.accept_calls =
+        syscall_test_evidence.accept_calls + 1;
+}
+
+fn syscall_test_evidence_accept_calls() -> usize {
+    return syscall_test_evidence.accept_calls;
+}
+
+fn syscall_test_evidence_record_accept_capability_roundtrip() {
+    syscall_test_evidence.accept_capability_roundtrips =
+        syscall_test_evidence.accept_capability_roundtrips + 1;
+}
+
+fn syscall_test_evidence_accept_capability_roundtrips() -> usize {
+    return syscall_test_evidence.accept_capability_roundtrips;
+}
+
+fn syscall_test_evidence_record_connected_close() {
+    syscall_test_evidence.connected_close_calls =
+        syscall_test_evidence.connected_close_calls + 1;
+}
+
+fn syscall_test_evidence_connected_close_calls() -> usize {
+    return syscall_test_evidence.connected_close_calls;
+}
+
+fn syscall_test_evidence_record_connected_read() {
+    syscall_test_evidence.connected_read_calls =
+        syscall_test_evidence.connected_read_calls + 1;
+}
+
+fn syscall_test_evidence_connected_read_calls() -> usize {
+    return syscall_test_evidence.connected_read_calls;
+}
+
+fn syscall_test_evidence_record_connected_write() {
+    syscall_test_evidence.connected_write_calls =
+        syscall_test_evidence.connected_write_calls + 1;
+}
+
+fn syscall_test_evidence_connected_write_calls() -> usize {
+    return syscall_test_evidence.connected_write_calls;
+}
+
+fn syscall_test_evidence_record_partial_write() {
+    syscall_test_evidence.partial_write_observed = true;
+}
+
+fn syscall_test_evidence_partial_write_observed() -> bool {
+    return syscall_test_evidence.partial_write_observed;
+}
