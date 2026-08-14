@@ -389,6 +389,7 @@ make kernelbuild-qemu-debug  # build kernel/build/qemu/kernel-debug.elf with DWA
 make kernelbuild        # build every maintained kernel target (currently rpi5 + qemu)
 make kernelcheck-rpi5   # build and run the RPi5 hardware integration suite (needs real hardware)
 make kernelcheck-qemu   # build and run the QEMU/AArch64 integration suite (no hardware needed)
+make kernelcheck-shell-qemu # PTY smoke test for the interactive QEMU ash path (no hardware needed)
 make kernelcheck-qemu-debug  # run the same QEMU suite against the DWARF build (no hardware needed)
 make kernelcheck        # build and test every maintained kernel target (needs real RPi5 hardware for the rpi5 half)
 make kernelsh-qemu      # boot QEMU and attach the current terminal to the ash UART

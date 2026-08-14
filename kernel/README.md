@@ -126,6 +126,7 @@ make kernelbuild-rpi5  # build kernel/build/rpi5/kernel.elf
 make kernelcheck-rpi5  # build and run the complete RPi5 integration test (needs real hardware)
 make kernelbuild-qemu  # build kernel/build/qemu/kernel.elf
 make kernelcheck-qemu  # build and run the complete QEMU integration test (no hardware needed)
+make kernelcheck-shell-qemu  # PTY smoke test for the interactive QEMU ash path
 make kernelbuild-qemu-debug  # build kernel/build/qemu/kernel-debug.elf with DWARF info
 make kernelcheck-qemu-debug  # run the complete QEMU integration test against the DWARF build
 make kernelcheck-oops-qemu  # verify parked QEMU oops records and the retained lifecycle trace
@@ -353,6 +354,7 @@ architectural setup (the EL2-to-EL1 drop).
 ```bash
 make kernelbuild-qemu  # build kernel/build/qemu/kernel.elf (no hardware needed)
 make kernelcheck-qemu  # build, boot, drive a host-side network peer, and verify (no hardware needed)
+make kernelcheck-shell-qemu  # PTY smoke test for the interactive QEMU ash path
 make kernelcheck-qemu-debug  # run the same integration suite with a -g kernel build
 ```
 
@@ -364,6 +366,11 @@ BusyBox ash prompt from a terminal, run
 configuration and connects its UART to pyserial miniterm over a local TCP
 chardev; this preserves LF input and local echo. Press Ctrl-] to leave the
 console and restore the host terminal settings.
+
+`kernelcheck-qemu` includes `kernelcheck-shell-qemu`, a PTY smoke test that
+exercises this interactive QEMU path automatically. The standalone target is
+also useful when diagnosing a terminal-specific regression without running
+the whole QEMU suite.
 
 The kernel never exits (a `while (true) {}` park at the end of boot, same as
 RPi5). `scripts/kernel_net_test.py <local-port> <remote-port>` is the host-side
