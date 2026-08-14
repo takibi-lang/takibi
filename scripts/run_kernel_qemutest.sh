@@ -37,6 +37,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="${KERNEL_QEMU_ELF:-$REPO_ROOT/kernel/build/qemu/kernel.elf}"
+RUN_LABEL="kernel/${KERNEL_QEMU_LABEL:-qemu}"
 VIEW_DIR="$REPO_ROOT/kernel/tests/qemu/views"
 COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
@@ -62,7 +63,7 @@ rm -f "$INTERACTIVE_HTTPD_READY" "$INTERACTIVE_HTTPD_DONE"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 exec 9>"$ARTIFACT_DIR/runner.lock"
 if ! flock -n 9; then
-    echo "FAIL kernel/qemu: another QEMU runner already owns $ARTIFACT_DIR" >&2
+    echo "FAIL $RUN_LABEL: another QEMU runner already owns $ARTIFACT_DIR" >&2
     exit 1
 fi
 if [ ! -f "$ELF" ]; then
@@ -70,7 +71,7 @@ if [ ! -f "$ELF" ]; then
     exit 1
 fi
 
-echo "[kernel/qemu] booting $(basename "$ELF") under QEMU"
+echo "[$RUN_LABEL] booting $(basename "$ELF") under QEMU"
 # This kernel's fn main() never exits (a final `while (true) {}` park,
 # same as RPi5's), so QEMU is backgrounded and killed once the boot's own
 # final marker appears -- there is no clean-exit signal to wait for. It
@@ -114,7 +115,7 @@ uart_driver_pid=$!
 # own -- the view diff below is the real verdict, and letting it run gives
 # a much more useful failure (which exact boot-log line is missing) than
 # aborting here would.
-echo "[kernel/qemu] driving host-side network peer (ARP/ICMP/TCP)"
+echo "[$RUN_LABEL] driving host-side network peer (ARP/ICMP/TCP)"
 peer_status=0
 timeout "$TIMEOUT_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" \
@@ -122,7 +123,7 @@ timeout "$TIMEOUT_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     >"$PEER_LOG" 2>&1 || peer_status=$?
 sed 's/^/  /' "$PEER_LOG"
 if [ "$peer_status" -ne 0 ]; then
-    echo "[kernel/qemu] host-side network peer reported failure (status $peer_status)" >&2
+    echo "[$RUN_LABEL] host-side network peer reported failure (status $peer_status)" >&2
 fi
 
 interactive_peer_status=$peer_status
@@ -167,12 +168,12 @@ while IFS= read -r name; do
     fi
     LC_ALL=C grep -E -f "$filter" "$UART_LOG.normalized" >"$actual" || true
     if ! cmp -s "$expected" "$actual"; then
-        echo "FAIL kernel/qemu view: $name" >&2
+        echo "FAIL $RUN_LABEL view: $name" >&2
         diff -u "$expected" "$actual" >&2 || true
         echo "artifacts: $ARTIFACT_DIR" >&2
         exit 1
     fi
-    echo "PASS kernel/qemu view: $name"
+    echo "PASS $RUN_LABEL view: $name"
     view_count=$((view_count + 1))
 done <<<"$view_names"
 
@@ -183,9 +184,9 @@ fi
 
 if [ "$interactive_peer_status" -ne 0 ] ||
         [ "$uart_driver_status" -ne 0 ]; then
-    echo "FAIL kernel/qemu: interactive HTTPd integration failed" >&2
+    echo "FAIL $RUN_LABEL: interactive HTTPd integration failed" >&2
     echo "artifacts: $ARTIFACT_DIR" >&2
     exit 1
 fi
 
-echo "PASS kernel/qemu ($view_count views, one boot)"
+echo "PASS $RUN_LABEL ($view_count views, one boot)"

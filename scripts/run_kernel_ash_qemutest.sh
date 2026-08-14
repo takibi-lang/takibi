@@ -5,6 +5,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
 ELF="${KERNEL_QEMU_ASH_ELF:-$REPO_ROOT/kernel/build/qemu/kernel.elf}"
+RUN_LABEL="kernel/${KERNEL_QEMU_ASH_LABEL:-qemu}"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
 ARTIFACT_DIR="${KERNEL_QEMU_ASH_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-qemu-ash}"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
@@ -35,7 +36,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
-echo "[kernel/qemu] starting automated ash UART test"
+echo "[$RUN_LABEL] starting automated ash UART test"
 qemu-system-aarch64 \
     -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
     -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=off" \
@@ -57,4 +58,4 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --log "${KERNEL_QEMU_ASH_UART_LOG:-$ARTIFACT_DIR/uart.log}" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --timeout "$TIMEOUT_SECS" --ash-only --validate-ash
-echo "PASS kernel/qemu ash TCP integration"
+echo "PASS $RUN_LABEL ash TCP integration"
