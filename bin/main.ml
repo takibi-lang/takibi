@@ -42,6 +42,7 @@ let () =
   let show_version = ref false in
   let emit_exception_frame_offsets = ref "" in
   let emit_struct_layout = ref "" in
+  let emit_depfile = ref "" in
   let i = ref 1 in
   while !i < Array.length Sys.argv do
     (match Sys.argv.(!i) with
@@ -61,6 +62,13 @@ let () =
            exit 1
          );
          emit_struct_layout := Sys.argv.(!i)
+     | "--emit-depfile" ->
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --emit-depfile requires a path\n";
+           exit 1
+         );
+         emit_depfile := Sys.argv.(!i)
      | "-o" ->
          incr i;
          if !i >= Array.length Sys.argv then (
@@ -106,7 +114,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-depfile <path>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -144,6 +152,25 @@ let () =
         Printf.eprintf "Error: %s\n" msg;
         exit 1
     in
+    (* GitHub issue #306: Use_resolver.resolve already computed the exact,
+       correctly-ordered `use` closure above -- the only thing missing for
+       Make's own staleness tracking to be as accurate as the compiler's is
+       surfacing that closure to a file. Mirrors gcc -MMD/-MF's depfile
+       convention: `<output>: <dep1> <dep2> ...`, consumed by the Makefile
+       via `-include`. Written before any later stage can fail, so a
+       compile error still leaves a depfile behind reflecting what was
+       actually read -- Make should still treat a target as depending on a
+       file that caused a real compile error the next time that file
+       changes. *)
+    if !emit_depfile <> "" then (
+      let deps = List.map fst resolved in
+      let chan = open_out !emit_depfile in
+      Printf.fprintf chan "%s:" !output_file;
+      List.iter (fun dep -> Printf.fprintf chan " %s" dep) deps;
+      Printf.fprintf chan "\n";
+      close_out chan
+    );
+
     let prog = List.concat_map snd resolved in
 
     (* GitHub issue #207: compile-time generics. Expands every

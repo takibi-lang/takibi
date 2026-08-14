@@ -506,7 +506,21 @@ $(KERNEL_QEMU_FPSIMD_O): $(KERNEL_RPI5_FPSIMD_S) | $(KERNEL_QEMU_BUILD_DIR)
 # duplicate top-level definition is a compile error by design.
 $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_GROWABLE_POOL_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) \
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) | $(KERNEL_QEMU_BUILD_DIR)
-	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --forbid-trap -o $@
+	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --forbid-trap --emit-depfile $@.d -o $@
+
+# GitHub issue #306: the hand-written prerequisite list on $(KERNEL_QEMU_MAIN_O)
+# above is a second, independently-maintained copy of exactly what the
+# compiler's own `use` resolution (issue #55/#95 Part A) already computes
+# correctly on every invocation -- it drifted once already (issue #305's
+# kernel/kernel/fd_table.tkb was reachable only transitively and missing
+# from that list, so Make silently kept a stale kernel.elf). --emit-depfile
+# above writes the real, complete closure to $(KERNEL_QEMU_MAIN_O).d in
+# gcc -MMD/-MF's Makefile-fragment format; -include-ing it here makes
+# Make's own staleness check as accurate as the compiler's. `-include`
+# (not `include`) so a missing .d file on a clean checkout is silently
+# skipped rather than a hard error, matching this convention's standard
+# clean-build bootstrap behavior.
+-include $(KERNEL_QEMU_MAIN_O).d
 
 $(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_MAIN_O) $(KERNEL_QEMU_LINK_LD)
 	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_MAIN_O) -o $@
