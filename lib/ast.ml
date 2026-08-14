@@ -395,6 +395,7 @@ type func = {
      declaration roots whose contracts are checked separately. *)
   body : stmt list;
   is_inline : bool;
+  is_noinline : bool;
   def_loc : loc [@printer pp_loc];  (* location of the "fn" keyword -- used for DWARF DISubprogram *)
 }
 [@@deriving show]

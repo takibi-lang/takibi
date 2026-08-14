@@ -262,7 +262,18 @@ fn kernel_syscall_persistent_shell_active() -> bool {
     return syscall_persistent_shell;
 }
 
-fn kernel_syscall_persistent_shell_checkpoint_fork(pid: usize) {
+// noinline (all four checkpoints below): each is meant to be a real,
+// addressable call site -- a future GDB negative-path regression breaking
+// on one to skip past it with `return` is exactly the scenario SPEC.md's
+// `noinline` entry describes. kernelcheck-lifecycle-gap-qemu does not
+// currently do that itself (it pokes exec-commit's own one-shot guard
+// variable directly instead, at an earlier, already-stable breakpoint --
+// see that script's own comments); GDB's `return` needs real DWARF call
+// frame info to unwind reliably here, which needs a -g kernel build this
+// repo does not have working yet (a real compiler bug was found and fixed
+// on the way to it, but a second, deeper one remains -- see
+// kernelbuild-qemu-debug's own Makefile comment and HISTORY.md).
+noinline fn kernel_syscall_persistent_shell_checkpoint_fork(pid: usize) {
     if (syscall_persistent_shell_checkpoint_fork_logged) { return; }
     syscall_persistent_shell_checkpoint_fork_logged = true;
     syscall_persistent_shell_child_pid = pid;
@@ -275,7 +286,7 @@ fn kernel_syscall_persistent_shell_checkpoint_fork(pid: usize) {
 // only by pid -- no generation check needed, since the pending target is
 // cleared on the very first match) is dispatched into a syscall of its own,
 // proving the scheduler actually resumed it rather than merely creating it.
-fn kernel_syscall_persistent_shell_checkpoint_selected() {
+noinline fn kernel_syscall_persistent_shell_checkpoint_selected() {
     if (syscall_persistent_shell_child_pid == 0 ||
         syscall_persistent_shell_checkpoint_selected_logged) {
         return;
@@ -294,7 +305,7 @@ fn kernel_syscall_persistent_shell_checkpoint_selected() {
 // being active -- the interactive ash's own launch (PID 1 forking+execing
 // it) and any later applet it runs would otherwise also match, well before
 // or after the boundary this checkpoint actually means.
-fn kernel_syscall_persistent_shell_checkpoint_exec_prepare(pid: usize) {
+noinline fn kernel_syscall_persistent_shell_checkpoint_exec_prepare(pid: usize) {
     if (pid != syscall_persistent_shell_child_pid ||
         syscall_persistent_shell_checkpoint_exec_prepare_logged) {
         return;
@@ -305,7 +316,7 @@ fn kernel_syscall_persistent_shell_checkpoint_exec_prepare(pid: usize) {
     kernel_boot_log("\n");
 }
 
-fn kernel_syscall_persistent_shell_checkpoint_exec_commit(pid: usize) {
+noinline fn kernel_syscall_persistent_shell_checkpoint_exec_commit(pid: usize) {
     if (pid != syscall_persistent_shell_child_pid ||
         syscall_persistent_shell_checkpoint_exec_commit_logged) {
         return;

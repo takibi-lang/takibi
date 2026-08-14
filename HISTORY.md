@@ -15,6 +15,62 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-14: `noinline fn`, and a real DWARF `TypeNamed`/variant bug found chasing a -g kernel build (issue #289 follow-up, issue #301)
+
+Revisiting #289's negative-path regression (below) to make it more robust
+surfaced two small, genuinely useful compiler changes and one still-open
+bug, tracked separately as #301.
+
+**`noinline fn`** mirrors the existing `inline fn` exactly (lexer/parser/
+AST/monomorphize/llvm_gen, one LLVM function attribute each): `is_inline`
+gained a sibling `is_noinline` field throughout, and `declare_func` now
+also emits LLVM's `noinline` attribute when set. Since Takibi never inlines
+an ordinary `fn` implicitly (only explicit `inline fn` triggers the
+always-inline pass), `noinline` has no effect on generated code today --
+its value is making "this function's identity as a real, addressable call
+frame is part of its contract" durable and self-documenting at the one
+call site that depends on it, rather than relying on today's incidental
+non-inlining. Applied to the four `persistent shell: ...` checkpoint
+functions in `kernel/kernel/syscall.tkb` (issue #289) for exactly that
+reason. See SPEC.md's new `noinline fn` entry and
+`test/test_takibi.ml`'s parser + "reaches LLVM as a real function
+attribute" codegen tests.
+
+**Attempting a `-g` debug kernel build** (`kernelbuild-qemu-debug`, to give
+GDB real Takibi type info instead of only raw addresses, plus a stable
+frame for `return` to pop) found a real DWARF codegen bug:
+`ditype_of_ast`'s `TypeNamed` case (`lib/llvm_gen.ml`) never checked
+`variant_lltypes`, unlike `ltype_of_ast`'s own `TypeNamed` handling right
+above it. `resolve_special_type` normally rewrites a variant's `TypeNamed`
+into `TypeVariant` (which `ditype_of_ast` already handled, deliberately
+emitting no DWARF type -- source-level tagged-union DIType is a documented
+v1 deferral) before a type reaches DWARF codegen, but a `stable_replace()`
+call's inferred result type reaches `ditype_of_ast` as a raw, unresolved
+`TypeNamed` -- that compiler builtin's return type comes directly from
+`type_inf.ml`'s own special-cased inference, never through that
+normalization. Any `let x: SomeVariant = stable_replace(...)` local
+therefore crashed a -g build with "Unknown named type" -- exactly what
+`kernel/kernel/process.tkb`'s `let previous: ScheduledProcessValue =
+stable_replace(...)` hit. Fixed by adding the same `variant_lltypes` check
+to `ditype_of_ast`'s `TypeNamed` case, confirmed against a regression test
+built from the existing minimal `stable_replace` fixture pattern already
+in `test/test_takibi.ml` (temporarily reverting the fix reproduces the
+exact original crash on that small, self-contained snippet, not just on
+the full kernel).
+
+That fix alone was not enough: compiling the real kernel with -g still
+segfaults (a native crash, not a clean `Llvm_gen.Error`) -- filed as #301
+rather than chased further in the same session, per the "narrow, closeable
+issues" preference and because a native segfault (likely stack-overflow-
+shaped, per that issue's own notes) is a different, deeper class of
+investigation than the type-lookup gap just fixed.
+`kernelcheck-lifecycle-gap-qemu` (#289) was reverted back to its already-
+verified, working design (poking the exec-commit checkpoint's own one-shot
+guard variable directly at an earlier, stable breakpoint) rather than left
+depending on the still-broken debug build; `kernelbuild-qemu-debug` stays
+defined in the Makefile, unwired from any check, as a discoverable landing
+point for #301.
+
 ### 2026-08-14: Interactive HTTPd lifecycle checkpoints, and collapsing to one top-level boot launch (issue #289)
 
 Investigating why "httpd" appeared in kernel-side identifiers (raised while

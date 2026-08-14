@@ -32,6 +32,7 @@ rule read = parse
 
   | "fn"      { FN }
   | "inline"  { INLINE }
+  | "noinline" { NOINLINE }
   | "return"  { RETURN }
   | "const"   { CONST }
   | "let"     { LET }

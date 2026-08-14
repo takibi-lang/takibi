@@ -480,6 +480,7 @@ type fn_template = {
   fn_effects : ident list option;
   fn_body : stmt list;
   fn_is_inline : bool;
+  fn_is_noinline : bool;
   fn_def_loc : loc;
 }
 
@@ -651,6 +652,7 @@ let run (prog : toplevel list) : toplevel list =
         fn_value_params = value_params;
         fn_ret_type = f.ret_type; fn_effects = f.effects;
         fn_body = f.body; fn_is_inline = f.is_inline;
+        fn_is_noinline = f.is_noinline;
         fn_def_loc = f.def_loc }
   in
   List.iter (function
@@ -1151,7 +1153,8 @@ let run (prog : toplevel list) : toplevel list =
       let ret_type = Option.map resolve_ty ret_type in
       let body = List.map (walk_stmt ~subst:no_subst ~vsubst:no_vsubst ~resolve_inst:apply_resolve) body in
       let def = FuncDef { name = mangled; params; ret_type; effects = tpl.fn_effects;
-                          body; is_inline = tpl.fn_is_inline; def_loc = tpl.fn_def_loc } in
+                          body; is_inline = tpl.fn_is_inline;
+                          is_noinline = tpl.fn_is_noinline; def_loc = tpl.fn_def_loc } in
       let prev = Option.value (Hashtbl.find_opt fn_by_template_name name) ~default:[] in
       Hashtbl.replace fn_by_template_name name (def :: prev)
     ) raw_fns;

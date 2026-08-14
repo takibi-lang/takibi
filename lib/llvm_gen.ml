@@ -1565,6 +1565,21 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
            in
            Hashtbl.add di_slice_types name slice_ty;
            slice_ty)
+  | TypeNamed sname when Hashtbl.mem variant_lltypes sname ->
+      (* Mirrors ltype_of_ast's own TypeNamed variant_lltypes check just
+         above -- resolve_special_type normally rewrites a variant's
+         TypeNamed into TypeVariant (handled above, deliberately null:
+         see that case's comment) before a type reaches here, but a
+         local `let` variable's own declared-type annotation reaches
+         DWARF emission via its raw, unresolved AST node, not through
+         that normalization. Without this case, any local variable
+         declared with a bare variant type name (e.g. `let previous:
+         ScheduledProcessValue = ...`) crashed -g kernel builds with
+         "Unknown named type" the first time a real, large program (not
+         just examples/dwarf_debug's own struct/enum-only fixture)
+         exercised it -- found building kernel/build/qemu/kernel-debug.elf
+         for scripts/run_kernel_qemutest_lifecycle_gap.sh. *)
+      Llvm_debuginfo.llmetadata_null ()
   | TypeNamed sname ->
       (match Hashtbl.find_opt enum_underlying sname with
        | Some ut ->
@@ -5283,6 +5298,8 @@ let declare_func ?prog_types fdef =
     let f         = declare_function key ft the_module in
     if fdef.is_inline then
       add_function_attr f (create_enum_attr context "alwaysinline" 0L) AttrIndex.Function;
+    if fdef.is_noinline then
+      add_function_attr f (create_enum_attr context "noinline" 0L) AttrIndex.Function;
     Hashtbl.add functions key (ft, f);
     Hashtbl.add func_ret_ast_types key ret_ast;
     Hashtbl.add func_param_ast_types key param_ast

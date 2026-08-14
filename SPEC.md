@@ -1851,6 +1851,20 @@ at codegen time rather than silently lowering to a racy `wfi`.
   definitions implicitly. `-g` builds currently disable the inlining pass
   to keep GDB stepping and local-variable visibility stable; use a
   non-`-g` build when checking object-code inlining behavior.
+- `noinline fn name(params) -> ret { ... }` is `inline`'s opposite: it
+  emits LLVM's `noinline` function attribute, an explicit, permanent
+  guarantee that this function keeps its own call site and its own stack
+  frame regardless of build flags or future optimization-level changes.
+  Since ordinary `fn` definitions are already never inlined implicitly
+  (see above), `noinline` has no effect on generated code *today* -- its
+  purpose is to make that guarantee durable and self-documenting at the
+  one call site that actually depends on it (typically a GDB breakpoint
+  target: a small, single-call-site function the inliner would otherwise
+  be free to fold away under a future, more aggressive default, silently
+  breaking `return`'s ability to pop a distinct frame there). Prefer it
+  over relying on incidental non-inlining whenever a function's identity
+  as a real, addressable call frame is part of its contract, not just an
+  implementation detail.
 - **Function overloading**: multiple `fn` definitions sharing a name are
   collected into an overload set and compiled under mangled linkage names
   (`_TK_<name>__<type-codes>`); DWARF still records the original,

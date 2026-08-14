@@ -37,7 +37,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelcheck-rpi5 kernelcheck-qemu kernelcheck-oops-qemu kernelcheck-lifecycle-gap-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-oops-qemu kernelcheck-lifecycle-gap-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -511,6 +511,34 @@ $(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_
 
 kernelbuild-qemu: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_ELF)
 
+# Debug variant: identical inputs to $(KERNEL_QEMU_MAIN_O)/$(KERNEL_QEMU_ELF)
+# above, just with -g added, so GDB would get real DWARF type info --
+# struct fields, enum variant names, bool -- instead of only raw addresses.
+# NOT YET WIRED INTO ANY CHECK: compiling this kernel's full source with -g
+# segfaults the compiler today. One real, now-fixed DWARF gap was found and
+# fixed on the way here (ditype_of_ast's TypeNamed case never checked
+# variant_lltypes, crashing on any -g build reaching a
+# `let x: SomeVariant = stable_replace(...)` local -- see the compiler unit
+# test next to that fix and HISTORY.md), but a second, deeper crash (a
+# native segfault, not a clean compiler error) remains and needs its own
+# investigation -- left as a separate target so kernelbuild-qemu-debug
+# stays buildable/discoverable once that's fixed, without blocking on it
+# now. A separate object/ELF rather than always building kernel.elf with
+# -g keeps the normal, much more frequently run lanes (kernelcheck-qemu,
+# kernelcheck-oops-qemu, kernelbuild) exactly as they were regardless.
+KERNEL_QEMU_MAIN_DEBUG_O := $(KERNEL_QEMU_BUILD_DIR)/main.debug.o
+KERNEL_QEMU_DEBUG_ELF    := $(KERNEL_QEMU_BUILD_DIR)/kernel-debug.elf
+
+$(KERNEL_QEMU_MAIN_DEBUG_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_GROWABLE_POOL_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) \
+    $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) | $(KERNEL_QEMU_BUILD_DIR)
+	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --forbid-trap -g -o $@
+
+$(KERNEL_QEMU_DEBUG_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_MAIN_DEBUG_O) $(KERNEL_QEMU_LINK_LD)
+	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_MAIN_DEBUG_O) -o $@
+	python3 scripts/check_kernel_asm_invariants.py $@ 1
+
+kernelbuild-qemu-debug: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_DEBUG_ELF)
+
 # Pure source-text check (issues #207/#242, see HISTORY.md's 2026-08-07
 # entry) -- no build product needed, so it runs independent of and before
 # the actual compile below rather than being tied to a .o/.elf rule.
@@ -589,6 +617,8 @@ kernelcheck-oops-qemu: kernelbuild-qemu $(KERNEL_CRASH_SNAPSHOT_LAYOUT)
 ## exec-commit logic runs untouched, proving the interactive-HTTPd harness's
 ## own last-completed/next-expected diagnosis names the right gap -- see
 ## scripts/run_kernel_qemutest_lifecycle_gap.sh for the full rationale.
+## Deliberately still on the plain (non-debug) ELF: see kernelbuild-qemu-debug's
+## own comment for why that path isn't ready yet.
 kernelcheck-lifecycle-gap-qemu: kernelbuild-qemu
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_qemutest_lifecycle_gap.sh
 

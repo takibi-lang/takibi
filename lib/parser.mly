@@ -131,7 +131,7 @@ let promote_be_field_type = function
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN INLINE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
+%token FN INLINE NOINLINE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
 %token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
@@ -423,12 +423,20 @@ func_def:
   | FN IDENT LPAREN params RPAREN ret_type_opt effects_opt LBRACE stmts RBRACE
     {
       Ast.{ name = $2; params = $4; ret_type = $6; effects = $7;
-            body = $9; is_inline = false; def_loc = $symbolstartpos }
+            body = $9; is_inline = false; is_noinline = false;
+            def_loc = $symbolstartpos }
     }
   | INLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt LBRACE stmts RBRACE
     {
       Ast.{ name = $3; params = $5; ret_type = $7; effects = $8;
-            body = $10; is_inline = true; def_loc = $symbolstartpos }
+            body = $10; is_inline = true; is_noinline = false;
+            def_loc = $symbolstartpos }
+    }
+  | NOINLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt LBRACE stmts RBRACE
+    {
+      Ast.{ name = $3; params = $5; ret_type = $7; effects = $8;
+            body = $10; is_inline = false; is_noinline = true;
+            def_loc = $symbolstartpos }
     }
 
 param:

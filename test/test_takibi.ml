@@ -413,8 +413,14 @@ let parser_tests = [
 
   Alcotest.test_case "inline function parses" `Quick (fun () ->
     match parse "inline fn add1(a: i32) i32 { return a + 1; }" with
-    | [Ast.FuncDef { name = "add1"; is_inline = true; _ }] -> ()
+    | [Ast.FuncDef { name = "add1"; is_inline = true; is_noinline = false; _ }] -> ()
     | _ -> Alcotest.fail "expected inline FuncDef"
+  );
+
+  Alcotest.test_case "noinline function parses" `Quick (fun () ->
+    match parse "noinline fn add1(a: i32) i32 { return a + 1; }" with
+    | [Ast.FuncDef { name = "add1"; is_inline = false; is_noinline = true; _ }] -> ()
+    | _ -> Alcotest.fail "expected noinline FuncDef"
   );
 
   Alcotest.test_case "global let without type" `Quick (fun () ->
@@ -7061,6 +7067,15 @@ let codegen_tests = [
       Alcotest.(check bool) "noreturn attribute" true
         (contains_substring ir "noreturn"));
 
+  Alcotest.test_case "noinline fn reaches LLVM as a real function attribute" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "noinline fn cg_noinline_target6() -> i32 { return 1; }
+         fn cg_noinline_call6() -> i32 { return cg_noinline_target6(); }");
+      let ir = Llvm.string_of_llmodule Llvm_gen.the_module in
+      Alcotest.(check bool) "noinline attribute" true
+        (contains_substring ir "noinline"));
+
   Alcotest.test_case
     "Slice 4 ABI: checker effects add no runtime parameters" `Quick
     (fun () ->
@@ -9635,6 +9650,55 @@ let codegen_tests = [
             DwarfVariantResult::Empty => { return 0; }
             DwarfVariantResult::Value(value) => { return value; }
           }
+        }");
+
+  (* Distinct from the plain-parameter variant test just above: a
+     stable_replace() result's inferred type reaches ditype_of_ast as a
+     raw, unresolved TypeNamed (this compiler-builtin call's return type is
+     produced directly by type_inf.ml's own special-cased inference, not
+     via the ordinary resolve_special_type normalization other `let`
+     annotations go through), not the already-normalized TypeVariant the
+     parameter case above exercises. Before ditype_of_ast's TypeNamed case
+     also checked variant_lltypes (see that fix's comment), this crashed
+     with "Unknown named type" the first time a real -g build reached a
+     `let x: SomeVariant = stable_replace(...)` -- found building
+     kernel/build/qemu/kernel-debug.elf, where kernel/kernel/process.tkb's
+     `let previous: ScheduledProcessValue = stable_replace(...)` hit
+     exactly this. *)
+  Alcotest.test_case
+    "DWARF debug info (-g): a stable_replace() result's un-normalized \
+     variant-named local type does not crash ditype_of_ast"
+    `Quick
+    (expect_codegen_ok
+       "linear view DwarfStableGuard[lock: addr];
+        linear struct DwarfStableOwner[n: usize] {
+          id: usize @ n;
+          value: i32;
+        }
+        variant DwarfStableValue {
+          Empty;
+          Full(exists n: usize. DwarfStableOwner[n]);
+        }
+        struct DwarfStableSlot {
+          private mutex: i32;
+          private value: DwarfStableValue;
+        }
+        private let mut dwarf_stable_slot: DwarfStableSlot;
+        fn dwarf_stable_lock(m: *i32 @ lock) -> DwarfStableGuard[lock] {
+          return view DwarfStableGuard[lock];
+        }
+        fn dwarf_stable_unlock(g: sink DwarfStableGuard[lock], m: *i32 @ lock) {}
+        fn dwarf_stable_drop(owner: sink DwarfStableOwner[n]) {}
+        fn dwarf_stable_use() {
+          let guard = dwarf_stable_lock(&dwarf_stable_slot.mutex);
+          let previous: DwarfStableValue = stable_replace(
+            guard, &dwarf_stable_slot.mutex, dwarf_stable_slot.value,
+            DwarfStableValue::Empty);
+          match previous {
+            DwarfStableValue::Empty => {}
+            DwarfStableValue::Full(owner) => { dwarf_stable_drop(owner); }
+          }
+          dwarf_stable_unlock(guard, &dwarf_stable_slot.mutex);
         }");
 
   Alcotest.test_case
