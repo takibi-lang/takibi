@@ -155,21 +155,14 @@ let () =
     (* GitHub issue #306: Use_resolver.resolve already computed the exact,
        correctly-ordered `use` closure above -- the only thing missing for
        Make's own staleness tracking to be as accurate as the compiler's is
-       surfacing that closure to a file. Mirrors gcc -MMD/-MF's depfile
-       convention: `<output>: <dep1> <dep2> ...`, consumed by the Makefile
-       via `-include`. Written before any later stage can fail, so a
-       compile error still leaves a depfile behind reflecting what was
-       actually read -- Make should still treat a target as depending on a
-       file that caused a real compile error the next time that file
-       changes. *)
-    if !emit_depfile <> "" then (
-      let deps = List.map fst resolved in
-      let chan = open_out !emit_depfile in
-      Printf.fprintf chan "%s:" !output_file;
-      List.iter (fun dep -> Printf.fprintf chan " %s" dep) deps;
-      Printf.fprintf chan "\n";
-      close_out chan
-    );
+       surfacing that closure to a file. Written before any later stage can
+       fail, so a compile error still leaves a depfile behind reflecting
+       what was actually read -- Make should still treat a target as
+       depending on a file that caused a real compile error the next time
+       that file changes. *)
+    if !emit_depfile <> "" then
+      Use_resolver.write_depfile !emit_depfile !output_file
+        (List.map fst resolved);
 
     let prog = List.concat_map snd resolved in
 

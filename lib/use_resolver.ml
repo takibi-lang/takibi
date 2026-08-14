@@ -127,3 +127,24 @@ let resolve
   in
   List.iter visit entry_paths;
   List.rev !order
+
+(* GitHub issue #306: `resolve` above already computes the exact, ordered
+   `use` closure a Make target actually depends on -- this renders that
+   closure as a single gcc -MMD/-MF-style depfile line (`<output>: <dep1>
+   <dep2> ...\n`) for the Makefile to `-include`. Kept as a pure
+   string-building function, separate from `write_depfile`'s file I/O, so
+   it is unit-testable the same dependency-injected way `resolve` itself
+   is (see this file's own header comment and test_takibi.ml's
+   `use_resolver_tests`). *)
+let depfile_contents (output : string) (deps : string list) : string =
+  let buf = Buffer.create 256 in
+  Buffer.add_string buf output;
+  Buffer.add_char buf ':';
+  List.iter (fun dep -> Buffer.add_char buf ' '; Buffer.add_string buf dep) deps;
+  Buffer.add_char buf '\n';
+  Buffer.contents buf
+
+let write_depfile (path : string) (output : string) (deps : string list) : unit =
+  let chan = open_out path in
+  output_string chan (depfile_contents output deps);
+  close_out chan

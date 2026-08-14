@@ -11759,6 +11759,42 @@ let use_resolver_tests =
                (contains_substring msg "b.tkb"));
   ]
 
+(* GitHub issue #306: depfile_contents is a pure string builder (no file
+   I/O), so these test it directly rather than through write_depfile and a
+   real temp file -- same "test the pure core, not the thin I/O wrapper"
+   split use_resolver_tests already uses for resolve vs. parse_file. *)
+let depfile_tests =
+  [
+    Alcotest.test_case "depfile_contents: no deps still names the output" `Quick (fun () ->
+      Alcotest.(check string) "line"
+        "main.o:\n" (Use_resolver.depfile_contents "main.o" []));
+
+    Alcotest.test_case "depfile_contents: single dep" `Quick (fun () ->
+      Alcotest.(check string) "line"
+        "main.o: a.tkb\n" (Use_resolver.depfile_contents "main.o" ["a.tkb"]));
+
+    Alcotest.test_case "depfile_contents: multiple deps stay in the given order, \
+                         space-separated, matching Use_resolver.resolve's own \
+                         dependency-before-dependent order" `Quick (fun () ->
+      Alcotest.(check string) "line"
+        "main.o: c.tkb b.tkb a.tkb\n"
+        (Use_resolver.depfile_contents "main.o" ["c.tkb"; "b.tkb"; "a.tkb"]));
+
+    Alcotest.test_case "depfile_contents: output composed directly with \
+                         Use_resolver.resolve's own result" `Quick (fun () ->
+      let uses_of items = List.filter_map (function Ast.UseDef p -> Some p | _ -> None) items in
+      let table = [
+        "a.tkb", parse "use \"b.tkb\";\nfn a_fn() {}";
+        "b.tkb", parse "fn b_fn() {}";
+      ] in
+      let parse_file path = List.assoc path table in
+      let prescan path = uses_of (parse_file path) in
+      let resolved = Use_resolver.resolve ~parse_file ~prescan ["a.tkb"] in
+      Alcotest.(check string) "line"
+        "main.o: b.tkb a.tkb\n"
+        (Use_resolver.depfile_contents "main.o" (List.map fst resolved)));
+  ]
+
 (* Takibi Core Slice 0: the surface checker's branch lattice is extracted
    behind Delta.Legacy_flow. Slice 3 later changed which component affine
    consults without changing this dataflow representation. *)
@@ -11806,5 +11842,6 @@ let () = Alcotest.run "takibi" [
   "parser",   parser_tests;
   "type_inf", infer_tests;
   "use_resolver", use_resolver_tests;
+  "depfile",      depfile_tests;
   "codegen",  codegen_tests;
 ]
