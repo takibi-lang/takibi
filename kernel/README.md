@@ -526,9 +526,12 @@ claim of general Linux compatibility. `SYSCALLS.md` is the per-syscall
 authority, `RESOURCE_LIMITS.md` is the per-resource-pool authority (every
 fixed-capacity pool -- process slots, descriptors, shared objects,
 connections, pages, and more -- with its exhaustion behavior and boundary
-test), and the common/platform view `.expected` files are the actual
-contracts; the list below is orientation for a reader deciding whether a
-workload will run, not a specification.
+test), `RUNTIME_STATE.md` is the per-global-state-ownership authority
+(every retained runtime `let mut` global, grouped by owner and why it
+stays global instead of moving behind a per-slot record), and the
+common/platform view `.expected` files are the actual contracts; the
+list below is orientation for a reader deciding whether a workload will
+run, not a specification.
 
 - **Filesystem.** One ext2 block group, nested path lookup, root-directory
   mutation, allocation bitmaps, and fast symlinks. Regular-file reads cover
