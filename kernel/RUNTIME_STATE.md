@@ -7,7 +7,7 @@ and why it stays a global instead of moving behind a per-process/
 per-connection/per-slot record.
 
 This file records the state of the kernel as of 2026-08-14 (commit
-`3266f29`). Like `RESOURCE_LIMITS.md`, treat this as a living document:
+`43873de`). Like `RESOURCE_LIMITS.md`, treat this as a living document:
 when a global is added, removed, or its ownership rationale changes,
 update this file in the same commit rather than letting it drift into a
 stale snapshot.
@@ -153,7 +153,14 @@ global scratch space, not per-process state.
 
 virtio-blk/virtio-net/rp1_gem/usb_xhci device state, QEMU/RPi5 UART ring
 buffers, the RPi5 mailbox, `exception_evidence.tkb`'s `crash_snapshot`/
-`crash_snapshot_capturing`.
+`crash_snapshot_capturing`. `CrashSnapshot` itself now also carries
+`wait4_status_ptr` and the current process's `fd_kind`/`fd_object`
+arrays (closing #294's own diagnostic-snapshot acceptance criterion --
+process/parent/wait-reason/address-space identity/syscall continuation/
+descriptor ownership are all now one allocation-free, read-only capture,
+populated via the same `kernel_process_crash_*()`/
+`kernel_fd_table_crash_*()` accessor pattern, never touching a linear
+owner or lock from a fail-stop path).
 
 **Why global:** #294's own design constraints say so explicitly --
 "Interrupt paths and early boot may need explicitly scoped global
