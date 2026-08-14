@@ -138,14 +138,14 @@ python3-serial`. Press Ctrl-] to leave either console.
 Exiting this way also restores the host terminal settings.
 
 The QEMU shell also reports the elapsed time from QEMU launch to the kernel's
-explicit `interactive shell: uart blocked` readiness marker. This is the
+explicit `persistent shell: uart blocked` readiness marker. This is the
 point at which ash is waiting for input, rather than merely the point at which
 the QEMU process or UART socket exists.
 
 ### Publish a page from interactive ash
 
 Both shell targets provide the same BusyBox HTTPd command. Wait for the
-`interactive shell: uart blocked` marker and its `/ #` prompt, then run:
+`persistent shell: uart blocked` marker and its `/ #` prompt, then run:
 
 ```sh
 /busybox-httpd httpd -f -p 8080 -h / &

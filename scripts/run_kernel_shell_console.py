@@ -10,7 +10,15 @@ import serial
 from serial.tools import miniterm
 
 
-READY_MARKER = b"interactive shell: uart blocked\n"
+# The bounded init.sh fixture emits the first marker while it exercises ash.
+# The shell exposed by kernelsh-* is its persistent self-replacement and emits
+# the second one. Accept both so this console remains usable while booting an
+# older image, but report the persistent shell as ready for current images.
+READY_MARKERS = (
+    b"persistent shell: uart blocked\n",
+    b"interactive shell: uart blocked\n",
+)
+READY_MARKER_WINDOW = max(len(marker) for marker in READY_MARKERS)
 PLATFORM = os.environ.get("KERNEL_SHELL_PLATFORM", "qemu")
 LABEL = f"[kernel/{PLATFORM}]"
 BOOT_PHASE_MARKERS = (
@@ -28,8 +36,13 @@ BOOT_PHASE_MARKERS = (
     (b"usb ext2: mounted", "USB ext2 mount"),
     (b"ext2 mount:", "ext2 mount"),
     (b"rootfs image:", "rootfs image resolve"),
+    (b"persistent shell: uart blocked", "ash readiness"),
     (b"interactive shell: uart blocked", "ash readiness"),
 )
+
+
+def ash_ready(output: bytes) -> bool:
+    return any(marker in output for marker in READY_MARKERS)
 
 
 class TimingMiniterm(miniterm.Miniterm):
@@ -46,8 +59,8 @@ class TimingMiniterm(miniterm.Miniterm):
                 if not data:
                     continue
                 if not self.reported:
-                    self.pending = (self.pending + data)[-len(READY_MARKER):]
-                    if READY_MARKER in self.pending:
+                    self.pending = (self.pending + data)[-READY_MARKER_WINDOW:]
+                    if ash_ready(self.pending):
                         elapsed_ms = (time.time_ns() - self.launch_ns) / 1_000_000
                         print(
                             f"{LABEL} ash readiness: {elapsed_ms:.1f} ms "
@@ -106,8 +119,8 @@ def main() -> int:
                             flush=True,
                         )
                         reported_phases.add(phase)
-            pending = (pending + data)[-len(READY_MARKER):]
-            if READY_MARKER in pending:
+            pending = (pending + data)[-READY_MARKER_WINDOW:]
+            if ash_ready(pending):
                 elapsed_ms = (time.time_ns() - launch_ns) / 1_000_000
                 if "ash readiness" not in reported_phases:
                     print(
