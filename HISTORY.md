@@ -15,6 +15,44 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-14: Full `-g` kernel build restored; checkpoint-frame `return` deliberately not adopted (issue #301)
+
+The remaining native segfault in `make kernelbuild-qemu-debug` was traced
+under GDB to LLVM's AArch64 DWARF emission, specifically
+`DwarfCompileUnit::createAndAddScopeChildren`, rather than an OCaml stack
+overflow. Takibi had emitted `llvm.dbg.declare` metadata for local variables
+whose source type deliberately has no v1 DWARF representation: tagged
+variants, tuples, views, and void. In particular, a raw `TypeNamed` variant
+can reach local debug-variable emission through `stable_replace()`. Its
+DIType was null, which formed malformed local-variable metadata and could
+crash LLVM while emitting the full kernel object.
+
+`declare_var` now omits those unsupported local-variable DIEs instead of
+creating a typeless `dbg.declare`. The existing DWARF regression fixture now
+also asserts that a variant local produces no `DILocalVariable`. The complete
+QEMU debug build passed, and `kernelcheck-qemu-debug` was added to run the
+ordinary QEMU view and ash TCP integration suites against `kernel-debug.elf`.
+It uses dedicated artifact directories and TCP/UDP ports, so it can run in
+parallel with the normal QEMU lane. `kernelcheck` and therefore `allcheck`
+include both lanes.
+
+`kernelcheck-lifecycle-gap-qemu` was also moved to `kernel-debug.elf`, so its
+existing GDB guard write has real Takibi source and type information. A
+follow-up attempt to replace that established guard mechanism with a
+breakpoint on the `noinline` exec-commit checkpoint followed by GDB `return`
+was deliberately abandoned. The function has an independent symbol and
+DWARF frame information, and GDB can arm the breakpoint, but QEMU's remote
+gdbstub reports the target as running when batch GDB sends `return`; the same
+failure reproduced with one vCPU, so it was not only an SMP thread-selection
+problem. The attempted runner could not reliably distinguish the remote
+control failure from a successful skipped checkpoint, whereas the guard
+method remains deterministic and the UART lifecycle diagnosis verifies the
+real observable gap. No kernel test hook or alternate debugger protocol was
+added solely to pursue that cosmetic simplification.
+
+For parallel output diagnosis, the normal and DWARF lanes are labelled
+`kernel/qemu` and `kernel/qemu-debug` respectively.
+
 ### 2026-08-14: `noinline fn`, and a real DWARF `TypeNamed`/variant bug found chasing a -g kernel build (issue #289 follow-up, issue #301)
 
 Revisiting #289's negative-path regression (below) to make it more robust
