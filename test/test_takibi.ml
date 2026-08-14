@@ -85,6 +85,56 @@ let contains_substring haystack needle =
   let rec scan i = i + n <= m && (String.sub haystack i n = needle || scan (i + 1)) in
   scan 0
 
+let read_all ic =
+  let buf = Buffer.create 1024 in
+  (try while true do Buffer.add_channel buf ic 1024 done with End_of_file -> ());
+  Buffer.contents buf
+
+(* Keep native LLVM backend failures outside this test process.  The compiler
+   executable sits beside the test executable under Dune's build root. *)
+let takibi_cli_path () =
+  let test_exe = Unix.realpath Sys.executable_name in
+  Filename.concat (Filename.dirname (Filename.dirname test_exe)) "bin/main.exe"
+
+let expect_aarch64_debug_object src () =
+  let source = Filename.temp_file "takibi-dwarf-object-" ".tkb" in
+  let object_file = Filename.temp_file "takibi-dwarf-object-" ".o" in
+  Fun.protect
+    ~finally:(fun () ->
+      (try Unix.unlink source with Unix.Unix_error _ -> ());
+      (try Unix.unlink object_file with Unix.Unix_error _ -> ()))
+    (fun () ->
+      let oc = open_out source in
+      output_string oc src;
+      close_out oc;
+      let compiler = takibi_cli_path () in
+      if not (Sys.file_exists compiler) then
+        Alcotest.failf "cannot find test compiler at %s" compiler;
+      let args = [| compiler; source; "-g"; "--target"; "aarch64-none-elf";
+                     "-o"; object_file |] in
+      let (stdout, stdin, stderr) =
+        Unix.open_process_args_full compiler args (Unix.environment ())
+      in
+      close_out_noerr stdin;
+      let out = read_all stdout in
+      let err = read_all stderr in
+      match Unix.close_process_full (stdout, stdin, stderr) with
+      | Unix.WEXITED 0 ->
+          if (Unix.stat object_file).Unix.st_size = 0 then
+            Alcotest.fail "compiler reported success but emitted an empty object"
+      | Unix.WEXITED status ->
+          Alcotest.failf
+            "AArch64 DWARF object-emission compiler exited %d\nstdout:\n%s\nstderr:\n%s"
+            status out err
+      | Unix.WSIGNALED signal ->
+          Alcotest.failf
+            "AArch64 DWARF object-emission compiler terminated by signal %d\nstdout:\n%s\nstderr:\n%s"
+            signal out err
+      | Unix.WSTOPPED signal ->
+          Alcotest.failf
+            "AArch64 DWARF object-emission compiler stopped by signal %d\nstdout:\n%s\nstderr:\n%s"
+            signal out err)
+
 let count_substring haystack needle =
   let n = String.length needle and m = String.length haystack in
   let rec count i acc =
@@ -9710,6 +9760,55 @@ let codegen_tests = [
        Alcotest.(check bool) "stable_replace variant local has no typeless DILocalVariable"
          false (contains_substring ir
            "DILocalVariable(name: \"dwarf_stable_previous\""));
+
+  Alcotest.test_case
+    "DWARF debug info (-g): unsupported variant, tuple, and view locals are \
+     omitted from local DIEs by policy" `Quick
+    (fun () ->
+       expect_codegen_ok
+         "linear view DwarfUnsupportedView;
+          variant DwarfUnsupportedVariant {
+            Empty;
+            Value(i32);
+          }
+          fn dwarf_unsupported_consume(g: sink DwarfUnsupportedView) {}
+          fn dwarf_unsupported_locals(input: DwarfUnsupportedVariant) -> i32 {
+            let dwarf_unsupported_variant: DwarfUnsupportedVariant = input;
+            let dwarf_unsupported_tuple: (i32, i32) = (1, 2);
+            let dwarf_unsupported_view: DwarfUnsupportedView = view DwarfUnsupportedView;
+            dwarf_unsupported_consume(dwarf_unsupported_view);
+            match dwarf_unsupported_variant {
+              DwarfUnsupportedVariant::Empty => { return 0; }
+              DwarfUnsupportedVariant::Value(value) => { return value; }
+            }
+          }" ();
+       let ir = Llvm.string_of_llmodule Llvm_gen.the_module in
+       List.iter (fun name ->
+         Alcotest.(check bool) (name ^ " has no DILocalVariable") false
+           (contains_substring ir ("DILocalVariable(name: \"" ^ name ^ "\""))
+       ) [ "dwarf_unsupported_variant"; "dwarf_unsupported_tuple";
+           "dwarf_unsupported_view" ]);
+
+  Alcotest.test_case
+    "DWARF debug info (-g): variant, tuple, and view locals survive isolated \
+     AArch64 object emission" `Quick
+    (expect_aarch64_debug_object
+       "linear view DwarfObjectView;
+        variant DwarfObjectVariant {
+          Empty;
+          Value(i32);
+        }
+        fn dwarf_object_consume(g: sink DwarfObjectView) {}
+        fn dwarf_object_locals(input: DwarfObjectVariant) -> i32 {
+          let object_variant: DwarfObjectVariant = input;
+          let object_tuple: (i32, i32) = (1, 2);
+          let object_view: DwarfObjectView = view DwarfObjectView;
+          dwarf_object_consume(object_view);
+          match object_variant {
+            DwarfObjectVariant::Empty => { return 0; }
+            DwarfObjectVariant::Value(value) => { return value; }
+          }
+        }");
 
   Alcotest.test_case
     "pointer difference codegens as an isize element count"

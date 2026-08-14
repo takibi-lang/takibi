@@ -1,3 +1,4 @@
 (test
  (name test_takibi)
- (libraries takibi alcotest))
+ (deps %{exe:../bin/main.exe})
+ (libraries takibi alcotest unix))

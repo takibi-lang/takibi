@@ -1660,6 +1660,26 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
               generics are not implemented yet, GitHub issue #207)"
              (ty_str ty)))
 
+(* A local-variable DIE, unlike the type positions nested inside other DWARF
+   metadata, must have a real DIType.  Keep that eligibility decision beside
+   [ditype_of_ast] instead of teaching every caller which source types it may
+   safely pass to dibuild_create_{auto,parameter}_variable.  In particular,
+   null is meaningful for a void subroutine return type, but malformed for a
+   DILocalVariable. *)
+let rec ditype_for_local dib file = function
+  | TypeView _ | TypeVariant _ | TypeTuple _ | TypeVoid -> None
+  | TypeNamed sname when Hashtbl.mem variant_lltypes sname -> None
+  | TypeExists (_, _, body) -> ditype_for_local dib file body
+  | TypeSingleton (base, _) | TypeRefined (_, _, base)
+  | TypeBorrow base | TypeSink base | TypeIo base ->
+      ditype_for_local dib file base
+  | TypeIndexed (name, _) -> ditype_for_local dib file (TypeNamed name)
+  | TypeBorrowMut base | TypeAlignedPtr (_, base) ->
+      (* These have pointer representation at runtime.  A pointer DIType is
+         valid even when its pointee is intentionally not modelled in v1. *)
+      Some (ditype_of_ast dib file (TypePtr base))
+  | ty -> Some (ditype_of_ast dib file ty)
+
 (* True for unsigned integer types (use udiv/urem/icmp ult etc.). Recurses
    into a refined type's own base -- this is what fixes the BinOp i32/i64
    width-sync's sign- vs zero-extension choice (see CLAUDE.md's
@@ -4347,16 +4367,9 @@ let gen_func ?prog_types fdef =
     match di_ctx with
     | None -> ()
     | Some (dib, file, sp) ->
-        (* A local-variable DIE requires a real DIType.  ditype_of_ast
-           deliberately returns null for source constructs with no v1 DWARF
-           representation (notably tagged variants); emitting dbg.declare
-           with that null type produces malformed metadata that LLVM's DWARF
-           backend can crash on while lowering a large module. *)
-        (match ast_ty with
-         | TypeVariant _ | TypeTuple _ | TypeView _ | TypeVoid -> ()
-         | TypeNamed sname when Hashtbl.mem variant_lltypes sname -> ()
-         | _ ->
-             let ty = ditype_of_ast dib file ast_ty in
+        (match ditype_for_local dib file ast_ty with
+         | None -> ()
+         | Some ty ->
              let flags = Llvm_debuginfo.diflags_get Llvm_debuginfo.DIFlag.Zero in
              let var_di =
                if is_param
