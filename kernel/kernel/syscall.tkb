@@ -179,13 +179,6 @@ struct CloneFileState {
 }
 
 private let mut clone_file_state: [CloneFileState; PROCESS_CONTEXT_MAX];
-// GitHub issue #244: set by whichever syscall handler returns
-// SyscallAction::Block, read by kernel_syscall_block_return() to decide
-// which of the two now-sharing-one-trampoline blockers to invoke.
-private let mut syscall_block_reason: ProcessWaitReason = ProcessWaitReason::None;
-// GitHub issue #244: wait4()'s own x1 (status pointer), stashed across the
-// block/wake gap -- see kernel_syscall_wait4_deliver()'s own comment.
-private let mut syscall_wait4_status_ptr: usize;
 enum UartBlockDelivery: u8 { Scalar; Read; }
 private let mut syscall_uart_block_delivery: [UartBlockDelivery; PROCESS_CONTEXT_MAX];
 private let mut syscall_connected_fixture_pending: bool;
@@ -1230,7 +1223,8 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
                             process_slot;
                         syscall_uart_block_delivery[slot] =
                             UartBlockDelivery::Read;
-                        syscall_block_reason = ProcessWaitReason::UartRx;
+                        kernel_process_current_set_pending_block(
+                            ProcessWaitReason::UartRx, 0);
                         return SyscallAction::Block;
                     }
                 }
@@ -1340,11 +1334,11 @@ fn kernel_syscall_exit_current_process(status: usize) -> SyscallAction {
 // parent step, kernel/kernel/process.tkb) -- the mirror of what
 // kernel_process_uart_wake() does for the UART blocker with a single
 // el0_context_set_x0, except wait4() also needs its x1 status pointer
-// (stashed in syscall_wait4_status_ptr when it blocked) honored, which a
-// bare scalar injection cannot express. frame_sp is the blocked parent's
-// own saved SP -- writing x0 there, not the current frame, is exactly
-// what el0_context_set_x0 is for (it takes an arbitrary saved context,
-// not "the currently running one").
+// (stashed in the blocking parent's own ProcessRecord, see issue #302)
+// honored, which a bare scalar injection cannot express. frame_sp is the
+// blocked parent's own saved SP -- writing x0 there, not the current
+// frame, is exactly what el0_context_set_x0 is for (it takes an arbitrary
+// saved context, not "the currently running one").
 //
 // GitHub issue #248: takes parent_slot explicitly (the blocked parent's
 // own pool_index) rather than reading kernel/kernel/process.tkb's
@@ -1353,11 +1347,17 @@ fn kernel_syscall_exit_current_process(status: usize) -> SyscallAction {
 // still the EXITING CHILD, not yet switched to the parent being woken
 // here. Needed so a multi-level concurrent wait4() chain delivers each
 // parent's OWN child's status/pid, not whichever slot happened to be
-// "current" (irrelevant here) or a shared global (the #248 bug this
-// parameter exists to avoid).
+// "current" (irrelevant here). GitHub issue #302: the status pointer read
+// below used to be exactly the shared-global bug #248 fixed for
+// reaped_pid/parent_slot -- a second parent blocking in wait4() before the
+// first one woke would silently overwrite the first parent's still-pending
+// status pointer with its own. scheduled_process_record_wait4_status_ptr
+// is keyed by parent_slot the same way reaped_pid/parent_slot already are.
 fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize,
                                 parent_slot: usize) !{unsafe} {
-    if (syscall_wait4_status_ptr != 0) {
+    let wait4_status_ptr: usize =
+        scheduled_process_record_wait4_status_ptr(parent_slot);
+    if (wait4_status_ptr != 0) {
         // The status buffer belongs to the PARENT being woken, but this runs
         // while the exiting CHILD is still current (see this function's
         // header comment and kernel_process_child_exit). user_write_u32
@@ -1372,7 +1372,7 @@ fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize,
         // already-exited path (correct address space, current is the parent)
         // never showed this.
         process_image_activate_root(parent_slot);
-        match user_range_check(address_space_root_for_slot(parent_slot), syscall_wait4_status_ptr, 4, UserAccessMode::Write) {
+        match user_range_check(address_space_root_for_slot(parent_slot), wait4_status_ptr, 4, UserAccessMode::Write) {
             UserRangeResult::Fault => {
                 el0_context_set_x0(frame_sp, LINUX_EFAULT);
                 return;
@@ -1441,7 +1441,8 @@ fn kernel_syscall_uart_block_prepare(frame_sp: usize) {
 // records which reason first.
 fn kernel_syscall_block_return(frame_sp: usize) {
     let mut next_sp: usize = 0;
-    if (syscall_block_reason == ProcessWaitReason::ChildExit) {
+    if (kernel_process_current_pending_block_reason() ==
+            ProcessWaitReason::ChildExit) {
         next_sp = kernel_process_block_wait4(frame_sp);
     } else {
         kernel_syscall_uart_block_prepare(frame_sp);
@@ -1576,7 +1577,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             enable_irq();
             return SyscallAction::Resume(value);
         }
-        syscall_block_reason = ProcessWaitReason::UartRx;
+        kernel_process_current_set_pending_block(
+            ProcessWaitReason::UartRx, 0);
         return SyscallAction::Block;
     }
 
@@ -3019,11 +3021,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 // into this handler's own code once the syscall took the
                 // Block path (a one-way tail branch, same as the UART-wait
                 // syscall this trampoline was built for). x1 (the status
-                // pointer) has to be remembered here and re-applied at
-                // wake time by kernel_syscall_wait4_deliver(), or a woken
-                // wait4() would resume with a stale x0/no status written.
-                syscall_wait4_status_ptr = x1;
-                syscall_block_reason = ProcessWaitReason::ChildExit;
+                // pointer) has to be remembered here and re-applied at wake
+                // time by kernel_syscall_wait4_deliver() -- issue #302
+                // moved that memory into the blocking parent's own
+                // ProcessRecord (kernel/kernel/process.tkb) instead of a
+                // module global, or a woken wait4() would resume with a
+                // stale x0/no status written.
+                kernel_process_current_set_pending_block(
+                    ProcessWaitReason::ChildExit, x1);
                 return SyscallAction::Block;
             }
             return SyscallAction::Resume(LINUX_ECHILD);

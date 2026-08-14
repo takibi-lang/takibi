@@ -84,6 +84,12 @@ struct ProcessRecord {
     saved_sp: usize;
     state: ProcessSlotState;
     wait_reason: ProcessWaitReason;
+    // GitHub issue #302: wait4()'s status pointer, owned per-slot so a
+    // multi-level concurrent wait4() chain delivers each blocked parent's
+    // OWN status pointer instead of a value shared across every blocked
+    // parent (the same bug class issue #248 fixed for reaped_pid/
+    // parent_slot -- see kernel_syscall_wait4_deliver's header comment).
+    wait4_status_ptr: usize;
     parent: ProcessHandle;
     has_parent: bool;
     child: ProcessHandle;
@@ -128,6 +134,14 @@ fn scheduled_process_record_state(
 fn scheduled_process_record_wait_reason(
         slot: {0..<KERNEL_PROCESS_MAX as usize}) -> ProcessWaitReason {
     return scheduled_process_records[slot].wait_reason;
+}
+
+fn scheduled_process_record_wait4_status_ptr(slot: usize) -> usize {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        return scheduled_process_records[checked].wait4_status_ptr;
+    }
+    return 0;
 }
 // A generic type argument to GrowablePool(T, ...) can only be a primitive
 // integer type, bool, a plain struct name, or a plain pointer to one of
@@ -1737,6 +1751,36 @@ fn kernel_process_current_pid() -> usize {
         return execution_current_handle.pool_index + 1;
     }
     return 1;
+}
+
+// GitHub issue #302: replaces kernel/kernel/syscall.tkb's own
+// syscall_block_reason/syscall_wait4_status_ptr module globals, which used
+// to relay a syscall handler's block decision across the one-way
+// .Lsyscall_block asm tail branch into kernel_syscall_block_return(). That
+// relay was a single slot shared by whichever process happened to block
+// next, not owned by the process it actually describes -- concretely wrong
+// for wait4_status_ptr the moment two different parents are each blocked in
+// wait4() at once (a later parent's block would overwrite an earlier
+// parent's still-pending status pointer). Writing straight into the
+// blocking process's own ProcessRecord keeps the pending decision scoped to
+// the process making it, still read back synchronously by
+// kernel_syscall_block_return() before any scheduler switch happens.
+fn kernel_process_current_set_pending_block(
+        reason: ProcessWaitReason, wait4_status_ptr: usize) {
+    if (execution_current_live) {
+        scheduled_process_records[execution_current_handle.pool_index]
+            .wait_reason = reason;
+        scheduled_process_records[execution_current_handle.pool_index]
+            .wait4_status_ptr = wait4_status_ptr;
+    }
+}
+
+fn kernel_process_current_pending_block_reason() -> ProcessWaitReason {
+    if (execution_current_live) {
+        return scheduled_process_records[execution_current_handle.pool_index]
+            .wait_reason;
+    }
+    return ProcessWaitReason::None;
 }
 
 // Allocation-free diagnostic view for the terminal exception path.  These
