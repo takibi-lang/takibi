@@ -16730,3 +16730,171 @@ replying to one.
 
 Verified stable across repeated `kernelcheck-qemu` runs; `kernelbuild-rpi5`,
 `langcheck`, and the full unit test suite all pass unaffected throughout.
+
+## 2026-08-14: GitHub Issue #294 -- Kernel Runtime State Consolidated
+## Behind Explicit Owners, Split Into Seven Sub-Issues
+
+#294 asked to reduce unowned/duplicated global mutable state in
+`kernel/` -- motivated by an interactive-ash-plus-background-HTTPd stall
+that required correlating state scattered across unrelated globals with
+no coherent single-process view -- without a single big-bang conversion.
+Landed as seven narrow sub-issues (#302-#308), each independently
+QEMU (four lanes: `kernelcheck-qemu`, `-qemu-debug`, `-oops-qemu`,
+`-lifecycle-gap-qemu`) and real-RPi5-hardware verified before merging,
+plus a documentation pass and one deliberately-deferred design memo.
+
+**#302 -- syscall continuation moved into `ProcessRecord`.**
+`syscall_block_reason`/`syscall_wait4_status_ptr` (`kernel/kernel/
+syscall.tkb` module globals relaying a block decision across the
+one-way `.Lsyscall_block` asm tail branch) moved into the blocking
+process's own `ProcessRecord` (`kernel/kernel/process.tkb`), via two new
+functions (`kernel_process_current_set_pending_block`/
+`_pending_block_reason`). Not just a style fix: `wait4_status_ptr` was a
+single global shared by every blocked parent -- a second parent blocking
+in `wait4()` before an earlier one woke would silently overwrite the
+first parent's still-pending status pointer with its own, a real bug
+found by re-reading `kernel_syscall_wait4_deliver()`'s own header
+comment, which already named the identical #248 bug class for
+`reaped_pid`/`parent_slot` without noticing the status pointer had the
+same problem.
+
+**#303/#304/#307 -- test-only state separated from production state.**
+`process.tkb`'s ten `execution_*` test/evidence counters (clone/exit/
+UART-block/scheduler-switch counts) moved into new
+`kernel/kernel/process_test_evidence.tkb`; `syscall.tkb`'s sixteen
+syscall-call-count evidence counters moved into new
+`kernel/kernel/syscall_test_evidence.tkb`; both followed
+`init/test_driver.tkb`'s pre-existing precedent for where test-only
+state belongs. `execution_scheduler_enabled`/`execution_reschedule_
+pending` deliberately stayed in `process.tkb` -- real scheduling code
+branches on them. #307 covered a harder case deferred out of #304 on
+purpose: twelve test-driver-bounded lifecycle fields (foreground-server
+bounding, the #289 persistent-shell checkpoint machinery) that DO gate
+real control flow (whether `accept4()` exits the process early; which
+one-shot line `listen()`/`read_uart()` boot-log). Moved into new
+`kernel/kernel/syscall_test_lifecycle.tkb` along with the functions that
+own them, with `syscall.tkb`'s real dispatch code now calling named
+predicate/mutator functions (`syscall_test_lifecycle_foreground_
+server_should_bound()`, `_listener_ready_label()`, `_note_reaped_
+pages()`) instead of touching the fields directly. `syscall_exec_pending/
+argc/argv/path` were investigated and left alone: real `execve()`
+staging state consumed synchronously within one syscall dispatch, not
+test-only and not a #302-style cross-block-gap relay.
+
+**#305 -- `fd_table.tkb`'s shared-object pool consolidated.**
+`object_pool` (`RefcountSlotMap`) was paired with nine parallel `object_*`
+arrays (kind/offset/inode/readable/writable/listener_state/port/
+transport_slot/transport_generation), all indexed by the same shared-
+object slot -- the exact "globals indexed in lockstep" shape
+`ProcessFdContext` already fixed for per-process descriptor state
+(#264), one struct down in the same file. Replaced with one `SharedObject`
+struct array (`object_records`); all 70 `object_FIELD[index]` accesses
+mechanically rewritten to `object_records[index].field`.
+
+**#306 -- the Makefile depfile drift #305 exposed, fixed at the
+compiler.** `fd_table.tkb`-only changes stopped triggering rebuilds:
+`kernel/kernel/fd_table.tkb` is reachable only transitively via
+`syscall.tkb`'s `use`, and `$(KERNEL_QEMU_MAIN_O)`'s hand-written
+Makefile prerequisite list never named it -- exactly the class of bug
+`lib/use_resolver.ml` (issue #55) was supposed to eliminate ("replacing
+hand-maintained Makefile file lists with a compiler-computed closure"),
+except the resolved closure never actually reached Make. Added
+`--emit-depfile <path>` to `bin/main.ml` (matching the existing
+`--emit-exception-frame-offsets`/`--emit-struct-layout` side-artifact
+convention), writing a gcc `-MMD`/`-MF`-style depfile from `Use_resolver.
+resolve`'s already-computed file list; `-include`d from the Makefile.
+Hit the identical bug class twice more live in the same session, both
+fixed the same way: `$(KERNEL_CRASH_SNAPSHOT_LAYOUT)`'s own prerequisite
+list was missing `exception_evidence.tkb` (the file `CrashSnapshot` is
+actually defined in) while extending it below, and a
+`git grep '$(TAKIBI)' Makefile | grep -v depfile` audit turned up two
+more real (non-single-file, `use`-graph-bearing) targets exercised every
+session -- `$(KERNEL_RPI5_MAIN_O)` and `$(KERNEL_QEMU_MAIN_DEBUG_O)` --
+now depfiled too. `$(KERNEL_RPI5_USER_PAYLOAD_TKB_O)` and the
+`linux_user/%_exe.o` pattern rule were checked and left alone: both
+compile files with zero `use` declarations, so a depfile there would
+carry no information beyond what is already tracked. A follow-up pass
+the same day extracted the depfile-line-building logic out of
+`bin/main.ml`'s inline block into `Use_resolver.depfile_contents`, a
+pure string builder mirroring `resolve`'s own pure-core-vs-thin-I/O-
+wrapper split, with four new Alcotest cases in `test/test_takibi.ml`
+(prior to this, `--emit-depfile` had zero unit coverage, only ad-hoc
+manual verification).
+
+**`CrashSnapshot` gains FD/socket ownership and syscall continuation.**
+Re-reading #294's acceptance criteria closely before considering it
+closeable surfaced a real gap: "a diagnostic snapshot identifies current
+process, parent/child relations, wait reason, address-space identity,
+syscall continuation, and relevant descriptor/socket ownership" --
+`CrashSnapshot` (`kernel/arch/arm64/kernel/exception_evidence.tkb`) had
+the first four but nothing for FD/socket ownership, and was missing
+#302's `wait4_status_ptr`. Added `kernel_process_crash_wait4_status_ptr()`
+(`process.tkb`) and `kernel_fd_table_crash_kind()`/`_object()`
+(`fd_table.tkb`), the same allocation-free, lock-free diagnostic-view
+accessor pattern `process.tkb`'s existing `kernel_process_crash_*()`
+functions already established -- a crash report must not acquire a
+linear owner or lock after a fatal exception. Hit issue #15/#217's
+struct-embedded-array chained-indexing parser gap directly while writing
+this (`crash_snapshot.fd_kind[index]` is a hard `Syntax error`; needed
+the documented `let local = s.field; local[i]` workaround, which per
+SPEC.md's own note also decays the field to an unchecked `*T` rather
+than a bounds-checked `[T; N]` -- harmless here since the loop bound is
+fixed at `PROCESS_FD_MAX`, but the same inherited constraint every other
+`fd_table.tkb` array-field access already lives with). Also updated
+`scripts/kernel_crash_snapshot.gdb`'s `takibi-oops` GDB command and
+`scripts/run_kernel_oops_qemutest.sh`'s UART-report regex for the new
+fields -- the GDB script's named-offset-variable design meant field
+reordering needed no changes there, only new printf lines for the
+genuinely new fields; the UART regex, matching raw printf'd text by
+position, needed an actual edit.
+
+**`kernel/RUNTIME_STATE.md` -- the last acceptance criterion.** New
+document, following `RESOURCE_LIMITS.md`'s established format (issue
+#295): every remaining `kernel/` global grouped by what owns it and why
+it stays global (process/scheduler core, diagnostic/trace infra,
+VM/address-space, FD/socket, network, filesystem, driver/platform
+singletons, test-only), plus explicit writeups of two candidates
+investigated and rejected rather than split -- `net/tcp.tkb`'s
+fault-injection state (load-bearing protocol logic woven through the
+real retransmit/drop state machine, not simple evidence counters) and
+its `conn_*` parallel arrays (not a duplicate of `tcp_connection_store`,
+which holds only linear ownership/locking bookkeeping, the same
+ownership-record-vs-data-record split `process.tkb` uses deliberately
+for `scheduled_process_store`/`scheduled_process_records`). Linked from
+`kernel/README.md`'s "Current limits" section alongside `SYSCALLS.md`/
+`RESOURCE_LIMITS.md`.
+
+**#308 -- a design memo, deliberately not implemented.** #294's
+"transitions ... expose invariant checks" criterion had no general
+mechanism, only one-off test-scenario probe functions
+(`kernel_process_clone_evidence()` and siblings). Investigating what a
+real fix would look like surfaced a better direction than a runtime
+`bool`-returning checker: `process.tkb` already lifts one invariant
+class to the type system (`ScheduledProcessOwner[process]`/
+`ScheduledProcessState[process, state]`, linear view types with a
+phantom state parameter -- you cannot construct a `Blocked` token except
+through a real transition function), but `ProcessRecord`'s own scalar
+fields (`wait_reason`, `wait4_status_ptr`, the `has_parent`/`parent` vs.
+`has_child`/`child` cross-slot pair) ride along outside that discipline
+as plain mutable fields. #308 records two concrete candidates (giving
+the `Blocked` state a `reason` payload instead of a disconnected field;
+a paired linear `ParentChildLink` capability for the harder cross-slot
+symmetry), ties them explicitly to issue #132's own stated "start from
+one real example" acceptance bar (#132 already names the identical
+class of gap: "this private `full` flag agrees with this
+ownership-bearing variant tag"), and states three general limits of
+compile-time verification worth keeping on record: type-level proofs
+cover the program's own control-flow/ownership discipline, not external
+facts (a user pointer's validity stays a runtime `user_range_check`
+regardless); `unsafe` islands (DMA, MMIO, interrupt handlers) sit
+outside any such proof's coverage; and more relational/structural proof
+machinery now increases what #95's deferred separate-compilation
+module-boundary design has to account for later. Explicitly not built
+on #200/#201 (deprioritized per the project's own "Cyclone path"
+positioning). #294 was closed without waiting on #308.
+
+Verified throughout: every sub-issue landed only after
+`kernelcheck-qemu`/`-qemu-debug`/`-oops-qemu`/`-lifecycle-gap-qemu`
+(38/38 views each) and `kernelcheck-rpi5` (38/38 views, real hardware)
+all passed; `make test` closed the session at 1002 Alcotest cases (up
+from 998 before this issue's own compiler-side work).
