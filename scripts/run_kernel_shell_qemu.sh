@@ -10,6 +10,20 @@ EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
 ARTIFACT_DIR="${KERNEL_QEMU_SHELL_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-shell-qemu}"
 SHELL_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 
+# The top-level Makefile normally enables -Oline, which captures a recipe's
+# stdout/stderr until its command exits. This is an intentionally long-lived
+# interactive command, so reconnect it to the invoking terminal before
+# miniterm takes over. Keep measure-only mode pipe-friendly for automated
+# readiness checks.
+if [ "${KERNEL_QEMU_SHELL_MEASURE_ONLY:-0}" != 1 ] &&
+        { [ ! -t 0 ] || [ ! -t 1 ]; }; then
+    if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+        echo "error: kernelsh-qemu requires an interactive terminal" >&2
+        exit 1
+    fi
+    exec </dev/tty >/dev/tty 2>&1
+fi
+
 if [ ! -f "$ELF" ] || [ ! -f "$EXT2_IMAGE" ]; then
     echo "error: kernel build products are missing; run 'make kernelbuild-qemu' first" >&2
     exit 1

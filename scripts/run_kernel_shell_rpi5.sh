@@ -10,6 +10,17 @@ ETH_TEST_SUBNET="${ETH_TEST_SUBNET:-192.168.20}"
 ETH_TEST_MAC="${ETH_TEST_MAC:-02:00:20:00:00:02}"
 ETH_TEST_HOST_IP="${ETH_TEST_HOST_IP:-192.168.20.1}"
 
+# See run_kernel_shell_qemu.sh: Make's normal -Oline setting captures this
+# long-lived recipe's standard streams. The shell must instead attach directly
+# to the invoking terminal so miniterm can display ash and receive keystrokes.
+if { [ ! -t 0 ] || [ ! -t 1 ]; }; then
+    if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+        echo "error: kernelsh-rpi5 requires an interactive terminal" >&2
+        exit 1
+    fi
+    exec </dev/tty >/dev/tty 2>&1
+fi
+
 if ! python3 -c 'import serial' >/dev/null 2>&1; then
     echo "error: pyserial is required; install it with: sudo apt-get install python3-serial" >&2
     exit 1
