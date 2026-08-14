@@ -1,0 +1,198 @@
+// Part of #294 (consolidate kernel runtime state behind explicit owners),
+// deferred out of #303/#304 on purpose (see #307): these twelve
+// syscall.tkb fields are entirely test-driver-orchestrated -- every entry
+// point below is called only from init/test_driver.tkb -- but unlike
+// #303/#304's pure evidence counters, some of them gate real control
+// flow (whether accept4() bounds the test daemon by exiting early; which
+// boot-log line a real UART-block/listener-ready path prints). That is
+// why this state gets its own file with real predicate/mutator functions
+// instead of #303/#304's plain get/record accessors: the actual decision
+// logic moves here too, so kernel/kernel/syscall.tkb's dispatch code only
+// ever calls a named, self-contained function, never touches these
+// fields directly.
+//
+// Current limitations: single-writer, matching kernel/kernel/syscall.tkb's
+// own "NOT SYNCHRONIZED, single-core dispatch only" limitation.
+
+// Test-driver-controlled foreground-server lifecycle. This is process and
+// socket state only: the syscall layer does not identify an application or
+// interpret its wire protocol.
+private let mut syscall_foreground_server_pending: bool;
+private let mut syscall_foreground_server_active: bool;
+private let mut syscall_foreground_server_exit_count_start: usize;
+private let mut syscall_foreground_server_completed_children: usize;
+private let mut syscall_foreground_server_reaped_pages: usize;
+private let mut syscall_connected_fixture_pending: bool;
+// Set only for the persistent terminal demo shell launched (via self-replace
+// exec, see kernel/tests/ext2/init.sh's final line) after the bounded suite
+// has completed. Its direct HTTPd child is a normal daemon even though that
+// shell occupies PID 1, which otherwise identifies the bounded init.sh
+// fixture. Named for the kernel-owned concept it gates -- persistent,
+// unbounded lifecycle vs. the bounded one-shot fixture -- not the payload
+// that happens to run under it.
+private let mut syscall_persistent_shell: bool;
+// Issue #289: lifecycle checkpoints for the persistent-shell scenario, so a
+// kernelcheck-qemu/kernelcheck-rpi5 stall names the last completed boundary
+// instead of a single generic timeout. `_child_pid` is the pending target
+// for the one-shot "child selected" checkpoint (0 = none/consumed); the
+// four checkpoint-printed booleans are one-shot guards, mirroring the
+// existing `syscall_test_evidence_record_read_uart_wait()` return-true-
+// once idiom (kernel/kernel/syscall_test_evidence.tkb). Each checkpoint
+// is its own named function (not inlined) so a QEMU regression can skip one
+// via a GDB breakpoint + `return`, without any dedicated test-only switch.
+private let mut syscall_persistent_shell_child_pid: usize;
+private let mut syscall_persistent_shell_checkpoint_fork_logged: bool;
+private let mut syscall_persistent_shell_checkpoint_selected_logged: bool;
+private let mut syscall_persistent_shell_checkpoint_exec_prepare_logged: bool;
+private let mut syscall_persistent_shell_checkpoint_exec_commit_logged: bool;
+
+// Called from kernel_syscall_daemon_start() (syscall.tkb), which is shared
+// by both the real HTTPd daemon path and this test fixture's own start --
+// every daemon start must clear a previous test fixture's pending/active
+// flags even when this particular daemon is not itself test-driven.
+fn syscall_test_lifecycle_daemon_reset() {
+    syscall_connected_fixture_pending = false;
+    syscall_foreground_server_pending = false;
+    syscall_foreground_server_active = false;
+}
+
+// Called from kernel_syscall_process_configure() (syscall.tkb) alongside
+// its other real per-boot resets.
+fn syscall_test_lifecycle_persistent_shell_clear() {
+    syscall_persistent_shell = false;
+}
+
+fn kernel_syscall_foreground_server_start() {
+    kernel_syscall_daemon_start();
+    syscall_foreground_server_pending = true;
+    syscall_foreground_server_active = true;
+    syscall_foreground_server_exit_count_start =
+        kernel_process_child_exit_count();
+    syscall_foreground_server_completed_children = 0;
+    syscall_foreground_server_reaped_pages = 0;
+}
+
+fn kernel_syscall_foreground_server_children() -> usize {
+    return syscall_foreground_server_completed_children;
+}
+
+fn kernel_syscall_foreground_server_reaped_pages() -> usize {
+    return syscall_foreground_server_reaped_pages;
+}
+
+// GitHub issue #289 (original comment, kernel/kernel/syscall.tkb): reaped
+// page count only ever grows within one foreground-server run, so a
+// smaller observation is stale rather than a real decrease.
+fn syscall_test_lifecycle_foreground_server_note_reaped_pages(
+        reaped_pages: usize) {
+    if (syscall_foreground_server_active &&
+            reaped_pages > syscall_foreground_server_reaped_pages) {
+        syscall_foreground_server_reaped_pages = reaped_pages;
+    }
+}
+
+// Encapsulates accept4()'s "the test driver may bound its foreground
+// server after two completed child sessions" check (moved from
+// syscall.tkb's own accept4 handler): true means the caller should exit
+// the current process now instead of proceeding with the real accept.
+fn syscall_test_lifecycle_foreground_server_should_bound(
+        current_child_exit_count: usize) -> bool {
+    if (syscall_foreground_server_active &&
+            current_child_exit_count >=
+                syscall_foreground_server_exit_count_start + 2) {
+        syscall_foreground_server_completed_children =
+            current_child_exit_count -
+                syscall_foreground_server_exit_count_start;
+        return true;
+    }
+    return false;
+}
+
+enum ListenerReadyLabel: u8 { ForegroundServer; ConnectedFixture; Persistent; }
+
+// Encapsulates listen()'s "which one-shot boot-log line applies" check
+// (moved from syscall.tkb's own listen() handler): checks and consumes
+// whichever pending flag matches, in the same priority order the original
+// inline if/else-if/else chain used.
+fn syscall_test_lifecycle_listener_ready_label() -> ListenerReadyLabel {
+    if (syscall_foreground_server_pending) {
+        syscall_foreground_server_pending = false;
+        return ListenerReadyLabel::ForegroundServer;
+    }
+    if (syscall_connected_fixture_pending) {
+        syscall_connected_fixture_pending = false;
+        return ListenerReadyLabel::ConnectedFixture;
+    }
+    return ListenerReadyLabel::Persistent;
+}
+
+fn kernel_syscall_connected_fixture_start() {
+    syscall_connected_fixture_pending = true;
+}
+
+fn kernel_syscall_persistent_shell_start() {
+    syscall_persistent_shell = true;
+}
+
+fn kernel_syscall_persistent_shell_active() -> bool {
+    return syscall_persistent_shell;
+}
+
+// noinline (all four checkpoints below): each is a real, addressable call
+// site with a durable debugger-facing frame contract. The lifecycle-gap
+// regression deliberately uses exec-commit's own one-shot guard instead, so
+// the real exec-commit logic remains untouched while GDB still has DWARF
+// source and type information from kernel-debug.elf.
+noinline fn kernel_syscall_persistent_shell_checkpoint_fork(pid: usize) {
+    if (syscall_persistent_shell_checkpoint_fork_logged) { return; }
+    syscall_persistent_shell_checkpoint_fork_logged = true;
+    syscall_persistent_shell_child_pid = pid;
+    kernel_boot_log("persistent shell: fork child pid=");
+    uart_put_udec(pid);
+    kernel_boot_log("\n");
+}
+
+// Self-disarming: fires once, the first time the forked child (identified
+// only by pid -- no generation check needed, since the pending target is
+// cleared on the very first match) is dispatched into a syscall of its own,
+// proving the scheduler actually resumed it rather than merely creating it.
+noinline fn kernel_syscall_persistent_shell_checkpoint_selected() {
+    if (syscall_persistent_shell_child_pid == 0 ||
+        syscall_persistent_shell_checkpoint_selected_logged) {
+        return;
+    }
+    if (kernel_process_current_pid() != syscall_persistent_shell_child_pid) {
+        return;
+    }
+    syscall_persistent_shell_checkpoint_selected_logged = true;
+    kernel_boot_log("persistent shell: child selected pid=");
+    uart_put_udec(syscall_persistent_shell_child_pid);
+    kernel_boot_log("\n");
+}
+
+// Both exec checkpoints below are scoped to the one tracked target pid (set
+// by the fork checkpoint above), not merely to the persistent-shell scenario
+// being active -- the interactive ash's own launch (PID 1 forking+execing
+// it) and any later applet it runs would otherwise also match, well before
+// or after the boundary this checkpoint actually means.
+noinline fn kernel_syscall_persistent_shell_checkpoint_exec_prepare(pid: usize) {
+    if (pid != syscall_persistent_shell_child_pid ||
+        syscall_persistent_shell_checkpoint_exec_prepare_logged) {
+        return;
+    }
+    syscall_persistent_shell_checkpoint_exec_prepare_logged = true;
+    kernel_boot_log("persistent shell: exec prepare pid=");
+    uart_put_udec(pid);
+    kernel_boot_log("\n");
+}
+
+noinline fn kernel_syscall_persistent_shell_checkpoint_exec_commit(pid: usize) {
+    if (pid != syscall_persistent_shell_child_pid ||
+        syscall_persistent_shell_checkpoint_exec_commit_logged) {
+        return;
+    }
+    syscall_persistent_shell_checkpoint_exec_commit_logged = true;
+    kernel_boot_log("persistent shell: exec commit pid=");
+    uart_put_udec(pid);
+    kernel_boot_log("\n");
+}

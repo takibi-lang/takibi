@@ -7,6 +7,7 @@ use "kernel/net/socket_capability.tkb";
 use "kernel/net/tcp.tkb";
 use "kernel/kernel/fd_table.tkb";
 use "kernel/kernel/syscall_test_evidence.tkb";
+use "kernel/kernel/syscall_test_lifecycle.tkb";
 
 // Current limitations (2026-08-13, issue #295). Keep this list current as
 // call sites change; a limitation that goes stale here is worse than
@@ -166,37 +167,6 @@ struct CloneFileState {
 private let mut clone_file_state: [CloneFileState; PROCESS_CONTEXT_MAX];
 enum UartBlockDelivery: u8 { Scalar; Read; }
 private let mut syscall_uart_block_delivery: [UartBlockDelivery; PROCESS_CONTEXT_MAX];
-private let mut syscall_connected_fixture_pending: bool;
-// Test-driver-controlled foreground-server lifecycle. This is process and
-// socket state only: the syscall layer does not identify an application or
-// interpret its wire protocol.
-private let mut syscall_foreground_server_pending: bool;
-private let mut syscall_foreground_server_active: bool;
-private let mut syscall_foreground_server_exit_count_start: usize;
-private let mut syscall_foreground_server_completed_children: usize;
-private let mut syscall_foreground_server_reaped_pages: usize;
-// Set only for the persistent terminal demo shell launched (via self-replace
-// exec, see kernel/tests/ext2/init.sh's final line) after the bounded suite
-// has completed. Its direct HTTPd child is a normal daemon even though that
-// shell occupies PID 1, which otherwise identifies the bounded init.sh
-// fixture. Named for the kernel-owned concept it gates -- persistent,
-// unbounded lifecycle vs. the bounded one-shot fixture -- not the payload
-// that happens to run under it.
-private let mut syscall_persistent_shell: bool;
-// Issue #289: lifecycle checkpoints for the persistent-shell scenario, so a
-// kernelcheck-qemu/kernelcheck-rpi5 stall names the last completed boundary
-// instead of a single generic timeout. `_child_pid` is the pending target
-// for the one-shot "child selected" checkpoint (0 = none/consumed); the
-// four checkpoint-printed booleans are one-shot guards, mirroring the
-// existing `syscall_test_evidence_record_read_uart_wait()` return-true-
-// once idiom (kernel/kernel/syscall_test_evidence.tkb). Each checkpoint
-// is its own named function (not inlined) so a QEMU regression can skip one
-// via a GDB breakpoint + `return`, without any dedicated test-only switch.
-private let mut syscall_persistent_shell_child_pid: usize;
-private let mut syscall_persistent_shell_checkpoint_fork_logged: bool;
-private let mut syscall_persistent_shell_checkpoint_selected_logged: bool;
-private let mut syscall_persistent_shell_checkpoint_exec_prepare_logged: bool;
-private let mut syscall_persistent_shell_checkpoint_exec_commit_logged: bool;
 private let mut syscall_exec_pending: bool;
 private let mut syscall_exec_argc: usize;
 private let mut syscall_exec_argv: [u8; 512];
@@ -218,94 +188,7 @@ fn kernel_syscall_daemon_start() {
         syscall_inetd_response_length[connection_index] = 0;
     }
     syscall_inetd_mode = false;
-    syscall_connected_fixture_pending = false;
-    syscall_foreground_server_pending = false;
-    syscall_foreground_server_active = false;
-}
-
-fn kernel_syscall_foreground_server_start() {
-    kernel_syscall_daemon_start();
-    syscall_foreground_server_pending = true;
-    syscall_foreground_server_active = true;
-    syscall_foreground_server_exit_count_start =
-        kernel_process_child_exit_count();
-    syscall_foreground_server_completed_children = 0;
-    syscall_foreground_server_reaped_pages = 0;
-}
-
-fn kernel_syscall_persistent_shell_start() {
-    syscall_persistent_shell = true;
-}
-
-fn kernel_syscall_persistent_shell_active() -> bool {
-    return syscall_persistent_shell;
-}
-
-// noinline (all four checkpoints below): each is a real, addressable call
-// site with a durable debugger-facing frame contract. The lifecycle-gap
-// regression deliberately uses exec-commit's own one-shot guard instead, so
-// the real exec-commit logic remains untouched while GDB still has DWARF
-// source and type information from kernel-debug.elf.
-noinline fn kernel_syscall_persistent_shell_checkpoint_fork(pid: usize) {
-    if (syscall_persistent_shell_checkpoint_fork_logged) { return; }
-    syscall_persistent_shell_checkpoint_fork_logged = true;
-    syscall_persistent_shell_child_pid = pid;
-    kernel_boot_log("persistent shell: fork child pid=");
-    uart_put_udec(pid);
-    kernel_boot_log("\n");
-}
-
-// Self-disarming: fires once, the first time the forked child (identified
-// only by pid -- no generation check needed, since the pending target is
-// cleared on the very first match) is dispatched into a syscall of its own,
-// proving the scheduler actually resumed it rather than merely creating it.
-noinline fn kernel_syscall_persistent_shell_checkpoint_selected() {
-    if (syscall_persistent_shell_child_pid == 0 ||
-        syscall_persistent_shell_checkpoint_selected_logged) {
-        return;
-    }
-    if (kernel_process_current_pid() != syscall_persistent_shell_child_pid) {
-        return;
-    }
-    syscall_persistent_shell_checkpoint_selected_logged = true;
-    kernel_boot_log("persistent shell: child selected pid=");
-    uart_put_udec(syscall_persistent_shell_child_pid);
-    kernel_boot_log("\n");
-}
-
-// Both exec checkpoints below are scoped to the one tracked target pid (set
-// by the fork checkpoint above), not merely to the persistent-shell scenario
-// being active -- the interactive ash's own launch (PID 1 forking+execing
-// it) and any later applet it runs would otherwise also match, well before
-// or after the boundary this checkpoint actually means.
-noinline fn kernel_syscall_persistent_shell_checkpoint_exec_prepare(pid: usize) {
-    if (pid != syscall_persistent_shell_child_pid ||
-        syscall_persistent_shell_checkpoint_exec_prepare_logged) {
-        return;
-    }
-    syscall_persistent_shell_checkpoint_exec_prepare_logged = true;
-    kernel_boot_log("persistent shell: exec prepare pid=");
-    uart_put_udec(pid);
-    kernel_boot_log("\n");
-}
-
-noinline fn kernel_syscall_persistent_shell_checkpoint_exec_commit(pid: usize) {
-    if (pid != syscall_persistent_shell_child_pid ||
-        syscall_persistent_shell_checkpoint_exec_commit_logged) {
-        return;
-    }
-    syscall_persistent_shell_checkpoint_exec_commit_logged = true;
-    kernel_boot_log("persistent shell: exec commit pid=");
-    uart_put_udec(pid);
-    kernel_boot_log("\n");
-}
-
-fn kernel_syscall_foreground_server_children() -> usize {
-    return syscall_foreground_server_completed_children;
-}
-
-fn kernel_syscall_foreground_server_reaped_pages() -> usize {
-    return syscall_foreground_server_reaped_pages;
+    syscall_test_lifecycle_daemon_reset();
 }
 
 fn kernel_syscall_exec_pending() -> bool { return syscall_exec_pending; }
@@ -330,10 +213,6 @@ fn kernel_syscall_exec_path_matches(name: []u8) -> bool !{unsafe} {
         index = index + 1;
     }
     return true;
-}
-
-fn kernel_syscall_connected_fixture_start() {
-    syscall_connected_fixture_pending = true;
 }
 
 must_use variant KernelFdReapResult { Failed; Reaped; }
@@ -495,7 +374,7 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_test_evidence_reset_read_uart_waits();
     syscall_exec_pending = false;
     syscall_exec_argc = 0;
-    syscall_persistent_shell = false;
+    syscall_test_lifecycle_persistent_shell_clear();
     for process_slot: usize in 0..<PROCESS_CONTEXT_MAX {
         syscall_uart_block_delivery[process_slot] = UartBlockDelivery::Scalar;
     }
@@ -1177,7 +1056,7 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
             if (kernel_uart_rx_pending() == false) {
                 enable_irq();
                 if (syscall_test_evidence_record_read_uart_wait()) {
-                    if (syscall_persistent_shell) {
+                    if (kernel_syscall_persistent_shell_active()) {
                         kernel_boot_log(
                             "\npersistent shell: uart blocked\n");
                     } else {
@@ -1276,12 +1155,8 @@ fn kernel_syscall_exit_current_process(status: usize) -> SyscallAction {
                 ProcessCloneVmReapResult::Reaped => { }
             }
         }
-        if (syscall_foreground_server_active) {
-            let reaped_pages: usize = process_image_clone_vm_reaped_pages();
-            if (reaped_pages > syscall_foreground_server_reaped_pages) {
-                syscall_foreground_server_reaped_pages = reaped_pages;
-            }
-        }
+        syscall_test_lifecycle_foreground_server_note_reaped_pages(
+            process_image_clone_vm_reaped_pages());
         return SyscallAction::CloneParent(kernel_process_child_exit(status));
     }
     return SyscallAction::Exit(status);
@@ -2477,14 +2352,16 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 listen_fd, UnifiedListenerState::Listening) == false) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
-        if (syscall_foreground_server_pending) {
-            syscall_foreground_server_pending = false;
-            kernel_boot_log("foreground server: listener ready port=8080\n");
-        } else if (syscall_connected_fixture_pending) {
-            syscall_connected_fixture_pending = false;
-            kernel_boot_log("linux socket: listener ready port=8080\n");
-        } else {
-            kernel_boot_log("persistent server: listener ready port=8080\n");
+        match syscall_test_lifecycle_listener_ready_label() {
+            ListenerReadyLabel::ForegroundServer => {
+                kernel_boot_log("foreground server: listener ready port=8080\n");
+            }
+            ListenerReadyLabel::ConnectedFixture => {
+                kernel_boot_log("linux socket: listener ready port=8080\n");
+            }
+            ListenerReadyLabel::Persistent => {
+                kernel_boot_log("persistent server: listener ready port=8080\n");
+            }
         }
         return SyscallAction::Resume(0);
     }
@@ -2495,12 +2372,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // new connection owner and returning its allocated descriptor.
         // The test driver may bound its foreground server after two
         // completed child sessions so the one-boot suite can continue.
-        if (syscall_foreground_server_active &&
-            kernel_process_child_exit_count() >=
-            syscall_foreground_server_exit_count_start + 2) {
-            syscall_foreground_server_completed_children =
-                kernel_process_child_exit_count() -
-                syscall_foreground_server_exit_count_start;
+        if (syscall_test_lifecycle_foreground_server_should_bound(
+                kernel_process_child_exit_count())) {
             return kernel_syscall_exit_current_process(0);
         }
         syscall_test_evidence_record_accept();
