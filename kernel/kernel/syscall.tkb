@@ -266,13 +266,9 @@ fn kernel_syscall_persistent_shell_active() -> bool {
 // addressable call site -- a future GDB negative-path regression breaking
 // on one to skip past it with `return` is exactly the scenario SPEC.md's
 // `noinline` entry describes. kernelcheck-lifecycle-gap-qemu does not
-// currently do that itself (it pokes exec-commit's own one-shot guard
-// variable directly instead, at an earlier, already-stable breakpoint --
-// see that script's own comments); GDB's `return` needs real DWARF call
-// frame info to unwind reliably here, which needs a -g kernel build this
-// repo does not have working yet (a real compiler bug was found and fixed
-// on the way to it, but a second, deeper one remains -- see
-// kernelbuild-qemu-debug's own Makefile comment and HISTORY.md).
+// currently uses that function's own one-shot guard instead, so the real
+// exec-commit logic remains untouched while GDB still has DWARF source and
+// type information from kernel-debug.elf.
 noinline fn kernel_syscall_persistent_shell_checkpoint_fork(pid: usize) {
     if (syscall_persistent_shell_checkpoint_fork_logged) { return; }
     syscall_persistent_shell_checkpoint_fork_logged = true;

@@ -613,10 +613,9 @@ kernelcheck-oops-qemu: kernelbuild-qemu $(KERNEL_CRASH_SNAPSHOT_LAYOUT)
 ## checkpoint's own one-shot guard so its print is skipped while the real
 ## exec-commit logic runs untouched, proving the interactive-HTTPd harness's
 ## own last-completed/next-expected diagnosis names the right gap -- see
-## scripts/run_kernel_qemutest_lifecycle_gap.sh for the full rationale.
-## Deliberately still on the plain (non-debug) ELF: see kernelbuild-qemu-debug's
-## own comment for why that path isn't ready yet.
-kernelcheck-lifecycle-gap-qemu: kernelbuild-qemu
+## scripts/run_kernel_qemutest_lifecycle_gap.sh for the full rationale. It
+## uses the DWARF-enabled ELF so GDB has Takibi source and type information.
+kernelcheck-lifecycle-gap-qemu: kernelbuild-qemu-debug
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_qemutest_lifecycle_gap.sh
 
 ## kernelsh-qemu: boot the standalone kernel, attach the current terminal to

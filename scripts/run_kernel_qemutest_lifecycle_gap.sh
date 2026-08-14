@@ -74,7 +74,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
+ELF="$REPO_ROOT/kernel/build/qemu/kernel-debug.elf"
 COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
 ARTIFACT_DIR="${KERNEL_QEMU_LIFECYCLE_GAP_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-lifecycle-gap-qemu}"
@@ -104,7 +104,7 @@ if ! flock -n 9; then
     exit 1
 fi
 if [ ! -f "$ELF" ]; then
-    echo "error: kernel ELF not found: $ELF (run 'make kernelbuild-qemu' first)" >&2
+    echo "error: kernel ELF not found: $ELF (run 'make kernelbuild-qemu-debug' first)" >&2
     exit 1
 fi
 if ! command -v gdb-multiarch >/dev/null 2>&1; then
@@ -112,7 +112,7 @@ if ! command -v gdb-multiarch >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "[kernel/qemu lifecycle-gap] booting kernel.elf under QEMU+GDB"
+echo "[kernel/qemu lifecycle-gap] booting kernel-debug.elf under QEMU+GDB"
 qemu-system-aarch64 \
     -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
     -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=on" \
