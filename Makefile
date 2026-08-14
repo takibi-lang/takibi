@@ -1,9 +1,11 @@
 # -- Configuration ------------------------------------------------------------
 # Parallel by default, overridable per-invocation: `make -j1 kernelcheck`
 # forces serial execution back, e.g. when a build error needs to be read one
-# recipe at a time. `-Oline` keeps independent long-running lanes visibly
-# streaming while making each completed line atomic at the terminal. `-Otarget`
-# remains unsuitable here: it hides all progress until a long recipe finishes.
+# recipe at a time. `-Oline` keeps completed recipe lines atomic at the
+# terminal; interactive recipes must reconnect themselves to /dev/tty because
+# their long-lived output is otherwise captured until the recipe exits.
+# `-Otarget` remains unsuitable here: it hides all progress until a long
+# recipe finishes.
 ifeq ($(MAKELEVEL),0)
 MAKEFLAGS += -j$(shell nproc)
 endif
