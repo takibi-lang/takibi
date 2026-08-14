@@ -2,6 +2,7 @@ use "kernel/mm/page.tkb";
 use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
 use "kernel/lib/growable_pool.tkb";
+use "kernel/kernel/process_test_evidence.tkb";
 // A process slot remains the temporary address-space key, but process.tkb
 // owns no table details. scheduled_process_alloc/reap are the lifecycle
 // choke points for kernel/mm/address_space.tkb's backing-page and ASID
@@ -749,30 +750,19 @@ fn scheduled_process_table_probe() -> bool {
 // per-slot instead of globally.
 private let mut execution_current_handle: ProcessHandle;
 private let mut execution_current_live: bool;
-private let mut execution_clone_calls: usize;
-private let mut execution_child_exit_count: usize;
-// The scheduler fixture's child deliberately exits 42. Record that fact,
-// rather than treating the first non-zero status in a boot-wide window as a
-// proxy for it: ordinary init children may legitimately fail too (BusyBox od
-// reaches the intentional stdin EBADF case), and their launch order is boot
-// policy rather than scheduler evidence.
-private let mut execution_exit_42_seen: bool;
 // GitHub issue #264 first stage keeps the #248 wait4 result fields and
 // #245 exec-image flag in the same ProcessRecord as their slot's state
 // and links. They remain indexed by the waiting/current process exactly
 // as before; only their storage layout changes.
 private let mut execution_reschedule_pending: bool;
-private let mut execution_timer_switches: usize;
-private let mut execution_deferred_switches: usize;
 private let mut execution_scheduler_enabled: bool;
-private let mut execution_deferred_requests: usize;
-private let mut execution_uart_blocks: usize;
-private let mut execution_uart_wakes: usize;
-private let mut execution_uart_parent_progress: usize;
-// Evidence is boot-scoped, unlike the per-workload counters above. The final
-// interactive shell starts after another execution_reset(), but must not make
-// the same one-time integration marker appear twice in a shared UART capture.
-private let mut execution_uart_block_logged: bool;
+// GitHub issue #303: the clone/exit/UART/scheduling *counters* that used
+// to live here as sibling execution_* globals moved to
+// kernel/kernel/process_test_evidence.tkb -- unlike
+// execution_reschedule_pending/execution_scheduler_enabled just above,
+// nothing in this file's real scheduling logic ever reads them back; only
+// the kernel_process_*_evidence() predicates below and syscall.tkb's
+// test-driver-bounded foreground-server lifecycle do.
 // Probe-only stand-ins for the two saved exception frames.  The real UART
 // wake path writes x0 into the blocked child's frame, so using valid fixed
 // storage here proves that path without touching a raw numeric address.
@@ -994,15 +984,7 @@ fn kernel_process_execution_reset() {
     execution_reschedule_pending = false;
     scheduled_process_table_clear();
     execution_current_live = false;
-    execution_clone_calls = 0;
-    execution_child_exit_count = 0;
-    execution_exit_42_seen = false;
-    execution_timer_switches = 0;
-    execution_deferred_switches = 0;
-    execution_deferred_requests = 0;
-    execution_uart_blocks = 0;
-    execution_uart_wakes = 0;
-    execution_uart_parent_progress = 0;
+    process_test_evidence_reset();
     kernel_process_trace_enabled = kernel_process_trace_boot_enabled;
     kernel_crash_trace_next = 0;
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
@@ -1031,7 +1013,7 @@ fn kernel_process_execution_reset() {
 fn kernel_process_request_reschedule() {
     if (execution_scheduler_enabled) {
         execution_reschedule_pending = true;
-        execution_deferred_requests = execution_deferred_requests + 1;
+        process_test_evidence_record_deferred_request();
     }
 }
 
@@ -1154,7 +1136,7 @@ fn kernel_process_timer_schedule(current_sp: usize) -> usize !{interrupt} {
     if (kernel_process_current_has_relative() == false) { return current_sp; }
     let next_sp: usize = kernel_process_schedule(current_sp);
     if (next_sp != current_sp) {
-        execution_timer_switches = execution_timer_switches + 1;
+        process_test_evidence_record_timer_switch();
     }
     return next_sp;
 }
@@ -1166,7 +1148,7 @@ fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {
     if (kernel_process_current_has_relative() == false) { return current_sp; }
     let next_sp: usize = kernel_process_schedule(current_sp);
     if (next_sp != current_sp) {
-        execution_deferred_switches = execution_deferred_switches + 1;
+        process_test_evidence_record_deferred_switch();
     }
     return next_sp;
 }
@@ -1212,9 +1194,7 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
             return 0;
         }
         execution_current_handle = child;
-        execution_uart_blocks = execution_uart_blocks + 1;
-        if (execution_uart_block_logged == false) {
-            execution_uart_block_logged = true;
+        if (process_test_evidence_record_uart_block()) {
             kernel_boot_log("uart rx: scheduler child blocked\n");
         }
         process_image_activate_root(child.pool_index);
@@ -1253,9 +1233,7 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
         return 0;
     }
     execution_current_handle = parent;
-    execution_uart_blocks = execution_uart_blocks + 1;
-    if (execution_uart_block_logged == false) {
-        execution_uart_block_logged = true;
+    if (process_test_evidence_record_uart_block()) {
         kernel_boot_log("uart rx: scheduler child blocked\n");
     }
     process_image_activate_root(parent.pool_index);
@@ -1380,7 +1358,7 @@ fn kernel_process_uart_wake(value: usize)
                                         execution_current_handle, value);
         }
     }
-    execution_uart_wakes = execution_uart_wakes + 1;
+    process_test_evidence_record_uart_wake();
     if (retry_read) { return ProcessUartWakeResult::RetryRead; }
     return ProcessUartWakeResult::Consumed;
 }
@@ -1409,14 +1387,15 @@ fn kernel_process_uart_record_parent_progress()
             ProcessWaitReason::UartRx) {
         return ProcessUartProgressResult::Invalid;
     }
-    execution_uart_parent_progress = execution_uart_parent_progress + 1;
+    process_test_evidence_record_uart_parent_progress();
     return ProcessUartProgressResult::Recorded;
 }
 
 fn kernel_process_uart_block_evidence() -> bool {
-    return execution_uart_blocks != 0 &&
-           execution_uart_wakes == execution_uart_blocks &&
-           execution_uart_parent_progress == 1;
+    return process_test_evidence_uart_blocks() != 0 &&
+           process_test_evidence_uart_wakes() ==
+               process_test_evidence_uart_blocks() &&
+           process_test_evidence_uart_parent_progress() == 1;
 }
 
 // #288's directed state-pair regression. It exercises the actual UART block
@@ -1427,7 +1406,7 @@ fn kernel_process_uart_block_evidence() -> bool {
 fn kernel_process_trace_block_wake_probe() -> bool {
     kernel_process_execution_reset();
     kernel_process_trace_enable();
-    execution_uart_block_logged = true;
+    process_test_evidence_set_uart_block_logged(true);
     let parent_frame: usize =
         (kernel_process_trace_probe_parent_frame as *usize) as usize;
     let child_frame: usize =
@@ -1475,7 +1454,7 @@ fn kernel_process_trace_block_wake_probe() -> bool {
     }
     kernel_process_execution_reset();
     kernel_process_trace_disable();
-    execution_uart_block_logged = false;
+    process_test_evidence_set_uart_block_logged(false);
     return setup_ok && saw_block && saw_wake;
 }
 
@@ -1527,8 +1506,9 @@ fn kernel_process_scheduler_probe() -> bool {
         }
     }
     let ok: bool = parent_sp == 0x1000 && child_sp == 0x2000 &&
-        deferred_parent_sp == 0x1000 && execution_timer_switches == 2 &&
-        execution_deferred_switches == 1 &&
+        deferred_parent_sp == 0x1000 &&
+        process_test_evidence_timer_switches() == 2 &&
+        process_test_evidence_deferred_switches() == 1 &&
         kernel_process_current_pid() == root_pid && saw_fork && saw_schedule &&
         saw_resume && saw_activate;
     kernel_process_scheduler_disable();
@@ -1637,7 +1617,7 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             // `kernel_process_current_pid() != 1`, which is always true here
             // regardless of who forked).
             execution_current_handle = child;
-            execution_clone_calls = execution_clone_calls + 1;
+            process_test_evidence_record_clone();
             kernel_process_trace_record(
                 ProcessTraceFork, child.pool_index + 1, child.generation,
                 parent.pool_index + 1, parent.generation, 1, 0,
@@ -1697,9 +1677,7 @@ fn kernel_process_clone_rollback() {
     scheduled_process_records[child.pool_index].has_parent = false;
     execution_current_handle = parent;
     process_image_activate_root(parent.pool_index);
-    if (execution_clone_calls > 0) {
-        execution_clone_calls = execution_clone_calls - 1;
-    }
+    process_test_evidence_release_clone();
 }
 
 // GitHub issue #245: execution_current_handle already names the child
@@ -1861,8 +1839,7 @@ fn kernel_process_current_child_pid() -> usize {
 }
 
 fn kernel_process_child_exit(status: usize) -> usize {
-    execution_child_exit_count = execution_child_exit_count + 1;
-    if (status == 42) { execution_exit_42_seen = true; }
+    process_test_evidence_record_child_exit(status);
     // GitHub issue #209: a child exit used to close the scheduling gate
     // here (kernel_process_scheduler_disable()), a leftover of the
     // two-process model where "a child exited" really did mean "nothing
@@ -2079,14 +2056,14 @@ fn kernel_process_exec_clear_for_pid(pid: usize) {
 // assertion is stated directly in terms of the property it always meant:
 // every process this fixture created is gone again.
 fn kernel_process_scheduler_acceptance_evidence() -> bool {
-    return execution_timer_switches >= 2 &&
-           execution_deferred_requests != 0 &&
-           execution_exit_42_seen &&
+    return process_test_evidence_timer_switches() >= 2 &&
+           process_test_evidence_deferred_requests() != 0 &&
+           process_test_evidence_exit_42_seen() &&
            kernel_process_schedulable_count() <= 1;
 }
 
 fn kernel_process_child_exit_count() -> usize {
-    return execution_child_exit_count;
+    return process_test_evidence_child_exit_count();
 }
 
 fn kernel_process_last_child_pid() -> usize {
@@ -2095,8 +2072,9 @@ fn kernel_process_last_child_pid() -> usize {
         .last_child_pid;
 }
 
-// GitHub issue #245: execution_clone_calls is a single counter shared by
-// every clone() since the last kernel_process_execution_reset(), not just
+// GitHub issue #245: process_test_evidence's clone_calls is a single
+// counter shared by every clone() since the last
+// kernel_process_execution_reset(), not just
 // the one this fixture cares about -- when this process itself was
 // reached via a fork+exec chain (ash forking an external command that
 // then execve()s), that outer fork already incremented it once, so
@@ -2104,8 +2082,8 @@ fn kernel_process_last_child_pid() -> usize {
 // (a clone genuinely happened) without assuming how many preceded it.
 fn kernel_process_clone_evidence() -> bool {
     return execution_current_live &&
-           execution_clone_calls >= 1 &&
-           execution_exit_42_seen &&
+           process_test_evidence_clone_calls() >= 1 &&
+           process_test_evidence_exit_42_seen() &&
            scheduled_process_records[execution_current_handle.pool_index]
                .has_child ==
                false &&

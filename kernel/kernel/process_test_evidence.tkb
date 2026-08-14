@@ -1,0 +1,149 @@
+// GitHub issue #303, part of #294 (consolidate kernel runtime state behind
+// explicit owners). Split out of kernel/kernel/process.tkb's own
+// execution_* globals: these ten counters/flags are read only by
+// kernel_process_*_evidence()/kernel_process_*_acceptance_evidence()
+// predicate functions (process.tkb) and by the test-driver-bounded
+// foreground-server lifecycle (kernel/kernel/syscall.tkb's
+// kernel_syscall_foreground_server_start()) -- never by real
+// scheduling/dispatch decisions. That is what distinguishes this file's
+// state from process.tkb's execution_scheduler_enabled/
+// execution_reschedule_pending, which stay there because
+// kernel_process_schedule()/kernel_process_syscall_return_schedule()
+// actually branch on them.
+//
+// Current limitations: single-writer, boot-scoped, matching the rest of
+// process.tkb's execution_* state before this split -- reset only from
+// kernel_process_execution_reset() via process_test_evidence_reset(),
+// never independently. process_test_evidence_record_timer_switch() is
+// called from kernel_process_timer_schedule(), a `!{interrupt}` context;
+// this file has no locking of its own, safe only because there is one
+// core running the scheduler (see process.tkb's own "Current
+// limitations" header).
+
+struct ProcessTestEvidence {
+    clone_calls: usize;
+    child_exit_count: usize;
+    exit_42_seen: bool;
+    uart_blocks: usize;
+    uart_wakes: usize;
+    uart_parent_progress: usize;
+    // Evidence is boot-scoped, unlike the per-workload counters above. The
+    // final interactive shell starts after another process_test_evidence_
+    // reset(), but must not make the same one-time integration marker
+    // appear twice in a shared UART capture -- see
+    // process_test_evidence_record_uart_block()'s own comment.
+    uart_block_logged: bool;
+    timer_switches: usize;
+    deferred_switches: usize;
+    deferred_requests: usize;
+}
+
+private let mut process_test_evidence: ProcessTestEvidence;
+
+fn process_test_evidence_reset() {
+    process_test_evidence.clone_calls = 0;
+    process_test_evidence.child_exit_count = 0;
+    process_test_evidence.exit_42_seen = false;
+    process_test_evidence.timer_switches = 0;
+    process_test_evidence.deferred_switches = 0;
+    process_test_evidence.deferred_requests = 0;
+    process_test_evidence.uart_blocks = 0;
+    process_test_evidence.uart_wakes = 0;
+    process_test_evidence.uart_parent_progress = 0;
+    // uart_block_logged intentionally NOT reset here, matching the
+    // original execution_uart_block_logged behavior.
+}
+
+fn process_test_evidence_record_clone() {
+    process_test_evidence.clone_calls = process_test_evidence.clone_calls + 1;
+}
+
+fn process_test_evidence_release_clone() {
+    if (process_test_evidence.clone_calls > 0) {
+        process_test_evidence.clone_calls =
+            process_test_evidence.clone_calls - 1;
+    }
+}
+
+fn process_test_evidence_clone_calls() -> usize {
+    return process_test_evidence.clone_calls;
+}
+
+fn process_test_evidence_record_child_exit(status: usize) {
+    process_test_evidence.child_exit_count =
+        process_test_evidence.child_exit_count + 1;
+    if (status == 42) { process_test_evidence.exit_42_seen = true; }
+}
+
+fn process_test_evidence_child_exit_count() -> usize {
+    return process_test_evidence.child_exit_count;
+}
+
+fn process_test_evidence_exit_42_seen() -> bool {
+    return process_test_evidence.exit_42_seen;
+}
+
+// Increments the block counter and returns true only the first time since
+// the last process_test_evidence_set_uart_block_logged(false) -- callers
+// use that to gate a one-time boot log line without duplicating the
+// increment-then-check-then-set sequence at each call site.
+fn process_test_evidence_record_uart_block() -> bool {
+    process_test_evidence.uart_blocks = process_test_evidence.uart_blocks + 1;
+    if (process_test_evidence.uart_block_logged == false) {
+        process_test_evidence.uart_block_logged = true;
+        return true;
+    }
+    return false;
+}
+
+fn process_test_evidence_set_uart_block_logged(value: bool) {
+    process_test_evidence.uart_block_logged = value;
+}
+
+fn process_test_evidence_uart_blocks() -> usize {
+    return process_test_evidence.uart_blocks;
+}
+
+fn process_test_evidence_record_uart_wake() {
+    process_test_evidence.uart_wakes = process_test_evidence.uart_wakes + 1;
+}
+
+fn process_test_evidence_uart_wakes() -> usize {
+    return process_test_evidence.uart_wakes;
+}
+
+fn process_test_evidence_record_uart_parent_progress() {
+    process_test_evidence.uart_parent_progress =
+        process_test_evidence.uart_parent_progress + 1;
+}
+
+fn process_test_evidence_uart_parent_progress() -> usize {
+    return process_test_evidence.uart_parent_progress;
+}
+
+fn process_test_evidence_record_timer_switch() {
+    process_test_evidence.timer_switches =
+        process_test_evidence.timer_switches + 1;
+}
+
+fn process_test_evidence_timer_switches() -> usize {
+    return process_test_evidence.timer_switches;
+}
+
+fn process_test_evidence_record_deferred_switch() {
+    process_test_evidence.deferred_switches =
+        process_test_evidence.deferred_switches + 1;
+}
+
+fn process_test_evidence_deferred_switches() -> usize {
+    return process_test_evidence.deferred_switches;
+}
+
+fn process_test_evidence_record_deferred_request() {
+    process_test_evidence.deferred_requests =
+        process_test_evidence.deferred_requests + 1;
+}
+
+fn process_test_evidence_deferred_requests() -> usize {
+    return process_test_evidence.deferred_requests;
+}
