@@ -385,9 +385,11 @@ make test               # run unit tests
 make langcheck          # repo-wide ASCII-only check (kernel/ + examples/ + linux_user/ + compiler)
 make kernelbuild-rpi5   # build kernel/build/rpi5/kernel.elf (no hardware needed)
 make kernelbuild-qemu   # build kernel/build/qemu/kernel.elf (no hardware needed)
+make kernelbuild-qemu-debug  # build kernel/build/qemu/kernel-debug.elf with DWARF info (no hardware needed)
 make kernelbuild        # build every maintained kernel target (currently rpi5 + qemu)
 make kernelcheck-rpi5   # build and run the RPi5 hardware integration suite (needs real hardware)
 make kernelcheck-qemu   # build and run the QEMU/AArch64 integration suite (no hardware needed)
+make kernelcheck-qemu-debug  # run the same QEMU suite against the DWARF build (no hardware needed)
 make kernelcheck        # build and test every maintained kernel target (needs real RPi5 hardware for the rpi5 half)
 make kernelsh-qemu      # boot QEMU and attach the current terminal to the ash UART
 make kernelsh-rpi5      # load RPi5 over SWD and attach the Debug Probe UART to the ash shell

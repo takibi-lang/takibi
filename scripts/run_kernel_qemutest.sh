@@ -36,7 +36,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
+ELF="${KERNEL_QEMU_ELF:-$REPO_ROOT/kernel/build/qemu/kernel.elf}"
 VIEW_DIR="$REPO_ROOT/kernel/tests/qemu/views"
 COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
@@ -66,11 +66,11 @@ if ! flock -n 9; then
     exit 1
 fi
 if [ ! -f "$ELF" ]; then
-    echo "error: kernel ELF not found: $ELF (run 'make kernelbuild-qemu' first)" >&2
+    echo "error: kernel ELF not found: $ELF" >&2
     exit 1
 fi
 
-echo "[kernel/qemu] booting kernel.elf under QEMU"
+echo "[kernel/qemu] booting $(basename "$ELF") under QEMU"
 # This kernel's fn main() never exits (a final `while (true) {}` park,
 # same as RPi5's), so QEMU is backgrounded and killed once the boot's own
 # final marker appears -- there is no clean-exit signal to wait for. It

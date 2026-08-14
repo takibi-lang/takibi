@@ -37,7 +37,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-oops-qemu kernelcheck-lifecycle-gap-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kernelcheck-lifecycle-gap-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -514,18 +514,11 @@ kernelbuild-qemu: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_E
 # Debug variant: identical inputs to $(KERNEL_QEMU_MAIN_O)/$(KERNEL_QEMU_ELF)
 # above, just with -g added, so GDB would get real DWARF type info --
 # struct fields, enum variant names, bool -- instead of only raw addresses.
-# NOT YET WIRED INTO ANY CHECK: compiling this kernel's full source with -g
-# segfaults the compiler today. One real, now-fixed DWARF gap was found and
-# fixed on the way here (ditype_of_ast's TypeNamed case never checked
-# variant_lltypes, crashing on any -g build reaching a
-# `let x: SomeVariant = stable_replace(...)` local -- see the compiler unit
-# test next to that fix and HISTORY.md), but a second, deeper crash (a
-# native segfault, not a clean compiler error) remains and needs its own
-# investigation -- left as a separate target so kernelbuild-qemu-debug
-# stays buildable/discoverable once that's fixed, without blocking on it
-# now. A separate object/ELF rather than always building kernel.elf with
-# -g keeps the normal, much more frequently run lanes (kernelcheck-qemu,
-# kernelcheck-oops-qemu, kernelbuild) exactly as they were regardless.
+# A separate object/ELF rather than always building kernel.elf with -g keeps
+# the ordinary kernelcheck-qemu lane on its compact non-debug artifact while
+# kernelcheck-qemu-debug exercises the same QEMU integration coverage with
+# DWARF enabled. Distinct TCP/UDP ports and artifact directories let both
+# lanes run concurrently under the default parallel make configuration.
 KERNEL_QEMU_MAIN_DEBUG_O := $(KERNEL_QEMU_BUILD_DIR)/main.debug.o
 KERNEL_QEMU_DEBUG_ELF    := $(KERNEL_QEMU_BUILD_DIR)/kernel-debug.elf
 
@@ -605,6 +598,10 @@ kernelcheck-qemu: kernelbuild-qemu
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_ash_qemutest.sh
 
+kernelcheck-qemu-debug: kernelbuild-qemu-debug
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_HWTEST_ARTIFACT_DIR="$(CURDIR)/_build/kernel-hwtest-qemu-debug" KERNEL_QEMU_SERIAL_PORT=18683 KERNEL_QEMU_NETDEV_LOCAL_PORT=18684 KERNEL_QEMU_NETDEV_REMOTE_PORT=18685 bash scripts/run_kernel_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ASH_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_ASH_ARTIFACT_DIR="$(CURDIR)/_build/kernel-hwtest-qemu-debug-ash" KERNEL_QEMU_ASH_SERIAL_PORT=18686 KERNEL_QEMU_ASH_NETDEV_LOCAL_PORT=18687 KERNEL_QEMU_ASH_NETDEV_REMOTE_PORT=18688 bash scripts/run_kernel_ash_qemutest.sh
+
 ## Focused terminal-path check.  This is deliberately separate from the
 ## ordinary QEMU suite because its expected result is a parked fail-stop.
 kernelcheck-oops-qemu: kernelbuild-qemu $(KERNEL_CRASH_SNAPSHOT_LAYOUT)
@@ -634,7 +631,7 @@ kernelsh-qemu: kernelbuild-qemu
 kernelsh-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_shell_rpi5.sh
 
-kernelcheck: kernelcheck-qemu kernelcheck-oops-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-rpi5
+kernelcheck: kernelcheck-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-rpi5
 
 ## allcheck: run every check this Makefile knows about -- langcheck, test,
 ## linuxcheck, kernelcheck -- so a single command surfaces a failure
@@ -666,7 +663,7 @@ kernelcheck: kernelcheck-qemu kernelcheck-oops-qemu kernelcheck-lifecycle-gap-qe
 allcheck:
 	@status=0; $(MAKE) langcheck test linuxcheck kernelcheck || status=$$?; \
 	if [ $$status -eq 0 ]; then \
-		echo "PASS allcheck: langcheck + compiler unit + linux_user + QEMU + QEMU oops + RPi5 integration"; \
+		echo "PASS allcheck: langcheck + compiler unit + linux_user + QEMU + QEMU debug + QEMU oops + RPi5 integration"; \
 	else \
 		echo "FAIL allcheck: one or more checks failed (see the lane output above)" >&2; \
 		exit $$status; \
@@ -677,7 +674,7 @@ allcheck:
 # produces a final, unmistakable allcheck failure receipt after Make has
 # waited for the other scheduled jobs.
 ifneq (,$(filter allcheck,$(MAKECMDGOALS)))
-$(info [allcheck] includes: langcheck, compiler unit tests, linux_user, QEMU integration, QEMU oops, and RPi5 integration)
+$(info [allcheck] includes: langcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, and RPi5 integration)
 endif
 
 # -- clean ---------------------------------------------------------------------

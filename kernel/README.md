@@ -118,6 +118,8 @@ make kernelbuild-rpi5  # build kernel/build/rpi5/kernel.elf
 make kernelcheck-rpi5  # build and run the complete RPi5 integration test (needs real hardware)
 make kernelbuild-qemu  # build kernel/build/qemu/kernel.elf
 make kernelcheck-qemu  # build and run the complete QEMU integration test (no hardware needed)
+make kernelbuild-qemu-debug  # build kernel/build/qemu/kernel-debug.elf with DWARF info
+make kernelcheck-qemu-debug  # run the complete QEMU integration test against the DWARF build
 make kernelcheck-oops-qemu  # verify parked QEMU oops records and the retained lifecycle trace
 make kernelcheck-lifecycle-gap-qemu  # verify the interactive-HTTPd checkpoint diagnosis names a real gap
 make kernelbuild       # build every maintained kernel target
@@ -343,6 +345,7 @@ architectural setup (the EL2-to-EL1 drop).
 ```bash
 make kernelbuild-qemu  # build kernel/build/qemu/kernel.elf (no hardware needed)
 make kernelcheck-qemu  # build, boot, drive a host-side network peer, and verify (no hardware needed)
+make kernelcheck-qemu-debug  # run the same integration suite with a -g kernel build
 ```
 
 Both need `qemu-system-aarch64` (part of the compiler dependencies listed in

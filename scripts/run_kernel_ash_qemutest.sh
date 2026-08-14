@@ -4,7 +4,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
-ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
+ELF="${KERNEL_QEMU_ASH_ELF:-$REPO_ROOT/kernel/build/qemu/kernel.elf}"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
 ARTIFACT_DIR="${KERNEL_QEMU_ASH_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-qemu-ash}"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
@@ -14,7 +14,7 @@ NETDEV_REMOTE_PORT="${KERNEL_QEMU_ASH_NETDEV_REMOTE_PORT:-17776}"
 TIMEOUT_SECS="${KERNEL_QEMU_ASH_TIMEOUT:-90}"
 
 if [ ! -f "$ELF" ] || [ ! -f "$EXT2_IMAGE" ]; then
-    echo "error: kernel build products are missing; run 'make kernelbuild-qemu' first" >&2
+    echo "error: kernel build products are missing" >&2
     exit 1
 fi
 
