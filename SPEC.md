@@ -330,14 +330,16 @@ parameter value, or top-level declaration name.
 - `checked_add_usize(a, b)` / `checked_mul_usize(a, b)` -- reserved
   compiler builtins for native-width unsigned arithmetic. Both operands
   must be `usize`, and the program must declare the standard result shape
-  `variant CheckedUsize { Value(usize); Overflow; }` (the reusable
-  declaration is in `examples/common/checked_usize.tkb`). The operation
-  returns `Value(result)` when representable and `Overflow` otherwise;
-  it never wraps silently and never emits a trap. Matching the result is
-  exhaustiveness-checked like any other closed variant. `CheckedUsize`
-  is currently unrestricted, so the compiler does not yet reject an
-  entirely ignored result; mandatory result consumption is separate
-  must-check/linearity design work.
+  `must_use variant CheckedUsize { Value(usize); Overflow; }` (the
+  reusable declaration is in `examples/common/checked_usize.tkb`). The
+  operation returns `Value(result)` when representable and `Overflow`
+  otherwise; it never wraps silently and never emits a trap. Matching the
+  result is exhaustiveness-checked like any other closed variant.
+  Declaring `CheckedUsize` as `must_use` (see "Closed Variants and
+  Existential Owners" below for the general `must_use` mechanism) means
+  an entirely ignored result is already a compile error today, the same
+  all-path consumption check every other `must_use variant` gets -- not
+  separate design work.
 - `unsafe { expr }` -- see "unsafe" below.
 
 ### Operator Precedence

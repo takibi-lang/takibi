@@ -119,7 +119,10 @@ After `make build`, the compiler is available at
 ```text
 takibi <file1.tkb> [file2.tkb ...] -o output.o
        [--target <triple>] [--cpu <cpu>] [--features <features>]
-       [-g] [--forbid-trap] [--forbid-unsafe] [--version]
+       [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe]
+       [--emit-exception-frame-offsets <StructName>]
+       [--emit-struct-layout <StructName>] [--emit-depfile <path>]
+       [--version]
 ```
 
 Multiple source files currently form one flat compilation unit. `use

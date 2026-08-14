@@ -10,7 +10,7 @@ core, but the Core described here is not pure HM. It layers refinement facts,
 effects, affine/linear permissions, static identities, privacy boundaries, and
 authority-region constraints into one permission-aware judgement.
 
-Implementation status (2026-07-22): Slices 0 through 6 and the currently
+Implementation status (2026-07-24): Slices 0 through 6 and the currently
 selected post-Slice-6 Core increments are implemented. The
 `Takibi_core` module owns the four-layer vocabulary, the current checker uses
 `Delta.Legacy_flow`, and the indexed runtime-owner subset described in 3.1 is
@@ -37,7 +37,13 @@ syntactic lock places and reject a mismatched explicit unlock pointer.
 Guard-derived pointer returns make `rtos_demo`'s shared data inaccessible
 after its authorizing `KGuard[lock]` is consumed. Pointer and slice `borrow`
 parameters now form a checked non-retaining call boundary, with the network
-and RTOS helper APIs migrated to state that contract. General linear-owner
+and RTOS helper APIs migrated to state that contract. A fixed-size array of
+a stable owner struct, declared as a top-level `private let mut [T; N]`, is
+now permitted where a bare stable owner struct already was -- each array
+element is its own independent `stable_replace`-able slot, addressed by a
+runtime index (`OWNERSHIP_KERNEL.md` 6.7.18); GitHub issue #158's `fork()`
+copy-on-write page table is the first real consumer of this slice, in
+place of hand-naming one global per slot. General linear-owner
 place/storage tracking, arbitrary address expressions,
 direct/general quantifiers and propositions remain design targets. External
 solver/prover integration is not an active implementation target; Z3 and
@@ -1320,16 +1326,17 @@ independently:
 |---|---|
 | #89 affine escape/inter-function behavior (closed) | indexed runtime owners, stable places, and standard Delta flow; remaining arbitrary stored-owner places moved to #131 |
 | #117 protocol action obligations (closed) | erased linear views first, then indexed `TcpConn` view change |
-| #113 generic typed channels | runtime generic payloads in Gamma, payload ownership transfer and private channel invariants in Delta |
-| #66 Simple RTOS | lock/task identities in Delta plus `may_block`, scheduling, and interrupt constraints in epsilon |
-| #20 variant enums | kind-carrying runtime variants and existential resource payloads |
-| #6 multiple cores | CPU-indexed guards, per-CPU state, and interrupt permissions |
+| #113 generic typed channels (closed as not-planned, superseded by #177) | runtime generic payloads in Gamma, payload ownership transfer and private channel invariants in Delta |
+| #66 Simple RTOS (closed) | lock/task identities in Delta plus `may_block`, scheduling, and interrupt constraints in epsilon |
+| #20 variant enums (closed) | kind-carrying runtime variants and existential resource payloads |
+| #6 multiple cores (closed) | CPU-indexed guards, per-CPU state, and interrupt permissions |
 | #106 aliasing (closed) | place identity, region/view predicates, and disjointness propositions; owner-derived region slices were its first closed slice |
 | #128 escape control (closed) | authority-bound pointer lifetimes extend region ties beyond slice returns, and stable exchange now names a same-container lock |
 | #87 asynchronous TX ownership (closed) | linear in-flight buffer/descriptor states and completion transitions |
 | #131 arbitrary stored indexed owners | demand-led successor for general place tracking, owner tables, and arbitrary owner-bearing storage |
 | #132 general lock/heap invariants | demand-led successor for invariant predicates, general region polymorphism, and precise lifetime-bearing aggregates |
-| #15/#108 cast and visibility hardening | unforgeable constructors and module boundaries for runtime owners and views |
+| #108 visibility hardening (closed) | unforgeable module boundaries for runtime owners and views |
+| #15 cast hardening (still open) | unforgeable constructors for runtime owners and views |
 | #13 deferred SMT path (not active) | reconsider only after a required real API exceeds the built-in checker; do not implement Z3 or solver-only infrastructure from the roadmap alone |
 
 When a slice reveals a genuinely independent acceptance criterion, create a

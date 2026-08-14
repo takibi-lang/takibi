@@ -32,13 +32,15 @@ consumption, affine null sentinels, cast escape hatches, or variants being
 future work are superseded by the Slice 3 result in 6.7.4 and by SPEC.md.
 
 Driving issues: #117 (witness tokens / protocol obligations -- where this
-plan was drawn up; now closed by the linear-event and `TcpConn` slices),
-#89 (affine drop/escape/inter-function; now closed, with arbitrary stored
-owner places split to #131), #108 (private visibility), #15 (safe pointer /
-cast audit), #113 (channel v2), #66 (Simple RTOS), #20 (variant enums),
-#106 (aliasing; closed after the region-slice slice), #87 (async TX
-ownership; closed), #128 (authority-bound pointer lifetimes; closed, with
-general invariants split to #132), #6 (multiple cores).
+plan was drawn up; closed by the linear-event and `TcpConn` slices),
+#89 (affine drop/escape/inter-function; closed, with arbitrary stored
+owner places split to #131), #108 (private visibility; closed), #15
+(safe pointer / cast audit; still open), #113 (channel v2; closed as
+not-planned/YAGNI, superseded by #177), #66 (Simple RTOS; closed), #20
+(variant enums; closed), #106 (aliasing; closed after the region-slice
+slice), #87 (async TX ownership; closed), #128 (authority-bound pointer
+lifetimes; closed, with general invariants split to #132), #6 (multiple
+cores; closed).
 
 ## 1. Motivation: one wall, four axes
 
