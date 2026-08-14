@@ -92,5 +92,9 @@ done
 echo "init: complete"
 
 # This is deliberately the final action: parent execve replaces PID 1, so
-# there is no shell left to continue the script after /bin/echo exits.
-exec /bin/echo exec-ok
+# there is no shell left to continue this script afterward. The replacement
+# is the persistent terminal demo (backgrounds an interactive ash and parks,
+# see httpd-demo.sh) rather than a command that exits, so control does not
+# return to the kernel driver in the normal case -- see kernel/init/
+# test_driver.tkb's handling of this exec for what still runs beforehand.
+exec /busybox sh /etc/httpd-demo.sh

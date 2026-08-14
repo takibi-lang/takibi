@@ -119,6 +119,7 @@ make kernelcheck-rpi5  # build and run the complete RPi5 integration test (needs
 make kernelbuild-qemu  # build kernel/build/qemu/kernel.elf
 make kernelcheck-qemu  # build and run the complete QEMU integration test (no hardware needed)
 make kernelcheck-oops-qemu  # verify parked QEMU oops records and the retained lifecycle trace
+make kernelcheck-lifecycle-gap-qemu  # verify the interactive-HTTPd checkpoint diagnosis names a real gap
 make kernelbuild       # build every maintained kernel target
 make kernelcheck       # build and test every maintained kernel target
 make kernelsh-qemu     # boot QEMU and use the current terminal as the ash UART console
@@ -383,6 +384,29 @@ on core 0; when real SMP scheduling is introduced, this ABI is intended to
 become one independently written ring per CPU rather than a false shared
 global order.
 
+### Interactive HTTPd lifecycle checkpoints
+
+The bounded self-test suite's own top-level ash execs, via a real `exec`
+self-replace (see `kernel/tests/ext2/init.sh`'s final line), directly into
+the persistent terminal demo shell -- a single top-level launch, not a
+second kernel-side one. That shell forks its own interactive ash, which in
+turn forks and execs the background HTTPd the host harness drives. Because
+that chain of boundaries used to collapse into one generic "interactive
+HTTPd did not become ready" timeout, the kernel now prints a
+`persistent shell: <name> pid=<n>` checkpoint at each of fork, child
+selected, exec prepare, and exec commit for that HTTPd child specifically
+(gated on `kernel_syscall_persistent_shell_active()`, not on any bounded
+self-test fork), plus a listener-ready line for the socket boundary.
+`scripts/run_kernel_uart_driver.py` tracks these in order alongside its own
+host-observed boundaries (command submitted, parent resumed) and, on a
+stall, names the last completed checkpoint and the next expected one
+instead of a single opaque timeout. `kernelcheck-lifecycle-gap-qemu` proves
+that diagnosis is itself correct: GDB pokes only the exec-commit
+checkpoint's own one-shot guard variable (no dedicated test-only kernel
+switch), so HTTPd still starts and answers real HTTP requests while that
+one print is skipped, and the harness is expected to fail naming exactly
+that gap.
+
 ### What this verifies
 
 `kernelcheck-qemu` boots the kernel once and projects that single UART
@@ -391,10 +415,10 @@ each exactly against its `.expected` file -- the identical "one boot, many
 independent contracts" pattern `kernelcheck-rpi5` uses (see "Expected-file
 integration views" below), just without the SWD reset/load dance: QEMU's
 TCP-backed serial chardev is read by the shared pyserial driver.
-Thirty-seven views currently pass. The target then runs a separate ash smoke
+Thirty-eight views currently pass. The target then runs a separate ash smoke
 lane using the same pyserial driver and the shared
 `kernel/tests/common/ash/ash.stdin` and `ash.expected` fixtures; the RPi5
-runner drives those fixtures during its one boot as well. The 37 views
+runner drives those fixtures during its one boot as well. The 38 views
 cover:
 
 - the full hardware-independent self-test bundle (FP/SIMD-across-IRQ, a
@@ -410,6 +434,9 @@ cover:
   over a private `-netdev dgram` transport.
 - the BusyBox HTTPd accept/serve loop, split requests, retransmission
   recovery, repeated requests, and exact `index.html` responses;
+- the interactive HTTPd child's own fork/child-selected/exec-prepare/
+  exec-commit/listener-ready lifecycle checkpoints, in order (see
+  "Interactive HTTPd lifecycle checkpoints" above);
 - the ext2-resident `init.sh` scenario, including connected socket I/O,
   overlapping connections, partial writes, UART input, and process/VM
   lifecycle checks;

@@ -248,6 +248,10 @@ fn kernel_process_child_exec_prepare() -> usize {
         return 0;
     }
     kernel_process_trace_exec_prepare();
+    if (kernel_syscall_persistent_shell_active()) {
+        kernel_syscall_persistent_shell_checkpoint_exec_prepare(
+            kernel_process_current_pid());
+    }
     // BusyBox is the rootfs interpreter/fallback for paths that ash asks the
     // kernel to execute but that are not separate regular files in this
     // small image. Keep the fallback on ext2 too: the plan describes the
@@ -318,7 +322,7 @@ fn kernel_process_child_exec_prepare() -> usize {
                         // the fixture state there made its accept loop stop
                         // after the fixture's two requests.
                         if (kernel_process_parent_is_root() &&
-                            kernel_syscall_interactive_httpd_shell_active() ==
+                            kernel_syscall_persistent_shell_active() ==
                                 false) {
                             kernel_init_socket_evidence =
                                 kernel_syscall_socket_evidence();
@@ -327,6 +331,10 @@ fn kernel_process_child_exec_prepare() -> usize {
                             kernel_tcp_inject_split_request();
                         } else {
                             kernel_syscall_daemon_start();
+                            if (kernel_syscall_persistent_shell_active()) {
+                                kernel_syscall_persistent_shell_checkpoint_exec_commit(
+                                    kernel_process_current_pid());
+                            }
                         }
                         process_image_activate_root(child_root);
                         kernel_process_child_exec_mark();
@@ -587,41 +595,6 @@ let mut kernel_test_rpi5_extended: bool;
 let mut kernel_test_httpd_daemon: bool;
 let mut kernel_test_init_script: bool;
 
-// The bounded suite deliberately tears every userspace image down and proves
-// that its page count reaches zero first. Only then is a fresh interactive ash
-// installed as the terminal demo workload. It intentionally does not return:
-// the background HTTPd launched from this shell is the persistent service the
-// user can continue exercising after the automated checks finish.
-fn kernel_interactive_httpd_shell_run() {
-    if (rootfs_plan_ready == false) { return; }
-    kernel_uart_rx_ring_reset();
-    kernel_process_execution_reset();
-    kernel_process_scheduler_enable();
-    match kernel_initial_process_map(
-            rootfs_plan_ready, saved_rootfs_plan,
-            saved_rootfs_inode, saved_rootfs_length,
-            saved_rootfs_plan,
-            "busybox\0sh\0/etc/httpd-demo.sh\0" as []u8, 3) {
-        ProcessImageMapResult::InvalidImage => {
-            kernel_boot_log("interactive httpd shell: invalid image\n");
-        }
-        ProcessImageMapResult::OutOfMemory => {
-            kernel_boot_log("interactive httpd shell: out of memory\n");
-        }
-        ProcessImageMapResult::Mapped(shell_pages) => {
-            let (heap_start, heap_limit) =
-                process_image_heap_range(shell_pages);
-            kernel_syscall_process_configure(heap_start, heap_limit);
-            kernel_syscall_interactive_httpd_shell_start();
-            let shell_status: usize = run_initial_user(
-                process_image_entry(shell_pages),
-                process_image_stack_pointer(shell_pages));
-            kernel_boot_log("interactive httpd shell: exited\n");
-            process_image_unmap(shell_pages);
-        }
-    }
-}
-
 fn kernel_test_driver_run() {
     kernel_test_common_probes();
     // Root 0 permanently owns its L1/L2 backing pages, while the process-stack
@@ -694,6 +667,62 @@ irq_uart_rx_unmask();
     // GitHub issue #209: init.sh now launches it as an ordinary child,
     // retaining that real readv/writev evidence without another
     // kernel-side image launch.
+
+    // Issue #289: this static mapping-capability probe only depends on
+    // ext2_mount_ready/saved_ext2_mount (already set up earlier in boot),
+    // not on anything init.sh produces, so it runs before init.sh's own
+    // launch now rather than after it. It used to run afterward, in the
+    // gap between init.sh's top-level run returning and the (now removed)
+    // second kernel-side launch of the persistent demo shell -- collapsing
+    // to a single top-level launch removed that gap, since init.sh's own
+    // run no longer returns in the normal case (see below).
+    if (ext2_mount_ready) {
+        match kernel_exec_resolve_dynamic_ext2_images(saved_ext2_mount) {
+            DynamicExecResolveResult::NotRequested => {}
+            DynamicExecResolveResult::Invalid => {
+                kernel_boot_log("httpd images: invalid ext2 pair\n");
+            }
+            DynamicExecResolveResult::Resolved(images) => {
+                if (images.primary.plan.entry == 0x3700 &&
+                    images.primary.plan.load_segments == 2 &&
+                    images.primary.plan.extent == 0x304B8 &&
+                    images.interpreter.plan.entry == 0x69DE8 &&
+                    images.interpreter.plan.load_segments == 2 &&
+                    images.interpreter.plan.extent == 0xC2F20) {
+                    kernel_boot_log("httpd images: busybox-extras+musl valid\n");
+                    match httpd_image_mapping_check(
+                            images.primary, images.interpreter) {
+                        HttpdImageMapCheckResult::Invalid => {
+                            kernel_boot_log("httpd map: invalid\n");
+                        }
+                        HttpdImageMapCheckResult::Verified => {}
+                    }
+                    match process_image_pair_map_ext2_in_root(
+                            images.primary.plan,
+                            saved_ext2_mount,
+                            images.primary.inode,
+                            images.primary.file_length,
+                            images.interpreter.plan,
+                            saved_ext2_mount,
+                            images.interpreter.inode,
+                            images.interpreter.file_length,
+                            0x40000, "check\0" as []u8, 1, 0) {
+                        ProcessImagePairProbeResult::Invalid => {
+                            kernel_boot_log("httpd map: combined invalid\n");
+                        }
+                        ProcessImagePairProbeResult::Ready(dynamic_pages) => {
+                            kernel_boot_log("httpd map: combined pages=331 musl-bias=0x40000 auxv ready clean\n");
+                            let (dynamic_heap_start, dynamic_heap_limit) =
+                                process_image_heap_range(dynamic_pages);
+                            kernel_syscall_process_configure(
+                                dynamic_heap_start, dynamic_heap_limit);
+                            process_image_unmap(dynamic_pages);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if (kernel_test_init_script) {
     // The first userspace process is an ext2-resident ash init
@@ -770,13 +799,52 @@ irq_uart_rx_unmask();
                            kernel_syscall_exec_pending()) {
                     // The final `exec` in init.sh replaces PID 1. This EL1
                     // continuation is the parent-exec handoff, distinct from
-                    // the child-frame path used by ordinary applets.
+                    // the child-frame path used by ordinary applets. Today
+                    // this exec target is kernel/tests/ext2/httpd-demo.sh,
+                    // the persistent terminal demo -- it backgrounds an
+                    // interactive ash and parks, so it does not return in
+                    // the normal case. Issue #289: since init.sh's own run
+                    // therefore no longer returns to kernel_test_driver_run()
+                    // afterward either, all of the evidence that used to be
+                    // reported there (bounded-suite pass/fail evidence,
+                    // double-free, page-leak) is reported right here
+                    // instead, decoupled from whatever this exec's target
+                    // does later -- it only describes init.sh's own
+                    // already-complete run, so waiting for the replacement
+                    // to also finish was never a real dependency, just an
+                    // artifact of reusing its exit as a return point.
                     kernel_init_script_pre_exec_evidence();
+                    kernel_init_script_success_evidence(false);
                     unified_fd_close_exec_descriptors(0);
                     let exec_argc: usize = kernel_syscall_exec_argc();
                     let exec_argv = kernel_syscall_exec_argv();
                     kernel_syscall_exec_clear();
                     process_image_unmap(script_pages);
+                    if (process_image_window_is_clear()) {
+                        kernel_boot_log("distro unmap: clean\n");
+                        kernel_boot_log("init unmap: clean\n");
+                    }
+                    // GitHub issue #207: every page released across this
+                    // whole boot must have been live at the time. Checked
+                    // here, now that init.sh's own image is fully torn
+                    // down and before the persistent demo's image is
+                    // mapped, rather than after init.sh returns (it no
+                    // longer does).
+                    if (page_allocator_double_free_count() == 0) {
+                        kernel_boot_log("resources: no double free\n");
+                    } else {
+                        kernel_boot_log("resources: DOUBLE FREE\n");
+                    }
+                    // All bounded-suite user images and fixtures have been
+                    // torn down at this point. The permanent root-0 pages
+                    // remain live; equality with the boot baseline proves
+                    // that no transient page leaked before the persistent
+                    // demo shell starts.
+                    if (page_allocator_live_count() == page_baseline) {
+                        kernel_boot_log("resources: pages=0\n");
+                    } else {
+                        kernel_boot_log("resources: pages leaked\n");
+                    }
                     match process_image_map_ext2(
                             saved_rootfs_plan, saved_ext2_mount,
                             saved_rootfs_inode, saved_rootfs_length,
@@ -788,32 +856,32 @@ irq_uart_rx_unmask();
                             kernel_boot_log("execve map: replacement out of memory\n");
                         }
                         ProcessImageMapResult::Mapped(replaced_pages) => {
+                            if (process_image_gap_is_unmapped()) {
+                                kernel_boot_log(
+                                    "execve: parent-exec handoff mapped\n");
+                            }
                             let (replacement_heap_start,
                                  replacement_heap_limit) =
                                 process_image_heap_range(replaced_pages);
                             kernel_syscall_process_configure(
                                 replacement_heap_start,
                                 replacement_heap_limit);
+                            kernel_syscall_persistent_shell_start();
+                            kernel_process_trace_enable();
                             let replacement_status: usize =
                                 run_initial_user(
                                     process_image_entry(replaced_pages),
                                     process_image_stack_pointer(
                                         replaced_pages));
-                            if (replacement_status == 0) {
-                                kernel_boot_log(
-                                    "execve: busybox echo exit: 0\n");
-                                kernel_init_script_success_evidence(false);
-                            } else {
-                                kernel_boot_log(
-                                    "execve: replacement failed\n");
-                            }
+                            // The persistent demo shell parks forever (see
+                            // kernel/tests/ext2/httpd-demo.sh); reaching
+                            // this point in normal operation would mean it
+                            // unexpectedly exited.
+                            kernel_boot_log(
+                                "execve: persistent shell exited unexpectedly status=");
+                            uart_put_udec(replacement_status);
+                            kernel_boot_log("\n");
                             process_image_unmap(replaced_pages);
-                            if (process_image_window_is_clear()) {
-                                kernel_boot_log(
-                                    "execve: image window clean\n");
-                                kernel_boot_log("distro unmap: clean\n");
-                                kernel_boot_log("init unmap: clean\n");
-                            }
                         }
                     }
                 } else {
@@ -830,81 +898,9 @@ irq_uart_rx_unmask();
 
     }
 
-if (ext2_mount_ready) {
-    match kernel_exec_resolve_dynamic_ext2_images(saved_ext2_mount) {
-        DynamicExecResolveResult::NotRequested => {}
-        DynamicExecResolveResult::Invalid => {
-            kernel_boot_log("httpd images: invalid ext2 pair\n");
-        }
-        DynamicExecResolveResult::Resolved(images) => {
-            if (images.primary.plan.entry == 0x3700 &&
-                images.primary.plan.load_segments == 2 &&
-                images.primary.plan.extent == 0x304B8 &&
-                images.interpreter.plan.entry == 0x69DE8 &&
-                images.interpreter.plan.load_segments == 2 &&
-                images.interpreter.plan.extent == 0xC2F20) {
-                kernel_boot_log("httpd images: busybox-extras+musl valid\n");
-                match httpd_image_mapping_check(
-                        images.primary, images.interpreter) {
-                    HttpdImageMapCheckResult::Invalid => {
-                        kernel_boot_log("httpd map: invalid\n");
-                    }
-                    HttpdImageMapCheckResult::Verified => {}
-                }
-                match process_image_pair_map_ext2_in_root(
-                        images.primary.plan,
-                        saved_ext2_mount,
-                        images.primary.inode,
-                        images.primary.file_length,
-                        images.interpreter.plan,
-                        saved_ext2_mount,
-                        images.interpreter.inode,
-                        images.interpreter.file_length,
-                        0x40000, "check\0" as []u8, 1, 0) {
-                    ProcessImagePairProbeResult::Invalid => {
-                        kernel_boot_log("httpd map: combined invalid\n");
-                    }
-                    ProcessImagePairProbeResult::Ready(dynamic_pages) => {
-                        kernel_boot_log("httpd map: combined pages=331 musl-bias=0x40000 auxv ready clean\n");
-                        let (dynamic_heap_start, dynamic_heap_limit) =
-                            process_image_heap_range(dynamic_pages);
-                        kernel_syscall_process_configure(
-                            dynamic_heap_start, dynamic_heap_limit);
-                        process_image_unmap(dynamic_pages);
-                    }
-                }
-            }
-        }
-    }
-}
     // GitHub issue #209: init.sh now runs the BusyBox shell/echo child-exec
     // fixture. The shared child-exec reap evidence above verifies its image
     // cleanup alongside every other init-launched applet.
-
-    // GitHub issue #207: every page released across this whole boot
-    // must have been live at the time. The pre-freelist allocator
-    // made a double free an idempotent no-op, so two real ones
-    // (process_image_cleanup's redundant growth-page loop, and
-    // process_clone_vm_release_growth_pages reading slots the
-    // recording side never wrote) sat undetected until the free
-    // list turned them into aliased physical pages. Checked before
-    // the reclaim below, which resets the counter along with the
-    // pool.
-    if (page_allocator_double_free_count() == 0) {
-        kernel_boot_log("resources: no double free\n");
-    } else {
-        kernel_boot_log("resources: DOUBLE FREE\n");
-    }
-
-    // All bounded-suite user images and fixtures have been torn down at this
-    // point. The permanent root-0 pages remain live; equality with the boot
-    // baseline proves that no transient page leaked before the terminal demo.
-    if (page_allocator_live_count() == page_baseline) {
-        kernel_boot_log("resources: pages=0\n");
-    } else {
-        kernel_boot_log("resources: pages leaked\n");
-    }
-    kernel_interactive_httpd_shell_run();
 }
 
 }

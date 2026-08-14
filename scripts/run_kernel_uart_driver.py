@@ -8,6 +8,56 @@ import time
 
 import serial
 
+# Issue #289: ordered lifecycle boundaries for the interactive HTTPd
+# scenario, in the order they must complete. "command-submitted" and
+# "parent-resumed" are host-observed (this driver's own state); the rest
+# are kernel-printed checkpoints (see kernel/kernel/syscall.tkb's
+# `persistent shell: ...` prints, gated to the interactive HTTPd child's own
+# fork/exec, not the demo shell's own launch). ARP reply and the two HTTP
+# requests that follow "parent-resumed" are the host network peer's own
+# concern (scripts/kernel_net_test.py), not this driver's -- its own
+# PASS/FAIL output covers that boundary.
+LIFECYCLE_CHECKPOINTS = (
+    ("command-submitted", lambda output, httpd_sent, httpd_ready: httpd_sent),
+    ("fork", lambda output, httpd_sent, httpd_ready:
+        b"persistent shell: fork child pid=" in output),
+    ("child-selected", lambda output, httpd_sent, httpd_ready:
+        b"persistent shell: child selected pid=" in output),
+    ("exec-prepare", lambda output, httpd_sent, httpd_ready:
+        b"persistent shell: exec prepare pid=" in output),
+    ("exec-commit", lambda output, httpd_sent, httpd_ready:
+        b"persistent shell: exec commit pid=" in output),
+    ("listen", lambda output, httpd_sent, httpd_ready:
+        b"persistent server: listener ready port=8080" in output),
+    ("parent-resumed", lambda output, httpd_sent, httpd_ready: httpd_ready),
+)
+
+
+def diagnose_lifecycle(output: bytes, httpd_sent: bool,
+                       httpd_ready: bool) -> str:
+    # Walk in order and stop at the first incomplete checkpoint, rather than
+    # scanning the whole list for any completed one: a later checkpoint can
+    # complete out of sequence relative to an earlier gap (e.g. exec-commit's
+    # own print suppressed while everything downstream of the exec it still
+    # performs -- listen, parent-resumed -- goes on to complete normally),
+    # and reporting that later one as "last completed" would describe a
+    # boundary that hasn't really been reached in order yet.
+    last_completed = None
+    next_expected = None
+    for name, check in LIFECYCLE_CHECKPOINTS:
+        if check(output, httpd_sent, httpd_ready):
+            last_completed = name
+        else:
+            next_expected = name
+            break
+    if last_completed is None:
+        return ("no lifecycle checkpoint completed yet, next expected "
+                f"'{LIFECYCLE_CHECKPOINTS[0][0]}'")
+    if next_expected is None:
+        return f"all lifecycle checkpoints completed through '{last_completed}'"
+    return (f"last completed checkpoint '{last_completed}', "
+            f"next expected '{next_expected}'")
+
 
 def write_uart_line(connection, line: bytes) -> None:
     # The kernel UART ISR currently drains one byte per interrupt. Pace the
@@ -105,7 +155,7 @@ def main() -> int:
                     payload_sent = True
 
                 if (interactive_httpd and not httpd_shell_probe_sent and
-                        b"interactive httpd shell: uart blocked\n" in output):
+                        b"persistent shell: uart blocked\n" in output):
                     write_uart_line(connection, b"echo httpd-shell-ready")
                     httpd_shell_probe_sent = True
                 if httpd_shell_probe_sent and not httpd_sent:
@@ -120,7 +170,7 @@ def main() -> int:
                               flush=True)
                         httpd_sent = True
                 if (httpd_sent and not httpd_probe_sent and
-                        b"interactive server: listener ready port=8080\n"
+                        b"persistent server: listener ready port=8080\n"
                         in output):
                     write_uart_line(connection, b"echo httpd-background-ok")
                     httpd_probe_sent = True
@@ -167,12 +217,15 @@ def main() -> int:
         if any(line.startswith("ls: ") for line in actual):
             raise RuntimeError("directory enumeration command reported an ls error")
     if interactive_httpd:
-        if not httpd_sent:
-            raise RuntimeError("final interactive HTTPd shell was not observed")
-        if not httpd_ready:
-            raise RuntimeError("background HTTPd did not leave ash responsive")
+        for name, check in LIFECYCLE_CHECKPOINTS:
+            if not check(output, httpd_sent, httpd_ready):
+                raise RuntimeError(
+                    "interactive HTTPd lifecycle stalled: "
+                    + diagnose_lifecycle(output, httpd_sent, httpd_ready))
         if not httpd_done_file.exists():
-            raise RuntimeError("host HTTP checks did not complete")
+            raise RuntimeError(
+                "host HTTP checks did not complete; "
+                + diagnose_lifecycle(output, httpd_sent, httpd_ready))
         for forbidden in ("can't open '/dev/null'", "sh: can't fork",
                           "exception: fail-stop"):
             if forbidden in text:

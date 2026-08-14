@@ -1,2 +1,1 @@
-^execve: busybox echo exit: 0$
-^execve: image window clean$
+^execve: parent-exec handoff mapped$

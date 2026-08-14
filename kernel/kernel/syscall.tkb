@@ -197,10 +197,27 @@ private let mut syscall_foreground_server_active: bool;
 private let mut syscall_foreground_server_exit_count_start: usize;
 private let mut syscall_foreground_server_completed_children: usize;
 private let mut syscall_foreground_server_reaped_pages: usize;
-// Set only for the terminal demo shell launched after the bounded suite has
-// completed. Its direct HTTPd child is a normal daemon even though that shell
-// occupies PID 1, which otherwise identifies the bounded init.sh fixture.
-private let mut syscall_interactive_httpd_shell: bool;
+// Set only for the persistent terminal demo shell launched (via self-replace
+// exec, see kernel/tests/ext2/init.sh's final line) after the bounded suite
+// has completed. Its direct HTTPd child is a normal daemon even though that
+// shell occupies PID 1, which otherwise identifies the bounded init.sh
+// fixture. Named for the kernel-owned concept it gates -- persistent,
+// unbounded lifecycle vs. the bounded one-shot fixture -- not the payload
+// that happens to run under it.
+private let mut syscall_persistent_shell: bool;
+// Issue #289: lifecycle checkpoints for the persistent-shell scenario, so a
+// kernelcheck-qemu/kernelcheck-rpi5 stall names the last completed boundary
+// instead of a single generic timeout. `_child_pid` is the pending target
+// for the one-shot "child selected" checkpoint (0 = none/consumed); the
+// four checkpoint-printed booleans are one-shot guards, mirroring the
+// existing `syscall_read_uart_waits == 1` idiom just below. Each checkpoint
+// is its own named function (not inlined) so a QEMU regression can skip one
+// via a GDB breakpoint + `return`, without any dedicated test-only switch.
+private let mut syscall_persistent_shell_child_pid: usize;
+private let mut syscall_persistent_shell_checkpoint_fork_logged: bool;
+private let mut syscall_persistent_shell_checkpoint_selected_logged: bool;
+private let mut syscall_persistent_shell_checkpoint_exec_prepare_logged: bool;
+private let mut syscall_persistent_shell_checkpoint_exec_commit_logged: bool;
 private let mut syscall_exec_pending: bool;
 private let mut syscall_exec_argc: usize;
 private let mut syscall_exec_argv: [u8; 512];
@@ -237,12 +254,66 @@ fn kernel_syscall_foreground_server_start() {
     syscall_foreground_server_reaped_pages = 0;
 }
 
-fn kernel_syscall_interactive_httpd_shell_start() {
-    syscall_interactive_httpd_shell = true;
+fn kernel_syscall_persistent_shell_start() {
+    syscall_persistent_shell = true;
 }
 
-fn kernel_syscall_interactive_httpd_shell_active() -> bool {
-    return syscall_interactive_httpd_shell;
+fn kernel_syscall_persistent_shell_active() -> bool {
+    return syscall_persistent_shell;
+}
+
+fn kernel_syscall_persistent_shell_checkpoint_fork(pid: usize) {
+    if (syscall_persistent_shell_checkpoint_fork_logged) { return; }
+    syscall_persistent_shell_checkpoint_fork_logged = true;
+    syscall_persistent_shell_child_pid = pid;
+    kernel_boot_log("persistent shell: fork child pid=");
+    uart_put_udec(pid);
+    kernel_boot_log("\n");
+}
+
+// Self-disarming: fires once, the first time the forked child (identified
+// only by pid -- no generation check needed, since the pending target is
+// cleared on the very first match) is dispatched into a syscall of its own,
+// proving the scheduler actually resumed it rather than merely creating it.
+fn kernel_syscall_persistent_shell_checkpoint_selected() {
+    if (syscall_persistent_shell_child_pid == 0 ||
+        syscall_persistent_shell_checkpoint_selected_logged) {
+        return;
+    }
+    if (kernel_process_current_pid() != syscall_persistent_shell_child_pid) {
+        return;
+    }
+    syscall_persistent_shell_checkpoint_selected_logged = true;
+    kernel_boot_log("persistent shell: child selected pid=");
+    uart_put_udec(syscall_persistent_shell_child_pid);
+    kernel_boot_log("\n");
+}
+
+// Both exec checkpoints below are scoped to the one tracked target pid (set
+// by the fork checkpoint above), not merely to the persistent-shell scenario
+// being active -- the interactive ash's own launch (PID 1 forking+execing
+// it) and any later applet it runs would otherwise also match, well before
+// or after the boundary this checkpoint actually means.
+fn kernel_syscall_persistent_shell_checkpoint_exec_prepare(pid: usize) {
+    if (pid != syscall_persistent_shell_child_pid ||
+        syscall_persistent_shell_checkpoint_exec_prepare_logged) {
+        return;
+    }
+    syscall_persistent_shell_checkpoint_exec_prepare_logged = true;
+    kernel_boot_log("persistent shell: exec prepare pid=");
+    uart_put_udec(pid);
+    kernel_boot_log("\n");
+}
+
+fn kernel_syscall_persistent_shell_checkpoint_exec_commit(pid: usize) {
+    if (pid != syscall_persistent_shell_child_pid ||
+        syscall_persistent_shell_checkpoint_exec_commit_logged) {
+        return;
+    }
+    syscall_persistent_shell_checkpoint_exec_commit_logged = true;
+    kernel_boot_log("persistent shell: exec commit pid=");
+    uart_put_udec(pid);
+    kernel_boot_log("\n");
 }
 
 fn kernel_syscall_foreground_server_children() -> usize {
@@ -443,7 +514,7 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_close_calls = 0;
     syscall_exec_pending = false;
     syscall_exec_argc = 0;
-    syscall_interactive_httpd_shell = false;
+    syscall_persistent_shell = false;
     for process_slot: usize in 0..<PROCESS_CONTEXT_MAX {
         syscall_uart_block_delivery[process_slot] = UartBlockDelivery::Scalar;
     }
@@ -1138,9 +1209,9 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
                 enable_irq();
                 syscall_read_uart_waits = syscall_read_uart_waits + 1;
                 if (syscall_read_uart_waits == 1) {
-                    if (syscall_interactive_httpd_shell) {
+                    if (syscall_persistent_shell) {
                         kernel_boot_log(
-                            "\ninteractive httpd shell: uart blocked\n");
+                            "\npersistent shell: uart blocked\n");
                     } else {
                         kernel_boot_log(
                             "\ninteractive shell: uart blocked\n");
@@ -1492,6 +1563,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         -> SyscallAction !{unsafe} {
     let exception_class: usize = (esr >> 26) & 0x3F;
     if (exception_class != 0x15) { return SyscallAction::Unreachable; }
+    kernel_syscall_persistent_shell_checkpoint_selected();
     if (number == AARCH64_NR_TAKIBI_UART_RX_WAIT) {
         disable_irq();
         if (kernel_uart_rx_pending()) {
@@ -2437,7 +2509,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             syscall_connected_fixture_pending = false;
             kernel_boot_log("linux socket: listener ready port=8080\n");
         } else {
-            kernel_boot_log("interactive server: listener ready port=8080\n");
+            kernel_boot_log("persistent server: listener ready port=8080\n");
         }
         return SyscallAction::Resume(0);
     }
@@ -2844,6 +2916,29 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
             ProcessCloneResult::ChildReady(child_pid) => {
+                // Guard against PID 1's own fork of the interactive ash
+                // (kernel/tests/ext2/httpd-demo.sh backgrounding it): that
+                // happens automatically at boot, before the host ever
+                // submits a command, and is not the boundary this
+                // checkpoint means. The checkpoint is specifically the
+                // interactive ash forking ITS OWN child (e.g. the
+                // backgrounded HTTPd) -- excluding PID 1 as the forking
+                // parent is sufficient, since PID 1 is the only process
+                // that forks directly under the persistent-shell scenario
+                // before the ash session itself forks anything.
+                //
+                // kernel_process_clone_begin() already switches "current"
+                // to the newly created CHILD before returning (the clone
+                // continuation resumes as the child directly, x0=0), so
+                // "current" here is child_pid, not the forking parent --
+                // kernel_process_parent_is_root() (which asks about
+                // *current's* parent) is the right check for "did PID 1
+                // do this fork", not a direct pid comparison against
+                // kernel_process_current_pid().
+                if (kernel_syscall_persistent_shell_active() &&
+                    kernel_process_parent_is_root() == false) {
+                    kernel_syscall_persistent_shell_checkpoint_fork(child_pid);
+                }
                 let child_slot: usize =
                     address_space_root_slot(kernel_process_current_root());
                 match process_image_clone_vm_begin(child_slot) {

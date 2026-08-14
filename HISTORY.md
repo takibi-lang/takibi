@@ -15,6 +15,92 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-14: Interactive HTTPd lifecycle checkpoints, and collapsing to one top-level boot launch (issue #289)
+
+Investigating why "httpd" appeared in kernel-side identifiers (raised while
+implementing #289's lifecycle checkpoints) surfaced a real, pre-existing gap:
+`kernel_test_driver_run()` launched two separate top-level processes via
+`kernel_initial_process_map()` -- one for `kernel/tests/ext2/init.sh` (the
+bounded self-test fixture), a second, entirely separate one hardcoded in
+`kernel_interactive_httpd_shell_run()` for `/etc/httpd-demo.sh` (the
+persistent terminal demo). This was exactly the "kernel-side argv scenario"
+pattern issue #209 eliminated for individual applets, except one instance
+survived for the demo shell itself -- and it is why the kernel carried an
+`httpd`-named flag (`syscall_interactive_httpd_shell`) to tell the two
+launches apart, rather than a name for the kernel-owned concept it actually
+gated (bounded one-shot fixture vs. persistent unbounded lifecycle).
+
+Collapsing to one launch was more than a rename: `init.sh`'s final line,
+`exec /bin/echo exec-ok`, is a deliberate self-replace (`SyscallAction::Exec`,
+"parent-exec handoff, no parent to notify") that exercises a distinct kernel
+code path, and -- because `/bin/echo` exits normally right afterward -- its
+clean return was also the only thing that triggered
+`kernel_init_script_success_evidence()` (all of the bounded suite's
+accumulated pass/fail evidence) and the double-free/"resources: pages=0"
+checks. `init.sh` now execs `/etc/httpd-demo.sh` directly instead (same
+self-replace mechanism, different target); `kernel/init/test_driver.tkb`
+moved that evidence/verification to fire right at the handoff point (between
+unmapping ash's own image and mapping the replacement), decoupling "did
+init.sh's own run produce the expected evidence" from "did whatever it execs
+into next also exit cleanly" -- which were only ever coupled by accident
+through `/bin/echo`'s exit, and would have silently swallowed unrelated,
+already-true evidence had the replacement failed for an unrelated reason.
+`kernel_interactive_httpd_shell_run()` and its own
+`kernel_process_execution_reset()`/second launch are gone.
+`syscall_interactive_httpd_shell` and its UART text were renamed to
+`syscall_persistent_shell`/`"persistent shell: ..."` throughout
+`kernel/kernel/syscall.tkb`. `kernel/tests/common/views/execve.expected`
+lost its two lines describing `/bin/echo`'s own exit (no longer applicable)
+and gained one proving the handoff itself: `"execve: parent-exec handoff
+mapped"`. `process_lifecycle.expected`/`shell_script.expected`/
+`distro_image.expected` needed no changes -- their exact text just moved
+earlier in the log, and the view mechanism (`grep -E -f filter | cmp`) does
+not care about cross-view ordering.
+
+On that corrected structure, four new one-shot `persistent shell: <name>
+pid=<n>` checkpoints (fork, child selected, exec prepare, exec commit) were
+added, gated to the interactive HTTPd child specifically -- not merely to
+"is the persistent-shell scenario active", which would also match the demo
+shell's own earlier launch of the interactive ash. The fork checkpoint
+required `kernel_process_parent_is_root() == false` rather than a pid
+comparison, since `kernel_process_clone_begin()` already switches `current`
+to the new child before returning `ChildReady`; the two exec checkpoints key
+off the fork checkpoint's own tracked target pid, not the scenario flag
+alone, so they don't also fire for the demo shell's own unrelated exec.
+`scripts/run_kernel_uart_driver.py` tracks these in order alongside the
+already-existing host-observed boundaries and, on a stall, now reports the
+last completed checkpoint and the next expected one instead of one opaque
+timeout. New common view: `httpd_interactive_lifecycle`.
+
+New negative-path regression, `kernelcheck-lifecycle-gap-qemu`
+(`scripts/run_kernel_qemutest_lifecycle_gap.sh`), proves that diagnosis
+itself is correct, not just that it never triggers: GDB pre-sets the
+exec-commit checkpoint's own one-shot guard variable directly (`set *(char
+*)&VAR = 1`), so its print never fires while the real exec-commit logic in
+its caller runs untouched -- no dedicated test-only kernel switch. A
+breakpoint on the checkpoint function itself plus `return` (mirroring
+`kernelcheck-oops-qemu`'s own precedent) does not work here: the function is
+small enough to be inlined at its one call site, so GDB has no distinct
+frame to pop ("Cannot pop the initial frame"). Getting the direct-write
+approach working reliably surfaced three environment-specific GDB/QEMU
+quirks worth remembering: (1) writing the guard immediately after `target
+remote` connects, before any kernel code runs, gets silently undone by this
+kernel's own early `.bss` zero-clear -- the write must happen after a
+breakpoint past that point (`kernel_process_execution_reset`, same one
+`kernelcheck-oops-qemu`'s `child_exec` mode already uses); (2) with `-smp 2`,
+GDB's default thread after `target remote` is CPU0, which `info threads`
+reports as `[running]` even though `-S` genuinely halted it, and any memory
+write against it fails with "Cannot execute this command while the target is
+running" -- this does not reproduce once stopped at a real breakpoint
+instead of `-S`'s raw initial halt; (3) `set *(char *)&VAR = 1` against this
+no-`-g` kernel build prints "has unknown type; cast it to its declared type"
+but the write completes anyway (confirmed by reading the value back with
+`print`) -- treating that message as fatal was an earlier, wrong assumption.
+No further `continue`/`detach` after the write: gdb-multiarch's `continue`
+against this remote target does not reliably block the batch command list,
+and batch mode already detaches (and, empirically, resumes a
+breakpoint-stopped target) on its own once the command list ends.
+
 ### 2026-08-13: A bounded lifecycle trace made terminal process failures inspectable (issue #288)
 
 The scheduler and process layer gained an opt-in, fixed 16-record trace that

@@ -37,7 +37,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelcheck-rpi5 kernelcheck-qemu kernelcheck-oops-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelcheck-rpi5 kernelcheck-qemu kernelcheck-oops-qemu kernelcheck-lifecycle-gap-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -584,6 +584,14 @@ kernelcheck-oops-qemu: kernelbuild-qemu $(KERNEL_CRASH_SNAPSHOT_LAYOUT)
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=data_abort_write KERNEL_QEMU_OOPS_GDB_PORT=18675 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-data-abort" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec KERNEL_QEMU_OOPS_GDB_PORT=18676 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-child-exec" bash scripts/run_kernel_oops_qemutest.sh
 
+## Issue #289 negative-path regression: GDB pokes the exec-commit lifecycle
+## checkpoint's own one-shot guard so its print is skipped while the real
+## exec-commit logic runs untouched, proving the interactive-HTTPd harness's
+## own last-completed/next-expected diagnosis names the right gap -- see
+## scripts/run_kernel_qemutest_lifecycle_gap.sh for the full rationale.
+kernelcheck-lifecycle-gap-qemu: kernelbuild-qemu
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_qemutest_lifecycle_gap.sh
+
 ## kernelsh-qemu: boot the standalone kernel, attach the current terminal to
 ## its TCP-backed UART console, and forward localhost:18080 to guest httpd.
 ## Exit miniterm with Ctrl-].
@@ -596,7 +604,7 @@ kernelsh-qemu: kernelbuild-qemu
 kernelsh-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_shell_rpi5.sh
 
-kernelcheck: kernelcheck-qemu kernelcheck-oops-qemu kernelcheck-rpi5
+kernelcheck: kernelcheck-qemu kernelcheck-oops-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-rpi5
 
 ## allcheck: run every check this Makefile knows about -- langcheck, test,
 ## linuxcheck, kernelcheck -- so a single command surfaces a failure
