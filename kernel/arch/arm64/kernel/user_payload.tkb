@@ -11,7 +11,7 @@
  * static-PIE ELF (GitHub issue #241; previously a flat position-independent
  * blob via a dedicated linker script, objcopied to raw bytes and embedded
  * into the kernel image directly), placed in the ext2 fixture image as
- * /user_payload, and launched from kernel/tests/ext2/init.sh like any
+ * /bin/user_payload, and launched from kernel/tests/ext2/init.sh like any
  * other external command -- see the Makefile's KERNEL_RPI5_USER_PAYLOAD_ELF
  * rule and KERNEL_EXT2_IMAGE's e2cp step.
  */

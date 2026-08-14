@@ -106,8 +106,8 @@ must_use variant DynamicExecResolveResult {
 // filesystem. Only the ELF header/program-table window is read into the
 // shared scratch buffer; PT_LOAD bytes are streamed later by
 // process_image_map_ext2_in_root(). Any failure at any step (name not
-// found, read failure, invalid ELF -- e.g. argv[0] names a symlink like
-// /echo or /bin/echo) returns NotFound and preserves the BusyBox fallback.
+// found, read failure, or invalid ELF) returns NotFound and preserves the
+// static-BusyBox fallback.
 fn kernel_exec_resolve_ext2_name_at(mount: Ext2Mount, name: []u8,
                                     metadata_address: usize)
         -> ExecResolveResult !{unsafe} {
@@ -161,7 +161,7 @@ fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: []u8)
 fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount)
         -> DynamicExecResolveResult !{unsafe} {
     match kernel_exec_resolve_ext2_name_at(
-            mount, "busybox-httpd" as []u8,
+            mount, "bin/busybox-extras" as []u8,
             (dynamic_primary_metadata as *u8) as usize) {
         ExecResolveResult::NotFound => {
             return DynamicExecResolveResult::Invalid;
@@ -187,7 +187,7 @@ fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount)
 fn kernel_exec_resolve_dynamic_ext2(mount: Ext2Mount)
         -> DynamicExecResolveResult !{unsafe} {
     if (kernel_syscall_exec_path_matches(
-            "/busybox-httpd" as []u8) == false) {
+            "/bin/httpd" as []u8) == false) {
         return DynamicExecResolveResult::NotRequested;
     }
     return kernel_exec_resolve_dynamic_ext2_images(mount);
@@ -615,17 +615,17 @@ saved_rootfs_inode = 0;
 saved_rootfs_length = 0;
 if (ext2_mount_ready) {
     match kernel_exec_resolve_ext2_name_at(
-            saved_ext2_mount, "bin/busybox" as []u8,
+            saved_ext2_mount, "bin/busybox.static" as []u8,
             (rootfs_metadata as *u8) as usize) {
         ExecResolveResult::NotFound => {
-            kernel_boot_log("rootfs image: /bin/busybox not found\n");
+            kernel_boot_log("rootfs image: /bin/busybox.static not found\n");
         }
         ExecResolveResult::Resolved(image) => {
             saved_rootfs_plan = image.plan;
             saved_rootfs_inode = image.inode;
             saved_rootfs_length = image.file_length;
             rootfs_plan_ready = true;
-            kernel_boot_log("rootfs image: ext2 /bin/busybox ready\n");
+            kernel_boot_log("rootfs image: ext2 /bin/busybox.static ready\n");
         }
     }
 }
@@ -733,7 +733,7 @@ irq_uart_rx_unmask();
     //
     // GitHub issue #241: user_payload.tkb's own EL0 syscall-ABI
     // fixture now runs from inside this script (as plain external
-    // command "/user_payload"; ash forks + execve()s it, resolved
+    // command "/bin/user_payload"; ash forks + execve()s it, resolved
     // transparently by kernel_process_child_exec_prepare -- see
     // above), not through the dedicated flat-blob mechanism #228
     // built. Its own TCP-drop-injection/scheduler arming,
@@ -759,7 +759,7 @@ irq_uart_rx_unmask();
                 rootfs_plan_ready, saved_rootfs_plan,
                 saved_rootfs_inode, saved_rootfs_length,
                 saved_rootfs_plan,
-                "busybox\0sh\0/init.sh\0" as []u8,
+                "bin/busybox.static\0sh\0/etc/init.sh\0" as []u8,
                 3) {
             ProcessImageMapResult::InvalidImage => {
                 kernel_boot_log("script map: invalid image\n");

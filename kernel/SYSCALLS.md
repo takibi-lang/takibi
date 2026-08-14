@@ -9,7 +9,8 @@ true.
 Reached-by-BusyBox column reflects the real, traced integration this kernel
 runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 `httpd -f -p 8080 -h /`) dynamically linked against pinned `musl` 1.2.6-r2
-(see `Makefile`'s `KERNEL_BUSYBOX_URL`/`KERNEL_HTTPD_URL`/`KERNEL_MUSL_URL`).
+(see `Makefile`'s `KERNEL_BUSYBOX_URL`/`KERNEL_BUSYBOX_EXTRAS_URL`/
+`KERNEL_MUSL_URL`).
 
 | # | name | status | notes |
 |---|------|--------|-------|
@@ -47,7 +48,7 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 | 214 | brk | Implemented | real heap-break growth within the fixed process arena |
 | 215 | munmap | Unsupported-by-design | the fixed short-lived process arena is reclaimed as a unit; not reachable in practice (musl never calls `munmap` in this integration) |
 | 220 | clone | Implemented | `CLONE_VM\|CLONE_VFORK` shape only, matching BusyBox httpd's own observed fork usage |
-| 221 | execve | Partial | parent handoff plus child-frame replacement; resolves `argv[0]` through ext2, validates a bounded ELF metadata window, and streams PT_LOAD pages from the file. Names without a separate ELF fall back to the ext2-resident static BusyBox, preserving its argv[0]-driven multi-call dispatch for `/echo`/`/bin/echo`; `/busybox-httpd` additionally maps its ext2-resident BusyBox Extras and musl interpreter pair. Copies pathname/argv, builds the child's own process-image root (whichever root it is currently scheduled on, not a fixed root), and returns child exit through the saved parent frame. Text scripts are not executable yet: there is no shebang interpreter dispatch or ENOEXEC shell fallback. |
+| 221 | execve | Partial | parent handoff plus child-frame replacement; resolves `argv[0]` through ext2, validates a bounded ELF metadata window, and streams PT_LOAD pages from the file. Static BusyBox applets such as `/bin/echo` are hard links to its ELF and retain argv[0]-driven multi-call dispatch; any unresolved path falls back to that same static image. `/bin/httpd` additionally maps its ext2-resident BusyBox Extras and musl interpreter pair. Copies pathname/argv, builds the child's own process-image root (whichever root it is currently scheduled on, not a fixed root), and returns child exit through the saved parent frame. Text scripts are not executable yet: there is no shebang interpreter dispatch or ENOEXEC shell fallback. |
 | 260 | wait4 | Partial | blocks the caller until its live child exits (by specific pid or `-1`/`WAIT_ANY`), or returns 0 for `WNOHANG` while it is still live; delivers the real reaped pid and exit status, tracked per-slot so any live process -- not just the tree root -- can wait for its own child; a process may have at most one live child at a time, so concurrent multi-child wait/reap remains out of scope |
 | 222 | mmap | Partial | anonymous-only (`MAP_PRIVATE\|MAP_ANONYMOUS`, `fd=-1`, no `PROT_EXEC`) via a heap-break-cursor emulation, not a real independent mapping; every real call shape musl's mallocng makes satisfies this (verified against the pinned musl 1.2.6 source directly) |
 | 226 | mprotect | Partial | real permission changes for exactly one transition (`RW+XN` <-> `R+XN` on data/heap/stack); anything else (adding `PROT_EXEC`, targeting text/rodata, mixed-class ranges) returns a real `EACCES`/`EINVAL`, never false success |

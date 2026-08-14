@@ -281,9 +281,9 @@ KERNEL_USER_BUILD_DIR    := $(KERNEL_DIR)/build/user
 KERNEL_BUSYBOX_URL       := https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-static-1.37.0-r31.apk
 KERNEL_BUSYBOX_APK       := $(KERNEL_USER_BUILD_DIR)/busybox-static.apk
 KERNEL_BUSYBOX_STATIC    := $(KERNEL_USER_BUILD_DIR)/busybox-static
-KERNEL_HTTPD_URL         := https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-extras-1.37.0-r31.apk
-KERNEL_HTTPD_APK         := $(KERNEL_USER_BUILD_DIR)/busybox-extras.apk
-KERNEL_HTTPD             := $(KERNEL_USER_BUILD_DIR)/busybox-httpd
+KERNEL_BUSYBOX_EXTRAS_URL := https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-extras-1.37.0-r31.apk
+KERNEL_BUSYBOX_EXTRAS_APK := $(KERNEL_USER_BUILD_DIR)/busybox-extras.apk
+KERNEL_BUSYBOX_EXTRAS     := $(KERNEL_USER_BUILD_DIR)/busybox-extras
 KERNEL_MUSL_URL          := https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/musl-1.2.6-r2.apk
 KERNEL_MUSL_APK          := $(KERNEL_USER_BUILD_DIR)/musl.apk
 KERNEL_MUSL_LOADER       := $(KERNEL_USER_BUILD_DIR)/ld-musl-aarch64.so.1
@@ -349,10 +349,10 @@ $(KERNEL_BUSYBOX_STATIC): $(KERNEL_BUSYBOX_APK)
 	tar -xOzf $< bin/busybox.static > $@
 	chmod +x $@
 
-$(KERNEL_HTTPD_APK): | $(KERNEL_USER_BUILD_DIR)
-	curl -sSLf $(KERNEL_HTTPD_URL) -o $@
+$(KERNEL_BUSYBOX_EXTRAS_APK): | $(KERNEL_USER_BUILD_DIR)
+	curl -sSLf $(KERNEL_BUSYBOX_EXTRAS_URL) -o $@
 
-$(KERNEL_HTTPD): $(KERNEL_HTTPD_APK)
+$(KERNEL_BUSYBOX_EXTRAS): $(KERNEL_BUSYBOX_EXTRAS_APK)
 	tar -xOzf $< bin/busybox-extras > $@
 	chmod +x $@
 
@@ -363,7 +363,7 @@ $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 	tar -xOzf $< lib/ld-musl-aarch64.so.1 > $@
 	chmod +x $@
 
-$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd-demo.sh $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_HTTPD) $(KERNEL_MUSL_LOADER) | $(KERNEL_USER_BUILD_DIR)
+$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd-demo.sh $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
 	truncate -s 4194304 $@.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 4096
@@ -374,11 +374,11 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $@.tmp:/hello.txt
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $@.tmp:/mutable.txt
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/index.html $@.tmp:/index.html
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $@.tmp:/init.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $@.tmp:/etc/init.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/httpd-demo.sh $@.tmp:/etc/httpd-demo.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $@.tmp:/large.txt
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSYBOX_STATIC) $@.tmp:/bin/busybox
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_HTTPD) $@.tmp:/busybox-httpd
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSYBOX_STATIC) $@.tmp:/bin/busybox.static
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSYBOX_EXTRAS) $@.tmp:/bin/busybox-extras
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_MUSL_LOADER) $@.tmp:/lib/ld-musl-aarch64.so.1
 	truncate -s 0 $@.devnull.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.devnull.tmp $@.tmp:/dev/null
@@ -387,26 +387,27 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	printf '\n' >>$@.read_indirect.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.read_indirect.tmp $@.tmp:/read_indirect.txt
 	rm -f $@.read_indirect.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_RPI5_USER_PAYLOAD_ELF) $@.tmp:/user_payload
-	debugfs -w -R 'set_inode_field /bin/busybox mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /busybox-httpd mode 0100755' $@.tmp >/dev/null 2>&1
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_RPI5_USER_PAYLOAD_ELF) $@.tmp:/bin/user_payload
+	debugfs -w -R 'set_inode_field /bin/busybox.static mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/busybox-extras mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /lib/ld-musl-aarch64.so.1 mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /init.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /user_payload mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /etc/init.sh mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/user_payload mode 0100755' $@.tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 debugfs -w -R 'symlink /latest hello.txt' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox /busybox' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox /cat' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox /uname' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox /od' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox /bin/echo' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox /bin/ls' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox /echo' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/sh' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/cat' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/uname' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/od' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/echo' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/ls' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox-extras /bin/httpd' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'mkdir /many' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'expand /many' $@.tmp >/dev/null 2>&1
 	for index in $$(seq -w 0 19); do \
-		debugfs -w -R "link /bin/busybox /many/entry-$$index" $@.tmp >/dev/null 2>&1; \
+		debugfs -w -R "link /bin/busybox.static /many/entry-$$index" $@.tmp >/dev/null 2>&1; \
 	done
-	debugfs -w -R 'set_inode_field /bin/busybox links_count 28' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/busybox.static links_count 27' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/busybox-extras links_count 2' $@.tmp >/dev/null 2>&1
 	e2fsck -fn $@.tmp >/dev/null
 	mv $@.tmp $@
 

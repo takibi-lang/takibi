@@ -4,5 +4,5 @@
 # normally replaces stdin with /dev/null, so preserve the inherited terminal
 # on fd 3 first and restore it explicitly in the child.
 exec 3<&0
-/busybox sh -i <&3 &
+/bin/sh -i <&3 &
 while :; do :; done

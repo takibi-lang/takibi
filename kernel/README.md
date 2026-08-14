@@ -75,8 +75,16 @@ The current RPi5 kernel includes:
 - one-boot integration views that independently compare boot, VM, process,
   syscall, filesystem, USB, Ethernet, BusyBox, and HTTPd evidence.
 
+The rootfs keeps executable files under `/bin`: Alpine's original
+`busybox.static` and `busybox-extras` names identify the two real binaries;
+`sh`, `cat`, `echo`, `ls`, `od`, and `uname` are hard links to the static
+binary, while `httpd` is a hard link to BusyBox Extras. The independent
+Takibi test program is `/bin/user_payload`. Boot policy scripts remain under
+`/etc` (`/etc/init.sh` and `/etc/httpd-demo.sh`).
+
 The current HTTPd milestone runs the unmodified pinned BusyBox Extras binary
-as a persistent foreground daemon: `busybox-httpd httpd -f -p 8080 -h /`.
+through its `/bin/httpd` hard link as a persistent foreground daemon:
+`httpd -f -p 8080 -h /`.
 HTTPd creates its own IPv6 wildcard listener, accepts each connection, and
 uses the observed `clone(SIGCHLD)` fork shape. Each child receives a private
 copy-on-write view of the parent's initial 331-page VM plus a distinct kernel
@@ -148,7 +156,7 @@ Both shell targets provide the same BusyBox HTTPd command. Wait for the
 `interactive shell: uart blocked` marker and its `/ #` prompt, then run:
 
 ```sh
-/busybox-httpd httpd -f -p 8080 -h / &
+httpd -f -p 8080 -h / &
 ```
 
 For QEMU, start the shell and open the forwarded loopback URL in a browser:
@@ -207,7 +215,7 @@ DAIF.I masking, catching a class of past hand-written-assembly regression
 without needing a board or a probabilistic real-hardware race to
 reproduce it. It also links `kernel/arch/arm64/kernel/user_payload.tkb`/
 `user_payload_asm.S` into their own real static-PIE ELF (placed on the ext2
-fixture image as `/user_payload` and launched from `kernel/tests/ext2/init.sh`
+fixture image as `/bin/user_payload` and launched from `kernel/tests/ext2/init.sh`
 like any other external command) and runs
 `scripts/check_user_payload_no_rw_globals.py` against that link -- a static
 check that a top-level mutable global in that file is not guaranteed to be
@@ -526,11 +534,10 @@ workload will run, not a specification.
   core 0.
   Core 1 proves autonomous EL1 entry and shared-MMU visibility, then parks.
   `execve` resolves `argv[0]` as an ext2 path, validates a bounded ELF
-  metadata window, and streams each PT_LOAD page from the file. It falls back
-  to the ext2-resident static BusyBox image on any resolution failure -- so its own
-  argv[0]-driven multi-call applet dispatch (`echo`, `sh`, etc.) still works
-  for names with no real ELF behind them, such as the `/echo`/`/bin/echo`
-  ext2 hard links (superseding an earlier two-entry registry). `wait4` blocks
+  metadata window, and streams each PT_LOAD page from the file. Static
+  BusyBox applets such as `/bin/echo` are hard links to its ELF, so their
+  argv[0]-driven multi-call dispatch works without a separate registry; an
+  unresolved path falls back to that same static image. `wait4` blocks
   the caller until its live child exits (by specific pid or `-1`/
   `WAIT_ANY`), delivering the real reaped pid and exit status, tracked
   per-slot so any live process (not just the tree root) can wait for its

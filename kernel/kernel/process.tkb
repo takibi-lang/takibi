@@ -1586,7 +1586,7 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
     // correctly meant "the one single child is still alive". Once any
     // slot can independently fork, that flag stays true for the entire
     // lifetime of an OUTER ancestor's own child (e.g. ash's fork of
-    // /user_payload) regardless of what an INNER descendant does, so it
+    // /bin/user_payload) regardless of what an INNER descendant does, so it
     // wrongly rejected a real, unrelated clone deeper in the tree (found
     // on real RPi5 hardware: user_payload's own fork always failed with
     // -EINVAL while running as ash's forked+exec'd child). The per-slot
@@ -1824,7 +1824,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // two-process model where "a child exited" really did mean "nothing
     // is left to switch between." Under PID 1 running many children over
     // one boot that is simply false, and because the gate could only ever
-    // close, the FIRST child to exit (init.sh's `/cat`) permanently
+    // close, the FIRST child to exit (init.sh's `/bin/cat`) permanently
     // disabled preemption for every process started afterwards. Observed
     // exactly that way: a later fixture's child woke from UART RX (its
     // ISR logged the byte) and was then never selected again, because no

@@ -15,7 +15,7 @@ esac
 
 # The kernel enters this ash image once. Ordinary applets run through ash's
 # child fork/execve path, not through another kernel-side image launch.
-/cat /hello.txt
+/bin/cat /hello.txt
 if [ "$?" -eq 0 ]; then
     echo "busybox exit: 0"
 else
@@ -23,7 +23,7 @@ else
     exit 1
 fi
 
-/uname -a
+/bin/uname -a
 if [ "$?" -eq 0 ]; then
     echo "busybox uname exit: 0"
 else
@@ -34,17 +34,17 @@ fi
 # BusyBox od exercises readv(2) against /hello.txt. Standard input is now a
 # real inherited UART descriptor, matching the shell's other standard fds;
 # the named input file therefore completes normally.
-/od /hello.txt
+/bin/od /hello.txt
 if [ "$?" -eq 0 ]; then
     echo "busybox od exit: 0"
 else
     echo "busybox od failed"
 fi
 
-# Keep `exit $?` after /echo so ash cannot tail-call exec the command in
+# Keep `exit $?` after /bin/echo so ash cannot tail-call exec the command in
 # place of its shell process. This leaves a real child execve, exit, and
 # parent wait4/reap lifecycle for the kernel to exercise.
-/busybox sh -c '/echo child-exec-ok; exit $?'
+/bin/sh -c '/bin/echo child-exec-ok; exit $?'
 if [ "$?" -eq 0 ]; then
     echo "child exec: shell exit: 0"
 else
@@ -55,7 +55,7 @@ fi
 # This remains a child shell, but now exercises an actual interactive ash
 # read/eval loop over UART. The runner sends a harmless leading assignment,
 # then an observable command and exit after ppoll publishes the blocked marker.
-/busybox sh -i
+/bin/sh -i
 if [ "$?" -eq 0 ]; then
     echo "busybox interactive shell exit: 0"
 else
@@ -67,7 +67,7 @@ fi
 # entry after all twelve direct blocks. `cat` reaches sendfile(2), proving
 # the file reader streams through the indirect pointer rather than treating
 # either direct pointers or the one-block staging area as a whole-file limit.
-/cat /read_indirect.txt
+/bin/cat /read_indirect.txt
 if [ "$?" -eq 0 ]; then
     echo "busybox indirect-file exit: 0"
 else
@@ -79,11 +79,11 @@ fi
 # through a dedicated flat-blob mechanism straight from the kernel's own
 # boot sequence) is a real ELF in this filesystem now, launched the same
 # way any other external command here is: ash forks and execve()s it.
-/user_payload
+/bin/user_payload
 
 # This foreground daemon is an ordinary ash child. Its dynamic BusyBox/musl
 # image is selected by the command name, while the shell remains PID 1.
-/busybox-httpd httpd -f -p 8080 -h /
+/bin/httpd -f -p 8080 -h /
 
 for phase in fd uart telnet; do
     echo "init: phase $phase"
@@ -97,4 +97,4 @@ echo "init: complete"
 # see httpd-demo.sh) rather than a command that exits, so control does not
 # return to the kernel driver in the normal case -- see kernel/init/
 # test_driver.tkb's handling of this exec for what still runs beforehand.
-exec /busybox sh /etc/httpd-demo.sh
+exec /bin/sh /etc/httpd-demo.sh

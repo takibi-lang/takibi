@@ -398,7 +398,7 @@ def init_send(sock: socket.socket, state, data: bytes) -> bool:
 
 
 def init_script_fixture(sock: socket.socket) -> bool:
-    # /user_payload binds 8080, accepts both streams before reading either,
+    # /bin/user_payload binds 8080, accepts both streams before reading either,
     # reads eight bytes from each, writes conn-B on fd 6 and an HTTP status
     # line on fd 5, then writes a 1461-byte response split by the kernel's
     # deliberate dropped-data-segment fixture.

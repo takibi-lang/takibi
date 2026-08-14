@@ -1,4 +1,4 @@
-rootfs image: ext2 /bin/busybox ready
+rootfs image: ext2 /bin/busybox.static ready
 distro map: pages=401 rx+rw-xn heap+stack=rw+xn
 distro load: file bytes match bss=zero gap=unmapped
 distro stack: argc=3 argv auxv ready
