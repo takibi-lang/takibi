@@ -524,9 +524,9 @@ lib/
 bin/
   main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--forbid-trap] [--forbid-unsafe] [--emit-struct-layout <StructName>] [--version]`)
                      Multiple .tkb files are concatenated (flat global namespace) before compilation.
-                     -g emits full DWARF debug info. QEMU/GDB source-level regression coverage lives in
-                     examples/dwarf_debug and scripts/run_qemutest.sh; the PC-sampling profiler is a
-                     separate use of the same gdbstub plumbing.
+                     -g emits full DWARF debug info. QEMU/GDB source-level regression coverage includes
+                     examples/dwarf_debug and the maintained kernelcheck-qemu-debug lane; the PC-sampling
+                     profiler is a separate use of the same gdbstub plumbing.
                      --version prints the version from dune-project's `(version ...)` field via
                      the `dune-build-info` library (`Build_info.V1.version ()`) and exits 0 --
                      bump `dune-project`'s package version to change what this prints, nothing in
@@ -1058,10 +1058,13 @@ one-line description of what it does.
 ## Debug Info and Execution Profiling (QEMU)
 
 `-g` emits full DWARF intended to be useful in real `gdb-multiarch`
-sessions, not just to satisfy `llvm-dwarfdump`. The live QEMU/GDB
-regression fixture is `examples/dwarf_debug/dwarf_debug.tkb`, with
-normalized expected output in `examples/dwarf_debug/dwarf_debug.gdb.expected`
-and the harness in `scripts/run_qemutest.sh`.
+sessions, not just to satisfy `llvm-dwarfdump`. The historical live QEMU/GDB
+fixture is `examples/dwarf_debug/dwarf_debug.tkb`, with normalized expected
+output in `examples/dwarf_debug/dwarf_debug.gdb.expected` and the harness in
+`scripts/run_qemutest.sh`. The maintained full-kernel regression is
+`make kernelcheck-qemu-debug`: it compiles `kernel-debug.elf` with `-g`, then
+runs the ordinary QEMU view and ash TCP suites with separate ports and
+artifacts from the non-debug lane.
 
 The same QEMU gdbstub plumbing is also used by the sampling profilers for
 HTTP/TCP experiments. That technique is useful for CPU-bound code, but it

@@ -9672,10 +9672,11 @@ let codegen_tests = [
      exactly this. *)
   Alcotest.test_case
     "DWARF debug info (-g): a stable_replace() result's un-normalized \
-     variant-named local type does not crash ditype_of_ast"
+     variant-named local type produces no typeless local-variable metadata"
     `Quick
-    (expect_codegen_ok
-       "linear view DwarfStableGuard[lock: addr];
+    (fun () ->
+       expect_codegen_ok
+         "linear view DwarfStableGuard[lock: addr];
         linear struct DwarfStableOwner[n: usize] {
           id: usize @ n;
           value: i32;
@@ -9696,15 +9697,19 @@ let codegen_tests = [
         fn dwarf_stable_drop(owner: sink DwarfStableOwner[n]) {}
         fn dwarf_stable_use() {
           let guard = dwarf_stable_lock(&dwarf_stable_slot.mutex);
-          let previous: DwarfStableValue = stable_replace(
+          let dwarf_stable_previous: DwarfStableValue = stable_replace(
             guard, &dwarf_stable_slot.mutex, dwarf_stable_slot.value,
             DwarfStableValue::Empty);
-          match previous {
+          match dwarf_stable_previous {
             DwarfStableValue::Empty => {}
             DwarfStableValue::Full(owner) => { dwarf_stable_drop(owner); }
           }
           dwarf_stable_unlock(guard, &dwarf_stable_slot.mutex);
-        }");
+        }" ();
+       let ir = Llvm.string_of_llmodule Llvm_gen.the_module in
+       Alcotest.(check bool) "stable_replace variant local has no typeless DILocalVariable"
+         false (contains_substring ir
+           "DILocalVariable(name: \"dwarf_stable_previous\""));
 
   Alcotest.test_case
     "pointer difference codegens as an isize element count"
