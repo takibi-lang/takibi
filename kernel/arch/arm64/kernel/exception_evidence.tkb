@@ -1,4 +1,5 @@
 use "kernel/kernel/process.tkb";
+use "kernel/kernel/fd_table.tkb";
 use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
 
 // Stable, fixed-size fail-stop payload.  `valid` is written last, and
@@ -21,6 +22,7 @@ struct CrashSnapshot {
     parent_pid: usize;
     process_state: usize;
     wait_reason: usize;
+    wait4_status_ptr: usize;
     root_slot: usize;
     root_l1: usize;
     root_asid: usize;
@@ -32,6 +34,13 @@ struct CrashSnapshot {
     saved_tpidr_el0: usize;
     trace_count: usize;
     trace: [usize; KERNEL_CRASH_TRACE_WORDS];
+    // Issue #294: current process's own descriptor table -- fd_kind[i]
+    // (0=Empty/1=Terminal/2=OpenFile/3=Directory/4=Listener/5=Connection)
+    // and fd_object[i] (the shared-object slot it holds, meaningless when
+    // fd_kind[i] is Empty), so a diagnostic snapshot can identify relevant
+    // descriptor/socket ownership, not just process/scheduler/VM state.
+    fd_kind: [usize; PROCESS_FD_MAX];
+    fd_object: [usize; PROCESS_FD_MAX];
 }
 
 let mut crash_snapshot: CrashSnapshot;
@@ -86,12 +95,23 @@ fn crash_snapshot_render() !{unsafe} {
     kernel_boot_log(" parent="); uart_put_udec(crash_snapshot.parent_pid);
     kernel_boot_log(" state="); uart_put_udec(crash_snapshot.process_state);
     kernel_boot_log(" wait="); uart_put_udec(crash_snapshot.wait_reason);
+    kernel_boot_log(" wait4_status_ptr="); crash_snapshot_put_hex(crash_snapshot.wait4_status_ptr);
     kernel_boot_log(" root="); uart_put_udec(crash_snapshot.root_slot);
     kernel_boot_log(" asid="); uart_put_udec(crash_snapshot.root_asid);
     kernel_boot_log(" l1="); crash_snapshot_put_hex(crash_snapshot.root_l1);
     kernel_boot_log(" image=");
     if (crash_snapshot.image_kind == 1) { kernel_boot_log("exec\n"); }
     else { kernel_boot_log("bootstrap\n"); }
+    let render_fd_kind = crash_snapshot.fd_kind;
+    let render_fd_object = crash_snapshot.fd_object;
+    for fd: isize in 0..<(PROCESS_FD_MAX as isize) {
+        if (render_fd_kind[fd] != 0) {
+            kernel_boot_log("oops: fd="); uart_put_udec(fd as usize);
+            kernel_boot_log(" kind="); uart_put_udec(render_fd_kind[fd]);
+            kernel_boot_log(" object="); uart_put_udec(render_fd_object[fd]);
+            kernel_boot_log("\n");
+        }
+    }
     if (crash_snapshot.saved_frame_available != 0) {
         kernel_boot_log("oops: saved sp_el0="); crash_snapshot_put_hex(crash_snapshot.saved_sp_el0);
         kernel_boot_log(" tpidr_el0="); crash_snapshot_put_hex(crash_snapshot.saved_tpidr_el0);
@@ -157,10 +177,19 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     crash_snapshot.parent_pid = kernel_process_crash_parent_pid();
     crash_snapshot.process_state = kernel_process_crash_state();
     crash_snapshot.wait_reason = kernel_process_crash_wait_reason();
+    crash_snapshot.wait4_status_ptr = kernel_process_crash_wait4_status_ptr();
     crash_snapshot.root_slot = kernel_process_crash_root_slot();
     crash_snapshot.root_l1 = address_space_l1_physical(crash_snapshot.root_slot);
     crash_snapshot.root_asid = address_space_asid(crash_snapshot.root_slot);
     crash_snapshot.image_kind = kernel_process_crash_image_kind();
+    let crash_fd_kind = crash_snapshot.fd_kind;
+    let crash_fd_object = crash_snapshot.fd_object;
+    for fd: isize in 0..<(PROCESS_FD_MAX as isize) {
+        crash_fd_kind[fd] =
+            kernel_fd_table_crash_kind(crash_snapshot.root_slot, fd as usize);
+        crash_fd_object[fd] =
+            kernel_fd_table_crash_object(crash_snapshot.root_slot, fd as usize);
+    }
     crash_snapshot.saved_frame_available = 0;
     if (frame_sp != 0) {
         crash_snapshot_copy_saved_frame(frame_sp, &crash_snapshot.saved_sp_el0);

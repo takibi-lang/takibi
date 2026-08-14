@@ -1214,3 +1214,29 @@ fn unified_fd_table_probe() -> bool {
     }
     return shared && heap_independent;
 }
+
+// Allocation-free diagnostic view for the terminal exception path (issue
+// #294's last acceptance criterion), mirroring kernel/kernel/process.tkb's
+// own kernel_process_crash_*() accessors: reads plain ProcessFdContext data
+// only, never object_pool's RefcountSlotMap internals -- a crash report
+// must not acquire a lock after a fatal exception.
+fn kernel_fd_table_crash_kind(process: usize, fd: usize) -> usize {
+    if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX) { return 0; }
+    let process_index = unified_fd_narrow_process(process);
+    let fd_kind = process_fd_context[process_index].fd_kind;
+    match fd_kind[fd as isize] {
+        UnifiedFdKind::Empty => { return 0; }
+        UnifiedFdKind::Terminal => { return 1; }
+        UnifiedFdKind::OpenFile => { return 2; }
+        UnifiedFdKind::Directory => { return 3; }
+        UnifiedFdKind::Listener => { return 4; }
+        UnifiedFdKind::Connection => { return 5; }
+    }
+}
+
+fn kernel_fd_table_crash_object(process: usize, fd: usize) -> usize {
+    if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX) { return 0; }
+    let process_index = unified_fd_narrow_process(process);
+    let fd_object = process_fd_context[process_index].fd_object;
+    return fd_object[fd as isize];
+}

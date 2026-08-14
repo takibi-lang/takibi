@@ -1796,6 +1796,16 @@ fn kernel_process_crash_wait_reason() -> usize {
     }
 }
 
+// Issue #294: syscall continuation, alongside wait_reason above -- #302
+// moved wait4()'s status pointer into this same ProcessRecord field, so
+// a diagnostic snapshot naming the wait reason without this leaves half
+// of a blocked wait4()'s continuation state invisible.
+fn kernel_process_crash_wait4_status_ptr() -> usize {
+    if (execution_current_live == false) { return 0; }
+    return scheduled_process_record_wait4_status_ptr(
+        execution_current_handle.pool_index);
+}
+
 fn kernel_process_crash_root_slot() -> usize {
     if (execution_current_live == false) { return 0; }
     return execution_current_handle.pool_index;

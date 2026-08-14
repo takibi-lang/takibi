@@ -18,6 +18,11 @@
 # the ordinary, git-tracked kernel/arch/arm64/kernel/exception_context.inc,
 # which holds the hand-written SAVE/RESTORE macro bodies and is NOT gitignored.
 kernel/arch/arm64/kernel/exception_context_offsets.inc
+# GitHub issue #306: --emit-depfile sibling of the generated file above --
+# it lands next to it (outside _build/ and kernel/build/, both already
+# ignored below) since exception_context_offsets.inc itself is generated
+# in-tree rather than under a build directory.
+kernel/arch/arm64/kernel/exception_context_offsets.inc.d
 
 # Downloaded at build time (Makefile's COMMON_AARCH64_BUSYBOX_APK rule,
 # GitHub issue #156) -- a real, GPL-2.0, third-party binary fetched

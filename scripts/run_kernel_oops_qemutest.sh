@@ -123,7 +123,7 @@ if ! grep -Eq "^oops: fail-stop seq=[1-9][0-9]* cpu=[0-9]+ slot=8 ec=0x000000000
 fi
 if [ "$MODE" != child_exec ] &&
         { ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=7 pid=1 gen=[1-9][0-9]* ' "$UART_LOG" ||
-          ! grep -q '^oops: process pid=1 parent=0 state=2 wait=0 root=0 asid=1 .* image=bootstrap$' "$UART_LOG"; }; then
+          ! grep -Eq '^oops: process pid=1 parent=0 state=2 wait=0 wait4_status_ptr=0x0+ root=0 asid=1 .* image=bootstrap$' "$UART_LOG"; }; then
     echo "FAIL kernel/qemu oops: expected bootstrap process trace" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1

@@ -13,6 +13,14 @@ define takibi-oops
     printf "takibi-oops: seq=%lu cpu=%lu slot=%lu esr=0x%016lx far=0x%016lx elr=0x%016lx spsr=0x%016lx\n", $snapshot[$takibi_crashsnapshot_sequence / 8], $snapshot[$takibi_crashsnapshot_cpu / 8], $snapshot[$takibi_crashsnapshot_vector_slot / 8], $snapshot[$takibi_crashsnapshot_esr_el1 / 8], $snapshot[$takibi_crashsnapshot_far_el1 / 8], $snapshot[$takibi_crashsnapshot_elr_el1 / 8], $snapshot[$takibi_crashsnapshot_spsr_el1 / 8]
     printf "takibi-oops: live sp_el0=0x%016lx tpidr_el0=0x%016lx ttbr0=0x%016lx\n", $snapshot[$takibi_crashsnapshot_sp_el0 / 8], $snapshot[$takibi_crashsnapshot_tpidr_el0 / 8], $snapshot[$takibi_crashsnapshot_ttbr0_el1 / 8]
     printf "takibi-oops: process pid=%lu parent=%lu state=%lu wait=%lu root=%lu asid=%lu image=%lu\n", $snapshot[$takibi_crashsnapshot_process_pid / 8], $snapshot[$takibi_crashsnapshot_parent_pid / 8], $snapshot[$takibi_crashsnapshot_process_state / 8], $snapshot[$takibi_crashsnapshot_wait_reason / 8], $snapshot[$takibi_crashsnapshot_root_slot / 8], $snapshot[$takibi_crashsnapshot_root_asid / 8], $snapshot[$takibi_crashsnapshot_image_kind / 8]
+    printf "takibi-oops: wait4_status_ptr=0x%016lx\n", $snapshot[$takibi_crashsnapshot_wait4_status_ptr / 8]
+    set $fd_item = 0
+    while $fd_item < 16
+      if $snapshot[$takibi_crashsnapshot_fd_kind / 8 + $fd_item] != 0
+        printf "takibi-oops: fd=%lu kind=%lu object=%lu\n", $fd_item, $snapshot[$takibi_crashsnapshot_fd_kind / 8 + $fd_item], $snapshot[$takibi_crashsnapshot_fd_object / 8 + $fd_item]
+      end
+      set $fd_item = $fd_item + 1
+    end
     if $snapshot[$takibi_crashsnapshot_saved_frame_available / 8] != 0
       printf "takibi-oops: saved sp_el0=0x%016lx tpidr_el0=0x%016lx elr=0x%016lx spsr=0x%016lx\n", $snapshot[$takibi_crashsnapshot_saved_sp_el0 / 8], $snapshot[$takibi_crashsnapshot_saved_tpidr_el0 / 8], $snapshot[$takibi_crashsnapshot_saved_elr_el1 / 8], $snapshot[$takibi_crashsnapshot_saved_spsr_el1 / 8]
     else
