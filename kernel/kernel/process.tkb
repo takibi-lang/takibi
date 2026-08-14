@@ -1608,6 +1608,20 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             scheduled_process_records[parent.pool_index].has_child = true;
             scheduled_process_records[child.pool_index].parent = parent;
             scheduled_process_records[child.pool_index].has_parent = true;
+            // "current" becomes the CHILD right here, before this function
+            // returns ChildReady -- the assembly clone continuation resumes
+            // as the child directly (x0=0), so there is no separate
+            // parent-side return path to switch on later. A caller reading
+            // kernel_process_current_pid()/kernel_process_current_root() etc.
+            // immediately after matching ChildReady therefore observes the
+            // CHILD's identity, not the parent's; asking "did the parent do
+            // this fork" needs kernel_process_parent_is_root() (which asks
+            // about *current's own* parent) or the caller's own pre-call
+            // snapshot of parent, not a comparison against current's pid
+            // taken after this call. This surprised a real caller once
+            // (issue #289's fork checkpoint originally gated on
+            // `kernel_process_current_pid() != 1`, which is always true here
+            // regardless of who forked).
             execution_current_handle = child;
             execution_clone_calls = execution_clone_calls + 1;
             kernel_process_trace_record(
