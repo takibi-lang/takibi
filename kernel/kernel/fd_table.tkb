@@ -74,21 +74,28 @@ private let mut process_fd_context:
     [ProcessFdContext; PROCESS_CONTEXT_MAX];
 // Slot allocation is O(1) via kernel/lib/refcount_slotmap.tkb's
 // RefcountSlotMap(N, MAX_REFS) (issue #242, follow-up to issue #207)
-// instead of a hand-rolled linear scan over object_kind[]==Empty, and
+// instead of a hand-rolled linear scan over object_records[].kind==Empty, and
 // object_generation[]/object_references[] are replaced by the pool's own
-// per-slot generation+refcount pair. object_kind stays this file's own
-// application data (RefcountSlotMap only knows "occupied or not", not what
-// kind of object occupies a slot).
+// per-slot generation+refcount pair. object_records[].kind stays this
+// file's own application data (RefcountSlotMap only knows "occupied or
+// not", not what kind of object occupies a slot).
 private let mut object_pool: RefcountSlotMap(SHARED_OBJECT_MAX, SHARED_OBJECT_MAX_REFS);
-private let mut object_kind: [UnifiedFdKind; SHARED_OBJECT_MAX];
-private let mut object_offset: [usize; SHARED_OBJECT_MAX];
-private let mut object_inode: [usize; SHARED_OBJECT_MAX];
-private let mut object_readable: [bool; SHARED_OBJECT_MAX];
-private let mut object_writable: [bool; SHARED_OBJECT_MAX];
-private let mut object_listener_state: [UnifiedListenerState; SHARED_OBJECT_MAX];
-private let mut object_port: [u16; SHARED_OBJECT_MAX];
-private let mut object_transport_slot: [usize; SHARED_OBJECT_MAX];
-private let mut object_transport_generation: [usize; SHARED_OBJECT_MAX];
+// GitHub issue #305: one record per shared-object slot, replacing nine
+// parallel arrays that had to be indexed in lockstep -- the same
+// consolidation ProcessFdContext above already did for per-process
+// descriptor state (issue #264).
+struct SharedObject {
+    kind: UnifiedFdKind;
+    offset: usize;
+    inode: usize;
+    readable: bool;
+    writable: bool;
+    listener_state: UnifiedListenerState;
+    port: u16;
+    transport_slot: usize;
+    transport_generation: usize;
+}
+private let mut object_records: [SharedObject; SHARED_OBJECT_MAX];
 
 // Public callers validate their process argument before narrowing it. The
 // fallback is unreachable at those call sites, but keeps the helper total.
@@ -147,15 +154,15 @@ must_use variant UnifiedFdAllocResult {
 fn unified_fd_table_init() {
     refcount_pool_init(&object_pool);
     for object: usize in 0..<SHARED_OBJECT_MAX {
-        object_kind[object] = UnifiedFdKind::Empty;
-        object_offset[object] = 0;
-        object_inode[object] = 0;
-        object_readable[object] = false;
-        object_writable[object] = false;
-        object_listener_state[object] = UnifiedListenerState::Closed;
-        object_port[object] = 0;
-        object_transport_slot[object] = 0;
-        object_transport_generation[object] = 0;
+        object_records[object].kind = UnifiedFdKind::Empty;
+        object_records[object].offset = 0;
+        object_records[object].inode = 0;
+        object_records[object].readable = false;
+        object_records[object].writable = false;
+        object_records[object].listener_state = UnifiedListenerState::Closed;
+        object_records[object].port = 0;
+        object_records[object].transport_slot = 0;
+        object_records[object].transport_generation = 0;
     }
     for process: usize in 0..<PROCESS_CONTEXT_MAX {
         let fd_kind = process_fd_context[process].fd_kind;
@@ -226,13 +233,13 @@ fn unified_file_open(process: usize, fd: usize, inode: usize,
         UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
         UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
-            object_inode[handle.slot] = inode;
-            object_readable[handle.slot] = readable;
-            object_writable[handle.slot] = writable;
+            object_records[handle.slot].inode = inode;
+            object_records[handle.slot].readable = readable;
+            object_records[handle.slot].writable = writable;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
-                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
@@ -241,7 +248,7 @@ fn unified_file_open(process: usize, fd: usize, inode: usize,
                 // so its refcount is 0 -- see UnifiedFdInstallResult's own
                 // header comment. Handled the same as Invalid for totality.
                 UnifiedFdInstallResult::RefOverflow => {
-                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
@@ -258,19 +265,19 @@ fn unified_directory_open(process: usize, fd: usize, inode: usize)
         UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
         UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
-            object_inode[handle.slot] = inode;
-            object_readable[handle.slot] = true;
-            object_writable[handle.slot] = false;
+            object_records[handle.slot].inode = inode;
+            object_records[handle.slot].readable = true;
+            object_records[handle.slot].writable = false;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
-                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdInstallResult::RefOverflow => {
-                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
@@ -293,13 +300,13 @@ fn unified_terminal_stdio_open(process: usize) -> UnifiedOpenResult {
             match unified_fd_install(process, 0, handle.slot,
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
-                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdInstallResult::RefOverflow => {
-                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
@@ -364,7 +371,7 @@ fn unified_terminal_is_open(process: usize, fd: usize) -> bool {
     if (fd_kind[fd as isize] == UnifiedFdKind::Terminal &&
         object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        return object_kind[object] == UnifiedFdKind::Terminal &&
+        return object_records[object].kind == UnifiedFdKind::Terminal &&
                refcount_pool_matches(&object_pool, object,
                                      fd_generation[fd as isize]);
     }
@@ -381,8 +388,8 @@ fn unified_object_alloc_first(kind: UnifiedFdKind) -> UnifiedObjectResult {
             let (slot_value, generation) = pair;
             if (slot_value < SHARED_OBJECT_MAX) {
                 let slot: {0..<SHARED_OBJECT_MAX as usize} = slot_value;
-                object_kind[slot] = kind;
-                object_offset[slot] = 0;
+                object_records[slot].kind = kind;
+                object_records[slot].offset = 0;
                 let mut handle: UnifiedObjectHandle = { slot, generation };
                 return UnifiedObjectResult::Allocated(handle);
             }
@@ -419,7 +426,7 @@ fn unified_socket_lookup(process: usize, fd: usize,
     let object_value: usize = fd_object[fd as isize];
     if (fd_kind[fd as isize] == kind && object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        if (object_kind[object] == kind &&
+        if (object_records[object].kind == kind &&
             refcount_pool_matches(&object_pool, object,
                                   fd_generation[fd as isize])) {
             let mut handle: UnifiedObjectHandle = {
@@ -436,18 +443,18 @@ fn unified_listener_create(process: usize, fd: usize) -> UnifiedOpenResult {
         UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
         UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
-            object_listener_state[handle.slot] = UnifiedListenerState::Created;
-            object_port[handle.slot] = 0;
+            object_records[handle.slot].listener_state = UnifiedListenerState::Created;
+            object_records[handle.slot].port = 0;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
-                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdInstallResult::RefOverflow => {
-                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
@@ -466,18 +473,18 @@ fn unified_connection_create(process: usize, fd: usize,
         UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
         UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
-            object_transport_slot[handle.slot] = transport_slot;
-            object_transport_generation[handle.slot] = transport_generation;
+            object_records[handle.slot].transport_slot = transport_slot;
+            object_records[handle.slot].transport_generation = transport_generation;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
-                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdInstallResult::RefOverflow => {
-                    object_kind[handle.slot] = UnifiedFdKind::Empty;
+                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
                     refcount_pool_abandon(&object_pool, handle.slot,
                                          handle.generation);
                     return UnifiedOpenResult::Invalid;
@@ -546,9 +553,9 @@ fn unified_object_references(handle: UnifiedObjectHandle) -> usize {
 }
 
 fn unified_listener_state(handle: UnifiedObjectHandle) -> UnifiedListenerState {
-    if (object_kind[handle.slot] == UnifiedFdKind::Listener &&
+    if (object_records[handle.slot].kind == UnifiedFdKind::Listener &&
         refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        return object_listener_state[handle.slot];
+        return object_records[handle.slot].listener_state;
     }
     return UnifiedListenerState::Closed;
 }
@@ -556,44 +563,44 @@ fn unified_listener_state(handle: UnifiedObjectHandle) -> UnifiedListenerState {
 fn unified_listener_set_state(handle: UnifiedObjectHandle,
                               state: UnifiedListenerState)
         -> UnifiedFdResult {
-    if (object_kind[handle.slot] == UnifiedFdKind::Listener &&
+    if (object_records[handle.slot].kind == UnifiedFdKind::Listener &&
         refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        object_listener_state[handle.slot] = state;
+        object_records[handle.slot].listener_state = state;
         return UnifiedFdResult::Ok;
     }
     return UnifiedFdResult::Invalid;
 }
 
 fn unified_listener_port(handle: UnifiedObjectHandle) -> u16 {
-    if (object_kind[handle.slot] == UnifiedFdKind::Listener &&
+    if (object_records[handle.slot].kind == UnifiedFdKind::Listener &&
         refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        return object_port[handle.slot];
+        return object_records[handle.slot].port;
     }
     return 0;
 }
 
 fn unified_listener_set_port(handle: UnifiedObjectHandle, port: u16)
         -> UnifiedFdResult {
-    if (object_kind[handle.slot] == UnifiedFdKind::Listener &&
+    if (object_records[handle.slot].kind == UnifiedFdKind::Listener &&
         refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        object_port[handle.slot] = port;
+        object_records[handle.slot].port = port;
         return UnifiedFdResult::Ok;
     }
     return UnifiedFdResult::Invalid;
 }
 
 fn unified_connection_slot(handle: UnifiedObjectHandle) -> usize {
-    if (object_kind[handle.slot] == UnifiedFdKind::Connection &&
+    if (object_records[handle.slot].kind == UnifiedFdKind::Connection &&
         refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        return object_transport_slot[handle.slot];
+        return object_records[handle.slot].transport_slot;
     }
     return SHARED_OBJECT_MAX;
 }
 
 fn unified_connection_generation(handle: UnifiedObjectHandle) -> usize {
-    if (object_kind[handle.slot] == UnifiedFdKind::Connection &&
+    if (object_records[handle.slot].kind == UnifiedFdKind::Connection &&
         refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        return object_transport_generation[handle.slot];
+        return object_records[handle.slot].transport_generation;
     }
     return 0;
 }
@@ -610,7 +617,7 @@ fn unified_file_lookup(process: usize, fd: usize) -> UnifiedFileResult {
     if (fd_kind[fd as isize] == UnifiedFdKind::OpenFile &&
         object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        if (object_kind[object] == UnifiedFdKind::OpenFile &&
+        if (object_records[object].kind == UnifiedFdKind::OpenFile &&
             refcount_pool_matches(&object_pool, object,
                                   fd_generation[fd as isize])) {
             let mut handle: UnifiedObjectHandle = {
@@ -623,9 +630,9 @@ fn unified_file_lookup(process: usize, fd: usize) -> UnifiedFileResult {
 }
 
 fn unified_file_inode(handle: UnifiedObjectHandle) -> usize {
-    if (object_kind[handle.slot] == UnifiedFdKind::OpenFile &&
+    if (object_records[handle.slot].kind == UnifiedFdKind::OpenFile &&
         refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        return object_inode[handle.slot];
+        return object_records[handle.slot].inode;
     }
     return 0;
 }
@@ -645,7 +652,7 @@ fn unified_directory_lookup(process: usize, fd: usize)
     if (fd_kind[fd as isize] == UnifiedFdKind::Directory &&
         object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        if (object_kind[object] == UnifiedFdKind::Directory &&
+        if (object_records[object].kind == UnifiedFdKind::Directory &&
             refcount_pool_matches(&object_pool, object,
                                   fd_generation[fd as isize])) {
             let mut handle: UnifiedObjectHandle = {
@@ -658,23 +665,23 @@ fn unified_directory_lookup(process: usize, fd: usize)
 }
 
 fn unified_directory_inode(handle: UnifiedObjectHandle) -> usize {
-    if (object_kind[handle.slot] == UnifiedFdKind::Directory &&
+    if (object_records[handle.slot].kind == UnifiedFdKind::Directory &&
         refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        return object_inode[handle.slot];
+        return object_records[handle.slot].inode;
     }
     return 0;
 }
 
 fn unified_file_is_readable(handle: UnifiedObjectHandle) -> bool {
-    return object_kind[handle.slot] == UnifiedFdKind::OpenFile &&
+    return object_records[handle.slot].kind == UnifiedFdKind::OpenFile &&
            refcount_pool_matches(&object_pool, handle.slot, handle.generation) &&
-           object_readable[handle.slot];
+           object_records[handle.slot].readable;
 }
 
 fn unified_file_is_writable(handle: UnifiedObjectHandle) -> bool {
-    return object_kind[handle.slot] == UnifiedFdKind::OpenFile &&
+    return object_records[handle.slot].kind == UnifiedFdKind::OpenFile &&
            refcount_pool_matches(&object_pool, handle.slot, handle.generation) &&
-           object_writable[handle.slot];
+           object_records[handle.slot].writable;
 }
 
 fn unified_fd_install(process: usize, fd: usize, object_value: usize,
@@ -691,7 +698,7 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
     if (object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
         if (fd_kind[fd as isize] != UnifiedFdKind::Empty ||
-            object_kind[object] == UnifiedFdKind::Empty) {
+            object_records[object].kind == UnifiedFdKind::Empty) {
             return UnifiedFdInstallResult::Invalid;
         }
         match refcount_pool_retain(&object_pool, object, generation) {
@@ -699,7 +706,7 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
             RefcountRetainResult::Overflow => { return UnifiedFdInstallResult::RefOverflow; }
             RefcountRetainResult::Ok => {}
         }
-        fd_kind[fd as isize] = object_kind[object];
+        fd_kind[fd as isize] = object_records[object].kind;
         fd_object[fd as isize] = object;
         fd_generation[fd as isize] = generation;
         fd_close_on_exec[fd as isize] = false;
@@ -726,7 +733,7 @@ fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult {
             RefcountReleaseResult::Invalid => { return UnifiedFdResult::Invalid; }
             RefcountReleaseResult::StillHeld => {}
             RefcountReleaseResult::Freed => {
-                object_kind[object] = UnifiedFdKind::Empty;
+                object_records[object].kind = UnifiedFdKind::Empty;
             }
         }
         fd_kind[fd as isize] = UnifiedFdKind::Empty;
@@ -758,7 +765,7 @@ fn unified_fd_clone_rollback(
                     RefcountReleaseResult::Invalid => {}
                     RefcountReleaseResult::StillHeld => {}
                     RefcountReleaseResult::Freed => {
-                        object_kind[undo_object] = UnifiedFdKind::Empty;
+                        object_records[undo_object].kind = UnifiedFdKind::Empty;
                     }
                 }
             }
@@ -790,7 +797,7 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult {
             let object_value: usize = parent_fd_object[fd as isize];
             if (object_value < SHARED_OBJECT_MAX) {
                 let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-                if (object_kind[object] != parent_fd_kind[fd as isize] ||
+                if (object_records[object].kind != parent_fd_kind[fd as isize] ||
                     refcount_pool_count(&object_pool, object,
                                         parent_fd_generation[fd as isize]) == 0) {
                     return UnifiedFdResult::Invalid;
@@ -869,11 +876,11 @@ fn unified_fd_set_offset(process: usize, fd: usize, offset: usize)
          fd_kind[fd as isize] == UnifiedFdKind::Directory) &&
         object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        if ((object_kind[object] == UnifiedFdKind::OpenFile ||
-             object_kind[object] == UnifiedFdKind::Directory) &&
+        if ((object_records[object].kind == UnifiedFdKind::OpenFile ||
+             object_records[object].kind == UnifiedFdKind::Directory) &&
             refcount_pool_matches(&object_pool, object,
                                   fd_generation[fd as isize])) {
-            object_offset[object] = offset;
+            object_records[object].offset = offset;
             return UnifiedFdResult::Ok;
         }
     }
@@ -893,11 +900,11 @@ fn unified_fd_offset(process: usize, fd: usize) -> UnifiedOffsetResult {
          fd_kind[fd as isize] == UnifiedFdKind::Directory) &&
         object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        if ((object_kind[object] == UnifiedFdKind::OpenFile ||
-             object_kind[object] == UnifiedFdKind::Directory) &&
+        if ((object_records[object].kind == UnifiedFdKind::OpenFile ||
+             object_records[object].kind == UnifiedFdKind::Directory) &&
             refcount_pool_matches(&object_pool, object,
                                   fd_generation[fd as isize])) {
-            return UnifiedOffsetResult::Found(object_offset[object]);
+            return UnifiedOffsetResult::Found(object_records[object].offset);
         }
     }
     return UnifiedOffsetResult::Missing;
@@ -951,7 +958,7 @@ fn unified_object_pool_exhaustion_probe() -> bool {
     let freed_slot: {0..<SHARED_OBJECT_MAX as usize} = handles[0].slot;
     let freed_generation: usize = handles[0].generation;
     refcount_pool_abandon(&object_pool, freed_slot, freed_generation);
-    object_kind[freed_slot] = UnifiedFdKind::Empty;
+    object_records[freed_slot].kind = UnifiedFdKind::Empty;
     let mut reused_ok: bool = false;
     match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
         UnifiedObjectResult::Full => {}
@@ -966,7 +973,7 @@ fn unified_object_pool_exhaustion_probe() -> bool {
     for i: usize in 0..<SHARED_OBJECT_MAX {
         refcount_pool_abandon(&object_pool, handles[i].slot,
                               handles[i].generation);
-        object_kind[handles[i].slot] = UnifiedFdKind::Empty;
+        object_records[handles[i].slot].kind = UnifiedFdKind::Empty;
     }
     unified_fd_table_init();
     return true;
@@ -1190,7 +1197,7 @@ fn unified_fd_table_probe() -> bool {
         UnifiedFdResult::Ok => {}
     }
     for object: usize in 0..<SHARED_OBJECT_MAX {
-        if (object_kind[object] != UnifiedFdKind::Empty ||
+        if (object_records[object].kind != UnifiedFdKind::Empty ||
             refcount_pool_raw_count(&object_pool, object) != 0) {
             return false;
         }
