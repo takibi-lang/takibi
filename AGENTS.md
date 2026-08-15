@@ -350,9 +350,10 @@ sentinel convention.
   be converting every genuinely convertible case found along the way (including the "different
   shape" search results above), not stopping at the first cluster and leaving the rest as an
   unfinished carve-out -- reserve "leave it for now" for cases with a real reason (a shared
-  multi-file interface contract needing a coordinated change, code sitting next to this
-  project's one hand-justified `unsafe` site, a `!{interrupt}`-rooted handler, or a genuine HAL/
-  RTOS-channel boundary that would need a redesign of the boundary itself, not just the function).
+  multi-file interface contract needing a coordinated change, code sitting next to a
+  hand-justified `unsafe` site whose trust rationale the conversion would disturb, a
+  `!{interrupt}`-rooted handler, or a genuine HAL/RTOS-channel boundary that would need a
+  redesign of the boundary itself, not just the function).
 - **A raw wire/boundary int that still has to be decoded** (e.g. a value crossing an RTOS
   channel hardcoded to `i32` payloads, like `kvs_server_sdcard_rtos.tkb`'s `KvsSdStatus`) can
   use `match` directly against integer literals (see SPEC.md's "Match on Primitive Types",

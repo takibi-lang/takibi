@@ -6342,6 +6342,27 @@ let infer_tests = [
           let b = q[0..<8];
         }");
 
+  Alcotest.test_case
+    "unsafe { stmt* } scopes its own `let` bindings the same as a plain \
+     { } block -- a name declared inside is unbound after the closing brace" `Quick
+    (expect_type_error "Unbound variable: a"
+       "fn block315_let_scope(p: *u8) !{unsafe} {
+          unsafe { let a = p[0..<4]; }
+          let b = a;
+        }");
+
+  Alcotest.test_case
+    "unsafe { stmt* } nests: a block-form unsafe directly inside another \
+     still grants (unsafe_depth survives a doubled increment/decrement)" `Quick
+    (expect_ok
+       "fn block315_nested(p: *u8) !{unsafe} {
+          unsafe {
+            unsafe {
+              let a = p[0..<4];
+            }
+          }
+        }");
+
   (* Reversed (see HISTORY.md): unlike may_block/interrupt/exception, which
      are real control-flow/concurrency hazards a caller's own effect
      reasoning must compose with, unsafe here means only "one bounded,
@@ -10088,6 +10109,21 @@ let codegen_tests = [
           for i: usize in 0..<n {
             let a: u8 = s[i];
             funsafe315_g5[i] = a;
+          }
+        }");
+
+  Alcotest.test_case
+    "unsafe { stmt* } nested inside another still skips the runtime check \
+     (unsafe_depth's doubled increment/decrement doesn't leave it stuck \
+     above zero) -- codegen-level cross-check of the type_inf.ml-level \
+     nesting test above, since llvm_gen.ml keeps its own separate \
+     unsafe_depth counter (sync rule)" `Quick
+    (expect_trap_sites 0
+       "fn funsafe315_nested(s: []u8, i: usize) -> u8 !{unsafe} {
+          unsafe {
+            unsafe {
+              return s[i];
+            }
           }
         }");
 
