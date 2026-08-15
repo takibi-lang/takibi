@@ -615,6 +615,14 @@ kernelbuild-rpi5: kernel-lib-check kernel-verify-exception-frame $(KERNEL_RPI5_E
 
 kernelbuild: kernelbuild-rpi5 kernelbuild-qemu
 
+## trustedbasecheck: GitHub issue #238 -- repeatable trusted-base metrics
+## (unsafe block count, handwritten assembly lines, --forbid-trap kernel
+## line count, plus supplementary counts). Reads kernelbuild's own depfiles,
+## so it depends on kernelbuild rather than re-scanning the tree by guess.
+.PHONY: trustedbasecheck
+trustedbasecheck: kernelbuild
+	python3 scripts/measure_trusted_base.py
+
 ## RPI5_SERIAL_DEV: empty by default, resolved at runtime by
 ## scripts/rpi5_uart_dev.sh (which picks the ttyACM device out by its
 ## /dev/serial/by-id label). Override only if the auto-detected device is

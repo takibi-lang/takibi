@@ -184,6 +184,16 @@ let () =
     (* HM type inference -- catches type errors and produces resolved types *)
     let prog_types = Typechecker.infer_program prog in
 
+    (* GitHub issue #218: audit-map warning for casting a non-literal
+       integer to an ordinary (non-affine/linear, non-io) pointer. Non-
+       fatal, same reasoning as the "unnecessary unsafe" warning below --
+       see Type_inf.check_nonliteral_ptr_cast_warning's own comment for
+       why this stops short of the hard error #218's title asks for. *)
+    if !Type_inf.nonliteral_ptr_cast_warnings <> [] then begin
+      let sites = List.rev !Type_inf.nonliteral_ptr_cast_warnings in
+      List.iter (fun (loc, what) -> report_warning loc what) sites
+    end;
+
     if !forbid_unsafe then begin
       let unsafe_functions = Types.StringMap.bindings prog_types.functions
         |> List.filter_map (fun (name, info) ->

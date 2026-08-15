@@ -15,6 +15,48 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: Issue #218's Non-Affine Cast Population Made Visible As a Warning, Plus Issue #238's Trusted-Base Measurement Script
+
+Continuation of the same session's #218/#316/#239/#240 work. #316's
+comment thread measured that broadening #218's affine-only unsafe rule
+to ALL non-`io` pointer targets would hit roughly 1146 sites -- landing
+that as a hard error today would reproduce the exact "unsafe becomes too
+common to carry audit signal" failure the affine-only scoping was
+already measured and narrowed to avoid. Rather than wait on #316's still-
+open `*io` decision to do anything, added `check_nonliteral_ptr_cast_warning`
+(`lib/type_inf.ml`, called from the same two `Cast` case sites as the
+existing affine-target hard error): a non-fatal warning, using the exact
+same accumulate-in-a-ref-list-then-print-in-bin/main.ml pattern issue
+#315's "unnecessary unsafe" warning already established
+(`nonliteral_ptr_cast_warnings`, reset in `infer_program`, read in
+`bin/main.ml` right after type inference). Exempts `io`-qualified
+pointee targets entirely (not merely silent -- #316 owns that decision)
+and affine/linear opaque targets (already the hard error, would double-
+report). A full `make kernelbuild` now emits 459 of these warnings with
+zero change to build success -- the full audit map issue #238 wants,
+available today, with no code migration forced yet.
+
+**`scripts/measure_trusted_base.py` (issue #238).** Reads the exact
+`--forbid-trap` file set from `kernel/build/{rpi5,qemu}/main.o.d`
+(`--emit-depfile` output, issue #306) rather than guessing from a
+directory scan, so the "kernel Takibi lines under --forbid-trap" metric
+can never include a file that is not actually reachable from either
+kernel entry point. Reports the three required metrics (unsafe block
+count via a `unsafe\s*\{` scan -- every unsafe construct in this
+language is block-form since #315, so this cannot over/under-count;
+handwritten assembly lines; forbid-trap kernel line count) plus two
+supplementary ones (raw `as *T` pointer cast count, and the new #218
+warning count via a one-shot QEMU-target compile). Wired as `make
+trustedbasecheck` (depends on `kernelbuild`, so the depfiles it reads
+always reflect the current tree). Current baseline: 62 unsafe blocks,
+861 handwritten assembly lines, 22610 kernel .tkb lines under
+`--forbid-trap` (53 files), 498 raw pointer casts, 153 issue-#218
+warnings (QEMU target only).
+
+`dune runtest`: 1076/1076 (up from 1073 -- 3 new tests for the #218
+warning's exemption/firing behavior). `make kernelbuild` still compiles
+clean.
+
 ### 2026-08-15: Dereferencing an Opaque Struct Pointer Was an Internal Compiler Error, Not a Type Error
 
 Found probing what operations an affine/linear opaque handle (`*Lease`,

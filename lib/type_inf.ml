@@ -1198,6 +1198,44 @@ let check_kinded_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
           ^ to_string tgt ^ " }` to mark it"))
   | _ -> ()
 
+(* GitHub issue #218: audit-map warning for casting a non-literal integer
+   to an ORDINARY (non-affine/linear) pointer -- deliberately a warning,
+   not yet an error. #218's own broadening beyond affine/linear targets
+   would, per #316's measurement, hit roughly 1146 sites across kernel/,
+   most of them fixed-size-array-plus-computed-byte-offset access rather
+   than a genuine hardware/forgery boundary (see this repo's #316 issue
+   comment thread) -- landing that as a hard `unsafe` requirement today
+   would reproduce the exact "unsafe becomes too common to carry audit
+   signal" failure the affine-only scoping above was already measured
+   and narrowed to avoid (HISTORY.md's issue #15 entry). This warning
+   exists to make the full population visible (issue #238's trusted-base
+   metrics can count it) without forcing any code change yet. `*io T` is
+   exempted entirely: #316 owns that decision and has not made it yet.
+   Affine/linear opaque targets are exempted here too, since those are
+   already a hard error above -- this would otherwise double-report. *)
+let nonliteral_ptr_cast_warnings : (Lexing.position * string) list ref = ref []
+
+let is_io_pointee = function
+  | TIo _ -> true
+  | _ -> false
+
+let check_nonliteral_ptr_cast_warning loc (src_expr : Ast.expr) (tgt : ty) =
+  if not (is_literal_derived src_expr) then
+    match tgt with
+    | TPtr (TStruct sname)
+      when StringSet.mem sname !affine_opaque_names
+        || StringSet.mem sname !linear_opaque_names -> ()
+    | TPtr elem | TAlignedPtr (_, elem) when not (is_io_pointee elem) ->
+        nonliteral_ptr_cast_warnings :=
+          (loc, Printf.sprintf
+            "casting a non-literal integer to %s asserts it is a valid \
+             pointer with no evidence (GitHub issue #218); not yet an \
+             error -- see issue #316 for the *io/general-pointer scoping \
+             decision this is waiting on"
+            (to_string tgt))
+          :: !nonliteral_ptr_cast_warnings
+    | _ -> ()
+
 (* Slice 3: ownership-bearing values cannot be cast away. The temporary
    affine-to-usize exception existed only for null-sentinel acquisition;
    kind-carrying variants replace that encoding. `unsafe` does not duplicate
@@ -1873,6 +1911,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                         source already carries a refined range. *)
                      check_kinded_ptr_cast_needs_unsafe e.loc e tgt;
                      check_aligned_ptr_cast_needs_unsafe e.loc e tgt;
+                     check_nonliteral_ptr_cast_warning e.loc e tgt;
                      tgt)
             | _ ->
                 (* GitHub issue #15 follow-up: casting a non-literal integer
@@ -1904,6 +1943,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    entry for the full before/after measurement. *)
                 check_kinded_ptr_cast_needs_unsafe e.loc e tgt;
                 check_aligned_ptr_cast_needs_unsafe e.loc e tgt;
+                check_nonliteral_ptr_cast_warning e.loc e tgt;
                 (* GitHub issue #100 follow-up: an EXPLICIT `x as {lo..<hi
                    as base}` cast target reaches here for any source that
                    isn't itself a pointer/slice/already-refined value (in
@@ -4295,6 +4335,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
 
 let infer_program (prog : Ast.toplevel list) : program_types =
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
+  nonliteral_ptr_cast_warnings := [];  (* fresh per compilation / per unit test *)
   enclosing_future_writes := StringSet.empty;  (* fresh per compilation / per unit test *)
   resolved_call_targets := StringMap.empty;
   resolved_indirect_call_effects := StringMap.empty;

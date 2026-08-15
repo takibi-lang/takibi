@@ -76,6 +76,17 @@ let expect_unnecessary_unsafe expected src () =
   Alcotest.(check int) "recorded unnecessary-unsafe sites"
     expected (List.length !Llvm_gen.unnecessary_unsafe_sites)
 
+(* GitHub issue #218: expect type inference to succeed AND to have recorded
+   exactly [expected] non-literal-pointer-cast audit warnings
+   (Type_inf.nonliteral_ptr_cast_warnings). Mirrors expect_unnecessary_unsafe;
+   infer_program resets the list at the start of each run. *)
+let expect_nonliteral_ptr_cast_warnings expected src () =
+  (match infer src with
+   | _ -> ()
+   | exception Types.TypeError (_, msg) -> Alcotest.failf "unexpected TypeError: %s" msg);
+  Alcotest.(check int) "recorded nonliteral-ptr-cast warnings"
+    expected (List.length !Type_inf.nonliteral_ptr_cast_warnings)
+
 (* Expect codegen to raise Llvm_gen.Error with a message containing [fragment]. *)
 let expect_codegen_error fragment src () =
   match gen_codegen src with
@@ -3398,6 +3409,22 @@ let infer_tests = [
      `*io T`) the affine-only scoping exists to preserve. *)
   Alcotest.test_case "casting a non-literal integer to a non-affine pointer needs no unsafe" `Quick
     (expect_ok "fn f(base: usize, offset: usize) { let p: *io u32 = (base + offset) as *io u32; }");
+
+  (* GitHub issue #218 audit-map warning (issue #316's io decision still
+     pending, see check_nonliteral_ptr_cast_warning's own comment): the
+     SAME negative-control cast above (an io target) records zero warnings
+     -- io stays fully exempt, not merely downgraded from error to warning. *)
+  Alcotest.test_case "a non-literal cast to *io stays warning-free too" `Quick
+    (expect_nonliteral_ptr_cast_warnings 0
+       "fn f(base: usize, offset: usize) { let p: *io u32 = (base + offset) as *io u32; }");
+
+  Alcotest.test_case "a non-literal cast to an ordinary (non-io) pointer records one #218 warning" `Quick
+    (expect_nonliteral_ptr_cast_warnings 1
+       "fn f(base: usize, offset: usize) { let p: *u32 = (base + offset) as *u32; }");
+
+  Alcotest.test_case "a literal cast to an ordinary pointer records no #218 warning" `Quick
+    (expect_nonliteral_ptr_cast_warnings 0
+       "fn f() { let p: *u32 = 0 as usize as *u32; }");
 
   (* -- GitHub issue #239: reject pointer-to-pointer types such as **T --- *)
 
