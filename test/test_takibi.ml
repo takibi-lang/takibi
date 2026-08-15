@@ -4616,6 +4616,55 @@ let infer_tests = [
        | exception Types.TypeError (_, msg) ->
            Alcotest.failf "expected a non-private global to stay unrestricted, got: %s" msg);
 
+  (* GitHub issue #214: a same-named parameter in a different file must
+     shadow a private global, not be misidentified as a reference to it.
+     Minimal repro is the linux_user/freelist_generic/ case that hit this
+     twice (a `backing` and a `core` parameter each colliding with an
+     unrelated file's `private let` of the same name). *)
+  Alcotest.test_case
+    "private global: a same-named PARAMETER in a different file shadows it \
+     rather than triggering the privacy check (issue #214)" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "fn a_takes(backing: i32) -> i32 { return backing; }";
+         "b.tkb", "private let mut backing: i32 = 7;
+                   fn b_calls() -> i32 { return a_takes(backing); }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf
+             "expected the parameter to shadow the unrelated private global, got: %s" msg);
+
+  Alcotest.test_case
+    "private global: a same-named LOCAL LET in a different file shadows it \
+     rather than triggering the privacy check (issue #214)" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "fn a_shadows() -> i32 { let backing: i32 = 9; return backing; }";
+         "b.tkb", "private let mut backing: i32 = 7;
+                   fn b_unrelated() -> i32 { return backing; }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf
+             "expected the local let to shadow the unrelated private global, got: %s" msg);
+
+  Alcotest.test_case
+    "private global: a same-named parameter in the SAME file as the \
+     declaration does not mask a genuine cross-file violation elsewhere \
+     (issue #214 does not weaken the original check)" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "fn a_shadows(backing: i32) -> i32 { return backing; }";
+         "b.tkb", "private let mut backing: i32 = 7;
+                   fn b_reads_directly() -> i32 { return backing; }";
+         "c.tkb", "fn c_reads() -> i32 { return backing; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "mentions the global's name" true
+             (contains_substring msg "backing"));
+
   (* -- Linear kind (OWNERSHIP_KERNEL.md Stage 1, GitHub issue #117) -------
      `linear opaque struct` = exactly-once-on-every-path obligations.
      Prelude shared by most cases below: a token type, a mint, a sink. *)

@@ -904,24 +904,34 @@ let var_align_bytes : int StringMap.t ref = ref StringMap.empty
    are top-level functions with no access to infer_program's own locals. *)
 let private_globals : (string, string) Hashtbl.t = Hashtbl.create 8
 
+(* GitHub issue #214: names bound by a LOCAL declaration (function
+   parameter, let/let mut, tuple destructuring, for-loop counter, foreach
+   element, or let-match) within the function currently being type-checked.
+   A local binding always shadows a private global of the same name from a
+   different file -- e.g. a `backing` parameter must not be misidentified
+   as a reference to an unrelated file's `private let backing`. This
+   language has no nested function definitions, so "current function" is
+   unambiguous; reset once per infer_func call (see there) and once more
+   before Pass 3 starts so global-initializer expressions (checked before
+   any infer_func call) never see a stale set from a previous compilation
+   unit test. Consulted, never itself driving type inference, by
+   check_private_global_access below. *)
+let locally_bound_names : StringSet.t ref = ref StringSet.empty
+
 (* Known limitation: this checks by NAME only, not by resolved binding, so a
    local variable/parameter in a different file that happens to share a
-   private global's exact name would be misidentified as a violation (a
-   false-positive compile error, not a silent miscompilation -- the safe
-   failure direction, but still worth fixing if it ever bites). Distinguishing
-   "this Var resolves to the shadowing local" from "this Var resolves to the
-   global" would need threading a locally-bound-names set through
-   infer_expr/infer_stmt, which no other check in this file needs today. Not
-   done here since it is not needed by any currently-compiled-together file
-   (verified: no other file's local declares any of the 5 names this feature
-   currently protects) -- see GitHub issue #108. *)
+   private global's exact name would previously have been misidentified as
+   a violation -- fixed by consulting locally_bound_names above (GitHub
+   issue #214; originally noted as a known gap in issue #108). *)
 let check_private_global_access (use_loc : Ast.loc) (name : string) : unit =
-  match Hashtbl.find_opt private_globals name with
-  | Some decl_file when decl_file <> use_loc.Lexing.pos_fname ->
-      raise (TypeError (use_loc, Printf.sprintf
-        "'%s' is a private global declared in '%s'; it may only be referenced \
-         from that same file" name decl_file))
-  | _ -> ()
+  if StringSet.mem name !locally_bound_names then ()
+  else
+    match Hashtbl.find_opt private_globals name with
+    | Some decl_file when decl_file <> use_loc.Lexing.pos_fname ->
+        raise (TypeError (use_loc, Printf.sprintf
+          "'%s' is a private global declared in '%s'; it may only be referenced \
+           from that same file" name decl_file))
+    | _ -> ()
 
 (* OWNERSHIP_KERNEL.md Stage 2 (GitHub issue #108) tables, populated once
    per infer_program run, same discipline as private_globals above. *)
@@ -3305,6 +3315,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       (match align_opt with
        | Some n -> var_align_bytes := StringMap.add name n !var_align_bytes
        | None -> ());
+      locally_bound_names := StringSet.add name !locally_bound_names;  (* issue #214 *)
       ( StringMap.add name (bind_ty, is_mut) tyenv,
         StringMap.add name bind_ty raw_locals )
   | LetTuple (names, rhs) ->
@@ -3340,6 +3351,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                into an immutable binding (no address for later field \
                access)" sname))
         | _ -> ()) comp_tys;
+      List.iter (fun n ->
+        locally_bound_names := StringSet.add n !locally_bound_names  (* issue #214 *)
+      ) names;
       ( List.fold_left2 (fun env n t -> StringMap.add n (t, false) env)
           tyenv names comp_tys,
         List.fold_left2 (fun m n t -> StringMap.add n t m)
@@ -3503,6 +3517,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          name, and resolve_local_ast looks types up by exactly this key --
          without this second binding, the counter's alloca would silently
          fall back to i32 regardless of what idx_ty says here. *)
+      locally_bound_names := StringSet.add name !locally_bound_names;  (* issue #214 *)
       let body_env = StringMap.add name (idx_ty, false) tyenv in
       let raw_locals = StringMap.add ("__for_" ^ name) idx_ty raw_locals in
       let (_, raw_locals') = List.fold_left
@@ -3541,6 +3556,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       (match repr st with
        | TSlice (el, _) ->
            (* Element is an immutable per-iteration value of the element type. *)
+           locally_bound_names := StringSet.add name !locally_bound_names;  (* issue #214 *)
            let body_env = StringMap.add name (el, false) tyenv in
            let (_, raw_locals') = List.fold_left
              (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
@@ -3761,6 +3777,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          distinction. *)
       value_static_identities := StringMap.remove name !value_static_identities;
       invalidate_place_binding name;
+      locally_bound_names := StringSet.add name !locally_bound_names;  (* issue #214 *)
       let ty = of_ast_opt ty_opt in
       let tyenv' = StringMap.add name (ty, true) tyenv in
       let raw_locals' = StringMap.add name ty raw_locals in
@@ -3886,6 +3903,13 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
     value_static_identities := StringMap.empty;
     place_static_identities := StringMap.empty;
     var_align_bytes := !global_align_bytes_baseline;  (* see its own comment *)
+    (* GitHub issue #214: reset per function, then seed with this
+       function's own parameter names -- see locally_bound_names' own
+       comment. *)
+    locally_bound_names := StringSet.empty;
+    List.iter (fun (name, _) ->
+      locally_bound_names := StringSet.add name !locally_bound_names
+    ) fdef.params;
     let param_tys = List.map (fun (_, ty_opt) -> of_ast_opt ty_opt) fdef.params in
     let ret_ty    = ret_of_ast_opt fdef.ret_type in
     (* Start with globals visible, then shadow them with params (params are mutable) *)
@@ -4172,6 +4196,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Hashtbl.replace private_globals name loc.Lexing.pos_fname
     | _ -> ()
   ) prog;
+  locally_bound_names := StringSet.empty;
   opaque_struct_names_all := opaque_names;
   Hashtbl.reset private_opaque_types;
   Hashtbl.reset private_struct_fields;
