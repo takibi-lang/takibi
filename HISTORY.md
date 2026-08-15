@@ -15,6 +15,92 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: `kernel/platform/rpi5/usb_xhci.tkb` Migrated From Byte-Array-Plus-Manual-Offset TRB Rings to `[Trb; N]` Array-of-Struct
+
+Same session's #218/#316/#239/#240 measurement work found the dominant
+shape behind the 1146-site non-affine pointer-cast population: a fixed-
+size byte array minted to a raw address once, then repeatedly re-cast at
+computed offsets to read/write individual dwords -- exactly what a
+slice's own length/identity proof exists to prevent, but slices cover
+only ~4 expressions in kernel/ today. Investigating alternatives (user
+question: "is there something better than reaching for slices by
+default?") found that for this specific shape -- a fixed-stride array of
+fixed-layout records, not a variable-length externally-supplied buffer --
+plain array-of-struct already does strictly better than a slice would,
+with zero new compiler work: `ring[i].field = value` on a `[Trb; N]`
+gets checked bounds (verified: an unproven `usize` index correctly hits
+`--forbid-trap`'s "array bounds check remains", where the equivalent
+`(base + i*16) as *u32` pointer arithmetic had no check at all, checked
+or otherwise) plus real per-field typing, which a slice alone would not
+add (a slice still needs a further cast/reinterpret step to reach a
+typed field). Array-to-pointer decay already widens directly to `*u8`
+with no intermediate cast (`ring as *u8` on a `[Trb; N] align(64)` global
+works unchanged), so the file's `dma_prepare_tx`/`dma_prepare_rx`/
+`dma_finish_rx` call sites needed no edits at all.
+
+**Struct.** One `Trb { dw0, dw1, dw2, dw3: u32 }` covers all five rings
+(Command, Event, EP0 control, bulk IN, bulk OUT) -- a TRB is always 4
+dwords/16 bytes regardless of its type field, and the existing code
+already only ever addressed dwords generically (no per-type named
+fields), so no per-TRB-type sub-struct was needed.
+
+**Two access styles, chosen by whether the index is provable.** A for-
+loop counter over a `const`-bounded range (`for i: usize in
+0..<EVT_RING_TRBS`) is automatically refined to `{0..<N}` (issue #251's
+precedent), so the zeroing loops in `xhci_setup_rings_and_start` use
+real checked array indexing (`xhci_evt_ring[i].dw3 = 0`) and get a
+genuine new bounds guarantee. Every other site's index is runtime
+producer/consumer state (`xhci_cmd_enq`, `xhci_evt_idx`, `xhci_ep0_enq`,
+a bulk `enq` local) with no refined type, so array indexing there would
+have introduced a new, unprovable `--forbid-trap` obligation the
+original pointer arithmetic never had (confirmed by trying it first: the
+compiler correctly rejected it, "index type usize cannot prove range").
+Kept these at `*Trb` pointer indexing instead -- the exact same trust
+level the raw address arithmetic already had, just with automatic
+stride/offset computation instead of hand-written `idx*16 + k*4` and
+named fields instead of `d0_ptr`/`d1_ptr`/etc. Pointer indexing is
+isize-only (SPEC.md), so every such site casts its `usize` index with
+`as isize`; bare integer-literal indices (`cmd_ring[0]`, `cmd_ring[1]`,
+`cmd_ring[2]` for the three fixed bring-up command slots) needed no cast,
+since `IntLit` is polymorphic and unifies with `isize` from context.
+`usb_bulk_xfer`'s dynamically-selected ring (`ring = xhci_bulk_in_ring as
+*Trb` vs `xhci_bulk_out_ring`, chosen by `dir_in`) could not use `&mut
+[Trb; N]` for this -- confirmed by trying it first: `&`/`&mut` only
+wraps a plain struct type today, not an array -- so it uses a reassigned
+`*Trb` local instead, identical in shape to the original's reassigned
+`usize ring_base` local.
+
+**Out of scope, left untouched.** `xhci_dcbaa`/`xhci_scratchpad_array`/
+`xhci_erst`/`xhci_input_ctx`/`xhci_device_ctx`/`xhci_ctrl_buf`/
+`msc_cbw_buf`/`msc_csw_buf`/`msc_scratch_buf`/`msc_bounce_buf` are not
+TRB-ring-shaped (Device/Input Context blocks copied wholesale, USB
+descriptor bytes parsed byte-at-a-time, a CBW built via individual byte
+writes for endian-agnostic construction) -- migrating those is a
+separate, differently-shaped problem, not attempted here.
+`xhci_recover_bulk_stall` computes a ring's DMA address but never writes
+a TRB dword directly, so it needed no change at all.
+
+**Verified.** Hand-checked every offset->TRB[index].dwK mapping against
+the diff line by line before building (e.g. Link TRB writes had no dw2
+in the original at every one of the 4 rings' Link-TRB sites -- the
+migrated code preserves that, not writing dw2 there either). `dune
+runtest` unaffected (1076/1076, this is a kernel/ file, no test-suite
+change needed). Full `make kernelbuild` (RPi5 + QEMU) compiles clean;
+`scripts/check_kernel_asm_invariants.py` still passes on both ELFs.
+Measured effect via `scripts/measure_trusted_base.py`: raw pointer casts
+498 -> 448, issue #218 audit warnings (QEMU target) 153 -> 102,
+`--forbid-trap` kernel line count 22610 -> 22564 (net smaller despite
+the new struct declaration, since indexed field access is shorter than
+manual offset arithmetic). The file's own remaining #218 warnings (65
+unique lines) are entirely the out-of-scope byte buffers above, not TRB
+rings.
+
+**Not yet done: real-hardware verification.** This session verified
+compile-time correctness and the measured metrics above; `kernelcheck-
+rpi5` (the actual USB/Mass-Storage hardware exercise this driver
+ultimately has to pass) was not run, per this project's standing rule to
+get fresh confirmation before any RPi5 hardware access.
+
 ### 2026-08-15: Issue #218's Non-Affine Cast Population Made Visible As a Warning, Plus Issue #238's Trusted-Base Measurement Script
 
 Continuation of the same session's #218/#316/#239/#240 work. #316's

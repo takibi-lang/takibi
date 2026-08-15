@@ -64,18 +64,35 @@ const CTX_STRIDE: usize = 64;
 const INPUT_CTX_SIZE: usize = 2112;  // 33 * CTX_STRIDE
 const DEVICE_CTX_SIZE: usize = 2048; // 32 * CTX_STRIDE
 
+// A TRB (Transfer Request Block) is always 4 dwords/16 bytes regardless of
+// its type field (dw3 bits 15:10) -- every ring below (Command, Event, EP0
+// control, bulk IN/OUT) is a fixed-stride array of these, so one struct
+// covers all of them. GitHub issue #218/#316 follow-up: replaces manual
+// `(ring_base + idx*16 + k*4) as *u32` pointer arithmetic with checked
+// array-of-struct indexing (ring[idx].dwK) wherever the index is a
+// compile-time-refined loop counter, and with `*Trb` pointer indexing
+// (same trust level the raw pointer arithmetic already had, no new
+// --forbid-trap obligation) wherever the index is runtime producer/
+// consumer state (xhci_cmd_enq, xhci_evt_idx, xhci_ep0_enq, ...).
+struct Trb {
+    dw0: u32;
+    dw1: u32;
+    dw2: u32;
+    dw3: u32;
+}
+
 let mut xhci_dcbaa: [u8; 65 * 8] align(64);
 let mut xhci_scratchpad_array: [u8; 2 * 8] align(64);
 let mut xhci_scratchpad_buf0: [u8; 4096] align(4096);
 let mut xhci_scratchpad_buf1: [u8; 4096] align(4096);
-let mut xhci_cmd_ring: [u8; CMD_RING_TRBS * 16] align(64);
-let mut xhci_evt_ring: [u8; EVT_RING_TRBS * 16] align(64);
+let mut xhci_cmd_ring: [Trb; CMD_RING_TRBS] align(64);
+let mut xhci_evt_ring: [Trb; EVT_RING_TRBS] align(64);
 let mut xhci_erst: [u8; 16] align(64);
 let mut xhci_input_ctx: [u8; INPUT_CTX_SIZE] align(64);
 let mut xhci_device_ctx: [u8; DEVICE_CTX_SIZE] align(64);
-let mut xhci_ep0_ring: [u8; EP0_RING_TRBS * 16] align(64);
-let mut xhci_bulk_in_ring: [u8; BULK_RING_TRBS * 16] align(64);
-let mut xhci_bulk_out_ring: [u8; BULK_RING_TRBS * 16] align(64);
+let mut xhci_ep0_ring: [Trb; EP0_RING_TRBS] align(64);
+let mut xhci_bulk_in_ring: [Trb; BULK_RING_TRBS] align(64);
+let mut xhci_bulk_out_ring: [Trb; BULK_RING_TRBS] align(64);
 let mut xhci_ctrl_buf: [u8; 256] align(64);
 
 let mut xhci_slot_id: usize = 0;
@@ -142,37 +159,29 @@ let mut xhci_cmd_cycle: u32 = 1;
 // at which a 3-TRB control TD first failed to fit before the Link TRB.
 // examples/rp1_usb_smoke/rp1_usb_smoke.tkb never hit this only because
 // it happened to issue one fewer control transfer and stopped at 14.
-fn xhci_ring_close_segment(ring_base: usize, link_idx: usize,
+fn xhci_ring_close_segment(ring: *Trb, link_idx: usize,
                            from_idx: usize, cycle: u32, noop_type: u32) {
     let mut pad: usize = from_idx;
     for k: usize in 0..<64 {
         if (pad >= link_idx) {
             break;
         }
-        let o: usize = pad * 16;
-        let d0_ptr: *u32 = (ring_base + o) as *u32;
-        *d0_ptr = 0;
-        let d1_ptr: *u32 = (ring_base + o + 4) as *u32;
-        *d1_ptr = 0;
-        let d2_ptr: *u32 = (ring_base + o + 8) as *u32;
-        *d2_ptr = 0;
-        let d3_ptr: *u32 = (ring_base + o + 12) as *u32;
-        *d3_ptr = cycle | (noop_type << 10);
+        ring[pad as isize].dw0 = 0;
+        ring[pad as isize].dw1 = 0;
+        ring[pad as isize].dw2 = 0;
+        ring[pad as isize].dw3 = cycle | (noop_type << 10);
         pad = pad + 1;
     }
     // Link TRB: its pointer (DWORD0/1) was written once at ring setup
     // and never changes; only the Cycle bit needs republishing.
-    let link_off: usize = link_idx * 16;
-    let link_dw3_ptr: *u32 = (ring_base + link_off + 12) as *u32;
-    *link_dw3_ptr = cycle | (1 << 1) | (6 << 10); // Cycle | Toggle Cycle | Link
+    ring[link_idx as isize].dw3 = cycle | (1 << 1) | (6 << 10); // Cycle | Toggle Cycle | Link
 }
 
 fn xhci_cmd_advance() {
     xhci_cmd_enq = xhci_cmd_enq + 1;
     let link_idx: usize = CMD_RING_TRBS - 1;
     if (xhci_cmd_enq + 1 > link_idx) {
-        let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
-        xhci_ring_close_segment(cmd_ring_base, link_idx, xhci_cmd_enq,
+        xhci_ring_close_segment(xhci_cmd_ring as *Trb, link_idx, xhci_cmd_enq,
                                 xhci_cmd_cycle, 23);
         dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
         xhci_cmd_enq = 0;
@@ -271,11 +280,10 @@ fn xhci_irq_handler() !{interrupt} {
 // to keep delivering events. Returns the completion code (DWORD2 bits
 // 31:24), or 0 if no matching event turned up.
 fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 {
-    let evt_ring_base: usize = (xhci_evt_ring as *u8) as usize;
-    let evt_ring_dma: usize = evt_ring_base + RP1_DMA_PCI_OFFSET;
+    let evt_ring: *Trb = xhci_evt_ring as *Trb;
+    let evt_ring_dma: usize = ((xhci_evt_ring as *u8) as usize) + RP1_DMA_PCI_OFFSET;
 
     for scan: usize in 0..<8 {
-        let off: usize = xhci_evt_idx * 16;
         let mut seen: bool = false;
         let mut dw3: u32 = 0;
         // GitHub issue #187: waits via interrupt_wait() (race-free wfe/sev,
@@ -286,8 +294,7 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 {
         // eventually returns 0 instead of sleeping forever.
         for i: usize in 0..<timeout_ms {
             dma_finish_rx(xhci_evt_ring as *align(64) u8, EVT_RING_TRBS * 16);
-            let dw3_ptr: *u32 = (evt_ring_base + off + 12) as *u32;
-            let d3: u32 = *dw3_ptr;
+            let d3: u32 = evt_ring[xhci_evt_idx as isize].dw3;
             if ((d3 & 1) == xhci_evt_cycle) {
                 seen = true;
                 dw3 = d3;
@@ -299,8 +306,7 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 {
             return 0;
         }
 
-        let dw2_ptr: *u32 = (evt_ring_base + off + 8) as *u32;
-        let dw2: u32 = *dw2_ptr;
+        let dw2: u32 = evt_ring[xhci_evt_idx as isize].dw2;
         let trb_type: u32 = (dw3 >> 10) & 0x3F;
 
         xhci_evt_idx = xhci_evt_idx + 1;
@@ -340,7 +346,7 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 {
 fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
                  w_index: u32, w_length: u32, buf_dma: usize,
                  dir_in: bool) -> u32 {
-    let ep0_ring_base: usize = (xhci_ep0_ring as *u8) as usize;
+    let ep0_ring: *Trb = xhci_ep0_ring as *Trb;
     let has_data: bool = w_length > 0;
 
     // A control TD is at most 3 TRBs (Setup + Data + Status); reserve
@@ -350,57 +356,45 @@ fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
     let need: usize = 3;
     let ep0_link_idx: usize = EP0_RING_TRBS - 1;
     if (xhci_ep0_enq + need > ep0_link_idx) {
-        xhci_ring_close_segment(ep0_ring_base, ep0_link_idx, xhci_ep0_enq,
+        xhci_ring_close_segment(ep0_ring, ep0_link_idx, xhci_ep0_enq,
                                 xhci_ep0_cycle, 8);
         xhci_ep0_enq = 0;
         xhci_ep0_cycle = 1 - xhci_ep0_cycle;
     }
-    let first_off: usize = xhci_ep0_enq * 16;
+    let first_idx: usize = xhci_ep0_enq;
     let cyc: u32 = xhci_ep0_cycle;
 
     let mut trt: u32 = 0;
     if (has_data) {
         if (dir_in) { trt = 3; } else { trt = 2; }
     }
-    let s_dw0_ptr: *u32 = (ep0_ring_base + first_off) as *u32;
-    *s_dw0_ptr = bm_request_type | (b_request << 8) | (w_value << 16);
-    let s_dw1_ptr: *u32 = (ep0_ring_base + first_off + 4) as *u32;
-    *s_dw1_ptr = w_index | (w_length << 16);
-    let s_dw2_ptr: *u32 = (ep0_ring_base + first_off + 8) as *u32;
-    *s_dw2_ptr = 8;
-    let s_dw3_ptr: *u32 = (ep0_ring_base + first_off + 12) as *u32;
-    *s_dw3_ptr = cyc | (1 << 6) | (2 << 10) | (trt << 16);
+    ep0_ring[first_idx as isize].dw0 = bm_request_type | (b_request << 8) | (w_value << 16);
+    ep0_ring[first_idx as isize].dw1 = w_index | (w_length << 16);
+    ep0_ring[first_idx as isize].dw2 = 8;
+    ep0_ring[first_idx as isize].dw3 = cyc | (1 << 6) | (2 << 10) | (trt << 16);
 
-    let mut off: usize = first_off + 16;
+    let mut idx: usize = first_idx + 1;
 
     if (has_data) {
         let mut dir_bit: u32 = 0;
         if (dir_in) { dir_bit = 1; }
-        let d_dw0_ptr: *u32 = (ep0_ring_base + off) as *u32;
-        *d_dw0_ptr = (buf_dma & 0xFFFFFFFF) as u32;
-        let d_dw1_ptr: *u32 = (ep0_ring_base + off + 4) as *u32;
-        *d_dw1_ptr = ((buf_dma >> 32) & 0xFFFFFFFF) as u32;
-        let d_dw2_ptr: *u32 = (ep0_ring_base + off + 8) as *u32;
-        *d_dw2_ptr = w_length;
-        let d_dw3_ptr: *u32 = (ep0_ring_base + off + 12) as *u32;
-        *d_dw3_ptr = cyc | (3 << 10) | (dir_bit << 16);
-        off = off + 16;
+        ep0_ring[idx as isize].dw0 = (buf_dma & 0xFFFFFFFF) as u32;
+        ep0_ring[idx as isize].dw1 = ((buf_dma >> 32) & 0xFFFFFFFF) as u32;
+        ep0_ring[idx as isize].dw2 = w_length;
+        ep0_ring[idx as isize].dw3 = cyc | (3 << 10) | (dir_bit << 16);
+        idx = idx + 1;
     }
 
     let mut st_dir: u32 = 1;
     if (has_data) {
         if (dir_in) { st_dir = 0; }
     }
-    let t_dw0_ptr: *u32 = (ep0_ring_base + off) as *u32;
-    *t_dw0_ptr = 0;
-    let t_dw1_ptr: *u32 = (ep0_ring_base + off + 4) as *u32;
-    *t_dw1_ptr = 0;
-    let t_dw2_ptr: *u32 = (ep0_ring_base + off + 8) as *u32;
-    *t_dw2_ptr = 0;
-    let t_dw3_ptr: *u32 = (ep0_ring_base + off + 12) as *u32;
-    *t_dw3_ptr = cyc | (1 << 5) | (4 << 10) | (st_dir << 16);
+    ep0_ring[idx as isize].dw0 = 0;
+    ep0_ring[idx as isize].dw1 = 0;
+    ep0_ring[idx as isize].dw2 = 0;
+    ep0_ring[idx as isize].dw3 = cyc | (1 << 5) | (4 << 10) | (st_dir << 16);
 
-    xhci_ep0_enq = (off + 16) / 16;
+    xhci_ep0_enq = idx + 1;
     dma_prepare_tx(xhci_ep0_ring as *u8, EP0_RING_TRBS * 16);
 
     let db_ptr: *io u32 = (RP1_USBHOST0_DOORBELL + xhci_slot_id * 4) as *io u32;
@@ -416,12 +410,12 @@ fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
 // transfer outstanding. Returns the completion code -- 1 is Success and
 // 13 is Short Packet, both of which mean the data arrived.
 fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 {
-    let mut ring_base: usize = (xhci_bulk_out_ring as *u8) as usize;
+    let mut ring: *Trb = xhci_bulk_out_ring as *Trb;
     let mut enq: usize = xhci_bulk_out_enq;
     let mut cyc: u32 = xhci_bulk_out_cycle;
     let mut dci: usize = xhci_bulk_out_dci;
     if (dir_in) {
-        ring_base = (xhci_bulk_in_ring as *u8) as usize;
+        ring = xhci_bulk_in_ring as *Trb;
         enq = xhci_bulk_in_enq;
         cyc = xhci_bulk_in_cycle;
         dci = xhci_bulk_in_dci;
@@ -435,25 +429,20 @@ fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 {
     // silently kills the ring.
     let bulk_link_idx: usize = BULK_RING_TRBS - 1;
     if (enq + 1 > bulk_link_idx) {
-        xhci_ring_close_segment(ring_base, bulk_link_idx, enq, cyc, 8);
+        xhci_ring_close_segment(ring, bulk_link_idx, enq, cyc, 8);
         enq = 0;
         cyc = 1 - cyc;
     }
 
-    let off: usize = enq * 16;
-    let dw0_ptr: *u32 = (ring_base + off) as *u32;
-    *dw0_ptr = (buf_dma & 0xFFFFFFFF) as u32;
-    let dw1_ptr: *u32 = (ring_base + off + 4) as *u32;
-    *dw1_ptr = ((buf_dma >> 32) & 0xFFFFFFFF) as u32;
-    let dw2_ptr: *u32 = (ring_base + off + 8) as *u32;
-    *dw2_ptr = length;
+    ring[enq as isize].dw0 = (buf_dma & 0xFFFFFFFF) as u32;
+    ring[enq as isize].dw1 = ((buf_dma >> 32) & 0xFFFFFFFF) as u32;
+    ring[enq as isize].dw2 = length;
     // ISP (Interrupt on Short Packet, bit2) only has defined meaning for
     // IN transfers (a device sending fewer bytes than offered); left
     // off for OUT, where the host always controls the exact byte count.
     let mut isp_bit: u32 = 0;
     if (dir_in) { isp_bit = 1 << 2; }
-    let dw3_ptr: *u32 = (ring_base + off + 12) as *u32;
-    *dw3_ptr = cyc | isp_bit | (1 << 5) | (1 << 10);
+    ring[enq as isize].dw3 = cyc | isp_bit | (1 << 5) | (1 << 10);
     if (dir_in) {
         dma_prepare_tx(xhci_bulk_in_ring as *u8, BULK_RING_TRBS * 16);
     } else {
@@ -503,16 +492,11 @@ fn xhci_run_command(dw0: u32, dw1: u32, dw2: u32, trb_type: u32,
                     dci: usize) -> u32 {
     let dci_u32: u32 = dci as u32;
     let slot_u32: u32 = xhci_slot_id as u32;
-    let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
-    let cmd_off: usize = xhci_cmd_enq * 16;
-    let d0_ptr: *u32 = (cmd_ring_base + cmd_off) as *u32;
-    *d0_ptr = dw0;
-    let d1_ptr: *u32 = (cmd_ring_base + cmd_off + 4) as *u32;
-    *d1_ptr = dw1;
-    let d2_ptr: *u32 = (cmd_ring_base + cmd_off + 8) as *u32;
-    *d2_ptr = dw2;
-    let d3_ptr: *u32 = (cmd_ring_base + cmd_off + 12) as *u32;
-    *d3_ptr = xhci_cmd_cycle | (trb_type << 10) | (dci_u32 << 16)
+    let cmd_ring: *Trb = xhci_cmd_ring as *Trb;
+    cmd_ring[xhci_cmd_enq as isize].dw0 = dw0;
+    cmd_ring[xhci_cmd_enq as isize].dw1 = dw1;
+    cmd_ring[xhci_cmd_enq as isize].dw2 = dw2;
+    cmd_ring[xhci_cmd_enq as isize].dw3 = xhci_cmd_cycle | (trb_type << 10) | (dci_u32 << 16)
             | (slot_u32 << 24);
     dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
     xhci_cmd_advance();
@@ -802,30 +786,20 @@ fn xhci_setup_rings_and_start() -> bool {
     xhci_bulk_out_enq = 0;
     xhci_bulk_out_cycle = 1;
 
-    let evt_zero_base: usize = (xhci_evt_ring as *u8) as usize;
     for i: usize in 0..<EVT_RING_TRBS {
-        let p: *u32 = (evt_zero_base + i * 16 + 12) as *u32;
-        *p = 0;
+        xhci_evt_ring[i].dw3 = 0;
     }
     dma_prepare_tx(xhci_evt_ring as *u8, EVT_RING_TRBS * 16);
-    let cmd_zero_base: usize = (xhci_cmd_ring as *u8) as usize;
     for i: usize in 0..<CMD_RING_TRBS {
-        let p: *u32 = (cmd_zero_base + i * 16 + 12) as *u32;
-        *p = 0;
+        xhci_cmd_ring[i].dw3 = 0;
     }
-    let ep0_zero_base: usize = (xhci_ep0_ring as *u8) as usize;
     for i: usize in 0..<EP0_RING_TRBS {
-        let p: *u32 = (ep0_zero_base + i * 16 + 12) as *u32;
-        *p = 0;
+        xhci_ep0_ring[i].dw3 = 0;
     }
     dma_prepare_tx(xhci_ep0_ring as *u8, EP0_RING_TRBS * 16);
-    let bin_zero_base: usize = (xhci_bulk_in_ring as *u8) as usize;
-    let bout_zero_base: usize = (xhci_bulk_out_ring as *u8) as usize;
     for i: usize in 0..<BULK_RING_TRBS {
-        let pi: *u32 = (bin_zero_base + i * 16 + 12) as *u32;
-        *pi = 0;
-        let po: *u32 = (bout_zero_base + i * 16 + 12) as *u32;
-        *po = 0;
+        xhci_bulk_in_ring[i].dw3 = 0;
+        xhci_bulk_out_ring[i].dw3 = 0;
     }
     dma_prepare_tx(xhci_bulk_in_ring as *u8, BULK_RING_TRBS * 16);
     dma_prepare_tx(xhci_bulk_out_ring as *u8, BULK_RING_TRBS * 16);
@@ -854,23 +828,18 @@ fn xhci_setup_rings_and_start() -> bool {
     *dcbaa0_hi_ptr = ((scratchpad_array_dma >> 32) & 0xFFFFFFFF) as u32;
     dma_prepare_tx(xhci_dcbaa as *u8, 65 * 8);
 
-    let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
-    let cmd_ring_dma: usize = cmd_ring_base + RP1_DMA_PCI_OFFSET;
-    let trb0_dw3_ptr: *u32 = (cmd_ring_base + 12) as *u32;
-    *trb0_dw3_ptr = 0x00002401; // Enable Slot, Cycle=1
+    let cmd_ring: *Trb = xhci_cmd_ring as *Trb;
+    let cmd_ring_dma: usize = ((xhci_cmd_ring as *u8) as usize) + RP1_DMA_PCI_OFFSET;
+    cmd_ring[0].dw3 = 0x00002401; // Enable Slot, Cycle=1
 
-    let cmd_link_off: usize = (CMD_RING_TRBS - 1) * 16;
-    let clink_dw0_ptr: *u32 = (cmd_ring_base + cmd_link_off) as *u32;
-    *clink_dw0_ptr = (cmd_ring_dma & 0xFFFFFFFF) as u32;
-    let clink_dw1_ptr: *u32 = (cmd_ring_base + cmd_link_off + 4) as *u32;
-    *clink_dw1_ptr = ((cmd_ring_dma >> 32) & 0xFFFFFFFF) as u32;
-    let clink_dw3_ptr: *u32 = (cmd_ring_base + cmd_link_off + 12) as *u32;
-    *clink_dw3_ptr = 0x00001803;
+    let cmd_link_idx: usize = CMD_RING_TRBS - 1;
+    cmd_ring[cmd_link_idx as isize].dw0 = (cmd_ring_dma & 0xFFFFFFFF) as u32;
+    cmd_ring[cmd_link_idx as isize].dw1 = ((cmd_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+    cmd_ring[cmd_link_idx as isize].dw3 = 0x00001803;
     dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
 
-    let evt_ring_base: usize = (xhci_evt_ring as *u8) as usize;
     let erst_base: usize = (xhci_erst as *u8) as usize;
-    let evt_ring_dma: usize = evt_ring_base + RP1_DMA_PCI_OFFSET;
+    let evt_ring_dma: usize = ((xhci_evt_ring as *u8) as usize) + RP1_DMA_PCI_OFFSET;
     let erst_dma: usize = erst_base + RP1_DMA_PCI_OFFSET;
     let erst_dw0_ptr: *u32 = erst_base as *u32;
     *erst_dw0_ptr = (evt_ring_dma & 0xFFFFFFFF) as u32;
@@ -967,15 +936,12 @@ fn xhci_address_device() -> bool {
     *dcbaa_slot_hi_ptr = ((device_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
     dma_prepare_tx(xhci_dcbaa as *u8, 65 * 8);
 
-    let ep0_ring_base: usize = (xhci_ep0_ring as *u8) as usize;
-    let ep0_ring_dma: usize = ep0_ring_base + RP1_DMA_PCI_OFFSET;
-    let ep0_link_off: usize = (EP0_RING_TRBS - 1) * 16;
-    let ep0_link_dw0_ptr: *u32 = (ep0_ring_base + ep0_link_off) as *u32;
-    *ep0_link_dw0_ptr = (ep0_ring_dma & 0xFFFFFFFF) as u32;
-    let ep0_link_dw1_ptr: *u32 = (ep0_ring_base + ep0_link_off + 4) as *u32;
-    *ep0_link_dw1_ptr = ((ep0_ring_dma >> 32) & 0xFFFFFFFF) as u32;
-    let ep0_link_dw3_ptr: *u32 = (ep0_ring_base + ep0_link_off + 12) as *u32;
-    *ep0_link_dw3_ptr = 0x00001803;
+    let ep0_ring: *Trb = xhci_ep0_ring as *Trb;
+    let ep0_ring_dma: usize = ((xhci_ep0_ring as *u8) as usize) + RP1_DMA_PCI_OFFSET;
+    let ep0_link_idx: usize = EP0_RING_TRBS - 1;
+    ep0_ring[ep0_link_idx as isize].dw0 = (ep0_ring_dma & 0xFFFFFFFF) as u32;
+    ep0_ring[ep0_link_idx as isize].dw1 = ((ep0_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+    ep0_ring[ep0_link_idx as isize].dw3 = 0x00001803;
     dma_prepare_tx(xhci_ep0_ring as *u8, EP0_RING_TRBS * 16);
     xhci_ep0_enq = 0;
     xhci_ep0_cycle = 1;
@@ -1064,13 +1030,10 @@ fn xhci_address_device() -> bool {
     // Linux's hub_port_reset() waits 10ms + 40ms margin.
     delay_us(50000);
 
-    let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
-    let trb1_dw0_ptr: *u32 = (cmd_ring_base + 16) as *u32;
-    *trb1_dw0_ptr = (input_ctx_dma & 0xFFFFFFFF) as u32;
-    let trb1_dw1_ptr: *u32 = (cmd_ring_base + 20) as *u32;
-    *trb1_dw1_ptr = ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
-    let trb1_dw3_ptr: *u32 = (cmd_ring_base + 28) as *u32;
-    *trb1_dw3_ptr = (1 | (11 << 10) | (xhci_slot_id << 24)) as u32;
+    let cmd_ring: *Trb = xhci_cmd_ring as *Trb;
+    cmd_ring[1].dw0 = (input_ctx_dma & 0xFFFFFFFF) as u32;
+    cmd_ring[1].dw1 = ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
+    cmd_ring[1].dw3 = (1 | (11 << 10) | (xhci_slot_id << 24)) as u32;
     dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
 
     let doorbell0_ptr: *io u32 = RP1_USBHOST0_DOORBELL as *io u32;
@@ -1223,26 +1186,20 @@ fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool {
     let slot_dw0: u32 = *slot_dw0_ptr;
     *slot_dw0_ptr = (slot_dw0 & 0x07FFFFFF) | (((max_idx + 1) as u32) << 27);
 
-    let bulk_in_ring_base: usize = (xhci_bulk_in_ring as *u8) as usize;
-    let bulk_in_ring_dma: usize = bulk_in_ring_base + RP1_DMA_PCI_OFFSET;
-    let bulk_out_ring_base: usize = (xhci_bulk_out_ring as *u8) as usize;
-    let bulk_out_ring_dma: usize = bulk_out_ring_base + RP1_DMA_PCI_OFFSET;
-    let bulk_link_off: usize = (BULK_RING_TRBS - 1) * 16;
+    let bulk_in_ring: *Trb = xhci_bulk_in_ring as *Trb;
+    let bulk_in_ring_dma: usize = ((xhci_bulk_in_ring as *u8) as usize) + RP1_DMA_PCI_OFFSET;
+    let bulk_out_ring: *Trb = xhci_bulk_out_ring as *Trb;
+    let bulk_out_ring_dma: usize = ((xhci_bulk_out_ring as *u8) as usize) + RP1_DMA_PCI_OFFSET;
+    let bulk_link_idx: usize = BULK_RING_TRBS - 1;
 
-    let bin_link0_ptr: *u32 = (bulk_in_ring_base + bulk_link_off) as *u32;
-    *bin_link0_ptr = (bulk_in_ring_dma & 0xFFFFFFFF) as u32;
-    let bin_link1_ptr: *u32 = (bulk_in_ring_base + bulk_link_off + 4) as *u32;
-    *bin_link1_ptr = ((bulk_in_ring_dma >> 32) & 0xFFFFFFFF) as u32;
-    let bin_link3_ptr: *u32 = (bulk_in_ring_base + bulk_link_off + 12) as *u32;
-    *bin_link3_ptr = 0x00001803;
+    bulk_in_ring[bulk_link_idx as isize].dw0 = (bulk_in_ring_dma & 0xFFFFFFFF) as u32;
+    bulk_in_ring[bulk_link_idx as isize].dw1 = ((bulk_in_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+    bulk_in_ring[bulk_link_idx as isize].dw3 = 0x00001803;
     dma_prepare_tx(xhci_bulk_in_ring as *u8, BULK_RING_TRBS * 16);
 
-    let bout_link0_ptr: *u32 = (bulk_out_ring_base + bulk_link_off) as *u32;
-    *bout_link0_ptr = (bulk_out_ring_dma & 0xFFFFFFFF) as u32;
-    let bout_link1_ptr: *u32 = (bulk_out_ring_base + bulk_link_off + 4) as *u32;
-    *bout_link1_ptr = ((bulk_out_ring_dma >> 32) & 0xFFFFFFFF) as u32;
-    let bout_link3_ptr: *u32 = (bulk_out_ring_base + bulk_link_off + 12) as *u32;
-    *bout_link3_ptr = 0x00001803;
+    bulk_out_ring[bulk_link_idx as isize].dw0 = (bulk_out_ring_dma & 0xFFFFFFFF) as u32;
+    bulk_out_ring[bulk_link_idx as isize].dw1 = ((bulk_out_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+    bulk_out_ring[bulk_link_idx as isize].dw3 = 0x00001803;
     dma_prepare_tx(xhci_bulk_out_ring as *u8, BULK_RING_TRBS * 16);
 
     let in_ctx_off: usize = (in_idx + 2) * CTX_STRIDE;
@@ -1276,13 +1233,10 @@ fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool {
     *icc_add_ptr = 1 | in_add_bit | out_add_bit;
     dma_prepare_tx(xhci_input_ctx as *u8, INPUT_CTX_SIZE);
 
-    let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
-    let ce_dw0_ptr: *u32 = (cmd_ring_base + 32) as *u32;
-    *ce_dw0_ptr = (input_ctx_dma & 0xFFFFFFFF) as u32;
-    let ce_dw1_ptr: *u32 = (cmd_ring_base + 36) as *u32;
-    *ce_dw1_ptr = ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
-    let ce_dw3_ptr: *u32 = (cmd_ring_base + 44) as *u32;
-    *ce_dw3_ptr = (1 | (12 << 10) | (xhci_slot_id << 24)) as u32;
+    let cmd_ring: *Trb = xhci_cmd_ring as *Trb;
+    cmd_ring[2].dw0 = (input_ctx_dma & 0xFFFFFFFF) as u32;
+    cmd_ring[2].dw1 = ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
+    cmd_ring[2].dw3 = (1 | (12 << 10) | (xhci_slot_id << 24)) as u32;
     dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
 
     let doorbell0_ptr: *io u32 = RP1_USBHOST0_DOORBELL as *io u32;
