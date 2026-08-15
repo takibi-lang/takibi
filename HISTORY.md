@@ -181,11 +181,14 @@ manual offset arithmetic). The file's own remaining #218 warnings (65
 unique lines) are entirely the out-of-scope byte buffers above, not TRB
 rings.
 
-**Not yet done: real-hardware verification.** This session verified
-compile-time correctness and the measured metrics above; `kernelcheck-
-rpi5` (the actual USB/Mass-Storage hardware exercise this driver
-ultimately has to pass) was not run, per this project's standing rule to
-get fresh confirmation before any RPi5 hardware access.
+**Real-hardware verification.** The user ran `make allcheck` themselves
+afterward (unprompted, to confirm the kernelsh-qemu race fix below);
+`kernelcheck-rpi5`'s `usb_storage.actual` view matched
+`kernel/tests/rpi5/views/usb_storage.expected` byte-for-byte on real RP1
+xHCI hardware -- slot enable, address device, configure endpoint,
+ext2 provisioning, byte-equal verify, write/resize/bitmap/owner/create/
+lookup/unlink, and mount all passed through the migrated `[Trb; N]`
+rings exactly as before the migration.
 
 ### 2026-08-15: Issue #218's Non-Affine Cast Population Made Visible As a Warning, Plus Issue #238's Trusted-Base Measurement Script
 
