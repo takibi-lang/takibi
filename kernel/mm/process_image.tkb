@@ -976,31 +976,36 @@ fn process_image_load_page(page: borrow PageOwner[page],
 
     // Both ranges are explicitly bounded above. Their endpoints are related
     // runtime values, which the current refinement checker cannot carry into
-    // slice syntax; unsafe is confined to constructing these checked views.
+    // slice syntax; unsafe is confined to constructing these checked views
+    // and immediately consuming them (GitHub issue #315: one block now
+    // covers both constructions plus their sole immediate use, instead of
+    // one per-expression wrap each).
     let source: *u8 = plan.image_address as *u8;
-    let destination = unsafe {
-        bytes[destination_offset..<destination_offset + copy_length]
-    };
-    let file_bytes = unsafe {
-        source[source_offset as isize..<(source_offset + copy_length) as isize]
-    };
-    slice_copy(destination, file_bytes);
-    if (slice_eq(destination, file_bytes) == false) {
-        return ProcessImagePageLoadResult::Invalid;
+    unsafe {
+        let destination =
+            bytes[destination_offset..<destination_offset + copy_length];
+        let file_bytes =
+            source[source_offset as isize..<(source_offset + copy_length) as isize];
+        slice_copy(destination, file_bytes);
+        if (slice_eq(destination, file_bytes) == false) {
+            return ProcessImagePageLoadResult::Invalid;
+        }
     }
 
     // Every byte outside the file-backed overlap must still be zero. Dynamic
     // slice endpoints have the same explicit proof above and the same narrow
     // checker limitation as the copy views.
     let zeros = process_image_zero_page as []u8;
-    let prefix = unsafe { bytes[0..<destination_offset] };
-    let zero_prefix = unsafe { zeros[0..<destination_offset] };
     let suffix_start: usize = destination_offset + copy_length;
-    let suffix = unsafe { bytes[suffix_start..<PAGE_SIZE] };
-    let zero_suffix = unsafe { zeros[suffix_start..<PAGE_SIZE] };
-    if (slice_eq(prefix, zero_prefix) == false ||
-        slice_eq(suffix, zero_suffix) == false) {
-        return ProcessImagePageLoadResult::Invalid;
+    unsafe {
+        let prefix = bytes[0..<destination_offset];
+        let zero_prefix = zeros[0..<destination_offset];
+        let suffix = bytes[suffix_start..<PAGE_SIZE];
+        let zero_suffix = zeros[suffix_start..<PAGE_SIZE];
+        if (slice_eq(prefix, zero_prefix) == false ||
+            slice_eq(suffix, zero_suffix) == false) {
+            return ProcessImagePageLoadResult::Invalid;
+        }
     }
     return ProcessImagePageLoadResult::Loaded;
 }
@@ -1053,11 +1058,12 @@ fn process_image_load_page_ext2(page: borrow PageOwner[page],
                     let mut take: usize = read_length;
                     if (take > remaining) { take = remaining; }
                     let block_bytes = process_image_ext2_block as []u8;
-                    let source = unsafe { block_bytes[0..<take] };
-                    let destination = unsafe {
-                        bytes[destination_offset..<destination_offset + take]
-                    };
-                    slice_copy(destination, source);
+                    unsafe {
+                        let source = block_bytes[0..<take];
+                        let destination =
+                            bytes[destination_offset..<destination_offset + take];
+                        slice_copy(destination, source);
+                    }
                     destination_offset = destination_offset + take;
                     source_offset = source_offset + take;
                     remaining = remaining - take;
@@ -1066,14 +1072,16 @@ fn process_image_load_page_ext2(page: borrow PageOwner[page],
         }
     }
     let zeros = process_image_zero_page as []u8;
-    let prefix = unsafe { bytes[0..<copy_start - page_start] };
-    let zero_prefix = unsafe { zeros[0..<copy_start - page_start] };
     let suffix_start: usize = copy_end - page_start;
-    let suffix = unsafe { bytes[suffix_start..<PAGE_SIZE] };
-    let zero_suffix = unsafe { zeros[suffix_start..<PAGE_SIZE] };
-    if (slice_eq(prefix, zero_prefix) == false ||
-        slice_eq(suffix, zero_suffix) == false) {
-        return ProcessImagePageLoadResult::Invalid;
+    unsafe {
+        let prefix = bytes[0..<copy_start - page_start];
+        let zero_prefix = zeros[0..<copy_start - page_start];
+        let suffix = bytes[suffix_start..<PAGE_SIZE];
+        let zero_suffix = zeros[suffix_start..<PAGE_SIZE];
+        if (slice_eq(prefix, zero_prefix) == false ||
+            slice_eq(suffix, zero_suffix) == false) {
+            return ProcessImagePageLoadResult::Invalid;
+        }
     }
     return ProcessImagePageLoadResult::Loaded;
 }

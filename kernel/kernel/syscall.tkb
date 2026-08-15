@@ -1331,11 +1331,11 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
     let child_frame_sp: usize = child_stack_top - EXC_CONTEXT_SIZE;
     let parent_frame_base: *u8 = parent_frame_sp as *u8;
     let child_frame_base: *u8 = child_frame_sp as *u8;
-    let src: []u8 =
-        unsafe { parent_frame_base[0..<EXC_CONTEXT_SIZE as isize] };
-    let dst: []u8 =
-        unsafe { child_frame_base[0..<EXC_CONTEXT_SIZE as isize] };
-    let copied: usize = slice_copy(dst, src);
+    unsafe {
+        let src: []u8 = parent_frame_base[0..<EXC_CONTEXT_SIZE as isize];
+        let dst: []u8 = child_frame_base[0..<EXC_CONTEXT_SIZE as isize];
+        let copied: usize = slice_copy(dst, src);
+    }
     let installed_child_sp: usize =
         kernel_process_clone_context_install(parent_frame_sp, child_frame_sp);
     if (installed_child_sp == 0) {

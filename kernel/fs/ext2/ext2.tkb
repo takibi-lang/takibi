@@ -433,9 +433,11 @@ fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
                 let mut chunk: usize = KERNEL_BLOCK_SIZE;
                 if (inode.size - copied < chunk) { chunk = inode.size - copied; }
                 let source_pointer: *u8 = ext2_file_block as *u8;
-                let source = unsafe { source_pointer[0..<chunk as isize] };
-                let target = unsafe { destination[copied..<copied + chunk] };
-                slice_copy(target, source);
+                unsafe {
+                    let source = source_pointer[0..<chunk as isize];
+                    let target = destination[copied..<copied + chunk];
+                    slice_copy(target, source);
+                }
                 copied = copied + chunk;
             }
             return Ext2ReadResult::Read(inode.size);
@@ -492,9 +494,11 @@ fn ext2_read_file_chunk(mount: Ext2Mount, inode_number: usize,
             }
             let source_pointer: *u8 =
                 (ext2_file_block as *u8) + (block_offset as isize);
-            let source = unsafe { source_pointer[0..<chunk as isize] };
-            let target = unsafe { destination[0..<chunk] };
-            slice_copy(target, source);
+            unsafe {
+                let source = source_pointer[0..<chunk as isize];
+                let target = destination[0..<chunk];
+                slice_copy(target, source);
+            }
             return Ext2ReadResult::Read(chunk);
         }
     }
@@ -534,9 +538,11 @@ fn ext2_read_directory_chunk(mount: Ext2Mount, inode_number: usize,
             }
             let source_pointer: *u8 =
                 (ext2_file_block as *u8) + (block_offset as isize);
-            let source = unsafe { source_pointer[0..<chunk as isize] };
-            let target = unsafe { destination[0..<chunk] };
-            slice_copy(target, source);
+            unsafe {
+                let source = source_pointer[0..<chunk as isize];
+                let target = destination[0..<chunk];
+                slice_copy(target, source);
+            }
             return Ext2ReadResult::Read(chunk);
         }
     }
@@ -663,9 +669,11 @@ fn ext2_read_fast_symlink(mount: Ext2Mount, inode_number: usize,
             let inode_pointer: *u8 =
                 (ext2_metadata_block as *u8) + (inode.table_offset as isize);
             let inline_target: *u8 = inode_pointer + 40;
-            let source = unsafe { inline_target[0..<inode.size as isize] };
-            let target = unsafe { destination[0..<inode.size] };
-            slice_copy(target, source);
+            unsafe {
+                let source = inline_target[0..<inode.size as isize];
+                let target = destination[0..<inode.size];
+                slice_copy(target, source);
+            }
             return Ext2SymlinkResult::Read(inode.size);
         }
     }

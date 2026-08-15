@@ -3408,7 +3408,7 @@ let rec stmt_always_returns (s : Ast.stmt) : bool = match s.desc with
   | Ast.Return _ -> true
   | Ast.If (_, yes, no) ->
       no <> [] && stmt_list_always_returns yes && stmt_list_always_returns no
-  | Ast.Block body -> stmt_list_always_returns body
+  | Ast.Block body | Ast.UnsafeBlock body -> stmt_list_always_returns body
   | _ -> false
 and stmt_list_always_returns stmts = List.exists stmt_always_returns stmts
 
@@ -3651,6 +3651,19 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
         (tyenv, raw_locals) stmts
       in
+      (tyenv, raw_locals')
+  | UnsafeBlock stmts ->
+      (* GitHub issue #315: same as Block, except every statement inside
+         is checked with unsafe_depth raised -- the block-granularity
+         grant. No exception-safe decrement needed, same rationale as
+         Ast.Unsafe's own case: a TypeError aborts compilation and
+         infer_program resets the counter. *)
+      incr unsafe_depth;
+      let (_, raw_locals') = fold_stmts_with_future_writes
+        (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
+        (tyenv, raw_locals) stmts
+      in
+      decr unsafe_depth;
       (tyenv, raw_locals')
   | If (cond, then_s, else_s) ->
       let ct = infer_expr senv eenv tyenv fenv cond in
@@ -4118,7 +4131,7 @@ let check_const_shadowing (fdef : Ast.func) =
   let rec go_stmt (s : Ast.stmt) = match s.desc with
     | Ast.Let (_, name, _, _, _) ->
         if Const_env.find name <> None then reject s.loc name
-    | Ast.Block ss | Ast.While (_, ss) -> List.iter go_stmt ss
+    | Ast.Block ss | Ast.UnsafeBlock ss | Ast.While (_, ss) -> List.iter go_stmt ss
     | Ast.If (_, t, e) -> List.iter go_stmt t; List.iter go_stmt e
     | Ast.For (name, _, _, _, body) ->
         if Const_env.find name <> None then reject s.loc name;
@@ -4169,7 +4182,7 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
   and go_stmt (s : Ast.stmt) = match s.desc with
     | Ast.Let (_, name, None, _, _) -> check s.loc name
     | Ast.Let (_, _, Some _, _, _) -> ()
-    | Ast.Block ss | Ast.While (_, ss) -> List.iter go_stmt ss
+    | Ast.Block ss | Ast.UnsafeBlock ss | Ast.While (_, ss) -> List.iter go_stmt ss
     | Ast.If (_, t, e) -> List.iter go_stmt t; List.iter go_stmt e
     | Ast.For (_, _, _, _, body) | Ast.ForEach (_, _, body) -> List.iter go_stmt body
     | Ast.Match (_, arms) -> go_arms arms
@@ -5205,7 +5218,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      | Ast.Return (Some e) | Ast.Expr e | Ast.Yield e -> validate_expr_types e
      | Ast.Return None -> ()
      | Ast.LetTuple (_, e) -> validate_expr_types e
-     | Ast.Block body -> List.iter validate_stmt_types body
+     | Ast.Block body | Ast.UnsafeBlock body -> List.iter validate_stmt_types body
      | Ast.While (c, body) ->
          validate_expr_types c; List.iter validate_stmt_types body
      | Ast.If (c, yes, no) ->
@@ -6885,7 +6898,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let body = match arm with
             | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) -> b in
           always_terminates body) arms
-      | Ast.Block body -> always_terminates body
+      | Ast.Block body | Ast.UnsafeBlock body -> always_terminates body
       | _ -> false
     and always_terminates stmts = List.exists stmt_always_terminates stmts in
     let rec check_stmts moved declared taints stmts =
@@ -7074,7 +7087,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (moved,
            List.fold_left (fun d n -> PathSet.add (PVar n) d) declared names,
            taints)
-      | Ast.Block body ->
+      | Ast.Block body | Ast.UnsafeBlock body ->
           let (out, _, taints_out) = check_stmts moved declared taints body in
           (out, declared, taints_out)
       | Ast.If (cond, yes, no) ->
@@ -7396,6 +7409,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           visit_expr e
       | Ast.Return None -> ()
       | Ast.Block stmts -> List.iter visit_stmt stmts
+      | Ast.UnsafeBlock stmts ->
+          contains_unsafe := true; List.iter visit_stmt stmts
       | Ast.Let (_, _, _, init, _) -> Option.iter visit_expr init
       | Ast.If (condition, yes, no) ->
           visit_expr condition; List.iter visit_stmt yes; List.iter visit_stmt no

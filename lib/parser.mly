@@ -581,6 +581,14 @@ stmt:
        empty scope block has no observable effect either way, so
        requiring at least one statement costs nothing in practice. *)
     { { desc = Block (first :: rest); loc = $symbolstartpos } }
+  | UNSAFE LBRACE b = stmts RBRACE
+    (* GitHub issue #315: unsafe { stmt* } -- block-granularity sibling of
+       expr's own `UNSAFE LBRACE e = expr RBRACE` (see below in this same
+       grammar). `stmts` is 0-or-more (unlike the plain Block production
+       above), since the leading UNSAFE token already disambiguates this
+       from a struct-literal-as-statement -- no reduce/reduce conflict to
+       avoid here the way bare `{ }` has. *)
+    { { desc = UnsafeBlock b; loc = $symbolstartpos } }
   | IF LPAREN c = expr RPAREN LBRACE t = stmts RBRACE p = else_part
     { { desc = If(c, t, p); loc = $symbolstartpos } }
   | WHILE LPAREN c = expr RPAREN LBRACE b = stmts RBRACE

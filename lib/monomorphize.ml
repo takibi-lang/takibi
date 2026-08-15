@@ -221,6 +221,7 @@ let rec relocate_stmt (mangled : string) (s : stmt) : stmt =
     | Expr e -> Expr (ex e)
     | Yield e -> Yield (ex e)
     | Block ss -> Block (sts ss)
+    | UnsafeBlock ss -> UnsafeBlock (sts ss)
     | Let (m, name, ty_opt, e_opt, align_opt) ->
         Let (m, name, ty_opt, Option.map ex e_opt, align_opt)
     | If (c, t, e) -> If (ex c, sts t, sts e)
@@ -304,6 +305,7 @@ let rec walk_stmt ~subst ~vsubst ~resolve_inst (s : stmt) : stmt =
     | Expr e -> Expr (ex e)
     | Yield e -> Yield (ex e)
     | Block ss -> Block (sts ss)
+    | UnsafeBlock ss -> UnsafeBlock (sts ss)
     | Let (m, name, ty_opt, e_opt, align_opt) ->
         Let (m, name, Option.map ty ty_opt, Option.map ex e_opt, align_opt)
     | If (c, t, e) -> If (ex c, sts t, sts e)
@@ -871,6 +873,7 @@ let run (prog : toplevel list) : toplevel list =
         | Expr e -> Expr (ex e)
         | Yield e -> Yield (ex e)
         | Block ss -> Block (sts ss)
+        | UnsafeBlock ss -> UnsafeBlock (sts ss)
         | Let (m, name, ty_opt, e_opt, align_opt) ->
             let ty_opt = Option.map ty ty_opt in
             let e_opt = Option.map ex e_opt in

@@ -15,6 +15,85 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: `unsafe { stmt* }` Block Form (Issue #315)
+
+`unsafe { expr }` was grammar-restricted to a single expression
+(`UNSAFE LBRACE e = expr RBRACE`, `lib/parser.mly`), forcing one
+`unsafe { }` wrap per unproven operation even when several such
+operations shared one trust rationale. #315 asked for a design that
+scales from expression to block to (eventually) function/file
+granularity without inventing four separate mechanisms. The chosen
+framing: **grant** (widens `unsafe_depth`, unlocks unchecked-assertion
+constructs) and **declare** (`!{unsafe}`, an audit-only marker that
+grants nothing) are orthogonal axes already present in the existing
+code; only `unsafe { }` grants, at exactly two syntactic positions
+(expr, and now stmt-list), and `!{unsafe}` stays a per-function
+declaration unchanged by this issue -- mirrors Rust's 2024-edition fix
+requiring `unsafe {}` blocks inside `unsafe fn` bodies for the same
+audit-value reason. A file-level `!{unsafe}` declaration and a future
+method-level marker are left as natural, un-implemented extensions of
+the *declare* axis, out of this issue's scope.
+
+**Implementation.** New `Ast.UnsafeBlock of stmt list` stmt variant
+(`lib/ast.ml`), parsed via `UNSAFE LBRACE b = stmts RBRACE` at the
+`stmt:` level (`lib/parser.mly`; no grammar conflict with the existing
+expr form -- the leading `UNSAFE` token disambiguates immediately,
+unlike bare `{ }`'s existing struct-literal ambiguity). `type_inf.ml`'s
+`infer_stmt` handles it exactly like `Block` except `unsafe_depth` is
+incremented/decremented around the whole statement list; `llvm_gen.ml`'s
+`gen_stmt` mirrors this (sync rule, same as the expr form's existing
+two-copy pattern). Every other exhaustive `stmt_desc` match across
+`ast.ml`/`type_inf.ml`/`llvm_gen.ml`/`monomorphize.ml` (structural
+walkers, the `contains_unsafe` effect-summary visitor, linear/moved-value
+tracking, `always_returns`/`always_terminates`, monomorphization) was
+extended by letting the compiler's own exhaustiveness warnings drive
+every call site, rather than grepping for `Block` by hand. 9 new
+Alcotest cases (`test/test_takibi.ml`) cover: `!{unsafe}` is still
+required for a function using only the block form; one block covers
+multiple unproven ops including a whole loop body's worth (an `expect_ok`
+type-check case); the block does **not** leak past its own closing brace
+(both a `TypeError`-level check and an `expect_trap_sites` codegen-level
+check, proving `unsafe_depth` genuinely returns to 0 afterward, not just
+in the common case).
+
+**Scoping lesson (mid-session correction).** The first migration attempt
+wrapped `kernel/kernel/fd_table.tkb`'s `unified_fd_clone_rollback` --
+the issue's own motivating example, 4 separate expr-level wraps inside
+one loop -- in a single block covering the *entire loop body*. That
+compiled and passed every test, but on inspection it also pulled in
+`refcount_pool_release` (an unrelated function call with its own control
+flow) and `object_records[undo_object]` (a **different**, already-proven
+array access) into the audited-as-unsafe region -- exactly the density
+dilution #315's own Motivation warned against. Reverted. The real
+lesson: `unsafe { stmt* }` only pays off when a run of statements is
+*entirely* unproven operations back-to-back with no unrelated safe logic
+between them -- `unified_fd_clone_rollback`'s 4 sites are scattered
+across an if-condition, a let-init, a call-argument, and a bare
+assignment, never contiguous, so it was reverted to its original 4
+per-expression wraps and left alone. The actually-common shape turned
+out to be a different, genuinely frequent idiom already in the codebase:
+"construct one or two checked views from an unproven bound via
+consecutive `let`s, then immediately consume them with nothing else in
+between" -- migrated at every occurrence found: `kernel/fs/ext2/ext2.tkb`
+(4 sites: `ext2_read_file_chunk`, `ext2_read_file_chunk_offset`,
+`ext2_read_directory_chunk`, `ext2_symlink_target`), `kernel/mm/
+process_image.tkb` (4 sites across `process_image_load_page` and its
+ext2-backed counterpart -- two of these required hoisting a `suffix_start`
+computation a few lines earlier, since it depended on nothing computed
+in between, to keep the block's `let`s from needing to escape their own
+scope), and `kernel/kernel/syscall.tkb` (the clone syscall's parent/child
+exception-frame copy). Each site collapsed 2 (or, for the `prefix`/
+`zero_prefix`/`suffix`/`zero_suffix` quartets, 4) wraps into 1, with the
+immediate `slice_copy`/`slice_eq` consumer call kept *inside* the block
+deliberately (it is the sole, immediate use of the just-constructed
+views, not unrelated logic) rather than trying to make the constructed
+slices escape the block's scope. Verified via `make kernelbuild-qemu`
+and `make kernelbuild-rpi5` (`--forbid-trap`, both targets) plus
+`make kernelcheck-qemu` (all 38 QEMU integration views green, including
+`ext2`, `ext2_mutation`, `execve`, `process_fd_table`, and `syscall`).
+
+---
+
 ### 2026-08-15: `&T`/`&mut T` Reference Type Designed, Implemented, and Rolled Out Repo-Wide (Issues #314/#319/#320, All Closed Same Session)
 
 Measuring pointer usage across `kernel/` (504 pointer type annotations,

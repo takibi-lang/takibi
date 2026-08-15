@@ -784,7 +784,7 @@ let rec stmt_always_returns (s : Ast.stmt) : bool = match s.desc with
   | Ast.Return _ -> true
   | Ast.If (_, yes, no) ->
       no <> [] && stmt_list_always_returns yes && stmt_list_always_returns no
-  | Ast.Block body -> stmt_list_always_returns body
+  | Ast.Block body | Ast.UnsafeBlock body -> stmt_list_always_returns body
   | _ -> false
 and stmt_list_always_returns stmts = List.exists stmt_always_returns stmts
 
@@ -1093,7 +1093,7 @@ let slice_rebind_names (stmts : Ast.stmt list) : string list =
     | LetTuple (ns, e)       -> List.iter add ns; go_expr e
     | Expr e | Return (Some e) | Yield e -> go_expr e
     | Return None            -> ()
-    | Block ss               -> List.iter go_stmt ss
+    | Block ss | UnsafeBlock ss -> List.iter go_stmt ss
     | If (c, t, el)          -> go_expr c;
                                 List.iter go_stmt t; List.iter go_stmt el
     | While (c, b)           -> go_expr c; List.iter go_stmt b
@@ -2048,7 +2048,7 @@ let rec collect_lets stmts =
   List.concat_map (fun s ->
     match s.desc with
     | Let (true, name, ty_opt, _, align_opt) -> [(name, ty_opt, s.loc, align_opt)]
-    | Block ss                    -> collect_lets ss
+    | Block ss | UnsafeBlock ss   -> collect_lets ss
     | If (_, t, e)                -> collect_lets t @ collect_lets e
     | While (_, b)                -> collect_lets b
     | For (name, _, _, _, body)   ->
@@ -2100,7 +2100,7 @@ let mutable_pattern_key loc vtype cname name =
 let rec collect_mutable_pattern_binders stmts =
   List.concat_map (fun (s : Ast.stmt) ->
     match s.desc with
-    | Block body | While (_, body) | For (_, _, _, _, body)
+    | Block body | UnsafeBlock body | While (_, body) | For (_, _, _, _, body)
     | ForEach (_, _, body) -> collect_mutable_pattern_binders body
     | If (_, yes, no) ->
         collect_mutable_pattern_binders yes
@@ -2142,7 +2142,7 @@ let rec collect_immutable_lets stmts =
     match s.desc with
     | Let (false, name, ty_opt, Some _, _) -> [(name, ty_opt, s.loc)]
     | LetTuple (names, _)          -> List.map (fun name -> (name, None, s.loc)) names
-    | Block ss                    -> collect_immutable_lets ss
+    | Block ss | UnsafeBlock ss   -> collect_immutable_lets ss
     | If (_, t, e)                -> collect_immutable_lets t @ collect_immutable_lets e
     | While (_, b)                -> collect_immutable_lets b
     | For (_, _, _, _, body)      -> collect_immutable_lets body
@@ -4764,6 +4764,15 @@ let gen_func ?prog_types fdef =
 
     | Block stmts ->
         run_stmts_with_future_writes stmts
+
+    | UnsafeBlock stmts ->
+        (* GitHub issue #315: mirrors type_inf.ml's UnsafeBlock case (sync
+           rule) -- same unsafe_depth widen/narrow around the whole
+           statement list that the Unsafe expr case already does around a
+           single expr. *)
+        incr unsafe_depth;
+        run_stmts_with_future_writes stmts;
+        decr unsafe_depth
 
     | If (cond, then_stmts, else_stmts) ->
         let cond_v   = as_cond (snd (gen_expr locals cond)) in

@@ -340,7 +340,8 @@ parameter value, or top-level declaration name.
   an entirely ignored result is already a compile error today, the same
   all-path consumption check every other `must_use variant` gets -- not
   separate design work.
-- `unsafe { expr }` -- see "unsafe" below.
+- `unsafe { expr }` -- see "unsafe" below. Also accepts a statement list,
+  `unsafe { stmt* }` (GitHub issue #315) -- see "unsafe { stmt* }" below.
 
 ### Operator Precedence
 
@@ -2276,6 +2277,35 @@ Currently gates exactly three things:
 arithmetic/dereference, or an exhaustive enum's runtime variant check
 (the latter is deliberately left checked: skipping it risks LLVM
 `unreachable`-based undefined behavior, not merely a redundant check).
+
+### unsafe { stmt* } -- block form
+
+GitHub issue #315: `unsafe { ... }` also accepts a statement list, not
+only a single expression, gating the exact same three constructs listed
+above for every statement inside it (same `unsafe_depth` mechanism, just
+widened around a `stmt list` instead of one `expr`). It does **not**
+leak past its own closing brace -- a statement textually after the block
+still needs its own `unsafe` -- and, like the plain `{ }` block, a `let`
+declared inside does not escape it.
+
+Reserve this for a short, already-justified run of statements that share
+one trust rationale and have no unrelated logic between them -- in
+practice, "construct one or two checked views from an unproven bound,
+then immediately consume them" (e.g. `kernel/fs/ext2/ext2.tkb`'s
+repeated `unsafe { let source = ...; let target = ...; slice_copy(target,
+source); }` shape). Wrapping a whole function body or a loop body that
+also touches unrelated, already-proven data is a misuse: it pulls safe
+code into the audited region and dilutes `unsafe`'s value as a
+grep-able, reviewable signal (see GitHub issue #315's own discussion --
+an early draft of this feature wrapped an entire loop body and was
+reverted for exactly this reason). The per-expression form remains the
+default for an isolated unproven operation; reach for the block form
+only when several sit back-to-back with nothing else between them.
+
+This is independent of `!{unsafe}` (the function-level declaration,
+above): a function using only the block form still needs its own
+`!{unsafe}`, and the block form is not a way to make `!{unsafe}` alone
+sufficient for a whole function body.
 
 ## --forbid-trap
 

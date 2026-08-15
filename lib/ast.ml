@@ -327,6 +327,18 @@ and stmt_desc =
          participate in general control flow, only in "is this an arm's
          terminal statement" structural checks. *)
   | Block of stmt list
+  | UnsafeBlock of stmt list
+      (* unsafe { stmt* } -- GitHub issue #315: block-granularity sibling
+         of `Unsafe` (the expr form, above). Same grant primitive (widens
+         `unsafe_depth` around everything nested inside), just applied to
+         a statement list instead of a single expr, so a tight,
+         already-justified stretch of code (e.g. a loop body doing
+         several unproven index ops under one trust rationale) needs one
+         wrap instead of one per operation. Does NOT change `!{unsafe}`'s
+         own meaning or requirement -- that stays a per-function audit
+         declaration only (see Ast.Unsafe's comment and SPEC.md), never a
+         grant by itself; wrapping an entire function body in `unsafe {
+         ... }` is how you grant a whole function, not `!{unsafe}` alone. *)
   | Let of bool * ident * type_expr option * expr option * int option  (* is_mutable, name, type, init, align *)
   | If of expr * stmt list * stmt list
   | While of expr * stmt list
@@ -685,7 +697,7 @@ let written_names (stmts : stmt list) : string list =
     | LetTuple (ns, e)       -> List.iter add ns; go_expr e
     | Expr e | Return (Some e) | Yield e -> go_expr e
     | Return None            -> ()
-    | Block ss               -> List.iter go_stmt ss
+    | Block ss | UnsafeBlock ss -> List.iter go_stmt ss
     | If (c, t, el)          -> go_expr c;
                                 List.iter go_stmt t; List.iter go_stmt el
     | While (c, b)           -> go_expr c; List.iter go_stmt b

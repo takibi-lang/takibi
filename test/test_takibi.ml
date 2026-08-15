@@ -6295,6 +6295,53 @@ let infer_tests = [
       Alcotest.(check (list string)) "leaf effects" ["unsafe"] leaf.effects;
       Alcotest.(check (list string)) "caller effects" ["unsafe"] caller.effects);
 
+  (* GitHub issue #315: unsafe { stmt* } -- block-granularity sibling of
+     unsafe { expr }, added so a stretch of statements sharing one trust
+     justification (the motivating case: kernel/kernel/fd_table.tkb's
+     unified_fd_clone_rollback, 4 separate unsafe{expr} wraps around 4
+     unproven ops inside one loop body) needs one wrap instead of one per
+     operation. Same grant mechanism (unsafe_depth), just walking a stmt
+     list instead of a single expr -- these tests exercise the block form
+     through the same positive/negative-control pairing already used for
+     the expr form above. *)
+  Alcotest.test_case
+    "unsafe { stmt* } requires !{unsafe} on its enclosing function, same \
+     as unsafe { expr }" `Quick
+    (expect_type_error "does not declare !{unsafe}"
+       "fn block315_missing_decl(p: *u8) { unsafe { let s = p[0..<4]; } }");
+
+  Alcotest.test_case
+    "unsafe { stmt* } covers MULTIPLE unproven ops with one wrap (the \
+     fd_table.tkb motivating case)" `Quick
+    (expect_ok
+       "fn block315_two_ops(p: *u8, q: *u8) !{unsafe} {
+          unsafe {
+            let a = p[0..<4];
+            let b = q[0..<8];
+          }
+        }");
+
+  Alcotest.test_case
+    "unsafe { stmt* } wrapping an entire loop body covers every unproven \
+     op inside it with one wrap" `Quick
+    (expect_ok
+       "fn block315_loop(p: *u8, n: usize) !{unsafe} {
+          unsafe {
+            for i: usize in 0..<n {
+              let a = p[0..<4];
+            }
+          }
+        }");
+
+  Alcotest.test_case
+    "unsafe { stmt* } does not leak past its own closing brace -- a \
+     sibling statement right after the block still needs its own unsafe" `Quick
+    (expect_type_error "asserts a length without evidence"
+       "fn block315_scope_leak(p: *u8, q: *u8) !{unsafe} {
+          unsafe { let a = p[0..<4]; }
+          let b = q[0..<8];
+        }");
+
   (* Reversed (see HISTORY.md): unlike may_block/interrupt/exception, which
      are real control-flow/concurrency hazards a caller's own effect
      reasoning must compose with, unsafe here means only "one bounded,
@@ -9976,6 +10023,72 @@ let codegen_tests = [
        "let mut funsafe249_arr_d: [u8; 8];
         fn funsafe249_array_store_checked(i: usize) {
           funsafe249_arr_d[i] = 7;
+        }");
+
+  (* GitHub issue #315: unsafe { stmt* } block form -- same escape hatch as
+     the funsafe249 group just above, but ONE wrap now needs to skip the
+     runtime check at MULTIPLE unproven sites inside it, and must NOT skip
+     the check for a sibling statement outside its own closing brace. *)
+  Alcotest.test_case
+    "unsafe { stmt* } skips the runtime check at every unproven op it \
+     wraps (zero trap sites for two ops under one wrap)" `Quick
+    (expect_trap_sites 0
+       "let mut funsafe315_g1: [u8; 8];
+        fn funsafe315_block_two_ops(s: []u8, i: usize, j: usize) !{unsafe} {
+          unsafe {
+            let a: u8 = s[i];
+            funsafe315_g1[j] = a;
+          }
+        }");
+
+  Alcotest.test_case
+    "the SAME two ops WITHOUT the unsafe block still record both trap \
+     sites (opt-in, not a default-mode change)" `Quick
+    (expect_trap_sites 2
+       "let mut funsafe315_g2: [u8; 8];
+        fn funsafe315_block_two_ops_checked(s: []u8, i: usize, j: usize) {
+          let a: u8 = s[i];
+          funsafe315_g2[j] = a;
+        }");
+
+  Alcotest.test_case
+    "unsafe { stmt* } does not leak past its closing brace: a sibling \
+     statement right after the block still gets its trap check" `Quick
+    (expect_trap_sites 1
+       "let mut funsafe315_g3: [u8; 8];
+        fn funsafe315_block_scope_leak(s: []u8, i: usize, j: usize) !{unsafe} {
+          unsafe {
+            let a: u8 = s[i];
+          }
+          funsafe315_g3[j] = 1;
+        }");
+
+  Alcotest.test_case
+    "unsafe { stmt* } wrapping a whole loop body skips the check at every \
+     unproven op inside every iteration's (statically single) codegen \
+     site (the fd_table.tkb unified_fd_clone_rollback shape: N wraps \
+     collapsed into 1 covering the whole loop body)" `Quick
+    (expect_trap_sites 0
+       "let mut funsafe315_g4: [u8; 8];
+        fn funsafe315_loop_wrap(s: []u8, n: usize) !{unsafe} {
+          unsafe {
+            for i: usize in 0..<n {
+              let a: u8 = s[i];
+              funsafe315_g4[i] = a;
+            }
+          }
+        }");
+
+  Alcotest.test_case
+    "the SAME loop body WITHOUT the unsafe block still records both trap \
+     sites" `Quick
+    (expect_trap_sites 2
+       "let mut funsafe315_g5: [u8; 8];
+        fn funsafe315_loop_wrap_checked(s: []u8, n: usize) {
+          for i: usize in 0..<n {
+            let a: u8 = s[i];
+            funsafe315_g5[i] = a;
+          }
         }");
 
   (* Kept last in this group deliberately: Llvm_gen.enable_debug_info flips a
