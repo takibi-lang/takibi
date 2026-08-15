@@ -15,6 +15,44 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: `kernel/arch/arm64/kernel/exception_evidence.tkb` Migrated Off Array-Decay-Avoidance Local Bindings (4 Sites)
+
+The same pattern as the previous entry's `fd_table.tkb` migration,
+found by grepping for the same local-binding shape after that migration
+landed: `crash_snapshot_render()`/`crash_snapshot_capture()` (the
+fail-stop crash-report path, both already `!{unsafe}` for unrelated
+reasons -- raw trace-buffer pointer arithmetic elsewhere in
+`crash_snapshot_render`) each decayed `CrashSnapshot`'s `fd_kind`/
+`fd_object` array fields to a local `*usize` before indexing. Unlike
+every prior file in this family, both loops here are `for fd in
+0..<PROCESS_FD_MAX` with BOTH bounds compile-time constants (a bare
+literal and a global `const`), so `type_inf.ml`'s `Const_env.bound_value`
+-gated for-loop refinement (see the previous two entries' discussion of
+its constant-only restriction) fires normally here -- no wrapping-if or
+additional `unsafe` needed, a clean mechanical swap to direct
+`crash_snapshot.fd_kind[fd]` indexing with a `usize` loop counter
+(dropping the `isize`/`as usize` casts the old pointer-arithmetic
+required).
+
+Note on verification: this crash-report path is fail-stop-by-design
+(see `kernel_el0_faultstop_and_single_page_stack`) and is not exercised
+by any automated `kernelcheck-qemu`/`kernelcheck-rpi5` view -- it is
+`use`d (linked) but never actually invoked outside a real unhandled
+exception. Correctness here rests on the compiler's own `--forbid-trap`
+proof (a clean build with zero residual trap sites, meaning the checker
+genuinely proved every access in-bounds, not merely "never observed to
+fault because untested") plus a manual diff review confirming the
+transformation is a pure mechanical swap with identical loop bounds,
+iteration order, and values passed to `kernel_fd_table_crash_kind`/
+`kernel_fd_table_crash_object`. No live-hardware fault-injection test
+exists for this path in the current test suite.
+
+Verified: `dune runtest` (1021/1021, unchanged), `langcheck`, a clean
+`kernelbuild-qemu`/`kernelbuild-rpi5`, a full `kernelcheck-qemu`
+real-boot run (38 views, ash/TCP, PTY smoke test), and the user's own
+`make allcheck` (includes `kernelcheck-rpi5` on real hardware),
+all green.
+
 ### 2026-08-15: `kernel/kernel/fd_table.tkb` Migrated Off Array-Decay-Avoidance Local Bindings (49 Sites)
 
 The last and largest of the three files flagged as still using the old
