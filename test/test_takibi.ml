@@ -5245,6 +5245,27 @@ let infer_tests = [
         fn blob_peek(p: *Blob) -> i32 { return 0; }
         fn walk(p: *Blob) -> i32 { return blob_peek(p[1]); }");
 
+  Alcotest.test_case "opaque ptr deref: reading through an affine handle is a \
+                      compile error (was an internal compiler error, invalid \
+                      LLVM IR load of an opaque type)" `Quick
+    (expect_type_error "cannot dereference '*Lease'"
+       "affine opaque struct Lease;
+        fn acquire() -> *Lease { return 0 as usize as *Lease; }
+        fn f() { let t: *Lease = acquire(); let x = *t; }");
+
+  Alcotest.test_case "opaque ptr deref: writing through an affine handle is a \
+                      compile error too (was also an internal compiler error)" `Quick
+    (expect_type_error "cannot dereference '*Lease'"
+       "affine opaque struct Lease;
+        fn acquire() -> *Lease { return 0 as usize as *Lease; }
+        fn f() { let t: *Lease = acquire(); *t = *t; }");
+
+  Alcotest.test_case "opaque ptr deref: reading through a PLAIN opaque pointer \
+                      is a compile error too" `Quick
+    (expect_type_error "cannot dereference '*Blob'"
+       "opaque struct Blob;
+        fn peek(p: *Blob) -> i32 { let x = *p; return 0; }");
+
   Alcotest.test_case "affine ptr laundering: `t as *Other` without unsafe is a \
                       compile error" `Quick
     (expect_type_error "cannot cast an affine/linear value"

@@ -1104,6 +1104,26 @@ let check_ptr_arith_complete (loc : Ast.loc) (t : ty) =
          opaque (incomplete) type with no size" n n))
   | _ -> ()
 
+(* Same "opaque struct has no known layout" reasoning as
+   check_ptr_arith_complete, applied to Deref instead of arithmetic/
+   indexing: `*p` for p: *OpaqueStruct has no size/fields to load, so it
+   must be rejected here too rather than reaching llvm_gen.ml and
+   producing an internal-compiler-error LLVM `load` of an opaque type. An
+   affine/linear opaque handle's whole point is that its pointee never
+   really exists (see is_literal_derived's callers -- these values are
+   typically minted from a bare integer/address, e.g. `0 as usize as
+   *Lease`), so this closes the same hole arithmetic/indexing already
+   had, for the one remaining pointer operation that could still reach
+   the missing-size problem. *)
+let check_deref_complete (loc : Ast.loc) (t : ty) =
+  match repr t with
+  | TPtr (TStruct n) | TAlignedPtr (_, TStruct n)
+    when StringSet.mem n !opaque_struct_names_all ->
+      raise (TypeError (loc, Printf.sprintf
+        "cannot dereference '*%s': '%s' is an opaque (incomplete) type \
+         with no size" n n))
+  | _ -> ()
+
 let rec gcd a b = if b = 0 then abs a else gcd b (a mod b)
 
 (* Is this integer expression PROVABLY a multiple of some compile-time-
@@ -1547,6 +1567,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       canon_ty t1
   | Deref e1 ->
       let t1 = infer_expr senv eenv tyenv fenv e1 in
+      check_deref_complete e1.loc t1;
       let inner = match repr t1 with
         | TPtr inner ->
             (* *io T deref returns T (io is a storage qualifier; volatile handled in codegen) *)
@@ -2806,6 +2827,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            TVoid
        | Deref ptr_expr ->
            let pt = infer_expr senv eenv tyenv fenv ptr_expr in
+           check_deref_complete ptr_expr.loc pt;
            (match repr pt with
             | TRef _ ->
                 (* GitHub issue #314/#319: same "&T is read-only, &mut T

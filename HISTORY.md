@@ -15,6 +15,30 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: Dereferencing an Opaque Struct Pointer Was an Internal Compiler Error, Not a Type Error
+
+Found probing what operations an affine/linear opaque handle (`*Lease`,
+etc.) actually permits, while scoping issue #240 (reject pointer struct
+fields). Arithmetic/indexing on an opaque struct pointer was already
+correctly rejected at type-check time
+(`check_ptr_arith_complete`, itself fixing a prior internal-compiler-
+error report -- see the "opaque ptr arithmetic" tests). Dereferencing one
+(`*t` for `t: *Lease`, both the read path in `infer_expr`'s `Deref` case
+and the write path in `Assign`'s `Deref` case) had no equivalent guard:
+`lib/llvm_gen.ml` would happily emit an LLVM `load`/`store` of the
+opaque type, which LLVM itself then rejected as invalid IR, surfacing as
+`Fatal error: exception Takibi.Llvm_gen.Error("internal compiler error:
+invalid LLVM IR generated...")` instead of a clean, located
+`Types.TypeError`. Added `check_deref_complete` (`lib/type_inf.ml`,
+same `opaque_struct_names_all` lookup `check_ptr_arith_complete` already
+uses) and called it from both Deref sites. Two new regression tests
+mirror the existing opaque-ptr-arithmetic ones (read and write), plus
+one confirming a plain (non-affine) `opaque struct` hits the same
+guard. `dune runtest` 1073/1073; `make kernelbuild` (RPi5 + QEMU) still
+compiles clean, confirming no real kernel code relied on dereferencing
+an opaque handle (it never could -- every prior attempt crashed the
+compiler instead of the intended function).
+
 ### 2026-08-15: Reject Pointer-to-Pointer Types Such As `**T` (Issue #239)
 
 Scoping issue #218 (calculated-integer-to-pointer cast audit boundary)
