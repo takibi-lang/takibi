@@ -45,6 +45,10 @@ not yet expressed enough information for a proof.
   once or exactly once.
 - `borrow`, `borrow mut`, indexed owners, and region-tied pointers permit
   temporary access without losing the underlying ownership obligation.
+- `&T` and `&mut T` are non-arithmetic, non-forgeable references to a
+  struct, distinct from the raw, arithmetic-capable `*T` at the type
+  level -- an ordinary "pass by reference to avoid copying" parameter can
+  be written this way with no runtime cost and no `unsafe`.
 - closed variants describe fallible operations without integer sentinels;
   `must_use variant` makes ignoring an outcome a compile error.
 - effect rows such as `!{may_block}`, `!{interrupt}`, and `!{unsafe}` expose

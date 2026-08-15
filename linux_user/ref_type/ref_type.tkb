@@ -1,0 +1,71 @@
+// &T/&mut T reference type demo (GitHub issues #314/#319/#320): field
+// mutation gated on &mut, field reads through either, free widening to
+// *T for an unmigrated callee, &mut T reborrowing as &T, and a nested
+// field address minted through a &mut T parameter (the exact shape
+// kernel/lib/growable_pool.tkb's own `let core: &FreelistCore(N) =
+// &pool.core;` migration used). This is a runtime-execution fixture
+// (unlike test/test_takibi.ml's compile-only cases): it proves the
+// mutation is actually observable, not just that it type-checks.
+struct Pool {
+    count: i32;
+}
+
+struct Outer {
+    core: Pool;
+}
+
+fn bump(p: &mut Pool) {
+    p.count = p.count + 1;
+}
+
+fn peek(p: &Pool) -> i32 {
+    return p.count;
+}
+
+// A not-yet-migrated callee still declared *T: &T/&mut T must widen into
+// it with no `unsafe`, and no call-site change.
+fn legacy_peek(p: *Pool) -> i32 {
+    return p.count;
+}
+
+// &mut T reborrows as &T through an ordinary call, not just at a fresh
+// &expr mint site.
+fn peek_via_mut(p: &mut Pool) -> i32 {
+    return peek(p);
+}
+
+fn use_core(c: &Pool) -> i32 {
+    return c.count;
+}
+
+fn outer_bump(o: &mut Outer) -> i32 {
+    let core: &mut Pool = &o.core;
+    core.count = core.count + 10;
+    return use_core(core);
+}
+
+fn test_ref_type() {
+    let mut pool: Pool = {0};
+    bump(&pool);
+    bump(&pool);
+    uart_puts("after two bumps: ");
+    uart_print(peek(&pool));
+    uart_puts("\r\n");
+
+    uart_puts("legacy *T callee still works: ");
+    uart_print(legacy_peek(&pool));
+    uart_puts("\r\n");
+
+    uart_puts("mut reborrows as shared: ");
+    uart_print(peek_via_mut(&pool));
+    uart_puts("\r\n");
+
+    let mut outer: Outer = {{5}};
+    uart_puts("nested field &mut via let: ");
+    uart_print(outer_bump(&outer));
+    uart_puts("\r\n");
+}
+
+fn app_main() {
+    test_ref_type();
+}

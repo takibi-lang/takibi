@@ -1,0 +1,4 @@
+after two bumps: 2
+legacy *T callee still works: 2
+mut reborrows as shared: 2
+nested field &mut via let: 15

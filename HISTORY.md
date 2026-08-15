@@ -15,6 +15,166 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: `&T`/`&mut T` Reference Type Designed, Implemented, and Rolled Out Repo-Wide (Issues #314/#319/#320, All Closed Same Session)
+
+Measuring pointer usage across `kernel/` (504 pointer type annotations,
+497 `as *T` casts) found that most of them were an ordinary "pass by
+reference to avoid copying" idiom (`pool: *GrowablePool`, dereferenced
+only via plain field access) indistinguishable, at the type level, from
+`*T`'s other role: genuinely raw pointer arithmetic, forgery from a
+computed integer, MMIO, wire-format overlays. #314 asked for a type that
+makes that distinction real, ahead of any future `unsafe` mandate on raw
+pointer operations (#218/#239/#240, none of which exist yet). A census of
+`kernel/`'s 385 `&expr` (`AddrOf`) sites found the actual minting side of
+the problem already mostly solved: `AddrOf` already only accepts a bare
+variable or struct field, already requires a mutable local (globals are
+always addressable), and already rejects linear/indexed-owner/view/
+variant/singleton targets -- the only thing missing was that its result
+was unconditionally `*T`, so none of that already-enforced discipline
+survived past the moment the pointer was minted. The chosen design was
+Rust's naming (a separate, non-`TypePtr` category, with an asymmetric
+free-widen/`unsafe`-narrow cast rule) wrapping Zig's actual mechanism (a
+pointer kind that is structurally incapable of arithmetic, Zig's
+single-item `*T` vs. many-item `[*]T` split) -- not a `borrow`/`sink`
+extension (that machinery solves the unrelated, heavier problem of
+affine/linear consumption tracking, and its `strip_borrow` step erases
+the wrapper before any body-internal check runs anyway, so it would not
+have achieved the goal) and not a new mint keyword (would have required
+touching all 385 `&expr` sites AND all migrated declarations, instead of
+just the declarations).
+
+**The type.** `&T` (shared) / `&mut T` (exclusive) are new, genuinely
+separate `Ast.type_expr`/`Types.ty` constructors (`TypeRef`/`TypeRefMut`,
+`TRef`/`TRefMut`) -- not a qualifier on `TypePtr`/`TPtr`, so a future
+raw-pointer `unsafe` mandate can never accidentally match them by
+matching on the pointer representation. `&expr`'s own grammar and
+restrictions never changed; only which type a successful mint produces is
+now resolved from context (a call argument's declared parameter type, or
+a `let` annotation) via a new `infer_addrof_wrapped` helper shared between
+`infer_expr`'s unconstrained default (`` `Ptr ``, byte-for-byte the
+previous behavior) and the new context-directed paths (`` `Ref ``/
+`` `RefMut ``). Field reads work through either; field writes (`.field =
+v`, `*r = v`) are a compile error through `&T`, allowed through `&mut T`
+-- a real, new correctness guarantee `*T` never had. No arithmetic,
+indexing, or other casts are allowed on `&T`/`&mut T`, unconditionally,
+with no `unsafe` escape (forgery-proofness is the entire point). `&T`/
+`&mut T` widen to `*T` with no `unsafe` (mirrors the existing "a real
+object's address needs no unsafe" precedent from issue #218's affine-cast
+rule); the reverse -- asserting a raw `*T` is a live, correctly-typed,
+non-aliased value -- needs an exact pointee match and always needs
+`unsafe`. v1 legal positions are function parameters and local `let`
+bindings only, not struct fields, globals, return types, or array/slice
+elements -- no escape/lifetime analysis is implemented (deliberately; see
+below), so it simply is not legal anywhere an escape could happen.
+Codegen is byte-for-byte identical to `*T` (same bare pointer, same
+calling convention): the entire distinction lives in the OCaml-side type
+checker.
+
+**Where a genuinely new type touches more files than expected.** Adding
+`TRef`/`TRefMut` to `Types.ty` in `types.ml` immediately surfaced, via
+OCaml's own `warning 8 (partial-match)` treated as a build error, every
+site in `type_inf.ml` needing a companion case (`to_string`, `occurs`,
+`function_effect_rows`, `subst_in_ty`, `unify`'s new one-directional
+widening rules, `of_ast_in_scope`, `inst`, `to_ast`) -- mechanical,
+complete, and fast. Three OTHER layers do NOT get this guarantee, because
+they pattern-match on `Ast.type_expr` (not `Types.ty`) with matches that
+mostly end in a wildcard fallback rather than being exhaustive, so a
+missing case silently misbehaves at runtime instead of failing to build:
+- `llvm_gen.ml` needed `TypeRef (TypeNamed s) | TypeRefMut (TypeNamed s)`
+  added to FOUR separate, independently-duplicated
+  `TypeNamed s | TypePtr (TypeNamed s) | TypeAlignedPtr (_, TypeNamed s)`
+  -shaped matches (`AddrOf`'s own `FieldGet` sub-case, `gen_field_access`'s
+  read path, the `Assign`/`FieldGet` write path, plus `struct_instance` in
+  `type_inf.ml` itself) -- found one at a time via codegen test failures
+  ("field access '.count' on non-struct type"), not a build error. A
+  shared `struct_name_of_type : Ast.type_expr -> string option` helper,
+  used by all four sites instead of each re-deriving the same pattern,
+  would have collapsed this to one edit and is worth doing before the
+  next type that needs the same treatment.
+- `monomorphize.ml`'s pre-typecheck generic-inference pass
+  (`derive_arg_type`/`unify_arg`) works purely syntactically on
+  `Ast.type_expr`, entirely independent of `type_inf.ml`'s `Types.ty`
+  -level widening rules -- migrating a generic function's own pointer
+  parameter to `&mut T` broke `T`/const-generic-value inference for every
+  caller (`cannot infer type parameter 'T'`, then `cannot infer generic
+  value parameter 'N'`) until `unify_arg`'s `TypePtr a, TypePtr b` case
+  and `derive_arg_type`'s `&x.field` case both got `TypeRef`/`TypeRefMut`
+  companions. This is a THIRD place (beyond `type_inf.ml` and
+  `llvm_gen.ml`) that duplicates type-shape matching for a new type; the
+  existing "grep `llvm_gen.ml` for a matching mechanism after a
+  `type_inf.ml` proof change" discipline needs to explicitly cover
+  `monomorphize.ml` too, whenever the new type can wrap a
+  `TypeGenericInst`.
+- Call arguments are checked via `infer_expr` + `unify_at`, NOT
+  `check_expr`'s bidirectional expected-type pushdown -- that path is
+  StructLit/ArrayLit-field-only, despite its own header comment already
+  saying so ("falls back to infer_expr + unify for all other
+  expressions"). Assumed otherwise on the first pass, built the
+  context-directed dispatch into `check_expr` alone, and only found the
+  gap once `bump(&pool)` against a `p: &mut Pool` parameter failed with
+  "cannot unify *Pool with &mut Pool". Fixed by adding the same
+  `AddrOf`-vs-expected-type dispatch directly into the `Call` case's own
+  argument loop, and separately into `Let`'s initializer handling (which
+  also does not use `check_expr`). A future context-directed type will
+  hit the same three-injection-point shape (`check_expr`, `Call`, `Let`)
+  again unless `check_expr` is made the single argument-checking path
+  everywhere, which nothing this session did (kept as a real, but
+  out-of-scope, architectural observation).
+- A genuine soundness gap, found by re-reading the design rather than a
+  test failure: field writes (`.field = v`, `*r = v`) were gated on `&T`
+  vs. `&mut T`, but index-assignment into an array FIELD reached through a
+  `&T` (`r.some_array_field[i] = v`) was not -- `struct_instance`/
+  `place_undecayed_type` resolve the field name identically for `&T` and
+  `&mut T`, so the `Index`-assign branch never separately checked the
+  base's own outer wrapper. Closed with `check_no_write_through_shared_ref`,
+  which walks the whole `FieldGet` chain rooted at an `Index`/
+  `AssignIndex` base (not just one level, matching `place_undecayed_type`'s
+  own "any depth" chain support) checking each level's own base type for
+  `TRef`; a plain struct-valued intermediate field never matches, so this
+  only closes the previously-unchecked case.
+
+**Migration.** `kernel/lib/growable_pool.tkb`'s `pool: *GrowablePool`
+parameter (and its `let core: *FreelistCore(N) = &pool.core;` locals) --
+the acceptance criterion's own example -- migrated with zero caller-side
+changes (#319). A precise, repo-wide inventory (a one-off tool parsing
+every `.tkb` file with the compiler's own `Parser`/`Ast`, cross-
+referencing every `affine opaque struct`/`linear opaque struct` name so
+those stay excluded as a different, already-solved mechanism; not
+committed -- a planning aid, not a recurring check) found the remaining
+"ordinary struct borrow" candidates were three more small library files
+(`kernel/lib/freelist.tkb`/`slotmap.tkb`/`refcount_slotmap.tkb`, all
+`FreelistCore(N)`/`Freelist(T,N)`/`SlotMap(N)`/`RefcountSlotMap(N,
+MAX_REFS)` generic-struct-instantiation parameters, resolved to concrete
+struct names by `Monomorphize.run` before `type_inf.ml` ever sees them,
+same shape `GrowablePool(...)` already used) -- migrated as #320, with
+`kernel/mm/page.tkb`'s own 4 intermediate `let core: *FreelistCore(...)
+= &boot_page_pool.core;` locals (a pre-existing, unrelated workaround for
+a separate generic-inference limitation: a generic call's static
+parameters cannot be inferred from a nested-field address, only from a
+plain local/global or its own address) needing the same treatment; every
+OTHER caller across the whole `kernel/` tree already called through a
+plain `&global` and needed zero changes. Widening the same inventory to
+the WHOLE `kernel/` tree (52 files) afterward found the remaining 2
+parameter + 39 `let` sites were, every one individually spot-checked, `as
+*StructName` casts from a raw buffer/queue-memory address or a computed
+integer offset (`kernel/net/{tcp,icmp,arp}.tkb`'s wire-format overlays,
+`kernel/mm/process_image.tkb`/`kernel/fs/elf64.tkb`'s ELF-header parsing
+from a raw address, `kernel/drivers/{block/virtio_blk,net/virtio_net}.tkb`'s
+descriptor-ring overlays) -- the genuinely-raw category this design
+always intended to leave on `*T`, not migration candidates. The ordinary-
+struct-borrow migration opportunity is therefore exhausted repo-wide, not
+partially: #314/#319/#320 were all closed the same session.
+
+Verified throughout: `dune test` (1042/1042, 20 new cases across
+`type_inf`/`codegen`, plus a `linux_user/ref_type` execution fixture
+proving `&mut T` mutation is actually observable at runtime, not merely
+type-checked), `make kernelbuild-qemu`/`kernelbuild-rpi5`,
+`kernelcheck-qemu` (38/38 views each time, across three separate landings),
+`kernelcheck-rpi5` on real hardware (38/38 views each time, across three
+separate landings, explicitly re-authorized by the user each session per
+this project's hardware-notification policy), and `make linuxcheck`, all
+green.
+
 ### 2026-08-15: `kernel/arch/arm64/kernel/exception_evidence.tkb` Migrated Off Array-Decay-Avoidance Local Bindings (4 Sites)
 
 The same pattern as the previous entry's `fd_table.tkb` migration,
