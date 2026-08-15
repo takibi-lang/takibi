@@ -15,6 +15,92 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: `kernelsh-qemu`'s Intermittent "Connection Refused" Was an Unguarded Boot Race, Not a Real Failure
+
+Reported after a `make allcheck` run: the `kernelsh-qemu` PTY smoke test
+(part of `kernelcheck-qemu`) failed with `ConnectionRefusedError` /
+`serial.serialutil.SerialException: Could not open port
+socket://127.0.0.1:17777`. Did not reproduce on an isolated `make clean
+&& make kernelcheck-qemu`, nor on a second `make clean && make
+allcheck` -- consistent with the user's recollection that this specific
+error had happened a "few times before," always intermittently. First
+ruled out same-session relevance: `disk_initialize()` (the entry point
+into the just-migrated `kernel/platform/rpi5/usb_xhci.tkb`, see the
+entry above) is only ever called from `kernel/platform/rpi5/intc.tkb`/
+`init.tkb` -- `kernel/platform/qemu/init.tkb` never calls it, so the
+xHCI driver is compiled into the QEMU binary (shared-file build
+convenience) but is dead code there; it cannot have caused a QEMU-side
+failure.
+
+**Root cause, found by reading the scripts rather than trying to
+reproduce again** (this project's own recurring lesson: re-derive from
+existing evidence before running another experiment -- see the
+QEMU-virtio-debugging memory). `scripts/run_kernel_shell_qemu.sh`
+backgrounds `qemu-system-aarch64` (`-serial
+tcp:127.0.0.1:$PORT,server=on,wait=off`) and, with no synchronization at
+all, immediately launches `scripts/run_kernel_shell_console.py` to
+connect to that same port as a TCP client. `wait=off` means the QEMU
+guest starts running immediately regardless of whether a client has
+connected -- deliberate, for the interactive-shell use case -- but
+nothing in either script waited for QEMU's own listen socket to
+actually be bound first. Under light load QEMU binds it in low single-
+digit milliseconds, well before the Python client even finishes
+importing pyserial, so the race is normally invisible; under the CPU
+contention `make allcheck` creates (the QEMU and RPi5 lanes run in
+parallel, and RPi5's SWD flash step is CPU-heavy), QEMU's own process
+start can lose that race, and Linux refuses a `connect()` to a port with
+nothing listening yet immediately rather than queuing it -- producing
+exactly the observed traceback with no QEMU-side error message (because
+QEMU had not failed; it just had not started listening yet).
+Confirmed this was a known, already-fixed-elsewhere class of bug in this
+same codebase: `scripts/run_kernel_uart_driver.py` (used by
+`run_kernel_qemutest.sh`, the OTHER `kernelcheck-qemu` step that ran
+moments earlier in the very same failing log and always passed) already
+retries its own `serial_for_url()` open in a loop on
+`serial.SerialException`. `scripts/run_kernel_shell_console.py` (used
+only by `kernelsh-qemu`) was the one caller of this pattern that never
+got the same treatment.
+
+**Fix.** Added `open_with_retry()` to `run_kernel_shell_console.py`
+(shared by both the QEMU and RPi5 shell paths), bounded at 10s with
+0.2s polling -- generous headroom under the smoketest's own 45s start
+timeout, negligible added latency on the normal (first-attempt-succeeds)
+path. `scripts/run_kernel_shell_qemu.sh` now exports
+`KERNEL_SHELL_BACKEND_PID=$QEMU_PID` (after `QEMU_PID` is actually
+assigned -- an early draft of this fix exported it too early, while still
+empty, and was caught before committing).
+
+**The diagnostic trap requested alongside the fix.** Every retry attempt
+and its outcome is logged to stderr: a same-run recovery prints "UART
+open succeeded on attempt N ... backend process was just slow to bind,
+not crashed" (turning a silent, invisible race into a visible one-line
+timing note in the log, so if this recurs even without failing outright
+there is now direct evidence the race is still happening), and a
+genuine timeout reports the attempt count, total elapsed time, and --
+via `KERNEL_SHELL_BACKEND_PID` -- whether the backend process was still
+alive at that point: alive means "still just slow, the timeout itself
+needs raising or the contention needs investigating"; dead means "it
+actually exited or crashed, look at its own stderr" -- collapsing what
+used to require reproducing the failure into something readable
+directly from next time's log. `run_kernel_shell_rpi5.sh` connects to a
+real device file rather than a backgrounded process, so it passes no
+backend PID and the alive/dead note is simply omitted there; the retry
+loop itself still applies (harmless there too, and plausibly useful for
+a `/dev/serial/by-id` enumeration race, though that was not this
+report's failure).
+
+**Verified.** A standalone harness drove `open_with_retry()` directly
+against a real socket: with nothing ever listening, it retried for the
+full bounded window then raised with the diagnostic message; with a
+listener that appeared partway through the window, it recovered and
+logged the recovery. `make kernelcheck-shell-qemu` (the real target)
+still passes normally, first attempt, no added latency. The original
+race was never actually reproduced end-to-end -- by nature, it depends
+on scheduling luck under load this session could not reliably force --
+but the mechanism match (identical `SerialException`/`ECONNREFUSED`
+signature, identical unsynchronized-background-then-connect shape,
+identical already-fixed sibling script) is exact.
+
 ### 2026-08-15: `kernel/platform/rpi5/usb_xhci.tkb` Migrated From Byte-Array-Plus-Manual-Offset TRB Rings to `[Trb; N]` Array-of-Struct
 
 Same session's #218/#316/#239/#240 measurement work found the dominant

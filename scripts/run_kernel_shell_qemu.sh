@@ -67,6 +67,7 @@ if [ "${KERNEL_QEMU_SHELL_MEASURE_ONLY:-0}" = 1 ]; then
 fi
 "${QEMU_COMMAND[@]}" &
 QEMU_PID=$!
+export KERNEL_SHELL_BACKEND_PID="$QEMU_PID"
 cleanup() {
     kill "$QEMU_PID" 2>/dev/null || true
     wait "$QEMU_PID" 2>/dev/null || true

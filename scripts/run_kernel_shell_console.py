@@ -21,6 +21,83 @@ READY_MARKERS = (
 READY_MARKER_WINDOW = max(len(marker) for marker in READY_MARKERS)
 PLATFORM = os.environ.get("KERNEL_SHELL_PLATFORM", "qemu")
 LABEL = f"[kernel/{PLATFORM}]"
+
+# kernelsh-qemu backgrounds `qemu-system-aarch64` (server=on,wait=off) and
+# connects to its TCP UART socket with no synchronization between the two --
+# there is no signal for "the listen socket is bound yet". Under light load
+# QEMU binds it well before this script even finishes importing pyserial, so
+# the race is invisible; under heavy concurrent load (this project's own
+# `make allcheck` runs the QEMU and RPi5 lanes in parallel, and RPi5's SWD
+# flash step is CPU-heavy) QEMU's own process start can lose the race,
+# producing an immediate ECONNREFUSED (Linux refuses a connect() to a port
+# with nothing listening yet rather than queuing it) that looked, before this
+# retry loop existed, like a hard failure with no way to tell "QEMU was just
+# slow to bind" apart from "QEMU crashed on startup" from the log alone.
+OPEN_RETRY_TIMEOUT_SECONDS = 10
+OPEN_RETRY_INTERVAL_SECONDS = 0.2
+
+
+def backend_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def open_with_retry(serial_instance) -> None:
+    """Open serial_instance, retrying past a transient connection-refused
+    race with the backend process (QEMU's own socket bind, or -- for
+    RPi5 -- a USB serial device that has not finished enumerating yet).
+    Every retry is logged so a recurrence leaves a timeline in the log
+    instead of a single opaque traceback: how many attempts it took (or
+    that every attempt failed), and whether the backend process was
+    still alive at the point this gave up -- alive means "still just
+    slow, raise the timeout"; dead means "it exited/crashed, look at
+    why" rather than assuming the two are the same failure."""
+    backend_pid_env = os.environ.get("KERNEL_SHELL_BACKEND_PID")
+    backend_pid = int(backend_pid_env) if backend_pid_env else None
+    deadline = time.monotonic() + OPEN_RETRY_TIMEOUT_SECONDS
+    attempt = 0
+    last_error: Exception | None = None
+    while True:
+        attempt += 1
+        try:
+            serial_instance.open()
+            if attempt > 1:
+                print(
+                    f"{LABEL} UART open succeeded on attempt {attempt} "
+                    f"(after {OPEN_RETRY_INTERVAL_SECONDS * (attempt - 1):.1f}s "
+                    "of connection-refused retries -- the backend process was "
+                    "just slow to bind, not crashed)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            return
+        except serial.SerialException as exc:
+            last_error = exc
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(OPEN_RETRY_INTERVAL_SECONDS)
+    alive_note = ""
+    if backend_pid is not None:
+        alive_note = (
+            f"; backend pid {backend_pid} is "
+            + ("still alive (raise OPEN_RETRY_TIMEOUT_SECONDS or investigate "
+               "startup contention)" if backend_alive(backend_pid)
+               else "no longer running (it exited/crashed before ever "
+               "binding -- this is not a timing race, look at its own "
+               "stderr output above)")
+        )
+    print(
+        f"{LABEL} UART open failed after {attempt} attempts over "
+        f"{OPEN_RETRY_TIMEOUT_SECONDS}s{alive_note}",
+        file=sys.stderr,
+        flush=True,
+    )
+    raise last_error
 BOOT_PHASE_MARKERS = (
     (b"takibi kernel:", "kernel entry"),
     (b"memory:", "memory detection"),
@@ -92,7 +169,7 @@ def main() -> int:
     baudrate = int(sys.argv[2])
     launch_ns = int(os.environ["KERNEL_SHELL_LAUNCH_NS"])
     serial_instance = serial.serial_for_url(port, baudrate, do_not_open=True)
-    serial_instance.open()
+    open_with_retry(serial_instance)
     connected_ms = (time.time_ns() - launch_ns) / 1_000_000
     print(
         f"{LABEL} UART connected: {connected_ms:.1f} ms after launch",
