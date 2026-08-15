@@ -158,6 +158,8 @@ let rec resolve_declared_type = function
   | Ast.TypeBorrow t -> Ast.TypeBorrow (resolve_declared_type t)
   | Ast.TypeBorrowMut t -> Ast.TypeBorrowMut (resolve_declared_type t)
   | Ast.TypeSink t -> Ast.TypeSink (resolve_declared_type t)
+  | Ast.TypeRef t -> Ast.TypeRef (resolve_declared_type t)
+  | Ast.TypeRefMut t -> Ast.TypeRefMut (resolve_declared_type t)
   | Ast.TypeAlignedPtr (n, t) -> Ast.TypeAlignedPtr (n, resolve_declared_type t)
   | Ast.TypeTuple ts -> Ast.TypeTuple (List.map resolve_declared_type ts)
   | Ast.TypeSingleton (t, n) -> Ast.TypeSingleton (resolve_declared_type t, n)
@@ -238,7 +240,8 @@ let struct_instance = function
   | TStruct s -> Some (s, [])
   | TIndexedStruct (s, args) -> Some (s, args)
   | TPtr (TStruct s) | TPtr (TIo (TStruct s))
-  | TAlignedPtr (_, TStruct s) -> Some (s, [])
+  | TAlignedPtr (_, TStruct s)
+  | TRef (TStruct s) | TRefMut (TStruct s) -> Some (s, [])
   | _ -> None
 
 (* sizeof(T)/offsetof(T, field) are only ever a genuine OCaml-computable
@@ -1276,6 +1279,21 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       if contains_view_ty t1 || contains_view_ty t2 then
         raise (TypeError (e.loc,
           "erased views cannot be operands of runtime operators"));
+      (* GitHub issue #314/#319: &T/&mut T is bit-opaque -- no arithmetic,
+         no bitwise ops, no comparison, with no `unsafe` escape (forgery
+         -proofness is the entire point of this type). Checked here, before
+         any operator-specific case below, so a same-shaped pair (which
+         would otherwise unify fine, since TRef/TRefMut DO unify with
+         themselves for ordinary argument-passing purposes) can never
+         silently fall through the generic "unify and go" catchall that
+         closes most of the cases below. Use the referent's OWN fields/
+         values, or widen to *T first, for anything this rejects. *)
+      (match repr t1, repr t2 with
+       | (TRef _ | TRefMut _), _ | _, (TRef _ | TRefMut _) ->
+           raise (TypeError (e.loc,
+             "&/&mut does not support operators (arithmetic, bitwise, or \
+              comparison); use its fields, or widen it to *T first"))
+       | _ -> ());
       (* GitHub issue #186: u16be (bare or refined-over-it) deliberately does
          not participate in ordinary arithmetic, shifts, or ORDERING
          comparisons -- comparing two byte-swapped bit patterns numerically
@@ -1523,68 +1541,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
         raise (TypeError (e.loc,
           "stable owner container storage cannot be dereferenced or copied as a whole; access its ordinary fields through the pointer"));
       inner
-  | AddrOf inner ->
-      (match inner.desc with
-       | Var name ->
-           check_private_global_access e.loc name;
-           let (t, is_mut) = lookup_binding e.loc name tyenv in
-           (match repr t with
-            | TPtr _ | TAlignedPtr _ -> invalidate_place_projections name
-            | _ -> ());
-           if is_linear_ptr_ty t then
-             raise (TypeError (e.loc, Printf.sprintf
-               "cannot take the address of linear value '%s': an alias would \
-                escape obligation tracking" name));
-           if is_indexed_owner_ty t then
-             raise (TypeError (e.loc, Printf.sprintf
-               "cannot take the address of indexed owner '%s': an alias would \
-                escape obligation tracking" name));
-           if contains_view_ty t then
-             raise (TypeError (e.loc, Printf.sprintf
-               "cannot take the address of erased view '%s': views have no runtime storage"
-               name));
-           if is_variant_ty t then
-             raise (TypeError (e.loc, Printf.sprintf
-               "cannot take the address of variant '%s': an alias would escape payload ownership tracking"
-               name));
-           if contains_singleton_ty t then
-             raise (TypeError (e.loc, Printf.sprintf
-               "cannot take the address of singleton value '%s': mutation \
-                through a widened pointer would invalidate its static identity"
-               name));
-           if not is_mut then
-             raise (TypeError (e.loc,
-               Printf.sprintf "cannot take address of immutable variable '%s'" name));
-           (* GitHub issue #102: &x on an align(N)-declared variable proves
-              *align(N) T, same source as the array-decay case above. *)
-           (match StringMap.find_opt name !var_align_bytes with
-            | Some n -> TAlignedPtr (n, t)
-            | None -> TPtr t)
-       | FieldGet (base_expr, fname) ->
-           let bt = infer_expr senv eenv tyenv fenv base_expr in
-           let sname = match repr bt with
-             | TStruct s | TPtr (TStruct s) | TPtr (TIo (TStruct s))
-             | TAlignedPtr (_, TStruct s) -> s
-             | _ -> raise (TypeError (base_expr.loc,
-                 Printf.sprintf "field address '.%s' on non-struct type '%s'"
-                   fname (to_string bt)))
-           in
-           let fields = match StringMap.find_opt sname senv with
-             | Some (fs, _, _) -> fs
-             | None -> raise (TypeError (e.loc,
-                 Printf.sprintf "unknown struct type '%s'" sname))
-           in
-           check_private_field_access e.loc sname fname;
-           if is_stable_owner_field sname fname then
-             raise (TypeError (e.loc, Printf.sprintf
-               "stable owner field '%s.%s' cannot be addressed; use stable_replace while holding its guard"
-               sname fname));
-           (match List.assoc_opt fname fields with
-            | Some ft -> TPtr (of_ast ft)
-            | None -> raise (TypeError (e.loc,
-                Printf.sprintf "no field '%s' in struct '%s'" fname sname)))
-       | _ ->
-           raise (TypeError (e.loc, "& requires a variable or struct field")))
+  | AddrOf inner -> infer_addrof_wrapped senv eenv tyenv fenv e inner `Ptr
   | Cast (target_ty, e) ->
       let src_ty = infer_expr senv eenv tyenv fenv e in
       check_resource_cast_away e.loc src_ty;
@@ -1653,6 +1610,52 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            of_ast target_ty
        | None, None ->
            let tgt = tgt_ty in
+           (match tgt with
+            | TRef _ | TRefMut _ ->
+                (* GitHub issue #314/#319: the only legal casts INTO &T/
+                   &mut T are (a) from an already-&/&mut-typed source of
+                   the exact same referent (an explicit reborrow -- delegated
+                   to `unify`'s own TRef/TRefMut subtyping rules, so a shared
+                   -to-mut cast is rejected the same way an implicit one
+                   would be) or (b) from a raw pointer to the EXACT SAME
+                   pointee type, which always needs `unsafe` (this is the
+                   one place a raw *T can be asserted to be a live,
+                   correctly-typed, non-aliased value -- the ordinary,
+                   unsafe-free way to get a reference is `&x`/`&mut x` on a
+                   real value, see infer_addrof_wrapped). No other source is
+                   legal, not even under `unsafe`: fabricating a reference
+                   from an arbitrary integer or an unrelated pointer type
+                   would defeat the entire "no forgery" point of this type. *)
+                (match repr src_ty with
+                 | TRef _ | TRefMut _ ->
+                     (try unify src_ty tgt; tgt
+                      with Unify_error reason ->
+                        raise (TypeError (e.loc, Printf.sprintf
+                          "cannot cast %s to %s: %s"
+                          (to_string src_ty) (to_string tgt) reason)))
+                 | TPtr inner | TAlignedPtr (_, inner) ->
+                     let want_inner = match tgt with
+                       | TRef t | TRefMut t -> t | _ -> assert false in
+                     if repr inner <> repr want_inner then
+                       raise (TypeError (e.loc, Printf.sprintf
+                         "cannot cast %s to %s: &/&mut can only be cast from \
+                          a raw pointer to the exact same pointee type"
+                         (to_string src_ty) (to_string tgt)));
+                     if !unsafe_depth = 0 then
+                       raise (TypeError (e.loc, Printf.sprintf
+                         "casting %s to %s asserts it is a live, correctly \
+                          -typed, non-aliased value with no evidence; write \
+                          `unsafe { ... as %s }` to mark it, or use \
+                          `&x`/`&mut x` on the real value instead"
+                         (to_string src_ty) (to_string tgt) (to_string tgt)));
+                     tgt
+                 | _ ->
+                     raise (TypeError (e.loc, Printf.sprintf
+                       "cannot cast %s to %s: &/&mut can only be minted with \
+                        `&x`/`&mut x` on a real value, or (under `unsafe`) \
+                        cast from a raw pointer to the exact same type"
+                       (to_string src_ty) (to_string tgt))))
+            | _ ->
            (match target_ty with
             | Ast.TypeSlice (el_ast, want_min) ->
                 (* Slice creation cast. Sources:
@@ -1869,7 +1872,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    written syntax with no check against a literal source's
                    actual value. *)
                 check_literal_fits_refined e.loc e tgt;
-                tgt)))
+                tgt))))
 
   | FieldGet (base_expr, fname) ->
       infer_field_access ~decay:true senv eenv tyenv fenv e.loc base_expr fname
@@ -2704,7 +2707,27 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  "mutable borrow of '%s' overlaps another argument in the same call"
                  name))
            ) mutable_places;
-           List.iter2 (fun arg pt ->
+           List.iter2 (fun (arg : Ast.expr) pt ->
+             match arg.desc, repr pt with
+             (* GitHub issue #314/#319: call arguments are matched via
+                infer_expr (bottom-up) + unify, NOT check_expr's
+                expected-type pushdown (that path is StructLit/ArrayLit-
+                only) -- so &expr's own type-directed dispatch needs a
+                dedicated case here too, mirroring the one in Let's own
+                initializer handling below. Without this, `bump(&pool)`
+                against a `p: &mut Pool` parameter would infer `&pool` as
+                plain `*Pool` (infer_addrof_wrapped's `Ptr default) and
+                then fail to unify against `&mut Pool`, since TPtr does not
+                narrow into TRefMut. *)
+             | AddrOf inner, TRef _ ->
+                 let at = infer_addrof_wrapped senv eenv tyenv fenv arg inner `Ref in
+                 unify_at arg.loc at pt;
+                 check_literal_fits_refined arg.loc arg pt
+             | AddrOf inner, TRefMut _ ->
+                 let at = infer_addrof_wrapped senv eenv tyenv fenv arg inner `RefMut in
+                 unify_at arg.loc at pt;
+                 check_literal_fits_refined arg.loc arg pt
+             | _ ->
              let at = infer_expr senv eenv tyenv fenv arg in
              (* An existentially-typed argument (e.g. passing a LetMatch-
                 bound `exists page: usize. PageOwner[page]` local to a
@@ -2764,6 +2787,18 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            TVoid
        | Deref ptr_expr ->
            let pt = infer_expr senv eenv tyenv fenv ptr_expr in
+           (match repr pt with
+            | TRef _ ->
+                (* GitHub issue #314/#319: same "&T is read-only, &mut T
+                   isn't" gate as the FieldGet case above, but for `*r = v`
+                   -- Deref's own widen-to-TPtr fallback below would
+                   otherwise let a shared reference through by accident,
+                   since TRef -> TPtr widening is unconditional. *)
+                raise (TypeError (ptr_expr.loc, Printf.sprintf
+                  "cannot write through a shared reference '%s'; declare it \
+                   '&mut ...' instead"
+                  (to_string pt)))
+            | _ -> ());
            let inner = match repr pt with
              | TPtr i -> strip_io i
              | _ ->
@@ -2865,6 +2900,15 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  | _ ->
                      raise (TypeError (base_expr.loc,
                        "field assignment on an indexed owner requires a mutable local or parameter")))
+            | TRef _ ->
+                (* GitHub issue #314/#319: shared &T grants read-only field
+                   access; only &mut T may write. Unlike TPtr (which has
+                   never distinguished this), &T is meant to make "this
+                   parameter cannot mutate" a real, checked guarantee. *)
+                raise (TypeError (base_expr.loc, Printf.sprintf
+                  "cannot write field '.%s' through a shared reference '%s'; \
+                   declare it '&mut ...' instead"
+                  fname (to_string bt)))
             | _ -> ());
            let (sname, static_args) = match struct_instance (repr bt) with
              | Some x -> x
@@ -2913,6 +2957,91 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            TVoid
        | _ ->
            raise (TypeError (lhs.loc, "not an assignable expression")))
+
+(* GitHub issue #314/#319: shared &expr (AddrOf) validation/typing, shared
+   between infer_expr's own default (unconstrained) case and check_expr's
+   expected-type-directed cases. `wrap` selects what the proven address is
+   wrapped in: `Ptr (today's unconstrained default -- TAlignedPtr when an
+   align(N) proof is available, else plain TPtr, byte-for-byte the same as
+   before this type existed), `Ref (shared &T), or `RefMut (exclusive
+   &mut T). The minting rules themselves (bare variable or struct field
+   only, mutable local or any global, rejecting linear/indexed-owner/view/
+   variant/singleton targets) are IDENTICAL regardless of `wrap` -- &T/
+   &mut T does not relax or add to what & already refuses to mint, it only
+   changes what type a successful mint produces. *)
+and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
+    (wrap : [`Ptr | `Ref | `RefMut]) : ty =
+  (match inner.desc with
+   | Var name ->
+       check_private_global_access e.loc name;
+       let (t, is_mut) = lookup_binding e.loc name tyenv in
+       (match repr t with
+        | TPtr _ | TAlignedPtr _ -> invalidate_place_projections name
+        | _ -> ());
+       if is_linear_ptr_ty t then
+         raise (TypeError (e.loc, Printf.sprintf
+           "cannot take the address of linear value '%s': an alias would \
+            escape obligation tracking" name));
+       if is_indexed_owner_ty t then
+         raise (TypeError (e.loc, Printf.sprintf
+           "cannot take the address of indexed owner '%s': an alias would \
+            escape obligation tracking" name));
+       if contains_view_ty t then
+         raise (TypeError (e.loc, Printf.sprintf
+           "cannot take the address of erased view '%s': views have no runtime storage"
+           name));
+       if is_variant_ty t then
+         raise (TypeError (e.loc, Printf.sprintf
+           "cannot take the address of variant '%s': an alias would escape payload ownership tracking"
+           name));
+       if contains_singleton_ty t then
+         raise (TypeError (e.loc, Printf.sprintf
+           "cannot take the address of singleton value '%s': mutation \
+            through a widened pointer would invalidate its static identity"
+           name));
+       if not is_mut then
+         raise (TypeError (e.loc,
+           Printf.sprintf "cannot take address of immutable variable '%s'" name));
+       (match wrap with
+        | `Ref -> TRef t
+        | `RefMut -> TRefMut t
+        | `Ptr ->
+            (* GitHub issue #102: &x on an align(N)-declared variable proves
+               *align(N) T, same source as the array-decay case above. *)
+            (match StringMap.find_opt name !var_align_bytes with
+             | Some n -> TAlignedPtr (n, t)
+             | None -> TPtr t))
+   | FieldGet (base_expr, fname) ->
+       let bt = infer_expr senv eenv tyenv fenv base_expr in
+       let sname = match repr bt with
+         | TStruct s | TPtr (TStruct s) | TPtr (TIo (TStruct s))
+         | TAlignedPtr (_, TStruct s)
+         | TRef (TStruct s) | TRefMut (TStruct s) -> s
+         | _ -> raise (TypeError (base_expr.loc,
+             Printf.sprintf "field address '.%s' on non-struct type '%s'"
+               fname (to_string bt)))
+       in
+       let fields = match StringMap.find_opt sname senv with
+         | Some (fs, _, _) -> fs
+         | None -> raise (TypeError (e.loc,
+             Printf.sprintf "unknown struct type '%s'" sname))
+       in
+       check_private_field_access e.loc sname fname;
+       if is_stable_owner_field sname fname then
+         raise (TypeError (e.loc, Printf.sprintf
+           "stable owner field '%s.%s' cannot be addressed; use stable_replace while holding its guard"
+           sname fname));
+       (match List.assoc_opt fname fields with
+        | Some ft ->
+            let ft_ty = of_ast ft in
+            (match wrap with
+             | `Ptr -> TPtr ft_ty
+             | `Ref -> TRef ft_ty
+             | `RefMut -> TRefMut ft_ty)
+        | None -> raise (TypeError (e.loc,
+            Printf.sprintf "no field '%s' in struct '%s'" fname sname)))
+   | _ ->
+       raise (TypeError (e.loc, "& requires a variable or struct field")))
 
 (* GitHub issue #217: shared struct-field-access logic for both an ordinary
    field READ (FieldGet -- decays an array-typed field to a bare element
@@ -3037,6 +3166,20 @@ let rec check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
         check_expr senv eenv tyenv fenv ei
           (field_type_for_instance sname static_args ft)
       ) fields exprs
+  | AddrOf inner, TRef _ ->
+      (* GitHub issue #314/#319: &expr's own grammar/minting rules never
+         change (see infer_addrof_wrapped); only which type a successful
+         mint produces depends on context, exactly like a call argument's
+         declared parameter type already directs struct-literal checking
+         above. A not-yet-migrated *T-typed context skips this case
+         entirely (falls to the generic branch below, unchanged from
+         before this type existed) -- so every existing `&x` call site
+         keeps compiling with zero changes. *)
+      let actual = infer_addrof_wrapped senv eenv tyenv fenv e inner `Ref in
+      unify_at e.loc actual expected
+  | AddrOf inner, TRefMut _ ->
+      let actual = infer_addrof_wrapped senv eenv tyenv fenv e inner `RefMut in
+      unify_at e.loc actual expected
   | _ ->
       let te = infer_expr senv eenv tyenv fenv e in
       let te = adapt_actual_to_expected tyenv e te (strip_io expected) in
@@ -3341,6 +3484,18 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
              | _ -> raise (TypeError (loc,
                  "literal { ... } requires a struct or array type annotation")));
             None
+        | Some ({ desc = AddrOf inner; loc } as e)
+          when (match repr ty with TRef _ | TRefMut _ -> true | _ -> false) ->
+            (* GitHub issue #314/#319: mirrors check_expr's own AddrOf-vs-
+               TRef/TRefMut cases -- a `let` annotation is another context
+               that directs &expr's result type, just like a call
+               argument's declared parameter type does. `let core:
+               &FreelistCore(N) = &pool.core;` is the acceptance-criterion
+               example from #319 (kernel/lib/growable_pool.tkb). *)
+            let wrap = match repr ty with TRefMut _ -> `RefMut | _ -> `Ref in
+            let et = infer_addrof_wrapped senv eenv tyenv fenv e inner wrap in
+            unify_at loc et (strip_io ty);
+            Some et
         | Some e ->
             let et = infer_expr senv eenv tyenv fenv e in
             let et = adapt_actual_to_expected tyenv e et (strip_io ty) in
@@ -4594,6 +4749,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeRefined (_, _, base) -> validate_complete_type loc false base
     | Ast.TypeBorrow inner | Ast.TypeBorrowMut inner | Ast.TypeSink inner
     | Ast.TypeSingleton (inner, _) -> validate_complete_type loc behind_ptr inner
+    | Ast.TypeRef inner | Ast.TypeRefMut inner -> validate_complete_type loc true inner
     | Ast.TypeExists (_, _, inner) -> validate_complete_type loc behind_ptr inner
     | Ast.TypeIndexed _ -> ()
     | _ -> ()
@@ -4609,6 +4765,31 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeExists (_, _, body) -> contains_borrow body
     | _ -> false
   in
+  (* GitHub issue #314/#319: &T/&mut T is, in v1, legal only as a function
+     parameter type or a local `let` binding type -- not a struct field,
+     global, return type, or array/slice element (no escape/lifetime
+     analysis is implemented for it yet; see #314's #132 discussion for
+     why that is deliberate, not deferred-and-forgotten). Mirrors
+     contains_borrow's own shape/call sites exactly. *)
+  let rec contains_ref = function
+    | Ast.TypeRef _ | Ast.TypeRefMut _ -> true
+    | Ast.TypePtr t | Ast.TypeIo t -> contains_ref t
+    | Ast.TypeTuple ts -> List.exists contains_ref ts
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> contains_ref t
+    | Ast.TypeFn (args, ret, _) ->
+        List.exists contains_ref args || contains_ref ret
+    | Ast.TypeRefined (_, _, base) | Ast.TypeSingleton (base, _) -> contains_ref base
+    | Ast.TypeExists (_, _, body) -> contains_ref body
+    | _ -> false
+  in
+  (* &T/&mut T may only wrap a plain named struct -- the whole point is a
+     struct borrow, not a general-purpose pointer alternative. Rejects
+     nonsensical/underspecified shapes like &usize, &*T, or &&T up front. *)
+  let validate_ref_referent loc = function
+    | Ast.TypeNamed _ -> ()
+    | inner -> raise (TypeError (loc, Printf.sprintf
+        "&/&mut may only wrap a plain struct type, not '%s'"
+        (Ast.show_type_expr inner))) in
   let is_kinded name =
     StringSet.mem name affine_names || StringSet.mem name linear_names in
   (* OWNERSHIP_KERNEL.md Stage 1 storage bans, declaration side: a linear
@@ -4834,6 +5015,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeSink _ ->
         raise (TypeError (loc,
           "sink is only valid on an affine/linear opaque pointer, indexed owner, erased view, or kinded variant parameter"))
+    | Ast.TypeRef inner ->
+        validate_ref_referent loc inner;
+        validate_complete_type loc true inner
+    | Ast.TypeRefMut inner ->
+        validate_ref_referent loc inner;
+        validate_complete_type loc true inner
     | ty ->
         if ast_contains_stable_owner_value ty then
           raise (TypeError (loc,
@@ -4841,6 +5028,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         if contains_borrow ty then
           raise (TypeError (loc,
             "borrow/sink must wrap the entire function parameter type"));
+        if contains_ref ty then
+          raise (TypeError (loc,
+            "&/&mut must wrap the entire function parameter type"));
         if type_mentions_view ty && not (is_direct_view_type ty) then
           raise (TypeError (loc,
             "an erased view must be the entire function parameter type; it cannot live inside a runtime container or function pointer"));
@@ -4863,10 +5053,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             "a singleton value cannot live behind a pointer or inside array/slice storage"));
         validate_complete_type loc false ty
   in
-  let validate_nonparam_type loc ty =
+  let validate_nonparam_type ?(allow_ref=false) loc ty =
     validate_static_type loc ty;
     if contains_borrow ty then
       raise (TypeError (loc, "borrow/sink is only valid in function parameter types"));
+    (match ty with
+     | (Ast.TypeRef inner | Ast.TypeRefMut inner) when allow_ref ->
+         validate_ref_referent loc inner
+     | _ ->
+         if contains_ref ty then
+           raise (TypeError (loc,
+             "&/&mut is only valid in a function parameter type or a local \
+              let binding type (GitHub issue #314/#319): not a struct \
+              field, global, return type, or array/slice element")));
     if type_mentions_view ty && not (is_direct_view_type ty) then
       raise (TypeError (loc,
         "an erased view cannot live inside a runtime container or function pointer"));
@@ -4931,11 +5130,18 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         validate_nonparam_type loc body;
         validation_static_scope := saved_scope;
         allow_implicit_static := saved_implicit
-    | _ -> validate_nonparam_type loc ty
+    | _ -> validate_nonparam_type ~allow_ref:true loc ty
   in
   let rec validate_expr_types (e : Ast.expr) =
     (match e.desc with
-     | Ast.Cast (ty, x) -> validate_nonparam_type e.loc ty; validate_expr_types x
+     | Ast.Cast (ty, x) ->
+         (* GitHub issue #314/#319: `x as &T`/`x as &mut T` is a legal cast
+            target (see infer_expr's Cast case for the actual semantics --
+            only a same-referent raw pointer, gated by `unsafe`, or another
+            &/&mut of the same referent, may cast INTO &T/&mut T); allow it
+            here too, same as validate_let_type already does for a `let`
+            annotation. *)
+         validate_nonparam_type ~allow_ref:true e.loc ty; validate_expr_types x
      | Ast.SizeOf ty | Ast.OffsetOf (ty, _) ->
          if type_mentions_view ty then
            raise (TypeError (e.loc,

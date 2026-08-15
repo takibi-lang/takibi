@@ -110,6 +110,20 @@ type type_expr =
        function as the designated terminal consumer of the value, so the
        callee's own body is NOT required to forward/consume it further
        (GitHub issue #89's "sink" design -- see HISTORY.md). *)
+  | TypeRef of type_expr
+    (* &T -- shared, non-arithmetic reference to an owned struct value.
+       Structurally distinct from TypePtr (not a qualifier on it), so a
+       future raw-pointer unsafe mandate never matches it. Field reads only;
+       no arithmetic, no indexing, no casts to/from any other type except a
+       free (no-unsafe) widen to *T. GitHub issue #314/#319: v1 is legal
+       only as a function parameter or local `let` binding type -- not a
+       struct field, global, return type, or array/slice element. Minted
+       only via `&lvalue` (AddrOf); never forged. *)
+  | TypeRefMut of type_expr
+    (* &mut T -- exclusive reference: same restrictions as TypeRef, but
+       field writes are also allowed. Does not itself prove no other alias
+       of the same place exists concurrently -- see #314/#132 discussion:
+       that stronger guarantee is deliberately out of scope here. *)
   | TypeTuple of type_expr list
     (* (T1, T2, ...) -- function-local product (OWNERSHIP_KERNEL.md 5.9,
        GitHub issue #120). Legal in function return types, parameter

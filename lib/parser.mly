@@ -968,6 +968,8 @@ type_expr:
   | BORROW MUT t = type_expr { TypeBorrowMut t }
   | BORROW t = type_expr { TypeBorrow t }
   | SINK t = type_expr { TypeSink t }
+  | AMP MUT t = type_expr { TypeRefMut t }
+  | AMP t = type_expr { TypeRef t }
   | EXISTS name = IDENT COLON sort = static_sort_expr DOT body = type_expr
     { TypeExists (name, sort, body) }
   | LBRACE lo = refined_bound DOTDOTLT hi = refined_bound RBRACE

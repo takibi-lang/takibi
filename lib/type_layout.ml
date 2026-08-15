@@ -81,6 +81,7 @@ let rec size_align_of_type pos seen ty =
   | TypeBorrowMut _ -> ptr_size_align ()
   | TypeAlignedPtr _ -> ptr_size_align ()
   | TypePtr _ | TypeFn _ -> ptr_size_align ()
+  | TypeRef _ | TypeRefMut _ -> ptr_size_align ()
   | TypeIo t -> size_align_of_type pos seen t
   | TypeRefined (_, _, base) -> size_align_of_type pos seen base
   | TypeArray (elem, n) ->

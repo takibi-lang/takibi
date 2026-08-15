@@ -616,6 +616,8 @@ let rec ty_str = function
   | TypeBorrow t -> "borrow " ^ ty_str t
   | TypeBorrowMut t -> "borrow mut " ^ ty_str t
   | TypeSink t -> "sink " ^ ty_str t
+  | TypeRef t -> "&" ^ ty_str t
+  | TypeRefMut t -> "&mut " ^ ty_str t
   | TypeAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (ty_str t)
   | TypeTuple ts ->
       Printf.sprintf "(%s)" (String.concat ", " (List.map ty_str ts))
@@ -1456,6 +1458,9 @@ let rec ltype_of_ast = function
   | TypeBorrow t | TypeSink t -> ltype_of_ast t
   | TypeBorrowMut _ -> pointer_type context
   | TypeAlignedPtr _ -> pointer_type context
+  | TypeRef _ | TypeRefMut _ -> pointer_type context
+    (* Same LLVM representation as *T (GitHub issue #314/#319): the
+       distinction is entirely OCaml-side type checking, zero ABI cost. *)
   | TypeKind ->
       raise (Error
         "BUG: 'type' reached codegen unresolved (should have been \
@@ -1576,6 +1581,10 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
   | TypeAlignedPtr (_, t) -> ditype_of_ast dib file (TypePtr t)
       (* alignment is a compile-time-only proof (see ltype_of_ast); gdb
          just sees an ordinary pointer *)
+  | TypeRef t | TypeRefMut t -> ditype_of_ast dib file (TypePtr t)
+      (* &T/&mut T (GitHub issue #314/#319): same LLVM representation as
+         *T, so gdb sees an ordinary pointer -- the reference restrictions
+         are compile-time-only, same rationale as TypeAlignedPtr above. *)
   | TypeIo t       -> ditype_of_ast dib file t       (* io T is a value type at the LLVM level too; see ltype_of_ast *)
   | TypePtr t ->
       let ptr_bits = integer_bitwidth (usize_lltype ()) in
@@ -1889,7 +1898,7 @@ let rec coerce v (dst : Ast.type_expr) =
         (build_insertvalue agg (coerce cv t) i "tupc" builder, i + 1))
         (undef dst_ll, 0) ts in
       agg
-  | TypePtr _ | TypeAlignedPtr _ ->
+  | TypePtr _ | TypeAlignedPtr _ | TypeRef _ | TypeRefMut _ ->
       (* inttoptr auto-truncates/zero-extends the source integer to the
          pointer width per the LLVM LangRef, so no manual width-matching
          step is needed -- this works whether the pointer is 32-bit
@@ -2587,6 +2596,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              | TypeNamed s        -> s
              | TypePtr (TypeNamed s) -> s
              | TypeAlignedPtr (_, TypeNamed s) -> s   (* GitHub issue #102 *)
+             | TypeRef (TypeNamed s) | TypeRefMut (TypeNamed s) -> s   (* GitHub issue #314/#319 *)
              | _ -> raise (Error (Printf.sprintf
                  "field address '.%s' on non-struct type" fname))
            in
@@ -4176,6 +4186,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              | TypePtr (TypeNamed s)            -> (s, false, base_v)
              | TypePtr (TypeIo (TypeNamed s))   -> (s, true, base_v)
              | TypeAlignedPtr (_, TypeNamed s)  -> (s, false, base_v)
+             | TypeRef (TypeNamed s) | TypeRefMut (TypeNamed s) -> (s, false, base_v)
              | TypeIndexed (s, _) ->
                  (match base_expr.desc with
                   | Var name ->
@@ -4234,6 +4245,7 @@ and gen_field_access ~decay locals (base_expr : Ast.expr) (fname : string)
         | TypePtr   (TypeNamed s)          -> (s, false)
         | TypePtr   (TypeIo (TypeNamed s)) -> (s, true)   (* field access through *io Struct is volatile *)
         | TypeAlignedPtr (_, TypeNamed s)  -> (s, false)  (* GitHub issue #102 *)
+        | TypeRef (TypeNamed s) | TypeRefMut (TypeNamed s) -> (s, false)  (* GitHub issue #314/#319 *)
         | _ -> raise (Error (Printf.sprintf
             "field access '.%s' on non-struct type" fname))
       in
@@ -4525,7 +4537,7 @@ let gen_func ?prog_types fdef =
     | TypeBorrowMut base
     | TypeSink base
     | TypeIo base -> is_debug_aggregate_ty base
-    | TypeView _ | TypeAlignedPtr _ | TypePtr _ | TypeFn _
+    | TypeView _ | TypeAlignedPtr _ | TypePtr _ | TypeFn _ | TypeRef _ | TypeRefMut _
     | TypeI8 | TypeU8 | TypeI16 | TypeU16 | TypeU16Be | TypeI32 | TypeU32 | TypeU32Be
     | TypeI64 | TypeU64 | TypeUsize | TypeIsize | TypeBool | TypeVoid -> false
     | TypeKind | TypeGenericInst _ | TypeIntLit _ | TypeArraySym _ | TypeSliceSym _ ->

@@ -1745,6 +1745,93 @@ constant-expression arithmetic between two named constants
 `let mut` global, or a global declared later in the (concatenated)
 source, is a compile error.
 
+## Non-Raw Reference Types: `&T` / `&mut T` (GitHub issues #314/#319)
+
+`&T` (shared) and `&mut T` (exclusive) are references to a plain named
+struct value -- structurally distinct from `*T` (a separate `Ast.type_expr`/
+`Types.ty` constructor, not a qualifier on `TypePtr`), so a raw-pointer
+`unsafe` mandate that might land in the future (see "Known Limitations")
+never has to special-case them. They exist to give ordinary
+pass-by-reference parameters (`pool: *GrowablePool`, passed purely to avoid
+copying and dereferenced only through ordinary field access) a type that is
+provably non-arithmetic and non-forged, without disturbing `*T`'s own,
+already-pervasive, arithmetic-capable role in drivers and wire-format code.
+
+```takibi
+struct Pool { count: usize; }
+
+fn bump(p: &mut Pool) { p.count = p.count + 1; }   // may write fields
+fn peek(p: &Pool) -> usize { return p.count; }      // read-only
+
+fn f() {
+    let mut pool: Pool = {0};
+    bump(&pool);           // &pool synthesizes &mut Pool here (parameter-directed)
+    let n = peek(&pool);   // &pool synthesizes &Pool here -- same call-site spelling
+}
+```
+
+- **Minting is unchanged `&expr`.** There is no separate mint syntax:
+  `&expr` (`AddrOf`) keeps its existing grammar and restrictions exactly
+  (only a bare variable or struct field -- `&s`, `&s.field`, never
+  `&arr[i]`; a local must be mutable to be addressed, globals are always
+  addressable; linear/indexed-owner/erased-view/variant/singleton targets
+  are rejected). Only the *type* `&expr` produces changes, resolved from
+  context: a function argument or `let` annotation of type `&T`/`&mut T`
+  directs `&expr` to mint that type; with no such directing context (an
+  unannotated `let`, a not-yet-migrated `*T` parameter, any other use)
+  `&expr` still synthesizes plain `*T` exactly as it always has. This is
+  why migrating one function's parameter from `*T` to `&T`/`&mut T`
+  requires no changes at any of that type's existing `&expr` call sites.
+- **Field access.** `r.field` (read) works through either `&T` or
+  `&mut T`. `r.field = v` (write), and `*r = v` through a `&`/`&mut`-typed
+  place, is a compile error for `&T` -- only `&mut T` may write. This is a
+  real, new correctness guarantee `*T` never had (no const/mut pointer
+  distinction exists for `*T`).
+- **No arithmetic, no indexing, no other casts -- bit-opaque, no `unsafe`
+  escape.** `r + 1`, `r[i]`, and any cast into `&T`/`&mut T` other than
+  the two forms below are compile errors, unconditionally (forgery
+  -proofness is the entire point of this type, so there is no `unsafe`
+  override, mirroring affine/linear's own "no cast-away" rule).
+- **Widening/narrowing casts, asymmetric.** `&T`/`&mut T` widen to `*T`
+  (and further, e.g. `as usize`) with **no** `unsafe` -- an address that
+  really did come from `&x` needs no further justification, the same
+  principle already established for affine-handle casts built from a real
+  object's address. The reverse -- asserting a raw `*T` is actually a
+  live, correctly-typed, non-aliased value and building a `&T`/`&mut T`
+  from it -- is legal ONLY from the exact same pointee type, and always
+  needs `unsafe`:
+  ```takibi
+  fn take(p: &Pool) -> usize { return p.count; }
+  fn f(raw: *Pool) -> usize !{unsafe} {
+      return take(unsafe { raw as &Pool });   // asserts raw is live
+  }
+  ```
+  An already-`&`/`&mut`-typed source may also cast to `&T`/`&mut T` of the
+  same referent with no `unsafe` (an explicit reborrow); `&mut T` widens to
+  `&T` this way (and via ordinary argument passing), never the reverse.
+  No other source type may cast to `&T`/`&mut T` at all, not even under
+  `unsafe` -- fabricating a reference from an arbitrary integer or an
+  unrelated pointer type would defeat the entire point of this type.
+- **Legal positions, v1: function parameters and local `let` bindings
+  only.** Not a struct field, global, return type, or array/slice element.
+  No escape/lifetime analysis is implemented for `&T`/`&mut T` (deliberately
+  -- see #132 for the project's general region-polymorphism work, which
+  this does not depend on and is not blocked by), so it simply is not
+  legal anywhere an escape could happen.
+- **No aliasing/exclusivity proof.** `&mut T` guarantees "only this
+  parameter may write field/deref targets," by construction of who can
+  call it with what -- it does not prove no other alias of the same place
+  exists concurrently. That stronger guarantee (a general borrow checker)
+  is out of scope; see #132.
+- **Codegen: identical to `*T`.** Same bare pointer representation, same
+  calling convention, zero runtime cost -- the distinction is entirely in
+  the OCaml-side type checker.
+
+`kernel/lib/growable_pool.tkb`'s `pool: *GrowablePool` parameter (and its
+`let core: *FreelistCore(N) = &pool.core;` locals) is the first migrated
+call site. Further files migrate incrementally, one narrow issue at a
+time, per this project's usual practice.
+
 ## MMIO / Volatile
 
 - `io T` is a volatile-qualified *value* type (same LLVM representation

@@ -220,6 +220,8 @@ let rec show_type = function
   | Ast.TypeBorrow t -> "borrow " ^ show_type t
   | Ast.TypeBorrowMut t -> "borrow mut " ^ show_type t
   | Ast.TypeSink t -> "sink " ^ show_type t
+  | Ast.TypeRef t -> "&" ^ show_type t
+  | Ast.TypeRefMut t -> "&mut " ^ show_type t
   | Ast.TypeAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (show_type t)
   | Ast.TypeTuple ts ->
       Printf.sprintf "(%s)" (String.concat ", " (List.map show_type ts))
@@ -6893,6 +6895,117 @@ let infer_tests = [
        "generic struct Freelist(T: type) { count: usize; }
         generic struct Freelist(U: type) { other: usize; }");
 
+  (* -- &T/&mut T reference type (GitHub issue #314/#319) -------------- *)
+
+  Alcotest.test_case "&mut T parameter reads and writes fields" `Quick
+    (expect_ok
+       "struct Pool { count: usize; }
+        fn bump(p: &mut Pool) { p.count = p.count + 1; }
+        fn f() { let mut pool: Pool = {0}; bump(&pool); }");
+
+  Alcotest.test_case "&T parameter reads fields" `Quick
+    (expect_ok
+       "struct Pool { count: usize; }
+        fn peek(p: &Pool) -> usize { return p.count; }
+        fn f() { let mut pool: Pool = {0}; let n = peek(&pool); }");
+
+  Alcotest.test_case "&T parameter cannot write a field" `Quick
+    (expect_type_error
+       "cannot write field"
+       "struct Pool { count: usize; }
+        fn bump(p: &Pool) { p.count = p.count + 1; }
+        fn f() { let mut pool: Pool = {0}; bump(&pool); }");
+
+  Alcotest.test_case "&/&mut supports no arithmetic" `Quick
+    (expect_type_error
+       "does not support operators"
+       "struct Pool { count: usize; }
+        fn bad(p: &mut Pool) { let q = p + 1; }
+        fn f() { let mut pool: Pool = {0}; bad(&pool); }");
+
+  Alcotest.test_case "&/&mut supports no indexing" `Quick
+    (expect_type_error
+       "index operator on non-array/pointer type"
+       "struct Pool { count: usize; }
+        fn bad(p: &mut Pool) -> usize { return p[0]; }
+        fn f() { let mut pool: Pool = {0}; let n = bad(&pool); }");
+
+  Alcotest.test_case "&T cannot be forged from an integer, not even under unsafe" `Quick
+    (expect_type_error
+       "can only be minted with"
+       "struct Pool { count: usize; }
+        fn bad() {
+          let n: usize = 4096;
+          let p: &Pool = unsafe { n as &Pool };
+        }");
+
+  Alcotest.test_case "*T -> &T cast requires unsafe" `Quick
+    (expect_type_error
+       "asserts it is a live"
+       "struct Pool { count: usize; }
+        fn take(p: &Pool) -> usize { return p.count; }
+        fn f(raw: *Pool) -> usize { return take(raw as &Pool); }");
+
+  Alcotest.test_case "*T -> &T cast is legal under unsafe" `Quick
+    (expect_ok
+       "struct Pool { count: usize; }
+        fn take(p: &Pool) -> usize { return p.count; }
+        fn f(raw: *Pool) -> usize !{unsafe} { return take(unsafe { raw as &Pool }); }");
+
+  Alcotest.test_case "&T widens to *T with no unsafe (existing, un-migrated callee keeps working)" `Quick
+    (expect_ok
+       "struct Pool { count: usize; }
+        fn legacy_peek(p: *Pool) -> usize { return p.count; }
+        fn f() { let mut pool: Pool = {0}; let n = legacy_peek(&pool); }");
+
+  Alcotest.test_case "&mut T widens to &T (reborrow as shared)" `Quick
+    (expect_ok
+       "struct Pool { count: usize; }
+        fn peek(p: &Pool) -> usize { return p.count; }
+        fn bump_then_peek(p: &mut Pool) -> usize { return peek(p); }
+        fn f() { let mut pool: Pool = {0}; let n = bump_then_peek(&pool); }");
+
+  Alcotest.test_case "&T does not widen to &mut T" `Quick
+    (expect_type_error
+       "cannot unify"
+       "struct Pool { count: usize; }
+        fn bump(p: &mut Pool) { p.count = p.count + 1; }
+        fn peek_then_bump(p: &Pool) { bump(p); }
+        fn f() { let mut pool: Pool = {0}; peek_then_bump(&pool); }");
+
+  Alcotest.test_case "let with &T annotation resolves &expr against it (growable_pool.tkb shape)" `Quick
+    (expect_ok
+       "struct Core { n: usize; }
+        struct Pool { core: Core; }
+        fn use_core(c: &Core) -> usize { return c.n; }
+        fn f(pool: &mut Pool) -> usize {
+          let core: &Core = &pool.core;
+          return use_core(core);
+        }");
+
+  Alcotest.test_case "&T is rejected as a struct field type" `Quick
+    (expect_type_error
+       "is only valid in a function parameter type or a local"
+       "struct Core { n: usize; }
+        struct Holder { c: &Core; }");
+
+  Alcotest.test_case "&T is rejected as a global type" `Quick
+    (expect_type_error
+       "is only valid in a function parameter type or a local"
+       "struct Core { n: usize; }
+        let mut g: &Core;");
+
+  Alcotest.test_case "&T is rejected as a return type" `Quick
+    (expect_type_error
+       "is only valid in a function parameter type or a local"
+       "struct Core { n: usize; }
+        fn f(c: &Core) -> &Core { return c; }");
+
+  Alcotest.test_case "&T may only wrap a plain struct type" `Quick
+    (expect_type_error
+       "may only wrap a plain struct type"
+       "fn f(x: &usize) { }");
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------
@@ -11946,6 +12059,34 @@ let codegen_tests = [
        Alcotest.(check bool) "regr_outer_init$RegrPoint$2 calls regr_inner_init$2, not $3"
          true (contains_substring (ir "regr_outer_init$RegrPoint$2") "@\"regr_inner_init$2\""
                && not (contains_substring (ir "regr_outer_init$RegrPoint$2") "@\"regr_inner_init$3\"")));
+
+  (* GitHub issue #314/#319: &mut T codegens identically to *T -- same bare
+     pointer representation, verified end-to-end through LLVM's own IR
+     verifier (not just type-checked). Mirrors the growable_pool.tkb
+     migration shape: a &mut-typed parameter mutates a field, called with
+     a plain `&local`. *)
+  Alcotest.test_case "&mut T parameter mutation codegens and verifies" `Quick
+    (expect_codegen_ok
+       "struct RefCodegenPool { count: usize; }
+        fn ref_codegen_bump(p: &mut RefCodegenPool) { p.count = p.count + 1; }
+        fn ref_codegen_app_main() -> usize {
+          let mut pool: RefCodegenPool = {0};
+          ref_codegen_bump(&pool);
+          return pool.count;
+        }");
+
+  (* Exact growable_pool.tkb migration shape: `let core: &Core = &pool.core;`
+     -- a &T local initialized from a nested field address, then used to
+     read through. *)
+  Alcotest.test_case "let with &T annotation from a nested field address codegens and verifies" `Quick
+    (expect_codegen_ok
+       "struct RefCodegenCore { n: usize; }
+        struct RefCodegenOuter { core: RefCodegenCore; }
+        fn ref_codegen_use_core(c: &RefCodegenCore) -> usize { return c.n; }
+        fn ref_codegen_outer_main(pool: &mut RefCodegenOuter) -> usize {
+          let core: &RefCodegenCore = &pool.core;
+          return ref_codegen_use_core(core);
+        }");
 
 ]
 

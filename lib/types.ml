@@ -64,6 +64,14 @@ type ty =
        *align(N) T flows freely into a plain *T (widening) or a
        *align(K) T where K divides N; a plain *T or an insufficiently
        aligned pointer flowing into a *align(N) T position is rejected. *)
+  | TRef of ty            (* &T -- shared, non-arithmetic reference (GitHub
+                              issue #314/#319). Structurally distinct from
+                              TPtr, not a qualifier on it. Widens freely
+                              (one direction only) into a plain TPtr; the
+                              reverse needs an explicit unsafe cast. *)
+  | TRefMut of ty          (* &mut T -- exclusive reference: same as TRef,
+                               plus field writes. Widens freely into TRef
+                               (reborrow-as-shared) and into TPtr. *)
 
 and tv =
   | Unbound of int  (* unresolved unification variable *)
@@ -156,6 +164,8 @@ let rec to_string t =
   | TSlice (t, 0) -> Printf.sprintf "[]%s" (to_string t)
   | TSlice (t, n) -> Printf.sprintf "[%s; %d..]" (to_string t) n
   | TAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (to_string t)
+  | TRef t -> Printf.sprintf "&%s" (to_string t)
+  | TRefMut t -> Printf.sprintf "&mut %s" (to_string t)
   | TFun (ps, r, effects) ->
       let suffix = match effects with
         | None -> ""
@@ -196,6 +206,7 @@ let rec occurs rv = function
   | TArray (t, _)              -> occurs rv t
   | TSlice (t, _)              -> occurs rv t
   | TAlignedPtr (_, t)         -> occurs rv t
+  | TRef t | TRefMut t         -> occurs rv t
   | TTuple ts                  -> List.exists (occurs rv) ts
   | TExists (_, _, _, t)       -> occurs rv t
   | TIndexedStruct _           -> false
@@ -210,7 +221,8 @@ let rec function_effect_rows t =
       :: (List.concat_map function_effect_rows params
           @ function_effect_rows ret)
   | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
-  | TAlignedPtr (_, t) | TSingleton (t, _) -> function_effect_rows t
+  | TAlignedPtr (_, t) | TSingleton (t, _)
+  | TRef t | TRefMut t -> function_effect_rows t
   | TTuple ts -> List.concat_map function_effect_rows ts
   | TExists (_, _, _, body) -> function_effect_rows body
   | _ -> []
@@ -247,6 +259,8 @@ and subst_in_ty old replacement t =
   | TTuple ts -> TTuple (List.map (subst_in_ty old replacement) ts)
   | TSlice (t, n) -> TSlice (subst_in_ty old replacement t, n)
   | TAlignedPtr (n, t) -> TAlignedPtr (n, subst_in_ty old replacement t)
+  | TRef t -> TRef (subst_in_ty old replacement t)
+  | TRefMut t -> TRefMut (subst_in_ty old replacement t)
   | TIndexedStruct (name, args) ->
       TIndexedStruct (name, List.map (subst_static_term old replacement) args)
   | TView (name, args) ->
@@ -409,6 +423,28 @@ let rec unify t1 t2 =
          on an align(%d) variable, a literal address, pointer arithmetic by \
          a multiple of %d, or `unsafe { ... as *align(%d) %s }` to mark it"
         (to_string (TPtr t1)) n (to_string t2) n n n (to_string t2)))
+  (* GitHub issue #314/#319: &T/&mut T is a genuinely separate type from
+     TPtr, not a qualifier on it -- see the `ty` constructor's own comment.
+     Subtyping is one-directional, mirroring TAlignedPtr's shape: a
+     reference always widens into a plain pointer (an address that is
+     real, non-forged, and never was arithmetic'd is trivially a valid
+     plain pointer), and &mut T additionally reborrows as &T. The reverse
+     directions (TPtr -> TRef/TRefMut, TRef -> TRefMut) are deliberately
+     absent here; going from a raw pointer to a reference requires an
+     explicit `unsafe` cast (see type_inf.ml's Cast case), and a shared
+     reference can never become exclusive. *)
+  | TRef t1, TRef t2 ->
+      require_writable_pointer_effect_invariance t1 t2;
+      unify t1 t2
+  | TRefMut t1, TRefMut t2 ->
+      require_writable_pointer_effect_invariance t1 t2;
+      unify t1 t2
+  | TRefMut t1, TRef t2 ->
+      require_writable_pointer_effect_invariance t1 t2;
+      unify t1 t2
+  | TRef t1, TPtr t2 | TRefMut t1, TPtr t2 ->
+      require_writable_pointer_effect_invariance t1 t2;
+      unify t1 t2  (* widening to a plain pointer is always OK *)
   | TTuple ts1, TTuple ts2 ->
       if List.length ts1 <> List.length ts2 then
         raise (Unify_error (Printf.sprintf
@@ -547,6 +583,8 @@ let rec of_ast_in_scope scope = function
   | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t ->
       of_ast_in_scope scope t
   | Ast.TypeAlignedPtr (n, t) -> TAlignedPtr (n, of_ast_in_scope scope t)
+  | Ast.TypeRef t -> TRef (of_ast_in_scope scope t)
+  | Ast.TypeRefMut t -> TRefMut (of_ast_in_scope scope t)
   | Ast.TypeKind ->
       raise (TypeError (Lexing.dummy_pos,
         "'type' is only valid as a generic parameter's declared type; \
@@ -611,6 +649,8 @@ let instantiate_static_params ty =
     | TTuple ts -> TTuple (List.map inst ts)
     | TSlice (t, n) -> TSlice (inst t, n)
     | TAlignedPtr (n, t) -> TAlignedPtr (n, inst t)
+    | TRef t -> TRef (inst t)
+    | TRefMut t -> TRefMut (inst t)
     | TIndexedStruct (name, args) ->
         TIndexedStruct (name, List.map inst_static args)
     | TView (name, args) -> TView (name, List.map inst_static args)
@@ -647,6 +687,8 @@ let rec to_ast t =
   | TRefinedInt (lo, hi, base) -> Ast.TypeRefined (lo, hi, to_ast base)
   | TSlice (t, n) -> Ast.TypeSlice (to_ast t, n)
   | TAlignedPtr (n, t) -> Ast.TypeAlignedPtr (n, to_ast t)
+  | TRef t -> Ast.TypeRef (to_ast t)
+  | TRefMut t -> Ast.TypeRefMut (to_ast t)
   | TTuple ts -> Ast.TypeTuple (List.map to_ast ts)
   | TVar { contents = Unbound _ } -> Ast.TypeI32
   | TVar { contents = Link _ }    -> assert false

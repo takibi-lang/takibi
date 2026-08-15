@@ -114,6 +114,8 @@ let rec transform ~(subst : string -> type_expr option)
   | TypeBorrow t -> TypeBorrow (go t)
   | TypeBorrowMut t -> TypeBorrowMut (go t)
   | TypeSink t -> TypeSink (go t)
+  | TypeRef t -> TypeRef (go t)
+  | TypeRefMut t -> TypeRefMut (go t)
   | TypeAlignedPtr (n, t) -> TypeAlignedPtr (n, go t)
   | TypeSingleton (t, arg) -> TypeSingleton (go t, arg)
   | TypeExists (n, sort, body) -> TypeExists (n, sort, go body)
@@ -531,6 +533,7 @@ let discover_value_generic_params
               with Invalid_argument _ -> List.iter scan_ty args)
          | None -> List.iter scan_ty args)
     | TypePtr t | TypeIo t | TypeBorrow t | TypeBorrowMut t | TypeSink t
+    | TypeRef t | TypeRefMut t
     | TypeAlignedPtr (_, t) -> scan_ty t
     | TypeArray (t, _) | TypeSlice (t, _)
     | TypeArraySym (t, _) | TypeSliceSym (t, _) -> scan_ty t
@@ -594,6 +597,21 @@ let rec unify_arg (type_params : string list) (value_params : string list)
   | TypeIo a, TypeIo b -> u a b
   | TypeBorrow a, b | TypeBorrowMut a, b | TypeSink a, b -> u a b
   | a, TypeBorrow b | a, TypeBorrowMut b | a, TypeSink b -> u a b
+  (* GitHub issue #314/#319: derive_arg_type below always synthesizes a
+     plain TypePtr for an AddrOf-shaped argument, regardless of the
+     callee's actual declared parameter wrapper -- unlike TypeBorrow/
+     TypeSink just above (pure parameter-mode annotations that never
+     appear as a variable's own declared type, so peeling only the
+     template side is enough there), &mut GrowablePool(T, ...) vs. the
+     derived *GrowablePool(T, ...) is a mismatch between TWO DIFFERENT
+     wrapper constructors that must be peeled together, mirroring
+     `TypePtr a, TypePtr b -> u a b` just above exactly. Real type-checking
+     (including whether &T/&mut T is even the right wrapper for this
+     parameter) happens later in type_inf.ml; this pass only needs a
+     plausible T to mangle a name. *)
+  | TypeRef a, TypePtr b | TypeRefMut a, TypePtr b -> u a b
+  | TypeRef a, TypeRef b | TypeRefMut a, TypeRefMut b
+  | TypeRefMut a, TypeRef b -> u a b
   | TypeArray (a, _), TypeArray (b, _) -> u a b
   | TypeSlice (a, _), TypeSlice (b, _) -> u a b
   | TypeAlignedPtr (_, a), TypeAlignedPtr (_, b) -> u a b
@@ -722,6 +740,8 @@ let run (prog : toplevel list) : toplevel list =
       | AddrOf { desc = FieldGet ({ desc = Var name; _ }, fname); _ } ->
           (match Hashtbl.find_opt local_types name with
            | Some (TypePtr (TypeGenericInst (sname, args)))
+           | Some (TypeRef (TypeGenericInst (sname, args)))
+           | Some (TypeRefMut (TypeGenericInst (sname, args)))
            | Some (TypeGenericInst (sname, args)) ->
                (match Hashtbl.find_opt struct_templates sname with
                 | Some tpl ->
