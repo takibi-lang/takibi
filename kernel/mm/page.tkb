@@ -76,8 +76,7 @@ struct PageMeta {
 // GitHub issue #253 follow-up (2026-08-09): wraps FreelistCore(N), the
 // PageMeta array, and the double-free counter in one top-level struct/global
 // -- exactly SlotMap(N)'s own shape, applied non-generically here since this
-// file's only ever going to have one pool. A struct field's OWN struct-array
-// field must be assigned to a local before indexed field access (issue #15).
+// file's only ever going to have one pool.
 struct BootPagePool {
     core: FreelistCore(BOOT_PAGE_COUNT);
     meta: [PageMeta; BOOT_PAGE_COUNT];
@@ -110,10 +109,13 @@ fn page_allocator_init() {
     // every other freelist_core_* call site below.
     let core: *FreelistCore(BOOT_PAGE_COUNT) = &boot_page_pool.core;
     freelist_core_init(core);
-    let meta = boot_page_pool.meta;   // issue #15: struct-embedded array
-    for i: isize in 0..<(BOOT_PAGE_COUNT as isize) {   // field decays to raw pointer,
-        meta[i].occupied = false;           // isize index (not usize)
-        meta[i].map_refcount = 0;
+    // GitHub issue #217 (2026-08-15): boot_page_pool.meta[i] indexes the
+    // struct-embedded array field directly and is checked/proven by the
+    // for-loop counter's own {0..<BOOT_PAGE_COUNT} type -- no more
+    // manual `let`/raw-pointer-arithmetic workaround (issue #15) needed.
+    for i: usize in 0..<BOOT_PAGE_COUNT {
+        boot_page_pool.meta[i].occupied = false;
+        boot_page_pool.meta[i].map_refcount = 0;
     }
     boot_page_pool.double_remove_count = 0;
 }
@@ -126,9 +128,9 @@ fn page_alloc() -> PageAllocResult {
             let (index, generation) = freelist_owner_into_parts(slot);
             if (index < BOOT_PAGE_COUNT) {
                 let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
-                let meta = boot_page_pool.meta;   // issue #15, as above
-                meta[checked as isize].occupied = true;
-                meta[checked as isize].map_refcount = 0;
+                // GitHub issue #217: checked indexing, see page_allocator_init's own comment.
+                boot_page_pool.meta[checked].occupied = true;
+                boot_page_pool.meta[checked].map_refcount = 0;
                 return PageAllocResult::Allocated(
                     page_owner_new(checked, generation));
             }
@@ -143,14 +145,14 @@ fn page_alloc() -> PageAllocResult {
 // its source instead of silently corrupting the chain a second time.
 fn page_free(owner: sink PageOwner[page]) {
     let index: {0..<BOOT_PAGE_COUNT as usize} = owner.index;
-    let meta = boot_page_pool.meta;   // issue #15, as above
-    if (meta[index as isize].occupied == false) {
+    // GitHub issue #217: checked indexing, see page_allocator_init's own comment.
+    if (boot_page_pool.meta[index].occupied == false) {
         boot_page_pool.double_remove_count = boot_page_pool.double_remove_count + 1;
         freelist_owner_drop(freelist_owner_new(index, owner.generation));
         return;
     }
-    meta[index as isize].occupied = false;
-    meta[index as isize].map_refcount = 0;
+    boot_page_pool.meta[index].occupied = false;
+    boot_page_pool.meta[index].map_refcount = 0;
     let core: *FreelistCore(BOOT_PAGE_COUNT) = &boot_page_pool.core;
     freelist_core_remove(core,
                          freelist_owner_new(index, owner.generation));
@@ -222,8 +224,7 @@ fn page_owner_transfer_index(owner: sink PageOwner[page])
 // page from this allocator.
 fn page_mapping_install(owner: sink PageOwner[page]) {
     let index: {0..<BOOT_PAGE_COUNT as usize} = owner.index;
-    let meta = boot_page_pool.meta;
-    meta[index as isize].map_refcount = 1;
+    boot_page_pool.meta[index].map_refcount = 1;  // GitHub issue #217: checked indexing
     page_owner_transfer_index(owner);
 }
 
@@ -253,15 +254,15 @@ fn page_mapping_retain_physical(physical: usize) -> PageMappingRetainResult {
     let index: usize = (physical - base) / PAGE_SIZE;
     if (index < BOOT_PAGE_COUNT) {
         let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
-        let meta = boot_page_pool.meta;
-        let current: usize = meta[checked as isize].map_refcount;
-        if (meta[checked as isize].occupied == false || current == 0) {
+        // GitHub issue #217: checked indexing, see page_allocator_init's own comment.
+        let current: usize = boot_page_pool.meta[checked].map_refcount;
+        if (boot_page_pool.meta[checked].occupied == false || current == 0) {
             return PageMappingRetainResult::NotMapped;
         }
         if (current >= PAGE_MAP_REF_MAX) {
             return PageMappingRetainResult::RefCeilingReached;
         }
-        meta[checked as isize].map_refcount = current + 1;
+        boot_page_pool.meta[checked].map_refcount = current + 1;
         return PageMappingRetainResult::Retained;
     }
     return PageMappingRetainResult::NotMapped;
@@ -284,9 +285,9 @@ fn page_mapping_ref_ceiling_probe() -> bool {
         PageAllocResult::Allocated(owner) => {
             let physical: usize = page_physical_address(owner);
             let index: {0..<BOOT_PAGE_COUNT as usize} = owner.index;
-            let meta = boot_page_pool.meta;
+            // GitHub issue #217: checked indexing, see page_allocator_init's own comment.
 
-            meta[index as isize].map_refcount = PAGE_MAP_REF_MAX;
+            boot_page_pool.meta[index].map_refcount = PAGE_MAP_REF_MAX;
             let mut ceiling_ok: bool = false;
             match page_mapping_retain_physical(physical) {
                 PageMappingRetainResult::RefCeilingReached => {
@@ -296,12 +297,12 @@ fn page_mapping_ref_ceiling_probe() -> bool {
                 PageMappingRetainResult::Retained => {}
             }
             if (ceiling_ok == false ||
-                    meta[index as isize].map_refcount != PAGE_MAP_REF_MAX) {
+                    boot_page_pool.meta[index].map_refcount != PAGE_MAP_REF_MAX) {
                 page_free(owner);
                 return false;
             }
 
-            meta[index as isize].map_refcount = PAGE_MAP_REF_MAX - 1;
+            boot_page_pool.meta[index].map_refcount = PAGE_MAP_REF_MAX - 1;
             let mut below_ceiling_ok: bool = false;
             match page_mapping_retain_physical(physical) {
                 PageMappingRetainResult::Retained => { below_ceiling_ok = true; }
@@ -309,7 +310,7 @@ fn page_mapping_ref_ceiling_probe() -> bool {
                 PageMappingRetainResult::RefCeilingReached => {}
             }
             if (below_ceiling_ok == false ||
-                    meta[index as isize].map_refcount != PAGE_MAP_REF_MAX) {
+                    boot_page_pool.meta[index].map_refcount != PAGE_MAP_REF_MAX) {
                 page_free(owner);
                 return false;
             }
@@ -330,9 +331,9 @@ fn page_mapping_refcount_physical(physical: usize) -> usize {
     let index: usize = (physical - base) / PAGE_SIZE;
     if (index < BOOT_PAGE_COUNT) {
         let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
-        let meta = boot_page_pool.meta;
-        if (meta[checked as isize].occupied) {
-            return meta[checked as isize].map_refcount;
+        // GitHub issue #217: checked indexing, see page_allocator_init's own comment.
+        if (boot_page_pool.meta[checked].occupied) {
+            return boot_page_pool.meta[checked].map_refcount;
         }
     }
     return 0;
@@ -348,15 +349,15 @@ fn page_mapping_release_physical(physical: usize) {
     let index: usize = (physical - base) / PAGE_SIZE;
     if (index < BOOT_PAGE_COUNT) {
         let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
-        let meta = boot_page_pool.meta;
-        let current: usize = meta[checked as isize].map_refcount;
-        if (meta[checked as isize].occupied == false || current == 0) {
+        // GitHub issue #217: checked indexing, see page_allocator_init's own comment.
+        let current: usize = boot_page_pool.meta[checked].map_refcount;
+        if (boot_page_pool.meta[checked].occupied == false || current == 0) {
             boot_page_pool.double_remove_count =
                 boot_page_pool.double_remove_count + 1;
             return;
         }
         let next: usize = current - 1;
-        meta[checked as isize].map_refcount = next;
+        boot_page_pool.meta[checked].map_refcount = next;
         if (next == 0) {
             page_transferred_release(checked);
         }
@@ -367,14 +368,14 @@ fn page_mapping_release_physical(physical: usize) {
 // bit. The coarser owner that called page_owner_transfer_index only kept the
 // index, so a fabricated generation is still used for the free-list link.
 fn page_transferred_release(index: {0..<BOOT_PAGE_COUNT as usize}) {
-    let meta = boot_page_pool.meta;   // issue #15, as above
-    if (meta[index as isize].occupied == false) {
+    // GitHub issue #217: checked indexing, see page_allocator_init's own comment.
+    if (boot_page_pool.meta[index].occupied == false) {
         boot_page_pool.double_remove_count = boot_page_pool.double_remove_count + 1;
         freelist_owner_drop(freelist_owner_new(index, 0));
         return;
     }
-    meta[index as isize].occupied = false;
-    meta[index as isize].map_refcount = 0;
+    boot_page_pool.meta[index].occupied = false;
+    boot_page_pool.meta[index].map_refcount = 0;
     let core: *FreelistCore(BOOT_PAGE_COUNT) = &boot_page_pool.core;
     freelist_core_remove(core, freelist_owner_new(index, 0));
 }
@@ -394,10 +395,9 @@ fn page_transferred_release_physical(physical: usize) {
 }
 
 fn page_allocator_live_count() -> usize {
-    let meta = boot_page_pool.meta;   // issue #15, as above
     let mut live: usize = 0;
-    for i: isize in 0..<(BOOT_PAGE_COUNT as isize) {   // isize index (not usize)
-        if (meta[i].occupied) { live = live + 1; }
+    for i: usize in 0..<BOOT_PAGE_COUNT {  // GitHub issue #217: checked indexing
+        if (boot_page_pool.meta[i].occupied) { live = live + 1; }
     }
     return live;
 }

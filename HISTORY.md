@@ -15,6 +15,91 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: Early-Return-Guard Narrowing Was Never Synced Into Codegen's Own Bounds-Check Elision (GitHub Issue #296 Follow-Up)
+
+Issue #296's fix (previous entry) landed entirely in `lib/type_inf.ml`
+and was verified there -- `dune runtest`, `langcheck`, `linuxcheck`, a
+clean whole-kernel build, and full `kernelcheck-qemu`/`kernelcheck-rpi5`
+real-boot runs, all green. It was only while attempting the natural
+follow-up work the fix was supposed to enable -- migrating
+`kernel/lib/growable_pool.tkb` off its old array-decay-avoidance
+workaround (`let x = struct.field; x[i]`) onto direct checked
+`struct.field[i]` indexing, guarded by the same early-return idiom
+`asid.tkb` now used -- that `growable_pool_remove`'s guarded `index`
+still reported a residual `--forbid-trap` trap site at its `Index`
+use, despite type_inf.ml correctly proving the narrowing. Isolated with
+a sequence of minimal repro `.tkb` files that separated three shapes: a
+then-branch `Index` use (worked), a fallthrough use through a function
+CALL (worked, since call-argument type-checking reads type_inf's own
+narrowed `tyenv`), and a fallthrough `Index`/`AssignIndex` use (broken).
+
+Root cause: `lib/llvm_gen.ml` cannot see type_inf.ml's resolved
+`tyenv` -- it re-derives its own bounds-check-elision decisions during
+codegen via a separate, mutable-Hashtbl-based `narrowing_ctx`, kept in
+sync with type_inf.ml's narrowing logic by convention (the "Sync rule"
+documented throughout both files) rather than by construction. Issue
+#296's `enclosing_future_writes`/fallthrough-narrowing mechanism was
+implemented only on the type_inf.ml side; nothing analogous existed in
+llvm_gen.ml, so a function-call consumer (whose safety is decided
+purely by the type checker) correctly stopped needing a runtime check,
+while an `Index`/`AssignIndex` consumer (whose safety is decided by
+codegen's own copy of the logic) did not.
+
+Fixed by re-implementing the same mechanism a second time in
+llvm_gen.ml: `enclosing_future_writes : string list ref`,
+`pending_fallthrough_narrowing_ctx`/`pending_fallthrough_locals` (the
+two halves of `narrowing_ctx`'s state), and
+`run_stmts_with_future_writes` (an `and`-sibling of `gen_stmt` inside
+`gen_func`, since it must close over the function-local `locals`
+table) replacing every `List.iter gen_stmt <list>` call site (`Block`,
+`If`'s then/else, loop bodies, `Match` arms, and the function body
+itself). `negate_cond`/`stmt_always_returns`/`stmt_list_always_returns`
+were likewise duplicated from type_inf.ml. In the `If` case, the
+narrowing is computed and pushed onto the pending-fallthrough state
+right after emitting the conditional branch (`future_writes_here` is
+captured before recursing into then/else, which reuse and clobber the
+same ref for their own nested folds) and popped back off after the
+whole enclosing statement list finishes, mirroring
+`fold_stmts_with_future_writes`'s save/restore shape exactly.
+
+This is the clearest concrete case this session found of the general
+risk the Sync-rule convention between type_inf.ml and llvm_gen.ml
+carries: a type-level fix can be complete, fully tested, and verified
+on real hardware, and still leave codegen's independent copy of the
+same reasoning stale, because nothing forces the two to change
+together. The gap was caught only by chance -- by doing the exact kind
+of migration work the original fix was meant to unblock, on a kernel
+data structure (`growable_pool.tkb`) that happened to consume the
+narrowed binding via `Index` rather than a function call. A regression
+suite change alone would not have caught it, since issue #296's own
+tests happened to all use function-call consumers.
+
+Regression coverage added directly at the codegen level this time
+(`expect_trap_sites 0`, not just `expect_ok`/`expect_type_error`): one
+case mirroring the minimal repro, one mirroring `growable_pool.tkb`'s
+actual struct-field-array shape, and one covering `AssignIndex`
+(write) specifically, since it is a separate codegen path from
+`Index` (read). (An early version of these three tests all reused the
+bare function name `f` and crashed Alcotest with `Invalid_argument`
+from `List.iter2` -- module-level Hashtbl state keyed by function name
+leaks across test cases sharing a name, which every other test in the
+file already avoids by suffixing; fixed by renaming to
+`f296a`/`f296b`/`f296c`.)
+
+Landed together with the `growable_pool.tkb` (9 sites) and
+`kernel/mm/page.tkb` (10 sites) array-decay-workaround migrations this
+fix unblocked -- all sites in both files are provably safe by
+type-level narrowing alone except `growable_pool_activate_chunk`,
+marked `!{unsafe}` for the same genuinely-unprovable-precondition
+reason as `freelist_core_remove` in the prior migration (issue #216's
+class of gap: a cross-function invariant the checker cannot see).
+
+Verified: `dune runtest` (1021/1021), `langcheck`, `linuxcheck`, a
+clean `kernelbuild-qemu`/`kernelbuild-rpi5`, a full `kernelcheck-qemu`
+real-boot run (38 views including `growable_pool` and
+`page_mapping_ref_ceiling`), and a full `kernelcheck-rpi5` real-
+hardware run (38/38 views), all with no regressions.
+
 ### 2026-08-15: Early-Return-Guard Narrowing Extended to Mutable Bindings/Parameters (GitHub Issue #296)
 
 Issue #295's own follow-up fix (commit 7ef912c) had narrowed the

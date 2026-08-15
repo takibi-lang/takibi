@@ -160,15 +160,15 @@ fn growable_pool_init(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNK
     let core: *FreelistCore(N) = &pool.core;
     core.free_head = N;
     core.next_generation = 1;
-    let occupant = pool.occupant_generation;   // issue #15: struct-embedded
-    for i: isize in 0..<N {                    // array field decays to a
-        occupant[i] = 0;                       // raw pointer on read
+    // GitHub issue #217 (2026-08-15): checked indexing directly through
+    // pool -- no more manual `let`/raw-pointer-arithmetic workaround
+    // (issue #15) needed.
+    for i: usize in 0..<N {
+        pool.occupant_generation[i] = 0;
     }
-    let bases = pool.chunk_data_base;          // issue #15, as above
-    let indices = pool.chunk_page_index;       // issue #15, as above
-    for c: isize in 0..<MAX_CHUNKS {
-        bases[c] = 0;
-        indices[c] = 0;
+    for c: usize in 0..<MAX_CHUNKS {
+        pool.chunk_data_base[c] = 0;
+        pool.chunk_page_index[c] = 0;
     }
     pool.double_remove_count = 0;
     pool.active_chunks = 0;
@@ -180,13 +180,21 @@ fn growable_pool_init(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNK
 // primitive; freelist_core_insert/_remove themselves are called completely
 // unmodified everywhere else in this file.
 fn growable_pool_activate_chunk(
-        T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N), chunk: usize) {
+        T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N), chunk: usize) !{unsafe} {
     let core: *FreelistCore(N) = &pool.core;
-    let next_free = core.next_free;            // issue #15, as above
     let base_index: usize = chunk * SLOTS_PER_CHUNK;
-    for offset: isize in 0..<SLOTS_PER_CHUNK {
-        let slot: usize = base_index + (offset as usize);
-        next_free[slot as isize] = core.free_head;
+    // GitHub issue #217: core.next_free[slot] is now a real checked index,
+    // but `slot < N` depends on `N == SLOTS_PER_CHUNK * MAX_CHUNKS` and
+    // `chunk < MAX_CHUNKS` -- both caller-maintained-by-hand preconditions
+    // (see this file's own "Current limitations" section), not something
+    // provable inside this function from `chunk: usize` alone. Same class
+    // of cross-function-boundary gap as issue #216's owner.index; unsafe
+    // makes this genuinely unchecked slot arithmetic grep-visible instead
+    // of silently invisible to the checker the way the old *usize-decay
+    // pointer arithmetic left it.
+    for offset: usize in 0..<SLOTS_PER_CHUNK {
+        let slot: usize = base_index + offset;
+        unsafe { core.next_free[slot] = core.free_head };
         core.free_head = slot;
     }
 }
@@ -195,9 +203,8 @@ fn growable_pool_finish_insert(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, 
                                owner: FreelistOwner[allocation])
         -> GrowablePoolInsertResult {
     let index: usize = freelist_owner_index(owner);
-    let occupant = pool.occupant_generation;   // issue #15, as above
-    if (index < N) {
-        occupant[index as isize] = freelist_owner_generation(owner);
+    if (index < N) {  // GitHub issue #217: checked indexing
+        pool.occupant_generation[index] = freelist_owner_generation(owner);
     }
     return GrowablePoolInsertResult::Allocated(owner);
 }
@@ -238,11 +245,9 @@ fn growable_pool_grow_one_chunk(
             let page_index: usize =
                 page_owner_transfer_index(page_owner) as usize;
             let chunk: usize = pool.active_chunks;
-            let bases = pool.chunk_data_base;   // issue #15, as above
-            let indices = pool.chunk_page_index; // issue #15, as above
-            if (chunk < MAX_CHUNKS) {
-                bases[chunk as isize] = base;
-                indices[chunk as isize] = page_index;
+            if (chunk < MAX_CHUNKS) {  // GitHub issue #217: checked indexing
+                pool.chunk_data_base[chunk] = base;
+                pool.chunk_page_index[chunk] = page_index;
             }
             growable_pool_zero_page(base);
             pool.active_chunks = chunk + 1;
@@ -330,17 +335,20 @@ fn growable_pool_ensure(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHU
 fn growable_pool_remove(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
                         owner: sink FreelistOwner[allocation]) {
     let index: usize = freelist_owner_index(owner);
-    let occupant = pool.occupant_generation;   // issue #15, as above
+    // GitHub issue #217/#296: index is narrowed to {0..<N} for the rest of
+    // this function by the early-return guard just below (issue #296
+    // extended that narrowing to survive an early return, not just a
+    // wrapping if), so these are real checked indices.
     if (index >= N) {
         freelist_owner_drop(owner);
         return;
     }
-    if (occupant[index as isize] == 0) {
+    if (pool.occupant_generation[index] == 0) {
         pool.double_remove_count = pool.double_remove_count + 1;
         freelist_owner_drop(owner);
         return;
     }
-    occupant[index as isize] = 0;
+    pool.occupant_generation[index] = 0;
     freelist_core_remove(&pool.core, owner);
 }
 
@@ -359,8 +367,7 @@ fn growable_pool_active_chunks(
 fn growable_pool_matches(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
                          index: usize, generation: usize) -> bool {
     if (index >= N || generation == 0) { return false; }
-    let occupant = pool.occupant_generation;   // issue #15, as above
-    return occupant[index as isize] == generation;
+    return pool.occupant_generation[index] == generation;  // GitHub issue #217/#296
 }
 
 // Raw pointer to whichever chunk's page backs slot `index` -- no copy,
@@ -376,12 +383,12 @@ fn growable_pool_ptr_for_index(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, 
                                index: usize) -> *T {
     let chunk: usize = index / SLOTS_PER_CHUNK;
     let local: usize = index % SLOTS_PER_CHUNK;
-    let bases = pool.chunk_data_base;   // issue #15, as above
+    // GitHub issue #217: checked indexing (chunk narrowed to {0..<MAX_CHUNKS}).
     if (chunk < MAX_CHUNKS) {
-        let base: usize = bases[chunk as isize];
+        let base: usize = pool.chunk_data_base[chunk];
         return (base as *T) + (local as isize);
     }
-    let base: usize = bases[0];
+    let base: usize = pool.chunk_data_base[0];
     return (base as *T) + (local as isize);
 }
 

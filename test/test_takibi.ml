@@ -7928,6 +7928,52 @@ let codegen_tests = [
           core.next_free[i] = core.free_head;
         }");
 
+  (* GitHub issue #296 codegen-sync regression: type_inf.ml's fallthrough
+     narrowing after an early-return guard proved sound (a function CALL
+     requiring the narrowed type compiled fine, per this file's own
+     type_inf-level #296 tests), but llvm_gen.ml's OWN, separate
+     re-derivation of narrowing (narrowing_ctx/locals -- gen_expr cannot
+     see type_inf's resolved tyenv) was never extended to match, so an
+     Index consuming the SAME narrowed variable right after the guard
+     kept an unnecessary residual bounds check under --forbid-trap. Found
+     while migrating kernel/lib/growable_pool.tkb off its #217 decay
+     workaround -- the exact `if (index >= N) { return; } ...
+     pool.field[index] ...` shape used throughout that file. Both
+     immutable and mutable/parameter cases, since #296 covers both. *)
+  Alcotest.test_case
+    "early-return guard narrowing elides the bounds check for an Index \
+     consumer, not just a function-call consumer (issue #296 codegen \
+     sync)" `Quick
+    (expect_trap_sites 0
+       "fn f296a(idx: usize) -> usize {
+          let mut buf: [usize; 6];
+          if (idx >= 6) { return 0; }
+          return buf[idx];
+        }");
+
+  Alcotest.test_case
+    "early-return guard narrowing elides the bounds check for an Index \
+     consumer through a struct field, matching the real \
+     kernel/lib/growable_pool.tkb shape (issue #296 codegen sync)" `Quick
+    (expect_trap_sites 0
+       "struct Pool296 { occ: [usize; 6]; }
+        fn f296b(pool: *Pool296, idx: usize) {
+          let index: usize = idx;
+          if (index >= 6) { return; }
+          if (pool.occ[index] == 0) { return; }
+          pool.occ[index] = 0;
+        }");
+
+  Alcotest.test_case
+    "early-return guard narrowing elides the bounds check for an \
+     AssignIndex (write) consumer too (issue #296 codegen sync)" `Quick
+    (expect_trap_sites 0
+       "fn f296c(idx: usize) {
+          let mut buf: [usize; 6];
+          if (idx >= 6) { return; }
+          buf[idx] = 1;
+        }");
+
   Alcotest.test_case
     "multi-level struct field chain a.b.c[i] indexes the innermost \
      array field directly (issue #217: only the OUTERMOST field needs \

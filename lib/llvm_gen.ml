@@ -701,6 +701,39 @@ type local_binding =
    gen_expr cannot access locals directly, so type overrides are passed through here. *)
 let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
 
+(* GitHub issue #296 codegen sync: type_inf.ml's own enclosing_future_writes
+   (see that ref's comment) has an exact mirror here, discovered missing
+   only after this issue had already shipped -- type_inf.ml's tyenv proved
+   an early-return-guarded variable narrowed into the fallthrough (so a
+   function CALL requiring that refined type compiled fine), but codegen's
+   OWN, separate re-derivation of narrowing (narrowing_ctx/locals, since
+   gen_expr has no access to type_inf's resolved tyenv) never got the same
+   extension -- so an Index/AssignIndex consuming that same variable right
+   after the guard still emitted (and, under --forbid-trap, still reported)
+   an unnecessary residual bounds check. Not a soundness bug (the emitted
+   check simply never fires, since the value really is in range) but a
+   real --forbid-trap-visible regression from what the type system already
+   proves. Same "written_names of the statements strictly after the one
+   about to be processed" definition as type_inf.ml's ref; kept as a
+   SEPARATE ref (not literally shared) because these are two independent
+   passes over the same AST (type-checking fully completes before codegen
+   starts), so type_inf.ml's own ref is stale/meaningless by the time
+   codegen runs. *)
+let enclosing_future_writes : string list ref = ref []
+
+(* Accumulates early-return-guard fallthrough narrowing (narrowing_ctx
+   entries, and Imm `locals` entries) applied by an `If` statement anywhere
+   in the CURRENT statement list, so that list's own enclosing scope (see
+   run_stmts_with_future_writes, defined per-gen_func call alongside
+   gen_stmt itself since both close over that call's own `locals` table)
+   can restore them once its own iteration completes -- exactly the scope
+   boundary type_inf.ml's tyenv threading provides for free by
+   construction, that this file's shared-mutable-state model has to
+   reconstruct explicitly. The `If` case is the only thing that ever
+   pushes onto these; every other statement kind leaves both alone. *)
+let pending_fallthrough_narrowing_ctx : (string * Ast.type_expr option) list ref = ref []
+let pending_fallthrough_locals : (string * local_binding) list ref = ref []
+
 (* Collect per-variable bounds from an if-condition for codegen narrowing.
    A comparison constrains `Var n` whenever the OTHER operand's static
    value range is known: an integer literal / Const_env constant is
@@ -715,6 +748,44 @@ let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
    variables reached through arithmetic are not consulted here, so codegen
    may keep a check type_inf considered proven -- safe direction, shows up
    as a --forbid-trap site; bind the value to an immutable local to fix. *)
+(* GitHub issue #296 codegen sync: mirrors type_inf.ml's negate_cond
+   exactly (same AST-level transform, no type-checking-specific state
+   involved, so the logic is identical, not just similarly-shaped) --
+   logical negation of a condition expression, for narrowing the
+   fallthrough path after an early-return guard. De Morgan for And/Or,
+   flipped comparisons for relational operators; any other shape returns
+   None rather than guessing. Change together with type_inf.ml's copy. *)
+let rec negate_cond (e : Ast.expr) : Ast.expr option =
+  match e.desc with
+  | BinOp (And, a, b) ->
+      (match negate_cond a, negate_cond b with
+       | Some na, Some nb -> Some { e with desc = BinOp (Or, na, nb) }
+       | _ -> None)
+  | BinOp (Or, a, b) ->
+      (match negate_cond a, negate_cond b with
+       | Some na, Some nb -> Some { e with desc = BinOp (And, na, nb) }
+       | _ -> None)
+  | BinOp (Lt, a, b) -> Some { e with desc = BinOp (Ge, a, b) }
+  | BinOp (Ge, a, b) -> Some { e with desc = BinOp (Lt, a, b) }
+  | BinOp (Le, a, b) -> Some { e with desc = BinOp (Gt, a, b) }
+  | BinOp (Gt, a, b) -> Some { e with desc = BinOp (Le, a, b) }
+  | BinOp (Eq, a, b) -> Some { e with desc = BinOp (Ne, a, b) }
+  | BinOp (Ne, a, b) -> Some { e with desc = BinOp (Eq, a, b) }
+  | _ -> None
+
+(* GitHub issue #296 codegen sync: mirrors type_inf.ml's
+   stmt_always_returns/stmt_list_always_returns exactly -- purely
+   syntactic "does this statement list always return" check, conservative
+   in the safe direction (a loop is never a terminator; any unlisted
+   statement shape returns false). Change together with type_inf.ml's copy. *)
+let rec stmt_always_returns (s : Ast.stmt) : bool = match s.desc with
+  | Ast.Return _ -> true
+  | Ast.If (_, yes, no) ->
+      no <> [] && stmt_list_always_returns yes && stmt_list_always_returns no
+  | Ast.Block body -> stmt_list_always_returns body
+  | _ -> false
+and stmt_list_always_returns stmts = List.exists stmt_always_returns stmts
+
 let collect_bounds_cond (locals : (string, local_binding) Hashtbl.t)
     (cond : Ast.expr) =
   let take_lo a b = match a, b with
@@ -4680,7 +4751,7 @@ let gen_func ?prog_types fdef =
         ) names
 
     | Block stmts ->
-        List.iter gen_stmt stmts
+        run_stmts_with_future_writes stmts
 
     | If (cond, then_stmts, else_stmts) ->
         let cond_v   = as_cond (snd (gen_expr locals cond)) in
@@ -4689,6 +4760,13 @@ let gen_func ?prog_types fdef =
         let merge_bb = append_block context "merge" f in
         let merge_reachable = ref false in
         ignore (build_cond_br cond_v then_bb else_bb builder);
+        (* GitHub issue #296 codegen sync: captured NOW, before then_stmts/
+           else_stmts's own nested run_stmts_with_future_writes calls below
+           overwrite enclosing_future_writes for their own duration -- see
+           that function's own comment for why re-reading the ref
+           afterward would see the wrong (inner) scope's value instead of
+           this If's own position in its enclosing list. *)
+        let future_writes_here = !enclosing_future_writes in
 
         position_at_end then_bb builder;
         let killed     = Ast.written_names then_stmts in
@@ -4696,7 +4774,7 @@ let gen_func ?prog_types fdef =
         let saved      = apply_narrowing     locals cond killed in
         let saved_mut  = apply_narrowing_mut locals cond killed in
         let saved_idx  = apply_slice_index_narrowing cond killed_idx in
-        List.iter gen_stmt then_stmts;
+        run_stmts_with_future_writes then_stmts;
         restore_narrowing     locals saved;
         restore_narrowing_mut saved_mut;
         restore_slice_index_narrowing saved_idx;
@@ -4706,7 +4784,7 @@ let gen_func ?prog_types fdef =
         end;
 
         position_at_end else_bb builder;
-        List.iter gen_stmt else_stmts;
+        run_stmts_with_future_writes else_stmts;
         if block_terminator (insertion_block builder) = None then begin
           merge_reachable := true;
           ignore (build_br merge_bb builder)
@@ -4717,7 +4795,37 @@ let gen_func ?prog_types fdef =
            synthetic merge block without predecessors.  Terminate that block
            explicitly so gen_func's generic fallthrough return cannot invent
            a scalar return for an unreachable aggregate-returning path. *)
-        if not !merge_reachable then ignore (build_unreachable builder)
+        if not !merge_reachable then ignore (build_unreachable builder);
+
+        (* GitHub issue #295/#296 codegen sync: type_inf.ml's own
+           continuation_tyenv, reconstructed here -- when then_stmts always
+           returns, code from here on (the rest of this enclosing
+           statement list) is reached only via the path where `cond` was
+           false, so its negation narrows Imm locals/Mut narrowing_ctx the
+           same way a wrapping `if` already does, UNION'd with the SAME
+           two kill sources type_inf.ml's filter uses: names written
+           anywhere in else_stmts itself (a real else branch's own writes
+           still invalidate the proof for what follows it) and names in
+           future_writes_here (anything written later in this SAME
+           enclosing list, captured above -- issue #296's own extension
+           covering Mut bindings/parameters, not just Imm locals). Pushed
+           onto pending_fallthrough_narrowing_ctx/_locals rather than
+           applied-and-immediately-restored like the then-branch above,
+           so it survives into this list's LATER siblings; run_stmts_
+           with_future_writes' caller restores it once this whole list's
+           own iteration completes (see that function's own comment). *)
+        if stmt_list_always_returns then_stmts then begin
+          match negate_cond cond with
+          | None -> ()
+          | Some neg ->
+              let fallthrough_killed =
+                Ast.written_names else_stmts @ future_writes_here in
+              let f_saved     = apply_narrowing     locals neg fallthrough_killed in
+              let f_saved_mut = apply_narrowing_mut locals neg fallthrough_killed in
+              pending_fallthrough_locals := f_saved @ !pending_fallthrough_locals;
+              pending_fallthrough_narrowing_ctx :=
+                f_saved_mut @ !pending_fallthrough_narrowing_ctx
+        end
 
     | Break ->
         let (break_bb, _) = Stack.top loop_stack in
@@ -4739,7 +4847,7 @@ let gen_func ?prog_types fdef =
 
         position_at_end body_bb builder;
         Stack.push (after_bb, cond_bb) loop_stack;
-        List.iter gen_stmt body;
+        run_stmts_with_future_writes body;
         ignore (Stack.pop loop_stack);
         if block_terminator (insertion_block builder) = None then
           ignore (build_br cond_bb builder);
@@ -4803,7 +4911,7 @@ let gen_func ?prog_types fdef =
         Stack.push (exit_bb, incr_bb) loop_stack;
         let killed_idx = slice_rebind_names body in
         let saved_idx  = apply_for_slice_index_narrowing name hi_expr killed_idx in
-        List.iter gen_stmt body;
+        run_stmts_with_future_writes body;
         restore_slice_index_narrowing saved_idx;
         ignore (Stack.pop loop_stack);
         Hashtbl.remove locals name;
@@ -4858,7 +4966,7 @@ let gen_func ?prog_types fdef =
         let ev = build_load (ltype_of_ast elem_ty) ep "fe_val" builder in
         Hashtbl.add locals name (Imm (elem_ty, to_arith_width elem_ty ev));
         Stack.push (exit_bb, incr_bb) loop_stack;
-        List.iter gen_stmt body;
+        run_stmts_with_future_writes body;
         ignore (Stack.pop loop_stack);
         Hashtbl.remove locals name;
         if block_terminator (insertion_block builder) = None then
@@ -4988,16 +5096,16 @@ let gen_func ?prog_types fdef =
                       Hashtbl.replace locals name (Mut (payload_ty, ptr))
                     end else
                       Hashtbl.replace locals name (Imm (payload_ty, payload_v));
-                    List.iter gen_stmt body;
+                    run_stmts_with_future_writes body;
                     (match old with
                      | Some prior -> Hashtbl.replace locals name prior
                      | None -> Hashtbl.remove locals name)
-                | Some _, None -> List.iter gen_stmt body
-                | None, None -> List.iter gen_stmt body
+                | Some _, None -> run_stmts_with_future_writes body
+                | None, None -> run_stmts_with_future_writes body
                 | None, Some _ -> raise (Error
                     "BUG: numeric enum match arm has a payload binder"))
-           | ArmWild body            -> List.iter gen_stmt body
-           | ArmIntLit (_, body)     -> List.iter gen_stmt body);
+           | ArmWild body            -> run_stmts_with_future_writes body
+           | ArmIntLit (_, body)     -> run_stmts_with_future_writes body);
           if block_terminator (insertion_block builder) = None then begin
             merge_reachable := true;
             ignore (build_br merge_bb builder)
@@ -5041,9 +5149,50 @@ let gen_func ?prog_types fdef =
           Hashtbl.add locals name (Imm (ast_ty, erased_view_value ()));
         let arms = rewrite_letmatch_arm_bodies name arms in
         gen_stmt { desc = Match (disc, arms); loc = s.loc }
+
+  (* GitHub issue #296 codegen sync: drop-in replacement for the plain
+     `List.iter gen_stmt stmts` every statement-list site below used to
+     call directly (function body, Block, If's then/else, While/For/
+     ForEach's body, Match's arms) -- see enclosing_future_writes/
+     pending_fallthrough_*'s own comments above for why both exist. Mirrors type_inf.ml's
+     own comments above for why both exist. Mirrors type_inf.ml's
+     fold_stmts_with_future_writes: set enclosing_future_writes fresh to
+     the SUFFIX after each statement (never the statement itself or
+     anything before it) right before generating it, so the `If` case's
+     own fallthrough-narrowing logic sees the correct enclosing-list
+     position regardless of what any earlier sibling's own nested
+     processing left the ref as. After the whole list finishes, restore
+     every narrowing_ctx/locals entry any `If` in this list pushed onto
+     pending_fallthrough_narrowing_ctx/_locals (an `If`'s fallthrough
+     narrowing is meant to survive into LATER siblings in the SAME list,
+     never past the end of it), then restore the accumulator refs
+     themselves so a nested list's own accumulation doesn't leak into the
+     list that contains it. *)
+  and run_stmts_with_future_writes (stmts : Ast.stmt list) : unit =
+    let saved_pending_ctx = !pending_fallthrough_narrowing_ctx in
+    let saved_pending_locals = !pending_fallthrough_locals in
+    pending_fallthrough_narrowing_ctx := [];
+    pending_fallthrough_locals := [];
+    let rec go = function
+      | [] -> ()
+      | s :: rest ->
+          enclosing_future_writes := Ast.written_names rest;
+          gen_stmt s;
+          go rest
+    in
+    go stmts;
+    List.iter (fun (name, old_opt) ->
+      match old_opt with
+      | None     -> Hashtbl.remove narrowing_ctx name
+      | Some old -> Hashtbl.replace narrowing_ctx name old
+    ) !pending_fallthrough_narrowing_ctx;
+    List.iter (fun (name, old) -> Hashtbl.replace locals name old)
+      !pending_fallthrough_locals;
+    pending_fallthrough_narrowing_ctx := saved_pending_ctx;
+    pending_fallthrough_locals := saved_pending_locals
   in
 
-  List.iter gen_stmt fdef.body;
+  run_stmts_with_future_writes fdef.body;
 
   (* Ensure the exit block has a terminator *)
   if block_terminator (insertion_block builder) = None then begin
