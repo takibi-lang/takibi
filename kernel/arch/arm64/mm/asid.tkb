@@ -92,7 +92,18 @@ fn asid_owner_transfer(owner: sink AsidOwner[asid]) -> usize {
 // occupied, so a fabricated generation of 0 is exactly as sound here as
 // the real one would be.
 fn asid_transferred_release(asid: usize) {
-    if (asid == 0 || asid > ASID_MAX) { return; }
+    // `asid < 1` (not `asid == 0`): equivalent for an unsigned asid, but
+    // `<`/`>` narrow this file's range-narrowing machinery the same way
+    // the already-supported `if (v >= 0 && v < N)` wrapping-if form does,
+    // where `==`/`!=` do not -- GitHub issue #296 extended fallthrough
+    // narrowing to this function's own `asid` parameter (previously
+    // excluded, being non-`let`), which surfaced that `asid - 1` below
+    // could not be proven non-negative from the `!=`-shaped guard's own
+    // negation even though it always is at runtime (the guard already
+    // rules out asid == 0). Rewritten rather than left unproven or
+    // marked unsafe, since an equivalent, already-provable condition
+    // shape was available.
+    if (asid < 1 || asid > ASID_MAX) { return; }
     let index: usize = asid - 1;
     slotmap_remove(&asid_pool, freelist_owner_new(index, 0));
 }

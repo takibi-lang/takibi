@@ -83,6 +83,57 @@ let active_readonly_borrows : StringSet.t ref = ref StringSet.empty
 let function_param_modes : Ast.type_expr option list StringMap.t ref =
   ref StringMap.empty
 
+(* GitHub issue #296: names any statement in the CURRENT (innermost)
+   enclosing statement list writes to (Ast.written_names -- already used
+   by if-condition narrowing's own then-branch kill logic, and already
+   correctly covers nested Assigns, &mut aliasing, and same-name `let`
+   re-declarations, not just a bare top-level `name = e;`). Set by each
+   statement-list fold site (Block, function body, If's then/else,
+   While/For/ForEach's body, Match/LetMatch arms) to written_names of
+   the list about to be folded, save/restore around that fold exactly
+   like active_static_scope above -- so by the time a NESTED If's own
+   continuation-narrowing logic reads this ref, it reflects the
+   INNERMOST enclosing list, correctly modeling lexical nesting.
+   Consulted ONLY by the If case below, to decide whether a MUTABLE
+   binding's early-return-guard narrowing can survive into the
+   fallthrough continuation without risking a later sibling assignment
+   invalidating it -- see that case's own comment for why the mut-only
+   restriction this ref replaces was needed in the first place, and why
+   this is sound (deliberately over-approximate: it uses "written
+   ANYWHERE in the enclosing list", not the precise suffix after this
+   exact If, which only ever makes narrowing MORE conservative, never
+   less). *)
+let enclosing_future_writes : StringSet.t ref = ref StringSet.empty
+
+(* Drop-in replacement for `List.fold_left f init stmts` that keeps
+   enclosing_future_writes correct at every step. Sets it to
+   written_names of the SUFFIX strictly after the statement about to be
+   processed (never the statement itself or anything before it) --
+   critical, since Ast.written_names' own Let case adds the declared
+   name to its result (by design, for narrow_from_cond's kill-set use;
+   see its own comment), so using it over the WHOLE list (this file's
+   first attempt) flagged a variable as "future-written" by its OWN
+   declaring `let`, permanently defeating narrowing for every local.
+   Re-set fresh before EVERY element rather than saved/restored around
+   the whole fold: a nested statement's own recursive use of this same
+   function (its own If/Block/etc. case processing a nested body) freely
+   overwrites the ref for its own duration and this function's next step
+   simply overwrites it again with the CORRECT value for this list's own
+   next position -- no stack or restore needed, since every genuine use
+   site (the If case below) captures the ref's value into a local BEFORE
+   recursing into its own then/else bodies, rather than re-reading the
+   ref afterward once nested processing may have left it in an unrelated
+   state. *)
+let fold_stmts_with_future_writes
+    (f : 'a -> Ast.stmt -> 'a) (init : 'a) (stmts : Ast.stmt list) : 'a =
+  let rec go acc = function
+    | [] -> acc
+    | s :: rest ->
+        enclosing_future_writes := StringSet.of_list (Ast.written_names rest);
+        go (f acc s) rest
+  in
+  go init stmts
+
 let view_kinds : (string, Ast.opaque_kind) Hashtbl.t = Hashtbl.create 8
 let view_params : (string, Ast.static_param list) Hashtbl.t = Hashtbl.create 8
 let variant_defs : (string, (string * Ast.type_expr option) list) Hashtbl.t =
@@ -3416,7 +3467,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
           raw_locals names comp_tys )
   | Block stmts ->
       (* Let bindings extend the inner env but do not escape the block *)
-      let (_, raw_locals') = List.fold_left
+      let (_, raw_locals') = fold_stmts_with_future_writes
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
         (tyenv, raw_locals) stmts
       in
@@ -3424,12 +3475,19 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
   | If (cond, then_s, else_s) ->
       let ct = infer_expr senv eenv tyenv fenv cond in
       check_cond cond.loc ct;
+      (* Captured NOW, before then_s/else_s's own nested folds below
+         (each a fold_stmts_with_future_writes call in its own right)
+         overwrite enclosing_future_writes for their own duration -- see
+         that function's own comment for why re-reading the ref after
+         nested processing would see the wrong (inner) scope's value
+         instead of this If's own position in ITS enclosing list. *)
+      let future_writes_here = !enclosing_future_writes in
       let then_tyenv = narrow_from_cond tyenv cond then_s in
-      let (_, rl1) = List.fold_left
+      let (_, rl1) = fold_stmts_with_future_writes
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
         (then_tyenv, raw_locals) then_s
       in
-      let (_, rl2) = List.fold_left
+      let (_, rl2) = fold_stmts_with_future_writes
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
         (tyenv, rl1) else_s
       in
@@ -3452,45 +3510,49 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          union of ranges, so an And-shaped guard's negated Or cannot
          narrow anything) falls back to today's exact behavior.
 
-         MUT-ONLY restriction, found the hard way against real kernel
-         code (kernel/drivers/net/virtio_net.tkb's `if (initialized !=
-         0) { return Failed; } initialized = 1;` init-guard idiom broke
-         on the first whole-kernel build after this feature was added):
-         then_tyenv's own narrowing above is safe because it is used
-         ONLY for checking statements inside then_s itself, in the same
-         List.fold_left that naturally re-threads the environment after
-         each statement -- a write anywhere inside then_s is checked
-         against then_s's own kill set first. This continuation
-         environment is different in kind: it survives into arbitrarily
-         many SIBLING statements after this whole if, which this `If`
-         case has no visibility into (infer_stmt/the enclosing Block's
-         fold processes one statement at a time), so a later plain
-         assignment to a narrowed MUTABLE variable would otherwise be
-         checked against the stale narrowed type instead of its
-         declared type -- exactly virtio_net.tkb's `initialized = 1;`
-         after `initialized` had just been narrowed to {0..<1} by the
-         guard above it, rejecting the plainly-valid assignment.
-         Restricting this to IMMUTABLE bindings only sidesteps the
-         problem by construction: a `let` (not `let mut`) binding can
-         never be reassigned (enforced above at the "cannot assign to
-         immutable variable" check), so no later sibling statement can
-         ever invalidate an immutable narrowing this way. A full fix for
-         mutable variables would need the enclosing block's own
-         statement-list fold to know what its LATER statements write
-         before trusting a narrowing this far ahead -- a real, separate,
-         higher-risk change to the shared statement-list-processing
-         pattern used throughout this file, not attempted here. *)
-      let only_immutable_narrowing env =
+         GitHub issue #296: this continuation environment survives into
+         arbitrarily many SIBLING statements after this whole if, unlike
+         then_tyenv's own narrowing above (used only for checking
+         statements INSIDE then_s itself, in the same List.fold_left
+         that re-threads the environment after each statement, so a
+         write anywhere inside then_s is checked against then_s's own
+         kill set first). Originally restricted to IMMUTABLE bindings
+         only, found the hard way against real kernel code
+         (kernel/drivers/net/virtio_net.tkb's `if (initialized != 0) {
+         return Failed; } initialized = 1;` init-guard idiom broke on
+         the first whole-kernel build after this feature was first
+         added): a later plain assignment to a narrowed MUTABLE variable
+         was checked against the stale narrowed type instead of its
+         declared type, rejecting the plainly-valid assignment. Now uses
+         enclosing_future_writes (set by this If's own enclosing
+         statement-list fold, see that ref's own comment) instead of a
+         blanket mutability filter: a mutable binding keeps its
+         narrowing into the continuation exactly when no statement
+         anywhere in the SAME enclosing list writes to it, which covers
+         virtio_net.tkb's shape (the write is caught, narrowing is
+         correctly dropped for `initialized`) while still letting a
+         mutable variable that is never reassigned after the guard (the
+         actual common case, and the whole point of this feature) keep
+         its narrowing. Applied to ALL bindings, not just mutable ones,
+         since it strictly subsumes the old immutable case (an
+         immutable name can never appear in written_names from an
+         ordinary reassignment, only from a same-name shadowing `let`
+         re-declaration -- which SHOULD also invalidate the old
+         narrowing, a latent gap the old mutability-only filter never
+         covered either). *)
+      let filter_by_future_writes env =
         StringMap.mapi (fun name entry ->
-          match StringMap.find_opt name tyenv with
-          | Some ((_, true) as original) when entry <> original -> original
-          | _ -> entry
+          if StringSet.mem name future_writes_here then
+            match StringMap.find_opt name tyenv with
+            | Some original when entry <> original -> original
+            | _ -> entry
+          else entry
         ) env
       in
       let continuation_tyenv =
         if stmt_list_always_returns then_s then
           match negate_cond cond with
-          | Some neg -> only_immutable_narrowing (narrow_from_cond tyenv neg else_s)
+          | Some neg -> filter_by_future_writes (narrow_from_cond tyenv neg else_s)
           | None -> tyenv
         else tyenv
       in
@@ -3498,7 +3560,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
   | While (cond, body) ->
       let ct = infer_expr senv eenv tyenv fenv cond in
       check_cond cond.loc ct;
-      let (_, raw_locals') = List.fold_left
+      let (_, raw_locals') = fold_stmts_with_future_writes
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
         (tyenv, raw_locals) body
       in
@@ -3576,7 +3638,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       locally_bound_names := StringSet.add name !locally_bound_names;  (* issue #214 *)
       let body_env = StringMap.add name (idx_ty, false) tyenv in
       let raw_locals = StringMap.add ("__for_" ^ name) idx_ty raw_locals in
-      let (_, raw_locals') = List.fold_left
+      let (_, raw_locals') = fold_stmts_with_future_writes
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
         (body_env, raw_locals) body
       in
@@ -3614,7 +3676,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
            (* Element is an immutable per-iteration value of the element type. *)
            locally_bound_names := StringSet.add name !locally_bound_names;  (* issue #214 *)
            let body_env = StringMap.add name (el, false) tyenv in
-           let (_, raw_locals') = List.fold_left
+           let (_, raw_locals') = fold_stmts_with_future_writes
              (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
              (body_env, raw_locals) body
            in
@@ -3628,7 +3690,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
   | Match (disc, arms) ->
       let dt = infer_expr senv eenv tyenv fenv disc in
       let infer_arm_body env rl body =
-        let (_, rl') = List.fold_left
+        let (_, rl') = fold_stmts_with_future_writes
           (fun (env, locs) stmt ->
             infer_stmt senv eenv env fenv ret_ty locs in_loop stmt)
           (env, rl) body
@@ -3973,7 +4035,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
       (fun m (name, _) ty -> StringMap.add name (ty, true) m)
       genv fdef.params param_tys
     in
-    let (_, raw_locals) = List.fold_left
+    let (_, raw_locals) = fold_stmts_with_future_writes
       (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs false s)
       (init_env, StringMap.empty) fdef.body
     in
@@ -3996,6 +4058,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
 
 let infer_program (prog : Ast.toplevel list) : program_types =
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
+  enclosing_future_writes := StringSet.empty;  (* fresh per compilation / per unit test *)
   resolved_call_targets := StringMap.empty;
   resolved_indirect_call_effects := StringMap.empty;
   (* GitHub issue #79 follow-up: ONE flat namespace for every top-level

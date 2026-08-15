@@ -15,6 +15,93 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: Early-Return-Guard Narrowing Extended to Mutable Bindings/Parameters (GitHub Issue #296)
+
+Issue #295's own follow-up fix (commit 7ef912c) had narrowed the
+fallthrough path after an early-return guard (`if (cond) { return
+...; }` with no else) for IMMUTABLE `let` bindings only, deliberately
+excluding mutable locals and ordinary (non-`mut`) function parameters
+-- both assignable in this language -- after an unrestricted first
+attempt broke `kernel/drivers/net/virtio_net.tkb`'s `if (initialized !=
+0) { return Failed; } initialized = 1;` init-guard idiom on the first
+whole-kernel build: the narrowed `{0..<1}` type for `initialized`
+survived into the very next statement, an ordinary assignment of `1`,
+and rejected a plainly valid write.
+
+Fixed via `enclosing_future_writes`, a `StringSet.t ref` set by every
+statement-list fold (`fold_stmts_with_future_writes`, replacing the
+raw `List.fold_left` at each of `lib/type_inf.ml`'s ~8 statement-list
+processing sites: `Block`, `If`'s then/else, `While`/`For`/`ForEach`'s
+body, `Match`/`LetMatch`'s shared `infer_arm_body`, and the function
+body itself) to `Ast.written_names` of the statements strictly AFTER
+the one about to be processed. The `If` case captures this into a local
+(`future_writes_here`) at the very start of its own processing, before
+recursing into its then/else bodies' own nested folds (which
+legitimately overwrite the ref for their own duration) -- reading the
+ref itself, rather than a value captured before recursion, would have
+seen whatever the LAST nested statement happened to leave it as, not
+this `If`'s own correct position in its enclosing list. A binding then
+keeps its narrowing into the continuation exactly when no statement
+anywhere in the same enclosing list writes to it afterward, which
+directly excludes the exact virtio_net.tkb shape (a dedicated
+regression test reproduces it) while finally allowing the common case
+this issue was filed for: a mutable/parameter binding that is checked
+once and never reassigned.
+
+Of the two directions the issue itself raised, this is closer to
+"Direction 2" (a block-level look-ahead kill set) than the "Direction 1"
+it tentatively favored (re-deriving `Assign`'s check target from
+`raw_locals` instead of `tyenv`, then somehow updating `tyenv`
+afterward) -- Direction 1 turned out to have a real soundness gap on
+inspection: `tyenv` is threaded purely functionally through
+`infer_stmt`'s fold, and `Assign` lives inside `infer_expr`, which has
+no mechanism to hand an updated `tyenv` back to its caller, so a stale
+narrowed entry would keep incorrectly eliding bounds checks on later
+READS even if the write-time check were separately relaxed. Direction
+2's kill-set approach sidesteps this by never letting the unsound
+narrowing exist in `tyenv` in the first place, at the cost of the
+larger, multi-site threading change the issue's own text flagged as
+higher-risk -- taken on directly here rather than attempting Direction
+1's smaller diff first, given the soundness gap was identified before
+any implementation began. Deliberately conservative: `written_names`
+is computed once over the WHOLE remaining suffix, not the precise
+statement-by-statement reachability set, and also correctly excludes a
+same-name shadowing `let` re-declaration (which should invalidate an
+old narrowing too, a gap the old mutability-only filter never covered
+either) since `written_names`' own `Let` case already adds the
+declared name.
+
+One real, pre-existing checker limitation surfaced immediately on the
+first real-kernel rebuild, distinct from this issue's own logic:
+`kernel/arch/arm64/mm/asid.tkb`'s `asid_transferred_release(asid:
+usize)` guards with `if (asid == 0 || asid > ASID_MAX) { return; }`,
+previously never narrowed at all (a bare parameter, excluded by the old
+mutability filter) -- now narrowed, it exposed that this range system's
+`==`/`!=` comparisons do not raise a range's lower bound the way
+`<`/`>=` already do, so the negated guard's `asid != 0` conjunct
+contributed nothing, leaving `asid`'s post-guard range at `{0..<17}`
+instead of `{1..<17}`, and `asid - 1` computed the out-of-range
+`{-1..<16}`. The code was always runtime-safe; only the checker's proof
+was incomplete. Fixed by rewriting the guard to `asid < 1 ||
+asid > ASID_MAX` (equivalent for an unsigned value, but using the
+comparison shape this range system already understands, matching the
+already-established `if (v >= 0 && v < N)` wrapping-if idiom) rather
+than extending `==`/`!=` range narrowing in the same pass -- that
+remains issue #282's own explicitly low-priority, separate scope.
+
+Verified: `dune runtest` (1016/1016 -- one existing test flipped from
+`expect_type_error` to `expect_ok` matching the now-intended behavior,
+plus two new regression cases reproducing and confirming the
+virtio_net.tkb shape stays correctly excluded), `langcheck`,
+`linuxcheck` (full suite), a clean `kernelbuild-qemu`/`kernelbuild-rpi5`
+(the `asid.tkb` gap was caught here, at compile time, on the first
+build attempt), a full `kernelcheck-qemu` real-boot run (38 views
+including `asid_pool`, ash/TCP integration, PTY smoke test), and --
+per this issue's own acceptance criteria, not satisfied by a
+compile-only or QEMU-only pass -- a full `kernelcheck-rpi5` real-
+hardware run (38/38 views, including `asid_pool`), all with no
+regressions.
+
 ### 2026-08-15: `UserRange` Split Into `UserReadRange`/`UserWriteRange` (GitHub Issue #199)
 
 `kernel/mm/user_memory.tkb`'s `UserRange` carried its validated

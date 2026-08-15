@@ -3822,32 +3822,33 @@ let infer_tests = [
       "fn foo(i: {0..<8 as i32}) {} \
        fn f(v: i32) { if (0 <= v && v < 8) { foo(v); } }");
 
-  (* GitHub issue #295 follow-up: an early-return guard narrows the
-     FALLTHROUGH path (code after the if, not a `then`/`else` body) via
-     the condition's own logical negation, when the guarded branch always
-     returns and there is no else. Found while writing kernel/net/tcp.tkb's
-     pending_tcp_record: `if (found < 0 || found >= 4) { return -1; }`
-     followed by code needing found: {0..<4} previously had no way to
-     prove that range short of restructuring into the already-supported
-     wrapping-if form.
+  (* GitHub issue #295 follow-up (extended by #296, see below): an
+     early-return guard narrows the FALLTHROUGH path (code after the if,
+     not a `then`/`else` body) via the condition's own logical negation,
+     when the guarded branch always returns and there is no else. Found
+     while writing kernel/net/tcp.tkb's pending_tcp_record: `if (found <
+     0 || found >= 4) { return -1; }` followed by code needing found:
+     {0..<4} previously had no way to prove that range short of
+     restructuring into the already-supported wrapping-if form.
 
-     IMMUTABLE ONLY: found the hard way against real kernel code
-     (kernel/drivers/net/virtio_net.tkb's `if (initialized != 0) {
-     return Failed; } initialized = 1;` init-guard idiom broke on the
-     first whole-kernel build after an unrestricted version of this
-     feature was added -- the narrowed {0..<1} type for `initialized`
+     GitHub issue #296: originally restricted to immutable `let` bindings
+     only (found the hard way against real kernel code --
+     kernel/drivers/net/virtio_net.tkb's `if (initialized != 0) { return
+     Failed; } initialized = 1;` init-guard idiom broke on the first
+     whole-kernel build after an unrestricted version of this feature was
+     first added, since the narrowed {0..<1} type for `initialized`
      survived into the very next statement, an ordinary assignment of 1
-     to it, and rejected a plainly valid write). Restricted to immutable
-     `let` bindings, which can never be reassigned, sidestepping that
-     failure mode entirely rather than attempting to track every
-     possible later write across an unbounded number of sibling
-     statements this `If` case cannot see. This means an ordinary,
-     non-`mut` function PARAMETER -- assignable by default in this
-     language even without a `mut` keyword on the parameter itself, see
-     the "does NOT narrow a mutable parameter" test below -- is not
-     narrowed either; every positive test below therefore copies the
-     guarded parameter into an immutable local first (`let n: i32 = v;`),
-     matching the shape pending_tcp_record itself used. *)
+     to it, and rejected a plainly valid write). Now extended to mutable
+     bindings AND ordinary (non-`mut`) function parameters -- both
+     assignable in this language -- via enclosing_future_writes: a
+     mutable/parameter binding keeps its narrowing into the continuation
+     exactly when NO statement anywhere in the same enclosing list writes
+     to it afterward (see that ref's own comment in lib/type_inf.ml). The
+     virtio_net.tkb shape is exactly the case this excludes: `initialized`
+     IS written later (by `initialized = 1;`), so its narrowing is
+     correctly dropped and the assignment is checked against its ordinary
+     declared type, not a stale narrowed one -- see the dedicated
+     regression test below. *)
   Alcotest.test_case "early-return guard (De Morgan of ||) narrows the \
                        fallthrough path for an immutable local" `Quick
     (expect_ok
@@ -3859,13 +3860,39 @@ let infer_tests = [
          return 0; \
        }");
 
-  Alcotest.test_case "early-return guard does NOT narrow a mutable \
-                       function parameter (only immutable bindings are \
-                       narrowed -- see this test block's header comment)" `Quick
-    (expect_type_error "unproven i32"
+  Alcotest.test_case "early-return guard (issue #296) narrows a mutable \
+                       function parameter that is never reassigned \
+                       afterward" `Quick
+    (expect_ok
       "fn foo(i: {0..<4 as i32}) {} \
        fn f(v: i32) -> i32 { \
          if (v < 0 || v >= 4) { return -1; } \
+         foo(v); \
+         return 0; \
+       }");
+
+  Alcotest.test_case "early-return guard (issue #296 regression: the \
+                       virtio_net.tkb shape) drops narrowing for a \
+                       variable reassigned later in the same enclosing \
+                       list, so the later assignment is checked against \
+                       its declared type, not a stale narrowed one" `Quick
+    (expect_ok
+      "fn f(v: i32) -> i32 { \
+         if (v != 0) { return -1; } \
+         v = 5; \
+         return v; \
+       }");
+
+  Alcotest.test_case "early-return guard (issue #296): a variable \
+                       reassigned later still cannot be passed where the \
+                       narrowed range would have been required (the \
+                       dropped narrowing is not silently kept for reads \
+                       either)" `Quick
+    (expect_type_error "unproven i32"
+      "fn foo(i: {0..<1 as i32}) {} \
+       fn f(v: i32) -> i32 { \
+         if (v != 0) { return -1; } \
+         v = 5; \
          foo(v); \
          return 0; \
        }");
