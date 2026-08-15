@@ -15,6 +15,79 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: A Local Binding Now Shadows a Same-Named Private Global From a Different File (GitHub Issue #214)
+
+`check_private_global_access` (`lib/type_inf.ml`, GitHub issue #108) rejected
+any identifier matching a `private let` global's name whenever the use site's
+own file differed from the global's declaring file -- even when that
+identifier actually resolved to an ordinary local binding (a function
+parameter, `let`, tuple-destructure name, for-loop counter, foreach element,
+or let-match name) in the function currently being checked, which should
+shadow the global entirely and never reference it at all. The check had
+always been by NAME only, a known limitation on record since issue #108
+itself. It surfaced twice in the same session while building
+`linux_user/freelist_generic/` (issue #207's generics follow-on): a
+`backing` parameter and, separately, a `core` parameter, each colliding
+with an unrelated file's own `private let` of the same name, each requiring
+a rename to work around (see that file's `backing_storage`/`pool_core`
+naming, left as-is -- reverting the workaround was not required to close
+this and was out of scope).
+
+Fixed by adding `locally_bound_names`, a `StringSet.t ref` tracking every
+name bound by a local declaration in the function currently being
+type-checked. Reset once per `infer_func` call and seeded with that
+function's own parameter names (mirroring `infer_func`'s own "start with
+globals visible, then shadow them with params" `tyenv` construction), then
+extended at every other site that introduces a genuinely new local name:
+`Let`, `LetTuple`, the `for` counter, `ForEach`'s element, and `LetMatch`.
+`check_private_global_access` now short-circuits when the referenced name
+is in this set, before ever consulting the `private_globals` table.
+Deliberately NOT implemented via physical-equality comparison against a
+snapshot of the global environment (`genv`) -- that would have been a
+smaller diff, but a global's own type can be refined by ordinary
+if-narrowing inside a function body, producing a new physically-distinct
+tuple for the SAME global; treating that as "shadowed" would have silently
+disabled the privacy check for a narrowed private global, flipping the
+failure mode from the existing safe direction (false-positive compile
+error) to an unsafe one (silently permitted violation).
+
+Verified with `dune runtest` (1005/1005, three new regression cases: a
+same-named parameter shadowing across files, a same-named local `let`
+shadowing across files, and a negative control confirming an unrelated
+function's same-named parameter does not mask a genuine same-name
+cross-file violation elsewhere), plus `make kernelbuild-qemu` and
+`make linuxbuild` (including `linux_user/freelist_generic/` itself, the
+file that originally hit this) as a broader smoke test of the whole-program
+type-checking path this change touches.
+
+### 2026-08-15: Issue #233's Intermittent `child_exec` Flake Closed After 33 Consecutive Real-Hardware Passes, No Repro
+
+Attempted to reproduce issue #233 (an intermittent `child_exec` view failure
+on `make kernelcheck-rpi5`, originally measured at roughly 1-in-6-to-8 boots)
+now that its own follow-up fix (commit `96a29a5`, archiving the full capture
+on any view failure to `_build/kernel-hwtest-rpi5-failures/<timestamp>-<view>/`)
+is in place to actually preserve evidence if it fires.
+
+Ran `make kernelcheck-rpi5` 33 times in a row on real RPi5 hardware. Every
+run passed all 38 views, including `child_exec` every time, and the failure
+archive directory stayed empty throughout -- it was never triggered.
+Statistically, if the original ~1-in-6-to-8 rate still held, the probability
+of 33 consecutive passes is roughly 0.2%-1.2% (`(1 - 1/6)^33 ~ 0.0024`,
+`(1 - 1/8)^33 ~ 0.0122`), strong evidence the failure mode is either far
+rarer than the original 14-run sample suggested, or was tied to something no
+longer present -- issue #233's own text had already flagged that its two
+original reproductions could not distinguish a real execve/wait4 functional
+bug from a host-side UART capture drop, and this session's runs postdate
+both issue #232's silent-miscompilation fix and issue #234's follow-up
+hardening, either of which could plausibly have been the actual cause.
+
+Closed without a code change, given the strength of this negative result and
+to avoid further tying up shared RPi5 lab hardware chasing a rate this low.
+The failure-archive infrastructure remains in place; if this resurfaces, the
+next occurrence will preserve its own `uart.log`/transcript for real
+diagnosis instead of being silently overwritten the way both of the original
+reproductions were.
+
 ### 2026-08-14: Full `-g` kernel build restored; checkpoint-frame `return` deliberately not adopted (issue #301)
 
 The remaining native segfault in `make kernelbuild-qemu-debug` was traced
