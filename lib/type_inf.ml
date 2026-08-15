@@ -1225,6 +1225,24 @@ let check_aligned_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
                (to_string tgt) (to_string tgt))))
   | _ -> ()
 
+(* GitHub issue #239: companion to types.ml's of_ast_in_scope check, for the
+   handful of sites that mint a *T directly from an already-resolved `ty`
+   (array-to-pointer decay, address-of) rather than from an Ast.type_expr
+   annotation -- an of_ast_in_scope-only check would miss e.g. `let mut p:
+   *u8 = ...; let pp = &p;` (pp's `**u8` is never written down, so no
+   TypePtr AST node exists to reject; it is inferred straight from p's own
+   already-resolved ty). Every other TPtr/TAlignedPtr construction in this
+   file reconstructs an element type taken from an ALREADY pointer-typed
+   value (pointer arithmetic, deref widening), so it can only repeat a
+   nesting level that would already have been rejected when that pointer
+   was first minted; only true minting sites need this call. *)
+let check_no_nested_ptr_mint loc (inner : ty) =
+  if is_ty_pointer_shaped inner then
+    raise (TypeError (loc,
+      "nested pointer indirection (e.g. **T) is not allowed; \
+       Takibi has no ownership/lifetime model for multi-level pointers \
+       (GitHub issue #239)"))
+
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
@@ -1252,6 +1270,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    actual motivating shape (examples/common_stm32/eth.tkb's
                    `eth_rx_bufs`, a DMA buffer array used bare as its own
                    base address). *)
+                check_no_nested_ptr_mint e.loc inner;
                 (match StringMap.find_opt name !var_align_bytes with
                  | Some n -> TAlignedPtr (n, inner)
                  | None -> TPtr inner)
@@ -3033,6 +3052,7 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
         | `Ptr ->
             (* GitHub issue #102: &x on an align(N)-declared variable proves
                *align(N) T, same source as the array-decay case above. *)
+            check_no_nested_ptr_mint e.loc t;
             (match StringMap.find_opt name !var_align_bytes with
              | Some n -> TAlignedPtr (n, t)
              | None -> TPtr t))
@@ -3060,7 +3080,7 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
         | Some ft ->
             let ft_ty = of_ast ft in
             (match wrap with
-             | `Ptr -> TPtr ft_ty
+             | `Ptr -> check_no_nested_ptr_mint e.loc ft_ty; TPtr ft_ty
              | `Ref -> TRef ft_ty
              | `RefMut -> TRefMut ft_ty)
         | None -> raise (TypeError (e.loc,
@@ -3105,7 +3125,9 @@ and infer_field_access ~decay senv eenv tyenv fenv (loc : Ast.loc)
            let raw = field_type_for_instance sname static_args ft in
            if not decay then raw
            else (match raw with
-             | TArray (inner, _) -> TPtr inner  (* array field decays to *elem *)
+             | TArray (inner, _) ->
+                 check_no_nested_ptr_mint loc inner;
+                 TPtr inner  (* array field decays to *elem *)
              | TIo    inner      -> inner        (* io field returns value type T (volatile handled in codegen) *)
              | t                 -> t)
        | None ->

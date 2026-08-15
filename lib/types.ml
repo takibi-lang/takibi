@@ -148,6 +148,17 @@ let rec repr = function
       let t' = repr t in r := Link t'; t'
   | t -> t
 
+(* GitHub issue #239 companion to of_ast_in_scope's Ast.type_expr-level
+   check: guards the `ty`-level minting sites (array decay, address-of)
+   where a *T is constructed directly from an already-resolved `ty`
+   rather than from an Ast.type_expr annotation, so of_ast_in_scope's
+   check alone would not see it. Same io-qualifier-stripping rule. *)
+let rec is_ty_pointer_shaped t =
+  match repr t with
+  | TPtr _ | TAlignedPtr _ -> true
+  | TIo t -> is_ty_pointer_shaped t
+  | _ -> false
+
 let rec to_string t =
   match repr t with
   | TBool -> "bool"
@@ -548,6 +559,25 @@ let static_of_ast scope = function
   | Ast.StaticInt n -> SConst n
   | Ast.StaticEnum (name, case) -> SEnum (name, case)
 
+(* GitHub issue #239: reject *T where T is itself pointer-shaped, i.e. two
+   levels of raw pointer indirection (written * *T, *align(N) *T, *io *T,
+   and so on). Nested indirection introduces ownership/lifetime/provenance
+   questions the language does not otherwise need to solve, and no kernel
+   code needs it (a repo-wide survey found zero genuine uses). `io` is a
+   qualifier, not a pointer layer, so it is stripped before checking --
+   `*io T` stays legal as long as T itself is not pointer-shaped. *)
+let rec is_pointer_shaped = function
+  | Ast.TypePtr _ | Ast.TypeAlignedPtr _ -> true
+  | Ast.TypeIo t -> is_pointer_shaped t
+  | _ -> false
+
+let reject_nested_pointer t =
+  if is_pointer_shaped t then
+    raise (TypeError (Lexing.dummy_pos,
+      "nested pointer indirection (e.g. **T) is not allowed; \
+       Takibi has no ownership/lifetime model for multi-level pointers \
+       (GitHub issue #239)"))
+
 let rec of_ast_in_scope scope = function
   | Ast.TypeBool     -> TBool
   | Ast.TypeI8       -> TI8  | Ast.TypeI16 -> TI16 | Ast.TypeI32 -> TI32 | Ast.TypeI64 -> TI64
@@ -557,7 +587,7 @@ let rec of_ast_in_scope scope = function
   | Ast.TypeIsize    -> TIsize
   | Ast.TypeUsize    -> TUsize
   | Ast.TypeVoid     -> TVoid
-  | Ast.TypePtr   t      -> TPtr   (of_ast_in_scope scope t)
+  | Ast.TypePtr   t      -> reject_nested_pointer t; TPtr   (of_ast_in_scope scope t)
   | Ast.TypeIo    t      -> TIo (of_ast_in_scope scope t)
   | Ast.TypeArray (t, n) -> TArray (of_ast_in_scope scope t, n)
   | Ast.TypeFn (ps, r, effects) ->
@@ -582,7 +612,7 @@ let rec of_ast_in_scope scope = function
   | Ast.TypeTuple ts -> TTuple (List.map (of_ast_in_scope scope) ts)
   | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t ->
       of_ast_in_scope scope t
-  | Ast.TypeAlignedPtr (n, t) -> TAlignedPtr (n, of_ast_in_scope scope t)
+  | Ast.TypeAlignedPtr (n, t) -> reject_nested_pointer t; TAlignedPtr (n, of_ast_in_scope scope t)
   | Ast.TypeRef t -> TRef (of_ast_in_scope scope t)
   | Ast.TypeRefMut t -> TRefMut (of_ast_in_scope scope t)
   | Ast.TypeKind ->

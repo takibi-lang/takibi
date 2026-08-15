@@ -15,6 +15,80 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: Reject Pointer-to-Pointer Types Such As `**T` (Issue #239)
+
+Scoping issue #218 (calculated-integer-to-pointer cast audit boundary)
+surfaced two related, larger issues: #316 (whether `*io T` needs its own
+unsafe gate) and a measurement that a blanket unsafe mandate on
+non-affine pointer casts would hit 1146 sites across ~30 files, mostly
+DMA ring/buffer offset arithmetic rather than genuine hardware
+boundaries -- posted as a comment on #316 rather than re-litigated here.
+Before tackling that larger reduction, closed the two cheapest, lowest-
+risk doors first: #239 (this entry) and #240 (reject pointer struct
+fields, not yet done).
+
+**What changed.** `*T` where `T` is itself pointer-shaped (`**T`,
+`*align(N) *T`, `*io *T`, and so on through any struct/array/field
+nesting) is now a compile-time error. A repo-wide survey found zero
+genuine `**T` uses in `kernel/`/`examples/` -- the one grep hit
+(`examples/common_stm32/sdmmc.tkb`) was markdown-bold text in a comment,
+not code.
+
+**Two enforcement layers were needed, not one.** The obvious spot,
+`lib/types.ml`'s `of_ast_in_scope` (the sole `Ast.type_expr -> ty`
+conversion point, covering every declared type: parameters, fields,
+return types, `let` annotations), catches any `**T` written down
+explicitly. But `**T` can also arise purely through inference, with no
+`Ast.TypePtr` AST node ever existing to reject: `let mut p: *u8 = ...;
+let pp = &p;` infers `pp: **u8` entirely from `p`'s own already-resolved
+`ty`, bypassing `of_ast_in_scope` completely (confirmed by hand before
+fixing it -- the codegen output showed the bare compile succeeding). Four
+`ty`-level "minting" sites in `lib/type_inf.ml` needed the same guard:
+a bare array-of-pointers variable decaying to a pointer
+(`infer_expr`'s `Var` case), address-of on a pointer-typed local or
+pointer-typed struct field (`infer_addrof_wrapped`'s `Var`/`FieldGet`
+cases), and an array-of-pointers struct field decaying on read
+(`infer_field_access`). Every OTHER `TPtr`/`TAlignedPtr` construction in
+`type_inf.ml` (pointer arithmetic, deref widening) merely reconstructs
+an element type taken from an ALREADY pointer-typed value, so by
+induction it can only repeat a nesting level that would have been
+rejected at its own original mint site -- only true minting sites needed
+the new check. Two `ty`- and `Ast.type_expr`-level predicates
+(`is_ty_pointer_shaped` in `types.ml`, `is_pointer_shaped` on
+`Ast.type_expr` also in `types.ml`) both strip `TIo`/`TypeIo` before
+checking, since `io` is a qualifier, not a pointer layer -- `*io T`
+stays legal as long as `T` itself is not pointer-shaped.
+
+**Existing tests relied on `**T` as a vehicle for testing something
+else, and broke.** Three pre-existing tests used `**T` positions
+specifically to reach a DIFFERENT, more specific downstream check:
+region/authority address-of laundering (`let pp: **u8 = &p;` where `p`
+is authority-derived -- the authority-tracking pass's own "indirect
+local region tracking is not implemented" message), a borrow-parameter
+dereference leak (`fn f(p: borrow **u8) -> *u8 { return *p; }`), and
+storing a linear value through a pointer (a linear opaque struct's own
+runtime representation IS a pointer, so "a pointer to a slot holding a
+linear value" is inherently `**T` -- there is no other way to write that
+scenario). All three now fail earlier and more generally, at the `**T`
+type itself, before the specific downstream check ever runs; updated
+their expected error to the new #239 message with a comment explaining
+the supersession, rather than deleting the coverage. The borrow-
+dereference and linear-store scenarios are now structurally
+unreachable, not merely rejected at the point of use -- a stronger
+guarantee than either original check provided on its own. The borrow-
+field-leak scenario (same danger, reached via a struct field instead of
+a dereference) remains legal to write and stays covered by its own
+neighboring test.
+
+**Verification.** `dune runtest` (1070/1070, up from 1057 -- 9 new #239-
+specific positive/negative-control tests, plus the 3 updated ones), a
+full `make kernelbuild` (both RPi5 and QEMU targets, the real ~1146-site
+codebase) with no new errors, and the five heaviest-non-`io`-cast-count
+example files compiled clean as standalone object files (`rp1_usb_smoke`,
+`el0_shell`, `el0_elf_load` -- `kernelbuild` itself already covered
+`kernel/platform/rpi5/usb_xhci.tkb`, `virtio_net.tkb`, `virtio_blk.tkb`,
+`ext2.tkb`, `syscall.tkb`).
+
 ### 2026-08-15: `unsafe { stmt* }` Block Form (Issue #315)
 
 `unsafe { expr }` was grammar-restricted to a single expression

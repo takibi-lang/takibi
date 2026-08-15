@@ -2415,10 +2415,17 @@ let infer_tests = [
            return x as i32;
          }")));
 
+  (* Before GitHub issue #239, this scenario was caught by the
+     authority-tracking pass ("cannot take the address of
+     authority-derived pointer... indirect local region tracking is not
+     implemented"). #239 now rejects &p's **u8 result type unconditionally,
+     for ANY *T local regardless of taint, so this specific laundering
+     route is now caught earlier, during ordinary type inference, by a
+     strictly more general check. *)
   Alcotest.test_case
     "region pointer: address-of cannot launder the authority tie" `Quick
     (expect_type_error
-      "cannot take the address of authority-derived pointer 'p'; indirect local region tracking is not implemented"
+      "nested pointer indirection"
       (region_fixture ^
         "fn reg_ptr_address_bad() -> i32 {
            let idx: {0..<4 as usize} = 0;
@@ -2469,11 +2476,21 @@ let infer_tests = [
            reg_borrow_stash = f;
          }"));
 
+  (* Before GitHub issue #239, this scenario was caught by the
+     authority-tracking pass at `return *p` ("authority-derived pointer
+     '<value>' cannot be returned"). #239 now rejects the `borrow **u8`
+     parameter type itself, unconditionally, before the function body is
+     even analyzed -- a Deref can no longer yield a pointer-typed value at
+     all, since nothing can be typed **u8 in the first place. The
+     protection this test originally demonstrated (a pointer read out of
+     borrowed/authority-tied storage cannot leak by being returned) is
+     still covered by the next test below via a struct field instead of a
+     dereference. *)
   Alcotest.test_case
     "region call: borrow pointer dereference cannot return a pointer alias"
     `Quick
     (expect_type_error
-      "authority-derived pointer '<value>' cannot be returned"
+      "nested pointer indirection"
       "fn borrow_deref_leak(p: borrow **u8) -> *u8 { return *p; }");
 
   Alcotest.test_case
@@ -3381,6 +3398,63 @@ let infer_tests = [
      `*io T`) the affine-only scoping exists to preserve. *)
   Alcotest.test_case "casting a non-literal integer to a non-affine pointer needs no unsafe" `Quick
     (expect_ok "fn f(base: usize, offset: usize) { let p: *io u32 = (base + offset) as *io u32; }");
+
+  (* -- GitHub issue #239: reject pointer-to-pointer types such as **T --- *)
+
+  Alcotest.test_case "a direct **T let annotation is rejected" `Quick
+    (expect_type_error "nested pointer indirection"
+       "fn f() { let pp: **u8 = 0 as usize as **u8; }");
+
+  Alcotest.test_case "**T as a function parameter is rejected" `Quick
+    (expect_type_error "nested pointer indirection"
+       "fn f(pp: **u8) {}");
+
+  Alcotest.test_case "**T as a function return type is rejected" `Quick
+    (expect_type_error "nested pointer indirection"
+       "fn f() -> **u8 { return 0 as usize as **u8; }");
+
+  Alcotest.test_case "*align(N) *T is rejected" `Quick
+    (expect_type_error "nested pointer indirection"
+       "fn f(p: *align(8) *u8) {}");
+
+  Alcotest.test_case "*io *T is rejected" `Quick
+    (expect_type_error "nested pointer indirection"
+       "fn f(p: *io *u8) {}");
+
+  Alcotest.test_case "*T where T is a struct field's pointer type is rejected" `Quick
+    (expect_type_error "nested pointer indirection"
+       "struct Holder { p: *u8; } fn f(pp: **Holder) {}");
+
+  Alcotest.test_case
+    "taking the address of a *T local (inferred **T) is rejected without an annotation"
+    `Quick
+    (expect_type_error "nested pointer indirection"
+       "fn f() { let mut p: *u8 = 0 as usize as *u8; let pp = &p; }");
+
+  Alcotest.test_case
+    "taking the address of a *T struct field (inferred **T) is rejected"
+    `Quick
+    (expect_type_error "nested pointer indirection"
+       "struct Holder { p: *u8; }
+        fn f(h: &mut Holder) { let pp = &h.p; }");
+
+  Alcotest.test_case
+    "a bare array-of-pointers variable decaying to **T is rejected"
+    `Quick
+    (expect_type_error "nested pointer indirection"
+       "fn f() { let mut arr: [*u8; 4]; let pp = arr; }");
+
+  Alcotest.test_case "a single-level *T annotation stays legal (positive control)" `Quick
+    (expect_ok "fn f(p: *u8) {}");
+
+  Alcotest.test_case "*align(N) T stays legal (positive control)" `Quick
+    (expect_ok "fn f(p: *align(8) u8) {}");
+
+  Alcotest.test_case "*io T stays legal (positive control)" `Quick
+    (expect_ok "fn f(p: *io u8) {}");
+
+  Alcotest.test_case "a struct field of pointer type stays legal (positive control, #240 not yet implemented)" `Quick
+    (expect_ok "struct Holder { p: *u8; } fn f(h: &Holder) { let x: *u8 = h.p; }");
 
   (* -- GitHub issue #102: provable pointer alignment, *align(N) T ---- *)
 
@@ -5014,8 +5088,17 @@ let infer_tests = [
        "linear opaque struct LinTok;
         let mut g_tok: *LinTok = 0 as usize as *LinTok;");
 
+  (* A linear value's own runtime representation IS a pointer, *LinTok, so
+     "a pointer to a slot holding a linear value" is inherently **LinTok --
+     there is no other way to express this scenario. Before GitHub issue
+     #239, this was caught by the linear-value-through-a-pointer check
+     ("cannot store a linear value through a pointer"). #239 now rejects
+     the `pp: **LinTok` parameter type itself, unconditionally, before the
+     function body is analyzed, which also means the underlying danger
+     (aliasing/overwriting a linear value through an indirect pointer) is
+     now structurally unreachable, not merely rejected at the store site. *)
   Alcotest.test_case "linear: storing through a pointer is a compile error" `Quick
-    (expect_type_error "cannot store a linear value through a pointer"
+    (expect_type_error "nested pointer indirection"
        "linear opaque struct LinTok;
         fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
         fn lin_store(pp: **LinTok) {
