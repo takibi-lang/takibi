@@ -2809,6 +2809,21 @@ let infer_tests = [
   Alcotest.test_case "while (true) still works" `Quick
     (expect_ok "fn f() { while (true) { break; } }");
 
+  Alcotest.test_case
+    "while's own condition does NOT narrow the loop body, unlike if \
+     (found migrating kernel/kernel/fd_table.tkb off array-decay-\
+     avoidance indexing, 2026-08-15): the body is processed with the \
+     same tyenv the loop was entered with, even though a two-sided \
+     condition would be enough to narrow if this were an `if`" `Quick
+    (expect_type_error "unproven i32"
+      "fn foo(i: {0..<4 as i32}) {} \
+       fn f(v: i32) { \
+         while (v >= 0 && v < 4) { \
+           foo(v); \
+           return; \
+         } \
+       }");
+
   Alcotest.test_case "if condition: a concretely-typed i32 variable is still rejected" `Quick
     (expect_type_error "cannot unify"
        "fn f(x: i32) { if (x) { } }");
