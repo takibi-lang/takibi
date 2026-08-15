@@ -173,10 +173,9 @@ blocks (the "immediately consume the just-constructed view" pattern, see
 above) are mechanically "unnecessary" by this lint's own definition
 (`slice_copy` itself never consults `unsafe_depth`) but were kept there
 deliberately, for a reason orthogonal to what this lint checks -- the
-user's own call in this session: "slice_copyがunsafeかは議論がわかれます
-が。どの道リファインメントが信用できないのでunsafeでいいと思います"
-("whether slice_copy counts as unsafe is debatable, but the refinement
-can't be trusted anyway either way, so it's fine for it to be inside").
+user's own call in this session: whether `slice_copy` counts as unsafe
+is debatable, but the refinement can't be trusted anyway either way, so
+it's fine for it to be inside.
 3 new Alcotest cases in `test/test_takibi.ml` lock in the mechanism
 itself (a proven-safe statement nested deep inside a scope that also has
 genuine uses elsewhere; a fully-clean scope recording zero; the expr
