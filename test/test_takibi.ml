@@ -3897,6 +3897,37 @@ let infer_tests = [
          return 0; \
        }");
 
+  (* GitHub issue #296 (see kernel/arch/arm64/mm/asid.tkb's
+     asid_transferred_release, the real function that hit this): a guard
+     written with `!=` narrows the fallthrough (negates to `==`, a single
+     point), but the SAME comparison written the other way, with `==`,
+     does NOT (negates to `!=`, not representable as a contiguous
+     range) -- an easy-to-miss asymmetry when picking which side of a
+     `==`/`!=` pair to write a guard with. *)
+  Alcotest.test_case "early-return guard (issue #296): `!=` in the guard \
+                       narrows the fallthrough (negates to `==`, a \
+                       single point)" `Quick
+    (expect_ok
+      "fn foo(i: {0..<1 as i32}) {} \
+       fn f(v: i32) -> i32 { \
+         if (v != 0) { return -1; } \
+         foo(v); \
+         return 0; \
+       }");
+
+  Alcotest.test_case "early-return guard (issue #296): the SAME \
+                       comparison written with `==` instead does NOT \
+                       narrow the fallthrough (negates to `!=`, not a \
+                       contiguous range) -- write the equivalent `<`/`>=` \
+                       form if a proof is needed" `Quick
+    (expect_type_error "unproven i32"
+      "fn foo(i: {0..<1 as i32}) {} \
+       fn f(v: i32) -> i32 { \
+         if (v == 1) { return -1; } \
+         foo(v); \
+         return 0; \
+       }");
+
   (* An And-conjunction guard negates to an Or via De Morgan
      (negate_cond (And a b) = Or (negate a) (negate b)), and
      collect_bounds only ever recurses into And, not Or (same

@@ -1199,13 +1199,22 @@ direct-call graph must not contain `may_block`; `interrupt_wait()` is
 intrinsically blocking. Diagnostics include one offending call path.
 
 `unsafe` records unchecked memory reasoning. Every function that directly
-contains an `unsafe { ... }` expression must declare `!{unsafe}`. The effect
-then propagates through resolved direct calls and through
-`fn !{unsafe}(...)` callback contracts. An explicit effect row that omits
-`unsafe` rejects a call path reaching it; an unannotated caller receives the
-inferred effect. `--forbid-unsafe` rejects a compilation containing any
-function with a reachable unsafe effect, allowing reviewed unsafe boundary
-files to be audited separately while ordinary code is compiled under denial.
+contains an `unsafe { ... }` expression must declare `!{unsafe}` -- a local,
+self-declaration-only requirement at the definition site, not a required
+annotation on every caller. Reachability through resolved direct calls is
+still inferred for `fn !{unsafe}(...)` callback-contract compatibility (a
+function reaching unsafe cannot satisfy a callback slot whose own row omits
+it) and for the function's own reported effect list, but an ordinary
+explicit effect row on a *caller* (`!{may_block}`, or a bare `!{}`) no
+longer rejects a call path that reaches unsafe code -- unlike `may_block`/
+`interrupt`/`exception`, which are real control-flow/concurrency hazards a
+caller's own reasoning must compose with, `unsafe` here means only "one
+bounded, local proof was done by hand," and mandating it propagate through
+every explicitly-contracted caller does not scale in code that touches
+MMIO/syscalls/interrupts constantly (see HISTORY.md's 2026-08-15 entry
+reversing this). `--forbid-unsafe` remains the opt-in, whole-program
+"reject if unsafe is reachable anywhere" mode for a subtree that wants
+that stronger guarantee.
 
 `noreturn` is currently a trusted extern-only contract. A call to such an
 extern terminates control-flow analysis, and LLVM receives the corresponding
@@ -1336,9 +1345,17 @@ as superseded by Slice 3):
   `unsafe`. Closed variants are the supported Option/Result-shaped
   encoding; null-sentinel ownership is no longer sanctioned.
 
-Known limitation (shared with private globals): checks are by name/type
-identity, not by resolved binding; and the declaring file itself remains
-the trusted island -- privacy narrows the audit surface to that file, it
+Known limitation: these checks (opaque handle/view minting, struct field
+privacy) are by name/type identity, not by resolved binding, so a local
+parameter/let of the same name in a DIFFERENT file could in principle be
+misidentified the same way private globals' own check once was (GitHub
+issue #214, 2026-08-15, fixed for private globals specifically -- see
+HISTORY.md -- a local binding of any kind now shadows a same-named
+private global from another file instead of triggering a false-positive
+privacy violation; the opaque-handle/view/struct-field checks above were
+not part of that fix and may still have the same false-positive gap in
+principle, unconfirmed). The declaring file itself remains the trusted
+island regardless -- privacy narrows the audit surface to that file, it
 does not verify the file's own bodies.
 
 ## Tuples
@@ -1944,6 +1961,34 @@ at codegen time rather than silently lowering to a racy `wfi`.
   `examples/narrow/narrow.tkb` demonstrate this signed case
   deliberately, including a negative input that the two-sided check
   correctly rejects).
+- **Early-return-guard narrowing**: `if (cond) { return ...; }` (or any
+  branch that always returns, unconditionally, with no `else`) narrows
+  the FALLTHROUGH code after the whole `if` -- not the branch body
+  itself -- via `cond`'s own logical negation (De Morgan for `&&`/`||`,
+  flipped comparisons for `<`/`>=`/`==`/`!=`). `!=` never narrows to a
+  contiguous range (excluding one point from an unbounded range isn't
+  representable as a single `{lo..<hi}`), whether written directly in a
+  guard or produced by negating `==` -- so a guard written with `==`
+  (negating to `!=`) does NOT narrow the fallthrough, e.g. `if (v == 0)
+  { return; }` leaves `v` unnarrowed afterward, while the same guard
+  written as `if (v < 1) { return; }` does (negates to the narrowable
+  `v >= 1`). A guard written with `!=` DOES narrow the fallthrough,
+  since its negation is `==` (to the single point `{k..<k+1}`) --
+  `kernel/arch/arm64/mm/asid.tkb`'s `asid_transferred_release` hit
+  exactly this asymmetry (GitHub issue #296, 2026-08-15): its guard's
+  `asid == 0` disjunct negates to the unnarrowable `asid != 0`, rewritten
+  to the equivalent, narrowable `asid < 1` form instead of left unproven.
+  Applies to any binding --
+  immutable, mutable, or an ordinary function parameter -- EXCEPT one
+  that some statement anywhere else in the same enclosing statement list
+  (not just the branch itself) later writes to; that exclusion is what
+  keeps this sound for a variable reassigned after the guard (`if
+  (initialized != 0) { return Failed; } initialized = 1;` correctly
+  keeps `initialized` unnarrowed, since it's reassigned right after).
+  GitHub issue #295 introduced this narrowing for immutable bindings
+  only; issue #296 (2026-08-15) extended it to mutable bindings and
+  parameters via that same-enclosing-list write check (see HISTORY.md
+  for both).
 - **Same-base subslice rule**: `s[v + j ..< v + k]` for the *same*
   variable `v` and constant (or non-negative-lower-bounded) offsets `j`,
   `k` has a provable length `k - j` and a provable `lo <= hi`,
@@ -2186,24 +2231,21 @@ investigations behind any of these, see `HISTORY.md`.
   -- exact equality? prefix? a runtime length check? -- is unresolved).
   Deferred until a concrete case needs one rather than designed
   speculatively now.
-- **Indexing (`arr[i]`, `arr[lo..<hi]`) requires a bare identifier
-  immediately before `[` -- not any general expression.**
-  `lib/parser.mly`'s `Index`/`SliceOf` productions are `id = IDENT
-  LBRACKET ...`, and `lib/ast.ml`'s `Index of ident * expr` mirrors that
-  in the AST. `s.field[i]` (a struct field, even a non-generic one) is
-  therefore a hard parser-level `Syntax error`, not a type error --
-  `s.field` has already reduced to a `FieldGet` expression by the time
-  `[` is reached, and only a bare `Var` can feed `Index`. The standard
-  workaround, used throughout `kernel/`, is `let local = s.field; local[i]`
-  (see "issue #15" comments at nearly every struct-embedded-array call
-  site) -- but note this workaround ALSO loses the field's array-ness
-  (see `Structs`' own array-field-decay note): `local` binds as `*T`, not
-  `[T; N]`, so the resulting indexing is raw-pointer (`isize`, unchecked),
-  not the checked `usize` form a real local array gets. Tracked as GitHub
-  issue #217 (which also covers the decay problem); confirmed to extend
-  at least one level further than that issue's stated acceptance
-  criterion (`s.field[i].field`, an array of structs, not just an array
-  of primitives -- see that issue's 2026-08-09 comment).
+- **Indexing another Index expression's result directly is not
+  supported** -- `a[i][j]` or `a[i].field` (as opposed to `a[i]` alone,
+  or `s.field[i]` -- see just below) is a clear compile error ("not yet
+  supported"), not silently accepted. `place_undecayed_type`
+  (`lib/type_inf.ml`) would need an address-preserving codegen variant
+  of `Index` that does not exist yet -- today's `Index` codegen always
+  loads the final element value, discarding its address. GitHub issue
+  #217 (2026-08-15, see HISTORY.md) closed the two gaps this bullet used
+  to describe -- `Index`'s base was previously restricted to a bare
+  identifier at the grammar level (`s.field[i]` was a hard `Syntax
+  error`), and even the `let local = s.field; local[i]` workaround lost
+  the field's checked array-ness (raw, unchecked `isize` pointer
+  arithmetic instead of a real bounds check). `s.field[i]` now compiles
+  directly with a real checked bounds check, for a FieldGet chain of any
+  depth (`a.b.c[i]`); only Index-as-a-base remains unsupported.
 - **A generic call's own value parameter cannot be inferred from
   `&s.field` when `s`'s type is a plain, non-generic struct**, even
   though the field's own declared type is already fully concrete and
