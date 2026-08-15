@@ -1827,10 +1827,21 @@ fn f() {
   calling convention, zero runtime cost -- the distinction is entirely in
   the OCaml-side type checker.
 
-`kernel/lib/growable_pool.tkb`'s `pool: *GrowablePool` parameter (and its
-`let core: *FreelistCore(N) = &pool.core;` locals) is the first migrated
-call site. Further files migrate incrementally, one narrow issue at a
-time, per this project's usual practice.
+Migrated so far: `kernel/lib/growable_pool.tkb` (`pool: *GrowablePool`),
+`kernel/lib/freelist.tkb` (`FreelistCore`/`Freelist`), `kernel/lib/
+slotmap.tkb` (`SlotMap`), `kernel/lib/refcount_slotmap.tkb`
+(`RefcountSlotMap`) -- every parameter of these four small "resource pool"
+libraries is now `&mut`. Caller sites needed no changes except where an
+existing intermediate `let core: *FreelistCore(N) = &x.core;`-shaped local
+(a pre-existing, unrelated workaround for a separate generic-inference
+limitation: a generic call's static parameters cannot be inferred from a
+nested-field address, only from a plain local/global or its address) also
+had its own annotation updated to `&mut` -- `kernel/mm/page.tkb` needed
+this, every other caller (`kernel/kernel/process.tkb`, `kernel/kernel/
+fd_table.tkb`, `kernel/net/tcp.tkb`, `kernel/arch/arm64/mm/asid.tkb`)
+already called through a plain `&global` and needed no change at all.
+Further files migrate incrementally, one narrow issue at a time, per this
+project's usual practice.
 
 ## MMIO / Volatile
 

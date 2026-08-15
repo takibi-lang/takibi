@@ -41,7 +41,7 @@ generic struct RefcountSlotMap(N: usize, MAX_REFS: usize) {
     double_release_count: usize;
 }
 
-fn refcount_pool_init(pool: *RefcountSlotMap(N, MAX_REFS)) {
+fn refcount_pool_init(pool: &mut RefcountSlotMap(N, MAX_REFS)) {
     freelist_core_init(&pool.core);
     // GitHub issue #217: pool.generation[i]/pool.refcount[i] index the
     // struct-embedded array fields directly and are checked/proven by
@@ -63,7 +63,7 @@ must_use variant RefcountAllocResult {
 // holder, mirroring fd_table.tkb's own pre-existing alloc/install split
 // (an object can be allocated and then fail to install its first fd
 // reference, at which point it must be abandoned, not released).
-fn refcount_pool_alloc(pool: *RefcountSlotMap(N, MAX_REFS))
+fn refcount_pool_alloc(pool: &mut RefcountSlotMap(N, MAX_REFS))
         -> RefcountAllocResult {
     match freelist_core_insert(&pool.core) {
         FreelistPopResult::Empty => { return RefcountAllocResult::Full; }
@@ -95,7 +95,7 @@ fn refcount_pool_alloc(pool: *RefcountSlotMap(N, MAX_REFS))
 // the slot genuinely has zero holders -- calling this on a slot with any
 // live holder would silently orphan them, so it refuses rather than
 // guessing what was intended.
-fn refcount_pool_abandon(pool: *RefcountSlotMap(N, MAX_REFS),
+fn refcount_pool_abandon(pool: &mut RefcountSlotMap(N, MAX_REFS),
                          index: usize, generation_value: usize) -> bool {
     // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
     if (index < N) {
@@ -112,7 +112,7 @@ fn refcount_pool_abandon(pool: *RefcountSlotMap(N, MAX_REFS),
 
 must_use variant RefcountRetainResult { Invalid; Overflow; Ok; }
 
-fn refcount_pool_retain(pool: *RefcountSlotMap(N, MAX_REFS),
+fn refcount_pool_retain(pool: &mut RefcountSlotMap(N, MAX_REFS),
                         index: usize, generation_value: usize)
         -> RefcountRetainResult {
     // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
@@ -141,7 +141,7 @@ must_use variant RefcountReleaseResult { Invalid; StillHeld; Freed; }
 // the guard, silently did nothing), so this counts the event instead of
 // corrupting the free chain by pushing an already-free slot a second
 // time.
-fn refcount_pool_release(pool: *RefcountSlotMap(N, MAX_REFS),
+fn refcount_pool_release(pool: &mut RefcountSlotMap(N, MAX_REFS),
                          index: usize, generation_value: usize)
         -> RefcountReleaseResult {
     // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
@@ -168,7 +168,7 @@ fn refcount_pool_release(pool: *RefcountSlotMap(N, MAX_REFS),
     return RefcountReleaseResult::Invalid;
 }
 
-fn refcount_pool_matches(pool: *RefcountSlotMap(N, MAX_REFS),
+fn refcount_pool_matches(pool: &mut RefcountSlotMap(N, MAX_REFS),
                          index: usize, generation_value: usize) -> bool {
     if (generation_value == 0) { return false; }
     // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
@@ -180,7 +180,7 @@ fn refcount_pool_matches(pool: *RefcountSlotMap(N, MAX_REFS),
 
 // 0 for a mismatched/stale handle, exactly like the object_references()
 // accessor this replaces already did by checking generation first.
-fn refcount_pool_count(pool: *RefcountSlotMap(N, MAX_REFS),
+fn refcount_pool_count(pool: &mut RefcountSlotMap(N, MAX_REFS),
                        index: usize, generation_value: usize) -> usize {
     // GitHub issue #217: inlined rather than calling refcount_pool_matches
     // -- a proof from an earlier CALL's own condition does not carry
@@ -202,7 +202,7 @@ fn refcount_pool_count(pool: *RefcountSlotMap(N, MAX_REFS),
 // check) -- unlike refcount_pool_count, does not require the caller's own
 // generation, so it also reports a leaked (allocated, still counted, but
 // otherwise-unreachable) slot's nonzero count instead of masking it as 0.
-fn refcount_pool_raw_count(pool: *RefcountSlotMap(N, MAX_REFS),
+fn refcount_pool_raw_count(pool: &mut RefcountSlotMap(N, MAX_REFS),
                            index: usize) -> usize {
     // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
     if (index < N) {
@@ -211,7 +211,7 @@ fn refcount_pool_raw_count(pool: *RefcountSlotMap(N, MAX_REFS),
     return 0;
 }
 
-fn refcount_pool_double_release_count(pool: *RefcountSlotMap(N, MAX_REFS))
+fn refcount_pool_double_release_count(pool: &mut RefcountSlotMap(N, MAX_REFS))
         -> usize {
     return pool.double_release_count;
 }

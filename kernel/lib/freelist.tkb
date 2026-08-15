@@ -116,7 +116,7 @@ generic struct FreelistCore(N: usize) {
     next_generation: usize;
 }
 
-fn freelist_core_init(core: *FreelistCore(N)) {
+fn freelist_core_init(core: &mut FreelistCore(N)) {
     // GitHub issue #217: core.next_free[i] indexes the struct-embedded
     // array field directly, through the same checked TArray/
     // emit_bounds_check codegen path a local array's own indexing
@@ -131,7 +131,7 @@ fn freelist_core_init(core: *FreelistCore(N)) {
     core.next_generation = 1;
 }
 
-fn freelist_core_insert(core: *FreelistCore(N)) -> FreelistPopResult {
+fn freelist_core_insert(core: &mut FreelistCore(N)) -> FreelistPopResult {
     let head: usize = core.free_head;
     if (head >= 0 && head < N) {
         // GitHub issue #217: head is narrowed to {0..<N} on this branch,
@@ -145,7 +145,7 @@ fn freelist_core_insert(core: *FreelistCore(N)) -> FreelistPopResult {
     return FreelistPopResult::Empty;
 }
 
-fn freelist_core_remove(core: *FreelistCore(N), owner: sink FreelistOwner[allocation]) !{unsafe} {
+fn freelist_core_remove(core: &mut FreelistCore(N), owner: sink FreelistOwner[allocation]) !{unsafe} {
     // GitHub issue #216: owner.index is only ever produced by
     // freelist_core_insert from this same core's next_free, so it is
     // always in range in practice, but that fact crosses a function-call
@@ -170,16 +170,16 @@ generic struct Freelist(T: type, N: usize) {
     data: [T; N..];
 }
 
-fn freelist_init(T: type, target: *Freelist(T, N), data_backing: [T; N..]) {
+fn freelist_init(T: type, target: &mut Freelist(T, N), data_backing: [T; N..]) {
     freelist_core_init(&target.core);
     target.data = data_backing;
 }
 
-fn freelist_insert(T: type, target: *Freelist(T, N)) -> FreelistPopResult {
+fn freelist_insert(T: type, target: &mut Freelist(T, N)) -> FreelistPopResult {
     return freelist_core_insert(&target.core);
 }
 
-fn freelist_remove(T: type, target: *Freelist(T, N),
+fn freelist_remove(T: type, target: &mut Freelist(T, N),
                     owner: sink FreelistOwner[allocation]) {
     freelist_core_remove(&target.core, owner);
 }
@@ -193,7 +193,7 @@ fn freelist_remove(T: type, target: *Freelist(T, N),
 // `as *T` cast is needed to get a raw pointer for the offset -- this
 // whole function is raw pointer arithmetic (issue #15), same as it has
 // been since the very first #207 worked example.
-fn freelist_ref(T: type, target: *Freelist(T, N),
+fn freelist_ref(T: type, target: &mut Freelist(T, N),
                 owner: borrow FreelistOwner[allocation]) -> *T {
     let data = target.data;
     let index: isize = freelist_owner_index(owner) as isize;
