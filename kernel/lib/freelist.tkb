@@ -117,26 +117,27 @@ generic struct FreelistCore(N: usize) {
 }
 
 fn freelist_core_init(core: *FreelistCore(N)) {
-    let next_free = core.next_free;
-    // GitHub issue #15: next_free is a struct-embedded array field, so
-    // this read decays to a raw *usize (see this file's own header
-    // comment) -- next_free[i] below is ordinary unchecked pointer
-    // arithmetic, not a runtime-checked trap site. Deliberately accepted,
-    // not proven safe. Pointer indexing needs an isize offset (unlike
-    // checked array/slice indexing, which accepts usize), hence `i:
-    // isize` here rather than usize.
-    for i: isize in 0..<N {
-        next_free[i] = i as usize + 1;
+    // GitHub issue #217: core.next_free[i] indexes the struct-embedded
+    // array field directly, through the same checked TArray/
+    // emit_bounds_check codegen path a local array's own indexing
+    // already gets -- no more manual `let`/raw-*usize-pointer-arithmetic
+    // workaround (issue #15) needed here. The for-loop counter's own
+    // {0..<N} refined type proves this in range at compile time, so
+    // there is no runtime trap site left to elide even at -O0.
+    for i: usize in 0..<N {
+        core.next_free[i] = i + 1;
     }
     core.free_head = 0;
     core.next_generation = 1;
 }
 
 fn freelist_core_insert(core: *FreelistCore(N)) -> FreelistPopResult {
-    let next_free = core.next_free;   // see freelist_core_init's #15 note
     let head: usize = core.free_head;
     if (head >= 0 && head < N) {
-        core.free_head = next_free[head as isize];
+        // GitHub issue #217: head is narrowed to {0..<N} on this branch,
+        // so this checked index is also statically proven -- see
+        // freelist_core_init's own comment.
+        core.free_head = core.next_free[head];
         let generation: usize = core.next_generation;
         core.next_generation = generation + 1;
         return FreelistPopResult::Popped(freelist_owner_new(head, generation));
@@ -144,17 +145,23 @@ fn freelist_core_insert(core: *FreelistCore(N)) -> FreelistPopResult {
     return FreelistPopResult::Empty;
 }
 
-fn freelist_core_remove(core: *FreelistCore(N), owner: sink FreelistOwner[allocation]) {
-    let next_free = core.next_free;   // see freelist_core_init's #15 note
+fn freelist_core_remove(core: *FreelistCore(N), owner: sink FreelistOwner[allocation]) !{unsafe} {
     // GitHub issue #216: owner.index is only ever produced by
     // freelist_core_insert from this same core's next_free, so it is
     // always in range in practice, but that fact crosses a function-call
-    // boundary -- and, now that next_free is raw pointer arithmetic
-    // rather than a checked slice access (issue #15), there is no trap
-    // site here for --forbid-trap to even report; this is NOT a safety
-    // improvement over an earlier slice-based version, it is the checker
-    // no longer looking at this code at all.
-    next_free[freelist_owner_index(owner) as isize] = core.free_head;
+    // boundary -- FreelistOwner's own `index` field is a plain usize
+    // with no compile-time-visible bound (see #216 for the "extend it
+    // with a second erased static value parameter tracking the pool's
+    // capacity" idea, deliberately not committed to here; #200/#201's
+    // research track is the eventual real fix). GitHub issue #217 closed
+    // the companion gap that used to hide this call entirely: indexing
+    // core.next_free is now a REAL checked array access, so this one
+    // line needs an explicit `unsafe` marker to skip the bounds check.
+    // That marker is the actual improvement over the old state -- this
+    // site is grep-visible and --forbid-trap-exempt only THROUGH it, not
+    // silently invisible to the checker the way the old *usize-decay
+    // pointer-arithmetic workaround left it.
+    unsafe { core.next_free[freelist_owner_index(owner)] = core.free_head };
     core.free_head = freelist_owner_index(owner);
 }
 

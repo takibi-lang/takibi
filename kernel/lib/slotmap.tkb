@@ -42,9 +42,12 @@ generic struct SlotMap(N: usize) {
 
 fn slotmap_init(map: *SlotMap(N)) {
     freelist_core_init(&map.core);
-    let occupant = map.occupant_generation;   // decays to *usize, issue #15
-    for i: isize in 0..<N {
-        occupant[i] = 0;
+    // GitHub issue #217: map.occupant_generation[i] indexes the struct-
+    // embedded array field directly and is checked/proven, same as
+    // kernel/lib/freelist.tkb's freelist_core_init -- no more manual
+    // `let`/raw-pointer-arithmetic workaround (issue #15) needed here.
+    for i: usize in 0..<N {
+        map.occupant_generation[i] = 0;
     }
     map.double_remove_count = 0;
 }
@@ -55,9 +58,10 @@ fn slotmap_insert(map: *SlotMap(N)) -> FreelistPopResult {
         FreelistPopResult::Popped(owner) => {
             let index: usize = freelist_owner_index(owner);
             let generation: usize = freelist_owner_generation(owner);
-            let occupant = map.occupant_generation;   // issue #15, as above
+            // GitHub issue #217: index is narrowed to {0..<N} on this
+            // branch, so this checked index is statically proven.
             if (index < N) {
-                occupant[index as isize] = generation;
+                map.occupant_generation[index] = generation;
             }
             return FreelistPopResult::Popped(owner);
         }
@@ -79,18 +83,23 @@ fn slotmap_insert(map: *SlotMap(N)) -> FreelistPopResult {
 // diagnosable rather than compounding the corruption.
 fn slotmap_remove(map: *SlotMap(N), owner: sink FreelistOwner[allocation]) {
     let index: usize = freelist_owner_index(owner);
-    let occupant = map.occupant_generation;   // issue #15, as above
-    if (index >= N) {
+    // GitHub issue #217: written as a wrapping `if (index < N) { ... }`
+    // rather than an early-return guard (`if (index >= N) { return; }`
+    // followed by using index) -- the narrower's known scope limit
+    // (see HISTORY.md's 2026-08-13 issue #295 entry) only narrows the
+    // wrapping form, so this shape is what actually proves index in
+    // range for the checked indices below.
+    if (index < N) {
+        if (map.occupant_generation[index] == 0) {
+            map.double_remove_count = map.double_remove_count + 1;
+            freelist_owner_drop(owner);
+            return;
+        }
+        map.occupant_generation[index] = 0;
+        freelist_core_remove(&map.core, owner);
+    } else {
         freelist_owner_drop(owner);
-        return;
     }
-    if (occupant[index as isize] == 0) {
-        map.double_remove_count = map.double_remove_count + 1;
-        freelist_owner_drop(owner);
-        return;
-    }
-    occupant[index as isize] = 0;
-    freelist_core_remove(&map.core, owner);
 }
 
 fn slotmap_double_remove_count(map: *SlotMap(N)) -> usize {
@@ -105,9 +114,12 @@ fn slotmap_double_remove_count(map: *SlotMap(N)) -> usize {
 // monotonic, so 0 can never be a live occupant's real generation, only an
 // unallocated slot's reset value or an uninitialized/garbage caller value.
 fn slotmap_matches(map: *SlotMap(N), index: usize, generation: usize) -> bool {
-    if (index >= N || generation == 0) { return false; }
-    let occupant = map.occupant_generation;   // issue #15, as above
-    return occupant[index as isize] == generation;
+    if (generation == 0) { return false; }
+    // GitHub issue #217: wrapping form, see slotmap_remove's own comment.
+    if (index < N) {
+        return map.occupant_generation[index] == generation;
+    }
+    return false;
 }
 
 // Returns the generation currently occupying `index`, or 0 if free/out of
@@ -117,19 +129,20 @@ fn slotmap_matches(map: *SlotMap(N), index: usize, generation: usize) -> bool {
 // slot's handle before tearing the whole pool down), as opposed to
 // slotmap_matches()'s yes/no check against an already-known generation.
 fn slotmap_occupant_generation(map: *SlotMap(N), index: usize) -> usize {
-    if (index >= N) { return 0; }
-    let occupant = map.occupant_generation;   // issue #15, as above
-    return occupant[index as isize];
+    // GitHub issue #217: wrapping form, see slotmap_remove's own comment.
+    if (index < N) {
+        return map.occupant_generation[index];
+    }
+    return 0;
 }
 
 // O(N) diagnostic, not a hot-path primitive -- mirrors what every ported
 // call site used to compute from its own used[] array by hand (e.g.
 // page.tkb's boot allocator's own live-page count for leak detection).
 fn slotmap_live_count(map: *SlotMap(N)) -> usize {
-    let occupant = map.occupant_generation;   // issue #15, as above
     let mut live: usize = 0;
-    for i: isize in 0..<N {
-        if (occupant[i] != 0) { live = live + 1; }
+    for i: usize in 0..<N {  // issue #217: for-loop counter proven {0..<N}
+        if (map.occupant_generation[i] != 0) { live = live + 1; }
     }
     return live;
 }

@@ -15,6 +15,141 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: `kernel/lib/freelist.tkb`/`slotmap.tkb`/`refcount_slotmap.tkb` Migrated to Checked Struct-Field Indexing (Issue #217 Follow-up)
+
+The Makefile's own long-standing comment on these three files (plus
+`growable_pool.tkb`, which uses them) named the exact accepted risk:
+`--forbid-trap` passed for them only because their bookkeeping arrays
+(`FreelistCore(N)`'s `next_free`, `SlotMap(N)`'s `occupant_generation`,
+`RefcountSlotMap(N, MAX_REFS)`'s `generation`/`refcount`) decayed to
+unchecked `*usize` pointers the moment they were read as a struct field
+(issue #15), so the checker had stopped looking at that code, not proven
+it safe. Issue #217's fix made direct `core.next_free[i]`-style indexing
+possible; this migrated all three files off their `let next_free =
+core.next_free; ... next_free[i as isize]` workaround.
+
+17 of 18 call sites turned out to be trivially provable once actually
+checked -- either a for-loop counter's own `{0..<N}` refined type, or an
+existing `if (index < N) { ... }` guard already wrapping the index's use.
+5 sites in `slotmap.tkb`/`refcount_slotmap.tkb` initially still reported
+a residual trap despite an apparently-equivalent guard
+(`if (index >= N) { return ...; } ... index ...` written as an
+early-return instead of a wrapping `if`) -- a known, already-documented
+narrower limitation (see this file's 2026-08-13 issue #295 entry:
+"an early-return guard clause... does NOT narrow the type... only the
+wrapping `if (v >= 0 && v < N) { ... }` form does"), not a new bug.
+Restructured those 5 into the wrapping form (behavior-preserving --
+early return vs. an `else` branch computing the same result) rather than
+attempting to extend the narrower, which stayed out of scope here.
+`refcount_pool_count` additionally could not just call
+`refcount_pool_matches(pool, index, generation_value)` and then index --
+a proof from an earlier CALL's own condition does not carry across the
+function-call boundary (the same class of gap as issue #216's
+cross-function owner-index provenance) -- so its check was inlined
+directly into its own body instead.
+
+The one call site that genuinely could not be proven --
+`freelist_core_remove`'s `next_free[owner.index]`, issue #216's own
+already-documented cross-function provenance gap (`owner.index` is only
+ever produced in-range by `freelist_core_insert`, but `FreelistOwner`'s
+`index` field carries no compile-time-visible bound across that function
+boundary) -- is now an explicit `unsafe { core.next_free[...] = ...; }`,
+requiring `freelist_core_remove` to declare `!{unsafe}`. This is the
+concrete case that surfaced the effect-propagation problem fixed in this
+file's own adjacent 2026-08-15 entry above (marking one function
+`!{unsafe}` initially cascaded into 9 files' worth of effect-contract
+widening before that reversal); after it, this line's risk is genuinely
+grep-visible (`unsafe` marker, visible in `--forbid-unsafe` output for
+anyone who opts in) instead of silently invisible to the checker the way
+the old `*usize`-decay pointer arithmetic left it -- the actual
+improvement the user asked for when this migration was proposed.
+
+Verified per-file with the exact `--forbid-trap`-gated linux_user compile
+command plus a real execution diff against each `.expected` file
+(`freelist_pool`, `freelist_generic`, `slotmap`, `refcount_slotmap`, and
+`growable_pool` as the fourth, indirect consumer) -- all pass, all byte-
+identical output, confirming this is a real behavioral no-op, not just a
+compile-time change. Final full-suite verification: `dune runtest`
+(1014/1014), `make linuxcheck` (every linux_user test, not just the
+touched ones), `make kernelbuild-qemu kernelbuild-rpi5`, and a full
+`kernelcheck-qemu` real-boot run (38 views + ash/TCP + PTY) -- these
+libraries back `kernel/mm/page.tkb`, `kernel/kernel/process.tkb`,
+`kernel/mm/address_space.tkb`, and `kernel/net/tcp.tkb`'s connection
+pool, so the real-boot pass is the actual regression bar, not the
+compile-only one.
+
+### 2026-08-15: `unsafe` Stops Propagating as a Required Effect Through Explicit Contracts (Reverses Part of Issue #179)
+
+Issue #179 (2026-07-28) made a function's own `unsafe { ... }` usage
+require a matching `!{unsafe}` self-declaration AND made that effect
+propagate: any OTHER function with an explicit effect contract
+(`!{may_block}`, `!{interrupt}`, `!{exception}`, or even a bare `!{}`)
+that transitively reached unsafe code was rejected unless its own
+declared contract also listed `unsafe`. Discovered to be too strict for a
+real kernel while migrating `kernel/lib/freelist.tkb`'s
+`freelist_core_remove` to issue #217's new checked struct-field indexing
+(see that issue's own entry below): the ONE remaining accepted-risk line
+there (issue #216's cross-function `owner.index` provenance gap) needed
+an explicit `unsafe { ... }` marker once indexing became a real checked
+access -- and marking just that one function `!{unsafe}` forced a
+cascade, since `kernel_syscall_inetd_accept`'s `!{may_block}` contract
+transitively reaches it through `tcp_connection_free` -> `slotmap_remove`
+-> `freelist_core_remove`. Measuring the actual blast radius (`grep -rl`
+for every caller of `slotmap_remove`/`freelist_core_remove`/
+`refcount_pool_abandon`/`refcount_pool_release`) found 9 files spanning
+process/page/address-space/tcp/fd_table -- effectively the kernel's core
+resource-management subsystems -- all of which would have needed their
+own effect contracts widened to keep compiling.
+
+The user's diagnosis, confirmed by that measurement: `may_block`/
+`interrupt`/`exception` are real control-flow/concurrency hazards a
+CALLER's own effect reasoning needs to compose with (an interrupt handler
+that transitively blocks is a genuine bug the effect system exists to
+catch). `unsafe` here means something categorically different -- "one
+bounded, local proof was done by hand instead of by the type system" --
+which does not need to compose with a caller's own contract at all. A
+kernel touches the outside world (MMIO, syscalls, interrupts) constantly
+enough that mandating propagation through every explicitly-contracted
+caller does not scale the way it does for a narrow userspace FFI
+boundary; it just forces every accepted-risk leaf to widen every
+contract-declaring function transitively above it, diluting exactly the
+signal the marker was meant to carry.
+
+Removed only the propagation-enforcement check in `lib/type_inf.ml`
+(`"function '%s' violates its explicit effect contract: unsafe effect is
+reachable"`) -- three things deliberately kept unchanged: (1) the
+self-declaration requirement (a function whose OWN body contains
+`unsafe { ... }` must still say `!{unsafe}` -- a local, zero-propagation,
+grep-visible marker at the definition site, not a composing effect);
+(2) `--forbid-unsafe` (`bin/main.ml`), issue #179's own opt-in
+whole-program "reject if unsafe is reachable anywhere" mode, confirmed to
+already exist and already be unused by any Makefile target -- exactly the
+"opt-in, not on by default for /kernel" split proposed in this
+conversation, so nothing new needed adding there; (3) function-pointer
+effect-contract compatibility (`lib/types.ml`, unrelated mechanism,
+unaffected since it compares each function's already-computed `effects`
+list directly rather than re-deriving reachability).
+
+This freed `freelist_core_remove` to become `!{unsafe}` with zero other
+files touched -- its callers (`slotmap_remove`, etc.) have no explicit
+effect contract of their own, so nothing above it needs to change. Not a
+safety regression: `--forbid-unsafe` still rejects unsafe reachability
+end-to-end for any subtree that opts in (verified unchanged against
+`examples/forbid_unsafe_wrong`), and a future effect extension for
+interrupt-adjacent code (issue #298, unimplemented) already names its own
+narrow, targeted operation set (allocation, lock acquisition, UART
+logging, reentrant logging) rather than blanket `unsafe`, so this
+reversal does not preempt or conflict with it.
+
+Verified: `dune runtest` (1014/1014 -- one test flipped from
+`expect_type_error "unsafe effect is reachable"` to `expect_ok`, matching
+the new, deliberately looser behavior; every other unsafe-effect test,
+including self-declaration and function-pointer contract compatibility,
+unchanged and still passing), `kernelbuild-qemu`/`kernelbuild-rpi5`
+(both clean, no cascading effect-contract errors), `linuxcheck` (all
+linux_user tests pass), and a full `kernelcheck-qemu` real-boot run (38
+views + ash/TCP + PTY) with no regressions.
+
 ### 2026-08-15: `struct_ptr.array_field[i]` Now Compiles Directly, With a Real Checked Bounds Check (GitHub Issue #217)
 
 Closed both gaps issue #217 identified in `arr[i]` indexing when `arr` is a

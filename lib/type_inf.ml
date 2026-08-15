@@ -7299,12 +7299,29 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           "function '%s' cannot verify its explicit !{} non-blocking contract: unknown effects via %s"
           (display_effect_key key) (String.concat " -> " path)))
       end
-    end;
-    if Option.is_some effects_opt && not (List.mem "unsafe" effects)
-       && StringSet.mem key may_unsafe then
-      raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
-        "function '%s' violates its explicit effect contract: unsafe effect is reachable"
-        (display_effect_key key)))
+    end
+    (* GitHub issue #179 originally made an explicit effect contract
+       (may_block/interrupt/exception/bare !{}) reject transitively
+       reaching unsafe unless the contract also listed "unsafe" --
+       REMOVED (see HISTORY.md's entry reversing this): unlike
+       may_block/interrupt/exception, which are real control-flow/
+       concurrency hazards a CALLER's own reasoning needs to compose
+       with, unsafe here just means "one bounded, local proof was done
+       by hand instead of by the type system." Mandating that it
+       propagate through every explicitly-effect-declared caller in a
+       real kernel (MMIO/syscalls/interrupts touch the outside world
+       constantly) turned a single accepted-risk line into a forced
+       rewrite of every explicit-contract function transitively above
+       it -- confirmed concretely: marking kernel/lib/freelist.tkb's
+       freelist_core_remove !{unsafe} required touching 9 files across
+       process/page/address-space/tcp/fd_table before this reversal.
+       --forbid-unsafe (bin/main.ml, unchanged) remains the opt-in,
+       whole-program "prove zero unsafe anywhere" mode for a subtree
+       that wants it; kernel/ does not enable it. The self-declaration
+       requirement above (a function whose OWN body contains unsafe{}
+       must say !{unsafe}) is unchanged -- that part is a local,
+       zero-propagation, grep-visible marker at the definition site,
+       not a composing effect. *)
   ) declared_effects;
   let functions = StringMap.mapi (fun key info ->
     let declared = match StringMap.find_opt key declared_effects with

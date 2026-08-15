@@ -173,23 +173,22 @@ $(LINUX_USER_DIR)/page_pool/page_pool_exe.o: $(LINUX_USER_DIR)/page_pool/page_po
 $(LINUX_USER_DIR)/inet_checksum/inet_checksum_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 
-# Freelist redesign follow-up: --forbid-trap now PASSES for the four
-# targets below -- but this is NOT a safety improvement over the earlier
-# #213/#215-tracked trap sites, and must not be read as one.
-# freelist.tkb's FreelistCore(N) now embeds its bookkeeping array
-# (next_free: [usize; N]) directly as a struct field; reading that field
-# decays to a raw, UNCHECKED pointer (lib/type_inf.ml's FieldGet TArray
-# case, lib/llvm_gen.ml's matching TypeArray case -- confirmed, and
-# tracked as a concrete instance of GitHub issue #15 "Safe pointer").
-# Unchecked pointer arithmetic never emits a bounds-check trap at all, so
-# --forbid-trap has nothing left to reject here -- the checker stopped
-# LOOKING at this code, it did not prove it safe. See freelist.tkb's own
-# per-function #15 comments (freelist_core_init/_insert/_remove) for the
-# precise accepted-risk sites. `data` (the payload storage) deliberately
-# stayed a caller-owned slice specifically to keep REAL checked/elidable
-# indexing (see freelist.tkb's own header comment) -- only the internal
-# bookkeeping array traded that away, by deliberate choice, to avoid
-# forcing collection-library callers to declare index storage themselves.
+# GitHub issue #217 (2026-08-15) closed the array-field-decay gap this
+# comment used to describe for the four targets below: FreelistCore(N)'s
+# next_free, SlotMap(N)'s occupant_generation, and RefcountSlotMap(N,
+# MAX_REFS)'s generation/refcount all now index directly through their
+# owning struct pointer (core.next_free[i], not a decayed *usize) and go
+# through the SAME checked/elidable bounds-check codegen a local array
+# already got. 17 of 18 call sites across the three files are statically
+# proven with zero residual trap; the one that genuinely cannot be (issue
+# #216's cross-function owner-index provenance gap in
+# freelist_core_remove) is now an explicit, grep-visible `unsafe { ... }`
+# marker instead of silently-unchecked pointer arithmetic the checker had
+# stopped looking at. See HISTORY.md's 2026-08-15 entries (the migration
+# itself, and the adjacent one reversing part of issue #179's unsafe-
+# effect propagation, which this migration is what surfaced). `data` (the
+# payload storage) stayed a caller-owned slice throughout -- it was never
+# affected by the array-field decay gap in the first place.
 #
 # All four of freelist_pool/freelist_generic/slotmap/refcount_slotmap
 # `use` kernel/lib/'s own production files directly (not a re-prototyped

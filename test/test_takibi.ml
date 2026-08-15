@@ -6220,8 +6220,22 @@ let infer_tests = [
       Alcotest.(check (list string)) "leaf effects" ["unsafe"] leaf.effects;
       Alcotest.(check (list string)) "caller effects" ["unsafe"] caller.effects);
 
-  Alcotest.test_case "explicit safe effect contract rejects transitive unsafe" `Quick
-    (expect_type_error "unsafe effect is reachable"
+  (* Reversed (see HISTORY.md): unlike may_block/interrupt/exception, which
+     are real control-flow/concurrency hazards a caller's own effect
+     reasoning must compose with, unsafe here means only "one bounded,
+     local proof was done by hand" -- mandating it propagate through every
+     explicitly-effect-declared caller turned a single accepted-risk line
+     into a forced rewrite of every explicit-contract function transitively
+     above it in a real kernel (confirmed concretely via kernel/lib/
+     freelist.tkb's freelist_core_remove, whose !{unsafe} marking required
+     touching 9 files before this reversal). --forbid-unsafe (unchanged,
+     opt-in, checked below) remains available for a subtree that wants a
+     whole-program "zero unsafe" guarantee. *)
+  Alcotest.test_case
+    "an explicit safe effect contract no longer rejects transitive unsafe \
+     (unsafe is not required in the declared effect set of a caller that \
+     merely reaches it)" `Quick
+    (expect_ok
        "fn unsafe_leaf_contract(p: *u8) !{unsafe} {
           let s = unsafe { p[0..<1] };
         }

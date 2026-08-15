@@ -43,11 +43,13 @@ generic struct RefcountSlotMap(N: usize, MAX_REFS: usize) {
 
 fn refcount_pool_init(pool: *RefcountSlotMap(N, MAX_REFS)) {
     freelist_core_init(&pool.core);
-    let generation = pool.generation;   // decays to *usize, issue #15
-    let refcount = pool.refcount;       // issue #15, as above
-    for i: isize in 0..<N {
-        generation[i] = 0;
-        refcount[i] = 0;
+    // GitHub issue #217: pool.generation[i]/pool.refcount[i] index the
+    // struct-embedded array fields directly and are checked/proven by
+    // the for-loop counter's own {0..<N} type -- no more manual `let`/
+    // raw-pointer-arithmetic workaround (issue #15) needed here.
+    for i: usize in 0..<N {
+        pool.generation[i] = 0;
+        pool.refcount[i] = 0;
     }
     pool.double_release_count = 0;
 }
@@ -73,12 +75,17 @@ fn refcount_pool_alloc(pool: *RefcountSlotMap(N, MAX_REFS))
             // FreelistOwner, so it is deliberately dropped rather than
             // threaded through the rest of this pool's API.
             freelist_owner_drop(owner);
-            if (index >= N) { return RefcountAllocResult::Full; }
-            let generation = pool.generation;
-            let refcount = pool.refcount;
-            generation[index as isize] = generation_value;
-            refcount[index as isize] = 0;
-            return RefcountAllocResult::Allocated((index, generation_value));
+            // GitHub issue #217: wrapping form (`if index < N`), not an
+            // early-return guard -- the narrower's known scope limit
+            // (HISTORY.md's 2026-08-13 issue #295 entry) only narrows
+            // the wrapping form, needed here to prove the checked
+            // indices below in range.
+            if (index < N) {
+                pool.generation[index] = generation_value;
+                pool.refcount[index] = 0;
+                return RefcountAllocResult::Allocated((index, generation_value));
+            }
+            return RefcountAllocResult::Full;
         }
     }
 }
@@ -90,16 +97,17 @@ fn refcount_pool_alloc(pool: *RefcountSlotMap(N, MAX_REFS))
 // guessing what was intended.
 fn refcount_pool_abandon(pool: *RefcountSlotMap(N, MAX_REFS),
                          index: usize, generation_value: usize) -> bool {
-    if (index >= N) { return false; }
-    let generation = pool.generation;
-    let refcount = pool.refcount;
-    if (generation[index as isize] != generation_value ||
-        generation_value == 0 || refcount[index as isize] != 0) {
-        return false;
+    // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
+    if (index < N) {
+        if (pool.generation[index] != generation_value ||
+            generation_value == 0 || pool.refcount[index] != 0) {
+            return false;
+        }
+        pool.generation[index] = 0;
+        freelist_core_remove(&pool.core, freelist_owner_new(index, generation_value));
+        return true;
     }
-    generation[index as isize] = 0;
-    freelist_core_remove(&pool.core, freelist_owner_new(index, generation_value));
-    return true;
+    return false;
 }
 
 must_use variant RefcountRetainResult { Invalid; Overflow; Ok; }
@@ -107,19 +115,20 @@ must_use variant RefcountRetainResult { Invalid; Overflow; Ok; }
 fn refcount_pool_retain(pool: *RefcountSlotMap(N, MAX_REFS),
                         index: usize, generation_value: usize)
         -> RefcountRetainResult {
-    if (index >= N) { return RefcountRetainResult::Invalid; }
-    let generation = pool.generation;
-    if (generation[index as isize] != generation_value ||
-        generation_value == 0) {
-        return RefcountRetainResult::Invalid;
+    // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
+    if (index < N) {
+        if (pool.generation[index] != generation_value ||
+            generation_value == 0) {
+            return RefcountRetainResult::Invalid;
+        }
+        let current: usize = pool.refcount[index];
+        if (current >= MAX_REFS) {
+            return RefcountRetainResult::Overflow;
+        }
+        pool.refcount[index] = current + 1;
+        return RefcountRetainResult::Ok;
     }
-    let refcount = pool.refcount;
-    let current: usize = refcount[index as isize];
-    if (current >= MAX_REFS) {
-        return RefcountRetainResult::Overflow;
-    }
-    refcount[index as isize] = current + 1;
-    return RefcountRetainResult::Ok;
+    return RefcountRetainResult::Invalid;
 }
 
 must_use variant RefcountReleaseResult { Invalid; StillHeld; Freed; }
@@ -135,45 +144,58 @@ must_use variant RefcountReleaseResult { Invalid; StillHeld; Freed; }
 fn refcount_pool_release(pool: *RefcountSlotMap(N, MAX_REFS),
                          index: usize, generation_value: usize)
         -> RefcountReleaseResult {
-    if (index >= N) { return RefcountReleaseResult::Invalid; }
-    let generation = pool.generation;
-    if (generation[index as isize] != generation_value ||
-        generation_value == 0) {
-        return RefcountReleaseResult::Invalid;
+    // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
+    if (index < N) {
+        if (pool.generation[index] != generation_value ||
+            generation_value == 0) {
+            return RefcountReleaseResult::Invalid;
+        }
+        let current: usize = pool.refcount[index];
+        if (current == 0) {
+            pool.double_release_count = pool.double_release_count + 1;
+            return RefcountReleaseResult::Invalid;
+        }
+        let next: usize = current - 1;
+        pool.refcount[index] = next;
+        if (next == 0) {
+            pool.generation[index] = 0;
+            freelist_core_remove(&pool.core,
+                                 freelist_owner_new(index, generation_value));
+            return RefcountReleaseResult::Freed;
+        }
+        return RefcountReleaseResult::StillHeld;
     }
-    let refcount = pool.refcount;
-    let current: usize = refcount[index as isize];
-    if (current == 0) {
-        pool.double_release_count = pool.double_release_count + 1;
-        return RefcountReleaseResult::Invalid;
-    }
-    let next: usize = current - 1;
-    refcount[index as isize] = next;
-    if (next == 0) {
-        generation[index as isize] = 0;
-        freelist_core_remove(&pool.core,
-                             freelist_owner_new(index, generation_value));
-        return RefcountReleaseResult::Freed;
-    }
-    return RefcountReleaseResult::StillHeld;
+    return RefcountReleaseResult::Invalid;
 }
 
 fn refcount_pool_matches(pool: *RefcountSlotMap(N, MAX_REFS),
                          index: usize, generation_value: usize) -> bool {
-    if (index >= N || generation_value == 0) { return false; }
-    let generation = pool.generation;
-    return generation[index as isize] == generation_value;
+    if (generation_value == 0) { return false; }
+    // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
+    if (index < N) {
+        return pool.generation[index] == generation_value;
+    }
+    return false;
 }
 
 // 0 for a mismatched/stale handle, exactly like the object_references()
 // accessor this replaces already did by checking generation first.
 fn refcount_pool_count(pool: *RefcountSlotMap(N, MAX_REFS),
                        index: usize, generation_value: usize) -> usize {
-    if (refcount_pool_matches(pool, index, generation_value) == false) {
-        return 0;
+    // GitHub issue #217: inlined rather than calling refcount_pool_matches
+    // -- a proof from an earlier CALL's own condition does not carry
+    // across the function-call boundary into this checked index (the
+    // same class of gap as issue #216's cross-function owner-index
+    // provenance). Nested (not `&&`-chained in one condition) because
+    // the narrower only tracks index's {0..<N} bound for code textually
+    // inside the wrapping `if`'s own body, not a later conjunct of the
+    // same condition expression.
+    if (generation_value != 0 && index < N) {
+        if (pool.generation[index] == generation_value) {
+            return pool.refcount[index];
+        }
     }
-    let refcount = pool.refcount;
-    return refcount[index as isize];
+    return 0;
 }
 
 // Diagnostic/test use (e.g. an end-of-scenario "every slot truly empty"
@@ -182,9 +204,11 @@ fn refcount_pool_count(pool: *RefcountSlotMap(N, MAX_REFS),
 // otherwise-unreachable) slot's nonzero count instead of masking it as 0.
 fn refcount_pool_raw_count(pool: *RefcountSlotMap(N, MAX_REFS),
                            index: usize) -> usize {
-    if (index >= N) { return 0; }
-    let refcount = pool.refcount;
-    return refcount[index as isize];
+    // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
+    if (index < N) {
+        return pool.refcount[index];
+    }
+    return 0;
 }
 
 fn refcount_pool_double_release_count(pool: *RefcountSlotMap(N, MAX_REFS))
