@@ -58,9 +58,7 @@ enum UnifiedFdKind: u8 {
 enum UnifiedListenerState: u8 { Closed; Created; Bound; Listening; }
 // GitHub issue #264 third stage: descriptor state and the process heap break
 // share one record, so a process slot has one local FD context rather than
-// five globals that must be indexed in lockstep. Array fields are accessed
-// through local bindings below because embedded-array indexing is not yet a
-// direct parser/lowering operation (issue #15).
+// five globals that must be indexed in lockstep.
 struct ProcessFdContext {
     fd_kind: [UnifiedFdKind; PROCESS_FD_MAX];
     fd_object: [usize; PROCESS_FD_MAX];
@@ -165,15 +163,11 @@ fn unified_fd_table_init() {
         object_records[object].transport_generation = 0;
     }
     for process: usize in 0..<PROCESS_CONTEXT_MAX {
-        let fd_kind = process_fd_context[process].fd_kind;
-        let fd_object = process_fd_context[process].fd_object;
-        let fd_generation = process_fd_context[process].fd_generation;
-        let fd_close_on_exec = process_fd_context[process].fd_close_on_exec;
-        for fd: isize in 0..<(PROCESS_FD_MAX as isize) {
-            fd_kind[fd] = UnifiedFdKind::Empty;
-            fd_object[fd] = 0;
-            fd_generation[fd] = 0;
-            fd_close_on_exec[fd] = false;
+        for fd: usize in 0..<PROCESS_FD_MAX {
+            process_fd_context[process].fd_kind[fd] = UnifiedFdKind::Empty;
+            process_fd_context[process].fd_object[fd] = 0;
+            process_fd_context[process].fd_generation[fd] = 0;
+            process_fd_context[process].fd_close_on_exec[fd] = false;
         }
         process_fd_context[process].heap_break = 0;
         process_fd_context[process].heap_start = 0;
@@ -364,16 +358,13 @@ fn unified_terminal_is_open(process: usize, fd: usize) -> bool {
         return false;
     }
     let process_index = unified_fd_narrow_process(process);
-    let fd_kind = process_fd_context[process_index].fd_kind;
-    let fd_object = process_fd_context[process_index].fd_object;
-    let fd_generation = process_fd_context[process_index].fd_generation;
-    let object_value: usize = fd_object[fd as isize];
-    if (fd_kind[fd as isize] == UnifiedFdKind::Terminal &&
+    let object_value: usize = process_fd_context[process_index].fd_object[fd];
+    if (process_fd_context[process_index].fd_kind[fd] == UnifiedFdKind::Terminal &&
         object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
         return object_records[object].kind == UnifiedFdKind::Terminal &&
                refcount_pool_matches(&object_pool, object,
-                                     fd_generation[fd as isize]);
+                                     process_fd_context[process_index].fd_generation[fd]);
     }
     return false;
 }
@@ -401,15 +392,13 @@ fn unified_object_alloc_first(kind: UnifiedFdKind) -> UnifiedObjectResult {
 fn unified_fd_alloc(process: usize, first: usize) -> UnifiedFdAllocResult {
     if (process >= PROCESS_CONTEXT_MAX) { return UnifiedFdAllocResult::Full; }
     let process_index = unified_fd_narrow_process(process);
-    let fd_kind = process_fd_context[process_index].fd_kind;
-    let mut fd: usize = first;
-    while (fd < PROCESS_FD_MAX) {
-        if (fd_kind[fd as isize] == UnifiedFdKind::Empty &&
-            fd < PROCESS_FD_MAX) {
-            let result: {0..<PROCESS_FD_MAX as usize} = fd;
-            return UnifiedFdAllocResult::Allocated(result);
+    for fd: usize in first..<PROCESS_FD_MAX {
+        if (fd < PROCESS_FD_MAX) {
+            if (process_fd_context[process_index].fd_kind[fd] == UnifiedFdKind::Empty) {
+                let result: {0..<PROCESS_FD_MAX as usize} = fd;
+                return UnifiedFdAllocResult::Allocated(result);
+            }
         }
-        fd = fd + 1;
     }
     return UnifiedFdAllocResult::Full;
 }
@@ -420,17 +409,15 @@ fn unified_socket_lookup(process: usize, fd: usize,
         return UnifiedSocketResult::Missing;
     }
     let process_index = unified_fd_narrow_process(process);
-    let fd_kind = process_fd_context[process_index].fd_kind;
-    let fd_object = process_fd_context[process_index].fd_object;
-    let fd_generation = process_fd_context[process_index].fd_generation;
-    let object_value: usize = fd_object[fd as isize];
-    if (fd_kind[fd as isize] == kind && object_value < SHARED_OBJECT_MAX) {
+    let object_value: usize = process_fd_context[process_index].fd_object[fd];
+    if (process_fd_context[process_index].fd_kind[fd] == kind &&
+        object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
         if (object_records[object].kind == kind &&
             refcount_pool_matches(&object_pool, object,
-                                  fd_generation[fd as isize])) {
+                                  process_fd_context[process_index].fd_generation[fd])) {
             let mut handle: UnifiedObjectHandle = {
-                object, fd_generation[fd as isize]
+                object, process_fd_context[process_index].fd_generation[fd]
             };
             return UnifiedSocketResult::Found(handle);
         }
@@ -502,14 +489,12 @@ fn unified_fd_duplicate(process: usize, old_fd: usize, new_fd: usize)
         return UnifiedFdInstallResult::Invalid;
     }
     let process_index = unified_fd_narrow_process(process);
-    let fd_kind = process_fd_context[process_index].fd_kind;
-    let fd_object = process_fd_context[process_index].fd_object;
-    let fd_generation = process_fd_context[process_index].fd_generation;
-    if (fd_kind[old_fd as isize] == UnifiedFdKind::Empty) {
+    if (process_fd_context[process_index].fd_kind[old_fd] == UnifiedFdKind::Empty) {
         return UnifiedFdInstallResult::Invalid;
     }
-    return unified_fd_install(process, new_fd, fd_object[old_fd as isize],
-                              fd_generation[old_fd as isize]);
+    return unified_fd_install(process, new_fd,
+                              process_fd_context[process_index].fd_object[old_fd],
+                              process_fd_context[process_index].fd_generation[old_fd]);
 }
 
 fn unified_fd_set_close_on_exec(process: usize, fd: usize, value: bool)
@@ -518,10 +503,8 @@ fn unified_fd_set_close_on_exec(process: usize, fd: usize, value: bool)
         return UnifiedFdResult::Invalid;
     }
     let process_index = unified_fd_narrow_process(process);
-    let fd_kind = process_fd_context[process_index].fd_kind;
-    let fd_close_on_exec = process_fd_context[process_index].fd_close_on_exec;
-    if (fd_kind[fd as isize] != UnifiedFdKind::Empty) {
-        fd_close_on_exec[fd as isize] = value;
+    if (process_fd_context[process_index].fd_kind[fd] != UnifiedFdKind::Empty) {
+        process_fd_context[process_index].fd_close_on_exec[fd] = value;
         return UnifiedFdResult::Ok;
     }
     return UnifiedFdResult::Invalid;
@@ -532,8 +515,7 @@ fn unified_fd_close_on_exec(process: usize, fd: usize) -> bool {
         return false;
     }
     let process_index = unified_fd_narrow_process(process);
-    let fd_close_on_exec = process_fd_context[process_index].fd_close_on_exec;
-    return fd_close_on_exec[fd as isize];
+    return process_fd_context[process_index].fd_close_on_exec[fd];
 }
 
 fn unified_fd_close_exec_descriptors(process: usize) {
@@ -610,18 +592,15 @@ fn unified_file_lookup(process: usize, fd: usize) -> UnifiedFileResult {
         return UnifiedFileResult::Missing;
     }
     let process_index = unified_fd_narrow_process(process);
-    let fd_kind = process_fd_context[process_index].fd_kind;
-    let fd_object = process_fd_context[process_index].fd_object;
-    let fd_generation = process_fd_context[process_index].fd_generation;
-    let object_value: usize = fd_object[fd as isize];
-    if (fd_kind[fd as isize] == UnifiedFdKind::OpenFile &&
+    let object_value: usize = process_fd_context[process_index].fd_object[fd];
+    if (process_fd_context[process_index].fd_kind[fd] == UnifiedFdKind::OpenFile &&
         object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
         if (object_records[object].kind == UnifiedFdKind::OpenFile &&
             refcount_pool_matches(&object_pool, object,
-                                  fd_generation[fd as isize])) {
+                                  process_fd_context[process_index].fd_generation[fd])) {
             let mut handle: UnifiedObjectHandle = {
-                object, fd_generation[fd as isize]
+                object, process_fd_context[process_index].fd_generation[fd]
             };
             return UnifiedFileResult::Found(handle);
         }
@@ -645,18 +624,15 @@ fn unified_directory_lookup(process: usize, fd: usize)
         return UnifiedDirectoryResult::Missing;
     }
     let process_index = unified_fd_narrow_process(process);
-    let fd_kind = process_fd_context[process_index].fd_kind;
-    let fd_object = process_fd_context[process_index].fd_object;
-    let fd_generation = process_fd_context[process_index].fd_generation;
-    let object_value: usize = fd_object[fd as isize];
-    if (fd_kind[fd as isize] == UnifiedFdKind::Directory &&
+    let object_value: usize = process_fd_context[process_index].fd_object[fd];
+    if (process_fd_context[process_index].fd_kind[fd] == UnifiedFdKind::Directory &&
         object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
         if (object_records[object].kind == UnifiedFdKind::Directory &&
             refcount_pool_matches(&object_pool, object,
-                                  fd_generation[fd as isize])) {
+                                  process_fd_context[process_index].fd_generation[fd])) {
             let mut handle: UnifiedObjectHandle = {
-                object, fd_generation[fd as isize]
+                object, process_fd_context[process_index].fd_generation[fd]
             };
             return UnifiedDirectoryResult::Found(handle);
         }
@@ -691,13 +667,9 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
         return UnifiedFdInstallResult::Invalid;
     }
     let process_index = unified_fd_narrow_process(process);
-    let fd_kind = process_fd_context[process_index].fd_kind;
-    let fd_object = process_fd_context[process_index].fd_object;
-    let fd_generation = process_fd_context[process_index].fd_generation;
-    let fd_close_on_exec = process_fd_context[process_index].fd_close_on_exec;
     if (object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        if (fd_kind[fd as isize] != UnifiedFdKind::Empty ||
+        if (process_fd_context[process_index].fd_kind[fd] != UnifiedFdKind::Empty ||
             object_records[object].kind == UnifiedFdKind::Empty) {
             return UnifiedFdInstallResult::Invalid;
         }
@@ -706,10 +678,10 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
             RefcountRetainResult::Overflow => { return UnifiedFdInstallResult::RefOverflow; }
             RefcountRetainResult::Ok => {}
         }
-        fd_kind[fd as isize] = object_records[object].kind;
-        fd_object[fd as isize] = object;
-        fd_generation[fd as isize] = generation;
-        fd_close_on_exec[fd as isize] = false;
+        process_fd_context[process_index].fd_kind[fd] = object_records[object].kind;
+        process_fd_context[process_index].fd_object[fd] = object;
+        process_fd_context[process_index].fd_generation[fd] = generation;
+        process_fd_context[process_index].fd_close_on_exec[fd] = false;
         return UnifiedFdInstallResult::Ok;
     }
     return UnifiedFdInstallResult::Invalid;
@@ -720,15 +692,11 @@ fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult {
         return UnifiedFdResult::Invalid;
     }
     let process_index = unified_fd_narrow_process(process);
-    let fd_kind = process_fd_context[process_index].fd_kind;
-    let fd_object = process_fd_context[process_index].fd_object;
-    let fd_generation = process_fd_context[process_index].fd_generation;
-    let fd_close_on_exec = process_fd_context[process_index].fd_close_on_exec;
-    let object_value: usize = fd_object[fd as isize];
-    if (fd_kind[fd as isize] != UnifiedFdKind::Empty &&
+    let object_value: usize = process_fd_context[process_index].fd_object[fd];
+    if (process_fd_context[process_index].fd_kind[fd] != UnifiedFdKind::Empty &&
         object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        let generation: usize = fd_generation[fd as isize];
+        let generation: usize = process_fd_context[process_index].fd_generation[fd];
         match refcount_pool_release(&object_pool, object, generation) {
             RefcountReleaseResult::Invalid => { return UnifiedFdResult::Invalid; }
             RefcountReleaseResult::StillHeld => {}
@@ -736,10 +704,10 @@ fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult {
                 object_records[object].kind = UnifiedFdKind::Empty;
             }
         }
-        fd_kind[fd as isize] = UnifiedFdKind::Empty;
-        fd_object[fd as isize] = 0;
-        fd_generation[fd as isize] = 0;
-        fd_close_on_exec[fd as isize] = false;
+        process_fd_context[process_index].fd_kind[fd] = UnifiedFdKind::Empty;
+        process_fd_context[process_index].fd_object[fd] = 0;
+        process_fd_context[process_index].fd_generation[fd] = 0;
+        process_fd_context[process_index].fd_close_on_exec[fd] = false;
         return UnifiedFdResult::Ok;
     }
     return UnifiedFdResult::Invalid;
@@ -751,17 +719,24 @@ fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult {
 // from child_index rather than taking them as pointer parameters, matching
 // this file's existing idiom (see e.g. unified_fd_table_init).
 fn unified_fd_clone_rollback(
-        child_index: {0..<PROCESS_CONTEXT_MAX as usize}, limit: usize) {
-    let child_fd_kind = process_fd_context[child_index].fd_kind;
-    let child_fd_object = process_fd_context[child_index].fd_object;
-    let child_fd_generation = process_fd_context[child_index].fd_generation;
+        child_index: {0..<PROCESS_CONTEXT_MAX as usize},
+        limit: {0..<PROCESS_FD_MAX as usize}) !{unsafe} {
+    // GitHub issue #216-class gap: `undo < PROCESS_FD_MAX` is true by
+    // construction (every caller passes a `limit` itself bounded by
+    // PROCESS_FD_MAX, see the 3 call sites in unified_fd_clone below) but
+    // not provable inside this function alone -- the for-loop's own
+    // range-refinement only recognizes a literal/const upper bound (see
+    // type_inf.ml's For case), not a runtime parameter's own refined type,
+    // even though `limit` is refined to exactly {0..<PROCESS_FD_MAX} here.
     for undo: usize in 0..<limit {
-        if (child_fd_kind[undo as isize] != UnifiedFdKind::Empty) {
-            let undo_value: usize = child_fd_object[undo as isize];
+        if (unsafe { process_fd_context[child_index].fd_kind[undo] } !=
+            UnifiedFdKind::Empty) {
+            let undo_value: usize =
+                unsafe { process_fd_context[child_index].fd_object[undo] };
             if (undo_value < SHARED_OBJECT_MAX) {
                 let undo_object: {0..<SHARED_OBJECT_MAX as usize} = undo_value;
                 match refcount_pool_release(&object_pool, undo_object,
-                                            child_fd_generation[undo as isize]) {
+                        unsafe { process_fd_context[child_index].fd_generation[undo] }) {
                     RefcountReleaseResult::Invalid => {}
                     RefcountReleaseResult::StillHeld => {}
                     RefcountReleaseResult::Freed => {
@@ -769,7 +744,7 @@ fn unified_fd_clone_rollback(
                     }
                 }
             }
-            child_fd_kind[undo as isize] = UnifiedFdKind::Empty;
+            unsafe { process_fd_context[child_index].fd_kind[undo] = UnifiedFdKind::Empty };
         }
     }
 }
@@ -779,27 +754,17 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult {
         parent == child) { return UnifiedFdResult::Invalid; }
     let parent_index = unified_fd_narrow_process(parent);
     let child_index = unified_fd_narrow_process(child);
-    let parent_fd_kind = process_fd_context[parent_index].fd_kind;
-    let parent_fd_object = process_fd_context[parent_index].fd_object;
-    let parent_fd_generation = process_fd_context[parent_index].fd_generation;
-    let parent_fd_close_on_exec =
-        process_fd_context[parent_index].fd_close_on_exec;
-    let child_fd_kind = process_fd_context[child_index].fd_kind;
-    let child_fd_object = process_fd_context[child_index].fd_object;
-    let child_fd_generation = process_fd_context[child_index].fd_generation;
-    let child_fd_close_on_exec =
-        process_fd_context[child_index].fd_close_on_exec;
     for fd: usize in 0..<PROCESS_FD_MAX {
-        if (child_fd_kind[fd as isize] != UnifiedFdKind::Empty) {
+        if (process_fd_context[child_index].fd_kind[fd] != UnifiedFdKind::Empty) {
             return UnifiedFdResult::Invalid;
         }
-        if (parent_fd_kind[fd as isize] != UnifiedFdKind::Empty) {
-            let object_value: usize = parent_fd_object[fd as isize];
+        if (process_fd_context[parent_index].fd_kind[fd] != UnifiedFdKind::Empty) {
+            let object_value: usize = process_fd_context[parent_index].fd_object[fd];
             if (object_value < SHARED_OBJECT_MAX) {
                 let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-                if (object_records[object].kind != parent_fd_kind[fd as isize] ||
+                if (object_records[object].kind != process_fd_context[parent_index].fd_kind[fd] ||
                     refcount_pool_count(&object_pool, object,
-                                        parent_fd_generation[fd as isize]) == 0) {
+                                        process_fd_context[parent_index].fd_generation[fd]) == 0) {
                     return UnifiedFdResult::Invalid;
                 }
             } else {
@@ -826,20 +791,23 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult {
     // clone. Each failure branch below now undoes fds 0..fd before
     // returning, matching scheduled_process_alloc's own rollback discipline.
     for fd: usize in 0..<PROCESS_FD_MAX {
-        child_fd_kind[fd as isize] = parent_fd_kind[fd as isize];
-        child_fd_object[fd as isize] = parent_fd_object[fd as isize];
-        child_fd_generation[fd as isize] = parent_fd_generation[fd as isize];
-        child_fd_close_on_exec[fd as isize] =
-            parent_fd_close_on_exec[fd as isize];
-        if (parent_fd_kind[fd as isize] != UnifiedFdKind::Empty) {
-            let value: usize = parent_fd_object[fd as isize];
+        process_fd_context[child_index].fd_kind[fd] =
+            process_fd_context[parent_index].fd_kind[fd];
+        process_fd_context[child_index].fd_object[fd] =
+            process_fd_context[parent_index].fd_object[fd];
+        process_fd_context[child_index].fd_generation[fd] =
+            process_fd_context[parent_index].fd_generation[fd];
+        process_fd_context[child_index].fd_close_on_exec[fd] =
+            process_fd_context[parent_index].fd_close_on_exec[fd];
+        if (process_fd_context[parent_index].fd_kind[fd] != UnifiedFdKind::Empty) {
+            let value: usize = process_fd_context[parent_index].fd_object[fd];
             if (value < SHARED_OBJECT_MAX) {
                 let object: {0..<SHARED_OBJECT_MAX as usize} = value;
                 match refcount_pool_retain(&object_pool, object,
-                                           parent_fd_generation[fd as isize]) {
+                                           process_fd_context[parent_index].fd_generation[fd]) {
                     RefcountRetainResult::Ok => {}
                     RefcountRetainResult::Invalid => {
-                        child_fd_kind[fd as isize] = UnifiedFdKind::Empty;
+                        process_fd_context[child_index].fd_kind[fd] = UnifiedFdKind::Empty;
                         unified_fd_clone_rollback(child_index, fd);
                         return UnifiedFdResult::Invalid;
                     }
@@ -847,13 +815,13 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult {
                         kernel_boot_log_resource_exhausted(
                             "shared object reference count" as *u8,
                             SHARED_OBJECT_MAX_REFS);
-                        child_fd_kind[fd as isize] = UnifiedFdKind::Empty;
+                        process_fd_context[child_index].fd_kind[fd] = UnifiedFdKind::Empty;
                         unified_fd_clone_rollback(child_index, fd);
                         return UnifiedFdResult::Invalid;
                     }
                 }
             } else {
-                child_fd_kind[fd as isize] = UnifiedFdKind::Empty;
+                process_fd_context[child_index].fd_kind[fd] = UnifiedFdKind::Empty;
                 unified_fd_clone_rollback(child_index, fd);
                 return UnifiedFdResult::Invalid;
             }
@@ -868,18 +836,15 @@ fn unified_fd_set_offset(process: usize, fd: usize, offset: usize)
         return UnifiedFdResult::Invalid;
     }
     let process_index = unified_fd_narrow_process(process);
-    let fd_kind = process_fd_context[process_index].fd_kind;
-    let fd_object = process_fd_context[process_index].fd_object;
-    let fd_generation = process_fd_context[process_index].fd_generation;
-    let object_value: usize = fd_object[fd as isize];
-    if ((fd_kind[fd as isize] == UnifiedFdKind::OpenFile ||
-         fd_kind[fd as isize] == UnifiedFdKind::Directory) &&
+    let object_value: usize = process_fd_context[process_index].fd_object[fd];
+    if ((process_fd_context[process_index].fd_kind[fd] == UnifiedFdKind::OpenFile ||
+         process_fd_context[process_index].fd_kind[fd] == UnifiedFdKind::Directory) &&
         object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
         if ((object_records[object].kind == UnifiedFdKind::OpenFile ||
              object_records[object].kind == UnifiedFdKind::Directory) &&
             refcount_pool_matches(&object_pool, object,
-                                  fd_generation[fd as isize])) {
+                                  process_fd_context[process_index].fd_generation[fd])) {
             object_records[object].offset = offset;
             return UnifiedFdResult::Ok;
         }
@@ -892,18 +857,15 @@ fn unified_fd_offset(process: usize, fd: usize) -> UnifiedOffsetResult {
         return UnifiedOffsetResult::Missing;
     }
     let process_index = unified_fd_narrow_process(process);
-    let fd_kind = process_fd_context[process_index].fd_kind;
-    let fd_object = process_fd_context[process_index].fd_object;
-    let fd_generation = process_fd_context[process_index].fd_generation;
-    let object_value: usize = fd_object[fd as isize];
-    if ((fd_kind[fd as isize] == UnifiedFdKind::OpenFile ||
-         fd_kind[fd as isize] == UnifiedFdKind::Directory) &&
+    let object_value: usize = process_fd_context[process_index].fd_object[fd];
+    if ((process_fd_context[process_index].fd_kind[fd] == UnifiedFdKind::OpenFile ||
+         process_fd_context[process_index].fd_kind[fd] == UnifiedFdKind::Directory) &&
         object_value < SHARED_OBJECT_MAX) {
         let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
         if ((object_records[object].kind == UnifiedFdKind::OpenFile ||
              object_records[object].kind == UnifiedFdKind::Directory) &&
             refcount_pool_matches(&object_pool, object,
-                                  fd_generation[fd as isize])) {
+                                  process_fd_context[process_index].fd_generation[fd])) {
             return UnifiedOffsetResult::Found(object_records[object].offset);
         }
     }
@@ -913,9 +875,8 @@ fn unified_fd_offset(process: usize, fd: usize) -> UnifiedOffsetResult {
 fn unified_fd_destroy(process: usize) -> UnifiedFdResult {
     if (process >= PROCESS_CONTEXT_MAX) { return UnifiedFdResult::Invalid; }
     let process_index = unified_fd_narrow_process(process);
-    let fd_kind = process_fd_context[process_index].fd_kind;
     for fd: usize in 0..<PROCESS_FD_MAX {
-        if (fd_kind[fd as isize] != UnifiedFdKind::Empty) {
+        if (process_fd_context[process_index].fd_kind[fd] != UnifiedFdKind::Empty) {
             match unified_fd_close(process, fd) {
                 UnifiedFdResult::Invalid => {
                     return UnifiedFdResult::Invalid;
@@ -1223,8 +1184,7 @@ fn unified_fd_table_probe() -> bool {
 fn kernel_fd_table_crash_kind(process: usize, fd: usize) -> usize {
     if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX) { return 0; }
     let process_index = unified_fd_narrow_process(process);
-    let fd_kind = process_fd_context[process_index].fd_kind;
-    match fd_kind[fd as isize] {
+    match process_fd_context[process_index].fd_kind[fd] {
         UnifiedFdKind::Empty => { return 0; }
         UnifiedFdKind::Terminal => { return 1; }
         UnifiedFdKind::OpenFile => { return 2; }
@@ -1237,6 +1197,5 @@ fn kernel_fd_table_crash_kind(process: usize, fd: usize) -> usize {
 fn kernel_fd_table_crash_object(process: usize, fd: usize) -> usize {
     if (process >= PROCESS_CONTEXT_MAX || fd >= PROCESS_FD_MAX) { return 0; }
     let process_index = unified_fd_narrow_process(process);
-    let fd_object = process_fd_context[process_index].fd_object;
-    return fd_object[fd as isize];
+    return process_fd_context[process_index].fd_object[fd];
 }

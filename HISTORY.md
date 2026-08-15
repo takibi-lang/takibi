@@ -15,6 +15,92 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: `kernel/kernel/fd_table.tkb` Migrated Off Array-Decay-Avoidance Local Bindings (49 Sites)
+
+The last and largest of the three files flagged as still using the old
+"bind a struct-embedded array field to a local before indexing it"
+workaround (`kernel/mm/page.tkb` and `kernel/lib/growable_pool.tkb`,
+previous entries), predating issue #217's direct-indexing fix.
+`ProcessFdContext`'s four `[T; PROCESS_FD_MAX]` fields (`fd_kind`,
+`fd_object`, `fd_generation`, `fd_close_on_exec`) were read out into
+local bindings at the top of nearly every function in the file (e.g.
+`let fd_kind = process_fd_context[process_index].fd_kind;`), which -- as
+the struct's own doc comment used to say, citing issue #15 -- decays the
+array field to a raw `*T` pointer. Every subsequent `fd_kind[fd as
+isize]` was therefore genuinely UNCHECKED raw-pointer arithmetic (SPEC.md:
+"`p[i]` ... on a raw pointer `*T` ... get no runtime bounds check at
+all"), not merely a style wart: the `fd >= PROCESS_FD_MAX` guards present
+at nearly every call site were real validation for callers, but did
+nothing to protect the array reads/writes themselves, which trusted the
+decayed pointer unconditionally. All 49 sites converted to direct
+`process_fd_context[process_index].fd_kind[fd]`-style checked indexing
+(dropping every `as isize` cast, since checked array indexing takes
+`usize`/a refined index, not the raw-pointer-specific `isize`), and the
+stale issue #15 comment on `ProcessFdContext` removed.
+
+Two sites needed more than a mechanical rewrite:
+
+- `unified_fd_alloc`'s `while (fd < PROCESS_FD_MAX) { ... fd = fd + 1; }`
+  loop does not narrow `fd` at all under direct indexing -- `While`'s own
+  type_inf.ml case type-checks the condition but never applies it as a
+  narrowing fact to the body (`While (cond, body) -> ... infer_stmt ...
+  tyenv ...`, the unmodified `tyenv` passed straight through, unlike
+  `If`). Converting the loop to `for fd: usize in first..<PROCESS_FD_MAX`
+  did not fix this by itself either: a for-loop's own range refinement
+  (`type_inf.ml`'s `For` case, `idx_ty`) only fires when BOTH bounds are
+  compile-time constants (`Const_env.bound_value`), and `first` here is a
+  runtime parameter, not a constant -- so the loop counter `fd` still
+  carried a plain unrefined `usize`. Fixed with this codebase's ordinary
+  `if (fd < PROCESS_FD_MAX) { ... }` wrapping-if idiom placed around BOTH
+  the indexing use and the loop's own `{0..<PROCESS_FD_MAX}`-typed result
+  construction (nesting it, not `&&`-combining it with the adjacent
+  `fd_kind[fd] == Empty` check -- an `&&`-combined single condition was
+  tried first and, surprisingly, still failed llvm_gen.ml's own
+  trap-check on the indexing sub-expression even though the type-level
+  proof succeeded, a further wrinkle of the same type_inf.ml/llvm_gen.ml
+  sync gap the previous entry describes, not chased down further here
+  since the nested-if form sidesteps it entirely and is one line longer).
+
+- `unified_fd_clone_rollback(child_index, limit)` iterates `for undo:
+  usize in 0..<limit`, where `limit` is a PARAMETER already refined to
+  `{0..<PROCESS_FD_MAX as usize}` at the signature (true at all 3 call
+  sites, each passing a `unified_fd_clone`-loop `fd` of exactly that
+  type) -- yet this still does not narrow `undo`, for the identical
+  reason as `unified_fd_alloc` above: `Const_env.bound_value` only
+  recognizes a literal or a named global constant as a for-loop's hi
+  bound, not an arbitrary already-refined runtime expression, even one
+  whose own upper bound is a compile-time constant one step removed.
+  Refining `limit`'s own type was there to try to communicate this to
+  the checker; the checker cannot use it. Marked `!{unsafe}` instead,
+  matching `kernel/lib/freelist.tkb`'s `freelist_core_remove` and
+  `kernel/lib/growable_pool.tkb`'s `growable_pool_activate_chunk` (same
+  entries, previous sessions) -- the same class of issue #216 gap: true
+  by construction across a function boundary, not provable inside the
+  one function alone. Each of the four unproven indexing operations
+  wrapped individually in `unsafe { ... }` (the grammar only allows
+  `unsafe { expr }`, not a block of statements), rather than one
+  blanket-unsafe function body, matching the existing per-site
+  convention in both prior files.
+
+Neither gap is specific to fd_table.tkb; both are general, previously
+undocumented for-loop-counter narrowing limitations (constant-bounds-only
+refinement) that any future `for i in lo..<hi` over a non-constant,
+already-refined bound will hit again. Left as a known limitation rather
+than fixed in the type checker this session -- flagged for the user
+rather than filed as an issue unilaterally, matching this session's
+established pattern of only filing issues on explicit request.
+
+Verified: `dune runtest` (1021/1021, no new tests needed -- purely an
+application-level `.tkb` migration, no compiler behavior changed), a
+clean `kernelbuild-qemu`/`kernelbuild-rpi5` (both gaps above were caught
+here, at compile time, via `--forbid-trap`), `langcheck`, `linuxcheck`,
+a full `kernelcheck-qemu` real-boot run (38 views including
+`process_fd_table`, ash/TCP integration, PTY smoke test -- the PTY
+smoke test failed once on a QEMU serial-socket `ConnectionRefusedError`
+unrelated to this change, a transient host-side timing race, and passed
+cleanly on retry), and a full `kernelcheck-rpi5` real-hardware run
+(38/38 views including `process_fd_table`), all with no regressions.
+
 ### 2026-08-15: Early-Return-Guard Narrowing Was Never Synced Into Codegen's Own Bounds-Check Elision (GitHub Issue #296 Follow-Up)
 
 Issue #296's fix (previous entry) landed entirely in `lib/type_inf.ml`
