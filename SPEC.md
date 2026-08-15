@@ -2307,6 +2307,27 @@ above): a function using only the block form still needs its own
 `!{unsafe}`, and the block form is not a way to make `!{unsafe}` alone
 sufficient for a whole function body.
 
+### Unnecessary-unsafe warning
+
+The compiler tracks, per statement inside `unsafe { stmt* }` (recursively,
+at every nesting depth) and per `unsafe { expr }`, whether anything
+inside it actually elided a runtime check or asserted an otherwise-
+illegal construct. If nothing did, it prints a non-fatal warning (`File
+"...", line N, character C: warning: ...`) suggesting the statement be
+moved outside the scope -- the same "audit density should match real
+trust decisions" concern the block form's own scoping guidance above is
+about, now checked mechanically instead of only by review. Always on
+(not gated by a flag): cheap, reuses data the codegen already computes,
+and a real build should have zero such warnings.
+
+Scoped to the categories `llvm_gen.ml` itself decides (single-element
+index elision, subslice-with-unprovable-bounds elision, raw-pointer
+slice construction) -- **not** the affine/aligned-pointer-cast category
+(a pure type-checker-level gate with no codegen footprint to hook into),
+so a statement whose only justification is one of those casts would be
+misreported as unnecessary. No `kernel/` site uses that category inside
+`unsafe` as of this writing.
+
 ## --forbid-trap
 
 `takibi ... --forbid-trap` rejects compilation if **any** runtime trap

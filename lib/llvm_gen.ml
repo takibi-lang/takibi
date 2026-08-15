@@ -568,6 +568,36 @@ let init_function_profile_table keys =
    per compilation for the same reason type_inf's counter is. *)
 let unsafe_depth = ref 0
 
+(* GitHub issue #315 follow-up: "unnecessary unsafe" detection. Every site
+   below that already consults `unsafe_depth` to decide whether to elide a
+   runtime check (or, for a raw-pointer subslice, to construct one at all)
+   also calls `note_unsafe_use` exactly when that elision genuinely
+   happened -- i.e. when the operation would NOT have been legal/checked
+   without `unsafe`. `unsafe { ... }`/`unsafe { stmt* }` then compares
+   `unsafe_use_marker` before and after generating each covered statement
+   (or, for the expr form, the wrapped expr): no change means that
+   statement never actually needed to be inside the unsafe scope. Mirrors
+   `trap_sites`' own "accumulate a list, let bin/main.ml report it"
+   pattern, deliberately non-fatal (a good-hygiene hint, not a rejection).
+
+   Scoped to the categories llvm_gen.ml itself decides (single-element
+   index elision, subslice-with-unprovable-bounds elision, raw-pointer
+   slice construction) -- NOT the affine/aligned-pointer-cast category
+   (`check_kinded_ptr_cast_needs_unsafe`/`check_aligned_ptr_cast_needs_unsafe`
+   in type_inf.ml), which is a pure type-checker-level gate with no
+   llvm_gen.ml footprint to hook into. As of this writing zero kernel/
+   sites use that category inside `unsafe`, so this is not a live
+   false-positive risk today, but a future affine/aligned-cast-only
+   unsafe site would be (wrongly) flagged as unnecessary by this check --
+   closing that gap would need the same before/after marker duplicated in
+   type_inf.ml's own statement walk, not attempted here. *)
+let unsafe_use_marker = ref 0
+let note_unsafe_use () = incr unsafe_use_marker
+let unsafe_lint_active = ref false
+let unnecessary_unsafe_sites : (Lexing.position * string) list ref = ref []
+let record_unnecessary_unsafe loc what =
+  unnecessary_unsafe_sites := (loc, what) :: !unnecessary_unsafe_sites
+
 (* Human-readable type names for trap-site messages (Ast.show_type_expr's
    raw constructor dump is too noisy for a user-facing compile error). *)
 let rec ty_str = function
@@ -3235,7 +3265,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
           | Some (lo, hi) -> lo < 0 || hi > n
           | _ -> true
         in
-        if needs_check && !unsafe_depth = 0 then emit_bounds_check e.loc idx_ty idx_v n;
+        if needs_check && !unsafe_depth = 0 then emit_bounds_check e.loc idx_ty idx_v n
+        else if needs_check then note_unsafe_use ();
         let arr_ll = array_type (ltype_of_ast elem_ty) n in
         let zero   = const_int (i32_type context) 0 in
         let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
@@ -3298,7 +3329,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
               | _ -> false)
         in
         if not proven && !unsafe_depth = 0 then
-          emit_bounds_check_dyn e.loc idx_ty idx_v min_len (slice_len fat);
+          emit_bounds_check_dyn e.loc idx_ty idx_v min_len (slice_len fat)
+        else if not proven then note_unsafe_use ();
         let ep = build_gep (ltype_of_ast elem_ty) (slice_ptr fat) [|idx_v|] "idx_ptr" builder in
         let v  = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
         (elem_ty, to_arith_width elem_ty v)
@@ -3423,7 +3455,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                type system doesn't track -- see CLAUDE.md's P4c section).
                No trap site recorded: this is a deliberate assertion, not
                a residual gap --forbid-trap should report. *)
-            ()
+            note_unsafe_use ()
           else begin
             (* Runtime-checked subslice (gradual form): one check, one
                recorded trap site, and everything downstream of the
@@ -3462,7 +3494,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         (* Slice construction from a raw pointer: UNCHECKED by design (the
            unsafe-gated escape hatch, used once at a driver boundary). The
            claimed minimum is whatever the bounds' static ranges guarantee
-           (sync rule: same formula as type_inf's TPtr branch). *)
+           (sync rule: same formula as type_inf's TPtr branch). Reaching
+           this function at all means type_inf.ml's own gate (2097-ish,
+           "slice construction from a raw pointer asserts a length without
+           evidence") already required unsafe_depth > 0 to type-check, so
+           this use is unconditional, not re-derived from unsafe_depth here. *)
+        note_unsafe_use ();
         let (lo_v, lo_r) = gen_bound lo_e in
         let (hi_v, hi_r) = gen_bound hi_e in
         let min_len = match lo_r, hi_r with
@@ -3490,7 +3527,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          CLAUDE.md's P4c section for why those are correlated-bounds cases
          plain intervals can't close). *)
       incr unsafe_depth;
+      let before_use = !unsafe_use_marker in
       let r = gen_expr locals e1 in
+      if !unsafe_use_marker = before_use then
+        record_unnecessary_unsafe e.loc
+          "unsafe { } did not need to be here: nothing inside it actually \
+           elided a check or asserted an otherwise-illegal construct";
       decr unsafe_depth;
       r
 
@@ -4135,7 +4177,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                | _ -> true
              in
              if needs_check && !unsafe_depth = 0 then
-               emit_bounds_check idx.loc idx_ty idx_v n;
+               emit_bounds_check idx.loc idx_ty idx_v n
+             else if needs_check then note_unsafe_use ();
              let arr_ll = array_type (ltype_of_ast elem_ty) n in
              let zero   = const_int (i32_type context) 0 in
              let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
@@ -4158,7 +4201,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                    | _ -> false)
              in
              if not proven && !unsafe_depth = 0 then
-               emit_bounds_check_dyn idx.loc idx_ty idx_v min_len (slice_len fat);
+               emit_bounds_check_dyn idx.loc idx_ty idx_v min_len (slice_len fat)
+             else if not proven then note_unsafe_use ();
              let ep = build_gep (ltype_of_ast elem_ty) (slice_ptr fat) [|idx_v|] "idx_ptr" builder in
              ignore (build_store (coerce rhs_v elem_ty) ep builder)
            in
@@ -4769,10 +4813,22 @@ let gen_func ?prog_types fdef =
         (* GitHub issue #315: mirrors type_inf.ml's UnsafeBlock case (sync
            rule) -- same unsafe_depth widen/narrow around the whole
            statement list that the Unsafe expr case already does around a
-           single expr. *)
+           single expr. unsafe_lint_active turns on per-statement
+           "unnecessary unsafe" checking (see its own comment, near
+           unsafe_depth's declaration) for every statement inside this
+           scope, including ones nested arbitrarily deep in if/while/for/
+           match bodies -- run_stmts_with_future_writes's own `go` loop is
+           the single shared choke point every such nested statement list
+           passes through, so hooking in there (guarded by this flag)
+           reaches all of them with no per-construct plumbing. Save/restore
+           rather than unconditional on/off: a nested `unsafe { }` inside
+           this one must not turn tracking OFF when IT exits. *)
+        let was_lint_active = !unsafe_lint_active in
+        unsafe_lint_active := true;
         incr unsafe_depth;
         run_stmts_with_future_writes stmts;
-        decr unsafe_depth
+        decr unsafe_depth;
+        unsafe_lint_active := was_lint_active
 
     | If (cond, then_stmts, else_stmts) ->
         let cond_v   = as_cond (snd (gen_expr locals cond)) in
@@ -5198,7 +5254,16 @@ let gen_func ?prog_types fdef =
       | [] -> ()
       | s :: rest ->
           enclosing_future_writes := Ast.written_names rest;
-          gen_stmt s;
+          if !unsafe_lint_active then begin
+            let before_use = !unsafe_use_marker in
+            gen_stmt s;
+            if !unsafe_use_marker = before_use then
+              record_unnecessary_unsafe s.loc
+                "statement inside unsafe { } did not need it: nothing in \
+                 it actually elided a check or asserted an otherwise-\
+                 illegal construct -- consider moving it outside the scope"
+          end else
+            gen_stmt s;
           go rest
     in
     go stmts;
@@ -5755,6 +5820,9 @@ let gen_program ?prog_types prog =
   trap_sites := [];  (* fresh per compilation (and per unit test) *)
   Buffer.clear raw_asm_buf;
   unsafe_depth := 0;
+  unsafe_use_marker := 0;
+  unsafe_lint_active := false;
+  unnecessary_unsafe_sites := [];  (* fresh per compilation (and per unit test), mirrors trap_sites *)
   Hashtbl.reset erased_view_names;
   Hashtbl.reset variant_defs;
   Hashtbl.reset variant_lltypes;

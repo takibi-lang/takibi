@@ -69,7 +69,7 @@ fn kernel_exec_argv0_name() -> ExecArgv0NameResult !{unsafe} {
     if (argv.len < 2) {
         return ExecArgv0NameResult::Invalid;
     }
-    let first_byte: u8 = unsafe { argv[0] };
+    let first_byte: u8 = argv[0];
     if (first_byte != 0x2F) {
         return ExecArgv0NameResult::Invalid;
     }

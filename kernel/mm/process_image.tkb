@@ -997,9 +997,14 @@ fn process_image_load_page(page: borrow PageOwner[page],
     // checker limitation as the copy views.
     let zeros = process_image_zero_page as []u8;
     let suffix_start: usize = destination_offset + copy_length;
+    // destination_offset alone is directly bounded above (checked just
+    // above), so the checker proves prefix/zero_prefix without unsafe;
+    // suffix_start is a SUM of two related runtime values, which the
+    // checker cannot carry into slice syntax the same way -- see this
+    // function's own opening comment.
+    let prefix = bytes[0..<destination_offset];
+    let zero_prefix = zeros[0..<destination_offset];
     unsafe {
-        let prefix = bytes[0..<destination_offset];
-        let zero_prefix = zeros[0..<destination_offset];
         let suffix = bytes[suffix_start..<PAGE_SIZE];
         let zero_suffix = zeros[suffix_start..<PAGE_SIZE];
         if (slice_eq(prefix, zero_prefix) == false ||

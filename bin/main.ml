@@ -11,6 +11,12 @@ let report_error pos msg =
   let file = pos.Lexing.pos_fname in
   Printf.eprintf "File \"%s\", line %d, character %d: %s\n" file line col msg
 
+let report_warning pos msg =
+  let line = pos.Lexing.pos_lnum in
+  let col = pos.Lexing.pos_cnum - pos.Lexing.pos_bol + 1 in
+  let file = pos.Lexing.pos_fname in
+  Printf.eprintf "File \"%s\", line %d, character %d: warning: %s\n" file line col msg
+
 let parse_file filename =
   let chan = open_in filename in
   let lexbuf = Lexing.from_channel chan in
@@ -279,6 +285,20 @@ let () =
       end else
         print_string (Buffer.contents buf);
       exit 0
+    end;
+
+    (* GitHub issue #315 follow-up: "unnecessary unsafe" hygiene warnings.
+       Non-fatal (unlike --forbid-trap below) -- a good-hygiene hint that a
+       statement/expr inside `unsafe { }` never actually elided a check,
+       not a rejection, since the affine/aligned-cast unsafe category is
+       invisible to this check (see Llvm_gen.unsafe_use_marker's own
+       comment) and a false positive there should not block a build.
+       Always on, not gated by a flag: cheap (already-computed data), and
+       every kernel/ site is clean today, so this should not add noise to
+       an ordinary build. *)
+    if !Llvm_gen.unnecessary_unsafe_sites <> [] then begin
+      let sites = List.rev !Llvm_gen.unnecessary_unsafe_sites in
+      List.iter (fun (loc, what) -> report_warning loc what) sites
     end;
 
     (* --forbid-trap: reject the program if any runtime trap check remains.

@@ -2659,8 +2659,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (path_length > 256) { return SyscallAction::Resume(LINUX_EINVAL); }
         let exec_path: []u8 = syscall_exec_path as []u8;
         let saved_path: usize = slice_copy(
-            unsafe { exec_path[0..<path_length] },
-            unsafe { path_view[0..<path_length] });
+            exec_path[0..<path_length],
+            path_view[0..<path_length]);
         if (saved_path != path_length) {
             return SyscallAction::Resume(LINUX_EFAULT);
         }

@@ -64,6 +64,18 @@ let expect_trap_sites expected src () =
   Alcotest.(check int) "recorded trap sites"
     expected (List.length !Llvm_gen.trap_sites)
 
+(* GitHub issue #315 follow-up: expect codegen to succeed AND to have
+   recorded exactly [expected] "unnecessary unsafe" sites
+   (Llvm_gen.unnecessary_unsafe_sites -- a statement/expr inside `unsafe`
+   that never actually elided a check). Mirrors expect_trap_sites exactly;
+   gen_program resets the list at the start of each run. *)
+let expect_unnecessary_unsafe expected src () =
+  (match gen_codegen src with
+   | _ -> ()
+   | exception Llvm_gen.Error msg -> Alcotest.failf "unexpected codegen Error: %s" msg);
+  Alcotest.(check int) "recorded unnecessary-unsafe sites"
+    expected (List.length !Llvm_gen.unnecessary_unsafe_sites)
+
 (* Expect codegen to raise Llvm_gen.Error with a message containing [fragment]. *)
 let expect_codegen_error fragment src () =
   match gen_codegen src with
@@ -10125,6 +10137,50 @@ let codegen_tests = [
               return s[i];
             }
           }
+        }");
+
+  (* GitHub issue #315 follow-up: "unnecessary unsafe" lint, found and
+     validated against a reconstruction of this same session's own
+     unified_fd_clone_rollback over-wrap mistake (see HISTORY.md and
+     feedback_unsafe_block_scoping_discipline memory) -- a proven-safe
+     array store nested inside an unsafe { for ... { if ... { ... } } }
+     is flagged individually, even though the enclosing scope also
+     contains genuinely-needed unsafe operations elsewhere. *)
+  Alcotest.test_case
+    "unnecessary-unsafe lint: a proven-safe statement nested deep inside \
+     an unsafe { } scope is flagged even though sibling statements in the \
+     same scope genuinely need it" `Quick
+    (expect_unnecessary_unsafe 1
+       "let mut funsafe315_lint_a: [u8; 4];
+        let mut funsafe315_lint_b: [u8; 4];
+        fn funsafe315_lint_nested(s: []u8, n: usize, proven: {0..<4 as usize}) !{unsafe} {
+          unsafe {
+            for i: usize in 0..<n {
+              if (s[i] != 0) {
+                funsafe315_lint_a[proven] = 1;
+              }
+            }
+          }
+        }");
+
+  Alcotest.test_case
+    "unnecessary-unsafe lint: every statement in the scope genuinely \
+     needing an elided check records zero unnecessary-unsafe sites" `Quick
+    (expect_unnecessary_unsafe 0
+       "fn funsafe315_lint_clean(s: []u8, i: usize, j: usize) !{unsafe} {
+          unsafe {
+            let a: u8 = s[i];
+            let b: u8 = s[j];
+          }
+        }");
+
+  Alcotest.test_case
+    "unnecessary-unsafe lint: the expr form (`unsafe { expr }`) is also \
+     covered, not just the block form" `Quick
+    (expect_unnecessary_unsafe 1
+       "fn funsafe315_lint_expr_form(proven: {0..<4 as usize}) -> u8 !{unsafe} {
+          let mut arr: [u8; 4];
+          return unsafe { arr[proven] };
         }");
 
   (* Kept last in this group deliberately: Llvm_gen.enable_debug_info flips a

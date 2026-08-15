@@ -94,6 +94,97 @@ and `make kernelbuild-rpi5` (`--forbid-trap`, both targets) plus
 
 ---
 
+### 2026-08-15: "Unnecessary Unsafe" Warning (Issue #315 Follow-Up)
+
+A retrospective after #315 (above) asked whether the fd_table.tkb
+over-wrap mistake -- caught only by the user reading a diff, since every
+automated check (type inference, all 1051 unit tests, `--forbid-trap` on
+both kernel targets, all 38 QEMU integration views) passed on the wrong
+version -- could have been caught mechanically. It could, with a
+per-statement lint built entirely from data the codegen already computes:
+every site that already consults `unsafe_depth` to decide whether to
+elide a runtime check (`load_from_array`/`load_from_slice`/
+`store_to_array`/`store_to_slice`/`sub_of_slice`, plus `sub_of_ptr`'s
+unconditional raw-pointer-slice-construction case) now also calls a new
+`note_unsafe_use ()`, incrementing a counter (`unsafe_use_marker`).
+`unsafe { expr }`/`unsafe { stmt* }` compare this counter before and
+after generating what they cover; no change means nothing inside
+actually needed the grant. The block form's own check is per-statement,
+not per-scope, and recurses to arbitrary nesting depth (if/while/for/
+match bodies) by hooking into `run_stmts_with_future_writes`'s single
+shared `go` loop -- every nested statement list in the whole codegen
+passes through it, so no per-construct plumbing was needed. Guarded by a
+new `unsafe_lint_active` flag, save/restored around `UnsafeBlock` so a
+nested `unsafe { }` doesn't turn tracking off when it exits. Findings
+accumulate in `Llvm_gen.unnecessary_unsafe_sites`, mirroring
+`trap_sites`' own "accumulate a list, let bin/main.ml report it" pattern
+-- reported as always-on, non-fatal warnings (`bin/main.ml`'s new
+`report_warning`), not a `--forbid-*`-style rejection.
+
+**Deliberately scoped to what codegen alone can see**: the
+affine/aligned-pointer-cast unsafe category
+(`check_kinded_ptr_cast_needs_unsafe`/`check_aligned_ptr_cast_needs_unsafe`
+in `type_inf.ml`) is a pure compile-time gate with no codegen footprint,
+so a statement whose only justification is one of those casts would be
+misreported as unnecessary by this check. Closing that gap would need
+the same before/after marker duplicated in type_inf.ml's own statement
+walk; not attempted here since zero real `kernel/` sites use that
+category inside `unsafe` today (verified by grep before shipping).
+
+**Validated two ways.** First, by reconstructing the exact reverted
+`unified_fd_clone_rollback` over-wrap from the earlier #315 session as a
+standalone probe: the lint flagged precisely the statements identified by
+hand at the time (`object_records[...]` and the `refcount_pool_release`
+call site) and nothing else. Second, and more valuably, running it
+against the real, already-committed `kernel/` tree found two **genuine,
+pre-existing** unnecessary `unsafe` sites, unrelated to any code touched
+this session:
+- `kernel/init/test_driver.tkb`'s `kernel_exec_argv0_name`: `unsafe {
+  argv[0] }` after an `if (argv.len < 2) { return ...; }` guard --
+  `argv.len >= 2` is a direct, single-variable narrowing fact the checker
+  already closes without unsafe (confirmed via `--forbid-trap` on a
+  minimal repro before touching the real file). The function's other two
+  `unsafe` sites (a loop-bound index and a subslice, both needing a
+  narrowing chain the checker doesn't close) still correctly need it.
+- `kernel/kernel/syscall.tkb`'s exec path/argv copy: `unsafe {
+  exec_path[0..<path_length] }` / `unsafe { path_view[0..<path_length] }`
+  after `if (path_length > 256) { return ...; }` against two `[u8; 256]`
+  globals -- same direct-narrowing case, one level up (a subslice against
+  a cast array's statically-known length, not a raw pointer).
+- A `unsafe`-block *within this same session's own #315 migration*
+  (`process_image.tkb`'s `process_image_load_page`): `prefix`/
+  `zero_prefix` turned out to be provable via `destination_offset`'s own
+  direct guard, while the sibling `suffix`/`zero_suffix` genuinely still
+  need unsafe (`suffix_start` is a *sum* of two related runtime values,
+  a narrowing chain the checker doesn't close) -- split into a proven
+  prefix computed outside the block and an unsafe block covering only the
+  genuinely unprovable suffix pair, rather than leaving the stronger
+  proof hidden behind the weaker one's `unsafe` wrap.
+
+All three fixes verified via `make kernelbuild-qemu`/`kernelbuild-rpi5`
+(`--forbid-trap`, confirming removal didn't reopen a residual trap site)
+and `make kernelcheck-qemu` (`execve`/`syscall`/`process_fd_table` views
+green, exercising exactly the changed paths at runtime).
+
+**Remaining warnings are known, not bugs**: the `slice_copy`/`slice_eq`/
+`return` statements this session's earlier #315 migration deliberately
+kept *inside* `ext2.tkb`/`process_image.tkb`/`syscall.tkb`'s unsafe
+blocks (the "immediately consume the just-constructed view" pattern, see
+above) are mechanically "unnecessary" by this lint's own definition
+(`slice_copy` itself never consults `unsafe_depth`) but were kept there
+deliberately, for a reason orthogonal to what this lint checks -- the
+user's own call in this session: "slice_copyがunsafeかは議論がわかれます
+が。どの道リファインメントが信用できないのでunsafeでいいと思います"
+("whether slice_copy counts as unsafe is debatable, but the refinement
+can't be trusted anyway either way, so it's fine for it to be inside").
+3 new Alcotest cases in `test/test_takibi.ml` lock in the mechanism
+itself (a proven-safe statement nested deep inside a scope that also has
+genuine uses elsewhere; a fully-clean scope recording zero; the expr
+form being covered too), deliberately not asserting on the known-accepted
+sites above.
+
+---
+
 ### 2026-08-15: `&T`/`&mut T` Reference Type Designed, Implemented, and Rolled Out Repo-Wide (Issues #314/#319/#320, All Closed Same Session)
 
 Measuring pointer usage across `kernel/` (504 pointer type annotations,
