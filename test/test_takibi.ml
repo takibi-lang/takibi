@@ -1318,7 +1318,7 @@ let parser_tests = [
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Expr { desc = Ast.Assign (
-             { desc = Ast.Index ("arr", { desc = Ast.Var "i"; _ }); _ },
+             { desc = Ast.Index ({ desc = Ast.Var "arr"; _ }, { desc = Ast.Var "i"; _ }); _ },
              { desc = Ast.IntLit 88L; _ }); _ } -> ()   (* 'X' = 88 *)
          | _ -> Alcotest.fail "expected Expr(Assign(Index(arr, Var i), IntLit 88))")
     | _ -> Alcotest.fail "unexpected structure"
@@ -1339,7 +1339,7 @@ let parser_tests = [
     match parse "fn f(arr: *u8, i: i32) u8 { return arr[i]; }" with
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
-         | Ast.Return (Some { desc = Ast.Index ("arr", { desc = Ast.Var "i"; _ }); _ }) -> ()
+         | Ast.Return (Some { desc = Ast.Index ({ desc = Ast.Var "arr"; _ }, { desc = Ast.Var "i"; _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected Return(Index(arr, Var i))")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1350,7 +1350,7 @@ let parser_tests = [
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Return (Some { desc = Ast.BinOp (Ast.Add, { desc = Ast.Var "a"; _ },
-                                 { desc = Ast.Index ("arr", _); _ }); _ }) -> ()
+                                 { desc = Ast.Index ({ desc = Ast.Var "arr"; _ }, _); _ }); _ }) -> ()
          | _ -> Alcotest.fail "expected Add(a, Index(arr,...)) -- [] must bind tighter than +")
     | _ -> Alcotest.fail "unexpected structure"
   );
@@ -1442,7 +1442,7 @@ let parser_tests = [
         (match s.desc with
          | Ast.Expr { desc = Ast.Assign (
              { desc = Ast.FieldGet (
-                 { desc = Ast.Index ("descs", { desc = Ast.Var "i"; _ }); _ },
+                 { desc = Ast.Index ({ desc = Ast.Var "descs"; _ }, { desc = Ast.Var "i"; _ }); _ },
                  "value"); _ },
              { desc = Ast.IntLit 5L; _ }); _ } -> ()
          | _ -> Alcotest.fail "expected Expr(Assign(FieldGet(Index(descs, i), value), 5))")
@@ -1454,7 +1454,7 @@ let parser_tests = [
     | [Ast.FuncDef { body = [s]; _ }] ->
         (match s.desc with
          | Ast.Expr { desc = Ast.Assign (
-             ({ desc = Ast.FieldGet ({ desc = Ast.Index ("descs", _); _ }, "value"); _ } as lhs),
+             ({ desc = Ast.FieldGet ({ desc = Ast.Index ({ desc = Ast.Var "descs"; _ }, _); _ }, "value"); _ } as lhs),
              { desc = Ast.BinOp (Ast.Add, load, { desc = Ast.IntLit 1L; _ }); _ }); _ }
            when lhs == load -> ()
          | _ -> Alcotest.fail "expected indexed Assign(FieldGet, BinOp) compound desugaring")
@@ -1472,6 +1472,23 @@ let parser_tests = [
          | _ -> Alcotest.fail "expected Add(FieldGet, FieldGet)")
     | _ -> Alcotest.fail "unexpected structure"
   );
+
+  (* GitHub issue #217: s.field[i] parses directly, with no manual `let`
+     workaround needed to spell an array-typed struct field's indexing. *)
+  Alcotest.test_case
+    "struct-field array indexing s.field[i] parses to Index(FieldGet(...))" `Quick
+    (fun () ->
+      match parse
+        "struct Core { next_free: [usize; 8]; } \
+         fn f(c: *Core, i: usize) -> usize { return c.next_free[i]; }" with
+      | [Ast.StructDef _; Ast.FuncDef { body = [s]; _ }] ->
+          (match s.desc with
+           | Ast.Return (Some { desc = Ast.Index (
+               { desc = Ast.FieldGet ({ desc = Ast.Var "c"; _ }, "next_free"); _ },
+               { desc = Ast.Var "i"; _ }); _ }) -> ()
+           | _ -> Alcotest.fail "expected Return(Index(FieldGet(c, next_free), Var i))")
+      | _ -> Alcotest.fail "unexpected structure"
+    );
 
   Alcotest.test_case "packed struct definition parses with is_packed=true" `Quick (fun () ->
     match parse "struct packed Hdr { a: u8; b: u16; }" with
@@ -3707,6 +3724,43 @@ let infer_tests = [
     (expect_ok
       "let mut buf: [u8; 8]; \
        fn f(i: {0..<8 as usize}) { buf[i % 8] = 'X'; }");
+
+  (* GitHub issue #217: struct_ptr.array_field[i] type-checks directly
+     (no manual `let` workaround) for both read and write, and the
+     restricted-shape rule around it fires clear errors rather than
+     silently accepting (and later crashing codegen on) an unsupported
+     base shape. *)
+  Alcotest.test_case
+    "struct-field array READ struct_ptr.field[i] type-checks with no \
+     manual let-binding workaround (issue #217 Gap 1)" `Quick
+    (expect_ok
+      "struct Core217T { next_free: [usize; 8]; } \
+       fn f(core: *Core217T, i: usize) -> usize { return core.next_free[i]; }");
+
+  Alcotest.test_case
+    "struct-field array WRITE struct_ptr.field[i] = v type-checks with no \
+     manual let-binding workaround (issue #217 Gap 1)" `Quick
+    (expect_ok
+      "struct Core217T2 { next_free: [usize; 8]; } \
+       fn f(core: *Core217T2, i: usize, v: usize) { core.next_free[i] = v; }");
+
+  Alcotest.test_case
+    "indexing another Index's result directly (a[i][j]) is a clear, \
+     not-yet-supported type error rather than an accepted-then-crashing \
+     shape (issue #217 explicitly scopes this out; codegen has no \
+     address-preserving Index-as-base variant)" `Quick
+    (expect_type_error "not yet supported"
+      "fn f(a: *[usize; 4], i: usize, j: usize) -> usize {
+         return (*a)[i][j];
+       }");
+
+  Alcotest.test_case
+    "indexing a non-place expr (a function call's result) is rejected \
+     rather than silently accepted (issue #217's restricted-shape rule: \
+     Var/FieldGet-chain only, matching static_place_key)" `Quick
+    (expect_type_error "must be a variable or a chain of struct field"
+      "fn mk217() -> *usize { return 0 as usize as *usize; }
+       fn f(i: usize) -> usize { return mk217()[i]; }");
 
   (* -- Step 3.4: Bounds check elision (global array + TypeRefined index) -- *)
 
@@ -7765,6 +7819,53 @@ let codegen_tests = [
           a[0] = 6 as u8;
           if (a[0] == 6 as u8) { return 1; }
           return 0;
+        }");
+
+  (* GitHub issue #217: struct_ptr.array_field[i] -- no manual `let`
+     workaround -- now goes through the SAME checked TArray/
+     emit_bounds_check codegen path a local array's own indexing already
+     gets, instead of silently decaying to unchecked raw-pointer
+     arithmetic with no trap site at all. An unproven index records a
+     real trap site (the acceptance bar this issue's own text names);
+     a provably-in-range index still elides it, matching ordinary local
+     array indexing's existing elision behavior. *)
+  Alcotest.test_case
+    "struct-field array WRITE with an unproven index records a real \
+     trap site (issue #217 Gap 2: was silently zero before this fix)" `Quick
+    (expect_trap_sites 1
+       "struct Core217 { next_free: [usize; 8]; free_head: usize; }
+        fn core217_push(core: *Core217, i: usize) {
+          core.next_free[i] = core.free_head;
+        }");
+
+  Alcotest.test_case
+    "struct-field array READ with an unproven index records a real \
+     trap site (issue #217 Gap 2, read side)" `Quick
+    (expect_trap_sites 1
+       "struct Core217R { next_free: [usize; 8]; }
+        fn core217_get(core: *Core217R, i: usize) -> usize {
+          return core.next_free[i];
+        }");
+
+  Alcotest.test_case
+    "struct-field array indexing with a PROVEN {0..<8} index still elides \
+     the bounds check (issue #217 does not regress existing elision)" `Quick
+    (expect_trap_sites 0
+       "struct Core217P { next_free: [usize; 8]; free_head: usize; }
+        fn core217_proven(core: *Core217P, i: {0..<8 as usize}) {
+          core.next_free[i] = core.free_head;
+        }");
+
+  Alcotest.test_case
+    "multi-level struct field chain a.b.c[i] indexes the innermost \
+     array field directly (issue #217: only the OUTERMOST field needs \
+     un-decayed treatment, intermediate struct fields work unmodified)"
+    `Quick
+    (expect_codegen_ok
+       "struct Core217Inner { next_free: [usize; 4]; }
+        struct Core217Outer { inner: Core217Inner; }
+        fn core217_nested(o: *Core217Outer, i: {0..<4 as usize}) -> usize {
+          return o.inner.next_free[i];
         }");
 
   Alcotest.test_case

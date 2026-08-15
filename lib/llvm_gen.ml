@@ -2296,6 +2296,17 @@ let effective_slice_min id m =
   | Some (TypeSlice (_, m2)) -> max m m2
   | _ -> m
 
+(* GitHub issue #217: what an Index/SliceOf base resolves to -- an array's
+   own address and length, a slice's fat value and minimum length, or a
+   loaded pointer value (with whether it was reached through an `io`
+   field/variable). Mirrors type_inf.ml's place_undecayed_type + its
+   TArray/TSlice/TPtr classification, but at the codegen level (an actual
+   address/value, not just a type). *)
+type index_storage =
+  | IdxArray of Ast.type_expr * int * llvalue
+  | IdxSlice of Ast.type_expr * int * llvalue
+  | IdxPtr   of Ast.type_expr * llvalue * bool
+
 (* -- Expression codegen --------------------------------------------------- *)
 (* Returns (ast_type, llvalue).  ast_type is needed for Deref to know
    the element type when emitting a load instruction (LLVM 19 opaque ptrs). *)
@@ -3117,75 +3128,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (target_ty, to_arith_width target_ty (coerce v target_ty))))
 
   | FieldGet (base_expr, fname) ->
-      let (base_ty, base_v) = gen_expr locals base_expr in
-      (match base_ty, fname with
-       | TypeSlice _, "len" ->
-           (TypeUsize, slice_len base_v)
-       | TypeIndexed (sname, _), _ ->
-           let (idx, field_ty) = field_info sname fname in
-           let v = build_extractvalue base_v idx fname builder in
-           let value_ty = erase_singleton_type field_ty in
-           (value_ty, to_arith_width value_ty v)
-       | _ ->
-      let (sname, through_io) = match base_ty with
-        | TypeNamed s                      -> (s, false)
-        | TypePtr   (TypeNamed s)          -> (s, false)
-        | TypePtr   (TypeIo (TypeNamed s)) -> (s, true)   (* field access through *io Struct is volatile *)
-        | TypeAlignedPtr (_, TypeNamed s)  -> (s, false)  (* GitHub issue #102 *)
-        | _ -> raise (Error (Printf.sprintf
-            "field access '.%s' on non-struct type" fname))
-      in
-      let (idx, field_ty) = field_info sname fname in
-      let llty = Hashtbl.find struct_lltypes sname in
-      if type_of base_v = llty then begin
-        let value_ty = resolve_special_type field_ty in
-        let v = build_extractvalue base_v idx fname builder in
-        (value_ty, to_arith_width value_ty v)
-      end else begin
-        let field_ptr = build_in_bounds_gep llty base_v
-          [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
-          (fname ^ "_ptr") builder
-        in
-        (match field_ty with
-       | TypeNamed name when Hashtbl.mem variant_defs name ->
-           let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
-           if through_io then set_volatile true v;
-           (TypeVariant name, v)
-       | TypeNamed ename when Hashtbl.mem enum_underlying ename ->
-           (* Enum struct field reached through a POINTER to the struct
-              (an array element, a *Struct parameter) rather than an
-              in-register struct value: load the underlying integer, the
-              same distinction the array-element Index case above already
-              makes for a bare enum element. Falling through to the
-              "nested struct field" branch below returned the field
-              POINTER typed as the enum itself, which every consumer then
-              used as if it were the value: `match` emitted `switch ptr`
-              and `== Enum::Variant` emitted a pointer-vs-integer icmp,
-              both rejected by LLVM's verifier (an internal compiler
-              error rather than a miscompile). A `return` of such a field
-              happened to work anyway -- the return path coerces the
-              pointer by loading it -- which is why this stayed hidden. *)
-           let ut = Hashtbl.find enum_underlying ename in
-           let v = build_load (ltype_of_ast ut) field_ptr fname builder in
-           if through_io then set_volatile true v;
-           (field_ty, v)
-       | TypeNamed _ ->
-           (* Nested struct field: return the pointer as-is (same approach as array decay) *)
-           (TypePtr field_ty, field_ptr)
-       | TypeArray (elem_ty, _) ->
-           (* Array field: return a pointer to the first element (same decay as local array variables) *)
-           (TypePtr elem_ty, field_ptr)
-       | TypeIo inner_ty ->
-           let v = build_load (ltype_of_ast inner_ty) field_ptr fname builder in
-           set_volatile true v;
-           (inner_ty, to_arith_width inner_ty v)
-       | _ ->
-           let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
-           if through_io then set_volatile true v;
-           (field_ty, to_arith_width field_ty v))
-      end)
+      gen_field_access ~decay:true locals base_expr fname
 
-  | Index (id, idx) ->
+  | Index (base, idx) ->
       let (idx_ty_raw, idx_raw) = gen_expr locals idx in
       let idx_v = to_index_width ~is_signed:(not (is_unsigned idx_ty_raw)) idx_raw in
       (* idx_ty priority: Const_env constant name (e.g. tcp[TCP_FLAGS] --
@@ -3253,6 +3198,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          so hi <= min implies hi <= len). Otherwise check against the
          runtime length, unless (P4c-1, same as sub_of_slice below) the
          access is wrapped in unsafe. *)
+      (* GitHub issue #217: same_base_key generalizes the old bare-ident
+         `s = id` comparison to a base that may now be a struct field path
+         -- only a bare Var base can ever match a prior `slice_index_ctx`
+         fact (which is itself only ever recorded against a bare name), so
+         a FieldGet base simply never hits this optimization (falls back
+         to a runtime check, never unsound). *)
+      let same_base_key = match base.desc with Ast.Var n -> Some n | _ -> None in
       let load_from_slice elem_ty min_len fat =
         let proven =
           (match refinement_range idx_ty with
@@ -3260,7 +3212,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            | _ -> false)
           || (match idx.desc with
               | Var v -> (match Hashtbl.find_opt slice_index_ctx v with
-                          | Some s -> s = id
+                          | Some s -> Some s = same_base_key
                           | None -> false)
               | _ -> false)
         in
@@ -3270,52 +3222,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         let v  = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
         (elem_ty, to_arith_width elem_ty v)
       in
-      (match Hashtbl.find_opt locals id with
-       | Some (Mut (TypeArray (elem_ty, n), ptr)) ->
-           load_from_array elem_ty n ptr
-       | Some (Mut (TypeSlice (elem_ty, m), alloca_ptr)) ->
-           let fat = build_load (ltype_of_ast (TypeSlice (elem_ty, m))) alloca_ptr id builder in
-           load_from_slice elem_ty (effective_slice_min id m) fat
-       | Some (Imm (TypeSlice (elem_ty, m), fat)) ->
-           load_from_slice elem_ty m fat
-       | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr))
-       | Some (Mut (TypeAlignedPtr (_, TypeIo elem_ty), alloca_ptr)) ->
-           (* *io T variable: load pointer value from alloca, then volatile access *)
-           let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
-           load_through_ptr elem_ty ptr_v true
-       | Some (Mut (TypePtr elem_ty, alloca_ptr))
-       | Some (Mut (TypeAlignedPtr (_, elem_ty), alloca_ptr)) ->
-           let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
-           load_through_ptr elem_ty ptr_v false
-       | Some (Imm (TypePtr (TypeIo elem_ty), ptr_v))
-       | Some (Imm (TypeAlignedPtr (_, TypeIo elem_ty), ptr_v)) ->
-           load_through_ptr elem_ty ptr_v true
-       | Some (Imm (TypePtr elem_ty, ptr_v))
-       | Some (Imm (TypeAlignedPtr (_, elem_ty), ptr_v)) ->
-           load_through_ptr elem_ty ptr_v false
-       | Some _ ->
-           raise (Error (Printf.sprintf "Index: '%s' is not an array or pointer" id))
-       | None ->
-           (match Hashtbl.find_opt global_vars id with
-            | Some (TypeArray (elem_ty, n), gptr) ->
-                load_from_array elem_ty n gptr
-            | Some (TypeSlice (elem_ty, m), gptr) ->
-                let fat = build_load (ltype_of_ast (TypeSlice (elem_ty, m))) gptr id builder in
-                load_from_slice elem_ty (effective_slice_min id m) fat
-            | Some (TypePtr (TypeIo elem_ty), gptr)
-            | Some (TypeAlignedPtr (_, TypeIo elem_ty), gptr) ->
-                let ptr_v = build_load (pointer_type context) gptr id builder in
-                load_through_ptr elem_ty ptr_v true
-            | Some (TypePtr elem_ty, gptr)
-            | Some (TypeAlignedPtr (_, elem_ty), gptr) ->
-                let ptr_v = build_load (pointer_type context) gptr id builder in
-                load_through_ptr elem_ty ptr_v false
-            | Some _ ->
-                raise (Error (Printf.sprintf "Index: '%s' is not an array or pointer" id))
-            | None ->
-                raise (Error (Printf.sprintf "Index: undefined variable '%s'" id))))
+      (match resolve_index_storage ~op:"Index" locals base with
+       | IdxArray (elem_ty, n, arr_ptr) -> load_from_array elem_ty n arr_ptr
+       | IdxSlice (elem_ty, min_len, fat) -> load_from_slice elem_ty min_len fat
+       | IdxPtr (elem_ty, ptr_v, is_volatile) -> load_through_ptr elem_ty ptr_v is_volatile)
 
-  | SliceOf (id, lo_e, hi_e) ->
+  | SliceOf (base, lo_e, hi_e) ->
       (* Sync rule: the proven/checked decision below uses the same
          bound-range formula as type_inf.ml's SliceOf case (constant via
          Const_env.bound_value, else the bound expression's refined range,
@@ -3479,35 +3391,10 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         in
         finish_sub elem_ty base_ptr lo_v hi_v min_len
       in
-      (match Hashtbl.find_opt locals id with
-       | Some (Mut (TypeSlice (el, m), alloca_ptr)) ->
-           let fat = build_load (ltype_of_ast (TypeSlice (el, m))) alloca_ptr id builder in
-           sub_of_slice el (effective_slice_min id m) fat
-       | Some (Imm (TypeSlice (el, m), fat)) ->
-           sub_of_slice el m fat
-       | Some (Mut (TypeArray (el, n), ptr)) ->
-           sub_of_array el n ptr
-       | Some (Mut (TypePtr el, alloca_ptr)) ->
-           let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
-           sub_of_ptr el ptr_v
-       | Some (Imm (TypePtr el, ptr_v)) ->
-           sub_of_ptr el ptr_v
-       | Some _ ->
-           raise (Error (Printf.sprintf "SliceOf: '%s' is not a slice/array/pointer" id))
-       | None ->
-           (match Hashtbl.find_opt global_vars id with
-            | Some (TypeSlice (el, m), gptr) ->
-                let fat = build_load (ltype_of_ast (TypeSlice (el, m))) gptr id builder in
-                sub_of_slice el (effective_slice_min id m) fat
-            | Some (TypeArray (el, n), gptr) ->
-                sub_of_array el n gptr
-            | Some (TypePtr el, gptr) ->
-                let ptr_v = build_load (pointer_type context) gptr id builder in
-                sub_of_ptr el ptr_v
-            | Some _ ->
-                raise (Error (Printf.sprintf "SliceOf: '%s' is not a slice/array/pointer" id))
-            | None ->
-                raise (Error (Printf.sprintf "SliceOf: undefined variable '%s'" id))))
+      (match resolve_index_storage ~op:"SliceOf" locals base with
+       | IdxSlice (el, m, fat) -> sub_of_slice el m fat
+       | IdxArray (el, n, ptr) -> sub_of_array el n ptr
+       | IdxPtr (el, ptr_v, _is_volatile) -> sub_of_ptr el ptr_v)
 
   | Unsafe e1 ->
       (* Mostly a type-checker gate (see Ast.Unsafe): for the pointer->slice
@@ -4139,7 +4026,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let inst = build_store coerced ptr_v builder in
            if is_volatile then set_volatile true inst;
            (TypeVoid, const_null (i1_type context))
-       | Index (id, idx) ->
+       | Index (base, idx) ->
            let (idx_ty_raw, idx_raw) = gen_expr locals idx in
            let idx_v = to_index_width ~is_signed:(not (is_unsigned idx_ty_raw)) idx_raw in
            let idx_ty = match Const_env.bound_value idx with
@@ -4150,22 +4037,17 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                               | Some t -> t | None -> idx_ty_raw)
                   | _ -> idx_ty_raw)
            in
-           let elem_ty_hint =
-             match Hashtbl.find_opt locals id with
-             | Some (Mut (TypeArray (elem_ty, _), _))
-             | Some (Mut (TypeSlice (elem_ty, _), _))
-             | Some (Imm (TypeSlice (elem_ty, _), _))
-             | Some (Mut (TypePtr (TypeIo elem_ty), _))
-             | Some (Mut (TypePtr elem_ty, _))
-             | Some (Imm (TypePtr (TypeIo elem_ty), _))
-             | Some (Imm (TypePtr elem_ty, _))
-             | Some (Mut (TypeAlignedPtr (_, TypeIo elem_ty), _))
-             | Some (Mut (TypeAlignedPtr (_, elem_ty), _))
-             | Some (Imm (TypeAlignedPtr (_, TypeIo elem_ty), _))
-             | Some (Imm (TypeAlignedPtr (_, elem_ty), _)) -> Some elem_ty
-             | _ -> None
-           in
+           (* GitHub issue #217: elem_ty_hint is a type-only PEEK (no
+              codegen), deliberately evaluated -- and rhs generated --
+              BEFORE the base's actual storage is resolved below, exactly
+              preserving the pre-#217 instruction order: a pointer-typed
+              base's value is loaded fresh AFTER rhs runs, not before, in
+              case rhs's own evaluation could observe/affect that
+              pointer's current storage. Only resolve_index_storage
+              (after rhs) actually issues the load/GEP instructions. *)
+           let elem_ty_hint = peek_index_elem_ty locals base in
            let (_, rhs_v) = gen_expr ?expected_ty:elem_ty_hint locals rhs in
+           let same_base_key = match base.desc with Ast.Var n -> Some n | _ -> None in
            let store_to_array elem_ty n arr_ptr =
              let needs_check = match refinement_range idx_ty with
                | Some (lo, hi) -> lo < 0 || hi > n
@@ -4190,7 +4072,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 | _ -> false)
                || (match idx.desc with
                    | Var v -> (match Hashtbl.find_opt slice_index_ctx v with
-                               | Some s -> s = id
+                               | Some s -> Some s = same_base_key
                                | None -> false)
                    | _ -> false)
              in
@@ -4199,49 +4081,10 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              let ep = build_gep (ltype_of_ast elem_ty) (slice_ptr fat) [|idx_v|] "idx_ptr" builder in
              ignore (build_store (coerce rhs_v elem_ty) ep builder)
            in
-           (match Hashtbl.find_opt locals id with
-            | Some (Mut (TypeArray (elem_ty, n), ptr)) ->
-                store_to_array elem_ty n ptr
-            | Some (Mut (TypeSlice (el, m), alloca_ptr)) ->
-                let fat = build_load (ltype_of_ast (TypeSlice (el, m))) alloca_ptr id builder in
-                store_to_slice el (effective_slice_min id m) fat
-            | Some (Imm (TypeSlice (el, m), fat)) ->
-                store_to_slice el m fat
-            | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr))
-            | Some (Mut (TypeAlignedPtr (_, TypeIo elem_ty), alloca_ptr)) ->
-                let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
-                store_through_ptr elem_ty ptr_v true
-            | Some (Mut (TypePtr elem_ty, alloca_ptr))
-            | Some (Mut (TypeAlignedPtr (_, elem_ty), alloca_ptr)) ->
-                let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
-                store_through_ptr elem_ty ptr_v false
-            | Some (Imm (TypePtr (TypeIo elem_ty), ptr_v))
-            | Some (Imm (TypeAlignedPtr (_, TypeIo elem_ty), ptr_v)) ->
-                store_through_ptr elem_ty ptr_v true
-            | Some (Imm (TypePtr elem_ty, ptr_v))
-            | Some (Imm (TypeAlignedPtr (_, elem_ty), ptr_v)) ->
-                store_through_ptr elem_ty ptr_v false
-            | Some _ ->
-                raise (Error (Printf.sprintf "AssignIndex: '%s' is not an array or pointer" id))
-            | None ->
-                (match Hashtbl.find_opt global_vars id with
-                 | Some (TypeArray (elem_ty, n), gptr) ->
-                     store_to_array elem_ty n gptr
-                 | Some (TypeSlice (el, m), gptr) ->
-                     let fat = build_load (ltype_of_ast (TypeSlice (el, m))) gptr id builder in
-                     store_to_slice el (effective_slice_min id m) fat
-                 | Some (TypePtr (TypeIo elem_ty), gptr)
-                 | Some (TypeAlignedPtr (_, TypeIo elem_ty), gptr) ->
-                     let ptr_v = build_load (pointer_type context) gptr id builder in
-                     store_through_ptr elem_ty ptr_v true
-                 | Some (TypePtr elem_ty, gptr)
-                 | Some (TypeAlignedPtr (_, elem_ty), gptr) ->
-                     let ptr_v = build_load (pointer_type context) gptr id builder in
-                     store_through_ptr elem_ty ptr_v false
-                 | Some _ ->
-                     raise (Error (Printf.sprintf "AssignIndex: '%s' is not an array or pointer" id))
-                 | None ->
-                     raise (Error (Printf.sprintf "AssignIndex: undefined variable '%s'" id))));
+           (match resolve_index_storage ~op:"AssignIndex" locals base with
+            | IdxArray (elem_ty, n, arr_ptr) -> store_to_array elem_ty n arr_ptr
+            | IdxSlice (elem_ty, min_len, fat) -> store_to_slice elem_ty min_len fat
+            | IdxPtr (elem_ty, ptr_v, is_volatile) -> store_through_ptr elem_ty ptr_v is_volatile);
            (TypeVoid, const_null (i1_type context))
        | FieldGet (base_expr, fname) ->
            (* GitHub issue #211: a dereferenced-pointer field assignment's
@@ -4288,6 +4131,189 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (TypeVoid, const_null (i1_type context))
        | _ ->
            raise (Error "BUG: not an assignable expression (should have been rejected by type_inf.ml)"))
+
+(* GitHub issue #217: shared struct-field-access codegen for both an
+   ordinary field READ (FieldGet -- decays an array-typed field to a bare
+   element pointer, `decay:true`, exactly as before this issue) and an
+   Index/SliceOf base's UN-DECAYED address recovery (`decay:false`, used
+   by resolve_index_storage below). Single-sourced from the pre-existing
+   FieldGet codegen rather than duplicated, so the struct-layout GEP logic
+   can never drift between the two call sites -- the only actual
+   difference is the TypeArray arm at the end (an array field's own
+   address, not the decayed-to-pointer value). *)
+and gen_field_access ~decay locals (base_expr : Ast.expr) (fname : string)
+    : Ast.type_expr * llvalue =
+  let (base_ty, base_v) = gen_expr locals base_expr in
+  match base_ty, fname with
+  | TypeSlice _, "len" ->
+      (TypeUsize, slice_len base_v)
+  | TypeIndexed (sname, _), _ ->
+      let (idx, field_ty) = field_info sname fname in
+      if not decay && (match field_ty with TypeArray _ -> true | _ -> false) then
+        raise (Error (Printf.sprintf
+          "cannot index field '.%s': it is held by value (a generic struct \
+           value, not reached through a pointer), so it has no address to \
+           index into" fname));
+      let v = build_extractvalue base_v idx fname builder in
+      let value_ty = erase_singleton_type field_ty in
+      (value_ty, to_arith_width value_ty v)
+  | _ ->
+      let (sname, through_io) = match base_ty with
+        | TypeNamed s                      -> (s, false)
+        | TypePtr   (TypeNamed s)          -> (s, false)
+        | TypePtr   (TypeIo (TypeNamed s)) -> (s, true)   (* field access through *io Struct is volatile *)
+        | TypeAlignedPtr (_, TypeNamed s)  -> (s, false)  (* GitHub issue #102 *)
+        | _ -> raise (Error (Printf.sprintf
+            "field access '.%s' on non-struct type" fname))
+      in
+      let (idx, field_ty) = field_info sname fname in
+      let llty = Hashtbl.find struct_lltypes sname in
+      if type_of base_v = llty then begin
+        if not decay && (match field_ty with TypeArray _ -> true | _ -> false) then
+          raise (Error (Printf.sprintf
+            "cannot index field '.%s': the containing struct is held by \
+             value, not reached through a pointer, so it has no address to \
+             index into" fname));
+        let value_ty = resolve_special_type field_ty in
+        let v = build_extractvalue base_v idx fname builder in
+        (value_ty, to_arith_width value_ty v)
+      end else begin
+        let field_ptr = build_in_bounds_gep llty base_v
+          [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
+          (fname ^ "_ptr") builder
+        in
+        (match field_ty with
+       | TypeNamed name when Hashtbl.mem variant_defs name ->
+           let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
+           if through_io then set_volatile true v;
+           (TypeVariant name, v)
+       | TypeNamed ename when Hashtbl.mem enum_underlying ename ->
+           (* Enum struct field reached through a POINTER to the struct
+              (an array element, a *Struct parameter) rather than an
+              in-register struct value: load the underlying integer, the
+              same distinction the array-element Index case above already
+              makes for a bare enum element. Falling through to the
+              "nested struct field" branch below returned the field
+              POINTER typed as the enum itself, which every consumer then
+              used as if it were the value: `match` emitted `switch ptr`
+              and `== Enum::Variant` emitted a pointer-vs-integer icmp,
+              both rejected by LLVM's verifier (an internal compiler
+              error rather than a miscompile). A `return` of such a field
+              happened to work anyway -- the return path coerces the
+              pointer by loading it -- which is why this stayed hidden. *)
+           let ut = Hashtbl.find enum_underlying ename in
+           let v = build_load (ltype_of_ast ut) field_ptr fname builder in
+           if through_io then set_volatile true v;
+           (field_ty, v)
+       | TypeNamed _ ->
+           (* Nested struct field: return the pointer as-is (same approach as array decay) *)
+           (TypePtr field_ty, field_ptr)
+       | TypeArray (elem_ty, n) ->
+           if decay then (TypePtr elem_ty, field_ptr)  (* array field decays to *elem *)
+           else (TypeArray (elem_ty, n), field_ptr)     (* issue #217: un-decayed address *)
+       | TypeIo inner_ty ->
+           let v = build_load (ltype_of_ast inner_ty) field_ptr fname builder in
+           set_volatile true v;
+           (inner_ty, to_arith_width inner_ty v)
+       | _ ->
+           let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
+           if through_io then set_volatile true v;
+           (field_ty, to_arith_width field_ty v))
+      end
+
+(* GitHub issue #217: resolve an Index/SliceOf base -- a bare variable
+   (the ONLY shape possible before this issue; exact same lookup/error
+   messages as before, just now returning index_storage instead of
+   dispatching straight into a load/store closure) or a struct field path
+   (via gen_field_access ~decay:false, whose TypeArray/TypeSlice/TypePtr
+   result classifies identically). `op` names the caller in "BUG"-style
+   error messages (these should be unreachable in any program type_inf.ml
+   already accepted -- it validates the exact same shapes first). *)
+and resolve_index_storage ~op locals (base : Ast.expr) : index_storage =
+  match base.desc with
+  | Ast.Var id ->
+      (match Hashtbl.find_opt locals id with
+       | Some (Mut (TypeArray (elem_ty, n), ptr)) -> IdxArray (elem_ty, n, ptr)
+       | Some (Mut (TypeSlice (elem_ty, m), alloca_ptr)) ->
+           let fat = build_load (ltype_of_ast (TypeSlice (elem_ty, m))) alloca_ptr id builder in
+           IdxSlice (elem_ty, effective_slice_min id m, fat)
+       | Some (Imm (TypeSlice (elem_ty, m), fat)) -> IdxSlice (elem_ty, m, fat)
+       | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr))
+       | Some (Mut (TypeAlignedPtr (_, TypeIo elem_ty), alloca_ptr)) ->
+           let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
+           IdxPtr (elem_ty, ptr_v, true)
+       | Some (Mut (TypePtr elem_ty, alloca_ptr))
+       | Some (Mut (TypeAlignedPtr (_, elem_ty), alloca_ptr)) ->
+           let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
+           IdxPtr (elem_ty, ptr_v, false)
+       | Some (Imm (TypePtr (TypeIo elem_ty), ptr_v))
+       | Some (Imm (TypeAlignedPtr (_, TypeIo elem_ty), ptr_v)) ->
+           IdxPtr (elem_ty, ptr_v, true)
+       | Some (Imm (TypePtr elem_ty, ptr_v))
+       | Some (Imm (TypeAlignedPtr (_, elem_ty), ptr_v)) ->
+           IdxPtr (elem_ty, ptr_v, false)
+       | Some _ ->
+           raise (Error (Printf.sprintf "%s: '%s' is not an array or pointer" op id))
+       | None ->
+           (match Hashtbl.find_opt global_vars id with
+            | Some (TypeArray (elem_ty, n), gptr) -> IdxArray (elem_ty, n, gptr)
+            | Some (TypeSlice (elem_ty, m), gptr) ->
+                let fat = build_load (ltype_of_ast (TypeSlice (elem_ty, m))) gptr id builder in
+                IdxSlice (elem_ty, effective_slice_min id m, fat)
+            | Some (TypePtr (TypeIo elem_ty), gptr)
+            | Some (TypeAlignedPtr (_, TypeIo elem_ty), gptr) ->
+                let ptr_v = build_load (pointer_type context) gptr id builder in
+                IdxPtr (elem_ty, ptr_v, true)
+            | Some (TypePtr elem_ty, gptr)
+            | Some (TypeAlignedPtr (_, elem_ty), gptr) ->
+                let ptr_v = build_load (pointer_type context) gptr id builder in
+                IdxPtr (elem_ty, ptr_v, false)
+            | Some _ ->
+                raise (Error (Printf.sprintf "%s: '%s' is not an array or pointer" op id))
+            | None ->
+                raise (Error (Printf.sprintf "%s: undefined variable '%s'" op id))))
+  | Ast.FieldGet (base_expr, fname) ->
+      (match gen_field_access ~decay:false locals base_expr fname with
+       | (TypeArray (elem_ty, n), field_ptr) -> IdxArray (elem_ty, n, field_ptr)
+       | (TypeSlice (elem_ty, m), fat) -> IdxSlice (elem_ty, m, fat)
+       | (TypePtr (TypeIo elem_ty), ptr_v)
+       | (TypeAlignedPtr (_, TypeIo elem_ty), ptr_v) -> IdxPtr (elem_ty, ptr_v, true)
+       | (TypePtr elem_ty, ptr_v)
+       | (TypeAlignedPtr (_, elem_ty), ptr_v) -> IdxPtr (elem_ty, ptr_v, false)
+       | (t, _) -> raise (Error (Printf.sprintf
+           "%s: field '.%s' is not an array, slice, or pointer (has type %s)"
+           op fname (Ast.show_type_expr t))))
+  | _ ->
+      raise (Error (Printf.sprintf
+        "BUG: %s base should have been rejected by type_inf.ml" op))
+
+(* GitHub issue #217: a type-only (no codegen) peek at an Index/SliceOf
+   base's element type, used ONLY to seed a store's RHS with an
+   expected_ty hint before evaluating it -- deliberately preserves the
+   pre-#217 behavior of checking `locals` alone (never `global_vars`, and
+   never a struct field's layout) so this refactor changes no existing
+   case's codegen order or output; see the Assign/Index case's own
+   comment for why the ORDER (peek before rhs, resolve storage after)
+   matters. Returning None for anything else just means the RHS infers
+   its own type instead of being hinted -- type_inf.ml's unify_at already
+   proved they match, so this cannot silently accept a wrong RHS type. *)
+and peek_index_elem_ty locals (base : Ast.expr) : Ast.type_expr option =
+  match base.desc with
+  | Ast.Var id ->
+      (match Hashtbl.find_opt locals id with
+       | Some (Mut (TypeArray (elem_ty, _), _))
+       | Some (Mut (TypeSlice (elem_ty, _), _))
+       | Some (Imm (TypeSlice (elem_ty, _), _))
+       | Some (Mut (TypePtr (TypeIo elem_ty), _))
+       | Some (Mut (TypePtr elem_ty, _))
+       | Some (Imm (TypePtr (TypeIo elem_ty), _))
+       | Some (Imm (TypePtr elem_ty, _))
+       | Some (Mut (TypeAlignedPtr (_, TypeIo elem_ty), _))
+       | Some (Mut (TypeAlignedPtr (_, elem_ty), _))
+       | Some (Imm (TypeAlignedPtr (_, TypeIo elem_ty), _))
+       | Some (Imm (TypeAlignedPtr (_, elem_ty), _)) -> Some elem_ty
+       | _ -> None)
+  | _ -> None
 
 (* -- Function codegen ---------------------------------------------------- *)
 

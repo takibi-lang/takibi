@@ -213,11 +213,23 @@ and expr_desc =
                                   exactly when the literal itself flows into
                                   a consuming position (bound/passed/
                                   returned) -- see check_affine_func *)
-  | Index of ident * expr      (* arr[idx] -- preserves array/pointer type for bounds checking *)
-  | SliceOf of ident * expr * expr  (* s[lo..<hi] -- subslice of a slice/array (compile-time
+  | Index of expr * expr
+      (* base[idx] -- preserves array/pointer type for bounds checking.
+         GitHub issue #217: `base` is syntactically any expr (so
+         `s.field[i]` parses without a manual `let` workaround), but
+         type_inf.ml's own place-path recovery (see its
+         "undecayed_place_type"/index base comment) restricts which
+         SHAPES are actually legal here -- a bare variable, a chain of
+         FieldGets, or another Index (for `a[i][j]`), never an arbitrary
+         expr -- so the un-decayed declared type of an array-typed base
+         can always be recovered by direct lookup/struct-field-table walk
+         instead of general type inference (which would otherwise decay
+         an array field to a bare pointer and lose bounds-check info). *)
+  | SliceOf of expr * expr * expr  (* base[lo..<hi] -- subslice of a slice/array (compile-time
                                        constant bounds, proven against the min length) or
                                        slice construction from a raw pointer (unchecked
-                                       assertion; only allowed inside unsafe { ... }) *)
+                                       assertion; only allowed inside unsafe { ... }); `base`
+                                       has the same restricted-shape rule as Index above. *)
   | Unsafe of expr             (* unsafe { expr } -- permits unchecked-assertion
                                   constructs (pointer -> slice construction) inside.
                                   Changes NO semantics and generates NO code of its
@@ -627,8 +639,8 @@ let written_names (stmts : stmt list) : string list =
     | BinOp (_, a, b) -> go_expr a; go_expr b
     | Call (_, args) | StructLit args | TupleLit args -> List.iter go_expr args
     | VariantCtor (_, _, payload) -> go_expr payload
-    | Index (_, idx) -> go_expr idx
-    | SliceOf (_, lo, hi) -> go_expr lo; go_expr hi
+    | Index (base, idx) -> go_expr base; go_expr idx
+    | SliceOf (base, lo, hi) -> go_expr base; go_expr lo; go_expr hi
     | Assign (lhs, rhs) ->
         (* GitHub issue #184: mirrors the old dedicated Assign/AssignIndex/
            AssignDeref/AssignField stmt cases exactly (same names added,
@@ -636,7 +648,14 @@ let written_names (stmts : stmt list) : string list =
            expr's LHS shape instead of 4 separate AST constructors. *)
         (match lhs.desc with
          | Var n -> add n
-         | Index (n, idx) -> add n; go_expr idx
+         | Index (base, idx) ->
+             (* GitHub issue #217: base is now any restricted-shape expr,
+                not just a bare ident -- mirror FieldGet's own "walk the
+                base, add nothing by name" behavior unless the base IS a
+                bare Var (the common, previously-only-possible case),
+                where invalidating that name's narrowing is still correct. *)
+             (match base.desc with Var n -> add n | _ -> go_expr base);
+             go_expr idx
          | Deref p -> go_expr p
          | FieldGet (b, _) -> go_expr b
          | _ -> go_expr lhs);

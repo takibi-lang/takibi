@@ -176,7 +176,28 @@ let promote_be_field_type = function
 %left SHR SHL     (* shifts: tighter than +/-, looser than * / % *)
 %left TIMES DIV PERCENT  (* multiplicative *)
 %nonassoc UNARY   (* unary * (deref), & (addrof), unary - *)
-%left DOT         (* highest: field access -- postfix, binds tighter than prefix ops *)
+%nonassoc BRACKET_ELSEWHERE
+   (* GitHub issue #217 pseudo-token: LOWER than LBRACKET, tagged via
+      %prec on the two OTHER grammar spots that also see IDENT/empty
+      immediately followed by `[` -- `IDENT` completing a bare
+      base_type_expr (vs. extending into `IDENT[args]`, a generic type
+      instantiation) and `view_static_args`' empty alternative (vs.
+      extending into `[args]`, explicit view arguments). Both want `[`
+      to always extend THEM rather than let Index's own now-general
+      `expr LBRACKET ...` rule claim it instead -- e.g. `x as T[N]` must
+      stay "cast to generic type T[N]", never "(x as T)[N]" (index the
+      cast result). Lower than LBRACKET makes shift (extend) win
+      deterministically instead of menhy's undeclared-precedence default. *)
+%left DOT LBRACKET
+   (* highest: field access / indexing -- postfix, binds tighter than prefix
+      ops. GitHub issue #217: LBRACKET joined DOT here once Index/SliceOf's
+      base became a general expr (previously a bare IDENT could not be
+      followed by a binary operator before `[`, so no conflict existed);
+      without a declared precedence, `a + b[i]` and every other "binary op
+      immediately followed by `[`" shape was an unresolved (if consistently
+      shift-favoring) conflict against each `expr -> expr OP expr`
+      reduction. Same tier as DOT, matching how postfix `.field` and `[i]`
+      already compose with each other with no ordering surprise. *)
 %nonassoc TYPE_BASE
 %nonassoc AT
 
@@ -752,12 +773,16 @@ expr:
     { { desc = TupleLit (e1 :: e2 :: es); loc = $symbolstartpos } }
   | e = expr AS t = type_expr
     { { desc = Cast (t, e); loc = $symbolstartpos } }
-  | id = IDENT LBRACKET idx = expr RBRACKET
-    (* arr[i] -- preserved as Index node; codegen emits bounds check for [T;N] arrays *)
-    { { desc = Index (id, idx); loc = $symbolstartpos } }
-  | id = IDENT LBRACKET lo = expr DOTDOTLT hi = expr RBRACKET
-    (* s[lo..<hi] -- subslice (constant bounds, proven) or slice-from-pointer (unchecked) *)
-    { { desc = SliceOf (id, lo, hi); loc = $symbolstartpos } }
+  | b = expr LBRACKET idx = expr RBRACKET
+    (* base[i] -- preserved as Index node; codegen emits bounds check for
+       [T;N] arrays. GitHub issue #217: base is any expr syntactically
+       (so `s.field[i]` parses directly, matching `s.field` itself being
+       an ordinary expr via the DOT rule below) -- type_inf.ml restricts
+       which shapes are actually legal as an Index base. *)
+    { { desc = Index (b, idx); loc = $symbolstartpos } }
+  | b = expr LBRACKET lo = expr DOTDOTLT hi = expr RBRACKET
+    (* base[lo..<hi] -- subslice (constant bounds, proven) or slice-from-pointer (unchecked) *)
+    { { desc = SliceOf (b, lo, hi); loc = $symbolstartpos } }
   | UNSAFE LBRACE e = expr RBRACE
     (* unsafe { e } -- visibility marker permitting unchecked-assertion constructs in e *)
     { { desc = Unsafe e; loc = $symbolstartpos } }
@@ -849,7 +874,7 @@ base_type_expr:
        *value*-identity static arguments (checker-only, zero runtime
        cost). Keeping these two visually distinct was an explicit design
        goal, not an accident. *)
-  | IDENT { TypeNamed $1 }
+  | IDENT %prec BRACKET_ELSEWHERE { TypeNamed $1 }
   | n = INT { TypeIntLit (narrow_int64 $symbolstartpos "generic value argument" n) }
     (* Const generics follow-up to GitHub issue #207: a bare integer as a
        TypeGenericInst value argument, e.g. the `3` in `Freelist(usize,
@@ -865,7 +890,7 @@ static_arg:
     { StaticEnum (enum_name, case_name) }
 
 view_static_args:
-  | /* empty */ { [] }
+  | /* empty */ %prec BRACKET_ELSEWHERE { [] }
   | LBRACKET args = separated_nonempty_list(COMMA, static_arg) RBRACKET { args }
 
 (* Array size: a compile-time integer constant expression -- a literal, the

@@ -54,9 +54,9 @@ let rec count_var_occurrences name (e : Ast.expr) =
   | Ast.FieldGet (x, _) | Ast.Unsafe x -> count_var_occurrences name x
   | Ast.StructLit xs | Ast.TupleLit xs -> count_all xs
   | Ast.Index (base, index) ->
-      (if base = name then 1 else 0) + count_var_occurrences name index
+      count_var_occurrences name base + count_var_occurrences name index
   | Ast.SliceOf (base, lo, hi) ->
-      (if base = name then 1 else 0)
+      count_var_occurrences name base
       + count_var_occurrences name lo + count_var_occurrences name hi
   | Ast.Assign (lhs, rhs) ->
       count_var_occurrences name lhs + count_var_occurrences name rhs
@@ -341,8 +341,10 @@ let rec static_place_key (e : Ast.expr) =
      shape -- stable_replace's own caller must bind it to a variable
      first, matching how every other place in this function already
      requires a syntactically simple base. *)
-  | Ast.Index (id, idx) ->
-      Option.map (fun idx_key -> id ^ "[" ^ idx_key ^ "]") (static_place_key idx)
+  | Ast.Index (base, idx) ->
+      (match static_place_key base, static_place_key idx with
+       | Some base_key, Some idx_key -> Some (base_key ^ "[" ^ idx_key ^ "]")
+       | _ -> None)
   | _ -> None
 
 let static_identity_for_place place =
@@ -1819,42 +1821,16 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 tgt)))
 
   | FieldGet (base_expr, fname) ->
-      let bt = infer_expr senv eenv tyenv fenv base_expr in
-      (match repr bt, fname with
-       | TSlice _, "len" -> TUsize  (* s.len -- the slice's runtime length *)
-       | _ ->
-      let (sname, static_args) = match struct_instance (repr bt) with
-        | Some x -> x
-        | _ ->
-            raise (TypeError (base_expr.loc,
-              Printf.sprintf "field access '.%s' on non-struct type '%s'"
-                fname (to_string bt)))
-      in
-      let fields = match StringMap.find_opt sname senv with
-        | Some (fs, _, _) -> fs
-        | None ->
-            raise (TypeError (e.loc,
-              Printf.sprintf "unknown struct type '%s'" sname))
-      in
-      check_private_field_access e.loc sname fname;
-      if is_stable_owner_field sname fname then
-        raise (TypeError (e.loc, Printf.sprintf
-          "stable owner field '%s.%s' cannot be read directly; use stable_replace while holding its guard"
-          sname fname));
-      (match List.assoc_opt fname fields with
-       | Some ft ->
-           (match field_type_for_instance sname static_args ft with
-            | TArray (inner, _) -> TPtr inner  (* array field decays to *elem *)
-            | TIo    inner      -> inner        (* io field returns value type T (volatile handled in codegen) *)
-            | t                 -> t)
-       | None ->
-           raise (TypeError (e.loc,
-             Printf.sprintf "no field '%s' in struct '%s'" fname sname))))
+      infer_field_access ~decay:true senv eenv tyenv fenv e.loc base_expr fname
 
-  | Index (id, idx) ->
-      check_private_global_access e.loc id;
-      (* Get the variable's original type (no array decay, unlike Var) *)
-      let vt = lookup e.loc id tyenv in
+  | Index (base, idx) ->
+      (* GitHub issue #217: base's un-decayed declared type, recovered by
+         direct lookup/struct-field-table walk (place_undecayed_type)
+         rather than general infer_expr -- an array-typed struct field
+         must NOT decay to a bare element pointer here the way an
+         ordinary (non-indexing) field read decays it, or bounds-check
+         codegen loses the array length entirely. *)
+      let vt = place_undecayed_type senv eenv tyenv fenv base in
       let it = infer_expr senv eenv tyenv fenv idx in
       (match repr vt with
        | TArray (elem, n) ->
@@ -1894,9 +1870,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt))))
 
-  | SliceOf (id, lo_e, hi_e) ->
-      check_private_global_access e.loc id;
-      let vt = lookup e.loc id tyenv in
+  | SliceOf (base, lo_e, hi_e) ->
+      let vt = place_undecayed_type senv eenv tyenv fenv base in
       let lo_t = infer_expr senv eenv tyenv fenv lo_e in
       let hi_t = infer_expr senv eenv tyenv fenv hi_e in
       (* A subslice range is indexing too: array/slice bounds use usize,
@@ -2069,7 +2044,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                   raise (TypeError (e.loc,
                     Printf.sprintf
                       "slice construction from a raw pointer asserts a length \
-                       without evidence; write `unsafe { %s[..] }` to mark it" id));
+                       without evidence; write `unsafe { %s[..] }` to mark it"
+                      (Option.value (static_place_key base) ~default:"expr")));
                 (* Claimed minimum from the bounds' static ranges (sync
                    rule: same formula as llvm_gen's sub_of_ptr). *)
                 (match bound_range lo_e lo_t, bound_range hi_e hi_t with
@@ -2768,9 +2744,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            unify_at rhs.loc vt inner;
            check_literal_fits_refined rhs.loc rhs inner;
            TVoid
-       | Index (id, idx) ->
-           check_private_global_access lhs.loc id;
-           let vt = lookup lhs.loc id tyenv in
+       | Index (base, idx) ->
+           let vt = place_undecayed_type senv eenv tyenv fenv base in
            let it = infer_expr senv eenv tyenv fenv idx in
            let rt = infer_expr senv eenv tyenv fenv rhs in
            let elem_ty = match repr vt with
@@ -2887,6 +2862,87 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            TVoid
        | _ ->
            raise (TypeError (lhs.loc, "not an assignable expression")))
+
+(* GitHub issue #217: shared struct-field-access logic for both an ordinary
+   field READ (FieldGet -- decays an array-typed field to a bare element
+   pointer, `decay:true`) and an Index/SliceOf base's UN-DECAYED type
+   recovery (`decay:false`, called from place_undecayed_type below). Single-
+   sourced rather than duplicated so privacy/stable-owner checks and error
+   messages can never drift between the two call sites -- the only actual
+   difference between them is the one `match ... with TArray -> TPtr ...`
+   step at the very end. *)
+and infer_field_access ~decay senv eenv tyenv fenv (loc : Ast.loc)
+    (base_expr : Ast.expr) (fname : string) : ty =
+  let bt = infer_expr senv eenv tyenv fenv base_expr in
+  match repr bt, fname with
+  | TSlice _, "len" -> TUsize  (* s.len -- the slice's runtime length *)
+  | bt_repr, _ ->
+      let (sname, static_args) = match struct_instance bt_repr with
+        | Some x -> x
+        | _ ->
+            raise (TypeError (base_expr.loc,
+              Printf.sprintf "field access '.%s' on non-struct type '%s'"
+                fname (to_string bt)))
+      in
+      let fields = match StringMap.find_opt sname senv with
+        | Some (fs, _, _) -> fs
+        | None ->
+            raise (TypeError (loc,
+              Printf.sprintf "unknown struct type '%s'" sname))
+      in
+      check_private_field_access loc sname fname;
+      if is_stable_owner_field sname fname then
+        raise (TypeError (loc, Printf.sprintf
+          "stable owner field '%s.%s' cannot be read directly; use stable_replace while holding its guard"
+          sname fname));
+      (match List.assoc_opt fname fields with
+       | Some ft ->
+           let raw = field_type_for_instance sname static_args ft in
+           if not decay then raw
+           else (match raw with
+             | TArray (inner, _) -> TPtr inner  (* array field decays to *elem *)
+             | TIo    inner      -> inner        (* io field returns value type T (volatile handled in codegen) *)
+             | t                 -> t)
+       | None ->
+           raise (TypeError (loc,
+             Printf.sprintf "no field '%s' in struct '%s'" fname sname)))
+
+(* GitHub issue #217: recover the UN-DECAYED declared type of a restricted
+   Index/SliceOf base path -- a bare variable, or a chain of struct field
+   accesses (through a pointer or value struct) rooted in one -- mirroring
+   static_place_key's own restricted-shape recognition just above. Any
+   other expr shape is rejected here: allowing indexing's base to be
+   syntactically any expr (see the parser's own comment on Index/SliceOf)
+   does not mean any expr is a semantically legal one, and only this
+   restricted set keeps a direct, non-inferring lookup of the base's
+   un-decayed type tractable, the same reasoning that motivated keeping
+   Index's base an `ident` in the first place before this fix. A FieldGet
+   chain of any depth (`a.b.c[i]`) works through ordinary recursion here
+   (only the OUTERMOST field needs the un-decayed treatment -- ordinary
+   infer_expr already threads intermediate struct-typed field addresses
+   through correctly) and its matching codegen (llvm_gen.ml's
+   gen_field_access ~decay:false) shares that same property. Deliberately
+   NOT extended to another Index as a base (`a[i].field`, `a[i][j]`):
+   doing so would need an address-preserving variant of Index's own
+   codegen (today's Index always LOADS the final element value, discarding
+   its address) that does not exist yet -- left for a follow-up rather
+   than accepted here and left to crash the compiler at codegen. *)
+and place_undecayed_type senv eenv tyenv fenv (e : Ast.expr) : ty =
+  match e.desc with
+  | Ast.Var name ->
+      check_private_global_access e.loc name;
+      lookup e.loc name tyenv
+  | Ast.FieldGet (base_expr, fname) ->
+      infer_field_access ~decay:false senv eenv tyenv fenv e.loc base_expr fname
+  | Ast.Index _ ->
+      raise (TypeError (e.loc,
+        "indexing another index expression's result directly (`a[i][j]` or \
+         `a[i].field[j]`) is not yet supported; bind the intermediate \
+         result to a variable first"))
+  | _ ->
+      raise (TypeError (e.loc,
+        "an index/slice base must be a variable or a chain of struct field \
+         accesses, not an arbitrary expression"))
 
 (* -- Checking mode --------------------------------------------------------- *)
 (* check_expr pushes the expected type inward (bidirectional checking).
@@ -6007,7 +6063,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                Some inner
            | _ -> None)
       | Ast.Index (base, _) ->
-          (match Option.map strip_borrow (StringMap.find_opt base !var_types) with
+          (match Option.map strip_borrow (expr_ast_type base) with
            | Some (Ast.TypePtr inner) | Some (Ast.TypeAlignedPtr (_, inner))
            | Some (Ast.TypeArray (inner, _)) | Some (Ast.TypeSlice (inner, _)) ->
                Some inner
@@ -6074,14 +6130,23 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (match StringMap.find_opt n !var_types with
            | Some (Ast.TypeArray _) -> PathSet.empty
            | _ -> TaintEnv.get n taints)
-      | Ast.SliceOf (base, _, _) -> TaintEnv.get base taints
+      | Ast.SliceOf (base, _, _) ->
+          (* A subslice needs the SAME `Cast(TypeSlice, Var n)` treatment
+             below when base is a bare Var (a subslice IS a slice view of
+             the array), NOT the ordinary Var case above -- that case's
+             TypeArray exclusion exists for plain array reads elsewhere
+             and would wrongly hide a stack-array's own taint here
+             (GitHub issue #217; confirmed by test: "region slice: a
+             stack-array subslice cannot be returned" regressed without
+             this special case). base_taint captures exactly this. *)
+          base_taint taints base
       | Ast.Cast (Ast.TypeSlice _, { Ast.desc = Ast.Var n; _ }) ->
           TaintEnv.get n taints
       | Ast.Cast (_, x) | Ast.Bnot x | Ast.Unsafe x -> expr_taint taints x
       | Ast.Deref x | Ast.FieldGet (x, _) when expr_has_region_result e ->
           expr_taint taints x
       | Ast.Index (base, _) when expr_has_region_result e ->
-          TaintEnv.get base taints
+          base_taint taints base  (* issue #217: same reasoning as SliceOf's case above *)
       | Ast.BinOp ((Ast.Add | Ast.Sub | Ast.Mul | Ast.Div | Ast.Mod
                    | Ast.Bor | Ast.Bxor | Ast.Band | Ast.Shr | Ast.Shl),
                    left, right) ->
@@ -6104,6 +6169,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                  PathSet.empty args
            | None -> PathSet.empty)
       | _ -> PathSet.empty
+    (* GitHub issue #217: an Index/SliceOf base's own taint -- a bare Var
+       goes straight to TaintEnv (bypassing expr_taint's ordinary Var
+       case's TypeArray exclusion, which exists for plain array reads
+       elsewhere and is NOT what a subslice/element access of that same
+       array means), anything else recurses through expr_taint normally. *)
+    and base_taint taints (base : Ast.expr) =
+      match base.desc with
+      | Ast.Var n -> TaintEnv.get n taints
+      | _ -> expr_taint taints base
     in
     let accepts_region_borrow = function
       | Some (Ast.TypeBorrow inner) -> ast_region_kind inner <> None
@@ -6126,7 +6200,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     (* The name a taint diagnostic should blame for an escaping expression. *)
     let rec taint_source_name (e : Ast.expr) = match e.desc with
       | Ast.Var n -> n
-      | Ast.SliceOf (base, _, _) -> base
+      | Ast.SliceOf (base, _, _) -> taint_source_name base
       | Ast.Cast (_, x) | Ast.Bnot x | Ast.Unsafe x -> taint_source_name x
       | Ast.Call (name, _) -> Printf.sprintf "result of '%s'" name
       | _ -> "<value>"
@@ -6196,6 +6270,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             value_kind name (kind_word p) (path_to_string p)
             (path_to_string p))))
         (TaintEnv.get name taints)
+    in
+    (* GitHub issue #217: an Index/SliceOf base is no longer always a bare
+       ident -- region taint is deliberately keyed only by directly tracked
+       local NAMES (see the "no component/case shape for runtime
+       aggregates" limitation below), so a FieldGet/Index-chain base has no
+       single tracked name to check liveness against. Apply the real check
+       only when the base still reduces to the one shape it can say
+       anything about (a bare Var); any other restricted shape is silently
+       skipped here, matching the pre-existing "aggregate region tracking
+       is not implemented" limitation rather than pretending to check
+       something this design cannot yet check. *)
+    let require_region_live_base loc taints moved (base : Ast.expr) =
+      match base.desc with
+      | Ast.Var name -> require_region_live loc taints moved name
+      | _ -> ()
     in
     (* A taint names its authority by the current surface place key. Reusing
        that key for a new owner/guard would otherwise make an old derived
@@ -6403,15 +6492,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              vanish into a dropped temporary (OWNERSHIP_KERNEL.md 5.9). *)
           List.fold_left (fun m x -> check_expr taints m consume x) moved xs
       | Ast.Index (base, i) ->
-          (* Index/SliceOf bases are bare idents in the AST and are NOT
-             visited as Var expressions, so the region use check must fire
-             here explicitly (they are how a derived frame slice is actually
+          (* Index/SliceOf bases are not visited as ordinary Var/FieldGet
+             expressions (place_undecayed_type reads them directly, not
+             infer_expr), so the region use check must fire here
+             explicitly (they are how a derived frame slice is actually
              read). *)
-          require_region_live e.loc taints moved base;
-          require_no_region_aggregate_load e.loc e (TaintEnv.get base taints);
+          require_region_live_base e.loc taints moved base;
+          require_no_region_aggregate_load e.loc e (base_taint taints base);
           check_expr taints moved false i
       | Ast.SliceOf (base, lo, hi) ->
-          require_region_live e.loc taints moved base;
+          require_region_live_base e.loc taints moved base;
           check_expr taints (check_expr taints moved false lo) false hi
       | Ast.SizeOf _ | Ast.OffsetOf _ | Ast.IntLit _ | Ast.BoolLit _
       | Ast.StringLit _ | Ast.EmbedFile _ -> moved
@@ -6474,7 +6564,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            | Ast.FieldGet (base_expr, _) ->
                check_expr taints (check_expr taints moved false base_expr) false rhs
            | Ast.Index (base, i) ->
-               require_region_live e.loc taints moved base;
+               require_region_live_base e.loc taints moved base;
                check_expr taints (check_expr taints moved false i) false rhs
            | _ -> moved (* not an lvalue; infer_expr already rejected it *))
     in
@@ -6635,7 +6725,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                        false rhs,
                      declared, taints))
            | Ast.Index (base, i) ->
-               require_region_live loc taints moved base;
+               require_region_live_base loc taints moved base;
                require_no_taint_escape loc taints `Store rhs;
                (check_expr taints (check_expr taints moved false i) false rhs,
                 declared, taints)

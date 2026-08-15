@@ -15,6 +15,93 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: `struct_ptr.array_field[i]` Now Compiles Directly, With a Real Checked Bounds Check (GitHub Issue #217)
+
+Closed both gaps issue #217 identified in `arr[i]` indexing when `arr` is a
+struct field rather than a bare local:
+
+**Gap 1 (parser/AST):** `Index`/`SliceOf`'s base (`lib/ast.ml`) was `ident`,
+not a general `expr`, so `core.next_free[i]` required a manual
+`let next_free = core.next_free; next_free[i] = ...;` workaround before it
+would even parse. Widened both to `expr` (`lib/parser.mly`: `b = expr
+LBRACKET idx = expr RBRACKET`, reusing the already-working recursive `expr`
+grammar the same way `expr DOT fname` already does, rather than inventing a
+second, narrower nonterminal -- an earlier attempt at a separate
+`index_base` nonterminal sharing IDENT/DOT prefixes with `expr`'s own
+FieldGet chain turned out to be a textbook reduce/reduce conflict, not
+resolvable by bounding its depth). This introduced 32 new shift/reduce
+conflicts (a previously-zero-conflict grammar) -- confirmed by comparing
+against a `git stash`ed baseline build, all in the single "binary operator
+followed by `[`" shape (`expr -> expr OP expr .` vs. shift `LBRACKET`).
+Fixed with a semantics-preserving precedence declaration (`%left DOT
+LBRACKET`, same tier as field access) plus a new low pseudo-token
+(`BRACKET_ELSEWHERE`) on the two unrelated existing productions that also
+see `IDENT`/empty immediately followed by `[` (a cast's generic type args,
+`x as T[N]`; a view literal's explicit args, `view Name[args]`) so `[`
+deterministically extends THEM rather than being claimed by the new Index
+rule -- back to zero conflicts, verified with `menhir --explain`.
+
+**Gap 2 (type inference/codegen):** even through the old workaround, the
+field read itself decayed `next_free: [usize; N]` to a bare `*usize`
+(`lib/type_inf.ml`'s FieldGet case, `lib/llvm_gen.ml`'s matching codegen),
+so indexing went through unchecked raw-pointer arithmetic with no bounds
+check and no trap site at all -- confirmed by the Makefile's own long-
+standing comment on `freelist_pool`/`freelist_generic`/`slotmap`/
+`refcount_slotmap`: `--forbid-trap` passed for these only because the
+checker had stopped looking, not because anything was proven safe. Fixed
+by adding a `decay:bool` parameter to the shared field-access logic in
+both files (`infer_field_access`/`gen_field_access`, factored out of the
+existing FieldGet case so privacy/struct-layout logic is single-sourced,
+not duplicated) -- `decay:true` is the unchanged existing FieldGet
+behavior; `decay:false`, used only by a new `place_undecayed_type`/
+`resolve_index_storage` pair for an Index/SliceOf base, returns the
+field's raw `TArray`/un-decayed address instead, so the SAME
+`emit_bounds_check`/elision codegen a local array already gets now
+applies to a struct field too.
+
+The restricted-shape rule keeping this tractable (no general expression
+inference for an Index base, matching `static_place_key`'s existing
+Var/FieldGet-chain recognition): a base of shape `Var`, or a FieldGet
+chain of any depth (`a.b.c[i]` -- only the OUTERMOST field needs the
+un-decayed treatment; intermediate struct-typed field reads are
+unaffected by `decay` either way and just work), is required. Index-of-
+Index-as-a-base (`a[i][j]`, `a[i].field`) is a deliberate, explicit
+`TypeError` ("not yet supported"), not accepted-then-crashed: today's
+`Index` codegen always LOADS the final element value, discarding its
+address, and adding an address-preserving variant was out of scope here
+-- matches the issue's own "nested paths are a nice-to-have, not
+required" framing.
+
+A generalization pass over both files' other `Index`/`SliceOf`-base call
+sites (`written_names`, region-taint tracking's `expr_taint`/
+`require_region_live`/`taint_source_name`, `resolve_index_storage`'s own
+Var-vs-FieldGet dispatch) surfaced one real regression during testing:
+region-taint's `expr_taint` has a `Var` case that deliberately returns
+empty for a `TypeArray`-typed name (a plain array READ elsewhere
+decays and is untainted by design) -- reusing that same function
+uniformly for an Index/SliceOf base's OWN taint silently hid a
+stack-array subslice's taint, since the base IS the array itself, not an
+ordinary read of it. Fixed with a small `base_taint` helper that goes
+straight to `TaintEnv` for a bare-Var base (bypassing that exclusion,
+matching the pre-existing `Cast(TypeSlice, Var n)` special case) and
+falls back to `expr_taint` otherwise; caught by the existing "region
+slice: a stack-array subslice cannot be returned" regression test, not a
+new one written for this issue.
+
+Verified: `dune runtest` (1014/1014, 9 new regression cases -- direct
+read/write type-checking, the two rejected shapes, a multi-level FieldGet
+chain, and `expect_trap_sites` codegen tests proving BOTH directions: an
+unproven index now records a real trap site where it silently recorded
+zero before, and a provably-in-range index still elides the check exactly
+like local-array indexing already did). `make kernelbuild-qemu
+kernelbuild-rpi5 linuxbuild langcheck` all clean (including the four
+Makefile-flagged freelist/slotmap files -- unaffected in practice since
+none of them use the new direct-indexing form yet, still on their
+`let`+`isize`-pointer-arithmetic workaround; migrating them is a natural
+follow-up, not done here). `make kernelcheck-qemu` (38 views, ash TCP
+integration, PTY smoke test) all pass -- a full real-boot behavioral
+check, not just a compile check.
+
 ### 2026-08-15: A Local Binding Now Shadows a Same-Named Private Global From a Different File (GitHub Issue #214)
 
 `check_private_global_access` (`lib/type_inf.ml`, GitHub issue #108) rejected
