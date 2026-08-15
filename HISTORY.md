@@ -15,6 +15,63 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-15: `UserRange` Split Into `UserReadRange`/`UserWriteRange` (GitHub Issue #199)
+
+`kernel/mm/user_memory.tkb`'s `UserRange` carried its validated
+`UserAccessMode` (Read/Write) only as a fact already spent at
+construction time, not in its own type -- nothing stopped a range
+checked for `Read` from being passed to `copy_to_user` (a write) or vice
+versa. Wrong-direction use was not silently dangerous before this issue
+(it still faulted, via this kernel's EL0 fail-stop path, at the
+hardware/page-table level) but relied on the underlying page's real
+permissions happening to also reject the mistake, not on the type
+system catching it. Split into two structs (`UserReadRange`/
+`UserWriteRange`), each still only constructible via its own private-
+field constructor (`user_range_check_read`/`user_range_check_write`,
+replacing the old single `user_range_check(..., mode)`) -- the "known
+zero-new-compiler-features" option the issue's own text named as the
+safe fallback, taken directly rather than first spiking the untested
+indexed-struct-over-an-enum alternative it also raised, since this issue
+was picked up as prep work for #291 (procfs) rather than as its own
+open-ended research spike.
+
+`kernel/kernel/syscall.tkb`'s 35 call sites (of `user_range_check`,
+each already passing a literal `UserAccessMode::Read`/`::Write`) and
+their matching 35 `UserRangeResult::Fault`/`::Ok` result arms were
+migrated with a small purpose-written script (balanced-paren-aware, since
+a naive regex breaks on the nested `kernel_process_current_root()` call
+inside almost every argument list) rather than by hand across a ~3000-
+line file -- verified mechanically sound by an exact post-migration count
+match (35 calls, 35 Fault, 35 Ok; 13 Read + 22 Write summing to 35) before
+ever attempting a build.
+
+The migration surfaced one genuine finding, not just a mechanical
+rename: `syscall_ppoll_dispatch`'s pollfd array is validated once as
+`UserWriteRange` (its `revents` field is written) but also READ through
+that same handle (`fd`/`events`, supplied by the caller) -- the exact
+"one buffer, two directions, one syscall" shape a naive split would
+either wrongly forbid or silently paper over. Resolved with an explicit,
+one-directional downgrade, `user_write_range_as_read` (write implies
+read on this architecture: a writable mapping's AP bits already grant
+read access, and the other path `user_range_check_write` accepts --  an
+unresolved COW page -- is read-only until the write that triggers its
+copy, so it's trivially readable too) -- a NAMED conversion a call site
+must reach for explicitly, not an implicit coercion that would quietly
+let a `UserWriteRange` satisfy a `UserReadRange` parameter everywhere,
+which would have defeated the point of the split. `user_range_resolve_cow`
+(only ever reachable from write-side helpers) took `UserWriteRange`
+directly rather than either type, since a read never needs COW
+resolution at all.
+
+Verified: a clean `make kernelbuild-qemu`/`kernelbuild-rpi5` (the ppoll
+type mismatch was caught here, at compile time, exactly as the issue
+intended, on the very first build attempt) and a full `kernelcheck-qemu`
+real-boot run (38 views including `syscall`/`syscall_subset`/
+`user_memory`/`user_memory_root_isolation`, ash/TCP integration, PTY
+smoke test) with no regressions -- `dune runtest`/`langcheck` also run
+for hygiene, unaffected since this issue touched only `kernel/*.tkb`
+files, no compiler code.
+
 ### 2026-08-15: `kernel/lib/freelist.tkb`/`slotmap.tkb`/`refcount_slotmap.tkb` Migrated to Checked Struct-Field Indexing (Issue #217 Follow-up)
 
 The Makefile's own long-standing comment on these three files (plus
