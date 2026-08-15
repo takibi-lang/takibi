@@ -7006,6 +7006,23 @@ let infer_tests = [
        "may only wrap a plain struct type"
        "fn f(x: &usize) { }");
 
+  (* GitHub issue #314/#319 follow-up: index-assignment through an array
+     field reached via a shared &T was not gated the way a direct
+     `.field = v`/`*r = v` write already is -- see
+     check_no_write_through_shared_ref. *)
+  Alcotest.test_case "&T cannot write an array field via index assignment" `Quick
+    (expect_type_error
+       "cannot write through a shared reference"
+       "struct RefArrPool { slots: [usize; 4]; }
+        fn bad(p: &RefArrPool) { p.slots[0] = 1; }
+        fn f() { let mut pool: RefArrPool = {{0, 0, 0, 0}}; bad(&pool); }");
+
+  Alcotest.test_case "&mut T can write an array field via index assignment" `Quick
+    (expect_ok
+       "struct RefArrPool { slots: [usize; 4]; }
+        fn ok(p: &mut RefArrPool) { p.slots[0] = 1; }
+        fn f() { let mut pool: RefArrPool = {{0, 0, 0, 0}}; ok(&pool); }");
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------

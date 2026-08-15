@@ -2831,6 +2831,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            check_literal_fits_refined rhs.loc rhs inner;
            TVoid
        | Index (base, idx) ->
+           check_no_write_through_shared_ref senv eenv tyenv fenv base;
            let vt = place_undecayed_type senv eenv tyenv fenv base in
            let it = infer_expr senv eenv tyenv fenv idx in
            let rt = infer_expr senv eenv tyenv fenv rhs in
@@ -2957,6 +2958,30 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            TVoid
        | _ ->
            raise (TypeError (lhs.loc, "not an assignable expression")))
+
+(* GitHub issue #314/#319 follow-up: index-assignment through an array
+   FIELD reached via a shared &T was not gated the way a direct
+   `.field = v` write or a `*r = v` write already are -- struct_instance/
+   place_undecayed_type resolve the field name identically for &T and
+   &mut T, so `r.some_array_field[i] = v;` silently succeeded through a
+   shared reference. Walks the FieldGet chain rooted at an Index/AssignIndex
+   base (the same "any depth" chain place_undecayed_type itself supports)
+   checking each level's own immediate base type; a plain struct-valued
+   intermediate field (not itself &-typed) never matches TRef, so this
+   never rejects legitimate code, only the previously-unchecked shared
+   -reference-write case. *)
+and check_no_write_through_shared_ref senv eenv tyenv fenv (e : Ast.expr) : unit =
+  match e.desc with
+  | FieldGet (inner_expr, _) ->
+      let inner_ty = infer_expr senv eenv tyenv fenv inner_expr in
+      (match repr inner_ty with
+       | TRef _ ->
+           raise (TypeError (inner_expr.loc, Printf.sprintf
+             "cannot write through a shared reference '%s'; declare it \
+              '&mut ...' instead"
+             (to_string inner_ty)))
+       | _ -> check_no_write_through_shared_ref senv eenv tyenv fenv inner_expr)
+  | _ -> ()
 
 (* GitHub issue #314/#319: shared &expr (AddrOf) validation/typing, shared
    between infer_expr's own default (unconstrained) case and check_expr's
