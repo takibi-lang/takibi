@@ -3219,9 +3219,34 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                  | _ -> raise (Error
                      "slice cast source must be an array variable, string \
                       literal, or slice")))
-       | TypePtr _ when (match src_ty with TypeSlice _ -> true | _ -> false) ->
+       | TypePtr pointee_ty when (match src_ty with TypeSlice _ -> true | _ -> false) ->
            (* slice -> pointer: the explicit bridge back into the pointer
-              world; just the ptr half of the fat value. *)
+              world; just the ptr half of the fat value. GitHub issue #218
+              follow-up, sync rule with type_inf.ml's own TSlice Cast case:
+              re-derive here whether the proven minimum length actually
+              covers sizeof(pointee), using the REAL target DataLayout
+              (Type_layout, fully populated by now but not yet at type-
+              check time) -- strictly more precise than type_inf.ml's own
+              const_type_size fast path, but the two can never disagree on
+              a case const_type_size DOES decide (both read the same
+              struct/array shape), only add cases it could not. If the
+              length is insufficient, this cast could only have reached
+              codegen at all because it was wrapped in `unsafe` (type_inf.ml
+              would otherwise have rejected it), so that use was genuine,
+              not accidental -- record it so the "unnecessary unsafe" lint
+              does not misreport it as a no-op wrap. *)
+           (match pointee_ty with
+            | TypeU8 -> ()
+            | _ ->
+                let pointee_llty = ltype_of_ast pointee_ty in
+                let dl = match !target_data with
+                  | Some dl -> dl
+                  | None -> raise (Error "slice cast: target data layout not initialized")
+                in
+                let need = Int64.to_int (Llvm_target.DataLayout.abi_size pointee_llty dl) in
+                (match src_ty with
+                 | TypeSlice (_, m) when m > 0 && m >= need -> ()
+                 | _ -> note_unsafe_use ()));
            (target_ty, slice_ptr v)
        | _ ->
            (* Every other u8/i16/etc-typed expression result (Var, Index,

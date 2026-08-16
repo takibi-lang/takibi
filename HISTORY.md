@@ -15,6 +15,87 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-16: Checked Slice-to-Struct-Pointer Casts (GitHub Issue #218 Follow-Up)
+
+Continuation of the #218/#316 measurement work: `slice_expr as *T` was
+previously "as free as *T as *U" (unconditional, per its own comment) --
+the slice's own length was never checked against `sizeof(T)`, the exact
+same "the proof gets discarded at the cast boundary" gap the DMA-ring
+base-minting problem had, just for the wire-format-overlay population
+(`kernel/net/tcp.tkb`'s `frame as *EthHdr`, `ip as *Ipv4Hdr`, etc.)
+instead of the fixed-record-array one #239's TRB migration already
+closed. Unlike that population, this one already had everything needed
+to PROVE most real sites safe, not just warn about them: a slice type
+already carries a compile-time minimum length (`TSlice(elem, n)`, `n=0`
+meaning dynamic/unproven), and `sizeof(T)` was already partially
+computable at type-check time via `const_type_size` (built for issue
+#77's own `sizeof(...)` refined-literal fast path -- target-independent
+struct/array shapes only: fixed-width primitives, no `align(N)`).
+
+**The rule.** `TPtr TU8` targets stay unconditionally free (a byte
+pointer's own size is 1; any length already proves it -- this is also
+what most of the ~1146-site DMA/wire population already casts to, so
+nothing there regresses). Any other pointee: if `const_type_size` can
+compute `sizeof(pointee)` AND the slice's proven minimum length `n > 0`
+covers it, free; otherwise `unsafe` is required, with one of three
+distinct messages depending on which condition failed (length proven but
+insufficient / length not proven at all / size itself not provable here)
+-- distinguishing these matters because they call for different fixes
+(tighten the type vs. add a runtime length check vs. this specific cast
+just cannot be proven target-independently).
+
+**Codegen has its own, MORE precise re-check (sync rule), not just a
+mirror of type_inf.ml's.** At codegen time the real target DataLayout is
+available (`Llvm_target.DataLayout.abi_size`, `!Llvm_gen.target_data`),
+which type_inf.ml's `const_type_size` deliberately never has access to
+(it runs before `setup_target`) -- so llvm_gen.ml's version of the check
+can correctly clear MORE sizes than type_inf.ml's fast path (e.g. an
+aligned struct, not just packed target-independent ones), while never
+disagreeing on any case the fast path DOES decide. Whichever one ran,
+`note_unsafe_use()` is called exactly when the length was genuinely
+insufficient at that point -- otherwise the cast could not have reached
+codegen at all without `unsafe`, so a required `unsafe` is never
+misreported by issue #315's "unnecessary unsafe" lint as a no-op wrap.
+
+**First attempt reached across a module boundary that does not exist:**
+tried calling `Type_layout.sizeof_type` from `lib/llvm_gen.ml` directly,
+which does not build -- `Type_layout` depends on `Llvm_gen` (for
+`target_data`), not the other way around, so `Llvm_gen` cannot import
+it. Fixed by inlining the same `ltype_of_ast` + `DataLayout.abi_size`
+pattern `SizeOf`'s own codegen case already uses a few lines above,
+which is also how `llvm_gen.ml`'s own separate copy of `const_type_size`
+(a second, intentionally-duplicated implementation -- see its own
+"disagreement" runtime check) already works; not a new pattern, a
+precedented one, caught before it reached a build.
+
+**Measured against the real kernel/ tree: exactly one site.**
+`kernel/fs/elf64.tkb`'s `image as *KernelElf64Header` -- not a real bug.
+The function's own pre-existing comment already explained the gap
+before this session touched it: the `if` condition checks `image.len >=
+ELF_HEADER_SIZE && image.len >= 7`, and `ELF_HEADER_SIZE` (a
+`sizeof`-derived `let`, correctly 64) genuinely proves sufficiency at
+runtime, but is not a syntactic literal the type checker's narrowing can
+fold into the slice's own minimum-length type -- only the redundant
+`>= 7` literal conjunct actually narrows. A human already reasoned this
+correctly; the type system could not yet see it. Marked with `unsafe {
+}` (function annotated `!{unsafe}`), extending the existing comment to
+point at this cast specifically, rather than attempting to teach
+if-narrowing to fold non-literal bounds (a real, separate, higher-effort
+follow-up, not undertaken here).
+
+Verified: `dune runtest` 1083/1083 (7 new tests: sufficient/insufficient/
+unprovable-length/target-dependent-size/unsafe-escape/*u8-exemption at
+the type-check level, plus one codegen-level "not flagged unnecessary"
+check placed in the file's existing post-`setup_target` test cluster,
+not the type-check-only group above it -- moved there after a first
+attempt hit "target data layout not initialized" in a context with no
+real target machine configured). Full `make kernelbuild` (RPi5 + QEMU)
+compiles clean; the #218 warning count is unchanged (102, QEMU target)
+since this is an orthogonal, independently-provable population, not a
+subset of it.
+
+---
+
 ### 2026-08-15: `kernelsh-qemu`'s Intermittent "Connection Refused" Was an Unguarded Boot Race, Not a Real Failure
 
 Reported after a `make allcheck` run: the `kernelsh-qemu` PTY smoke test

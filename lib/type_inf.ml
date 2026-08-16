@@ -1861,15 +1861,61 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                          "cannot cast pointer to %s; \
                           use `(ptr as usize) as %s` to make the truncation explicit"
                          (to_string tgt) (to_string tgt))))
-            | TSlice _ ->
+            | TSlice (_, n) ->
                 (match tgt with
-                 | TPtr _ ->
+                 | TPtr TU8 ->
                      (* Explicit bridge from the slice world back into the
-                        pointer world (`frame as *u8`) -- used where an API
-                        still takes pointer+length (checksums, net_transmit,
-                        response building). As free as *T as *U, and equally
-                        visible: the reader sees exactly where bounds
-                        governance ends. *)
+                        BYTE-pointer world (`frame as *u8`) -- used where an
+                        API still takes pointer+length (checksums,
+                        net_transmit, response building). Free, unconditionally:
+                        a byte pointer's "pointee size" is 1, so any slice
+                        length already proves it, and this is the same
+                        length-erasing operation `[]T as *T` element-typed
+                        casts already are for the general case just below. *)
+                     tgt
+                 | TPtr pointee ->
+                     (* GitHub issue #218 follow-up (slice/struct-overlay
+                        variant): a slice already carries a length -- unlike
+                        the plain-integer #218 population, this cast can
+                        actually be PROVEN safe when that length and the
+                        target's size are both compile-time-known, instead
+                        of only ever being warned about. Reuses
+                        const_type_size (already built for sizeof(T)'s own
+                        refined-literal fast path) so this can never
+                        disagree with sizeof's own notion of "provable
+                        here" -- both read the exact same struct/array
+                        shape rules. n=0 means a dynamic-length slice (no
+                        minimum length was ever proven, e.g. a runtime
+                        `as []T` reinterpret); n>0 is a real lower bound
+                        (a `[T; N..]` parameter, or a literal-bounds
+                        subslice like `frame[14..<34]`). *)
+                     if !unsafe_depth = 0 then
+                       (match const_type_size senv (to_ast pointee), n > 0 with
+                        | Some sz, true when n >= sz -> ()
+                        | Some sz, true ->
+                            raise (TypeError (e.loc, Printf.sprintf
+                              "cannot cast %s to %s: proven minimum length %d \
+                               is smaller than sizeof(%s) = %d bytes; write \
+                               `unsafe { ... as %s }` to mark it"
+                              (to_string src_ty) (to_string tgt) n
+                              (to_string pointee) sz (to_string tgt)))
+                        | Some sz, false ->
+                            raise (TypeError (e.loc, Printf.sprintf
+                              "casting %s to %s asserts it is at least \
+                               sizeof(%s) = %d bytes with no evidence: this \
+                               slice's length is not compile-time-provable; \
+                               write `unsafe { ... as %s }` to mark it"
+                              (to_string src_ty) (to_string tgt)
+                              (to_string pointee) sz (to_string tgt)))
+                        | None, _ ->
+                            raise (TypeError (e.loc, Printf.sprintf
+                              "casting %s to %s asserts it is a valid \
+                               pointer with no evidence: sizeof(%s) is not \
+                               provable at compile time here (its layout \
+                               depends on target-specific data); write \
+                               `unsafe { ... as %s }` to mark it"
+                              (to_string src_ty) (to_string tgt)
+                              (to_string pointee) (to_string tgt))));
                      tgt
                  | _ ->
                      raise (TypeError (e.loc,

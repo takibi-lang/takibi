@@ -69,18 +69,23 @@ let mut ELF_IDENT_MAGIC: [u8; 7] = {0x7F, 0x45, 0x4C, 0x46, 2, 1, 1};
 // the address was never the thing this change was making safe. The caller
 // pairs it with the same checked metadata window supplied as `image`.
 fn distro_elf_validate_with_length(address: usize, image: borrow []u8,
-                                   logical_length: usize) -> DistroElfResult {
+                                   logical_length: usize) -> DistroElfResult !{unsafe} {
     // `image.len >= 7` is redundant with `>= ELF_HEADER_SIZE` (always
     // 64) at runtime, but ELF_HEADER_SIZE is a `let` (sizeof-derived,
     // not a const literal), so the type checker cannot fold it into a
     // provable bound for the image[0..<7] ident slice below; the
-    // literal conjunct is what actually narrows.
+    // literal conjunct is what actually narrows. The same gap means the
+    // slice-to-struct-pointer cast just below cannot see this branch's
+    // own `>= ELF_HEADER_SIZE` check either (GitHub issue #218 follow-up:
+    // that cast now requires a compile-time-provable minimum length,
+    // and a `let`-bound size is not one) -- `unsafe` marks that the
+    // runtime check on this exact line is what actually vouches for it.
     if (image.len >= ELF_HEADER_SIZE && image.len >= 7) {
         // `image` contains the ELF header and program table. A streaming
         // source may keep the rest of the file on ext2, so its logical file
         // length can be larger than this metadata window.
         let length: usize = logical_length;
-        let header: *KernelElf64Header = image as *KernelElf64Header;
+        let header: *KernelElf64Header = unsafe { image as *KernelElf64Header };
         if (slice_eq(image[0..<7], ELF_IDENT_MAGIC as []u8) == false) {
             return DistroElfResult::Invalid;
         }

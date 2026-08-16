@@ -3426,6 +3426,39 @@ let infer_tests = [
     (expect_nonliteral_ptr_cast_warnings 0
        "fn f() { let p: *u32 = 0 as usize as *u32; }");
 
+  (* -- GitHub issue #218 follow-up: checked slice-to-struct-pointer casts - *)
+
+  Alcotest.test_case "slice-to-struct cast with a provably-sufficient minimum length needs no unsafe" `Quick
+    (expect_ok
+       "struct packed P4 { a: u32; }
+        fn f(s: [u8; 4..]) -> u32 { let p: *P4 = s as *P4; return p.a; }");
+
+  Alcotest.test_case "slice-to-struct cast with a provably-INSUFFICIENT minimum length is rejected" `Quick
+    (expect_type_error "proven minimum length 2 is smaller than sizeof(P4) = 4 bytes"
+       "struct packed P4 { a: u32; }
+        fn f(s: [u8; 2..]) -> u32 { let p: *P4 = s as *P4; return p.a; }");
+
+  Alcotest.test_case "slice-to-struct cast from a dynamic-length ([]T) slice is rejected" `Quick
+    (expect_type_error "this slice's length is not compile-time-provable"
+       "struct packed P4 { a: u32; }
+        fn f(s: []u8) -> u32 { let p: *P4 = s as *P4; return p.a; }");
+
+  Alcotest.test_case "slice-to-struct cast whose target size is not target-independent-provable is rejected" `Quick
+    (expect_type_error "sizeof(HasUsize) is not provable at compile time here"
+       "struct packed HasUsize { a: usize; }
+        fn f(s: [u8; 64..]) -> usize { let p: *HasUsize = s as *HasUsize; return p.a; }");
+
+  Alcotest.test_case "unsafe marks an otherwise-unprovable slice-to-struct cast" `Quick
+    (expect_ok
+       "struct packed P4 { a: u32; }
+        fn f(s: []u8) -> u32 !{unsafe} {
+          let p: *P4 = unsafe { s as *P4 };
+          return p.a;
+        }");
+
+  Alcotest.test_case "slice-to-*u8 stays free regardless of provable length (byte pointer's own size is 1)" `Quick
+    (expect_ok "fn f(s: []u8) -> *u8 { return s as *u8; }");
+
   (* -- GitHub issue #239: reject pointer-to-pointer types such as **T --- *)
 
   Alcotest.test_case "a direct **T let annotation is rejected" `Quick
@@ -10608,6 +10641,20 @@ let codegen_tests = [
        in
        Alcotest.(check int) "usize_bitwidth" 64 (Llvm_gen.usize_bitwidth ());
        Alcotest.(check int) "isize_bitwidth" 64 (Llvm_gen.isize_bitwidth ()));
+
+  (* GitHub issue #218 follow-up (checked slice-to-struct-pointer casts):
+     needs a real target machine, since the codegen-side re-check (sync
+     rule with type_inf.ml's own TSlice Cast case) reads the DataLayout's
+     actual abi_size, unlike type_inf.ml's own const_type_size fast path
+     -- so this belongs in this post-setup_target group, not with the
+     type-check-only tests above. *)
+  Alcotest.test_case "the unsafe wrapping an unprovable slice-to-struct cast is NOT flagged as unnecessary" `Quick
+    (expect_unnecessary_unsafe 0
+       "struct packed P4 { a: u32; }
+        fn f(s: []u8) -> u32 !{unsafe} {
+          let p: *P4 = unsafe { s as *P4 };
+          return p.a;
+        }");
 
   Alcotest.test_case
     "array GEP preserves a usize index at i64 width on AArch64"
