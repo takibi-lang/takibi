@@ -2002,6 +2002,36 @@ let infer_tests = [
         fn issue327_broken_solo() -> i32 { return issue327_unbound_solo; }
         fn issue327_ok_b() -> i32 { return 2; }");
 
+  (* GitHub issue #327 Stage 1 follow-up: unsafe_depth is deliberately not
+     exception-safe within a single infer_func call (see the
+     Unsafe/UnsafeBlock case comments in infer_expr/infer_stmt). Before
+     Pass 3 could catch-and-continue past one function's TypeError, that
+     was harmless -- the whole infer_program call aborted immediately, so
+     no later function could ever observe a leftover non-zero depth. Once
+     Pass 3 keeps going, a function that raises WHILE unsafe_depth > 0
+     could leak that depth into every function checked after it, silently
+     authorizing their own unrelated unsafe-gated casts. This function
+     order is the repro: the first function raises from inside `unsafe {
+     }` (so unsafe_depth is 1 when the exception escapes), and the second
+     function has an unsafe-gated `*io` literal assignment with NO unsafe
+     wrapping at all -- it must still be rejected, not silently let
+     through by a leaked depth from the first function's failure. *)
+  Alcotest.test_case
+    "unsafe_depth does not leak across functions when an earlier one \
+     raises from inside `unsafe { }`"
+    `Quick
+    (expect_multi_type_error
+       ["issue327_unbound_in_unsafe"; "assigning an integer literal directly"]
+       "fn issue327_leak_one() -> u32 {
+          unsafe {
+            return issue327_unbound_in_unsafe;
+          }
+        }
+        fn issue327_leak_two() -> u32 {
+          let p: *io u32 = 0x1000;
+          return *p;
+        }");
+
   Alcotest.test_case
     "authority pointer: access before guard consumption is accepted" `Quick
     (fun () ->

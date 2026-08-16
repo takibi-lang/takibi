@@ -6372,6 +6372,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         (try StringMap.add key (infer_func senv eenv fenv genv fdef) m
          with Types.TypeError (loc, msg) ->
            collected_type_errors := (loc, msg) :: !collected_type_errors;
+           (* unsafe_depth is deliberately not exception-safe within a
+              single infer_func call (see its own Unsafe/UnsafeBlock case
+              comments: "a TypeError aborts this compilation, and
+              infer_program resets the counter") -- true before this Stage
+              1 change made this fold catch-and-continue rather than
+              letting the first exception abort infer_program outright. A
+              function that raised while unsafe_depth was > 0 would
+              otherwise leak that non-zero depth into every function
+              checked AFTER it in this same fold, silently authorizing
+              their unrelated unsafe-gated casts as if they were inside an
+              unsafe block they never wrote. Reset here restores the
+              "every function starts outside any unsafe scope" invariant
+              that was implicitly true before this fold could continue
+              past a failure. *)
+           unsafe_depth := 0;
            m)
     | _ -> m
   ) StringMap.empty prog in
