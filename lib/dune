@@ -7,7 +7,14 @@
   (pps ppx_deriving.show)))
 
 (menhir
- (modules parser))
+ (modules parser)
+ ; GitHub issue #309: --strict turns every menhir warning (including
+ ; "N shift/reduce conflicts were arbitrarily resolved") into a hard
+ ; build failure instead of scrolling by unnoticed in dune's own output.
+ ; Issue #217 introduced 32 such conflicts in one change; menhir's default
+ ; resolution happened to be correct in all 32, but nothing forced anyone
+ ; to check that before this flag existed.
+ (flags --strict))
 
 (rule
  (targets lexer.ml)
