@@ -12832,6 +12832,132 @@ let codegen_tests = [
           return ref_codegen_use_core(core);
         }");
 
+  (* GitHub issue #322: lib/monomorphize.ml's derive_arg_type/unify_arg is
+     a THIRD independent layer (beyond type_inf.ml's Types.ty-level unify
+     rules and llvm_gen.ml's own codegen matches) that re-derives "does
+     this argument's type match this generic parameter's declared wrapper
+     shape" reasoning, purely syntactically on raw Ast.type_expr, with
+     zero visibility into type_inf.ml's own widening/subtyping rules.
+     Adding TypeRef/TypeRefMut for #314/#319/#320 broke generic inference
+     for every caller of a migrated generic function ("cannot infer type
+     parameter 'T'"), caught only by a real `make kernelbuild-qemu`, not
+     `dune test` -- neither gap was caught by any codegen test. These
+     cases are the regression coverage that would have caught that (and
+     would catch any future missing wrapper companion case) before a real
+     kernel build does, one per wrapper Ast.type_expr constructor that can
+     legally appear on a generic function's parameter. *)
+  Alcotest.test_case
+    "generic inference through a *T (TypePtr) parameter (issue #322)" `Quick
+    (expect_codegen_ok
+       "fn inner322ptr(T: type, p: *T) -> T { return *p; }
+        fn outer322ptr() -> usize {
+          let mut x: usize = 7;
+          return inner322ptr(&x);
+        }");
+
+  (* Codegen has no Deref case for TypeAlignedPtr (only TypePtr/TypePtr(TypeIo
+     _) -- a separate, pre-existing gap, not this issue's concern), so this
+     exercises inference only, without dereferencing p. *)
+  Alcotest.test_case
+    "generic inference through a *align(N) T (TypeAlignedPtr) parameter \
+     (issue #322)" `Quick
+    (expect_codegen_ok
+       "fn inner322align(T: type, p: *align(8) T) { }
+        fn outer322align(p: *align(8) usize) {
+          inner322align(p);
+        }");
+
+  (* type_inf.ml's validate_param_type restricts `borrow` to a raw/aligned
+     pointer, slice, affine/linear opaque pointer, indexed owner, erased
+     view, or kinded variant -- a bare generic `T` is none of those, so the
+     wrapped type must itself be a raw pointer (`borrow *T`). *)
+  Alcotest.test_case
+    "generic inference through a borrow *T (TypeBorrow) parameter \
+     (issue #322)" `Quick
+    (expect_codegen_ok
+       "fn inner322borrow(T: type, p: borrow *T) { }
+        fn outer322borrow(x: *usize) {
+          inner322borrow(x);
+        }");
+
+  (* validate_param_type restricts `borrow mut` specifically to an
+     affine/linear INDEXED runtime owner (Ast.TypeIndexed on a kinded
+     name) -- unlike the other wrappers, this one cannot wrap a bare
+     generic T at all, so the type/value-generic inference driven through
+     T here comes from a SEPARATE, ordinary `val: T` parameter alongside
+     the borrow-mut-wrapped one; this still exercises unify_arg's
+     `TypeBorrowMut a, b -> u a b` arm for the second parameter without
+     crashing or mis-inferring the first. *)
+  Alcotest.test_case
+    "generic inference through a borrow mut Owner[n] (TypeBorrowMut) \
+     parameter alongside an ordinary T parameter (issue #322)" `Quick
+    (expect_codegen_ok
+       "linear struct BorrowMut322Owner[n: usize] { value: i32; }
+        fn inner322borrowmut(T: type, val: T, o: borrow mut BorrowMut322Owner[n]) { }
+        fn outer322borrowmut(x: usize, o: borrow mut BorrowMut322Owner[m]) {
+          inner322borrowmut(x, o);
+        }");
+
+  (* validate_param_type restricts `sink` to (among others) an
+     affine/linear OPAQUE POINTER -- `sink *T` where T resolves to an
+     affine opaque struct, mirroring `borrow *T` above. *)
+  Alcotest.test_case
+    "generic inference through a sink *T (TypeSink) parameter (issue #322)"
+    `Quick
+    (expect_codegen_ok
+       "affine opaque struct Sink322Token;
+        fn inner322sink(T: type, p: sink *T) { }
+        fn outer322sink(x: *Sink322Token) {
+          inner322sink(x);
+        }");
+
+  Alcotest.test_case
+    "generic inference through a &T (TypeRef) parameter (issue #322)" `Quick
+    (expect_codegen_ok
+       "struct Ref322Point { n: usize; }
+        fn inner322ref(T: type, p: &T) -> usize { return p.n; }
+        fn outer322ref(pt: &Ref322Point) -> usize {
+          return inner322ref(pt);
+        }");
+
+  Alcotest.test_case
+    "generic inference through a &mut T (TypeRefMut) parameter \
+     (issue #322)" `Quick
+    (expect_codegen_ok
+       "struct RefMut322Point { n: usize; }
+        fn inner322refmut(T: type, p: &mut T) { p.n = p.n + 1; }
+        fn outer322refmut(pt: &mut RefMut322Point) {
+          inner322refmut(pt);
+        }");
+
+  Alcotest.test_case
+    "generic inference through a *io T (TypeIo) parameter (issue #322)"
+    `Quick
+    (expect_codegen_ok
+       "fn inner322io(T: type, p: *io T) -> T { return *p; }
+        fn outer322io(p: *io u32) -> u32 {
+          return inner322io(p);
+        }");
+
+  (* The &x.field nested-field-address form specifically -- derive_arg_
+     type's own header comment calls this out as needed for "a generic
+     function's own body calling ANOTHER generic function via a field
+     address" (the kernel/lib/growable_pool.tkb-adjacent shape this
+     mechanism was built for). Requires the outer variable's OWN type to
+     already be a TypeGenericInst (an instantiated generic struct, not a
+     plain one -- see issue #259 for the plain-struct gap this does NOT
+     cover), matching derive_arg_type's own match arms exactly. *)
+  Alcotest.test_case
+    "generic inference through &x.field where x's own type is a generic \
+     struct instance (issue #322)" `Quick
+    (expect_codegen_ok
+       "generic struct Field322Core(T: type) { n: T; }
+        generic struct Field322Outer(T: type) { core: Field322Core(T); }
+        fn inner322field(T: type, p: *Field322Core(T)) -> T { return p.n; }
+        fn outer322field(o: Field322Outer(usize)) -> usize {
+          return inner322field(&o.core);
+        }");
+
 ]
 
 (* GitHub issue #55: Use_resolver's DFS closure algorithm, tested against
