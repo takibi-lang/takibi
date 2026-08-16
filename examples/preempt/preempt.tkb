@@ -3,8 +3,8 @@
 // now factored into scheduler_tick() below) is identical, but each
 // platform triggers and structures it differently --
 //   - QEMU (ARM Generic Timer, PPI #30): `irq_dispatch(frame_sp) -> next_sp`
-//     reads GICv2's gic.cpu_iar to confirm the timer fired, calls
-//     scheduler_tick(), then writes gic.cpu_eoir -- called directly from
+//     reads GICv2's gic_cpu_iar to confirm the timer fired, calls
+//     scheduler_tick(), then writes gic_cpu_eoir -- called directly from
 //     examples/common_qemu/startup.S's irq_entry.
 //   - Raspberry Pi 3B (ARM Generic Timer via BCM2837's own 2-level
 //     interrupt controller): `rpi3_irq_dispatch(frame_sp) -> next_sp`
@@ -21,7 +21,8 @@
 // examples/net_echo/net_echo.tkb's header comment for the general
 // pattern) -- whichever isn't relevant to the target being built is dead
 // code there. The unconditional `use "examples/common_qemu/gic.tkb"`
-// above already pulls in GicRegs/`gic` for every target regardless (no
+// above already pulls in the `gic_cpu_iar`/`gic_cpu_eoir` globals for
+// every target regardless (no
 // Makefile command-line involvement needed, only as a staleness
 // prerequisite -- same reasoning the existing QEMU-side Makefile
 // comments document), so irq_dispatch type-checks identically on STM32
@@ -73,17 +74,17 @@ fn scheduler_tick(frame_sp: usize) -> usize {
 }
 
 fn irq_dispatch(frame_sp: usize) -> usize {
-    let id: u32 = *gic.cpu_iar;
+    let id: u32 = *gic_cpu_iar;
     if (id == 30) {
         let next: usize = scheduler_tick(frame_sp);
-        *(gic.cpu_eoir) = id;
+        *(gic_cpu_eoir) = id;
         return next;
     }
-    *(gic.cpu_eoir) = id;
+    *(gic_cpu_eoir) = id;
     return frame_sp;
 }
 
-// Raspberry Pi 3B: no EOI register to write (unlike GICv2's gic.cpu_eoir
+// Raspberry Pi 3B: no EOI register to write (unlike GICv2's gic_cpu_eoir
 // above) -- BCM2837's local timer IRQ is a direct, level-triggered per-
 // core line that clears itself once scheduler_rearm_tick() (called
 // inside scheduler_tick()) re-arms the comparator, same as

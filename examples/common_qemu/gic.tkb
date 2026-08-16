@@ -7,18 +7,18 @@
 use "examples/common_qemu/gic_regs.tkb";
 
 fn gic_init() {
-    *(gic.distr_ctlr) = 1;
-    *(gic.cpu_pmr)    = 0xff;
-    *(gic.cpu_ctlr)   = 1;
+    *(gic_distr_ctlr) = 1;
+    *(gic_cpu_pmr)    = 0xff;
+    *(gic_cpu_ctlr)   = 1;
 }
 
 fn gic_enable_timer_ppi() {
-    *(gic.distr_isen0) = 1 << 30; // PPI #30: ARM Generic Timer
+    *(gic_distr_isen0) = 1 << 30; // PPI #30: ARM Generic Timer
 }
 
 fn gic_enable_uart_spi() !{unsafe} {
     let gicd_itargetsr8: *io u32 = unsafe { 0x08000820 as *io u32 };
-    *(gic.distr_isen1) = 2;          // SPI #1 (IRQ #33): PL011 UART RX
+    *(gic_distr_isen1) = 2;          // SPI #1 (IRQ #33): PL011 UART RX
     *gicd_itargetsr8   = 0x01010101; // route SPI #0-#3 to CPU0
 }
 

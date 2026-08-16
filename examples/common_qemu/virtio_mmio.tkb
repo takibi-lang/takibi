@@ -203,11 +203,11 @@ fn virtio_irq_handler() !{interrupt} {
 }
 
 fn irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
-    let id: u32 = *(gic.cpu_iar);
+    let id: u32 = *(gic_cpu_iar);
     if (id == (virtio_gic_irq as u32)) {
         virtio_irq_handler();
     }
-    *(gic.cpu_eoir) = id;
+    *(gic_cpu_eoir) = id;
     return frame_sp;
 }
 

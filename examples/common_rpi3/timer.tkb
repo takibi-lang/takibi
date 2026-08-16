@@ -17,14 +17,14 @@
 // matching examples/common_stm32/scheduler.tkb's names), so
 // examples/preempt/preempt.tkb and its siblings need no per-platform
 // branch for setup. What DOES need a per-platform branch, unavoidably:
-// each of those files' own `irq_dispatch` bakes GICv2's `gic.cpu_iar`/
-// `gic.cpu_eoir` polling directly into the SAME function that decides
+// each of those files' own `irq_dispatch` bakes GICv2's `gic_cpu_iar`/
+// `gic_cpu_eoir` polling directly into the SAME function that decides
 // which task runs next -- there is no shared HAL entry point to swap
 // out the way UART's uart_irq_handler is, since the scheduling
 // DECISION itself is example-specific state, not driver logic. Each
 // scheduler-group file now ALSO defines `rpi3_irq_dispatch(frame_sp)
 // -> usize`, calling this file's `rpi3_timer_irq_pending()` instead of
-// `gic.cpu_iar`, and both platforms' dispatch functions share the
+// `gic_cpu_iar`, and both platforms' dispatch functions share the
 // platform-independent tick/switch bookkeeping via a `scheduler_tick`
 // helper extracted from what used to be `irq_dispatch`'s own body -- a
 // refactor, not a behavior change, for the existing QEMU path (verified

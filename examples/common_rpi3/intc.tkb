@@ -24,7 +24,7 @@
 // irq_uart_rx_unmask(), so examples/echo/echo.tkb and examples/irq/
 // irq.tkb's app_main() needs no per-platform branch to call these.
 // Those two shared files' OWN irq_dispatch() (which directly pokes
-// GICv2's gic.cpu_iar/gic.cpu_eoir) stays dead code here, exactly as it
+// GICv2's gic_cpu_iar/gic_cpu_eoir) stays dead code here, exactly as it
 // already is on STM32 -- this target instead vectors UART0's RX
 // interrupt to a dedicated handler
 // (examples/common_rpi3/uart.tkb's uart_irq_handler(), called from

@@ -81,15 +81,44 @@ variants) needed widening to `fn !{unsafe}() -> void` since each file's
 `fn !{}(...)`'s explicit empty-effects contract otherwise rejects it.
 `examples/common_qemu/virtio_mmio.tkb` (the file `kernel/drivers/net/
 virtio_net.tkb` was itself ported from) needed the same multi-line-cast
-manual fix as its downstream copy. Known small residual, not chased
-further: 3 sites across `virtio_net.tkb`/`virtio_blk.tkb` that
-reinterpret an EXISTING pointer (`*u8`) as `*io Struct` (rather than
-casting from an integer) still trip the "unnecessary unsafe" lint,
-because LLVM's opaque `ptr` type makes source and destination identical
-at `coerce`'s entry check, so this reinterpret path never reaches the
-`inttoptr` branch `note_unsafe_use()` was added to. `unsafe` itself is
-still correctly required and present at those 3 sites; only the lint's
-heuristic is imprecise there.
+manual fix as its downstream copy.
+
+**Follow-up fixes, later the same day.** The 3-site "unnecessary unsafe"
+residual above (`virtio_net.tkb`/`virtio_blk.tkb` reinterpreting an
+EXISTING pointer, e.g. `*u8`, as `*io Struct` rather than casting from an
+integer) turned out to be fixable after all: `note_unsafe_use()` moved
+from deep inside `coerce`'s `inttoptr` branch (never reached for a
+pointer-to-pointer reinterpretation, since LLVM's opaque `ptr` type makes
+source and destination identical at `coerce`'s entry short-circuit) to
+the top of `gen_expr`'s `Cast` case itself, called unconditionally
+whenever the target is `*io`-shaped -- type-checking already guarantees
+every such `Cast` reaching codegen is inside `unsafe`, so this is safe
+regardless of the source's own shape. Verified: zero `*io`-related
+"unnecessary unsafe" warnings remain anywhere in `kernel/`.
+
+Also decided and closed out #240's other open thread the same day:
+whether an ordinary `*io T` struct FIELD should share #240's
+pointer-field restriction. Extended it to `*io T` -- same capability-
+based reasoning #240 already uses for `*T`/`*align(N) T` (a `*io T`
+field can hide the identical unenforced-length ownership hazard via a
+paired count field, e.g. `chan_regs: *io ChanRegs; chan_count: usize;`
+walked as `chan_regs + i`, even though no such pattern happened to exist
+in the codebase yet). A repo-wide grep found exactly one real occurrence
+of a `*io T` struct field, `examples/common_qemu/gic_regs.tkb`'s
+`GicRegs` (seven scattered, UNRELATED register addresses grouped in one
+struct purely for cross-file type sharing -- not one offset-consistent
+MMIO block, so there was no `*io Struct`-base-pointer shape to preserve
+here), migrated to seven individual module-level `*io u32` globals
+(`gic_distr_ctlr`, `gic_cpu_iar`, etc.), the same pattern every other
+MMIO driver in this codebase already uses. ~10 consumer files updated
+from `gic.fieldname` to `gic_fieldname` accordingly. A single large
+register block discovered from PCI config space/ACPI/dtb in the future
+remains fully served by the pre-existing, unaffected `*io Struct`
+POINTER VARIABLE pattern (`let regs: *io BigRegBlock = ...;`, `p.field`
+already a checked volatile field load) -- this decision only closes the
+struct-FIELD shape, which had no real use case left once actually
+surveyed. `make allbuild` (every examples/ + kernel/ target,
+build-only) and `dune test` (1100 tests) both clean after both fixes.
 
 Verified: `dune build`/`dune test` clean (1100 tests, 6 new), `make
 allcheck` clean end-to-end (langcheck, compiler unit tests, linux_user,

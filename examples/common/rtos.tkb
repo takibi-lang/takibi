@@ -204,19 +204,19 @@ fn sched_next(frame_sp: usize) -> usize {
 }
 
 fn irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
-    let id: u32 = *gic.cpu_iar;
+    let id: u32 = *gic_cpu_iar;
     if (id == 30) {
         scheduler_rearm_tick();
         let next_sp: usize = sched_next(frame_sp);
-        *(gic.cpu_eoir) = id;
+        *(gic_cpu_eoir) = id;
         return next_sp;
     }
-    *(gic.cpu_eoir) = id;
+    *(gic_cpu_eoir) = id;
     return frame_sp;
 }
 
 // Raspberry Pi 3B: examples/common_rpi3/timer.tkb's rpi3_timer_irq_pending()
-// instead of GICv2's gic.cpu_iar/gic.cpu_eoir -- see examples/preempt/
+// instead of GICv2's gic_cpu_iar/gic_cpu_eoir -- see examples/preempt/
 // preempt.tkb's header comment for why every scheduler-group file needs
 // its own rpi3_irq_dispatch rather than a shared one, and
 // examples/common/rpi3_stub.tkb's header comment for why

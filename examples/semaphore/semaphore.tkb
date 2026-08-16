@@ -38,17 +38,17 @@ let mut stack_a: [u8; 4096];
 let mut stack_b: [u8; 4096];
 
 fn irq_dispatch(frame_sp: usize) -> usize {
-    let id: u32 = *gic.cpu_iar;
+    let id: u32 = *gic_cpu_iar;
     if (id == 30) {
         scheduler_rearm_tick();
         let sp: *usize = sched.tcb_sp;
         sp[sched.current_task] = frame_sp;
         sched.current_task = (sched.current_task + 1) % sched.task_count;
-        *(gic.cpu_eoir) = id;
+        *(gic_cpu_eoir) = id;
         let sp2: *usize = sched.tcb_sp;
         return sp2[sched.current_task];
     }
-    *(gic.cpu_eoir) = id;
+    *(gic_cpu_eoir) = id;
     return frame_sp;
 }
 

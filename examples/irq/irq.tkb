@@ -25,9 +25,9 @@
 // itself is harmless to call unconditionally too, since it just writes
 // into irq_tbl, which the STM32 side's USART1_IRQHandler never consults.
 //
-// `use`s gic_regs.tkb (types only), NOT full gic.tkb: this file's own
-// irq_dispatch is dead code on STM32 but still references `gic.cpu_iar`/
-// `gic.cpu_eoir`, so it needs the GicRegs type there too -- but the STM32
+// `use`s gic_regs.tkb (its register globals only), NOT full gic.tkb: this
+// file's own irq_dispatch is dead code on STM32 but still references
+// `gic_cpu_iar`/`gic_cpu_eoir`, so it needs those globals there too -- but the STM32
 // build ALSO needs examples/common_stm32/nvic.tkb's real
 // irq_uart_rx_setup/irq_uart_rx_unmask, and full gic.tkb defines those
 // same two names again (its own real QEMU implementation), which used to
@@ -67,7 +67,7 @@ fn uart_rx_isr() !{} {
 }
 
 fn irq_dispatch(frame_sp: i32) -> i32 !{interrupt} {
-    let id: i32 = (*gic.cpu_iar) as i32; // GICC_IAR is u32; the ID itself fits
+    let id: i32 = (*gic_cpu_iar) as i32; // GICC_IAR is u32; the ID itself fits
                                           // comfortably in i32 and is used as
                                           // an array index below (which
                                           // requires i32, see lib/type_inf.ml's
@@ -77,7 +77,7 @@ fn irq_dispatch(frame_sp: i32) -> i32 !{interrupt} {
         let t: *fn !{}() -> void = irq_tbl.handlers;
         let h: fn !{}() -> void = t[index];
         h();
-        *(gic.cpu_eoir) = id as u32;
+        *(gic_cpu_eoir) = id as u32;
     }
     return frame_sp;
 }

@@ -3638,8 +3638,9 @@ let infer_tests = [
      capability exemption for it is moot; no test needed here since
      #240 is not what's doing the rejecting. *)
 
-  Alcotest.test_case "an *io T struct field stays legal (deferred to issue #316)" `Quick
-    (expect_ok "struct Holder { p: *io u32; }");
+  Alcotest.test_case "an *io T struct field is rejected too (issue #316's resolution extends #240 to *io)" `Quick
+    (expect_type_error "cannot hold pointer type"
+       "struct Holder { p: *io u32; }");
 
   Alcotest.test_case "a plain (non-pointer) struct field stays legal (positive control)" `Quick
     (expect_ok "struct Holder { p: u8; }");

@@ -3051,6 +3051,23 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
   | Cast (target_ty, src_e) ->
       let (src_ty_raw, v) = gen_expr locals src_e in
+      (* GitHub issue #316: any `as *io T` cast reaching codegen at all was
+         already required to be inside `unsafe` by type_inf.ml's
+         check_io_ptr_cast_needs_unsafe -- record that use here,
+         unconditionally, rather than relying on coerce's own
+         note_unsafe_use hook (below): coerce short-circuits with an
+         unconverted `v` whenever the source is ALREADY a pointer (LLVM 19
+         represents every pointer as the same opaque `ptr`, so a
+         *T -> *io U reinterpretation, e.g. virtio ring code overlaying a
+         `*u8` DMA buffer as `*io VirtqUsed`, never reaches coerce's
+         inttoptr branch at all). Placed once, here, so every Cast-based
+         *io construction is covered regardless of the source's own shape
+         (integer or pointer) -- the implicit direct-literal sugar (`let
+         dr: *io u8 = 0x09000000;`, no Cast node at all) still relies on
+         coerce's own hook, which stays in place for that path. *)
+      (match target_ty with
+       | TypePtr (TypeIo _) | TypeAlignedPtr (_, TypeIo _) -> note_unsafe_use ()
+       | _ -> ());
       (* Consult narrowing_ctx when the source is a bare Var, same pattern
          as Index/AssignIndex/SliceOf: an if-narrowed Mut variable's proven
          range must be visible here too, since `v as {lo..<hi as usize}` is

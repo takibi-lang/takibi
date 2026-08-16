@@ -413,18 +413,29 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   tail padding automatically appended so `sizeof(struct) % N == 0`. Use
   for DMA descriptor rings, cache-line-separated data, SIMD types.
 - **A struct field of pointer type is rejected unless that pointer is
-  already structurally incapable of forgery** (GitHub issue #240): `*T`
-  or `*align(N) T` is a compile error there unless `T` is an affine or
-  linear opaque struct -- the one pointee kind that already
+  already structurally incapable of forgery** (GitHub issue #240): `*T`,
+  `*align(N) T`, or `*io T` is a compile error there unless `T` is an
+  affine or linear opaque struct -- the one pointee kind that already
   unconditionally rejects arithmetic, indexing, dereference, and cast-
   away regardless of where the pointer value lives, so storing it in a
   field hides no more than storing it in a local already would. `*io T`
-  fields stay legal (MMIO register-block structs), pending a further
-  scoping decision (GitHub issue #316) about whether `*io` should share
-  this rule too. An ordinary raw-pointer field (`buf: *i32` alongside a
+  used to be exempt, pending issue #316's MMIO scoping decision; #316
+  extended this rule to `*io T` too (same reasoning: `*io T` supports
+  the identical arithmetic/indexing as ordinary `*T`, so a `*io T` field
+  can hide the same ownership hazard via a paired, unenforced length
+  field). An ordinary raw-pointer field (`buf: *i32` alongside a
   separate, unenforced length field) is exactly the hazard this rejects
   -- use a slice (`[]T`, which bundles and enforces the length itself)
-  or an owned array field instead.
+  or an owned array field instead. For individually named hardware
+  registers previously grouped into one struct purely for cross-file
+  type sharing, use separate module-level `*io`-qualified globals
+  instead (`examples/common_qemu/gic_regs.tkb`'s migration is the
+  reference example). A single, large, OFFSET-CONSISTENT register block
+  is unaffected either way: that is a `*io Struct` POINTER VARIABLE
+  (`let regs: *io BigRegBlock = ...;`, see "MMIO / Volatile" below for
+  its own already-checked field-offset access), not a struct field, and
+  this rule only governs pointer types stored INSIDE another struct's
+  fields.
 
 ## Indexed Runtime Owners
 

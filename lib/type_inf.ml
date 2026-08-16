@@ -5238,12 +5238,31 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      check_resource_cast_away), regardless of where the pointer value
      lives. An ordinary `*T`/`*align(N) T` field can still do all of
      those, so it can hide exactly the ownership/lifetime relationship
-     this issue's Motivation describes. `*io T` stays exempt pending
-     issue #316's still-open MMIO scoping decision -- not silently
-     ignored, deliberately deferred, same reasoning as the issue #218
-     warning's own `*io` exemption. *)
+     this issue's Motivation describes. `*io T` used to be exempt here,
+     deferred pending issue #316's MMIO scoping decision -- #316 resolved
+     by requiring `unsafe` for `*io` construction uniformly, with the same
+     capability-based reasoning this rule already uses (`*io T` supports
+     the identical arithmetic/indexing/dereference as ordinary `*T`, so a
+     `*io T` field can hide the same ownership/lifetime relationship via a
+     paired, unenforced length field, e.g. `chan_regs: *io ChanRegs;
+     chan_count: usize;` walked as `chan_regs + i`) -- extended here for
+     consistency rather than left as a standing exemption. The repo-wide
+     survey this decision was based on found exactly one real occurrence
+     (examples/common_qemu/gic_regs.tkb's `GicRegs`, seven UNRELATED
+     scattered-address registers with no paired length field at all, not
+     an MMIO block hazard in practice), migrated to individual
+     module-level `*io` globals -- the same pattern every other MMIO
+     driver in this codebase already uses, and the one this rule's own
+     error message below points to. A single large, OFFSET-CONSISTENT
+     register block (the shape a future PCI-config/ACPI/dtb-discovered
+     device would actually want) was never blocked by this rule in the
+     first place: that is a `*io Struct` POINTER VARIABLE (`let regs: *io
+     BigRegBlock = ...;`), not a struct FIELD, and `p.field` on it is
+     already a volatile field load with compiler-checked offsets (see
+     "MMIO / Volatile" in SPEC.md) -- entirely unaffected by this rule,
+     which only governs pointer types stored INSIDE another struct's own
+     fields. *)
   let struct_field_ptr_pointee_is_inert = function
-    | Ast.TypeIo _ -> true
     | Ast.TypeNamed sname ->
         StringSet.mem sname !affine_opaque_names
         || StringSet.mem sname !linear_opaque_names
@@ -5257,9 +5276,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             "struct field '%s.%s' cannot hold pointer type '%s': it still \
              supports arithmetic, indexing, and dereference, which can \
              hide an ownership/lifetime relationship (GitHub issue #240); \
-             use a slice, an affine/linear opaque handle, or (for a fixed \
-             hardware register block, pending issue #316) an `io`-qualified \
-             pointer instead"
+             use a slice, an affine/linear opaque handle, or (for \
+             individually named hardware registers) separate module-level \
+             `*io`-qualified globals instead"
             sname fname (Ast.show_type_expr ty)))
     | _ -> ()
   in
