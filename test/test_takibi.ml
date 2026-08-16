@@ -4507,6 +4507,56 @@ let infer_tests = [
          return 0; \
        }");
 
+  (* GitHub issue #310: two real-kernel shapes named in the issue's own
+     Motivation, each now getting an explanatory hint instead of a bare
+     "unproven" message. `cond(v)` above deliberately keeps its PLAIN
+     message unchanged (v never appears as a BinOp comparison operand in
+     a bare function-call condition, so record_guard_narrow_hints records
+     nothing for it) -- the issue's own "should keep today's plain
+     'unproven' message rather than guessing" scoping, confirmed by that
+     existing test still passing unmodified. *)
+  Alcotest.test_case
+    "early-return guard: a guard using '==' gets a hint explaining its \
+     negation ('!=') can't narrow, mirroring kernel/arch/arm64/mm/ \
+     asid.tkb's asid_transferred_release (issue #310)" `Quick
+    (expect_type_error
+       "was the subject of an early-return guard above using '=='"
+       "fn foo(i: {1..<8 as usize}) {} \
+        fn f(asid: usize) { \
+          if (asid == 0) { return; } \
+          foo(asid); \
+        }");
+
+  Alcotest.test_case
+    "early-return guard: an And-shaped guard whose negation lands on an \
+     unsupported Or gets a hint, mirroring the kernel/lib/slotmap.tkb \
+     -shaped restructuring this issue's own Motivation names (issue \
+     #310)" `Quick
+    (expect_type_error
+       "whose negation is not a condition shape this compiler's \
+        narrowing recognizes"
+       "fn foo(i: {0..<4 as i32}) {} \
+        fn f(v: i32) -> i32 { \
+          if (v >= 0 && v < 4) { return -1; } \
+          foo(v); \
+          return 0; \
+        }");
+
+  (* Positive control (issue #310's own acceptance criteria): a guard \
+     shape that DOES narrow continues to produce no error at all -- no \
+     hint machinery involved since unify_at never fails here. *)
+  Alcotest.test_case
+    "early-return guard: an Or-shaped guard whose negation is a \
+     supported And still narrows with no error (issue #310 positive \
+     control)" `Quick
+    (expect_ok
+      "fn foo(i: {0..<4 as i32}) {} \
+       fn f(v: i32) -> i32 { \
+         if (v < 0 || v >= 4) { return -1; } \
+         foo(v); \
+         return 0; \
+       }");
+
   (* -- Step 3.5 for loop: for i in lo..<hi ----------------------------------- *)
 
   Alcotest.test_case "for loop parses and type-checks" `Quick

@@ -2,6 +2,14 @@ open Types
 
 module StringSet = Set.Make (String)
 
+(* GitHub issue #310: used to scope guard_narrow_hints' own append to
+   error messages that actually name the "unproven" failure shape,
+   without needing a structured exception variant just for that check. *)
+let contains_substring haystack needle =
+  let hl = String.length haystack and nl = String.length needle in
+  let rec go i = i + nl <= hl && (String.sub haystack i nl = needle || go (i + 1)) in
+  nl = 0 || go 0
+
 let compiler_builtins = StringSet.of_list [
   "slice_copy"; "slice_eq"; "stable_replace"; "min"; "max";
   "dma_publish"; "dma_consume"; "device_fence"; "signal_fence";
@@ -1447,6 +1455,15 @@ let check_no_nested_ptr_mint loc (inner : ty) =
       "nested pointer indirection (e.g. **T) is not allowed; \
        Takibi has no ownership/lifetime model for multi-level pointers \
        (GitHub issue #239)"))
+
+(* GitHub issue #310: per-variable "why didn't the early-return guard
+   above narrow this" hint, name -> explanation text. Declared here
+   (ahead of check_expr, its sole reader) so the reader has no forward
+   reference to record_guard_narrow_hints (its writer, defined later
+   near negate_cond -- see that function's own comment for the full
+   design). Reset per function (see infer_func), matching
+   locally_bound_names' own per-function-scoping precedent. *)
+let guard_narrow_hints : (string, string) Hashtbl.t = Hashtbl.create 8
 
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
@@ -3550,7 +3567,25 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
       in
       let te = adapt_actual_to_expected tyenv e te (strip_io expected) in
       (* If expected type is io T: check compatibility with T (strip the storage qualifier) *)
-      unify_at e.loc te (strip_io expected);
+      (* GitHub issue #310: append a guard-narrowing hint when THIS exact
+         failure shape (an "unproven" value flowing into a refined/proven
+         target) names a variable an earlier early-return guard couldn't
+         narrow -- see guard_narrow_hints' own comment. Purely additive to
+         an error that was already going to fire (same loc, longer text),
+         so this cannot change which programs are accepted; scoped to
+         messages containing "unproven" so an unrelated unify failure for
+         the same variable (a genuine type mismatch, not a missing proof)
+         is not given a non-sequitur hint. *)
+      (try unify_at e.loc te (strip_io expected)
+       with TypeError (eloc, msg) ->
+         let hint = match e.desc with
+           | Var name when contains_substring msg "unproven" ->
+               Hashtbl.find_opt guard_narrow_hints name
+           | _ -> None
+         in
+         (match hint with
+          | Some h -> raise (TypeError (eloc, msg ^ " (" ^ h ^ ")"))
+          | None -> raise (TypeError (eloc, msg))));
       check_literal_fits_refined e.loc e (strip_io expected);
       check_io_ptr_literal_needs_unsafe e.loc e (strip_io expected);
       te
@@ -3735,6 +3770,65 @@ let rec negate_cond (e : Ast.expr) : Ast.expr option =
   | BinOp (Eq, a, b) -> Some { e with desc = BinOp (Ne, a, b) }
   | BinOp (Ne, a, b) -> Some { e with desc = BinOp (Eq, a, b) }
   | _ -> None
+
+(* GitHub issue #310: populates guard_narrow_hints (declared near the top
+   of this file, before check_expr, so check_expr's fallback -- defined
+   earlier than negate_cond in this file's own dependency order -- can
+   read it without a forward reference). When an early-return guard's
+   negation can't narrow the fallthrough -- negate_cond returns None (an
+   unrecognized shape), or returns Some but the negated shape is an Or at
+   the top (from negating an And-guard; collect_bounds' own `go` has no
+   Or case, see its comment), or a comparison inside the guard uses `==`
+   (whose negation `!=` collect_bounds also has no case for) -- records
+   WHY per mentioned variable, reusing negate_cond/collect_bounds' own
+   existing shape recognition rather than inventing a second
+   classification (this issue's own scope). Consulted by check_expr's
+   fallback (the single choke point issue #323 already routes both
+   call-argument and let-initializer checking through) when a "cannot
+   pass unproven" error names one of these variables, so the message
+   explains the actual reason instead of leaving it to be re-derived from
+   source. Diagnostics-only: never consulted by narrow_from_cond or any
+   other narrowing-DECISION site, so it cannot change which programs are
+   accepted -- only appended to an error that was already going to fire. *)
+let record_guard_narrow_hints (cond : Ast.expr) =
+  let var_of (e : Ast.expr) = match e.desc with Var n -> Some n | _ -> None in
+  let rec comparison_vars (e : Ast.expr) acc = match e.desc with
+    | BinOp ((And | Or), a, b) -> comparison_vars b (comparison_vars a acc)
+    | BinOp ((Ge | Gt | Le | Lt | Eq | Ne), l, r) ->
+        List.filter_map var_of [l; r] @ acc
+    | _ -> acc
+  in
+  let rec eq_vars (e : Ast.expr) acc = match e.desc with
+    | BinOp (And, a, b) -> eq_vars b (eq_vars a acc)
+    | BinOp (Eq, l, r) -> List.filter_map var_of [l; r] @ acc
+    | _ -> acc
+  in
+  let generic_hint n = Printf.sprintf
+    "'%s' was the subject of an early-return guard above whose negation \
+     is not a condition shape this compiler's narrowing recognizes (e.g. \
+     an Or, or an unrecognized comparison) -- wrap this use in an \
+     explicit `if (...) { ...; use %s ...; }` instead of relying on the \
+     guard's own fallthrough narrowing" n n
+  in
+  let eq_hint n = Printf.sprintf
+    "'%s' was the subject of an early-return guard above using '==', \
+     whose negation ('!=') cannot narrow the fallthrough to a single \
+     contiguous range -- rewrite the guard using < or >= instead (e.g. \
+     `if (%s < N) { return; }`), or wrap this use in an explicit \
+     `if (%s ...) { ... }`" n n n
+  in
+  (match negate_cond cond with
+   | None ->
+       List.iter (fun n -> Hashtbl.replace guard_narrow_hints n (generic_hint n))
+         (comparison_vars cond [])
+   | Some neg ->
+       (match neg.desc with
+        | BinOp (Or, _, _) ->
+            List.iter (fun n -> Hashtbl.replace guard_narrow_hints n (generic_hint n))
+              (comparison_vars cond [])
+        | _ -> ()));
+  List.iter (fun n -> Hashtbl.replace guard_narrow_hints n (eq_hint n))
+    (eq_vars cond [])
 
 (* Purely syntactic "does this statement list always return" check, local
    to the range-narrowing pass (kept separate from the resource-flow
@@ -4105,11 +4199,12 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         ) env
       in
       let continuation_tyenv =
-        if stmt_list_always_returns then_s then
+        if stmt_list_always_returns then_s then begin
+          record_guard_narrow_hints cond;  (* GitHub issue #310 *)
           match negate_cond cond with
           | Some neg -> filter_by_future_writes (narrow_from_cond tyenv neg else_s)
           | None -> tyenv
-        else tyenv
+        end else tyenv
       in
       (continuation_tyenv, rl2)
   | While (cond, body) ->
@@ -4630,6 +4725,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
     check_const_shadowing fdef;
     value_static_identities := StringMap.empty;
     place_static_identities := StringMap.empty;
+    Hashtbl.reset guard_narrow_hints;  (* GitHub issue #310, fresh per function *)
     var_align_bytes := !global_align_bytes_baseline;  (* see its own comment *)
     (* GitHub issue #214: reset per function, then seed with this
        function's own parameter names -- see locally_bound_names' own
