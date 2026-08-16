@@ -720,23 +720,18 @@ fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult {
 // this file's existing idiom (see e.g. unified_fd_table_init).
 fn unified_fd_clone_rollback(
         child_index: {0..<PROCESS_CONTEXT_MAX as usize},
-        limit: {0..<PROCESS_FD_MAX as usize}) !{unsafe} {
-    // GitHub issue #216-class gap: `undo < PROCESS_FD_MAX` is true by
-    // construction (every caller passes a `limit` itself bounded by
-    // PROCESS_FD_MAX, see the 3 call sites in unified_fd_clone below) but
-    // not provable inside this function alone -- the for-loop's own
-    // range-refinement only recognizes a literal/const upper bound (see
-    // type_inf.ml's For case), not a runtime parameter's own refined type,
-    // even though `limit` is refined to exactly {0..<PROCESS_FD_MAX} here.
+        limit: {0..<PROCESS_FD_MAX as usize}) {
+    // GitHub issue #312 (2026-08-16): `undo < PROCESS_FD_MAX` is now
+    // proven directly -- the for-loop's own range-refinement reuses
+    // `limit`'s own already-proven {0..<PROCESS_FD_MAX} upper bound, no
+    // `!{unsafe}`/per-index unsafe wrapping needed.
     for undo: usize in 0..<limit {
-        if (unsafe { process_fd_context[child_index].fd_kind[undo] } !=
-            UnifiedFdKind::Empty) {
-            let undo_value: usize =
-                unsafe { process_fd_context[child_index].fd_object[undo] };
+        if (process_fd_context[child_index].fd_kind[undo] != UnifiedFdKind::Empty) {
+            let undo_value: usize = process_fd_context[child_index].fd_object[undo];
             if (undo_value < SHARED_OBJECT_MAX) {
                 let undo_object: {0..<SHARED_OBJECT_MAX as usize} = undo_value;
                 match refcount_pool_release(&object_pool, undo_object,
-                        unsafe { process_fd_context[child_index].fd_generation[undo] }) {
+                        process_fd_context[child_index].fd_generation[undo]) {
                     RefcountReleaseResult::Invalid => {}
                     RefcountReleaseResult::StillHeld => {}
                     RefcountReleaseResult::Freed => {
@@ -744,7 +739,7 @@ fn unified_fd_clone_rollback(
                     }
                 }
             }
-            unsafe { process_fd_context[child_index].fd_kind[undo] = UnifiedFdKind::Empty };
+            process_fd_context[child_index].fd_kind[undo] = UnifiedFdKind::Empty;
         }
     }
 }

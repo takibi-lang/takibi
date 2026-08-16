@@ -8716,6 +8716,25 @@ let codegen_tests = [
           return total;
         }");
 
+  (* GitHub issue #312: the unified_fd_clone_rollback-shaped case
+     (kernel/kernel/fd_table.tkb, 2026-08-15) -- a for-loop's hi_expr is a
+     RUNTIME parameter with its own already-proven TRefinedInt, not a
+     Const_env-recognized constant. Locks in the paired type_inf.ml/
+     llvm_gen.ml fix at the codegen/--forbid-trap level, matching how the
+     #311 sync tests just above lock in the constant-bound case. *)
+  Alcotest.test_case
+    "for-loop counter over 0..<limit, where limit has its own proven \
+     upper bound, elides the Index bounds check (issue #312)" `Quick
+    (expect_trap_sites 0
+       "fn f312_for(limit: {0..<6 as usize}) -> usize {
+          let mut buf: [usize; 6];
+          let mut total: usize = 0;
+          for i: usize in 0..<limit {
+            total = total + buf[i];
+          }
+          return total;
+        }");
+
   Alcotest.test_case
     "multi-level struct field chain a.b.c[i] indexes the innermost \
      array field directly (issue #217: only the OUTERMOST field needs \
@@ -12010,6 +12029,28 @@ let codegen_tests = [
        "cannot determine a concrete type for for-loop counter 'i'"
        "fn foo(x: u8) {}
         fn f() { for i in 0..<4 { foo(i); } }");
+
+  (* GitHub issue #312: `for i in 0..<limit` where `limit` is a RUNTIME
+     parameter with its OWN already-proven TRefinedInt (not a
+     Const_env-recognized syntactic constant) previously gave the counter
+     the unrefined base type only -- this is the unified_fd_clone_rollback
+     -shaped gap found migrating kernel/kernel/fd_table.tkb (2026-08-15):
+     `for undo: usize in 0..<limit { ... }` needed `!{unsafe}` plus a
+     per-index unsafe wrap before this fix, purely because limit's own
+     proof (limit: {0..<PROCESS_FD_MAX as usize}) was never reused. *)
+  Alcotest.test_case
+    "for-loop counter over 0..<limit, where limit has its own already- \
+     proven TRefinedInt upper bound (not a Const_env constant), inherits \
+     that bound (issue #312)" `Quick
+    (fun () ->
+      let pt = infer
+        "fn f312(limit: {0..<8 as usize}) {
+           for undo: usize in 0..<limit { }
+         }" in
+      let fi = Types.StringMap.find "f312" pt.Types.functions in
+      Alcotest.check type_t "undo inherits {0..<8}"
+        (Ast.TypeRefined (0, 8, Ast.TypeUsize))
+        (Types.StringMap.find "__for_undo" fi.Types.local_types));
 
   Alcotest.test_case
     "for i: u8 in 0..<4 gives the counter EXACTLY TRefinedInt(0, 4, u8) --

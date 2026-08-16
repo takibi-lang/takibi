@@ -5100,8 +5100,8 @@ let gen_func ?prog_types fdef =
         let counter_ty   = res ctr_name None in
         let counter_base = canon_ty counter_ty in
         let is_uns       = is_unsigned counter_base in
-        let (_, lo_v0) = gen_expr ~expected_ty:counter_base locals lo_expr in
-        let (_, hi_v0) = gen_expr ~expected_ty:counter_base locals hi_expr in
+        let (lo_ty0, lo_v0) = gen_expr ~expected_ty:counter_base locals lo_expr in
+        let (hi_ty0, hi_v0) = gen_expr ~expected_ty:counter_base locals hi_expr in
         let lo_w      = to_arith_width counter_base lo_v0 in
         let hi_w      = to_arith_width counter_base hi_v0 in
         let ctr_ptr   = match Hashtbl.find_opt locals ctr_name with
@@ -5124,10 +5124,31 @@ let gen_func ?prog_types fdef =
 
         position_at_end body_bb builder;
         (* Sync rule: type_inf.ml's For case makes the same decision through
-           the same Const_env.bound_value helper; keep them identical. *)
+           the same Const_env.bound_value helper; keep them identical.
+           GitHub issue #312: when the bounds aren't both compile-time
+           constants, also mirror type_inf.ml's own fallback -- reuse
+           hi_expr's own already-resolved type (hi_ty0, from gen_expr just
+           above) when it's already a proven TypeRefined, tying the
+           counter to hi_expr's own upper bound, with lo taken from
+           whichever of lo_expr's constant value or its own proven
+           TypeRefined lower bound is available. *)
         let loop_ty = match Const_env.bound_value lo_expr, Const_env.bound_value hi_expr with
           | Some lo_k, Some hi_k -> TypeRefined (lo_k, hi_k, counter_base)
-          | _ -> counter_base
+          | lo_c, _ ->
+              (match hi_ty0 with
+               | TypeRefined (_, hi_hi, hi_base) when hi_base = counter_base ->
+                   let lo = match lo_c with
+                     | Some lo_k -> Some lo_k
+                     | None ->
+                         (match lo_ty0 with
+                          | TypeRefined (lo_lo, _, lo_base) when lo_base = counter_base ->
+                              Some lo_lo
+                          | _ -> None)
+                   in
+                   (match lo with
+                    | Some lo_v -> TypeRefined (lo_v, hi_hi, counter_base)
+                    | None -> counter_base)
+               | _ -> counter_base)
         in
         Hashtbl.add locals name (Imm (loop_ty, i_val));
         Stack.push (exit_bb, incr_bb) loop_stack;

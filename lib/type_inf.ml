@@ -4182,7 +4182,37 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
        | _ -> ());
       let idx_ty = match const_bounds with
         | Some lo_v, Some hi_v -> TRefinedInt (lo_v, hi_v, base_raw)
-        | _ -> base_raw
+        | (lo_c, _) ->
+            (* GitHub issue #312: hi_expr may not resolve via Const_env
+               (a syntactic constant) yet already carry a proven
+               TRefinedInt of its own (e.g. a runtime parameter `limit:
+               {0..<N as usize}`) -- reuse that proof for the counter's
+               own upper bound instead of falling back to the unrefined
+               base. The lower bound comes from const_bounds' own lo_c
+               when lo_expr IS a constant (the common `0..<limit` shape);
+               when lo_expr is ALSO non-constant, its own inferred type
+               is checked the same way. No useful lower bound at all
+               (neither side provable) keeps today's unrefined behavior,
+               matching this issue's own scoping note that a
+               contributes-nothing bound stays as before.
+               Sync rule: llvm_gen.ml's For case makes the same decision
+               independently (via gen_expr's own returned type for
+               hi_expr, mirroring the Const_env.bound_value sync just
+               above); keep them identical. *)
+            (match repr hi_ty with
+             | TRefinedInt (_, hi_hi, hi_base) when repr hi_base = repr base_raw ->
+                 let lo = match lo_c with
+                   | Some lo_v -> Some lo_v
+                   | None ->
+                       (match repr lo_ty with
+                        | TRefinedInt (lo_lo, _, lo_base) when repr lo_base = repr base_raw ->
+                            Some lo_lo
+                        | _ -> None)
+                 in
+                 (match lo with
+                  | Some lo_v -> TRefinedInt (lo_v, hi_hi, base_raw)
+                  | None -> base_raw)
+             | _ -> base_raw)
       in
       (* Loop variable is immutable (Imm binding, no reassignment). Does not escape the loop.
          Also register under the mangled "__for_<name>" key: llvm_gen.ml's
