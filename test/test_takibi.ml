@@ -13004,6 +13004,26 @@ let codegen_tests = [
           return struct323_sum({1, 2});
         }");
 
+  (* GitHub issue #259: derive_arg_type's &x.field case previously only
+     matched when x's OWN type was itself a TypeGenericInst (an
+     instantiated generic struct) -- a PLAIN, non-generic struct whose
+     field is already a fully-concrete generic instantiation (nothing to
+     substitute) had no matching case at all, so `N` could not be inferred
+     and the call was rejected with "cannot infer generic value parameter
+     'N'". Mirrors kernel/mm/page.tkb's BootPagePool shape (issue #253):
+     an ordinary struct field whose declared type is already concrete. *)
+  Alcotest.test_case
+    "generic value-parameter inference through &x.field where x's own \
+     type is a PLAIN (non-generic) struct (issue #259)" `Quick
+    (expect_codegen_ok
+       "generic struct Core259(N: usize) { cap: usize; }
+        struct Outer259 { core: Core259(4); meta: usize; }
+        private let mut outer259_global: Outer259;
+        fn core259_init(c: *Core259(N)) { }
+        fn outer259_use() {
+          core259_init(&outer259_global.core);
+        }");
+
 ]
 
 (* GitHub issue #55: Use_resolver's DFS closure algorithm, tested against

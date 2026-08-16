@@ -768,6 +768,27 @@ let run (prog : toplevel list) : toplevel list =
                                           ~resolve_inst:collect_resolve field_ty))
                      | None -> None)
                 | None -> None)
+           (* GitHub issue #259: `var`'s own type being a PLAIN (non-generic)
+              struct, not a TypeGenericInst -- e.g. kernel/mm/page.tkb's
+              `BootPagePool { core: FreelistCore(BOOT_PAGE_COUNT); ... }`,
+              an ordinary struct whose field is already a fully-concrete
+              generic instantiation. Nothing to substitute (no template
+              parameters exist for a plain struct), so this looks up
+              `fname`'s declared type directly from the struct's own
+              definition in `prog` and returns it as-is -- narrower than,
+              and additive to, the TypeGenericInst case above, not a
+              generalization of it. *)
+           | Some (TypeNamed sname) | Some (TypePtr (TypeNamed sname)) ->
+               let fields = List.find_map (function
+                 | StructDef (n, fields, _, _, _, _) when n = sname -> Some fields
+                 | OwnedStructDef (n, _, _, fields, _, _, _, _, _) when n = sname ->
+                     Some fields
+                 | _ -> None
+               ) prog in
+               (match fields with
+                | Some fields ->
+                    Option.map (fun ft -> TypePtr ft) (List.assoc_opt fname fields)
+                | None -> None)
            | _ -> None)
       | _ -> None
     in

@@ -102,13 +102,10 @@ fn page_owner_new(index: {0..<BOOT_PAGE_COUNT as usize},
 }
 
 fn page_allocator_init() {
-    // GitHub issue #253: a generic call's N cannot be inferred from a
-    // nested-field address (&boot_page_pool.core) -- only from a plain
-    // local/global (or its address) with an already-known type, so the
-    // pointer is bound explicitly here first. Same reasoning applies to
-    // every other freelist_core_* call site below.
-    let core: &mut FreelistCore(BOOT_PAGE_COUNT) = &boot_page_pool.core;
-    freelist_core_init(core);
+    // GitHub issue #259 (2026-08-16): a nested-field address
+    // (&boot_page_pool.core) now infers the generic call's N directly, no
+    // intermediate binding needed.
+    freelist_core_init(&boot_page_pool.core);
     // GitHub issue #217 (2026-08-15): boot_page_pool.meta[i] indexes the
     // struct-embedded array field directly and is checked/proven by the
     // for-loop counter's own {0..<BOOT_PAGE_COUNT} type -- no more
@@ -121,8 +118,7 @@ fn page_allocator_init() {
 }
 
 fn page_alloc() -> PageAllocResult {
-    let core: &mut FreelistCore(BOOT_PAGE_COUNT) = &boot_page_pool.core;
-    match freelist_core_insert(core) {
+    match freelist_core_insert(&boot_page_pool.core) {
         FreelistPopResult::Empty => { return PageAllocResult::OutOfMemory; }
         FreelistPopResult::Popped(slot) => {
             let (index, generation) = freelist_owner_into_parts(slot);
@@ -153,8 +149,7 @@ fn page_free(owner: sink PageOwner[page]) {
     }
     boot_page_pool.meta[index].occupied = false;
     boot_page_pool.meta[index].map_refcount = 0;
-    let core: &mut FreelistCore(BOOT_PAGE_COUNT) = &boot_page_pool.core;
-    freelist_core_remove(core,
+    freelist_core_remove(&boot_page_pool.core,
                          freelist_owner_new(index, owner.generation));
 }
 
@@ -376,8 +371,7 @@ fn page_transferred_release(index: {0..<BOOT_PAGE_COUNT as usize}) {
     }
     boot_page_pool.meta[index].occupied = false;
     boot_page_pool.meta[index].map_refcount = 0;
-    let core: &mut FreelistCore(BOOT_PAGE_COUNT) = &boot_page_pool.core;
-    freelist_core_remove(core, freelist_owner_new(index, 0));
+    freelist_core_remove(&boot_page_pool.core, freelist_owner_new(index, 0));
 }
 
 fn page_transferred_release_physical(physical: usize) {
