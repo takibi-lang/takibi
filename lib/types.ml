@@ -119,9 +119,31 @@ let rigid_static name =
   incr next_static_id;
   SParam (!next_static_id, name)
 
+(* GitHub issue #266: the OLD "__value%d" name is an internal counter with
+   no source-level meaning -- static_to_string prints an SParam's own name
+   verbatim, so a "static value mismatch" error naming one of these leaked
+   the raw counter straight into user-facing output (e.g. "static value
+   mismatch: __value136 vs desc"), found porting kernel/drivers/net/
+   virtio_net.tkb: an intermediate `let idx: {0..<8 as usize} = reply.index;`
+   binding loses reply.index's own `@ desc` tie, and the fresh identity
+   minted for `idx` here is what a later mismatch actually names. This
+   message is deliberately generic (not a proposal to redesign static-value
+   unification, just its diagnostic text for this one failure mode) --
+   fresh_named_rigid_static below gives the one call site that already
+   knows a source name (an immutable Var whose own identity was never
+   established) a much more specific version of it. *)
 let fresh_rigid_static () =
   incr next_static_id;
-  SParam (!next_static_id, Printf.sprintf "__value%d" !next_static_id)
+  SParam (!next_static_id, "an anonymous compile-time value")
+
+(* Same as fresh_rigid_static, but for the one call site that already has
+   the source-level variable name in hand -- names the actual construct
+   responsible instead of falling back to the fully generic message. *)
+let fresh_named_rigid_static name =
+  incr next_static_id;
+  SParam (!next_static_id, Printf.sprintf
+    "an anonymous compile-time value (from '%s' -- possibly an \
+     intermediate `let` binding that lost its own static identity)" name)
 
 type static_scope = (string, static_term) Hashtbl.t
 

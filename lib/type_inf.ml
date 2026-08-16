@@ -527,7 +527,7 @@ let adapt_actual_to_expected (tyenv : tyenv) (e : Ast.expr)
              | None ->
                  let identity =
                    if is_address then rigid_static name
-                   else fresh_rigid_static ()
+                   else fresh_named_rigid_static name
                  in
                  value_static_identities :=
                    StringMap.add name identity !value_static_identities;

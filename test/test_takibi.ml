@@ -2693,6 +2693,29 @@ let infer_tests = [
          ii_drop(a); ii_drop(b);
        }");
 
+  (* GitHub issue #266: an intermediate `let` re-annotation strips a
+     singleton-typed value's own static identity (here, `idx`'s tie to
+     `n` is lost the moment it flows through `let plain: {0..<4 as usize}
+     = idx;`, a bare, un-tied annotation). The struct literal `{ plain }`
+     then needs a fresh identity for `plain`, which cannot equal `n`
+     (already fixed by the OTHER construction site elsewhere in a real
+     program, mirrored here by requiring both fields to share `n`) --
+     before this issue's fix, the resulting message named the fresh
+     identity as a raw internal counter ("__value136"), not anything
+     traceable to source. Mirrors the exact shape found porting
+     kernel/drivers/net/virtio_net.tkb (issue #237 M4): `let idx: {0..<8
+     as usize} = reply.index;` losing reply.index's own `@ desc` tie. *)
+  Alcotest.test_case
+    "an intermediate let binding that loses a static identity names the \
+     source variable, not an internal counter (issue #266)" `Quick
+    (expect_type_error "an anonymous compile-time value (from 'plain'"
+      "linear struct Field266Owner[n: usize] { idx: {0..<4 as usize} @ n; }
+       fn f266_make(idx: {0..<4 as usize} @ n) -> Field266Owner[n] {
+         let plain: {0..<4 as usize} = idx;
+         let mut x: Field266Owner[n] = { plain };
+         return x;
+       }");
+
   Alcotest.test_case "Slice 1: range is checked before an indexed owner is minted" `Quick
     (expect_type_error "constant value 4 does not fit the refined type {0..<4}"
       "linear struct InfRange[n: usize] { idx: {0..<4 as usize} @ n; }
