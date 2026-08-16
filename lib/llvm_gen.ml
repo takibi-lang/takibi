@@ -777,7 +777,17 @@ type local_binding =
 
 (* Module-level table for Mut binding narrowing from if-conditions.
    Compilation is single-threaded, so a module-level Hashtbl is safe.
-   gen_expr cannot access locals directly, so type overrides are passed through here. *)
+   gen_expr cannot access locals directly, so type overrides are passed through here.
+   GitHub issue #311: Index/AssignIndex's own idx_ty computation no longer
+   treats this table as its primary source -- it now checks
+   Type_inf.index_resolved_ty first (type-checking's own resolved proof for
+   that exact index expression, keyed by location), falling back to this
+   table only as a defensive net. Every OTHER consumer of this table
+   (BinOp comparisons, Assign, Call arguments, Return, ...) is unaffected
+   and still relies on it as before -- #311's own fix was deliberately
+   scoped to Index/AssignIndex specifically (the one consumer that matters
+   for --forbid-trap soundness reporting), not a full replacement of this
+   mechanism. *)
 let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
 
 (* GitHub issue #296 codegen sync: type_inf.ml's own enclosing_future_writes
@@ -3386,15 +3396,28 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let idx_v = to_index_width ~is_signed:(not (is_unsigned idx_ty_raw)) idx_raw in
       (* idx_ty priority: Const_env constant name (e.g. tcp[TCP_FLAGS] --
          sound because check_const_shadowing forbids shadowing, so the value
-         is exactly the recorded literal) > Mut narrowing from narrowing_ctx
-         (if-condition) > the raw inferred type. *)
+         is exactly the recorded literal; NOT captured by type_inf.ml's own
+         resolved type below, since a `const` reference's registered tyenv
+         entry is its declared type, not a refined singleton reflecting the
+         literal) > type_inf.ml's own resolved type for this exact index
+         expression (GitHub issue #311: Type_inf.index_resolved_ty, the
+         same proof type-checking itself used to accept the program --
+         trusting it here retires this file's own independent narrowing_ctx
+         re-derivation as the primary source, closing the two-implementation
+         duplication issue #296/#311 found real gaps in) > the old
+         narrowing_ctx/raw-inferred-type fallback, kept only as a defensive
+         net for the case (not expected in practice) where type_inf.ml
+         never populated an entry for this location. *)
       let idx_ty = match Const_env.bound_value idx with
         | Some k -> TypeRefined (k, k + 1, TypeUsize)  (* idx_v is already forced to usize width via to_index_width above *)
         | None ->
-            (match idx.desc with
-             | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
-                         | Some t -> t | None -> idx_ty_raw)
-             | _ -> idx_ty_raw)
+            (match Hashtbl.find_opt Type_inf.index_resolved_ty idx.loc with
+             | Some t -> t
+             | None ->
+                 (match idx.desc with
+                  | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
+                              | Some t -> t | None -> idx_ty_raw)
+                  | _ -> idx_ty_raw))
       in
       (* Array load [T; N]: skip bounds check when TypeRefined proves safety,
          or (P4c-1, same as sub_of_slice below) when the access is wrapped
@@ -4299,13 +4322,18 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Index (base, idx) ->
            let (idx_ty_raw, idx_raw) = gen_expr locals idx in
            let idx_v = to_index_width ~is_signed:(not (is_unsigned idx_ty_raw)) idx_raw in
+           (* GitHub issue #311: same priority as the read-Index case above
+              -- see that one's own comment for the full rationale. *)
            let idx_ty = match Const_env.bound_value idx with
              | Some k -> TypeRefined (k, k + 1, TypeUsize)
              | None ->
-                 (match idx.desc with
-                  | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
-                              | Some t -> t | None -> idx_ty_raw)
-                  | _ -> idx_ty_raw)
+                 (match Hashtbl.find_opt Type_inf.index_resolved_ty idx.loc with
+                  | Some t -> t
+                  | None ->
+                      (match idx.desc with
+                       | Var n -> (match Hashtbl.find_opt narrowing_ctx n with
+                                   | Some t -> t | None -> idx_ty_raw)
+                       | _ -> idx_ty_raw))
            in
            (* GitHub issue #217: elem_ty_hint is a type-only PEEK (no
               codegen), deliberately evaluated -- and rhs generated --

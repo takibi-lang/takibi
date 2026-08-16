@@ -1465,6 +1465,45 @@ let check_no_nested_ptr_mint loc (inner : ty) =
    locally_bound_names' own per-function-scoping precedent. *)
 let guard_narrow_hints : (string, string) Hashtbl.t = Hashtbl.create 8
 
+(* GitHub issue #311: this file's own resolved type for an Index/
+   AssignIndex node's index expression, keyed by that expression's own
+   location -- consulted by llvm_gen.ml as the primary source for its
+   own bounds-check-elision decision, instead of independently
+   re-deriving narrowing via its own separate narrowing_ctx (the
+   duplication this issue is about). Scoped narrowly to Index/
+   AssignIndex's own index sub-expression specifically (not a general
+   "annotate every use site" mechanism) per this issue's own
+   investigation comment: it is the one consumer of narrowing_ctx that
+   matters for --forbid-trap soundness reporting, and the two files'
+   independent re-derivation of narrowing has already caused two real,
+   found gaps (issue #296, #311's own history).
+
+   Sound to trust as the PRIMARY source, not just a supplementary check:
+   `it` is exactly the proof type-checking itself used to accept the
+   program (the same `infer_expr ... idx` call whose result later flows
+   into unify_at/refinement checks elsewhere) -- codegen eliding a check
+   based on it can only UNDER-prove relative to what a hand-rolled
+   codegen-side re-derivation might have found (a missed optimization,
+   never a soundness bug), since it never claims more than type-checking
+   itself already established.
+
+   Deliberately NOT a full replacement for llvm_gen.ml's own idx_ty
+   computation: llvm_gen.ml's Const_env.bound_value fast path stays
+   FIRST and unconditional, since `it` does not capture a compile-time
+   constant's exact value the way Const_env.bound_value does (a `const`
+   reference's own registered tyenv entry is its DECLARED type, e.g.
+   plain usize, not a refined singleton reflecting the literal) --
+   replacing that fast path with this table would regress existing
+   --forbid-trap-clean constant-indexed accesses (e.g. `tcp[TCP_FLAGS]`)
+   into needing a runtime check. The separate #213 slice_index_ctx
+   mechanism (llvm_gen.ml-only, no type_inf.ml counterpart) is also left
+   completely untouched -- it answers a different question ("is this
+   exactly the same already-checked base/index pair") this table cannot
+   express. Reset once per compilation (not per-function): the location
+   key is unique across the whole program, and Index/AssignIndex nodes
+   in different functions never collide. *)
+let index_resolved_ty : (Lexing.position, Ast.type_expr) Hashtbl.t = Hashtbl.create 64
+
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
@@ -2206,6 +2245,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          codegen loses the array length entirely. *)
       let vt = place_undecayed_type senv eenv tyenv fenv base in
       let it = infer_expr senv eenv tyenv fenv idx in
+      Hashtbl.replace index_resolved_ty idx.loc (to_ast it);  (* GitHub issue #311 *)
       (match repr vt with
        | TArray (elem, n) ->
            require_usize_index idx.loc it;
@@ -3152,6 +3192,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            check_no_write_through_shared_ref senv eenv tyenv fenv base;
            let vt = place_undecayed_type senv eenv tyenv fenv base in
            let it = infer_expr senv eenv tyenv fenv idx in
+           Hashtbl.replace index_resolved_ty idx.loc (to_ast it);  (* GitHub issue #311 *)
            let rt = infer_expr senv eenv tyenv fenv rhs in
            let elem_ty = match repr vt with
              | TArray (elem, n) ->
@@ -4769,6 +4810,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   type_checker_unsafe_use_marker := 0;  (* GitHub issue #328, fresh per compilation / per unit test *)
   type_checker_lint_active := false;
   Hashtbl.reset type_checker_consumed_unsafe_at;
+  Hashtbl.reset index_resolved_ty;  (* GitHub issue #311, fresh per compilation / per unit test *)
   enclosing_future_writes := StringSet.empty;  (* fresh per compilation / per unit test *)
   resolved_call_targets := StringMap.empty;
   resolved_indirect_call_effects := StringMap.empty;
