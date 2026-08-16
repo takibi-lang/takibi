@@ -329,7 +329,7 @@ let () =
     if !output_file <> "" then
       Llvm_gen.emit_object machine !output_file
     else
-      Llvm.dump_module Llvm_gen.the_module
+      Llvm.dump_module !Llvm_gen.the_module
   with
   | Typechecker.TypeError (loc, msg) ->
       report_error loc msg;

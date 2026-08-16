@@ -4,7 +4,16 @@ open Ast
 exception Error of string
 
 let context = global_context ()
-let the_module = create_module context "takibi_module"
+(* GitHub issue #326: a ref, not a plain value, so gen_program can dispose
+   and recreate it at the start of every compilation. bin/main.exe only ever
+   calls gen_program once per process, so this was invisible there, but
+   test/test_takibi.ml calls Llvm_gen.gen_program hundreds of times in one
+   process -- without recreation, every codegen test accumulated into (and
+   could observe or collide with) every earlier test's declarations. See
+   the reset preamble in gen_program for the full set of module-scoped
+   state (functions/global_vars/extern_symbols, target triple/datalayout,
+   debug info) that must be recreated or reapplied in lockstep. *)
+let the_module = ref (create_module context "takibi_module")
 let builder = builder context
 
 (* Counter for unique string literal global names *)
@@ -33,8 +42,9 @@ let extern_symbols : (string, llvalue) Hashtbl.t = Hashtbl.create 8
    appending, and this OCaml LLVM binding has no append variant, so every
    producer of this kind of raw asm must share this one buffer rather than
    calling `set_module_inline_asm` itself. Reset at the start of each
-   gen_program run, same as trap_sites, since Llvm_gen.the_module is a
-   single process-global module reused across every test in this binary. *)
+   gen_program run, same as trap_sites -- this buffer is process-global but
+   Llvm_gen.!the_module itself is now recreated per gen_program run too (see
+   issue #326), so both need their own fresh start each time. *)
 let raw_asm_buf = Buffer.create 512
 let current_program_types : Types.program_types option ref = ref None
 (* Struct type registry: name -> LLVM struct lltype *)
@@ -170,6 +180,13 @@ let const_field_offset (sname : string) (field : string) : int option =
 
 (* Target data layout -- set by setup_target; used for struct tail-padding computation *)
 let target_data : Llvm_target.DataLayout.t option ref = ref None
+(* GitHub issue #326: the raw triple/datalayout strings setup_target last
+   applied, remembered so gen_program can reapply them to a freshly
+   recreated Llvm_gen.the_module. Deliberately as sticky as target_data
+   itself (see test/test_takibi.ml's "one-way-switch" comment) -- once a
+   target is configured, every later gen_program call keeps using it. *)
+let configured_target_triple = ref ""
+let configured_datalayout_str = ref ""
 (* Enum underlying type registry: enum name -> underlying Ast type (u8/u16/u32/u64) *)
 let enum_underlying  : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 8
 (* Enum variant registry: enum name -> [(variant_name, discriminant_value)] *)
@@ -264,7 +281,7 @@ let build_profile_path_recorder () =
   let path_table_g = require_profile_global prof_path_table "__takibi_prof_path_table" in
   let path_overflow_g = require_profile_global prof_path_overflow "__takibi_prof_path_overflow" in
   let fty = function_type (void_type context) [| i32; i32; i64 |] in
-  let fn = define_function "__takibi_prof_record_path" fty the_module in
+  let fn = define_function "__takibi_prof_record_path" fty !the_module in
   prof_record_path_fn := Some fn;
 
   let task_arg = param fn 0 in
@@ -538,24 +555,24 @@ let init_function_profile_table keys =
       |> Array.of_list
     in
     let table_init = const_array entry_ty entries in
-    let table_g = define_global "__takibi_prof_table" table_init the_module in
+    let table_g = define_global "__takibi_prof_table" table_init !the_module in
     set_section ".takibi_prof" table_g;
     prof_table := Some table_g;
-    let n_g = define_global "__takibi_prof_count" (const_int i32 (List.length profiled)) the_module in
+    let n_g = define_global "__takibi_prof_count" (const_int i32 (List.length profiled)) !the_module in
     set_global_constant true n_g;
     set_section ".takibi_prof" n_g;
     prof_depth := Some (define_global "__takibi_prof_depth"
-      (const_null (array_type i32 prof_task_capacity)) the_module);
-    prof_overflow := Some (define_global "__takibi_prof_overflow" (const_int i32 0) the_module);
+      (const_null (array_type i32 prof_task_capacity)) !the_module);
+    prof_overflow := Some (define_global "__takibi_prof_overflow" (const_int i32 0) !the_module);
     prof_stack_cycles := Some (define_global "__takibi_prof_stack_cycles"
-      (const_null (array_type (array_type i64 prof_stack_capacity) prof_task_capacity)) the_module);
+      (const_null (array_type (array_type i64 prof_stack_capacity) prof_task_capacity)) !the_module);
     prof_stack_ids := Some (define_global "__takibi_prof_stack_ids"
-      (const_null (array_type (array_type i32 prof_stack_capacity) prof_task_capacity)) the_module);
+      (const_null (array_type (array_type i32 prof_stack_capacity) prof_task_capacity)) !the_module);
     let frames_ty = array_type i32 prof_path_max_depth in
     let path_entry_ty = packed_struct_type context [| i32; i32; i32; i64; frames_ty |] in
     prof_path_table := Some (define_global "__takibi_prof_path_table"
-      (const_null (array_type path_entry_ty prof_path_capacity)) the_module);
-    prof_path_overflow := Some (define_global "__takibi_prof_path_overflow" (const_int i32 0) the_module);
+      (const_null (array_type path_entry_ty prof_path_capacity)) !the_module);
+    prof_path_overflow := Some (define_global "__takibi_prof_path_overflow" (const_int i32 0) !the_module);
     ignore (build_profile_path_recorder ())
   end
 
@@ -664,9 +681,20 @@ let rec ty_str = function
 let debug_info_enabled = ref false
 let dibuilder_opt : Llvm_debuginfo.lldibuilder option ref = ref None
 let di_compile_unit : Llvm.llmetadata option ref = ref None
+(* GitHub issue #326: the primary_file enable_debug_info was first called
+   with, remembered so gen_program can rebuild the DIBuilder/DICompileUnit
+   against a freshly recreated Llvm_gen.the_module. debug_info_enabled is a
+   one-way switch (see test/test_takibi.ml's DWARF test comment) -- once
+   set, every later gen_program call must redo this setup, not just the
+   first. *)
+let debug_primary_file : string option ref = ref None
 (* One DIFile per source filename: `takibi a.tkb b.tkb -o out.o` concatenates ASTs
    from different files, so each function's DISubprogram needs the DIFile that
-   actually matches where it was written, not just the first input file. *)
+   actually matches where it was written, not just the first input file.
+   Keyed off the DIBuilder that created each entry, so it must be reset
+   whenever setup_debug_info_for_module rebuilds the DIBuilder (issue #326) --
+   a stale entry would hand a new DIBuilder metadata created by a now-gone
+   one. *)
 let di_files : (string, Llvm.llmetadata) Hashtbl.t = Hashtbl.create 8
 
 let di_file_for (dib : Llvm_debuginfo.lldibuilder) (filename : string) : Llvm.llmetadata =
@@ -691,13 +719,18 @@ let di_file_for (dib : Llvm_debuginfo.lldibuilder) (filename : string) : Llvm.ll
       Hashtbl.add di_files filename f;
       f
 
-(* Enable DWARF line-table emission for the rest of this compilation.
-   Called once from bin/main.ml when -g is passed, before gen_program runs.
-   [primary_file] anchors the DICompileUnit; each function's own DISubprogram
-   still points at its true source file via di_file_for. *)
-let enable_debug_info (primary_file : string) =
-  debug_info_enabled := true;
-  let dib = Llvm_debuginfo.dibuilder the_module in
+(* GitHub issue #326: builds (or rebuilds) the DIBuilder/DICompileUnit/module
+   flags against the CURRENT Llvm_gen.the_module. Split out of
+   enable_debug_info so gen_program can re-run exactly this setup every time
+   it recreates the module, not just on debug_info_enabled's first flip.
+   Requires debug_primary_file to already be set. *)
+let setup_debug_info_for_module () =
+  let primary_file = match !debug_primary_file with
+    | Some f -> f
+    | None -> raise (Error "BUG: setup_debug_info_for_module called before enable_debug_info")
+  in
+  Hashtbl.reset di_files;
+  let dib = Llvm_debuginfo.dibuilder !the_module in
   dibuilder_opt := Some dib;
   let file = di_file_for dib primary_file in
   let cu = Llvm_debuginfo.dibuild_create_compile_unit dib
@@ -718,10 +751,19 @@ let enable_debug_info (primary_file : string) =
   di_compile_unit := Some cu;
   (* Without these module flags LLVM silently strips all debug metadata again
      (a missing/mismatched "Debug Info Version" is treated as "no debug info"). *)
-  add_module_flag the_module ModuleFlagBehavior.Warning "Debug Info Version"
+  add_module_flag !the_module ModuleFlagBehavior.Warning "Debug Info Version"
     (value_as_metadata (const_int (i32_type context) (Llvm_debuginfo.debug_metadata_version ())));
-  add_module_flag the_module ModuleFlagBehavior.Warning "Dwarf Version"
+  add_module_flag !the_module ModuleFlagBehavior.Warning "Dwarf Version"
     (value_as_metadata (const_int (i32_type context) 4))
+
+(* Enable DWARF line-table emission for the rest of this compilation.
+   Called once from bin/main.ml when -g is passed, before gen_program runs.
+   [primary_file] anchors the DICompileUnit; each function's own DISubprogram
+   still points at its true source file via di_file_for. *)
+let enable_debug_info (primary_file : string) =
+  debug_info_enabled := true;
+  debug_primary_file := Some primary_file;
+  setup_debug_info_for_module ()
 
 (* Locals are either immutable SSA values or mutable alloca pointers *)
 type local_binding =
@@ -1204,9 +1246,9 @@ let starts_with s prefix =
   String.length s >= n && String.sub s 0 n = prefix
 
 let get_or_declare_intrinsic name fty =
-  match lookup_function name the_module with
+  match lookup_function name !the_module with
   | Some fn -> fn
-  | None -> declare_function name fty the_module
+  | None -> declare_function name fty !the_module
 
 (* Emit a target-specific hardware barrier which is also opaque to LLVM's
    memory optimizer. ARM/AArch64 and x86 have target intrinsics; LLVM 19/22
@@ -1219,7 +1261,7 @@ let get_or_declare_intrinsic name fty =
    likewise starts conservatively with MFENCE. These can be weakened later
    per platform without changing Takibi source semantics. *)
 let emit_device_barrier kind =
-  let triple = target_triple the_module in
+  let triple = target_triple !the_module in
   let void_fn = function_type (void_type context) [||] in
   if starts_with triple "aarch64" then begin
     let fty = function_type (void_type context) [| i32_type context |] in
@@ -1252,7 +1294,7 @@ let emit_device_barrier kind =
    flag in a loop.  Do not silently substitute WFI on targets without an
    equivalent retained notification -- that would reintroduce the race. *)
 let emit_interrupt_event notify =
-  let triple = target_triple the_module in
+  let triple = target_triple !the_module in
   let fty = function_type (void_type context) [||] in
   let asm =
     if starts_with triple "aarch64" || starts_with triple "arm"
@@ -1269,12 +1311,15 @@ let setup_target ?(triple = "") ?(cpu = "") ?(features = "") () =
   let _ = Llvm_all_backends.initialize () in
   let triple = if triple = "" then Llvm_target.Target.default_triple () else triple in
   Target_info.configure triple;
-  set_target_triple triple the_module;
+  set_target_triple triple !the_module;
   let target  = Llvm_target.Target.by_triple triple in
   let machine = Llvm_target.TargetMachine.create ~triple ~cpu ~features target in
   let layout  = Llvm_target.TargetMachine.data_layout machine in
-  set_data_layout (Llvm_target.DataLayout.as_string layout) the_module;
+  let layout_str = Llvm_target.DataLayout.as_string layout in
+  set_data_layout layout_str !the_module;
   target_data := Some layout;
+  configured_target_triple := triple;
+  configured_datalayout_str := layout_str;
   machine
 
 (* Run IR-level optimization passes.
@@ -1308,7 +1353,7 @@ let run_optimizations machine =
        function(mem2reg,early-cse,simplifycfg,\
                 correlated-propagation,constraint-elimination,simplifycfg)"
   in
-  (match Llvm_passbuilder.run_passes the_module pipeline machine opts with
+  (match Llvm_passbuilder.run_passes !the_module pipeline machine opts with
    | Ok ()    -> ()
    | Error msg -> raise (Error (Printf.sprintf "IR optimization failed: %s" msg)));
   Llvm_passbuilder.dispose_passbuilder_options opts
@@ -1316,7 +1361,7 @@ let run_optimizations machine =
 let emit_object machine output_path =
   run_optimizations machine;
   Llvm_target.TargetMachine.emit_to_file
-    the_module
+    !the_module
     Llvm_target.CodeGenFileType.ObjectFile
     output_path
     machine
@@ -2348,7 +2393,7 @@ let emit_trap_when bad ~bad_name ~ok_name =
   ignore (build_cond_br bad bad_bb ok_bb builder);
   position_at_end bad_bb builder;
   let trap_ft = function_type (void_type context) [||] in
-  let trap_fn = declare_function "llvm.trap" trap_ft the_module in
+  let trap_fn = declare_function "llvm.trap" trap_ft !the_module in
   ignore (build_call trap_ft trap_fn [||] "" builder);
   ignore (build_unreachable builder);
   position_at_end ok_bb builder
@@ -2538,7 +2583,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         else             const_int (i8_type context) 0)
       in
       let arr    = const_array (i8_type context) bytes in
-      let g      = define_global name arr the_module in
+      let g      = define_global name arr !the_module in
       set_global_constant true g;
       set_linkage Linkage.Private g;
       let zero   = const_int (i32_type context) 0 in
@@ -3139,7 +3184,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let narrowed = coerce v src_base in  (* real i16/i32, not widen_load's i32 *)
            let bswap_ft = function_type bswap_ty [| bswap_ty |] in
            let bswap_name = if width = 16 then "llvm.bswap.i16" else "llvm.bswap.i32" in
-           let bswap_fn = declare_function bswap_name bswap_ft the_module in
+           let bswap_fn = declare_function bswap_name bswap_ft !the_module in
            let swapped = build_call bswap_ft bswap_fn [| narrowed |]
              (Printf.sprintf "bswap%d" width) builder in
            (target_ty, to_arith_width target_ty swapped)
@@ -3187,7 +3232,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              ) variants;
              position_at_end bad_bb builder;
              let trap_ft = function_type (void_type context) [||] in
-             let trap_fn = declare_function "llvm.trap" trap_ft the_module in
+             let trap_fn = declare_function "llvm.trap" trap_ft !the_module in
              ignore (build_call trap_ft trap_fn [||] "" builder);
              ignore (build_unreachable builder);
              position_at_end ok_bb builder;
@@ -3866,7 +3911,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
           [ptr_e; len_e]) ->
       let (_, ptr) = gen_expr locals ptr_e in
       let (_, len) = gen_expr ~expected_ty:TypeUsize locals len_e in
-      let triple = target_triple the_module in
+      let triple = target_triple !the_module in
       if starts_with triple "arm" || starts_with triple "thumb" then begin
         (match name with
          | "dma_prepare_tx" ->
@@ -5625,7 +5670,7 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable decl_loc =
     (match expr_opt with
      | Some e -> Hashtbl.add global_const_defs name (ast_ty, e)
      | None -> ());
-  let gvar = define_global name init the_module in
+  let gvar = define_global name init !the_module in
   let eff_align = match align_opt with
     | Some _ -> align_opt
     | None   -> (match ast_ty with
@@ -5654,7 +5699,7 @@ let declare_func ?prog_types fdef =
     let ret_ast   = resolve_ret_ast prog_types key fdef.ret_type in
     let ret_ll    = ltype_of_ret_ast ret_ast in
     let ft        = function_type ret_ll param_lls in
-    let f         = declare_function key ft the_module in
+    let f         = declare_function key ft !the_module in
     if fdef.is_inline then
       add_function_attr f (create_enum_attr context "alwaysinline" 0L) AttrIndex.Function;
     if fdef.is_noinline then
@@ -5691,7 +5736,7 @@ let declare_func ?prog_types fdef =
    declaration in the same program, so this only ever runs once per
    compile). *)
 let gen_vector_table entries =
-  let triple = target_triple the_module in
+  let triple = target_triple !the_module in
   if not (starts_with triple "aarch64") then
     raise (Error
       "BUG: vector_table codegen reached for a non-AArch64 target -- \
@@ -5832,7 +5877,7 @@ let emit_exception_restore off total =
    correctness over micro-optimization for what is an interrupt/fail-stop
    path, not a hot loop). *)
 let gen_exception_entry name frame dispatch before =
-  let triple = target_triple the_module in
+  let triple = target_triple !the_module in
   if not (starts_with triple "aarch64") then
     raise (Error
       "BUG: exception_entry codegen reached for a non-AArch64 target -- \
@@ -5869,7 +5914,7 @@ let gen_exception_entry name frame dispatch before =
    call with the frame's own address already in x0 (AAPCS first-argument
    register) -- exactly el0_context_resume's existing shape. *)
 let gen_exception_restore name frame =
-  let triple = target_triple the_module in
+  let triple = target_triple !the_module in
   if not (starts_with triple "aarch64") then
     raise (Error
       "BUG: exception_restore codegen reached for a non-AArch64 target -- \
@@ -5892,6 +5937,52 @@ let gen_exception_restore name frame =
   emit_exception_restore off total
 
 let gen_program ?prog_types prog =
+  (* GitHub issue #326: dispose and recreate the_module itself before
+     anything else, rather than trying to reset the per-program Hashtables
+     in place. bin/main.exe only ever reaches this function once per
+     process, so this is a no-op there beyond destroying an empty module,
+     but test/test_takibi.ml calls gen_program hundreds of times in one
+     process; a persistent module made every declared function/global name
+     process-global for the whole test run. That in turn meant `functions`
+     (declare_func's "already declared" guard, keyed by bare name) had to
+     stay unreset to avoid llvm's declare_function returning a bitcast for
+     a same-name-different-signature redeclaration -- which then silently
+     starved func_ret_ast_types/func_param_ast_types of updates for any
+     name reused with a different arity across two tests (the exact
+     `Invalid_argument("List.iter2")` crash this issue reports). Disposing
+     the module makes every compilation start from the same clean slate
+     bin/main.exe always had, so no table needs a name-keyed "already
+     declared" guard to survive across separate gen_program calls.
+     Every Hashtbl below that can hold a value tied to the disposed module
+     (an llvalue, or debug metadata built from a DIBuilder bound to it)
+     MUST be reset here too, or it keeps a dangling handle into freed LLVM
+     state. The purely-AST-typed tables (func_ret_ast_types,
+     func_param_ast_types, struct_fields, struct_alignments,
+     struct_is_packed, global_const_defs) hold no LLVM handle and so are
+     not a correctness requirement, but are reset anyway to keep them
+     bounded across a long test run instead of growing one stale entry per
+     reused name forever. *)
+  Llvm.dispose_module !the_module;
+  the_module := create_module context "takibi_module";
+  Hashtbl.reset functions;
+  Hashtbl.reset global_vars;
+  Hashtbl.reset extern_symbols;
+  Hashtbl.reset func_ret_ast_types;
+  Hashtbl.reset func_param_ast_types;
+  Hashtbl.reset struct_lltypes;
+  Hashtbl.reset struct_fields;
+  Hashtbl.reset struct_alignments;
+  Hashtbl.reset struct_is_packed;
+  Hashtbl.reset global_const_defs;
+  (* setup_target/enable_debug_info are one-way switches that may have run
+     before this call (or before an earlier gen_program call, in the same
+     process) -- both applied their state to the now-disposed module, so it
+     must be reapplied to the fresh one. *)
+  if !configured_target_triple <> "" then begin
+    set_target_triple !configured_target_triple !the_module;
+    set_data_layout !configured_datalayout_str !the_module
+  end;
+  if !debug_info_enabled then setup_debug_info_for_module ();
   current_program_types := prog_types;
   trap_sites := [];  (* fresh per compilation (and per unit test) *)
   Buffer.clear raw_asm_buf;
@@ -6027,7 +6118,7 @@ let gen_program ?prog_types prog =
             (match ret_ty with Some t -> t | None -> TypeVoid) in
           let ret_ll    = ltype_of_ret_ast ret_ast in
           let ft        = function_type ret_ll param_lls in
-          let f         = declare_function name ft the_module in
+          let f         = declare_function name ft !the_module in
           (match effects with
            | Some effects when List.mem "noreturn" effects ->
                add_function_attr f
@@ -6043,7 +6134,7 @@ let gen_program ?prog_types prog =
              address. declare_global (as opposed to define_global) leaves it
              external, to be resolved against the assembly/linker-defined
              symbol of the same name at link time. *)
-          let g = declare_global (i8_type context) name the_module in
+          let g = declare_global (i8_type context) name !the_module in
           Hashtbl.add extern_symbols name g
         end
     | StructDef _ -> ()
@@ -6099,7 +6190,7 @@ let gen_program ?prog_types prog =
     | GenericStructDef _ -> ()
   ) prog;
   if Buffer.length raw_asm_buf > 0 then
-    set_module_inline_asm the_module (Buffer.contents raw_asm_buf);
+    set_module_inline_asm !the_module (Buffer.contents raw_asm_buf);
   (* Resolve any deferred/forward-referenced DI metadata. Must run after every
      gen_func call above, before the module is optimized or emitted to an object. *)
   (match !dibuilder_opt with

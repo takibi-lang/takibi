@@ -34,10 +34,11 @@ let infer_files files =
 
 (* Runs the full pipeline through LLVM codegen (no target machine, no
    object-file emission -- gen_program works without setup_target, see its
-   align_opt handling). Each caller must use function/global names unique
-   within this test binary: Llvm_gen.the_module is a single process-global
-   module with no reset, so two test cases defining the same name would
-   collide. *)
+   align_opt handling). GitHub issue #326: Llvm_gen.gen_program disposes and
+   recreates Llvm_gen.the_module at the start of every call, so distinct test
+   cases are free to reuse the same function/global names -- each gen_codegen
+   call starts from a genuinely empty module, matching bin/main.exe's own
+   single-compilation-per-process behavior. *)
 let gen_codegen src =
   let prog = Monomorphize.run (parse src) in
   let prog_types = Type_inf.infer_program prog in
@@ -3471,19 +3472,21 @@ let infer_tests = [
      identical at coerce's own entry short-circuit for a pointer-to-
      pointer reinterpretation, which is why gen_expr's Cast case now calls
      note_unsafe_use() directly instead of relying on coerce alone. *)
-  (* Deliberately named `io_literal_sugar_probe`, NOT the file's usual
-     placeholder `f` -- found this session (see the new GitHub issue on
-     llvm_gen.ml's un-reset per-compilation Hashtables) that `fn f()`
-     here, immediately ahead of a LATER `fn f(param) -> T` test elsewhere
-     in this file, corrupts that unrelated later test with a stale,
-     wrong-arity `func_param_ast_types` entry (Invalid_argument
-     "List.iter2" in gen_func) -- the bug is a genuine compiler-side gap
-     (several Hashtables in gen_program's reset preamble are missing),
-     not anything about this test's own content; a unique name is the
-     workaround until that gap is fixed. Do not rename this back to `f`. *)
+  (* GitHub issue #326 (fixed): this test used to be named
+     `io_literal_sugar_probe` instead of the file's usual placeholder `f`,
+     because a bare `fn f()` here -- immediately ahead of a LATER
+     `fn f(param) -> T` test elsewhere in this file -- corrupted that
+     unrelated later test with a stale, wrong-arity `func_param_ast_types`
+     entry (Invalid_argument "List.iter2" in gen_func). Root cause was
+     gen_program reusing the same Llvm_gen.the_module (and its
+     `functions` "already declared" guard) across every gen_codegen call
+     in this process; gen_program now disposes and recreates the module
+     per call, so `fn f()`/`fn f(x)`/etc. across unrelated tests no longer
+     interact. Renamed back to the placeholder name as living regression
+     coverage: keep this named `f`. *)
   Alcotest.test_case "the direct-literal *io sugar records zero unnecessary-unsafe sites (issue #316 lint fix)" `Quick
     (expect_unnecessary_unsafe 0
-       "fn io_literal_sugar_probe() !{unsafe} { unsafe { let dr: *io u8 = 0x09000000; } }");
+       "fn f() !{unsafe} { unsafe { let dr: *io u8 = 0x09000000; } }");
 
   Alcotest.test_case "a cast reinterpreting an existing pointer as *io Struct records zero unnecessary-unsafe sites" `Quick
     (expect_unnecessary_unsafe 0
@@ -7839,7 +7842,7 @@ let codegen_tests = [
       ignore (gen_codegen
         "extern fn cg_exception_stop5() !{noreturn};
          fn cg_exception_call5() { cg_exception_stop5(); }");
-      let ir = Llvm.string_of_llmodule Llvm_gen.the_module in
+      let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
       Alcotest.(check bool) "noreturn attribute" true
         (contains_substring ir "noreturn"));
 
@@ -7848,7 +7851,7 @@ let codegen_tests = [
       ignore (gen_codegen
         "noinline fn cg_noinline_target6() -> i32 { return 1; }
          fn cg_noinline_call6() -> i32 { return cg_noinline_target6(); }");
-      let ir = Llvm.string_of_llmodule Llvm_gen.the_module in
+      let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
       Alcotest.(check bool) "noinline attribute" true
         (contains_substring ir "noinline"));
 
@@ -10548,7 +10551,7 @@ let codegen_tests = [
             }
             return total;
           }" ();
-       let ir = Llvm.string_of_llmodule Llvm_gen.the_module in
+       let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
        Alcotest.(check bool) "DIGlobalVariableExpression exists"
          true (contains_substring ir "!DIGlobalVariableExpression");
        Alcotest.(check bool) "enum DIType is named"
@@ -10657,7 +10660,7 @@ let codegen_tests = [
             DwarfVariantResult::Value(value) => { return value; }
           }
         }" ();
-       let ir = Llvm.string_of_llmodule Llvm_gen.the_module in
+       let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
        Alcotest.(check bool) "variant local has no typeless DILocalVariable"
          false (contains_substring ir
            "DILocalVariable(name: \"dwarf_variant_unrepresented\""));
@@ -10711,7 +10714,7 @@ let codegen_tests = [
           }
           dwarf_stable_unlock(guard, &dwarf_stable_slot.mutex);
         }" ();
-       let ir = Llvm.string_of_llmodule Llvm_gen.the_module in
+       let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
        Alcotest.(check bool) "stable_replace variant local has no typeless DILocalVariable"
          false (contains_substring ir
            "DILocalVariable(name: \"dwarf_stable_previous\""));
@@ -10737,7 +10740,7 @@ let codegen_tests = [
               DwarfUnsupportedVariant::Value(value) => { return value; }
             }
           }" ();
-       let ir = Llvm.string_of_llmodule Llvm_gen.the_module in
+       let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
        List.iter (fun name ->
          Alcotest.(check bool) (name ^ " has no DILocalVariable") false
            (contains_substring ir ("DILocalVariable(name: \"" ^ name ^ "\""))
@@ -10788,9 +10791,12 @@ let codegen_tests = [
 
   (* Kept last, in this exact order, for the same one-way-switch reason as
      the DWARF tests above: Llvm_gen.setup_target permanently overwrites
-     Llvm_gen.the_module's target triple/data layout (Llvm_gen.target_data)
-     for the rest of this test process -- there is no way to reset back to
-     "no target machine". Every codegen test registered above this point
+     Llvm_gen.target_data for the rest of this test process -- there is no
+     way to reset back to "no target machine" (GitHub issue #326:
+     Llvm_gen.the_module itself is recreated fresh per gen_program call, but
+     target_data and the configured triple/datalayout it implies are
+     deliberately reapplied to each new module, not reset). Every codegen
+     test registered above this point
      relies on that state staying None (usize/pointer-int conversions
      falling back to i64 -- see Llvm_gen.usize_lltype), so nothing may be
      added after this group without re-checking that assumption.
@@ -10971,7 +10977,7 @@ let codegen_tests = [
           let mut GLOBAL_ENUM_STATE: GlobalInitState = GlobalInitState::Running;
           fn codegen_global_enum_use() -> GlobalInitState { return GLOBAL_ENUM_STATE; }"
        in
-       let gv = match Llvm.lookup_global "GLOBAL_ENUM_STATE" Llvm_gen.the_module with
+       let gv = match Llvm.lookup_global "GLOBAL_ENUM_STATE" !Llvm_gen.the_module with
          | Some gv -> gv
          | None -> Alcotest.fail "GLOBAL_ENUM_STATE was not emitted"
        in
@@ -10990,7 +10996,7 @@ let codegen_tests = [
           let GLOBAL_ENUM_CODE: u16 = GlobalInitCode::Second as u16;
           fn codegen_global_enum_code_use() -> u16 { return GLOBAL_ENUM_CODE; }"
        in
-       let gv = match Llvm.lookup_global "GLOBAL_ENUM_CODE" Llvm_gen.the_module with
+       let gv = match Llvm.lookup_global "GLOBAL_ENUM_CODE" !Llvm_gen.the_module with
          | Some gv -> gv
          | None -> Alcotest.fail "GLOBAL_ENUM_CODE was not emitted"
        in
