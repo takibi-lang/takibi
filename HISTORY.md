@@ -15,6 +15,59 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-16: `make allcheck` Regression -- Checked Slice-to-Struct-Pointer Casts Wrongly Required `unsafe` When Target == Element Type
+
+Found by the user running `make clean && make allcheck` after the #240
+session above: `linuxcheck` failed compiling
+`kernel/lib/freelist.tkb#freelist_ref$usize$3` (a generic function
+instantiated for `usize`) --
+`casting [usize; 3..] to *usize asserts it is a valid pointer with no
+evidence: sizeof(usize) is not provable at compile time here`. A real
+gap in the earlier "checked slice-to-struct-pointer casts" work (issue
+#218 follow-up, this session's own #218 entry above): that design
+special-cased `*u8` targets as unconditionally free ("a byte pointer's
+own size is 1") but never considered the more general case a slice
+cast to its OWN element type is -- `[T; N..] as *T` is not a
+reinterpretation asserting some OTHER byte layout fits at all, it is
+exactly the pointer-extraction half of an ordinary array-to-pointer
+decay, which has always been unconditionally free regardless of N.
+`usize` tripped this specifically because it is target-dependent
+(`const_type_size` cannot compute it, unlike `kernel/fs/elf64.tkb`'s
+earlier, genuinely-needed `unsafe` case), so the missing exemption
+turned into a hard build failure rather than an unnecessary warning.
+
+**Fix**, sync rule in both `lib/type_inf.ml` (the `TSlice` `Cast` case)
+and `lib/llvm_gen.ml` (its codegen-time re-check): exempt `TPtr pointee`
+unconditionally, same as the existing `TPtr TU8` case, when `pointee`
+structurally equals the slice's own element type. No sizeof computation
+is needed or attempted for this case -- there is no new claim being
+made, so the target-dependent-size problem that broke `usize` cannot
+recur for any element type, known or not.
+
+**Also found while re-verifying: a second real fallout site the
+original #240 migration missed.** `linux_user/ringbuf/ringbuf.tkb` and
+`linux_user/bubblesort/bubblesort.tkb` are near-duplicate ports of
+`examples/ringbuf/ringbuf.tkb` and `examples/bubblesort/bubblesort.tkb`
+(same struct shapes, plus an `app_main()` wrapper) that #240's original
+repo-wide survey missed entirely -- that survey only scanned `kernel/`
+and `examples/`, never `linux_user/`. Migrated both with the identical
+fix already applied to their `examples/` counterparts.
+
+**Verified**, this time deliberately re-running every non-hardware
+`allcheck` lane individually rather than trusting a single combined run
+(the earlier `make kernelbuild` no-op-log incident this session already
+showed combined output can be misleading): `dune runtest` 1089/1089,
+`make langcheck`, `make linuxcheck` (now genuinely PASS, not just
+compiles -- `ringbuf`/`bubblesort` both execute and match `.expected`
+byte-for-byte), full `make kernelbuild`, and `kernelcheck-qemu` /
+`kernelcheck-qemu-debug` / `kernelcheck-oops-qemu` /
+`kernelcheck-lifecycle-gap-qemu` all individually PASS (the lifecycle-gap
+lane's own internal "FAIL kernel UART driver: ... stalled" line is its
+deliberate negative-path assertion succeeding, not a real failure --
+see that target's own Makefile comment). `kernelcheck-rpi5` (real
+hardware) intentionally not run without fresh confirmation, per this
+project's standing rule.
+
 ### 2026-08-16: Reject Pointer Fields in Structs, Capability-Based (GitHub Issue #240)
 
 Implemented the reformulation posted to #240's own comment thread

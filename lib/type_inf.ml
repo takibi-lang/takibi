@@ -1861,7 +1861,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                          "cannot cast pointer to %s; \
                           use `(ptr as usize) as %s` to make the truncation explicit"
                          (to_string tgt) (to_string tgt))))
-            | TSlice (_, n) ->
+            | TSlice (elem, n) ->
                 (match tgt with
                  | TPtr TU8 ->
                      (* Explicit bridge from the slice world back into the
@@ -1872,6 +1872,24 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                         length already proves it, and this is the same
                         length-erasing operation `[]T as *T` element-typed
                         casts already are for the general case just below. *)
+                     tgt
+                 | TPtr pointee when repr pointee = repr elem ->
+                     (* GitHub issue #218 follow-up regression (found via
+                        kernel/lib/freelist.tkb#freelist_ref -- `[usize;
+                        3..] as *usize`): when the cast target is the
+                        SAME type as the slice's own element type, this
+                        is not a reinterpretation asserting some OTHER
+                        byte layout fits -- it is exactly the pointer-
+                        extraction half of an ordinary array-to-pointer
+                        decay (`arr as *T` on a `[T; N]`), always free
+                        regardless of N. Checking sizeof at all here
+                        would be both wrong in principle (no new claim
+                        is being made) and impossible in practice for a
+                        target-dependent element type like `usize` --
+                        exactly what tripped this over, since
+                        const_type_size cannot compute sizeof(usize)
+                        and previously forced `unsafe` on a cast that
+                        was never actually asserting anything. *)
                      tgt
                  | TPtr pointee ->
                      (* GitHub issue #218 follow-up (slice/struct-overlay

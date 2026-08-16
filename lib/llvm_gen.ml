@@ -3235,8 +3235,18 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
               would otherwise have rejected it), so that use was genuine,
               not accidental -- record it so the "unnecessary unsafe" lint
               does not misreport it as a no-op wrap. *)
-           (match pointee_ty with
-            | TypeU8 -> ()
+           (match pointee_ty, src_ty with
+            | TypeU8, _ -> ()
+            | _, TypeSlice (elem, _) when elem = pointee_ty ->
+                (* Sync rule with type_inf.ml's own same-element-type
+                   exemption just above: casting to the slice's OWN
+                   element type is a plain pointer-extraction decay, not
+                   a reinterpretation, so it needs no sizeof check (and
+                   for a target-dependent element type like `usize`,
+                   none is even computable here without a real target
+                   machine -- see kernel/lib/freelist.tkb#freelist_ref,
+                   the regression this exemption fixes). *)
+                ()
             | _ ->
                 let pointee_llty = ltype_of_ast pointee_ty in
                 let dl = match !target_data with
