@@ -398,9 +398,33 @@ make kernelsh-qemu      # boot QEMU and attach the current terminal to the ash U
 make kernelsh-rpi5      # load RPi5 over SWD and attach the Debug Probe UART to the ash shell
 make linuxbuild         # build linux_user/'s host-native Linux/AMD64 tests (no QEMU/hardware needed)
 make linuxcheck         # build and run linux_user/'s tests, diffing stdout against each .expected
+make allbuild           # langcheck + test + linuxbuild + kernelbuild + every examples/ target, BUILD ONLY -- no execution/hardware step, so it needs no confirmation and nothing to wait on; the cheapest way to check "did this change break anything ANYWHERE in the repo"
 make allcheck           # langcheck + test + linuxcheck + kernelcheck together (needs real RPi5 hardware for the last one)
 make clean              # remove dune build artifacts, kernel/ link outputs, and linux_user/ build outputs
 ```
+
+**Run `make allbuild` proactively, not just at the end.** It touches no
+hardware and executes nothing, so it needs no confirmation and there is
+no reason to save it for last. In particular:
+
+- Before believing any change to `lib/*.ml` (a new type-checker rule, a
+  codegen change, anything affecting how `.tkb` source compiles) is
+  complete, run it -- `kernel/` alone is not the whole repo.
+  `examples/` and `linux_user/` are separate trees with their own
+  Makefiles and are easy to forget; a change validated only against
+  `kernel/` can still break dozens of files elsewhere (this happened in
+  the issue #316 session: a repo-wide `*io`/`unsafe` policy change was
+  migrated and committed against `kernel/` only, and `examples/`'s ~410
+  more sites were found only after the fact, by a human running `make
+  allcheck` post-push). Run `make allbuild` BEFORE the first commit of
+  such a change, not as a final check afterward.
+- Prefer it over hand-rolled `grep`/regex surveys of "which files need
+  updating" for a repo-wide change. A regex-based survey only finds the
+  shapes it was written to look for; `make allbuild` finds everything
+  that fails to compile, including shapes the survey's author did not
+  anticipate (the same #316 session missed a struct-literal
+  initializer's `*io` fields entirely -- a shape no grep pattern in use
+  at the time matched -- until `make allbuild` caught it).
 
 Examples-only targets (STM32/RPi3/QEMU milestones) all require
 the `-f examples/Makefile` flag:
