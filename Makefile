@@ -728,6 +728,31 @@ ifneq (,$(filter allcheck,$(MAKECMDGOALS)))
 $(info [allcheck] includes: langcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, and RPi5 integration)
 endif
 
+## allbuild: a fast, no-execution/no-hardware smoke gate across all three
+## source trees (kernel/, linux_user/, examples/) -- COMPILES everything
+## (type-checks, since this compiler has no separate type-check-only mode;
+## codegen/link still runs, but nothing is ever executed or flashed) without
+## the QEMU boot/UART-diff/hardware time allcheck's full lanes spend. Exists
+## specifically to catch a new lib/type_inf.ml or lib/llvm_gen.ml check that
+## is too strict (or too loose) somewhere allcheck's own kernel-only build
+## step would never reach -- kernel/ does not exercise every generic
+## instantiation or code shape the OTHER two trees do (e.g. kernel/ never
+## instantiates kernel/lib/freelist.tkb's Freelist(T) with T=usize; only
+## linux_user/freelist_generic/freelist_generic.tkb does), so a compiler
+## change that only ran `make kernelbuild` before landing can still break
+## `make allcheck` elsewhere. Run this after any lib/*.ml change, before
+## considering it done.
+.PHONY: allbuild
+allbuild:
+	@status=0; $(MAKE) langcheck test linuxbuild kernelbuild || status=$$?; \
+	$(MAKE) -f examples/Makefile allcheck-build || status=$$?; \
+	if [ $$status -eq 0 ]; then \
+		echo "PASS allbuild: langcheck + compiler unit + linux_user + kernel (RPi5+QEMU) + every examples/ target, all build-only"; \
+	else \
+		echo "FAIL allbuild: one or more lanes failed to build (see the lane output above)" >&2; \
+		exit $$status; \
+	fi
+
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts, kernel/ link outputs, and linux_user/
 ## build outputs. Does not touch examples/ -- use `make -f examples/Makefile

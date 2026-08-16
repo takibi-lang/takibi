@@ -71,8 +71,14 @@ let mut our_ip:  [u8; 4];
 // TCP_URGENT) come from examples/common/netutil.tkb's `use` above --
 // offsetof(ArpHdr/Ipv4Hdr/TcpHdr, field)-based, matching http_server.tkb.
 
+// GitHub issue #240: `name83` used to be a raw `*u8` field -- an ordinary
+// struct field holding a pointer that still supports arithmetic/indexing
+// is no longer allowed, even here where it is really just an address
+// value riding through a channel handoff, never indexed through the
+// field itself. Stored as `usize` (its own bit pattern) and cast back to
+// `*u8` at the one consumption site below.
 struct SdReadChunkRequest {
-    private name83: *u8;
+    private name83: usize;
     private off: u32;
     private want: u32;
 }
@@ -168,7 +174,7 @@ fn sd_worker() {
                 // Do not retain the caller task's frame pointer in the request.
                 // The rendezvous response makes this bounce buffer ready to copy.
                 chan_send(&sd_response_ch,
-                          sd_read_file_chunk(read.name83, read.off,
+                          sd_read_file_chunk(read.name83 as *u8, read.off,
                                              sd_chunk_buf, read.want) as i32);
             }
             SdRequest::FileSize(name83) => {
@@ -197,7 +203,7 @@ fn sd_file_size_rpc(name83: *u8) -> HttpFileSizeResult {
 
 fn sd_read_chunk_rpc(name83: *u8, off: u32, dst: borrow *u8,
         want: u32) -> u32 {
-    let mut request: SdReadChunkRequest = { name83, off, want };
+    let mut request: SdReadChunkRequest = { name83 as usize, off, want };
     sd_request_send(&sd_request_ch, SdRequest::ReadChunk(request));
     let got: u32 = chan_recv(&sd_response_ch) as u32;
     bytes_copy(dst, sd_chunk_buf, got as isize);

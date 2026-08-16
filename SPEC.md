@@ -412,6 +412,19 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   element of a `[Name; K]` array of that struct type to N bytes, with
   tail padding automatically appended so `sizeof(struct) % N == 0`. Use
   for DMA descriptor rings, cache-line-separated data, SIMD types.
+- **A struct field of pointer type is rejected unless that pointer is
+  already structurally incapable of forgery** (GitHub issue #240): `*T`
+  or `*align(N) T` is a compile error there unless `T` is an affine or
+  linear opaque struct -- the one pointee kind that already
+  unconditionally rejects arithmetic, indexing, dereference, and cast-
+  away regardless of where the pointer value lives, so storing it in a
+  field hides no more than storing it in a local already would. `*io T`
+  fields stay legal (MMIO register-block structs), pending a further
+  scoping decision (GitHub issue #316) about whether `*io` should share
+  this rule too. An ordinary raw-pointer field (`buf: *i32` alongside a
+  separate, unenforced length field) is exactly the hazard this rejects
+  -- use a slice (`[]T`, which bundles and enforces the length itself)
+  or an owned array field instead.
 
 ## Indexed Runtime Owners
 
@@ -1532,6 +1545,23 @@ length, not the exact length.
   the minimum.
 - `s as *T` -- explicit bridge back to the raw-pointer world (the `ptr`
   half only). Casting a slice to anything else is a compile error.
+  **When `T` is `u8`, or is exactly the slice's own element type, this
+  is unconditionally free** (a byte pointer's size is 1, and casting to
+  the slice's own element type is a plain pointer-extraction decay, not
+  a reinterpretation, so no proof is needed either way -- this also
+  means it works for a target-dependent element type like `usize`, which
+  `sizeof` itself cannot resolve at compile time). **Casting to any
+  OTHER type `U`** (GitHub issue #218 follow-up, "slice-to-struct-
+  pointer" variant) requires the slice's proven minimum length to cover
+  `sizeof(U)` -- provable only when `U`'s size is itself target-
+  independent (the same fixed-width-primitive/array/packed-struct rules
+  `sizeof(...)` uses, via `const_type_size`) and the slice's own minimum
+  is a real nonzero lower bound (not a dynamic `[]T` with no proven
+  floor). If either is missing, `unsafe { s as *U }` is required; the
+  error message distinguishes "proven length too small," "length not
+  provable at all," and "size itself not provable here" since each
+  calls for a different fix (tighten the type / add a runtime length
+  check / this specific cast just can't be proven target-independently).
 
 **Stack lifetime**: a slice derived from a local array is tied to the current
 stack frame. It may be used locally and passed through a verified `borrow`
@@ -1733,6 +1763,22 @@ then attempts a field read through the old pointer.
   check at all (raw pointers are the unsafe escape hatch; the compiler
   does not track allocation provenance, so `ptr1 - ptr2` is only
   meaningful when both derive from the same allocation).
+- **`*T` where `T` is itself pointer-shaped is always a compile error**
+  (`**T`, `*align(N) *T`, `*io *T`, and so on through any struct/array/
+  field nesting, GitHub issue #239) -- no `unsafe` escape, unconditional.
+  Nested indirection introduces ownership/lifetime/provenance questions
+  the language does not otherwise need to solve, and a repo-wide survey
+  found zero genuine uses. Enforced at both the type-annotation level
+  (`lib/types.ml`'s `of_ast_in_scope`, the sole `Ast.type_expr -> ty`
+  conversion point) and at the four `ty`-level "minting" sites where a
+  `**T` can arise purely through inference with no `Ast.TypePtr` AST node
+  to catch it: a bare array-of-pointers variable decaying to a pointer,
+  address-of on a pointer-typed local or pointer-typed struct field, and
+  an array-of-pointers struct field decaying on read (`let mut p: *u8 =
+  ...; let pp = &p;` used to compile to a working `**u8` binding before
+  this closed). `io` is a qualifier, not a pointer layer, so it is
+  stripped before checking -- `*io T` stays legal as long as `T` itself
+  is not pointer-shaped.
 
 ### Global Constant Folding
 
@@ -2242,7 +2288,7 @@ all, regardless of type.
 cannot itself prove, and produces **no trap** -- it is a checkless
 assertion the compiler is told to trust, distinct from a runtime check
 (a check the compiler still doubts, which *does* generate a trap).
-Currently gates exactly three things:
+Currently gates exactly four things:
 
 - Slice construction from a raw pointer, `unsafe { p[lo..<hi] }` -- the
   length assertion at a driver boundary.
@@ -2264,14 +2310,24 @@ Currently gates exactly three things:
   entry. Deliberately scoped to kinded targets, not pointer casts in
   general: a cast built entirely from compile-time integer literals or a
   real object's address (`&x`) needs no `unsafe`, which is what keeps
-  trusted opaque-token constructors legal, but any OTHER pointer cast (including
-  a non-literal integer cast to an ordinary, non-affine pointer, e.g. a
-  runtime-discovered MMIO base address offset and cast to `*io T`) stays
-  legal without `unsafe` too -- narrowed to affine targets specifically
-  because a broader version was measured against this codebase's real
-  MMIO drivers and found to demand `unsafe` on essentially every
-  hardware register access, which would have made `unsafe` too common to
-  carry any audit signal.
+  trusted opaque-token constructors legal. Any OTHER non-literal-integer-
+  to-pointer cast (an ordinary, non-affine, non-`io` target -- see GitHub
+  issue #218) still compiles without `unsafe`, but as of the #218
+  follow-up now emits a non-fatal audit warning rather than passing
+  silently -- narrowed to a warning, not a hard requirement, because a
+  broader hard-`unsafe` version was measured against this codebase's real
+  MMIO/DMA-ring code and found to demand `unsafe` on roughly 1146 sites,
+  which would have made `unsafe` too common to carry any audit signal
+  (see issue #316, still open, for the `*io` scoping decision blocking
+  promoting this from warning to error). A cast to `*io T` specifically
+  stays fully silent either way, pending that same decision.
+- Casting a slice (`[]T` or `[T; N..]`) to `*U` where `U` is neither `u8`
+  nor the slice's own element type `T` (GitHub issue #218 follow-up,
+  slice/struct-overlay variant) -- see "Slices" below. `*u8` and
+  same-element-type targets stay unconditionally free (pointer
+  extraction, not a reinterpretation); any other target needs the
+  slice's proven minimum length to cover `sizeof(U)`, computed via the
+  same target-independent rules `sizeof(...)` itself uses, or `unsafe`.
 
 `unsafe` is **not** currently extended to general pointer
 arithmetic/dereference, or an exhaustive enum's runtime variant check

@@ -3473,6 +3473,40 @@ let infer_tests = [
   Alcotest.test_case "slice-to-*u8 stays free regardless of provable length (byte pointer's own size is 1)" `Quick
     (expect_ok "fn f(s: []u8) -> *u8 { return s as *u8; }");
 
+  (* Regression test for a `make allcheck` failure found by the user
+     right after this feature landed: kernel/lib/freelist.tkb's generic
+     freelist_ref instantiated for `usize` compiled `[usize; 3..] as
+     *usize` -- a slice cast to its OWN element type, which is not a
+     reinterpretation and needs no sizeof proof, but the original
+     implementation only special-cased *u8, not "target equals the
+     slice's own element type" in general. usize is target-dependent
+     (const_type_size cannot compute it), so the missing exemption
+     turned into a hard, unconditional compile failure rather than a
+     merely-unnecessary unsafe requirement. *)
+  Alcotest.test_case "slice-to-its-own-element-type stays free even when that type's size is not const_type_size-provable (usize)" `Quick
+    (expect_ok "fn f(s: [usize; 3..]) -> *usize { return s as *usize; }");
+
+  Alcotest.test_case "slice-to-its-own-element-type stays free even for a dynamic-length ([]T) slice" `Quick
+    (expect_ok "fn f(s: []usize) -> *usize { return s as *usize; }");
+
+  Alcotest.test_case "slice-to-its-own-element-type stays free for an ordinary (const_type_size-provable) element type too" `Quick
+    (expect_ok "fn f(s: []u32) -> *u32 { return s as *u32; }");
+
+  Alcotest.test_case "slice-to-a-DIFFERENT-type still needs proof (same-element-type exemption is not a general escape hatch)" `Quick
+    (expect_type_error "casting"
+       "struct packed P4 { a: u32; }
+        fn f(s: []usize) -> *P4 { return s as *P4; }");
+
+  (* Codegen-level check for the same fix, lib/llvm_gen.ml's own sync-rule
+     re-derivation (not just type_inf.ml's) -- confirms the codegen path
+     also recognizes the same-element-type exemption and does not
+     attempt (and fail on, pre-fix) a target-dependent sizeof lookup for
+     it. Needs no setup_target: this exemption skips the DataLayout
+     lookup entirely, unlike the genuinely-unsafe case tested further
+     below in the post-setup_target group. *)
+  Alcotest.test_case "slice-to-its-own-element-type (usize) codegens without needing a real target machine" `Quick
+    (expect_codegen_ok "fn f(s: [usize; 3..]) -> *usize { return s as *usize; }");
+
   (* -- GitHub issue #239: reject pointer-to-pointer types such as **T --- *)
 
   Alcotest.test_case "a direct **T let annotation is rejected" `Quick

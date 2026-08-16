@@ -15,6 +15,95 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-16: End-of-Session Review -- Docs/Test Gaps, a New `make allbuild` Fast Smoke Gate, and the Survey Regex It Immediately Caught
+
+Requested review before closing out the day's #218/#239/#240/#316 work:
+missing test coverage, stale docs, and prevention ideas for the two real
+regressions found this session (the `usize` slice-cast gap above, and
+issue #240's original survey missing `linux_user/`).
+
+**Test coverage.** Added 5 regression tests for the same-element-type
+slice-cast fix (sufficient-length, dynamic-length, an ordinary provable
+type, a same-element-type negative control confirming the exemption is
+not a general escape hatch, and one codegen-level check) -- the fix had
+shipped with none. `scripts/run_kernel_shell_console.py`'s
+`open_with_retry()` (the kernelsh-qemu race fix) deliberately gets none
+either -- the user's call: `make allcheck`'s own integration coverage is
+considered sufficient, and `scripts/` has no existing unit-test
+convention to extend for one function.
+
+**Docs.** `SPEC.md` had fallen behind four features landed this session:
+added `**T`-rejection (#239) to "Arrays and Pointers", pointer-struct-
+field rejection (#240) to "Structs", the slice-to-struct-pointer cast
+rule to "Slices", and updated "`unsafe { ... }`" from "gates exactly
+three things" to four, fixing a line that had become flatly wrong (it
+still said a non-affine pointer cast "stays legal without `unsafe`
+too", which stopped being true the moment the #218 audit warning
+shipped earlier this session). `AGENTS.md` gained the new
+`trustedbasecheck`/`allbuild` targets in its command list. `ROADMAP.md`
+is now 11 days stale but left alone per its own explicit "refreshed
+occasionally and wholesale, not incrementally" policy -- flagged to the
+user rather than refreshed unilaterally, since a full priority-axis
+rewrite is a judgment call, not a mechanical fix.
+
+**On the "should the slice-cast bug have been a warning instead of a
+hard error" question.** Discussed directly with the user rather than
+taken as settled: the earlier write-up's "new type-checker restrictions
+should default to landing as a warning" framing over-generalized from
+issue #218's own non-affine population (a genuine, unresolved policy
+question, correctly staged as a warning pending #316) to this case,
+which was a straightforward implementation bug with exactly one correct
+fix. A warning would likely have shipped silently into a build that
+already carries 100+ unrelated #218 warnings, and the underlying gap
+could have persisted indefinitely with nothing forcing attention to it.
+The hard failure, caught the same day via `make allcheck`, is the
+system working as intended; the real gap was verifying the change
+against only `kernel/` before considering it complete. Concretely:
+`kernel/` never instantiates `kernel/lib/freelist.tkb`'s
+`Freelist(T)`/`freelist_ref` with `T = usize` anywhere (confirmed by
+grep) -- only `linux_user/freelist_generic/freelist_generic.tkb` does,
+so `make kernelbuild` could not have caught this regardless of how
+thoroughly it was run.
+
+**`make allbuild`** (root `Makefile`, paired naming with `allcheck`):
+compiles everything in all three source trees --
+`langcheck + test + linuxbuild + kernelbuild` plus
+`make -f examples/Makefile allcheck-build` (already existed, covers
+every QEMU/STM32/RPi5 example target) -- with no execution, QEMU boot,
+or hardware step, specifically as a fast gate to run after any
+`lib/*.ml` change before considering it complete. Existing pieces
+(`linuxbuild`, `kernelbuild`, `allcheck-build`) were reused rather than
+duplicated; only the target wiring is new.
+
+**It immediately found a second, real issue #240 fallout site the
+original survey missed, for a genuine reason this time.** The first
+`make allbuild` run failed on
+`examples/http_server_sdcard_rtos/http_server_sdcard_rtos.tkb`'s
+`SdReadChunkRequest.name83: *u8` field. Root cause: the Python survey
+script used during #240's original investigation matched a struct
+field with the regex `^\s*\w+\s*:\s*\*`, which does not match a line
+starting with the `private` visibility modifier (`private name83:
+*u8;` -- `\w+` greedily consumes `private` itself, then finds `name83`
+where it expected `:`, and fails to match) -- every `private`-qualified
+pointer field in the whole repo was silently invisible to that survey.
+Re-running the corrected regex (`^\s*(private\s+)?\w+\s*:\s*\*`) across
+all three trees found exactly one previously-missed site (this one);
+everything else the corrected regex reports was already fixed earlier
+this session. Fixed by storing the address as `usize` (its own bit
+pattern) instead of `*u8` in the struct, cast back to `*u8` at the one
+consumption site -- this field is a bare address riding through an RTOS
+channel handoff between tasks, never indexed or dereferenced through
+the struct itself, so it does not fit the slice/owned-array pattern
+`ringbuf.tkb`/`bubblesort.tkb` used; a `usize` roundtrip is the minimal
+fix and picks up a #218 audit warning at the cast site for free.
+
+Verified: `dune runtest` 1094/1094, `make langcheck`, and `make
+allbuild` itself now passes clean end to end (only pre-existing #218
+warnings remain, no errors) across kernel/, linux_user/, and every
+`examples/` target (QEMU + STM32 + RPi5), confirming the corrected
+survey's "exactly one remaining site" conclusion by construction rather
+than by re-trusting the same grep.
+
 ### 2026-08-16: `make allcheck` Regression -- Checked Slice-to-Struct-Pointer Casts Wrongly Required `unsafe` When Target == Element Type
 
 Found by the user running `make clean && make allcheck` after the #240

@@ -388,6 +388,7 @@ make kernelbuild-rpi5   # build kernel/build/rpi5/kernel.elf (no hardware needed
 make kernelbuild-qemu   # build kernel/build/qemu/kernel.elf (no hardware needed)
 make kernelbuild-qemu-debug  # build kernel/build/qemu/kernel-debug.elf with DWARF info (no hardware needed)
 make kernelbuild        # build every maintained kernel target (currently rpi5 + qemu)
+make trustedbasecheck   # print unsafe/asm/forbid-trap-line counts (scripts/measure_trusted_base.py; depends on kernelbuild)
 make kernelcheck-rpi5   # build and run the RPi5 hardware integration suite (needs real hardware)
 make kernelcheck-qemu   # build and run the QEMU/AArch64 integration suite (no hardware needed)
 make kernelcheck-shell-qemu # PTY smoke test for the interactive QEMU ash path (no hardware needed)
