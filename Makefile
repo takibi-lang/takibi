@@ -76,8 +76,13 @@ $(TAKIBI): FORCE
 # concurrently with "dune build": dune's build-directory lock file is not
 # safe against two concurrent dune invocations racing to create it
 # (observed: "Unexpected contents of build directory global lock file").
+# ALCOTEST_COMPACT=1 collapses each passing test to a single '.' instead of
+# a full "[OK] suite N description..." line -- with 1100+ tests, the
+# uncompacted form buried real failures in thousands of lines of routine
+# pass output. Alcotest still prints full failure detail regardless of this
+# setting, so nothing about diagnosing a real failure is lost.
 test: build
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" dune test
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env ALCOTEST_COMPACT=1 dune test
 
 ## langcheck: verify that all source files contain only ASCII characters.
 ## Repo-wide (kernel/, examples/, the compiler itself), so this is the one

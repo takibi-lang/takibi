@@ -58,7 +58,7 @@
 let mut uart_tx_buf: [u8; 128];
 let mut uart_tx_head: io {0..<128 as usize};
 let mut uart_tx_tail: io {0..<128 as usize};
-let mut uart_rx_handler: fn !{}() -> void;
+let mut uart_rx_handler: fn !{unsafe}() -> void;
 
 // Set right before DMA2 Stream7 is enabled, cleared by its completion ISR --
 // gates whether uart_putc/the ISR itself may kick a new burst (see
@@ -81,39 +81,39 @@ let mut dma_tx_len: io usize;
 // platform_init() below so every STM32 example gets this uniformly, with no
 // startup.S/startup_ram.S changes needed on either the Flash or
 // RAM-execution boot path.
-fn lcd_off() {
-    let rcc_ahb1enr: *io u32 = 0x40023830; // RCC_AHB1ENR
+fn lcd_off() !{unsafe} {
+    let rcc_ahb1enr: *io u32 = unsafe { 0x40023830 as *io u32 }; // RCC_AHB1ENR
     *rcc_ahb1enr = *rcc_ahb1enr | (1 << 8) | (1 << 10); // GPIOIEN | GPIOKEN
 
     // PI12 (LCD_DISP): MODER bits [25:24] = 0b01 (output). BSRR's upper
     // half atomically resets a pin without a read-modify-write on ODR.
-    let gpioi_moder: *io u32 = 0x40022000;
-    let gpioi_bsrr:  *io u32 = 0x40022018;
+    let gpioi_moder: *io u32 = unsafe { 0x40022000 as *io u32 };
+    let gpioi_bsrr:  *io u32 = unsafe { 0x40022018 as *io u32 };
     *gpioi_moder = (*gpioi_moder & ~(3 << 24)) | (1 << 24);
     *gpioi_bsrr = 1 << (12 + 16); // reset PI12
 
     // PK3 (LCD_BL_CTRL): MODER bits [7:6] = 0b01 (output).
-    let gpiok_moder: *io u32 = 0x40022800;
-    let gpiok_bsrr:  *io u32 = 0x40022818;
+    let gpiok_moder: *io u32 = unsafe { 0x40022800 as *io u32 };
+    let gpiok_bsrr:  *io u32 = unsafe { 0x40022818 as *io u32 };
     *gpiok_moder = (*gpiok_moder & ~(3 << 6)) | (1 << 6);
     *gpiok_bsrr = 1 << (3 + 16); // reset PK3
 }
 
-fn uart_rx_discard() !{} {
-    let usart1_rdr: *io u8 = 0x40011024;
+fn uart_rx_discard() !{unsafe} {
+    let usart1_rdr: *io u8 = unsafe { 0x40011024 as *io u8 };
     let discarded: u8 = *usart1_rdr;
 }
 
-fn uart_init() {
-    let rcc_ahb1enr: *io u32 = 0x40023830; // RCC_AHB1ENR
-    let rcc_apb2enr: *io u32 = 0x40023844; // RCC_APB2ENR
-    let nvic_iser1: *io u32 = 0xE000E104;  // IRQ37 USART1
-    let nvic_icer1: *io u32 = 0xE000E184;
-    let nvic_icpr1: *io u32 = 0xE000E284;
-    let nvic_iser2: *io u32 = 0xE000E108;  // IRQ70 DMA2_Stream7
-    let nvic_icpr2: *io u32 = 0xE000E288;
-    let usart1_cr1: *io u32 = 0x40011000;
-    let usart1_cr3: *io u32 = 0x40011008;
+fn uart_init() !{unsafe} {
+    let rcc_ahb1enr: *io u32 = unsafe { 0x40023830 as *io u32 }; // RCC_AHB1ENR
+    let rcc_apb2enr: *io u32 = unsafe { 0x40023844 as *io u32 }; // RCC_APB2ENR
+    let nvic_iser1: *io u32 = unsafe { 0xE000E104 as *io u32 };  // IRQ37 USART1
+    let nvic_icer1: *io u32 = unsafe { 0xE000E184 as *io u32 };
+    let nvic_icpr1: *io u32 = unsafe { 0xE000E284 as *io u32 };
+    let nvic_iser2: *io u32 = unsafe { 0xE000E108 as *io u32 };  // IRQ70 DMA2_Stream7
+    let nvic_icpr2: *io u32 = unsafe { 0xE000E288 as *io u32 };
+    let usart1_cr1: *io u32 = unsafe { 0x40011000 as *io u32 };
+    let usart1_cr3: *io u32 = unsafe { 0x40011008 as *io u32 };
     *rcc_ahb1enr = *rcc_ahb1enr | (1 | (1 << 1) | (1 << 22)); // GPIOAEN | GPIOBEN | DMA2EN
     *rcc_apb2enr = *rcc_apb2enr | (1 << 4);       // USART1EN
 
@@ -127,14 +127,14 @@ fn uart_init() {
     *nvic_icpr1 = 1 << 5;
 
     // PA9 -> AF7 (USART1_TX): 2-bit MODER field = 0b10 (alternate function)
-    let gpioa_moder: *io u32 = 0x40020000;
-    let gpioa_afrh:  *io u32 = 0x40020024;
+    let gpioa_moder: *io u32 = unsafe { 0x40020000 as *io u32 };
+    let gpioa_afrh:  *io u32 = unsafe { 0x40020024 as *io u32 };
     *gpioa_moder = (*gpioa_moder & ~(3 << 18)) | (2 << 18);
     *gpioa_afrh  = (*gpioa_afrh  & ~(15 << 4)) | (7 << 4);
 
     // PB7 -> AF7 (USART1_RX)
-    let gpiob_moder: *io u32 = 0x40020400;
-    let gpiob_afrl:  *io u32 = 0x40020420;
+    let gpiob_moder: *io u32 = unsafe { 0x40020400 as *io u32 };
+    let gpiob_afrl:  *io u32 = unsafe { 0x40020420 as *io u32 };
     *gpiob_moder = (*gpiob_moder & ~(3 << 14)) | (2 << 14);
     *gpiob_afrl  = (*gpiob_afrl  & ~(15 << 28)) | (7 << 28);
 
@@ -143,7 +143,7 @@ fn uart_init() {
     // (default), BRR is used directly as the divider, no manual
     // mantissa/fraction packing needed.
     // BRR = round(16_000_000 / 115200) = 139 = 0x8B
-    let usart1_brr: *io u32 = 0x4001100C;
+    let usart1_brr: *io u32 = unsafe { 0x4001100C as *io u32 };
     uart_tx_head = 0;
     uart_tx_tail = 0;
     dma_tx_active = false;
@@ -169,7 +169,7 @@ fn uart_init() {
 // interrupt context (the completion ISR, to chain the next burst): while
 // dma_tx_active is false, DMA2 Stream7 cannot be mid-transfer, so nothing
 // else can be touching these registers concurrently.
-fn dma_uart_tx_kick() {
+fn dma_uart_tx_kick() !{unsafe} {
     // No bare `return;` (illegal in a void function -- see SPEC.md), so the
     // "nothing to do" cases are expressed as nested-if guards instead of
     // early returns.
@@ -190,12 +190,12 @@ fn dma_uart_tx_kick() {
             let buf_ptr: *u8 = uart_tx_buf;
             let src_ptr: *u8 = buf_ptr + (tail as isize);
 
-            let dma2_s7cr:   *io u32 = 0x400264B8;
-            let dma2_s7ndtr: *io u32 = 0x400264BC;
-            let dma2_s7par:  *io u32 = 0x400264C0;
-            let dma2_s7m0ar: *io u32 = 0x400264C4;
-            let dma2_s7fcr:  *io u32 = 0x400264CC;
-            let dma2_hifcr:  *io u32 = 0x4002640C;
+            let dma2_s7cr:   *io u32 = unsafe { 0x400264B8 as *io u32 };
+            let dma2_s7ndtr: *io u32 = unsafe { 0x400264BC as *io u32 };
+            let dma2_s7par:  *io u32 = unsafe { 0x400264C0 as *io u32 };
+            let dma2_s7m0ar: *io u32 = unsafe { 0x400264C4 as *io u32 };
+            let dma2_s7fcr:  *io u32 = unsafe { 0x400264CC as *io u32 };
+            let dma2_hifcr:  *io u32 = unsafe { 0x4002640C as *io u32 };
             let usart1_tdr:  u32 = 0x40011028; // plain u32: only ever used as DMA2's peripheral address
 
             dma_tx_len = burst_len;
@@ -255,13 +255,13 @@ fn uart_puts(s: *u8) {
 // body can call this uniformly on either target. Reading RDR also clears
 // USART1's RXNE flag -- that IS the interrupt acknowledgment on this
 // target, no separate step needed (see irq.tkb's header comment).
-fn uart_isr_getc() -> u8 {
-    let usart1_rdr: *io u8 = 0x40011024;
+fn uart_isr_getc() -> u8 !{unsafe} {
+    let usart1_rdr: *io u8 = unsafe { 0x40011024 as *io u8 };
     return *usart1_rdr;
 }
 
-fn uart_rx_ready() -> bool {
-    let usart1_isr: *io u32 = 0x4001101C;
+fn uart_rx_ready() -> bool !{unsafe} {
+    let usart1_isr: *io u32 = unsafe { 0x4001101C as *io u32 };
     return (*usart1_isr & (1 << 5)) != 0; // RXNE
 }
 
@@ -281,9 +281,9 @@ fn USART1_IRQHandler() !{interrupt} {
 // DMA2 Stream7's completion interrupt: advances the ring's tail past the
 // burst that just finished, wakes anything blocked in uart_putc's
 // ring-full wait, and chains the next burst if more data is queued.
-fn DMA2_Stream7_IRQHandler() !{interrupt} {
-    let dma2_hisr:  *io u32 = 0x40026404;
-    let dma2_hifcr: *io u32 = 0x4002640C;
+fn DMA2_Stream7_IRQHandler() !{interrupt, unsafe} {
+    let dma2_hisr:  *io u32 = unsafe { 0x40026404 as *io u32 };
+    let dma2_hifcr: *io u32 = unsafe { 0x4002640C as *io u32 };
     if ((*dma2_hisr & (1 << 27)) != 0) { // TCIF7
         *dma2_hifcr = (1 << 22) | (1 << 24) | (1 << 25) | (1 << 26) | (1 << 27);
         let sent: usize = dma_tx_len;
@@ -301,15 +301,15 @@ fn DMA2_Stream7_IRQHandler() !{interrupt} {
 // mid-burst"), then quiesce USART1/DMA2 Stream7 interrupts before a
 // debugger installs its next flash loader.  Long-running servers never
 // return.
-fn uart_shutdown() !{may_block} {
+fn uart_shutdown() !{may_block, unsafe} {
     while (uart_tx_tail != uart_tx_head) {
         interrupt_wait();
     }
-    let usart1_cr1: *io u32 = 0x40011000;
-    let usart1_cr3: *io u32 = 0x40011008;
-    let nvic_icer1: *io u32 = 0xE000E184;
-    let nvic_icer2: *io u32 = 0xE000E188;
-    let dma2_s7cr:  *io u32 = 0x400264B8;
+    let usart1_cr1: *io u32 = unsafe { 0x40011000 as *io u32 };
+    let usart1_cr3: *io u32 = unsafe { 0x40011008 as *io u32 };
+    let nvic_icer1: *io u32 = unsafe { 0xE000E184 as *io u32 };
+    let nvic_icer2: *io u32 = unsafe { 0xE000E188 as *io u32 };
+    let dma2_s7cr:  *io u32 = unsafe { 0x400264B8 as *io u32 };
     *usart1_cr1 = *usart1_cr1 & ~(1 << 5); // RXNEIE
     *usart1_cr3 = *usart1_cr3 & ~(1 << 7); // DMAT
     *dma2_s7cr = *dma2_s7cr & ~1;          // disable DMA2 Stream7

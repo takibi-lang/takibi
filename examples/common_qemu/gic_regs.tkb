@@ -34,4 +34,9 @@ struct GicRegs {
     cpu_eoir:    *io u32;   // 0x08010010  GICC_EOIR
 }
 
-let gic: GicRegs = {0x08000000, 0x08000100, 0x08000104, 0x08010000, 0x08010004, 0x0801000C, 0x08010010};
+let gic: GicRegs = {
+    unsafe { 0x08000000 as *io u32 }, unsafe { 0x08000100 as *io u32 },
+    unsafe { 0x08000104 as *io u32 }, unsafe { 0x08010000 as *io u32 },
+    unsafe { 0x08010004 as *io u32 }, unsafe { 0x0801000C as *io u32 },
+    unsafe { 0x08010010 as *io u32 }
+};

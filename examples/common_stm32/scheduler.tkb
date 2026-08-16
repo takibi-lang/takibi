@@ -35,28 +35,28 @@ fn setup_task_stack(s: *u8, f: fn() -> void) -> usize {
 // clock cycles (processor clock source, TICKINT so it raises an exception),
 // and sets PendSV to the lowest exception priority (standard ARM guidance:
 // a context switch must never preempt another pending exception mid-flight).
-fn systick_init(reload: u32) {
-    let shpr3: *io u32 = 0xE000ED20;
+fn systick_init(reload: u32) !{unsafe} {
+    let shpr3: *io u32 = unsafe { 0xE000ED20 as *io u32 };
     *shpr3 = *shpr3 | (0xFF << 16); // PendSV (bits 23:16) = lowest priority
 
-    let systick_ctrl: *io u32 = 0xE000E010;
-    let systick_load: *io u32 = 0xE000E014;
-    let systick_val:  *io u32 = 0xE000E018;
+    let systick_ctrl: *io u32 = unsafe { 0xE000E010 as *io u32 };
+    let systick_load: *io u32 = unsafe { 0xE000E014 as *io u32 };
+    let systick_val:  *io u32 = unsafe { 0xE000E018 as *io u32 };
     *systick_load = reload;
     *systick_val = 0;
     *systick_ctrl = 1 | (1 << 1) | (1 << 2); // ENABLE | TICKINT | CLKSOURCE=core clock
 }
 
-fn systick_disable() {
-    let systick_ctrl: *io u32 = 0xE000E010;
+fn systick_disable() !{unsafe} {
+    let systick_ctrl: *io u32 = unsafe { 0xE000E010 as *io u32 };
     *systick_ctrl = *systick_ctrl & ~1; // clear ENABLE
 }
 
 // Called from a SysTick_Handler to request a context switch; the actual
 // register save/restore happens in PendSV_Handler (examples/common_stm32/
 // startup.S), which then calls the takibi-defined pendsv_dispatch.
-fn pendsv_trigger() {
-    let icsr: *io u32 = 0xE000ED04;
+fn pendsv_trigger() !{unsafe} {
+    let icsr: *io u32 = unsafe { 0xE000ED04 as *io u32 };
     *icsr = *icsr | (1 << 28); // ICSR.PENDSVSET
 }
 

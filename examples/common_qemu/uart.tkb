@@ -1,5 +1,5 @@
-fn uart_putc(c: u8) {
-    let dr: *io u8 = 0x09000000; // PL011 UART DR
+fn uart_putc(c: u8) !{unsafe} {
+    let dr: *io u8 = unsafe { 0x09000000 as *io u8 }; // PL011 UART DR
     *dr = c;
 }
 
@@ -15,8 +15,8 @@ fn uart_puts(s: *u8) {
 // irq.tkb). Shares its name with examples/common_stm32/uart.tkb's version,
 // which reads a different register (USART1 RDR, not PL011 DR), so a
 // shared ISR body can call this uniformly on either target.
-fn uart_isr_getc() -> u8 {
-    let dr: *io u8 = 0x09000000; // PL011 UART DR
+fn uart_isr_getc() -> u8 !{unsafe} {
+    let dr: *io u8 = unsafe { 0x09000000 as *io u8 }; // PL011 UART DR
     return *dr;
 }
 

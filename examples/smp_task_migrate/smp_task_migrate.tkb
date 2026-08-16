@@ -92,8 +92,8 @@ fn transfer_take() -> MigrationTransfer {
     return result;
 }
 
-fn migrating_task() {
-    let shared_va: *io u8 = dynamic_va_base() as *io u8;
+fn migrating_task() !{unsafe} {
+    let shared_va: *io u8 = unsafe { dynamic_va_base() as *io u8 };
     seen_core0 = *shared_va;
     dma_publish();
     task_migratable = 1;
@@ -172,12 +172,12 @@ fn rpi3_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
     return frame_sp;
 }
 
-fn core1_migrate_main(cpu: CpuOwner[1]) {
+fn core1_migrate_main(cpu: CpuOwner[1]) !{unsafe} {
     while (migrate_stage != 1) { interrupt_wait(); }
     dma_consume();
     mmu_address_space_activate(0);
     tlb_invalidate_all_el2();
-    let shared_va: *io u8 = dynamic_va_base() as *io u8;
+    let shared_va: *io u8 = unsafe { dynamic_va_base() as *io u8 };
     seen_core1_before = *shared_va;
     dma_publish();
     migrate_stage = 2;

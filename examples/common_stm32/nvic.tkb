@@ -4,13 +4,13 @@
 // dispatch step; enabling an interrupt here is the only setup an ISR needs
 // beyond defining the handler function itself.
 
-fn enable_usart1_irq() {
-    let nvic_iser1: *io u32 = 0xE000E104; // NVIC_ISER1 (covers IRQ32-63)
+fn enable_usart1_irq() !{unsafe} {
+    let nvic_iser1: *io u32 = unsafe { 0xE000E104 as *io u32 }; // NVIC_ISER1 (covers IRQ32-63)
     *nvic_iser1 = *nvic_iser1 | (1 << 5); // IRQ37 = USART1 (37 - 32 = bit 5)
 }
 
-fn enable_eth_irq() {
-    let nvic_iser1: *io u32 = 0xE000E104; // NVIC_ISER1, IRQ32-63
+fn enable_eth_irq() !{unsafe} {
+    let nvic_iser1: *io u32 = unsafe { 0xE000E104 as *io u32 }; // NVIC_ISER1, IRQ32-63
     *nvic_iser1 = *nvic_iser1 | (1 << 29); // IRQ61 = ETH
 }
 
@@ -20,7 +20,7 @@ fn irq_uart_rx_setup() {
     enable_usart1_irq();
 }
 
-fn irq_uart_rx_unmask() {
-    let usart1_cr1: *io u32 = 0x40011000;
+fn irq_uart_rx_unmask() !{unsafe} {
+    let usart1_cr1: *io u32 = unsafe { 0x40011000 as *io u32 };
     *usart1_cr1 = *usart1_cr1 | (1 << 5); // RXNEIE
 }

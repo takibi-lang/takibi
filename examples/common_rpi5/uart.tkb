@@ -61,12 +61,12 @@
 // enumeration (link training, root-bridge forwarding, BAR assignment),
 // now implemented in examples/common_rpi5/pcie.tkb.
 
-let mut uart_rx_handler: fn !{}() -> void;
+let mut uart_rx_handler: fn !{unsafe}() -> void;
 
-fn uart_putc(c: u8) {
-    let fr: *io u32 = 0x1F00030018; // UART0_FR (RP1 rp1_uart0, base 0x1F00030000 + 0x018)
+fn uart_putc(c: u8) !{unsafe} {
+    let fr: *io u32 = unsafe { 0x1F00030018 as *io u32 }; // UART0_FR (RP1 rp1_uart0, base 0x1F00030000 + 0x018)
     while ((*fr & (1 << 5)) != 0) { } // wait while TXFF (TX FIFO full)
-    let dr: *io u8 = 0x1F00030000; // UART0_DR
+    let dr: *io u8 = unsafe { 0x1F00030000 as *io u8 }; // UART0_DR
     *dr = c;
 }
 
@@ -77,21 +77,21 @@ fn uart_puts(s: *u8) {
     }
 }
 
-fn uart_rx_discard() !{} {
-    let dr: *io u8 = 0x1F00030000;
+fn uart_rx_discard() !{unsafe} {
+    let dr: *io u8 = unsafe { 0x1F00030000 as *io u8 };
     let discarded: u8 = *dr;
 }
 
 // Direct, non-polling receive for an interrupt handler that already knows
 // RX data is present. Reading DR advances the PL011 FIFO and deasserts its
 // level condition once the FIFO drops below the configured threshold.
-fn uart_isr_getc() -> u8 {
-    let dr: *io u8 = 0x1F00030000;
+fn uart_isr_getc() -> u8 !{unsafe} {
+    let dr: *io u8 = unsafe { 0x1F00030000 as *io u8 };
     return *dr;
 }
 
-fn uart_rx_ready() -> bool {
-    let fr: *io u32 = 0x1F00030018;
+fn uart_rx_ready() -> bool !{unsafe} {
+    let fr: *io u32 = unsafe { 0x1F00030018 as *io u32 };
     return (*fr & (1 << 4)) == 0; // RXFE clear = data available
 }
 
@@ -105,24 +105,24 @@ fn uart_tx_isr() {
 // Called by rpi5_irq_dispatch after GICC_IAR identifies the UART0 MSI-X
 // vector. The controller-level RP1 IACK and GICC EOIR happen in intc.tkb
 // after this source-level acknowledgement is complete.
-fn uart_irq_handler() !{interrupt} {
+fn uart_irq_handler() !{interrupt, unsafe} {
     if (uart_rx_ready()) {
         uart_rx_handler();
     }
     // Receive-timeout is latched separately from the FIFO level and must be
     // cleared explicitly after servicing a short (e.g. one-byte) burst.
-    let uart_icr: *io u32 = 0x1F00030044;
+    let uart_icr: *io u32 = unsafe { 0x1F00030044 as *io u32 };
     *uart_icr = 1 << 6; // RTIC
 }
 
-fn uart_init() {
-    let uart_cr: *io u32 = 0x1F00030030;
-    let uart_ibrd: *io u32 = 0x1F00030024;
-    let uart_fbrd: *io u32 = 0x1F00030028;
-    let uart_lcrh: *io u32 = 0x1F0003002C;
-    let uart_imsc: *io u32 = 0x1F00030038;
-    let uart_icr: *io u32 = 0x1F00030044;
-    let uart_ifls: *io u32 = 0x1F00030034;
+fn uart_init() !{unsafe} {
+    let uart_cr: *io u32 = unsafe { 0x1F00030030 as *io u32 };
+    let uart_ibrd: *io u32 = unsafe { 0x1F00030024 as *io u32 };
+    let uart_fbrd: *io u32 = unsafe { 0x1F00030028 as *io u32 };
+    let uart_lcrh: *io u32 = unsafe { 0x1F0003002C as *io u32 };
+    let uart_imsc: *io u32 = unsafe { 0x1F00030038 as *io u32 };
+    let uart_icr: *io u32 = unsafe { 0x1F00030044 as *io u32 };
+    let uart_ifls: *io u32 = unsafe { 0x1F00030034 as *io u32 };
 
     uart_rx_handler = uart_rx_discard;
     *uart_cr = 0; // disable UART before reconfiguring it
@@ -139,8 +139,8 @@ fn uart_init() {
 
     // Peripheral state survives SWD re-injection. Drain stale input before
     // enabling RX so the first delivered byte always belongs to this run.
-    let fr_drain: *io u32 = 0x1F00030018;
-    let dr_drain: *io u8 = 0x1F00030000;
+    let fr_drain: *io u32 = unsafe { 0x1F00030018 as *io u32 };
+    let dr_drain: *io u8 = unsafe { 0x1F00030000 as *io u8 };
     while ((*fr_drain & (1 << 4)) == 0) {
         let discarded: u8 = *dr_drain;
     }

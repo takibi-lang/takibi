@@ -14,14 +14,14 @@
 // BCD bytes gives wrong answers whenever the "units" nibble rolls over
 // (0x09 -> 0x10 is a raw jump of 7, not 1), not just at 60 seconds.
 
-fn rtc_init() {
-    let rcc_apb1enr: *io u32 = 0x40023840;
+fn rtc_init() !{unsafe} {
+    let rcc_apb1enr: *io u32 = unsafe { 0x40023840 as *io u32 };
     *rcc_apb1enr = *rcc_apb1enr | (1 << 28); // PWREN
 
-    let pwr_cr1: *io u32 = 0x40007000;
+    let pwr_cr1: *io u32 = unsafe { 0x40007000 as *io u32 };
     *pwr_cr1 = *pwr_cr1 | (1 << 8); // DBP: unlock backup domain writes
 
-    let rcc_csr: *io u32 = 0x40023874;
+    let rcc_csr: *io u32 = unsafe { 0x40023874 as *io u32 };
     *rcc_csr = *rcc_csr | 1; // LSION
     while ((*rcc_csr & (1 << 1)) == 0) {} // wait LSIRDY
 
@@ -29,21 +29,21 @@ fn rtc_init() {
     // so this is only ever really written once across repeated test runs
     // -- harmless to redo every boot, the hardware ignores RTCSEL writes
     // once already selected.
-    let rcc_bdcr: *io u32 = 0x40023870;
+    let rcc_bdcr: *io u32 = unsafe { 0x40023870 as *io u32 };
     *rcc_bdcr = (*rcc_bdcr & ~(3 << 8)) | (2 << 8); // RTCSEL = LSI (0b10)
     *rcc_bdcr = *rcc_bdcr | (1 << 15);              // RTCEN
 
     // RTC_WPR's unlocked state does NOT persist across reset, so this
     // must run every boot even though RTCEN above usually doesn't need to.
-    let rtc_wpr: *io u32 = 0x40002824;
+    let rtc_wpr: *io u32 = unsafe { 0x40002824 as *io u32 };
     *rtc_wpr = 0xCA;
     *rtc_wpr = 0x53;
 
-    let rtc_isr: *io u32 = 0x4000280C;
+    let rtc_isr: *io u32 = unsafe { 0x4000280C as *io u32 };
     *rtc_isr = *rtc_isr | (1 << 7);       // INIT: enter init mode
     while ((*rtc_isr & (1 << 6)) == 0) {} // wait INITF
 
-    let rtc_prer: *io u32 = 0x40002810;
+    let rtc_prer: *io u32 = unsafe { 0x40002810 as *io u32 };
     *rtc_prer = (127 << 16) | 255; // PREDIV_A=127, PREDIV_S=255
 
     *rtc_isr = *rtc_isr & ~(1 << 7); // exit init mode; calendar resumes
@@ -52,14 +52,14 @@ fn rtc_init() {
     while ((*rtc_isr & (1 << 5)) == 0) {} // wait RSF (shadow regs synced)
 }
 
-fn rtc_is_running() -> bool {
-    let rcc_bdcr: *io u32 = 0x40023870;
+fn rtc_is_running() -> bool !{unsafe} {
+    let rcc_bdcr: *io u32 = unsafe { 0x40023870 as *io u32 };
     return (*rcc_bdcr & (1 << 15)) != 0; // RTCEN
 }
 
-fn rtc_read_seconds() -> i32 {
-    let rtc_tr: *io u32 = 0x40002800;
-    let rtc_dr: *io u32 = 0x40002804;
+fn rtc_read_seconds() -> i32 !{unsafe} {
+    let rtc_tr: *io u32 = unsafe { 0x40002800 as *io u32 };
+    let rtc_dr: *io u32 = unsafe { 0x40002804 as *io u32 };
     let v: u32 = *rtc_tr & 0x7F; // ST (bits 6:4) + SU (bits 3:0), raw BCD
     let unused: u32 = *rtc_dr;   // must read DR after TR to unfreeze the
                                  // calendar shadow registers (RM0385)

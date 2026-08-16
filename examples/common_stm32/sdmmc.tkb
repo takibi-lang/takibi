@@ -118,33 +118,33 @@ use "examples/common_stm32/eth_sdmmc_regs.tkb";
 // eth_sdmmc_regs.tkb's `use` above (GitHub issue #97 follow-up -- shared
 // with examples/common_stm32/eth.tkb).
 // RCC_DCKCFGR2 is unique to this file (eth.tkb has no need for it).
-let RCC_DCKCFGR2: *io u32 = 0x40023890;
+let RCC_DCKCFGR2: *io u32 = unsafe { 0x40023890 as *io u32 };
 
 // -- GPIO (MODER/OSPEEDR/PUPDR/AFRL/AFRH), same read-modify-write idiom as
 // examples/common_stm32/eth.tkb -- PC8..PC12 (D0..D3, CLK) and PD2 (CMD),
 // all AF12. Card detect (PC13) is not used by this driver (no hot-swap
 // support; a card is assumed present at disk_initialize() time). ---------
-let GPIOC_PUPDR:   *io u32 = 0x4002080C;
-let GPIOC_AFRH:    *io u32 = 0x40020824;
+let GPIOC_PUPDR:   *io u32 = unsafe { 0x4002080C as *io u32 };
+let GPIOC_AFRH:    *io u32 = unsafe { 0x40020824 as *io u32 };
 
-let GPIOD_MODER:   *io u32 = 0x40020C00;
-let GPIOD_OSPEEDR: *io u32 = 0x40020C08;
-let GPIOD_PUPDR:   *io u32 = 0x40020C0C;
-let GPIOD_AFRL:    *io u32 = 0x40020C20;
+let GPIOD_MODER:   *io u32 = unsafe { 0x40020C00 as *io u32 };
+let GPIOD_OSPEEDR: *io u32 = unsafe { 0x40020C08 as *io u32 };
+let GPIOD_PUPDR:   *io u32 = unsafe { 0x40020C0C as *io u32 };
+let GPIOD_AFRL:    *io u32 = unsafe { 0x40020C20 as *io u32 };
 
 // -- SDMMC1 (SDMMC1_BASE = APB2PERIPH_BASE + 0x2C00 = 0x40012C00) ------------
-let SDMMC_POWER:   *io u32 = 0x40012C00;
-let SDMMC_CLKCR:   *io u32 = 0x40012C04;
-let SDMMC_ARG:     *io u32 = 0x40012C08;
-let SDMMC_CMD:     *io u32 = 0x40012C0C;
-let SDMMC_RESPCMD: *io u32 = 0x40012C10;
-let SDMMC_RESP1:   *io u32 = 0x40012C14;
-let SDMMC_DTIMER:  *io u32 = 0x40012C24;
-let SDMMC_DLEN:    *io u32 = 0x40012C28;
-let SDMMC_DCTRL:   *io u32 = 0x40012C2C;
-let SDMMC_STA:     *io u32 = 0x40012C34;
-let SDMMC_ICR:     *io u32 = 0x40012C38;
-let SDMMC_MASK:    *io u32 = 0x40012C3C;
+let SDMMC_POWER:   *io u32 = unsafe { 0x40012C00 as *io u32 };
+let SDMMC_CLKCR:   *io u32 = unsafe { 0x40012C04 as *io u32 };
+let SDMMC_ARG:     *io u32 = unsafe { 0x40012C08 as *io u32 };
+let SDMMC_CMD:     *io u32 = unsafe { 0x40012C0C as *io u32 };
+let SDMMC_RESPCMD: *io u32 = unsafe { 0x40012C10 as *io u32 };
+let SDMMC_RESP1:   *io u32 = unsafe { 0x40012C14 as *io u32 };
+let SDMMC_DTIMER:  *io u32 = unsafe { 0x40012C24 as *io u32 };
+let SDMMC_DLEN:    *io u32 = unsafe { 0x40012C28 as *io u32 };
+let SDMMC_DCTRL:   *io u32 = unsafe { 0x40012C2C as *io u32 };
+let SDMMC_STA:     *io u32 = unsafe { 0x40012C34 as *io u32 };
+let SDMMC_ICR:     *io u32 = unsafe { 0x40012C38 as *io u32 };
+let SDMMC_MASK:    *io u32 = unsafe { 0x40012C3C as *io u32 };
 let SDMMC_FIFO_ADDR: u32 = 0x40012C80; // plain u32, not *io -- only ever used as DMA2's peripheral address
 
 // -- DMA2 Stream3, Channel4 (SDMMC1's DMA request mapping on STM32F7,
@@ -156,12 +156,12 @@ let SDMMC_FIFO_ADDR: u32 = 0x40012C80; // plain u32, not *io -- only ever used a
 // streams 0-3 live in the "Low" registers (LISR/LIFCR), not "High"
 // (streams 4-7) -- stream3's own 6 flag bits (FEIF3/DMEIF3/TEIF3/HTIF3/TCIF3,
 // bit 23 reserved) sit at bits 22-27 of LISR/LIFCR.
-let DMA2_LIFCR:  *io u32 = 0x40026408;
-let DMA2_S3CR:   *io u32 = 0x40026458;
-let DMA2_S3NDTR: *io u32 = 0x4002645C;
-let DMA2_S3PAR:  *io u32 = 0x40026460;
-let DMA2_S3M0AR: *io u32 = 0x40026464;
-let DMA2_S3FCR:  *io u32 = 0x4002646C;
+let DMA2_LIFCR:  *io u32 = unsafe { 0x40026408 as *io u32 };
+let DMA2_S3CR:   *io u32 = unsafe { 0x40026458 as *io u32 };
+let DMA2_S3NDTR: *io u32 = unsafe { 0x4002645C as *io u32 };
+let DMA2_S3PAR:  *io u32 = unsafe { 0x40026460 as *io u32 };
+let DMA2_S3M0AR: *io u32 = unsafe { 0x40026464 as *io u32 };
+let DMA2_S3FCR:  *io u32 = unsafe { 0x4002646C as *io u32 };
 
 // STA flags this driver checks/clears (see header comment for provenance).
 // Spelled as literal hex values, matching each flag's Msk from the CMSIS
@@ -194,8 +194,8 @@ let mut card_rca: u32;  // relative card address, captured once at CMD3
 
 let mut sdmmc1_irq_flag: io u32; // set by SDMMC1_IRQHandler, cleared by the waiter
 
-fn enable_sdmmc1_irq() {
-    let nvic_iser1: *io u32 = 0xE000E104; // NVIC_ISER1, IRQ32-63
+fn enable_sdmmc1_irq() !{unsafe} {
+    let nvic_iser1: *io u32 = unsafe { 0xE000E104 as *io u32 }; // NVIC_ISER1, IRQ32-63
     *nvic_iser1 = *nvic_iser1 | (1 << 17); // IRQ49 = SDMMC1 (49 - 32 = bit 17)
 }
 

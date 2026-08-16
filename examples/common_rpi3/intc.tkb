@@ -34,23 +34,23 @@
 // QEMU's software-dispatch-by-ID one. See examples/common_rpi3/
 // AGENTS.md for the full register research this file is based on.
 
-fn irq_uart_rx_setup() {
+fn irq_uart_rx_setup() !{unsafe} {
     // Route the GPU IRQ (every peripheral interrupt, UART0 included) to
     // core 0. Written unconditionally, not assumed already 0 (the
     // architectural reset value) -- see startup.S's comment on why
     // system-register-shaped state here is inherited from a previous
     // occupant of this core, not a genuine reset, under this project's
     // JTAG re-injection workflow.
-    let gpu_int_route: *io u32 = 0x4000000C;
+    let gpu_int_route: *io u32 = unsafe { 0x4000000C as *io u32 };
     *gpu_int_route = 0; // 0b00: GPU IRQ -> core 0's IRQ input
 
     // VC interrupt controller: enable UART0's line (global IRQ 57).
-    let enable_irqs_2: *io u32 = 0x3F00B214;
+    let enable_irqs_2: *io u32 = unsafe { 0x3F00B214 as *io u32 };
     *enable_irqs_2 = 1 << 25;
 }
 
-fn irq_uart_rx_unmask() {
-    let uart0_imsc: *io u32 = 0x3F201038; // UART0_IMSC
+fn irq_uart_rx_unmask() !{unsafe} {
+    let uart0_imsc: *io u32 = unsafe { 0x3F201038 as *io u32 }; // UART0_IMSC
     // RXIM (bit 4): fires once the RX FIFO trigger level is reached
     // (examples/common_rpi3/uart.tkb's own UART0_IFLS write sets that to
     // its finest granularity, 2 bytes). RTIM (bit 6, Receive Timeout
@@ -68,12 +68,12 @@ fn irq_uart_rx_unmask() {
 // interrupt controller") and, if set, the VC controller's own
 // pending_2 bank (bit 25 = UART0) -- called from startup.S's IRQ entry.
 // Returns true if the fired interrupt was UART0's.
-fn intc_uart_irq_pending() -> bool {
-    let core0_irq_source: *io u32 = 0x40000060;
+fn intc_uart_irq_pending() -> bool !{unsafe} {
+    let core0_irq_source: *io u32 = unsafe { 0x40000060 as *io u32 };
     if ((*core0_irq_source & (1 << 8)) == 0) {
         return false;
     }
-    let pending_2: *io u32 = 0x3F00B208;
+    let pending_2: *io u32 = unsafe { 0x3F00B208 as *io u32 };
     return (*pending_2 & (1 << 25)) != 0;
 }
 

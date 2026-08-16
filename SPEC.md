@@ -1899,7 +1899,10 @@ project's usual practice.
   optimize/reorder/eliminate it).
 - Any direct access to a variable declared `io T` (e.g. `let flag: io
   i32;`) is volatile.
-- `&io_var` automatically produces `*io T` -- no `as *io T` cast needed.
+- `&io_var` automatically produces `*io T` -- no `as *io T` cast needed,
+  and no `unsafe` either: taking the address of a real, already-existing
+  `io`-qualified variable is not the unprovable "this integer denotes a
+  valid register" assertion the `unsafe { ... }` gate below is about.
 - `io` is stripped on dereference: `*p` where `p: *io i32` has result
   type `i32` (not `io i32`); volatility is confined to the load
   instruction itself.
@@ -1910,7 +1913,10 @@ project's usual practice.
   ISR write.
 - `p.field` where `p: *io Struct` is a volatile field load.
 - An integer literal can be assigned directly to an MMIO pointer type
-  (`let dr: *io u8 = 0x09000000;`) -- coerces via `inttoptr`.
+  (`let dr: *io u8 = unsafe { 0x09000000 };`) -- coerces via `inttoptr`.
+  As of GitHub issue #316, this requires `unsafe` like any other `*io`
+  construction (see "unsafe { ... }" below) -- there is no bare-literal
+  exemption for `*io` the way there is for affine/linear handle casts.
 
 **DMA / synchronization builtins** (no user-callable `extern fn`
 needed): `dma_publish()`, `dma_consume()`, `device_fence()` (ARM/AArch64
@@ -2288,7 +2294,7 @@ all, regardless of type.
 cannot itself prove, and produces **no trap** -- it is a checkless
 assertion the compiler is told to trust, distinct from a runtime check
 (a check the compiler still doubts, which *does* generate a trap).
-Currently gates exactly four things:
+Currently gates exactly five things:
 
 - Slice construction from a raw pointer, `unsafe { p[lo..<hi] }` -- the
   length assertion at a driver boundary.
@@ -2317,10 +2323,25 @@ Currently gates exactly four things:
   silently -- narrowed to a warning, not a hard requirement, because a
   broader hard-`unsafe` version was measured against this codebase's real
   MMIO/DMA-ring code and found to demand `unsafe` on roughly 1146 sites,
-  which would have made `unsafe` too common to carry any audit signal
-  (see issue #316, still open, for the `*io` scoping decision blocking
-  promoting this from warning to error). A cast to `*io T` specifically
-  stays fully silent either way, pending that same decision.
+  which would have made `unsafe` too common to carry any audit signal.
+  `*io T` targets are excluded from this warning population entirely --
+  see the next bullet, which gates them as a hard error instead.
+- Constructing a `*io T` pointer from anything other than an
+  already-`*io`-typed value (GitHub issue #316): both an explicit
+  `x as *io T` cast and the direct-literal sugar (`let dr: *io u8 =
+  0x09000000;`, "MMIO / Volatile" below) require `unsafe`. Unlike the
+  affine/linear case just above, there is **no literal exemption** here
+  -- a hardcoded MMIO address is exactly as unprovable to the compiler as
+  a runtime-discovered one (a PCI BAR scan, a future dtb/ACPI table
+  walk); the difference is human reviewability at the call site, which is
+  what marking it `unsafe` is *for*, not a reason to exempt it from
+  marking. Ordinary pointer arithmetic on an ALREADY `*io`-typed value
+  (`io_ptr + 4`) stays unsafe-free, matching this language's general
+  stance that `unsafe` does not extend to plain pointer arithmetic --
+  only the moment a `*io` pointer is first minted from a non-`*io` source
+  is gated. This is a narrower, deliberately separate decision from the
+  #218 warning above: it does not revisit the "any pointer" rejection,
+  and ordinary non-affine, non-`io` pointer casts remain warning-only.
 - Casting a slice (`[]T` or `[T; N..]`) to `*U` where `U` is neither `u8`
   nor the slice's own element type `T` (GitHub issue #218 follow-up,
   slice/struct-overlay variant) -- see "Slices" below. `*u8` and

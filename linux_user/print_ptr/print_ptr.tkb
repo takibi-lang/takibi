@@ -3,10 +3,10 @@
 // to i32 for uart_print_hex (which prints 32 bits).
 // On QEMU all addresses are below 4 GB so no bits are lost.
 
-fn test_print_ptr() {
+fn test_print_ptr() !{unsafe} {
     uart_puts("=== print_ptr test ===\r\n");
 
-    let uart: *io u8 = 0x09000000;
+    let uart: *io u8 = unsafe { 0x09000000 as *io u8 };
     uart_puts("uart: ");
     uart_print_hex((uart as usize) as i32);
     uart_puts("\r\n");

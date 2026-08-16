@@ -103,16 +103,16 @@ fn rpi3_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
     return frame_sp;
 }
 
-fn vm_task_a() {
-    let shared_va: *io u8 = dynamic_va_base() as *io u8;
+fn vm_task_a() !{unsafe} {
+    let shared_va: *io u8 = unsafe { dynamic_va_base() as *io u8 };
     let done: *io i32 = &vm_sched.done;
     while (*done == 0) {
         task_a_seen = *shared_va;
     }
 }
 
-fn vm_task_b() {
-    let shared_va: *io u8 = dynamic_va_base() as *io u8;
+fn vm_task_b() !{unsafe} {
+    let shared_va: *io u8 = unsafe { dynamic_va_base() as *io u8 };
     let done: *io i32 = &vm_sched.done;
     while (*done == 0) {
         task_b_seen = *shared_va;

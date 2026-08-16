@@ -228,7 +228,7 @@ let mut usb_msc_bulk_out_burst: u32 = 0;
 // Advances ERDP past everything consumed, which the controller requires
 // to keep delivering events. Returns the completion code (DWORD2 bits
 // 31:24), or 0 if no matching event turned up.
-fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 {
+fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 !{unsafe} {
     let evt_ring_base: usize = (usb_smoke_evt_ring as *u8) as usize;
     let evt_ring_dma: usize = evt_ring_base + RP1_DMA_PCI_OFFSET;
     let ir0_base: usize = 0x1F00200000 + 0x460 + 0x20;
@@ -263,9 +263,9 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 {
             usb_xhci_evt_idx = 0;
             usb_xhci_evt_cycle = 1 - usb_xhci_evt_cycle;
         }
-        let erdp_lo_ptr: *io u32 = (ir0_base + 0x18) as *io u32;
+        let erdp_lo_ptr: *io u32 = unsafe { (ir0_base + 0x18) as *io u32 };
         *erdp_lo_ptr = ((evt_ring_dma + usb_xhci_evt_idx * 16) & 0xFFFFFFFF) as u32;
-        let erdp_hi_ptr: *io u32 = (ir0_base + 0x1C) as *io u32;
+        let erdp_hi_ptr: *io u32 = unsafe { (ir0_base + 0x1C) as *io u32 };
         *erdp_hi_ptr = (((evt_ring_dma + usb_xhci_evt_idx * 16) >> 32) & 0xFFFFFFFF) as u32;
 
         if (trb_type == want_type) {
@@ -289,7 +289,7 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 {
 // usb_xhci_last_residual.
 fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
                  w_index: u32, w_length: u32, buf_dma: usize,
-                 dir_in: bool) -> u32 {
+                 dir_in: bool) -> u32 !{unsafe} {
     let ep0_ring_base: usize = (usb_smoke_ep0_ring as *u8) as usize;
     let has_data: bool = w_length > 0;
 
@@ -361,7 +361,7 @@ fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
 
     // Doorbell array is indexed by slot ID, 4 bytes per entry (slot 0
     // being the Command doorbell). DB Target = DCI 1 for EP0.
-    let db_ptr: *io u32 = (0x1F00200500 + usb_xhci_slot_id * 4) as *io u32;
+    let db_ptr: *io u32 = unsafe { (0x1F00200500 + usb_xhci_slot_id * 4) as *io u32 };
     *db_ptr = 1;
 
     // Transfer Event is TRB Type 32.
@@ -394,7 +394,7 @@ let mut msc_tag: u32 = 0;
 // bytes than asked still raises the event rather than leaving the
 // transfer outstanding. Returns the completion code -- 1 is Success and
 // 13 is Short Packet, both of which mean the data arrived.
-fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 {
+fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 !{unsafe} {
     let mut ring_base: usize = (usb_smoke_bulk_out_ring as *u8) as usize;
     let mut enq: usize = usb_bulk_out_enq;
     let mut cyc: u32 = usb_bulk_out_cycle;
@@ -437,7 +437,7 @@ fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 {
         usb_bulk_out_cycle = cyc;
     }
 
-    let db_ptr: *io u32 = (0x1F00200500 + usb_xhci_slot_id * 4) as *io u32;
+    let db_ptr: *io u32 = unsafe { (0x1F00200500 + usb_xhci_slot_id * 4) as *io u32 };
     *db_ptr = dci as u32;
 
     return usb_await_event(32, 5000);
@@ -543,7 +543,7 @@ fn msc_run_command(data_len: u32, dir_in: bool) -> u32 {
     return 0;
 }
 
-fn app_main() {
+fn app_main() !{unsafe} {
     uart_puts("rp1_usb_smoke\n");
 
     usb_smoke_checkpoint = 1;
@@ -551,23 +551,23 @@ fn app_main() {
     // HCIVERSION (bits 31:16, BCD -- e.g. 0x0110 for xHCI v1.10). Read as
     // one 32-bit word (no *io u16 precedent exists yet in this repo) --
     // the standard way real XHCI drivers read this pair together.
-    let host0_cap0_ptr: *io u32 = 0x1F00200000;
+    let host0_cap0_ptr: *io u32 = unsafe { 0x1F00200000 as *io u32 };
     usb_smoke_host0_cap0 = *host0_cap0_ptr;
     usb_smoke_checkpoint = 2;
 
-    let host0_hcsparams1_ptr: *io u32 = 0x1F00200004;
+    let host0_hcsparams1_ptr: *io u32 = unsafe { 0x1F00200004 as *io u32 };
     usb_smoke_host0_hcsparams1 = *host0_hcsparams1_ptr;
     usb_smoke_checkpoint = 3;
 
-    let host0_hcsparams2_ptr: *io u32 = 0x1F00200008;
+    let host0_hcsparams2_ptr: *io u32 = unsafe { 0x1F00200008 as *io u32 };
     usb_smoke_host0_hcsparams2 = *host0_hcsparams2_ptr;
     usb_smoke_checkpoint = 4;
 
-    let host0_hcsparams3_ptr: *io u32 = 0x1F0020000C;
+    let host0_hcsparams3_ptr: *io u32 = unsafe { 0x1F0020000C as *io u32 };
     usb_smoke_host0_hcsparams3 = *host0_hcsparams3_ptr;
     usb_smoke_checkpoint = 5;
 
-    let host0_hccparams1_ptr: *io u32 = 0x1F00200010;
+    let host0_hccparams1_ptr: *io u32 = unsafe { 0x1F00200010 as *io u32 };
     usb_smoke_host0_hccparams1 = *host0_hccparams1_ptr;
     usb_smoke_checkpoint = 6;
 
@@ -584,11 +584,11 @@ fn app_main() {
     uart_puts("\r\n");
 
     usb_smoke_checkpoint = 7;
-    let host1_cap0_ptr: *io u32 = 0x1F00300000;
+    let host1_cap0_ptr: *io u32 = unsafe { 0x1F00300000 as *io u32 };
     usb_smoke_host1_cap0 = *host1_cap0_ptr;
     usb_smoke_checkpoint = 8;
 
-    let host1_hcsparams1_ptr: *io u32 = 0x1F00300004;
+    let host1_hcsparams1_ptr: *io u32 = unsafe { 0x1F00300004 as *io u32 };
     usb_smoke_host1_hcsparams1 = *host1_hcsparams1_ptr;
     usb_smoke_checkpoint = 9;
 
@@ -601,19 +601,19 @@ fn app_main() {
     // Step 2: standard XHCI Operational registers, Capability base +
     // CAPLENGTH (0x20, confirmed identical for both controllers above).
     usb_smoke_checkpoint = 10;
-    let host0_usbsts_ptr: *io u32 = 0x1F00200024;
+    let host0_usbsts_ptr: *io u32 = unsafe { 0x1F00200024 as *io u32 };
     usb_smoke_host0_usbsts = *host0_usbsts_ptr;
     usb_smoke_checkpoint = 11;
 
-    let host0_portsc1_ptr: *io u32 = 0x1F00200420;
+    let host0_portsc1_ptr: *io u32 = unsafe { 0x1F00200420 as *io u32 };
     usb_smoke_host0_portsc1 = *host0_portsc1_ptr;
     usb_smoke_checkpoint = 12;
 
-    let host0_portsc2_ptr: *io u32 = 0x1F00200430;
+    let host0_portsc2_ptr: *io u32 = unsafe { 0x1F00200430 as *io u32 };
     usb_smoke_host0_portsc2 = *host0_portsc2_ptr;
     usb_smoke_checkpoint = 13;
 
-    let host0_portsc3_ptr: *io u32 = 0x1F00200440;
+    let host0_portsc3_ptr: *io u32 = unsafe { 0x1F00200440 as *io u32 };
     usb_smoke_host0_portsc3 = *host0_portsc3_ptr;
     usb_smoke_checkpoint = 14;
 
@@ -630,19 +630,19 @@ fn app_main() {
     uart_puts("\r\n");
 
     usb_smoke_checkpoint = 15;
-    let host1_usbsts_ptr: *io u32 = 0x1F00300024;
+    let host1_usbsts_ptr: *io u32 = unsafe { 0x1F00300024 as *io u32 };
     usb_smoke_host1_usbsts = *host1_usbsts_ptr;
     usb_smoke_checkpoint = 16;
 
-    let host1_portsc1_ptr: *io u32 = 0x1F00300420;
+    let host1_portsc1_ptr: *io u32 = unsafe { 0x1F00300420 as *io u32 };
     usb_smoke_host1_portsc1 = *host1_portsc1_ptr;
     usb_smoke_checkpoint = 17;
 
-    let host1_portsc2_ptr: *io u32 = 0x1F00300430;
+    let host1_portsc2_ptr: *io u32 = unsafe { 0x1F00300430 as *io u32 };
     usb_smoke_host1_portsc2 = *host1_portsc2_ptr;
     usb_smoke_checkpoint = 18;
 
-    let host1_portsc3_ptr: *io u32 = 0x1F00300440;
+    let host1_portsc3_ptr: *io u32 = unsafe { 0x1F00300440 as *io u32 };
     usb_smoke_host1_portsc3 = *host1_portsc3_ptr;
     usb_smoke_checkpoint = 19;
 
@@ -675,7 +675,7 @@ fn app_main() {
         for i: usize in 0..<8 {
             usb_smoke_ecp_offset = (ecp_addr - 0x1F00200000) as u32;
             usb_smoke_checkpoint = 22;
-            let ecp_ptr: *io u32 = ecp_addr as *io u32;
+            let ecp_ptr: *io u32 = unsafe { ecp_addr as *io u32 };
             usb_smoke_ecp_dword = *ecp_ptr;
             usb_smoke_checkpoint = 23;
 
@@ -712,7 +712,7 @@ fn app_main() {
                 // (ASCII "USB "), DWORD2 bits[7:0]=Compatible Port
                 // Offset (1-based), bits[15:8]=Compatible Port Count.
                 // Major revision is this entry's own DWORD0 bits[31:24].
-                let dw2_ptr: *io u32 = (ecp_addr + 8) as *io u32;
+                let dw2_ptr: *io u32 = unsafe { (ecp_addr + 8) as *io u32 };
                 let dw2: u32 = *dw2_ptr;
                 let port_offset: u32 = dw2 & 0xFF;
                 let port_count: u32 = (dw2 >> 8) & 0xFF;
@@ -739,10 +739,10 @@ fn app_main() {
     // the Command doorbell and configure the Event Ring's interrupter
     // registers, before any real Enable Slot command can be issued.
     usb_smoke_checkpoint = 31;
-    let host0_dboff_ptr: *io u32 = 0x1F00200014;
+    let host0_dboff_ptr: *io u32 = unsafe { 0x1F00200014 as *io u32 };
     let host0_dboff: u32 = *host0_dboff_ptr;
     usb_smoke_checkpoint = 32;
-    let host0_rtsoff_ptr: *io u32 = 0x1F00200018;
+    let host0_rtsoff_ptr: *io u32 = unsafe { 0x1F00200018 as *io u32 };
     let host0_rtsoff: u32 = *host0_rtsoff_ptr;
     usb_smoke_checkpoint = 33;
 
@@ -773,7 +773,7 @@ fn app_main() {
     // yet touch DCBAAP/CRCR/CONFIG -- those are still a separate, later
     // step, only safe to attempt once this halt is confirmed.
     usb_smoke_checkpoint = 40;
-    let host0_usbcmd_ptr: *io u32 = 0x1F00200020;
+    let host0_usbcmd_ptr: *io u32 = unsafe { 0x1F00200020 as *io u32 };
     let usbcmd_before: u32 = *host0_usbcmd_ptr;
     uart_puts("usbhost0 USBCMD before halt: ");
     uart_print_hex(usbcmd_before as i32);
@@ -788,7 +788,7 @@ fn app_main() {
     let mut halt_polls: usize = 0;
     for i: usize in 0..<100 {
         usb_smoke_checkpoint = 43;
-        let usbsts_poll_ptr: *io u32 = 0x1F00200024;
+        let usbsts_poll_ptr: *io u32 = unsafe { 0x1F00200024 as *io u32 };
         let usbsts_poll: u32 = *usbsts_poll_ptr;
         halt_polls = i + 1;
         if ((usbsts_poll & 1) == 1) {
@@ -799,9 +799,9 @@ fn app_main() {
     }
     usb_smoke_checkpoint = 44;
 
-    let usbcmd_after_ptr: *io u32 = 0x1F00200020;
+    let usbcmd_after_ptr: *io u32 = unsafe { 0x1F00200020 as *io u32 };
     let usbcmd_after: u32 = *usbcmd_after_ptr;
-    let usbsts_after_ptr: *io u32 = 0x1F00200024;
+    let usbsts_after_ptr: *io u32 = unsafe { 0x1F00200024 as *io u32 };
     let usbsts_after: u32 = *usbsts_after_ptr;
     uart_puts("usbhost0 USBCMD after write: ");
     uart_print_hex(usbcmd_after as i32);
@@ -836,16 +836,16 @@ fn app_main() {
     let mut hcrst_confirmed: bool = false;
     if (halt_confirmed) {
         usb_smoke_checkpoint = 45;
-        let usbcmd_hcrst_ptr: *io u32 = 0x1F00200020 as *io u32;
+        let usbcmd_hcrst_ptr: *io u32 = unsafe { 0x1F00200020 as *io u32 };
         let usbcmd_before_hcrst: u32 = *usbcmd_hcrst_ptr;
         *usbcmd_hcrst_ptr = usbcmd_before_hcrst | 2;
 
         let mut hcrst_polls: usize = 0;
         for i: usize in 0..<1000 {
             usb_smoke_checkpoint = 46;
-            let usbcmd_poll_ptr: *io u32 = 0x1F00200020 as *io u32;
+            let usbcmd_poll_ptr: *io u32 = unsafe { 0x1F00200020 as *io u32 };
             let usbcmd_poll: u32 = *usbcmd_poll_ptr;
-            let usbsts_poll2_ptr: *io u32 = 0x1F00200024 as *io u32;
+            let usbsts_poll2_ptr: *io u32 = unsafe { 0x1F00200024 as *io u32 };
             let usbsts_poll2: u32 = *usbsts_poll2_ptr;
             hcrst_polls = i + 1;
             // HCRST self-clears (bit1) AND CNR (USBSTS bit11) must also
@@ -871,7 +871,7 @@ fn app_main() {
         // HCRST itself, the later fault has nothing to do with this
         // example's own Command/Event Ring setup at all.
         if (hcrst_confirmed) {
-            let usbsts_post_hcrst_ptr: *io u32 = 0x1F00200024 as *io u32;
+            let usbsts_post_hcrst_ptr: *io u32 = unsafe { 0x1F00200024 as *io u32 };
             let usbsts_post_hcrst: u32 = *usbsts_post_hcrst_ptr;
             uart_puts("USBSTS immediately after HCRST: ");
             uart_print_hex(usbsts_post_hcrst as i32);
@@ -914,10 +914,10 @@ fn app_main() {
         // (examples/common_rpi5/pcie.tkb), and the window itself maps
         // PCI 0x10_00000000 -> CPU 0, matching the device tree exactly.
         pcie2_dma_inbound_setup();
-        let rc_bar2_lo_diag_ptr: *io u32 = 0x1000124034 as *io u32;
-        let rc_bar2_hi_diag_ptr: *io u32 = 0x1000124038 as *io u32;
-        let ubus_bar2_lo_diag_ptr: *io u32 = 0x10001240B4 as *io u32;
-        let ubus_bar2_hi_diag_ptr: *io u32 = 0x10001240B8 as *io u32;
+        let rc_bar2_lo_diag_ptr: *io u32 = unsafe { 0x1000124034 as *io u32 };
+        let rc_bar2_hi_diag_ptr: *io u32 = unsafe { 0x1000124038 as *io u32 };
+        let ubus_bar2_lo_diag_ptr: *io u32 = unsafe { 0x10001240B4 as *io u32 };
+        let ubus_bar2_hi_diag_ptr: *io u32 = unsafe { 0x10001240B8 as *io u32 };
         uart_puts("RC_BAR2_LO: ");
         uart_print_hex((*rc_bar2_lo_diag_ptr) as i32);
         uart_puts(" RC_BAR2_HI: ");
@@ -1047,39 +1047,39 @@ fn app_main() {
         // interpretation that a later ERSTBA write never re-triggered.
         usb_smoke_checkpoint = 56;
         let ir0_base: usize = 0x1F00200000 + 0x460 + 0x20;
-        let erstsz_ptr: *io u32 = ir0_base as *io u32;
+        let erstsz_ptr: *io u32 = unsafe { ir0_base as *io u32 };
         *erstsz_ptr = 1;
         usb_smoke_checkpoint = 57;
-        let erstba_lo_ptr: *io u32 = (ir0_base + 0x10) as *io u32;
+        let erstba_lo_ptr: *io u32 = unsafe { (ir0_base + 0x10) as *io u32 };
         *erstba_lo_ptr = (erst_dma & 0xFFFFFFFF) as u32;
-        let erstba_hi_ptr: *io u32 = (ir0_base + 0x14) as *io u32;
+        let erstba_hi_ptr: *io u32 = unsafe { (ir0_base + 0x14) as *io u32 };
         *erstba_hi_ptr = ((erst_dma >> 32) & 0xFFFFFFFF) as u32;
         usb_smoke_checkpoint = 58;
-        let erdp_lo_ptr: *io u32 = (ir0_base + 0x18) as *io u32;
+        let erdp_lo_ptr: *io u32 = unsafe { (ir0_base + 0x18) as *io u32 };
         *erdp_lo_ptr = (evt_ring_dma & 0xFFFFFFFF) as u32;
-        let erdp_hi_ptr: *io u32 = (ir0_base + 0x1C) as *io u32;
+        let erdp_hi_ptr: *io u32 = unsafe { (ir0_base + 0x1C) as *io u32 };
         *erdp_hi_ptr = ((evt_ring_dma >> 32) & 0xFFFFFFFF) as u32;
 
         // DCBAAP (Operational+0x30).
         usb_smoke_checkpoint = 59;
-        let dcbaap_lo_ptr: *io u32 = 0x1F00200050 as *io u32;
+        let dcbaap_lo_ptr: *io u32 = unsafe { 0x1F00200050 as *io u32 };
         *dcbaap_lo_ptr = (dcbaa_dma & 0xFFFFFFFF) as u32;
-        let dcbaap_hi_ptr: *io u32 = 0x1F00200054 as *io u32;
+        let dcbaap_hi_ptr: *io u32 = unsafe { 0x1F00200054 as *io u32 };
         *dcbaap_hi_ptr = ((dcbaa_dma >> 32) & 0xFFFFFFFF) as u32;
 
         // CRCR (Operational+0x18): pointer | RCS=1 (bit0). CS/CA (bits
         // 2:1) left clear -- this is ring INITIALIZATION, not a stop/
         // abort request.
         usb_smoke_checkpoint = 60;
-        let crcr_lo_ptr: *io u32 = 0x1F00200038 as *io u32;
+        let crcr_lo_ptr: *io u32 = unsafe { 0x1F00200038 as *io u32 };
         *crcr_lo_ptr = ((cmd_ring_dma & 0xFFFFFFC0) | 1) as u32;
-        let crcr_hi_ptr: *io u32 = 0x1F0020003C as *io u32;
+        let crcr_hi_ptr: *io u32 = unsafe { 0x1F0020003C as *io u32 };
         *crcr_hi_ptr = ((cmd_ring_dma >> 32) & 0xFFFFFFFF) as u32;
 
         // CONFIG (Operational+0x38): MaxSlotsEn=1 -- this example only
         // ever enables one slot for the one flash drive on port 3.
         usb_smoke_checkpoint = 61;
-        let config_ptr: *io u32 = 0x1F00200058 as *io u32;
+        let config_ptr: *io u32 = unsafe { 0x1F00200058 as *io u32 };
         *config_ptr = 1;
 
         // Restart the controller (USBCMD.RS=1). Reads USBCMD fresh here
@@ -1088,7 +1088,7 @@ fn app_main() {
         // whatever bits happen to be there NOW is correct; the earlier
         // (pre-reset) INTE/HSEE snapshot is stale after a real reset.
         usb_smoke_checkpoint = 62;
-        let usbcmd_restart_ptr: *io u32 = 0x1F00200020 as *io u32;
+        let usbcmd_restart_ptr: *io u32 = unsafe { 0x1F00200020 as *io u32 };
         let usbcmd_fresh: u32 = *usbcmd_restart_ptr;
         let usbcmd_restart_val: u32 = usbcmd_fresh | 1;
         *usbcmd_restart_ptr = usbcmd_restart_val;
@@ -1097,7 +1097,7 @@ fn app_main() {
         let mut run_polls: usize = 0;
         for i: usize in 0..<100 {
             usb_smoke_checkpoint = 63;
-            let usbsts_run_ptr: *io u32 = 0x1F00200024 as *io u32;
+            let usbsts_run_ptr: *io u32 = unsafe { 0x1F00200024 as *io u32 };
             let usbsts_run: u32 = *usbsts_run_ptr;
             run_polls = i + 1;
             if ((usbsts_run & 1) == 0) {
@@ -1122,7 +1122,7 @@ fn app_main() {
         // DCBAAP/CRCR/CONFIG/restart), not from the doorbell ring or any
         // actual TRB fetch attempt.
         if (run_confirmed) {
-            let usbsts_pre_doorbell_ptr: *io u32 = 0x1F00200024 as *io u32;
+            let usbsts_pre_doorbell_ptr: *io u32 = unsafe { 0x1F00200024 as *io u32 };
             let usbsts_pre_doorbell: u32 = *usbsts_pre_doorbell_ptr;
             uart_puts("USBSTS before ringing doorbell: ");
             uart_print_hex(usbsts_pre_doorbell as i32);
@@ -1140,7 +1140,7 @@ fn app_main() {
             // -- writing 0 to its Target field enqueues/executes pending
             // Command Ring TRBs.
             usb_smoke_checkpoint = 64;
-            let doorbell0_ptr: *io u32 = 0x1F00200500 as *io u32;
+            let doorbell0_ptr: *io u32 = unsafe { 0x1F00200500 as *io u32 };
             *doorbell0_ptr = 0;
 
             // Wait for the Command Completion Event (TRB Type 33). The
@@ -1300,7 +1300,7 @@ fn app_main() {
                 // likewise write-only-meaningful and must come from the
                 // OR below, never from the read-back value.
                 usb_smoke_checkpoint = 79;
-                let portsc3_reset_ptr: *io u32 = 0x1F00200440 as *io u32;
+                let portsc3_reset_ptr: *io u32 = unsafe { 0x1F00200440 as *io u32 };
                 let portsc3_before_reset: u32 = *portsc3_reset_ptr;
                 *portsc3_reset_ptr = (portsc3_before_reset & 0xCE00FFE9) | (1 << 4);
 
@@ -1308,7 +1308,7 @@ fn app_main() {
                 let mut reset_polls: usize = 0;
                 for i: usize in 0..<500 {
                     usb_smoke_checkpoint = 80;
-                    let portsc3_poll_ptr: *io u32 = 0x1F00200440 as *io u32;
+                    let portsc3_poll_ptr: *io u32 = unsafe { 0x1F00200440 as *io u32 };
                     let portsc3_poll: u32 = *portsc3_poll_ptr;
                     reset_polls = i + 1;
                     if (((portsc3_poll >> 21) & 1) == 1) {
@@ -1318,7 +1318,7 @@ fn app_main() {
                     delay_us(1000);
                 }
 
-                let portsc3_after_reset_ptr: *io u32 = 0x1F00200440 as *io u32;
+                let portsc3_after_reset_ptr: *io u32 = unsafe { 0x1F00200440 as *io u32 };
                 let portsc3_after_reset: u32 = *portsc3_after_reset_ptr;
                 uart_puts("port reset (PRC) confirmed: ");
                 if (reset_confirmed) {
@@ -1337,7 +1337,7 @@ fn app_main() {
                 // port reset also sets -- leaving them latched would
                 // make every later PORTSC read look like a fresh event.
                 if (reset_confirmed) {
-                    let portsc3_clear_ptr: *io u32 = 0x1F00200440 as *io u32;
+                    let portsc3_clear_ptr: *io u32 = unsafe { 0x1F00200440 as *io u32 };
                     let portsc3_before_clear: u32 = *portsc3_clear_ptr;
                     *portsc3_clear_ptr = (portsc3_before_clear & 0xCE00FFE9)
                         | (1 << 21) | (1 << 17) | (1 << 19);
@@ -1357,7 +1357,7 @@ fn app_main() {
                 // (bit1) must still read 1 and PLS (bits 8:5) must be 0
                 // (U0) here, or the port is not actually usable and
                 // Address Device cannot possibly reach the device.
-                let portsc3_ready_ptr: *io u32 = 0x1F00200440 as *io u32;
+                let portsc3_ready_ptr: *io u32 = unsafe { 0x1F00200440 as *io u32 };
                 let portsc3_ready: u32 = *portsc3_ready_ptr;
                 uart_puts("PORTSC3 before address device: ");
                 uart_print_hex(portsc3_ready as i32);
@@ -1412,7 +1412,7 @@ fn app_main() {
                     uart_print_hex(((addr_dw3 >> 10) & 0x3F) as i32);
                 } else {
                     uart_puts("NO (timed out)");
-                    let usbsts_addr_diag_ptr: *io u32 = 0x1F00200024 as *io u32;
+                    let usbsts_addr_diag_ptr: *io u32 = unsafe { 0x1F00200024 as *io u32 };
                     let usbsts_addr_diag: u32 = *usbsts_addr_diag_ptr;
                     uart_puts(" USBSTS=");
                     uart_print_hex(usbsts_addr_diag as i32);
@@ -1476,7 +1476,7 @@ fn app_main() {
                         uart_print_hex(((usb_xhci_last_evt_dw3 >> 16) & 0x1F) as i32);
                     } else {
                         uart_puts("NO (timed out)");
-                        let usbsts_x_ptr: *io u32 = 0x1F00200024 as *io u32;
+                        let usbsts_x_ptr: *io u32 = unsafe { 0x1F00200024 as *io u32 };
                         let usbsts_x: u32 = *usbsts_x_ptr;
                         uart_puts(" USBSTS=");
                         uart_print_hex(usbsts_x as i32);
@@ -2088,15 +2088,15 @@ fn app_main() {
                 // indicates whether the doorbell ring actually started
                 // command processing at all.
                 usb_smoke_checkpoint = 66;
-                let usbsts_diag_ptr: *io u32 = 0x1F00200024 as *io u32;
+                let usbsts_diag_ptr: *io u32 = unsafe { 0x1F00200024 as *io u32 };
                 let usbsts_diag: u32 = *usbsts_diag_ptr;
-                let crcr_diag_lo_ptr: *io u32 = 0x1F00200038 as *io u32;
+                let crcr_diag_lo_ptr: *io u32 = unsafe { 0x1F00200038 as *io u32 };
                 let crcr_diag_lo: u32 = *crcr_diag_lo_ptr;
-                let dcbaap_diag_lo_ptr: *io u32 = 0x1F00200050 as *io u32;
+                let dcbaap_diag_lo_ptr: *io u32 = unsafe { 0x1F00200050 as *io u32 };
                 let dcbaap_diag_lo: u32 = *dcbaap_diag_lo_ptr;
-                let erdp_diag_lo_ptr: *io u32 = (ir0_base + 0x18) as *io u32;
+                let erdp_diag_lo_ptr: *io u32 = unsafe { (ir0_base + 0x18) as *io u32 };
                 let erdp_diag_lo: u32 = *erdp_diag_lo_ptr;
-                let erstba_diag_lo_ptr: *io u32 = (ir0_base + 0x10) as *io u32;
+                let erstba_diag_lo_ptr: *io u32 = unsafe { (ir0_base + 0x10) as *io u32 };
                 let erstba_diag_lo: u32 = *erstba_diag_lo_ptr;
                 uart_puts("diag USBSTS: ");
                 uart_print_hex(usbsts_diag as i32);

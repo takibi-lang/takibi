@@ -15,6 +15,94 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-16: Issue #316 Resolved -- `*io` Construction Requires `unsafe` Unconditionally, No Literal Exemption
+
+Design discussion (not implementation) walked through several candidate
+policies for `*io` before landing on the one shipped: a dedicated
+"trusted MMIO map" declaration construct with the base address as its
+one audited construction point; reusing the literal/non-literal axis
+already built for affine-handle casts; and finally the position actually
+adopted -- `*io` gets no literal exemption at all, because a hardcoded
+address is exactly as unprovable to the compiler as a runtime-discovered
+one, and the two differ only in human reviewability, which `unsafe`
+marking a site is *for*, not a reason to skip marking it. This was
+sharpened by a real counter-example already in the codebase:
+`lib/type_inf.ml`'s own comment for the affine-cast check cites
+`examples/common_qemu/virtio_mmio.tkb`'s `(virtio_base + offset) as *io
+i32` (base discovered by scanning device slots at boot) as the reason a
+broader "any non-literal integer to any pointer" rule was rejected --
+proof that the literal/non-literal axis, useful for affine handles
+(which never legitimately come from a computed integer), is the WRONG
+axis for `*io` (whose base legitimately often IS a computed or
+discovered integer: PCI BAR scanning today, dtb/ACPI parsing tomorrow).
+The session's stated ultimate goal -- replacing a real AMD64 desktop's
+Linux kernel, where nearly every MMIO base comes from ACPI/PCI
+enumeration rather than a fixed literal -- reinforced the same
+conclusion: building a bespoke "trusted literal" carve-out for `*io`
+would not even pay off on that target. Filed issue #324 (RPi5 dtb-based
+MMIO discovery) as a related but explicitly separate, not-yet-solved
+question -- #250's own investigation already found `x0` carries no
+usable DTB pointer over this project's current SWD-injection boot path,
+so dtb support is blocked on a real firmware-driven boot path, not just
+a parser.
+
+**Implementation.** `lib/type_inf.ml` gained two checks mirroring the
+affine-cast one but WITHOUT its `is_literal_derived` exemption:
+`check_io_ptr_cast_needs_unsafe` (explicit `as *io T`) and
+`check_io_ptr_literal_needs_unsafe` (the SPEC-documented direct-literal
+sugar, which never reaches a `Cast` AST node -- `IntLit`'s inferred type
+is a fresh unification variable that unifies with `*io T` directly at
+whichever Let/Assign/Return/Call-arg/struct-or-array-literal-field site
+the annotation lives, so it needed wiring at all 10 applicable
+`check_literal_fits_refined` call sites separately). `lib/llvm_gen.ml`
+picked up two follow-ons found by exercising the checks against real
+code: `eval_const` gained an `Unsafe inner -> eval_const ft inner`
+passthrough (an `unsafe`-wrapped immutable global initializer previously
+crashed codegen with "unsupported constant expression" instead of
+folding), and `coerce`'s integer-to-pointer branch now calls
+`note_unsafe_use()` for `*io` destinations so the existing
+"unnecessary unsafe" lint (previously blind to this whole category, same
+documented gap as the affine-cast check) stops misreporting every `*io`
+construction as a no-op wrap.
+
+**Kernel-wide migration**, done in two passes after the first one missed
+`examples/` and `linux_user/` entirely (only `kernel/` had been
+surveyed): all ~590 `*io` construction sites across 12 `kernel/` driver
+files plus 29 `examples/` files plus `linux_user/print_ptr.tkb` now wrap
+in `unsafe { ... as *io T }`. Every literal-only site was written with
+an explicit `as *io T` rather than the bare-literal sugar specifically
+because the new `note_unsafe_use()` hook only fires on the `Cast` path.
+Two mechanical follow-ons the migration forced: roughly 100 functions
+across both trees gained the `!{unsafe}` effect declaration their bodies
+now require, and the `uart_rx_handler: fn !{}() -> void` stored-handler
+slot (present in 5 separate `uart.tkb` files across QEMU/RPi3/RPi5/STM32
+variants) needed widening to `fn !{unsafe}() -> void` since each file's
+`uart_rx_discard` (now `!{unsafe}`) is assigned into it directly --
+`fn !{}(...)`'s explicit empty-effects contract otherwise rejects it.
+`examples/common_qemu/virtio_mmio.tkb` (the file `kernel/drivers/net/
+virtio_net.tkb` was itself ported from) needed the same multi-line-cast
+manual fix as its downstream copy. Known small residual, not chased
+further: 3 sites across `virtio_net.tkb`/`virtio_blk.tkb` that
+reinterpret an EXISTING pointer (`*u8`) as `*io Struct` (rather than
+casting from an integer) still trip the "unnecessary unsafe" lint,
+because LLVM's opaque `ptr` type makes source and destination identical
+at `coerce`'s entry check, so this reinterpret path never reaches the
+`inttoptr` branch `note_unsafe_use()` was added to. `unsafe` itself is
+still correctly required and present at those 3 sites; only the lint's
+heuristic is imprecise there.
+
+Verified: `dune build`/`dune test` clean (1100 tests, 6 new), `make
+allcheck` clean end-to-end (langcheck, compiler unit tests, linux_user,
+QEMU integration/debug/oops, and RPi5 hardware integration all PASS).
+
+Also this session: `make test` now sets `ALCOTEST_COMPACT=1`, collapsing
+each passing test to a single `.` instead of a full `[OK] suite N
+description...` line -- with 1100+ tests, uncompacted output buried real
+failures under thousands of routine-pass lines. Alcotest still prints
+full failure detail regardless of this setting.
+
+---
+
 ### 2026-08-16: End-of-Session Review -- Docs/Test Gaps, a New `make allbuild` Fast Smoke Gate, and the Survey Regex It Immediately Caught
 
 Requested review before closing out the day's #218/#239/#240/#316 work:

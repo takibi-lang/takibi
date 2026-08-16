@@ -162,16 +162,16 @@ let mut tx_used_seen:        isize = 0;
 let mut rx_avail_idx:        isize = 0;
 let mut tx_avail_idx:        isize = 0;
 
-fn vreg(offset: i32) -> *io i32 {
-    return (virtio_base + offset) as *io i32;
+fn vreg(offset: i32) -> *io i32 !{unsafe} {
+    return unsafe { (virtio_base + offset) as *io i32 };
 }
 
-fn virtio_net_find() -> bool {
+fn virtio_net_find() -> bool !{unsafe} {
     for i in 0..<VIRTIO_MMIO_SLOT_COUNT {
         let base: i32 = VIRTIO_MMIO_FIRST_SLOT + i * VIRTIO_MMIO_SLOT_STRIDE;
-        let magic_p: *io u32 = base as *io u32;
+        let magic_p: *io u32 = unsafe { base as *io u32 };
         if (*magic_p == VIRTIO_MAGIC_VALUE) {
-            let devid_p: *io u32 = (base + VIRTIO_DEVICE_ID) as *io u32;
+            let devid_p: *io u32 = unsafe { (base + VIRTIO_DEVICE_ID) as *io u32 };
             if (*devid_p == VIRTIO_DEVICE_ID_NET) {
                 virtio_base = base;
                 virtio_gic_irq = VIRTIO_MMIO_FIRST_INTID + i;
@@ -182,13 +182,13 @@ fn virtio_net_find() -> bool {
     return false;
 }
 
-fn gic_enable_virtio_irq() {
+fn gic_enable_virtio_irq() !{unsafe} {
     let isenabler_n: i32 = virtio_gic_irq / 32;
     let bit: i32 = virtio_gic_irq - isenabler_n * 32;
-    let isenabler: *io u32 = (0x08000100 + isenabler_n * 4) as *io u32;
+    let isenabler: *io u32 = unsafe { (0x08000100 + isenabler_n * 4) as *io u32 };
     *isenabler = 1 << (bit as u32);
 
-    let itargetsr: *io u8 = (0x08000800 + virtio_gic_irq) as *io u8;
+    let itargetsr: *io u8 = unsafe { (0x08000800 + virtio_gic_irq) as *io u8 };
     *itargetsr = 1 as u8;
 }
 
@@ -239,10 +239,10 @@ fn virtio_driver_ok() {
 
 // Reads the device's 6-byte MAC out of Config space. VIRTIO_NET_F_MAC is
 // always acked in virtio_negotiate() now, so this is always meaningful.
-fn virtio_net_read_mac(mac_out: *u8) {
+fn virtio_net_read_mac(mac_out: *u8) !{unsafe} {
     for i: isize in 0..<6 {
-        let p: *io u8 = (virtio_base + VIRTIO_CONFIG_MAC_OFFSET
-            + (i as i32)) as *io u8;
+        let p: *io u8 = unsafe { (virtio_base + VIRTIO_CONFIG_MAC_OFFSET
+            + (i as i32)) as *io u8 };
         mac_out[i] = *p;
     }
 }
@@ -287,20 +287,20 @@ fn avail_publish(queue_mem: *u8, new_idx: isize) {
 // a global/memory load out of a tight loop" hazard called out in
 // CLAUDE.md's "Volatile Reads of Global Variables" section (the compiler
 // has no way to know DMA writes are coming) -- so these must be `io`.
-fn used_idx_get(queue_mem: *u8) -> isize {
-    let used: *io VirtqUsed = (queue_mem + PAGE_SIZE) as *io VirtqUsed;
+fn used_idx_get(queue_mem: *u8) -> isize !{unsafe} {
+    let used: *io VirtqUsed = unsafe { (queue_mem + PAGE_SIZE) as *io VirtqUsed };
     return used.idx as isize;
 }
 
-fn used_ring_get_id(queue_mem: *u8, slot: isize) -> isize {
-    let ring: *io VirtqUsedElem = (queue_mem + PAGE_SIZE
-        + (offsetof(VirtqUsed, ring) as isize)) as *io VirtqUsedElem;
+fn used_ring_get_id(queue_mem: *u8, slot: isize) -> isize !{unsafe} {
+    let ring: *io VirtqUsedElem = unsafe { (queue_mem + PAGE_SIZE
+        + (offsetof(VirtqUsed, ring) as isize)) as *io VirtqUsedElem };
     return ring[slot].id as isize;
 }
 
-fn used_ring_get_len(queue_mem: *u8, slot: isize) -> i32 {
-    let ring: *io VirtqUsedElem = (queue_mem + PAGE_SIZE
-        + (offsetof(VirtqUsed, ring) as isize)) as *io VirtqUsedElem;
+fn used_ring_get_len(queue_mem: *u8, slot: isize) -> i32 !{unsafe} {
+    let ring: *io VirtqUsedElem = unsafe { (queue_mem + PAGE_SIZE
+        + (offsetof(VirtqUsed, ring) as isize)) as *io VirtqUsedElem };
     return ring[slot].len as i32; // same reasoning as used_ring_get_id.
 }
 

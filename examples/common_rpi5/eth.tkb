@@ -38,13 +38,13 @@ let mut gem_tx_buf: [u8; 1536] align(64);
 let mut gem_initialized: i32 = 0;
 let mut gem_tx_next: i32 = 0;
 
-fn gem_read(off: usize) -> u32 {
-    let reg: *io u32 = (GEM_BASE + off) as *io u32;
+fn gem_read(off: usize) -> u32 !{unsafe} {
+    let reg: *io u32 = unsafe { (GEM_BASE + off) as *io u32 };
     return *reg;
 }
 
-fn gem_write(off: usize, value: u32) {
-    let reg: *io u32 = (GEM_BASE + off) as *io u32;
+fn gem_write(off: usize, value: u32) !{unsafe} {
+    let reg: *io u32 = unsafe { (GEM_BASE + off) as *io u32 };
     *reg = value;
 }
 
@@ -68,15 +68,15 @@ fn gem_mdio_write(reg: u32, value: u32) -> bool {
     return gem_mdio_wait();
 }
 
-fn gem_phy_reset() {
+fn gem_phy_reset() !{unsafe} {
     // RPi5 board DTS: PHY reset is RP1 GPIO32, active low, 5 ms.
     // GPIO32 is bank 1 bit 4. Put the pin in GPIO mode, drive low, then
     // release it high before touching MDIO.
-    let ctrl: *io u32 = 0x1F000D4024 as *io u32;
-    let rio_out_clr: *io u32 = 0x1F000E7000 as *io u32;
-    let rio_out_set: *io u32 = 0x1F000E6000 as *io u32;
-    let rio_oe_set: *io u32 = 0x1F000E6004 as *io u32;
-    let pad: *io u32 = 0x1F000F4014 as *io u32;
+    let ctrl: *io u32 = unsafe { 0x1F000D4024 as *io u32 };
+    let rio_out_clr: *io u32 = unsafe { 0x1F000E7000 as *io u32 };
+    let rio_out_set: *io u32 = unsafe { 0x1F000E6000 as *io u32 };
+    let rio_oe_set: *io u32 = unsafe { 0x1F000E6004 as *io u32 };
+    let pad: *io u32 = unsafe { 0x1F000F4014 as *io u32 };
     *rio_out_clr = 1 << 4;
     *rio_oe_set = 1 << 4;
     *pad = (*pad | (1 << 6)) & 0xFFFFFF7F;
@@ -127,7 +127,7 @@ fn gem_rearm_rx() {
     dma_prepare_tx(gem_rx_desc as *u8, 64);
 }
 
-fn net_init() -> NetInitResult {
+fn net_init() -> NetInitResult !{unsafe} {
     if (gem_initialized != 0) { return NetInitResult::Failed; }
 
     // RP1 bus masters address RAM through PCI [0x10_00000000, ...).
@@ -135,7 +135,7 @@ fn net_init() -> NetInitResult {
 
     // Keep the firmware-selected parent/divider but explicitly enable the
     // RP1 Ethernet TX clock; unlike clk_sys this branch is not critical.
-    let eth_clk_ctrl: *io u32 = 0x1F00018064 as *io u32;
+    let eth_clk_ctrl: *io u32 = unsafe { 0x1F00018064 as *io u32 };
     *eth_clk_ctrl = *eth_clk_ctrl | (1 << 11);
 
     // Stop RX/TX, enable management port, mask all queue-0 interrupts.

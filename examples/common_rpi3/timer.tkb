@@ -75,8 +75,8 @@ fn setup_task_stack(s: *u8, f: fn() -> void) -> usize {
 // section 4.10 (also used, for the same register, by
 // examples/common_rpi3/intc.tkb's UART dispatch, checking bit 8 there
 // instead).
-fn rpi3_timer_irq_pending_core(core: {0..<4 as usize}) -> bool {
-    let irq_source_base: *io u32 = 0x40000060;
+fn rpi3_timer_irq_pending_core(core: {0..<4 as usize}) -> bool !{unsafe} {
+    let irq_source_base: *io u32 = unsafe { 0x40000060 as *io u32 };
     let irq_source: *io u32 = irq_source_base + (core as isize);
     return (*irq_source & (1 << 1)) != 0;
 }
@@ -85,8 +85,8 @@ fn rpi3_timer_irq_pending() -> bool {
     return rpi3_timer_irq_pending_core(0);
 }
 
-fn timer_init_core(core: {0..<4 as usize}) {
-    let timer_irq_control_base: *io u32 = 0x40000040;
+fn timer_init_core(core: {0..<4 as usize}) !{unsafe} {
+    let timer_irq_control_base: *io u32 = unsafe { 0x40000040 as *io u32 };
     let timer_irq_control: *io u32 = timer_irq_control_base + (core as isize);
     *timer_irq_control = 1 << 1; // enable CNTPNSIRQ as an IRQ
     set_cntp_tval((read_cntfrq() >> 6) as i32);

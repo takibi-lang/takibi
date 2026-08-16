@@ -15,7 +15,7 @@ let mut pcie_smoke_bar0_data: u32 = 0xAAAAAAAA;
 let mut pcie_smoke_bar2_data: u32 = 0xAAAAAAAA;
 let mut pcie_smoke_fr: u32 = 0xAAAAAAAA;
 
-fn app_main() {
+fn app_main() !{unsafe} {
     pcie_smoke_checkpoint = 1;
     let linked: bool = pcie2_init();
     pcie_smoke_checkpoint = 2;
@@ -40,11 +40,11 @@ fn app_main() {
     pcie_smoke_cmd_after = pcie2_config_read32(1, 0, 4);
     pcie_smoke_checkpoint = 7;
 
-    let bar0: *io u32 = 0x1F00410000;
-    let bar2: *io u32 = 0x1F00400000;
+    let bar0: *io u32 = unsafe { 0x1F00410000 as *io u32 };
+    let bar2: *io u32 = unsafe { 0x1F00400000 as *io u32 };
     pcie_smoke_bar0_data = *bar0;
     pcie_smoke_bar2_data = *bar2;
-    let fr: *io u32 = 0x1F00030018;
+    let fr: *io u32 = unsafe { 0x1F00030018 as *io u32 };
     pcie_smoke_fr = *fr;
     pcie_smoke_checkpoint = 8;
 

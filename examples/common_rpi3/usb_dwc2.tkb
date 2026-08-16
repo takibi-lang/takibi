@@ -30,17 +30,17 @@ use "examples/common_rpi3/timer_asm_extern.tkb";
 const DWC2_CORE_BASE: usize = 0x3F980000;
 const DWC2_HOST_BASE: usize = 0x3F980400;
 
-let dwc2_vendor_id: *io u32 = 0x3F980040;
-let dwc2_ahb_cfg:   *io u32 = 0x3F980008;
-let dwc2_usb_cfg:   *io u32 = 0x3F98000C;
-let dwc2_reset:     *io u32 = 0x3F980010;
-let dwc2_hw_cfg2:   *io u32 = 0x3F980048;
-let dwc2_rx_fifo_siz:       *io u32 = 0x3F980024;
-let dwc2_nper_tx_fifo_siz:  *io u32 = 0x3F980028;
+let dwc2_vendor_id: *io u32 = unsafe { 0x3F980040 as *io u32 };
+let dwc2_ahb_cfg:   *io u32 = unsafe { 0x3F980008 as *io u32 };
+let dwc2_usb_cfg:   *io u32 = unsafe { 0x3F98000C as *io u32 };
+let dwc2_reset:     *io u32 = unsafe { 0x3F980010 as *io u32 };
+let dwc2_hw_cfg2:   *io u32 = unsafe { 0x3F980048 as *io u32 };
+let dwc2_rx_fifo_siz:       *io u32 = unsafe { 0x3F980024 as *io u32 };
+let dwc2_nper_tx_fifo_siz:  *io u32 = unsafe { 0x3F980028 as *io u32 };
 
-let dwc2_host_cfg:  *io u32 = 0x3F980400;
-let dwc2_host_port: *io u32 = 0x3F980440;
-let dwc2_pcgcctl:   *io u32 = 0x3F980E00;
+let dwc2_host_cfg:  *io u32 = unsafe { 0x3F980400 as *io u32 };
+let dwc2_host_port: *io u32 = unsafe { 0x3F980440 as *io u32 };
+let dwc2_pcgcctl:   *io u32 = unsafe { 0x3F980E00 as *io u32 };
 
 const RESET_SOFT_RESET:    u32 = 0x00000001;
 const RESET_RX_FIFO_FLUSH: u32 = 0x00000010;
@@ -90,19 +90,19 @@ fn dwc2_read_ahb_cfg() -> u32 {
 fn dwc2_read_hw_cfg2() -> u32 {
     return *dwc2_hw_cfg2;
 }
-fn dwc2_read_hw_cfg3() -> u32 {
-    let hw_cfg3: *io u32 = 0x3F98004C;
+fn dwc2_read_hw_cfg3() -> u32 !{unsafe} {
+    let hw_cfg3: *io u32 = unsafe { 0x3F98004C as *io u32 };
     return *hw_cfg3;
 }
-fn dwc2_read_gnptxsts() -> u32 {
-    let gnptxsts: *io u32 = 0x3F980020;
+fn dwc2_read_gnptxsts() -> u32 !{unsafe} {
+    let gnptxsts: *io u32 = unsafe { 0x3F980020 as *io u32 };
     return *gnptxsts;
 }
 // GINTSTS bit 0 = CurMod: 1 = host mode, 0 = device mode. Host channel
 // registers are inert in device mode, so this is the first thing to
 // check when transactions fail silently.
-fn dwc2_is_host_mode() -> bool {
-    let gintsts: *io u32 = 0x3F980014;
+fn dwc2_is_host_mode() -> bool !{unsafe} {
+    let gintsts: *io u32 = unsafe { 0x3F980014 as *io u32 };
     return (*gintsts & 1) != 0;
 }
 fn dwc2_read_usb_cfg() -> u32 {
@@ -113,8 +113,8 @@ fn dwc2_read_usb_cfg() -> u32 {
 // a millisecond apart differing is direct proof the host is actively
 // driving the bus; frozen means SOFs are not being generated and no
 // transaction can possibly succeed.
-fn dwc2_frame_number() -> u32 {
-    let hfnum: *io u32 = 0x3F980408;
+fn dwc2_frame_number() -> u32 !{unsafe} {
+    let hfnum: *io u32 = unsafe { 0x3F980408 as *io u32 };
     return *hfnum & 0xFFFF;
 }
 
@@ -209,8 +209,8 @@ fn dwc2_core_init() {
 // HOST_PER_TX_FIFO_SIZ are each (start address in low 16 bits) | (depth
 // in bits 31:16), where each FIFO's start address is the sum of every
 // earlier FIFO's size (they're laid out back-to-back in one shared SRAM).
-fn dwc2_program_fifo_sizes() {
-    let host_per_tx_fifo_siz: *io u32 = 0x3F980100;
+fn dwc2_program_fifo_sizes() !{unsafe} {
+    let host_per_tx_fifo_siz: *io u32 = unsafe { 0x3F980100 as *io u32 };
     *dwc2_rx_fifo_siz = 774;
     *dwc2_nper_tx_fifo_siz = 774 | (2000 << 16);
     *host_per_tx_fifo_siz = 2774 | (1306 << 16);
@@ -324,20 +324,20 @@ const HCINT_STALL:         u32 = 0x00000008;
 const HCINT_NAK:           u32 = 0x00000010;
 const HCINT_XACT_ERROR:    u32 = 0x00000080;
 
-fn chan_char_reg(chan: usize) -> *io u32 {
-    return (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x00) as *io u32;
+fn chan_char_reg(chan: usize) -> *io u32 !{unsafe} {
+    return unsafe { (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x00) as *io u32 };
 }
-fn chan_int_reg(chan: usize) -> *io u32 {
-    return (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x08) as *io u32;
+fn chan_int_reg(chan: usize) -> *io u32 !{unsafe} {
+    return unsafe { (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x08) as *io u32 };
 }
-fn chan_xfersiz_reg(chan: usize) -> *io u32 {
-    return (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x10) as *io u32;
+fn chan_xfersiz_reg(chan: usize) -> *io u32 !{unsafe} {
+    return unsafe { (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x10) as *io u32 };
 }
-fn chan_dmaaddr_reg(chan: usize) -> *io u32 {
-    return (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x14) as *io u32;
+fn chan_dmaaddr_reg(chan: usize) -> *io u32 !{unsafe} {
+    return unsafe { (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x14) as *io u32 };
 }
-fn chan_split_reg(chan: usize) -> *io u32 {
-    return (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x04) as *io u32;
+fn chan_split_reg(chan: usize) -> *io u32 !{unsafe} {
+    return unsafe { (DWC2_HOST_BASE + 0x100 + chan * 0x20 + 0x04) as *io u32 };
 }
 
 // dwc2_channel_transfer: program `chan` for ONE transfer stage (DMA

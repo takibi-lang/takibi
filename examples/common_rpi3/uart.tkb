@@ -26,12 +26,12 @@
 // needing to touch examples/echo/echo.tkb or examples/irq/irq.tkb's own
 // GICv2-shaped irq_dispatch() at all (dead code here, same as on STM32).
 
-let mut uart_rx_handler: fn !{}() -> void;
+let mut uart_rx_handler: fn !{unsafe}() -> void;
 
-fn uart_putc(c: u8) {
-    let fr: *io u32 = 0x3F201018; // UART0_FR
+fn uart_putc(c: u8) !{unsafe} {
+    let fr: *io u32 = unsafe { 0x3F201018 as *io u32 }; // UART0_FR
     while ((*fr & (1 << 5)) != 0) { } // wait while TXFF (TX FIFO full)
-    let dr: *io u8 = 0x3F201000; // UART0_DR
+    let dr: *io u8 = unsafe { 0x3F201000 as *io u8 }; // UART0_DR
     *dr = c;
 }
 
@@ -42,8 +42,8 @@ fn uart_puts(s: *u8) {
     }
 }
 
-fn uart_rx_discard() !{} {
-    let dr: *io u8 = 0x3F201000; // UART0_DR
+fn uart_rx_discard() !{unsafe} {
+    let dr: *io u8 = unsafe { 0x3F201000 as *io u8 }; // UART0_DR
     let discarded: u8 = *dr;
 }
 
@@ -56,13 +56,13 @@ fn uart_rx_discard() !{} {
 // condition -- that IS the interrupt acknowledgment on this target, no
 // separate step needed (PL011's RX interrupt is level-triggered on FIFO
 // fill state, not a separate latch a controller-level write clears).
-fn uart_isr_getc() -> u8 {
-    let dr: *io u8 = 0x3F201000; // UART0_DR
+fn uart_isr_getc() -> u8 !{unsafe} {
+    let dr: *io u8 = unsafe { 0x3F201000 as *io u8 }; // UART0_DR
     return *dr;
 }
 
-fn uart_rx_ready() -> bool {
-    let fr: *io u32 = 0x3F201018; // UART0_FR
+fn uart_rx_ready() -> bool !{unsafe} {
+    let fr: *io u32 = unsafe { 0x3F201018 as *io u32 }; // UART0_FR
     return (*fr & (1 << 4)) == 0; // RXFE clear = data available
 }
 
@@ -79,7 +79,7 @@ fn uart_tx_isr() {
 // dispatch table. Matches examples/common_stm32/uart.tkb's
 // USART1_IRQHandler in spirit (poll the ready flag once, hand off to
 // whatever examples/echo/echo.tkb or examples/irq/irq.tkb registered).
-fn uart_irq_handler() !{interrupt} {
+fn uart_irq_handler() !{interrupt, unsafe} {
     if (uart_rx_ready()) {
         uart_rx_handler();
     }
@@ -93,18 +93,18 @@ fn uart_irq_handler() !{interrupt} {
     // irq_uart_rx_unmask() started unmasking RTIM too (GitHub issue
     // #156's FIFO-enable fix) -- harmless to write even on a spurious
     // call where RTI was never actually pending.
-    let uart_icr: *io u32 = 0x3F201044;
+    let uart_icr: *io u32 = unsafe { 0x3F201044 as *io u32 };
     *uart_icr = 1 << 6;
 }
 
-fn uart_init() {
-    let gpfsel1: *io u32 = 0x3F200004;
-    let gppud: *io u32 = 0x3F200094;
-    let gppudclk0: *io u32 = 0x3F200098;
-    let uart_cr: *io u32 = 0x3F201030;
-    let uart_ibrd: *io u32 = 0x3F201024;
-    let uart_fbrd: *io u32 = 0x3F201028;
-    let uart_lcrh: *io u32 = 0x3F20102C;
+fn uart_init() !{unsafe} {
+    let gpfsel1: *io u32 = unsafe { 0x3F200004 as *io u32 };
+    let gppud: *io u32 = unsafe { 0x3F200094 as *io u32 };
+    let gppudclk0: *io u32 = unsafe { 0x3F200098 as *io u32 };
+    let uart_cr: *io u32 = unsafe { 0x3F201030 as *io u32 };
+    let uart_ibrd: *io u32 = unsafe { 0x3F201024 as *io u32 };
+    let uart_fbrd: *io u32 = unsafe { 0x3F201028 as *io u32 };
+    let uart_lcrh: *io u32 = unsafe { 0x3F20102C as *io u32 };
 
     uart_rx_handler = uart_rx_discard;
     *uart_cr = 0; // disable UART0 before reconfiguring it
@@ -158,7 +158,7 @@ fn uart_init() {
     // 1/2-full reset default, which would otherwise make
     // examples/echo/examples/irq's own interrupt-per-keystroke design
     // wait for 8 bytes before ever firing.
-    let uart_ifls: *io u32 = 0x3F201034;
+    let uart_ifls: *io u32 = unsafe { 0x3F201034 as *io u32 };
     *uart_ifls = 0;
 
     // Clear any latched PL011 interrupt state and drain any unread RX
@@ -167,10 +167,10 @@ fn uart_init() {
     // state does (see startup.S's quiescing comment): without this, the
     // first byte examples/echo echoes could be a stale leftover from an
     // earlier run's input, not this run's.
-    let uart_icr: *io u32 = 0x3F201044;
+    let uart_icr: *io u32 = unsafe { 0x3F201044 as *io u32 };
     *uart_icr = 0x7FF; // all interrupt bits
-    let fr_drain: *io u32 = 0x3F201018;
-    let dr_drain: *io u8 = 0x3F201000;
+    let fr_drain: *io u32 = unsafe { 0x3F201018 as *io u32 };
+    let dr_drain: *io u8 = unsafe { 0x3F201000 as *io u8 };
     while ((*fr_drain & (1 << 4)) == 0) { // RXFE clear = stale data waiting
         let discarded: u8 = *dr_drain;
     }

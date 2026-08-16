@@ -17,9 +17,9 @@
 // here; channels 0-7 are legacy single-value mailboxes this project has
 // no use for.
 
-let mbox_read:   *io u32 = 0x3F00B880;
-let mbox_status: *io u32 = 0x3F00B898;
-let mbox_write:  *io u32 = 0x3F00B8A0;
+let mbox_read:   *io u32 = unsafe { 0x3F00B880 as *io u32 };
+let mbox_status: *io u32 = unsafe { 0x3F00B898 as *io u32 };
+let mbox_write:  *io u32 = unsafe { 0x3F00B8A0 as *io u32 };
 
 const MBOX_STATUS_FULL:  u32 = 0x80000000;
 const MBOX_STATUS_EMPTY: u32 = 0x40000000;

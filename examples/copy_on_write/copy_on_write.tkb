@@ -72,7 +72,7 @@ fn rpi3_sync_exception_dispatch(esr: usize, far: usize,
     rpi3_exception_unhandled();
 }
 
-fn cow_app_main(installed: ExceptionHandlerInstalled[0]) {
+fn cow_app_main(installed: ExceptionHandlerInstalled[0]) !{unsafe} {
     let core_tag = exception_handler_core(installed);
     let initial_vacant = cow_cell_open(installed, core_tag);
     page_pool_init();
@@ -102,7 +102,7 @@ fn cow_app_main(installed: ExceptionHandlerInstalled[0]) {
                                                 space1, mapping1,
                                                 lease0, lease1)));
 
-            let ptr: *io u8 = dynamic_va_base() as *io u8;
+            let ptr: *io u8 = unsafe { dynamic_va_base() as *io u8 };
             uart_puts("before write: "); uart_print(*ptr); uart_puts("\n");
             *ptr = 42;
             uart_puts("after write: "); uart_print(*ptr); uart_puts("\n");
