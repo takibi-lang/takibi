@@ -8655,6 +8655,44 @@ let codegen_tests = [
           buf[idx] = 1;
         }");
 
+  (* GitHub issue #311: type_inf.ml's tyenv-based narrowing and
+     llvm_gen.ml's own separate narrowing_ctx re-derivation are two
+     independently-maintained implementations of the same rules, kept in
+     sync only by a hand-followed "Sync rule" convention -- #296's own
+     history (just above) shows this drifting silently once already. The
+     three #296 tests above cover early-return-guard narrowing
+     specifically; these two extend the same "prove it stays synced"
+     coverage to the OTHER two narrowing constructs type_inf.ml supports
+     today (plain two-sided If narrowing, and for-loop counter narrowing
+     over a constant bound) so a regression in either file's handling of
+     THESE ALREADY-SUPPORTED shapes fails a test immediately, not silently
+     as a residual trap site discovered later by chance. This does not
+     cover a genuinely NEW narrowing construct (e.g. #312's non-constant
+     for-loop bound, or #313's while-condition narrowing, neither
+     implemented yet) -- that gap is why issue #311 remains open as a
+     design question rather than closed by this stopgap alone. *)
+  Alcotest.test_case
+    "plain if-condition narrowing (not just early-return-guard) elides \
+     the Index bounds check (issue #311 sync coverage)" `Quick
+    (expect_trap_sites 0
+       "fn f311_if(idx: usize) -> usize {
+          let mut buf: [usize; 6];
+          if (idx < 6) { return buf[idx]; } else { return 0; }
+        }");
+
+  Alcotest.test_case
+    "for-loop counter narrowing over a constant bound elides the Index \
+     bounds check (issue #311 sync coverage)" `Quick
+    (expect_trap_sites 0
+       "fn f311_for() -> usize {
+          let mut buf: [usize; 6];
+          let mut total: usize = 0;
+          for i: usize in 0..<6 {
+            total = total + buf[i];
+          }
+          return total;
+        }");
+
   Alcotest.test_case
     "multi-level struct field chain a.b.c[i] indexes the innermost \
      array field directly (issue #217: only the OUTERMOST field needs \
