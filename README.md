@@ -97,6 +97,7 @@ hardware tooling. For the compiler required by the kernel:
 ```bash
 make build       # build the Takibi compiler
 make test        # run compiler unit tests
+make allbuild     # build EVERYTHING (compiler, kernel/, linux_user/, every examples/ target) -- no execution/hardware step, cheapest full-repo sanity check
 ```
 
 For the maintained kernel surface:
