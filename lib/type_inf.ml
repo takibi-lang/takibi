@@ -3021,48 +3021,31 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  "mutable borrow of '%s' overlaps another argument in the same call"
                  name))
            ) mutable_places;
+           (* GitHub issue #323: routed through check_expr, which now
+              covers everything this hand-written loop used to do itself
+              (the AddrOf-vs-TRef/TRefMut dispatch, existential-argument
+              opening, adapt_actual_to_expected, unify_at,
+              check_literal_fits_refined, check_io_ptr_literal_needs_unsafe
+              -- see check_expr's own cases and its header comment).
+
+              One case is deliberately bypassed: a bare `{ ... }`
+              struct-literal argument. check_expr's own StructLit cases
+              would make this type-check where it previously always raised
+              "struct literal requires a type annotation" (call arguments
+              never routed through check_expr's StructLit handling before,
+              unlike Let initializers and nested struct-literal fields,
+              which already allowed it) -- but llvm_gen.ml's codegen has no
+              support for a StructLit as a general call-argument
+              expression (its own gen_expr raises "BUG: StructLit must be
+              handled in gen_stmt / gen_global, not gen_expr" for it,
+              caught by this issue's own new regression test). Accepting
+              it here would trade a clean, expected TypeError for an
+              internal-error codegen crash, so this keeps the exact
+              pre-#323 rejection for this one shape instead. *)
            List.iter2 (fun (arg : Ast.expr) pt ->
-             match arg.desc, repr pt with
-             (* GitHub issue #314/#319: call arguments are matched via
-                infer_expr (bottom-up) + unify, NOT check_expr's
-                expected-type pushdown (that path is StructLit/ArrayLit-
-                only) -- so &expr's own type-directed dispatch needs a
-                dedicated case here too, mirroring the one in Let's own
-                initializer handling below. Without this, `bump(&pool)`
-                against a `p: &mut Pool` parameter would infer `&pool` as
-                plain `*Pool` (infer_addrof_wrapped's `Ptr default) and
-                then fail to unify against `&mut Pool`, since TPtr does not
-                narrow into TRefMut. *)
-             | AddrOf inner, TRef _ ->
-                 let at = infer_addrof_wrapped senv eenv tyenv fenv arg inner `Ref in
-                 unify_at arg.loc at pt;
-                 check_literal_fits_refined arg.loc arg pt
-             | AddrOf inner, TRefMut _ ->
-                 let at = infer_addrof_wrapped senv eenv tyenv fenv arg inner `RefMut in
-                 unify_at arg.loc at pt;
-                 check_literal_fits_refined arg.loc arg pt
-             | _ ->
-             let at = infer_expr senv eenv tyenv fenv arg in
-             (* An existentially-typed argument (e.g. passing a LetMatch-
-                bound `exists page: usize. PageOwner[page]` local to a
-                function expecting a plain, per-call-generic `PageOwner
-                [page]` parameter) is opened here: a function parameter
-                cannot itself be existential (Slice 3 restriction, see
-                validate_param_type), so `pt` is always the concrete
-                shape underneath. Passing the actual argument through
-                without opening it first would unify against `at`'s own
-                SEALED binder and always fail (see instantiate_exists_ty's
-                comment for why); this is existential elimination, same
-                operation match-arm payload binding already performs, just
-                triggered by a call site instead of a pattern match. *)
-             let at = match repr at with
-               | TExists _ -> open_exists_ty at
-               | _ -> at
-             in
-             let at = adapt_actual_to_expected tyenv arg at pt in
-             unify_at arg.loc at pt;
-             check_literal_fits_refined arg.loc arg pt;
-             check_io_ptr_literal_needs_unsafe arg.loc arg pt
+             match arg.desc with
+             | StructLit _ -> ignore (infer_expr senv eenv tyenv fenv arg)
+             | _ -> ignore (check_expr senv eenv tyenv fenv arg pt)
            ) args param_tys;
            ret_ty)
   | Assign (lhs, rhs) ->
@@ -3477,14 +3460,22 @@ and place_undecayed_type senv eenv tyenv fenv (e : Ast.expr) : ty =
    Handles nested StructLit for both struct and array fields.
    Falls back to infer_expr + unify for all other expressions. *)
 
-let rec check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
+(* GitHub issue #323: returns the actual/resolved type (mirroring
+   infer_expr's own return), not just unit -- needed so callers that
+   route through this function (Let's initializer handling, in
+   particular) can still see the resolved type for their own follow-up
+   checks (e.g. the struct-by-value alloca check just below this
+   function's own call sites) the same way they could when they called
+   infer_expr/unify_at directly instead of through here. *)
+and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
   match e.desc, repr expected with
   | StructLit exprs, TArray (elem_ty, n) ->
       if List.length exprs <> n then
         raise (TypeError (e.loc, Printf.sprintf
           "array [_; %d] expects %d elements but literal has %d"
           n n (List.length exprs)));
-      List.iter (fun ei -> check_expr senv eenv tyenv fenv ei elem_ty) exprs
+      List.iter (fun ei -> ignore (check_expr senv eenv tyenv fenv ei elem_ty)) exprs;
+      expected
   | StructLit exprs, TStruct sname ->
       let fields = match StringMap.find_opt sname senv with
         | Some (fs, _, _) -> fs
@@ -3497,8 +3488,9 @@ let rec check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
           "struct '%s' has %d fields but literal has %d values"
           sname (List.length fields) (List.length exprs)));
       List.iter2 (fun (_, ft) ei ->
-        check_expr senv eenv tyenv fenv ei (of_ast ft)
-      ) fields exprs
+        ignore (check_expr senv eenv tyenv fenv ei (of_ast ft))
+      ) fields exprs;
+      expected
   | StructLit exprs, TIndexedStruct (sname, static_args) ->
       let fields = match StringMap.find_opt sname senv with
         | Some (fs, _, _) -> fs
@@ -3511,9 +3503,10 @@ let rec check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
           "struct '%s' has %d fields but literal has %d values"
           sname (List.length fields) (List.length exprs)));
       List.iter2 (fun (_, ft) ei ->
-        check_expr senv eenv tyenv fenv ei
-          (field_type_for_instance sname static_args ft)
-      ) fields exprs
+        ignore (check_expr senv eenv tyenv fenv ei
+          (field_type_for_instance sname static_args ft))
+      ) fields exprs;
+      expected
   | AddrOf inner, TRef _ ->
       (* GitHub issue #314/#319: &expr's own grammar/minting rules never
          change (see infer_addrof_wrapped); only which type a successful
@@ -3522,19 +3515,45 @@ let rec check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
          above. A not-yet-migrated *T-typed context skips this case
          entirely (falls to the generic branch below, unchanged from
          before this type existed) -- so every existing `&x` call site
-         keeps compiling with zero changes. *)
+         keeps compiling with zero changes.
+         GitHub issue #323: check_literal_fits_refined added here to match
+         what the Call-argument and Let-initializer call sites already did
+         in their own, now-removed, duplicate AddrOf/TRef cases -- a
+         behavior difference from before #323 for this exact branch's
+         OTHER two callers (StructLit field checking), which never
+         exercised it since &expr cannot appear inside a `{ ... }`
+         literal's own value list. *)
       let actual = infer_addrof_wrapped senv eenv tyenv fenv e inner `Ref in
-      unify_at e.loc actual expected
+      unify_at e.loc actual expected;
+      check_literal_fits_refined e.loc e expected;
+      actual
   | AddrOf inner, TRefMut _ ->
       let actual = infer_addrof_wrapped senv eenv tyenv fenv e inner `RefMut in
-      unify_at e.loc actual expected
+      unify_at e.loc actual expected;
+      check_literal_fits_refined e.loc e expected;
+      actual
   | _ ->
       let te = infer_expr senv eenv tyenv fenv e in
+      (* GitHub issue #323: existential elimination, moved here from the
+         Call-argument loop's own copy (see its own comment, now removed)
+         -- an existentially-typed argument/initializer (e.g. a LetMatch-
+         bound local passed to a parameter/annotation expecting the
+         concrete shape underneath) must be opened before unify_at, or it
+         always fails against `expected`'s own sealed binder. Previously
+         only Call's own path did this; StructLit-field and Let-initializer
+         callers of this function did not, though neither is currently
+         known to be reachable with an existentially-typed field/init
+         value in the existing test suite or kernel/ tree. *)
+      let te = match repr te with
+        | TExists _ -> open_exists_ty te
+        | _ -> te
+      in
       let te = adapt_actual_to_expected tyenv e te (strip_io expected) in
       (* If expected type is io T: check compatibility with T (strip the storage qualifier) *)
       unify_at e.loc te (strip_io expected);
       check_literal_fits_refined e.loc e (strip_io expected);
-      check_io_ptr_literal_needs_unsafe e.loc e (strip_io expected)
+      check_io_ptr_literal_needs_unsafe e.loc e (strip_io expected);
+      te
 
 (* -- Flow-sensitive type narrowing ----------------------------------------- *)
 
@@ -3830,29 +3849,35 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                 Printf.sprintf "struct literal requires `let mut %s: Name = {...}`" name));
             (match repr ty with
              | (TStruct _ | TIndexedStruct _ | TArray _) as expected ->
-                 check_expr senv eenv tyenv fenv { desc = StructLit exprs; loc } expected
+                 ignore (check_expr senv eenv tyenv fenv { desc = StructLit exprs; loc } expected)
              | _ -> raise (TypeError (loc,
                  "literal { ... } requires a struct or array type annotation")));
             None
-        | Some ({ desc = AddrOf inner; loc } as e)
-          when (match repr ty with TRef _ | TRefMut _ -> true | _ -> false) ->
-            (* GitHub issue #314/#319: mirrors check_expr's own AddrOf-vs-
-               TRef/TRefMut cases -- a `let` annotation is another context
-               that directs &expr's result type, just like a call
-               argument's declared parameter type does. `let core:
-               &FreelistCore(N) = &pool.core;` is the acceptance-criterion
-               example from #319 (kernel/lib/growable_pool.tkb). *)
-            let wrap = match repr ty with TRefMut _ -> `RefMut | _ -> `Ref in
-            let et = infer_addrof_wrapped senv eenv tyenv fenv e inner wrap in
-            unify_at loc et (strip_io ty);
-            Some et
         | Some e ->
-            let et = infer_expr senv eenv tyenv fenv e in
-            let et = adapt_actual_to_expected tyenv e et (strip_io ty) in
-            (* Initialization: match actual(expr) as a subtype of expected(type annotation) *)
-            unify_at e.loc et (strip_io ty);
-            check_literal_fits_refined e.loc e (strip_io ty);
-            check_io_ptr_literal_needs_unsafe e.loc e (strip_io ty);
+            (* GitHub issue #323: routed through check_expr, which now
+               covers the AddrOf-vs-TRef/TRefMut dispatch this `let` case
+               used to duplicate as its own separate match arm (see
+               #314/#319's own history: `let core: &FreelistCore(N) =
+               &pool.core;`, kernel/lib/growable_pool.tkb) -- check_expr's
+               own AddrOf/TRef and AddrOf/TRefMut cases only fire when
+               `ty`'s repr actually is TRef/TRefMut, so a `let` annotation
+               of any other type (including *T, "not yet migrated" to
+               &T/&mut T) still falls through to check_expr's fallback,
+               which calls infer_expr's own AddrOf case exactly as this
+               file's previous "Some e -> infer_expr ..." general branch
+               did for every non-TRef/TRefMut annotation. Two observed
+               behavior differences from before this change, both strict
+               capability gains: an AddrOf initializer against a &T/&mut T
+               annotation now also runs check_literal_fits_refined (the
+               dedicated Let-side AddrOf branch never called it, unlike
+               the Call-argument loop's own copy); and an existentially-
+               typed initializer is now opened before unification the same
+               way an existentially-typed call argument already was (see
+               check_expr's own fallback comment) -- previously unique to
+               Call, now shared, though no existing test or kernel/ site
+               is known to exercise a Let initializer that would have hit
+               either gap. *)
+            let et = check_expr senv eenv tyenv fenv e (strip_io ty) in
             (* Same restriction as the struct-literal case just above, but
                for any OTHER struct-typed initializer (a function call
                returning a struct by value, a field/array read, etc.): an
@@ -6337,7 +6362,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          | Some { desc = Ast.StructLit exprs; loc } ->
              (match repr ty with
               | (TStruct _ | TArray _) as expected ->
-                  check_expr senv eenv genv fenv { desc = Ast.StructLit exprs; loc } expected
+                  ignore (check_expr senv eenv genv fenv { desc = Ast.StructLit exprs; loc } expected)
               | _ -> raise (TypeError (loc,
                   "literal { ... } requires a struct or array type annotation")));
              genv

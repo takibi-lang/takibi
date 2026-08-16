@@ -12958,6 +12958,29 @@ let codegen_tests = [
           return inner322field(&o.core);
         }");
 
+  (* GitHub issue #323: routing the Call-argument loop through check_expr
+     would make a bare `{ ... }` struct-literal argument against a
+     struct-typed parameter type-check (check_expr's own StructLit cases),
+     where it previously always raised "struct literal requires a type
+     annotation" -- EXCEPT llvm_gen.ml's codegen has no support for a
+     StructLit as a general call-argument expression (its own gen_expr
+     raises "BUG: StructLit must be handled in gen_stmt / gen_global, not
+     gen_expr" for it: this test caught that mismatch the first time it
+     was written as a positive "now type-checks" case). #323's own Call
+     loop deliberately special-cases StructLit arguments to bypass
+     check_expr and keep calling infer_expr directly instead, preserving
+     the exact pre-#323 rejection. This is the negative-control regression
+     test for that deliberate exclusion. *)
+  Alcotest.test_case
+    "a bare struct-literal call argument is still rejected, not silently \
+     accepted by check_expr (issue #323 negative control)" `Quick
+    (expect_type_error "struct literal requires a type annotation"
+       "struct Struct323Point { x: i32; y: i32; }
+        fn struct323_sum(p: Struct323Point) -> i32 { return p.x + p.y; }
+        fn struct323_use() -> i32 {
+          return struct323_sum({1, 2});
+        }");
+
 ]
 
 (* GitHub issue #55: Use_resolver's DFS closure algorithm, tested against
