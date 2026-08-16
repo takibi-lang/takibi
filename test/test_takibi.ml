@@ -12967,7 +12967,7 @@ let core_tests = [
 
 (* -- Entry point ----------------------------------------------------------- *)
 
-let () = Alcotest.run "takibi" [
+let named_groups = [
   "core",     core_tests;
   "parser",   parser_tests;
   "type_inf", infer_tests;
@@ -12975,3 +12975,64 @@ let () = Alcotest.run "takibi" [
   "depfile",      depfile_tests;
   "codegen",  codegen_tests;
 ]
+
+(* GitHub issue #329: proactively surfaces cross-test state-leak bugs like
+   issue #326's un-reset Hashtables, which sat dormant until a new test
+   happened to land at exactly the wrong fixed position. Opt-in via
+   SHUFFLE_TESTS (default run order above is completely unchanged when the
+   env var is unset), and deliberately flattens/interleaves ALL SIX groups
+   into one shuffled sequence rather than only shuffling within each named
+   group -- #326's own bug crossed group boundaries (a type_inf-group test
+   corrupted a codegen-group test), and Alcotest runs the groups given to
+   `run` in the fixed order given to it, so shuffling only within each
+   group can never reorder relative to another group and would not have
+   caught that exact case.
+
+   Alcotest has no built-in shuffle/seed option (`--help` confirms), and
+   `'a test_case = string * speed_level * (a' -> return)` is registered
+   per NAMED GROUP with per-group indices starting at 0 (lib/alcotest's
+   own Core.register) -- passing the same group name in multiple separate
+   `(name, cases)` entries to flatten across groups would make every entry
+   restart its own index at 0, producing "Duplicate test path" errors, not
+   an interleaved run. So a shuffled run collapses to ONE synthetic
+   "shuffled" group with fresh sequential Alcotest-native numbers, NOT the
+   original per-group numbers used elsewhere in this file and in past
+   debugging sessions -- to keep a shuffled failure greppable back to
+   where it lived before shuffling, each test's own original "group#index"
+   is prefixed onto its doc string instead (visible in Alcotest's own
+   printed test line, e.g. "shuffled 314 [codegen#181] ..."), a deliberate
+   substitute for the numbering this design question in the issue itself
+   flagged as a real cost, not an accidental side effect.
+
+   SHUFFLE_TESTS=1 uses a fresh random seed (rerun to get a different
+   order); any other value that parses as an int is used AS the seed
+   verbatim, to reproduce an exact past shuffled run. The seed actually
+   used is always printed first, in the SHUFFLE_TESTS=<seed> form, so a
+   failure can be reproduced exactly regardless of which form triggered
+   this run. *)
+let () =
+  match Sys.getenv_opt "SHUFFLE_TESTS" with
+  | None -> Alcotest.run "takibi" named_groups
+  | Some raw ->
+      let seed = match raw with
+        | "1" -> Random.self_init (); Random.bits ()
+        | s -> (match int_of_string_opt s with
+                | Some n -> n
+                | None -> Random.self_init (); Random.bits ())
+      in
+      Printf.printf
+        "SHUFFLE_TESTS=%d (rerun with SHUFFLE_TESTS=%d to reproduce this exact order)\n%!"
+        seed seed;
+      let rng = Random.State.make [| seed |] in
+      let flat = List.concat_map (fun (gname, cases) ->
+        List.mapi (fun i case -> (gname, i, case)) cases
+      ) named_groups in
+      let arr = Array.of_list flat in
+      for i = Array.length arr - 1 downto 1 do
+        let j = Random.State.int rng (i + 1) in
+        let tmp = arr.(i) in arr.(i) <- arr.(j); arr.(j) <- tmp
+      done;
+      let shuffled = Array.to_list arr |> List.map (fun (gname, i, (doc, speed, fn)) ->
+        (Printf.sprintf "[%s#%d] %s" gname (i + 1) doc, speed, fn)
+      ) in
+      Alcotest.run "takibi" [ "shuffled", shuffled ]
