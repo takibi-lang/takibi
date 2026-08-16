@@ -1,6 +1,18 @@
 // Ring buffer demo. RingBuf struct wraps head/tail with % cap.
+//
+// GitHub issue #240: `buf` used to be a raw `*i32` field with no
+// compiler-enforced relationship to `cap` (an ordinary struct field
+// holding a pointer that still supports arithmetic/indexing can hide
+// exactly that kind of relationship). Now an owned `[i32; 4]` field,
+// so the buffer's own storage genuinely lives inside RingBuf rather
+// than being aliased in from elsewhere. `head`/`tail` are only ever
+// kept in `0..<cap` by the `% cap` below, not by a type-level proof
+// (cap is a runtime field, not a literal the checker can fold), so
+// indexing still decays the field to a pointer and uses ordinary
+// pointer indexing -- exactly the same trust level the original
+// `*i32` field already had, not a new unsafe escape.
 struct RingBuf {
-    buf:  *i32;
+    buf:  [i32; 4];
     head: isize;
     tail: isize;
     size: i32;
@@ -23,8 +35,7 @@ fn rb_pop(rb: *RingBuf) -> i32 {
 }
 
 fn test_ringbuf() {
-    let mut data: [i32; 4];
-    let mut rb: RingBuf = {data, 0, 0, 0, 4};
+    let mut rb: RingBuf = {{0, 0, 0, 0}, 0, 0, 0, 4};
 
     rb_push(&rb, 1);
     rb_push(&rb, 2);

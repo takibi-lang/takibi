@@ -15,6 +15,75 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-16: Reject Pointer Fields in Structs, Capability-Based (GitHub Issue #240)
+
+Implemented the reformulation posted to #240's own comment thread
+during this session's earlier investigation: key the rule off
+capability (can this pointer type still do arithmetic/indexing/
+dereference?), not spelling. A repo-wide survey had found only 12 real
+sites, and most of them were NOT the hazard #240's Motivation
+describes -- 3 were the affine-handle-in-struct-field ownership-
+tracking mechanism (issue #89 Hurdle 3) working as designed, 7 were
+`examples/common_qemu/gic_regs.tkb`'s literal-address MMIO register
+table (deferred to #316), and only 2 (`ringbuf.tkb`, `bubblesort.tkb`)
+were the actual C-idiom hazard.
+
+**The rule** (`lib/type_inf.ml`'s `check_struct_field_pointer`, called
+from both `StructDef` and `OwnedStructDef`'s existing per-field
+validation loops): a struct field of type `*T`/`*align(N) T` is
+rejected unless `T` is an affine or linear opaque struct -- the one
+pointee kind already structurally incapable of arithmetic, indexing,
+dereference, or cast-away (`check_ptr_arith_complete`,
+`check_deref_complete`, `check_resource_cast_away`, all pre-existing).
+`*io T` fields stay exempt, deferred to #316 same as the #218 warning.
+
+**Fallout: existing tests used ordinary pointer struct fields purely as
+a vehicle to reach a DIFFERENT downstream check** -- the same pattern
+issue #239 hit earlier this session. Three region/authority-tracking
+tests (`region call: borrow pointer field cannot return a pointer
+alias`, its nested-aggregate sibling, and #239's own "address-of a
+pointer field" mint-site test) now fail at struct declaration, before
+the behavior they were built to demonstrate ever runs; updated their
+expected error to #240's message with a comment explaining the
+supersession, following the same precedent set for #239's fallout
+rather than deleting coverage. A DWARF codegen regression test
+(self-referential struct debug-info, `DwarfNode { next: *DwarfNode;
+}`) lost its ability to construct that shape in Takibi source at all;
+split into a slimmed-down DWARF test (dropped the self-referential
+field, keeping the pointer-to-struct-parameter coverage the test also
+existed for) plus a dedicated #240 rejection test for the
+self-referential shape itself.
+
+**Migrated the two real targets.** `bubblesort.tkb`'s hand-rolled
+`IntSlice { data: *i32; len: isize; }` was replaced with this
+project's own native slice type (`[]T`) -- the struct existed
+specifically to "bundle data and length for pass-by-pointer," which is
+exactly what a slice already is, and does it with an enforced (not
+merely intended) relationship between the two. `bubble_sort`'s own
+`s[j]`/`s[j+1]` accesses needed `unsafe` (loop bound `n-1-i`, not
+`s.len` itself, so `--forbid-trap` cannot fold the "j < n-1-i implies
+j+1 <= n" arithmetic on its own) while `print_arr`'s `0..<s.len` loop
+stayed unsafe-free (a loop bound taken directly from a slice's own
+`.len`, indexing that same slice, IS recognized as safe). `ringbuf.tkb`
+kept the same shape it always had -- `buf` became an owned `[i32; 4]`
+field (storage now genuinely lives inside `RingBuf`, no separately-
+aliased pointer) but indexing still decays it to a pointer first
+(`head`/`tail` are bounded by a runtime `% cap`, not a literal,
+`--forbid-trap` cannot fold that either) -- same trust level the
+original `*i32` field already had, deliberately not switched to
+checked array indexing, since that would have demanded an unsafe
+escape the original code never needed.
+
+Verified: `dune runtest` 1089/1089 (7 new #240 tests, 6 updated
+fallout tests), full `make kernelbuild` compiles clean (kernel/ has
+zero pointer struct fields, so no kernel-side fallout at all), and
+`examples/algorithm_suite` -- the real aggregate build both `ringbuf.tkb`
+and `bubblesort.tkb` ship in -- rebuilt and ran under real QEMU with
+byte-for-byte matching output against both `.expected` files (plus
+every OTHER test in that same 13-example suite still passing,
+confirming no collateral damage). Also confirmed the STM32/RPi3/RPi5
+variants of the same aggregate source list still compile.
+
 ### 2026-08-16: Checked Slice-to-Struct-Pointer Casts (GitHub Issue #218 Follow-Up)
 
 Continuation of the #218/#316 measurement work: `slice_expr as *T` was

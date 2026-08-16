@@ -5135,6 +5135,40 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeExists (_, _, body) -> type_mentions_tuple body
     | _ -> false
   in
+  (* GitHub issue #240 (capability-based reformulation, see that issue's
+     comment thread): a struct field's pointer type is rejected unless it
+     is already structurally incapable of pointer forgery -- today that
+     means only a pointer to an affine/linear opaque struct, which
+     already rejects arithmetic, indexing, dereference, and cast-away
+     unconditionally (check_ptr_arith_complete, check_deref_complete,
+     check_resource_cast_away), regardless of where the pointer value
+     lives. An ordinary `*T`/`*align(N) T` field can still do all of
+     those, so it can hide exactly the ownership/lifetime relationship
+     this issue's Motivation describes. `*io T` stays exempt pending
+     issue #316's still-open MMIO scoping decision -- not silently
+     ignored, deliberately deferred, same reasoning as the issue #218
+     warning's own `*io` exemption. *)
+  let struct_field_ptr_pointee_is_inert = function
+    | Ast.TypeIo _ -> true
+    | Ast.TypeNamed sname ->
+        StringSet.mem sname !affine_opaque_names
+        || StringSet.mem sname !linear_opaque_names
+    | _ -> false
+  in
+  let check_struct_field_pointer sname fname sloc ty =
+    match ty with
+    | Ast.TypePtr pointee | Ast.TypeAlignedPtr (_, pointee) ->
+        if not (struct_field_ptr_pointee_is_inert pointee) then
+          raise (TypeError (sloc, Printf.sprintf
+            "struct field '%s.%s' cannot hold pointer type '%s': it still \
+             supports arithmetic, indexing, and dereference, which can \
+             hide an ownership/lifetime relationship (GitHub issue #240); \
+             use a slice, an affine/linear opaque handle, or (for a fixed \
+             hardware register block, pending issue #316) an `io`-qualified \
+             pointer instead"
+            sname fname (Ast.show_type_expr ty)))
+    | _ -> ()
+  in
   let rec linear_inside_container = function
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_linear t
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
@@ -5560,6 +5594,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold a tuple: tuples are values, \
                not storage (OWNERSHIP_KERNEL.md 5.9)" sname fname));
+          check_struct_field_pointer sname fname sloc ty;
           validate_nonparam_type sloc ty) fields
     | Ast.OwnedStructDef (sname, _, params, fields, _, _, _, _, sloc) ->
         let scope = Hashtbl.create 8 in
@@ -5600,6 +5635,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             raise (TypeError (sloc, Printf.sprintf
               "indexed owner field '%s.%s' cannot nest a singleton inside storage"
               sname fname));
+          check_struct_field_pointer sname fname sloc ty;
           validate_nonparam_type sloc ty) fields
     | Ast.VariantDef (vname, cases, _, vloc) ->
         if cases = [] then

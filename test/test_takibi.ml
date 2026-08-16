@@ -2504,10 +2504,19 @@ let infer_tests = [
       "nested pointer indirection"
       "fn borrow_deref_leak(p: borrow **u8) -> *u8 { return *p; }");
 
+  (* Before GitHub issue #240, this scenario was caught by the
+     authority-tracking pass at `return h.ptr` ("authority-derived
+     pointer '<value>' cannot be returned"). #240 now rejects
+     BorrowHolder's own `ptr: *u8` field declaration, unconditionally,
+     before the function is even analyzed -- an ordinary struct can no
+     longer hold a raw pointer field at all, so the specific danger this
+     test demonstrated (a pointer read out of borrowed storage leaking
+     by return) is now structurally unreachable, not merely rejected at
+     the return site. *)
   Alcotest.test_case
     "region call: borrow pointer field cannot return a pointer alias" `Quick
     (expect_type_error
-      "authority-derived pointer '<value>' cannot be returned"
+      "cannot hold pointer type"
       "struct BorrowHolder { ptr: *u8; value: i32; }
        fn borrow_field_leak(h: borrow *BorrowHolder) -> *u8 { return h.ptr; }");
 
@@ -2515,16 +2524,21 @@ let infer_tests = [
     "region call: borrow pointer field may return copied scalar data" `Quick
     (fun () ->
       ignore (infer
-        "struct BorrowScalarHolder { ptr: *u8; value: i32; }
+        "struct BorrowScalarHolder { value: i32; }
          fn borrow_scalar_copy(h: borrow *BorrowScalarHolder) -> i32 {
            return h.value;
          }"));
 
+  (* Before GitHub issue #240, this scenario was caught by the
+     authority-tracking pass's aggregate-copy check. #240 now rejects
+     BorrowInner's own `ptr: *u8` field declaration first, for the same
+     reason as the test just above -- structurally unreachable, not
+     merely rejected once copied. *)
   Alcotest.test_case
     "region call: borrowed nested aggregate cannot launder a pointer field"
     `Quick
     (expect_type_error
-      "an aggregate containing a pointer or slice cannot be copied from authority-derived storage"
+      "cannot hold pointer type"
       "struct BorrowInner { ptr: *u8; value: i32; }
        struct BorrowOuter { inner: BorrowInner; }
        fn borrow_nested_leak(h: borrow *BorrowOuter) -> *u8 {
@@ -3483,7 +3497,7 @@ let infer_tests = [
 
   Alcotest.test_case "*T where T is a struct field's pointer type is rejected" `Quick
     (expect_type_error "nested pointer indirection"
-       "struct Holder { p: *u8; } fn f(pp: **Holder) {}");
+       "struct Holder { p: u8; } fn f(pp: **Holder) {}");
 
   Alcotest.test_case
     "taking the address of a *T local (inferred **T) is rejected without an annotation"
@@ -3491,10 +3505,18 @@ let infer_tests = [
     (expect_type_error "nested pointer indirection"
        "fn f() { let mut p: *u8 = 0 as usize as *u8; let pp = &p; }");
 
+  (* Before GitHub issue #240, this specifically exercised issue #239's
+     mint-site guard on address-of a POINTER-typed field (h.p: *u8,
+     &h.p: **u8). #240 now rejects Holder's own `p: *u8` field
+     declaration first -- an ordinary struct can no longer hold a raw
+     pointer field at all, so this exact scenario (address-of a pointer
+     field) is now structurally unreachable; the sibling "address-of a
+     *T local" test above still covers #239's own mint-site logic via a
+     still-legal shape. *)
   Alcotest.test_case
     "taking the address of a *T struct field (inferred **T) is rejected"
     `Quick
-    (expect_type_error "nested pointer indirection"
+    (expect_type_error "cannot hold pointer type"
        "struct Holder { p: *u8; }
         fn f(h: &mut Holder) { let pp = &h.p; }");
 
@@ -3513,8 +3535,41 @@ let infer_tests = [
   Alcotest.test_case "*io T stays legal (positive control)" `Quick
     (expect_ok "fn f(p: *io u8) {}");
 
-  Alcotest.test_case "a struct field of pointer type stays legal (positive control, #240 not yet implemented)" `Quick
-    (expect_ok "struct Holder { p: *u8; } fn f(h: &Holder) { let x: *u8 = h.p; }");
+  (* -- GitHub issue #240: reject pointer fields in structs (capability- --
+     based reformulation, see that issue's comment thread: keyed off
+     whether the field's pointer type still supports arithmetic/
+     indexing/dereference, not off its spelling) ------------------------ *)
+
+  Alcotest.test_case "an ordinary pointer struct field is rejected" `Quick
+    (expect_type_error "cannot hold pointer type"
+       "struct Holder { p: *u8; }");
+
+  Alcotest.test_case "an *align(N) T struct field is rejected too" `Quick
+    (expect_type_error "cannot hold pointer type"
+       "struct Holder { p: *align(8) u8; }");
+
+  Alcotest.test_case "an ordinary (non-opaque) struct-pointer struct field is rejected" `Quick
+    (expect_type_error "cannot hold pointer type"
+       "struct Inner { x: i32; }
+        struct Holder { p: *Inner; }");
+
+  Alcotest.test_case "an affine opaque handle struct field stays legal (already structurally inert)" `Quick
+    (expect_ok
+       "affine opaque struct Lease;
+        struct Holder { t: *Lease; }");
+
+  (* A linear (not affine) opaque handle struct field is already rejected
+     for a separate, pre-existing reason unrelated to #240 -- linear
+     values cannot live in struct fields at all yet, full stop
+     (OWNERSHIP_KERNEL.md Stage 3 still pending), so #240's own
+     capability exemption for it is moot; no test needed here since
+     #240 is not what's doing the rejecting. *)
+
+  Alcotest.test_case "an *io T struct field stays legal (deferred to issue #316)" `Quick
+    (expect_ok "struct Holder { p: *io u32; }");
+
+  Alcotest.test_case "a plain (non-pointer) struct field stays legal (positive control)" `Quick
+    (expect_ok "struct Holder { p: u8; }");
 
   (* -- GitHub issue #102: provable pointer alignment, *align(N) T ---- *)
 
@@ -10420,25 +10475,27 @@ let codegen_tests = [
      (lib/llvm_gen.ml) that one only exercises with a pointer-to-struct
      parameter, a struct-typed local, and an array-typed local: the i32
      params/locals in the previous test never touch the TypePtr / TypeNamed
-     / TypeArray branches at all. Also a self-referential struct (a node
-     pointing at its own type) -- this is precisely the shape ditype_of_ast
-     is built to never recurse into (structs always resolve to a memberless
-     forward declaration, regardless of whether reached directly or through
-     a pointer), so this is the regression test for that specific
-     "must not hang/crash on self-reference" guarantee, not just "it
-     verifies". Also exercises the di_struct_placeholders cache: DwarfNode
-     is named twice (once via the pointer parameter, once via the direct
-     local), which must resolve to the same cached forward-decl rather than
-     create a duplicate metadata node each time. *)
+     / TypeArray branches at all. Also exercises the di_struct_placeholders
+     cache: DwarfNode is named twice (once via the pointer parameter, once
+     via the direct local), which must resolve to the same cached
+     forward-decl rather than create a duplicate metadata node each time.
+     GitHub issue #240 note: this test originally also covered a SELF-
+     referential struct (`next: *DwarfNode` as a field of DwarfNode
+     itself) as a regression guard for ditype_of_ast's "must not hang/
+     crash on self-reference" forward-declaration design. #240 now
+     rejects any ordinary struct-typed pointer field, including a
+     self-referential one, at declaration time -- so that specific shape
+     can no longer be constructed in Takibi source at all, and
+     ditype_of_ast's own self-reference guard is unreachable from any
+     valid program (harmless dead code, not a regression; see the
+     dedicated #240 rejection test just below for that shape). *)
   Alcotest.test_case
     "DWARF debug info (-g): pointer-to-struct parameter, struct-typed local, \
-     and array-typed local all produce verifier-accepted IR, including a \
-     self-referential struct type (regression coverage for ditype_of_ast's \
-     struct-as-forward-declaration design)" `Quick
+     and array-typed local all produce verifier-accepted IR \
+     (regression coverage for ditype_of_ast's struct-as-forward-declaration design)" `Quick
     (expect_codegen_ok
        "struct DwarfNode {
           value: i32;
-          next: *DwarfNode;
         }
 
         fn codegen_debug_info_struct_ptr(n: *DwarfNode) -> i32 {
@@ -10447,6 +10504,15 @@ let codegen_tests = [
           node.value = n.value;
           arr[0] = node.value;
           return arr[0];
+        }");
+
+  Alcotest.test_case
+    "GitHub issue #240: a self-referential struct pointer field is rejected \
+     (the exact shape the DWARF test above used to cover before #240)" `Quick
+    (expect_type_error "cannot hold pointer type"
+       "struct DwarfNodeSelfRef {
+          value: i32;
+          next: *DwarfNodeSelfRef;
         }");
 
   Alcotest.test_case

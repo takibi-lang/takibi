@@ -1,14 +1,22 @@
-// Bubble sort demo. IntSlice struct bundles data and length for pass-by-pointer.
-// Demonstrates array read/write through a pointer using arr[i]=v and arr[i].
-struct IntSlice {
-    data: *i32;
-    len:  isize;
-}
-
-fn print_arr(s: *IntSlice) {
-    let arr: *i32 = s.data;
-    for i in 0..<s.len {
-        uart_print(arr[i]);
+// Bubble sort demo. Demonstrates array read/write through a slice using
+// arr[i]=v and arr[i].
+//
+// GitHub issue #240: this used to define its own IntSlice struct
+// (`data: *i32; len: isize;`) to "bundle data and length for
+// pass-by-pointer" -- exactly what this project's own native slice type
+// (`[]T`, a real fat pointer with a checked length) already is. An
+// ordinary struct field holding a raw pointer that still supports
+// arithmetic/indexing can hide the very data+length relationship a
+// hand-rolled IntSlice was trying to bundle in the first place; the
+// native slice both bundles it AND enforces it (checked indexing, no
+// `IntSlice.len` that can silently drift from the real allocation).
+fn print_arr(s: borrow []i32) {
+    // `0..<s.len` indexing THIS SAME slice is provably in range on its
+    // own (the compiler recognizes a loop bound taken directly from a
+    // slice's own .len as safe to index that slice with) -- no unsafe
+    // needed here, unlike bubble_sort below.
+    for i: usize in 0..<s.len {
+        uart_print(s[i]);
         if (i < s.len - 1) {
             uart_putc(' ');
         }
@@ -16,15 +24,24 @@ fn print_arr(s: *IntSlice) {
     uart_puts("\r\n");
 }
 
-fn bubble_sort(s: *IntSlice) {
-    let arr: *i32 = s.data;
-    let n: isize = s.len;
-    for i in 0..<(n - 1) {
-        for j in 0..<(n - 1 - i) {
-            if (arr[j] > arr[j + 1]) {
-                let mut tmp: i32 = arr[j];
-                arr[j] = arr[j + 1];
-                arr[j + 1] = tmp;
+fn bubble_sort(s: borrow []i32) !{unsafe} {
+    let n: usize = s.len;
+    for i: usize in 0..<(n - 1) {
+        for j: usize in 0..<(n - 1 - i) {
+            // j < n-1-i implies j+1 < n-i <= n, so both s[j] and
+            // s[j+1] are genuinely in range -- but that implication is
+            // arithmetic the type checker does not fold once the loop
+            // bound is no longer literally `s.len` itself (see
+            // print_arr above, which stays unsafe-free for exactly
+            // that reason). Every statement in this block needs the
+            // same escape, so it covers the whole block rather than
+            // each access individually.
+            unsafe {
+                if (s[j] > s[j + 1]) {
+                    let mut tmp: i32 = s[j];
+                    s[j] = s[j + 1];
+                    s[j + 1] = tmp;
+                }
             }
         }
     }
@@ -33,13 +50,11 @@ fn bubble_sort(s: *IntSlice) {
 fn test_bubblesort() {
     let mut buf: [i32; 8] = {5, 3, 8, 1, 9, 2, 7, 4};
 
-    let mut s: IntSlice = {buf, 8};
-
     uart_puts("before: ");
-    print_arr(&s);
+    print_arr(buf as []i32);
 
-    bubble_sort(&s);
+    bubble_sort(buf as []i32);
 
     uart_puts("after:  ");
-    print_arr(&s);
+    print_arr(buf as []i32);
 }
