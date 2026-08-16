@@ -5068,9 +5068,23 @@ let gen_func ?prog_types fdef =
         ignore (build_cond_br cond_v body_bb after_bb builder);
 
         position_at_end body_bb builder;
+        (* GitHub issue #313: mirrors type_inf.ml's own While case calling
+           narrow_from_cond -- same kill set (Ast.written_names body, "not
+           written anywhere in the body"), same two mechanisms narrow_from_
+           cond itself wraps (apply_narrowing for Imm/slice-min-length,
+           apply_narrowing_mut for Mut via narrowing_ctx). Deliberately NOT
+           mirroring apply_slice_index_narrowing here -- that is a
+           SEPARATE #213 mechanism with no type_inf.ml-side counterpart in
+           narrow_from_cond, so adding it here would elide a check
+           type_inf.ml never proved for this construct. *)
+        let killed    = Ast.written_names body in
+        let saved     = apply_narrowing     locals cond killed in
+        let saved_mut = apply_narrowing_mut locals cond killed in
         Stack.push (after_bb, cond_bb) loop_stack;
         run_stmts_with_future_writes body;
         ignore (Stack.pop loop_stack);
+        restore_narrowing     locals saved;
+        restore_narrowing_mut saved_mut;
         if block_terminator (insertion_block builder) = None then
           ignore (build_br cond_bb builder);
 

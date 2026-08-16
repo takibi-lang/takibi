@@ -2976,16 +2976,40 @@ let infer_tests = [
   Alcotest.test_case "while (true) still works" `Quick
     (expect_ok "fn f() { while (true) { break; } }");
 
+  (* GitHub issue #313 (fixed 2026-08-16): while's own condition now
+     narrows the loop body the same way if's own condition already does,
+     as long as the narrowed binding is never reassigned anywhere in the
+     body (the narrower first version this issue's own text scoped to --
+     reuses narrow_from_cond's existing kill-set soundness check verbatim,
+     no new analysis needed). Previously (found migrating kernel/kernel/
+     fd_table.tkb off array-decay-avoidance indexing, 2026-08-15) the body
+     was processed with the same tyenv the loop was entered with, even
+     though this exact two-sided condition would have narrowed an `if`. *)
   Alcotest.test_case
-    "while's own condition does NOT narrow the loop body, unlike if \
-     (found migrating kernel/kernel/fd_table.tkb off array-decay-\
-     avoidance indexing, 2026-08-15): the body is processed with the \
-     same tyenv the loop was entered with, even though a two-sided \
-     condition would be enough to narrow if this were an `if`" `Quick
+    "while's own condition narrows the loop body when the narrowed \
+     binding is never reassigned there (issue #313)" `Quick
+    (expect_ok
+      "fn foo(i: {0..<4 as i32}) {} \
+       fn f(v: i32) { \
+         while (v >= 0 && v < 4) { \
+           foo(v); \
+           return; \
+         } \
+       }");
+
+  (* Negative control: `v` IS reassigned inside the body before its
+     narrowed use, so narrow_from_cond's kill set correctly excludes it --
+     stays unrefined/rejected, matching this issue's own acceptance
+     criteria for the case deliberately left unsound otherwise. *)
+  Alcotest.test_case
+    "while's own condition does NOT narrow a binding reassigned inside \
+     the loop body before its narrowed use (issue #313 negative control)"
+    `Quick
     (expect_type_error "unproven i32"
       "fn foo(i: {0..<4 as i32}) {} \
        fn f(v: i32) { \
          while (v >= 0 && v < 4) { \
+           v = v + 1; \
            foo(v); \
            return; \
          } \
@@ -8733,6 +8757,24 @@ let codegen_tests = [
             total = total + buf[i];
           }
           return total;
+        }");
+
+  (* GitHub issue #313: locks in the paired type_inf.ml/llvm_gen.ml fix
+     (narrow_from_cond reused for While, apply_narrowing/apply_narrowing_
+     mut mirrored in codegen) at the codegen/--forbid-trap level, matching
+     the #311/#312 sync tests just above. `v` is never reassigned in the
+     body, so the Index bounds check is elided both at the type level and
+     in the generated IR. *)
+  Alcotest.test_case
+    "while's own condition narrows a never-reassigned binding, eliding \
+     the Index bounds check (issue #313)" `Quick
+    (expect_trap_sites 0
+       "fn f313_while(v: usize) -> i32 {
+          let mut buf: [i32; 4];
+          while (v < 4) {
+            return buf[v];
+          }
+          return 0;
         }");
 
   Alcotest.test_case

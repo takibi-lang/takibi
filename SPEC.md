@@ -2184,21 +2184,27 @@ at codegen time rather than silently lowering to a racy `wfi`.
   check. `let mut x: i32 = v;` discards the proof and uses the bare
   declared type, since reassignment can genuinely bring an unproven
   value later.
-- **`while (cond) { ... }` does NOT narrow from its own condition,
-  unlike `if`.** `cond` is type-checked but the body is processed with
-  the same `tyenv` the loop was entered with -- a guard like `while (fd
-  < PROCESS_FD_MAX) { arr[fd] = ...; fd = fd + 1; }` gives `fd` no
-  proven upper bound inside the body, even though the loop can only run
-  while the condition holds. Found migrating `kernel/kernel/fd_table.tkb`
-  off raw-pointer array-decay indexing (2026-08-15): converting the
-  `while` to `for fd in first..<PROCESS_FD_MAX` did not fix this either,
-  since `first` is a runtime value, not a compile-time constant (see
-  "For Loops" below) -- the fix was an explicit `if (fd <
-  PROCESS_FD_MAX) { ... }` wrapping the body, the same idiom already used
-  for signed lower bounds and mutable-binding narrowing elsewhere in this
-  document. Prefer a `for` loop with constant bounds when the upper bound
-  is known at compile time; fall back to an explicit wrapping-`if` inside
-  a `while`/`for`-with-non-constant-bounds body otherwise.
+- **`while (cond) { ... }` narrows from its own condition the same way
+  `if` does (GitHub issue #313), but ONLY for a binding the loop body
+  never reassigns anywhere.** `while (v >= 0 && v < 4) { foo(v); ... }`
+  narrows `v` inside the body when `v` is never written there, reusing
+  the exact same `narrow_from_cond` machinery and kill-set rule `if`'s
+  own then-branch already relies on. A binding the body DOES reassign
+  stays unnarrowed for the whole body, not just after the write -- e.g.
+  `while (fd < PROCESS_FD_MAX) { arr[fd] = ...; fd = fd + 1; }` still
+  gives `fd` no proven upper bound, since `fd` is reassigned inside the
+  loop. Found migrating `kernel/kernel/fd_table.tkb` off raw-pointer
+  array-decay indexing (2026-08-15): converting the `while` to `for fd in
+  first..<PROCESS_FD_MAX` did not help either, since `first` is a runtime
+  value, not a compile-time constant (see "For Loops" below, though issue
+  #312 later taught a `for` loop to reuse an already-refined runtime
+  bound too) -- the fix for THIS reassigning-counter shape remains an
+  explicit `if (fd < PROCESS_FD_MAX) { ... }` wrapping the body, the same
+  idiom already used for signed lower bounds and mutable-binding
+  narrowing elsewhere in this document. Prefer a `for` loop with constant
+  (or, since #312, already-refined-runtime) bounds when the upper bound
+  is known; fall back to an explicit wrapping-`if` for a `while`/`for`
+  body that reassigns its own bound-tracking variable.
 
 ## Endian-Aware Integer Types
 

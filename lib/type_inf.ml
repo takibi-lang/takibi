@@ -4115,9 +4115,34 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
   | While (cond, body) ->
       let ct = infer_expr senv eenv tyenv fenv cond in
       check_cond cond.loc ct;
+      (* GitHub issue #313: narrow_from_cond already computes exactly the
+         soundness condition a `while` needs and no more -- its own kill
+         set (Ast.written_names body) excludes any name written ANYWHERE
+         in the body, not just before the narrowed use, which is
+         precisely "the loop body provably never reassigns it at all"
+         (the narrower first version this issue's own text calls out,
+         avoiding the harder "not reassigned between the narrowed use and
+         the next condition re-check" analysis a per-iteration narrowing
+         would need). No new soundness analysis needed: `if`'s own use of
+         this same function already established it's sound for exactly
+         this kill rule, and a `while` condition holding for the ENTIRE
+         body on every iteration is the same "cond implies these bounds
+         for every statement that follows, up to the next write" fact
+         `if`'s then-branch already relies on -- only reachable body
+         statements differ (loop body vs. then-branch), not the
+         underlying reasoning. Only applies to the BODY; the tyenv
+         returned after the loop for the fallthrough stays unnarrowed
+         (the condition is false there, a different, unrelated fact).
+         Sync rule: llvm_gen.ml's own While codegen case now applies the
+         same apply_narrowing/apply_narrowing_mut calls narrow_from_cond
+         itself wraps, for the same reason #311/#312 needed the matching
+         update -- without it this would be a real --forbid-trap
+         regression risk (proving more here without codegen eliding the
+         matching check). *)
+      let narrowed_tyenv = narrow_from_cond tyenv cond body in
       let (_, raw_locals') = fold_stmts_with_future_writes
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
-        (tyenv, raw_locals) body
+        (narrowed_tyenv, raw_locals) body
       in
       (tyenv, raw_locals')
   | For (name, ty_opt, lo_expr, hi_expr, body) ->
