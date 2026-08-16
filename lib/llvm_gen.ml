@@ -2121,6 +2121,32 @@ let as_cond v =
     "internal error: as_cond expected i1 (bool), got %s -- type checker's \
      bool-only condition invariant was violated" (string_of_lltype (type_of v))))
 
+(* GitHub issue #321: the "does this type wrap a struct, and if so by what
+   name" pattern, otherwise hand-duplicated across three call sites below
+   (AddrOf's FieldGet sub-case, gen_field_access's read path, and the
+   Assign/FieldGet write path) as three independent, non-exhaustive
+   Ast.type_expr matches -- each ending in a wildcard `_ -> raise`, so
+   OCaml's own exhaustiveness check never catches a missing case. Found
+   the hard way while implementing &T/&mut T (#314/#319/#320): adding
+   TypeRef/TypeRefMut meant finding and fixing all three sites one at a
+   time via codegen test failures ("field access '.count' on non-struct
+   type", "field assignment '.%s' on non-struct type"), not a single
+   `dune build` error.
+
+   Deliberately does NOT cover TypeIo-wrapped (`*io Struct`, which also
+   needs a "field access is volatile" flag no plain string can carry) or
+   TypeIndexed (a generic struct's own by-value storage, which needs a
+   completely different field-address strategy) -- both stay call-site
+   -specific, since each needs handling this shared helper can't express
+   in a plain `string option`. Does NOT touch lib/type_inf.ml's own
+   `struct_instance` (a different representation, `Types.ty` not
+   `Ast.type_expr`, already exhaustiveness-checked by OCaml since it's a
+   compiler-internal type this file doesn't independently extend). *)
+let struct_name_of_type : Ast.type_expr -> string option = function
+  | TypeNamed s | TypePtr (TypeNamed s) | TypeAlignedPtr (_, TypeNamed s)
+  | TypeRef (TypeNamed s) | TypeRefMut (TypeNamed s) -> Some s
+  | _ -> None
+
 (* Look up a struct field by name; returns (field_index, field_ast_type) *)
 let field_info struct_name fname =
   let fields = match Hashtbl.find_opt struct_fields struct_name with
@@ -2687,12 +2713,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | FieldGet (base_expr, fname) ->
            (* &expr.field -- get a pointer to the field via GEP (no load) *)
            let (base_ty, base_v) = gen_expr locals base_expr in
-           let sname = match base_ty with
-             | TypeNamed s        -> s
-             | TypePtr (TypeNamed s) -> s
-             | TypeAlignedPtr (_, TypeNamed s) -> s   (* GitHub issue #102 *)
-             | TypeRef (TypeNamed s) | TypeRefMut (TypeNamed s) -> s   (* GitHub issue #314/#319 *)
-             | _ -> raise (Error (Printf.sprintf
+           let sname = match struct_name_of_type base_ty with
+             | Some s -> s
+             | None -> raise (Error (Printf.sprintf
                  "field address '.%s' on non-struct type" fname))
            in
            let (idx, field_ty) = field_info sname fname in
@@ -4350,11 +4373,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              | _ -> gen_expr locals base_expr
            in
            let (sname, through_io, base_ptr) = match base_ty with
-             | TypeNamed s                      -> (s, false, base_v)
-             | TypePtr (TypeNamed s)            -> (s, false, base_v)
              | TypePtr (TypeIo (TypeNamed s))   -> (s, true, base_v)
-             | TypeAlignedPtr (_, TypeNamed s)  -> (s, false, base_v)
-             | TypeRef (TypeNamed s) | TypeRefMut (TypeNamed s) -> (s, false, base_v)
              | TypeIndexed (s, _) ->
                  (match base_expr.desc with
                   | Var name ->
@@ -4365,8 +4384,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                            name)))
                   | _ -> raise (Error
                       "BUG: indexed owner field assignment has no stable base"))
-             | _ -> raise (Error (Printf.sprintf
-                 "field assignment '.%s' on non-struct type" fname))
+             | _ ->
+                 (match struct_name_of_type base_ty with
+                  | Some s -> (s, false, base_v)
+                  | None -> raise (Error (Printf.sprintf
+                      "field assignment '.%s' on non-struct type" fname)))
            in
            let (idx, field_ty) = field_info sname fname in
            let llty = Hashtbl.find struct_lltypes sname in
@@ -4409,13 +4431,12 @@ and gen_field_access ~decay locals (base_expr : Ast.expr) (fname : string)
       (value_ty, to_arith_width value_ty v)
   | _ ->
       let (sname, through_io) = match base_ty with
-        | TypeNamed s                      -> (s, false)
-        | TypePtr   (TypeNamed s)          -> (s, false)
-        | TypePtr   (TypeIo (TypeNamed s)) -> (s, true)   (* field access through *io Struct is volatile *)
-        | TypeAlignedPtr (_, TypeNamed s)  -> (s, false)  (* GitHub issue #102 *)
-        | TypeRef (TypeNamed s) | TypeRefMut (TypeNamed s) -> (s, false)  (* GitHub issue #314/#319 *)
-        | _ -> raise (Error (Printf.sprintf
-            "field access '.%s' on non-struct type" fname))
+        | TypePtr (TypeIo (TypeNamed s)) -> (s, true)   (* field access through *io Struct is volatile *)
+        | _ ->
+            (match struct_name_of_type base_ty with
+             | Some s -> (s, false)
+             | None -> raise (Error (Printf.sprintf
+                 "field access '.%s' on non-struct type" fname)))
       in
       let (idx, field_ty) = field_info sname fname in
       let llty = Hashtbl.find struct_lltypes sname in
