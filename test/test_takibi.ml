@@ -3460,6 +3460,39 @@ let infer_tests = [
   Alcotest.test_case "unsafe { stmt* } marks the direct-literal *io sugar too (issue #316)" `Quick
     (expect_ok "fn f() !{unsafe} { unsafe { let dr: *io u8 = 0x09000000; } }");
 
+  (* Regression coverage for two real "unnecessary unsafe" false positives
+     found and fixed the same session (both genuinely required `unsafe`,
+     both got flagged as not needing it): a bare-literal *io construction
+     via coerce's implicit inttoptr path (found in kernel/platform/qemu/
+     uart.tkb), and a cast reinterpreting an ALREADY-pointer-typed source
+     as *io Struct (found in kernel/drivers/net/virtio_net.tkb's
+     used_idx_get) -- the latter never reached coerce's inttoptr branch at
+     all, since LLVM's opaque `ptr` type makes source and destination
+     identical at coerce's own entry short-circuit for a pointer-to-
+     pointer reinterpretation, which is why gen_expr's Cast case now calls
+     note_unsafe_use() directly instead of relying on coerce alone. *)
+  (* Deliberately named `io_literal_sugar_probe`, NOT the file's usual
+     placeholder `f` -- found this session (see the new GitHub issue on
+     llvm_gen.ml's un-reset per-compilation Hashtables) that `fn f()`
+     here, immediately ahead of a LATER `fn f(param) -> T` test elsewhere
+     in this file, corrupts that unrelated later test with a stale,
+     wrong-arity `func_param_ast_types` entry (Invalid_argument
+     "List.iter2" in gen_func) -- the bug is a genuine compiler-side gap
+     (several Hashtables in gen_program's reset preamble are missing),
+     not anything about this test's own content; a unique name is the
+     workaround until that gap is fixed. Do not rename this back to `f`. *)
+  Alcotest.test_case "the direct-literal *io sugar records zero unnecessary-unsafe sites (issue #316 lint fix)" `Quick
+    (expect_unnecessary_unsafe 0
+       "fn io_literal_sugar_probe() !{unsafe} { unsafe { let dr: *io u8 = 0x09000000; } }");
+
+  Alcotest.test_case "a cast reinterpreting an existing pointer as *io Struct records zero unnecessary-unsafe sites" `Quick
+    (expect_unnecessary_unsafe 0
+       "struct packed Used { idx: u16; }
+        fn used_idx_get(queue_mem: *u8) -> u16 !{unsafe} {
+            let used: *io Used = unsafe { (queue_mem + 4096) as *io Used };
+            return used.idx;
+        }");
+
   (* GitHub issue #218 audit-map warning: io is exempted from THIS
      (separate, soft) warning list now that it is a hard error above --
      otherwise the same site would double-report. Reached only once
