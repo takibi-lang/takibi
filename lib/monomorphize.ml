@@ -574,6 +574,15 @@ let discover_value_generic_params
    TypeGenericInst/TypeGenericInst case below, which needed no change at
    all: recursing into nested args lands on this new case by itself. *)
 
+(* GitHub issue #322: this is one of two independent "does this argument's
+   shape match the generic parameter's declared wrapper" implementations in
+   this file (the other is derive_arg_type below) -- a syntactic pass over
+   raw Ast.type_expr with no visibility into type_inf.ml's own unify rules.
+   Adding a new wrapper constructor here needs a matching case in
+   derive_arg_type too when that constructor can be an argument's own
+   *inferred* shape (not just a template's declared parameter shape); see
+   test/test_takibi.ml's own issue #322 regression cases, one per wrapper
+   constructor, for the checklist this gap left with no earlier coverage. *)
 let rec unify_arg (type_params : string list) (value_params : string list)
                   (bindings : (string, type_expr) Hashtbl.t)
                   (value_bindings : (string, int) Hashtbl.t)
@@ -732,7 +741,10 @@ let run (prog : toplevel list) : toplevel list =
        TypeNamed/subst path resolves either without needing vsubst here at
        all. Deliberately narrow (only ONE field-access level; does not
        recurse into `&x.a.b`) -- matches this whole mechanism's own
-       "deliberately weak inference" philosophy. *)
+       "deliberately weak inference" philosophy.
+
+       GitHub issue #322: this is the companion half of unify_arg's own
+       sync-risk comment above -- see that one for the checklist. *)
     let derive_arg_type (local_types : (string, type_expr) Hashtbl.t) (e : expr)
         : type_expr option =
       match e.desc with
