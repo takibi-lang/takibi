@@ -105,6 +105,44 @@ let function_param_modes : Ast.type_expr option list StringMap.t ref =
    less). *)
 let enclosing_future_writes : StringSet.t ref = ref StringSet.empty
 
+(* GitHub issue #328: mirrors lib/llvm_gen.ml's own unsafe_use_marker/
+   unsafe_lint_active mechanism (that file's own "unnecessary unsafe" lint,
+   GitHub issue #315), but for the PURE type-checker-level unsafe gates
+   (check_kinded_ptr_cast_needs_unsafe, check_aligned_ptr_cast_needs_unsafe,
+   check_io_ptr_cast_needs_unsafe, check_io_ptr_literal_needs_unsafe) that
+   llvm_gen.ml's own codegen-side marker cannot see on its own -- those are
+   pure type-checker rejections with no codegen footprint to hook a
+   note_unsafe_use() call into. This was a real, repeated bug source (see
+   issue #328's own history: the *io category needed a codegen-side
+   note_unsafe_use() call independently rediscovered and placed at the
+   right spot TWICE, in two different code shapes, for the SAME
+   type-checker-level requirement -- and the affine/linear-opaque-cast
+   category had NO coverage at all, a gap SPEC.md explicitly documented).
+   Every check_*_needs_unsafe function now records into
+   type_checker_unsafe_use_marker (via note_type_checker_unsafe_use) at
+   the exact point it decides unsafe_depth > 0 satisfies its requirement --
+   no codegen-side involvement needed, so any FUTURE check_*_needs_unsafe
+   gate gets correct lint coverage automatically, by construction.
+
+   type_checker_consumed_unsafe_at then records, per statement/expression
+   location, whether anything AT OR UNDER that location consumed one of
+   these type-checker-only justifications -- populated below by
+   fold_stmts_with_future_writes (per statement, mirroring llvm_gen.ml's
+   own run_stmts_with_future_writes) and by infer_expr's Unsafe case (as a
+   single unit, mirroring llvm_gen.ml's own Unsafe-expr codegen case).
+   lib/llvm_gen.ml's existing "unnecessary unsafe" report sites consult
+   this table as an ADDITIONAL OR'd-in signal (see its own comment at
+   record_unnecessary_unsafe's call sites), so a statement/expression whose
+   ONLY justification is one of these type-checker-only categories is not
+   wrongly flagged "unnecessary" by llvm_gen.ml's own, codegen-blind
+   marker -- the false positive this issue's own history describes. This
+   file never reads type_checker_consumed_unsafe_at itself. *)
+let type_checker_unsafe_use_marker = ref 0
+let note_type_checker_unsafe_use () = incr type_checker_unsafe_use_marker
+let type_checker_lint_active = ref false
+let type_checker_consumed_unsafe_at : (Lexing.position, unit) Hashtbl.t =
+  Hashtbl.create 16
+
 (* Drop-in replacement for `List.fold_left f init stmts` that keeps
    enclosing_future_writes correct at every step. Sets it to
    written_names of the SUFFIX strictly after the statement about to be
@@ -130,7 +168,25 @@ let fold_stmts_with_future_writes
     | [] -> acc
     | s :: rest ->
         enclosing_future_writes := StringSet.of_list (Ast.written_names rest);
-        go (f acc s) rest
+        (* GitHub issue #328: this is the single choke point every
+           statement list in this file passes through (Block, UnsafeBlock,
+           If's branches, While, For, ...), mirroring exactly why
+           llvm_gen.ml hooks its own per-statement "unnecessary unsafe"
+           check into its analogous run_stmts_with_future_writes rather
+           than at each individual statement-list call site. Only active
+           inside an UnsafeBlock (type_checker_lint_active, set there) --
+           a statement outside any unsafe scope can never be "unnecessarily
+           unsafe", so checking it would be meaningless overhead. *)
+        let acc' =
+          if !type_checker_lint_active then begin
+            let before = !type_checker_unsafe_use_marker in
+            let acc' = f acc s in
+            if !type_checker_unsafe_use_marker <> before then
+              Hashtbl.replace type_checker_consumed_unsafe_at s.loc ();
+            acc'
+          end else f acc s
+        in
+        go acc' rest
   in
   go init stmts
 
@@ -1191,11 +1247,18 @@ let check_kinded_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
   match tgt with
   | TPtr (TStruct sname) when StringSet.mem sname !affine_opaque_names
                            || StringSet.mem sname !linear_opaque_names ->
-      if !unsafe_depth = 0 && not (is_literal_derived src_expr) then
-        raise (TypeError (loc,
-          "casting a non-literal integer to an affine/linear handle asserts \
-           it is valid with no evidence; write `unsafe { ... as "
-          ^ to_string tgt ^ " }` to mark it"))
+      if not (is_literal_derived src_expr) then begin
+        if !unsafe_depth = 0 then
+          raise (TypeError (loc,
+            "casting a non-literal integer to an affine/linear handle asserts \
+             it is valid with no evidence; write `unsafe { ... as "
+            ^ to_string tgt ^ " }` to mark it"))
+        else
+          (* GitHub issue #328: this is the "consumed" branch --
+             unsafe_depth > 0 is the only reason this cast is allowed.
+             See type_checker_consumed_unsafe_at's own comment. *)
+          note_type_checker_unsafe_use ()
+      end
   | _ -> ()
 
 let is_io_pointer_ty = function
@@ -1219,12 +1282,17 @@ let is_io_pointer_ty = function
    language's general "unsafe is not extended to plain pointer
    arithmetic" stance (see "unsafe { ... }" in SPEC.md). *)
 let check_io_ptr_cast_needs_unsafe loc (tgt : ty) =
-  if is_io_pointer_ty tgt && !unsafe_depth = 0 then
-    raise (TypeError (loc, Printf.sprintf
-      "casting to '%s' asserts it denotes a real, correctly-sized hardware \
-       register with no evidence (GitHub issue #316); write `unsafe { ... \
-       as %s }` to mark it"
-      (to_string tgt) (to_string tgt)))
+  if is_io_pointer_ty tgt then begin
+    if !unsafe_depth = 0 then
+      raise (TypeError (loc, Printf.sprintf
+        "casting to '%s' asserts it denotes a real, correctly-sized hardware \
+         register with no evidence (GitHub issue #316); write `unsafe { ... \
+         as %s }` to mark it"
+        (to_string tgt) (to_string tgt)))
+    else
+      (* GitHub issue #328: see type_checker_consumed_unsafe_at's comment. *)
+      note_type_checker_unsafe_use ()
+  end
 
 (* Companion to check_io_ptr_cast_needs_unsafe for the IMPLICIT coercion
    path SPEC.md's "MMIO / Volatile" section documents ("An integer literal
@@ -1242,12 +1310,16 @@ let check_io_ptr_cast_needs_unsafe loc (tgt : ty) =
    that can reach here at all. *)
 let check_io_ptr_literal_needs_unsafe loc (e : Ast.expr) (target : ty) =
   match e.desc with
-  | Ast.IntLit _ when is_io_pointer_ty target && !unsafe_depth = 0 ->
-      raise (TypeError (loc, Printf.sprintf
-        "assigning an integer literal directly to '%s' asserts it denotes \
-         a real, correctly-sized hardware register with no evidence \
-         (GitHub issue #316); write `unsafe { ... }` around it"
-        (to_string target)))
+  | Ast.IntLit _ when is_io_pointer_ty target ->
+      if !unsafe_depth = 0 then
+        raise (TypeError (loc, Printf.sprintf
+          "assigning an integer literal directly to '%s' asserts it denotes \
+           a real, correctly-sized hardware register with no evidence \
+           (GitHub issue #316); write `unsafe { ... }` around it"
+          (to_string target)))
+      else
+        (* GitHub issue #328: see type_checker_consumed_unsafe_at's comment. *)
+        note_type_checker_unsafe_use ()
   | _ -> ()
 
 (* GitHub issue #218: audit-map warning for casting a non-literal integer
@@ -1336,14 +1408,26 @@ let check_resource_cast_away loc (src_ty : ty) =
 let check_aligned_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
   match tgt with
   | TAlignedPtr (n, _) ->
-      if !unsafe_depth = 0 then
-        (match provable_multiple_of src_expr with
-         | Some k when k mod n = 0 -> ()
-         | _ ->
+      (match provable_multiple_of src_expr with
+       | Some k when k mod n = 0 -> ()
+       | _ ->
+           if !unsafe_depth = 0 then
              raise (TypeError (loc, Printf.sprintf
                "casting a non-literal integer to %s asserts alignment with \
                 no evidence; write `unsafe { ... as %s }` to mark it"
-               (to_string tgt) (to_string tgt))))
+               (to_string tgt) (to_string tgt)))
+           else
+             (* GitHub issue #328: proof failed, so unsafe_depth > 0 is the
+                only reason this cast is allowed -- see
+                type_checker_consumed_unsafe_at's own comment. Unlike the
+                `Some k when k mod n = 0` case above, this genuinely
+                consumed the justification (previously, this whole branch
+                wasn't even evaluated when already inside unsafe, so
+                whether the proof would have succeeded or failed was never
+                distinguished -- now it always is, so a cast that HAPPENS
+                to sit inside unsafe but was always provably aligned
+                anyway does not get wrongly credited as "needing" it). *)
+             note_type_checker_unsafe_use ())
   | _ -> ()
 
 (* GitHub issue #239: companion to types.ml's of_ast_in_scope check, for the
@@ -2331,9 +2415,19 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | Unsafe e1 ->
       (* Transparent to typing except for permitting unchecked-assertion
          constructs inside. No exception-safe decrement needed: a TypeError
-         aborts this compilation, and infer_program resets the counter. *)
+         aborts this top-level item's own checking (infer_program's Pass 3
+         resets both unsafe_depth and this function's partial results
+         before moving to the next FuncDef -- see issue #327/#328's own
+         history for why that reset exists).
+         GitHub issue #328: whole-expression granularity, mirroring
+         llvm_gen.ml's own Unsafe-expr codegen case (unconditional, not
+         gated by type_checker_lint_active -- that flag only matters for
+         UnsafeBlock's per-STATEMENT checking below). *)
       incr unsafe_depth;
+      let before = !type_checker_unsafe_use_marker in
       let t = infer_expr senv eenv tyenv fenv e1 in
+      if !type_checker_unsafe_use_marker <> before then
+        Hashtbl.replace type_checker_consumed_unsafe_at e.loc ();
       decr unsafe_depth;
       t
 
@@ -3888,14 +3982,25 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       (* GitHub issue #315: same as Block, except every statement inside
          is checked with unsafe_depth raised -- the block-granularity
          grant. No exception-safe decrement needed, same rationale as
-         Ast.Unsafe's own case: a TypeError aborts compilation and
-         infer_program resets the counter. *)
+         Ast.Unsafe's own case: a TypeError aborts this top-level item's
+         own checking and infer_program's Pass 3 resets unsafe_depth
+         before moving to the next FuncDef.
+         GitHub issue #328: type_checker_lint_active turns on per-statement
+         "unnecessary unsafe" tracking (via fold_stmts_with_future_writes,
+         above) for every statement inside this scope, including ones
+         nested arbitrarily deep in If/While/For/match bodies -- mirrors
+         llvm_gen.ml's own UnsafeBlock codegen case exactly, including the
+         save/restore (not unconditional on/off): a nested `unsafe { }`
+         inside this one must not turn tracking OFF when IT exits. *)
+      let was_lint_active = !type_checker_lint_active in
+      type_checker_lint_active := true;
       incr unsafe_depth;
       let (_, raw_locals') = fold_stmts_with_future_writes
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
         (tyenv, raw_locals) stmts
       in
       decr unsafe_depth;
+      type_checker_lint_active := was_lint_active;
       (tyenv, raw_locals')
   | If (cond, then_s, else_s) ->
       let ct = infer_expr senv eenv tyenv fenv cond in
@@ -4485,6 +4590,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
   nonliteral_ptr_cast_warnings := [];  (* fresh per compilation / per unit test *)
   collected_type_errors := [];  (* fresh per compilation / per unit test *)
+  type_checker_unsafe_use_marker := 0;  (* GitHub issue #328, fresh per compilation / per unit test *)
+  type_checker_lint_active := false;
+  Hashtbl.reset type_checker_consumed_unsafe_at;
   enclosing_future_writes := StringSet.empty;  (* fresh per compilation / per unit test *)
   resolved_call_targets := StringMap.empty;
   resolved_indirect_call_effects := StringMap.empty;
@@ -6385,8 +6493,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               unsafe block they never wrote. Reset here restores the
               "every function starts outside any unsafe scope" invariant
               that was implicitly true before this fold could continue
-              past a failure. *)
+              past a failure. GitHub issue #328's type_checker_lint_active
+              is the same class of non-exception-safe flag (its own
+              save/restore only runs on UnsafeBlock's normal exit path),
+              so it needs the same reset here for the same reason. *)
            unsafe_depth := 0;
+           type_checker_lint_active := false;
            m)
     | _ -> m
   ) StringMap.empty prog in

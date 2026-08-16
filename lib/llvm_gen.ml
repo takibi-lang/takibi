@@ -599,15 +599,20 @@ let unsafe_depth = ref 0
 
    Scoped to the categories llvm_gen.ml itself decides (single-element
    index elision, subslice-with-unprovable-bounds elision, raw-pointer
-   slice construction) -- NOT the affine/aligned-pointer-cast category
-   (`check_kinded_ptr_cast_needs_unsafe`/`check_aligned_ptr_cast_needs_unsafe`
-   in type_inf.ml), which is a pure type-checker-level gate with no
-   llvm_gen.ml footprint to hook into. As of this writing zero kernel/
-   sites use that category inside `unsafe`, so this is not a live
-   false-positive risk today, but a future affine/aligned-cast-only
-   unsafe site would be (wrongly) flagged as unnecessary by this check --
-   closing that gap would need the same before/after marker duplicated in
-   type_inf.ml's own statement walk, not attempted here. *)
+   slice construction) -- NOT the pure type-checker-level gates
+   (`check_kinded_ptr_cast_needs_unsafe`/`check_aligned_ptr_cast_needs_unsafe`/
+   `check_io_ptr_cast_needs_unsafe`/`check_io_ptr_literal_needs_unsafe` in
+   type_inf.ml), which have no llvm_gen.ml codegen footprint to hook a
+   note_unsafe_use() call into. GitHub issue #328 (2026-08-16): those now
+   record their OWN "genuinely consumed unsafe" determination directly in
+   type_inf.ml (Type_inf.type_checker_consumed_unsafe_at, populated by
+   type_inf.ml's own before/after marker around every Unsafe/UnsafeBlock
+   node -- see that ref's own comment for the full design). Both of this
+   file's own report sites below (the Unsafe-expr case and the
+   per-statement check just below it) OR that table's determination in
+   alongside this file's own marker, so a site whose ONLY justification is
+   one of those type-checker-only categories is not wrongly flagged
+   unnecessary here. *)
 let unsafe_use_marker = ref 0
 let note_unsafe_use () = incr unsafe_use_marker
 let unsafe_lint_active = ref false
@@ -3641,7 +3646,14 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       incr unsafe_depth;
       let before_use = !unsafe_use_marker in
       let r = gen_expr locals e1 in
-      if !unsafe_use_marker = before_use then
+      (* GitHub issue #328: OR in type_inf.ml's own determination for the
+         type-checker-only categories (affine/linear/aligned/*io pointer
+         casts) it can see but this codegen-side marker cannot -- without
+         this, a site whose ONLY justification is one of those categories
+         would be wrongly flagged unnecessary here, the exact bug class
+         that motivated #328 (see its own history). *)
+      if !unsafe_use_marker = before_use
+         && not (Hashtbl.mem Type_inf.type_checker_consumed_unsafe_at e.loc) then
         record_unnecessary_unsafe e.loc
           "unsafe { } did not need to be here: nothing inside it actually \
            elided a check or asserted an otherwise-illegal construct";
@@ -5369,7 +5381,11 @@ let gen_func ?prog_types fdef =
           if !unsafe_lint_active then begin
             let before_use = !unsafe_use_marker in
             gen_stmt s;
-            if !unsafe_use_marker = before_use then
+            (* GitHub issue #328: OR in type_inf.ml's own per-statement
+               determination for the type-checker-only categories -- see
+               the Unsafe-expr case above for the full rationale. *)
+            if !unsafe_use_marker = before_use
+               && not (Hashtbl.mem Type_inf.type_checker_consumed_unsafe_at s.loc) then
               record_unnecessary_unsafe s.loc
                 "statement inside unsafe { } did not need it: nothing in \
                  it actually elided a check or asserted an otherwise-\

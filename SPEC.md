@@ -2408,13 +2408,18 @@ about, now checked mechanically instead of only by review. Always on
 (not gated by a flag): cheap, reuses data the codegen already computes,
 and a real build should have zero such warnings.
 
-Scoped to the categories `llvm_gen.ml` itself decides (single-element
-index elision, subslice-with-unprovable-bounds elision, raw-pointer
-slice construction) -- **not** the affine/aligned-pointer-cast category
-(a pure type-checker-level gate with no codegen footprint to hook into),
-so a statement whose only justification is one of those casts would be
-misreported as unnecessary. No `kernel/` site uses that category inside
-`unsafe` as of this writing.
+Two independent sources feed this determination. `llvm_gen.ml` tracks the
+categories it itself decides at codegen time (single-element index
+elision, subslice-with-unprovable-bounds elision, raw-pointer slice
+construction). `type_inf.ml` separately tracks the pure type-checker-level
+gates that have no codegen footprint to hook into (the affine/linear/
+aligned/`*io` pointer-cast categories) -- each `check_*_needs_unsafe`
+function records its own "genuinely consumed unsafe" determination the
+moment it decides `unsafe_depth > 0` satisfies its requirement, so any
+future such gate gets correct lint coverage automatically, with no
+codegen-side change needed (GitHub issue #328). A statement or expression
+is only reported as unnecessary when **neither** source found a
+justification for it.
 
 ## --forbid-trap
 

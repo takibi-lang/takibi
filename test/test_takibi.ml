@@ -3583,6 +3583,46 @@ let infer_tests = [
             return used.idx;
         }");
 
+  (* GitHub issue #328: check_kinded_ptr_cast_needs_unsafe (affine/linear
+     opaque handle casts) is a PURE type-checker-level gate with no
+     codegen footprint of its own -- before #328, a site whose ONLY
+     justification was this category was wrongly flagged unnecessary here,
+     the documented gap SPEC.md's "Unnecessary-unsafe warning" section
+     used to call out explicitly ("No kernel/ site uses that category
+     inside unsafe as of this writing"). A computed (non-literal-derived)
+     integer cast to an affine handle is exactly that category: nothing in
+     llvm_gen.ml's own codegen elides a runtime check for it (a plain
+     inttoptr), so llvm_gen.ml's OWN marker never moves here -- this only
+     stays at 0 because type_inf.ml's new type_checker_consumed_unsafe_at
+     is OR'd in (see llvm_gen.ml's Unsafe-expr case). *)
+  Alcotest.test_case
+    "a computed cast to an affine opaque handle records zero \
+     unnecessary-unsafe sites (issue #328 gap fix)"
+    `Quick
+    (expect_unnecessary_unsafe 0
+       "affine opaque struct Token;
+        fn make_from_index(idx: usize) -> *Token !{unsafe} {
+          return unsafe { idx as *Token };
+        }");
+
+  (* Negative control: an affine handle cast built from a LITERAL is
+     already exempt from needing unsafe at all (check_kinded_ptr_cast_
+     needs_unsafe's own literal exemption, GitHub issue #15) -- so
+     type_inf.ml's note_type_checker_unsafe_use() never fires for it, and
+     wrapping it in `unsafe { }` anyway must still be reported as
+     unnecessary. This is the "genuinely superfluous unsafe stays flagged"
+     counterpart to the positive control just above -- proves issue #328's
+     fix does not just silence the warning wholesale. *)
+  Alcotest.test_case
+    "a literal-derived cast to an affine opaque handle wrapped in \
+     unsafe still records one unnecessary-unsafe site"
+    `Quick
+    (expect_unnecessary_unsafe 1
+       "affine opaque struct Token;
+        fn make_from_literal() -> *Token !{unsafe} {
+          return unsafe { 0 as usize as *Token };
+        }");
+
   (* GitHub issue #218 audit-map warning: io is exempted from THIS
      (separate, soft) warning list now that it is a hard error above --
      otherwise the same site would double-report. Reached only once
