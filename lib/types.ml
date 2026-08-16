@@ -95,6 +95,15 @@ and static_var =
 
 exception TypeError of Ast.loc * string
 
+(* GitHub issue #327 Stage 1: raised by Type_inf.infer_program once, after
+   Pass 3 (function-body inference) has attempted EVERY function rather
+   than aborting at the first failure, so a single compilation can report
+   every independently-broken function in one run instead of one per
+   edit-rebuild cycle. Always non-empty; callers should treat it the same
+   way they treat a single TypeError, just report every entry instead of
+   one. *)
+exception MultiTypeError of (Ast.loc * string) list
+
 let next_id = ref 0
 let next_static_id = ref 0
 

@@ -294,6 +294,30 @@ let expect_type_error_at ?filename line column fragment src () =
       if not (contains_substring msg fragment)
       then Alcotest.failf "TypeError %S does not contain %S" msg fragment
 
+(* GitHub issue #327 Stage 1: expect a MultiTypeError with exactly
+   List.length fragments entries, each fragment matched against some
+   entry's message (order-independent -- Pass 3 folds over the whole
+   program, so encounter order tracks declaration order, not anything a
+   test should need to pin down). A single broken function still raises a
+   plain Types.TypeError, not MultiTypeError (see infer_program's own
+   comment) -- exercised as a negative control by expect_type_error
+   elsewhere in this file, not duplicated here. *)
+let expect_multi_type_error fragments src () =
+  match infer src with
+  | _ ->
+      Alcotest.failf "expected MultiTypeError, but inference succeeded"
+  | exception Types.MultiTypeError errors ->
+      Alcotest.(check int) "error count" (List.length fragments) (List.length errors);
+      List.iter (fun fragment ->
+        if not (List.exists (fun (_, msg) -> contains_substring msg fragment) errors)
+        then Alcotest.failf "no MultiTypeError entry contains %S (errors: %s)"
+          fragment (String.concat " | " (List.map snd errors))
+      ) fragments
+  | exception Types.TypeError (_, msg) ->
+      Alcotest.failf
+        "expected MultiTypeError with %d entries, got a single TypeError instead: %s"
+        (List.length fragments) msg
+
 (* Expect inference to succeed *)
 let expect_ok src () =
   match infer src with
@@ -1945,6 +1969,39 @@ let async_tx_fixture =
    "
 
 let infer_tests = [
+  (* GitHub issue #327 Stage 1: two independently-broken functions in one
+     program both get reported, instead of the second's error being
+     hidden by the first aborting the whole compilation. *)
+  Alcotest.test_case
+    "two independently-broken functions both surface as one MultiTypeError"
+    `Quick
+    (expect_multi_type_error ["issue327_unbound_one"; "issue327_unbound_two"]
+       "fn issue327_broken_one() -> i32 { return issue327_unbound_one; }
+        fn issue327_ok() -> i32 { return 1; }
+        fn issue327_broken_two() -> i32 { return issue327_unbound_two; }");
+
+  Alcotest.test_case
+    "three independently-broken functions all surface, not just the first two"
+    `Quick
+    (expect_multi_type_error
+       ["issue327_unbound_a"; "issue327_unbound_b"; "issue327_unbound_c"]
+       "fn issue327_broken_a() -> i32 { return issue327_unbound_a; }
+        fn issue327_broken_b() -> i32 { return issue327_unbound_b; }
+        fn issue327_broken_c() -> i32 { return issue327_unbound_c; }");
+
+  (* Negative control: exactly one broken function among otherwise-correct
+     ones still raises a plain Types.TypeError, not MultiTypeError -- every
+     other expect_type_error test in this file already depends on this,
+     but this one names it explicitly as issue #327's own compatibility
+     requirement. *)
+  Alcotest.test_case
+    "a single broken function still raises a plain TypeError, not MultiTypeError"
+    `Quick
+    (expect_type_error "issue327_unbound_solo"
+       "fn issue327_ok_a() -> i32 { return 1; }
+        fn issue327_broken_solo() -> i32 { return issue327_unbound_solo; }
+        fn issue327_ok_b() -> i32 { return 2; }");
+
   Alcotest.test_case
     "authority pointer: access before guard consumption is accepted" `Quick
     (fun () ->

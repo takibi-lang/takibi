@@ -1270,6 +1270,14 @@ let check_io_ptr_literal_needs_unsafe loc (e : Ast.expr) (target : ty) =
    double-report. *)
 let nonliteral_ptr_cast_warnings : (Lexing.position * string) list ref = ref []
 
+(* GitHub issue #327 Stage 1: every TypeError caught while attempting each
+   function body in infer_program's Pass 3, in encounter order. Reset at
+   the start of every infer_program call, same as nonliteral_ptr_cast_warnings
+   just above. Empty on a clean compilation -- Pass 3 raises MultiTypeError
+   directly (rather than leaving this for a caller to check) the moment it
+   finds this non-empty, so nothing outside this file needs to read it. *)
+let collected_type_errors : (Ast.loc * string) list ref = ref []
+
 let is_io_pointee = function
   | TIo _ -> true
   | _ -> false
@@ -4476,6 +4484,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
 let infer_program (prog : Ast.toplevel list) : program_types =
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
   nonliteral_ptr_cast_warnings := [];  (* fresh per compilation / per unit test *)
+  collected_type_errors := [];  (* fresh per compilation / per unit test *)
   enclosing_future_writes := StringSet.empty;  (* fresh per compilation / per unit test *)
   resolved_call_targets := StringMap.empty;
   resolved_indirect_call_effects := StringMap.empty;
@@ -6338,13 +6347,44 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add (overload_key name params) (List.map snd params) modes
     | _ -> modes
   ) StringMap.empty prog;
-  (* Pass 3: infer function bodies *)
+  (* Pass 3: infer function bodies.
+     GitHub issue #327 Stage 1: each FuncDef's own infer_func call is fully
+     self-contained here -- senv/eenv/fenv/genv are all closed-over/fixed
+     for the whole fold, and no function's success or failure changes what
+     any OTHER function in this same fold sees. That makes this the safe
+     place to stop letting one broken function abort every function after
+     it: a TypeError from one FuncDef is recorded and the fold moves on to
+     the next one, so a single `main.exe` invocation can surface every
+     independently-broken function in one pass (this is the concrete
+     scenario the issue was filed over: dozens of *io cast sites across a
+     40-file migration, each needing its own rebuild to discover under the
+     old raise-on-first-error behavior). A function whose body fails to
+     type-check gets no entry in `functions` at all; a call site elsewhere
+     that depends on it will surface its own (possibly-cascading, expected
+     per the issue's own Stage 2 scoping) error rather than silently using
+     a placeholder. If anything was recorded, MultiTypeError is raised here
+     -- before Pass 4's affine/linear checking, which assumes every
+     function in `functions` type-checked cleanly -- reporting every
+     collected error together instead of just the first. *)
   let functions = List.fold_left (fun m -> function
     | Ast.FuncDef fdef ->
         let key = overload_key fdef.name fdef.params in
-        StringMap.add key (infer_func senv eenv fenv genv fdef) m
+        (try StringMap.add key (infer_func senv eenv fenv genv fdef) m
+         with Types.TypeError (loc, msg) ->
+           collected_type_errors := (loc, msg) :: !collected_type_errors;
+           m)
     | _ -> m
   ) StringMap.empty prog in
+  (* Exactly one error behaves exactly as before (a plain TypeError, not
+     wrapped) -- every existing caller/test that pattern-matches on
+     Types.TypeError specifically (the overwhelmingly common case: one
+     broken function) keeps working unchanged. MultiTypeError is only used
+     when there is genuinely more than one to report, which is the only
+     case where anything needs to change. *)
+  (match List.rev !collected_type_errors with
+   | [] -> ()
+   | [(loc, msg)] -> raise (Types.TypeError (loc, msg))
+   | errors -> raise (Types.MultiTypeError errors));
   (* Function-local affine/linear checking for kinded values.
      struct` / `linear opaque struct`. This deliberately stops short of a
      general ownership system: values are tracked per named local within a

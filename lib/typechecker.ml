@@ -1,5 +1,7 @@
-(* Re-export the exception so main.ml can catch Typechecker.TypeError *)
+(* Re-export the exceptions so main.ml can catch Typechecker.TypeError /
+   Typechecker.MultiTypeError *)
 exception TypeError = Types.TypeError
+exception MultiTypeError = Types.MultiTypeError
 
 (* Run HM type inference over the whole program.
    Raises TypeError on type errors. *)
