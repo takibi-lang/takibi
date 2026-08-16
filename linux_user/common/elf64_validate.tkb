@@ -55,7 +55,7 @@ variant Elf64Validation {
 }
 
 fn elf64_validate_load(image_addr: usize, image_len: usize,
-                       page_va: usize) -> Elf64Validation {
+                       page_va: usize) -> Elf64Validation !{unsafe} {
     if (image_len < ELF64_HEADER_SIZE) {
         return Elf64Validation::Invalid;
     }
@@ -65,7 +65,7 @@ fn elf64_validate_load(image_addr: usize, image_len: usize,
         CheckedUsize::Value(value) => { image_end = value; }
     }
 
-    let hdr: *Elf64Header = image_addr as *Elf64Header;
+    let hdr: *Elf64Header = unsafe { image_addr as *Elf64Header };
     let ident: *u8 = hdr.e_ident as *u8;
     if (ident[0] != 0x7F || ident[1] != 0x45
             || ident[2] != 0x4C || ident[3] != 0x46
@@ -111,7 +111,7 @@ fn elf64_validate_load(image_addr: usize, image_len: usize,
     let mut any_load: bool = false;
     for i: usize in 0..<phnum {
         let ph_addr: usize = phdr_base + i * ELF64_PROGRAM_HEADER_SIZE;
-        let ph: *Elf64ProgramHeader = ph_addr as *Elf64ProgramHeader;
+        let ph: *Elf64ProgramHeader = unsafe { ph_addr as *Elf64ProgramHeader };
         if (ph.p_type == ELF64_PT_LOAD) {
             any_load = true;
             let seg_vaddr: usize = ph.p_vaddr as usize;

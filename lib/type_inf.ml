@@ -1332,22 +1332,10 @@ let check_io_ptr_literal_needs_unsafe loc (e : Ast.expr) (target : ty) =
 
 (* GitHub issue #218: audit-map warning for casting a non-literal integer
    to an ORDINARY (non-affine/linear) pointer -- deliberately a warning,
-   not yet an error. #218's own broadening beyond affine/linear targets
-   would, per #316's measurement, hit roughly 1146 sites across kernel/,
-   most of them fixed-size-array-plus-computed-byte-offset access rather
-   than a genuine hardware/forgery boundary (see this repo's #316 issue
-   comment thread) -- landing that as a hard `unsafe` requirement today
-   would reproduce the exact "unsafe becomes too common to carry audit
-   signal" failure the affine-only scoping above was already measured
-   and narrowed to avoid (HISTORY.md's issue #15 entry). This warning
-   exists to make the full population visible (issue #238's trusted-base
-   metrics can count it) without forcing any code change yet. `*io T` is
-   exempted here (not from unsafe -- see check_io_ptr_cast_needs_unsafe
-   above, #316's resolution -- but from this SEPARATE warning list, which
-   would otherwise double-report the same site as both a hard error and a
-   soft warning). Affine/linear opaque targets are exempted here too,
-   since those are already a hard error above -- this would otherwise
-   double-report. *)
+   not yet an error. This warning makes the full population visible without
+   forcing an unsafe migration before safe slice-based replacements exist.
+   `*io T` is exempted here because its dedicated hard error above already
+   handles it, and affine/linear opaque targets are likewise already gated. *)
 let nonliteral_ptr_cast_warnings : (Lexing.position * string) list ref = ref []
 
 (* GitHub issue #327 Stage 1: every TypeError caught while attempting each
@@ -1369,14 +1357,21 @@ let check_nonliteral_ptr_cast_warning loc (src_expr : Ast.expr) (tgt : ty) =
       when StringSet.mem sname !affine_opaque_names
         || StringSet.mem sname !linear_opaque_names -> ()
     | TPtr elem | TAlignedPtr (_, elem) when not (is_io_pointee elem) ->
-        nonliteral_ptr_cast_warnings :=
-          (loc, Printf.sprintf
-            "casting a non-literal integer to %s asserts it is a valid \
-             pointer with no evidence (GitHub issue #218); not yet an \
-             error -- see issue #316 for the *io/general-pointer scoping \
-             decision this is waiting on"
-            (to_string tgt))
-          :: !nonliteral_ptr_cast_warnings
+        if !unsafe_depth > 0 then
+          (* An explicit unsafe block records this calculated-address mint
+             as an audited boundary, even while #218 remains warning-only.
+             This also tells the unnecessary-unsafe lint that the block has
+             a real purpose. *)
+          note_type_checker_unsafe_use ()
+        else
+          nonliteral_ptr_cast_warnings :=
+            (loc, Printf.sprintf
+              "casting a non-literal integer to %s asserts it is a valid \
+               pointer with no evidence (GitHub issue #218); not yet an \
+               error -- migrate this boundary to a checked slice or wrap it \
+               in unsafe"
+              (to_string tgt))
+            :: !nonliteral_ptr_cast_warnings
     | _ -> ()
 
 (* Slice 3: ownership-bearing values cannot be cast away. The temporary

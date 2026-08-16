@@ -2343,14 +2343,12 @@ Currently gates exactly five things:
   real object's address (`&x`) needs no `unsafe`, which is what keeps
   trusted opaque-token constructors legal. Any OTHER non-literal-integer-
   to-pointer cast (an ordinary, non-affine, non-`io` target -- see GitHub
-  issue #218) still compiles without `unsafe`, but as of the #218
-  follow-up now emits a non-fatal audit warning rather than passing
-  silently -- narrowed to a warning, not a hard requirement, because a
-  broader hard-`unsafe` version was measured against this codebase's real
-  MMIO/DMA-ring code and found to demand `unsafe` on roughly 1146 sites,
-  which would have made `unsafe` too common to carry any audit signal.
-  `*io T` targets are excluded from this warning population entirely --
-  see the next bullet, which gates them as a hard error instead.
+  issue #218) compiles with an audit warning. Each warned site must
+  eventually become either a checked slice/array operation or an explicit
+  `unsafe` boundary; the latter consumes the warning and is recognized by
+  the unnecessary-unsafe lint as a real audit boundary. It remains
+  warning-only while the slice migrations are completed. `*io T` targets are excluded from this warning population
+  entirely -- see the next bullet, which gates them as a hard error instead.
 - Constructing a `*io T` pointer from anything other than an
   already-`*io`-typed value (GitHub issue #316): both an explicit
   `x as *io T` cast and the direct-literal sugar (`let dr: *io u8 =
@@ -2365,8 +2363,8 @@ Currently gates exactly five things:
   stance that `unsafe` does not extend to plain pointer arithmetic --
   only the moment a `*io` pointer is first minted from a non-`*io` source
   is gated. This is a narrower, deliberately separate decision from the
-  #218 warning above: it does not revisit the "any pointer" rejection,
-  and ordinary non-affine, non-`io` pointer casts remain warning-only.
+  #218 audit warning: `*io` requires an explicit boundary even for a
+  literal address.
 - Casting a slice (`[]T` or `[T; N..]`) to `*U` where `U` is neither `u8`
   nor the slice's own element type `T` (GitHub issue #218 follow-up,
   slice/struct-overlay variant) -- see "Slices" below. `*u8` and

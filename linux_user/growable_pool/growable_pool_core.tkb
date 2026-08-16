@@ -182,8 +182,8 @@ fn growable_pool_finish_insert(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, 
 // mm/page.tkb's real one, or this prototype's fake_page_provider.tkb) --
 // both currently agree on 4096, which this whole file already assumes
 // implicitly (one page_alloc() call always backs exactly one chunk).
-fn growable_pool_zero_page(base: usize) {
-    let bytes: *u8 = base as *u8;
+fn growable_pool_zero_page(base: usize) !{unsafe} {
+    let bytes: *u8 = unsafe { base as *u8 };
     let page_size: isize = PAGE_SIZE as isize;
     for i: isize in 0..<page_size {
         bytes[i] = 0;
@@ -316,16 +316,16 @@ fn growable_pool_matches(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CH
 // unreachable branch (mirrors kernel/mm/page.tkb's page_bytes's own
 // accepted-fallback style).
 fn growable_pool_ptr_for_index(T: type, pool: *GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
-                               index: usize) -> *T {
+                               index: usize) -> *T !{unsafe} {
     let chunk: usize = index / SLOTS_PER_CHUNK;
     let local: usize = index % SLOTS_PER_CHUNK;
     let bases = pool.chunk_data_base;   // issue #15, as above
     if (chunk < MAX_CHUNKS) {
         let base: usize = bases[chunk as isize];
-        return (base as *T) + (local as isize);
+        return unsafe { base as *T } + (local as isize);
     }
     let base: usize = bases[0];
-    return (base as *T) + (local as isize);
+    return unsafe { base as *T } + (local as isize);
 }
 
 // Self-directed-allocation mode: `owner` must have come from this pool's

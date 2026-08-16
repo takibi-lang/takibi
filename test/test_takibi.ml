@@ -78,9 +78,7 @@ let expect_unnecessary_unsafe expected src () =
     expected (List.length !Llvm_gen.unnecessary_unsafe_sites)
 
 (* GitHub issue #218: expect type inference to succeed AND to have recorded
-   exactly [expected] non-literal-pointer-cast audit warnings
-   (Type_inf.nonliteral_ptr_cast_warnings). Mirrors expect_unnecessary_unsafe;
-   infer_program resets the list at the start of each run. *)
+   exactly [expected] non-literal-pointer-cast audit warnings. *)
 let expect_nonliteral_ptr_cast_warnings expected src () =
   (match infer src with
    | _ -> ()
@@ -3552,13 +3550,21 @@ let infer_tests = [
                     release(t);
                 }");
 
-  (* Negative control: casting a non-literal integer to an ORDINARY
-     (non-affine, non-io) pointer stays legal -- this is the real driver
-     pattern (array/struct-overlay offset math) the affine-only scoping
-     exists to preserve; #218's warning-only population is still not a
-     hard error. *)
-  Alcotest.test_case "casting a non-literal integer to a non-affine, non-io pointer needs no unsafe" `Quick
-    (expect_ok "fn f(base: usize, offset: usize) { let p: *u32 = (base + offset) as *u32; }");
+  Alcotest.test_case "casting a non-literal integer to a non-affine, non-io pointer warns" `Quick
+    (expect_nonliteral_ptr_cast_warnings 1
+       "fn f(base: usize, offset: usize) { let p: *u32 = (base + offset) as *u32; }");
+
+  Alcotest.test_case "unsafe marks a calculated ordinary-pointer cast as audited (issue #218)" `Quick
+    (expect_nonliteral_ptr_cast_warnings 0
+       "fn f(base: usize, offset: usize) !{unsafe} {
+          let p: *u32 = unsafe { (base + offset) as *u32 };
+        }");
+
+  Alcotest.test_case "an audited calculated ordinary-pointer cast is not unnecessary unsafe (issue #218)" `Quick
+    (expect_unnecessary_unsafe 0
+       "fn f(base: usize, offset: usize) !{unsafe} {
+          let p: *u32 = unsafe { (base + offset) as *u32 };
+        }");
 
   (* GitHub issue #316's decision: *io construction gets NO literal
      exemption, unlike the affine/linear case above -- a hardcoded MMIO
@@ -3670,20 +3676,11 @@ let infer_tests = [
           return unsafe { 0 as usize as *Token };
         }");
 
-  (* GitHub issue #218 audit-map warning: io is exempted from THIS
-     (separate, soft) warning list now that it is a hard error above --
-     otherwise the same site would double-report. Reached only once
-     wrapped in unsafe, since the hard check above fires first outside
-     unsafe. *)
-  Alcotest.test_case "a non-literal cast to *io inside unsafe still records zero #218 warnings" `Quick
+  Alcotest.test_case "a non-literal cast to *io inside unsafe records zero #218 warnings" `Quick
     (expect_nonliteral_ptr_cast_warnings 0
        "fn f(base: usize, offset: usize) !{unsafe} {
             let p: *io u32 = unsafe { (base + offset) as *io u32 };
         }");
-
-  Alcotest.test_case "a non-literal cast to an ordinary (non-io) pointer records one #218 warning" `Quick
-    (expect_nonliteral_ptr_cast_warnings 1
-       "fn f(base: usize, offset: usize) { let p: *u32 = (base + offset) as *u32; }");
 
   Alcotest.test_case "a literal cast to an ordinary pointer records no #218 warning" `Quick
     (expect_nonliteral_ptr_cast_warnings 0
