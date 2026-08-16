@@ -15,6 +15,163 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-16: OCaml Compiler-Side Technical-Debt Sweep Before a Raw-Pointer `unsafe` Mandate -- 15 Issues Closed
+
+Prior sessions repeatedly tried to restructure `.tkb` code toward
+requiring `unsafe` for raw-pointer construction (the eventual targets are
+#218/#318/#325) and kept stalling because the OCaml compiler
+implementation itself wasn't sturdy enough to absorb the churn safely.
+This session triaged the accumulated OCaml/unit-test-side issue backlog,
+classified it by how directly it threatened the raw-pointer-unsafe work,
+and closed it smallest-effort-first: #326, #327, #328, #329, #311, #321,
+#322, #323, then (after checking in with the user) #309, #266, #259,
+#312, #313, #310. Every fix was verified with `dune test`, `kernelbuild-
+qemu`/`kernelbuild-rpi5` under `--forbid-trap`, and `kernelcheck-qemu`'s
+full real-boot run (38 views + TCP + PTY) before committing; several were
+also confirmed to actually reproduce their bug by temporarily reverting
+the fix and re-running the new test. #272/#273 (a general LLVM place/
+value split and stable codegen-local binding identities) were
+investigated and deliberately deferred -- both are genuine architectural
+refactors touching the entire codegen pipeline, not narrow patches, and
+attempting them without a dedicated session risked the exact kind of
+soundness regression this sweep was trying to prevent.
+
+**Test-infrastructure trio (#326/#327/#329).** `Llvm_gen.the_module` was
+created once at process startup and never reset -- harmless for
+`bin/main.exe` (one compile per process) but meant `test/test_takibi.ml`'s
+~1100 Alcotest cases all shared one growing module, and `declare_func`'s
+"already declared" guard (keyed by bare name, needed for real multi-file
+`use` compilations) silently skipped re-populating `func_ret_ast_types`/
+`func_param_ast_types` whenever two unrelated tests reused a name like
+`f` with different arity -- an `Invalid_argument("List.iter2")` crash
+that depended on exact test ordering. Fixed by disposing and recreating
+the module (and every Hashtable that could hold a dangling handle into
+it) at the top of every `gen_program` call, matching what already
+happened for real compilations. #327 then taught `infer_program`'s Pass 3
+to keep checking every function after one fails instead of aborting the
+whole compilation (`Types.MultiTypeError`, single-error case unchanged
+for backward compatibility) -- directly motivated by #316's own ~590-site
+migration needing dozens of rebuild cycles to enumerate remaining sites
+one error at a time. #329 added `SHUFFLE_TESTS`, an opt-in flag that
+flattens and randomizes execution order across all six Alcotest groups
+(not just within one, since #326's own bug crossed group boundaries) --
+its first-ever run immediately found 6 more real, pre-existing ordering
+bugs, filed separately as #331 rather than fixed inline, since #329's own
+job was the detection mechanism, not auditing everything it could find.
+
+**A regression #327 itself introduced, found before it shipped.**
+`Type_inf.unsafe_depth`'s increment/decrement was deliberately not
+exception-safe, on the documented assumption that a `TypeError` aborted
+the whole compilation immediately. #327's own Pass 3 fix broke that
+assumption by making the fold catch-and-continue -- a function that
+raised while `unsafe_depth > 0` (an unrelated error inside an `unsafe {
+}` block) would leak the elevated depth into every function checked
+after it in the same compilation, silently authorizing their own
+unrelated unsafe-gated casts. Caught by writing the obvious regression
+test (an earlier function failing from inside `unsafe { }`, followed by
+a later function with an unwrapped `*io` literal that must still be
+rejected) before considering #327 done, not after a real bug report.
+Fixed by resetting `unsafe_depth` in the same catch handler #327 added.
+
+**The type_inf.ml/llvm_gen.ml duplication pattern, four more times
+(#328/#312/#313/#311).** This codebase's "Sync rule" comment convention
+(two independent implementations of the same decision, kept aligned by
+hand) had already caused real bugs before this session (#296). It kept
+causing them: #328 moved the "unnecessary unsafe" lint's bookkeeping for
+the type-checker-only gates (affine/linear/aligned/`*io` pointer casts)
+directly into `type_inf.ml`'s own `check_*_needs_unsafe` functions,
+closing a gap SPEC.md had documented as unfixed (llvm_gen.ml's codegen-
+side marker structurally cannot see a pure type-checker rejection) --
+verified by writing a positive-control test, confirming it failed before
+the fix, then passed after. #312 taught `for`-loop counter narrowing to
+reuse an already-proven runtime bound (`for i in 0..<limit` where
+`limit: {0..<N as usize}`), not just a `Const_env`-recognized literal --
+`kernel/kernel/fd_table.tkb`'s `unified_fd_clone_rollback` lost its
+`!{unsafe}` effect and four manual per-index `unsafe { }` wraps as a
+direct result. #313 gave `while`'s own condition the same fallthrough-
+narrowing `if` already had, reusing `narrow_from_cond` verbatim (its
+existing kill-set rule -- a binding must not be written anywhere in the
+body -- already IS the "narrower first version" the issue asked for, no
+new soundness analysis needed). Both #312 and #313 required a MATCHING
+`llvm_gen.ml` change in the same commit, not a follow-up, or the fix
+would have been a real `--forbid-trap` regression (type_inf.ml proving
+more than codegen elides) -- confirmed for both by temporarily reverting
+and watching the new tests fail. #311 (the general "stop duplicating
+narrowing logic" issue) turned out to have no single choke point in
+`type_inf.ml` the way #328 had `fold_stmts_with_future_writes`, so full
+elimination was deferred after investigation -- but a narrower,
+carefully-scoped version shipped anyway: `type_inf.ml` now records its
+own resolved type for every `Index`/`AssignIndex` node's index
+expression (keyed by source location, since type-checking and codegen
+walk the identical AST), and `llvm_gen.ml`'s own bounds-check-elision
+decision consults that table as the primary source instead of
+re-deriving narrowing independently. Honestly documented that no
+currently-known narrowing shape newly passes because of #311 specifically
+(#312/#313 already closed this session's two concrete gaps on the same
+axis) -- its value is closing the duplication architecturally so the
+*next* narrowing extension doesn't need its own paired sync fix.
+Verified with the full weight the safety stakes warranted: `dune test`
+unchanged even with the fix temporarily reverted, then `--forbid-trap`
+kernel builds producing byte-identical warning output, then a full real
+boot across all 38 QEMU views plus 49 `linuxcheck` examples.
+
+**Refactor/coverage trio (#321/#322/#323).** #321 deduplicated four
+independent, non-exhaustive `Ast.type_expr` matches in `llvm_gen.ml` that
+all answered "does this type wrap a struct, and by what name" -- found
+the hard way during `&T`/`&mut T` work, one `dune build`-invisible
+codegen test failure at a time. #322 added `test/test_takibi.ml`
+regression coverage for `monomorphize.ml`'s generic-inference pass
+through every wrapper `Ast.type_expr` constructor that can appear on a
+generic parameter, since it had zero prior coverage and had already
+broken twice for the same reason #321 had. #323, explicitly the
+riskiest of the three by the issue's own framing (it touches how
+essentially every function call in the whole `kernel/` tree gets type-
+checked), routed the `Call`-argument loop and `Let`'s initializer
+checking through `check_expr` instead of each independently duplicating
+`infer_expr` + `unify_at` + the `AddrOf`-vs-`&T`/`&mut T` dispatch. Found
+and fixed one real regression before landing, not after: routing `Call`
+arguments through `check_expr` would have made a bare `{ ... }` struct-
+literal argument start type-checking (`check_expr`'s own `StructLit`
+cases, previously unreachable from a call site) while `llvm_gen.ml`'s
+codegen has no support for a `StructLit` as a general call-argument
+expression at all (`"BUG: StructLit must be handled in gen_stmt /
+gen_global, not gen_expr"` -- an internal-error crash, not a clean
+rejection). `Call`'s loop now deliberately keeps calling `infer_expr`
+directly for that one shape, preserving the exact pre-#323 rejection;
+the test that caught the crash became the negative-control regression
+case. Two smaller, currently-unreachable capability deltas (existential-
+value opening and `check_literal_fits_refined` now also reaching `Let`
+initializers, previously `Call`-only) were kept and documented rather
+than suppressed, per the issue's own "any behavior difference is worth
+its own writeup, not silently absorbed" guidance.
+
+**Smaller fixes (#309/#266/#259/#310).** #309 added `--strict` to the
+`menhir` dune stanza, turning any shift/reduce conflict into a hard build
+failure instead of a scrolled-past warning -- verified by deliberately
+removing a real precedence declaration and confirming the build failed
+with the expected conflict count. #266 replaced `fresh_rigid_static`'s
+internal `__value<N>` counter name (which leaked verbatim into user-
+facing "static value mismatch: __value136 vs desc" errors, since
+`static_to_string` prints an `SParam`'s name as-is) with a descriptive
+message, and gave the one call site that already has a source variable
+name in hand (`adapt_actual_to_expected`'s `identity_for_immutable_name`)
+a version naming the actual variable. #259 taught `monomorphize.ml`'s
+`derive_arg_type` to resolve `&x.field`'s generic value parameter when
+`x`'s own type is a PLAIN (non-generic) struct with an already-concrete
+field type, not only when `x` is itself an instantiated generic struct --
+`kernel/mm/page.tkb`'s `BootPagePool` was the named real-code motivation,
+and its four `freelist_core_*` call sites lost their explicit `let core =
+&boot_page_pool.core;` workaround binding as a result. #310 added a
+diagnostic-only hint (reusing `negate_cond`/`collect_bounds`' own shape
+recognition, never changing which programs are accepted or rejected) that
+names WHY an early-return guard's negation couldn't narrow the
+fallthrough -- a guard using `==` (whose negation `!=` has no
+`collect_bounds` case, matching `kernel/arch/arm64/mm/asid.tkb`'s own
+`asid_transferred_release` history) or an unsupported shape entirely
+(matching `kernel/lib/slotmap.tkb`'s own restructuring history);
+previously the type error just said "unproven," requiring the shape list
+to be re-derived from source by hand each time it was hit.
+
 ### 2026-08-16: Issue #316 Resolved -- `*io` Construction Requires `unsafe` Unconditionally, No Literal Exemption
 
 Design discussion (not implementation) walked through several candidate

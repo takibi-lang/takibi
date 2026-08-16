@@ -2277,6 +2277,14 @@ the nine primitive integer bases, same set `{lo..<hi as base}` accepts).
 - When *both* bounds are recognized compile-time constants (a literal,
   or a name resolving to an earlier `const`), the
   counter additionally carries the proven range `{lo..<hi}`.
+- GitHub issue #312: when `hi` is not a compile-time constant but its own
+  type is already a proven `{lo'..<hi' as base}` (e.g. a runtime
+  parameter `limit: {0..<N as usize}`), the counter still carries the
+  proven upper bound `hi'`, with the lower bound taken from `lo`'s own
+  constant value when available, or `lo`'s own proven lower bound
+  otherwise. `for i: usize in 0..<limit { arr[i] }` needs no `unsafe`
+  wrapping as a result. Falls back to the unrefined base (no bullet
+  above applies) only when neither side contributes a usable bound.
 - `for i: T in ...` pins the counter's base explicitly. Required
   whenever nothing else in the loop determines a concrete type for `i`
   (e.g. the body only does `arr[i]`, which alone does not pin a type) --
@@ -2509,13 +2517,3 @@ investigations behind any of these, see `HISTORY.md`.
   arithmetic instead of a real bounds check). `s.field[i]` now compiles
   directly with a real checked bounds check, for a FieldGet chain of any
   depth (`a.b.c[i]`); only Index-as-a-base remains unsupported.
-- **A generic call's own value parameter cannot be inferred from
-  `&s.field` when `s`'s type is a plain, non-generic struct**, even
-  though the field's own declared type is already fully concrete and
-  needs no substitution. `lib/monomorphize.ml`'s `derive_arg_type` only
-  handles `&s.field` when `s` itself is a `TypeGenericInst` (substituting
-  the outer instance's concrete arguments into the field's template
-  type, e.g. `SlotMap(N)`'s `core: FreelistCore(N)`); a plain struct
-  falls through to "cannot infer", requiring the same explicit-local-
-  binding workaround as the indexing gap above, for an unrelated reason
-  (monomorphization, not parsing). Tracked as GitHub issue #259.
