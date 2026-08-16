@@ -84,9 +84,9 @@ fn timed_out(t0: i64, timeout_us: i64) -> bool {
 // "brcm,bcm7216-pcie-sata-rescal", base 0x10_00119500). Linux's
 // reset-brcmstb-rescal.c: set bit0 at +0x0 to start calibration, poll
 // bit0 at +0x8 until set (done), then clear bit0 at +0x0.
-fn pcie_rescal_reset() -> bool {
-    let start: *io u32 = 0x1000119500;
-    let status: *io u32 = 0x1000119508;
+fn pcie_rescal_reset() -> bool !{unsafe} {
+    let start: *io u32 = unsafe { 0x1000119500 as *io u32 };
+    let status: *io u32 = unsafe { 0x1000119508 as *io u32 };
 
     *start = (*start) | 1;
 
@@ -117,9 +117,9 @@ fn pcie_rescal_reset() -> bool {
 // see this file's own bcm2712.dtsi research) both fall in bank 1 (index
 // >> 5 == 1), at bits 0 and 12 respectively (index & 0x1f), so both can
 // be asserted/deasserted together with one write each.
-fn pcie2_bridge_reset(assert_reset: bool) {
-    let bank1_set: *io u32 = 0x1001504330;   // bank 1 = base(0x1001504318) + 0x18
-    let bank1_clear: *io u32 = 0x1001504334; // bank1_set + 0x04
+fn pcie2_bridge_reset(assert_reset: bool) !{unsafe} {
+    let bank1_set: *io u32 = unsafe { 0x1001504330 as *io u32 };   // bank 1 = base(0x1001504318) + 0x18
+    let bank1_clear: *io u32 = unsafe { 0x1001504334 as *io u32 }; // bank1_set + 0x04
     let mask: u32 = (1 << 0) | (1 << 12);    // swinit (idx 32) | bridge (idx 44)
 
     if (assert_reset) {
@@ -134,8 +134,8 @@ fn pcie2_bridge_reset(assert_reset: bool) {
 // (PCIE_PERSTB, 0x4): "Perst bit has moved and assert value is 0"
 // (brcm_pcie_perst_set_7278's own comment) -- write 0 to ASSERT PERST#,
 // write 1 to DEASSERT.
-fn pcie2_perst_set(assert_perst: bool) {
-    let ctrl: *io u32 = 0x1000124064;
+fn pcie2_perst_set(assert_perst: bool) !{unsafe} {
+    let ctrl: *io u32 = unsafe { 0x1000124064 as *io u32 };
     let mut v: u32 = *ctrl;
     if (assert_perst) {
         v = v & ~(1 << 2);
@@ -145,8 +145,8 @@ fn pcie2_perst_set(assert_perst: bool) {
     *ctrl = v;
 }
 
-fn pcie2_link_up() -> bool {
-    let status: *io u32 = 0x1000124068; // PCIE_MISC_PCIE_STATUS
+fn pcie2_link_up() -> bool !{unsafe} {
+    let status: *io u32 = unsafe { 0x1000124068 as *io u32 }; // PCIE_MISC_PCIE_STATUS
     let v: u32 = *status;
     let dl_active: u32 = v & 0x20;   // PCIE_MISC_PCIE_STATUS_PCIE_DL_ACTIVE_MASK
     let phy_linkup: u32 = v & 0x10;  // PCIE_MISC_PCIE_STATUS_PCIE_PHYLINKUP_MASK
@@ -169,13 +169,13 @@ fn pcie2_link_up() -> bool {
 // numbers are assigned, RP1 temporarily answers at bus 0. After
 // pcie2_root_bridge_setup() assigns secondary/subordinate bus 1, RP1
 // correctly moves to bus 1, matching Linux's normal topology.
-fn pcie2_config_addr(bus: u32, devfn: u32, reg_where: u32) -> *io u32 {
-    let idx_addr: *io u32 = 0x1000129000; // EXT_CFG_INDEX
+fn pcie2_config_addr(bus: u32, devfn: u32, reg_where: u32) -> *io u32 !{unsafe} {
+    let idx_addr: *io u32 = unsafe { 0x1000129000 as *io u32 }; // EXT_CFG_INDEX
     let data_base: usize = 0x1000128000;  // EXT_CFG_DATA
 
     let idx: u32 = (bus << 20) | (devfn << 12);
     *idx_addr = idx;
-    return (data_base + ((reg_where & ~3) as usize)) as *io u32;
+    return unsafe { (data_base + ((reg_where & ~3) as usize)) as *io u32 };
 }
 
 fn pcie2_config_read32(bus: u32, devfn: u32, reg_where: u32) -> u32 {
@@ -203,9 +203,9 @@ fn pcie2_config_write32(bus: u32, devfn: u32, reg_where: u32, value: u32) {
 // BEFORE brcm_pcie_start_link()), not post-link tuning -- discovered
 // 2026-07-25 after a real-hardware attempt without it completed every
 // other step cleanly but never reported link-up.
-fn pcie2_mdio_write(regad: u32, wrdata: u32) -> bool {
-    let mdio_addr: *io u32 = 0x1000121100;
-    let mdio_wr_data: *io u32 = 0x1000121104;
+fn pcie2_mdio_write(regad: u32, wrdata: u32) -> bool !{unsafe} {
+    let mdio_addr: *io u32 = unsafe { 0x1000121100 as *io u32 };
+    let mdio_wr_data: *io u32 = unsafe { 0x1000121104 as *io u32 };
 
     *mdio_addr = regad & 0xffff;
     let flush: u32 = *mdio_addr;
@@ -231,7 +231,7 @@ fn pcie2_mdio_write(regad: u32, wrdata: u32) -> bool {
 // then an L1SS power-management clock-period adjustment
 // (PCIE_RC_PL_PHY_CTL_15 @ pcie2 base + 0x184c). Register/value pairs
 // transcribed directly from Linux's own `regs[]`/`data[]` arrays.
-fn pcie2_post_setup_bcm2712() -> bool {
+fn pcie2_post_setup_bcm2712() -> bool !{unsafe} {
     if (pcie2_mdio_write(0x1f, 0x1600) == false) { return false; } // SET_ADDR_OFFSET
     if (pcie2_mdio_write(0x16, 0x50b9) == false) { return false; }
     if (pcie2_mdio_write(0x17, 0xbda1) == false) { return false; }
@@ -243,7 +243,7 @@ fn pcie2_post_setup_bcm2712() -> bool {
 
     delay_us(150); // ~100-200us, matches Linux's usleep_range(100, 200)
 
-    let phy_ctl_15: *io u32 = 0x100012184c; // PCIE_RC_PL_PHY_CTL_15
+    let phy_ctl_15: *io u32 = unsafe { 0x100012184c as *io u32 }; // PCIE_RC_PL_PHY_CTL_15
     let mut tmp: u32 = *phy_ctl_15;
     tmp = tmp & ~0xff; // PCIE_RC_PL_PHY_CTL_15_PM_CLK_PERIOD_MASK
     tmp = tmp | 0x12;
@@ -259,8 +259,8 @@ fn pcie2_post_setup_bcm2712() -> bool {
 // by power-cycling) during the very first bring-up attempt, so each
 // step can be checkpointed independently over SWD instead of guessing
 // which one is unsafe.
-fn pcie2_serdes_enable() {
-    let hard_debug: *io u32 = 0x1000124304; // PCIE_HARD_DEBUG (bcm7712 offset)
+fn pcie2_serdes_enable() !{unsafe} {
+    let hard_debug: *io u32 = unsafe { 0x1000124304 as *io u32 }; // PCIE_HARD_DEBUG (bcm7712 offset)
     *hard_debug = (*hard_debug) & ~(1 << 27);
     delay_us(150); // same ~100-200us settle as this file's other 400-iteration loops
 }
@@ -276,8 +276,8 @@ fn pcie2_serdes_enable() {
 // research this port did; included here since they matched Linux's own
 // live, working configuration exactly, even though their individual
 // purpose isn't independently confirmed.
-fn pcie2_misc_ctrl_setup() {
-    let misc_ctrl: *io u32 = 0x1000124008; // PCIE_MISC_MISC_CTRL
+fn pcie2_misc_ctrl_setup() !{unsafe} {
+    let misc_ctrl: *io u32 = unsafe { 0x1000124008 as *io u32 }; // PCIE_MISC_MISC_CTRL
     let mut mctrl: u32 = *misc_ctrl;
     mctrl = mctrl | (1 << 12); // SCB_ACCESS_EN
     mctrl = mctrl | (1 << 13); // CFG_READ_UR_MODE
@@ -307,12 +307,12 @@ fn pcie2_misc_ctrl_setup() {
 // limit_mb most likely encodes a degenerate/zero-sized window on this
 // hardware, not an inclusive 1-MB range as originally assumed. Matching
 // Linux's own full-size window removes that guess entirely.
-fn pcie2_outbound_window_setup() {
-    let win0_lo: *io u32 = 0x100012400c;         // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LO
-    let win0_hi: *io u32 = 0x1000124010;         // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_HI
-    let win0_base_limit: *io u32 = 0x1000124070; // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT
-    let win0_base_hi: *io u32 = 0x1000124080;    // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI
-    let win0_limit_hi: *io u32 = 0x1000124084;   // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LIMIT_HI
+fn pcie2_outbound_window_setup() !{unsafe} {
+    let win0_lo: *io u32 = unsafe { 0x100012400c as *io u32 };         // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LO
+    let win0_hi: *io u32 = unsafe { 0x1000124010 as *io u32 };         // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_HI
+    let win0_base_limit: *io u32 = unsafe { 0x1000124070 as *io u32 }; // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT
+    let win0_base_hi: *io u32 = unsafe { 0x1000124080 as *io u32 };    // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI
+    let win0_limit_hi: *io u32 = unsafe { 0x1000124084 as *io u32 };   // PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LIMIT_HI
 
     *win0_lo = 0;
     *win0_hi = 0;
@@ -340,25 +340,25 @@ fn pcie2_outbound_window_setup() {
 // secondary bus number, a forwarding memory window, and Memory Space
 // Enable in its own Command register. Without these, RP1 config space is
 // visible but every BAR access returns 0xDEADDEAD.
-fn pcie2_root_bridge_setup() {
+fn pcie2_root_bridge_setup() !{unsafe} {
     let root_base: usize = 0x1000120000;
 
     // Linux brcm_pcie_setup(): identify the RC as a PCIe-to-PCIe bridge
     // instead of retaining the endpoint-mode default class code.
-    let id_val3: *io u32 = 0x100012043C; // PCIE_RC_CFG_PRIV1_ID_VAL3
+    let id_val3: *io u32 = unsafe { 0x100012043C as *io u32 }; // PCIE_RC_CFG_PRIV1_ID_VAL3
     *id_val3 = (*id_val3 & 0xFF000000) | 0x00060400;
 
     // Primary=0, Secondary=1, Subordinate=1, secondary latency=0.
-    let bus_numbers: *io u32 = (root_base + 0x18) as *io u32;
+    let bus_numbers: *io u32 = unsafe { (root_base + 0x18) as *io u32 };
     *bus_numbers = 0x00010100;
 
     // Forward non-prefetchable PCI addresses 0x00000000..0x004FFFFF.
     // The Type-1 fields have 1MB granularity, so this covers RP1 BAR1
     // (4MB), BAR2 (64KB), and BAR0 (16KB) in one window.
-    let memory_base_limit: *io u32 = (root_base + 0x20) as *io u32;
+    let memory_base_limit: *io u32 = unsafe { (root_base + 0x20) as *io u32 };
     *memory_base_limit = 0x00400000;
 
-    let command_status: *io u32 = (root_base + 0x04) as *io u32;
+    let command_status: *io u32 = unsafe { (root_base + 0x04) as *io u32 };
     *command_status = (*command_status & 0xFFFF0000) | 0x0006;
 }
 
@@ -383,11 +383,11 @@ fn pcie2_rp1_endpoint_setup() {
 // bcm2712.dtsi values (mip0 `brcm,msi-pci-addr` and `reg`). It is the one
 // PCIe-initiated path issue #164 needs; it does not expose ordinary RAM or
 // add a general DMA window.
-fn pcie2_mip0_inbound_setup() {
-    let rc_bar1_lo: *io u32 = 0x100012402C;
-    let rc_bar1_hi: *io u32 = 0x1000124030;
-    let ubus_bar1_remap_lo: *io u32 = 0x10001240AC;
-    let ubus_bar1_remap_hi: *io u32 = 0x10001240B0;
+fn pcie2_mip0_inbound_setup() !{unsafe} {
+    let rc_bar1_lo: *io u32 = unsafe { 0x100012402C as *io u32 };
+    let rc_bar1_hi: *io u32 = unsafe { 0x1000124030 as *io u32 };
+    let ubus_bar1_remap_lo: *io u32 = unsafe { 0x10001240AC as *io u32 };
+    let ubus_bar1_remap_hi: *io u32 = unsafe { 0x10001240B0 as *io u32 };
 
     // brcm_pcie_encode_ibar_size(4KB) = 0x1c.
     *rc_bar1_lo = 0xFFFFF000 | 0x1C;
@@ -463,11 +463,11 @@ fn pcie2_mip0_inbound_setup() {
 // physical address they hand to an RP1 bus master as a DMA target.
 const RP1_DMA_PCI_OFFSET: usize = 0x1000000000;
 
-fn pcie2_dma_inbound_setup() {
-    let rc_bar2_lo: *io u32 = 0x1000124034;
-    let rc_bar2_hi: *io u32 = 0x1000124038;
-    let ubus_bar2_remap_lo: *io u32 = 0x10001240B4;
-    let ubus_bar2_remap_hi: *io u32 = 0x10001240B8;
+fn pcie2_dma_inbound_setup() !{unsafe} {
+    let rc_bar2_lo: *io u32 = unsafe { 0x1000124034 as *io u32 };
+    let rc_bar2_hi: *io u32 = unsafe { 0x1000124038 as *io u32 };
+    let ubus_bar2_remap_lo: *io u32 = unsafe { 0x10001240B4 as *io u32 };
+    let ubus_bar2_remap_hi: *io u32 = unsafe { 0x10001240B8 as *io u32 };
 
     // PCI base 0x10_00000000 | size encoding 0x15 (64GB), matching the
     // device tree's own second dma-ranges entry exactly.

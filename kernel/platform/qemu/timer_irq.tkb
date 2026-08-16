@@ -14,8 +14,8 @@ fn timer_tick_rearm() {
     set_cntp_tval((read_cntfrq() >> 6) as i32);
 }
 
-fn gic_timer_ppi_enable() {
-    let gicd_isenabler0: *io u32 = 0x08000100;
+fn gic_timer_ppi_enable() !{unsafe} {
+    let gicd_isenabler0: *io u32 = unsafe { 0x08000100 as *io u32 };
     *gicd_isenabler0 = *gicd_isenabler0 | (1 << 30);
 }
 

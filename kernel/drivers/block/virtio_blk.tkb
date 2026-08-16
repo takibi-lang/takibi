@@ -82,8 +82,8 @@ fn virtio_blk_index_wrap_probe() -> bool {
     return index == 0 && virtio_blk_index_next(0xFFFF) == 0;
 }
 
-fn virtio_blk_reg(offset: i32) -> *io i32 {
-    return (virtio_blk_base + offset) as *io i32;
+fn virtio_blk_reg(offset: i32) -> *io i32 !{unsafe} {
+    return unsafe { (virtio_blk_base + offset) as *io i32 };
 }
 
 fn virtio_blk_setup_queue() {
@@ -95,12 +95,12 @@ fn virtio_blk_setup_queue() {
         (address / (VIRTIO_BLK_PAGE_SIZE as usize)) as i32;
 }
 
-fn virtio_blk_init() -> bool {
+fn virtio_blk_init() -> bool !{unsafe} {
     if (virtio_blk_ready) { return true; }
     for i in 0..<VIRTIO_BLK_MMIO_SLOTS {
         let base: i32 = VIRTIO_BLK_MMIO_FIRST + i * VIRTIO_BLK_MMIO_STRIDE;
-        let magic: *io u32 = base as *io u32;
-        let device: *io u32 = (base + VIRTIO_BLK_DEVICE_ID) as *io u32;
+        let magic: *io u32 = unsafe { base as *io u32 };
+        let device: *io u32 = unsafe { (base + VIRTIO_BLK_DEVICE_ID) as *io u32 };
         if (*magic == VIRTIO_BLK_MAGIC && *device == VIRTIO_BLK_ID) {
             virtio_blk_base = base;
             *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 0;
@@ -169,12 +169,12 @@ fn virtio_blk_submit(request_type: u32, sector: u32, buffer: *u8,
 
     let mut spins: isize = 0;
     while (spins < 10000000 &&
-           virtio_blk_used_seen == ((queue + VIRTIO_BLK_PAGE_SIZE)
-                                    as *io VirtioBlkUsed).idx) {
+           virtio_blk_used_seen == unsafe { ((queue + VIRTIO_BLK_PAGE_SIZE)
+                                    as *io VirtioBlkUsed) }.idx) {
         spins = spins + 1;
     }
-    if (virtio_blk_used_seen == ((queue + VIRTIO_BLK_PAGE_SIZE)
-                                 as *io VirtioBlkUsed).idx) {
+    if (virtio_blk_used_seen == unsafe { ((queue + VIRTIO_BLK_PAGE_SIZE)
+                                 as *io VirtioBlkUsed) }.idx) {
         return false;
     }
     dma_consume();
@@ -202,9 +202,9 @@ fn virtio_blk_probe() -> bool {
     return virtio_blk_read_sector(0, probe as *u8);
 }
 
-fn virtio_blk_capacity_sectors() -> usize {
+fn virtio_blk_capacity_sectors() -> usize !{unsafe} {
     if (virtio_blk_init() == false) { return 0; }
-    let low: *io u32 = (virtio_blk_base + 0x100) as *io u32;
-    let high: *io u32 = (virtio_blk_base + 0x104) as *io u32;
+    let low: *io u32 = unsafe { (virtio_blk_base + 0x100) as *io u32 };
+    let high: *io u32 = unsafe { (virtio_blk_base + 0x104) as *io u32 };
     return ((*low as u64) | ((*high as u64) << 32)) as usize;
 }

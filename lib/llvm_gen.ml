@@ -1933,6 +1933,21 @@ let rec coerce v (dst : Ast.type_expr) =
          pointer width per the LLVM LangRef, so no manual width-matching
          step is needed -- this works whether the pointer is 32-bit
          (Cortex-M7) or 64-bit (AArch64) without knowing which. *)
+      (* GitHub issue #316: reaching this branch at all means an integer
+         is being manufactured into a pointer (an already-pointer-typed
+         source would have matched `vty = dst_ll` above and returned
+         early). When the destination is `*io T`, type_inf.ml's
+         check_io_ptr_cast_needs_unsafe / check_io_ptr_literal_needs_unsafe
+         (pure type-checker-level gates, same shape as the affine/aligned-
+         cast checks this file's own note_unsafe_use comment already flags
+         as having "no codegen footprint to hook into") already required
+         this to be wrapped in `unsafe` -- record that use here so the
+         "unnecessary unsafe" lint does not misreport every *io construction
+         site as a no-op wrap, mirroring the slice-cast sizeof-shortfall
+         case above. *)
+      (match dst with
+       | TypePtr (TypeIo _) | TypeAlignedPtr (_, TypeIo _) -> note_unsafe_use ()
+       | _ -> ());
       build_inttoptr v (pointer_type context) "inttoptr" builder
   | TypeU8 | TypeI8 ->
       if vty = i32_type context || vty = i64_type context
@@ -5473,6 +5488,15 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable decl_loc =
   (* Recursively evaluate a compile-time constant expression. *)
   let rec eval_const (ft : Ast.type_expr) (e : Ast.expr) : llvalue =
     match e.desc, ft with
+    (* `unsafe { ... }` has already done its job by the time codegen runs
+       (type_inf.ml's unsafe_depth gate is a checker-only concept with no
+       runtime representation) -- a global initializer wrapped in it, e.g.
+       `let gicd_ctlr: *io u32 = unsafe { 0x107FFF9000 as *io u32 };`
+       (GitHub issue #316), must still fold to the SAME constant its inner
+       expression would fold to on its own; strip the wrapper and recurse
+       rather than leaving it unhandled (which previously reached the
+       catch-all `Error "unsupported constant expression"` below). *)
+    | Unsafe inner, _ -> eval_const ft inner
     | IntLit i, TypePtr _ ->
         const_inttoptr (const_of_int64 (usize_lltype ()) i true) (pointer_type context)
     | IntLit i, TypeU16Be ->

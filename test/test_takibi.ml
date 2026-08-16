@@ -3418,19 +3418,58 @@ let infer_tests = [
                 }");
 
   (* Negative control: casting a non-literal integer to an ORDINARY
-     (non-affine) pointer stays legal -- this is the real driver pattern
-     (a runtime-discovered MMIO base address, offset and cast to a plain
-     `*io T`) the affine-only scoping exists to preserve. *)
-  Alcotest.test_case "casting a non-literal integer to a non-affine pointer needs no unsafe" `Quick
-    (expect_ok "fn f(base: usize, offset: usize) { let p: *io u32 = (base + offset) as *io u32; }");
+     (non-affine, non-io) pointer stays legal -- this is the real driver
+     pattern (array/struct-overlay offset math) the affine-only scoping
+     exists to preserve; #218's warning-only population is still not a
+     hard error. *)
+  Alcotest.test_case "casting a non-literal integer to a non-affine, non-io pointer needs no unsafe" `Quick
+    (expect_ok "fn f(base: usize, offset: usize) { let p: *u32 = (base + offset) as *u32; }");
 
-  (* GitHub issue #218 audit-map warning (issue #316's io decision still
-     pending, see check_nonliteral_ptr_cast_warning's own comment): the
-     SAME negative-control cast above (an io target) records zero warnings
-     -- io stays fully exempt, not merely downgraded from error to warning. *)
-  Alcotest.test_case "a non-literal cast to *io stays warning-free too" `Quick
-    (expect_nonliteral_ptr_cast_warnings 0
+  (* GitHub issue #316's decision: *io construction gets NO literal
+     exemption, unlike the affine/linear case above -- a hardcoded MMIO
+     address is exactly as unprovable to the compiler as a runtime-
+     discovered one (see check_io_ptr_cast_needs_unsafe's comment in
+     lib/type_inf.ml). This reverses the earlier "io stays fully exempt"
+     behavior the two tests just above this block used to assert. *)
+  Alcotest.test_case "casting a non-literal integer to *io requires unsafe (issue #316)" `Quick
+    (expect_type_error "asserts it denotes a real, correctly-sized hardware register"
        "fn f(base: usize, offset: usize) { let p: *io u32 = (base + offset) as *io u32; }");
+
+  Alcotest.test_case "unsafe marks a non-literal cast to *io (issue #316)" `Quick
+    (expect_ok "fn f(base: usize, offset: usize) !{unsafe} {
+                    let p: *io u32 = unsafe { (base + offset) as *io u32 };
+                }");
+
+  Alcotest.test_case "a LITERAL cast to *io also requires unsafe (issue #316, no literal exemption)" `Quick
+    (expect_type_error "asserts it denotes a real, correctly-sized hardware register"
+       "fn f() { let p: *io u32 = 0x107FFF9000 as *io u32; }");
+
+  Alcotest.test_case "unsafe marks a literal cast to *io (issue #316)" `Quick
+    (expect_ok "fn f() !{unsafe} { let p: *io u32 = unsafe { 0x107FFF9000 as *io u32 }; }");
+
+  (* SPEC.md's "MMIO / Volatile" sugar ("An integer literal can be assigned
+     directly to an MMIO pointer type") bypasses the Cast AST node entirely
+     -- IntLit's inferred type is a fresh unification variable that unifies
+     with *io T directly at the Let site, so it needs its own check
+     (check_io_ptr_literal_needs_unsafe), not just the `as` cast check
+     tested above. *)
+  Alcotest.test_case "a bare integer literal assigned directly to *io requires unsafe (issue #316)" `Quick
+    (expect_type_error "asserts it denotes a real, correctly-sized hardware register"
+       "fn f() { let dr: *io u8 = 0x09000000; }");
+
+  Alcotest.test_case "unsafe { stmt* } marks the direct-literal *io sugar too (issue #316)" `Quick
+    (expect_ok "fn f() !{unsafe} { unsafe { let dr: *io u8 = 0x09000000; } }");
+
+  (* GitHub issue #218 audit-map warning: io is exempted from THIS
+     (separate, soft) warning list now that it is a hard error above --
+     otherwise the same site would double-report. Reached only once
+     wrapped in unsafe, since the hard check above fires first outside
+     unsafe. *)
+  Alcotest.test_case "a non-literal cast to *io inside unsafe still records zero #218 warnings" `Quick
+    (expect_nonliteral_ptr_cast_warnings 0
+       "fn f(base: usize, offset: usize) !{unsafe} {
+            let p: *io u32 = unsafe { (base + offset) as *io u32 };
+        }");
 
   Alcotest.test_case "a non-literal cast to an ordinary (non-io) pointer records one #218 warning" `Quick
     (expect_nonliteral_ptr_cast_warnings 1

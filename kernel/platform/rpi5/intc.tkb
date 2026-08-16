@@ -53,14 +53,14 @@ const RPI5_USB0_GIC_INTID: u32 = 191; // 32 + (MIP0 SPI base 128 + vector 31)
 const RP1_GEM_VECTOR: u32 = 6;
 const RPI5_GEM_GIC_INTID: u32 = 166; // 32 + (MIP0 SPI base 128 + vector 6)
 
-fn gic_uart0_msi_setup() {
-    let gicd_ctlr: *io u32 = 0x107FFF9000;
-    let gicd_isenabler5: *io u32 = 0x107FFF9114; // INTIDs 160..191
-    let gicd_icpendr5: *io u32 = 0x107FFF9294;
-    let gicd_itargetsr46: *io u32 = 0x107FFF98B8; // INTIDs 184..187
-    let gicd_icfgr11: *io u32 = 0x107FFF9C2C; // INTIDs 176..191
-    let gicc_ctlr: *io u32 = 0x107FFFA000;
-    let gicc_pmr: *io u32 = 0x107FFFA004;
+fn gic_uart0_msi_setup() !{unsafe} {
+    let gicd_ctlr: *io u32 = unsafe { 0x107FFF9000 as *io u32 };
+    let gicd_isenabler5: *io u32 = unsafe { 0x107FFF9114 as *io u32 }; // INTIDs 160..191
+    let gicd_icpendr5: *io u32 = unsafe { 0x107FFF9294 as *io u32 };
+    let gicd_itargetsr46: *io u32 = unsafe { 0x107FFF98B8 as *io u32 }; // INTIDs 184..187
+    let gicd_icfgr11: *io u32 = unsafe { 0x107FFF9C2C as *io u32 }; // INTIDs 176..191
+    let gicc_ctlr: *io u32 = unsafe { 0x107FFFA000 as *io u32 };
+    let gicc_pmr: *io u32 = unsafe { 0x107FFFA004 as *io u32 };
 
     // INTID 185 occupies byte 1 of ITARGETSR46. Route it to CPU interface
     // 0 without disturbing the neighboring interrupt targets.
@@ -78,10 +78,10 @@ fn gic_uart0_msi_setup() {
     *gicc_ctlr = *gicc_ctlr | 1;
 }
 
-fn mip0_uart0_setup() {
-    let mip_cfg_low_host: *io u32 = 0x1000130020;
-    let mip_mask_low_host: *io u32 = 0x1000130040;
-    let mip_mask_low_vpu: *io u32 = 0x1000130060;
+fn mip0_uart0_setup() !{unsafe} {
+    let mip_cfg_low_host: *io u32 = unsafe { 0x1000130020 as *io u32 };
+    let mip_mask_low_host: *io u32 = unsafe { 0x1000130040 as *io u32 };
+    let mip_mask_low_vpu: *io u32 = unsafe { 0x1000130060 as *io u32 };
 
     // Match irq-bcm2712-mip.c's host initialization for this one input:
     // edge-triggered at the GIC-facing MIP output, routed to the host and
@@ -91,16 +91,16 @@ fn mip0_uart0_setup() {
     *mip_mask_low_vpu = *mip_mask_low_vpu | (1 << 25);
 }
 
-fn rp1_uart0_msix_setup() {
+fn rp1_uart0_msix_setup() !{unsafe} {
     // RP1's MSI-X capability is at config offset 0xb0. Its table is BAR0
     // offset 0, with 61 16-byte entries; BAR0 is fixed at PCI 0x00410000
     // by pcie2_rp1_endpoint_setup and CPU-mapped at 0x1F00410000.
     let msix_cap: u32 = pcie2_config_read32(1, 0, 0xB0);
     let entry_base: usize = 0x1F00410000 + ((RP1_UART0_VECTOR as usize) * 16);
-    let msg_addr_lo: *io u32 = entry_base as *io u32;
-    let msg_addr_hi: *io u32 = (entry_base + 4) as *io u32;
-    let msg_data: *io u32 = (entry_base + 8) as *io u32;
-    let vector_ctrl: *io u32 = (entry_base + 12) as *io u32;
+    let msg_addr_lo: *io u32 = unsafe { entry_base as *io u32 };
+    let msg_addr_hi: *io u32 = unsafe { (entry_base + 4) as *io u32 };
+    let msg_data: *io u32 = unsafe { (entry_base + 8) as *io u32 };
+    let vector_ctrl: *io u32 = unsafe { (entry_base + 12) as *io u32 };
 
     *vector_ctrl = 1; // mask while rewriting the entry
     *msg_addr_lo = 0xFFFFF000;
@@ -114,15 +114,15 @@ fn rp1_uart0_msix_setup() {
 
     // RP1 PCIE_APBS MSIX_CFG[25]: ENABLE plus IACK_EN because UART0's
     // source is level-high. The SET alias avoids changing TEST/IACK bits.
-    let rp1_msix_cfg25_set: *io u32 = 0x1F0010886C;
+    let rp1_msix_cfg25_set: *io u32 = unsafe { 0x1F0010886C as *io u32 };
     *rp1_msix_cfg25_set = (1 << 0) | (1 << 3);
 }
 
-fn gic_usb0_msi_setup() {
-    let gicd_isenabler5: *io u32 = 0x107FFF9114; // INTIDs 160..191 (shared with UART0)
-    let gicd_icpendr5: *io u32 = 0x107FFF9294;
-    let gicd_itargetsr47: *io u32 = 0x107FFF98BC; // INTIDs 188..191
-    let gicd_icfgr11: *io u32 = 0x107FFF9C2C; // INTIDs 176..191 (shared with UART0)
+fn gic_usb0_msi_setup() !{unsafe} {
+    let gicd_isenabler5: *io u32 = unsafe { 0x107FFF9114 as *io u32 }; // INTIDs 160..191 (shared with UART0)
+    let gicd_icpendr5: *io u32 = unsafe { 0x107FFF9294 as *io u32 };
+    let gicd_itargetsr47: *io u32 = unsafe { 0x107FFF98BC as *io u32 }; // INTIDs 188..191
+    let gicd_icfgr11: *io u32 = unsafe { 0x107FFF9C2C as *io u32 }; // INTIDs 176..191 (shared with UART0)
 
     // INTID 191 occupies byte 3 of ITARGETSR47.
     let targets: u32 = *gicd_itargetsr47;
@@ -138,23 +138,23 @@ fn gic_usb0_msi_setup() {
     // gic_uart0_msi_setup(); this vector only needs its own bits set.
 }
 
-fn mip0_usb0_setup() {
-    let mip_cfg_low_host: *io u32 = 0x1000130020;
-    let mip_mask_low_host: *io u32 = 0x1000130040;
-    let mip_mask_low_vpu: *io u32 = 0x1000130060;
+fn mip0_usb0_setup() !{unsafe} {
+    let mip_cfg_low_host: *io u32 = unsafe { 0x1000130020 as *io u32 };
+    let mip_mask_low_host: *io u32 = unsafe { 0x1000130040 as *io u32 };
+    let mip_mask_low_vpu: *io u32 = unsafe { 0x1000130060 as *io u32 };
 
     *mip_cfg_low_host = *mip_cfg_low_host | (1 << 31);
     *mip_mask_low_host = *mip_mask_low_host & ~(1 << 31);
     *mip_mask_low_vpu = *mip_mask_low_vpu | (1 << 31);
 }
 
-fn rp1_usbhost0_msix_setup() {
+fn rp1_usbhost0_msix_setup() !{unsafe} {
     let msix_cap: u32 = pcie2_config_read32(1, 0, 0xB0);
     let entry_base: usize = 0x1F00410000 + ((RP1_USB0_VECTOR as usize) * 16);
-    let msg_addr_lo: *io u32 = entry_base as *io u32;
-    let msg_addr_hi: *io u32 = (entry_base + 4) as *io u32;
-    let msg_data: *io u32 = (entry_base + 8) as *io u32;
-    let vector_ctrl: *io u32 = (entry_base + 12) as *io u32;
+    let msg_addr_lo: *io u32 = unsafe { entry_base as *io u32 };
+    let msg_addr_hi: *io u32 = unsafe { (entry_base + 4) as *io u32 };
+    let msg_data: *io u32 = unsafe { (entry_base + 8) as *io u32 };
+    let vector_ctrl: *io u32 = unsafe { (entry_base + 12) as *io u32 };
 
     *vector_ctrl = 1;
     *msg_addr_lo = 0xFFFFF000;
@@ -170,15 +170,15 @@ fn rp1_usbhost0_msix_setup() {
     // MSIX_CFG_IACK_EN stays clear -- rp1.c's rp1_irq_set_type only sets it
     // for IRQ_TYPE_LEVEL_HIGH, and rp1_chained_handle_irq only issues the
     // post-service IACK write when that flag is set. ENABLE only.
-    let rp1_msix_cfg31_set: *io u32 = 0x1F00108884; // 0x1F00108808 + 31*4
+    let rp1_msix_cfg31_set: *io u32 = unsafe { 0x1F00108884 as *io u32 }; // 0x1F00108808 + 31*4
     *rp1_msix_cfg31_set = 1 << 0;
 }
 
-fn gic_gem_msi_setup() {
-    let gicd_isenabler5: *io u32 = 0x107FFF9114; // INTIDs 160..191 (shared with UART0/USB0)
-    let gicd_icpendr5: *io u32 = 0x107FFF9294;
-    let gicd_itargetsr41: *io u32 = 0x107FFF98A4; // INTIDs 164..167
-    let gicd_icfgr10: *io u32 = 0x107FFF9C28; // INTIDs 160..175
+fn gic_gem_msi_setup() !{unsafe} {
+    let gicd_isenabler5: *io u32 = unsafe { 0x107FFF9114 as *io u32 }; // INTIDs 160..191 (shared with UART0/USB0)
+    let gicd_icpendr5: *io u32 = unsafe { 0x107FFF9294 as *io u32 };
+    let gicd_itargetsr41: *io u32 = unsafe { 0x107FFF98A4 as *io u32 }; // INTIDs 164..167
+    let gicd_icfgr10: *io u32 = unsafe { 0x107FFF9C28 as *io u32 }; // INTIDs 160..175
 
     // INTID 166 occupies byte 2 of ITARGETSR41.
     let targets: u32 = *gicd_itargetsr41;
@@ -190,23 +190,23 @@ fn gic_gem_msi_setup() {
     *gicd_isenabler5 = 1 << 6;
 }
 
-fn mip0_gem_setup() {
-    let mip_cfg_low_host: *io u32 = 0x1000130020;
-    let mip_mask_low_host: *io u32 = 0x1000130040;
-    let mip_mask_low_vpu: *io u32 = 0x1000130060;
+fn mip0_gem_setup() !{unsafe} {
+    let mip_cfg_low_host: *io u32 = unsafe { 0x1000130020 as *io u32 };
+    let mip_mask_low_host: *io u32 = unsafe { 0x1000130040 as *io u32 };
+    let mip_mask_low_vpu: *io u32 = unsafe { 0x1000130060 as *io u32 };
 
     *mip_cfg_low_host = *mip_cfg_low_host | (1 << 6);
     *mip_mask_low_host = *mip_mask_low_host & ~(1 << 6);
     *mip_mask_low_vpu = *mip_mask_low_vpu | (1 << 6);
 }
 
-fn rp1_gem_msix_setup() {
+fn rp1_gem_msix_setup() !{unsafe} {
     let msix_cap: u32 = pcie2_config_read32(1, 0, 0xB0);
     let entry_base: usize = 0x1F00410000 + ((RP1_GEM_VECTOR as usize) * 16);
-    let msg_addr_lo: *io u32 = entry_base as *io u32;
-    let msg_addr_hi: *io u32 = (entry_base + 4) as *io u32;
-    let msg_data: *io u32 = (entry_base + 8) as *io u32;
-    let vector_ctrl: *io u32 = (entry_base + 12) as *io u32;
+    let msg_addr_lo: *io u32 = unsafe { entry_base as *io u32 };
+    let msg_addr_hi: *io u32 = unsafe { (entry_base + 4) as *io u32 };
+    let msg_data: *io u32 = unsafe { (entry_base + 8) as *io u32 };
+    let vector_ctrl: *io u32 = unsafe { (entry_base + 12) as *io u32 };
 
     *vector_ctrl = 1;
     *msg_addr_lo = 0xFFFFF000;
@@ -218,7 +218,7 @@ fn rp1_gem_msix_setup() {
 
     // RP1_INT_ETH is IRQ_TYPE_LEVEL_HIGH in rp1.dtsi, matching UART0: ENABLE
     // plus IACK_EN, and rpi5_irq_dispatch below issues the post-service IACK.
-    let rp1_msix_cfg6_set: *io u32 = 0x1F00108820; // 0x1F00108808 + 6*4
+    let rp1_msix_cfg6_set: *io u32 = unsafe { 0x1F00108820 as *io u32 }; // 0x1F00108808 + 6*4
     *rp1_msix_cfg6_set = (1 << 0) | (1 << 3);
 }
 
@@ -252,15 +252,15 @@ fn platform_irq_init() {
     enable_irq();
 }
 
-fn irq_uart_rx_unmask() {
-    let uart0_imsc: *io u32 = 0x1F00030038;
+fn irq_uart_rx_unmask() !{unsafe} {
+    let uart0_imsc: *io u32 = unsafe { 0x1F00030038 as *io u32 };
     *uart0_imsc = (1 << 4) | (1 << 6); // RXIM | RTIM
 }
 
 fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
-        -> usize !{interrupt} {
-    let gicc_iar: *io u32 = 0x107FFFA00C;
-    let gicc_eoir: *io u32 = 0x107FFFA010;
+        -> usize !{interrupt, unsafe} {
+    let gicc_iar: *io u32 = unsafe { 0x107FFFA00C as *io u32 };
+    let gicc_eoir: *io u32 = unsafe { 0x107FFFA010 as *io u32 };
     let id: u32 = *gicc_iar;
 
     if (id == RPI5_UART0_GIC_INTID) {
@@ -268,7 +268,7 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
 
         // RP1's level-triggered MSI-X wrapper needs an IACK after the
         // device source has been serviced, matching rp1_chained_handle_irq.
-        let rp1_msix_cfg25_set: *io u32 = 0x1F0010886C;
+        let rp1_msix_cfg25_set: *io u32 = unsafe { 0x1F0010886C as *io u32 };
         *rp1_msix_cfg25_set = 1 << 2; // MSIX_CFG_IACK
     } else if (id == RPI5_USB0_GIC_INTID) {
         xhci_irq_handler();
@@ -278,7 +278,7 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     } else if (id == RPI5_GEM_GIC_INTID) {
         gem_irq_handler();
 
-        let rp1_msix_cfg6_set: *io u32 = 0x1F00108820;
+        let rp1_msix_cfg6_set: *io u32 = unsafe { 0x1F00108820 as *io u32 };
         *rp1_msix_cfg6_set = 1 << 2; // MSIX_CFG_IACK
     } else if (id == RPI5_TIMER_GIC_INTID) {
         timer_irq_handler();

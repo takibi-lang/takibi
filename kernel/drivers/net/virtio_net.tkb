@@ -178,16 +178,16 @@ fn virtio_net_index_next(index: u16) -> u16 {
     return index + 1;
 }
 
-fn vreg(offset: i32) -> *io i32 {
-    return (virtio_base + offset) as *io i32;
+fn vreg(offset: i32) -> *io i32 !{unsafe} {
+    return unsafe { (virtio_base + offset) as *io i32 };
 }
 
-fn virtio_net_find() -> bool {
+fn virtio_net_find() -> bool !{unsafe} {
     for i in 0..<VIRTIO_MMIO_SLOT_COUNT {
         let base: i32 = VIRTIO_MMIO_FIRST_SLOT + i * VIRTIO_MMIO_SLOT_STRIDE;
-        let magic_p: *io u32 = base as *io u32;
+        let magic_p: *io u32 = unsafe { base as *io u32 };
         if (*magic_p == VIRTIO_MAGIC_VALUE) {
-            let devid_p: *io u32 = (base + VIRTIO_DEVICE_ID) as *io u32;
+            let devid_p: *io u32 = unsafe { (base + VIRTIO_DEVICE_ID) as *io u32 };
             if (*devid_p == VIRTIO_DEVICE_ID_NET) {
                 virtio_base = base;
                 virtio_net_gic_intid = VIRTIO_MMIO_FIRST_INTID + i;
@@ -212,14 +212,14 @@ fn virtio_net_find() -> bool {
 // GICD_ITARGETSR is one byte per INTID. This half was always correct even
 // while the dispatch comparison was not -- see VIRTIO_MMIO_FIRST_INTID's
 // own comment for that bug.
-fn virtio_net_gic_enable() {
+fn virtio_net_gic_enable() !{unsafe} {
     let isenabler_n: i32 = virtio_net_gic_intid / 32;
     let bit: i32 = virtio_net_gic_intid - isenabler_n * 32;
-    let icpendr: *io u32 = (0x08000280 + isenabler_n * 4) as *io u32;
+    let icpendr: *io u32 = unsafe { (0x08000280 + isenabler_n * 4) as *io u32 };
     *icpendr = 1 << (bit as u32);
-    let isenabler: *io u32 = (0x08000100 + isenabler_n * 4) as *io u32;
+    let isenabler: *io u32 = unsafe { (0x08000100 + isenabler_n * 4) as *io u32 };
     *isenabler = *isenabler | (1 << (bit as u32));
-    let itargetsr: *io u8 = (0x08000800 + virtio_net_gic_intid) as *io u8;
+    let itargetsr: *io u8 = unsafe { (0x08000800 + virtio_net_gic_intid) as *io u8 };
     *itargetsr = 1 as u8;
 }
 
@@ -280,20 +280,20 @@ fn avail_publish(queue_mem: *u8, new_idx: u16) {
     dma_publish();
 }
 
-fn used_idx_get(queue_mem: *u8) -> u16 {
-    let used: *io VirtqUsed = (queue_mem + VIRTIO_PAGE_SIZE) as *io VirtqUsed;
+fn used_idx_get(queue_mem: *u8) -> u16 !{unsafe} {
+    let used: *io VirtqUsed = unsafe { (queue_mem + VIRTIO_PAGE_SIZE) as *io VirtqUsed };
     return used.idx;
 }
 
-fn used_ring_get_id(queue_mem: *u8, slot: isize) -> isize {
-    let ring: *io VirtqUsedElem = (queue_mem + VIRTIO_PAGE_SIZE
-        + (offsetof(VirtqUsed, ring) as isize)) as *io VirtqUsedElem;
+fn used_ring_get_id(queue_mem: *u8, slot: isize) -> isize !{unsafe} {
+    let ring: *io VirtqUsedElem = unsafe { (queue_mem + VIRTIO_PAGE_SIZE
+        + (offsetof(VirtqUsed, ring) as isize)) as *io VirtqUsedElem };
     return ring[slot].id as isize;
 }
 
-fn used_ring_get_len(queue_mem: *u8, slot: isize) -> i32 {
-    let ring: *io VirtqUsedElem = (queue_mem + VIRTIO_PAGE_SIZE
-        + (offsetof(VirtqUsed, ring) as isize)) as *io VirtqUsedElem;
+fn used_ring_get_len(queue_mem: *u8, slot: isize) -> i32 !{unsafe} {
+    let ring: *io VirtqUsedElem = unsafe { (queue_mem + VIRTIO_PAGE_SIZE
+        + (offsetof(VirtqUsed, ring) as isize)) as *io VirtqUsedElem };
     return ring[slot].len as i32;
 }
 
@@ -469,10 +469,10 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
     return view NetRxCanAcquire;
 }
 
-fn net_read_mac(mac_out: borrow [u8; 6..]) {
+fn net_read_mac(mac_out: borrow [u8; 6..]) !{unsafe} {
     for i: usize in 0..<6 {
-        let p: *io u8 = (virtio_base + VIRTIO_CONFIG_MAC_OFFSET
-            + (i as i32)) as *io u8;
+        let p: *io u8 = unsafe { (virtio_base + VIRTIO_CONFIG_MAC_OFFSET
+            + (i as i32)) as *io u8 };
         mac_out[i] = *p;
     }
 }

@@ -1198,6 +1198,58 @@ let check_kinded_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
           ^ to_string tgt ^ " }` to mark it"))
   | _ -> ()
 
+let is_io_pointer_ty = function
+  | TPtr (TIo _) | TAlignedPtr (_, TIo _) -> true
+  | _ -> false
+
+(* GitHub issue #316's decision: unlike check_kinded_ptr_cast_needs_unsafe's
+   affine/linear case just above, `*io T` construction gets NO literal
+   exemption. A hardcoded MMIO address (`0x107FFF9000 as *io u32`) is just
+   as unprovable to the compiler as a runtime-discovered one (a PCI BAR
+   scan today, a future dtb/ACPI table walk) -- the only difference is
+   human reviewability, and that is exactly what marking the site with
+   `unsafe` is for, not a reason to skip marking it. Deliberately applies
+   to EVERY cast producing a *io-shaped target, regardless of the source
+   expression's own shape (integer, *T, or another *io U being
+   reinterpreted): the claim being asserted ("this really is a valid,
+   correctly-sized hardware register region") is the same unprovable
+   claim either way. Does NOT apply to ordinary pointer arithmetic on an
+   ALREADY *io-typed value (`io_ptr + 4`) -- that is stepping an
+   already-audited pointer, not minting a new one, matching this
+   language's general "unsafe is not extended to plain pointer
+   arithmetic" stance (see "unsafe { ... }" in SPEC.md). *)
+let check_io_ptr_cast_needs_unsafe loc (tgt : ty) =
+  if is_io_pointer_ty tgt && !unsafe_depth = 0 then
+    raise (TypeError (loc, Printf.sprintf
+      "casting to '%s' asserts it denotes a real, correctly-sized hardware \
+       register with no evidence (GitHub issue #316); write `unsafe { ... \
+       as %s }` to mark it"
+      (to_string tgt) (to_string tgt)))
+
+(* Companion to check_io_ptr_cast_needs_unsafe for the IMPLICIT coercion
+   path SPEC.md's "MMIO / Volatile" section documents ("An integer literal
+   can be assigned directly to an MMIO pointer type"): `let dr: *io u8 =
+   0x09000000;` never goes through an `as` Cast AST node at all, because
+   IntLit's inferred type (infer_expr's `IntLit _ -> fresh ()` case) is a
+   fully unconstrained metavariable that unifies with *io T directly at
+   whichever Let/Assign/Return/Call-arg/struct-or-array-literal-field site
+   the annotation lives -- the exact same site list check_literal_fits_
+   refined already covers, called alongside it everywhere that function is
+   called. Deliberately keyed on the raw AST shape (`e.desc = IntLit`) --
+   any other expression shape reaching a *io-typed target without a Cast
+   node would already have failed ordinary unification (TUsize does not
+   unify with TPtr(TIo _)), so IntLit is the only implicit-coercion shape
+   that can reach here at all. *)
+let check_io_ptr_literal_needs_unsafe loc (e : Ast.expr) (target : ty) =
+  match e.desc with
+  | Ast.IntLit _ when is_io_pointer_ty target && !unsafe_depth = 0 ->
+      raise (TypeError (loc, Printf.sprintf
+        "assigning an integer literal directly to '%s' asserts it denotes \
+         a real, correctly-sized hardware register with no evidence \
+         (GitHub issue #316); write `unsafe { ... }` around it"
+        (to_string target)))
+  | _ -> ()
+
 (* GitHub issue #218: audit-map warning for casting a non-literal integer
    to an ORDINARY (non-affine/linear) pointer -- deliberately a warning,
    not yet an error. #218's own broadening beyond affine/linear targets
@@ -1210,9 +1262,12 @@ let check_kinded_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
    and narrowed to avoid (HISTORY.md's issue #15 entry). This warning
    exists to make the full population visible (issue #238's trusted-base
    metrics can count it) without forcing any code change yet. `*io T` is
-   exempted entirely: #316 owns that decision and has not made it yet.
-   Affine/linear opaque targets are exempted here too, since those are
-   already a hard error above -- this would otherwise double-report. *)
+   exempted here (not from unsafe -- see check_io_ptr_cast_needs_unsafe
+   above, #316's resolution -- but from this SEPARATE warning list, which
+   would otherwise double-report the same site as both a hard error and a
+   soft warning). Affine/linear opaque targets are exempted here too,
+   since those are already a hard error above -- this would otherwise
+   double-report. *)
 let nonliteral_ptr_cast_warnings : (Lexing.position * string) list ref = ref []
 
 let is_io_pointee = function
@@ -1975,6 +2030,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                         source already carries a refined range. *)
                      check_kinded_ptr_cast_needs_unsafe e.loc e tgt;
                      check_aligned_ptr_cast_needs_unsafe e.loc e tgt;
+                     check_io_ptr_cast_needs_unsafe e.loc tgt;
                      check_nonliteral_ptr_cast_warning e.loc e tgt;
                      tgt)
             | _ ->
@@ -1991,22 +2047,33 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    computed value, straight to a plain `*io T` pointer
                    (examples/common_qemu/virtio_mmio.tkb's `(virtio_base +
                    offset) as *io i32`, `virtio_base` itself found by
-                   scanning device slots at boot) -- a legitimate pattern
-                   with no realistic way to tell apart syntactically from a
-                   genuinely bogus cast, so it must stay unmarked. An affine
-                   opaque handle is different in kind: nothing legitimate
-                   ever needs to fabricate one from an arbitrary computed
-                   integer (every real handle in this codebase already
-                   comes from that type's own constructor, e.g.
-                   `fat_open()`/`net_rx_acquire()`), so a cast building one
-                   from anything other than a literal or a real object's
-                   address (`&x`) is exactly the `examples/
+                   scanning device slots at boot) -- so the general "any
+                   pointer" version stays rejected, and this affine-only
+                   case stays as narrow as before. GitHub issue #316 later
+                   made a SEPARATE, deliberately narrower decision to
+                   require `unsafe` for `*io T` specifically regardless of
+                   literal-ness (check_io_ptr_cast_needs_unsafe, below) --
+                   including the virtio_mmio.tkb-style discovered-base
+                   pattern above, which now needs `unsafe { ... }` too. That
+                   is a targeted MMIO-provenance decision, not a reversal of
+                   the "any pointer" rejection: ordinary non-affine,
+                   non-`io` pointer casts (array/struct-overlay offset math,
+                   the roughly-1146-site population check_nonliteral_ptr_
+                   cast_warning below still only warns about) remain
+                   unsafe-free. An affine opaque handle is different in kind
+                   from both: nothing legitimate ever needs to fabricate one
+                   from an arbitrary computed integer (every real handle in
+                   this codebase already comes from that type's own
+                   constructor, e.g. `fat_open()`/`net_rx_acquire()`), so a
+                   cast building one from anything other than a literal or a
+                   real object's address (`&x`) is exactly the `examples/
                    affine_escape_via_index.tkb`-style misuse (a table index
                    smuggled through a pointer purely to get affine tracking)
                    this check exists to flag -- see HISTORY.md's issue #15
                    entry for the full before/after measurement. *)
                 check_kinded_ptr_cast_needs_unsafe e.loc e tgt;
                 check_aligned_ptr_cast_needs_unsafe e.loc e tgt;
+                check_io_ptr_cast_needs_unsafe e.loc tgt;
                 check_nonliteral_ptr_cast_warning e.loc e tgt;
                 (* GitHub issue #100 follow-up: an EXPLICIT `x as {lo..<hi
                    as base}` cast target reaches here for any source that
@@ -2306,6 +2373,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       let actual = adapt_actual_to_expected tyenv payload actual expected in
       unify_at payload.loc actual expected;
       check_literal_fits_refined payload.loc payload expected;
+      check_io_ptr_literal_needs_unsafe payload.loc payload expected;
       TVariant vtype
 
   | SizeOf ty ->
@@ -2891,7 +2959,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              in
              let at = adapt_actual_to_expected tyenv arg at pt in
              unify_at arg.loc at pt;
-             check_literal_fits_refined arg.loc arg pt
+             check_literal_fits_refined arg.loc arg pt;
+             check_io_ptr_literal_needs_unsafe arg.loc arg pt
            ) args param_tys;
            ret_ty)
   | Assign (lhs, rhs) ->
@@ -2928,6 +2997,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let ety = adapt_actual_to_expected tyenv rhs ety unify_target in
            unify_at rhs.loc ety unify_target;
            check_literal_fits_refined rhs.loc rhs unify_target;
+           check_io_ptr_literal_needs_unsafe rhs.loc rhs unify_target;
            TVoid
        | Deref ptr_expr ->
            let pt = infer_expr senv eenv tyenv fenv ptr_expr in
@@ -2974,6 +3044,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                "cannot store an indexed owner through a pointer: it would escape obligation tracking"));
            unify_at rhs.loc vt inner;
            check_literal_fits_refined rhs.loc rhs inner;
+           check_io_ptr_literal_needs_unsafe rhs.loc rhs inner;
            TVoid
        | Index (base, idx) ->
            check_no_write_through_shared_ref senv eenv tyenv fenv base;
@@ -3027,6 +3098,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                "cannot store an indexed owner into an array/slice element: it would escape obligation tracking"));
            unify_at rhs.loc rt elem_ty;
            check_literal_fits_refined rhs.loc rhs elem_ty;
+           check_io_ptr_literal_needs_unsafe rhs.loc rhs elem_ty;
            TVoid
        | FieldGet (base_expr, fname) ->
            let bt = infer_expr senv eenv tyenv fenv base_expr in
@@ -3100,6 +3172,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                "cannot store an indexed owner into a struct field: it would escape obligation tracking"));
            unify_at rhs.loc vt (strip_io field_ty);
            check_literal_fits_refined rhs.loc rhs (strip_io field_ty);
+           check_io_ptr_literal_needs_unsafe rhs.loc rhs (strip_io field_ty);
            TVoid
        | _ ->
            raise (TypeError (lhs.loc, "not an assignable expression")))
@@ -3358,7 +3431,8 @@ let rec check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : unit =
       let te = adapt_actual_to_expected tyenv e te (strip_io expected) in
       (* If expected type is io T: check compatibility with T (strip the storage qualifier) *)
       unify_at e.loc te (strip_io expected);
-      check_literal_fits_refined e.loc e (strip_io expected)
+      check_literal_fits_refined e.loc e (strip_io expected);
+      check_io_ptr_literal_needs_unsafe e.loc e (strip_io expected)
 
 (* -- Flow-sensitive type narrowing ----------------------------------------- *)
 
@@ -3620,6 +3694,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       let t = adapt_actual_to_expected tyenv e t ret_ty in
       unify_at e.loc t ret_ty;
       check_literal_fits_refined e.loc e ret_ty;
+      check_io_ptr_literal_needs_unsafe e.loc e ret_ty;
       (tyenv, raw_locals)
   | Expr e ->
       ignore (infer_expr senv eenv tyenv fenv e);
@@ -3675,6 +3750,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
             (* Initialization: match actual(expr) as a subtype of expected(type annotation) *)
             unify_at e.loc et (strip_io ty);
             check_literal_fits_refined e.loc e (strip_io ty);
+            check_io_ptr_literal_needs_unsafe e.loc e (strip_io ty);
             (* Same restriction as the struct-literal case just above, but
                for any OTHER struct-typed initializer (a function call
                returning a struct by value, a field/array read, etc.): an
@@ -6218,6 +6294,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              (try unify et (strip_io ty)
               with Unify_error m -> raise (TypeError (e.loc, m)));
              check_literal_fits_refined e.loc e (strip_io ty);
+             check_io_ptr_literal_needs_unsafe e.loc e (strip_io ty);
              (* Mirrors local lets' bind_ty exactly (see that comment) --
                 this is the piece that actually matters for issue #77: not
                 just "does this type-check" but "does the global keep the
