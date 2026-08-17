@@ -1,9 +1,9 @@
 intrusive_pool
 slot stride for usize (8-byte payload + 2 bookkeeping words): 24
-slots per chunk, derived from sizeof(T) alone: 168
-same pool type, 2000-byte payload, same derivation: 2
-static bytes of bookkeeping for a 336-object pool -- growable: 5440, intrusive: 64
-intrusive pool size is the same for a 2000-byte payload: true
+slots per chunk, derived from sizeof(T) alone: 165
+same pool type, 1960-byte payload, same derivation: 2
+static bytes of bookkeeping for a 336-object pool -- growable: 5440, intrusive: 80
+intrusive pool size is the same for a 1960-byte payload: true
 pages consumed before the first insert: 0
 two live slots hold distinct values: true
 one page backs both (live, chunks, pages): 2 1 1
@@ -15,5 +15,8 @@ double free of an already-freed slot counted, not acted on: true
 an address from another pool, rebranded by hand, is still rejected without dereferencing it: true
 200 live objects from a pool declared with no capacity (live, chunks, pages used): 200 2 2
 cursor walk found every live payload exactly once (count, checksum): 200 20100
-2000-byte objects placed before the PROVIDER ran out (objects, chunks, pages left): 10 5 0
+two chunks filled before the drain (live, chunks, pages): 4 2 2
+draining gave one page back and kept one empty chunk in reserve (live, chunks, released, pages still held): 0 1 1 1
+reallocating after the drain reused the reserved chunk without asking for a page: true
+1960-byte objects placed before the PROVIDER ran out (objects, chunks, pages left): 8 4 0
 done

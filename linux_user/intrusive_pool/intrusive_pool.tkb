@@ -31,18 +31,25 @@
 //   until the page provider is empty, and confirm the pool stopped
 //   because the PROVIDER ran out, not because the pool did.
 //
+// - pool_r: growth is not one-way -- fill two chunks, drain them, and
+//   watch exactly one page go back to the provider while one empty chunk
+//   is deliberately held in reserve, then confirm the next allocation
+//   reuses that reserve without asking for a page.
+//
 // Page budget across the whole run: pool_a 1 + pool_b 1 + pool_g 2 +
-// pool_x the remaining 5, for exactly the provider's 9.
+// pool_r 2 of which 1 comes back + pool_x whatever is left, for exactly
+// the provider's 9.
 use "linux_user/intrusive_pool/intrusive_pool_core.tkb";
 use "linux_user/growable_pool/growable_pool_core.tkb";
 
-// 2000 bytes of payload -> a 2016-byte slot -> 2 slots per 4096-byte
-// chunk. Big enough that a chunk boundary is crossed after two inserts
-// instead of after 168, and a case where "one page per object" would have
-// been the naive alternative.
+// 1960 bytes of payload -> a 1976-byte slot -> 2 slots per 4096-byte
+// chunk (which is what the 128-byte chunk header leaves room for). Big
+// enough that a chunk boundary is crossed after two inserts instead of
+// after 165, and a case where "one page per object" would have been the
+// naive alternative.
 struct BigPayload {
     tag: usize;
-    filler: [u8; 1992];
+    filler: [u8; 1952];
 }
 
 fn app_main() {
@@ -61,7 +68,7 @@ fn app_main() {
     uart_puts("slots per chunk, derived from sizeof(T) alone: ");
     uart_print(intrusive_pool_slots_per_chunk(&pool_s));
     uart_puts("\n");
-    uart_puts("same pool type, 2000-byte payload, same derivation: ");
+    uart_puts("same pool type, 1960-byte payload, same derivation: ");
     uart_print(intrusive_pool_slots_per_chunk(&pool_big));
     uart_puts("\n");
 
@@ -75,7 +82,7 @@ fn app_main() {
     uart_puts(", intrusive: ");
     uart_print(sizeof(IntrusivePool(usize)));
     uart_puts("\n");
-    uart_puts("intrusive pool size is the same for a 2000-byte payload: ");
+    uart_puts("intrusive pool size is the same for a 1960-byte payload: ");
     uart_print_bool(
         sizeof(IntrusivePool(usize)) == sizeof(IntrusivePool(BigPayload)));
     uart_puts("\n");
@@ -244,6 +251,85 @@ fn app_main() {
     uart_print(sum);
     uart_puts("\n");
 
+    // -- pool_r: growth is not one-way. Fill two chunks, drain them, and
+    // watch exactly one page go back while one empty chunk is held in
+    // reserve (GitHub issue #346's hysteresis -- see IntrusivePool's own
+    // comment for why one).
+    //
+    // Owners cannot be kept in an array (an indexed owner may not be
+    // stored in one), so the drain reconstructs each live slot's handle
+    // through the cursor API and the into_parts/new round trip, restarting
+    // the walk after every free -- the freed chunk can vanish underneath a
+    // cursor, which is exactly the address-stability change reclaim
+    // introduces.
+    let mut pool_r: IntrusivePool(BigPayload);
+    intrusive_pool_init(&pool_r);
+    let pages_before_reclaim: usize = page_allocator_live_count();
+    let mut filled: usize = 0;
+    let mut fill_failed: bool = false;
+    while (filled < 4 && fill_failed == false) {
+        match intrusive_pool_insert(&pool_r) {
+            IntrusivePoolInsertResult::Allocated(o) => {
+                intrusive_pool_ref(&pool_r, o).tag = filled + 1;
+                intrusive_owner_drop(o);
+                filled = filled + 1;
+            }
+            IntrusivePoolInsertResult::OutOfMemory => { fill_failed = true; }
+        }
+    }
+    uart_puts("two chunks filled before the drain (live, chunks, pages): ");
+    uart_print(intrusive_pool_live_count(&pool_r));
+    uart_puts(" ");
+    uart_print(intrusive_pool_chunk_count(&pool_r));
+    uart_puts(" ");
+    uart_print(page_allocator_live_count() - pages_before_reclaim);
+    uart_puts("\n");
+
+    let mut draining: bool = true;
+    while (draining) {
+        let mut cursor: usize = intrusive_pool_first_slot(&pool_r);
+        let mut freed_one: bool = false;
+        while (cursor != 0 && freed_one == false) {
+            let occupant: usize = intrusive_pool_slot_generation(&pool_r, cursor);
+            if (occupant != 0) {
+                let victim = intrusive_owner_new(&pool_r, cursor, occupant);
+                intrusive_pool_remove(&pool_r, victim);
+                freed_one = true;
+            } else {
+                cursor = intrusive_pool_next_slot(&pool_r, cursor);
+            }
+        }
+        if (freed_one == false) { draining = false; }
+    }
+    uart_puts("draining gave one page back and kept one empty chunk in ");
+    uart_puts("reserve (live, chunks, released, pages still held): ");
+    uart_print(intrusive_pool_live_count(&pool_r));
+    uart_puts(" ");
+    uart_print(intrusive_pool_chunk_count(&pool_r));
+    uart_puts(" ");
+    uart_print(intrusive_pool_released_chunk_count(&pool_r));
+    uart_puts(" ");
+    uart_print(page_allocator_live_count() - pages_before_reclaim);
+    uart_puts("\n");
+
+    // The reserved chunk is the whole point of holding one back: this
+    // allocation must not touch the page provider at all.
+    let pages_before_reuse: usize = page_allocator_live_count();
+    match intrusive_pool_insert(&pool_r) {
+        IntrusivePoolInsertResult::Allocated(o) => {
+            intrusive_owner_drop(o);
+            uart_puts("reallocating after the drain reused the reserved ");
+            uart_puts("chunk without asking for a page: ");
+            uart_print_bool(page_allocator_live_count() == pages_before_reuse &&
+                            intrusive_pool_chunk_count(&pool_r) == 1);
+            uart_puts("\n");
+        }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_r reuse failed\n");
+            return;
+        }
+    }
+
     // -- pool_x: the last remaining ceiling is the page provider's.
     let mut pool_x: IntrusivePool(BigPayload);
     intrusive_pool_init(&pool_x);
@@ -259,7 +345,7 @@ fn app_main() {
             IntrusivePoolInsertResult::OutOfMemory => { hit_provider_limit = true; }
         }
     }
-    uart_puts("2000-byte objects placed before the PROVIDER ran out ");
+    uart_puts("1960-byte objects placed before the PROVIDER ran out ");
     uart_puts("(objects, chunks, pages left): ");
     uart_print(placed);
     uart_puts(" ");

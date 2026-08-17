@@ -13,26 +13,29 @@
 //
 // The mechanism is the one Linux's SLUB and NetBSD's pool_cache/uma use:
 // the free list is INTRUSIVE -- threaded through the free slots' own
-// memory inside each chunk's page -- so there is no separate table to
-// size. Concretely:
+// memory inside each chunk's page, one chain per chunk -- so there is no
+// separate table to size. Concretely:
 //
 //   chunk (exactly one page, page-aligned, from page_alloc())
 //   +----------------------------------------------------------+
-//   | IntrusiveChunkHeader: pool_tag, next_chunk, slot_count,   |  <- 64 B
-//   |                       slot_stride, page_index, live_count |
+//   | IntrusiveChunkHeader: chunk-list and partial-list links,  |  <- 128 B
+//   |   this chunk's own free_head, slot_count, slot_stride,    |
+//   |   live_count, pool_tag                                    |
 //   +----------------------------------------------------------+
 //   | IntrusiveSlot(T) #0: generation, next_free, payload: T    |
 //   | IntrusiveSlot(T) #1: generation, next_free, payload: T    |
 //   | ...                                                       |
 //   +----------------------------------------------------------+
 //
-// and IntrusivePool(T) itself holds six plain scalars and not one array:
-// chunk list head, free-chain head, generation counter, and three
-// counters. Its whole static footprint is 64 bytes regardless of how many
-// objects will ever live in it, and its runtime footprint is exactly
-// `ceil(live / slots_per_chunk)` pages. The only remaining ceiling is the
-// real, physical one -- page.tkb running out of pages -- which is what
-// issue #344 asked for.
+// and IntrusivePool(T) itself holds plain scalars and not one array: two
+// list heads, the held-back empty chunk, a generation counter, and
+// counters. Its whole static footprint is 80 bytes regardless of how many
+// objects will ever live in it, and its runtime footprint is
+// `ceil(live / slots_per_chunk)` pages plus at most one held in reserve
+// -- in both directions, since an emptied chunk's page goes back to the
+// provider (issue #346). The only remaining ceiling is the real, physical
+// one -- page.tkb running out of pages -- which is what issue #344 asked
+// for.
 //
 // WHAT IS DELIBERATELY NOT A PARAMETER
 //
@@ -117,15 +120,19 @@
 //   and growable_pool.tkb all carry: no locking of its own. Safe only for
 //   a single execution context, which is a fact about callers, not
 //   something this file enforces.
-// - NEVER SHRINKS: a chunk's page is never returned to the page provider,
-//   even once every slot in it is free, so memory tracks the high-water
-//   mark of live objects, not the current count. Each chunk header
-//   already maintains its own live_count and page_index for exactly this
-//   future step; making reclaim O(1) rather than O(all slots) wants the
-//   free chain split per-chunk (SLUB's partial-list shape) instead of the
-//   single global chain used here, which is why it is not a small
-//   addition to this file -- see issue #346 rather than assuming it can
-//   be bolted on.
+// - Reclaim (issue #346) holds back exactly ONE fully-empty chunk per
+//   pool and returns every later one, so steady-state memory is
+//   `ceil(live / slots_per_chunk)` pages plus at most one. That reserve
+//   is a deliberate anti-thrash choice, not an accounting slip: see
+//   IntrusivePool's own comment.
+// - Slot addresses are NOT stable across reclaim. A cursor walk that
+//   frees as it goes can have the chunk under it released; the exerciser
+//   restarts its walk after every free for exactly this reason. What
+//   stays sound regardless is validation: the moment a chunk is
+//   unlinked, intrusive_pool_slot_is_valid rejects every address in it,
+//   and if the same page comes back later as a chunk of this same pool,
+//   the pool-global (never per-chunk) generation counter is what still
+//   rejects a stale handle.
 // - `intrusive_pool_ref` does NOT re-validate. It is the fast path, with
 //   the same contract kernel/lib/freelist.tkb's freelist_ref has: the
 //   `borrow IntrusiveOwner[pool_id, _]` parameter proves, through
@@ -138,9 +145,6 @@
 //   see intrusive_pool_slots_per_chunk's static_assert, which also pins
 //   the two INTRUSIVE_CHUNK_HEADER_SIZE invariants this layout depends on.
 //   No runtime failure path exists for any of the three.
-// - Slot addresses are stable for the pool's whole lifetime (a consequence
-//   of never shrinking). A future reclaim step invalidates that, and with
-//   it the assumption intrusive_pool_slot_is_valid's chunk walk relies on.
 //
 // Prototyped against linux_user/growable_pool/fake_page_provider.tkb, the
 // same small fake page_alloc() stand-in issue #26's own prototype used, so
@@ -149,22 +153,48 @@
 // became kernel/lib/growable_pool.tkb.
 use "linux_user/growable_pool/fake_page_provider.tkb";
 
-// Rounded up from sizeof(IntrusiveChunkHeader) (48) so the slot area
-// begins on a 64-byte boundary whatever alignment T turns out to need.
+// Rounded up from sizeof(IntrusiveChunkHeader) (80) so the slot area
+// begins on a 128-byte boundary whatever alignment T turns out to need.
 // Both halves of that sentence are checked, not assumed -- see
-// intrusive_pool_slots_per_chunk's static_asserts.
-const INTRUSIVE_CHUNK_HEADER_SIZE: usize = 64;
+// intrusive_pool_slots_per_chunk's static_asserts. 128 bytes is 3% of a
+// page; the alternative (packing the header down) would buy back at most
+// one slot for a small T and cost the reclaim bookkeeping issue #346
+// needs.
+const INTRUSIVE_CHUNK_HEADER_SIZE: usize = 128;
 
 // One per chunk, living at offset 0 of that chunk's own page -- never in a
 // pool-side array indexed by chunk number, which is the whole point.
-// `pool_tag` identifies the owning pool; `page_index` is kept only so a
-// future reclaim step can hand the page back.
+//
+// Two intrusive doubly-linked lists run through these headers:
+//
+// - the CHUNK list (next_chunk/prev_chunk) threads every chunk this pool
+//   owns. It is what intrusive_pool_slot_is_valid walks to decide whether
+//   an address of unknown provenance belongs here, and what the iteration
+//   cursor walks. Doubly linked so reclaim can unlink in O(1).
+// - the PARTIAL list (next_partial/prev_partial, membership flagged by
+//   on_partial) threads only the chunks with at least one free slot.
+//   Allocation always takes from its head, so it is O(1) and never has to
+//   search -- SLUB's own partial-list shape (GitHub issue #346).
+//
+// `on_partial` is a real field rather than something inferred from the
+// links because 0 is a legitimate value for both of them: the only member
+// of the partial list has next_partial == prev_partial == 0.
+//
+// `free_head` is this chunk's OWN free chain, threaded through its free
+// slots' `next_free` words. It is per chunk, not global, precisely so
+// that a chunk emptying is a local fact -- with one global chain, giving a
+// page back would have meant walking every slot of every other chunk to
+// unthread this one's.
 struct IntrusiveChunkHeader {
     pool_tag: usize;
     next_chunk: usize;
+    prev_chunk: usize;
+    next_partial: usize;
+    prev_partial: usize;
+    on_partial: usize;
+    free_head: usize;
     slot_count: usize;
     slot_stride: usize;
-    page_index: usize;
     live_count: usize;
 }
 
@@ -178,17 +208,27 @@ generic struct IntrusiveSlot(T: type) {
     payload: T;
 }
 
-// Six scalars. No array, no N, no MAX_CHUNKS -- this struct's size does
+// Scalars only. No array, no N, no MAX_CHUNKS -- this struct's size does
 // not depend on how many objects the pool will hold.
+//
+// `empty_chunk` is the hysteresis decision issue #346 asks to be made
+// explicitly: this pool holds back exactly ONE fully-empty chunk instead
+// of returning its page the moment it empties. A pool oscillating around
+// a chunk boundary -- allocate, free, allocate -- would otherwise hand a
+// page back and immediately ask for another on every cycle. One chunk is
+// the smallest cache that removes that thrash, and it is a per-pool cost
+// bounded by one page, not a tunable.
 generic struct IntrusivePool(T: type) {
     pool_tag: usize;
     chunk_head: usize;
-    free_head: usize;
+    partial_head: usize;
+    empty_chunk: usize;
     next_generation: usize;
     live_count: usize;
     chunk_count: usize;
     double_remove_count: usize;
     foreign_handle_count: usize;
+    released_chunk_count: usize;
 }
 
 // GitHub issue #345: `pool_id` is the erased ADDRESS of the pool that
@@ -261,12 +301,14 @@ fn intrusive_pool_init(T: type, pool: &mut IntrusivePool(T) @ pool_id) {
     pool.pool_tag = intrusive_pool_next_tag;
     intrusive_pool_next_tag = intrusive_pool_next_tag + 1;
     pool.chunk_head = 0;
-    pool.free_head = 0;
+    pool.partial_head = 0;
+    pool.empty_chunk = 0;
     pool.next_generation = 1;
     pool.live_count = 0;
     pool.chunk_count = 0;
     pool.double_remove_count = 0;
     pool.foreign_handle_count = 0;
+    pool.released_chunk_count = 0;
 }
 
 // Both derived from sizeof after monomorphization, never supplied by a
@@ -351,6 +393,76 @@ fn intrusive_pool_slot_is_valid(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     return slot_offset / header.slot_stride < header.slot_count;
 }
 
+// -- The two chunk lists -----------------------------------------------
+// All four of these are O(1); both lists are doubly linked precisely so
+// that reclaim (issue #346) never has to search for the chunk it is about
+// to unlink.
+
+fn intrusive_pool_link_partial(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                               base: usize) !{unsafe} {
+    let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(base);
+    if (header.on_partial != 0) { return; }
+    header.prev_partial = 0;
+    header.next_partial = pool.partial_head;
+    if (pool.partial_head != 0) {
+        intrusive_chunk_header_at(pool.partial_head).prev_partial = base;
+    }
+    pool.partial_head = base;
+    header.on_partial = 1;
+}
+
+fn intrusive_pool_unlink_partial(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                                 base: usize) !{unsafe} {
+    let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(base);
+    if (header.on_partial == 0) { return; }
+    if (header.prev_partial != 0) {
+        intrusive_chunk_header_at(header.prev_partial).next_partial = header.next_partial;
+    } else {
+        pool.partial_head = header.next_partial;
+    }
+    if (header.next_partial != 0) {
+        intrusive_chunk_header_at(header.next_partial).prev_partial = header.prev_partial;
+    }
+    header.prev_partial = 0;
+    header.next_partial = 0;
+    header.on_partial = 0;
+}
+
+fn intrusive_pool_unlink_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                               base: usize) !{unsafe} {
+    let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(base);
+    if (header.prev_chunk != 0) {
+        intrusive_chunk_header_at(header.prev_chunk).next_chunk = header.next_chunk;
+    } else {
+        pool.chunk_head = header.next_chunk;
+    }
+    if (header.next_chunk != 0) {
+        intrusive_chunk_header_at(header.next_chunk).prev_chunk = header.prev_chunk;
+    }
+    header.prev_chunk = 0;
+    header.next_chunk = 0;
+}
+
+// Hands one fully-empty chunk's page back to the provider. Both lists are
+// unlinked first, so the moment this returns, intrusive_pool_slot_is_valid
+// already rejects every address in that page -- which is what keeps a
+// stale handle into a reclaimed chunk from being dereferenced. If the
+// SAME page later comes back as a chunk of this same pool, the addresses
+// become valid again, and the pool-global (never per-chunk) generation
+// counter is what still rejects the stale handle.
+fn intrusive_pool_release_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                                base: usize) !{unsafe} {
+    intrusive_pool_unlink_partial(pool, base);
+    intrusive_pool_unlink_chunk(pool, base);
+    pool.chunk_count = pool.chunk_count - 1;
+    pool.released_chunk_count = pool.released_chunk_count + 1;
+    // The chunk base IS the page's physical address (one page-aligned page
+    // backs exactly one chunk), which is exactly what the provider's
+    // transferred-page release entry point takes -- this pool gave up its
+    // PageOwner at grow time, keeping only the address.
+    page_transferred_release_physical(base);
+}
+
 fn intrusive_pool_zero_page(base: usize) !{unsafe} {
     let bytes: *u8 = unsafe { base as *u8 };
     let page_size: isize = PAGE_SIZE as isize;
@@ -359,10 +471,11 @@ fn intrusive_pool_zero_page(base: usize) !{unsafe} {
     }
 }
 
-// Pulls one more page, carves it into slots, and pushes all of them onto
-// the free chain at once -- the pool's only growth step. Slots are linked
-// in descending order so that the chain hands them out in ascending order,
-// which keeps a chunk's first-fill behavior easy to reason about (contrast
+// Pulls one more page, carves it into slots, threads them onto that
+// chunk's OWN free chain, and puts the chunk at the head of the partial
+// list -- the pool's only growth step. Slots are linked in descending
+// order so the chain hands them out in ascending order, which keeps a
+// chunk's first-fill behavior easy to reason about (contrast
 // growable_pool_activate_chunk's own ascending push / descending pop).
 fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id)
         -> IntrusivePoolGrowResult !{unsafe} {
@@ -374,15 +487,26 @@ fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id)
         }
         PageAllocResult::Allocated(page_owner) => {
             let base: usize = page_physical_address(page_owner);
-            let page_index: usize = page_owner_transfer_index(page_owner) as usize;
+            // The pool keeps only the address from here on; the page's own
+            // owner is given up to this coarser bookkeeping, and
+            // intrusive_pool_release_chunk is what eventually gives the
+            // page itself back.
+            let _page_index: usize = page_owner_transfer_index(page_owner) as usize;
             intrusive_pool_zero_page(base);
             let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(base);
             header.pool_tag = pool.pool_tag;
             header.next_chunk = pool.chunk_head;
+            header.prev_chunk = 0;
+            header.next_partial = 0;
+            header.prev_partial = 0;
+            header.on_partial = 0;
+            header.free_head = 0;
             header.slot_count = slot_count;
             header.slot_stride = stride;
-            header.page_index = page_index;
             header.live_count = 0;
+            if (pool.chunk_head != 0) {
+                intrusive_chunk_header_at(pool.chunk_head).prev_chunk = base;
+            }
             pool.chunk_head = base;
             pool.chunk_count = pool.chunk_count + 1;
             let mut remaining: usize = slot_count;
@@ -392,17 +516,21 @@ fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id)
                     base + INTRUSIVE_CHUNK_HEADER_SIZE + remaining * stride;
                 let slot: *IntrusiveSlot(T) = intrusive_slot_at(pool, slot_address);
                 slot.generation = 0;
-                slot.next_free = pool.free_head;
-                pool.free_head = slot_address;
+                slot.next_free = header.free_head;
+                header.free_head = slot_address;
             }
+            intrusive_pool_link_partial(pool, base);
             return IntrusivePoolGrowResult::Grown;
         }
     }
 }
 
+// Always allocates from the head of the partial list, which by
+// construction has a free slot -- O(1), no search over chunks (GitHub
+// issue #346).
 fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id)
         -> IntrusivePoolInsertResult[pool_id] !{unsafe} {
-    if (pool.free_head == 0) {
+    if (pool.partial_head == 0) {
         match intrusive_pool_grow_one_chunk(pool) {
             IntrusivePoolGrowResult::OutOfMemory => {
                 return IntrusivePoolInsertResult::OutOfMemory;
@@ -410,22 +538,32 @@ fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id)
             IntrusivePoolGrowResult::Grown => {}
         }
     }
-    let slot_address: usize = pool.free_head;
+    let base: usize = pool.partial_head;
+    if (base == 0) {
+        // Unreachable: a chunk that grew successfully was linked into the
+        // partial list with slot_count >= 2 free slots. No trap site
+        // either way.
+        return IntrusivePoolInsertResult::OutOfMemory;
+    }
+    let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(base);
+    let slot_address: usize = header.free_head;
     if (slot_address == 0) {
-        // Unreachable: a chunk that grew successfully contributed
-        // slot_count >= 1 free slots. No trap site either way.
+        // Also unreachable: partial-list membership IS "free_head != 0".
         return IntrusivePoolInsertResult::OutOfMemory;
     }
     let slot: *IntrusiveSlot(T) = intrusive_slot_at(pool, slot_address);
-    pool.free_head = slot.next_free;
+    header.free_head = slot.next_free;
     let generation: usize = pool.next_generation;
     pool.next_generation = generation + 1;
     slot.generation = generation;
     slot.next_free = 0;
     pool.live_count = pool.live_count + 1;
-    let header: *IntrusiveChunkHeader =
-        intrusive_chunk_header_at(intrusive_chunk_base_of(slot_address));
     header.live_count = header.live_count + 1;
+    // This chunk is no longer the one empty chunk being held back.
+    if (pool.empty_chunk == base) { pool.empty_chunk = 0; }
+    // Full now: it has nothing left to hand out, so it leaves the partial
+    // list and rejoins on its next free.
+    if (header.free_head == 0) { intrusive_pool_unlink_partial(pool, base); }
     return IntrusivePoolInsertResult::Allocated(
         intrusive_owner_new(pool, slot_address, generation));
 }
@@ -450,13 +588,27 @@ fn intrusive_pool_remove(T: type, pool: &mut IntrusivePool(T) @ pool_id,
         intrusive_owner_drop(owner);
         return;
     }
+    let base: usize = intrusive_chunk_base_of(slot_address);
+    let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(base);
     slot.generation = 0;
-    slot.next_free = pool.free_head;
-    pool.free_head = slot_address;
+    slot.next_free = header.free_head;
+    header.free_head = slot_address;
     pool.live_count = pool.live_count - 1;
-    let header: *IntrusiveChunkHeader =
-        intrusive_chunk_header_at(intrusive_chunk_base_of(slot_address));
     header.live_count = header.live_count - 1;
+    // Was full, now has a free slot again.
+    intrusive_pool_link_partial(pool, base);
+    if (header.live_count == 0) {
+        // GitHub issue #346's hysteresis, stated once, here: hold back the
+        // FIRST chunk to empty, give every later one straight back. See
+        // IntrusivePool's own comment for why one is the right number.
+        if (pool.empty_chunk == 0) {
+            pool.empty_chunk = base;
+        } else {
+            if (pool.empty_chunk != base) {
+                intrusive_pool_release_chunk(pool, base);
+            }
+        }
+    }
     intrusive_owner_drop(owner);
 }
 
@@ -541,4 +693,12 @@ fn intrusive_pool_double_remove_count(T: type, pool: &mut IntrusivePool(T) @ poo
 
 fn intrusive_pool_foreign_handle_count(T: type, pool: &mut IntrusivePool(T) @ pool_id) -> usize {
     return pool.foreign_handle_count;
+}
+
+// How many chunks this pool has given back to the page provider, for a
+// caller (or a test) that wants to see reclaim actually happening rather
+// than infer it from the provider's own live count.
+fn intrusive_pool_released_chunk_count(T: type, pool: &mut IntrusivePool(T) @ pool_id)
+        -> usize {
+    return pool.released_chunk_count;
 }

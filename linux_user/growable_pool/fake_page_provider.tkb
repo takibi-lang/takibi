@@ -1,9 +1,10 @@
 // Small fixed-page allocator standing in for kernel/mm/page.tkb's real
 // physical pages (not available in this host-native environment). Exposes
-// exactly the subset of that file's public API growable_pool_core.tkb
-// needs -- PageOwner[page]/PageAllocResult/page_alloc/page_allocator_init/
-// page_physical_address/page_owner_transfer_index/page_allocator_live_count,
-// same names and shapes -- so growable_pool_core.tkb's own source ports to
+// exactly the subset of that file's public API its consumers need --
+// PageOwner[page]/PageAllocResult/page_alloc/page_allocator_init/
+// page_physical_address/page_owner_transfer_index/
+// page_transferred_release_physical/page_allocator_live_count, same names
+// and shapes -- so growable_pool_core.tkb's own source ports to
 // kernel/lib/growable_pool.tkb unchanged except for this file's `use` line
 // being swapped for "kernel/mm/page.tkb" (see that file for the real
 // implementation this one deliberately mirrors).
@@ -62,6 +63,31 @@ fn page_physical_address(owner: borrow PageOwner[page]) -> usize {
 fn page_owner_transfer_index(owner: sink PageOwner[page])
         -> {0..<PAGE_COUNT as usize} {
     return owner.index;
+}
+
+// Returns a page whose per-page ownership was handed off to a coarser
+// owner via page_owner_transfer_index (so the caller kept only the
+// address, not the PageOwner). Mirrors kernel/mm/page.tkb's own
+// page_transferred_release_physical, same name and same
+// plain-physical-address argument, so a file prototyped against this
+// provider still ports there by swapping one `use` line. Added for
+// GitHub issue #346, the first caller that ever gives a page back.
+fn page_transferred_release_physical(physical: usize) {
+    let base: usize = (fake_pages as *u8) as usize;
+    let pool_bytes: usize = PAGE_SIZE * PAGE_COUNT;
+    if (physical < base || physical >= base + pool_bytes ||
+        (physical - base) % PAGE_SIZE != 0) {
+        return;
+    }
+    let index: usize = (physical - base) / PAGE_SIZE;
+    // The real page.tkb reconstructs a generation-agnostic owner because
+    // its own occupancy bit is the authority. This provider's authority is
+    // SlotMap's occupant_generation, so recover the live generation and
+    // hand slotmap_remove a well-formed owner -- which keeps its
+    // double-free detection working on this path too.
+    let generation: usize = slotmap_occupant_generation(&fake_page_pool, index);
+    if (generation == 0) { return; }
+    slotmap_remove(&fake_page_pool, freelist_owner_new(index, generation));
 }
 
 fn page_allocator_live_count() -> usize {
