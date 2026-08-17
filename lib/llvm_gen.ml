@@ -822,6 +822,10 @@ let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
    starts), so type_inf.ml's own ref is stale/meaningless by the time
    codegen runs. *)
 let enclosing_future_writes : string list ref = ref []
+(* Endpoint facts need the narrower future kill set: writing `s[i]` does
+   not change s's pointer or length. Populated alongside the broad set by
+   run_stmts_with_future_writes after slice_rebind_names is available. *)
+let enclosing_future_slice_rebinds : string list ref = ref []
 
 (* Accumulates early-return-guard fallthrough narrowing (narrowing_ctx
    entries, and Imm `locals` entries) applied by an `If` statement anywhere
@@ -5099,6 +5103,7 @@ let gen_func ?prog_types fdef =
            afterward would see the wrong (inner) scope's value instead of
            this If's own position in its enclosing list. *)
         let future_writes_here = !enclosing_future_writes in
+        let future_rebinds_here = !enclosing_future_slice_rebinds in
 
         position_at_end then_bb builder;
         let killed     = Ast.written_names then_stmts in
@@ -5157,7 +5162,7 @@ let gen_func ?prog_types fdef =
               let f_saved     = apply_narrowing     locals neg fallthrough_killed in
               let f_saved_mut = apply_narrowing_mut locals neg fallthrough_killed in
               let f_saved_end = apply_slice_endpoint_narrowing neg
-                  (slice_rebind_names else_stmts @ future_writes_here) in
+                  (slice_rebind_names else_stmts @ future_rebinds_here) in
               pending_fallthrough_locals := f_saved @ !pending_fallthrough_locals;
               pending_fallthrough_narrowing_ctx :=
                 f_saved_mut @ !pending_fallthrough_narrowing_ctx;
@@ -5551,6 +5556,7 @@ let gen_func ?prog_types fdef =
       | [] -> ()
       | s :: rest ->
           enclosing_future_writes := Ast.written_names rest;
+          enclosing_future_slice_rebinds := slice_rebind_names rest;
           if !unsafe_lint_active then begin
             let before_use = !unsafe_use_marker in
             gen_stmt s;

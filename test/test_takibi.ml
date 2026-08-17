@@ -9237,6 +9237,16 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
+    "a later element write does not kill fallthrough endpoint evidence" `Quick
+    (expect_trap_sites 0
+       "fn f218_endpoint_then_element_write(s: [u8; 1..], end: usize) -> usize {
+          if (end > s.len) { return 0; }
+          let prefix = s[0..<end];
+          s[0] = 1;
+          return prefix.len;
+        }");
+
+  Alcotest.test_case
     "slice-length fallthrough narrowing accepts sizeof(packed struct) as \
      the natural bound" `Quick
     (expect_trap_sites 0
