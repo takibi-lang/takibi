@@ -80,6 +80,9 @@ let checked_mul a b =
     let product = a * b in
     if product / b = a then Some product else None
 
+let checked_div a b =
+  if b = 0 || (a = min_int && b = -1) then None else Some (a / b)
+
 let rec folded_value (e : Ast.expr) =
   match e.Ast.desc with
   | Ast.IntLit n -> Ast.int_of_intlit n
@@ -95,5 +98,9 @@ let rec folded_value (e : Ast.expr) =
   | Ast.BinOp (Ast.Mul, a, b) ->
       (match folded_value a, folded_value b with
        | Some x, Some y -> checked_mul x y
+       | _ -> None)
+  | Ast.BinOp (Ast.Div, a, b) ->
+      (match folded_value a, folded_value b with
+       | Some x, Some y -> checked_div x y
        | _ -> None)
   | _ -> None

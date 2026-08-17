@@ -81,15 +81,15 @@ struct Trb {
     dw3: u32;
 }
 
-let mut xhci_dcbaa: [u8; 65 * 8] align(64);
-let mut xhci_scratchpad_array: [u8; 2 * 8] align(64);
+let mut xhci_dcbaa: [u32; 65 * 2] align(64);
+let mut xhci_scratchpad_array: [u32; 2 * 2] align(64);
 let mut xhci_scratchpad_buf0: [u8; 4096] align(4096);
 let mut xhci_scratchpad_buf1: [u8; 4096] align(4096);
 let mut xhci_cmd_ring: [Trb; CMD_RING_TRBS] align(64);
 let mut xhci_evt_ring: [Trb; EVT_RING_TRBS] align(64);
-let mut xhci_erst: [u8; 16] align(64);
-let mut xhci_input_ctx: [u8; INPUT_CTX_SIZE] align(64);
-let mut xhci_device_ctx: [u8; DEVICE_CTX_SIZE] align(64);
+let mut xhci_erst: [u32; 4] align(64);
+let mut xhci_input_ctx: [u32; INPUT_CTX_SIZE / 4] align(64);
+let mut xhci_device_ctx: [u32; DEVICE_CTX_SIZE / 4] align(64);
 let mut xhci_ep0_ring: [Trb; EP0_RING_TRBS] align(64);
 let mut xhci_bulk_in_ring: [Trb; BULK_RING_TRBS] align(64);
 let mut xhci_bulk_out_ring: [Trb; BULK_RING_TRBS] align(64);
@@ -800,22 +800,18 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
     let scratchpad_array_dma: usize = scratchpad_array_base + RP1_DMA_PCI_OFFSET;
     let scratchpad_buf0_dma: usize = scratchpad_buf0_base + RP1_DMA_PCI_OFFSET;
     let scratchpad_buf1_dma: usize = scratchpad_buf1_base + RP1_DMA_PCI_OFFSET;
-    let sp0_ptr: *u32 = scratchpad_array_base as *u32;
-    *sp0_ptr = (scratchpad_buf0_dma & 0xFFFFFFFF) as u32;
-    let sp0_hi_ptr: *u32 = (scratchpad_array_base + 4) as *u32;
-    *sp0_hi_ptr = ((scratchpad_buf0_dma >> 32) & 0xFFFFFFFF) as u32;
-    let sp1_ptr: *u32 = (scratchpad_array_base + 8) as *u32;
-    *sp1_ptr = (scratchpad_buf1_dma & 0xFFFFFFFF) as u32;
-    let sp1_hi_ptr: *u32 = (scratchpad_array_base + 12) as *u32;
-    *sp1_hi_ptr = ((scratchpad_buf1_dma >> 32) & 0xFFFFFFFF) as u32;
+    xhci_scratchpad_array[0] = (scratchpad_buf0_dma & 0xFFFFFFFF) as u32;
+    xhci_scratchpad_array[1] =
+        ((scratchpad_buf0_dma >> 32) & 0xFFFFFFFF) as u32;
+    xhci_scratchpad_array[2] = (scratchpad_buf1_dma & 0xFFFFFFFF) as u32;
+    xhci_scratchpad_array[3] =
+        ((scratchpad_buf1_dma >> 32) & 0xFFFFFFFF) as u32;
     dma_prepare_tx(xhci_scratchpad_array as *u8, 16);
 
     let dcbaa_base: usize = (xhci_dcbaa as *u8) as usize;
     let dcbaa_dma: usize = dcbaa_base + RP1_DMA_PCI_OFFSET;
-    let dcbaa0_ptr: *u32 = dcbaa_base as *u32;
-    *dcbaa0_ptr = (scratchpad_array_dma & 0xFFFFFFFF) as u32;
-    let dcbaa0_hi_ptr: *u32 = (dcbaa_base + 4) as *u32;
-    *dcbaa0_hi_ptr = ((scratchpad_array_dma >> 32) & 0xFFFFFFFF) as u32;
+    xhci_dcbaa[0] = (scratchpad_array_dma & 0xFFFFFFFF) as u32;
+    xhci_dcbaa[1] = ((scratchpad_array_dma >> 32) & 0xFFFFFFFF) as u32;
     dma_prepare_tx(xhci_dcbaa as *u8, 65 * 8);
 
     let cmd_ring: *Trb = xhci_cmd_ring as *Trb;
@@ -831,12 +827,9 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
     let erst_base: usize = (xhci_erst as *u8) as usize;
     let evt_ring_dma: usize = ((xhci_evt_ring as *u8) as usize) + RP1_DMA_PCI_OFFSET;
     let erst_dma: usize = erst_base + RP1_DMA_PCI_OFFSET;
-    let erst_dw0_ptr: *u32 = erst_base as *u32;
-    *erst_dw0_ptr = (evt_ring_dma & 0xFFFFFFFF) as u32;
-    let erst_dw1_ptr: *u32 = (erst_base + 4) as *u32;
-    *erst_dw1_ptr = ((evt_ring_dma >> 32) & 0xFFFFFFFF) as u32;
-    let erst_dw2_ptr: *u32 = (erst_base + 8) as *u32;
-    *erst_dw2_ptr = 16;
+    xhci_erst[0] = (evt_ring_dma & 0xFFFFFFFF) as u32;
+    xhci_erst[1] = ((evt_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+    xhci_erst[2] = 16;
     dma_prepare_tx(xhci_erst as *u8, 16);
 
     // Programming order (ERSTSZ, then ERSTBA, then ERDP last) matches
@@ -920,10 +913,11 @@ fn xhci_address_device() -> bool !{unsafe} {
     let dcbaa_base: usize = (xhci_dcbaa as *u8) as usize;
     let device_ctx_base: usize = (xhci_device_ctx as *u8) as usize;
     let device_ctx_dma: usize = device_ctx_base + RP1_DMA_PCI_OFFSET;
-    let dcbaa_slot_ptr: *u32 = (dcbaa_base + xhci_slot_id * 8) as *u32;
-    *dcbaa_slot_ptr = (device_ctx_dma & 0xFFFFFFFF) as u32;
-    let dcbaa_slot_hi_ptr: *u32 = (dcbaa_base + xhci_slot_id * 8 + 4) as *u32;
-    *dcbaa_slot_hi_ptr = ((device_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
+    if (xhci_slot_id >= 65) { return false; }
+    let slot: {0..<65 as usize} = xhci_slot_id;
+    xhci_dcbaa[slot * 2] = (device_ctx_dma & 0xFFFFFFFF) as u32;
+    xhci_dcbaa[slot * 2 + 1] =
+        ((device_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
     dma_prepare_tx(xhci_dcbaa as *u8, 65 * 8);
 
     let ep0_ring: *Trb = xhci_ep0_ring as *Trb;
@@ -938,10 +932,8 @@ fn xhci_address_device() -> bool !{unsafe} {
 
     let input_ctx_base: usize = (xhci_input_ctx as *u8) as usize;
     let input_ctx_dma: usize = input_ctx_base + RP1_DMA_PCI_OFFSET;
-    let drop_flags_ptr: *u32 = input_ctx_base as *u32;
-    *drop_flags_ptr = 0;
-    let add_flags_ptr: *u32 = (input_ctx_base + 4) as *u32;
-    *add_flags_ptr = 3; // A0 (Slot) | A1 (EP0)
+    xhci_input_ctx[0] = 0;
+    xhci_input_ctx[1] = 3; // A0 (Slot) | A1 (EP0)
 
     // Slot Context: Route String=0 (root-port-attached), Speed = the
     // value PORTSC3 itself reports (bits 13:10), Context Entries=1,
@@ -966,23 +958,15 @@ fn xhci_address_device() -> bool !{unsafe} {
         }
         delay_us(1000);
     }
-    let slot_ctx_base: usize = input_ctx_base + 64;
-    let slot_dev_info_ptr: *u32 = slot_ctx_base as *u32;
-    *slot_dev_info_ptr = (slot_speed << 20) | (1 << 27);
-    let slot_dev_info2_ptr: *u32 = (slot_ctx_base + 4) as *u32;
-    *slot_dev_info2_ptr = 3 << 16; // ROOT_HUB_PORT(3)
+    xhci_input_ctx[16] = (slot_speed << 20) | (1 << 27);
+    xhci_input_ctx[17] = 3 << 16; // ROOT_HUB_PORT(3)
 
     // EP0 Context: EP Type=4 (Control Bidirectional), Error Count=3, Max
     // Packet Size=512 (SuperSpeed's own fixed control-endpoint value).
-    let ep0_ctx_base: usize = input_ctx_base + 128;
-    let ep0_ep_info2_ptr: *u32 = (ep0_ctx_base + 4) as *u32;
-    *ep0_ep_info2_ptr = (4 << 3) | (3 << 1) | (512 << 16);
-    let ep0_deq_lo_ptr: *u32 = (ep0_ctx_base + 8) as *u32;
-    *ep0_deq_lo_ptr = ((ep0_ring_dma & 0xFFFFFFFF) | 1) as u32;
-    let ep0_deq_hi_ptr: *u32 = (ep0_ctx_base + 12) as *u32;
-    *ep0_deq_hi_ptr = ((ep0_ring_dma >> 32) & 0xFFFFFFFF) as u32;
-    let ep0_tx_info_ptr: *u32 = (ep0_ctx_base + 16) as *u32;
-    *ep0_tx_info_ptr = 8;
+    xhci_input_ctx[33] = (4 << 3) | (3 << 1) | (512 << 16);
+    xhci_input_ctx[34] = ((ep0_ring_dma & 0xFFFFFFFF) | 1) as u32;
+    xhci_input_ctx[35] = ((ep0_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+    xhci_input_ctx[36] = 8;
     dma_prepare_tx(xhci_input_ctx as *u8, INPUT_CTX_SIZE);
 
     // USB Port Reset. 0xCE00FFE9 is Linux's own
@@ -1145,7 +1129,8 @@ fn xhci_configure() -> bool {
 // narrowing guard on this function's own parameters (matching
 // rp1_usb_smoke.tkb's own proven pattern) -- --forbid-trap otherwise
 // rejects out_num*2-1 as a possible underflow.
-fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool !{unsafe} {
+fn xhci_configure_endpoint(in_num: {1..<16 as usize},
+                           out_num: {1..<16 as usize}) -> bool !{unsafe} {
     let in_idx: usize = in_num * 2;
     let out_idx: usize = out_num * 2 - 1;
     let mut max_idx: usize = in_idx;
@@ -1153,7 +1138,6 @@ fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool !{unsafe} {
         max_idx = out_idx;
     }
 
-    let device_ctx_base: usize = (xhci_device_ctx as *u8) as usize;
     let input_ctx_base: usize = (xhci_input_ctx as *u8) as usize;
     let input_ctx_dma: usize = input_ctx_base + RP1_DMA_PCI_OFFSET;
     dma_finish_rx(xhci_device_ctx as *align(64) u8, DEVICE_CTX_SIZE);
@@ -1161,20 +1145,17 @@ fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool !{unsafe} {
     // Seed the Input Context from the controller's OUTPUT Device
     // Context (U-Boot's xhci_slot_copy/xhci_endpoint_copy) -- the Slot
     // Context already holds the USB address Address Device assigned.
-    for i: usize in 0..<32 {
-        let src_ptr: *u8 = (device_ctx_base + i) as *u8;
-        let dst_ptr: *u8 = (input_ctx_base + CTX_STRIDE + i) as *u8;
-        *dst_ptr = *src_ptr;
+    for i: usize in 0..<8 {
+        xhci_input_ctx[CTX_STRIDE / 4 + i] = xhci_device_ctx[i];
     }
-    for i: usize in 0..<32 {
-        let src_ptr: *u8 = (device_ctx_base + CTX_STRIDE + i) as *u8;
-        let dst_ptr: *u8 = (input_ctx_base + 2 * CTX_STRIDE + i) as *u8;
-        *dst_ptr = *src_ptr;
+    for i: usize in 0..<8 {
+        xhci_input_ctx[2 * CTX_STRIDE / 4 + i] =
+            xhci_device_ctx[CTX_STRIDE / 4 + i];
     }
 
-    let slot_dw0_ptr: *u32 = (input_ctx_base + CTX_STRIDE) as *u32;
-    let slot_dw0: u32 = *slot_dw0_ptr;
-    *slot_dw0_ptr = (slot_dw0 & 0x07FFFFFF) | (((max_idx + 1) as u32) << 27);
+    let slot_dw0: u32 = xhci_input_ctx[CTX_STRIDE / 4];
+    xhci_input_ctx[CTX_STRIDE / 4] =
+        (slot_dw0 & 0x07FFFFFF) | (((max_idx + 1) as u32) << 27);
 
     let bulk_in_ring: *Trb = xhci_bulk_in_ring as *Trb;
     let bulk_in_ring_dma: usize = ((xhci_bulk_in_ring as *u8) as usize) + RP1_DMA_PCI_OFFSET;
@@ -1192,35 +1173,31 @@ fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool !{unsafe} {
     bulk_out_ring[bulk_link_idx as isize].dw3 = 0x00001803;
     dma_prepare_tx(xhci_bulk_out_ring as *u8, BULK_RING_TRBS * 16);
 
-    let in_ctx_off: usize = (in_idx + 2) * CTX_STRIDE;
-    let in_ep_dw1_ptr: *u32 = (input_ctx_base + in_ctx_off + 4) as *u32;
-    *in_ep_dw1_ptr = (6 << 3) | (3 << 1)
+    let in_ctx_word: usize = (in_idx + 2) * (CTX_STRIDE / 4);
+    xhci_input_ctx[in_ctx_word + 1] = (6 << 3) | (3 << 1)
         | ((xhci_msc_bulk_in_burst & 0xFF) << 8)
         | ((xhci_msc_bulk_in_mps & 0xFFFF) << 16);
-    let in_ep_dw2_ptr: *u32 = (input_ctx_base + in_ctx_off + 8) as *u32;
-    *in_ep_dw2_ptr = ((bulk_in_ring_dma & 0xFFFFFFFF) | 1) as u32;
-    let in_ep_dw3_ptr: *u32 = (input_ctx_base + in_ctx_off + 12) as *u32;
-    *in_ep_dw3_ptr = ((bulk_in_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+    xhci_input_ctx[in_ctx_word + 2] =
+        ((bulk_in_ring_dma & 0xFFFFFFFF) | 1) as u32;
+    xhci_input_ctx[in_ctx_word + 3] =
+        ((bulk_in_ring_dma >> 32) & 0xFFFFFFFF) as u32;
 
-    let out_ctx_off: usize = (out_idx + 2) * CTX_STRIDE;
-    let out_ep_dw1_ptr: *u32 = (input_ctx_base + out_ctx_off + 4) as *u32;
-    *out_ep_dw1_ptr = (2 << 3) | (3 << 1)
+    let out_ctx_word: usize = (out_idx + 2) * (CTX_STRIDE / 4);
+    xhci_input_ctx[out_ctx_word + 1] = (2 << 3) | (3 << 1)
         | ((xhci_msc_bulk_out_burst & 0xFF) << 8)
         | ((xhci_msc_bulk_out_mps & 0xFFFF) << 16);
-    let out_ep_dw2_ptr: *u32 = (input_ctx_base + out_ctx_off + 8) as *u32;
-    *out_ep_dw2_ptr = ((bulk_out_ring_dma & 0xFFFFFFFF) | 1) as u32;
-    let out_ep_dw3_ptr: *u32 = (input_ctx_base + out_ctx_off + 12) as *u32;
-    *out_ep_dw3_ptr = ((bulk_out_ring_dma >> 32) & 0xFFFFFFFF) as u32;
+    xhci_input_ctx[out_ctx_word + 2] =
+        ((bulk_out_ring_dma & 0xFFFFFFFF) | 1) as u32;
+    xhci_input_ctx[out_ctx_word + 3] =
+        ((bulk_out_ring_dma >> 32) & 0xFFFFFFFF) as u32;
 
     // Input Control Context: add the Slot Context (A0) plus one bit per
     // endpoint at (index + 1). EP0's A1 is deliberately not set --
     // Configure Endpoint must not touch the control endpoint.
-    let icc_drop_ptr: *u32 = input_ctx_base as *u32;
-    *icc_drop_ptr = 0;
-    let icc_add_ptr: *u32 = (input_ctx_base + 4) as *u32;
+    xhci_input_ctx[0] = 0;
     let in_add_bit: u32 = (1 << (in_idx + 1)) as u32;
     let out_add_bit: u32 = (1 << (out_idx + 1)) as u32;
-    *icc_add_ptr = 1 | in_add_bit | out_add_bit;
+    xhci_input_ctx[1] = 1 | in_add_bit | out_add_bit;
     dma_prepare_tx(xhci_input_ctx as *u8, INPUT_CTX_SIZE);
 
     let cmd_ring: *Trb = xhci_cmd_ring as *Trb;

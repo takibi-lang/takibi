@@ -1904,20 +1904,11 @@ let rec refinement_range = function
   | TypeRefined (lo, hi, _) -> Some (lo, hi)
   | _ -> None
 
-(* Extract a small-number-scoped compile-time integer from an expression:
-   either a bare integer literal (see Ast.int_of_intlit's comment for why
-   IntLit's Int64.t payload cannot always be narrowed to `int`), or
-   (GitHub issue #185) a reference to a compile-time `const`. Used
-   throughout the range-propagation mirror of type_inf.ml's BinOp typing
-   below (sync rule: both sides must make the same decision -- including
-   this const-resolution addition). None uniformly covers both "not a
-   literal or known const at all" and "one, but too large to reason
-   about here" -- both fall back to the conservative (unrefined) case. *)
+(* Small compile-time integer evaluator used by the range-propagation mirror
+   of type_inf.ml. Keep the shared Const_env implementation here too so type
+   inference and codegen cannot disagree about checked constant arithmetic. *)
 let intlit_opt (e : Ast.expr) : int option =
-  match e.desc with
-  | Ast.IntLit k -> Ast.int_of_intlit k
-  | Ast.Var name -> Const_env.find name
-  | _ -> None
+  Const_env.folded_value e
 
 (* Widen a loaded value to the arithmetic width (i32 or i64).
    i8/u8/i16/u16 -> i32 (C-style integer promotion).
@@ -2953,9 +2944,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 (ret_ty, diff))
        | Mul ->
            (* Range propagation (sync rule with type_inf.ml's Mul):
-              {a..<b} * k (a positive literal OR Const_env-resolvable
-              named constant) -> {a*k..<(b-1)*k+1} *)
-           let k2 = Const_env.bound_value e2 and k1 = Const_env.bound_value e1 in
+              {a..<b} * k (a positive compile-time constant expression)
+              -> {a*k..<(b-1)*k+1} *)
+           let k2 = intlit_opt e2 and k1 = intlit_opt e1 in
            let ret_ty = match ty1, k2, ty2, k1 with
              | TypeRefined (a, b, base), Some k, _, _ when k > 0 ->
                  TypeRefined (a * k, (b - 1) * k + 1, base)
@@ -2968,7 +2959,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let result = if is_unsigned ty1
                         then build_udiv v1 v2 "divtmp" builder
                         else build_sdiv v1 v2 "divtmp" builder
-           in (ty1, result)
+           in
+           let ret_ty = match Const_env.folded_value e with
+             | Some k -> TypeRefined (k, k + 1, canon_ty ty1)
+             | None -> ty1
+           in
+           (ret_ty, result)
        | Lt ->
            let cmp = if is_unsigned ty1
                      then build_icmp Icmp.Ult v1 v2 "lttmp" builder

@@ -2087,9 +2087,10 @@ at codegen time rather than silently lowering to a racy `wfi`.
   bound-storage representation anyway).
 - **Range propagation** through ordinary arithmetic preserves the
   operand's own base (not always `i32`): `{a..<b} + {c..<d} ->
-  {a+c..<b+d-1}`; `{a..<b} + k -> {a+k..<b+k}` (k a literal, symmetric);
+  {a+c..<b+d-1}`; `{a..<b} + k -> {a+k..<b+k}` (`k` may be checked
+  `+`/`-`/`*`/`/` arithmetic over literals and `const` names, symmetric);
   `{a..<b} - {c..<d} -> {a-d+1..<b-c}`; `{a..<b} * k -> {a*k..<(b-1)*k+1}`
-  for a positive literal *or* a Const_env-resolvable named constant `k`;
+  for a positive compile-time `k` of the same checked-arithmetic form;
   `x & k -> {0..<k+1}` for a non-negative literal mask `k`, regardless of
   `x`'s own sign or range; `n % m -> {0..<m}` for a positive literal `m`,
   **only** when `n`'s own lower bound is already known non-negative

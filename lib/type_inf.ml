@@ -804,25 +804,13 @@ let check_match_int_literal_range loc lit base =
     raise (TypeError (loc, Printf.sprintf
       "match arm literal %d does not fit type '%s'" lit (to_string base)))
 
-(* Extract a small-number-scoped compile-time integer from an expression:
-   either a bare integer literal (see Ast.int_of_intlit's comment for why
-   IntLit's Int64.t payload cannot always be narrowed to `int`), or
-   (GitHub issue #185) a reference to a compile-time `const` -- exactly
-   as statically known as a literal, and Const_env.find's own shadowing
-   precondition (see its comment) means a Var here can only ever denote
-   the global constant, never a same-named local. Used throughout range
-   propagation below, which only ever needs to reason about realistic
-   mask/comparison/multiplier constants, never a genuinely 64-bit-wide
-   value. None uniformly covers "not a literal or known const at all"
-   and "one, but too large to reason about here" -- both fall back to
-   the conservative (unrefined) case, the same as any other non-constant
-   expression would. Sync rule: llvm_gen.ml's own intlit_opt mirrors this
-   exactly, change together. *)
+(* Extract a small-number-scoped compile-time integer from an expression.
+   Const_env.folded_value accepts literals/consts and checked arithmetic
+   over them, while returning None for overflow, division by zero, or a
+   runtime value. Used throughout range propagation below; sync rule:
+   llvm_gen.ml's own intlit_opt mirrors this exactly, change together. *)
 let intlit_opt (e : Ast.expr) : int option =
-  match e.desc with
-  | IntLit k -> Ast.int_of_intlit k
-  | Var name -> Const_env.find name
-  | _ -> None
+  Const_env.folded_value e
 
 (* Is this expression built up entirely from compile-time integer
    LITERALS or a real object's address (`IntLit`, `&x`, casts of a
@@ -1720,14 +1708,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      unify_at e.loc ct1 ct2;
                      ct1))
        | Mul ->
-           (* Range propagation: {a..<b} * k (k a positive literal OR a
-              Const_env-resolvable named constant, e.g. `idx * RX_BUF_SIZE`
-              -- see CLAUDE.md's P4c section for where using e2.desc's bare
-              IntLit check alone missed this) -> {a*k..<(b-1)*k+1} -- what
+           (* Range propagation: {a..<b} * k (k a positive compile-time
+              constant expression, e.g. `idx * (CTX_BYTES / 4)`)
+              -> {a*k..<(b-1)*k+1} -- what
               makes `tcp_hdr_len = doff * 4` carry doff's narrowed {5..<16}
               into {20..<61}. Sync rule with llvm_gen as for Add/Sub.
-              Non-constant or non-positive multipliers fall back to i32. *)
-           let k2 = Const_env.bound_value e2 and k1 = Const_env.bound_value e1 in
+              Runtime or non-positive multipliers fall back to i32. *)
+           let k2 = intlit_opt e2 and k1 = intlit_opt e1 in
            (match repr t1, k2, repr t2, k1 with
             | TRefinedInt (a, b, base), Some k, _, _ when k > 0 ->
                 unify_at e2.loc t2 base;
@@ -1742,7 +1729,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Div ->
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
            unify_at e.loc ct1 ct2;
-           ct1
+           (match Const_env.folded_value e with
+            | Some k -> TRefinedInt (k, k + 1, ct1)
+            | None -> ct1)
        | Lt | Gt | Le | Ge | Eq | Ne ->
            unify_at e.loc (canon_ty t1) (canon_ty t2);
            TBool

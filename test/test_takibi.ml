@@ -4197,6 +4197,16 @@ let infer_tests = [
       (Ast.TypeRefined (3, 7, Ast.TypeI32))
       fi.Types.ret_type);
 
+  Alcotest.test_case "range propagation folds a const quotient used as an array stride" `Quick
+    (expect_trap_sites 0
+      "const BYTES: usize = 64;
+       let mut words: [u32; 528];
+       fn f(endpoint: {1..<16 as usize}) {
+         let endpoint_index: usize = endpoint * 2;
+         let context_word: usize = (endpoint_index + 2) * (BYTES / 4);
+         words[context_word + 3] = 0;
+       }");
+
   Alcotest.test_case "TRefinedInt result is subtype of i32 return" `Quick
     (expect_ok "fn f(i: {0..<7 as i32}) -> i32 { return i + 1; }");
 
