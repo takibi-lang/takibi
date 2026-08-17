@@ -54,3 +54,35 @@ let bound_value (e : Ast.expr) =
   | Ast.IntLit n -> Ast.int_of_intlit n
   | Ast.Var name -> find name
   | _ -> None
+
+(* Fold the small compile-time integer expressions accepted as comparison
+   operands by flow-sensitive narrowing. Keep this separate from
+   [bound_value]: for-loop counter inference deliberately distinguishes a
+   bare literal/const bound from a compound expression, while a comparison
+   such as `offset < IMAGE_LEN - BLOCK_SIZE + 1` only needs the expression's
+   value at the point the condition is checked.
+
+   Addition/subtraction are the concrete operations needed by bounds written
+   in their natural algebraic form. Refuse host-int overflow rather than
+   allowing an OCaml wrap to become an unsound range proof. *)
+let checked_add a b =
+  if (b > 0 && a > max_int - b) || (b < 0 && a < min_int - b)
+  then None else Some (a + b)
+
+let checked_sub a b =
+  if (b > 0 && a < min_int + b) || (b < 0 && a > max_int + b)
+  then None else Some (a - b)
+
+let rec folded_value (e : Ast.expr) =
+  match e.Ast.desc with
+  | Ast.IntLit n -> Ast.int_of_intlit n
+  | Ast.Var name -> find name
+  | Ast.BinOp (Ast.Add, a, b) ->
+      (match folded_value a, folded_value b with
+       | Some x, Some y -> checked_add x y
+       | _ -> None)
+  | Ast.BinOp (Ast.Sub, a, b) ->
+      (match folded_value a, folded_value b with
+       | Some x, Some y -> checked_sub x y
+       | _ -> None)
+  | _ -> None

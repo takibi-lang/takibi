@@ -4200,6 +4200,11 @@ let infer_tests = [
   Alcotest.test_case "TRefinedInt result is subtype of i32 return" `Quick
     (expect_ok "fn f(i: {0..<7 as i32}) -> i32 { return i + 1; }");
 
+  Alcotest.test_case "narrower TRefinedInt range is a subtype of a wider refined range" `Quick
+    (expect_ok
+      "fn wider(i: {0..<513 as usize}) {}
+       fn f(i: {129..<513 as usize}) { wider(i); }");
+
   Alcotest.test_case "Mismatched refined return is a type error" `Quick
     (expect_type_error "range mismatch"
       "fn f(i: {0..<8 as i32}) -> {0..<8 as i32} { return i + 1; }");
@@ -4320,6 +4325,16 @@ let infer_tests = [
     (expect_ok
       "fn foo(i: {0..<8 as i32}) {} \
        fn f(v: i32) { if (0 <= v && v < 8) { foo(v); } }");
+
+  Alcotest.test_case
+    "if upper bound folds const addition/subtraction instead of requiring a magic-number literal" `Quick
+    (expect_ok
+      "const IMAGE_LEN: usize = 4096;
+       const BLOCK_SIZE: usize = 1024;
+       fn take(i: {0..<IMAGE_LEN - BLOCK_SIZE + 1 as usize}) {}
+       fn f(offset: usize) {
+         if (offset < IMAGE_LEN - BLOCK_SIZE + 1) { take(offset); }
+       }");
 
   (* GitHub issue #295 follow-up (extended by #296, see below): an
      early-return guard narrows the FALLTHROUGH path (code after the if,
@@ -8724,6 +8739,19 @@ let codegen_tests = [
           let mut buf: [usize; 6];
           if (idx >= 6) { return 0; }
           return buf[idx];
+        }");
+
+  Alcotest.test_case
+    "const-expression if narrowing and codegen agree for a same-base subslice" `Quick
+    (expect_trap_sites 0
+       "const CAPACITY: usize = 4096;
+        const WIDTH: usize = 1024;
+        fn f(storage: [u8; CAPACITY..], offset: usize) -> usize {
+          if (offset < CAPACITY - WIDTH + 1) {
+            let bounded: {0..<CAPACITY - WIDTH + 1 as usize} = offset;
+            return storage[bounded..<bounded + WIDTH].len;
+          }
+          return 0;
         }");
 
   Alcotest.test_case

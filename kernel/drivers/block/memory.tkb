@@ -21,7 +21,6 @@ struct KernelBlockDevice {
     // representation byte because the current backend rejects matching an
     // enum stored in a struct field when lowering LLVM IR.
     private backend: u8;
-    private address: usize;
     private length: usize;
 }
 
@@ -38,13 +37,12 @@ private let mut block_copy_batch_buffer:
     [u8; KERNEL_BLOCK_SIZE * KERNEL_BLOCK_BATCH];
 
 fn memory_block_device_ext2() -> KernelBlockDeviceResult {
-    let address: usize = (kernel_ext2_image as *u8) as usize;
     let length: usize = KERNEL_EXT2_IMAGE_LEN;
-    if (address == 0 || length == 0 || length % KERNEL_BLOCK_SIZE != 0) {
+    if (length == 0 || length % KERNEL_BLOCK_SIZE != 0) {
         return KernelBlockDeviceResult::Invalid;
     }
     let mut device: KernelBlockDevice = {
-        0, address, length
+        0, length
     };
     return KernelBlockDeviceResult::Ready(device);
 }
@@ -60,7 +58,7 @@ fn usb_mass_storage_block_device() -> KernelBlockDeviceResult {
     // Deliberately expose only the first 4 MiB. This is exactly the fixture
     // extent and bounds every destructive write far below the real medium's
     // capacity until partition/device ownership policy exists.
-    let mut device: KernelBlockDevice = { 1, 0, 4194304 };
+    let mut device: KernelBlockDevice = { 1, 4194304 };
     return KernelBlockDeviceResult::Ready(device);
 }
 
@@ -69,9 +67,8 @@ fn virtio_block_device_ext2() -> KernelBlockDeviceResult {
     if (sectors == 0 || sectors % 2 != 0) {
         return memory_block_device_ext2();
     }
-    let mut device: KernelBlockDevice = { 0, 0, 0 };
+    let mut device: KernelBlockDevice = { 0, 0 };
     device.backend = 2;
-    device.address = 0;
     device.length = sectors * 512;
     return KernelBlockDeviceResult::Ready(device);
 }
@@ -84,12 +81,17 @@ fn block_read(device: KernelBlockDevice, block: usize,
     }
     if (device.backend == 0) {
             let offset: usize = block * KERNEL_BLOCK_SIZE;
-            let source: *u8 = (device.address + offset) as *u8;
-            let source_bytes = unsafe {
-                source[0..<KERNEL_BLOCK_SIZE as isize]
-            };
-            slice_copy(destination[0..<KERNEL_BLOCK_SIZE], source_bytes);
-            return BlockIoResult::Ok;
+            if (offset < KERNEL_EXT2_IMAGE_LEN - KERNEL_BLOCK_SIZE + 1) {
+                let bounded_offset:
+                    {0..<KERNEL_EXT2_IMAGE_LEN - KERNEL_BLOCK_SIZE + 1 as usize} =
+                    offset;
+                let image = kernel_ext2_image as []u8;
+                let source_bytes =
+                    image[bounded_offset..<bounded_offset + KERNEL_BLOCK_SIZE];
+                slice_copy(destination[0..<KERNEL_BLOCK_SIZE], source_bytes);
+                return BlockIoResult::Ok;
+            }
+            return BlockIoResult::Invalid;
     } else if (device.backend == 1) {
         let sector: u32 = (block * 2) as u32;
         let target: *u8 = destination as *u8;
@@ -119,12 +121,17 @@ fn block_write(device: KernelBlockDevice, block: usize,
     }
     if (device.backend == 0) {
             let offset: usize = block * KERNEL_BLOCK_SIZE;
-            let destination: *u8 = (device.address + offset) as *u8;
-            let destination_bytes = unsafe {
-                destination[0..<KERNEL_BLOCK_SIZE as isize]
-            };
-            slice_copy(destination_bytes, source[0..<KERNEL_BLOCK_SIZE]);
-            return BlockIoResult::Ok;
+            if (offset < KERNEL_EXT2_IMAGE_LEN - KERNEL_BLOCK_SIZE + 1) {
+                let bounded_offset:
+                    {0..<KERNEL_EXT2_IMAGE_LEN - KERNEL_BLOCK_SIZE + 1 as usize} =
+                    offset;
+                let image = kernel_ext2_image as []u8;
+                let destination_bytes =
+                    image[bounded_offset..<bounded_offset + KERNEL_BLOCK_SIZE];
+                slice_copy(destination_bytes, source[0..<KERNEL_BLOCK_SIZE]);
+                return BlockIoResult::Ok;
+            }
+            return BlockIoResult::Invalid;
     } else if (device.backend == 1) {
         let sector: u32 = (block * 2) as u32;
         let bytes: *u8 = source as *u8;

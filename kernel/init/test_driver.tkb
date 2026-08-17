@@ -42,11 +42,13 @@ let mut exec_resolve_image: [u8; EXEC_METADATA_SIZE];
 let mut dynamic_primary_metadata: [u8; EXEC_METADATA_SIZE];
 let mut dynamic_interpreter_metadata: [u8; EXEC_METADATA_SIZE];
 
-fn exec_metadata_prefix(address: usize, length: usize) -> []u8 !{unsafe} {
-    let mut bounded: usize = length;
-    if (bounded > EXEC_METADATA_SIZE) { bounded = EXEC_METADATA_SIZE; }
-    let pointer: *u8 = address as *u8;
-    return unsafe { pointer[0..<bounded as isize] };
+fn exec_metadata_prefix(metadata: [u8; EXEC_METADATA_SIZE..],
+                        length: usize) -> []u8 {
+    if (length < EXEC_METADATA_SIZE + 1) {
+        let bounded: {0..<EXEC_METADATA_SIZE + 1 as usize} = length;
+        return metadata[0..<bounded];
+    }
+    return metadata[0..<EXEC_METADATA_SIZE];
 }
 let mut kernel_child_exec_entry: usize;
 let mut kernel_child_exec_stack: usize;
@@ -109,7 +111,7 @@ must_use variant DynamicExecResolveResult {
 // found, read failure, or invalid ELF) returns NotFound and preserves the
 // static-BusyBox fallback.
 fn kernel_exec_resolve_ext2_name_at(mount: Ext2Mount, name: []u8,
-                                    metadata_address: usize)
+                                    metadata: [u8; EXEC_METADATA_SIZE..])
         -> ExecResolveResult !{unsafe} {
     match ext2_lookup_path(mount, name) {
                 Ext2LookupResult::Invalid => { return ExecResolveResult::NotFound; }
@@ -121,19 +123,14 @@ fn kernel_exec_resolve_ext2_name_at(mount: Ext2Mount, name: []u8,
                         file_length > ext2_max_regular_file_size()) {
                         return ExecResolveResult::NotFound;
                     }
-                    let metadata_pointer: *u8 = metadata_address as *u8;
-                    let metadata = unsafe {
-                        metadata_pointer[0..<EXEC_METADATA_SIZE as isize]
-                    };
                     match ext2_read_file_chunk(mount, inode, 0, metadata) {
                         Ext2ReadResult::Invalid => {
                             return ExecResolveResult::NotFound;
                         }
                         Ext2ReadResult::Read(length) => {
                             match distro_elf_validate_with_length(
-                                    metadata_address,
-                                    exec_metadata_prefix(
-                                        metadata_address, length),
+                                    (metadata as *u8) as usize,
+                                    exec_metadata_prefix(metadata, length),
                                     file_length) {
                                 DistroElfResult::Invalid => {
                                     return ExecResolveResult::NotFound;
@@ -155,21 +152,21 @@ fn kernel_exec_resolve_ext2_name_at(mount: Ext2Mount, name: []u8,
 fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: []u8)
         -> ExecResolveResult !{unsafe} {
     return kernel_exec_resolve_ext2_name_at(
-        mount, name, (exec_resolve_image as *u8) as usize);
+        mount, name, exec_resolve_image as []u8);
 }
 
 fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount)
         -> DynamicExecResolveResult !{unsafe} {
     match kernel_exec_resolve_ext2_name_at(
             mount, "bin/busybox-extras" as []u8,
-            (dynamic_primary_metadata as *u8) as usize) {
+            dynamic_primary_metadata as []u8) {
         ExecResolveResult::NotFound => {
             return DynamicExecResolveResult::Invalid;
         }
         ExecResolveResult::Resolved(primary) => {
             match kernel_exec_resolve_ext2_name_at(
                     mount, "lib/ld-musl-aarch64.so.1" as []u8,
-                    (dynamic_interpreter_metadata as *u8) as usize) {
+                    dynamic_interpreter_metadata as []u8) {
                 ExecResolveResult::NotFound => {
                     return DynamicExecResolveResult::Invalid;
                 }
@@ -616,7 +613,7 @@ saved_rootfs_length = 0;
 if (ext2_mount_ready) {
     match kernel_exec_resolve_ext2_name_at(
             saved_ext2_mount, "bin/busybox.static" as []u8,
-            (rootfs_metadata as *u8) as usize) {
+            rootfs_metadata as []u8) {
         ExecResolveResult::NotFound => {
             kernel_boot_log("rootfs image: /bin/busybox.static not found\n");
         }

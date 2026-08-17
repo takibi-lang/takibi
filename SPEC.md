@@ -105,7 +105,9 @@ parameter value, or top-level declaration name.
 - **`{lo..<hi as base}`** is a refined integer subtype: a value of type
   `base` statically known to lie in `[lo, hi)`. See "Refined Integer
   Types" below. The bare form `{lo..<hi}` (no explicit `as base`) is
-  rejected -- the base must always be spelled out.
+  rejected -- the base must always be spelled out. Refined ranges follow
+  interval containment: `{a..<b as T}` is a subtype of `{c..<d as T}`
+  when `[a,b)` is contained by `[c,d)`.
 
 ## Literals
 
@@ -2103,8 +2105,12 @@ at codegen time rather than silently lowering to a racy `wfi`.
   already-proven range `v` carried in from outside). This applies to
   bare unrefined values too -- it's how an "unknown range" `i32` from
   MMIO/external input becomes usable as an array index or a `{lo..<hi}`
-  -typed function argument. Narrowing is invalidated ("killed") for the
-  rest of the branch if the branch (a) assigns to the narrowed variable,
+  -typed function argument. A bound may be an addition/subtraction
+  expression over integer literals and previously declared `const` names,
+  so the source can retain its natural form, e.g.
+  `if (offset < IMAGE_LEN - BLOCK_SIZE + 1)`, without replacing the
+  derived limit by a magic-number literal. Narrowing is invalidated
+  ("killed") for the rest of the branch if the branch (a) assigns to the narrowed variable,
   (b) takes its address (`&v`), or (c) rebinds the name (a `let`
   redeclaration or a `for`/`for-in` counter of the same name) -- the
   kill check is flow-insensitive within the branch (a write anywhere

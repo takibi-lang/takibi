@@ -825,8 +825,9 @@ let pending_fallthrough_locals : (string * local_binding) list ref = ref []
 
 (* Collect per-variable bounds from an if-condition for codegen narrowing.
    A comparison constrains `Var n` whenever the OTHER operand's static
-   value range is known: an integer literal / Const_env constant is
-   {k..<k+1}, and a variable whose binding (or active narrowing) is
+   value range is known: an integer literal / Const_env constant (including
+   addition/subtraction of those constants) is {k..<k+1}, and a variable
+   whose binding (or active narrowing) is
    refined contributes its own range. The fact collapses to a CONSTANT at
    collection time -- still interval reasoning, no relational domain, and
    no new kill obligations (the constant was true when the condition
@@ -889,7 +890,7 @@ let collect_bounds_cond (locals : (string, local_binding) Hashtbl.t)
     Types.StringMap.add name (take_lo lo_opt pl, take_hi hi_opt ph) acc
   in
   let range_of (e : Ast.expr) =
-    match Const_env.bound_value e with
+    match Const_env.folded_value e with
     | Some k -> Some (k, k + 1)
     | None ->
         (match e.desc with

@@ -376,7 +376,12 @@ let rec unify t1 t2 =
                (if List.length unexpected = 1 then "" else "s")
                (String.concat ", " unexpected))))
   | TRefinedInt (lo1, hi1, base1), TRefinedInt (lo2, hi2, base2) ->
-      if lo1 <> lo2 || hi1 <> hi2 then
+      (* A stronger proof is a subtype of a weaker one: [lo1, hi1) may
+         flow to [lo2, hi2) exactly when it is contained by it. Requiring
+         identical ranges made additional flow analysis paradoxically
+         break valid callers (e.g. a condition proving {129..<513} could
+         no longer satisfy a parameter asking only for {0..<513}). *)
+      if lo1 < lo2 || hi1 > hi2 then
         raise (Unify_error (Printf.sprintf
           "refined int range mismatch: {%d..<%d} vs {%d..<%d}" lo1 hi1 lo2 hi2));
       unify base1 base2

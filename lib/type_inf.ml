@@ -3632,7 +3632,8 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
    Returns name -> (lo_opt, hi_opt). Commutative forms (lo < v) are also handled. *)
 (* Collect per-variable bounds from an if condition. A comparison
    constrains `Var n` whenever the OTHER operand's static value range is
-   known: an integer literal k is {k..<k+1}, a Const_env constant likewise,
+   known: an integer literal k is {k..<k+1}, a Const_env constant likewise;
+   addition/subtraction of those constants is folded before narrowing;
    and a variable whose binding is refined contributes its own range
    (`total_len <= ip_len_in_frame` narrows total_len's upper bound to
    ip_len_in_frame's static maximum -- the fact collapses to a CONSTANT at
@@ -3656,7 +3657,7 @@ let collect_bounds tyenv (cond : Ast.expr) : (int option * int option) StringMap
   in
   (* Static value range of a comparison operand, when known. *)
   let range_of (e : Ast.expr) =
-    match Const_env.bound_value e with
+    match Const_env.folded_value e with
     | Some k -> Some (k, k + 1)
     | None ->
         (match e.desc with
