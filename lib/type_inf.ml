@@ -2284,13 +2284,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            require_isize_offset lo_e.loc lo_t;
            require_isize_offset hi_e.loc hi_t
        | _ -> ());
-      let const_bounds = (Const_env.bound_value lo_e, Const_env.bound_value hi_e) in
+      let const_bounds = (Const_env.folded_value lo_e, Const_env.folded_value hi_e) in
       (* Static value range of a bound: a compile-time constant k is {k..<k+1};
          a refined-typed expression contributes its own range. Sync rule:
          llvm_gen.ml's SliceOf makes the same proven/checked decision through
          the same formula (see its bound_range helper) -- change together. *)
       let bound_range be bt =
-        match Const_env.bound_value be with
+        match Const_env.folded_value be with
         | Some k -> Some (k, k + 1)
         | None -> (match repr bt with TRefinedInt (a, b, _) -> Some (a, b) | _ -> None)
       in

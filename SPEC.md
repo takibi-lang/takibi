@@ -1543,7 +1543,8 @@ length, not the exact length.
 - `arr as []T` / `arr as [T; N..]` -- from an array variable; the
   array's static size becomes the slice's minimum.
 - `s[a..<b]` on a slice or array -- subslice. When `a`/`b` are provably
-  in range (constant bounds, or a proven `{lo..<hi}` range, including the
+  in range (constant bounds, including checked `+`/`-`/`*`/`/` expressions
+  over literals and `const` names, or a proven `{lo..<hi}` range, including the
   "same-base" pattern `s[v..<v+k]` for the same variable `v` reused on
   both sides), no runtime check is generated and the result's minimum is
   the proven exact length. Otherwise a runtime check against the base's

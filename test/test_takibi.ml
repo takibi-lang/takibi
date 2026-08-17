@@ -9325,6 +9325,16 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
+    "constant-expression subslice bounds retain their proven minimum" `Quick
+    (expect_trap_sites 0
+       "const FTSL_PAGE: usize = 4096;
+        const FTSL_LAYOUT: usize = 512;
+        fn ftsl_const_expr(s: [u8; FTSL_PAGE..]) -> u8 {
+          let tail = s[FTSL_PAGE - FTSL_LAYOUT..<FTSL_PAGE];
+          return tail[FTSL_LAYOUT - 1];
+        }");
+
+  Alcotest.test_case
     "constant subslice beyond the proven minimum becomes a RUNTIME-CHECKED \
      subslice (P3 gradual form: the runtime length may exceed the minimum, \
      so this is one recorded trap site, not an error); after the check the \

@@ -202,6 +202,7 @@ const PROCESS_STACK_LOW_DYNAMIC: usize = 504;
 // #253 briefly conflated the two by reusing this name as a table bound;
 // issue #258 separated them again).
 const PROCESS_STACK_LAYOUT_BYTES: usize = 512;
+const PROCESS_STACK_WORDS: usize = PROCESS_STACK_LAYOUT_BYTES / 8;
 // Seed for ProcessImageRecord.heap_page_count (see PROCESS_STACK_LOW_*
 // above): consulted only where an image is mapped, never as a
 // decision point elsewhere.
@@ -221,6 +222,36 @@ const AT_EUID: usize = 12;
 const AT_GID: usize = 13;
 const AT_EGID: usize = 14;
 const AT_EXECFN: usize = 31;
+
+// The userspace ABI is little-endian AArch64. Keep the stack as the byte
+// slice carried by PageOwner and encode words explicitly; this avoids
+// discarding the page view's bounds/ownership evidence by minting a u64*.
+fn process_stack_store_word(stack: borrow [u8; PROCESS_STACK_LAYOUT_BYTES..],
+                            index: {0..<PROCESS_STACK_WORDS as usize},
+                            value: u64) {
+    let offset: usize = index * 8;
+    stack[offset] = value as u8;
+    stack[offset + 1] = (value >> 8) as u8;
+    stack[offset + 2] = (value >> 16) as u8;
+    stack[offset + 3] = (value >> 24) as u8;
+    stack[offset + 4] = (value >> 32) as u8;
+    stack[offset + 5] = (value >> 40) as u8;
+    stack[offset + 6] = (value >> 48) as u8;
+    stack[offset + 7] = (value >> 56) as u8;
+}
+
+fn process_stack_load_word(stack: borrow [u8; PROCESS_STACK_LAYOUT_BYTES..],
+                           index: {0..<PROCESS_STACK_WORDS as usize}) -> u64 {
+    let offset: usize = index * 8;
+    return (stack[offset] as u64) |
+           ((stack[offset + 1] as u64) << 8) |
+           ((stack[offset + 2] as u64) << 16) |
+           ((stack[offset + 3] as u64) << 24) |
+           ((stack[offset + 4] as u64) << 32) |
+           ((stack[offset + 5] as u64) << 40) |
+           ((stack[offset + 6] as u64) << 48) |
+           ((stack[offset + 7] as u64) << 56);
+}
 
 fn process_clone_vm_lock(lock: *i32 @ address)
         -> ProcessCloneVmGuard[address] {
@@ -759,85 +790,95 @@ fn process_image_prepare_stack(page: borrow PageOwner[page],
                                argv: []u8,
                                argc: usize)
         -> ProcessImageStackResult !{unsafe} {
-    if (argc == 0 || argc > 32) { return ProcessImageStackResult::Invalid; }
+    if (argc < 1 || argc > 32) { return ProcessImageStackResult::Invalid; }
+    let argument_count: {1..<33 as usize} = argc;
     let bytes = page_bytes(page);
     for i: usize in 0..<4096 { bytes[i] = 0; }
+    let stack = bytes[PAGE_SIZE - PROCESS_STACK_LAYOUT_BYTES..<PAGE_SIZE];
 
-    let physical_base: usize = page_physical_address(page) +
-                               PAGE_SIZE - PROCESS_STACK_LAYOUT_BYTES;
     let virtual_base: usize = USER_TEXT_VA +
                               process_stack_top_page() * PAGE_SIZE +
                               PAGE_SIZE - PROCESS_STACK_LAYOUT_BYTES;
     // argc, argv[], argv terminator, envp terminator, then eight auxv
     // key/value pairs and AT_NULL. The random bytes immediately follow.
-    let auxv_start: usize = argc + 3;
+    let auxv_start: usize = argument_count + 3;
     let random_offset: usize = (auxv_start + 18) * 8;
     let mut string_offset: usize = random_offset + 16;
     if (string_offset > PROCESS_STACK_LAYOUT_BYTES) {
         return ProcessImageStackResult::Invalid;
     }
     let random_address: usize = virtual_base + random_offset;
-    let words: *u64 = physical_base as *u64;
-    words[0] = argc as u64;
+    process_stack_store_word(stack, 0, argument_count as u64);
 
     let mut arg: usize = 0;
-    words[1 as isize] = (virtual_base + string_offset) as u64;
+    process_stack_store_word(stack, 1,
+                             (virtual_base + string_offset) as u64);
     // `for byte in argv` is the slice-safe iterator form: argv may later be
     // runtime data, but no unproved index is introduced while scanning it.
     for byte in argv {
-        if (arg >= argc) { break; }
-        if (string_offset >= PROCESS_STACK_LAYOUT_BYTES) {
+        if (arg >= argument_count) { break; }
+        let write_offset: usize = string_offset;
+        if (write_offset < stack.len) {
+            stack[write_offset] = byte;
+        } else {
             return ProcessImageStackResult::Invalid;
         }
-        let tail: *u8 = (physical_base + string_offset) as *u8;
-        tail[0 as isize] = byte;
         string_offset = string_offset + 1;
         if (byte == 0) {
             arg = arg + 1;
-            if (arg < argc) {
-                words[(arg + 1) as isize] =
-                    (virtual_base + string_offset) as u64;
+            if (arg < argument_count) {
+                process_stack_store_word(
+                    stack, arg + 1, (virtual_base + string_offset) as u64);
             }
         }
     }
-    if (arg != argc) { return ProcessImageStackResult::Invalid; }
-    words[(argc + 1) as isize] = 0;
-    words[(argc + 2) as isize] = 0;
+    if (arg != argument_count) { return ProcessImageStackResult::Invalid; }
+    process_stack_store_word(stack, argument_count + 1, 0);
+    process_stack_store_word(stack, argument_count + 2, 0);
 
     // The static PIE has no interpreter (AT_BASE=0). The ELF header and
     // program table are in the first PT_LOAD, so AT_PHDR is directly based
     // on the process load address.
-    words[auxv_start as isize] = AT_PAGESZ as u64;
-    words[(auxv_start + 1) as isize] = PAGE_SIZE as u64;
-    words[(auxv_start + 2) as isize] = AT_PHDR as u64;
-    words[(auxv_start + 3) as isize] =
-        (USER_TEXT_VA + plan.program_offset) as u64;
-    words[(auxv_start + 4) as isize] = AT_PHENT as u64;
-    words[(auxv_start + 5) as isize] = ELF_PROGRAM_HEADER_SIZE as u64;
-    words[(auxv_start + 6) as isize] = AT_PHNUM as u64;
-    words[(auxv_start + 7) as isize] = plan.program_count as u64;
-    words[(auxv_start + 8) as isize] = AT_BASE as u64;
-    words[(auxv_start + 9) as isize] = 0;
-    words[(auxv_start + 10) as isize] = AT_ENTRY as u64;
-    words[(auxv_start + 11) as isize] = (USER_TEXT_VA + plan.entry) as u64;
-    words[(auxv_start + 12) as isize] = AT_RANDOM as u64;
-    words[(auxv_start + 13) as isize] = random_address as u64;
-    words[(auxv_start + 14) as isize] = AT_SECURE as u64;
-    words[(auxv_start + 15) as isize] = 0;
-    words[(auxv_start + 16) as isize] = 0;
-    words[(auxv_start + 17) as isize] = 0;
-    let random: *u8 = (physical_base + random_offset) as *u8;
-    for i: usize in 0..<16 { random[i as isize] = (0xA5 ^ i) as u8; }
+    process_stack_store_word(stack, auxv_start, AT_PAGESZ as u64);
+    process_stack_store_word(stack, auxv_start + 1, PAGE_SIZE as u64);
+    process_stack_store_word(stack, auxv_start + 2, AT_PHDR as u64);
+    process_stack_store_word(stack, auxv_start + 3,
+                             (USER_TEXT_VA + plan.program_offset) as u64);
+    process_stack_store_word(stack, auxv_start + 4, AT_PHENT as u64);
+    process_stack_store_word(stack, auxv_start + 5,
+                             ELF_PROGRAM_HEADER_SIZE as u64);
+    process_stack_store_word(stack, auxv_start + 6, AT_PHNUM as u64);
+    process_stack_store_word(stack, auxv_start + 7,
+                             plan.program_count as u64);
+    process_stack_store_word(stack, auxv_start + 8, AT_BASE as u64);
+    process_stack_store_word(stack, auxv_start + 9, 0);
+    process_stack_store_word(stack, auxv_start + 10, AT_ENTRY as u64);
+    process_stack_store_word(stack, auxv_start + 11,
+                             (USER_TEXT_VA + plan.entry) as u64);
+    process_stack_store_word(stack, auxv_start + 12, AT_RANDOM as u64);
+    process_stack_store_word(stack, auxv_start + 13, random_address as u64);
+    process_stack_store_word(stack, auxv_start + 14, AT_SECURE as u64);
+    process_stack_store_word(stack, auxv_start + 15, 0);
+    process_stack_store_word(stack, auxv_start + 16, 0);
+    process_stack_store_word(stack, auxv_start + 17, 0);
+    for i: usize in 0..<16 {
+        let random_index: usize = random_offset + i;
+        if (random_index < stack.len) {
+            stack[random_index] = (0xA5 ^ i) as u8;
+        } else {
+            return ProcessImageStackResult::Invalid;
+        }
+    }
 
-    if (words[0 as isize] != argc as u64 ||
-        words[(argc + 1) as isize] != 0 ||
-        words[(argc + 2) as isize] != 0 ||
-        words[(auxv_start + 1) as isize] != PAGE_SIZE as u64 ||
-        words[(auxv_start + 3) as isize] !=
+    if (process_stack_load_word(stack, 0) != argument_count as u64 ||
+        process_stack_load_word(stack, argument_count + 1) != 0 ||
+        process_stack_load_word(stack, argument_count + 2) != 0 ||
+        process_stack_load_word(stack, auxv_start + 1) != PAGE_SIZE as u64 ||
+        process_stack_load_word(stack, auxv_start + 3) !=
             (USER_TEXT_VA + plan.program_offset) as u64 ||
-        words[(auxv_start + 11) as isize] !=
+        process_stack_load_word(stack, auxv_start + 11) !=
             (USER_TEXT_VA + plan.entry) as u64 ||
-        words[(auxv_start + 17) as isize] != 0) {
+        process_stack_load_word(stack, auxv_start + 17) != 0) {
         return ProcessImageStackResult::Invalid;
     }
     return ProcessImageStackResult::Ready;
@@ -849,86 +890,99 @@ fn process_dynamic_prepare_stack(page: borrow PageOwner[page],
                                  argv: []u8,
                                  argc: usize)
         -> ProcessImageStackResult !{unsafe} {
-    if (argc == 0 || argc > 32) { return ProcessImageStackResult::Invalid; }
+    if (argc < 1 || argc > 32) { return ProcessImageStackResult::Invalid; }
+    let argument_count: {1..<33 as usize} = argc;
     let bytes = page_bytes(page);
     for i: usize in 0..<4096 { bytes[i] = 0; }
+    let stack = bytes[PAGE_SIZE - PROCESS_STACK_LAYOUT_BYTES..<PAGE_SIZE];
 
-    let physical_base: usize = page_physical_address(page) +
-                               PAGE_SIZE - PROCESS_STACK_LAYOUT_BYTES;
     let virtual_base: usize = USER_TEXT_VA +
                               process_stack_top_page() * PAGE_SIZE +
                               PAGE_SIZE - PROCESS_STACK_LAYOUT_BYTES;
-    let words: *u64 = physical_base as *u64;
-    let auxv_start: usize = argc + 3;
+    let auxv_start: usize = argument_count + 3;
     let random_offset: usize = (auxv_start + 28) * 8;
     let mut string_offset: usize = random_offset + 16;
     if (string_offset > PROCESS_STACK_LAYOUT_BYTES) {
         return ProcessImageStackResult::Invalid;
     }
     let random_address: usize = virtual_base + random_offset;
-    words[0] = argc as u64;
+    process_stack_store_word(stack, 0, argument_count as u64);
     let mut arg: usize = 0;
-    words[1] = (virtual_base + string_offset) as u64;
+    let execfn_address: usize = virtual_base + string_offset;
+    process_stack_store_word(stack, 1, execfn_address as u64);
     for byte in argv {
-        if (arg >= argc) { break; }
-        if (string_offset >= PROCESS_STACK_LAYOUT_BYTES) {
+        if (arg >= argument_count) { break; }
+        let write_offset: usize = string_offset;
+        if (write_offset < stack.len) {
+            stack[write_offset] = byte;
+        } else {
             return ProcessImageStackResult::Invalid;
         }
-        let tail: *u8 = (physical_base + string_offset) as *u8;
-        tail[0] = byte;
         string_offset = string_offset + 1;
         if (byte == 0) {
             arg = arg + 1;
-            if (arg < argc) {
-                words[(arg + 1) as isize] =
-                    (virtual_base + string_offset) as u64;
+            if (arg < argument_count) {
+                process_stack_store_word(
+                    stack, arg + 1, (virtual_base + string_offset) as u64);
             }
         }
     }
-    if (arg != argc) { return ProcessImageStackResult::Invalid; }
-    words[(argc + 1) as isize] = 0;
-    words[(argc + 2) as isize] = 0;
-    words[auxv_start as isize] = AT_PAGESZ as u64;
-    words[(auxv_start + 1) as isize] = PAGE_SIZE as u64;
-    words[(auxv_start + 2) as isize] = AT_PHDR as u64;
-    words[(auxv_start + 3) as isize] =
-        (USER_TEXT_VA + application.program_offset) as u64;
-    words[(auxv_start + 4) as isize] = AT_PHENT as u64;
-    words[(auxv_start + 5) as isize] = ELF_PROGRAM_HEADER_SIZE as u64;
-    words[(auxv_start + 6) as isize] = AT_PHNUM as u64;
-    words[(auxv_start + 7) as isize] = application.program_count as u64;
-    words[(auxv_start + 8) as isize] = AT_BASE as u64;
-    words[(auxv_start + 9) as isize] = (USER_TEXT_VA + interpreter_bias) as u64;
-    words[(auxv_start + 10) as isize] = AT_ENTRY as u64;
-    words[(auxv_start + 11) as isize] = (USER_TEXT_VA + application.entry) as u64;
-    words[(auxv_start + 12) as isize] = AT_RANDOM as u64;
-    words[(auxv_start + 13) as isize] = random_address as u64;
-    words[(auxv_start + 14) as isize] = AT_SECURE as u64;
-    words[(auxv_start + 15) as isize] = 0;
-    words[(auxv_start + 16) as isize] = AT_UID as u64;
-    words[(auxv_start + 17) as isize] = 0;
-    words[(auxv_start + 18) as isize] = AT_EUID as u64;
-    words[(auxv_start + 19) as isize] = 0;
-    words[(auxv_start + 20) as isize] = AT_GID as u64;
-    words[(auxv_start + 21) as isize] = 0;
-    words[(auxv_start + 22) as isize] = AT_EGID as u64;
-    words[(auxv_start + 23) as isize] = 0;
-    words[(auxv_start + 24) as isize] = AT_EXECFN as u64;
-    words[(auxv_start + 25) as isize] = words[1];
-    words[(auxv_start + 26) as isize] = 0;
-    words[(auxv_start + 27) as isize] = 0;
-    let random: *u8 = (physical_base + random_offset) as *u8;
-    for i: usize in 0..<16 { random[i as isize] = (0x5A ^ i) as u8; }
+    if (arg != argument_count) { return ProcessImageStackResult::Invalid; }
+    process_stack_store_word(stack, argument_count + 1, 0);
+    process_stack_store_word(stack, argument_count + 2, 0);
+    process_stack_store_word(stack, auxv_start, AT_PAGESZ as u64);
+    process_stack_store_word(stack, auxv_start + 1, PAGE_SIZE as u64);
+    process_stack_store_word(stack, auxv_start + 2, AT_PHDR as u64);
+    process_stack_store_word(
+        stack, auxv_start + 3,
+        (USER_TEXT_VA + application.program_offset) as u64);
+    process_stack_store_word(stack, auxv_start + 4, AT_PHENT as u64);
+    process_stack_store_word(stack, auxv_start + 5,
+                             ELF_PROGRAM_HEADER_SIZE as u64);
+    process_stack_store_word(stack, auxv_start + 6, AT_PHNUM as u64);
+    process_stack_store_word(stack, auxv_start + 7,
+                             application.program_count as u64);
+    process_stack_store_word(stack, auxv_start + 8, AT_BASE as u64);
+    process_stack_store_word(stack, auxv_start + 9,
+                             (USER_TEXT_VA + interpreter_bias) as u64);
+    process_stack_store_word(stack, auxv_start + 10, AT_ENTRY as u64);
+    process_stack_store_word(stack, auxv_start + 11,
+                             (USER_TEXT_VA + application.entry) as u64);
+    process_stack_store_word(stack, auxv_start + 12, AT_RANDOM as u64);
+    process_stack_store_word(stack, auxv_start + 13, random_address as u64);
+    process_stack_store_word(stack, auxv_start + 14, AT_SECURE as u64);
+    process_stack_store_word(stack, auxv_start + 15, 0);
+    process_stack_store_word(stack, auxv_start + 16, AT_UID as u64);
+    process_stack_store_word(stack, auxv_start + 17, 0);
+    process_stack_store_word(stack, auxv_start + 18, AT_EUID as u64);
+    process_stack_store_word(stack, auxv_start + 19, 0);
+    process_stack_store_word(stack, auxv_start + 20, AT_GID as u64);
+    process_stack_store_word(stack, auxv_start + 21, 0);
+    process_stack_store_word(stack, auxv_start + 22, AT_EGID as u64);
+    process_stack_store_word(stack, auxv_start + 23, 0);
+    process_stack_store_word(stack, auxv_start + 24, AT_EXECFN as u64);
+    process_stack_store_word(stack, auxv_start + 25, execfn_address as u64);
+    process_stack_store_word(stack, auxv_start + 26, 0);
+    process_stack_store_word(stack, auxv_start + 27, 0);
+    for i: usize in 0..<16 {
+        let random_index: usize = random_offset + i;
+        if (random_index < stack.len) {
+            stack[random_index] = (0x5A ^ i) as u8;
+        } else {
+            return ProcessImageStackResult::Invalid;
+        }
+    }
 
-    if (words[0] != argc as u64 ||
-        words[(argc + 1) as isize] != 0 || words[(argc + 2) as isize] != 0 ||
-        words[(auxv_start + 3) as isize] !=
+    if (process_stack_load_word(stack, 0) != argument_count as u64 ||
+        process_stack_load_word(stack, argument_count + 1) != 0 ||
+        process_stack_load_word(stack, argument_count + 2) != 0 ||
+        process_stack_load_word(stack, auxv_start + 3) !=
             (USER_TEXT_VA + application.program_offset) as u64 ||
-        words[(auxv_start + 9) as isize] !=
+        process_stack_load_word(stack, auxv_start + 9) !=
             (USER_TEXT_VA + interpreter_bias) as u64 ||
-        words[(auxv_start + 11) as isize] !=
+        process_stack_load_word(stack, auxv_start + 11) !=
             (USER_TEXT_VA + application.entry) as u64 ||
-        words[(auxv_start + 27) as isize] != 0) {
+        process_stack_load_word(stack, auxv_start + 27) != 0) {
         return ProcessImageStackResult::Invalid;
     }
     return ProcessImageStackResult::Ready;

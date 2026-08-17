@@ -3445,7 +3445,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          narrowing_ctx/raw-inferred-type fallback, kept only as a defensive
          net for the case (not expected in practice) where type_inf.ml
          never populated an entry for this location. *)
-      let idx_ty = match Const_env.bound_value idx with
+      let idx_ty = match Const_env.folded_value idx with
         | Some k -> TypeRefined (k, k + 1, TypeUsize)  (* idx_v is already forced to usize width via to_index_width above *)
         | None ->
             (match Hashtbl.find_opt Type_inf.index_resolved_ty idx.loc with
@@ -3555,7 +3555,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                       | Some t -> t | None -> bty_raw)
           | _ -> bty_raw
         in
-        let range = match Const_env.bound_value be with
+        let range = match Const_env.folded_value be with
           | Some k -> Some (k, k + 1)
           | None -> refinement_range bty
         in
@@ -4383,7 +4383,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let idx_v = to_index_width ~is_signed:(not (is_unsigned idx_ty_raw)) idx_raw in
            (* GitHub issue #311: same priority as the read-Index case above
               -- see that one's own comment for the full rationale. *)
-           let idx_ty = match Const_env.bound_value idx with
+           let idx_ty = match Const_env.folded_value idx with
              | Some k -> TypeRefined (k, k + 1, TypeUsize)
              | None ->
                  (match Hashtbl.find_opt Type_inf.index_resolved_ty idx.loc with
