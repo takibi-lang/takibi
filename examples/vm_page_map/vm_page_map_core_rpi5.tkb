@@ -686,7 +686,10 @@ fn mapping_va_acquire(active: sink ActiveAddressSpace[core, asid],
 
 fn mapping_va_bytes(lease: borrow ActiveMappingView[core, asid, va, p])
         -> [u8; PAGE_SIZE..] @ p !{unsafe} {
-    let va_ptr: *u8 = lease.va_value as *u8;
+    // A live ActiveMappingView proves that this root is active and that its
+    // page remains mapped at `va_value`; this is the one machine-address
+    // conversion behind the safe page slice returned to callers.
+    let va_ptr: *u8 = unsafe { lease.va_value as *u8 };
     return unsafe { va_ptr[0..<4096] };
 }
 
