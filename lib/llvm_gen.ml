@@ -5119,12 +5119,7 @@ let gen_func ?prog_types fdef =
 
         position_at_end after_bb builder
 
-    | For (name, _ty_opt, lo_expr, hi_expr, body) ->
-        (* _ty_opt (the explicit `for i: T in ...` annotation, if any) is
-           not consulted directly here: type_inf.ml has already folded it
-           into the counter's resolved type, retrieved below via `res
-           ctr_name None` exactly as before -- codegen needs no separate
-           annotation-handling logic of its own. *)
+    | For (name, ty_opt, lo_expr, hi_expr, body) ->
         (* Loop counter is pre-allocated in the entry block by collect_lets,
            at whatever type type_inf.ml determined for the bounds (sync
            rule: both sides now unify lo/hi against EACH OTHER instead of
@@ -5175,7 +5170,11 @@ let gen_func ?prog_types fdef =
            counter to hi_expr's own upper bound, with lo taken from
            whichever of lo_expr's constant value or its own proven
            TypeRefined lower bound is available. *)
-        let loop_ty = match Const_env.bound_value lo_expr, Const_env.bound_value hi_expr with
+        let loop_bound_value = match ty_opt with
+          | Some _ -> Const_env.folded_value
+          | None -> Const_env.bound_value
+        in
+        let loop_ty = match loop_bound_value lo_expr, loop_bound_value hi_expr with
           | Some lo_k, Some hi_k -> TypeRefined (lo_k, hi_k, counter_base)
           | lo_c, _ ->
               (match hi_ty0 with

@@ -12127,6 +12127,14 @@ let codegen_tests = [
         (Types.StringMap.find "__for_i" fi.Types.local_types));
 
   Alcotest.test_case
+    "explicitly typed for-loop folds a const product into its counter proof" `Quick
+    (expect_trap_sites 0
+      "const ROWS: usize = 4;
+       const COLS: usize = 8;
+       let mut data: [u8; ROWS * COLS];
+       fn f() { for i: usize in 0..<ROWS * COLS { data[i] = 0; } }");
+
+  Alcotest.test_case
     "for-loop counter over ORDINARY literal bounds (`0..<4`, which
      Const_env.bound_value DOES recognize) is now a COMPILE ERROR when the
      body's only usage can't pin a concrete type -- deferred, usage-driven

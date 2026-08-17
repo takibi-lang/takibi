@@ -4320,10 +4320,18 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       (* Refine to TRefinedInt when both bounds are compile-time integers:
          a literal, or the name of a Const_env global constant (sound because
          check_const_shadowing rejects any local reusing a constant name).
+         An explicitly typed counter may additionally use folded addition,
+         subtraction, and multiplication over those constants: its base is already intentional,
+         so this gains proof precision without changing the deferred type
+         inference behavior of an unannotated compound-bound loop.
          For runtime variables, conservatively use the bounds' own base.
          Sync rule: llvm_gen.ml's For case makes the same decision through
-         the same Const_env.bound_value helper; keep them identical. *)
-      let const_bounds = (Const_env.bound_value lo_expr, Const_env.bound_value hi_expr) in
+         the same resolver choice; keep them identical. *)
+      let loop_bound_value = match ty_opt with
+        | Some _ -> Const_env.folded_value
+        | None -> Const_env.bound_value
+      in
+      let const_bounds = (loop_bound_value lo_expr, loop_bound_value hi_expr) in
       (* If both bounds are compile-time constants AND an explicit
          annotation was given, validate the bounds actually fit the
          annotated base -- a bare-literal bound has no inherent width of

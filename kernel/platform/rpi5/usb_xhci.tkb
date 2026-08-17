@@ -589,29 +589,22 @@ fn msc_recover_transport() -> bool {
 fn msc_cbw_header(data_len: u32, dir_in: bool, cb_len: u32) {
     msc_tag = msc_tag + 1;
     let tag: u32 = msc_tag;
-    let base: usize = (msc_cbw_buf as *u8) as usize;
     for i: usize in 0..<31 {
-        let p: *u8 = (base + i) as *u8;
-        *p = 0;
+        msc_cbw_buf[i] = 0;
     }
     let sig: u32 = 0x43425355;
     for i: usize in 0..<4 {
         let sh: u32 = (i * 8) as u32;
-        let p: *u8 = (base + i) as *u8;
-        *p = ((sig >> sh) & 0xFF) as u8;
-        let pt: *u8 = (base + 4 + i) as *u8;
-        *pt = ((tag >> sh) & 0xFF) as u8;
-        let pd: *u8 = (base + 8 + i) as *u8;
-        *pd = ((data_len >> sh) & 0xFF) as u8;
+        msc_cbw_buf[i] = ((sig >> sh) & 0xFF) as u8;
+        msc_cbw_buf[4 + i] = ((tag >> sh) & 0xFF) as u8;
+        msc_cbw_buf[8 + i] = ((data_len >> sh) & 0xFF) as u8;
     }
-    let flags_ptr: *u8 = (base + 12) as *u8;
     if (dir_in) {
-        *flags_ptr = 0x80;
+        msc_cbw_buf[12] = 0x80;
     } else {
-        *flags_ptr = 0x00;
+        msc_cbw_buf[12] = 0x00;
     }
-    let cblen_ptr: *u8 = (base + 14) as *u8;
-    *cblen_ptr = cb_len as u8;
+    msc_cbw_buf[14] = cb_len as u8;
 }
 
 // Run one complete Bulk-Only Transport command: CBW out, optional data
@@ -691,10 +684,8 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
     let mut csw_tag: u32 = 0;
     for i: usize in 0..<4 {
         let sh: u32 = (i * 8) as u32;
-        let p: *u8 = (csw_base + i) as *u8;
-        csw_sig = csw_sig | ((*p as u32) << sh);
-        let pt: *u8 = (csw_base + 4 + i) as *u8;
-        csw_tag = csw_tag | ((*pt as u32) << sh);
+        csw_sig = csw_sig | ((msc_csw_buf[i] as u32) << sh);
+        csw_tag = csw_tag | ((msc_csw_buf[4 + i] as u32) << sh);
     }
     if (csw_sig != 0x53425355) {
         return 4;
@@ -702,8 +693,7 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
     if (csw_tag != msc_tag) {
         return 5;
     }
-    let status_ptr: *u8 = (csw_base + 12) as *u8;
-    if (*status_ptr != 0) {
+    if (msc_csw_buf[12] != 0) {
         return 6;
     }
     return 0;
@@ -1301,9 +1291,7 @@ fn disk_initialize() -> DiskIoResult {
     let mut ready: bool = false;
     for i: usize in 0..<50 {
         msc_cbw_header(0, false, 6);
-        let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
-        let op_ptr: *u8 = (cbw_base + 15) as *u8;
-        *op_ptr = 0x00;
+        msc_cbw_buf[15] = 0x00;
         if (msc_run_command(0, false, msc_scratch_buf as *align(64) u8) == 0) {
             ready = true;
             break;
@@ -1317,16 +1305,13 @@ fn disk_initialize() -> DiskIoResult {
     // READ CAPACITY(10): confirm 512-byte blocks, this project's whole
     // storage stack's own fixed assumption.
     msc_cbw_header(8, true, 10);
-    let cbw_base2: usize = (msc_cbw_buf as *u8) as usize;
-    let cap_op_ptr: *u8 = (cbw_base2 + 15) as *u8;
-    *cap_op_ptr = 0x25;
+    msc_cbw_buf[15] = 0x25;
     if (msc_run_command(8, true, msc_scratch_buf as *align(64) u8) != 0) {
         return DiskIoResult::Err(-1);
     }
     let mut block_size: u32 = 0;
     for i: usize in 4..<8 {
-        let p: *u8 = (scratch_base + i) as *u8;
-        block_size = (block_size << 8) | (*p as u32);
+        block_size = (block_size << 8) | (msc_scratch_buf[i] as u32);
     }
     if (block_size != 512) {
         return DiskIoResult::Err(-1);
@@ -1356,21 +1341,13 @@ fn disk_write10_command_count() -> usize {
 // bounded by MSC_MAX_TRANSFER_SECTORS) | control(0). msc_cbw_header() must already have
 // been called to build the CBW header and zero this CDB region.
 fn msc_scsi_lba_cdb(op: u8, sector: u32, sectors: usize) {
-    let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
-    let op_ptr: *u8 = (cbw_base + 15) as *u8;
-    *op_ptr = op;
-    let lba_hi_ptr: *u8 = (cbw_base + 17) as *u8;
-    *lba_hi_ptr = ((sector >> 24) & 0xFF) as u8;
-    let lba_2_ptr: *u8 = (cbw_base + 18) as *u8;
-    *lba_2_ptr = ((sector >> 16) & 0xFF) as u8;
-    let lba_1_ptr: *u8 = (cbw_base + 19) as *u8;
-    *lba_1_ptr = ((sector >> 8) & 0xFF) as u8;
-    let lba_lo_ptr: *u8 = (cbw_base + 20) as *u8;
-    *lba_lo_ptr = (sector & 0xFF) as u8;
-    let len_hi_ptr: *u8 = (cbw_base + 22) as *u8;
-    *len_hi_ptr = ((sectors >> 8) & 0xFF) as u8;
-    let len_lo_ptr: *u8 = (cbw_base + 23) as *u8;
-    *len_lo_ptr = (sectors & 0xFF) as u8;
+    msc_cbw_buf[15] = op;
+    msc_cbw_buf[17] = ((sector >> 24) & 0xFF) as u8;
+    msc_cbw_buf[18] = ((sector >> 16) & 0xFF) as u8;
+    msc_cbw_buf[19] = ((sector >> 8) & 0xFF) as u8;
+    msc_cbw_buf[20] = (sector & 0xFF) as u8;
+    msc_cbw_buf[22] = ((sectors >> 8) & 0xFF) as u8;
+    msc_cbw_buf[23] = (sectors & 0xFF) as u8;
 }
 
 // Same retry policy as RPi3's own disk_read/disk_write: one attempt, and
@@ -1387,7 +1364,6 @@ fn disk_read_sectors(sector: u32, buf: *u8, sectors: usize) -> DiskIoResult {
         return DiskIoResult::Err(-1);
     }
     let length: usize = sectors * MSC_SECTOR_SIZE;
-    let bounce: usize = (msc_bounce_buf as *u8) as usize;
     msc_cbw_header(length as u32, true, 10);
     msc_scsi_lba_cdb(0x28, sector, sectors);
     let mut rc: u32 = msc_run_command(length as u32, true,
@@ -1402,9 +1378,9 @@ fn disk_read_sectors(sector: u32, buf: *u8, sectors: usize) -> DiskIoResult {
     if (rc != 0) {
         return DiskIoResult::Err(-1);
     }
-    for i: isize in 0..<length as isize {
-        let src: *u8 = (bounce as *u8);
-        buf[i] = src[i];
+    for i: usize in 0..<MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE {
+        if (i >= length) { break; }
+        buf[i as isize] = msc_bounce_buf[i];
     }
     return DiskIoResult::Ok;
 }
@@ -1430,10 +1406,9 @@ fn disk_write_sectors(sector: u32, buf: *u8, sectors: usize) -> DiskIoResult {
         return DiskIoResult::Err(-1);
     }
     let length: usize = sectors * MSC_SECTOR_SIZE;
-    let bounce: usize = (msc_bounce_buf as *u8) as usize;
-    for i: isize in 0..<length as isize {
-        let dst: *u8 = (bounce as *u8);
-        dst[i] = buf[i];
+    for i: usize in 0..<MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE {
+        if (i >= length) { break; }
+        msc_bounce_buf[i] = buf[i as isize];
     }
     msc_cbw_header(length as u32, false, 10);
     msc_scsi_lba_cdb(0x2A, sector, sectors);

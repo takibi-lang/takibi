@@ -2115,6 +2115,10 @@ at codegen time rather than silently lowering to a racy `wfi`.
   redeclaration or a `for`/`for-in` counter of the same name) -- the
   kill check is flow-insensitive within the branch (a write anywhere
   kills the whole branch body, not just after the write).
+  An explicitly typed `for i: T in lo..<hi` likewise folds `+`, `-`, and
+  `*` over literals and `const` names into the counter's refined range.
+  This lets a loop use the same symbolic product as its backing array size
+  without duplicating that product as a numeric literal.
   A **hi-only condition** (`if (v < hi)`, no explicit lower bound) also
   narrows when a sound lower bound is available without the condition:
   `v` of an unsigned base (`u8`/`u16`/`u32`/`u64`/`usize`) implicitly

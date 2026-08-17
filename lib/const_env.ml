@@ -73,6 +73,13 @@ let checked_sub a b =
   if (b > 0 && a < min_int + b) || (b < 0 && a > max_int + b)
   then None else Some (a - b)
 
+let checked_mul a b =
+  if a = 0 || b = 0 then Some 0
+  else if (a = min_int && b = -1) || (b = min_int && a = -1) then None
+  else
+    let product = a * b in
+    if product / b = a then Some product else None
+
 let rec folded_value (e : Ast.expr) =
   match e.Ast.desc with
   | Ast.IntLit n -> Ast.int_of_intlit n
@@ -84,5 +91,9 @@ let rec folded_value (e : Ast.expr) =
   | Ast.BinOp (Ast.Sub, a, b) ->
       (match folded_value a, folded_value b with
        | Some x, Some y -> checked_sub x y
+       | _ -> None)
+  | Ast.BinOp (Ast.Mul, a, b) ->
+      (match folded_value a, folded_value b with
+       | Some x, Some y -> checked_mul x y
        | _ -> None)
   | _ -> None
