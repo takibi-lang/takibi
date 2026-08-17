@@ -546,31 +546,31 @@ fn msc_recover_transport() -> bool {
 // callers fill in the CDB's own opcode/fields at msc_cbw_buf[15..]
 // afterward. bCBWLUN is always 0 -- single-drive scope, same as the RPi3
 // side.
-fn msc_cbw_header(data_len: u32, dir_in: bool, cb_len: u32) {
+fn msc_cbw_header(data_len: u32, dir_in: bool, cb_len: u32) !{unsafe} {
     msc_tag = msc_tag + 1;
     let tag: u32 = msc_tag;
     let base: usize = (msc_cbw_buf as *u8) as usize;
     for i: usize in 0..<31 {
-        let p: *u8 = (base + i) as *u8;
+        let p: *u8 = unsafe { (base + i) as *u8 };
         *p = 0;
     }
     let sig: u32 = 0x43425355;
     for i: usize in 0..<4 {
         let sh: u32 = (i * 8) as u32;
-        let p: *u8 = (base + i) as *u8;
+        let p: *u8 = unsafe { (base + i) as *u8 };
         *p = ((sig >> sh) & 0xFF) as u8;
-        let pt: *u8 = (base + 4 + i) as *u8;
+        let pt: *u8 = unsafe { (base + 4 + i) as *u8 };
         *pt = ((tag >> sh) & 0xFF) as u8;
-        let pd: *u8 = (base + 8 + i) as *u8;
+        let pd: *u8 = unsafe { (base + 8 + i) as *u8 };
         *pd = ((data_len >> sh) & 0xFF) as u8;
     }
-    let flags_ptr: *u8 = (base + 12) as *u8;
+    let flags_ptr: *u8 = unsafe { (base + 12) as *u8 };
     if (dir_in) {
         *flags_ptr = 0x80;
     } else {
         *flags_ptr = 0x00;
     }
-    let cblen_ptr: *u8 = (base + 14) as *u8;
+    let cblen_ptr: *u8 = unsafe { (base + 14) as *u8 };
     *cblen_ptr = cb_len as u8;
 }
 
@@ -580,7 +580,7 @@ fn msc_cbw_header(data_len: u32, dir_in: bool, cb_len: u32) {
 // fixed internal buffer), CSW in. The CBW must already be built by
 // msc_cbw_header() plus the caller's CDB bytes. Returns 0 on success, or
 // a small nonzero code identifying which stage failed.
-fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
+fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 !{unsafe} {
     let data_base: usize = data as usize;
     let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
     let cbw_dma: usize = cbw_base + RP1_DMA_PCI_OFFSET;
@@ -651,9 +651,9 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
     let mut csw_tag: u32 = 0;
     for i: usize in 0..<4 {
         let sh: u32 = (i * 8) as u32;
-        let p: *u8 = (csw_base + i) as *u8;
+        let p: *u8 = unsafe { (csw_base + i) as *u8 };
         csw_sig = csw_sig | ((*p as u32) << sh);
-        let pt: *u8 = (csw_base + 4 + i) as *u8;
+        let pt: *u8 = unsafe { (csw_base + 4 + i) as *u8 };
         csw_tag = csw_tag | ((*pt as u32) << sh);
     }
     if (csw_sig != 0x53425355) {
@@ -662,7 +662,7 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
     if (csw_tag != msc_tag) {
         return 5;
     }
-    let status_ptr: *u8 = (csw_base + 12) as *u8;
+    let status_ptr: *u8 = unsafe { (csw_base + 12) as *u8 };
     if (*status_ptr != 0) {
         return 6;
     }
