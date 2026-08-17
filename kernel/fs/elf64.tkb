@@ -107,7 +107,8 @@ fn distro_elf_validate_with_length(address: usize, image: borrow []u8,
         let mut load_count: usize = 0;
         for i: usize in 0..<program_count {
             let item_address: usize = address + program_offset + i * ELF_PROGRAM_HEADER_SIZE;
-            let item: *KernelElf64ProgramHeader = item_address as *KernelElf64ProgramHeader;
+            let item: *KernelElf64ProgramHeader =
+                unsafe { item_address as *KernelElf64ProgramHeader };
             if (item.segment_type == ELF_PT_LOAD) {
                 let offset: usize = item.offset as usize;
                 let file_size: usize = item.file_size as usize;

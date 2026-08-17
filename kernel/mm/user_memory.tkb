@@ -229,7 +229,7 @@ fn user_range_resolve_cow(range: UserWriteRange) -> bool !{unsafe} {
 
 fn copy_from_user(range: UserReadRange, destination: []u8) -> bool !{unsafe} {
     if (destination.len > range.length) { return false; }
-    let source_base: *u8 = range.address as *u8;
+    let source_base: *u8 = unsafe { range.address as *u8 };
     let source_view = unsafe { source_base[0..<range.length as isize] };
     let copied: usize = slice_copy(destination, source_view);
     return copied == destination.len;
@@ -238,7 +238,7 @@ fn copy_from_user(range: UserReadRange, destination: []u8) -> bool !{unsafe} {
 fn copy_to_user(range: UserWriteRange, source: []u8) -> bool !{unsafe} {
     if (source.len > range.length) { return false; }
     if (user_range_resolve_cow(range) == false) { return false; }
-    let destination_base: *u8 = range.address as *u8;
+    let destination_base: *u8 = unsafe { range.address as *u8 };
     let destination_view =
         unsafe { destination_base[0..<range.length as isize] };
     let copied: usize = slice_copy(destination_view, source);
@@ -251,9 +251,9 @@ fn copy_to_user(range: UserWriteRange, source: []u8) -> bool !{unsafe} {
 // this codebase already uses raw pointer arithmetic for on the kernel side.
 // The user-facing half is still only ever reached through UserReadRange/UserWriteRange.
 fn copy_from_user_raw(range: UserReadRange, destination: *u8, length: usize)
-        -> bool {
+        -> bool !{unsafe} {
     if (length > range.length) { return false; }
-    let source_base: *u8 = range.address as *u8;
+    let source_base: *u8 = unsafe { range.address as *u8 };
     let mut index: usize = 0;
     while (index < length) {
         let source_byte: *u8 = source_base + (index as isize);
@@ -268,7 +268,7 @@ fn copy_to_user_raw(range: UserWriteRange, source: *u8, length: usize)
         -> bool !{unsafe} {
     if (length > range.length) { return false; }
     if (user_range_resolve_cow(range) == false) { return false; }
-    let destination_base: *u8 = range.address as *u8;
+    let destination_base: *u8 = unsafe { range.address as *u8 };
     let mut index: usize = 0;
     while (index < length) {
         let source_byte: *u8 = source + (index as isize);
@@ -279,15 +279,15 @@ fn copy_to_user_raw(range: UserWriteRange, source: *u8, length: usize)
     return true;
 }
 
-fn user_read_byte(range: UserReadRange, offset: usize) -> u8 {
-    let source_byte: *u8 = (range.address + offset) as *u8;
+fn user_read_byte(range: UserReadRange, offset: usize) -> u8 !{unsafe} {
+    let source_byte: *u8 = unsafe { (range.address + offset) as *u8 };
     return *source_byte;
 }
 
 fn user_write_byte(range: UserWriteRange, offset: usize, value: u8) -> bool !{unsafe} {
     if (offset >= range.length) { return false; }
     if (user_range_resolve_cow(range) == false) { return false; }
-    let field: *u8 = (range.address + offset) as *u8;
+    let field: *u8 = unsafe { (range.address + offset) as *u8 };
     *field = value;
     return true;
 }
@@ -296,7 +296,7 @@ fn user_write_u32(range: UserWriteRange, offset: usize, value: u32)
         -> bool !{unsafe} {
     if (offset + 4 > range.length || offset + 4 < offset) { return false; }
     if (user_range_resolve_cow(range) == false) { return false; }
-    let field: *u32 = (range.address + offset) as *u32;
+    let field: *u32 = unsafe { (range.address + offset) as *u32 };
     *field = value;
     return true;
 }
@@ -305,7 +305,7 @@ fn user_write_u64(range: UserWriteRange, offset: usize, value: u64)
         -> bool !{unsafe} {
     if (offset + 8 > range.length || offset + 8 < offset) { return false; }
     if (user_range_resolve_cow(range) == false) { return false; }
-    let field: *u64 = (range.address + offset) as *u64;
+    let field: *u64 = unsafe { (range.address + offset) as *u64 };
     *field = value;
     return true;
 }
@@ -315,15 +315,15 @@ fn user_write_u64(range: UserWriteRange, offset: usize, value: u64)
 // fd) without ever dereferencing a raw user pointer directly. Bounds
 // checked the same way as the write side; the bool result distinguishes
 // "out of range" from a genuine value of 0.
-fn user_read_u32(range: UserReadRange, offset: usize) -> (bool, u32) {
+fn user_read_u32(range: UserReadRange, offset: usize) -> (bool, u32) !{unsafe} {
     if (offset + 4 > range.length || offset + 4 < offset) { return (false, 0); }
-    let field: *u32 = (range.address + offset) as *u32;
+    let field: *u32 = unsafe { (range.address + offset) as *u32 };
     return (true, *field);
 }
 
-fn user_read_u64(range: UserReadRange, offset: usize) -> (bool, u64) {
+fn user_read_u64(range: UserReadRange, offset: usize) -> (bool, u64) !{unsafe} {
     if (offset + 8 > range.length || offset + 8 < offset) { return (false, 0); }
-    let field: *u64 = (range.address + offset) as *u64;
+    let field: *u64 = unsafe { (range.address + offset) as *u64 };
     return (true, *field);
 }
 
@@ -341,7 +341,7 @@ fn user_write_u16(range: UserWriteRange, offset: usize, value: usize)
 
 fn user_zero_fill(range: UserWriteRange) -> bool !{unsafe} {
     if (user_range_resolve_cow(range) == false) { return false; }
-    let base: *u8 = range.address as *u8;
+    let base: *u8 = unsafe { range.address as *u8 };
     let mut index: usize = 0;
     while (index < range.length) {
         let byte: *u8 = base + (index as isize);
