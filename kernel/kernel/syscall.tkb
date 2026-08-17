@@ -79,13 +79,14 @@ const LINUX_PROT_WRITE: usize = 2;
 
 // struct utsname (aarch64 Linux ABI, <sys/utsname.h>): six 65-byte
 // (64 chars + NUL) fields, no padding between them.
+const UTSNAME_FIELD_SIZE: usize = 65;
 struct packed Utsname {
-    sysname: [u8; 65];
-    nodename: [u8; 65];
-    release: [u8; 65];
-    version: [u8; 65];
-    machine: [u8; 65];
-    domainname: [u8; 65];
+    sysname: [u8; UTSNAME_FIELD_SIZE];
+    nodename: [u8; UTSNAME_FIELD_SIZE];
+    release: [u8; UTSNAME_FIELD_SIZE];
+    version: [u8; UTSNAME_FIELD_SIZE];
+    machine: [u8; UTSNAME_FIELD_SIZE];
+    domainname: [u8; UTSNAME_FIELD_SIZE];
 }
 
 // struct iovec (aarch64 Linux ABI, <sys/uio.h>).
@@ -172,7 +173,7 @@ private let mut syscall_exec_argc: usize;
 private let mut syscall_exec_argv: [u8; 512];
 private let mut syscall_exec_path: [u8; 256];
 
-must_use variant SyscallPathResult { Fault; Invalid; Name(usize); }
+must_use variant SyscallPathResult { Fault; Invalid; Name([]u8); }
 
 fn kernel_syscall_daemon_start() {
     // Reinitialize only reusable TCP/socket scratch state; unlike
@@ -830,13 +831,21 @@ fn kernel_syscall_path_name(address: usize) -> SyscallPathResult {
     if (terminated == false || length == 0) {
         return SyscallPathResult::Invalid;
     }
-    if (length == 1 && path_view[0] == 0x2F) {
+    let path_length: usize = length;
+    if (path_length > path_view.len) {
+        return SyscallPathResult::Invalid;
+    }
+    let full_path = path_view[0..<path_length];
+    if (path_length == 1 && path_view[0] == 0x2F) {
         path_view[0] = 0x2E;
     }
     if (path_view[0] == 0x2F) {
-        return SyscallPathResult::Name(256 + length - 1);
+        if (full_path.len < 2) {
+            return SyscallPathResult::Invalid;
+        }
+        return SyscallPathResult::Name(full_path[1..<full_path.len]);
     }
-    return SyscallPathResult::Name(length);
+    return SyscallPathResult::Name(full_path);
 }
 
 // Issue #196: writev(2)/readv(2) per-segment results, kept distinct from
@@ -892,10 +901,11 @@ fn syscall_readv_segment(fd: usize, address: usize, length: usize)
         if (chunk_limit > KERNEL_BLOCK_SIZE) {
             chunk_limit = KERNEL_BLOCK_SIZE;
         }
-        let staging_base: *u8 = syscall_file_buffer as *u8;
-        let staging = unsafe {
-            staging_base[0..<chunk_limit as isize]
-        };
+        let staging_buffer = syscall_file_buffer as []u8;
+        if (chunk_limit > staging_buffer.len) {
+            return ReadSegmentResult::Errno(LINUX_EINVAL);
+        }
+        let staging = staging_buffer[0..<chunk_limit];
         match ext2_read_file_chunk(
                 syscall_ext2_mount, kernel_syscall_file_inode(fd),
                 kernel_syscall_file_offset(fd),
@@ -1088,15 +1098,13 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
     }
 }
 
-// Issue #196: writes `value` into a fixed 65-byte struct utsname field at
-// `field_offset` within the kernel-side scratch buffer `base` points at.
+// Issue #196: writes `value` into one fixed 65-byte struct utsname field.
 // The field was already zero-filled by the caller (see the uname(2)
 // handler below) before any field write, so a value shorter than 65
 // bytes leaves real zero padding, not leftover scratch-buffer content
 // from a previous uname(2) call.
-fn uname_write_field(base: *u8, field_offset: usize, value: []u8) !{unsafe} {
-    let field_base: *u8 = base + (field_offset as isize);
-    let field_view: []u8 = unsafe { field_base[0..<65 as isize] };
+fn uname_write_field(
+        field_view: borrow [u8; UTSNAME_FIELD_SIZE..], value: []u8) {
     let copied: usize = slice_copy(field_view, value);
 }
 
@@ -1589,7 +1597,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         copy_from_user_raw(range, destination_base, length);
                 }
             }
-            let content = unsafe { destination_base[0..<length as isize] };
+            let content_buffer = syscall_file_buffer as []u8;
+            if (length > content_buffer.len) {
+                return SyscallAction::Resume(LINUX_EINVAL);
+            }
+            let content = content_buffer[0..<length];
             match ext2_resize_small_file(
                     syscall_ext2_mount, kernel_syscall_file_inode(fd), content) {
                 Ext2ResizeResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
@@ -1627,13 +1639,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (syscall_ext2_ready == false) {
             return SyscallAction::Resume(LINUX_EBADF);
         }
-        let path_code: usize = match kernel_syscall_path_name(x1) {
+        let path_name: []u8 = match kernel_syscall_path_name(x1) {
             SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
             SyscallPathResult::Name(path) => { path }
         };
-        let path_start: usize = path_code / 256;
-        let path_name: usize = path_code % 256;
         let path_view: []u8 = syscall_path_buffer as []u8;
         let mut lookup_inode: usize = 2;
         if (path_view[0] != 0x2F && x0 < PROCESS_FD_MAX) {
@@ -1645,7 +1655,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match ext2_lookup_path_from(
             syscall_ext2_mount,
             lookup_inode,
-            unsafe { path_view[path_start..<path_start + path_name] }) {
+            path_name) {
             Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
             Ext2LookupResult::NotFound => {
                 return SyscallAction::Resume(LINUX_ENOENT);
@@ -1825,13 +1835,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         let mut path_address: usize = x1;
         if (number == 21) { path_address = x0; }
-        let path_code: usize = match kernel_syscall_path_name(path_address) {
+        let path_name: []u8 = match kernel_syscall_path_name(path_address) {
             SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
             SyscallPathResult::Name(path) => { path }
         };
-        let path_start: usize = path_code / 256;
-        let path_name: usize = path_code % 256;
         let path_view: []u8 = syscall_path_buffer as []u8;
         let mut lookup_inode: usize = 2;
         if (path_view[0] != 0x2F && x0 < PROCESS_FD_MAX) {
@@ -1843,7 +1851,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match ext2_lookup_path_from(
                 syscall_ext2_mount,
                 lookup_inode,
-                unsafe { path_view[path_start..<path_start + path_name] }) {
+                path_name) {
             Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
             Ext2LookupResult::NotFound => { return SyscallAction::Resume(LINUX_ENOENT); }
             Ext2LookupResult::Found(inode_number) => { return SyscallAction::Resume(0); }
@@ -1854,13 +1862,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // newfstatat(AT_FDCWD, path, stat, flags): return the bounded ext2
         // file, directory, or applet-link shape after validating the complete
         // userspace result.
-        let path_code: usize = match kernel_syscall_path_name(x1) {
+        let path_name: []u8 = match kernel_syscall_path_name(x1) {
             SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
             SyscallPathResult::Name(path) => { path }
         };
-        let path_start: usize = path_code / 256;
-        let path_name: usize = path_code % 256;
         let path_view: []u8 = syscall_path_buffer as []u8;
         let mut lookup_inode: usize = 2;
         if (path_view[0] != 0x2F && x0 < PROCESS_FD_MAX) {
@@ -1876,7 +1882,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match ext2_lookup_path_from(
                 syscall_ext2_mount,
                 lookup_inode,
-                unsafe { path_view[path_start..<path_start + path_name] }) {
+                path_name) {
             Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
             Ext2LookupResult::NotFound => { return SyscallAction::Resume(LINUX_ENOENT); }
             Ext2LookupResult::Found(inode_number) => {
@@ -2074,10 +2080,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             if (chunk_limit > KERNEL_BLOCK_SIZE) {
                 chunk_limit = KERNEL_BLOCK_SIZE;
             }
-            let staging_base: *u8 = syscall_file_buffer as *u8;
-            let staging = unsafe {
-                staging_base[0..<chunk_limit as isize]
-            };
+            let staging_buffer = syscall_file_buffer as []u8;
+            if (chunk_limit > staging_buffer.len) {
+                return SyscallAction::Resume(LINUX_EINVAL);
+            }
+            let staging = staging_buffer[0..<chunk_limit];
             match ext2_read_file_chunk(
                     syscall_ext2_mount, kernel_syscall_file_inode(fd),
                     kernel_syscall_file_offset(fd),
@@ -2499,10 +2506,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             if (chunk_limit > KERNEL_BLOCK_SIZE) {
                 chunk_limit = KERNEL_BLOCK_SIZE;
             }
-            let staging_base: *u8 = syscall_file_buffer as *u8;
-            let staging = unsafe {
-                staging_base[0..<chunk_limit as isize]
-            };
+            let staging_buffer = syscall_file_buffer as []u8;
+            if (chunk_limit > staging_buffer.len) {
+                return SyscallAction::Resume(LINUX_EINVAL);
+            }
+            let staging = staging_buffer[0..<chunk_limit];
             match ext2_read_file_chunk(
                     syscall_ext2_mount, kernel_syscall_file_inode(input_fd),
                     kernel_syscall_file_offset(input_fd),
@@ -2646,12 +2654,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             path_address = x1;
             argv_address = x2;
         }
-        let path_code: usize = match kernel_syscall_path_name(path_address) {
+        let exec_lookup_name: []u8 = match kernel_syscall_path_name(path_address) {
             SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
             SyscallPathResult::Name(path) => { path }
         };
-        let mut path_length: usize = path_code % 256;
+        let mut path_length: usize = exec_lookup_name.len;
         let path_view: []u8 = syscall_path_buffer as []u8;
         if (path_view[0] == 0x2F) { path_length = path_length + 1; }
         if (path_length == 0 || argv_address == 0) { return SyscallAction::Resume(LINUX_EINVAL); }
@@ -2682,7 +2690,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     if (string_address == 0) {
                         vector_terminated = true;
                     } else {
-                        let string_code: usize = match kernel_syscall_path_name(
+                        let argument_name: []u8 = match kernel_syscall_path_name(
                                 string_address as usize) {
                             SyscallPathResult::Fault => {
                                 return SyscallAction::Resume(LINUX_EFAULT);
@@ -2692,7 +2700,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             }
                             SyscallPathResult::Name(path) => { path }
                         };
-                        let mut string_length: usize = string_code % 256;
+                        let mut string_length: usize = argument_name.len;
                         if (path_view[0] == 0x2F) {
                             string_length = string_length + 1;
                         }
@@ -2705,13 +2713,27 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 if (end > 512 || argc >= 8) {
                                     return SyscallAction::Resume(LINUX_EINVAL);
                                 }
+                                let copy_length: usize = string_length + 1;
+                                let destination_start: usize = output_offset;
                                 let exec_argv_view: []u8 =
                                     syscall_exec_argv as []u8;
+                                if (destination_start > exec_argv_view.len) {
+                                    return SyscallAction::Resume(LINUX_EINVAL);
+                                }
+                                let destination_tail = exec_argv_view[
+                                    destination_start..<exec_argv_view.len];
+                                if (copy_length > destination_tail.len) {
+                                    return SyscallAction::Resume(LINUX_EINVAL);
+                                }
+                                let destination =
+                                    destination_tail[0..<copy_length];
+                                if (copy_length > path_view.len) {
+                                    return SyscallAction::Resume(LINUX_EINVAL);
+                                }
+                                let source = path_view[0..<copy_length];
                                 let copied: usize = slice_copy(
-                                    unsafe { exec_argv_view[
-                                        output_offset..<end] },
-                                    unsafe { path_view[0..<string_length + 1] });
-                                if (copied != string_length + 1) {
+                                    destination, source);
+                                if (copied != copy_length) {
                                     return SyscallAction::Resume(LINUX_EFAULT);
                                 }
                                 output_offset = end;
@@ -3218,26 +3240,41 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match user_range_check_write(kernel_process_current_root(), x0, sizeof(Utsname)) {
             UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserWriteRangeResult::Ok(range) => {
-                let base: *u8 = syscall_uname_buffer as *u8;
-                let mut zero_index: usize = 0;
-                while (zero_index < sizeof(Utsname)) {
-                    let byte: *u8 = base + (zero_index as isize);
-                    *byte = 0;
-                    zero_index = zero_index + 1;
+                let uname_bytes = syscall_uname_buffer as []u8;
+                for zero_index: usize in 0..<sizeof(Utsname) {
+                    syscall_uname_buffer[zero_index] = 0;
                 }
-                uname_write_field(base, offsetof(Utsname, sysname),
+                uname_write_field(uname_bytes[
+                                      offsetof(Utsname, sysname)..<
+                                      offsetof(Utsname, sysname) +
+                                          UTSNAME_FIELD_SIZE],
                                   "Linux" as []u8);
-                uname_write_field(base, offsetof(Utsname, nodename),
+                uname_write_field(uname_bytes[
+                                      offsetof(Utsname, nodename)..<
+                                      offsetof(Utsname, nodename) +
+                                          UTSNAME_FIELD_SIZE],
                                   "takibi" as []u8);
-                uname_write_field(base, offsetof(Utsname, release),
+                uname_write_field(uname_bytes[
+                                      offsetof(Utsname, release)..<
+                                      offsetof(Utsname, release) +
+                                          UTSNAME_FIELD_SIZE],
                                   "6.1.0-takibi" as []u8);
-                uname_write_field(base, offsetof(Utsname, version),
+                uname_write_field(uname_bytes[
+                                      offsetof(Utsname, version)..<
+                                      offsetof(Utsname, version) +
+                                          UTSNAME_FIELD_SIZE],
                                   "#1" as []u8);
-                uname_write_field(base, offsetof(Utsname, machine),
+                uname_write_field(uname_bytes[
+                                      offsetof(Utsname, machine)..<
+                                      offsetof(Utsname, machine) +
+                                          UTSNAME_FIELD_SIZE],
                                   "aarch64" as []u8);
-                uname_write_field(base, offsetof(Utsname, domainname),
+                uname_write_field(uname_bytes[
+                                      offsetof(Utsname, domainname)..<
+                                      offsetof(Utsname, domainname) +
+                                          UTSNAME_FIELD_SIZE],
                                   "(none)" as []u8);
-                let source: []u8 = unsafe { base[0..<sizeof(Utsname) as isize] };
+                let source: []u8 = uname_bytes[0..<sizeof(Utsname)];
                 let ok: bool = copy_to_user(range, source);
                 return SyscallAction::Resume(0);
             }
