@@ -237,7 +237,7 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 !{unsafe} {
         let mut dw3: u32 = 0;
         for i: usize in 0..<timeout_ms {
             dma_finish_rx(xhci_evt_ring as *align(64) u8, EVT_RING_TRBS * 16);
-            let dw3_ptr: *u32 = (evt_ring_base + off + 12) as *u32;
+            let dw3_ptr: *u32 = unsafe { (evt_ring_base + off + 12) as *u32 };
             let d3: u32 = *dw3_ptr;
             if ((d3 & 1) == xhci_evt_cycle) {
                 seen = true;
@@ -250,7 +250,7 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 !{unsafe} {
             return 0;
         }
 
-        let dw2_ptr: *u32 = (evt_ring_base + off + 8) as *u32;
+        let dw2_ptr: *u32 = unsafe { (evt_ring_base + off + 8) as *u32 };
         let dw2: u32 = *dw2_ptr;
         let trb_type: u32 = (dw3 >> 10) & 0x3F;
 
@@ -304,13 +304,13 @@ fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
     if (has_data) {
         if (dir_in) { trt = 3; } else { trt = 2; }
     }
-    let s_dw0_ptr: *u32 = (ep0_ring_base + first_off) as *u32;
+    let s_dw0_ptr: *u32 = unsafe { (ep0_ring_base + first_off) as *u32 };
     *s_dw0_ptr = bm_request_type | (b_request << 8) | (w_value << 16);
-    let s_dw1_ptr: *u32 = (ep0_ring_base + first_off + 4) as *u32;
+    let s_dw1_ptr: *u32 = unsafe { (ep0_ring_base + first_off + 4) as *u32 };
     *s_dw1_ptr = w_index | (w_length << 16);
-    let s_dw2_ptr: *u32 = (ep0_ring_base + first_off + 8) as *u32;
+    let s_dw2_ptr: *u32 = unsafe { (ep0_ring_base + first_off + 8) as *u32 };
     *s_dw2_ptr = 8;
-    let s_dw3_ptr: *u32 = (ep0_ring_base + first_off + 12) as *u32;
+    let s_dw3_ptr: *u32 = unsafe { (ep0_ring_base + first_off + 12) as *u32 };
     *s_dw3_ptr = cyc | (1 << 6) | (2 << 10) | (trt << 16);
 
     let mut off: usize = first_off + 16;
@@ -318,13 +318,13 @@ fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
     if (has_data) {
         let mut dir_bit: u32 = 0;
         if (dir_in) { dir_bit = 1; }
-        let d_dw0_ptr: *u32 = (ep0_ring_base + off) as *u32;
+        let d_dw0_ptr: *u32 = unsafe { (ep0_ring_base + off) as *u32 };
         *d_dw0_ptr = (buf_dma & 0xFFFFFFFF) as u32;
-        let d_dw1_ptr: *u32 = (ep0_ring_base + off + 4) as *u32;
+        let d_dw1_ptr: *u32 = unsafe { (ep0_ring_base + off + 4) as *u32 };
         *d_dw1_ptr = ((buf_dma >> 32) & 0xFFFFFFFF) as u32;
-        let d_dw2_ptr: *u32 = (ep0_ring_base + off + 8) as *u32;
+        let d_dw2_ptr: *u32 = unsafe { (ep0_ring_base + off + 8) as *u32 };
         *d_dw2_ptr = w_length;
-        let d_dw3_ptr: *u32 = (ep0_ring_base + off + 12) as *u32;
+        let d_dw3_ptr: *u32 = unsafe { (ep0_ring_base + off + 12) as *u32 };
         *d_dw3_ptr = cyc | (3 << 10) | (dir_bit << 16);
         off = off + 16;
     }
@@ -333,13 +333,13 @@ fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
     if (has_data) {
         if (dir_in) { st_dir = 0; }
     }
-    let t_dw0_ptr: *u32 = (ep0_ring_base + off) as *u32;
+    let t_dw0_ptr: *u32 = unsafe { (ep0_ring_base + off) as *u32 };
     *t_dw0_ptr = 0;
-    let t_dw1_ptr: *u32 = (ep0_ring_base + off + 4) as *u32;
+    let t_dw1_ptr: *u32 = unsafe { (ep0_ring_base + off + 4) as *u32 };
     *t_dw1_ptr = 0;
-    let t_dw2_ptr: *u32 = (ep0_ring_base + off + 8) as *u32;
+    let t_dw2_ptr: *u32 = unsafe { (ep0_ring_base + off + 8) as *u32 };
     *t_dw2_ptr = 0;
-    let t_dw3_ptr: *u32 = (ep0_ring_base + off + 12) as *u32;
+    let t_dw3_ptr: *u32 = unsafe { (ep0_ring_base + off + 12) as *u32 };
     *t_dw3_ptr = cyc | (1 << 5) | (4 << 10) | (st_dir << 16);
 
     xhci_ep0_enq = (off + 16) / 16;
@@ -385,18 +385,18 @@ fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 !{unsafe} {
     }
 
     let off: usize = enq * 16;
-    let dw0_ptr: *u32 = (ring_base + off) as *u32;
+    let dw0_ptr: *u32 = unsafe { (ring_base + off) as *u32 };
     *dw0_ptr = (buf_dma & 0xFFFFFFFF) as u32;
-    let dw1_ptr: *u32 = (ring_base + off + 4) as *u32;
+    let dw1_ptr: *u32 = unsafe { (ring_base + off + 4) as *u32 };
     *dw1_ptr = ((buf_dma >> 32) & 0xFFFFFFFF) as u32;
-    let dw2_ptr: *u32 = (ring_base + off + 8) as *u32;
+    let dw2_ptr: *u32 = unsafe { (ring_base + off + 8) as *u32 };
     *dw2_ptr = length;
     // ISP (Interrupt on Short Packet, bit2) only has defined meaning for
     // IN transfers (a device sending fewer bytes than offered); left
     // off for OUT, where the host always controls the exact byte count.
     let mut isp_bit: u32 = 0;
     if (dir_in) { isp_bit = 1 << 2; }
-    let dw3_ptr: *u32 = (ring_base + off + 12) as *u32;
+    let dw3_ptr: *u32 = unsafe { (ring_base + off + 12) as *u32 };
     *dw3_ptr = cyc | isp_bit | (1 << 5) | (1 << 10);
     if (dir_in) {
         dma_prepare_tx(xhci_bulk_in_ring as *u8, BULK_RING_TRBS * 16);
@@ -449,13 +449,13 @@ fn xhci_run_command(dw0: u32, dw1: u32, dw2: u32, trb_type: u32,
     let slot_u32: u32 = xhci_slot_id as u32;
     let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
     let cmd_off: usize = xhci_cmd_enq * 16;
-    let d0_ptr: *u32 = (cmd_ring_base + cmd_off) as *u32;
+    let d0_ptr: *u32 = unsafe { (cmd_ring_base + cmd_off) as *u32 };
     *d0_ptr = dw0;
-    let d1_ptr: *u32 = (cmd_ring_base + cmd_off + 4) as *u32;
+    let d1_ptr: *u32 = unsafe { (cmd_ring_base + cmd_off + 4) as *u32 };
     *d1_ptr = dw1;
-    let d2_ptr: *u32 = (cmd_ring_base + cmd_off + 8) as *u32;
+    let d2_ptr: *u32 = unsafe { (cmd_ring_base + cmd_off + 8) as *u32 };
     *d2_ptr = dw2;
-    let d3_ptr: *u32 = (cmd_ring_base + cmd_off + 12) as *u32;
+    let d3_ptr: *u32 = unsafe { (cmd_ring_base + cmd_off + 12) as *u32 };
     *d3_ptr = xhci_cmd_cycle | (trb_type << 10) | (dci_u32 << 16)
             | (slot_u32 << 24);
     dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
