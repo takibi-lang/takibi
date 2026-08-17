@@ -18756,3 +18756,74 @@ Verified throughout: every sub-issue landed only after
 (38/38 views each) and `kernelcheck-rpi5` (38/38 views, real hardware)
 all passed; `make test` closed the session at 1002 Alcotest cases (up
 from 998 before this issue's own compiler-side work).
+
+## 2026-08-17: GitHub Issue #318 -- String-Literal `*u8` Casts Exempted,
+## `svc5` Call Sites Migrated Off Hand-Counted Lengths
+
+A survey of `kernel/`'s 253 `as *u8` casts (issue #218's own follow-up
+note) found 32 were string literals cast directly into a `*u8`-typed
+API. Before any general raw-pointer `unsafe` mandate (#325, still
+unstarted) could sweep these in alongside genuinely calculated pointer
+casts, this issue asked for a documented decision on how string
+literals should be treated.
+
+Investigating first (rather than assuming the mandate would need new
+exemption logic) found the mandate isn't needed yet: `"str" as *u8` is
+*already* unsafe-free today. `StringLit` infers straight to `TPtr TU8`
+in `type_inf.ml`, so a literal cast lands in the Cast case's `TPtr _`
+branch (pointer-to-pointer, unconditionally allowed) and never reaches
+`is_literal_derived`/`check_nonliteral_ptr_cast_needs_unsafe`, the
+integer-source-only helpers #218 built. So #318 was preventive, not
+corrective: nothing is broken today, but a future #325 that adds a
+check directly to that `TPtr _` branch could accidentally start
+demanding `unsafe` for string literals unless it consults the right
+place first.
+
+**Exemption**: `is_literal_derived` (`lib/type_inf.ml`) gained a
+`StringLit _ -> true` case, same reasoning already used for `IntLit` --
+a literal's address is compiler-known, immutable, and unforgeable, so
+it belongs on the no-unsafe-needed side of #218's own literal-vs-
+calculated boundary. Currently unreachable from this function's actual
+callers (see above), but it's now the single source of truth #325
+should consult. A regression test (`"a string literal cast to *u8 needs
+no unsafe"`) pins the current behavior so it can't silently regress
+either.
+
+**Static string type -- resolved by reuse, not a new type.** Of the 32
+sites, 25 (`uart_puts`/`kernel_boot_log_resource_exhausted` log calls)
+only ever NUL-scan the cast pointer and never needed a length. The
+other 7, all in `kernel/arch/arm64/kernel/user_payload.tkb`, hand a
+literal into the Linux `svc5` (write(2)-equivalent) syscall ABI
+alongside a **hand-counted integer length in a separate argument** --
+a real bug class, since nothing checks the literal's actual byte length
+against that integer. The issue's own "minimal static string type"
+proposal turned out to already exist: the `[]u8` slice type (see
+"Slices" in SPEC.md) already supports `"literal" as []u8`, whose
+compile-time byte length (NUL excluded) becomes the slice's proven
+minimum, and `slice as *u8` bridges back to a raw pointer for free. No
+new type was needed.
+
+Of the 7 `svc5` sites, only 4 had a hand-written length that actually
+matched the literal's real length (`mutable_content`=7,
+`connection_b_response`=8, `socket_response`=19, and an 8-byte UART
+receive-loop bound) -- these were migrated to `[]u8` and now pass
+`.len` instead of the hand-counted integer. The other 3 were left
+untouched on purpose: they deliberately pass a length that does NOT
+match the literal (a `write(9, ..., 1)` EBADF probe where the length is
+irrelevant since the fd itself is invalid; an `openat` path argument
+that's NUL-terminated-only and never had a length; and a write that
+intentionally sends only 21 of a 22-byte literal's bytes, trimming the
+trailing newline) -- migrating these would have silently changed what
+each test actually exercises. The receive-loop's hand-written `while (u
+< 8)` plus raw pointer arithmetic was replaced with `for want_byte in
+uart_fixture { ... }`, `[]u8`'s safe element-iteration form -- chosen
+over `while (u < uart_fixture.len)` because narrowing doesn't reason
+about `.len` field reads, and because keeping the literal `8` around as
+a loop bound would have defeated the whole point of removing the
+hand-counted duplicate.
+
+Verified via `make test` (1150 Alcotest cases, including the new
+regression test) and `kernelcheck-qemu` (38/38 views, including the
+`userspace` view that exercises every `user_payload.tkb` fixture
+touched here). RPi5 hardware verification intentionally deferred --
+out of this session's scope.

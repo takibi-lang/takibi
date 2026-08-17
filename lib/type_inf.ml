@@ -843,6 +843,16 @@ let rec is_literal_derived (e : Ast.expr) : bool =
   match e.desc with
   | IntLit _ -> true
   | AddrOf _ -> true
+  | StringLit _ -> true
+      (* GitHub issue #318: a string literal's address is compiler-known,
+         immutable, and unforgeable -- same reasoning already used for
+         IntLit above. Currently unreachable from this function's own
+         callers (StringLit infers straight to TPtr TU8 and never reaches
+         the integer-source-only Cast branch that calls
+         is_literal_derived), but this is the single source of truth a
+         future general raw-pointer unsafe mandate (issue #325) should
+         consult so string literals aren't swept in with calculated
+         pointers. *)
   | Cast (_, inner) -> is_literal_derived inner
   | BinOp ((Add | Sub | Mul), a, b) -> is_literal_derived a && is_literal_derived b
   | _ -> false

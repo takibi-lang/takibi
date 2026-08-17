@@ -3923,6 +3923,9 @@ let infer_tests = [
       (Types.StringMap.find "s" fi.Types.local_types)
   );
 
+  Alcotest.test_case "a string literal cast to *u8 needs no unsafe (issue #318)" `Quick
+    (expect_ok "fn f() { let p: *u8 = \"hello\" as *u8; }");
+
   (* -- Struct literals -------------------------------------------- *)
 
   Alcotest.test_case "struct literal initializer type-checks" `Quick
