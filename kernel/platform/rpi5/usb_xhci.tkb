@@ -1027,19 +1027,19 @@ fn xhci_address_device() -> bool !{unsafe} {
 fn xhci_configure() -> bool {
     let ctrl_buf_base: usize = (xhci_ctrl_buf as *u8) as usize;
     let ctrl_buf_dma: usize = ctrl_buf_base + RP1_DMA_PCI_OFFSET;
+    let control_bytes = xhci_ctrl_buf as []u8;
 
     let cfg9_cc: u32 = usb_ctrl_xfer(0x80, 6, 0x0200, 0, 9, ctrl_buf_dma, true);
     if (cfg9_cc != 1) {
         return false;
     }
     dma_finish_rx(xhci_ctrl_buf as *align(64) u8, 256);
-    let tot_lo_ptr: *u8 = (ctrl_buf_base + 2) as *u8;
-    let tot_hi_ptr: *u8 = (ctrl_buf_base + 3) as *u8;
-    let mut total_len: usize = (*tot_lo_ptr as usize) | ((*tot_hi_ptr as usize) << 8);
-    if (total_len > 256) {
-        total_len = 256;
-    }
-    if (total_len < 9) {
+    let total_len: usize = (control_bytes[2] as usize) |
+                           ((control_bytes[3] as usize) << 8);
+    // A configuration descriptor is indivisible input. Silently truncating
+    // wTotalLength to the DMA buffer used to make the parser accept a prefix
+    // while raw pointers hid whether each child descriptor still fitted.
+    if (total_len > control_bytes.len || total_len < 9) {
         return false;
     }
 
@@ -1049,46 +1049,39 @@ fn xhci_configure() -> bool {
         return false;
     }
     dma_finish_rx(xhci_ctrl_buf as *align(64) u8, 256);
+    let configuration = control_bytes[0..<total_len];
 
     let mut pos: usize = 0;
     let mut in_msc_iface: bool = false;
     let mut last_ep_in: bool = false;
     let mut last_ep_bulk: bool = false;
     for step: usize in 0..<64 {
-        if (pos + 2 > total_len) {
-            break;
-        }
-        let blen_ptr: *u8 = (ctrl_buf_base + pos) as *u8;
-        let btype_ptr: *u8 = (ctrl_buf_base + pos + 1) as *u8;
-        let blen: usize = *blen_ptr as usize;
-        let btype: u32 = *btype_ptr as u32;
-        if (blen < 2) {
-            break;
+        let descriptor_start: usize = pos;
+        if (descriptor_start > configuration.len) { return false; }
+        let remaining = configuration[descriptor_start..<configuration.len];
+        if (remaining.len < 2) { return false; }
+        let blen: usize = remaining[0] as usize;
+        let btype: u32 = remaining[1] as u32;
+        if (blen < 2 || blen > remaining.len) { return false; }
+        let descriptor = remaining[0..<blen];
+
+        if (btype == 2 && descriptor.len >= 6) {
+            xhci_msc_config_value = descriptor[5] as u32;
         }
 
-        if (btype == 2 && blen >= 6) {
-            let cval_ptr: *u8 = (ctrl_buf_base + pos + 5) as *u8;
-            xhci_msc_config_value = *cval_ptr as u32;
-        }
-
-        if (btype == 4 && blen >= 9) {
-            let ifnum_ptr: *u8 = (ctrl_buf_base + pos + 2) as *u8;
-            let icls_ptr: *u8 = (ctrl_buf_base + pos + 5) as *u8;
-            let icls: u32 = *icls_ptr as u32;
+        if (btype == 4 && descriptor.len >= 9) {
+            let icls: u32 = descriptor[5] as u32;
             in_msc_iface = icls == 8;
             if (in_msc_iface) {
-                xhci_msc_interface_num = *ifnum_ptr as u32;
+                xhci_msc_interface_num = descriptor[2] as u32;
             }
         }
 
-        if (btype == 5 && blen >= 7) {
-            let epa_ptr: *u8 = (ctrl_buf_base + pos + 2) as *u8;
-            let attr_ptr: *u8 = (ctrl_buf_base + pos + 3) as *u8;
-            let mps_lo_ptr: *u8 = (ctrl_buf_base + pos + 4) as *u8;
-            let mps_hi_ptr: *u8 = (ctrl_buf_base + pos + 5) as *u8;
-            let epa: u32 = *epa_ptr as u32;
-            let attr: u32 = *attr_ptr as u32;
-            let mps: u32 = (*mps_lo_ptr as u32) | ((*mps_hi_ptr as u32) << 8);
+        if (btype == 5 && descriptor.len >= 7) {
+            let epa: u32 = descriptor[2] as u32;
+            let attr: u32 = descriptor[3] as u32;
+            let mps: u32 = (descriptor[4] as u32) |
+                           ((descriptor[5] as u32) << 8);
             last_ep_in = (epa & 0x80) != 0;
             last_ep_bulk = (attr & 3) == 2;
             if (in_msc_iface && last_ep_bulk) {
@@ -1102,9 +1095,8 @@ fn xhci_configure() -> bool {
             }
         }
 
-        if (btype == 0x30 && blen >= 6) {
-            let burst_ptr: *u8 = (ctrl_buf_base + pos + 2) as *u8;
-            let burst: u32 = *burst_ptr as u32;
+        if (btype == 0x30 && descriptor.len >= 6) {
+            let burst: u32 = descriptor[2] as u32;
             if (in_msc_iface && last_ep_bulk) {
                 if (last_ep_in) {
                     xhci_msc_bulk_in_burst = burst;
@@ -1114,7 +1106,7 @@ fn xhci_configure() -> bool {
             }
         }
 
-        pos = pos + blen;
+        pos = descriptor_start + blen;
     }
 
     let in_num: usize = (xhci_msc_bulk_in_ep & 0x0F) as usize;

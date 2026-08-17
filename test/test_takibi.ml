@@ -9189,6 +9189,72 @@ let codegen_tests = [
           return 0;
         }");
 
+  Alcotest.test_case
+    "runtime endpoint guard proves a prefix subslice without a second trap" `Quick
+    (expect_trap_sites 0
+       "fn f218_guarded_prefix(s: []u8, end: usize) -> usize {
+          if (end <= s.len) {
+            let prefix = s[0..<end];
+            return prefix.len;
+          }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "runtime endpoint guard proves a suffix ending at the same slice length" `Quick
+    (expect_trap_sites 0
+       "fn f218_guarded_suffix(s: []u8, start: usize) -> usize {
+          if (start <= s.len) {
+            let suffix = s[start..<s.len];
+            return suffix.len;
+          }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "early-return endpoint guard proves the fallthrough subslice" `Quick
+    (expect_trap_sites 0
+       "fn f218_guarded_fallthrough(s: []u8, end: usize) -> usize {
+          if (end > s.len) { return 0; }
+          let prefix = s[0..<end];
+          return prefix.len;
+        }");
+
+  Alcotest.test_case
+    "runtime endpoint evidence is tied to the compared slice" `Quick
+    (expect_trap_sites 1
+       "fn f218_endpoint_wrong_slice(s: []u8, t: []u8, end: usize) -> usize {
+          if (end <= s.len) {
+            let prefix = t[0..<end];
+            return prefix.len;
+          }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "runtime endpoint evidence is killed when the endpoint is reassigned" `Quick
+    (expect_trap_sites 1
+       "fn f218_endpoint_reassigned(s: []u8, end: usize) -> usize {
+          if (end <= s.len) {
+            end = end + 1;
+            let prefix = s[0..<end];
+            return prefix.len;
+          }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "runtime endpoint evidence is killed when the slice is rebound" `Quick
+    (expect_trap_sites 1
+       "fn f218_endpoint_slice_rebound(s: []u8, t: []u8, end: usize) -> usize {
+          if (end <= s.len) {
+            s = t;
+            let prefix = s[0..<end];
+            return prefix.len;
+          }
+          return 0;
+        }");
+
   (* -- GitHub issue #215: for-loop counter bounded by a slice's own
      runtime .len -------------------------------------------------------- *)
   (* Sibling of #213 but structural rather than condition-based: a

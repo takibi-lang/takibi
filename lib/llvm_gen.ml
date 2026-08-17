@@ -822,6 +822,7 @@ let enclosing_future_writes : string list ref = ref []
    pushes onto these; every other statement kind leaves both alone. *)
 let pending_fallthrough_narrowing_ctx : (string * Ast.type_expr option) list ref = ref []
 let pending_fallthrough_locals : (string * local_binding) list ref = ref []
+let pending_fallthrough_slice_endpoints : (string * string option) list ref = ref []
 
 (* Collect per-variable bounds from an if-condition for codegen narrowing.
    A comparison constrains `Var n` whenever the OTHER operand's static
@@ -1229,6 +1230,45 @@ let restore_slice_index_narrowing saved =
     match old_opt with
     | None     -> Hashtbl.remove slice_index_ctx v
     | Some old -> Hashtbl.replace slice_index_ctx v old
+  ) saved
+
+(* condition -> [(endpoint_var, slice_var)] for an endpoint already checked
+   against a slice's runtime length. Unlike slice_index_ctx, <= is valid:
+   an endpoint may equal len even though a single-element index may not. *)
+let slice_endpoint_facts (cond : Ast.expr) : (string * string) list =
+  let acc = Hashtbl.create 4 in
+  let add v s = Hashtbl.replace acc v s in
+  let rec go (e : Ast.expr) = match e.desc with
+    | BinOp (And, a, b) -> go a; go b
+    | BinOp ((Le | Lt), { desc = Var v; _ },
+             { desc = FieldGet ({ desc = Var s; _ }, "len"); _ })
+    | BinOp ((Ge | Gt), { desc = FieldGet ({ desc = Var s; _ }, "len"); _ },
+             { desc = Var v; _ }) -> add v s
+    | BinOp (Eq, { desc = Var v; _ },
+             { desc = FieldGet ({ desc = Var s; _ }, "len"); _ })
+    | BinOp (Eq, { desc = FieldGet ({ desc = Var s; _ }, "len"); _ },
+             { desc = Var v; _ }) -> add v s
+    | _ -> ()
+  in
+  go cond;
+  Hashtbl.fold (fun v s facts -> (v, s) :: facts) acc []
+
+let slice_endpoint_ctx : (string, string) Hashtbl.t = Hashtbl.create 4
+
+let apply_slice_endpoint_narrowing (cond : Ast.expr) (killed : string list) =
+  List.fold_left (fun saved (v, s) ->
+    if List.mem v killed || List.mem s killed then saved
+    else
+      let old = Hashtbl.find_opt slice_endpoint_ctx v in
+      Hashtbl.replace slice_endpoint_ctx v s;
+      (v, old) :: saved
+  ) [] (slice_endpoint_facts cond)
+
+let restore_slice_endpoint_narrowing saved =
+  List.iter (fun (v, old_opt) ->
+    match old_opt with
+    | None -> Hashtbl.remove slice_endpoint_ctx v
+    | Some old -> Hashtbl.replace slice_endpoint_ctx v old
   ) saved
 
 (* GitHub issue #215: a for-loop's own counter is structurally proven safe
@@ -3605,7 +3645,29 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let sub_of_slice elem_ty min_len fat =
         let (lo_v, lo_r) = gen_bound lo_e in
         let (hi_v, hi_r) = gen_bound hi_e in
-        if not (ranges_proven lo_r hi_r min_len) then begin
+        let base_name = match base.desc with Var n -> Some n | _ -> None in
+        let endpoint_proven e = match e.desc, base_name with
+          | Var v, Some s -> Hashtbl.find_opt slice_endpoint_ctx v = Some s
+          | _ -> false
+        in
+        let is_base_len e = match e.desc, base_name with
+          | FieldGet ({ desc = Var s; _ }, "len"), Some base_s -> s = base_s
+          | _ -> false
+        in
+        (* A runtime guard such as `end <= s.len` is itself the bounds
+           check. Reusing that fact for `s[0..<end]` must not emit a second
+           trap; likewise `start <= s.len` proves `s[start..<s.len]`.
+           These facts are identity-specific and branch-scoped. *)
+        let runtime_endpoint_proven =
+          let hi_within = endpoint_proven hi_e || is_base_len hi_e in
+          let ordered =
+            same_base_len <> None
+            || (Const_env.folded_value lo_e = Some 0)
+            || (is_base_len hi_e && endpoint_proven lo_e)
+          in
+          hi_within && ordered
+        in
+        if not (ranges_proven lo_r hi_r min_len || runtime_endpoint_proven) then begin
           if !unsafe_depth > 0 then
             (* P4c-1: unsafe skips the check entirely -- an explicit,
                visible "trust me" (same semantics as the pointer-base
@@ -5021,10 +5083,12 @@ let gen_func ?prog_types fdef =
         let saved      = apply_narrowing     locals cond killed in
         let saved_mut  = apply_narrowing_mut locals cond killed in
         let saved_idx  = apply_slice_index_narrowing cond killed_idx in
+        let saved_end  = apply_slice_endpoint_narrowing cond killed_idx in
         run_stmts_with_future_writes then_stmts;
         restore_narrowing     locals saved;
         restore_narrowing_mut saved_mut;
         restore_slice_index_narrowing saved_idx;
+        restore_slice_endpoint_narrowing saved_end;
         if block_terminator (insertion_block builder) = None then begin
           merge_reachable := true;
           ignore (build_br merge_bb builder);
@@ -5069,9 +5133,13 @@ let gen_func ?prog_types fdef =
                 Ast.written_names else_stmts @ future_writes_here in
               let f_saved     = apply_narrowing     locals neg fallthrough_killed in
               let f_saved_mut = apply_narrowing_mut locals neg fallthrough_killed in
+              let f_saved_end = apply_slice_endpoint_narrowing neg
+                  (slice_rebind_names else_stmts @ future_writes_here) in
               pending_fallthrough_locals := f_saved @ !pending_fallthrough_locals;
               pending_fallthrough_narrowing_ctx :=
-                f_saved_mut @ !pending_fallthrough_narrowing_ctx
+                f_saved_mut @ !pending_fallthrough_narrowing_ctx;
+              pending_fallthrough_slice_endpoints :=
+                f_saved_end @ !pending_fallthrough_slice_endpoints
         end
 
     | Break ->
@@ -5452,8 +5520,10 @@ let gen_func ?prog_types fdef =
   and run_stmts_with_future_writes (stmts : Ast.stmt list) : unit =
     let saved_pending_ctx = !pending_fallthrough_narrowing_ctx in
     let saved_pending_locals = !pending_fallthrough_locals in
+    let saved_pending_endpoints = !pending_fallthrough_slice_endpoints in
     pending_fallthrough_narrowing_ctx := [];
     pending_fallthrough_locals := [];
+    pending_fallthrough_slice_endpoints := [];
     let rec go = function
       | [] -> ()
       | s :: rest ->
@@ -5482,8 +5552,10 @@ let gen_func ?prog_types fdef =
     ) !pending_fallthrough_narrowing_ctx;
     List.iter (fun (name, old) -> Hashtbl.replace locals name old)
       !pending_fallthrough_locals;
+    restore_slice_endpoint_narrowing !pending_fallthrough_slice_endpoints;
     pending_fallthrough_narrowing_ctx := saved_pending_ctx;
-    pending_fallthrough_locals := saved_pending_locals
+    pending_fallthrough_locals := saved_pending_locals;
+    pending_fallthrough_slice_endpoints := saved_pending_endpoints
   in
 
   run_stmts_with_future_writes fdef.body;

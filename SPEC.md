@@ -1595,6 +1595,16 @@ upgrades a value's range (see "Refined Integer Types"/narrowing below),
 and is subject to the identical kill rule (an assignment, `&`-alias, or
 rebinding of the slice inside the branch invalidates the narrowing).
 
+**Runtime endpoint evidence**: a guard comparing a `usize` endpoint with
+the same slice's runtime length proves a following subslice without adding
+a second bounds check. Thus `if (end <= s.len) { s[0..<end] }` and
+`if (start <= s.len) { s[start..<s.len] }` are trap-free. The mirrored
+comparisons and the fallthrough after an early-return guard are equivalent.
+The evidence is tied to the exact endpoint and slice bindings and is killed
+if either is reassigned or aliased; it cannot justify a subslice of another
+slice. Equality with `.len` is valid for an endpoint, but does not make the
+same value a valid single-element index.
+
 **`for x in slice_expr { ... }`** -- safe-by-construction element
 iteration: the compiler generates the counter, length compare, and
 bounds-safe load itself, so there is no index expression to prove safe
