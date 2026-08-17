@@ -1,5 +1,31 @@
 open Takibi
 
+(* Neither Types.TypeError nor Types.MultiTypeError has a registered
+   exception printer, so any occurrence that escapes a test helper's own
+   match arms (a gap, not by design -- every helper below should catch
+   both) prints as a content-free `Takibi.Types.MultiTypeError(_)` with
+   no location or message, exactly as painful to debug as it sounds; hit
+   for real during issue #325's session, where several genuine test
+   failures showed up ONLY as this bare exception name in dune test's
+   summary output, forcing a raw grep of _build's per-test .output files
+   to recover the actual message. Registered once, globally, as a safety
+   net for any future helper (or missing arm in an existing one) with the
+   same gap -- this does not replace fixing each helper to handle
+   MultiTypeError with proper PASS/FAIL semantics (see expect_ok/
+   expect_type_error/expect_type_error_at below), it just guarantees an
+   uncaught escape is still readable instead of silently useless. *)
+let () =
+  Printexc.register_printer (function
+    | Types.TypeError (loc, msg) ->
+        Some (Printf.sprintf "Types.TypeError(%s:%d, %S)"
+          loc.Lexing.pos_fname loc.Lexing.pos_lnum msg)
+    | Types.MultiTypeError errors ->
+        Some (Printf.sprintf "Types.MultiTypeError[%s]"
+          (String.concat "; " (List.map (fun (loc, msg) ->
+            Printf.sprintf "%s:%d: %S" loc.Lexing.pos_fname loc.Lexing.pos_lnum msg)
+            errors)))
+    | _ -> None)
+
 (* -- Helpers --------------------------------------------------------------- *)
 
 let parse src =
@@ -253,19 +279,36 @@ let binop_t : Ast.binop Alcotest.testable =
     (fun fmt op -> Format.pp_print_string fmt (Ast.show_binop op))
     (=)
 
-(* Expect a TypeError whose message contains [fragment] *)
+(* Expect a TypeError whose message contains [fragment].
+
+   GitHub issue #327 note (added after a real session-time debugging cost,
+   see HISTORY.md): Pass 3 keeps checking every function body after one
+   fails, so a program with errors in TWO OR MORE functions raises
+   Types.MultiTypeError, not Types.TypeError -- before this fix, that case
+   fell through this function's own match entirely and propagated as a
+   raw, uncaught OCaml exception ([exception] Takibi.Types.MultiTypeError),
+   which Alcotest reports with no indication of which fragment was
+   expected or why the failure differs from an ordinary mismatched
+   TypeError. Catching it here and checking whether ANY entry contains
+   the fragment keeps this helper usable for a test whose snippet
+   incidentally trips a second, unrelated error in another function (a
+   real recurring shape once a check gets stricter -- see #325's own
+   migration, which is what surfaced this gap). *)
 let expect_type_error fragment src () =
   match infer src with
   | _ ->
       Alcotest.failf "expected TypeError containing %S, but inference succeeded"
         fragment
   | exception Types.TypeError (_, msg) ->
-      if not (let n = String.length fragment in
-              let m = String.length msg in
-              let rec scan i = i + n <= m &&
-                (String.sub msg i n = fragment || scan (i + 1))
-              in scan 0)
+      if not (contains_substring msg fragment)
       then Alcotest.failf "TypeError %S does not contain %S" msg fragment
+  | exception Types.MultiTypeError errors ->
+      if not (List.exists (fun (_, msg) -> contains_substring msg fragment) errors)
+      then Alcotest.failf
+          "expected a TypeError containing %S; got a MultiTypeError with %d \
+           entries, none of which contain it: %s"
+          fragment (List.length errors)
+          (String.concat " | " (List.map snd errors))
 
 let expect_type_error_at ?filename line column fragment src () =
   match infer src with
@@ -282,6 +325,21 @@ let expect_type_error_at ?filename line column fragment src () =
         (loc.Lexing.pos_cnum - loc.Lexing.pos_bol + 1);
       if not (contains_substring msg fragment)
       then Alcotest.failf "TypeError %S does not contain %S" msg fragment
+  | exception Types.MultiTypeError errors ->
+      let matches (loc, msg) =
+        contains_substring msg fragment
+        && loc.Lexing.pos_lnum = line
+        && loc.Lexing.pos_cnum - loc.Lexing.pos_bol + 1 = column
+        && (match filename with
+            | Some expected -> loc.Lexing.pos_fname = expected
+            | None -> true)
+      in
+      if not (List.exists matches errors)
+      then Alcotest.failf
+          "expected a TypeError containing %S at %d:%d; got a MultiTypeError \
+           with %d entries, none matching: %s"
+          fragment line column (List.length errors)
+          (String.concat " | " (List.map snd errors))
 
 (* GitHub issue #327 Stage 1: expect a MultiTypeError with exactly
    List.length fragments entries, each fragment matched against some
@@ -313,6 +371,9 @@ let expect_ok src () =
   | _ -> ()
   | exception Types.TypeError (_, msg) ->
       Alcotest.failf "unexpected TypeError: %s" msg
+  | exception Types.MultiTypeError errors ->
+      Alcotest.failf "unexpected MultiTypeError (%d entries): %s"
+        (List.length errors) (String.concat " | " (List.map snd errors))
 
 (* -- Parser tests ---------------------------------------------------------- *)
 

@@ -1986,7 +1986,8 @@ project's usual practice.
   (`let dr: *io u8 = unsafe { 0x09000000 };`) -- coerces via `inttoptr`.
   As of GitHub issue #316, this requires `unsafe` like any other `*io`
   construction (see "unsafe { ... }" below) -- there is no bare-literal
-  exemption for `*io` the way there is for affine/linear handle casts.
+  exemption for `*io`, matching affine/linear handle casts (#325) but
+  unlike an ordinary (non-kinded) pointer, which still keeps one (#218).
 
 **DMA / synchronization builtins** (no user-callable `extern fn`
 needed): `dma_publish()`, `dma_consume()`, `device_fence()` (ARM/AArch64
@@ -2406,10 +2407,21 @@ Currently gates these six categories:
 - Casting a calculated (not literal-derived) integer to a non-`io` raw
   pointer -- ordinary, affine, or linear -- requires `unsafe` (GitHub issue
   #218). A literal-derived address or a real object's address (`&x`) remains
-  ordinary for non-`io` pointers; aligned-pointer casts still additionally
-  need their separate alignment proof. This makes every calculated-address
-  minting boundary explicit while preserving ordinary literal-address and
-  trusted opaque-token constructors.
+  ordinary for a plain (non-kinded) pointer; aligned-pointer casts still
+  additionally need their separate alignment proof. This makes every
+  calculated-address minting boundary explicit while preserving ordinary
+  literal-address constructors.
+- Casting **any** value -- literal-derived or not -- to an affine/linear
+  opaque handle pointer requires `unsafe`, with the one exception of a real
+  object's address (`&x`) (GitHub issue #325, narrowing #218's own
+  literal exemption above specifically for kinded targets). A literal
+  sentinel (`0 as usize as *Token`) is exactly as unprovable to the
+  compiler as a runtime-computed one -- "nothing legitimate ever needs to
+  fabricate a handle from an arbitrary integer; every real handle already
+  comes from that type's own constructor" -- so it gets the same
+  no-literal-exemption treatment `*io` construction already has (see
+  below), while ordinary (non-kinded) pointers keep the more permissive
+  #218 rule just above.
 - Casting an integer to `*align(N) T` without a proof that the value is a
   multiple of `N` requires `unsafe`, even when it is not a calculated-address
   cast. A suitably aligned literal remains safe.

@@ -18896,3 +18896,238 @@ and the rough effort estimate.
 Verified again after this pass: `make test` (1151 Alcotest cases, up
 one from the `*u8 -> []u8` regression test) and `kernelcheck-qemu`
 (38/38 views).
+
+## 2026-08-17: GitHub Issue #15 Roadmap Closure and Pointer/Reference
+## Backlog Triage
+
+The user asked to close #15 ("Safe pointer roadmap") by asserting "no
+dangerous pointer access exists outside `unsafe`" and then, separately,
+to work down the broader backlog of pointer/reference/memory-adjacent
+issues. Both turned out to need more care than the framing suggested.
+
+**#15 could not honestly be closed on the stated premise.** `unsafe` in
+this language deliberately gates pointer *construction* (a calculated
+int-to-pointer cast, `*io` minting, a dangerous slice-to-pointer cast),
+never general pointer arithmetic/dereference -- SPEC.md says so
+explicitly, and this was true regardless of how complete the
+construction-side audit was. Separately, #15 itself had already been
+retitled on 2026-07-17/2026-08-05 to explicitly exclude that audit
+thread (split off as #217/#218 back then, both closed) -- its remaining
+scope was narrower: null safety, use-after-free, and kernel/user
+address-space typing, three design questions unrelated to whether
+casts are unsafe-gated. Investigated each: kernel/user typing turned
+out substantially covered already by #174 (`UserRange`,
+`copy_from_user`/`copy_to_user`, hardware-verified); null safety has
+zero design (no generic `Option[T]` exists); use-after-free has no
+general design, though `kernel/lib/growable_pool.tkb`'s generation-
+counter stale-handle detection (#217/#296) is a real, working mitigation
+at the data-structure level, and the original "no heap, so this can't
+happen" premise no longer holds now that #26 (growable pool) is closed.
+Split into #342 (null safety design) and #343 (UAF/dangling design),
+#15 closed with a wrap-up comment pointing to both.
+
+**Backlog triage, working from highest-confidence down.** Surveyed
+~20 open issues whose title/body touched memory, pointers, or
+references, and worked through them roughly in priority/ease order:
+
+- **#332** (`unify_arg`'s `TypeRef`/`TypeRefMut` asymmetry): a real,
+  narrow compiler bug. `lib/monomorphize.ml`'s `unify_arg` handled three
+  of the four `(TypeRef|TypeRefMut) x (TypeRef|TypeRefMut)` generic-
+  parameter-inference combinations, missing template=`&T`,
+  concrete=`&mut T` -- an ordinary, sound reference widening that should
+  have inferred fine. Added the missing arm plus a regression test using
+  the issue's own concrete failure shape. Commit 173c674.
+- **#325** (affine/linear opaque-handle cast literal exemption):
+  measured first, as the issue's own "Ask" required. Every literal-
+  derived affine/linear opaque-pointer cast in `kernel/`, `examples/`,
+  and `linux_user/` (17 real `.tkb` sites, plus ~12 more found in
+  `test/test_takibi.ml` once the exemption was actually removed and the
+  test suite re-run) was a `0 as usize as *Token`-style test/sentinel
+  construction -- `kernel/` declares zero affine/linear opaque structs
+  at all, confirming `check_kinded_ptr_cast_needs_unsafe`'s own original
+  claim that "every real handle already comes from that type's own
+  constructor." Removed the literal exemption (only `&x`, a real
+  object's address, stays exempt now), migrating every found site to
+  mint its sentinel via a `let mut X_storage: u8;` global plus
+  `&X_storage as *Token` instead of a bare literal. Finding all affected
+  sites took two more passes than expected: the first `dune test` run
+  after the change reported "33 failures!" but Alcotest's default
+  summary only ever printed ONE failure box per run, so the rest had to
+  be recovered by grepping `_build/.../*.output` files directly; a
+  second round of failures (6 more) turned out to be a completely
+  different symptom -- `Types.MultiTypeError` propagating uncaught
+  through `expect_ok`/`expect_type_error`, which didn't handle it,
+  producing a content-free `[exception] Takibi.Types.MultiTypeError(_)`
+  with no visible message. Both of these became their own fixes, see
+  below. Commit 5dadb88.
+- **#276** (ELF load plan buffer lifetime): NOT this session's work --
+  found already resolved by a concurrently running Codex agent session
+  (commit cfaa67f, `kernel: retain validated ELF images as slices`,
+  landed the same morning before this session started). Verified the
+  fix actually satisfies the issue's acceptance criteria
+  (`DistroElfLoadPlan.image_address: usize` became a genuine `[]u8`
+  slice via the existing `retaining`, non-`borrow` parameter mode, which
+  the compiler already rejects a stack-/owner-derived argument for) and
+  closed it with an explanatory comment. A reminder that this repo's
+  concurrent-agent usage is routine, not an incident (see AGENTS.md and
+  this project's own standing note on it) -- always check current state
+  before assuming an issue is still open.
+- **#171** (DMA cache-line contracts) and **#257** (migrate fixed-
+  capacity pools to `growable_pool`): both issue bodies were
+  significantly stale. #171's Stage 1 (target-aware alignment, 64B on
+  aarch64 vs 32B elsewhere) turned out to already be implemented
+  (`lib/target_info.ml`'s `dma_cache_contract`, `lib/type_inf.ml`'s
+  `dma_prepare_rx`/`dma_finish_rx` type-checking) -- corrected via
+  comment, left open scoped to Stages 2/3 (a genuinely new refinement-
+  type kind and a DMA ownership token), neither attempted. #257's table
+  was half wrong: `process_address_space_pool`/`PROCESS_ADDRESS_SPACE_MAX`
+  no longer exists anywhere in `kernel/` (superseded by
+  `address_space.tkb`'s plain `ADDRESS_SPACE_MAX = 16` array, already
+  matching the process table's own headroom), and `SHARED_OBJECT_MAX`
+  is 16 today, not the 4 the issue's table claimed. Only
+  `tcp_connection_pool` (`TCP_CONNECTION_MAX = 2`) is still a real,
+  documented-as-alarming ceiling (`kernelcheck-rpi5`'s own connected-I/O
+  view already runs it at 100% capacity). Corrected via comment; the
+  actual `tcp_connection_pool` migration was investigated but not
+  attempted in the same pass -- see below.
+- **#269** (file-private functions): designed and implemented `private
+  fn`, a fourth (now fifth, alongside globals/opaque-types/views/struct-
+  fields) place `private` can appear -- every direct call and every
+  function-pointer reference (the bare name used as a value) is
+  restricted to the function's declaring file, mirroring `private let`'s
+  existing cross-file check (#108) exactly, including the #214 local-
+  shadowing fix from day one (no known gap, unlike the opaque-type/view/
+  struct-field checks, which still have it). `lib/ast.ml`'s `func` gained
+  `is_private`; `lib/parser.mly`'s three `func_def` alternatives all take
+  a leading `private_flag`; `lib/monomorphize.ml`'s `fn_template` gained
+  `fn_is_private`, threaded through both places a generic function
+  template is captured and re-emitted so a private generic function
+  stays private after monomorphization; `lib/type_inf.ml` gained a
+  `private_functions` table and `check_private_function_access`,
+  consulted from the `Call` case's own `fname` and the `Var` case's fenv
+  fallback (function-pointer reference). 5 new tests. SPEC.md documents
+  the new form. Commit b22e313.
+
+  The issue's own suggested first consumer -- `kernel/mm/
+  address_space.tkb`'s `AddressSpaceRoot` slot accessor
+  (`address_space_root_slot`) and raw-root constructor
+  (`address_space_root_for_slot`) -- turned out not to fit: both are
+  called directly from `kernel/mm/user_memory.tkb`,
+  `kernel/kernel/syscall.tkb`, `kernel/mm/process_image.tkb`, and
+  `kernel/init/test_driver.tkb`, not confined to one "owning" file the
+  way the issue assumed. Marking them `private fn` would have broken
+  real, legitimate call sites. Investigated and reported this rather than
+  forcing the migration onto the wrong target. The user then asked
+  directly whether the issue should stay open just because its named
+  consumer didn't fit, given the actual reusable deliverable (the
+  language feature) was done and merged -- agreed, and closed #269: the
+  Goal and test acceptance criteria are met on their own, the
+  AddressSpaceRoot-specific criteria don't apply to the codebase's
+  current architecture, and there's no concrete present need for a
+  mechanical follow-up issue (YAGNI) -- #269's own "Relationship" section
+  already framed this as infrastructure for a future #132 slice, which
+  can pick a real consumer when that work starts. A useful data point on
+  when a delivered-but-mismatched-consumer issue should close vs. stay
+  open pending a better target: close it when the primitive itself is
+  the real, reusable deliverable and nothing concrete is currently
+  blocked on the specific consumer.
+
+**`tcp_connection_pool` investigation surfaced a deeper architectural
+gap than expected, leading to #344.** Asked to start on #257's one real
+remaining row, read `kernel/net/tcp.tkb` in full: ~20 parallel arrays
+(`conn_state`, `conn_remote_ip`, `pending_tcp_*`, etc.) all sized off
+`TCP_CONNECTION_MAX`, all indexed by `{0..<TCP_CONNECTION_MAX as usize}`
+refined types threaded through the file symbolically (never a literal
+2), which meant a plain constant bump would have been a one-line,
+low-risk fix. Proposed exactly that -- and the user pushed back with the
+question a production kernel actually has to answer: why should there
+be ANY hand-picked ceiling at all, when a real workload expects the
+visible limit to be "bounded only by physical memory," the way nobody
+using Linux thinks about a maximum TCP connection count.
+
+That reframing was correct and led to a real finding: `growable_pool.tkb`
+does NOT actually remove the "must guess a ceiling ahead of time"
+problem, it only makes the T-typed PAYLOAD lazy. Its own identity/
+occupancy bookkeeping (`FreelistCore(N)`'s `next_free`, this struct's
+own `occupant_generation`) is exactly as `N`-sized and pre-committed as
+`slotmap.tkb`'s own bookkeeping -- confirmed against the one real
+"expensive per-slot" consumer, `kernel/kernel/process.tkb`'s
+`scheduled_process_kernel_stacks` (`GrowablePool(KernelStackPage, 1,
+KERNEL_PROCESS_MAX, KERNEL_PROCESS_MAX)`), whose own header comment
+explicitly reserves `growable_pool` for "genuinely expensive per-slot"
+payloads (whole pages) while keeping its OWN sibling "tiny bookkeeping"
+arrays in the same file as plain fixed arrays -- the same shape
+`tcp.tkb`'s per-connection state mostly has, dominated by
+`pending_tcp_frame`'s 1514*4=6056-byte-per-connection buffer (large
+enough to be closer to the KernelStackPage case than "tiny," on
+reflection). Compared against how Linux/BSD actually handle this: TCP
+connection structs are allocated per-object from a SLAB/zone allocator
+whose free-object tracking is threaded through the free objects' own
+memory (intrusive), not a separate `N`-sized array, so bookkeeping cost
+scales with live object count, not a hypothetical maximum; capacity is
+bounded by real memory-pressure accounting (`net.ipv4.tcp_mem`-style),
+not a compile-time array. `kernel/lib/`'s whole pool-primitive lineage
+(`freelist.tkb` -> `slotmap.tkb` -> `growable_pool.tkb`, plus
+`kernel/mm/page.tkb`'s own `page_alloc()` at the very bottom) has never
+actually built that -- every layer is `FreelistCore(N)`-shaped, all the
+way down. `page.tkb`'s own `N = BOOT_PAGE_COUNT` is defensible (physical
+RAM genuinely is a fixed, known-at-boot quantity, similar in spirit to
+Linux's own `mem_map`/`max_pfn`), but nothing above it has the same
+excuse for a resource like TCP connection count.
+
+Searched the existing issue backlog exhaustively (dozens of keyword
+variants: alloc, heap, malloc, dynamic, unbounded, ceiling, slab,
+intrusive, arbitrary count, linked list, object count, N-less, no cap,
+...) for a previously-filed issue covering this exact gap, per the
+user's own recollection of having filed one -- found nothing matching
+(closest were #26 and #260, neither of which addresses the `N`-ceiling
+question itself). Filed **#344** ("kernel/lib/ pool primitives ...
+all still require a compile-time max N -- true count-unbounded
+allocation needs an intrusive design") recording this whole chain of
+reasoning, with `tcp_connection_pool` named as the motivating and likely
+first consumer once the design exists. `growable_pool.tkb`'s own header
+comment was updated in the same pass to stop overclaiming "this
+primitive exists to remove that specific ceiling" without the caveat
+that only payload memory is what's actually lazy. #257 was commented
+pointing at #344 as the real prerequisite for its `tcp_connection_pool`
+row; no code in `tcp.tkb` itself was touched.
+
+**Test-harness gaps found and fixed at session wrap-up, asked for
+explicitly.** Two issues directly caused real debugging cost during the
+#325 migration above and were fixed rather than just reported:
+
+- `test/test_takibi.ml`'s `expect_ok`/`expect_type_error`/
+  `expect_type_error_at` only caught `Types.TypeError`, never
+  `Types.MultiTypeError` (#327's multi-function error accumulation,
+  which fires whenever a test snippet happens to trip errors in two or
+  more functions -- an increasingly common shape once a check like
+  #325's gets stricter and starts flagging a second, previously-inert
+  site in the same snippet). A `MultiTypeError` escaping one of these
+  helpers propagated as a raw, uncaught OCaml exception with no
+  indication of which fragment was expected. Fixed: all three now check
+  whether the exception is `MultiTypeError` and, if so, whether any
+  entry matches (message fragment for `expect_type_error`, message
+  fragment + exact location for `expect_type_error_at`), failing with
+  every constituent message listed when nothing matches. `expect_ok` now
+  fails cleanly on a `MultiTypeError` too, instead of crashing the test
+  binary.
+- Neither `Types.TypeError` nor `Types.MultiTypeError` had a registered
+  `Printexc` printer anywhere in the codebase, so ANY future occurrence
+  that still escapes uncaught (a helper not yet covered, a new one added
+  later) prints as a content-free `Takibi.Types.MultiTypeError(_)` --
+  exactly what happened mid-session, forcing a raw grep of `_build`'s
+  per-test `.output` files to recover the actual failing messages
+  instead of reading them directly from `dune test`'s own output.
+  Registered a global printer in `test/test_takibi.ml` (both exceptions,
+  full location + message content) as a safety net independent of the
+  three helper fixes above.
+- SPEC.md's "unsafe { ... }" section was also found stale during this
+  wrap-up: its description of the affine/linear-cast rule and the
+  `*io`-vs-affine/linear comparison both still described the PRE-#325
+  behavior (literal exemption still present). Corrected both bullets.
+
+`dune test` (1158 cases) and `make allbuild` both pass after every
+change in this entry; `make -f examples/Makefile qemutest` (168
+integration tests, including every `*_wrong`/`*_never_consumed` negative
+fixture) also passed after the #325 migration specifically. No RPi5
+hardware was touched this session.

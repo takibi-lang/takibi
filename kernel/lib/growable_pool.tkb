@@ -12,6 +12,27 @@
 // ceiling; migrating a real pool onto it (started by issue #246) is
 // tracked per call site, not in this file.
 //
+// IMPORTANT caveat found while investigating issue #257 (2026-08-17, see
+// issue #344): this ONLY makes the T-typed PAYLOAD storage lazy (the
+// per-chunk physical pages). GrowablePool's own identity/occupancy
+// bookkeeping -- FreelistCore(N)'s next_free array and this struct's own
+// occupant_generation, both `[usize; N]` -- is exactly as N-sized and
+// pre-committed as SlotMap(N)'s own bookkeeping. Choosing N still means
+// guessing a ceiling ahead of time; this primitive only removes the
+// "wasted PAYLOAD memory when guessed too high" cost, not the "must guess
+// at all" question. A caller migrating specifically to escape the "N is
+// too small and causes real capacity-exhaustion bugs" failure mode (the
+// actual harm issue #26 was motivated by) should not assume adopting this
+// primitive alone fixes that -- it only helps if the payload itself is
+// expensive enough that a much larger N was previously infeasible on
+// memory-cost grounds (see kernel/kernel/process.tkb's
+// scheduled_process_kernel_stacks for a real case where that's true, and
+// its own header comment for why its sibling "tiny bookkeeping" arrays in
+// the same file deliberately stay plain fixed arrays instead). A truly
+// N-less pool (bookkeeping cost proportional to live objects, not a
+// pre-committed ceiling) is a separate, not-yet-built primitive -- see
+// issue #344.
+//
 // Ported from linux_user/growable_pool/growable_pool_core.tkb (issues
 // #26/#246's design prototype, verified there against a small fake page
 // provider -- see that file's own header for the full design rationale)
