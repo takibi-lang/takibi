@@ -77,15 +77,6 @@ let expect_unnecessary_unsafe expected src () =
   Alcotest.(check int) "recorded unnecessary-unsafe sites"
     expected (List.length !Llvm_gen.unnecessary_unsafe_sites)
 
-(* GitHub issue #218: expect type inference to succeed AND to have recorded
-   exactly [expected] non-literal-pointer-cast audit warnings. *)
-let expect_nonliteral_ptr_cast_warnings expected src () =
-  (match infer src with
-   | _ -> ()
-   | exception Types.TypeError (_, msg) -> Alcotest.failf "unexpected TypeError: %s" msg);
-  Alcotest.(check int) "recorded nonliteral-ptr-cast warnings"
-    expected (List.length !Type_inf.nonliteral_ptr_cast_warnings)
-
 (* Expect codegen to raise Llvm_gen.Error with a message containing [fragment]. *)
 let expect_codegen_error fragment src () =
   match gen_codegen src with
@@ -3550,12 +3541,12 @@ let infer_tests = [
                     release(t);
                 }");
 
-  Alcotest.test_case "casting a non-literal integer to a non-affine, non-io pointer warns" `Quick
-    (expect_nonliteral_ptr_cast_warnings 1
+  Alcotest.test_case "casting a non-literal integer to a non-affine, non-io pointer errors" `Quick
+    (expect_type_error "GitHub issue #218"
        "fn f(base: usize, offset: usize) { let p: *u32 = (base + offset) as *u32; }");
 
   Alcotest.test_case "unsafe marks a calculated ordinary-pointer cast as audited (issue #218)" `Quick
-    (expect_nonliteral_ptr_cast_warnings 0
+    (expect_ok
        "fn f(base: usize, offset: usize) !{unsafe} {
           let p: *u32 = unsafe { (base + offset) as *u32 };
         }");
@@ -3676,14 +3667,14 @@ let infer_tests = [
           return unsafe { 0 as usize as *Token };
         }");
 
-  Alcotest.test_case "a non-literal cast to *io inside unsafe records zero #218 warnings" `Quick
-    (expect_nonliteral_ptr_cast_warnings 0
+  Alcotest.test_case "a non-literal cast to *io inside unsafe remains accepted" `Quick
+    (expect_ok
        "fn f(base: usize, offset: usize) !{unsafe} {
             let p: *io u32 = unsafe { (base + offset) as *io u32 };
         }");
 
-  Alcotest.test_case "a literal cast to an ordinary pointer records no #218 warning" `Quick
-    (expect_nonliteral_ptr_cast_warnings 0
+  Alcotest.test_case "a literal cast to an ordinary pointer remains accepted" `Quick
+    (expect_ok
        "fn f() { let p: *u32 = 0 as usize as *u32; }");
 
   (* -- GitHub issue #218 follow-up: checked slice-to-struct-pointer casts - *)
@@ -4773,8 +4764,9 @@ let infer_tests = [
   Alcotest.test_case "pointer as usize type-checks" `Quick
     (expect_ok "let mut g: u8; fn f() { let p: *u8 = &g; let x: usize = p as usize; }");
 
-  Alcotest.test_case "usize as pointer type-checks" `Quick
-    (expect_ok "let mut g: u8; fn f() { let a: usize = 0x09000000; let p: *u8 = a as *u8; }");
+  Alcotest.test_case "usize as pointer requires unsafe" `Quick
+    (expect_type_error "GitHub issue #218"
+       "let mut g: u8; fn f() { let a: usize = 0x09000000; let p: *u8 = a as *u8; }");
 
   Alcotest.test_case "usize arithmetic type-checks" `Quick
     (expect_ok "let mut g: u8;
@@ -11382,9 +11374,9 @@ let codegen_tests = [
      have needed zext instead, so this specifically catches a \
      wrong-direction trunc/zext bug)" `Quick
     (expect_codegen_ok
-       "fn codegen_usize_ptr_roundtrip_cortexm(p: *i32) -> *i32 {
+       "fn codegen_usize_ptr_roundtrip_cortexm(p: *i32) -> *i32 !{unsafe} {
           let addr: usize = p as usize;
-          return addr as *i32;
+          return unsafe { addr as *i32 };
         }
 
         fn codegen_usize_narrowing_cast_cortexm(n: i64) -> usize {

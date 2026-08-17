@@ -1017,7 +1017,7 @@ fn xhci_address_device() -> bool !{unsafe} {
 
 // Configuration Descriptor -> parse Mass Storage interface + bulk
 // endpoints -> Configure Endpoint -> SET_CONFIGURATION.
-fn xhci_configure() -> bool {
+fn xhci_configure() -> bool !{unsafe} {
     let ctrl_buf_base: usize = (xhci_ctrl_buf as *u8) as usize;
     let ctrl_buf_dma: usize = ctrl_buf_base + RP1_DMA_PCI_OFFSET;
 
@@ -1026,8 +1026,8 @@ fn xhci_configure() -> bool {
         return false;
     }
     dma_finish_rx(xhci_ctrl_buf as *align(64) u8, 256);
-    let tot_lo_ptr: *u8 = (ctrl_buf_base + 2) as *u8;
-    let tot_hi_ptr: *u8 = (ctrl_buf_base + 3) as *u8;
+    let tot_lo_ptr: *u8 = unsafe { (ctrl_buf_base + 2) as *u8 };
+    let tot_hi_ptr: *u8 = unsafe { (ctrl_buf_base + 3) as *u8 };
     let mut total_len: usize = (*tot_lo_ptr as usize) | ((*tot_hi_ptr as usize) << 8);
     if (total_len > 256) {
         total_len = 256;
@@ -1051,8 +1051,8 @@ fn xhci_configure() -> bool {
         if (pos + 2 > total_len) {
             break;
         }
-        let blen_ptr: *u8 = (ctrl_buf_base + pos) as *u8;
-        let btype_ptr: *u8 = (ctrl_buf_base + pos + 1) as *u8;
+        let blen_ptr: *u8 = unsafe { (ctrl_buf_base + pos) as *u8 };
+        let btype_ptr: *u8 = unsafe { (ctrl_buf_base + pos + 1) as *u8 };
         let blen: usize = *blen_ptr as usize;
         let btype: u32 = *btype_ptr as u32;
         if (blen < 2) {
@@ -1060,13 +1060,13 @@ fn xhci_configure() -> bool {
         }
 
         if (btype == 2 && blen >= 6) {
-            let cval_ptr: *u8 = (ctrl_buf_base + pos + 5) as *u8;
+            let cval_ptr: *u8 = unsafe { (ctrl_buf_base + pos + 5) as *u8 };
             xhci_msc_config_value = *cval_ptr as u32;
         }
 
         if (btype == 4 && blen >= 9) {
-            let ifnum_ptr: *u8 = (ctrl_buf_base + pos + 2) as *u8;
-            let icls_ptr: *u8 = (ctrl_buf_base + pos + 5) as *u8;
+            let ifnum_ptr: *u8 = unsafe { (ctrl_buf_base + pos + 2) as *u8 };
+            let icls_ptr: *u8 = unsafe { (ctrl_buf_base + pos + 5) as *u8 };
             let icls: u32 = *icls_ptr as u32;
             in_msc_iface = icls == 8;
             if (in_msc_iface) {
@@ -1075,10 +1075,10 @@ fn xhci_configure() -> bool {
         }
 
         if (btype == 5 && blen >= 7) {
-            let epa_ptr: *u8 = (ctrl_buf_base + pos + 2) as *u8;
-            let attr_ptr: *u8 = (ctrl_buf_base + pos + 3) as *u8;
-            let mps_lo_ptr: *u8 = (ctrl_buf_base + pos + 4) as *u8;
-            let mps_hi_ptr: *u8 = (ctrl_buf_base + pos + 5) as *u8;
+            let epa_ptr: *u8 = unsafe { (ctrl_buf_base + pos + 2) as *u8 };
+            let attr_ptr: *u8 = unsafe { (ctrl_buf_base + pos + 3) as *u8 };
+            let mps_lo_ptr: *u8 = unsafe { (ctrl_buf_base + pos + 4) as *u8 };
+            let mps_hi_ptr: *u8 = unsafe { (ctrl_buf_base + pos + 5) as *u8 };
             let epa: u32 = *epa_ptr as u32;
             let attr: u32 = *attr_ptr as u32;
             let mps: u32 = (*mps_lo_ptr as u32) | ((*mps_hi_ptr as u32) << 8);
@@ -1096,7 +1096,7 @@ fn xhci_configure() -> bool {
         }
 
         if (btype == 0x30 && blen >= 6) {
-            let burst_ptr: *u8 = (ctrl_buf_base + pos + 2) as *u8;
+            let burst_ptr: *u8 = unsafe { (ctrl_buf_base + pos + 2) as *u8 };
             let burst: u32 = *burst_ptr as u32;
             if (in_msc_iface && last_ep_bulk) {
                 if (last_ep_in) {
@@ -1139,17 +1139,17 @@ fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool !{unsafe} {
     // Context (U-Boot's xhci_slot_copy/xhci_endpoint_copy) -- the Slot
     // Context already holds the USB address Address Device assigned.
     for i: usize in 0..<32 {
-        let src_ptr: *u8 = (device_ctx_base + i) as *u8;
-        let dst_ptr: *u8 = (input_ctx_base + CTX_STRIDE + i) as *u8;
+        let src_ptr: *u8 = unsafe { (device_ctx_base + i) as *u8 };
+        let dst_ptr: *u8 = unsafe { (input_ctx_base + CTX_STRIDE + i) as *u8 };
         *dst_ptr = *src_ptr;
     }
     for i: usize in 0..<32 {
-        let src_ptr: *u8 = (device_ctx_base + CTX_STRIDE + i) as *u8;
-        let dst_ptr: *u8 = (input_ctx_base + 2 * CTX_STRIDE + i) as *u8;
+        let src_ptr: *u8 = unsafe { (device_ctx_base + CTX_STRIDE + i) as *u8 };
+        let dst_ptr: *u8 = unsafe { (input_ctx_base + 2 * CTX_STRIDE + i) as *u8 };
         *dst_ptr = *src_ptr;
     }
 
-    let slot_dw0_ptr: *u32 = (input_ctx_base + CTX_STRIDE) as *u32;
+    let slot_dw0_ptr: *u32 = unsafe { (input_ctx_base + CTX_STRIDE) as *u32 };
     let slot_dw0: u32 = *slot_dw0_ptr;
     *slot_dw0_ptr = (slot_dw0 & 0x07FFFFFF) | (((max_idx + 1) as u32) << 27);
 
@@ -1159,59 +1159,59 @@ fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool !{unsafe} {
     let bulk_out_ring_dma: usize = bulk_out_ring_base + RP1_DMA_PCI_OFFSET;
     let bulk_link_off: usize = (BULK_RING_TRBS - 1) * 16;
 
-    let bin_link0_ptr: *u32 = (bulk_in_ring_base + bulk_link_off) as *u32;
+    let bin_link0_ptr: *u32 = unsafe { (bulk_in_ring_base + bulk_link_off) as *u32 };
     *bin_link0_ptr = (bulk_in_ring_dma & 0xFFFFFFFF) as u32;
-    let bin_link1_ptr: *u32 = (bulk_in_ring_base + bulk_link_off + 4) as *u32;
+    let bin_link1_ptr: *u32 = unsafe { (bulk_in_ring_base + bulk_link_off + 4) as *u32 };
     *bin_link1_ptr = ((bulk_in_ring_dma >> 32) & 0xFFFFFFFF) as u32;
-    let bin_link3_ptr: *u32 = (bulk_in_ring_base + bulk_link_off + 12) as *u32;
+    let bin_link3_ptr: *u32 = unsafe { (bulk_in_ring_base + bulk_link_off + 12) as *u32 };
     *bin_link3_ptr = 0x00001803;
     dma_prepare_tx(xhci_bulk_in_ring as *u8, BULK_RING_TRBS * 16);
 
-    let bout_link0_ptr: *u32 = (bulk_out_ring_base + bulk_link_off) as *u32;
+    let bout_link0_ptr: *u32 = unsafe { (bulk_out_ring_base + bulk_link_off) as *u32 };
     *bout_link0_ptr = (bulk_out_ring_dma & 0xFFFFFFFF) as u32;
-    let bout_link1_ptr: *u32 = (bulk_out_ring_base + bulk_link_off + 4) as *u32;
+    let bout_link1_ptr: *u32 = unsafe { (bulk_out_ring_base + bulk_link_off + 4) as *u32 };
     *bout_link1_ptr = ((bulk_out_ring_dma >> 32) & 0xFFFFFFFF) as u32;
-    let bout_link3_ptr: *u32 = (bulk_out_ring_base + bulk_link_off + 12) as *u32;
+    let bout_link3_ptr: *u32 = unsafe { (bulk_out_ring_base + bulk_link_off + 12) as *u32 };
     *bout_link3_ptr = 0x00001803;
     dma_prepare_tx(xhci_bulk_out_ring as *u8, BULK_RING_TRBS * 16);
 
     let in_ctx_off: usize = (in_idx + 2) * CTX_STRIDE;
-    let in_ep_dw1_ptr: *u32 = (input_ctx_base + in_ctx_off + 4) as *u32;
+    let in_ep_dw1_ptr: *u32 = unsafe { (input_ctx_base + in_ctx_off + 4) as *u32 };
     *in_ep_dw1_ptr = (6 << 3) | (3 << 1)
         | ((xhci_msc_bulk_in_burst & 0xFF) << 8)
         | ((xhci_msc_bulk_in_mps & 0xFFFF) << 16);
-    let in_ep_dw2_ptr: *u32 = (input_ctx_base + in_ctx_off + 8) as *u32;
+    let in_ep_dw2_ptr: *u32 = unsafe { (input_ctx_base + in_ctx_off + 8) as *u32 };
     *in_ep_dw2_ptr = ((bulk_in_ring_dma & 0xFFFFFFFF) | 1) as u32;
-    let in_ep_dw3_ptr: *u32 = (input_ctx_base + in_ctx_off + 12) as *u32;
+    let in_ep_dw3_ptr: *u32 = unsafe { (input_ctx_base + in_ctx_off + 12) as *u32 };
     *in_ep_dw3_ptr = ((bulk_in_ring_dma >> 32) & 0xFFFFFFFF) as u32;
 
     let out_ctx_off: usize = (out_idx + 2) * CTX_STRIDE;
-    let out_ep_dw1_ptr: *u32 = (input_ctx_base + out_ctx_off + 4) as *u32;
+    let out_ep_dw1_ptr: *u32 = unsafe { (input_ctx_base + out_ctx_off + 4) as *u32 };
     *out_ep_dw1_ptr = (2 << 3) | (3 << 1)
         | ((xhci_msc_bulk_out_burst & 0xFF) << 8)
         | ((xhci_msc_bulk_out_mps & 0xFFFF) << 16);
-    let out_ep_dw2_ptr: *u32 = (input_ctx_base + out_ctx_off + 8) as *u32;
+    let out_ep_dw2_ptr: *u32 = unsafe { (input_ctx_base + out_ctx_off + 8) as *u32 };
     *out_ep_dw2_ptr = ((bulk_out_ring_dma & 0xFFFFFFFF) | 1) as u32;
-    let out_ep_dw3_ptr: *u32 = (input_ctx_base + out_ctx_off + 12) as *u32;
+    let out_ep_dw3_ptr: *u32 = unsafe { (input_ctx_base + out_ctx_off + 12) as *u32 };
     *out_ep_dw3_ptr = ((bulk_out_ring_dma >> 32) & 0xFFFFFFFF) as u32;
 
     // Input Control Context: add the Slot Context (A0) plus one bit per
     // endpoint at (index + 1). EP0's A1 is deliberately not set --
     // Configure Endpoint must not touch the control endpoint.
-    let icc_drop_ptr: *u32 = input_ctx_base as *u32;
+    let icc_drop_ptr: *u32 = unsafe { input_ctx_base as *u32 };
     *icc_drop_ptr = 0;
-    let icc_add_ptr: *u32 = (input_ctx_base + 4) as *u32;
+    let icc_add_ptr: *u32 = unsafe { (input_ctx_base + 4) as *u32 };
     let in_add_bit: u32 = (1 << (in_idx + 1)) as u32;
     let out_add_bit: u32 = (1 << (out_idx + 1)) as u32;
     *icc_add_ptr = 1 | in_add_bit | out_add_bit;
     dma_prepare_tx(xhci_input_ctx as *u8, INPUT_CTX_SIZE);
 
     let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
-    let ce_dw0_ptr: *u32 = (cmd_ring_base + 32) as *u32;
+    let ce_dw0_ptr: *u32 = unsafe { (cmd_ring_base + 32) as *u32 };
     *ce_dw0_ptr = (input_ctx_dma & 0xFFFFFFFF) as u32;
-    let ce_dw1_ptr: *u32 = (cmd_ring_base + 36) as *u32;
+    let ce_dw1_ptr: *u32 = unsafe { (cmd_ring_base + 36) as *u32 };
     *ce_dw1_ptr = ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
-    let ce_dw3_ptr: *u32 = (cmd_ring_base + 44) as *u32;
+    let ce_dw3_ptr: *u32 = unsafe { (cmd_ring_base + 44) as *u32 };
     *ce_dw3_ptr = (1 | (12 << 10) | (xhci_slot_id << 24)) as u32;
     dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
 
@@ -1236,7 +1236,7 @@ fn xhci_configure_endpoint(in_num: usize, out_num: usize) -> bool !{unsafe} {
 // Address Device -> Configuration Descriptor + Configure Endpoint +
 // SET_CONFIGURATION -> Bulk-Only Transport bring-up -> confirm the unit
 // is ready and reports 512-byte blocks.
-fn disk_initialize() -> DiskIoResult {
+fn disk_initialize() -> DiskIoResult !{unsafe} {
     if (xhci_halt_and_reset() == false) {
         return DiskIoResult::Err(-1);
     }
@@ -1278,7 +1278,7 @@ fn disk_initialize() -> DiskIoResult {
     for i: usize in 0..<50 {
         msc_cbw_header(0, false, 6);
         let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
-        let op_ptr: *u8 = (cbw_base + 15) as *u8;
+        let op_ptr: *u8 = unsafe { (cbw_base + 15) as *u8 };
         *op_ptr = 0x00;
         if (msc_run_command(0, false, msc_scratch_buf as *align(64) u8) == 0) {
             ready = true;
@@ -1294,14 +1294,14 @@ fn disk_initialize() -> DiskIoResult {
     // storage stack's own fixed assumption.
     msc_cbw_header(8, true, 10);
     let cbw_base2: usize = (msc_cbw_buf as *u8) as usize;
-    let cap_op_ptr: *u8 = (cbw_base2 + 15) as *u8;
+    let cap_op_ptr: *u8 = unsafe { (cbw_base2 + 15) as *u8 };
     *cap_op_ptr = 0x25;
     if (msc_run_command(8, true, msc_scratch_buf as *align(64) u8) != 0) {
         return DiskIoResult::Err(-1);
     }
     let mut block_size: u32 = 0;
     for i: usize in 4..<8 {
-        let p: *u8 = (scratch_base + i) as *u8;
+        let p: *u8 = unsafe { (scratch_base + i) as *u8 };
         block_size = (block_size << 8) | (*p as u32);
     }
     if (block_size != 512) {
@@ -1323,19 +1323,19 @@ fn disk_status() -> DiskIoResult {
 // LBA(4, big-endian) | group number(0) | transfer length(2, big-endian,
 // always 1 block here) | control(0). msc_cbw_header() must already have
 // been called to build the CBW header and zero this CDB region.
-fn msc_scsi_lba_cdb(op: u8, sector: u32) {
+fn msc_scsi_lba_cdb(op: u8, sector: u32) !{unsafe} {
     let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
-    let op_ptr: *u8 = (cbw_base + 15) as *u8;
+    let op_ptr: *u8 = unsafe { (cbw_base + 15) as *u8 };
     *op_ptr = op;
-    let lba_hi_ptr: *u8 = (cbw_base + 17) as *u8;
+    let lba_hi_ptr: *u8 = unsafe { (cbw_base + 17) as *u8 };
     *lba_hi_ptr = ((sector >> 24) & 0xFF) as u8;
-    let lba_2_ptr: *u8 = (cbw_base + 18) as *u8;
+    let lba_2_ptr: *u8 = unsafe { (cbw_base + 18) as *u8 };
     *lba_2_ptr = ((sector >> 16) & 0xFF) as u8;
-    let lba_1_ptr: *u8 = (cbw_base + 19) as *u8;
+    let lba_1_ptr: *u8 = unsafe { (cbw_base + 19) as *u8 };
     *lba_1_ptr = ((sector >> 8) & 0xFF) as u8;
-    let lba_lo_ptr: *u8 = (cbw_base + 20) as *u8;
+    let lba_lo_ptr: *u8 = unsafe { (cbw_base + 20) as *u8 };
     *lba_lo_ptr = (sector & 0xFF) as u8;
-    let len_ptr: *u8 = (cbw_base + 23) as *u8;
+    let len_ptr: *u8 = unsafe { (cbw_base + 23) as *u8 };
     *len_ptr = 1;
 }
 
@@ -1345,7 +1345,7 @@ fn msc_scsi_lba_cdb(op: u8, sector: u32) {
 // retry of the same, side-effect-free-to-repeat command. Not attempted
 // more than once -- a transport that fails twice in a row needs a caller
 // decision, not a longer retry loop.
-fn disk_read(sector: u32, buf: *u8) -> DiskIoResult {
+fn disk_read(sector: u32, buf: *u8) -> DiskIoResult !{unsafe} {
     if (disk_io_ok(disk_status()) == false) {
         return DiskIoResult::Err(-1);
     }
@@ -1363,19 +1363,19 @@ fn disk_read(sector: u32, buf: *u8) -> DiskIoResult {
         return DiskIoResult::Err(-1);
     }
     for i: isize in 0..<512 {
-        let src: *u8 = (bounce as *u8);
+        let src: *u8 = unsafe { bounce as *u8 };
         buf[i] = src[i];
     }
     return DiskIoResult::Ok;
 }
 
-fn disk_write(sector: u32, buf: *u8) -> DiskIoResult {
+fn disk_write(sector: u32, buf: *u8) -> DiskIoResult !{unsafe} {
     if (disk_io_ok(disk_status()) == false) {
         return DiskIoResult::Err(-1);
     }
     let bounce: usize = (msc_bounce_buf as *u8) as usize;
     for i: isize in 0..<512 {
-        let dst: *u8 = (bounce as *u8);
+        let dst: *u8 = unsafe { bounce as *u8 };
         dst[i] = buf[i];
     }
     msc_cbw_header(512, false, 10);

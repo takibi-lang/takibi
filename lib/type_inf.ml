@@ -1334,18 +1334,14 @@ let check_io_ptr_literal_needs_unsafe loc (e : Ast.expr) (target : ty) =
         note_type_checker_unsafe_use ()
   | _ -> ()
 
-(* GitHub issue #218: audit-map warning for casting a non-literal integer
-   to an ORDINARY (non-affine/linear) pointer -- deliberately a warning,
-   not yet an error. This warning makes the full population visible without
-   forcing an unsafe migration before safe slice-based replacements exist.
+(* GitHub issue #218: reject casting a non-literal integer to an ORDINARY
+   (non-affine/linear) pointer unless the boundary is explicitly unsafe.
    `*io T` is exempted here because its dedicated hard error above already
    handles it, and affine/linear opaque targets are likewise already gated. *)
-let nonliteral_ptr_cast_warnings : (Lexing.position * string) list ref = ref []
-
 (* GitHub issue #327 Stage 1: every TypeError caught while attempting each
    function body in infer_program's Pass 3, in encounter order. Reset at
-   the start of every infer_program call, same as nonliteral_ptr_cast_warnings
-   just above. Empty on a clean compilation -- Pass 3 raises MultiTypeError
+   the start of every infer_program call. Empty on a clean compilation --
+   Pass 3 raises MultiTypeError
    directly (rather than leaving this for a caller to check) the moment it
    finds this non-empty, so nothing outside this file needs to read it. *)
 let collected_type_errors : (Ast.loc * string) list ref = ref []
@@ -1368,14 +1364,11 @@ let check_nonliteral_ptr_cast_warning loc (src_expr : Ast.expr) (tgt : ty) =
              a real purpose. *)
           note_type_checker_unsafe_use ()
         else
-          nonliteral_ptr_cast_warnings :=
-            (loc, Printf.sprintf
-              "casting a non-literal integer to %s asserts it is a valid \
-               pointer with no evidence (GitHub issue #218); not yet an \
-               error -- migrate this boundary to a checked slice or wrap it \
-               in unsafe"
-              (to_string tgt))
-            :: !nonliteral_ptr_cast_warnings
+          raise (TypeError (loc, Printf.sprintf
+            "casting a non-literal integer to %s asserts it is a valid \
+             pointer with no evidence (GitHub issue #218); migrate this \
+             boundary to a checked slice or wrap it in unsafe"
+            (to_string tgt)))
     | _ -> ()
 
 (* Slice 3: ownership-bearing values cannot be cast away. The temporary
@@ -4816,7 +4809,6 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
 
 let infer_program (prog : Ast.toplevel list) : program_types =
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
-  nonliteral_ptr_cast_warnings := [];  (* fresh per compilation / per unit test *)
   collected_type_errors := [];  (* fresh per compilation / per unit test *)
   type_checker_unsafe_use_marker := 0;  (* GitHub issue #328, fresh per compilation / per unit test *)
   type_checker_lint_active := false;
