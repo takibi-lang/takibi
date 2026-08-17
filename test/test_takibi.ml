@@ -10763,6 +10763,63 @@ let codegen_tests = [
      the same widening/hint logic #232 relies on has already resolved v1's
      real width), using the actual LLVM type rather than the AST-level
      nominal type -- see llvm_gen.ml's BinOp comment for why. *)
+  (* GitHub issue #344: `*T @ place` brands a linear owner to the pool that
+     minted it, so handing one pool's handle to another is a compile error
+     rather than something to detect at runtime. The mechanism already
+     worked for a plain struct (SPEC.md's MutexGuard); what did not work
+     was a GENERIC pool, because unify_arg had no arm for TypeSingleton and
+     so could not see the `Pool(T)` inside `*Pool(T) @ pool`. *)
+  Alcotest.test_case
+    "issue #344: a generic pool's type parameter is inferable through `@ place`"
+    `Quick
+    (expect_codegen_ok
+       "generic struct Issue344Pool(T: type) { head: usize; }
+        private linear struct Issue344Owner[pool: addr, allocation: usize] {
+          private slot: usize;
+          private generation: usize @ allocation;
+        }
+        fn issue344_owner_new(T: type, slot: usize, generation: usize @ allocation,
+                              p: *Issue344Pool(T) @ pool) -> Issue344Owner[pool, allocation] {
+          let mut o: Issue344Owner[pool, allocation] = { slot, generation };
+          return o;
+        }
+        fn issue344_take(T: type, p: *Issue344Pool(T) @ pool) -> Issue344Owner[pool, 1] {
+          return issue344_owner_new(0, 1, p);
+        }
+        fn issue344_give(T: type, p: *Issue344Pool(T) @ pool,
+                         o: sink Issue344Owner[pool, allocation]) {}
+        fn codegen_issue344_brand_ok() {
+          let mut pool_a: Issue344Pool(usize);
+          let oa = issue344_take(&pool_a);
+          issue344_give(&pool_a, oa);
+        }");
+
+  Alcotest.test_case
+    "issue #344: a branded handle returned to the wrong pool is a compile error"
+    `Quick
+    (expect_type_error "static value mismatch"
+       "generic struct Issue344Pool(T: type) { head: usize; }
+        private linear struct Issue344Owner[pool: addr, allocation: usize] {
+          private slot: usize;
+          private generation: usize @ allocation;
+        }
+        fn issue344_owner_new(T: type, slot: usize, generation: usize @ allocation,
+                              p: *Issue344Pool(T) @ pool) -> Issue344Owner[pool, allocation] {
+          let mut o: Issue344Owner[pool, allocation] = { slot, generation };
+          return o;
+        }
+        fn issue344_take(T: type, p: *Issue344Pool(T) @ pool) -> Issue344Owner[pool, 1] {
+          return issue344_owner_new(0, 1, p);
+        }
+        fn issue344_give(T: type, p: *Issue344Pool(T) @ pool,
+                         o: sink Issue344Owner[pool, allocation]) {}
+        fn codegen_issue344_brand_wrong() {
+          let mut pool_a: Issue344Pool(usize);
+          let mut pool_b: Issue344Pool(usize);
+          let oa = issue344_take(&pool_a);
+          issue344_give(&pool_b, oa);
+        }");
+
   (* GitHub issue #344: static_assert. Settled during codegen rather than
      type inference because its whole point is to see a GENERIC function's
      type parameter already substituted -- hence expect_codegen_error, not

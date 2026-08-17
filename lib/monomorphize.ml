@@ -634,6 +634,18 @@ let rec unify_arg (type_params : string list) (value_params : string list)
      plausible T to mangle a name; real reference-mode checking happens
      later in type_inf.ml. *)
   | TypeRef a, TypeRefMut b -> u a b
+  (* GitHub issue #344: `T @ n` / `*T @ place` is the SAME type plus a
+     checker-only static identity (SPEC.md: "It has exactly the same LLVM
+     representation as T"), so a singleton contributes its underlying type
+     here and nothing else -- peeled on either side, for the same reason
+     TypeBorrow/TypeSink are above. Without this arm, giving a generic
+     function's pool parameter an address identity (`p: *Pool(T) @ pool`,
+     the shape that brands an owner to the pool that minted it) made T
+     uninferable and the call failed with "cannot infer type parameter
+     'T'" -- the singleton annotation, which is erased and carries no
+     type information of its own, was hiding the one argument that
+     determines T. *)
+  | TypeSingleton (a, _), b | a, TypeSingleton (b, _) -> u a b
   | TypeArray (a, _), TypeArray (b, _) -> u a b
   | TypeSlice (a, _), TypeSlice (b, _) -> u a b
   | TypeAlignedPtr (_, a), TypeAlignedPtr (_, b) -> u a b
