@@ -2349,7 +2349,7 @@ all, regardless of type.
 cannot itself prove, and produces **no trap** -- it is a checkless
 assertion the compiler is told to trust, distinct from a runtime check
 (a check the compiler still doubts, which *does* generate a trap).
-Currently gates exactly five things:
+Currently gates these six categories:
 
 - Slice construction from a raw pointer, `unsafe { p[lo..<hi] }` -- the
   length assertion at a driver boundary.
@@ -2365,20 +2365,16 @@ Currently gates exactly five things:
   `load_from_array`/`load_from_slice`/`store_to_array`/`store_to_slice`
   in `lib/llvm_gen.ml` each check `unsafe_depth` the same way
   `sub_of_slice` already did).
-- Casting a non-literal integer to a pointer whose pointee is an
-  `affine opaque struct` or `linear opaque struct` type (GitHub issue
-  #15 follow-up) -- see "Affine Values" above and HISTORY.md's issue #15
-  entry. Deliberately scoped to kinded targets, not pointer casts in
-  general: a cast built entirely from compile-time integer literals or a
-  real object's address (`&x`) needs no `unsafe`, which is what keeps
-  trusted opaque-token constructors legal. Any OTHER non-literal-integer-
-  to-pointer cast (an ordinary, non-affine, non-`io` target -- see GitHub
-  issue #218) compiles with an audit warning. Each warned site must
-  eventually become either a checked slice/array operation or an explicit
-  `unsafe` boundary; the latter consumes the warning and is recognized by
-  the unnecessary-unsafe lint as a real audit boundary. It remains
-  warning-only while the slice migrations are completed. `*io T` targets are excluded from this warning population
-  entirely -- see the next bullet, which gates them as a hard error instead.
+- Casting a calculated (not literal-derived) integer to a non-`io` raw
+  pointer -- ordinary, affine, or linear -- requires `unsafe` (GitHub issue
+  #218). A literal-derived address or a real object's address (`&x`) remains
+  ordinary for non-`io` pointers; aligned-pointer casts still additionally
+  need their separate alignment proof. This makes every calculated-address
+  minting boundary explicit while preserving ordinary literal-address and
+  trusted opaque-token constructors.
+- Casting an integer to `*align(N) T` without a proof that the value is a
+  multiple of `N` requires `unsafe`, even when it is not a calculated-address
+  cast. A suitably aligned literal remains safe.
 - Constructing a `*io T` pointer from anything other than an
   already-`*io`-typed value (GitHub issue #316): both an explicit
   `x as *io T` cast and the direct-literal sugar (`let dr: *io u8 =
@@ -2393,7 +2389,7 @@ Currently gates exactly five things:
   stance that `unsafe` does not extend to plain pointer arithmetic --
   only the moment a `*io` pointer is first minted from a non-`*io` source
   is gated. This is a narrower, deliberately separate decision from the
-  #218 audit warning: `*io` requires an explicit boundary even for a
+  #218 calculated-pointer rule: `*io` requires an explicit boundary even for a
   literal address.
 - Casting a slice (`[]T` or `[T; N..]`) to `*U` where `U` is neither `u8`
   nor the slice's own element type `T` (GitHub issue #218 follow-up,
@@ -2411,7 +2407,7 @@ arithmetic/dereference, or an exhaustive enum's runtime variant check
 ### unsafe { stmt* } -- block form
 
 GitHub issue #315: `unsafe { ... }` also accepts a statement list, not
-only a single expression, gating the exact same three constructs listed
+only a single expression, gating the exact same constructs listed
 above for every statement inside it (same `unsafe_depth` mechanism, just
 widened around a `stmt list` instead of one `expr`). It does **not**
 leak past its own closing brace -- a statement textually after the block
@@ -2454,8 +2450,8 @@ Two independent sources feed this determination. `llvm_gen.ml` tracks the
 categories it itself decides at codegen time (single-element index
 elision, subslice-with-unprovable-bounds elision, raw-pointer slice
 construction). `type_inf.ml` separately tracks the pure type-checker-level
-gates that have no codegen footprint to hook into (the affine/linear/
-aligned/`*io` pointer-cast categories) -- each `check_*_needs_unsafe`
+gates that have no codegen footprint to hook into (the calculated-integer,
+affine/linear/aligned/`*io` pointer-cast categories) -- each `check_*_needs_unsafe`
 function records its own "genuinely consumed unsafe" determination the
 moment it decides `unsafe_depth > 0` satisfies its requirement, so any
 future such gate gets correct lint coverage automatically, with no

@@ -3545,6 +3545,10 @@ let infer_tests = [
     (expect_type_error "GitHub issue #218"
        "fn f(base: usize, offset: usize) { let p: *u32 = (base + offset) as *u32; }");
 
+  Alcotest.test_case "a literal integer to a non-affine, non-io pointer remains ordinary (issue #218)" `Quick
+    (expect_ok
+       "fn f() { let p: *u32 = 0x1000 as *u32; }");
+
   Alcotest.test_case "unsafe marks a calculated ordinary-pointer cast as audited (issue #218)" `Quick
     (expect_ok
        "fn f(base: usize, offset: usize) !{unsafe} {

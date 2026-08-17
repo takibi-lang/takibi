@@ -1350,7 +1350,7 @@ let is_io_pointee = function
   | TIo _ -> true
   | _ -> false
 
-let check_nonliteral_ptr_cast_warning loc (src_expr : Ast.expr) (tgt : ty) =
+let check_nonliteral_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
   if not (is_literal_derived src_expr) then
     match tgt with
     | TPtr (TStruct sname)
@@ -1359,9 +1359,8 @@ let check_nonliteral_ptr_cast_warning loc (src_expr : Ast.expr) (tgt : ty) =
     | TPtr elem | TAlignedPtr (_, elem) when not (is_io_pointee elem) ->
         if !unsafe_depth > 0 then
           (* An explicit unsafe block records this calculated-address mint
-             as an audited boundary, even while #218 remains warning-only.
-             This also tells the unnecessary-unsafe lint that the block has
-             a real purpose. *)
+             as an audited boundary and tells the unnecessary-unsafe lint
+             that the block has a real purpose. *)
           note_type_checker_unsafe_use ()
         else
           raise (TypeError (loc, Printf.sprintf
@@ -2172,50 +2171,22 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      check_kinded_ptr_cast_needs_unsafe e.loc e tgt;
                      check_aligned_ptr_cast_needs_unsafe e.loc e tgt;
                      check_io_ptr_cast_needs_unsafe e.loc tgt;
-                     check_nonliteral_ptr_cast_warning e.loc e tgt;
+                     check_nonliteral_ptr_cast_needs_unsafe e.loc e tgt;
                      tgt)
             | _ ->
-                (* GitHub issue #15 follow-up: casting a non-literal integer
-                   to a pointer to an AFFINE OPAQUE struct type asserts
-                   "this bit pattern is a valid handle" with no evidence at
-                   all (check_kinded_ptr_cast_needs_unsafe, above). This
-                   deliberately covers only affine-opaque targets, not
-                   pointer casts in general: an earlier, broader version of
-                   this check (any integer -> any pointer type) was
-                   measured against the whole example suite and rejected --
-                   this codebase's real MMIO drivers routinely cast a
-                   runtime-DISCOVERED hardware base address, offset by a
-                   computed value, straight to a plain `*io T` pointer
-                   (examples/common_qemu/virtio_mmio.tkb's `(virtio_base +
-                   offset) as *io i32`, `virtio_base` itself found by
-                   scanning device slots at boot) -- so the general "any
-                   pointer" version stays rejected, and this affine-only
-                   case stays as narrow as before. GitHub issue #316 later
-                   made a SEPARATE, deliberately narrower decision to
-                   require `unsafe` for `*io T` specifically regardless of
-                   literal-ness (check_io_ptr_cast_needs_unsafe, below) --
-                   including the virtio_mmio.tkb-style discovered-base
-                   pattern above, which now needs `unsafe { ... }` too. That
-                   is a targeted MMIO-provenance decision, not a reversal of
-                   the "any pointer" rejection: ordinary non-affine,
-                   non-`io` pointer casts (array/struct-overlay offset math,
-                   the roughly-1146-site population check_nonliteral_ptr_
-                   cast_warning below still only warns about) remain
-                   unsafe-free. An affine opaque handle is different in kind
-                   from both: nothing legitimate ever needs to fabricate one
-                   from an arbitrary computed integer (every real handle in
-                   this codebase already comes from that type's own
-                   constructor, e.g. `fat_open()`/`net_rx_acquire()`), so a
-                   cast building one from anything other than a literal or a
-                   real object's address (`&x`) is exactly the `examples/
-                   affine_escape_via_index.tkb`-style misuse (a table index
-                   smuggled through a pointer purely to get affine tracking)
-                   this check exists to flag -- see HISTORY.md's issue #15
-                   entry for the full before/after measurement. *)
+                (* A calculated integer has no compiler evidence that it
+                   denotes valid storage. Issue #218 therefore requires an
+                   explicit unsafe boundary for every non-io raw-pointer
+                   target, including ordinary struct-overlay pointers and
+                   affine/linear handles. `*io T` construction follows the
+                   separate, stricter issue #316 rule below: it is unsafe
+                   even for a literal address. Literal-derived non-io
+                   addresses and real-object addresses (`&x`) remain legal
+                   without unsafe, subject to the aligned-pointer proof. *)
                 check_kinded_ptr_cast_needs_unsafe e.loc e tgt;
                 check_aligned_ptr_cast_needs_unsafe e.loc e tgt;
                 check_io_ptr_cast_needs_unsafe e.loc tgt;
-                check_nonliteral_ptr_cast_warning e.loc e tgt;
+                check_nonliteral_ptr_cast_needs_unsafe e.loc e tgt;
                 (* GitHub issue #100 follow-up: an EXPLICIT `x as {lo..<hi
                    as base}` cast target reaches here for any source that
                    isn't itself a pointer/slice/already-refined value (in
