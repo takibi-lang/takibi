@@ -9248,6 +9248,15 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
+    "slice-length equality narrows the branch minimum in either order" `Quick
+    (expect_trap_sites 0
+       "fn f218_len_equality(s: []u8) -> u8 {
+          if (s.len == 2) { return s[1]; }
+          if (1 == s.len) { return s[0]; }
+          return 0;
+        }");
+
+  Alcotest.test_case
     "target-dependent sizeof does not become an unsound slice-length proof" `Quick
     (expect_trap_sites 1
        "struct F218NativeHeader { tag: u8; address: usize; }

@@ -749,7 +749,8 @@ let var_plus_const (e : expr) : (ident * int) option =
 
 (* Slice length lower bounds proven by an if condition: [(name, min_len)].
    Recognized shapes (joined by &&): `s.len >= K`, `s.len > K`,
-   `K <= s.len`, `K < s.len` with K a statically resolved integer. Used by
+   `K <= s.len`, `K < s.len`, and equality in either order, with K a
+   statically resolved integer. Used by
    if-narrowing to upgrade a slice binding's compile-time minimum length
    within the then-branch (subject to the same written_names kill rule as
    integer range narrowing). Single shared implementation for type_inf.ml
@@ -788,6 +789,9 @@ let slice_len_mins ?(resolve_const = fun (_ : string) -> None)
         (match bound_of lhs with Some k -> update n k | None -> ())
     | BinOp (Lt, lhs, { desc = FieldGet ({ desc = Var n; _ }, "len"); _ }) ->
         (match bound_of lhs with Some k -> update n (k + 1) | None -> ())
+    | BinOp (Eq, { desc = FieldGet ({ desc = Var n; _ }, "len"); _ }, rhs)
+    | BinOp (Eq, rhs, { desc = FieldGet ({ desc = Var n; _ }, "len"); _ }) ->
+        (match bound_of rhs with Some k -> update n k | None -> ())
     | _ -> ()
   in
   go cond;

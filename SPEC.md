@@ -1598,7 +1598,8 @@ rebinding of the slice inside the branch invalidates the narrowing). `K`
 may be a literal, a compile-time `const`, or a target-independent
 `sizeof(...)`/`offsetof(...)` value. The fallthrough after an early-return
 guard such as `if (s.len < sizeof(Header)) { return; }` carries the same
-minimum-length proof.
+minimum-length proof. Equality in either order also provides the lower-bound
+half of its fact, so `if (s.len == 2) { s[1] }` is trap-free.
 
 **Runtime endpoint evidence**: a guard comparing a `usize` endpoint with
 the same slice's runtime length proves a following subslice without adding
