@@ -233,10 +233,8 @@ fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
     return Ext2InodeResult::Inode(inode);
 }
 
-fn ext2_name_matches(entry: borrow *u8, entry_length: usize,
-                     name: []u8) -> bool !{unsafe} {
-    if (entry_length != name.len || entry_length > 255) { return false; }
-    let entry_name = unsafe { entry[0..<entry_length as isize] };
+fn ext2_name_matches(entry_name: borrow []u8, name: []u8) -> bool {
+    if (entry_name.len != name.len || entry_name.len > 255) { return false; }
     return slice_eq(entry_name, name);
 }
 
@@ -280,8 +278,26 @@ fn ext2_lookup_directory(mount: Ext2Mount, directory_inode: usize,
                     name_length > record_length - 8) {
                     return Ext2LookupResult::Invalid;
                 }
+                let file_bytes = ext2_file_block as []u8;
+                if (block_offset > file_bytes.len) {
+                    return Ext2LookupResult::Invalid;
+                }
+                let entry_tail =
+                    file_bytes[block_offset..<file_bytes.len];
+                if (record_length > entry_tail.len) {
+                    return Ext2LookupResult::Invalid;
+                }
+                let entry_bytes = entry_tail[0..<record_length];
+                if (entry_bytes.len < 8) {
+                    return Ext2LookupResult::Invalid;
+                }
+                let entry_payload = entry_bytes[8..<entry_bytes.len];
+                if (name_length > entry_payload.len) {
+                    return Ext2LookupResult::Invalid;
+                }
+                let entry_name = entry_payload[0..<name_length];
                 if (inode_number != 0 &&
-                    ext2_name_matches(entry + 8, name_length, name)) {
+                    ext2_name_matches(entry_name, name)) {
                     return Ext2LookupResult::Found(inode_number);
                 }
                 cursor = cursor + record_length;
@@ -301,29 +317,48 @@ fn ext2_lookup_path_from(mount: Ext2Mount, start_inode: usize, name: []u8)
     if (name.len == 0 || name.len > 255) {
         return Ext2LookupResult::Invalid;
     }
-    if (name.len == 1 && unsafe { name[0] } == 0x2E) {
-        return Ext2LookupResult::Found(start_inode);
+    if (name.len == 1) {
+        if (name[0] == 0x2E) {
+            return Ext2LookupResult::Found(start_inode);
+        }
     }
     let mut current_inode: usize = start_inode;
     let mut cursor: usize = 0;
     while (cursor < name.len) {
         let component_start: usize = cursor;
-        while (cursor < name.len && unsafe { name[cursor] } != 0x2F) {
-            cursor = cursor + 1;
-        }
-        if (cursor == component_start) {
+        if (component_start > name.len) {
             return Ext2LookupResult::Invalid;
         }
-        let component = unsafe { name[component_start..<cursor] };
-        if (component.len == 1 && unsafe { component[0] } == 0x2E) {
-            if (cursor < name.len) { cursor = cursor + 1; }
-            continue;
+        let name_tail = name[component_start..<name.len];
+        let mut component_length: usize = name_tail.len;
+        for position: usize in 0..<name_tail.len {
+            if (name_tail[position] == 0x2F) {
+                component_length = position;
+                break;
+            }
         }
-        if (component.len == 2 && unsafe { component[0] } == 0x2E &&
-            unsafe { component[1] } == 0x2E) {
-            current_inode = 2;
-            if (cursor < name.len) { cursor = cursor + 1; }
-            continue;
+        if (component_length == 0) {
+            return Ext2LookupResult::Invalid;
+        }
+        if (component_length > name_tail.len) {
+            return Ext2LookupResult::Invalid;
+        }
+        let component = name_tail[0..<component_length];
+        cursor = component_start + component_length;
+        if (component.len == 1) {
+            if (component[0] == 0x2E) {
+                if (cursor < name.len) { cursor = cursor + 1; }
+                continue;
+            }
+        }
+        if (component.len == 2) {
+            let first: u8 = component[0];
+            let second: u8 = component[1];
+            if (first == 0x2E && second == 0x2E) {
+                current_inode = 2;
+                if (cursor < name.len) { cursor = cursor + 1; }
+                continue;
+            }
         }
         match ext2_lookup_directory(mount, current_inode, component) {
             Ext2LookupResult::Invalid => { return Ext2LookupResult::Invalid; }
@@ -432,12 +467,21 @@ fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
                 }
                 let mut chunk: usize = KERNEL_BLOCK_SIZE;
                 if (inode.size - copied < chunk) { chunk = inode.size - copied; }
-                let source_pointer: *u8 = ext2_file_block as *u8;
-                unsafe {
-                    let source = source_pointer[0..<chunk as isize];
-                    let target = destination[copied..<copied + chunk];
-                    slice_copy(target, source);
+                let file_bytes = ext2_file_block as []u8;
+                if (chunk > file_bytes.len) {
+                    return Ext2ReadResult::Invalid;
                 }
+                let source = file_bytes[0..<chunk];
+                let destination_start: usize = copied;
+                if (destination_start > destination.len) {
+                    return Ext2ReadResult::Invalid;
+                }
+                let target =
+                    destination[destination_start..<destination.len];
+                if (source.len > target.len) {
+                    return Ext2ReadResult::Invalid;
+                }
+                slice_copy(target, source);
                 copied = copied + chunk;
             }
             return Ext2ReadResult::Read(inode.size);
@@ -492,13 +536,19 @@ fn ext2_read_file_chunk(mount: Ext2Mount, inode_number: usize,
             if (chunk > inode.size - offset) {
                 chunk = inode.size - offset;
             }
-            let source_pointer: *u8 =
-                (ext2_file_block as *u8) + (block_offset as isize);
-            unsafe {
-                let source = source_pointer[0..<chunk as isize];
-                let target = destination[0..<chunk];
-                slice_copy(target, source);
+            let file_bytes = ext2_file_block as []u8;
+            if (block_offset > file_bytes.len) {
+                return Ext2ReadResult::Invalid;
             }
+            let source_tail = file_bytes[block_offset..<file_bytes.len];
+            if (chunk > source_tail.len) {
+                return Ext2ReadResult::Invalid;
+            }
+            let source = source_tail[0..<chunk];
+            if (chunk > destination.len) {
+                return Ext2ReadResult::Invalid;
+            }
+            slice_copy(destination, source);
             return Ext2ReadResult::Read(chunk);
         }
     }
@@ -536,13 +586,19 @@ fn ext2_read_directory_chunk(mount: Ext2Mount, inode_number: usize,
             if (chunk > inode.size - offset) {
                 chunk = inode.size - offset;
             }
-            let source_pointer: *u8 =
-                (ext2_file_block as *u8) + (block_offset as isize);
-            unsafe {
-                let source = source_pointer[0..<chunk as isize];
-                let target = destination[0..<chunk];
-                slice_copy(target, source);
+            let file_bytes = ext2_file_block as []u8;
+            if (block_offset > file_bytes.len) {
+                return Ext2ReadResult::Invalid;
             }
+            let source_tail = file_bytes[block_offset..<file_bytes.len];
+            if (chunk > source_tail.len) {
+                return Ext2ReadResult::Invalid;
+            }
+            let source = source_tail[0..<chunk];
+            if (chunk > destination.len) {
+                return Ext2ReadResult::Invalid;
+            }
+            slice_copy(destination, source);
             return Ext2ReadResult::Read(chunk);
         }
     }
@@ -591,13 +647,12 @@ fn ext2_write_small_file(mount: Ext2Mount, inode_number: usize,
             // direct block without changing i_size. Allocation and truncate
             // become necessary only when a real caller requests them.
             if ((inode.mode & 0xF000) != 0x8000 ||
-                source.len != inode.size) {
+                source.len != inode.size || source.len > KERNEL_BLOCK_SIZE) {
                 return Ext2WriteResult::Invalid;
             }
             for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_file_block[i] = 0; }
             let file_bytes = ext2_file_block as []u8;
-            let target = unsafe { file_bytes[0..<inode.size] };
-            slice_copy(target, source);
+            slice_copy(file_bytes, source);
             match block_write(mount.device, inode.direct_block0,
                               ext2_file_block as []u8) {
                 BlockIoResult::Invalid => { return Ext2WriteResult::Invalid; }
@@ -624,8 +679,7 @@ fn ext2_resize_small_file(mount: Ext2Mount, inode_number: usize,
             // old i_size remains the only visible extent.
             for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_file_block[i] = 0; }
             let file_bytes = ext2_file_block as []u8;
-            let target = unsafe { file_bytes[0..<source.len] };
-            slice_copy(target, source);
+            slice_copy(file_bytes, source);
             match block_write(mount.device, inode.direct_block0,
                               ext2_file_block as []u8) {
                 BlockIoResult::Invalid => { return Ext2ResizeResult::Invalid; }
@@ -666,14 +720,26 @@ fn ext2_read_fast_symlink(mount: Ext2Mount, inode_number: usize,
                 BlockIoResult::Invalid => { return Ext2SymlinkResult::Invalid; }
                 BlockIoResult::Ok => { }
             }
-            let inode_pointer: *u8 =
-                (ext2_metadata_block as *u8) + (inode.table_offset as isize);
-            let inline_target: *u8 = inode_pointer + 40;
-            unsafe {
-                let source = inline_target[0..<inode.size as isize];
-                let target = destination[0..<inode.size];
-                slice_copy(target, source);
+            let metadata = ext2_metadata_block as []u8;
+            let table_offset: usize = inode.table_offset;
+            if (table_offset > metadata.len) {
+                return Ext2SymlinkResult::Invalid;
             }
+            let inode_tail =
+                metadata[table_offset..<metadata.len];
+            if (inode_tail.len < 40) {
+                return Ext2SymlinkResult::Invalid;
+            }
+            let inline_target = inode_tail[40..<inode_tail.len];
+            let symlink_size: usize = inode.size;
+            if (symlink_size > inline_target.len) {
+                return Ext2SymlinkResult::Invalid;
+            }
+            let source = inline_target[0..<symlink_size];
+            if (symlink_size > destination.len) {
+                return Ext2SymlinkResult::Invalid;
+            }
+            slice_copy(destination, source);
             return Ext2SymlinkResult::Read(inode.size);
         }
     }
@@ -1143,7 +1209,11 @@ fn ext2_directory_add(mount: Ext2Mount, inode_number: usize,
     match ext2_read_inode(mount, 2) {
         Ext2InodeResult::Invalid => { return Ext2DirectoryResult::Invalid; }
         Ext2InodeResult::Inode(root) => {
-            if ((root.mode & 0xF000) != 0x4000 || root.size < 8) {
+            // This mutation path loads only root.direct_block0 into the
+            // scratch buffer, so a larger directory needs a multi-block
+            // mutation implementation rather than pointer arithmetic past it.
+            if ((root.mode & 0xF000) != 0x4000 || root.size < 8 ||
+                root.size > KERNEL_BLOCK_SIZE) {
                 return Ext2DirectoryResult::Invalid;
             }
             match block_read(mount.device, root.direct_block0,
@@ -1180,10 +1250,19 @@ fn ext2_directory_add(mount: Ext2Mount, inode_number: usize,
                     }
                     new_entry[6] = name.len as u8;
                     new_entry[7] = 0;
-                    let name_pointer: *u8 = new_entry + 8;
-                    let name_target = unsafe {
-                        name_pointer[0..<name.len as isize]
-                    };
+                    let data = ext2_file_block as []u8;
+                    if (new_offset > data.len) {
+                        return Ext2DirectoryResult::Invalid;
+                    }
+                    let new_entry_bytes = data[new_offset..<data.len];
+                    if (new_entry_bytes.len < 8) {
+                        return Ext2DirectoryResult::Invalid;
+                    }
+                    let name_target =
+                        new_entry_bytes[8..<new_entry_bytes.len];
+                    if (name.len > name_target.len) {
+                        return Ext2DirectoryResult::Invalid;
+                    }
                     slice_copy(name_target, name);
                     match block_write(mount.device, root.direct_block0,
                                       ext2_file_block as []u8) {
@@ -1207,7 +1286,11 @@ fn ext2_directory_remove(mount: Ext2Mount, inode_number: usize,
     match ext2_read_inode(mount, 2) {
         Ext2InodeResult::Invalid => { return Ext2DirectoryResult::Invalid; }
         Ext2InodeResult::Inode(root) => {
-            if ((root.mode & 0xF000) != 0x4000 || root.size < 8) {
+            // This mutation path loads only root.direct_block0 into the
+            // scratch buffer, so a larger directory needs a multi-block
+            // mutation implementation rather than pointer arithmetic past it.
+            if ((root.mode & 0xF000) != 0x4000 || root.size < 8 ||
+                root.size > KERNEL_BLOCK_SIZE) {
                 return Ext2DirectoryResult::Invalid;
             }
             match block_read(mount.device, root.direct_block0,
@@ -1233,8 +1316,26 @@ fn ext2_directory_remove(mount: Ext2Mount, inode_number: usize,
                     name_length > record_length - 8) {
                     return Ext2DirectoryResult::Invalid;
                 }
+                let data = ext2_file_block as []u8;
+                let entry_start: usize = cursor;
+                if (entry_start > data.len) {
+                    return Ext2DirectoryResult::Invalid;
+                }
+                let entry_tail = data[entry_start..<data.len];
+                if (record_length > entry_tail.len) {
+                    return Ext2DirectoryResult::Invalid;
+                }
+                let entry_bytes = entry_tail[0..<record_length];
+                if (entry_bytes.len < 8) {
+                    return Ext2DirectoryResult::Invalid;
+                }
+                let entry_payload = entry_bytes[8..<entry_bytes.len];
+                if (name_length > entry_payload.len) {
+                    return Ext2DirectoryResult::Invalid;
+                }
+                let entry_name = entry_payload[0..<name_length];
                 if (entry_inode == inode_number &&
-                    ext2_name_matches(entry + 8, name_length, name)) {
+                    ext2_name_matches(entry_name, name)) {
                     if (has_previous == false) {
                         return Ext2DirectoryResult::Invalid;
                     }
@@ -1275,8 +1376,7 @@ fn ext2_initialize_regular_inode(mount: Ext2Mount,
     }
     for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_file_block[i] = 0; }
     let data = ext2_file_block as []u8;
-    let target = unsafe { data[0..<content.len] };
-    slice_copy(target, content);
+    slice_copy(data, content);
     match block_write(mount.device, block_owner.block_number,
                       ext2_file_block as []u8) {
         BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
