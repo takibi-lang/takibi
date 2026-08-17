@@ -370,16 +370,18 @@ fn growable_pool_matches(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MA
 // unreachable branch (mirrors kernel/mm/page.tkb's page_bytes's own
 // accepted-fallback style).
 fn growable_pool_ptr_for_index(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
-                               index: usize) -> *T {
+                               index: usize) -> *T !{unsafe} {
     let chunk: usize = index / SLOTS_PER_CHUNK;
     let local: usize = index % SLOTS_PER_CHUNK;
     // GitHub issue #217: checked indexing (chunk narrowed to {0..<MAX_CHUNKS}).
     if (chunk < MAX_CHUNKS) {
         let base: usize = pool.chunk_data_base[chunk];
-        return (base as *T) + (local as isize);
+        // The chunk allocator recorded this page-backed address.  Recovering
+        // its typed view is the pool's one explicit provenance boundary.
+        return unsafe { (base as *T) + (local as isize) };
     }
     let base: usize = pool.chunk_data_base[0];
-    return (base as *T) + (local as isize);
+    return unsafe { (base as *T) + (local as isize) };
 }
 
 // Self-directed-allocation mode: `owner` must have come from this pool's

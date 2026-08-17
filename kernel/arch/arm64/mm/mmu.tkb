@@ -10,13 +10,16 @@ const MMU_TABLE_ENTRY_COUNT: usize = 512;
 const UXN_BIT: usize = 0x40000000000000;
 const PXN_BIT: usize = 0x20000000000000;
 
-fn mmu_table_entry_write(base: usize, index: usize, value: usize) {
-    let entry: *usize = (base + index * 8) as *usize;
+fn mmu_table_entry_write(base: usize, index: usize, value: usize) !{unsafe} {
+    // `base` is a resolved physical page-table address.  The architecture
+    // boundary, rather than ordinary memory, establishes that it is mapped.
+    let entry: *usize = unsafe { (base + index * 8) as *usize };
     *entry = value;
 }
 
-fn mmu_table_entry_read(base: usize, index: usize) -> usize {
-    let entry: *usize = (base + index * 8) as *usize;
+fn mmu_table_entry_read(base: usize, index: usize) -> usize !{unsafe} {
+    // See mmu_table_entry_write: this is a physical page-table trust root.
+    let entry: *usize = unsafe { (base + index * 8) as *usize };
     return *entry;
 }
 

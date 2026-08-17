@@ -539,7 +539,7 @@ fn process_address_space_probe_fill_first_branch(root: usize) -> bool {
 // maps the same low VA to a different page. The final root releases prove
 // that the L3 pages and transferred user pages are all reclaimed by a table
 // walk rather than by a fixed 512-entry shadow list.
-fn process_address_space_probe() -> bool {
+fn process_address_space_probe() -> bool !{unsafe} {
     if (address_space_is_live(1) || address_space_is_live(2)) {
         return false;
     }
@@ -611,10 +611,17 @@ fn process_address_space_probe() -> bool {
                             let filled_first_branch: bool =
                                 first_ok && second_ok && third_ok &&
                                 process_address_space_probe_fill_first_branch(1);
-                            let low_address: *u8 =
-                                (USER_TEXT_VA + 511 * PAGE_SIZE) as *u8;
-                            let high_address: *u8 =
-                                (USER_TEXT_VA + 512 * PAGE_SIZE) as *u8;
+                            // This probe deliberately dereferences two EL0
+                            // virtual addresses after installing its test
+                            // mappings.  The page-table setup above is the
+                            // evidence; turning those calculated VAs into
+                            // pointers is the explicit trust boundary.
+                            let low_address: *u8 = unsafe {
+                                (USER_TEXT_VA + 511 * PAGE_SIZE) as *u8
+                            };
+                            let high_address: *u8 = unsafe {
+                                (USER_TEXT_VA + 512 * PAGE_SIZE) as *u8
+                            };
                             let mut mapped_ok: bool =
                                 filled_first_branch &&
                                 address_space_l3_branch_physical(1, 0) != 0 &&
