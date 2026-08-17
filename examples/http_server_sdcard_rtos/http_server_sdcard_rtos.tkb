@@ -153,7 +153,7 @@ fn sd_read_file_chunk(name83: *u8, off: u32, dst: *u8, want: u32) -> u32 {
     return got;
 }
 
-fn sd_worker() {
+fn sd_worker() !{unsafe} {
     while (true) {
         let request: SdRequest = sd_request_recv(&sd_request_ch);
         match request {
@@ -174,7 +174,7 @@ fn sd_worker() {
                 // Do not retain the caller task's frame pointer in the request.
                 // The rendezvous response makes this bounce buffer ready to copy.
                 chan_send(&sd_response_ch,
-                          sd_read_file_chunk(read.name83 as *u8, read.off,
+                          sd_read_file_chunk(unsafe { read.name83 as *u8 }, read.off,
                                              sd_chunk_buf, read.want) as i32);
             }
             SdRequest::FileSize(name83) => {

@@ -46,7 +46,7 @@ const SYSCALL_ERROR: usize = 0xFFFFFFFFFFFFFFFF;
 // mapped (el0_entry_va, PAGE_SIZE bytes), then copies and prints exactly
 // those bytes.
 fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
-                    x2: usize, elr: usize) -> (usize, usize) {
+                    x2: usize, elr: usize) -> (usize, usize) !{unsafe} {
     let ec: usize = (esr >> 26) & 0x3F;
     if (ec != 0x15) {
         return (0, 0);
@@ -67,7 +67,10 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
         if (buf - el0_entry_va > PAGE_SIZE - len) {
             return (elr, SYSCALL_ERROR);
         }
-        let src: *u8 = buf as *u8;
+        // This remains a deliberately bounded EL0 user-memory read.  The
+        // range validation above is necessary, while converting that EL0 VA
+        // into a kernel pointer is still an architectural trust boundary.
+        let src: *u8 = unsafe { buf as *u8 };
         for i: usize in 0..<len {
             uart_putc(src[i as isize]);
         }
@@ -112,7 +115,7 @@ fn app_main() !{unsafe} {
             let dst = mapping_bytes(mapping);
             let src_addr: usize = el0_payload_addr();
             let src_len: usize = el0_payload_len();
-            let src_ptr: *u8 = src_addr as *u8;
+            let src_ptr: *u8 = unsafe { src_addr as *u8 };
             if (src_len <= PAGE_SIZE) {
                 // src_len is narrowed (<= PAGE_SIZE) but not a compile-time
                 // constant, so a for-loop counter bounded by it does not

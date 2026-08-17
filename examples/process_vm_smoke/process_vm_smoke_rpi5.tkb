@@ -5,7 +5,7 @@
 
 use "examples/vm_page_map/vm_page_map_core_rpi5.tkb";
 
-fn app_main() {
+fn app_main() !{unsafe} {
     page_pool_init();
     uart_puts("process_vm_smoke\n");
 
@@ -22,9 +22,12 @@ fn app_main() {
         }
         ProcessMapResult::Mapped(pair) => {
             let (pas, active) = pair;
-            let ptr0: *u8 = base_va as *u8;
-            let ptr1: *u8 = (base_va + PAGE_SIZE) as *u8;
-            let ptr2: *u8 = (base_va + 2 * PAGE_SIZE) as *u8;
+            // process_address_space_map has established these three pages;
+            // reconstituting their active virtual addresses is the mapping
+            // boundary and cannot be proved from an integer alone.
+            let ptr0: *u8 = unsafe { base_va as *u8 };
+            let ptr1: *u8 = unsafe { (base_va + PAGE_SIZE) as *u8 };
+            let ptr2: *u8 = unsafe { (base_va + 2 * PAGE_SIZE) as *u8 };
             *ptr0 = 10;
             *ptr1 = 20;
             *ptr2 = 30;
