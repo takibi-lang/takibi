@@ -622,7 +622,15 @@ let rec unify_arg (type_params : string list) (value_params : string list)
      plausible T to mangle a name. *)
   | TypeRef a, TypePtr b | TypeRefMut a, TypePtr b -> u a b
   | TypeRef a, TypeRef b | TypeRefMut a, TypeRefMut b
-  | TypeRefMut a, TypeRef b -> u a b
+  | TypeRefMut a, TypeRef b
+  (* GitHub issue #332: template=&T (shared ref expected), concrete=&mut T
+     (exclusive ref argument) was the one missing combination -- passing an
+     exclusive reference where a shared reference suffices is ordinary,
+     sound widening, the same variance every other &mut T -> &T read-only
+     use in this codebase already relies on. This pass only needs a
+     plausible T to mangle a name; real reference-mode checking happens
+     later in type_inf.ml. *)
+  | TypeRef a, TypeRefMut b -> u a b
   | TypeArray (a, _), TypeArray (b, _) -> u a b
   | TypeSlice (a, _), TypeSlice (b, _) -> u a b
   | TypeAlignedPtr (_, a), TypeAlignedPtr (_, b) -> u a b

@@ -13260,6 +13260,23 @@ let codegen_tests = [
           return inner322ref(pt);
         }");
 
+  (* GitHub issue #332: the fourth (TypeRef|TypeRefMut) x (TypeRef|TypeRefMut)
+     combination missing from #322's own original sweep -- template=&T
+     (shared ref expected), concrete=&mut T (exclusive ref argument). An
+     ordinary, sound widening (the same variance every other &mut T -> &T
+     read-only use in this codebase already relies on), but unify_arg had
+     no arm for it and fell through to the catch-all, so T never got bound
+     and the call failed with "cannot infer type parameter 'T'". *)
+  Alcotest.test_case
+    "generic inference through a &T (TypeRef) parameter given a &mut T \
+     argument (issue #332)" `Quick
+    (expect_codegen_ok
+       "struct RefFromMut332Point { n: usize; }
+        fn inner332refmut(T: type, p: &T) -> usize { return p.n; }
+        fn outer332refmut(pt: &mut RefFromMut332Point) -> usize {
+          return inner332refmut(pt);
+        }");
+
   Alcotest.test_case
     "generic inference through a &mut T (TypeRefMut) parameter \
      (issue #322)" `Quick
