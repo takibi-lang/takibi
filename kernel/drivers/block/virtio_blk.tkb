@@ -118,12 +118,13 @@ fn virtio_blk_init() -> bool !{unsafe} {
     return false;
 }
 
-fn virtio_blk_submit(request_type: u32, sector: u32, buffer: *u8,
+fn virtio_blk_submit(request_type: u32, sector: u32,
+                     buffer: borrow [u8; 512..],
                      write: bool) -> bool !{unsafe} {
     if (virtio_blk_init() == false) { return false; }
+    let sector_buffer = buffer[0..<512];
     if (write) {
-        let source = unsafe { buffer[0..<512] };
-        slice_copy(virtio_blk_data_buf as []u8, source);
+        slice_copy(virtio_blk_data_buf as []u8, sector_buffer);
     }
     let request: *VirtioBlkRequest = virtio_blk_request_buf as *VirtioBlkRequest;
     request.request_type = request_type;
@@ -183,23 +184,24 @@ fn virtio_blk_submit(request_type: u32, sector: u32, buffer: *u8,
     if (virtio_blk_status_buf[0] != 0) { return false; }
     if (write == false) {
         dma_finish_rx(virtio_blk_data_buf as *align(64) u8, 512);
-        let destination = unsafe { buffer[0..<512] };
-        slice_copy(destination, virtio_blk_data_buf as []u8);
+        slice_copy(sector_buffer, virtio_blk_data_buf as []u8);
     }
     return true;
 }
 
-fn virtio_blk_read_sector(sector: u32, destination: *u8) -> bool {
+fn virtio_blk_read_sector(sector: u32,
+                          destination: borrow [u8; 512..]) -> bool {
     return virtio_blk_submit(VIRTIO_BLK_T_IN, sector, destination, false);
 }
 
-fn virtio_blk_write_sector(sector: u32, source: *u8) -> bool {
+fn virtio_blk_write_sector(sector: u32,
+                           source: borrow [u8; 512..]) -> bool {
     return virtio_blk_submit(VIRTIO_BLK_T_OUT, sector, source, true);
 }
 
 fn virtio_blk_probe() -> bool {
     let mut probe: [u8; 512];
-    return virtio_blk_read_sector(0, probe as *u8);
+    return virtio_blk_read_sector(0, probe as []u8);
 }
 
 fn virtio_blk_capacity_sectors() -> usize !{unsafe} {

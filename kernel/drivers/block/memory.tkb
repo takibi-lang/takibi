@@ -104,9 +104,10 @@ fn block_read(device: KernelBlockDevice, block: usize,
             DiskIoResult::Ok => { return BlockIoResult::Ok; }
         }
     } else {
-        let target: *u8 = destination as *u8;
-        if (virtio_blk_read_sector((block * 2) as u32, target) == false ||
-            virtio_blk_read_sector((block * 2 + 1) as u32, target + 512) == false) {
+        let first_sector = destination[0..<512];
+        let second_sector = destination[512..<KERNEL_BLOCK_SIZE];
+        if (virtio_blk_read_sector((block * 2) as u32, first_sector) == false ||
+            virtio_blk_read_sector((block * 2 + 1) as u32, second_sector) == false) {
             return BlockIoResult::Invalid;
         }
         return BlockIoResult::Ok;
@@ -144,9 +145,10 @@ fn block_write(device: KernelBlockDevice, block: usize,
             DiskIoResult::Ok => { return BlockIoResult::Ok; }
         }
     } else {
-        let bytes: *u8 = source as *u8;
-        if (virtio_blk_write_sector((block * 2) as u32, bytes) == false ||
-            virtio_blk_write_sector((block * 2 + 1) as u32, bytes + 512) == false) {
+        let first_sector = source[0..<512];
+        let second_sector = source[512..<KERNEL_BLOCK_SIZE];
+        if (virtio_blk_write_sector((block * 2) as u32, first_sector) == false ||
+            virtio_blk_write_sector((block * 2 + 1) as u32, second_sector) == false) {
             return BlockIoResult::Invalid;
         }
         return BlockIoResult::Ok;
