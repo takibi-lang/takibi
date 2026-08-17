@@ -36,7 +36,7 @@ let ELF_HEADER_SIZE: usize = sizeof(KernelElf64Header);
 let ELF_PROGRAM_HEADER_SIZE: usize = sizeof(KernelElf64ProgramHeader);
 
 struct DistroElfLoadPlan {
-    image_address: usize;
+    image: []u8;
     image_length: usize;
     program_offset: usize;
     program_count: usize;
@@ -51,42 +51,21 @@ must_use variant DistroElfResult { Invalid; Valid(DistroElfLoadPlan); }
 // endian), EI_VERSION(1=EV_CURRENT).
 let mut ELF_IDENT_MAGIC: [u8; 7] = {0x7F, 0x45, 0x4C, 0x46, 2, 1, 1};
 
-// image's length is the one fact this whole function -- and every
-// length/offset arithmetic check inside it -- ultimately trusts. Taking
-// a slice (rather than the previous `address: usize, length: usize`)
-// means that trust is established once, at whatever site the caller
-// turned a raw parsed byte count into `image` (an unsafe slice
-// construction there, same as kernel/fs/ext2/ext2.tkb's own pattern)
-// -- not re-asserted implicitly by this function's own body. Reading
-// `image.len` back out here is ordinary, checked slice access.
-//
-// `address` stays a separate plain parameter (not derived from
-// `image`) because the compiler will not let a pointer/address derived
-// FROM a `borrow` parameter escape into a returned struct
-// (DistroElfLoadPlan.image_address, still consumed as a raw address by
-// kernel/mm/process_image.tkb) -- "authority-derived value ... cannot
-// be stored in a struct value". That's not a loophole being dodged:
-// the address was never the thing this change was making safe. The caller
-// pairs it with the same checked metadata window supplied as `image`.
-fn distro_elf_validate_with_length(address: usize, image: borrow []u8,
-                                   logical_length: usize) -> DistroElfResult !{unsafe} {
-    // `image.len >= 7` is redundant with `>= ELF_HEADER_SIZE` (always
-    // 64) at runtime, but ELF_HEADER_SIZE is a `let` (sizeof-derived,
-    // not a const literal), so the type checker cannot fold it into a
-    // provable bound for the image[0..<7] ident slice below; the
-    // literal conjunct is what actually narrows. The same gap means the
-    // slice-to-struct-pointer cast just below cannot see this branch's
-    // own `>= ELF_HEADER_SIZE` check either (GitHub issue #218 follow-up:
-    // that cast now requires a compile-time-provable minimum length,
-    // and a `let`-bound size is not one) -- `unsafe` marks that the
-    // runtime check on this exact line is what actually vouches for it.
-    if (image.len >= ELF_HEADER_SIZE && image.len >= 7) {
+// The slice parameter is intentionally retaining rather than `borrow`:
+// a successful plan carries this exact checked metadata view to the mapper.
+// Stack- or owner-derived slices therefore cannot enter this API, while the
+// kernel's persistent global metadata windows can safely outlive the plan.
+fn distro_elf_validate_with_length(image: []u8,
+                                   logical_length: usize) -> DistroElfResult {
+    let header_end: usize = sizeof(KernelElf64Header);
+    if (header_end <= image.len) {
         // `image` contains the ELF header and program table. A streaming
         // source may keep the rest of the file on ext2, so its logical file
         // length can be larger than this metadata window.
         let length: usize = logical_length;
-        let header: *KernelElf64Header = unsafe { image as *KernelElf64Header };
-        if (slice_eq(image[0..<7], ELF_IDENT_MAGIC as []u8) == false) {
+        let header_bytes = image[0..<header_end];
+        let header: *KernelElf64Header = header_bytes as *KernelElf64Header;
+        if (slice_eq(header_bytes[0..<7], ELF_IDENT_MAGIC as []u8) == false) {
             return DistroElfResult::Invalid;
         }
         if (header.object_type != ELF_ET_DYN || header.machine != ELF_EM_AARCH64 ||
@@ -102,13 +81,20 @@ fn distro_elf_validate_with_length(address: usize, image: borrow []u8,
         }
         let table_size: usize = program_count * ELF_PROGRAM_HEADER_SIZE;
         if (table_size > length - program_offset) { return DistroElfResult::Invalid; }
+        if (program_offset > image.len) { return DistroElfResult::Invalid; }
 
         let mut maximum: usize = 0;
         let mut load_count: usize = 0;
         for i: usize in 0..<program_count {
-            let item_address: usize = address + program_offset + i * ELF_PROGRAM_HEADER_SIZE;
+            let item_offset: usize = program_offset + i * ELF_PROGRAM_HEADER_SIZE;
+            if (item_offset > image.len) { return DistroElfResult::Invalid; }
+            let item_tail = image[item_offset..<image.len];
+            if (item_tail.len < sizeof(KernelElf64ProgramHeader)) {
+                return DistroElfResult::Invalid;
+            }
+            let item_bytes = item_tail[0..<sizeof(KernelElf64ProgramHeader)];
             let item: *KernelElf64ProgramHeader =
-                unsafe { item_address as *KernelElf64ProgramHeader };
+                item_bytes as *KernelElf64ProgramHeader;
             if (item.segment_type == ELF_PT_LOAD) {
                 let offset: usize = item.offset as usize;
                 let file_size: usize = item.file_size as usize;
@@ -129,7 +115,7 @@ fn distro_elf_validate_with_length(address: usize, image: borrow []u8,
             return DistroElfResult::Invalid;
         }
         let mut plan: DistroElfLoadPlan = {
-            address, length, program_offset, program_count,
+            image, length, program_offset, program_count,
             entry, maximum, load_count
         };
         return DistroElfResult::Valid(plan);
@@ -137,6 +123,6 @@ fn distro_elf_validate_with_length(address: usize, image: borrow []u8,
     return DistroElfResult::Invalid;
 }
 
-fn distro_elf_validate(address: usize, image: borrow []u8) -> DistroElfResult {
-    return distro_elf_validate_with_length(address, image, image.len);
+fn distro_elf_validate(image: []u8) -> DistroElfResult {
+    return distro_elf_validate_with_length(image, image.len);
 }

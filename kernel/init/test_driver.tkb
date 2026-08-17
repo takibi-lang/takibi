@@ -53,7 +53,7 @@ fn exec_metadata_prefix(metadata: [u8; EXEC_METADATA_SIZE..],
 let mut kernel_child_exec_entry: usize;
 let mut kernel_child_exec_stack: usize;
 let mut kernel_init_socket_evidence: bool;
-let mut saved_rootfs_plan: DistroElfLoadPlan = {0, 0, 0, 0, 0, 0, 0};
+let mut saved_rootfs_plan: DistroElfLoadPlan;
 let mut rootfs_plan_ready: bool;
 let mut saved_rootfs_inode: usize;
 let mut saved_rootfs_length: usize;
@@ -129,7 +129,6 @@ fn kernel_exec_resolve_ext2_name_at(mount: Ext2Mount, name: []u8,
                         }
                         Ext2ReadResult::Read(length) => {
                             match distro_elf_validate_with_length(
-                                    (metadata as *u8) as usize,
                                     exec_metadata_prefix(metadata, length),
                                     file_length) {
                                 DistroElfResult::Invalid => {

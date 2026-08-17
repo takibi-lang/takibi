@@ -1022,49 +1022,45 @@ fn process_image_load_page(page: borrow PageOwner[page],
     let source_offset: usize = (header.offset as usize) +
                                (copy_start - segment_start);
     let copy_length: usize = copy_end - copy_start;
-    if (destination_offset > PAGE_SIZE || copy_length > PAGE_SIZE - destination_offset ||
+    let source = plan.image;
+    if (destination_offset > PAGE_SIZE ||
+        copy_length > PAGE_SIZE - destination_offset ||
         source_offset > plan.image_length ||
-        copy_length > plan.image_length - source_offset) {
+        copy_length > plan.image_length - source_offset ||
+        source_offset > source.len ||
+        copy_length > source.len - source_offset) {
         return ProcessImagePageLoadResult::Invalid;
     }
 
-    // Both ranges are explicitly bounded above. Their endpoints are related
-    // runtime values, which the current refinement checker cannot carry into
-    // slice syntax; unsafe is confined to constructing these checked views
-    // and immediately consuming them (GitHub issue #315: one block now
-    // covers both constructions plus their sole immediate use, instead of
-    // one per-expression wrap each).
-    let source: *u8 = plan.image_address as *u8;
-    unsafe {
-        let destination =
-            bytes[destination_offset..<destination_offset + copy_length];
-        let file_bytes =
-            source[source_offset as isize..<(source_offset + copy_length) as isize];
-        slice_copy(destination, file_bytes);
-        if (slice_eq(destination, file_bytes) == false) {
-            return ProcessImagePageLoadResult::Invalid;
-        }
+    let destination_tail = bytes[destination_offset..<PAGE_SIZE];
+    let source_tail = source[source_offset..<source.len];
+    if (copy_length > destination_tail.len) {
+        return ProcessImagePageLoadResult::Invalid;
+    }
+    let destination = destination_tail[0..<copy_length];
+    if (copy_length > source_tail.len) {
+        return ProcessImagePageLoadResult::Invalid;
+    }
+    let file_bytes = source_tail[0..<copy_length];
+    slice_copy(destination, file_bytes);
+    if (slice_eq(destination, file_bytes) == false) {
+        return ProcessImagePageLoadResult::Invalid;
     }
 
     // Every byte outside the file-backed overlap must still be zero. Dynamic
-    // slice endpoints have the same explicit proof above and the same narrow
-    // checker limitation as the copy views.
+    // endpoints reuse the same checked-slice evidence as the copy views.
     let zeros = process_image_zero_page as []u8;
     let suffix_start: usize = destination_offset + copy_length;
-    // destination_offset alone is directly bounded above (checked just
-    // above), so the checker proves prefix/zero_prefix without unsafe;
-    // suffix_start is a SUM of two related runtime values, which the
-    // checker cannot carry into slice syntax the same way -- see this
-    // function's own opening comment.
+    if (suffix_start > PAGE_SIZE) {
+        return ProcessImagePageLoadResult::Invalid;
+    }
     let prefix = bytes[0..<destination_offset];
     let zero_prefix = zeros[0..<destination_offset];
-    unsafe {
-        let suffix = bytes[suffix_start..<PAGE_SIZE];
-        let zero_suffix = zeros[suffix_start..<PAGE_SIZE];
-        if (slice_eq(prefix, zero_prefix) == false ||
-            slice_eq(suffix, zero_suffix) == false) {
-            return ProcessImagePageLoadResult::Invalid;
-        }
+    let suffix = bytes[suffix_start..<PAGE_SIZE];
+    let zero_suffix = zeros[suffix_start..<PAGE_SIZE];
+    if (slice_eq(prefix, zero_prefix) == false ||
+        slice_eq(suffix, zero_suffix) == false) {
+        return ProcessImagePageLoadResult::Invalid;
     }
     return ProcessImagePageLoadResult::Loaded;
 }
@@ -1243,11 +1239,27 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
         return ProcessImageSegmentsResult::OutOfMemory;
     }
     let mut mapped: usize = already_mapped;
+    let image = plan.image;
+    if (plan.program_offset > image.len) {
+        process_image_cleanup();
+        return ProcessImageSegmentsResult::Invalid;
+    }
     for segment_index: usize in 0..<plan.program_count {
-        let header_address: usize = plan.image_address + plan.program_offset +
-                                    segment_index * ELF_PROGRAM_HEADER_SIZE;
+        let header_offset: usize = plan.program_offset +
+                                   segment_index * ELF_PROGRAM_HEADER_SIZE;
+        if (header_offset > image.len) {
+            process_image_cleanup();
+            return ProcessImageSegmentsResult::Invalid;
+        }
+        let header_tail = image[header_offset..<image.len];
+        if (header_tail.len < sizeof(KernelElf64ProgramHeader)) {
+            process_image_cleanup();
+            return ProcessImageSegmentsResult::Invalid;
+        }
+        let header_bytes =
+            header_tail[0..<sizeof(KernelElf64ProgramHeader)];
         let header: *KernelElf64ProgramHeader =
-            header_address as *KernelElf64ProgramHeader;
+            header_bytes as *KernelElf64ProgramHeader;
         if (header.segment_type == ELF_PT_LOAD) {
             // PF_R=4 (rodata), PF_R|PF_X=5 (text), PF_R|PF_W=6 (data). A
             // writable+executable combination is never accepted.
