@@ -434,6 +434,12 @@ type func = {
   body : stmt list;
   is_inline : bool;
   is_noinline : bool;
+  is_private : bool;
+  (* GitHub issue #269: `private fn` restricts every direct call/function-
+     pointer reference to the same source file the function was declared
+     in, mirroring `private let`'s existing cross-file check (issue #108) --
+     see type_inf.ml's private_functions table and check_private_function_
+     access. *)
   def_loc : loc [@printer pp_loc];  (* location of the "fn" keyword -- used for DWARF DISubprogram *)
 }
 [@@deriving show]

@@ -1067,6 +1067,23 @@ let check_private_global_access (use_loc : Ast.loc) (name : string) : unit =
            from that same file" name decl_file))
     | _ -> ()
 
+(* GitHub issue #269: `private fn` name -> the source file it was declared
+   in, same discipline as private_globals above. Populated once in
+   infer_program, consulted by check_private_function_access at every
+   direct-call site (Call's own fname) and function-pointer reference (a
+   bare function name used as a value, Var's fenv fallback). *)
+let private_functions : (string, string) Hashtbl.t = Hashtbl.create 8
+
+let check_private_function_access (use_loc : Ast.loc) (name : string) : unit =
+  if StringSet.mem name !locally_bound_names then ()
+  else
+    match Hashtbl.find_opt private_functions name with
+    | Some decl_file when decl_file <> use_loc.Lexing.pos_fname ->
+        raise (TypeError (use_loc, Printf.sprintf
+          "'%s' is a private function declared in '%s'; it may only be \
+           referenced from that same file" name decl_file))
+    | _ -> ()
+
 (* OWNERSHIP_KERNEL.md Stage 2 (GitHub issue #108) tables, populated once
    per infer_program run, same discipline as private_globals above. *)
 
@@ -1543,6 +1560,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       TView (name, List.map (Types.static_of_ast scope) args)
   | Var name ->
       check_private_global_access e.loc name;
+      check_private_function_access e.loc name;
       (* Check local/global variables first *)
       (match StringMap.find_opt name tyenv with
        | Some (t, _) ->
@@ -3008,6 +3026,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            Printf.sprintf "%s expects 2 arguments: %s(a, b)" fname fname)))
 
   | Call (fname, args) ->
+      check_private_function_access e.loc fname;
       let direct = StringMap.find_opt fname fenv in
       let ft_opt = match direct with
         | Some [(target, ft)] ->
@@ -5091,6 +5110,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   List.iter (function
     | Ast.LetDef (name, _, _, _, _, true, loc) ->
         Hashtbl.replace private_globals name loc.Lexing.pos_fname
+    | _ -> ()
+  ) prog;
+  Hashtbl.reset private_functions;
+  List.iter (function
+    | Ast.FuncDef { name; is_private = true; def_loc; _ } ->
+        Hashtbl.replace private_functions name def_loc.Lexing.pos_fname
     | _ -> ()
   ) prog;
   locally_bound_names := StringSet.empty;

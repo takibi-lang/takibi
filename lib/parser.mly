@@ -441,22 +441,22 @@ variant_cases:
     { (name, Some payload) :: rest }
 
 func_def:
-  | FN IDENT LPAREN params RPAREN ret_type_opt effects_opt LBRACE stmts RBRACE
-    {
-      Ast.{ name = $2; params = $4; ret_type = $6; effects = $7;
-            body = $9; is_inline = false; is_noinline = false;
-            def_loc = $symbolstartpos }
-    }
-  | INLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt LBRACE stmts RBRACE
+  | p = private_flag FN IDENT LPAREN params RPAREN ret_type_opt effects_opt LBRACE stmts RBRACE
     {
       Ast.{ name = $3; params = $5; ret_type = $7; effects = $8;
-            body = $10; is_inline = true; is_noinline = false;
+            body = $10; is_inline = false; is_noinline = false; is_private = p;
             def_loc = $symbolstartpos }
     }
-  | NOINLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt LBRACE stmts RBRACE
+  | p = private_flag INLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt LBRACE stmts RBRACE
     {
-      Ast.{ name = $3; params = $5; ret_type = $7; effects = $8;
-            body = $10; is_inline = false; is_noinline = true;
+      Ast.{ name = $4; params = $6; ret_type = $8; effects = $9;
+            body = $11; is_inline = true; is_noinline = false; is_private = p;
+            def_loc = $symbolstartpos }
+    }
+  | p = private_flag NOINLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt LBRACE stmts RBRACE
+    {
+      Ast.{ name = $4; params = $6; ret_type = $8; effects = $9;
+            body = $11; is_inline = false; is_noinline = true; is_private = p;
             def_loc = $symbolstartpos }
     }
 

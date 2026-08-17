@@ -5368,6 +5368,76 @@ let infer_tests = [
            Alcotest.(check bool) "mentions the global's name" true
              (contains_substring msg "backing"));
 
+  (* GitHub issue #269: `private fn` restricts a top-level function to
+     direct calls/function-pointer references from its own declaring file,
+     the same discipline `private let` (#108) already gives globals. First
+     consumer: kernel/mm/address_space.tkb's AddressSpaceRoot slot accessor
+     and raw-root constructor. *)
+  Alcotest.test_case
+    "private function: calling it from the SAME file it was declared in is fine" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "private fn priv_f() -> i32 { return 7; }
+                   fn a_calls() -> i32 { return priv_f(); }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf "expected same-file call to type-check, got: %s" msg);
+
+  Alcotest.test_case
+    "private function: calling it from a DIFFERENT file is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "private fn priv_f() -> i32 { return 7; }";
+         "b.tkb", "fn b_calls() -> i32 { return priv_f(); }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "mentions the function's name" true
+             (contains_substring msg "priv_f");
+           Alcotest.(check bool) "mentions the declaring file" true
+             (contains_substring msg "a.tkb"));
+
+  Alcotest.test_case
+    "private function: referencing it as a function pointer from a \
+     DIFFERENT file is a compile error" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "private fn priv_f(x: i32) -> i32 { return x; }";
+         "b.tkb", "fn b_takes_ptr() { let g = priv_f; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "mentions the function's name" true
+             (contains_substring msg "priv_f"));
+
+  Alcotest.test_case
+    "negative control: a NON-private function is still freely callable \
+     across files (private is opt-in, not a default restriction)" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "fn plain_f() -> i32 { return 1; }";
+         "b.tkb", "fn b_calls() -> i32 { return plain_f(); }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf "expected a non-private function to stay callable, got: %s" msg);
+
+  Alcotest.test_case
+    "private function: a same-named LOCAL LET in a different file shadows \
+     it rather than triggering the privacy check (issue #214's own rule, \
+     applied to functions)" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "fn a_shadows() -> i32 { let priv_f: i32 = 9; return priv_f; }";
+         "b.tkb", "private fn priv_f() -> i32 { return 7; }
+                   fn b_unrelated() -> i32 { return priv_f(); }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf
+             "expected the local let to shadow the unrelated private function, got: %s" msg);
+
   (* -- Linear kind (OWNERSHIP_KERNEL.md Stage 1, GitHub issue #117) -------
      `linear opaque struct` = exactly-once-on-every-path obligations.
      Prelude shared by most cases below: a token type, a mint, a sink. *)

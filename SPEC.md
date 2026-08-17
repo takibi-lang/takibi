@@ -1330,7 +1330,7 @@ they add no LLVM parameter, field, instruction, or metadata.
 The file is takibi's module and trust boundary (GitHub issue #108,
 OWNERSHIP_KERNEL.md Stage 2): a narrow, human-reviewed file can force
 everything outside it to go through its functions. `private` appears in
-three places, all checked at compile time against the referencing
+five places, all checked at compile time against the referencing
 expression's own source file, with zero runtime/layout footprint:
 
 ```
@@ -1338,10 +1338,21 @@ private let mut conn_state: ConnState = ConnState::Listen;   // global
 private linear opaque struct PendingTcpEvent;                // opaque type
 private linear view EventPending;                            // erased view
 struct Chan { private mutex: i32; ... }                      // struct field
+private fn address_space_root_slot(root: AddressSpaceRoot) -> usize { ... } // function
 ```
 
 - **Global**: every reference (read, write, index, slice, address-of) to
   a `private let` global must come from its declaring file.
+- **Function** (GitHub issue #269): every direct call and every use of the
+  function's bare name as a value (function pointer) must come from its
+  declaring file. The function's own body, and any file that already holds
+  a value the function returned, are unaffected -- privacy gates the
+  reference to the function itself, the same "construction-only" shape the
+  opaque-type and struct-field rules below already have. Pairs naturally
+  with a private representation constructor/unwrap (e.g. an opaque or
+  private-fielded capability type) plus one deliberately public accessor
+  function in the same file, so outside code gets the capability only
+  through that sanctioned path.
 - **Opaque type** (any kind: plain/affine/linear): value CONSTRUCTION --
   any cast whose target type mentions the name (`0 as usize as *T`,
   `&x as *T`) -- must come from the declaring file. NAMING the type stays
@@ -1381,7 +1392,9 @@ HISTORY.md -- a local binding of any kind now shadows a same-named
 private global from another file instead of triggering a false-positive
 privacy violation; the opaque-handle/view/struct-field checks above were
 not part of that fix and may still have the same false-positive gap in
-principle, unconfirmed). The declaring file itself remains the trusted
+principle, unconfirmed). Private functions (issue #269) were built with
+the same locally-bound-names shadowing check from the start, so they do
+not have this gap. The declaring file itself remains the trusted
 island regardless -- privacy narrows the audit surface to that file, it
 does not verify the file's own bodies.
 
