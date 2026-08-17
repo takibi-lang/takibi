@@ -634,11 +634,11 @@ fn hvc_dispatch_fork() -> usize !{unsafe} {
             cow_page_table_share_all(0, page_count);
 
             let frame_src: *u8 = unsafe { pending_frame_sp as *u8 };
-            let frame_dst: *u8 = unsafe { parent_saved_frame as *u8 };
+            let frame_dst: *u8 = parent_saved_frame as *u8;
             for i: usize in 0..<272 {
                 frame_dst[i as isize] = frame_src[i as isize];
             }
-            let x0_ptr: *u64 = unsafe { frame_dst as *u64 };
+            let x0_ptr: *u64 = frame_dst as *u64;
             *x0_ptr = FORK_CHILD_PID as u64;
 
             // The child's own execve() runs el0_load_elf_into, which
@@ -1990,7 +1990,7 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
                     return (elr, ERR_ENOENT);
                 }
                 FatOpenResult::Opened(mut file) => {
-                    let staging: *u8 = unsafe { exec_staging as *u8 };
+                    let staging: *u8 = exec_staging as *u8;
                     let mut br: u32 = 0;
                     let result: FatIoResult = fat_read(file, staging, file_size, &br);
                     let close_result: FatIoResult = fat_close(file);
