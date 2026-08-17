@@ -3505,14 +3505,14 @@ let infer_tests = [
     (expect_type_error "sink is only valid"
        "fn bad(x: sink *u8) {}");
 
-  (* GitHub issue #15 follow-up: casting a non-literal integer to an
+  (* GitHub issue #15 follow-up: casting a non-address value to an
      AFFINE OPAQUE pointer type requires `unsafe` -- scoped narrowly to
      affine targets after a broader "any pointer" version was measured
      against the whole example suite and found to falsely flag legitimate
      runtime-computed MMIO addresses (see lib/type_inf.ml's Cast case
      comment and HISTORY.md's issue #15 entry). *)
   Alcotest.test_case "casting a non-literal integer to an affine handle requires unsafe" `Quick
-    (expect_type_error "casting a non-literal integer to an affine/linear handle"
+    (expect_type_error "casting a non-address value to an affine/linear handle"
        "affine opaque struct Token;
         fn f(idx: usize) { let t: *Token = idx as *Token; }");
 
@@ -3524,11 +3524,25 @@ let infer_tests = [
                     release(t);
                 }");
 
-  Alcotest.test_case "a literal cast to an affine handle needs no unsafe" `Quick
+  (* GitHub issue #325: unlike the ordinary/#218 calculated-pointer rule,
+     this affine/linear-handle check does NOT keep a literal exemption --
+     a literal sentinel is exactly as unprovable to the compiler as a
+     runtime-discovered one, so it needs the same explicit `unsafe`
+     boundary #316 already required for `*io`. Measured before removing
+     the exemption: every literal-derived affine/linear cast in this
+     repo (17 sites, all in examples/linux_user/ ownership-checker
+     fixtures) was already a `0 as usize as *Token`-style sentinel, not
+     load-bearing driver code. *)
+  Alcotest.test_case "a literal cast to an affine handle also requires unsafe (issue #325, no literal exemption)" `Quick
+    (expect_type_error "casting a non-address value to an affine/linear handle"
+       "affine opaque struct Token;
+        fn f() { let t: *Token = 0 as usize as *Token; }");
+
+  Alcotest.test_case "unsafe marks a literal cast to an affine handle (issue #325)" `Quick
     (expect_ok "affine opaque struct Token;
                 fn release(t: sink *Token) {}
-                fn f() {
-                    let t: *Token = 0 as usize as *Token;
+                fn f() !{unsafe} {
+                    let t: *Token = unsafe { 0 as usize as *Token };
                     release(t);
                 }");
 
@@ -3653,22 +3667,26 @@ let infer_tests = [
           return unsafe { idx as *Token };
         }");
 
-  (* Negative control: an affine handle cast built from a LITERAL is
-     already exempt from needing unsafe at all (check_kinded_ptr_cast_
-     needs_unsafe's own literal exemption, GitHub issue #15) -- so
-     type_inf.ml's note_type_checker_unsafe_use() never fires for it, and
-     wrapping it in `unsafe { }` anyway must still be reported as
-     unnecessary. This is the "genuinely superfluous unsafe stays flagged"
-     counterpart to the positive control just above -- proves issue #328's
-     fix does not just silence the warning wholesale. *)
+  (* Negative control: an affine handle cast built from a real object's
+     address (`&x`) is the one case still exempt from needing unsafe at
+     all after issue #325 removed the literal exemption (is_addr_derived,
+     lib/type_inf.ml) -- so type_inf.ml's note_type_checker_unsafe_use()
+     never fires for it, and wrapping it in `unsafe { }` anyway must still
+     be reported as unnecessary. This is the "genuinely superfluous unsafe
+     stays flagged" counterpart to the positive control just above --
+     proves issue #328's fix does not just silence the warning wholesale.
+     (Before #325, a bare-literal cast played this same role; #325 made
+     that case genuinely require unsafe instead, see the test just above,
+     so this control moved to the one exemption that survived.) *)
   Alcotest.test_case
-    "a literal-derived cast to an affine opaque handle wrapped in \
+    "an address-derived cast to an affine opaque handle wrapped in \
      unsafe still records one unnecessary-unsafe site"
     `Quick
     (expect_unnecessary_unsafe 1
        "affine opaque struct Token;
-        fn make_from_literal() -> *Token !{unsafe} {
-          return unsafe { 0 as usize as *Token };
+        let mut unnecessary_unsafe_storage: u8;
+        fn make_from_address() -> *Token !{unsafe} {
+          return unsafe { &unnecessary_unsafe_storage as *Token };
         }");
 
   Alcotest.test_case "a non-literal cast to *io inside unsafe remains accepted" `Quick
@@ -5356,8 +5374,8 @@ let infer_tests = [
 
   Alcotest.test_case "linear: create + sink on the straight-line path is fine" `Quick
     (fun () ->
-       match infer "linear opaque struct LinTok;
-                    fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+       match infer "linear opaque struct LinTok; let mut lintok_storage: u8;
+                    fn lmint() -> *LinTok { return &lintok_storage as *LinTok; }
                     fn lsink(t: sink *LinTok) {}
                     fn lin_ok() { let t: *LinTok = lmint(); lsink(t); }" with
        | _ -> ()
@@ -5366,8 +5384,8 @@ let infer_tests = [
   Alcotest.test_case "linear: consuming on BOTH branches of an if/else is fine \
                       (branching around a linear value is legal)" `Quick
     (fun () ->
-       match infer "linear opaque struct LinTok;
-                    fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+       match infer "linear opaque struct LinTok; let mut lintok_storage: u8;
+                    fn lmint() -> *LinTok { return &lintok_storage as *LinTok; }
                     fn lsink_a(t: sink *LinTok) {}
                     fn lsink_b(t: sink *LinTok) {}
                     fn lin_both(c: bool) {
@@ -5379,15 +5397,15 @@ let infer_tests = [
 
   Alcotest.test_case "linear: never consumed is a compile error" `Quick
     (expect_type_error "linear value 't' is never consumed"
-       "linear opaque struct LinTok;
-        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
+        fn lmint() -> *LinTok { return &lintok_storage as *LinTok; }
         fn lin_leak() { let t: *LinTok = lmint(); }");
 
   Alcotest.test_case "linear: consumed in only ONE branch is a compile error \
                       (linear forbids weakening)" `Quick
     (expect_type_error "consumed on some paths but not on every path"
-       "linear opaque struct LinTok;
-        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
+        fn lmint() -> *LinTok { return &lintok_storage as *LinTok; }
         fn lsink(t: sink *LinTok) {}
         fn lin_missed(c: bool) {
           let t: *LinTok = lmint();
@@ -5397,8 +5415,8 @@ let infer_tests = [
   Alcotest.test_case "negative control: one-branch affine consumption compiles \
                       because affine permits weakening" `Quick
     (fun () ->
-       match infer "affine opaque struct AffTok2;
-                    fn amint2() -> *AffTok2 { return 0 as usize as *AffTok2; }
+       match infer "affine opaque struct AffTok2; let mut afftok2_storage: u8;
+                    fn amint2() -> *AffTok2 { return &afftok2_storage as *AffTok2; }
                     fn asink2(t: sink *AffTok2) {}
                     fn aff_missed(c: bool) {
                       let t: *AffTok2 = amint2();
@@ -5409,15 +5427,15 @@ let infer_tests = [
 
   Alcotest.test_case "linear: casting a linear value away is a compile error" `Quick
     (expect_type_error "cannot cast an affine/linear value"
-       "linear opaque struct LinTok;
-        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
+        fn lmint() -> *LinTok { return &lintok_storage as *LinTok; }
         fn lin_cast() { let t: *LinTok = lmint(); let x: usize = t as usize; }");
 
   Alcotest.test_case "linear: assigning over an undischarged obligation is a \
                       compile error" `Quick
     (expect_type_error "would discard its obligation"
-       "linear opaque struct LinTok;
-        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
+        fn lmint() -> *LinTok { return &lintok_storage as *LinTok; }
         fn lsink(t: sink *LinTok) {}
         fn lin_overwrite() {
           let mut t: *LinTok = lmint();
@@ -5427,8 +5445,8 @@ let infer_tests = [
 
   Alcotest.test_case "linear: a discharged binding may be reinitialized" `Quick
     (expect_ok
-       "linear opaque struct LinTok;
-        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
+        fn lmint() -> *LinTok { return &lintok_storage as *LinTok; }
         fn lsink(t: sink *LinTok) {}
         fn lin_reinit() {
           let mut t: *LinTok = lmint();
@@ -5440,8 +5458,8 @@ let infer_tests = [
   Alcotest.test_case "linear: the self-transform idiom `t = transform(t)` is \
                       fine (RHS consumes the old obligation first)" `Quick
     (fun () ->
-       match infer "linear opaque struct LinTok;
-                    fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+       match infer "linear opaque struct LinTok; let mut lintok_storage: u8;
+                    fn lmint() -> *LinTok { return &lintok_storage as *LinTok; }
                     fn ltransform(t: *LinTok) -> *LinTok { return t; }
                     fn lsink(t: sink *LinTok) {}
                     fn lin_transform() {
@@ -5454,14 +5472,14 @@ let infer_tests = [
 
   Alcotest.test_case "linear: an uninitialized linear let is a compile error" `Quick
     (expect_type_error "must be initialized at its declaration"
-       "linear opaque struct LinTok;
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
         fn lin_uninit() { let mut t: *LinTok; }");
 
   Alcotest.test_case "linear: a pending obligation at an early return is a \
                       compile error" `Quick
     (expect_type_error "still pending at this return"
-       "linear opaque struct LinTok;
-        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
+        fn lmint() -> *LinTok { return &lintok_storage as *LinTok; }
         fn lsink(t: sink *LinTok) {}
         fn lin_early(c: bool) -> i32 {
           let t: *LinTok = lmint();
@@ -5472,8 +5490,8 @@ let infer_tests = [
 
   Alcotest.test_case "linear: a pending obligation at a break is a compile error" `Quick
     (expect_type_error "still pending at this break"
-       "linear opaque struct LinTok;
-        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
+        fn lmint() -> *LinTok { return &lintok_storage as *LinTok; }
         fn lsink(t: sink *LinTok) {}
         fn lin_break() {
           while (true) {
@@ -5485,8 +5503,8 @@ let infer_tests = [
   Alcotest.test_case "linear: returning the obligation itself IS consumption \
                       (return-forward compiles)" `Quick
     (fun () ->
-       match infer "linear opaque struct LinTok;
-                    fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+       match infer "linear opaque struct LinTok; let mut lintok_storage: u8;
+                    fn lmint() -> *LinTok { return &lintok_storage as *LinTok; }
                     fn lin_forward() -> *LinTok {
                       let t: *LinTok = lmint();
                       return t;
@@ -5497,7 +5515,7 @@ let infer_tests = [
   Alcotest.test_case "linear: a plain linear parameter consumed on only some \
                       paths is a compile error" `Quick
     (expect_type_error "still pending at this return"
-       "linear opaque struct LinTok;
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
         fn lsink(t: sink *LinTok) {}
         fn lin_param(c: bool, t: *LinTok) -> i32 {
           if (c) { return -1; }
@@ -5508,21 +5526,21 @@ let infer_tests = [
   Alcotest.test_case "linear: a plain linear parameter never consumed at all is \
                       a compile error (fall-through path)" `Quick
     (expect_type_error "linear parameter 't' is not consumed on every path"
-       "linear opaque struct LinTok;
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
         fn lin_swallow(t: *LinTok) {}");
 
   Alcotest.test_case "linear: a sink parameter needs no further forwarding \
                       (terminal consumer compiles)" `Quick
     (fun () ->
-       match infer "linear opaque struct LinTok;
+       match infer "linear opaque struct LinTok; let mut lintok_storage: u8;
                     fn lin_terminal(t: sink *LinTok) {}" with
        | _ -> ()
        | exception Types.TypeError (_, msg) -> Alcotest.failf "expected OK, got: %s" msg);
 
   Alcotest.test_case "linear: double consume is a compile error" `Quick
     (expect_type_error "linear value 't' was already consumed"
-       "linear opaque struct LinTok;
-        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
+        fn lmint() -> *LinTok { return &lintok_storage as *LinTok; }
         fn lsink(t: sink *LinTok) {}
         fn lin_double() {
           let t: *LinTok = lmint();
@@ -5533,8 +5551,8 @@ let infer_tests = [
   Alcotest.test_case "linear: taking the address of a linear value is a \
                       compile error" `Quick
     (expect_type_error "cannot take the address of linear value"
-       "linear opaque struct LinTok;
-        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
+        fn lmint() -> *LinTok { return &lintok_storage as *LinTok; }
         fn lsink(t: sink *LinTok) {}
         fn lin_addr() {
           let mut t: *LinTok = lmint();
@@ -5545,18 +5563,18 @@ let infer_tests = [
   Alcotest.test_case "linear: storing into a struct field is rejected at the \
                       field declaration" `Quick
     (expect_type_error "cannot hold a linear value"
-       "linear opaque struct LinTok;
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
         struct LinHolder { tok: *LinTok; }");
 
   Alcotest.test_case "linear: an array of linear values is rejected" `Quick
     (expect_type_error "cannot live inside an array/slice"
-       "linear opaque struct LinTok;
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
         fn lin_arr() { let mut a: [*LinTok; 2]; }");
 
   Alcotest.test_case "linear: a linear-typed global is rejected" `Quick
     (expect_type_error "cannot hold a linear value"
-       "linear opaque struct LinTok;
-        let mut g_tok: *LinTok = 0 as usize as *LinTok;");
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
+        let mut g_tok: *LinTok = &lintok_storage as *LinTok;");
 
   (* A linear value's own runtime representation IS a pointer, *LinTok, so
      "a pointer to a slot holding a linear value" is inherently **LinTok --
@@ -5569,8 +5587,8 @@ let infer_tests = [
      now structurally unreachable, not merely rejected at the store site. *)
   Alcotest.test_case "linear: storing through a pointer is a compile error" `Quick
     (expect_type_error "nested pointer indirection"
-       "linear opaque struct LinTok;
-        fn lmint() -> *LinTok { return 0 as usize as *LinTok; }
+       "linear opaque struct LinTok; let mut lintok_storage: u8;
+        fn lmint() -> *LinTok { return &lintok_storage as *LinTok; }
         fn lin_store(pp: **LinTok) {
           let t: *LinTok = lmint();
           *pp = t;
@@ -5584,8 +5602,8 @@ let infer_tests = [
   Alcotest.test_case "private type: minting in the declaring file is fine" `Quick
     (fun () ->
        match infer_files [
-         "seal.tkb", "private affine opaque struct SealTok;
-                      fn seal_mint() -> *SealTok { return 0 as usize as *SealTok; }
+         "seal.tkb", "private affine opaque struct SealTok; let mut sealtok_storage: u8;
+                      fn seal_mint() -> *SealTok { return &sealtok_storage as *SealTok; }
                       fn seal_sink(t: sink *SealTok) {}";
        ] with
        | _ -> ()
@@ -5594,7 +5612,7 @@ let infer_tests = [
   Alcotest.test_case "private type: minting from ANOTHER file is a compile error" `Quick
     (fun () ->
        match infer_files [
-         "seal.tkb", "private affine opaque struct SealTok;
+         "seal.tkb", "private affine opaque struct SealTok; let mut sealtok_storage: u8;
                       fn seal_sink(t: sink *SealTok) {}";
          "b.tkb", "fn forge() { let t: *SealTok = 0 as usize as *SealTok; seal_sink(t); }";
        ] with
@@ -5607,8 +5625,8 @@ let infer_tests = [
                       (annotations/pass-through -- only construction is gated)" `Quick
     (fun () ->
        match infer_files [
-         "seal.tkb", "private affine opaque struct SealTok;
-                      fn seal_mint() -> *SealTok { return 0 as usize as *SealTok; }
+         "seal.tkb", "private affine opaque struct SealTok; let mut sealtok_storage: u8;
+                      fn seal_mint() -> *SealTok { return &sealtok_storage as *SealTok; }
                       fn seal_sink(t: sink *SealTok) {}";
          "b.tkb", "fn relay() { let t: *SealTok = seal_mint(); seal_sink(t); }";
        ] with
@@ -5698,8 +5716,8 @@ let infer_tests = [
   Alcotest.test_case "opaque ptr arithmetic: `t + 1` on an affine handle is a \
                       compile error (kind-duplication hole, user-review probe)" `Quick
     (expect_type_error "pointer arithmetic/indexing on '*ArithTok'"
-       "affine opaque struct ArithTok;
-        fn amk() -> *ArithTok { return 0 as usize as *ArithTok; }
+       "affine opaque struct ArithTok; let mut arithtok_storage: u8;
+        fn amk() -> *ArithTok { return &arithtok_storage as *ArithTok; }
         fn asnk(t: sink *ArithTok) {}
         fn dup() {
           let t: *ArithTok = amk();
@@ -5719,15 +5737,15 @@ let infer_tests = [
                       compile error (was an internal compiler error, invalid \
                       LLVM IR load of an opaque type)" `Quick
     (expect_type_error "cannot dereference '*Lease'"
-       "affine opaque struct Lease;
-        fn acquire() -> *Lease { return 0 as usize as *Lease; }
+       "affine opaque struct Lease; let mut lease_storage: u8;
+        fn acquire() -> *Lease { return &lease_storage as *Lease; }
         fn f() { let t: *Lease = acquire(); let x = *t; }");
 
   Alcotest.test_case "opaque ptr deref: writing through an affine handle is a \
                       compile error too (was also an internal compiler error)" `Quick
     (expect_type_error "cannot dereference '*Lease'"
-       "affine opaque struct Lease;
-        fn acquire() -> *Lease { return 0 as usize as *Lease; }
+       "affine opaque struct Lease; let mut lease_storage: u8;
+        fn acquire() -> *Lease { return &lease_storage as *Lease; }
         fn f() { let t: *Lease = acquire(); *t = *t; }");
 
   Alcotest.test_case "opaque ptr deref: reading through a PLAIN opaque pointer \
@@ -5739,9 +5757,9 @@ let infer_tests = [
   Alcotest.test_case "affine ptr laundering: `t as *Other` without unsafe is a \
                       compile error" `Quick
     (expect_type_error "cannot cast an affine/linear value"
-       "affine opaque struct LaunTok;
+       "affine opaque struct LaunTok; let mut launtok_storage: u8;
         opaque struct OtherBlob;
-        fn lmk() -> *LaunTok { return 0 as usize as *LaunTok; }
+        fn lmk() -> *LaunTok { return &launtok_storage as *LaunTok; }
         fn lsnk(t: sink *LaunTok) {}
         fn launder() {
           let t: *LaunTok = lmk();
@@ -5751,9 +5769,9 @@ let infer_tests = [
 
   Alcotest.test_case "affine ptr laundering remains illegal inside unsafe" `Quick
     (expect_type_error "cannot cast an affine/linear value"
-       "affine opaque struct LaunTok2;
+       "affine opaque struct LaunTok2; let mut launtok2_storage: u8;
         opaque struct OtherBlob2;
-        fn lmk2() -> *LaunTok2 { return 0 as usize as *LaunTok2; }
+        fn lmk2() -> *LaunTok2 { return &launtok2_storage as *LaunTok2; }
         fn launder2() {
           let t: *LaunTok2 = lmk2();
           let o: *OtherBlob2 = unsafe { t as *OtherBlob2 };
@@ -5761,8 +5779,8 @@ let infer_tests = [
 
   Alcotest.test_case "an affine handle cannot be cast to usize" `Quick
     (expect_type_error "cannot cast an affine/linear value"
-       "affine opaque struct NullTok;
-        fn nmk() -> *NullTok { return 0 as usize as *NullTok; }
+       "affine opaque struct NullTok; let mut nulltok_storage: u8;
+        fn nmk() -> *NullTok { return &nulltok_storage as *NullTok; }
         fn nullcheck() {
           let t: *NullTok = nmk();
           let raw: usize = t as usize;
@@ -5787,8 +5805,8 @@ let infer_tests = [
                       destructured, and the obligation consumed -- the \
                       motivating shape for this issue" `Quick
     (fun () ->
-       match infer "linear opaque struct TupOb;
-                    fn tmint() -> *TupOb { return 0 as usize as *TupOb; }
+       match infer "linear opaque struct TupOb; let mut tupob_storage: u8;
+                    fn tmint() -> *TupOb { return &tupob_storage as *TupOb; }
                     fn tsnk(t: sink *TupOb) {}
                     fn make_pair() -> (i32, *TupOb) { return (42, tmint()); }
                     fn use_pair() {
@@ -5801,8 +5819,8 @@ let infer_tests = [
   Alcotest.test_case "tuple join-kind: a tuple containing a linear component \
                       IS linear -- never consuming it is a compile error" `Quick
     (expect_type_error "linear value 'p' is still pending"
-       "linear opaque struct TupOb2;
-        fn tmint2() -> *TupOb2 { return 0 as usize as *TupOb2; }
+       "linear opaque struct TupOb2; let mut tupob2_storage: u8;
+        fn tmint2() -> *TupOb2 { return &tupob2_storage as *TupOb2; }
         fn leak() -> i32 {
           let p: (i32, *TupOb2) = (1, tmint2());
         return 0;
@@ -5830,8 +5848,8 @@ let infer_tests = [
   Alcotest.test_case "tuple join-kind: consuming the tuple on only ONE branch \
                       is a compile error (inherits linear's all-paths rule)" `Quick
     (expect_type_error "consumed on some paths but not on every path"
-       "linear opaque struct TupOb3;
-        fn tmint3() -> *TupOb3 { return 0 as usize as *TupOb3; }
+       "linear opaque struct TupOb3; let mut tupob3_storage: u8;
+        fn tmint3() -> *TupOb3 { return &tupob3_storage as *TupOb3; }
         fn tsnk3(t: sink *TupOb3) {}
         fn use_pair(c: bool, x: i32) {
           let p: (i32, *TupOb3) = (x, tmint3());
@@ -5845,8 +5863,8 @@ let infer_tests = [
                       nothing that flows past it -- an unconsumed component \
                       is still caught at the LOCAL that captured it" `Quick
     (expect_type_error "linear value 'p' is still pending"
-       "linear opaque struct TupOb4;
-        fn tmint4() -> *TupOb4 { return 0 as usize as *TupOb4; }
+       "linear opaque struct TupOb4; let mut tupob4_storage: u8;
+        fn tmint4() -> *TupOb4 { return &tupob4_storage as *TupOb4; }
         fn make_pair4() -> (i32, *TupOb4) { return (1, tmint4()); }
         fn leak4() -> i32 {
           let p: (i32, *TupOb4) = make_pair4();
@@ -5955,8 +5973,8 @@ let infer_tests = [
   Alcotest.test_case "field path: consuming a field once via a sink call \
                       compiles" `Quick
     (fun () ->
-       match infer "affine opaque struct FTok;
-                    fn fmk() -> *FTok { return 0 as usize as *FTok; }
+       match infer "affine opaque struct FTok; let mut ftok_storage: u8;
+                    fn fmk() -> *FTok { return &ftok_storage as *FTok; }
                     fn fsnk(t: sink *FTok) {}
                     struct FHolder { t: *FTok; }
                     fn use_field() {
@@ -5970,8 +5988,8 @@ let infer_tests = [
   Alcotest.test_case "field path: double-consuming the SAME field is now a \
                       compile error (the concrete hole this stage closes)" `Quick
     (expect_type_error "affine value 'h.t' was already consumed"
-       "affine opaque struct FTok2;
-        fn fmk2() -> *FTok2 { return 0 as usize as *FTok2; }
+       "affine opaque struct FTok2; let mut ftok2_storage: u8;
+        fn fmk2() -> *FTok2 { return &ftok2_storage as *FTok2; }
         fn fsnk2(t: sink *FTok2) {}
         struct FHolder2 { t: *FTok2; }
         fn double_consume() {
@@ -5983,8 +6001,8 @@ let infer_tests = [
 
   Alcotest.test_case "field path: an affine field may be dropped" `Quick
     (expect_ok
-       "affine opaque struct FTok3;
-        fn fmk3() -> *FTok3 { return 0 as usize as *FTok3; }
+       "affine opaque struct FTok3; let mut ftok3_storage: u8;
+        fn fmk3() -> *FTok3 { return &ftok3_storage as *FTok3; }
         struct FHolder3 { t: *FTok3; }
         fn leak_field() {
           let mut h: FHolder3;
@@ -5995,8 +6013,8 @@ let infer_tests = [
                       (affine keeps its union/at-least-one-path semantics \
                       through fields too)" `Quick
     (fun () ->
-       match infer "affine opaque struct FTok4;
-                    fn fmk4() -> *FTok4 { return 0 as usize as *FTok4; }
+       match infer "affine opaque struct FTok4; let mut ftok4_storage: u8;
+                    fn fmk4() -> *FTok4 { return &ftok4_storage as *FTok4; }
                     fn fsnk4(t: sink *FTok4) {}
                     struct FHolder4 { t: *FTok4; }
                     fn maybe_consume(c: bool) {
@@ -6010,8 +6028,8 @@ let infer_tests = [
   Alcotest.test_case "field path: TWO DIFFERENT struct locals of the same \
                       type are independent paths (no false cross-aliasing)" `Quick
     (fun () ->
-       match infer "affine opaque struct FTok5;
-                    fn fmk5() -> *FTok5 { return 0 as usize as *FTok5; }
+       match infer "affine opaque struct FTok5; let mut ftok5_storage: u8;
+                    fn fmk5() -> *FTok5 { return &ftok5_storage as *FTok5; }
                     fn fsnk5(t: sink *FTok5) {}
                     struct FHolder5 { t: *FTok5; }
                     fn two_holders() {
@@ -6028,8 +6046,8 @@ let infer_tests = [
   Alcotest.test_case "field path: reassigning a field's RHS through another \
                       tracked variable consumes that variable too" `Quick
     (expect_type_error "affine value 'src' was already consumed"
-       "affine opaque struct FTok6;
-        fn fmk6() -> *FTok6 { return 0 as usize as *FTok6; }
+       "affine opaque struct FTok6; let mut ftok6_storage: u8;
+        fn fmk6() -> *FTok6 { return &ftok6_storage as *FTok6; }
         fn fsnk6(t: sink *FTok6) {}
         struct FHolder6 { t: *FTok6; }
         fn move_into_field() {
@@ -6042,8 +6060,8 @@ let infer_tests = [
 
   Alcotest.test_case "field path: returning a plain struct may weaken its affine field" `Quick
     (expect_ok
-       "affine opaque struct FTok7;
-        fn fmk7() -> *FTok7 { return 0 as usize as *FTok7; }
+       "affine opaque struct FTok7; let mut ftok7_storage: u8;
+        fn fmk7() -> *FTok7 { return &ftok7_storage as *FTok7; }
         struct FHolder7 { t: *FTok7; }
         fn make_holder() -> FHolder7 {
           let mut h: FHolder7;

@@ -2,9 +2,10 @@
 // name. A plain affine parameter may be dropped by its callee; passing it still
 // consumes the caller's copy, so later reuse remains a compile error.
 affine opaque struct Token;
+let mut token_storage: u8;
 
 fn make() -> *Token {
-    return 0 as usize as *Token;
+    return &token_storage as *Token;
 }
 
 fn drop_silently(t: *Token) {

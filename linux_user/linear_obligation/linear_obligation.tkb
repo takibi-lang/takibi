@@ -18,9 +18,10 @@
 // the obligation, so linear tokens are never null and never conditional).
 
 linear opaque struct Obligation;
+let mut obligation_storage: u8;
 
 fn obtain() -> *Obligation {
-    return 0 as usize as *Obligation;
+    return &obligation_storage as *Obligation;
 }
 
 fn fulfill_a(t: sink *Obligation) {

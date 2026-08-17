@@ -11,9 +11,10 @@
 // tracking stays variable-granular (no place tracking needed).
 
 linear opaque struct PairObligation;
+let mut pair_obligation_storage: u8;
 
 fn mint() -> *PairObligation {
-    return 0 as usize as *PairObligation;
+    return &pair_obligation_storage as *PairObligation;
 }
 
 fn fulfill(t: sink *PairObligation) {

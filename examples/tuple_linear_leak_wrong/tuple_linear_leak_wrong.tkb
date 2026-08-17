@@ -5,9 +5,10 @@
 // a bare unconsumed linear value would be -- the tuple is not a loophole
 // around the obligation it carries.
 linear opaque struct Receipt;
+let mut receipt_storage: u8;
 
 fn issue() -> *Receipt {
-    return 0 as usize as *Receipt;
+    return &receipt_storage as *Receipt;
 }
 
 fn make_pair() -> (i32, *Receipt) {

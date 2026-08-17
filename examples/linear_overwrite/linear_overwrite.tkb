@@ -8,9 +8,10 @@
 // the right-hand side consumes the old obligation before the assignment
 // lands, so nothing is discarded.
 linear opaque struct Duty;
+let mut duty_storage: u8;
 
 fn take_on() -> *Duty {
-    return 0 as usize as *Duty;
+    return &duty_storage as *Duty;
 }
 
 fn discharge(t: sink *Duty) {

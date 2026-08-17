@@ -1256,23 +1256,45 @@ let elem_stride_aligned (senv : senv) (n : int) (elem : ty) : bool =
        | _ -> false)
   | _ -> false
 
-(* GitHub issue #15 follow-up: require `unsafe` for a cast that builds an
-   AFFINE/LINEAR OPAQUE pointer from anything other than a compile-time literal or
-   a real object's address -- see is_literal_derived's comment for the
-   full reasoning and why this is scoped to affine targets only, not
-   pointer casts in general. Called from infer_expr's Cast case for BOTH
-   ways a source integer can reach that point (a plain unrefined base, or
-   a TRefinedInt -- e.g. a refined `{0..<4 as usize}` loop-proven index),
-   since those are two separate match arms there and neither should skip
-   this check. *)
+(* GitHub issue #325: is this expression a real object's address (`&x`),
+   possibly wrapped in casts? Unlike is_literal_derived (used by #218's
+   general calculated-pointer-cast gate), check_kinded_ptr_cast_needs_
+   unsafe below deliberately does NOT exempt bare integer literals -- only
+   `&x`. Measured 2026-08-17: every literal-derived affine/linear
+   opaque-pointer cast in kernel/, examples/, and linux_user/ is a
+   `0 as usize as *Token`-style test/sentinel construction (17 sites, all
+   in examples/linux_user/ ownership-checker fixtures -- kernel/ declares
+   no affine/linear opaque structs at all), confirming this function's own
+   original comment ("nothing legitimate ever needs to fabricate one from
+   an arbitrary computed integer -- every real handle in this codebase
+   already comes from that type's own constructor"): a literal sentinel is
+   exactly as unprovable to the compiler as a runtime-discovered one, so it
+   now gets the same no-literal-exemption treatment #316 already gave
+   `*io`. *)
+let rec is_addr_derived (e : Ast.expr) : bool =
+  match e.desc with
+  | AddrOf _ -> true
+  | Cast (_, inner) -> is_addr_derived inner
+  | _ -> false
+
+(* GitHub issue #15 follow-up (narrowed by #325): require `unsafe` for a
+   cast that builds an AFFINE/LINEAR OPAQUE pointer from anything other
+   than a real object's address (`&x`) -- see is_addr_derived's comment
+   just above for why literals lost their exemption here, and
+   is_literal_derived's comment for why this is scoped to affine/linear
+   targets only, not pointer casts in general. Called from infer_expr's
+   Cast case for BOTH ways a source integer can reach that point (a plain
+   unrefined base, or a TRefinedInt -- e.g. a refined `{0..<4 as usize}`
+   loop-proven index), since those are two separate match arms there and
+   neither should skip this check. *)
 let check_kinded_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
   match tgt with
   | TPtr (TStruct sname) when StringSet.mem sname !affine_opaque_names
                            || StringSet.mem sname !linear_opaque_names ->
-      if not (is_literal_derived src_expr) then begin
+      if not (is_addr_derived src_expr) then begin
         if !unsafe_depth = 0 then
           raise (TypeError (loc,
-            "casting a non-literal integer to an affine/linear handle asserts \
+            "casting a non-address value to an affine/linear handle asserts \
              it is valid with no evidence; write `unsafe { ... as "
             ^ to_string tgt ^ " }` to mark it"))
         else

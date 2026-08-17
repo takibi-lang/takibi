@@ -7,9 +7,10 @@
 // in one arm of a condition and swallows it in the other -- the shape of
 // GitHub issue #116's original TCP LastAck bug.
 linear opaque struct Duty;
+let mut duty_storage: u8;
 
 fn take_on() -> *Duty {
-    return 0 as usize as *Duty;
+    return &duty_storage as *Duty;
 }
 
 fn discharge(t: sink *Duty) {

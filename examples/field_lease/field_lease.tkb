@@ -17,9 +17,10 @@
 // once, or never consumed, purely within the one function that owns it.
 
 affine opaque struct Lease;
+let mut lease_storage: u8;
 
 fn acquire() -> *Lease {
-    return 0 as usize as *Lease;
+    return &lease_storage as *Lease;
 }
 
 fn release(t: sink *Lease) {

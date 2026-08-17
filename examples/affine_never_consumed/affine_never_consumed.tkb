@@ -3,9 +3,10 @@
 // at most once, but dropping it is legal. APIs that require cleanup now use a
 // linear type instead (FatFile, NetRxCpuOwned, MutexGuard, and KGuard).
 affine opaque struct Token;
+let mut token_storage: u8;
 
 fn make() -> *Token {
-    return 0 as usize as *Token;
+    return &token_storage as *Token;
 }
 
 fn release(t: sink *Token) {

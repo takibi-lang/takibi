@@ -2,9 +2,10 @@
 // a private affine handle type and its only legal source. See the main
 // file's header comment.
 private affine opaque struct SealTok;
+private let mut sealtok_storage: u8;
 
 fn seal_mint() -> *SealTok {
-    return 0 as usize as *SealTok;
+    return &sealtok_storage as *SealTok;
 }
 
 fn seal_sink(t: sink *SealTok) {

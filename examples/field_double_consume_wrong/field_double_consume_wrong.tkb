@@ -6,9 +6,10 @@
 // via a direct probe before this stage was designed; this is the
 // concrete hole Stage 3a exists to close.
 affine opaque struct Lease2;
+let mut lease2_storage: u8;
 
 fn acquire2() -> *Lease2 {
-    return 0 as usize as *Lease2;
+    return &lease2_storage as *Lease2;
 }
 
 fn release2(t: sink *Lease2) {

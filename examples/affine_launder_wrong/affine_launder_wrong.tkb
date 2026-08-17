@@ -5,9 +5,10 @@
 // must be represented by a variant instead of a null or retyped handle.
 affine opaque struct LaunTok;
 opaque struct OtherBlob;
+let mut launtok_storage: u8;
 
 fn lmk() -> *LaunTok {
-    return 0 as usize as *LaunTok;
+    return &launtok_storage as *LaunTok;
 }
 
 fn lsnk(t: sink *LaunTok) {

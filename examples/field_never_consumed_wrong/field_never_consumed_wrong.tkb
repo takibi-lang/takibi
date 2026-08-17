@@ -3,9 +3,10 @@
 // field may be dropped, while field_double_consume_wrong still proves that it
 // cannot be consumed twice.
 affine opaque struct Lease3;
+let mut lease3_storage: u8;
 
 fn acquire3() -> *Lease3 {
-    return 0 as usize as *Lease3;
+    return &lease3_storage as *Lease3;
 }
 
 struct Holder3 {
