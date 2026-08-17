@@ -87,14 +87,14 @@ fn app_main() {
     // -- pool_a: the handle lifecycle.
     let mut pool_a: IntrusivePool(usize);
     intrusive_pool_init(&pool_a);
-    let a0: exists s0: usize. IntrusiveOwner[s0] = match intrusive_pool_insert(&pool_a) {
+    let a0 = match intrusive_pool_insert(&pool_a) {
         IntrusivePoolInsertResult::Allocated(o) => { o }
         IntrusivePoolInsertResult::OutOfMemory => {
             uart_puts("pool_a insert 0 failed\n");
             return;
         }
     };
-    let a1: exists s1: usize. IntrusiveOwner[s1] = match intrusive_pool_insert(&pool_a) {
+    let a1 = match intrusive_pool_insert(&pool_a) {
         IntrusivePoolInsertResult::Allocated(o) => { o }
         IntrusivePoolInsertResult::OutOfMemory => {
             uart_puts("pool_a insert 1 failed\n");
@@ -130,7 +130,7 @@ fn app_main() {
     // The freed slot is the head of the free chain, so this reinsert gets
     // the SAME address back -- which is exactly the case a bare
     // occupancy flag could not distinguish from the stale handle above.
-    let a1b: exists s1b: usize. IntrusiveOwner[s1b] = match intrusive_pool_insert(&pool_a) {
+    let a1b = match intrusive_pool_insert(&pool_a) {
         IntrusivePoolInsertResult::Allocated(o) => { o }
         IntrusivePoolInsertResult::OutOfMemory => {
             uart_puts("pool_a reinsert failed\n");
@@ -149,12 +149,12 @@ fn app_main() {
     // A genuine double free, through the one legal way to fabricate a
     // handle (the into_parts/new round trip kernel/net/tcp.tkb's own owner
     // type needs).
-    let (a1b_slot, a1b_generation) = intrusive_owner_into_parts(a1b);
-    let first: exists sf: usize. IntrusiveOwner[sf] =
-        intrusive_owner_new(a1b_slot, a1b_generation);
+    let (a1b_slot, a1b_generation) = intrusive_owner_into_parts(&pool_a, a1b);
+    let first =
+        intrusive_owner_new(&pool_a, a1b_slot, a1b_generation);
     intrusive_pool_remove(&pool_a, first);
-    let again: exists sa: usize. IntrusiveOwner[sa] =
-        intrusive_owner_new(a1b_slot, a1b_generation);
+    let again =
+        intrusive_owner_new(&pool_a, a1b_slot, a1b_generation);
     let doubles_before: usize = intrusive_pool_double_remove_count(&pool_a);
     intrusive_pool_remove(&pool_a, again);
     uart_puts("double free of an already-freed slot counted, not acted on: ");
@@ -163,11 +163,20 @@ fn app_main() {
         intrusive_pool_live_count(&pool_a) == 1);
     uart_puts("\n");
 
-    // -- Foreign handle: pool_b never minted a0, and says so without
-    // dereferencing it.
+    // -- Cross-pool free is now a COMPILE error, not a runtime count:
+    // `intrusive_pool_remove(&pool_b, a0)` does not compile at all, since
+    // a0's type carries the address identity of the pool that minted it
+    // (GitHub issues #344/#345 -- test/test_takibi.ml holds that negative
+    // case, because a linux_user/ test can only assert on programs that
+    // DO compile). What is still detectable only at runtime is the one
+    // case the brand cannot cover: a handle correctly branded to THIS
+    // pool but carrying an address belonging to another, which takes
+    // explicitly naming both pools through the into_parts/new round trip
+    // -- an act that is at least grep-visible now, rather than the silent
+    // accident it used to be.
     let mut pool_b: IntrusivePool(usize);
     intrusive_pool_init(&pool_b);
-    let b0: exists sb: usize. IntrusiveOwner[sb] = match intrusive_pool_insert(&pool_b) {
+    let b0 = match intrusive_pool_insert(&pool_b) {
         IntrusivePoolInsertResult::Allocated(o) => { o }
         IntrusivePoolInsertResult::OutOfMemory => {
             uart_puts("pool_b insert 0 failed\n");
@@ -177,11 +186,10 @@ fn app_main() {
     };
     let a0_slot: usize = intrusive_owner_slot(a0);
     let a0_generation: usize = intrusive_owner_generation(a0);
-    let stolen: exists st: usize. IntrusiveOwner[st] =
-        intrusive_owner_new(a0_slot, a0_generation);
-    intrusive_pool_remove(&pool_b, stolen);
-    uart_puts("pool_a's handle rejected by pool_b as foreign, and pool_a's ");
-    uart_puts("slot left untouched: ");
+    let forged = intrusive_owner_new(&pool_b, a0_slot, a0_generation);
+    intrusive_pool_remove(&pool_b, forged);
+    uart_puts("an address from another pool, rebranded by hand, is still ");
+    uart_puts("rejected without dereferencing it: ");
     uart_print_bool(intrusive_pool_foreign_handle_count(&pool_b) == 1 &&
                     intrusive_pool_live_count(&pool_b) == 1 &&
                     intrusive_pool_matches(&pool_a, a0_slot, a0_generation) &&

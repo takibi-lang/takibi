@@ -53,7 +53,7 @@
 //
 // WHAT THE HANDLE IS
 //
-// IntrusiveOwner[allocation] carries the slot's ADDRESS plus its
+// IntrusiveOwner[pool_id, allocation] carries the slot's ADDRESS plus its
 // generation, rather than a slot index plus generation. An index would
 // need an index -> address table, which is exactly the `N`-sized array
 // this design exists to delete. The generation half is unchanged from the
@@ -70,19 +70,45 @@
 // making them separate types turns that into a compile error instead of
 // something to detect at runtime, which is this project's whole premise.
 //
-// FOREIGN AND STALE HANDLES
+// WHICH POOL A HANDLE BELONGS TO
 //
-// intrusive_pool_remove validates a handle before touching any memory it
-// names: intrusive_pool_slot_is_valid walks THIS pool's own chunk list
-// looking for the page the address falls in, then checks the offset lands
-// exactly on a slot boundary inside that chunk's carved range. It never
-// dereferences an address it has not already proven belongs to this pool,
-// so a handle forged (or round-tripped through
-// intrusive_owner_into_parts) from another pool is reported via
-// intrusive_pool_foreign_handle_count and dropped -- growable_pool cannot
-// detect this case at all, since one pool's small integer index is a
-// perfectly plausible index in another. The cost is O(chunks) -- chunks,
+// The owner's first static parameter is `pool_id: addr` -- the erased
+// ADDRESS of the pool that minted it (GitHub issue #345, the same
+// mechanism SPEC.md's MutexGuard uses to tie a guard to its lock). Every
+// entry point here takes its pool as `*IntrusivePool(T) @ pool_id`, so
+// freeing pool A's handle through pool B is a compile error:
+//
+//     intrusive_pool_remove(&pool_b, a0);
+//     // static value mismatch: &pool_a vs &pool_b
+//
+// growable_pool/slotmap cannot see that case at all -- one pool's small
+// integer index is a perfectly plausible index in another -- and an
+// earlier draft of this file could only count it after the fact.
+// IntrusivePoolInsertResult is indexed by the same `pool_id`, which is
+// what carries the brand through a FALLIBLE acquire; without indexed
+// variants the identity was lost at exactly the boundary an allocator
+// lives at.
+//
+// FORGED ADDRESSES AND STALE HANDLES
+//
+// What the brand does NOT prove is that the ADDRESS inside a handle is
+// really one of this pool's slots: intrusive_owner_into_parts /
+// intrusive_owner_new (the round trip a caller wrapping this handle in
+// its own owner type needs -- kernel/net/tcp.tkb's TcpConnectionOwner is
+// the motivating shape) can pair this pool's brand with another pool's
+// address. That now takes explicitly naming both pools, but it is still
+// expressible, so intrusive_pool_remove validates before touching any
+// memory the handle names: intrusive_pool_slot_is_valid walks THIS pool's
+// own chunk list looking for the page the address falls in, then checks
+// the offset lands exactly on a slot boundary inside that chunk's carved
+// range. It never dereferences an address it has not already proven
+// belongs to this pool. Rejections are counted in
+// intrusive_pool_foreign_handle_count. The cost is O(chunks) -- chunks,
 // not slots, and only on the free path.
+//
+// A pool that never needs that round trip can have the whole check
+// deleted: linearity plus the brand would then prove everything, and
+// remove becomes an unconditional O(1) unlink.
 //
 // Current limitations (2026-08-17). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
@@ -98,14 +124,19 @@
 //   future step; making reclaim O(1) rather than O(all slots) wants the
 //   free chain split per-chunk (SLUB's partial-list shape) instead of the
 //   single global chain used here, which is why it is not a small
-//   addition to this file -- see the follow-up issue rather than assuming
-//   it can be bolted on.
+//   addition to this file -- see issue #346 rather than assuming it can
+//   be bolted on.
 // - `intrusive_pool_ref` does NOT re-validate. It is the fast path, with
 //   the same contract kernel/lib/freelist.tkb's freelist_ref has: the
-//   `borrow IntrusiveOwner` proves, through linearity, that the caller
-//   holds a live allocation from SOME pool. A caller that round-trips a
-//   handle through intrusive_owner_into_parts (the only way to fabricate
-//   one) must re-validate with intrusive_pool_matches first.
+//   `borrow IntrusiveOwner[pool_id, _]` parameter proves, through
+//   linearity and the brand, that the caller holds a live allocation from
+//   THIS pool. A caller that round-trips a handle through
+//   intrusive_owner_into_parts (the only way to fabricate one) must
+//   re-validate with intrusive_pool_matches first.
+// - Pool parameters are `*IntrusivePool(T) @ pool_id`, a raw pointer,
+//   rather than the `&mut` reference type issue #314 introduced: the
+//   `@ place` singleton is only accepted on a raw pointer today. Nothing
+//   about the design needs a raw pointer -- see issue #347.
 // - A T larger than one page minus the chunk header cannot be pooled at
 //   all. That is a compile-time property of T, and it is enforced as one:
 //   see intrusive_pool_slots_per_chunk's static_assert, which also pins
@@ -164,14 +195,21 @@ generic struct IntrusivePool(T: type) {
     foreign_handle_count: usize;
 }
 
-private linear struct IntrusiveOwner[allocation: usize] {
+// GitHub issue #345: `pool_id` is the erased ADDRESS of the pool that
+// minted this handle. It costs nothing at runtime and makes "handle from
+// pool A, freed through pool B" a compile error rather than something to
+// notice afterwards -- see this file's header.
+private linear struct IntrusiveOwner[pool_id: addr, allocation: usize] {
     private slot: usize;
     private generation: usize @ allocation;
 }
 
-must_use variant IntrusivePoolInsertResult {
+// Indexed by the same `pool_id` its payload carries (GitHub issue #345) --
+// without that, the brand would be lost at exactly the boundary a real
+// allocator lives at, since a fallible acquire must return a variant.
+must_use variant IntrusivePoolInsertResult[pool_id: addr] {
     OutOfMemory;
-    Allocated(exists allocation: usize. IntrusiveOwner[allocation]);
+    Allocated(exists allocation: usize. IntrusiveOwner[pool_id, allocation]);
 }
 
 // kernel/lib/growable_pool.tkb's own grow result has to distinguish THREE
@@ -184,24 +222,26 @@ must_use variant IntrusivePoolGrowResult {
     Grown;
 }
 
-// Distinct pools get distinct tags so a handle minted by one is
-// recognizable as foreign to another (see this file's header). A plain
-// counter, not the pool's own address: an address would need an unsafe
-// cast in what is otherwise a fully safe entry point, and would make the
-// tag depend on where a pool happens to be laid out.
+// A per-chunk record of which pool owns it, for a future reclaim step and
+// for debugging a dumped page -- NOT the cross-pool check, which is the
+// erased `pool_id` brand and costs nothing at runtime (see this file's
+// header). A plain counter rather than the pool's own address: an address
+// would need an unsafe cast in what is otherwise a fully safe entry
+// point.
 private let mut intrusive_pool_next_tag: usize = 1;
 
-fn intrusive_owner_new(slot: usize, generation: usize @ allocation)
-        -> IntrusiveOwner[allocation] {
-    let mut owner: IntrusiveOwner[allocation] = { slot, generation };
+fn intrusive_owner_new(T: type, pool: *IntrusivePool(T) @ pool_id,
+                       slot: usize, generation: usize @ allocation)
+        -> IntrusiveOwner[pool_id, allocation] {
+    let mut owner: IntrusiveOwner[pool_id, allocation] = { slot, generation };
     return owner;
 }
 
-fn intrusive_owner_slot(owner: borrow IntrusiveOwner[allocation]) -> usize {
+fn intrusive_owner_slot(owner: borrow IntrusiveOwner[pool_id, allocation]) -> usize {
     return owner.slot;
 }
 
-fn intrusive_owner_generation(owner: borrow IntrusiveOwner[allocation]) -> usize {
+fn intrusive_owner_generation(owner: borrow IntrusiveOwner[pool_id, allocation]) -> usize {
     return owner.generation;
 }
 
@@ -210,7 +250,8 @@ fn intrusive_owner_generation(owner: borrow IntrusiveOwner[allocation]) -> usize
 // owner type (kernel/net/tcp.tkb's TcpConnectionOwner is the motivating
 // shape). Reconstruct with intrusive_owner_new. This is the ONLY way to
 // produce a handle this pool did not mint, which is why remove validates.
-fn intrusive_owner_into_parts(owner: sink IntrusiveOwner[allocation])
+fn intrusive_owner_into_parts(T: type, pool: *IntrusivePool(T) @ pool_id,
+                              owner: sink IntrusiveOwner[pool_id, allocation])
         -> (usize, usize @ allocation) {
     return (owner.slot, owner.generation);
 }
@@ -218,9 +259,9 @@ fn intrusive_owner_into_parts(owner: sink IntrusiveOwner[allocation])
 // Discharges the linear obligation without returning the slot -- for a
 // caller that has already established the slot must not be pushed back
 // (see intrusive_pool_remove's own rejection paths).
-fn intrusive_owner_drop(owner: sink IntrusiveOwner[allocation]) {}
+fn intrusive_owner_drop(owner: sink IntrusiveOwner[pool_id, allocation]) {}
 
-fn intrusive_pool_init(T: type, pool: &mut IntrusivePool(T)) {
+fn intrusive_pool_init(T: type, pool: *IntrusivePool(T) @ pool_id) {
     pool.pool_tag = intrusive_pool_next_tag;
     intrusive_pool_next_tag = intrusive_pool_next_tag + 1;
     pool.chunk_head = 0;
@@ -234,11 +275,11 @@ fn intrusive_pool_init(T: type, pool: &mut IntrusivePool(T)) {
 
 // Both derived from sizeof after monomorphization, never supplied by a
 // caller -- see this file's header.
-fn intrusive_pool_slot_stride(T: type, pool: &mut IntrusivePool(T)) -> usize {
+fn intrusive_pool_slot_stride(T: type, pool: *IntrusivePool(T) @ pool_id) -> usize {
     return sizeof(IntrusiveSlot(T));
 }
 
-fn intrusive_pool_slots_per_chunk(T: type, pool: &mut IntrusivePool(T)) -> usize {
+fn intrusive_pool_slots_per_chunk(T: type, pool: *IntrusivePool(T) @ pool_id) -> usize {
     // GitHub issue #344: "does a T-sized slot fit in a chunk at all?" is a
     // property of T and of this file's own layout constants, both fully
     // known once monomorphization has picked T -- so it is settled here,
@@ -277,7 +318,7 @@ fn intrusive_chunk_header_at(base: usize) -> *IntrusiveChunkHeader !{unsafe} {
 // Same for the slot side. Callers hold either an address they just
 // computed from a chunk they own, or one validated by
 // intrusive_pool_slot_is_valid.
-fn intrusive_slot_at(T: type, pool: &mut IntrusivePool(T), slot_address: usize)
+fn intrusive_slot_at(T: type, pool: *IntrusivePool(T) @ pool_id, slot_address: usize)
         -> *IntrusiveSlot(T) !{unsafe} {
     return unsafe { slot_address as *IntrusiveSlot(T) };
 }
@@ -287,7 +328,7 @@ fn intrusive_slot_at(T: type, pool: &mut IntrusivePool(T), slot_address: usize)
 // there -- the difference matters, because the whole point of validating
 // is that `base` may be garbage, and a header read would already be the
 // wild dereference we are trying to prevent. O(chunks).
-fn intrusive_pool_owns_chunk(T: type, pool: &mut IntrusivePool(T), base: usize)
+fn intrusive_pool_owns_chunk(T: type, pool: *IntrusivePool(T) @ pool_id, base: usize)
         -> bool !{unsafe} {
     let mut cursor: usize = pool.chunk_head;
     while (cursor != 0) {
@@ -300,7 +341,7 @@ fn intrusive_pool_owns_chunk(T: type, pool: &mut IntrusivePool(T), base: usize)
 // Full validation of a raw slot address: it names a chunk on this pool's
 // list, and it lands exactly on a slot boundary within that chunk's carved
 // slot range. After this returns true, dereferencing the slot is sound.
-fn intrusive_pool_slot_is_valid(T: type, pool: &mut IntrusivePool(T),
+fn intrusive_pool_slot_is_valid(T: type, pool: *IntrusivePool(T) @ pool_id,
                                 slot_address: usize) -> bool !{unsafe} {
     if (slot_address == 0) { return false; }
     let base: usize = intrusive_chunk_base_of(slot_address);
@@ -327,7 +368,7 @@ fn intrusive_pool_zero_page(base: usize) !{unsafe} {
 // in descending order so that the chain hands them out in ascending order,
 // which keeps a chunk's first-fill behavior easy to reason about (contrast
 // growable_pool_activate_chunk's own ascending push / descending pop).
-fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T))
+fn intrusive_pool_grow_one_chunk(T: type, pool: *IntrusivePool(T) @ pool_id)
         -> IntrusivePoolGrowResult !{unsafe} {
     let stride: usize = sizeof(IntrusiveSlot(T));
     let slot_count: usize = intrusive_pool_slots_per_chunk(pool);
@@ -363,8 +404,8 @@ fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T))
     }
 }
 
-fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T))
-        -> IntrusivePoolInsertResult !{unsafe} {
+fn intrusive_pool_insert(T: type, pool: *IntrusivePool(T) @ pool_id)
+        -> IntrusivePoolInsertResult[pool_id] !{unsafe} {
     if (pool.free_head == 0) {
         match intrusive_pool_grow_one_chunk(pool) {
             IntrusivePoolGrowResult::OutOfMemory => {
@@ -390,7 +431,7 @@ fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T))
         intrusive_chunk_header_at(intrusive_chunk_base_of(slot_address));
     header.live_count = header.live_count + 1;
     return IntrusivePoolInsertResult::Allocated(
-        intrusive_owner_new(slot_address, generation));
+        intrusive_owner_new(pool, slot_address, generation));
 }
 
 // Rejects, rather than acts on, two distinguishable classes of bad handle:
@@ -398,8 +439,8 @@ fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T))
 // already free or has been reused since (double_remove_count) -- the same
 // distinction kernel/lib/slotmap.tkb's slotmap_remove draws, plus the
 // cross-pool case slotmap has no way to see.
-fn intrusive_pool_remove(T: type, pool: &mut IntrusivePool(T),
-                         owner: sink IntrusiveOwner[allocation]) !{unsafe} {
+fn intrusive_pool_remove(T: type, pool: *IntrusivePool(T) @ pool_id,
+                         owner: sink IntrusiveOwner[pool_id, allocation]) !{unsafe} {
     let slot_address: usize = intrusive_owner_slot(owner);
     let generation: usize = intrusive_owner_generation(owner);
     if (intrusive_pool_slot_is_valid(pool, slot_address) == false) {
@@ -428,7 +469,7 @@ fn intrusive_pool_remove(T: type, pool: &mut IntrusivePool(T),
 // pair rather than an (index, generation) one: does this slot still hold
 // this exact occupant? No ownership proof required, and safe to call on an
 // address of unknown provenance.
-fn intrusive_pool_matches(T: type, pool: &mut IntrusivePool(T),
+fn intrusive_pool_matches(T: type, pool: *IntrusivePool(T) @ pool_id,
                           slot_address: usize, generation: usize)
         -> bool !{unsafe} {
     if (generation == 0) { return false; }
@@ -440,12 +481,12 @@ fn intrusive_pool_matches(T: type, pool: &mut IntrusivePool(T),
 // Field access through the result needs no explicit deref
 // (`intrusive_pool_ref(&pool, owner).field = 1;`); a whole-T read or write
 // does -- the same shape kernel/lib/freelist.tkb's freelist_ref has.
-fn intrusive_pool_ref(T: type, pool: &mut IntrusivePool(T),
-                      owner: borrow IntrusiveOwner[allocation]) -> *T !{unsafe} {
+fn intrusive_pool_ref(T: type, pool: *IntrusivePool(T) @ pool_id,
+                      owner: borrow IntrusiveOwner[pool_id, allocation]) -> *T !{unsafe} {
     return intrusive_pool_payload_at(pool, intrusive_owner_slot(owner));
 }
 
-fn intrusive_pool_payload_at(T: type, pool: &mut IntrusivePool(T),
+fn intrusive_pool_payload_at(T: type, pool: *IntrusivePool(T) @ pool_id,
                              slot_address: usize) -> *T !{unsafe} {
     return unsafe {
         (slot_address + offsetof(IntrusiveSlot(T), payload)) as *T
@@ -462,12 +503,12 @@ fn intrusive_pool_payload_at(T: type, pool: &mut IntrusivePool(T),
 // direct analogue of today's `if (slotmap_matches(...))` guard inside such
 // a scan.
 
-fn intrusive_pool_first_slot(T: type, pool: &mut IntrusivePool(T)) -> usize !{unsafe} {
+fn intrusive_pool_first_slot(T: type, pool: *IntrusivePool(T) @ pool_id) -> usize !{unsafe} {
     if (pool.chunk_head == 0) { return 0; }
     return pool.chunk_head + INTRUSIVE_CHUNK_HEADER_SIZE;
 }
 
-fn intrusive_pool_next_slot(T: type, pool: &mut IntrusivePool(T),
+fn intrusive_pool_next_slot(T: type, pool: *IntrusivePool(T) @ pool_id,
                             slot_address: usize) -> usize !{unsafe} {
     if (intrusive_pool_slot_is_valid(pool, slot_address) == false) { return 0; }
     let base: usize = intrusive_chunk_base_of(slot_address);
@@ -482,7 +523,7 @@ fn intrusive_pool_next_slot(T: type, pool: &mut IntrusivePool(T),
 }
 
 // 0 means "this slot is free". Safe on an address of unknown provenance.
-fn intrusive_pool_slot_generation(T: type, pool: &mut IntrusivePool(T),
+fn intrusive_pool_slot_generation(T: type, pool: *IntrusivePool(T) @ pool_id,
                                   slot_address: usize) -> usize !{unsafe} {
     if (intrusive_pool_slot_is_valid(pool, slot_address) == false) { return 0; }
     return intrusive_slot_at(pool, slot_address).generation;
@@ -490,18 +531,18 @@ fn intrusive_pool_slot_generation(T: type, pool: &mut IntrusivePool(T),
 
 // -- Observers ---------------------------------------------------------
 
-fn intrusive_pool_live_count(T: type, pool: &mut IntrusivePool(T)) -> usize {
+fn intrusive_pool_live_count(T: type, pool: *IntrusivePool(T) @ pool_id) -> usize {
     return pool.live_count;
 }
 
-fn intrusive_pool_chunk_count(T: type, pool: &mut IntrusivePool(T)) -> usize {
+fn intrusive_pool_chunk_count(T: type, pool: *IntrusivePool(T) @ pool_id) -> usize {
     return pool.chunk_count;
 }
 
-fn intrusive_pool_double_remove_count(T: type, pool: &mut IntrusivePool(T)) -> usize {
+fn intrusive_pool_double_remove_count(T: type, pool: *IntrusivePool(T) @ pool_id) -> usize {
     return pool.double_remove_count;
 }
 
-fn intrusive_pool_foreign_handle_count(T: type, pool: &mut IntrusivePool(T)) -> usize {
+fn intrusive_pool_foreign_handle_count(T: type, pool: *IntrusivePool(T) @ pool_id) -> usize {
     return pool.foreign_handle_count;
 }

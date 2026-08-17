@@ -12,7 +12,7 @@ same handle rejected immediately after free: true
 reinsert reused that exact slot address: true
 stale handle still rejected after the reuse: true
 double free of an already-freed slot counted, not acted on: true
-pool_a's handle rejected by pool_b as foreign, and pool_a's slot left untouched: true
+an address from another pool, rebranded by hand, is still rejected without dereferencing it: true
 200 live objects from a pool declared with no capacity (live, chunks, pages used): 200 2 2
 cursor walk found every live payload exactly once (count, checksum): 200 20100
 2000-byte objects placed before the PROVIDER ran out (objects, chunks, pages left): 10 5 0
