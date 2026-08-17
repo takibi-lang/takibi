@@ -1063,12 +1063,66 @@ A variant whose only payload is an erased view lowers to the tag alone, so
 Full source-level tagged-union DWARF metadata and a compact union ABI are
 deferred; code must not treat this first implementation as a stable C ABI.
 
+### Indexed Variants (GitHub issue #345)
+
+A variant may declare erased static parameters in brackets, exactly like an
+indexed runtime owner or an indexed erased view, so that a case payload can
+name them:
+
+```takibi
+private linear struct PoolOwner[pool: addr, allocation: usize] {
+    private slot: usize;
+    private generation: usize @ allocation;
+}
+
+must_use variant PoolTake[pool: addr] {
+    Empty;
+    Got(exists allocation: usize. PoolOwner[pool, allocation]);
+}
+
+fn pool_take(T: type, p: *Pool(T) @ pool) -> PoolTake[pool] { ... }
+fn pool_give(T: type, p: *Pool(T) @ pool, o: sink PoolOwner[pool, allocation]) {}
+```
+
+This is what makes a **fallible** acquire brandable. Without it, the
+`*T @ place` identity mechanism (see "Erased Affine/Linear Views" above)
+covered only an infallible acquire, because the failure case forces a
+variant return, and the returned handle then lost the identity of the
+resource it came from. The payoff is that returning a handle to the wrong
+pool is a compile error:
+
+```takibi
+match pool_take(&pool_a) {
+    PoolTake::Empty => {}
+    PoolTake::Got(o) => { pool_give(&pool_b, o); }
+    //                             ^ static value mismatch: &pool_a vs &pool_b
+}
+```
+
+- Sorts are the same ones a linear/affine struct accepts: `addr`, a
+  primitive integer, or an exhaustive enum. Duplicate parameter names are
+  rejected.
+- A variant that declares parameters must be written `Name[args]`
+  everywhere it is named; the bare `Name` form is an error stating the
+  required arity. A variant that declares none keeps working unchanged --
+  every existing variant in this codebase does.
+- At a constructor (`PoolTake::Got(o)`, `PoolTake::Empty`) the arguments
+  are inferred: from the payload's own type where there is one, and
+  otherwise from the destination the value flows into.
+- `match` substitutes the scrutinee's actual static arguments into each
+  arm's payload type, which is what carries the identity out of the
+  variant. Field projection on an indexed owner already works this way.
+- Static arguments are erased: no field, no ABI word, no change to the
+  tag-plus-payload layout described above.
+
 ### Slice 3 limits
 
 This slice intentionally implements only the shape needed by the current
 examples:
 
-- variants are concrete named types, not generic `Option[T]`/`Result[T,E]`;
+- variants are not generic over TYPE parameters (`Option[T]`/`Result[T,E]`);
+  they may carry erased static VALUE/address parameters -- see "Indexed
+  Variants" above;
 - each case has at most one payload; unrestricted ordinary concrete structs
   are supported by value, while arrays, indexed owner structs, and structs
   containing affine/linear fields are not;

@@ -356,8 +356,8 @@ let walk_toplevel ~subst ~vsubst ~resolve_inst (t : toplevel) : toplevel =
                        packed, align, priv, is_priv, l)
   | ViewDef _ | OpaqueStructDef _ | UseDef _ -> t
   | EnumDef (n, base, vs, ne) -> EnumDef (n, Option.map ty base, vs, ne)
-  | VariantDef (n, cases, mu, l) ->
-      VariantDef (n, List.map (fun (cn, pt) -> (cn, Option.map ty pt)) cases, mu, l)
+  | VariantDef (n, ps, cases, mu, l) ->
+      VariantDef (n, ps, List.map (fun (cn, pt) -> (cn, Option.map ty pt)) cases, mu, l)
   | GenericStructDef _ -> t
   | ExternSymbolDef _ -> t
   | VectorTableDef _ -> t
@@ -1001,8 +1001,8 @@ let run (prog : toplevel list) : toplevel list =
                            packed, align, priv, is_priv, l)
       | ViewDef _ | OpaqueStructDef _ | UseDef _ -> t
       | EnumDef (n, base, vs, ne) -> EnumDef (n, Option.map ty base, vs, ne)
-      | VariantDef (n, cases, mu, l) ->
-          VariantDef (n, List.map (fun (cn, pt) -> (cn, Option.map ty pt)) cases, mu, l)
+      | VariantDef (n, ps, cases, mu, l) ->
+          VariantDef (n, ps, List.map (fun (cn, pt) -> (cn, Option.map ty pt)) cases, mu, l)
       | GenericStructDef _ -> t
       | ExternSymbolDef _ -> t
       | VectorTableDef _ -> t

@@ -236,7 +236,15 @@ let rec show_type = function
       in
       Printf.sprintf "view %s[%s]" s
         (String.concat ", " (List.map arg args))
-  | Ast.TypeVariant s   -> s
+  | Ast.TypeVariant (s, []) -> s
+  | Ast.TypeVariant (s, args) ->
+      let arg = function
+        | Ast.StaticName n -> n
+        | Ast.StaticInt n -> string_of_int n
+        | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
+      in
+      Printf.sprintf "%s[%s]" s
+        (String.concat ", " (List.map arg args))
   | Ast.TypeExists (name, sort, body) ->
       Printf.sprintf "exists %s: %s. %s" name (show_type sort) (show_type body)
   | Ast.TypeIndexed (s, args) ->
@@ -426,7 +434,7 @@ let parser_tests = [
             [("conn", Ast.TypeUsize);
              ("state", Ast.TypeNamed "ParsedTcpState")], false, _);
          Ast.VariantDef
-           ("ParsedTcpDispatch",
+           ("ParsedTcpDispatch", [],
             [("Listen", Some (Ast.TypeExists
               ("conn", Ast.TypeUsize,
                Ast.TypeIndexed
@@ -482,7 +490,7 @@ let parser_tests = [
          }" with
       | [Ast.OwnedStructDef _;
          Ast.VariantDef
-           ("ParsedMaybe",
+           ("ParsedMaybe", [],
             [("None", None);
              ("Some", Some (Ast.TypeExists
                ("n", Ast.TypeUsize,
@@ -498,7 +506,7 @@ let parser_tests = [
     (fun () ->
       match parse "must_use variant ParsedStatus { Ok; Err(i32); }" with
       | [Ast.VariantDef
-           ("ParsedStatus", [("Ok", None); ("Err", Some Ast.TypeI32)],
+           ("ParsedStatus", [], [("Ok", None); ("Err", Some Ast.TypeI32)],
             true, _)] -> ()
       | _ -> Alcotest.fail "expected must_use VariantDef policy");
 
@@ -10763,6 +10771,95 @@ let codegen_tests = [
      the same widening/hint logic #232 relies on has already resolved v1's
      real width), using the actual LLVM type rather than the AST-level
      nominal type -- see llvm_gen.ml's BinOp comment for why. *)
+  (* GitHub issue #345: a variant with its own static parameters, which is
+     what lets a FALLIBLE operation return an owner branded to the
+     resource that produced it. Without it, `*T @ place` branding (issue
+     #344) only worked for an infallible acquire, since the failure case
+     forces a variant return and a variant could not mention a static
+     name. The brand has to survive being packed into the variant and
+     opened again by `match` -- which is exactly what the negative test
+     below pins down. *)
+  Alcotest.test_case
+    "issue #345: an indexed variant carries a brand through match"
+    `Quick
+    (expect_codegen_ok
+       ("generic struct Issue345Pool(T: type) { head: usize; }
+        private linear struct Issue345Owner[pool: addr, allocation: usize] {
+          private slot: usize;
+          private generation: usize @ allocation;
+        }
+        must_use variant Issue345Take[pool: addr] {
+          Empty;
+          Got(exists allocation: usize. Issue345Owner[pool, allocation]);
+        }
+        fn issue345_owner_new(T: type, slot: usize, generation: usize @ allocation,
+                              p: *Issue345Pool(T) @ pool) -> Issue345Owner[pool, allocation] {
+          let mut o: Issue345Owner[pool, allocation] = { slot, generation };
+          return o;
+        }
+        fn issue345_take(T: type, p: *Issue345Pool(T) @ pool) -> Issue345Take[pool] {
+          if (p.head == 0) { return Issue345Take::Empty; }
+          return Issue345Take::Got(issue345_owner_new(p.head, 7, p));
+        }
+        fn issue345_give(T: type, p: *Issue345Pool(T) @ pool,
+                         o: sink Issue345Owner[pool, allocation]) {}
+        fn codegen_issue345_ok() {
+          let mut pool_a: Issue345Pool(usize);
+          pool_a.head = 16;
+          match issue345_take(&pool_a) {
+            Issue345Take::Empty => {}
+            Issue345Take::Got(o) => { issue345_give(&pool_a, o); }
+          }
+        }"));
+
+  Alcotest.test_case
+    "issue #345: a handle opened from one pool's result cannot go to another"
+    `Quick
+    (expect_type_error "static value mismatch"
+       ("generic struct Issue345Pool(T: type) { head: usize; }
+        private linear struct Issue345Owner[pool: addr, allocation: usize] {
+          private slot: usize;
+          private generation: usize @ allocation;
+        }
+        must_use variant Issue345Take[pool: addr] {
+          Empty;
+          Got(exists allocation: usize. Issue345Owner[pool, allocation]);
+        }
+        fn issue345_owner_new(T: type, slot: usize, generation: usize @ allocation,
+                              p: *Issue345Pool(T) @ pool) -> Issue345Owner[pool, allocation] {
+          let mut o: Issue345Owner[pool, allocation] = { slot, generation };
+          return o;
+        }
+        fn issue345_take(T: type, p: *Issue345Pool(T) @ pool) -> Issue345Take[pool] {
+          if (p.head == 0) { return Issue345Take::Empty; }
+          return Issue345Take::Got(issue345_owner_new(p.head, 7, p));
+        }
+        fn issue345_give(T: type, p: *Issue345Pool(T) @ pool,
+                         o: sink Issue345Owner[pool, allocation]) {}
+        fn codegen_issue345_wrong() {
+          let mut pool_a: Issue345Pool(usize);
+          let mut pool_b: Issue345Pool(usize);
+          pool_a.head = 16;
+          match issue345_take(&pool_a) {
+            Issue345Take::Empty => {}
+            Issue345Take::Got(o) => { issue345_give(&pool_b, o); }
+          }
+        }"));
+
+  Alcotest.test_case
+    "issue #345: a variant case payload may not name an undeclared static parameter"
+    `Quick
+    (expect_type_error "not bound by this function signature or struct"
+       "private linear struct Issue345Bare[pool: addr, allocation: usize] {
+          private slot: usize;
+          private generation: usize @ allocation;
+        }
+        must_use variant Issue345NoParams {
+          Empty;
+          Got(exists allocation: usize. Issue345Bare[pool, allocation]);
+        }
+        fn codegen_issue345_unbound() {}");
+
   (* GitHub issue #344: `*T @ place` brands a linear owner to the pool that
      minted it, so handing one pool's handle to another is a compile error
      rather than something to detect at runtime. The mechanism already

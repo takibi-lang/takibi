@@ -74,7 +74,7 @@ type type_expr =
        Source annotations use the declared bare/indexed name; type inference
        resolves it to this distinct constructor so runtime structs and
        Delta-only views cannot be confused. *)
-  | TypeVariant of string
+  | TypeVariant of string * static_arg list
     (* Elaborated tagged runtime variant type. Source annotations use the
        declared bare name; payload kind is tracked separately in Delta. *)
   | TypeExists of ident * type_expr * type_expr
@@ -625,8 +625,15 @@ type toplevel =
      the type stays legal everywhere. *)
   | EnumDef of string * type_expr option * (string * int option) list * bool
   (* enum Name: u16 { Variant = val; _; } -- last bool = is_nonexhaustive *)
-  | VariantDef of string * (string * type_expr option) list * bool * loc
-  (* [must_use] variant Name { None; Some(T); } -- closed tagged sum. Each
+  | VariantDef of string * static_param list
+      * (string * type_expr option) list * bool * loc
+  (* [must_use] variant Name[p: sort, ...] { None; Some(T); } -- closed
+     tagged sum. The static parameter list (GitHub issue #345) is erased
+     exactly like an indexed owner struct's own: it adds no field and no
+     ABI word, and exists so a case payload can name it -- which is what
+     lets a fallible operation return an owner branded to the resource
+     that produced it (see issue #344's pool). Empty for every variant
+     that does not use the feature, which is all of them today. Each
      case has at most one directly supported payload in Slice 3. The bool is
      true for `must_use variant`: a checker-only obligation requiring every
      produced value to be handled or transferred on every path, without

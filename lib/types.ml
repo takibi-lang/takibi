@@ -20,7 +20,13 @@ type ty =
   | TStruct of string     (* named struct type *)
   | TView of string * static_term list
     (* Erased affine/linear permission value with checker-only indices. *)
-  | TVariant of string    (* tagged runtime sum; kind is derived from payloads *)
+  | TVariant of string * static_term list
+    (* tagged runtime sum; kind is derived from payloads. The static
+       argument list (GitHub issue #345) is erased, exactly like TView's
+       and TIndexedStruct's -- it exists so a case payload can name the
+       variant's own static parameter, and is unified positionally the
+       same way those are. Empty for every variant that does not declare
+       static parameters. *)
   | TExists of string * Ast.type_expr * static_term * ty
     (* Binder name, static sort, bound static term, payload schema. The
        binder is erased; a runtime owner retains its ordinary layout and an
@@ -220,7 +226,10 @@ let rec to_string t =
   | TView (s, args) ->
       Printf.sprintf "view %s[%s]" s
         (String.concat ", " (List.map static_to_string args))
-  | TVariant s -> Printf.sprintf "variant %s" s
+  | TVariant (s, []) -> Printf.sprintf "variant %s" s
+  | TVariant (s, args) ->
+      Printf.sprintf "variant %s[%s]" s
+        (String.concat ", " (List.map static_to_string args))
   | TExists (name, sort, _, body) ->
       Printf.sprintf "exists %s: %s. %s" name
         (Ast.show_type_expr sort) (to_string body)
@@ -307,6 +316,8 @@ and subst_in_ty old replacement t =
       TIndexedStruct (name, List.map (subst_static_term old replacement) args)
   | TView (name, args) ->
       TView (name, List.map (subst_static_term old replacement) args)
+  | TVariant (name, args) ->
+      TVariant (name, List.map (subst_static_term old replacement) args)
   | TSingleton (base, n) ->
       TSingleton (subst_in_ty old replacement base,
                   subst_static_term old replacement n)
@@ -538,9 +549,14 @@ let rec unify t1 t2 =
           "static argument count mismatch for view %s: %d vs %d"
           s1 (List.length args1) (List.length args2)));
       List.iter2 unify_static args1 args2
-  | TVariant s1, TVariant s2 ->
+  | TVariant (s1, args1), TVariant (s2, args2) ->
       if s1 <> s2 then
-        raise (Unify_error (Printf.sprintf "variant type mismatch: %s vs %s" s1 s2))
+        raise (Unify_error (Printf.sprintf "variant type mismatch: %s vs %s" s1 s2));
+      if List.length args1 <> List.length args2 then
+        raise (Unify_error (Printf.sprintf
+          "static argument count mismatch for variant %s: %d vs %d"
+          s1 (List.length args1) (List.length args2)));
+      List.iter2 unify_static args1 args2
   | TExists (_, sort1, binder1, body1),
     TExists (_, sort2, binder2, body2) ->
       if sort1 <> sort2 then
@@ -632,7 +648,8 @@ let rec of_ast_in_scope scope = function
   | Ast.TypeNamed s      -> TStruct s
   | Ast.TypeView (s, args) ->
       TView (s, List.map (static_of_ast scope) args)
-  | Ast.TypeVariant s    -> TVariant s
+  | Ast.TypeVariant (s, args) ->
+      TVariant (s, List.map (static_of_ast scope) args)
   | Ast.TypeExists (name, sort, body) ->
       let inner_scope = Hashtbl.copy scope in
       let binder = rigid_static name in
@@ -720,6 +737,7 @@ let instantiate_static_params ty =
     | TIndexedStruct (name, args) ->
         TIndexedStruct (name, List.map inst_static args)
     | TView (name, args) -> TView (name, List.map inst_static args)
+    | TVariant (name, args) -> TVariant (name, List.map inst_static args)
     | TSingleton (base, n) -> TSingleton (inst base, inst_static n)
     | TExists _ as t -> t
     | t -> t
@@ -744,7 +762,7 @@ let rec to_ast t =
   | TFun (ps, r, effects) -> Ast.TypeFn (List.map to_ast ps, to_ast r, effects)
   | TStruct s     -> Ast.TypeNamed s
   | TView (s, args) -> Ast.TypeView (s, List.map static_to_ast args)
-  | TVariant s    -> Ast.TypeVariant s
+  | TVariant (s, args) -> Ast.TypeVariant (s, List.map static_to_ast args)
   | TExists (name, sort, _, body) ->
       Ast.TypeExists (name, sort, to_ast body)
   | TIndexedStruct (s, args) ->

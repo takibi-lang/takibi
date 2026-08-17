@@ -107,7 +107,7 @@ let rec size_align_of_type pos seen ty =
         (offset + tsz, max max_align talign)
       ) (0, 1) ts in
       (align_up off max_align, max_align)
-  | TypeVariant name ->
+  | TypeVariant (name, _) ->
       (match Hashtbl.find_opt variants name with
        | None -> fail pos (Printf.sprintf "unknown variant '%s' in sizeof" name)
        | Some cases ->
@@ -137,7 +137,7 @@ let rec size_align_of_type pos seen ty =
        | Some underlying -> size_align_of_type pos seen underlying
        | None ->
            if Hashtbl.mem variants name then
-             size_align_of_type pos seen (TypeVariant name)
+             size_align_of_type pos seen (TypeVariant (name, []))
            else if Hashtbl.mem views name then
              fail pos (Printf.sprintf
                "erased view '%s' has no runtime size or alignment" name)

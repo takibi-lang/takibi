@@ -334,12 +334,16 @@ item:
     { let (vs, ne) = $4 in
       Type_layout.register_enum $2 TypeU32;
       EnumDef ($2, None, vs, ne) }
-  | VARIANT name = IDENT LBRACE cases = variant_cases RBRACE
+  (* GitHub issue #345: the optional `[p: sort, ...]` reuses
+     view_static_params (the same "empty or a static_params list" rule
+     `view` already has), so an indexed variant's payload can name a
+     static parameter -- see Ast.VariantDef. *)
+  | VARIANT name = IDENT ps = view_static_params LBRACE cases = variant_cases RBRACE
     { Type_layout.register_variant name cases;
-      VariantDef (name, cases, false, $symbolstartpos) }
-  | MUST_USE VARIANT name = IDENT LBRACE cases = variant_cases RBRACE
+      VariantDef (name, ps, cases, false, $symbolstartpos) }
+  | MUST_USE VARIANT name = IDENT ps = view_static_params LBRACE cases = variant_cases RBRACE
     { Type_layout.register_variant name cases;
-      VariantDef (name, cases, true, $symbolstartpos) }
+      VariantDef (name, ps, cases, true, $symbolstartpos) }
   | USE STRING SEMI
     { UseDef $2 }
 

@@ -89,7 +89,7 @@ let rec resolve_special_type = function
   | TypeNamed name when Hashtbl.mem erased_view_names name -> TypeView (name, [])
   | TypeIndexed (name, args) when Hashtbl.mem erased_view_names name ->
       TypeView (name, args)
-  | TypeNamed name when Hashtbl.mem variant_defs name -> TypeVariant name
+  | TypeNamed name when Hashtbl.mem variant_defs name -> TypeVariant (name, [])
   | TypePtr t -> TypePtr (resolve_special_type t)
   | TypeIo t -> TypeIo (resolve_special_type t)
   | TypeArray (t, n) -> TypeArray (resolve_special_type t, n)
@@ -658,7 +658,7 @@ let rec ty_str = function
       in
       Printf.sprintf "view %s[%s]" s
         (String.concat ", " (List.map arg args))
-  | TypeVariant s -> s
+  | TypeVariant (s, _) -> s
   | TypeExists (name, sort, body) ->
       Printf.sprintf "exists %s: %s. %s" name (ty_str sort) (ty_str body)
   | TypeIndexed (s, args) ->
@@ -1564,7 +1564,7 @@ let rec ltype_of_ast = function
   | TypeVoid        -> void_type context
   | TypeView (name, _) -> raise (Error (Printf.sprintf
       "internal error: erased view '%s' reached runtime layout" name))
-  | TypeVariant name ->
+  | TypeVariant (name, _) ->
       (match Hashtbl.find_opt variant_lltypes name with
        | Some llty -> llty
        | None -> raise (Error (Printf.sprintf "Unknown variant type: %s" name)))
@@ -2204,9 +2204,14 @@ let as_cond v =
    `struct_instance` (a different representation, `Types.ty` not
    `Ast.type_expr`, already exhaustiveness-checked by OCaml since it's a
    compiler-internal type this file doesn't independently extend). *)
-let struct_name_of_type : Ast.type_expr -> string option = function
+let rec struct_name_of_type : Ast.type_expr -> string option = function
   | TypeNamed s | TypePtr (TypeNamed s) | TypeAlignedPtr (_, TypeNamed s)
   | TypeRef (TypeNamed s) | TypeRefMut (TypeNamed s) -> Some s
+  (* GitHub issue #345: `*T @ place` has the same pointer representation as
+     `*T` -- the address identity is checker-only and erases here -- so
+     reaching a field through one is the same GEP. Mirrors type_inf.ml's
+     struct_instance, which is the type-side half of the same rule. *)
+  | TypeSingleton (base, _) -> struct_name_of_type base
   | _ -> None
 
 (* Look up a struct field by name; returns (field_index, field_ast_type) *)
@@ -2453,9 +2458,9 @@ let function_key (pt : Types.program_types option) (fdef : Ast.func) =
         | TypeNamed name when Hashtbl.mem erased_view_names name -> TypeView (name, [])
         | TypeIndexed (name, _) when Hashtbl.mem erased_view_names name ->
             TypeView (name, [])
-        | TypeNamed name when Hashtbl.mem variant_defs name -> TypeVariant name
+        | TypeNamed name when Hashtbl.mem variant_defs name -> TypeVariant (name, [])
         | TypeView (name, _) -> TypeView (name, [])
-        | TypeVariant name -> TypeVariant name
+        | TypeVariant (name, args) -> TypeVariant (name, args)
         | TypeExists (_, _, body) -> abi_type body
         | TypeBorrow t | TypeBorrowMut t | TypeSink t
         | TypeAlignedPtr (_, t) -> abi_type t
@@ -3113,11 +3118,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 "BUG: payload variant %s::%s reached nullary constructor codegen"
                 ename vname))
             | None -> ());
-           let llty = ltype_of_ast (TypeVariant ename) in
+           let llty = ltype_of_ast (TypeVariant (ename, [])) in
            let value = build_insertvalue (undef llty)
              (const_int (i32_type context) layout.variant_tag) 0
              "variant.tag" builder in
-           (TypeVariant ename, value))
+           (TypeVariant (ename, []), value))
 
   | VariantCtor (vtype, vname, payload) ->
       let layout = variant_case vtype vname in
@@ -3129,7 +3134,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       in
       let payload_ty = runtime_payload_type schema in
       let (_, payload_v) = gen_expr ~expected_ty:payload_ty locals payload in
-      let llty = ltype_of_ast (TypeVariant vtype) in
+      let llty = ltype_of_ast (TypeVariant (vtype, [])) in
       let value = build_insertvalue (undef llty)
         (const_int (i32_type context) layout.variant_tag) 0
         "variant.tag" builder in
@@ -3139,7 +3144,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
             build_insertvalue value (coerce payload_v payload_ty) field
               "variant.payload" builder
       in
-      (TypeVariant vtype, value)
+      (TypeVariant (vtype, []), value)
 
   | SizeOf ty ->
       let elem_llty = ltype_of_ast ty in
@@ -4035,7 +4040,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let overflow = build_extractvalue pair 1 "checked.overflow" builder in
       let value_case = variant_case "CheckedUsize" "Value" in
       let overflow_case = variant_case "CheckedUsize" "Overflow" in
-      let result_ty = TypeVariant "CheckedUsize" in
+      let result_ty = TypeVariant ("CheckedUsize", []) in
       let llty = ltype_of_ast result_ty in
       let value_result = build_insertvalue (undef llty)
         (const_int (i32_type context) value_case.variant_tag) 0
@@ -4574,7 +4579,7 @@ and gen_field_access ~decay locals (base_expr : Ast.expr) (fname : string)
        | TypeNamed name when Hashtbl.mem variant_defs name ->
            let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
            if through_io then set_volatile true v;
-           (TypeVariant name, v)
+           (TypeVariant (name, []), v)
        | TypeNamed ename when Hashtbl.mem enum_underlying ename ->
            (* Enum struct field reached through a POINTER to the struct
               (an array element, a *Struct parameter) rather than an
@@ -5372,7 +5377,7 @@ let gen_func ?prog_types fdef =
           | _ -> None
         ) arms in
         let variant_name = match disc_ty with
-          | TypeVariant name -> Some name
+          | TypeVariant (name, _) -> Some name
           | TypeNamed name when Hashtbl.mem variant_defs name -> Some name
           (* An existential binder can make the codegen-local expression type
              less precise than the already-checked match arms.  Recover the
@@ -6288,7 +6293,7 @@ let gen_program ?prog_types prog =
   Hashtbl.reset noreturn_functions;
   List.iter (function
     | ViewDef (name, _, _, _, _) -> Hashtbl.replace erased_view_names name ()
-    | VariantDef (name, cases, _, _) -> Hashtbl.replace variant_defs name cases
+    | VariantDef (name, _, cases, _, _) -> Hashtbl.replace variant_defs name cases
     | ExternFuncDef (name, _, _, Some effects)
       when List.mem "noreturn" effects ->
         Hashtbl.replace noreturn_functions name ()
@@ -6362,7 +6367,7 @@ let gen_program ?prog_types prog =
      union before Takibi has a settled ABI.  Erased view payloads and
      existential binders add no field; the existential body still does. *)
   List.iter (function
-    | VariantDef (name, cases, _, _) ->
+    | VariantDef (name, _, cases, _, _) ->
         let next_field = ref 1 in
         let runtime_fields = ref [] in
         let layouts = List.mapi (fun tag (cname, payload) ->
