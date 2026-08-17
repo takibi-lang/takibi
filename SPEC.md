@@ -494,10 +494,14 @@ fn slot_unlease(lease: sink SlotLease[n]) {}
   value is `n`". It has exactly the same LLVM representation as `T` and
   preserves any refinement range already carried by `T`; for example,
   `{0..<4 as usize} @ n` proves both identity and array bounds.
-- When `T` is a pointer, `T @ place` instead relates that pointer to a static
-  value of sort `addr`. It has the same pointer representation as `T`; the
-  address identity is checker-only. Pointer singletons are used by the
-  indexed lock guards described below.
+- When `T` is a pointer or a reference (`&T`/`&mut T`, GitHub issue #347),
+  `T @ place` instead relates that value to a static value of sort `addr`.
+  It has the same representation as `T`; the address identity is
+  checker-only. The annotation binds OUTSIDE the qualifier: `*T @ place`
+  and `&mut T @ place` are "the pointer/reference to T, indexed by place",
+  never a singleton stored behind it. Address singletons are used by the
+  indexed lock guards described below, and by any API that ties a handle
+  to the resource that minted it (see "Indexed Variants").
 - `Name[n]` has the declared struct fields at runtime. Its static arguments
   do not add fields or ABI words. Unbound static names in function signatures
   are implicitly universally quantified and instantiated freshly per call.
@@ -1080,8 +1084,8 @@ must_use variant PoolTake[pool: addr] {
     Got(exists allocation: usize. PoolOwner[pool, allocation]);
 }
 
-fn pool_take(T: type, p: *Pool(T) @ pool) -> PoolTake[pool] { ... }
-fn pool_give(T: type, p: *Pool(T) @ pool, o: sink PoolOwner[pool, allocation]) {}
+fn pool_take(T: type, p: &mut Pool(T) @ pool) -> PoolTake[pool] { ... }
+fn pool_give(T: type, p: &mut Pool(T) @ pool, o: sink PoolOwner[pool, allocation]) {}
 ```
 
 This is what makes a **fallible** acquire brandable. Without it, the

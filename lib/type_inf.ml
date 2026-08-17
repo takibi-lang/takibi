@@ -580,7 +580,9 @@ let adapt_actual_to_expected (tyenv : tyenv) (e : Ast.expr)
   | TSingleton _, TSingleton _ -> actual
   | TSingleton (expected_base, _), _ ->
       let is_address = match repr expected_base with
-        | TPtr _ | TAlignedPtr _ -> true
+        (* GitHub issue #347: a reference is an address value too, and its
+           identity comes from the same `&name` place a pointer's does. *)
+        | TPtr _ | TAlignedPtr _ | TRef _ | TRefMut _ -> true
         | _ -> false
       in
       let identity_for_immutable_name ~is_address name =
@@ -3676,6 +3678,21 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
       unify_at e.loc actual expected;
       check_literal_fits_refined e.loc e expected;
       actual
+  (* GitHub issue #347: `&mut T @ place` -- the same mint as the two cases
+     above (which type of reference to produce still comes from the
+     expected type), plus the address identity, which
+     adapt_actual_to_expected derives from the `&name` place exactly as it
+     already does for `*T @ place`. Without this case the singleton
+     wrapper hid the TRef/TRefMut from the dispatch, and `&x` fell to the
+     generic branch below and produced a raw pointer. *)
+  | AddrOf inner, TSingleton (ref_base, _)
+    when (match repr ref_base with TRef _ | TRefMut _ -> true | _ -> false) ->
+      let mode = match repr ref_base with TRefMut _ -> `RefMut | _ -> `Ref in
+      let actual = infer_addrof_wrapped senv eenv tyenv fenv e inner mode in
+      let actual = adapt_actual_to_expected tyenv e actual expected in
+      unify_at e.loc actual expected;
+      check_literal_fits_refined e.loc e expected;
+      actual
   | _ ->
       let te = infer_expr senv eenv tyenv fenv e in
       (* GitHub issue #323: existential elimination, moved here from the
@@ -5313,7 +5330,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | (Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
       | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
       | Ast.TypeIsize | Ast.TypeUsize) as t -> t
-    | Ast.TypePtr _ | Ast.TypeAlignedPtr _ -> Ast.TypeNamed "addr"
+    (* GitHub issue #347: `&T`/`&mut T` are reference VALUES with the same
+       representation as a pointer, so an address identity on one means
+       exactly what it means on `*T` -- see SPEC.md's "Indexed Runtime
+       Owners" on pointer singletons. Without this, a branded API had to
+       take a raw pointer, undoing issue #314 at its own call sites. *)
+    | Ast.TypePtr _ | Ast.TypeAlignedPtr _
+    | Ast.TypeRef _ | Ast.TypeRefMut _ -> Ast.TypeNamed "addr"
     | t -> raise (TypeError (loc, Printf.sprintf
         "singleton '@' requires an integer or pointer runtime type, got %s"
         (Types.to_string (Types.of_ast t))))
@@ -5825,6 +5848,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         validate_ref_referent loc inner;
         validate_complete_type loc true inner
     | Ast.TypeRefMut inner ->
+        validate_ref_referent loc inner;
+        validate_complete_type loc true inner
+    (* GitHub issue #347: `&mut T @ place` parses (via parser.mly's
+       lift_singleton) as the REFERENCE indexed by place, exactly as
+       `*T @ place` does for a pointer -- so it still wraps the entire
+       parameter type, and the referent is validated the same way. *)
+    | Ast.TypeSingleton ((Ast.TypeRef inner | Ast.TypeRefMut inner), _) ->
         validate_ref_referent loc inner;
         validate_complete_type loc true inner
     | ty ->

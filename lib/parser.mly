@@ -5,7 +5,13 @@ open Ast
    normalization `*T @ place` would build `*(T @ place)`. Singleton values
    are forbidden behind pointers; the useful and documented interpretation
    is instead "the pointer T, indexed by place". Applying the same
-   lift through [io] makes `*io T @ place` behave consistently. *)
+   lift through [io] makes `*io T @ place` behave consistently, and
+   (GitHub issue #347) through `&`/`&mut` makes `&mut T @ place` mean
+   "the reference to T, indexed by place" -- the only reading that is
+   meaningful, since an identity is a fact about a reference VALUE and
+   `&mut T`'s pointee is not one. Without it a branded API had to be
+   spelled with a raw pointer, undoing issue #314 at exactly the call
+   sites it was written for. *)
 let lift_singleton wrap = function
   | TypeSingleton (base, arg) -> TypeSingleton (wrap base, arg)
   | ty -> wrap ty
@@ -988,8 +994,8 @@ type_expr:
   | BORROW MUT t = type_expr { TypeBorrowMut t }
   | BORROW t = type_expr { TypeBorrow t }
   | SINK t = type_expr { TypeSink t }
-  | AMP MUT t = type_expr { TypeRefMut t }
-  | AMP t = type_expr { TypeRef t }
+  | AMP MUT t = type_expr { lift_singleton (fun t -> TypeRefMut t) t }
+  | AMP t = type_expr { lift_singleton (fun t -> TypeRef t) t }
   | EXISTS name = IDENT COLON sort = static_sort_expr DOT body = type_expr
     { TypeExists (name, sort, body) }
   | LBRACE lo = refined_bound DOTDOTLT hi = refined_bound RBRACE

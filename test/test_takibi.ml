@@ -10771,6 +10771,66 @@ let codegen_tests = [
      the same widening/hint logic #232 relies on has already resolved v1's
      real width), using the actual LLVM type rather than the AST-level
      nominal type -- see llvm_gen.ml's BinOp comment for why. *)
+  (* GitHub issue #347: the same brand, spelled on issue #314's reference
+     type instead of a raw pointer. `&mut T @ place` binds outside the
+     reference (parser.mly's lift_singleton), so it still wraps the whole
+     parameter type. *)
+  Alcotest.test_case
+    "issue #347: `&mut T @ place` brands a handle, same as the pointer form"
+    `Quick
+    (expect_codegen_ok
+       "generic struct Issue347Pool(T: type) { head: usize; }
+        private linear struct Issue347Owner[pool: addr, allocation: usize] {
+          private slot: usize;
+          private generation: usize @ allocation;
+        }
+        fn issue347_owner_new(T: type, p: &mut Issue347Pool(T) @ pool,
+                              slot: usize, generation: usize @ allocation)
+                -> Issue347Owner[pool, allocation] {
+          let mut o: Issue347Owner[pool, allocation] = { slot, generation };
+          return o;
+        }
+        fn issue347_take(T: type, p: &mut Issue347Pool(T) @ pool)
+                -> Issue347Owner[pool, 1] {
+          p.head = p.head + 1;
+          return issue347_owner_new(p, 0, 1);
+        }
+        fn issue347_give(T: type, p: &mut Issue347Pool(T) @ pool,
+                         o: sink Issue347Owner[pool, allocation]) {}
+        fn codegen_issue347_ok() {
+          let mut pool_a: Issue347Pool(usize);
+          let oa = issue347_take(&pool_a);
+          issue347_give(&pool_a, oa);
+        }");
+
+  Alcotest.test_case
+    "issue #347: a `&mut T @ place` brand rejects the wrong pool too"
+    `Quick
+    (expect_type_error "static value mismatch"
+       "generic struct Issue347Pool(T: type) { head: usize; }
+        private linear struct Issue347Owner[pool: addr, allocation: usize] {
+          private slot: usize;
+          private generation: usize @ allocation;
+        }
+        fn issue347_owner_new(T: type, p: &mut Issue347Pool(T) @ pool,
+                              slot: usize, generation: usize @ allocation)
+                -> Issue347Owner[pool, allocation] {
+          let mut o: Issue347Owner[pool, allocation] = { slot, generation };
+          return o;
+        }
+        fn issue347_take(T: type, p: &mut Issue347Pool(T) @ pool)
+                -> Issue347Owner[pool, 1] {
+          return issue347_owner_new(p, 0, 1);
+        }
+        fn issue347_give(T: type, p: &mut Issue347Pool(T) @ pool,
+                         o: sink Issue347Owner[pool, allocation]) {}
+        fn codegen_issue347_wrong() {
+          let mut pool_a: Issue347Pool(usize);
+          let mut pool_b: Issue347Pool(usize);
+          let oa = issue347_take(&pool_a);
+          issue347_give(&pool_b, oa);
+        }");
+
   (* GitHub issue #345: a variant with its own static parameters, which is
      what lets a FALLIBLE operation return an owner branded to the
      resource that produced it. Without it, `*T @ place` branding (issue
