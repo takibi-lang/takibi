@@ -376,6 +376,14 @@ fn kernel_test_platform_storage() {
                     // a syscall-return path outside fn main()'s own scope.
                     saved_ext2_mount = mount;
                     ext2_mount_ready = true;
+                    // The memory-backed fixture is the root filesystem used
+                    // by the init process below.  Configure the syscall
+                    // path from this mount even when USB MSC provisioning
+                    // was unavailable (and also replace the temporary USB
+                    // mount when it was available); otherwise openat(2)
+                    // observes syscall_ext2_ready == false and reports
+                    // EBADF for /etc/init.sh.
+                    kernel_syscall_ext2_configure(mount);
                     if (ext2_fixture_geometry_is_expected(mount)) {
                         kernel_boot_log("ext2 mount: block=1024 inodes=1024 blocks=4096\n");
                     }
