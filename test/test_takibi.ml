@@ -9221,6 +9221,27 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
+    "slice-length fallthrough narrowing accepts sizeof(packed struct) as \
+     the natural bound" `Quick
+    (expect_trap_sites 0
+       "struct packed F218ElfHeader { tag: u32; address: u64; }
+        fn f218_sizeof_fallthrough(s: []u8) -> usize {
+          if (s.len < sizeof(F218ElfHeader)) { return 0; }
+          let header = s[0..<sizeof(F218ElfHeader)];
+          return header.len;
+        }");
+
+  Alcotest.test_case
+    "target-dependent sizeof does not become an unsound slice-length proof" `Quick
+    (expect_trap_sites 1
+       "struct F218NativeHeader { tag: u8; address: usize; }
+        fn f218_native_sizeof(s: []u8) -> usize {
+          if (s.len < sizeof(F218NativeHeader)) { return 0; }
+          let header = s[0..<sizeof(F218NativeHeader)];
+          return header.len;
+        }");
+
+  Alcotest.test_case
     "runtime endpoint evidence is tied to the compared slice" `Quick
     (expect_trap_sites 1
        "fn f218_endpoint_wrong_slice(s: []u8, t: []u8, end: usize) -> usize {

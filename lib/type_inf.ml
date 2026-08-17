@@ -363,6 +363,22 @@ let const_field_offset (senv : senv) (sname : string) (field : string) : int opt
       in go fields
   | _ -> None
 
+(* Values admissible as static slice-length bounds. Const_env handles the
+   ordinary literal/const arithmetic; sizeof/offsetof need the struct layout
+   environment above. Keep this deliberately restricted to the same
+   target-independent layouts for which SizeOf/OffsetOf infer refined
+   singleton types. llvm_gen.ml mirrors this resolver and rechecks those
+   layouts against LLVM's actual DataLayout. *)
+let static_slice_bound (senv : senv) (e : Ast.expr) : int option =
+  match Const_env.folded_value e with
+  | Some _ as value -> value
+  | None ->
+      (match e.desc with
+       | Ast.SizeOf ty -> const_type_size senv ty
+       | Ast.OffsetOf (Ast.TypeNamed name, field) ->
+           const_field_offset senv name field
+       | _ -> None)
+
 (* Enum environment: maps enum name to (underlying_ast_type, [(variant_name, value)]) *)
 type eenv = (Ast.type_expr * (string * int) list) StringMap.t
 
@@ -3704,7 +3720,7 @@ let collect_bounds tyenv (cond : Ast.expr) : (int option * int option) StringMap
    that proof (`if (v >= 0 && v < 8) { v = 100; use(v); }`). The kill set
    comes from Ast.written_names; llvm_gen.ml's apply_narrowing/_mut use the
    same function on the same body (sync rule -- see written_names' comment). *)
-let narrow_from_cond tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
+let narrow_from_cond senv tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
   let killed = Ast.written_names then_body in
   let bounds = collect_bounds tyenv cond in
   let env =
@@ -3766,7 +3782,8 @@ let narrow_from_cond tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
                StringMap.add name (TSlice (el, k), is_mut) env
            | _ -> env)
       | None -> env
-  ) env (Ast.slice_len_mins ~resolve_const:Const_env.find cond)
+  ) env (Ast.slice_len_mins ~resolve_const:Const_env.find
+           ~resolve_bound:(static_slice_bound senv) cond)
 
 (* Logical negation of a condition expression, for narrowing the
    fallthrough path after an early-return guard (`if (cond) { return
@@ -4157,7 +4174,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          nested processing would see the wrong (inner) scope's value
          instead of this If's own position in ITS enclosing list. *)
       let future_writes_here = !enclosing_future_writes in
-      let then_tyenv = narrow_from_cond tyenv cond then_s in
+      let then_tyenv = narrow_from_cond senv tyenv cond then_s in
       let (_, rl1) = fold_stmts_with_future_writes
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
         (then_tyenv, raw_locals) then_s
@@ -4228,7 +4245,8 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         if stmt_list_always_returns then_s then begin
           record_guard_narrow_hints cond;  (* GitHub issue #310 *)
           match negate_cond cond with
-          | Some neg -> filter_by_future_writes (narrow_from_cond tyenv neg else_s)
+          | Some neg ->
+              filter_by_future_writes (narrow_from_cond senv tyenv neg else_s)
           | None -> tyenv
         end else tyenv
       in
@@ -4260,7 +4278,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          update -- without it this would be a real --forbid-trap
          regression risk (proving more here without codegen eliding the
          matching check). *)
-      let narrowed_tyenv = narrow_from_cond tyenv cond body in
+      let narrowed_tyenv = narrow_from_cond senv tyenv cond body in
       let (_, raw_locals') = fold_stmts_with_future_writes
         (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
         (narrowed_tyenv, raw_locals) body

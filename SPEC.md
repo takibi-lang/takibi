@@ -1594,7 +1594,11 @@ the slice's actual (runtime) `.len` is generated.
 proven minimum to `K` for the branch, the same way integer narrowing
 upgrades a value's range (see "Refined Integer Types"/narrowing below),
 and is subject to the identical kill rule (an assignment, `&`-alias, or
-rebinding of the slice inside the branch invalidates the narrowing).
+rebinding of the slice inside the branch invalidates the narrowing). `K`
+may be a literal, a compile-time `const`, or a target-independent
+`sizeof(...)`/`offsetof(...)` value. The fallthrough after an early-return
+guard such as `if (s.len < sizeof(Header)) { return; }` carries the same
+minimum-length proof.
 
 **Runtime endpoint evidence**: a guard comparing a `usize` endpoint with
 the same slice's runtime length proves a following subslice without adding

@@ -749,34 +749,34 @@ let var_plus_const (e : expr) : (ident * int) option =
 
 (* Slice length lower bounds proven by an if condition: [(name, min_len)].
    Recognized shapes (joined by &&): `s.len >= K`, `s.len > K`,
-   `K <= s.len`, `K < s.len` with K a bare integer literal OR (GitHub
-   issue #185) a reference to a compile-time `const`. Used by
+   `K <= s.len`, `K < s.len` with K a statically resolved integer. Used by
    if-narrowing to upgrade a slice binding's compile-time minimum length
    within the then-branch (subject to the same written_names kill rule as
    integer range narrowing). Single shared implementation for type_inf.ml
    and llvm_gen.ml -- sync rule, same reasoning as written_names above.
 
-   `resolve_const` resolves a bare name to a known compile-time integer
-   constant -- callers pass `Const_env.find`. ast.ml cannot depend on
-   const_env.ml directly (const_env.ml's own bound_value takes an
-   Ast.expr, so the dependency already runs the other way), so this is
-   injected rather than called directly; its default (always `None`)
-   keeps any caller that does not pass it behaving exactly as before.
-   Const_env.find's own shadowing precondition (see its bound_value
-   comment) means a `Var` naming a registered const can only ever denote
-   the global constant, never a same-named local, so no separate check
-   is needed here. *)
+   `resolve_bound` is injected because ast.ml cannot depend on the type and
+   layout environments needed to resolve target-independent sizeof/offsetof
+   expressions. Its default preserves the original literal/const behavior;
+   type inference and codegen pass matching resolvers so neither side can
+   prove a wider class than the other. `resolve_const` remains separate for
+   callers which only have Const_env's name table. *)
 let slice_len_mins ?(resolve_const = fun (_ : string) -> None)
+    ?resolve_bound
     (cond : expr) : (string * int) list =
   let acc = Hashtbl.create 4 in
   let update name k =
     let prev = match Hashtbl.find_opt acc name with Some p -> p | None -> 0 in
     Hashtbl.replace acc name (max prev k)
   in
-  let bound_of e = match e.desc with
+  let default_bound e = match e.desc with
     | IntLit k -> int_of_intlit k
     | Var name -> resolve_const name
     | _ -> None
+  in
+  let bound_of = match resolve_bound with
+    | Some f -> f
+    | None -> default_bound
   in
   let rec go e = match e.desc with
     | BinOp (And, e1, e2) -> go e1; go e2

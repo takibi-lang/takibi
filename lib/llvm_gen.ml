@@ -178,6 +178,19 @@ let const_field_offset (sname : string) (field : string) : int option =
       in go fields
   | _ -> None
 
+(* Codegen mirror of type_inf.ml's static_slice_bound. Only layouts for
+   which both phases can compute a target-independent value participate;
+   SizeOf codegen separately cross-checks that value against DataLayout. *)
+let static_slice_bound (e : Ast.expr) : int option =
+  match Const_env.folded_value e with
+  | Some _ as value -> value
+  | None ->
+      (match e.desc with
+       | Ast.SizeOf ty -> const_type_size ty
+       | Ast.OffsetOf (Ast.TypeNamed name, field) ->
+           const_field_offset name field
+       | _ -> None)
+
 (* Target data layout -- set by setup_target; used for struct tail-padding computation *)
 let target_data : Llvm_target.DataLayout.t option ref = ref None
 (* GitHub issue #326: the raw triple/datalayout strings setup_target last
@@ -1009,7 +1022,8 @@ let apply_narrowing (locals : (string, local_binding) Hashtbl.t)
           Hashtbl.replace locals name (Imm (TypeSlice (el, k), v));
           (name, old) :: saved
       | _ -> saved
-  ) saved (Ast.slice_len_mins ~resolve_const:Const_env.find cond)
+  ) saved (Ast.slice_len_mins ~resolve_const:Const_env.find
+             ~resolve_bound:static_slice_bound cond)
 
 let restore_narrowing (locals : (string, local_binding) Hashtbl.t) saved =
   List.iter (fun (name, old) -> Hashtbl.replace locals name old) saved
@@ -1084,7 +1098,8 @@ let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t)
           Hashtbl.replace narrowing_ctx name (TypeSlice (el, max m k));
           (name, old) :: saved
       | _ -> saved
-  ) saved (Ast.slice_len_mins ~resolve_const:Const_env.find cond)
+  ) saved (Ast.slice_len_mins ~resolve_const:Const_env.find
+             ~resolve_bound:static_slice_bound cond)
 
 let restore_narrowing_mut saved =
   List.iter (fun (name, old_opt) ->
