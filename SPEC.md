@@ -1634,6 +1634,22 @@ already-proven minimum (the initializer's stronger proof survives); a
 `let mut` binding always uses its declared (possibly weaker) type, since
 reassignment can genuinely bring a shorter slice later.
 
+**Design principle -- keep `[]T`/`[T; N..]` to exactly this one shape.**
+GitHub issue #318 (string-literal `*u8` casts) considered, then
+deliberately rejected, tagging `[]u8` with an additional proof (e.g. a
+"NUL-terminated" flag, via the same construction-path-limiting + kill-
+rule pattern `embed_file` already uses for its own position
+restriction). Multiplying slice/string type variants by proven property
+is exactly the usability trap ATS2's `string`/`strptr`/`strnptr` split
+became in practice (see HISTORY.md's 2026-08-17 entry) -- a caller has
+to know which variant a given call site wants and convert between them,
+which stops being "the safe default" and starts being its own tax. If a
+stronger guarantee is ever genuinely needed, prefer expressing it as an
+ordinary refinement on the existing `usize` minimum (the same literal-
+arithmetic folding `[T; N]`'s own array-size position already allows,
+see "Arrays and Pointers" below) over introducing a new type or tagged
+variant.
+
 ## Authority-Derived Region Returns
 
 ### Owner-derived slices

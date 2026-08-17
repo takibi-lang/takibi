@@ -18827,3 +18827,24 @@ regression test) and `kernelcheck-qemu` (38/38 views, including the
 `userspace` view that exercises every `user_payload.tkb` fixture
 touched here). RPi5 hardware verification intentionally deferred --
 out of this session's scope.
+
+**Design principle recorded, not just applied.** A follow-up discussion
+the same session walked through `*u8`/`[]u8`'s asymmetry (`[]u8 as *u8`
+is free for `T=u8`; the reverse requires a real array/literal/slice
+source, confirmed by hand-compiling both directions), the space cost of
+the fat-pointer representation, and whether `[]u8`'s minimum-only length
+(no upper bound in the type) would bite a future string library. That
+surfaced a real risk from the user's own ATS2 experience: `string`/
+`strptr`/`strnptr` (three string types differing by linearity/ownership,
+Postiats' prelude) forced callers to know which variant a given call
+site wanted and convert between them -- a real usability tax, not a
+theoretical one. Since this issue's own investigation had briefly
+considered tagging `[]u8` with a "NUL-terminated" proof (construction-
+path-limiting + kill-rule, the same style `embed_file` already uses) to
+let a slice bridge to `uart_puts` unsafe-free, and deliberately did NOT
+build it, the session closed by writing that restraint down as a
+standing principle rather than leaving it as something only this
+session's transcript remembers: SPEC.md's "Slices" section now states
+explicitly that `[]T`/`[T; N..]` should stay one shape, and any future
+stronger guarantee should extend the existing minimum-length refinement
+rather than add a tagged variant.
