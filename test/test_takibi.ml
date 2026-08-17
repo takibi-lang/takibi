@@ -9212,6 +9212,22 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
+    "constant suffix start within the slice minimum proves ordering against runtime .len" `Quick
+    (expect_trap_sites 0
+       "fn f218_static_suffix(s: [u8; 2..]) -> usize {
+          let suffix = s[1..<s.len];
+          return suffix.len;
+        }");
+
+  Alcotest.test_case
+    "constant suffix start beyond the slice minimum keeps its runtime check" `Quick
+    (expect_trap_sites 1
+       "fn f218_static_suffix_unproven(s: []u8) -> usize {
+          let suffix = s[1..<s.len];
+          return suffix.len;
+        }");
+
+  Alcotest.test_case
     "early-return endpoint guard proves the fallthrough subslice" `Quick
     (expect_trap_sites 0
        "fn f218_guarded_fallthrough(s: []u8, end: usize) -> usize {

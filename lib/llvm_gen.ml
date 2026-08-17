@@ -3672,13 +3672,21 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         (* A runtime guard such as `end <= s.len` is itself the bounds
            check. Reusing that fact for `s[0..<end]` must not emit a second
            trap; likewise `start <= s.len` proves `s[start..<s.len]`.
-           These facts are identity-specific and branch-scoped. *)
+           A constant suffix start within the slice's proven minimum is also
+           ordered before `s.len`, independently of the runtime tail length.
+           Runtime endpoint facts are identity-specific and branch-scoped. *)
         let runtime_endpoint_proven =
           let hi_within = endpoint_proven hi_e || is_base_len hi_e in
+          let constant_start_within_min =
+            match Const_env.folded_value lo_e with
+            | Some start -> start >= 0 && start <= min_len
+            | None -> false
+          in
           let ordered =
             same_base_len <> None
             || (Const_env.folded_value lo_e = Some 0)
             || (is_base_len hi_e && endpoint_proven lo_e)
+            || (is_base_len hi_e && constant_start_within_min)
           in
           hi_within && ordered
         in

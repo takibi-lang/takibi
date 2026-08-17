@@ -1608,7 +1608,10 @@ comparisons and the fallthrough after an early-return guard are equivalent.
 The evidence is tied to the exact endpoint and slice bindings and is killed
 if either is reassigned or aliased; it cannot justify a subslice of another
 slice. Equality with `.len` is valid for an endpoint, but does not make the
-same value a valid single-element index.
+same value a valid single-element index. A constant suffix
+`s[K..<s.len]` is likewise trap-free when the slice's proven minimum length
+is at least `K`; the minimum-length guarantee proves that `K <= s.len` for
+every runtime length of the slice.
 
 **`for x in slice_expr { ... }`** -- safe-by-construction element
 iteration: the compiler generates the counter, length compare, and
