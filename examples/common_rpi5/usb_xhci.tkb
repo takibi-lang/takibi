@@ -60,18 +60,28 @@ const CTX_STRIDE: usize = 64;
 const INPUT_CTX_SIZE: usize = 2112;  // 33 * CTX_STRIDE
 const DEVICE_CTX_SIZE: usize = 2048; // 32 * CTX_STRIDE
 
-let mut xhci_dcbaa: [u8; 65 * 8] align(64);
-let mut xhci_scratchpad_array: [u8; 2 * 8] align(64);
+// Every transfer request block is four 32-bit words.  Representing rings as
+// typed arrays keeps their 16-byte layout while making word selection checked
+// rather than recreating pointers from calculated byte addresses.
+struct Trb {
+    dw0: u32;
+    dw1: u32;
+    dw2: u32;
+    dw3: u32;
+}
+
+let mut xhci_dcbaa: [u32; 65 * 2] align(64);
+let mut xhci_scratchpad_array: [u32; 2 * 2] align(64);
 let mut xhci_scratchpad_buf0: [u8; 4096] align(4096);
 let mut xhci_scratchpad_buf1: [u8; 4096] align(4096);
-let mut xhci_cmd_ring: [u8; CMD_RING_TRBS * 16] align(64);
-let mut xhci_evt_ring: [u8; EVT_RING_TRBS * 16] align(64);
-let mut xhci_erst: [u8; 16] align(64);
-let mut xhci_input_ctx: [u8; INPUT_CTX_SIZE] align(64);
-let mut xhci_device_ctx: [u8; DEVICE_CTX_SIZE] align(64);
-let mut xhci_ep0_ring: [u8; EP0_RING_TRBS * 16] align(64);
-let mut xhci_bulk_in_ring: [u8; BULK_RING_TRBS * 16] align(64);
-let mut xhci_bulk_out_ring: [u8; BULK_RING_TRBS * 16] align(64);
+let mut xhci_cmd_ring: [Trb; CMD_RING_TRBS] align(64);
+let mut xhci_evt_ring: [Trb; EVT_RING_TRBS] align(64);
+let mut xhci_erst: [u32; 4] align(64);
+let mut xhci_input_ctx: [u32; INPUT_CTX_SIZE / 4] align(64);
+let mut xhci_device_ctx: [u32; DEVICE_CTX_SIZE / 4] align(64);
+let mut xhci_ep0_ring: [Trb; EP0_RING_TRBS] align(64);
+let mut xhci_bulk_in_ring: [Trb; BULK_RING_TRBS] align(64);
+let mut xhci_bulk_out_ring: [Trb; BULK_RING_TRBS] align(64);
 let mut xhci_ctrl_buf: [u8; 256] align(64);
 
 let mut xhci_slot_id: usize = 0;
@@ -138,37 +148,29 @@ let mut xhci_cmd_cycle: u32 = 1;
 // at which a 3-TRB control TD first failed to fit before the Link TRB.
 // examples/rp1_usb_smoke/rp1_usb_smoke.tkb never hit this only because
 // it happened to issue one fewer control transfer and stopped at 14.
-fn xhci_ring_close_segment(ring_base: usize, link_idx: usize,
+fn xhci_ring_close_segment(ring: *Trb, link_idx: usize,
                            from_idx: usize, cycle: u32, noop_type: u32) {
     let mut pad: usize = from_idx;
     for k: usize in 0..<64 {
         if (pad >= link_idx) {
             break;
         }
-        let o: usize = pad * 16;
-        let d0_ptr: *u32 = (ring_base + o) as *u32;
-        *d0_ptr = 0;
-        let d1_ptr: *u32 = (ring_base + o + 4) as *u32;
-        *d1_ptr = 0;
-        let d2_ptr: *u32 = (ring_base + o + 8) as *u32;
-        *d2_ptr = 0;
-        let d3_ptr: *u32 = (ring_base + o + 12) as *u32;
-        *d3_ptr = cycle | (noop_type << 10);
+        ring[pad as isize].dw0 = 0;
+        ring[pad as isize].dw1 = 0;
+        ring[pad as isize].dw2 = 0;
+        ring[pad as isize].dw3 = cycle | (noop_type << 10);
         pad = pad + 1;
     }
     // Link TRB: its pointer (DWORD0/1) was written once at ring setup
     // and never changes; only the Cycle bit needs republishing.
-    let link_off: usize = link_idx * 16;
-    let link_dw3_ptr: *u32 = (ring_base + link_off + 12) as *u32;
-    *link_dw3_ptr = cycle | (1 << 1) | (6 << 10); // Cycle | Toggle Cycle | Link
+    ring[link_idx as isize].dw3 = cycle | (1 << 1) | (6 << 10); // Cycle | Toggle Cycle | Link
 }
 
 fn xhci_cmd_advance() {
     xhci_cmd_enq = xhci_cmd_enq + 1;
     let link_idx: usize = CMD_RING_TRBS - 1;
     if (xhci_cmd_enq + 1 > link_idx) {
-        let cmd_ring_base: usize = (xhci_cmd_ring as *u8) as usize;
-        xhci_ring_close_segment(cmd_ring_base, link_idx, xhci_cmd_enq,
+        xhci_ring_close_segment(xhci_cmd_ring as *Trb, link_idx, xhci_cmd_enq,
                                 xhci_cmd_cycle, 23);
         dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
         xhci_cmd_enq = 0;
@@ -290,7 +292,7 @@ fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
     let need: usize = 3;
     let ep0_link_idx: usize = EP0_RING_TRBS - 1;
     if (xhci_ep0_enq + need > ep0_link_idx) {
-        xhci_ring_close_segment(ep0_ring_base, ep0_link_idx, xhci_ep0_enq,
+        xhci_ring_close_segment(xhci_ep0_ring as *Trb, ep0_link_idx, xhci_ep0_enq,
                                 xhci_ep0_cycle, 8);
         xhci_ep0_enq = 0;
         xhci_ep0_cycle = 1 - xhci_ep0_cycle;
@@ -357,11 +359,13 @@ fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
 // 13 is Short Packet, both of which mean the data arrived.
 fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 !{unsafe} {
     let mut ring_base: usize = (xhci_bulk_out_ring as *u8) as usize;
+    let mut ring: *Trb = xhci_bulk_out_ring as *Trb;
     let mut enq: usize = xhci_bulk_out_enq;
     let mut cyc: u32 = xhci_bulk_out_cycle;
     let mut dci: usize = xhci_bulk_out_dci;
     if (dir_in) {
         ring_base = (xhci_bulk_in_ring as *u8) as usize;
+        ring = xhci_bulk_in_ring as *Trb;
         enq = xhci_bulk_in_enq;
         cyc = xhci_bulk_in_cycle;
         dci = xhci_bulk_in_dci;
@@ -375,7 +379,7 @@ fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 !{unsafe} {
     // silently kills the ring.
     let bulk_link_idx: usize = BULK_RING_TRBS - 1;
     if (enq + 1 > bulk_link_idx) {
-        xhci_ring_close_segment(ring_base, bulk_link_idx, enq, cyc, 8);
+        xhci_ring_close_segment(ring, bulk_link_idx, enq, cyc, 8);
         enq = 0;
         cyc = 1 - cyc;
     }
