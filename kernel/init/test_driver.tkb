@@ -75,17 +75,20 @@ fn kernel_exec_argv0_name() -> ExecArgv0NameResult !{unsafe} {
     if (first_byte != 0x2F) {
         return ExecArgv0NameResult::Invalid;
     }
-    let mut end: usize = 1;
-    while (end < argv.len) {
-        let current: u8 = unsafe { argv[end] };
-        if (current == 0) { break; }
-        end = end + 1;
+    let name_bytes: []u8 = argv[1..<argv.len];
+    let mut end: usize = name_bytes.len;
+    for position: usize in 0..<name_bytes.len {
+        let current: u8 = name_bytes[position];
+        if (current == 0) {
+            end = position;
+            break;
+        }
     }
-    if (end >= argv.len) {
-        return ExecArgv0NameResult::Invalid;
+    if (end < name_bytes.len) {
+        let name: []u8 = name_bytes[0..<end];
+        return ExecArgv0NameResult::Name(name);
     }
-    let name: []u8 = unsafe { argv[1..<end] };
-    return ExecArgv0NameResult::Name(name);
+    return ExecArgv0NameResult::Invalid;
 }
 
 struct Ext2ExecImage {
