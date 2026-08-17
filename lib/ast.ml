@@ -2,6 +2,25 @@ type loc = Lexing.position
 
 let pp_loc fmt _ = Format.fprintf fmt "<loc>"
 
+(* The real source file a loc came from, with any per-instantiation suffix
+   removed. lib/monomorphize.ml's relocate_loc appends "#" ^ mangled name
+   to pos_fname so that a nested generic call's Types.loc_key stays unique
+   across instantiations (see its own comment for why that matters); every
+   OTHER consumer of pos_fname wants the file that is actually on disk.
+   Getting that wrong is not cosmetic: type_inf.ml's `private` checks all
+   compare a use site's file against the declaring file, so before this
+   existed, a `private let` global (or `private fn`, or a private struct
+   field) referenced from a GENERIC function in its own declaring file was
+   rejected as a cross-file access -- the use site's pos_fname had been
+   rewritten to "file.tkb#fn$usize" while the declaration's was still
+   "file.tkb". A path containing '#' would defeat this, which is why the
+   split is on the FIRST occurrence: relocate_loc only ever appends, and
+   can append more than once for a nested instantiation. *)
+let source_file_of_loc (loc : loc) : string =
+  match String.index_opt loc.Lexing.pos_fname '#' with
+  | None -> loc.Lexing.pos_fname
+  | Some i -> String.sub loc.Lexing.pos_fname 0 i
+
 type 'a located = {
   desc: 'a;
   loc: loc [@printer pp_loc];

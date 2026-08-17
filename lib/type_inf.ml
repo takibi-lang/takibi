@@ -1061,7 +1061,7 @@ let check_private_global_access (use_loc : Ast.loc) (name : string) : unit =
   if StringSet.mem name !locally_bound_names then ()
   else
     match Hashtbl.find_opt private_globals name with
-    | Some decl_file when decl_file <> use_loc.Lexing.pos_fname ->
+    | Some decl_file when decl_file <> Ast.source_file_of_loc use_loc ->
         raise (TypeError (use_loc, Printf.sprintf
           "'%s' is a private global declared in '%s'; it may only be referenced \
            from that same file" name decl_file))
@@ -1078,7 +1078,7 @@ let check_private_function_access (use_loc : Ast.loc) (name : string) : unit =
   if StringSet.mem name !locally_bound_names then ()
   else
     match Hashtbl.find_opt private_functions name with
-    | Some decl_file when decl_file <> use_loc.Lexing.pos_fname ->
+    | Some decl_file when decl_file <> Ast.source_file_of_loc use_loc ->
         raise (TypeError (use_loc, Printf.sprintf
           "'%s' is a private function declared in '%s'; it may only be \
            referenced from that same file" name decl_file))
@@ -1132,7 +1132,7 @@ let private_views : (string, string) Hashtbl.t = Hashtbl.create 8
 
 let check_private_view_construction (loc : Ast.loc) name =
   match Hashtbl.find_opt private_views name with
-  | Some file when file <> loc.Lexing.pos_fname ->
+  | Some file when file <> Ast.source_file_of_loc loc ->
       raise (TypeError (loc, Printf.sprintf
         "cannot mint private view '%s' outside its declaring file '%s'"
         name file))
@@ -1151,7 +1151,7 @@ let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
   let rec walk = function
     | Ast.TypeNamed n ->
         (match Hashtbl.find_opt private_opaque_types n with
-         | Some file when file <> loc.Lexing.pos_fname ->
+         | Some file when file <> Ast.source_file_of_loc loc ->
              raise (TypeError (loc, Printf.sprintf
                "cannot construct a value of private type '%s' outside its \
                 declaring file '%s' (that file's functions are the only \
@@ -1164,7 +1164,7 @@ let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> walk t
     | Ast.TypeIndexed (n, _) ->
         (match Hashtbl.find_opt private_struct_lit n with
-         | Some file when file <> loc.Lexing.pos_fname ->
+         | Some file when file <> Ast.source_file_of_loc loc ->
              raise (TypeError (loc, Printf.sprintf
                "cannot construct a value of private type '%s' outside its declaring file '%s'"
                n file))
@@ -1176,7 +1176,7 @@ let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
 
 let check_private_field_access (loc : Ast.loc) (sname : string) (fname : string) =
   match Hashtbl.find_opt private_struct_fields (sname, fname) with
-  | Some file when file <> loc.Lexing.pos_fname ->
+  | Some file when file <> Ast.source_file_of_loc loc ->
       raise (TypeError (loc, Printf.sprintf
         "field '%s.%s' is private to '%s'; go through that file's accessor \
          functions" sname fname file))
@@ -1184,7 +1184,7 @@ let check_private_field_access (loc : Ast.loc) (sname : string) (fname : string)
 
 let check_private_struct_literal (loc : Ast.loc) (sname : string) =
   match Hashtbl.find_opt private_struct_lit sname with
-  | Some file when file <> loc.Lexing.pos_fname ->
+  | Some file when file <> Ast.source_file_of_loc loc ->
       raise (TypeError (loc, Printf.sprintf
         "cannot construct struct '%s' with a literal outside '%s': it has \
          private fields (use that file's constructor functions)" sname file))
@@ -5109,13 +5109,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset private_globals;
   List.iter (function
     | Ast.LetDef (name, _, _, _, _, true, loc) ->
-        Hashtbl.replace private_globals name loc.Lexing.pos_fname
+        Hashtbl.replace private_globals name (Ast.source_file_of_loc loc)
     | _ -> ()
   ) prog;
   Hashtbl.reset private_functions;
   List.iter (function
     | Ast.FuncDef { name; is_private = true; def_loc; _ } ->
-        Hashtbl.replace private_functions name def_loc.Lexing.pos_fname
+        Hashtbl.replace private_functions name (Ast.source_file_of_loc def_loc)
     | _ -> ()
   ) prog;
   locally_bound_names := StringSet.empty;
@@ -5126,20 +5126,20 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset private_views;
   List.iter (function
     | Ast.OpaqueStructDef (name, _, true, loc) ->
-        Hashtbl.replace private_opaque_types name loc.Lexing.pos_fname
+        Hashtbl.replace private_opaque_types name (Ast.source_file_of_loc loc)
     | Ast.StructDef (sname, _, _, _, privs, loc) when privs <> [] ->
-        Hashtbl.replace private_struct_lit sname loc.Lexing.pos_fname;
+        Hashtbl.replace private_struct_lit sname (Ast.source_file_of_loc loc);
         List.iter (fun f ->
-          Hashtbl.replace private_struct_fields (sname, f) loc.Lexing.pos_fname
+          Hashtbl.replace private_struct_fields (sname, f) (Ast.source_file_of_loc loc)
         ) privs
     | Ast.OwnedStructDef (sname, _, _, _, _, _, privs, is_private, loc) ->
         if is_private || privs <> [] then
-          Hashtbl.replace private_struct_lit sname loc.Lexing.pos_fname;
+          Hashtbl.replace private_struct_lit sname (Ast.source_file_of_loc loc);
         List.iter (fun f ->
-          Hashtbl.replace private_struct_fields (sname, f) loc.Lexing.pos_fname
+          Hashtbl.replace private_struct_fields (sname, f) (Ast.source_file_of_loc loc)
         ) privs
     | Ast.ViewDef (name, _, _, true, loc) ->
-        Hashtbl.replace private_views name loc.Lexing.pos_fname
+        Hashtbl.replace private_views name (Ast.source_file_of_loc loc)
     | _ -> ()
   ) prog;
   Hashtbl.reset stable_owner_fields;

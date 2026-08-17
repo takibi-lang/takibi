@@ -4741,7 +4741,7 @@ let gen_func ?prog_types fdef =
     if !debug_info_enabled then begin
       let dib = match !dibuilder_opt with Some d -> d | None -> assert false in
       let cu  = match !di_compile_unit with Some c -> c | None -> assert false in
-      let file = di_file_for dib fdef.def_loc.Lexing.pos_fname in
+      let file = di_file_for dib (source_file_of_loc fdef.def_loc) in
       let line = fdef.def_loc.Lexing.pos_lnum in
       let param_ast_for_di =
         Option.value (Hashtbl.find_opt func_param_ast_types key)
@@ -5717,7 +5717,7 @@ let attach_global_debug name ast_ty decl_loc gvar =
   if !debug_info_enabled then
     let dib = match !dibuilder_opt with Some d -> d | None -> assert false in
     let cu  = match !di_compile_unit with Some c -> c | None -> assert false in
-    let file = di_file_for dib decl_loc.Lexing.pos_fname in
+    let file = di_file_for dib (source_file_of_loc decl_loc) in
     let line = decl_loc.Lexing.pos_lnum in
     let ty = ditype_of_ast dib file ast_ty in
     let align_bits =
