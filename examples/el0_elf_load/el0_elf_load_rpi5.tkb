@@ -243,7 +243,7 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             if (buf - el0_page_va > el0_region_size - len) {
                 return (elr, SYSCALL_ERROR);
             }
-            let dst: *u8 = buf as *u8;
+            let dst: *u8 = unsafe { buf as *u8 };
             while (uart_rx_ready() == false) {
             }
             let mut n: usize = 0;
@@ -270,7 +270,7 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             if (buf - el0_page_va > el0_region_size - len) {
                 return (elr, SYSCALL_ERROR);
             }
-            let src: *u8 = buf as *u8;
+            let src: *u8 = unsafe { buf as *u8 };
             for i: usize in 0..<len {
                 uart_putc(src[i as isize]);
             }
@@ -297,8 +297,8 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             let mut ok: i32 = 1;
             for i: usize in 0..<iovcnt {
                 let entry_addr: usize = iov + i * 16;
-                let base_ptr: *u64 = entry_addr as *u64;
-                let len_ptr: *u64 = (entry_addr + 8) as *u64;
+                let base_ptr: *u64 = unsafe { entry_addr as *u64 };
+                let len_ptr: *u64 = unsafe { (entry_addr + 8) as *u64 };
                 let base: usize = *base_ptr as usize;
                 let len: usize = *len_ptr as usize;
                 if (base < el0_page_va || len > el0_region_size) {
@@ -306,7 +306,7 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
                 } else if (base - el0_page_va > el0_region_size - len) {
                     ok = 0;
                 } else {
-                    let src: *u8 = base as *u8;
+                    let src: *u8 = unsafe { base as *u8 };
                     for j: usize in 0..<len {
                         uart_putc(src[j as isize]);
                     }
@@ -339,10 +339,10 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             }
             while (uart_rx_ready() == false) {
             }
-            let revents0: *u16 = (fds + 6) as *u16;
+            let revents0: *u16 = unsafe { (fds + 6) as *u16 };
             *revents0 = 1; // POLLIN
             for i: usize in 1..<nfds {
-                let revents_i: *u16 = (fds + i * 8 + 6) as *u16;
+                let revents_i: *u16 = unsafe { (fds + i * 8 + 6) as *u16 };
                 *revents_i = 0;
             }
             return (elr, 1);
@@ -365,7 +365,7 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             if (pathname - el0_page_va > el0_region_size - 1) {
                 return (elr, SYSCALL_ERROR);
             }
-            let path_ptr: *u8 = pathname as *u8;
+            let path_ptr: *u8 = unsafe { pathname as *u8 };
             if (path_ptr[0 as isize] != 0) {
                 return (elr, ERR_ENOENT);
             }
@@ -375,13 +375,13 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             if (statbuf - el0_page_va > el0_region_size - 128) {
                 return (elr, SYSCALL_ERROR);
             }
-            let dst: *u8 = statbuf as *u8;
+            let dst: *u8 = unsafe { statbuf as *u8 };
             for i: usize in 0..<128 {
                 dst[i as isize] = 0;
             }
-            let mode_ptr: *u32 = (statbuf + 16) as *u32;
+            let mode_ptr: *u32 = unsafe { (statbuf + 16) as *u32 };
             *mode_ptr = 0x2190; // S_IFCHR (0o020000) | 0o620
-            let nlink_ptr: *u32 = (statbuf + 20) as *u32;
+            let nlink_ptr: *u32 = unsafe { (statbuf + 20) as *u32 };
             *nlink_ptr = 1;
             return (elr, 0);
         }
@@ -433,7 +433,7 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             if (buf - el0_page_va > el0_region_size - len) {
                 return (elr, SYSCALL_ERROR);
             }
-            let dst: *u8 = buf as *u8;
+            let dst: *u8 = unsafe { buf as *u8 };
             for i: usize in 0..<len {
                 dst[i as isize] = (0x5A ^ i) as u8;
             }
@@ -492,7 +492,7 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             if (buf - el0_page_va > el0_region_size - 2) {
                 return (elr, SYSCALL_ERROR);
             }
-            let dst: *u8 = buf as *u8;
+            let dst: *u8 = unsafe { buf as *u8 };
             dst[0 as isize] = 0x2f; // '/'
             dst[1 as isize] = 0x00; // NUL
             return (elr, 2);
@@ -508,7 +508,7 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             if (buf - el0_page_va > el0_region_size - 390) {
                 return (elr, SYSCALL_ERROR);
             }
-            let dst: *u8 = buf as *u8;
+            let dst: *u8 = unsafe { buf as *u8 };
             for i: usize in 0..<390 {
                 dst[i as isize] = 0;
             }
@@ -557,7 +557,7 @@ fn app_main() !{unsafe} {
         uart_puts("cpio image too small\n");
         return;
     }
-    let hdr_base: *u8 = archive_addr as *u8;
+    let hdr_base: *u8 = unsafe { archive_addr as *u8 };
     if (hdr_base[0] != 0x30 || hdr_base[1] != 0x37 || hdr_base[2] != 0x30
             || hdr_base[3] != 0x37 || hdr_base[4] != 0x30 || hdr_base[5] != 0x31) {
         uart_puts("bad cpio magic\n");
@@ -634,12 +634,12 @@ fn app_main() !{unsafe} {
         }
         ProcessMapResult::Mapped(pair) => {
             let (pas, active2) = pair;
-            let dst: *u8 = page_va as *u8;
+            let dst: *u8 = unsafe { page_va as *u8 };
 
             let mut ok: i32 = 1;
             for i: usize in 0..<phnum {
                 let ph_addr: usize = phdr_base + i * ELF64_PROGRAM_HEADER_SIZE;
-                let ph_ptr: *Elf64ProgramHeader = ph_addr as *Elf64ProgramHeader;
+                let ph_ptr: *Elf64ProgramHeader = unsafe { ph_addr as *Elf64ProgramHeader };
                 if (ph_ptr.p_type == ELF64_PT_LOAD) {
                     let seg_link_vaddr: usize = ph_ptr.p_vaddr as usize;
                     let seg_offset: usize = ph_ptr.p_offset as usize;
@@ -662,7 +662,7 @@ fn app_main() !{unsafe} {
                         // interval on one of them alone -- slice_copy's
                         // own runtime min(dst.len, src.len) is what's
                         // actually safe here.
-                        let src: *u8 = image_addr as *u8;
+                        let src: *u8 = unsafe { image_addr as *u8 };
                         let dst_base: usize = seg_vaddr - page_va;
                         let seg_dst = unsafe {
                             dst[dst_base as isize..<(dst_base + seg_filesz) as isize]
@@ -709,64 +709,64 @@ fn app_main() !{unsafe} {
             let random_addr: usize = layout_base + 176;
             let string_addr: usize = layout_base + 192;
 
-            let argc_ptr: *u64 = layout_base as *u64;
+            let argc_ptr: *u64 = unsafe { layout_base as *u64 };
             *argc_ptr = 1;
-            let argv0_ptr: *u64 = (layout_base + 8) as *u64;
+            let argv0_ptr: *u64 = unsafe { (layout_base + 8) as *u64 };
             *argv0_ptr = string_addr as u64;
-            let argv_null_ptr: *u64 = (layout_base + 16) as *u64;
+            let argv_null_ptr: *u64 = unsafe { (layout_base + 16) as *u64 };
             *argv_null_ptr = 0;
-            let envp_null_ptr: *u64 = (layout_base + 24) as *u64;
+            let envp_null_ptr: *u64 = unsafe { (layout_base + 24) as *u64 };
             *envp_null_ptr = 0;
 
-            let auxv0_type_ptr: *u64 = (layout_base + 32) as *u64;
+            let auxv0_type_ptr: *u64 = unsafe { (layout_base + 32) as *u64 };
             *auxv0_type_ptr = AT_PAGESZ as u64;
-            let auxv0_val_ptr: *u64 = (layout_base + 40) as *u64;
+            let auxv0_val_ptr: *u64 = unsafe { (layout_base + 40) as *u64 };
             *auxv0_val_ptr = PAGE_SIZE as u64;
 
-            let auxv1_type_ptr: *u64 = (layout_base + 48) as *u64;
+            let auxv1_type_ptr: *u64 = unsafe { (layout_base + 48) as *u64 };
             *auxv1_type_ptr = AT_PHDR as u64;
-            let auxv1_val_ptr: *u64 = (layout_base + 56) as *u64;
+            let auxv1_val_ptr: *u64 = unsafe { (layout_base + 56) as *u64 };
             *auxv1_val_ptr = at_phdr as u64;
 
-            let auxv2_type_ptr: *u64 = (layout_base + 64) as *u64;
+            let auxv2_type_ptr: *u64 = unsafe { (layout_base + 64) as *u64 };
             *auxv2_type_ptr = AT_PHENT as u64;
-            let auxv2_val_ptr: *u64 = (layout_base + 72) as *u64;
+            let auxv2_val_ptr: *u64 = unsafe { (layout_base + 72) as *u64 };
             *auxv2_val_ptr = ELF64_PROGRAM_HEADER_SIZE as u64;
 
-            let auxv3_type_ptr: *u64 = (layout_base + 80) as *u64;
+            let auxv3_type_ptr: *u64 = unsafe { (layout_base + 80) as *u64 };
             *auxv3_type_ptr = AT_PHNUM as u64;
-            let auxv3_val_ptr: *u64 = (layout_base + 88) as *u64;
+            let auxv3_val_ptr: *u64 = unsafe { (layout_base + 88) as *u64 };
             *auxv3_val_ptr = phnum as u64;
 
-            let auxv4_type_ptr: *u64 = (layout_base + 96) as *u64;
+            let auxv4_type_ptr: *u64 = unsafe { (layout_base + 96) as *u64 };
             *auxv4_type_ptr = AT_BASE as u64;
-            let auxv4_val_ptr: *u64 = (layout_base + 104) as *u64;
+            let auxv4_val_ptr: *u64 = unsafe { (layout_base + 104) as *u64 };
             *auxv4_val_ptr = 0;
 
-            let auxv5_type_ptr: *u64 = (layout_base + 112) as *u64;
+            let auxv5_type_ptr: *u64 = unsafe { (layout_base + 112) as *u64 };
             *auxv5_type_ptr = AT_ENTRY as u64;
-            let auxv5_val_ptr: *u64 = (layout_base + 120) as *u64;
+            let auxv5_val_ptr: *u64 = unsafe { (layout_base + 120) as *u64 };
             *auxv5_val_ptr = entry as u64;
 
-            let auxv6_type_ptr: *u64 = (layout_base + 128) as *u64;
+            let auxv6_type_ptr: *u64 = unsafe { (layout_base + 128) as *u64 };
             *auxv6_type_ptr = AT_RANDOM as u64;
-            let auxv6_val_ptr: *u64 = (layout_base + 136) as *u64;
+            let auxv6_val_ptr: *u64 = unsafe { (layout_base + 136) as *u64 };
             *auxv6_val_ptr = random_addr as u64;
 
-            let auxv7_type_ptr: *u64 = (layout_base + 144) as *u64;
+            let auxv7_type_ptr: *u64 = unsafe { (layout_base + 144) as *u64 };
             *auxv7_type_ptr = AT_SECURE as u64;
-            let auxv7_val_ptr: *u64 = (layout_base + 152) as *u64;
+            let auxv7_val_ptr: *u64 = unsafe { (layout_base + 152) as *u64 };
             *auxv7_val_ptr = 0;
 
-            let auxv_null_type_ptr: *u64 = (layout_base + 160) as *u64;
+            let auxv_null_type_ptr: *u64 = unsafe { (layout_base + 160) as *u64 };
             *auxv_null_type_ptr = 0;
-            let auxv_null_val_ptr: *u64 = (layout_base + 168) as *u64;
+            let auxv_null_val_ptr: *u64 = unsafe { (layout_base + 168) as *u64 };
             *auxv_null_val_ptr = 0;
 
             // AT_RANDOM's 16-byte pointee -- a deliberate low-quality
             // fixed stub, not all-zero so a real libc's stack-protector
             // guard isn't a predictable constant either.
-            let random_ptr: *u8 = random_addr as *u8;
+            let random_ptr: *u8 = unsafe { random_addr as *u8 };
             for i: usize in 0..<16 {
                 random_ptr[i as isize] = (0xA5 ^ i) as u8;
             }
@@ -774,7 +774,7 @@ fn app_main() !{unsafe} {
             // "prog\0" -- argv[0]'s own string data, placed above the
             // array (higher address), matching real kernel layout
             // convention.
-            let string_ptr: *u8 = string_addr as *u8;
+            let string_ptr: *u8 = unsafe { string_addr as *u8 };
             string_ptr[0 as isize] = 0x70; // 'p'
             string_ptr[1 as isize] = 0x72; // 'r'
             string_ptr[2 as isize] = 0x6f; // 'o'
