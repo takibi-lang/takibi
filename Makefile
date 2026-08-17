@@ -148,6 +148,7 @@ COMMON_LINUX_PRINT_BASE  := $(LINUX_USER_DIR)/common/print.tkb $(LINUX_USER_DIR)
 # adding new linux_user/ tests for a new algorithm or data structure.
 LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump percpu page_pool \
                              freelist_pool freelist_generic slotmap refcount_slotmap growable_pool \
+                             intrusive_pool \
                              hello print_int print_hex print_ptr mem array struct struct_refined \
                              nonexhaustive refined narrow enum align packed struct_align const_global \
                              sizeof_offsetof int64 bitops indexed_view tcp_conn_view \
@@ -213,6 +214,13 @@ $(LINUX_USER_DIR)/freelist_generic/freelist_generic_exe.o: kernel/lib/freelist.t
 $(LINUX_USER_DIR)/slotmap/slotmap_exe.o: kernel/lib/slotmap.tkb kernel/lib/freelist.tkb
 $(LINUX_USER_DIR)/refcount_slotmap/refcount_slotmap_exe.o: kernel/lib/refcount_slotmap.tkb kernel/lib/freelist.tkb
 $(LINUX_USER_DIR)/growable_pool/growable_pool_exe.o: kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/growable_pool/growable_pool_core.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
+# GitHub issue #344's prototype reuses growable_pool's own fake page
+# provider rather than copying it, so that both pools draw from the same
+# 9-page supply -- which is what makes intrusive_pool.tkb's side-by-side
+# static-footprint comparison (it `use`s growable_pool_core.tkb too, purely
+# to take sizeof of a GrowablePool holding the same object count) a
+# like-for-like one.
+$(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_exe.o: kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_core.tkb $(LINUX_USER_DIR)/growable_pool/growable_pool_core.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
 $(LINUX_USER_DIR)/ip_parse/ip_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 

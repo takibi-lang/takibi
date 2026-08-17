@@ -1,0 +1,272 @@
+// End-to-end exerciser for intrusive_pool_core.tkb (design prototype for
+// GitHub issue #344). Everything here draws from the same 9-page
+// fake_page_provider.tkb that issue #26's growable_pool prototype uses,
+// which is also what makes the side-by-side size comparison below fair:
+// both pools are asked to hold objects out of the same page supply.
+//
+// The claim under test is narrow and structural: an IntrusivePool(T)
+// declaration names NO capacity -- no N, no MAX_CHUNKS, no
+// SLOTS_PER_CHUNK -- and the pool still grows until the page provider
+// itself runs out. Everything else here exists to show that removing the
+// ceiling did not cost any of the safety properties the existing pools
+// have:
+//
+// - pool_s: sizes and derived layout constants (stride and slots-per-chunk
+//   computed from sizeof(T), never supplied by this file), plus the
+//   static-footprint comparison against a GrowablePool sized to hold the
+//   same number of objects.
+// - pool_a: the handle lifecycle -- allocate, write, read back, free,
+//   reject a stale handle, reject it again after the slot is REUSED (so
+//   the generation, not mere occupancy, is what gates it), and count a
+//   genuine double free.
+// - pool_a vs pool_b: a handle minted by one pool, offered to another, is
+//   rejected as foreign without ever dereferencing it. growable_pool/
+//   slotmap cannot see this case at all: one pool's slot index is a
+//   perfectly plausible index in another.
+// - pool_g: 200 live objects from a pool declared with no capacity, over
+//   exactly the two pages that many objects need, then walked back with
+//   the iteration cursor a scanning consumer (kernel/net/tcp.tkb's
+//   connection lookup) would use in place of `for i in 0..<N`.
+// - pool_x: the only ceiling left is the physical one -- keep inserting
+//   until the page provider is empty, and confirm the pool stopped
+//   because the PROVIDER ran out, not because the pool did.
+//
+// Page budget across the whole run: pool_a 1 + pool_b 1 + pool_g 2 +
+// pool_x the remaining 5, for exactly the provider's 9.
+use "linux_user/intrusive_pool/intrusive_pool_core.tkb";
+use "linux_user/growable_pool/growable_pool_core.tkb";
+
+// 2000 bytes of payload -> a 2016-byte slot -> 2 slots per 4096-byte
+// chunk. Big enough that a chunk boundary is crossed after two inserts
+// instead of after 168, and a case where "one page per object" would have
+// been the naive alternative.
+struct BigPayload {
+    tag: usize;
+    filler: [u8; 1992];
+}
+
+fn app_main() {
+    page_allocator_init();
+    uart_puts("intrusive_pool\n");
+
+    // -- Derived layout, and the static footprint the ceiling used to cost.
+    let mut pool_s: IntrusivePool(usize);
+    intrusive_pool_init(&pool_s);
+    let mut pool_big: IntrusivePool(BigPayload);
+    intrusive_pool_init(&pool_big);
+
+    uart_puts("slot stride for usize (8-byte payload + 2 bookkeeping words): ");
+    uart_print(intrusive_pool_slot_stride(&pool_s));
+    uart_puts("\n");
+    uart_puts("slots per chunk, derived from sizeof(T) alone: ");
+    uart_print(intrusive_pool_slots_per_chunk(&pool_s));
+    uart_puts("\n");
+    uart_puts("same pool type, 2000-byte payload, same derivation: ");
+    uart_print(intrusive_pool_slots_per_chunk(&pool_big));
+    uart_puts("\n");
+
+    // A GrowablePool able to hold the same 336 objects must pre-commit
+    // FreelistCore(336)'s next_free plus its own occupant_generation --
+    // 336 usizes each -- before a single object exists. IntrusivePool(T)
+    // has no such array, and its size does not move when the payload type
+    // changes either.
+    uart_puts("static bytes of bookkeeping for a 336-object pool -- growable: ");
+    uart_print(sizeof(GrowablePool(usize, 168, 2, 336)));
+    uart_puts(", intrusive: ");
+    uart_print(sizeof(IntrusivePool(usize)));
+    uart_puts("\n");
+    uart_puts("intrusive pool size is the same for a 2000-byte payload: ");
+    uart_print_bool(
+        sizeof(IntrusivePool(usize)) == sizeof(IntrusivePool(BigPayload)));
+    uart_puts("\n");
+
+    uart_puts("pages consumed before the first insert: ");
+    uart_print(page_allocator_live_count());
+    uart_puts("\n");
+
+    // -- pool_a: the handle lifecycle.
+    let mut pool_a: IntrusivePool(usize);
+    intrusive_pool_init(&pool_a);
+    let a0: exists s0: usize. IntrusiveOwner[s0] = match intrusive_pool_insert(&pool_a) {
+        IntrusivePoolInsertResult::Allocated(o) => { o }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_a insert 0 failed\n");
+            return;
+        }
+    };
+    let a1: exists s1: usize. IntrusiveOwner[s1] = match intrusive_pool_insert(&pool_a) {
+        IntrusivePoolInsertResult::Allocated(o) => { o }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_a insert 1 failed\n");
+            intrusive_owner_drop(a0);
+            return;
+        }
+    };
+    *intrusive_pool_ref(&pool_a, a0) = 111;
+    *intrusive_pool_ref(&pool_a, a1) = 222;
+    uart_puts("two live slots hold distinct values: ");
+    uart_print_bool(*intrusive_pool_ref(&pool_a, a0) == 111 &&
+                    *intrusive_pool_ref(&pool_a, a1) == 222);
+    uart_puts("\n");
+    uart_puts("one page backs both (live, chunks, pages): ");
+    uart_print(intrusive_pool_live_count(&pool_a));
+    uart_puts(" ");
+    uart_print(intrusive_pool_chunk_count(&pool_a));
+    uart_puts(" ");
+    uart_print(page_allocator_live_count());
+    uart_puts("\n");
+
+    let a1_slot: usize = intrusive_owner_slot(a1);
+    let a1_generation: usize = intrusive_owner_generation(a1);
+    uart_puts("live handle matches before free: ");
+    uart_print_bool(intrusive_pool_matches(&pool_a, a1_slot, a1_generation));
+    uart_puts("\n");
+    intrusive_pool_remove(&pool_a, a1);
+    uart_puts("same handle rejected immediately after free: ");
+    uart_print_bool(
+        intrusive_pool_matches(&pool_a, a1_slot, a1_generation) == false);
+    uart_puts("\n");
+
+    // The freed slot is the head of the free chain, so this reinsert gets
+    // the SAME address back -- which is exactly the case a bare
+    // occupancy flag could not distinguish from the stale handle above.
+    let a1b: exists s1b: usize. IntrusiveOwner[s1b] = match intrusive_pool_insert(&pool_a) {
+        IntrusivePoolInsertResult::Allocated(o) => { o }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_a reinsert failed\n");
+            intrusive_owner_drop(a0);
+            return;
+        }
+    };
+    uart_puts("reinsert reused that exact slot address: ");
+    uart_print_bool(intrusive_owner_slot(a1b) == a1_slot);
+    uart_puts("\n");
+    uart_puts("stale handle still rejected after the reuse: ");
+    uart_print_bool(
+        intrusive_pool_matches(&pool_a, a1_slot, a1_generation) == false);
+    uart_puts("\n");
+
+    // A genuine double free, through the one legal way to fabricate a
+    // handle (the into_parts/new round trip kernel/net/tcp.tkb's own owner
+    // type needs).
+    let (a1b_slot, a1b_generation) = intrusive_owner_into_parts(a1b);
+    let first: exists sf: usize. IntrusiveOwner[sf] =
+        intrusive_owner_new(a1b_slot, a1b_generation);
+    intrusive_pool_remove(&pool_a, first);
+    let again: exists sa: usize. IntrusiveOwner[sa] =
+        intrusive_owner_new(a1b_slot, a1b_generation);
+    let doubles_before: usize = intrusive_pool_double_remove_count(&pool_a);
+    intrusive_pool_remove(&pool_a, again);
+    uart_puts("double free of an already-freed slot counted, not acted on: ");
+    uart_print_bool(
+        intrusive_pool_double_remove_count(&pool_a) == doubles_before + 1 &&
+        intrusive_pool_live_count(&pool_a) == 1);
+    uart_puts("\n");
+
+    // -- Foreign handle: pool_b never minted a0, and says so without
+    // dereferencing it.
+    let mut pool_b: IntrusivePool(usize);
+    intrusive_pool_init(&pool_b);
+    let b0: exists sb: usize. IntrusiveOwner[sb] = match intrusive_pool_insert(&pool_b) {
+        IntrusivePoolInsertResult::Allocated(o) => { o }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_b insert 0 failed\n");
+            intrusive_owner_drop(a0);
+            return;
+        }
+    };
+    let a0_slot: usize = intrusive_owner_slot(a0);
+    let a0_generation: usize = intrusive_owner_generation(a0);
+    let stolen: exists st: usize. IntrusiveOwner[st] =
+        intrusive_owner_new(a0_slot, a0_generation);
+    intrusive_pool_remove(&pool_b, stolen);
+    uart_puts("pool_a's handle rejected by pool_b as foreign, and pool_a's ");
+    uart_puts("slot left untouched: ");
+    uart_print_bool(intrusive_pool_foreign_handle_count(&pool_b) == 1 &&
+                    intrusive_pool_live_count(&pool_b) == 1 &&
+                    intrusive_pool_matches(&pool_a, a0_slot, a0_generation) &&
+                    *intrusive_pool_ref(&pool_a, a0) == 111);
+    uart_puts("\n");
+    intrusive_pool_remove(&pool_a, a0);
+    intrusive_pool_remove(&pool_b, b0);
+
+    // -- pool_g: 200 objects out of a declaration that names no capacity.
+    // Owners are deliberately dropped rather than freed, so the
+    // allocations stay live and the pool has to keep growing.
+    let mut pool_g: IntrusivePool(usize);
+    intrusive_pool_init(&pool_g);
+    let pages_before_growth: usize = page_allocator_live_count();
+    let mut wanted: usize = 0;
+    let mut exhausted: bool = false;
+    while (wanted < 200 && exhausted == false) {
+        match intrusive_pool_insert(&pool_g) {
+            IntrusivePoolInsertResult::Allocated(o) => {
+                *intrusive_pool_ref(&pool_g, o) = wanted + 1;
+                intrusive_owner_drop(o);
+                wanted = wanted + 1;
+            }
+            IntrusivePoolInsertResult::OutOfMemory => { exhausted = true; }
+        }
+    }
+    uart_puts("200 live objects from a pool declared with no capacity ");
+    uart_puts("(live, chunks, pages used): ");
+    uart_print(intrusive_pool_live_count(&pool_g));
+    uart_puts(" ");
+    uart_print(intrusive_pool_chunk_count(&pool_g));
+    uart_puts(" ");
+    uart_print(page_allocator_live_count() - pages_before_growth);
+    uart_puts("\n");
+
+    // The scan a consumer does in place of `for i in 0..<N`: walk the
+    // chunk list, skip free slots, and check every live payload.
+    let mut cursor: usize = intrusive_pool_first_slot(&pool_g);
+    let mut seen: usize = 0;
+    let mut sum: usize = 0;
+    while (cursor != 0) {
+        if (intrusive_pool_slot_generation(&pool_g, cursor) != 0) {
+            seen = seen + 1;
+            sum = sum + *intrusive_pool_payload_at(&pool_g, cursor);
+        }
+        cursor = intrusive_pool_next_slot(&pool_g, cursor);
+    }
+    uart_puts("cursor walk found every live payload exactly once ");
+    uart_puts("(count, checksum): ");
+    uart_print(seen);
+    uart_puts(" ");
+    uart_print(sum);
+    uart_puts("\n");
+
+    // -- pool_x: the last remaining ceiling is the page provider's.
+    let mut pool_x: IntrusivePool(BigPayload);
+    intrusive_pool_init(&pool_x);
+    let mut placed: usize = 0;
+    let mut hit_provider_limit: bool = false;
+    while (hit_provider_limit == false) {
+        match intrusive_pool_insert(&pool_x) {
+            IntrusivePoolInsertResult::Allocated(o) => {
+                intrusive_pool_ref(&pool_x, o).tag = placed + 1;
+                intrusive_owner_drop(o);
+                placed = placed + 1;
+            }
+            IntrusivePoolInsertResult::OutOfMemory => { hit_provider_limit = true; }
+        }
+    }
+    uart_puts("2000-byte objects placed before the PROVIDER ran out ");
+    uart_puts("(objects, chunks, pages left): ");
+    uart_print(placed);
+    uart_puts(" ");
+    uart_print(intrusive_pool_chunk_count(&pool_x));
+    uart_puts(" ");
+    uart_print(PAGE_COUNT - page_allocator_live_count());
+    uart_puts("\n");
+
+    uart_puts("done\n");
+}
+
+fn uart_print_bool(value: bool) {
+    if (value) {
+        uart_puts("true");
+    } else {
+        uart_puts("false");
+    }
+}
