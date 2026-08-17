@@ -381,6 +381,15 @@ and stmt_desc =
          immutable binding, kind-tracked via its inferred type. *)
   | Break
   | Continue
+  | StaticAssert of expr * string option
+      (* static_assert(cond[, "message"]); -- GitHub issue #344. A
+         statement, not a top-level item, because the facts worth
+         asserting are usually about a GENERIC function's own type
+         parameter (`sizeof(Slot(T)) <= PAGE_SIZE - HEADER`), and T is in
+         scope nowhere else. Evaluated in llvm_gen.ml after
+         monomorphization has substituted concrete types, so a generic
+         function is checked once per instantiation and an instantiation
+         that never happens is never checked. Emits no code. *)
   | Match of expr * match_arm list
       (* match expr { Name::Case(binding) => {...} Name::None => {...} } *)
   | LetMatch of bool * ident * type_expr option * expr * match_arm list
@@ -730,6 +739,7 @@ let written_names (stmts : stmt list) : string list =
                                 List.iter go_stmt b
     | ForEach (n, se, b)     -> add n; go_expr se; List.iter go_stmt b
     | Break | Continue       -> ()
+    | StaticAssert (e, _)    -> go_expr e
     | Match (d, arms)        ->
         go_expr d;
         List.iter (function

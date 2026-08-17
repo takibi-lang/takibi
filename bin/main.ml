@@ -324,6 +324,16 @@ let () =
   | Typechecker.TypeError (loc, msg) ->
       report_error loc msg;
       exit 1
+  | Llvm_gen.Error msg ->
+      (* GitHub issue #344: static_assert reports through this exception
+         (it is settled during codegen, after monomorphization -- see
+         Llvm_gen.check_static_asserts_stmts). Catching it here makes that
+         a normal compile-time diagnostic and a nonzero exit status,
+         instead of an uncaught OCaml exception trace. Every other
+         Llvm_gen.Error is an internal-consistency failure and reads
+         better this way too. *)
+      Printf.eprintf "Error: %s\n" msg;
+      exit 1
   | Typechecker.MultiTypeError errors ->
       (* GitHub issue #327 Stage 1: Type_inf.infer_program's Pass 3 keeps
          checking every function body even after one fails, so this can

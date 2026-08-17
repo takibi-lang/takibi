@@ -136,7 +136,7 @@ let promote_be_field_type = function
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
 %token ASSIGN DOT
-%token IF ELSE WHILE FOR IN BREAK CONTINUE
+%token IF ELSE WHILE FOR IN BREAK CONTINUE STATIC_ASSERT
 %token EOF
 %token AMP TILDE
 
@@ -608,6 +608,14 @@ stmt:
        expression disambiguates from the lo..<hi range form) *)
     { { desc = ForEach (id, s, body); loc = $symbolstartpos } }
   | BREAK SEMI    { { desc = Break;    loc = $symbolstartpos } }
+  (* GitHub issue #344: static_assert(cond); / static_assert(cond, "why");
+     -- a compile-time-only check with no runtime form. A statement rather
+     than a top-level item so that it can name a generic function's own
+     type parameter; see Ast.StaticAssert for the rest of the rationale. *)
+  | STATIC_ASSERT LPAREN c = expr RPAREN SEMI
+    { { desc = StaticAssert (c, None); loc = $symbolstartpos } }
+  | STATIC_ASSERT LPAREN c = expr COMMA m = STRING RPAREN SEMI
+    { { desc = StaticAssert (c, Some m); loc = $symbolstartpos } }
   | CONTINUE SEMI { { desc = Continue; loc = $symbolstartpos } }
   | MATCH expr LBRACE match_arms RBRACE
     { { desc = Match ($2, $4); loc = $symbolstartpos } }

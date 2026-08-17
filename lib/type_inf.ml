@@ -3975,6 +3975,16 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       if not in_loop then
         raise (TypeError (s.loc, "break/continue outside of a loop"));
       (tyenv, raw_locals)
+  | StaticAssert (cond, _) ->
+      (* GitHub issue #344: type-check the condition here so a malformed
+         one is reported as an ordinary type error at its own source
+         location. Whether it is a compile-time CONSTANT, and whether it
+         holds, are settled later, in llvm_gen.ml -- only after
+         monomorphization has substituted a generic function's type
+         parameters, which is the whole reason this is a statement. *)
+      let ct = infer_expr senv eenv tyenv fenv cond in
+      check_cond cond.loc ct;
+      (tyenv, raw_locals)
   | Return None ->
       (match ret_ty with
        | TVoid -> ()
@@ -5905,6 +5915,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          List.iter (function
            | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) ->
                List.iter validate_stmt_types b) arms
+     | Ast.StaticAssert _
      | Ast.Break | Ast.Continue -> ())
   in
   List.iter (function
@@ -7657,6 +7668,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       (moved, declared, taints)
     and check_stmt moved declared taints (s : Ast.stmt) =
       match s.desc with
+      | Ast.StaticAssert _ ->
+          (* Compile-time only: names nothing at runtime, so it can move,
+             borrow and taint nothing. *)
+          (moved, declared, taints)
       | Ast.Return None ->
           require_no_pending_linear s.loc "return" moved declared;
           (moved, declared, taints)
@@ -8148,6 +8163,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             | Ast.ArmVariant (_, _, _, stmts) | Ast.ArmWild stmts
             | Ast.ArmIntLit (_, stmts) ->
                 List.iter visit_stmt stmts) arms
+      | Ast.StaticAssert _
       | Ast.Break | Ast.Continue -> ()
     in
     List.iter visit_stmt body;

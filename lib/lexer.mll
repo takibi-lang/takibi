@@ -72,6 +72,7 @@ rule read = parse
   | "sizeof"  { SIZEOF }
   | "use"     { USE }
   | "offsetof" { OFFSETOF }
+  | "static_assert" { STATIC_ASSERT }
   | "type"    { TYPE }
   | "generic" { GENERIC }
 

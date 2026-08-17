@@ -231,6 +231,7 @@ let rec relocate_stmt (mangled : string) (s : stmt) : stmt =
     | LetTuple (names, e) -> LetTuple (names, ex e)
     | Break -> Break
     | Continue -> Continue
+    | StaticAssert (c, m) -> StaticAssert (ex c, m)
     | Match (e, arms) -> Match (ex e, List.map (relocate_arm mangled) arms)
     | LetMatch (m, name, t_opt, e, arms) ->
         LetMatch (m, name, t_opt, ex e, List.map (relocate_arm mangled) arms)
@@ -316,6 +317,7 @@ let rec walk_stmt ~subst ~vsubst ~resolve_inst (s : stmt) : stmt =
     | LetTuple (names, e) -> LetTuple (names, ex e)
     | Break -> Break
     | Continue -> Continue
+    | StaticAssert (c, m) -> StaticAssert (ex c, m)
     | Match (e, arms) -> Match (ex e, List.map (walk_arm ~subst ~vsubst ~resolve_inst) arms)
     | LetMatch (m, name, t_opt, e, arms) ->
         LetMatch (m, name, Option.map ty t_opt, ex e,
@@ -932,6 +934,7 @@ let run (prog : toplevel list) : toplevel list =
         | LetTuple (names, e) -> LetTuple (names, ex e)
         | Break -> Break
         | Continue -> Continue
+        | StaticAssert (c, m) -> StaticAssert (ex c, m)
         | Match (e, arms) -> Match (ex e, List.map (walk_arm_calls ~subst ~vsubst local_types) arms)
         | LetMatch (m, name, t_opt, e, arms) ->
             (* GitHub issue #207: when the annotation is omitted, this

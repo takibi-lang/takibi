@@ -1209,6 +1209,7 @@ let slice_rebind_names (stmts : Ast.stmt list) : string list =
                                 List.iter go_stmt b
     | ForEach (n, se, b)     -> add n; go_expr se; List.iter go_stmt b
     | Break | Continue       -> ()
+    | StaticAssert (e, _)    -> go_expr e
     | Match (d, arms)        ->
         go_expr d;
         List.iter (function
@@ -2310,7 +2311,8 @@ let rec collect_mutable_pattern_binders stmts =
           | ArmWild body -> collect_mutable_pattern_binders body
           | ArmIntLit (_, body) -> collect_mutable_pattern_binders body
         ) arms
-    | Let _ | LetTuple _ | Return _ | Expr _ | Yield _ | Break | Continue -> []
+    | Let _ | LetTuple _ | Return _ | Expr _ | Yield _ | Break | Continue
+    | StaticAssert _ -> []
   ) stmts
 
 (* Immutable `let` bindings normally stay as SSA values (Imm) so codegen can
@@ -5170,6 +5172,12 @@ let gen_func ?prog_types fdef =
                 f_saved_end @ !pending_fallthrough_slice_endpoints
         end
 
+    | StaticAssert _ ->
+        (* GitHub issue #344: no runtime form at all. Checked by
+           check_static_asserts below, in its own pass over the
+           already-monomorphized program. *)
+        ()
+
     | Break ->
         let (break_bb, _) = Stack.top loop_stack in
         ignore (build_br break_bb builder)
@@ -5712,6 +5720,92 @@ let rec eval_const_int (e : Ast.expr) : Int64.t =
       in
       Llvm_target.DataLayout.offset_of_element llty field_index dl
   | _ -> raise (Error "global initializer: unsupported constant expression")
+
+(* GitHub issue #344: the constant folder behind `static_assert`. Layered
+   ON TOP of eval_const_int rather than merged into it: eval_const_int's
+   own job is global-initializer folding, where refusing anything beyond a
+   literal/cast/sizeof chain is deliberate (see its comment), whereas an
+   assertion is written specifically to RELATE two such constants
+   ("sizeof(Slot(T)) fits in a chunk", "N == SLOTS_PER_CHUNK * MAX_CHUNKS")
+   and is useless without arithmetic and comparison. Any leaf it does not
+   recognize falls through to eval_const_int, so both stay in sync on
+   sizeof/offsetof/const-global/enum handling by construction.
+
+   Comparisons are signed (Int64.compare). Every value these assertions
+   compare is a size, an offset or a small count, so the distinction cannot
+   arise without an expression that already overflowed into the sign bit --
+   at which point a wrong answer from the assert is the least of it. *)
+let rec eval_static_int (e : Ast.expr) : Int64.t =
+  let bool_of i = if i then 1L else 0L in
+  match e.desc with
+  | Unsafe inner -> eval_static_int inner
+  | BinOp (Sub, { desc = IntLit 0L; _ }, _) ->
+      (* Unary minus: eval_const_int recognizes this exact shape already. *)
+      eval_const_int e
+  | BinOp (op, a, b) ->
+      let x = eval_static_int a in
+      let y = eval_static_int b in
+      let nonzero what =
+        if y = 0L then
+          raise (Error (Printf.sprintf "static_assert: %s by zero" what)) in
+      (match op with
+       | Add  -> Int64.add x y
+       | Sub  -> Int64.sub x y
+       | Mul  -> Int64.mul x y
+       | Div  -> nonzero "division"; Int64.div x y
+       | Mod  -> nonzero "remainder"; Int64.rem x y
+       | Lt   -> bool_of (Int64.compare x y < 0)
+       | Gt   -> bool_of (Int64.compare x y > 0)
+       | Le   -> bool_of (Int64.compare x y <= 0)
+       | Ge   -> bool_of (Int64.compare x y >= 0)
+       | Eq   -> bool_of (x = y)
+       | Ne   -> bool_of (x <> y)
+       | And  -> bool_of (x <> 0L && y <> 0L)
+       | Or   -> bool_of (x <> 0L || y <> 0L)
+       | Band -> Int64.logand x y
+       | Bor  -> Int64.logor x y
+       | Bxor -> Int64.logxor x y
+       | Shl  -> Int64.shift_left x (Int64.to_int y)
+       | Shr  -> Int64.shift_right_logical x (Int64.to_int y))
+  | _ -> eval_const_int e
+
+(* Every static_assert in one function body, including nested blocks. The
+   condition has already been type-checked as a bool by type_inf.ml; what
+   is settled here is whether it is a compile-time CONSTANT (it must be --
+   an assertion that could only be decided at runtime is itself the error)
+   and whether it holds. *)
+let rec check_static_asserts_stmts (stmts : Ast.stmt list) : unit =
+  List.iter (fun (s : Ast.stmt) ->
+    let arms_of arms =
+      List.iter (function
+        | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) ->
+            check_static_asserts_stmts b) arms
+    in
+    match s.desc with
+    | Ast.StaticAssert (cond, message) ->
+        let where =
+          Printf.sprintf "%s:%d" (Ast.source_file_of_loc s.loc)
+            s.loc.Lexing.pos_lnum in
+        let value =
+          try eval_static_int cond with
+          | Error msg ->
+              raise (Error (Printf.sprintf
+                "%s: static_assert condition is not a compile-time constant \
+                 (%s)" where msg))
+        in
+        if value = 0L then
+          raise (Error (match message with
+            | Some m -> Printf.sprintf "%s: static assertion failed: %s" where m
+            | None   -> Printf.sprintf "%s: static assertion failed" where))
+    | Ast.Block b | Ast.UnsafeBlock b -> check_static_asserts_stmts b
+    | Ast.If (_, t, e) ->
+        check_static_asserts_stmts t; check_static_asserts_stmts e
+    | Ast.While (_, b) | Ast.For (_, _, _, _, b) | Ast.ForEach (_, _, b) ->
+        check_static_asserts_stmts b
+    | Ast.Match (_, arms) | Ast.LetMatch (_, _, _, _, arms) -> arms_of arms
+    | Ast.Let _ | Ast.LetTuple _ | Ast.Return _ | Ast.Expr _ | Ast.Yield _
+    | Ast.Break | Ast.Continue -> ()
+  ) stmts
 
 let attach_global_debug name ast_ty decl_loc gvar =
   if !debug_info_enabled then
@@ -6357,6 +6451,17 @@ let gen_program ?prog_types prog =
       | _ -> None)
   in
   init_function_profile_table function_keys;
+  (* GitHub issue #344: static_assert runs here, between the two codegen
+     passes -- late enough that monomorphize.ml has substituted every
+     generic type parameter and the target data layout that sizeof reads is
+     configured, early enough that a failed assertion aborts before any
+     function body is emitted. `prog` at this point holds one FuncDef per
+     INSTANTIATION, so a generic function's assertion is checked once per
+     concrete type it is used at, and not at all if it is never used. *)
+  List.iter (function
+    | FuncDef fdef -> check_static_asserts_stmts fdef.body
+    | _ -> ()
+  ) prog;
   (* Pass 2: generate function bodies *)
   List.iter (function
     | FuncDef fdef    -> ignore (gen_func ?prog_types fdef)

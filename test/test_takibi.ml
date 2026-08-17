@@ -10763,6 +10763,70 @@ let codegen_tests = [
      the same widening/hint logic #232 relies on has already resolved v1's
      real width), using the actual LLVM type rather than the AST-level
      nominal type -- see llvm_gen.ml's BinOp comment for why. *)
+  (* GitHub issue #344: static_assert. Settled during codegen rather than
+     type inference because its whole point is to see a GENERIC function's
+     type parameter already substituted -- hence expect_codegen_error, not
+     expect_type_error. *)
+  Alcotest.test_case
+    "issue #344: a false static_assert is a compile error carrying its message"
+    `Quick
+    (expect_codegen_error "static assertion failed: two is not three"
+       "fn codegen_issue344_false() -> usize {
+          static_assert(2 == 3, \"two is not three\");
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "issue #344: a true static_assert emits no code and compiles"
+    `Quick
+    (expect_codegen_ok
+       "fn codegen_issue344_true() -> usize {
+          static_assert(4096 - 64 >= 24 * 168);
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "issue #344: a condition that is not a compile-time constant is rejected"
+    `Quick
+    (expect_codegen_error "not a compile-time constant"
+       "fn codegen_issue344_runtime(x: usize) -> usize {
+          static_assert(x < 10);
+          return 0;
+        }");
+
+  (* The motivating case: the assertion is about sizeof of a type built
+     from the function's own type parameter, so it can only be decided per
+     instantiation. The same generic body passes for one T and fails for
+     another -- and an instantiation that never happens is never checked. *)
+  Alcotest.test_case
+    "issue #344: static_assert sees a generic type parameter, per instantiation"
+    `Quick
+    (expect_codegen_ok
+       "generic struct Issue344Slot(T: type) { generation: usize; payload: T; }
+        fn issue344_fits(T: type, s: *Issue344Slot(T)) -> usize {
+          static_assert(sizeof(Issue344Slot(T)) <= 4032, \"slot must fit a chunk\");
+          return sizeof(Issue344Slot(T));
+        }
+        fn codegen_issue344_generic_ok() -> usize {
+          let mut small: Issue344Slot(u32);
+          return issue344_fits(&small);
+        }");
+
+  Alcotest.test_case
+    "issue #344: the same generic body fails for a type parameter that is too big"
+    `Quick
+    (expect_codegen_error "slot must fit a chunk"
+       "generic struct Issue344Slot(T: type) { generation: usize; payload: T; }
+        struct Issue344Big { filler: [u8; 8192]; }
+        fn issue344_fits(T: type, s: *Issue344Slot(T)) -> usize {
+          static_assert(sizeof(Issue344Slot(T)) <= 4032, \"slot must fit a chunk\");
+          return sizeof(Issue344Slot(T));
+        }
+        fn codegen_issue344_generic_too_big() -> usize {
+          let mut big: Issue344Slot(Issue344Big);
+          return issue344_fits(&big);
+        }");
+
   Alcotest.test_case
     "issue #234: a shift amount equal to the 32-bit operand width is a compile error"
     `Quick

@@ -275,6 +275,32 @@ parameter value, or top-level declaration name.
   rhs` and are supported on all five assignable forms above (`*p`,
   `*(expr)`, `arr[i]`, `s.field`, and a plain variable).
 - `match expr { arms }` -- see "Enums" below.
+- `static_assert(cond);` / `static_assert(cond, "message");` -- a
+  compile-time-only check with no runtime form and no emitted code.
+  `cond` must type-check as `bool` (the same rule as `if`/`while`) and
+  must additionally reduce to a compile-time constant; one that could
+  only be decided at runtime is itself an error ("static_assert condition
+  is not a compile-time constant"). The folder accepts integer and bool
+  literals, `sizeof`/`offsetof`, `const` globals and immutable global
+  constants, enum variants, `as` casts, and arithmetic, bitwise,
+  comparison and `&&`/`||` operators over those; comparisons are signed.
+  It is a **statement**, not a top-level item, so that it can name a
+  generic function's own type parameter -- which is the motivating case:
+
+  ```takibi
+  fn pool_slots_per_chunk(T: type, pool: &mut Pool(T)) -> usize {
+      static_assert(sizeof(Slot(T)) <= PAGE_SIZE - HEADER_SIZE,
+                    "one T-sized slot does not fit in a single chunk");
+      return (PAGE_SIZE - HEADER_SIZE) / sizeof(Slot(T));
+  }
+  ```
+
+  Assertions inside a generic function are checked **once per
+  instantiation**, after monomorphization has substituted concrete types,
+  so the same body can pass for one `T` and fail for another; a generic
+  function that is never instantiated is never checked. Statements after
+  a failed assertion are irrelevant -- compilation stops before any
+  function body is emitted.
 
 ## Expressions and Operators
 
