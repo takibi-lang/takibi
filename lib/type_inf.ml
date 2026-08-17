@@ -1970,7 +1970,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                                          than the required minimum %d" n (to_string tgt) want_min));
                                     TSlice (el_want, n)
                                 | t' -> raise (TypeError (e.loc, Printf.sprintf
-                                    "cannot cast '%s' to a slice" (to_string t'))))
+                                    "cannot cast '%s' to a slice: a raw pointer alone \
+                                     carries no length evidence -- only an array \
+                                     variable, a string literal, or an existing slice \
+                                     can become a slice; use `unsafe { p[lo..<hi] }` if \
+                                     the length is known another way" (to_string t'))))
                            | None -> raise (TypeError (e.loc,
                                Printf.sprintf "Unbound variable: %s" name)))
                       | Ast.StringLit str ->
@@ -1988,7 +1992,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                           TSlice (el_want, n)
                       | _ -> raise (TypeError (e.loc,
                           "slice cast requires an array variable, string \
-                           literal, or slice source"))))
+                           literal, or slice source -- a raw pointer alone \
+                           carries no length evidence; use \
+                           `unsafe { p[lo..<hi] }` if the length is known \
+                           another way"))))
             | _ ->
            (* GitHub issue #186: u16be/u32be cast ONLY to/from their own
               plain or refined host type (u16be<->u16, u32be<->u32) --
@@ -2030,7 +2037,19 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    *align(N) T` is the one case needing its own check,
                    just below. *)
                 (match tgt with
-                 | TUsize | TPtr _ -> tgt
+                 | TUsize | TPtr _ ->
+                     (* GitHub issue #325 (still unstarted as of #318): if a
+                        future general raw-pointer unsafe mandate ever adds
+                        an unsafe check to this pointer-to-pointer/pointer-
+                        to-usize branch, it MUST consult is_literal_derived
+                        first and skip the check when it returns true.
+                        StringLit source expressions land here (StringLit
+                        infers straight to TPtr TU8), and is_literal_derived
+                        already recognizes StringLit for exactly this
+                        reason -- see GitHub issue #318's HISTORY.md entry.
+                        Without this, a string literal cast would get swept
+                        in with genuinely calculated pointers. *)
+                     tgt
                  | TAlignedPtr (n_dst, _) ->
                      (* GitHub issue #102: an explicit cast asserting
                         alignment on an already-pointer source -- allowed

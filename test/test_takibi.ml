@@ -9654,6 +9654,16 @@ let codegen_tests = [
             return s as i32;
           }" ());
 
+  Alcotest.test_case
+    "the *u8 -> []u8 bridge is one-way: a bare pointer carries no length \
+     evidence, so casting it back to a slice is a type error (issue #318 \
+     follow-up)" `Quick
+    (expect_type_error "carries no length evidence"
+       "fn ftp3_no_bridge_back(p: *u8) -> usize {
+          let s = p as []u8;
+          return s.len;
+        }");
+
   (* -- P4a: interval extensions + same-base subslice rule ---------------- *)
 
   Alcotest.test_case

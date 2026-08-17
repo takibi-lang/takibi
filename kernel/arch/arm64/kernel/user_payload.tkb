@@ -48,7 +48,11 @@ fn initial_user_payload() {
      * of the literal 2 it used to be. */
     let my_pid: usize = svc5(172, 0, 0, 0, 0, 0);
 
-    /* write(9, ..., 1) must return -EBADF. */
+    /* write(9, ..., 1) must return -EBADF. The length `1` is deliberately
+     * NOT the literal's real length (22 bytes) -- fd 9 is invalid, so the
+     * write never reaches a length check at all; this is not a candidate
+     * for the []u8/.len migration GitHub issue #318 did elsewhere in this
+     * file. */
     let user_message: *u8 = "hello from userspace\n" as *u8;
     fail_if(svc5(64, 9, user_message as usize, 1, 0, 0) != EBADF_RC);
 
@@ -184,6 +188,11 @@ fn initial_user_payload() {
         }
         fail_if(reaped != pid);
 
+        /* Deliberately sends 21 of this literal's 22 real bytes, trimming
+         * the trailing newline -- the length `21` intentionally does NOT
+         * match the literal's real length, so this is not a candidate for
+         * the []u8/.len migration GitHub issue #318 did elsewhere in this
+         * file. */
         let user_message2: *u8 = "hello from userspace\n" as *u8;
         fail_if(svc5(64, 1, user_message2 as usize, 21, 0, 0) != 21);
         svc5(93, 0, 0, 0, 0, 0);

@@ -1529,7 +1529,9 @@ arm, not once per literal.
   grammar, not both.
 - **No pattern beyond a `|`-separated set of literals is supported yet**
   -- no ranges (`0..<10 => { ... }`), and no string/byte-slice patterns
-  (this project has no first-class string type; what a string *pattern*
+  (this project has no first-class string type -- though `[]u8`, via
+  `"literal" as []u8`, gets most of the way there for the compile-time-
+  known-length case; see "Slices" below -- what a string *pattern*
   should even mean is an open question, not yet designed).
 
 ## Slices
@@ -1576,6 +1578,13 @@ length, not the exact length.
   provable at all," and "size itself not provable here" since each
   calls for a different fix (tighten the type / add a runtime length
   check / this specific cast just can't be proven target-independently).
+
+  **The bridge is one-way.** A bare `*T` carries no length evidence, so
+  `p as []T` for a raw pointer `p` is a compile error -- only an array
+  variable, a string literal, or an existing slice can become a slice
+  (see the three forms above). If a length is known some other way,
+  `unsafe { p[lo..<hi] }` is the escape hatch, same as any other raw-
+  pointer slice construction.
 
 **Stack lifetime**: a slice derived from a local array is tied to the current
 stack frame. It may be used locally and passed through a verified `borrow`
@@ -2533,7 +2542,14 @@ investigations behind any of these, see `HISTORY.md`.
   relationship is invariant, but which the type system tracks as
   independent ranges) is not supported -- see HISTORY.md's P4c section.
   `unsafe` is the current escape hatch for the rare case this actually
-  blocks a proof.
+  blocks a proof. This also covers comparing a loop counter against a
+  slice's own runtime `.len` (`while (u < s.len) { s[u] }` still gets a
+  runtime bounds check on `s[u]`, since `collect_bounds`/`range_of` only
+  understands a comparison operand that is a literal, a `const`, or a
+  refined-int variable -- a field access like `s.len` is not one of
+  those); `for x in s { ... }` sidesteps the whole question by never
+  materializing an index variable to bound in the first place, and is
+  the preferred form for exactly this reason (see "Slices" above).
 - **`match` on a primitive integer type supports only literal and
   `|`-separated OR-pattern literal patterns** (see "Match on Primitive
   Types," GitHub issue #151/#156) -- no range patterns (`0..<10 =>

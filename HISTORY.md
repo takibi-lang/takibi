@@ -18848,3 +18848,51 @@ session's transcript remembers: SPEC.md's "Slices" section now states
 explicitly that `[]T`/`[T; N..]` should stay one shape, and any future
 stronger guarantee should extend the existing minimum-length refinement
 rather than add a tagged variant.
+
+**Wrap-up pass: documentation and small hardening the #318 work itself
+surfaced.** Requested explicitly at session close, separate from the
+issue's own acceptance criteria:
+- `user_payload.tkb`'s two `svc5` write sites that intentionally send a
+  DIFFERENT length than their literal's real byte count (the EBADF probe
+  at line ~52, and the deliberate 21-of-22-byte partial write at line
+  ~187) now say so in a comment, so a future reader doesn't have to
+  re-derive "is this a []u8/.len migration candidate?" from scratch the
+  way this session had to.
+- SPEC.md gained three small additions: the pattern-matching section's
+  "no first-class string type" note now points at `[]u8` as the
+  practical answer for the compile-time-known-length case; "Slices"
+  documents that the `*T -> []T` bridge is one-way (a bare pointer
+  proves nothing, so only an array/literal/slice source can become a
+  slice -- confirmed by hand-compiling the rejection); and the
+  Known-Limitations relational-reasoning bullet now names `while (u <
+  s.len) { s[u] }` as a concrete instance of the same limitation, with
+  `for x in s { ... }` as the reason that pattern was preferred in
+  `user_payload.tkb`'s own uart_fixture loop.
+- `lib/type_inf.ml`: `is_literal_derived`'s new `StringLit` case
+  (from earlier this same entry) is currently dead code -- nothing
+  calls it for a StringLit source yet. The Cast case's own `TPtr _ |
+  TAlignedPtr _ -> tgt` branch, where `StringLit` actually lands today,
+  now carries a comment pointing forward to issue #325: whoever adds an
+  unsafe check to that branch must consult `is_literal_derived` first.
+  Also: the two slice-cast error messages a bare `*u8` source hits
+  (`cannot cast '...' to a slice` and the generic "slice cast requires"
+  fallback) now explain WHY (a raw pointer carries no length evidence)
+  and name the escape hatch (`unsafe { p[lo..<hi] }`), instead of just
+  naming the rejected type. A new regression test pins the *u8 -> []u8
+  rejection itself, which had no test coverage before this pass despite
+  being load-bearing for #318's whole "the bridge is one-way" argument.
+
+Two further ideas surfaced but deliberately deferred to their own
+issues rather than done inline, since both are real scope, not small
+hardening: (1) a `--forbid-trap` diagnostic that explains WHY a
+narrowing didn't fire (e.g. "comparison operand is a field access, not
+a literal/const/refined-int variable") instead of just reporting the
+trap site; (2) code-coverage tooling (`bisect_ppx`, confirmed NOT
+currently installed in this environment) to catch a case like
+`is_literal_derived`'s new dead branch mechanically instead of via
+manual code-path tracing. See their own GitHub issues for what's known
+and the rough effort estimate.
+
+Verified again after this pass: `make test` (1151 Alcotest cases, up
+one from the `*u8 -> []u8` regression test) and `kernelcheck-qemu`
+(38/38 views).
