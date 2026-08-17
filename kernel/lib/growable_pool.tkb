@@ -209,20 +209,6 @@ fn growable_pool_finish_insert(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHU
     return GrowablePoolInsertResult::Allocated(owner);
 }
 
-// Zeroes one whole physical page starting at `base`. page_alloc() does not
-// guarantee clean memory (a page freed by an unrelated subsystem and
-// reused here can carry stale content), so every freshly acquired chunk
-// is zeroed once, here, rather than leaving that guarantee to each of
-// this pool's two access modes (self-directed alloc/free, or the
-// externally-indexed growable_pool_ensure/_ref_at pair below) separately.
-fn growable_pool_zero_page(base: usize) {
-    let bytes: *u8 = base as *u8;
-    let page_size: isize = PAGE_SIZE as isize;
-    for i: isize in 0..<page_size {
-        bytes[i] = 0;
-    }
-}
-
 // Acquires one more physical page and registers it as the next chunk --
 // the "grow" half shared by both access modes below. Does NOT touch the
 // free chain (see growable_pool_activate_chunk for that, called only by
@@ -241,6 +227,11 @@ fn growable_pool_grow_one_chunk(
             return GrowablePoolGrowResult::OutOfMemory;
         }
         PageAllocResult::Allocated(page_owner) => {
+            // page_alloc() does not guarantee clean memory. Zero through
+            // the owner's checked page slice before its authority is
+            // transferred into the pool's coarser chunk bookkeeping.
+            let bytes = page_bytes(page_owner);
+            for i: usize in 0..<4096 { bytes[i] = 0; }
             let base: usize = page_physical_address(page_owner);
             let page_index: usize =
                 page_owner_transfer_index(page_owner) as usize;
@@ -249,7 +240,6 @@ fn growable_pool_grow_one_chunk(
                 pool.chunk_data_base[chunk] = base;
                 pool.chunk_page_index[chunk] = page_index;
             }
-            growable_pool_zero_page(base);
             pool.active_chunks = chunk + 1;
             return GrowablePoolGrowResult::Grown;
         }
