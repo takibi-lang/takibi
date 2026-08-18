@@ -48,11 +48,18 @@
 use "linux_user/intrusive_pool/intrusive_pool_core.tkb";
 use "linux_user/growable_pool/growable_pool_core.tkb";
 
-// 1960 bytes of payload -> a 1976-byte slot -> 2 slots per 4096-byte
+// 1960 bytes of payload -> a 1968-byte slot -> 2 slots per 4096-byte
 // chunk (which is what the 128-byte chunk header leaves room for). Big
 // enough that a chunk boundary is crossed after two inserts instead of
-// after 165, and a case where "one page per object" would have been the
+// after 248, and a case where "one page per object" would have been the
 // naive alternative.
+//
+// It is also where issue #348's overlay buys nothing: the slot shrank
+// from 1976 to 1968 bytes and the count stayed at 2, because 3968/1968
+// and 3968/1976 both floor to 2. What costs a slot at this size is the
+// 128-byte in-page header (#349's cliff), not the bookkeeping word --
+// the two density issues dominate at opposite ends of the size range,
+// which is worth knowing before sequencing them.
 struct BigPayload {
     tag: usize;
     filler: [u8; 1952];
@@ -68,7 +75,13 @@ fn app_main() {
     let mut pool_big: IntrusivePool(BigPayload);
     intrusive_pool_init(&pool_big);
 
-    uart_puts("slot stride for usize (8-byte payload + 2 bookkeeping words): ");
+    // GitHub issue #348: ONE bookkeeping word, not two. The free-chain
+    // link shares the payload's storage, so an 8-byte payload costs 16
+    // bytes per slot rather than 24 -- 248 objects per chunk instead of
+    // 165, a 1.50x density gain. (Not 2x: the payload itself does not
+    // shrink, and `generation` is deliberately kept for the always-on
+    // use-after-free check.)
+    uart_puts("slot stride for usize (8-byte payload + 1 bookkeeping word): ");
     uart_print(intrusive_pool_slot_stride(&pool_s));
     uart_puts("\n");
     uart_puts("slots per chunk, derived from sizeof(T) alone: ");
@@ -363,7 +376,7 @@ fn app_main() {
     let c_slot0: usize = intrusive_pool_first_slot(&pool_c);
     let c_slot1: usize = intrusive_pool_next_slot(&pool_c, c_slot0);
     let poison: usize = 0x4141414141410;
-    intrusive_slot_at(&pool_c, c_slot1).next_free = poison;
+    *intrusive_slot_link_at(&pool_c, c_slot1) = poison;
 
     // The poisoned slot is itself a perfectly legitimate free slot, so
     // this allocation must still succeed -- it is the one AFTER it that
@@ -467,7 +480,7 @@ fn app_main() {
     uart_print_bool(intrusive_pool_slot_generation(&pool_c, live_slot) != 0 &&
                     intrusive_chunk_base_of(live_slot) != poisoned_base);
     uart_puts("\n");
-    intrusive_slot_at(&pool_c, free_head).next_free = live_slot;
+    *intrusive_slot_link_at(&pool_c, free_head) = live_slot;
 
     let alias_before: usize = intrusive_pool_corrupt_free_chain_count(&pool_c);
     let live_generation: usize = intrusive_pool_slot_generation(&pool_c, live_slot);

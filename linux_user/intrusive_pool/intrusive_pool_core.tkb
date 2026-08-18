@@ -22,8 +22,8 @@
 //   |   this chunk's own free_head, slot_count, slot_stride,    |
 //   |   live_count, pool_tag                                    |
 //   +----------------------------------------------------------+
-//   | IntrusiveSlot(T) #0: generation, next_free, payload: T    |
-//   | IntrusiveSlot(T) #1: generation, next_free, payload: T    |
+//   | IntrusiveSlot(T) #0: generation, storage (payload OR link)|
+//   | IntrusiveSlot(T) #1: generation, storage (payload OR link)|
 //   | ...                                                       |
 //   +----------------------------------------------------------+
 //
@@ -151,6 +151,36 @@
 // an entropy source this kernel has no story for yet, and randomizing a
 // chunk's initial free order.
 //
+// WHERE THE LINK LIVES
+//
+// In the payload's own storage (GitHub issue #348), which is why
+// IntrusiveSlot(T) is `{ generation, storage: [u8; sizeof(T)] }` and not
+// `{ generation, next_free, payload }`. The link matters only while the
+// slot is free and the payload only while it is live, so the two never
+// need to coexist -- overlaying them is what SLUB and pool(9) both do,
+// and it takes this pool's bookkeeping from 16 bytes per object to 8:
+// 248 objects per chunk for an 8-byte payload instead of 165.
+//
+// `generation` is what says which reading is the valid one, and it was
+// already doing that job: 0 means free, which is the invariant the
+// alloc-path check above relies on. That makes the slot a tagged union
+// whose tag it already had -- spelling it as a `variant` instead
+// measures 32 bytes, because the variant adds a SECOND tag.
+//
+// The gain is 1.50x, not 2x, and only for small payloads: the payload
+// itself does not shrink, so a 64-byte one gains 1.12x and a 1008-byte
+// one gains nothing at all (#349's in-page header is the whole story at
+// that end). `generation` is deliberately not overlaid -- it is live
+// exactly when the payload is, so it has no complementary partner, and
+// it buys the always-on use-after-free check Linux offers only under
+// KASAN.
+//
+// `[u8; sizeof(T)]` is what makes this expressible: a second `T`-typed
+// field would have claimed its own storage instead of sharing. That
+// spelling did not compile until commit a81e7f9 -- array sizes folded
+// `sizeof` at parse time, which cannot work for a generic's own type
+// parameter, since T has no layout until monomorphization binds it.
+//
 // Current limitations (2026-08-17). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
@@ -194,6 +224,22 @@
 //   THIS pool. A caller that round-trips a handle through
 //   intrusive_owner_into_parts (the only way to fabricate one) must
 //   re-validate with intrusive_pool_matches first.
+// - A freshly allocated payload is UNINITIALIZED -- write it before
+//   reading it. It holds whatever the free chain last left there, which
+//   since issue #348 is a link pointer rather than a previous occupant's
+//   remains. This is uniform: it holds for a slot's first use as much as
+//   for its reuse, because insert deliberately does not zero storage it
+//   would have to invent a T's worth of value for. (The page IS zeroed at
+//   grow time, but the chain is threaded through it immediately after, so
+//   nothing may depend on first-use zeroes.)
+// - T must be at least pointer-sized and must not need stronger than
+//   8-byte alignment, both because the free-chain link shares its
+//   storage and because `[u8; N]` contributes no alignment of its own
+//   (issue #348). Both are static_asserts in
+//   intrusive_pool_slots_per_chunk, measured rather than assumed -- the
+//   alignment one via IntrusiveSlotAlignProbe, since the language has no
+//   `alignof` yet. A T that violates either does not compile; neither is
+//   a runtime failure path, and neither can be silently misaligned.
 // - A T larger than one page minus the chunk header cannot be pooled at
 //   all. That is a compile-time property of T, and it is enforced as one:
 //   see intrusive_pool_slots_per_chunk's static_assert, which also pins
@@ -270,14 +316,41 @@ struct IntrusiveChunkHeader {
     corrupt_free_chain_count: usize;
 }
 
-// `next_free` is the intrusive link: meaningful only while this slot is
-// free (generation == 0), and overwritten with 0 the moment it is handed
-// out. `generation` is never reused for a different occupant, which is
-// what makes a stale handle detectable.
+// GitHub issue #348: `storage` is the payload's raw bytes, and it is
+// ALSO where the free-chain link lives -- the two are perfectly
+// complementary in time, since the link is meaningful only while the slot
+// is free and the payload only while it is live. Overlaying them is what
+// every production allocator does (SLUB writes its chain pointer into the
+// free object; NetBSD's pool(9) overlays `struct pool_item`), and it
+// halves this slot's bookkeeping from 16 bytes to 8.
+//
+// `[u8; sizeof(T)]` is what makes the overlay expressible at all: a
+// second field of type `T` would have forced its own storage rather than
+// sharing. That spelling needed a compiler change (commit a81e7f9) --
+// array_size's `sizeof` used to fold at parse time, which cannot work for
+// a generic's own type parameter.
+//
+// `generation` is deliberately NOT overlaid: it is live while the object
+// is, so it has no complementary partner, and its 8 bytes buy the
+// always-on use-after-free check that Linux only offers under KASAN. It
+// is also what says which of the two readings of `storage` is the valid
+// one -- 0 means the link, nonzero means a T -- which makes this slot a
+// tagged union whose tag it already was. (Spelling it as a `variant`
+// measures 32 bytes rather than 16: the variant adds a second tag
+// duplicating this one.)
 generic struct IntrusiveSlot(T: type) {
     generation: usize;
-    next_free: usize;
-    payload: T;
+    storage: [u8; sizeof(T)];
+}
+
+// Measures T's alignment, which the language has no `alignof` for yet:
+// laying a T after a single byte forces exactly `alignof(T) - 1` bytes of
+// padding, so `sizeof(IntrusiveSlotAlignProbe(T)) - sizeof(T)` IS
+// `alignof(T)`. Used only by intrusive_pool_slots_per_chunk's
+// static_assert; no value of this type is ever created.
+generic struct IntrusiveSlotAlignProbe(T: type) {
+    pad: u8;
+    value: T;
 }
 
 // Scalars only. No array, no N, no MAX_CHUNKS -- this struct's size does
@@ -407,6 +480,38 @@ fn intrusive_pool_slots_per_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id
                   "INTRUSIVE_CHUNK_HEADER_SIZE is smaller than the header it reserves space for");
     static_assert(INTRUSIVE_CHUNK_HEADER_SIZE % 16 == 0,
                   "INTRUSIVE_CHUNK_HEADER_SIZE must keep the slot area maximally aligned");
+    // GitHub issue #348, the two conditions the payload/link overlay
+    // needs. Both are properties of T alone, so both are settled here
+    // rather than being anything a caller or a runtime path can get
+    // wrong -- the same stance the two asserts above take.
+    //
+    // 1. The link has to fit in the storage it shares with the payload.
+    //    A T smaller than a pointer would have the chain write past its
+    //    own slot and into the next one's generation word.
+    static_assert(sizeof(T) >= sizeof(usize),
+                  "IntrusivePool(T): T is smaller than the free-chain link that shares its storage");
+    // 2. `storage` is a `[u8; N]`, whose own alignment is 1, so it
+    //    contributes nothing to IntrusiveSlot(T)'s alignment -- unlike
+    //    the `payload: T` field it replaced, which used to force it. The
+    //    slot is therefore aligned to `generation`'s 8, and a T wanting
+    //    more than that would be handed a misaligned address. Measured
+    //    rather than assumed, via the align probe, since the language has
+    //    no `alignof`.
+    //
+    //    No T can violate this TODAY, and the assert is deliberately here
+    //    anyway. Every takibi type currently tops out at 8-byte alignment
+    //    (the widest primitive is 8; a struct takes the max of its
+    //    fields; an array takes its element's), and `align(N)` does not
+    //    raise a struct's alignment where it is embedded -- `struct A
+    //    align(32) {...}` inside `struct H { pad: u8; v: A; }` still
+    //    lands at offset 8, though SPEC.md's "every instance/array
+    //    element aligned to N" reads as though it should not. So this
+    //    assert is unfalsifiable until over-alignment becomes
+    //    expressible, and it is exactly then that a silently misaligned
+    //    payload would appear here. Cheaper to write it now, while the
+    //    reasoning is in hand, than to remember later.
+    static_assert(sizeof(IntrusiveSlotAlignProbe(T)) - sizeof(T) <= sizeof(usize),
+                  "IntrusivePool(T): T needs stronger alignment than the slot layout guarantees");
     return (PAGE_SIZE - INTRUSIVE_CHUNK_HEADER_SIZE) / sizeof(IntrusiveSlot(T));
 }
 
@@ -431,6 +536,25 @@ fn intrusive_chunk_header_at(base: usize) -> *IntrusiveChunkHeader !{unsafe} {
 fn intrusive_slot_at(T: type, pool: &mut IntrusivePool(T) @ pool_id, slot_address: usize)
         -> *IntrusiveSlot(T) !{unsafe} {
     return unsafe { slot_address as *IntrusiveSlot(T) };
+}
+
+// The free-chain link (GitHub issue #348). This is the SAME address
+// intrusive_pool_payload_at hands out as a `*T` -- that is the overlay,
+// stated in one place instead of being spread across the three sites
+// that thread the chain. Which of the two readings is the valid one is
+// never guessed: `generation == 0` says link, nonzero says payload, and
+// every caller here is on a path that has just established which.
+//
+// Both readings are ordinary raw casts at this file's existing
+// provenance boundary -- the same one intrusive_slot_at and
+// intrusive_pool_payload_at already sit on -- so the overlay adds no new
+// class of unchecked operation, only a second view of storage whose
+// exclusivity the generation word already tracked.
+fn intrusive_slot_link_at(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                          slot_address: usize) -> *usize !{unsafe} {
+    return unsafe {
+        (slot_address + offsetof(IntrusiveSlot(T), storage)) as *usize
+    };
 }
 
 // Is `base` a chunk this pool actually owns? Walks this pool's own chunk
@@ -625,7 +749,9 @@ fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id)
                     base + INTRUSIVE_CHUNK_HEADER_SIZE + remaining * stride;
                 let slot: *IntrusiveSlot(T) = intrusive_slot_at(pool, slot_address);
                 slot.generation = 0;
-                slot.next_free = header.free_head;
+                // generation is 0, so this slot's storage is the link's,
+                // not a payload's (GitHub issue #348).
+                *intrusive_slot_link_at(pool, slot_address) = header.free_head;
                 header.free_head = slot_address;
             }
             intrusive_pool_link_partial(pool, base);
@@ -699,11 +825,20 @@ fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id)
         intrusive_pool_unlink_partial(pool, base);
         return IntrusivePoolInsertResult::OutOfMemory;
     }
-    header.free_head = slot.next_free;
+    // Read the link BEFORE stamping the generation: the two share this
+    // slot's storage (GitHub issue #348), and stamping is exactly the
+    // moment that storage stops being the chain's and becomes the
+    // caller's payload.
+    header.free_head = *intrusive_slot_link_at(pool, slot_address);
     let generation: usize = pool.next_generation;
     pool.next_generation = generation + 1;
     slot.generation = generation;
-    slot.next_free = 0;
+    // Nothing zeroes the storage here. It used to be a separate word
+    // worth clearing; now it is the payload's own bytes, and writing to
+    // them would be this pool inventing a value for a T it knows nothing
+    // about. The contract is uniform instead: a freshly allocated
+    // payload is uninitialized, write it before reading it. See "Current
+    // limitations".
     pool.live_count = pool.live_count + 1;
     header.live_count = header.live_count + 1;
     // This chunk is no longer the one empty chunk being held back.
@@ -737,8 +872,12 @@ fn intrusive_pool_remove(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     }
     let base: usize = intrusive_chunk_base_of(slot_address);
     let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(base);
+    // Clear the generation FIRST, then write the link: that order is the
+    // mirror of insert's, and it is what keeps the two readings of this
+    // slot's shared storage (GitHub issue #348) from ever both looking
+    // valid. The payload's bytes are the chain's again from here.
     slot.generation = 0;
-    slot.next_free = header.free_head;
+    *intrusive_slot_link_at(pool, slot_address) = header.free_head;
     header.free_head = slot_address;
     pool.live_count = pool.live_count - 1;
     header.live_count = header.live_count - 1;
@@ -793,7 +932,7 @@ fn intrusive_pool_ref(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 fn intrusive_pool_payload_at(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                              slot_address: usize) -> *T !{unsafe} {
     return unsafe {
-        (slot_address + offsetof(IntrusiveSlot(T), payload)) as *T
+        (slot_address + offsetof(IntrusiveSlot(T), storage)) as *T
     };
 }
 
