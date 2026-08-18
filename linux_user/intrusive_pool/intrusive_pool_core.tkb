@@ -78,8 +78,10 @@
 // The owner's first static parameter is `pool_id: addr` -- the erased
 // ADDRESS of the pool that minted it (GitHub issue #345, the same
 // mechanism SPEC.md's MutexGuard uses to tie a guard to its lock). Every
-// entry point here takes its pool as `*IntrusivePool(T) @ pool_id`, so
-// freeing pool A's handle through pool B is a compile error:
+// entry point here takes its pool as `&mut IntrusivePool(T) @ pool_id`
+// (issue #314's reference type, plus the identity issue #347 taught it
+// to carry), so freeing pool A's handle through pool B is a compile
+// error:
 //
 //     intrusive_pool_remove(&pool_b, a0);
 //     // static value mismatch: &pool_a vs &pool_b

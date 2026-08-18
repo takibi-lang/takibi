@@ -105,8 +105,34 @@ type type_expr =
        see SPEC.md's "Indexed Runtime Owners" for the existing bracket
        form this is deliberately NOT reusing. GitHub issue #207. *)
   | TypeSingleton of type_expr * static_arg
-    (* T @ n -- a runtime integer or pointer T whose value/identity is also
-       available as an erased static argument. *)
+    (* T @ n -- a runtime integer, pointer, or reference T whose
+       value/identity is also available as an erased static argument.
+
+       CHECKLIST -- this wrapper is meant to be structurally
+       TRANSPARENT: SPEC.md says outright "it has exactly the same LLVM
+       representation as T". Every session that has touched code needing
+       "the base type ignoring this wrapper" has independently
+       rediscovered that transparency is NOT automatic -- each call site
+       below has its OWN pattern match that must include a
+       TypeSingleton/TSingleton arm, and nothing enforces that a new one
+       remembers to. Found the hard way across five separate functions in
+       one session (GitHub issues #344/#345/#347): unify_arg
+       (monomorphize.ml, generic type-parameter inference through `@`),
+       struct_instance (type_inf.ml) and struct_name_of_type
+       (llvm_gen.ml) (field access through a singleton-wrapped pointer/
+       reference), is_affine_type/is_linear_type/is_must_use_type and
+       type_mentions_variant/type_mentions_kinded_variant (type_inf.ml,
+       ownership tracking on a raw signature type), check_expr's AddrOf
+       dispatch and adapt_actual_to_expected's is_address check
+       (type_inf.ml, minting `&x`/`*x` with the right wrapper and
+       identity). Before adding a NEW function that pattern-matches
+       type_expr/ty looking for a struct/variant/view/pointer/reference
+       shape, check whether it needs to see through TypeSingleton too --
+       and add it to this list. A single `Ast.strip_singleton` helper
+       that all of the above route through, rather than each repeating
+       the same one-line match arm, would turn this checklist into a
+       structural guarantee instead of a reminder; see GitHub issue
+       #357 for that consolidation. *)
   | TypeRefined of int * int * type_expr
     (* {lo..<hi} -- refined int: lo <= x < hi. Third field is the
        underlying primitive type (mirrors Types.ty's TRefinedInt -- see

@@ -30,8 +30,11 @@
 // its own header comment for why its sibling "tiny bookkeeping" arrays in
 // the same file deliberately stay plain fixed arrays instead). A truly
 // N-less pool (bookkeeping cost proportional to live objects, not a
-// pre-committed ceiling) is a separate, not-yet-built primitive -- see
-// issue #344.
+// pre-committed ceiling) is a separate primitive -- prototyped and
+// working as of issue #344/#345/#346/#347 at
+// linux_user/intrusive_pool/intrusive_pool_core.tkb, not yet promoted to
+// kernel/lib/ (that promotion, and a real consumer migration, are what
+// keeps #344 itself open).
 //
 // Ported from linux_user/growable_pool/growable_pool_core.tkb (issues
 // #26/#246's design prototype, verified there against a small fake page

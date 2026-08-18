@@ -15,6 +15,170 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-17 to 2026-08-18: GitHub Issue #344 -- a Count-Unbounded Pool
+Primitive, Branded to Its Owner, Reclaiming Its Own Memory
+
+Investigating #257 (TCP connection pool migration) had already established
+that `kernel/lib/growable_pool.tkb` only makes the T-typed PAYLOAD lazy;
+its own identity bookkeeping (`FreelistCore(N)`'s `next_free` and its own
+`occupant_generation`, both `[usize; N]`) is exactly as N-sized and
+pre-committed as `slotmap.tkb`'s. #344 asked for a genuinely
+count-unbounded design, prototyped in `linux_user/` first per this
+project's usual process, modelled on Linux SLUB and NetBSD/OpenBSD's
+`pool(9)`: an intrusive free list threaded through free slots' own
+memory, so bookkeeping cost is proportional to live objects, never a
+pre-committed ceiling.
+
+**A real compiler bug found before any of that.** `lib/monomorphize.ml`'s
+`relocate_loc` appends `"#" ^ mangled-name` to every instantiated node's
+`loc.pos_fname` so `Types.loc_key` stays unique across instantiations
+(needed to stop one generic instantiation's own nested-call resolution
+from silently overwriting a different instantiation's at the same source
+location). `type_inf.ml`'s seven `private` checks (globals, functions,
+opaque types, indexed-owner construction, struct literals, struct
+fields, views) all compared `pos_fname` directly, so a `private let`/
+`private fn` referenced from a GENERIC function in its OWN declaring file
+was rejected as cross-file access -- "x.tkb#f\$usize" != "x.tkb". Found
+only because `linux_user/intrusive_pool/`'s design needed exactly that
+shape (a private counter read by a generic constructor in the same
+file). Fixed by `Ast.source_file_of_loc` (splits at the first `#`) routed
+through every comparison, registration included, plus the two `di_file_for`
+DWARF sites that had the same bug (naming a generic function's source
+file "x.tkb#f\$usize", a path that does not exist).
+
+**`static_assert(cond[, "message"])` added**, a statement (not a
+top-level item, so it can name a generic function's own type parameter),
+evaluated in `llvm_gen.ml` between the two codegen passes -- after
+monomorphization substitutes concrete types, before any body is emitted
+-- so a generic body is checked once per instantiation and an
+instantiation that never happens is never checked. Motivated directly by
+the pool prototype's first draft, which carried a `SlotTooLarge` case
+through two `must_use variant`s purely to report something knowable at
+compile time (`sizeof(Slot(T)) <= chunk capacity`), forcing every caller
+to match on an outcome that could never occur for a `T` that compiled
+once. `bin/main.ml` now catches `Llvm_gen.Error` as an ordinary
+diagnostic rather than letting it escape as an OCaml exception trace.
+
+**`unify_arg` was missing a `TypeSingleton` arm.** `T @ n` / `*T @ place`
+is, by SPEC.md's own definition, the same type plus a checker-only static
+identity -- so it should peel exactly like `TypeBorrow`/`TypeSink`/
+`TypeRef` already did in this function, and did not. Branding a GENERIC
+pool to its handles (`p: *Pool(T) @ pool`) made `T` uninferable ("cannot
+infer type parameter 'T'") because the one argument that determines it
+was hidden behind an annotation that carries no type information of its
+own. This is the same "a singleton is its base type plus a checker-only
+fact" rule that recurred four more times this session (see below) --
+worth remembering as a class, not a one-off.
+
+**Indexed variants added (#345): `variant Name[p: sort] { ... }`.**
+Branding an INFALLIBLE acquire already worked (SPEC.md's own
+`MutexGuard`); a FALLIBLE one could not, because the failure path forces
+a `must_use variant` return and a variant could not mention a static
+name -- so the identity was lost at exactly the boundary a real allocator
+lives at. Three workarounds (reserve/take split, a dummy owner on
+failure, a `(bool, Reservation[pool])` tuple) were tried and rejected:
+all three launder failure into a consumable handle, exactly what
+SPEC.md's "fallible ownership uses a closed variant instead of a null
+sentinel" rule exists to prevent. Implementation mirrors `TView`/
+`TIndexedStruct`: `Ast.TypeVariant`/`Types.TVariant` gain a static-argument
+list unified positionally; `VariantDef` gains a static-parameter list
+seeded into each case payload's own validation scope; a constructor
+INFERS the arguments (from the payload's type, or the destination for a
+payload-less case) and `match` SUBSTITUTES the scrutinee's actual
+arguments into each arm -- the substitution is what carries the brand out
+of the variant. Two more instances of the same singleton-transparency
+gap had to be closed for this to be usable at all: `struct_instance`
+(type_inf.ml) and `struct_name_of_type` (llvm_gen.ml) did not see through
+`TSingleton`, so a branded pool could not reach its own fields; and the
+ownership predicates (`is_affine_type`/`is_linear_type`/`is_must_use_type`,
+`type_mentions_variant` and friends) read raw signature types BEFORE
+`resolve_declared_type` runs, where an indexed variant is still spelled
+`TypeIndexed`, so each needed a third reading of a variant name alongside
+`TypeNamed`/`TypeVariant`.
+
+**`&T @ place` / `&mut T @ place` accepted (#347).** Branding forced
+every `intrusive_pool` entry point onto a raw pointer
+(`*IntrusivePool(T) @ pool_id`), because the singleton annotation bound
+INSIDE the reference (`&mut (T @ place)`, meaningless -- an identity is a
+fact about a reference VALUE, and `&mut T`'s pointee is not one) rather
+than outside it, undoing part of #314 at exactly the call sites it was
+written for. `parser.mly`'s existing `lift_singleton` (which already
+normalized `*T @ place`/`*io T @ place` the same way) now covers `&`/
+`&mut` too; the `addr` sort is accepted for `TRef`/`TRefMut`;
+`validate_complete_type` accepts a singleton-wrapped reference as still
+wrapping the whole parameter type; and `check_expr`'s `AddrOf` dispatch
+(which decides whether `&x` mints a reference or a raw pointer, from the
+EXPECTED type) now sees through the singleton, with
+`adapt_actual_to_expected` treating a reference as an address value so
+the `&name` place supplies the identity. All 21 of
+`intrusive_pool_core.tkb`'s pool parameters migrated back to
+`&mut IntrusivePool(T) @ pool_id`.
+
+**Reclaim (#346): per-chunk free lists, SLUB's partial-list shape.** The
+prototype could grow until physical memory ran out but never gave
+anything back -- a worse trade here than for `growable_pool`, since the
+whole point of removing the ceiling is to let a bursty resource (a TCP
+connection count) grow to whatever a burst needs, and a pool that never
+shrinks turns a transient burst into a permanent cost. The single global
+free chain was what made reclaim expensive (freeing a chunk meant
+unthreading its slots from a chain running through every other chunk);
+it is now one chain per chunk, held in that chunk's own header, plus a
+doubly-linked PARTIAL list of chunks with a free slot. Allocation always
+takes from the partial list's head (O(1), no search); a chunk leaves the
+list when full and rejoins on its next free; an emptied chunk unlinks
+from both lists in O(1) and its page goes back to the provider.
+Hysteresis, made an explicit decision rather than an accident: exactly
+ONE fully-empty chunk is held in reserve per pool, bounded to one page,
+not a tunable -- without it, a pool oscillating around a chunk boundary
+would return a page and immediately re-request one on every cycle. The
+chunk header grew from 64 to 128 bytes to carry the two lists' links and
+the per-chunk free head, checked by the existing header-size
+`static_assert` so the number could not drift silently. Slot-address
+stability changed as a real consequence (a cursor walk that frees as it
+goes can have its own chunk released underneath it -- the exerciser's
+drain loop restarts its walk for exactly this reason) and the file's
+limitations header was rewritten to say so rather than leaving the old
+"stable for the pool's lifetime" claim standing.
+`linux_user/growable_pool/fake_page_provider.tkb` gained
+`page_transferred_release_physical`, mirroring `kernel/mm/page.tkb`'s own
+entry point of that name, since this was the first consumer that ever
+gave a page back.
+
+**Gap analysis against production allocators, filed as #348-#356.**
+Once the design stabilized it was compared against Linux SLUB, FreeBSD
+UMA, and NetBSD/OpenBSD `pool(9)` -- the skeleton matches them (partial
+list + hysteresis-gated reclaim is SLUB's shape; in-page header plus
+intrusive free chain is `pool(9)`'s), and the type-system guarantees on
+top (cross-pool free is a compile error; leaks and double frees are
+linearity violations; UAF detection is always-on rather than a
+KASAN-only debug feature) are properties none of those allocators have.
+The gaps are all in the layers above the skeleton: density (#348 --
+16 bytes/object bookkeeping, the DOMINANT term, 165 vs. 512 objects/page
+for an 8-byte payload; #349 -- the in-page header costs a whole slot at
+page-dividing strides, a cliff rather than a uniform tax; #350 --
+one-page chunks put a hard ceiling on `sizeof(T)`), concurrency (#351 --
+no locking anywhere in `kernel/lib/`'s pool lineage, the largest single
+gap), hardening (#352 -- the only outright BUG found: `insert` pops
+`header.free_head` with no validation at all, so one stray write into a
+free slot's link word makes the next allocation return an arbitrary
+pointer -- exactly what SLUB's `CONFIG_SLAB_FREELIST_HARDENED` exists to
+stop), scale/operations (#353 -- O(chunks) address validation where
+`virt_to_slab()` is O(1); #354 -- reclaim is reactive only, no shrinker
+equivalent; #355 -- no invariant probe), and semantics (#356 -- a reused
+slot's contract is "zeroed on first use, stale afterwards", the worst of
+both). An earlier verbal density comparison blamed the small-object gap
+on the chunk header; recomputing both terms showed the header costs
+about 3% there and the 16-bytes/object cost about 67% -- attribute a
+density loss by computing every term, not by eyeballing which constant
+looks bigger.
+
+`#344` itself stays open: what remains is promotion to
+`kernel/lib/intrusive_pool.tkb` (only the `use` line changes, the same
+path `growable_pool_core.tkb` took) and the `tcp.tkb` migration (#257),
+which is the larger of the two since `tcp.tkb`'s ~20 parallel
+`[T; TCP_CONNECTION_MAX]` arrays have to become fields of one payload
+struct first.
+
 ### 2026-08-16: OCaml Compiler-Side Technical-Debt Sweep Before a Raw-Pointer `unsafe` Mandate -- 15 Issues Closed
 
 Prior sessions repeatedly tried to restructure `.tkb` code toward

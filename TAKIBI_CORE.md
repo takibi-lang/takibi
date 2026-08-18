@@ -60,6 +60,23 @@ and nested containers. `ExceptionResume[elr]` plus a trusted extern-only
 `!{noreturn}` fail-stop express the EL2 same-ELR resume boundary. This is a
 concrete exception-entry slice, not a general FFI ownership system.
 
+Closed variants may now declare their own erased static parameters
+(`variant Name[p: sort] { ... }`, GitHub issue #345), the same sort
+vocabulary a linear/affine struct already accepts. A case payload may
+name a variant's own parameter, and `match` substitutes the scrutinee's
+actual static arguments into the opened arm -- the mechanism that lets a
+FALLIBLE acquire (which must return a variant on the failure path) still
+return an owner carrying the erased identity of the resource that
+produced it, `Owner[pool, allocation]` branded by an address-sorted
+`pool_id`, where before only an infallible acquire could carry that
+identity. The `T @ place` singleton this depends on (3.2's `MutexGuard`
+mechanism) now also accepts `&T`/`&mut T` (GitHub issue #347), not only
+`*T`, so a branded API can keep issue #314's reference types instead of
+reverting to a raw pointer. `linux_user/intrusive_pool/` is the first
+consumer, branding every pool entry point to the pool that owns it and
+making a cross-pool free a static-identity mismatch rather than a
+runtime check.
+
 The examples in this document are elaboration fixtures. Their contracts and
 runtime representations are decisions; punctuation may change when a fixture
 becomes an implementation slice.

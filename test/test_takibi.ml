@@ -5507,6 +5507,65 @@ let infer_tests = [
            Alcotest.failf
              "expected the local let to shadow the unrelated private function, got: %s" msg);
 
+  (* Regression for the bug fixed alongside GitHub issue #344 (commit
+     47a0f23): lib/monomorphize.ml's relocate_loc appends "#" + a mangled
+     name to a MONOMORPHIZED instantiation's own loc.pos_fname (to keep
+     Types.loc_key collision-free across instantiations -- see its own
+     comment), which the private-access checks above used to compare
+     directly against the declaring file's plain pos_fname. So a private
+     global/fn referenced from a GENERIC function, in that generic
+     function's OWN declaring file, was rejected as cross-file access
+     ("x.tkb#f$i32" <> "x.tkb") the moment that function was actually
+     instantiated -- caught only because linux_user/intrusive_pool/'s
+     design needed exactly this shape (a private counter read by a
+     generic constructor in the same file). Needs an actual call site: a
+     generic function's body is only relocated once it is monomorphized,
+     so an uncalled generic fn's own private-access check would not have
+     exercised the bug. *)
+  Alcotest.test_case
+    "private global: read from a GENERIC function in its own declaring \
+     file is fine (regression, see commit 47a0f23)" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "private let mut priv_g_generic: i32 = 0;
+                   fn a_reads_generic(T: type, x: T) -> i32 { return priv_g_generic; }
+                   fn a_calls_it() -> i32 { let v: i32 = 0; return a_reads_generic(v); }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf
+             "expected a private global read from a same-file generic \
+              function to type-check, got: %s" msg);
+
+  Alcotest.test_case
+    "private function: called from a GENERIC function in its own \
+     declaring file is fine (regression, see commit 47a0f23)" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "private fn priv_f_generic() -> i32 { return 7; }
+                   fn a_calls_generic(T: type, x: T) -> i32 { return priv_f_generic(); }
+                   fn a_calls_it() -> i32 { let v: i32 = 0; return a_calls_generic(v); }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf
+             "expected a private function called from a same-file \
+              generic function to type-check, got: %s" msg);
+
+  Alcotest.test_case
+    "private global: still rejected from a GENERIC function in a \
+     DIFFERENT file (negative control for the regression above)" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "private let mut priv_g_generic_x: i32 = 0;";
+         "b.tkb", "fn b_reads_generic(T: type, x: T) -> i32 { return priv_g_generic_x; }
+                   fn b_calls_it() -> i32 { let v: i32 = 0; return b_reads_generic(v); }";
+       ] with
+       | _ -> Alcotest.fail "expected a cross-file private global read to be rejected"
+       | exception Types.TypeError (_, msg) ->
+           if not (contains_substring msg "private global") then
+             Alcotest.failf "expected a privacy error, got: %s" msg);
+
   (* -- Linear kind (OWNERSHIP_KERNEL.md Stage 1, GitHub issue #117) -------
      `linear opaque struct` = exactly-once-on-every-path obligations.
      Prelude shared by most cases below: a token type, a mint, a sink. *)

@@ -5607,7 +5607,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     (* GitHub issue #345: an indexed variant is still spelled TypeIndexed
        in a raw signature -- these predicates read fdef.ret_type/params
        BEFORE resolve_declared_type ever runs, so each of them needs the
-       same three readings of a variant name. *)
+       same three readings of a variant name. See GitHub issue #358 for
+       the proposal to resolve TypeIndexed eagerly instead, which would
+       remove this arm (and its four siblings below/above) entirely. *)
     | Ast.TypeIndexed (name, _) | Ast.TypeNamed name ->
         Hashtbl.mem variant_defs name
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t

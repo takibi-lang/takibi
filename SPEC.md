@@ -1942,9 +1942,12 @@ i32;`), a unary-minus literal, or a reference to an *earlier* immutable
 global with its own constant initializer (`let Y: [u8;4] = X;` --
 supported uniformly for scalars, arrays, and structs). General
 constant-expression arithmetic between two named constants
-(`let X: i32 = A + B;`) is deliberately **not** supported. Referencing a
-`let mut` global, or a global declared later in the (concatenated)
-source, is a compile error.
+(`let X: i32 = A + B;`) is deliberately **not** supported here --
+`static_assert`'s own condition folder (see "Statements" above) does
+support arithmetic between compile-time constants, but only to decide a
+boolean, never to produce a new named constant a later declaration could
+use. Referencing a `let mut` global, or a global declared later in the
+(concatenated) source, is a compile error.
 
 ## Non-Raw Reference Types: `&T` / `&mut T` (GitHub issues #314/#319)
 
