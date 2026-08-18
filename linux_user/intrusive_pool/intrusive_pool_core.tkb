@@ -137,6 +137,15 @@
 // pointer is not handed out, the event is counted, and that chunk is
 // QUARANTINED -- see IntrusiveChunkHeader.corrupt_free_chain_count.
 //
+// That is two checks, in an order that matters. The arithmetic one proves
+// the popped address is a well-formed slot of THIS chunk, which is what
+// makes it safe to dereference at all; only then does insert read the
+// slot's `generation` and reject a nonzero one, because a live slot on a
+// free chain is a contradiction. Without the second check the first would
+// still pass an address corrupted to point at a LIVE slot in the same
+// chunk -- which does not fault, and so would silently alias two owners
+// onto one slot: quieter than the wild pointer, and worse.
+//
 // Not attempted here, deliberately: XOR-obfuscating the chain pointer
 // with a per-pool random cookie, which is real defence in depth but needs
 // an entropy source this kernel has no story for yet, and randomizing a
@@ -169,14 +178,15 @@
 //   mean a pool under a repeated stray write bleeds a page per event
 //   rather than failing loudly. Revisit if that ever stops being the
 //   right trade.
-// - The alloc-path check proves the popped address is a well-formed slot
-//   ADDRESS in the chunk it came from. It does NOT prove the slot was
-//   actually free: a `next_free` corrupted to the address of a LIVE slot
-//   in the same chunk passes, and the pool would then hand out a second
-//   handle to it. The generation word makes that detectable at remove
-//   time (the older handle stops matching), not preventable here. Closing
-//   it needs the free/live bit to be checkable independently of the chain
-//   itself, which is issue #348's state-dependent-view question.
+// - The alloc-path check reads `slot_stride` and `slot_count` out of the
+//   chunk header and trusts them. A stray write into the HEADER rather
+//   than into a slot therefore weakens the check itself -- a `slot_stride`
+//   of 1 makes almost every address in the page look slot-aligned. Both
+//   fields are in fact compile-time constants after monomorphization
+//   (`sizeof(IntrusiveSlot(T))` and intrusive_pool_slots_per_chunk()), so
+//   cross-checking them costs nothing; it is not done here only because
+//   it belongs to hardening the header as a whole -- every function in
+//   this file trusts it, not just insert.
 // - `intrusive_pool_ref` does NOT re-validate. It is the fast path, with
 //   the same contract kernel/lib/freelist.tkb's freelist_ref has: the
 //   `borrow IntrusiveOwner[pool_id, _]` parameter proves, through
@@ -665,6 +675,23 @@ fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id)
         return IntrusivePoolInsertResult::OutOfMemory;
     }
     let slot: *IntrusiveSlot(T) = intrusive_slot_at(pool, slot_address);
+    // The second half of the same check, and the cheaper-but-worse case:
+    // a `next_free` corrupted to a well-formed address of a LIVE slot in
+    // this same chunk passes the arithmetic above. Handing it out would
+    // not fault -- it would silently alias two owners onto one slot, which
+    // is worse than the wild pointer, since nothing downstream is even
+    // startled by it. The invariant that catches it costs nothing and
+    // needs no new state: a slot's generation is 0 for exactly as long as
+    // it is free (grow zeroes it, remove zeroes it before pushing, insert
+    // stamps it), so a nonzero generation on a free-chain entry is a
+    // contradiction. Reading it is sound only because the range check
+    // above already proved this address is one of this chunk's slots --
+    // which is why the two checks are in this order and not the other.
+    if (slot.generation != 0) {
+        header.corrupt_free_chain_count = header.corrupt_free_chain_count + 1;
+        intrusive_pool_unlink_partial(pool, base);
+        return IntrusivePoolInsertResult::OutOfMemory;
+    }
     header.free_head = slot.next_free;
     let generation: usize = pool.next_generation;
     pool.next_generation = generation + 1;

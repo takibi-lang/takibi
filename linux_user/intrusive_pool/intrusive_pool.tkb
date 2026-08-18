@@ -450,6 +450,55 @@ fn app_main() {
         }
     }
 
+    // The quieter half of the same primitive: point the chain at a LIVE
+    // slot of the same chunk instead of at garbage. That address is a
+    // perfectly well-formed slot, so the arithmetic check alone would pass
+    // it, and handing it out would not fault -- it would alias two owners
+    // onto one slot. The generation word is what refuses it.
+    //
+    // Reuses the fresh chunk the recovery above already paid for (it is at
+    // pool.chunk_head, so first_slot walks it), which is why this costs no
+    // further page. Its slots #0 and #1 are the two live allocations made
+    // above, and #2 is its current free_head.
+    let live_slot: usize = intrusive_pool_first_slot(&pool_c);
+    let live_next: usize = intrusive_pool_next_slot(&pool_c, live_slot);
+    let free_head: usize = intrusive_pool_next_slot(&pool_c, live_next);
+    uart_puts("the aliasing target really is a live slot in the fresh chunk: ");
+    uart_print_bool(intrusive_pool_slot_generation(&pool_c, live_slot) != 0 &&
+                    intrusive_chunk_base_of(live_slot) != poisoned_base);
+    uart_puts("\n");
+    intrusive_slot_at(&pool_c, free_head).next_free = live_slot;
+
+    let alias_before: usize = intrusive_pool_corrupt_free_chain_count(&pool_c);
+    let live_generation: usize = intrusive_pool_slot_generation(&pool_c, live_slot);
+    match intrusive_pool_insert(&pool_c) {
+        IntrusivePoolInsertResult::Allocated(o) => { intrusive_owner_drop(o); }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_c alias setup insert failed\n");
+            return;
+        }
+    }
+    let mut alias_rejected: bool = false;
+    let mut aliased: bool = false;
+    match intrusive_pool_insert(&pool_c) {
+        IntrusivePoolInsertResult::Allocated(o) => {
+            if (intrusive_owner_slot(o) == live_slot) { aliased = true; }
+            intrusive_owner_drop(o);
+        }
+        IntrusivePoolInsertResult::OutOfMemory => { alias_rejected = true; }
+    }
+    uart_puts("a chain pointing at a LIVE slot is refused, and its existing ");
+    uart_puts("occupant is untouched (rejected, aliased, counted, occupant kept): ");
+    uart_print_bool(alias_rejected);
+    uart_puts(" ");
+    uart_print_bool(aliased);
+    uart_puts(" ");
+    uart_print(intrusive_pool_corrupt_free_chain_count(&pool_c) - alias_before);
+    uart_puts(" ");
+    uart_print_bool(
+        intrusive_pool_slot_generation(&pool_c, live_slot) == live_generation);
+    uart_puts("\n");
+
     // -- pool_x: the last remaining ceiling is the page provider's.
     let mut pool_x: IntrusivePool(BigPayload);
     intrusive_pool_init(&pool_x);
