@@ -451,32 +451,39 @@ fn intrusive_pool_owns_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id, bas
 // Full validation of a raw slot address: it names a chunk on this pool's
 // list, and it lands exactly on a slot boundary within that chunk's carved
 // slot range. After this returns true, dereferencing the slot is sound.
+// It is exactly intrusive_chunk_slot_in_range below, plus the chunk-list
+// walk that finds out WHICH chunk to range-check against. Stated that way
+// rather than repeating the arithmetic, because these two are the file's
+// only validation of a raw address and two copies of it would eventually
+// disagree -- and the copy that drifts is the one deciding whether a
+// dereference is sound.
 fn intrusive_pool_slot_is_valid(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                                 slot_address: usize) -> bool !{unsafe} {
     if (slot_address == 0) { return false; }
     let base: usize = intrusive_chunk_base_of(slot_address);
     if (intrusive_pool_owns_chunk(pool, base) == false) { return false; }
-    let offset: usize = slot_address - base;
-    if (offset < INTRUSIVE_CHUNK_HEADER_SIZE) { return false; }
-    let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(base);
-    let slot_offset: usize = offset - INTRUSIVE_CHUNK_HEADER_SIZE;
-    if (header.slot_stride == 0) { return false; }
-    if (slot_offset % header.slot_stride != 0) { return false; }
-    return slot_offset / header.slot_stride < header.slot_count;
+    return intrusive_chunk_slot_in_range(base, intrusive_chunk_header_at(base),
+                                         slot_address);
 }
 
-// GitHub issue #352: the O(1) half of validation, for the alloc fast path.
-// `intrusive_pool_slot_is_valid` above proves an address of UNKNOWN
-// provenance belongs to this pool at all -- O(chunks), because it has to
-// walk the chunk list to find out. This function does not need that walk:
-// the caller (intrusive_pool_insert) already knows `base` and `header`,
-// because the address under suspicion is `header.free_head` -- popped from
-// the very chunk it is validating against. So this is pure arithmetic on
-// values already in hand: does the popped address land in THIS chunk's
-// carved slot range, at an exact slot boundary? A corrupted `next_free`
-// word (or a corrupted `free_head` itself) fails this the same way a
-// corrupted index fails an array pool's bounds check -- see this file's
-// header, "Problem".
+// GitHub issue #352: the O(1) core of validation, and the alloc fast
+// path's whole check. Does `slot_address` land in the chunk at `base`, on
+// an exact slot boundary, below that chunk's slot_count?
+//
+// intrusive_pool_slot_is_valid above wraps this in a chunk-list walk
+// because it starts from an address of UNKNOWN provenance and has to
+// discover which chunk to check against. intrusive_pool_insert needs no
+// such walk: the address under suspicion is `header.free_head`, popped
+// from the very chunk it is being checked against, so `base` and `header`
+// are already in hand and this is pure arithmetic. A corrupted
+// `next_free` word (or a corrupted `free_head` itself) fails it the same
+// way a corrupted index fails an array pool's bounds check -- see this
+// file's header, "A CORRUPTED FREE CHAIN".
+//
+// `base` is trusted to be a real chunk base: either the caller proved it
+// (slot_is_valid's owns_chunk walk) or it is reading its own partial-list
+// head. The header's slot_stride/slot_count are trusted too -- see
+// "Current limitations".
 fn intrusive_chunk_slot_in_range(base: usize, header: *IntrusiveChunkHeader,
                                  slot_address: usize) -> bool !{unsafe} {
     if (slot_address < base) { return false; }
