@@ -732,6 +732,60 @@ let parser_tests = [
                      None, None, false, _, _)] -> ()
       | _ -> Alcotest.fail "expected variant tag plus u32 payload field size 8");
 
+  (* GitHub issue #348 groundwork: array_size's SIZEOF case used to
+     evaluate eagerly at parse time, which cannot work for a generic's own
+     type parameter -- `T` has no layout until Monomorphize.run binds it,
+     so `[u8; sizeof(T)]` failed with "unknown type 'T' in sizeof". It now
+     defers to Ast.ASSizeof in exactly that case, the type-parameter
+     counterpart of the ASParam the IDENT case already produced for value
+     parameters. This is what lets a pool slot hold `[u8; sizeof(T)]`
+     storage instead of a separate word (intrusive_pool, issue #344). *)
+  Alcotest.test_case
+    "array size via sizeof(T) inside a generic struct defers to ASSizeof \
+     rather than failing at parse time (issue #348)" `Quick
+    (fun () ->
+      match parse "generic struct Slot(T: type) { s: [u8; sizeof(T)]; }" with
+      | [Ast.GenericStructDef _] -> ()
+      | _ -> Alcotest.fail "expected the generic struct to parse"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.failf "expected sizeof(T) to defer, got: %s" msg);
+
+  Alcotest.test_case
+    "sizeof(T) array size resolves per instantiation, so one generic \
+     struct gets a different size for each T (issue #348)" `Quick
+    (fun () ->
+      let src =
+        "generic struct Slot(T: type) { generation: usize; s: [u8; sizeof(T)]; }
+         struct Big { a: usize; b: usize; c: usize; }
+         fn use_them() -> i32 {
+             let mut a: Slot(usize);
+             let mut b: Slot(Big);
+             a.generation = 0;
+             b.generation = 0;
+             return 0;
+         }" in
+      match Monomorphize.run (parse src) with
+      | prog ->
+          let size_of name =
+            Type_layout.sizeof_type Lexing.dummy_pos (Ast.TypeNamed name) in
+          ignore prog;
+          Alcotest.(check int) "Slot(usize) is 8 + sizeof(usize)" 16
+            (size_of "Slot$usize");
+          Alcotest.(check int) "Slot(Big) is 8 + sizeof(Big)" 32
+            (size_of "Slot$Big")
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.failf "expected both instantiations to resolve, got: %s" msg);
+
+  Alcotest.test_case
+    "sizeof of an unknown type in an array size is still rejected -- the \
+     deferral is gated on the name being a generic type parameter" `Quick
+    (fun () ->
+      match parse "let buf: [u8; sizeof(NoSuchType)];" with
+      | _ -> Alcotest.fail "expected an unknown type to be rejected"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) "mentions the unknown type" true
+            (contains_substring msg "NoSuchType"));
+
   Alcotest.test_case "array size referencing unknown identifier is a syntax error" `Quick (fun () ->
     match parse "let ring: [u8; UNDEFINED];" with
     | _ -> Alcotest.fail "expected an error, but parsing succeeded"

@@ -95,13 +95,13 @@ let rec transform ~(subst : string -> type_expr option)
        `run` below) is what actually reads its value. *)
   | TypeArraySym (t, sz) ->
       let elem = go t in
-      (match eval_size vsubst sz with
+      (match eval_size ~resolve_ty:go vsubst sz with
        | Some n -> TypeArray (elem, n)
        | None -> raise (Types.TypeError (Lexing.dummy_pos,
            "BUG: an unresolved symbolic array size escaped monomorphization")))
   | TypeSliceSym (t, sz) ->
       let elem = go t in
-      (match eval_size vsubst sz with
+      (match eval_size ~resolve_ty:go vsubst sz with
        | Some n -> TypeSlice (elem, n)
        | None -> raise (Types.TypeError (Lexing.dummy_pos,
            "BUG: an unresolved symbolic slice minimum escaped monomorphization")))
@@ -133,10 +133,21 @@ let rec transform ~(subst : string -> type_expr option)
 (* Evaluate a symbolic array-size expression against a value-parameter
    substitution. Mirrors lib/parser.mly's own array_size arithmetic
    exactly (eager left-to-right evaluation via OCaml's own +/-/*//). *)
-and eval_size (vsubst : string -> int option) (sz : array_size_expr) : int option =
+and eval_size ~(resolve_ty : type_expr -> type_expr)
+              (vsubst : string -> int option) (sz : array_size_expr) : int option =
+  let eval_size = eval_size ~resolve_ty in
   match sz with
   | ASLit n -> Some n
   | ASParam name -> vsubst name
+  | ASSizeof t ->
+      (* The type parameter is bound by now, so the layout question the
+         parser could not answer is answerable here. `resolve_ty` is the
+         enclosing `transform`'s own `go`, so nested generics
+         (`sizeof(Slot(T))`) substitute before being measured. A type
+         still without a registered layout at this point raises
+         Type_layout's own "unknown type ... in sizeof" rather than
+         silently producing a wrong size. *)
+      Some (Type_layout.sizeof_type Lexing.dummy_pos (resolve_ty t))
   | ASAdd (a, b) ->
       (match eval_size vsubst a, eval_size vsubst b with
        | Some x, Some y -> Some (x + y) | _ -> None)

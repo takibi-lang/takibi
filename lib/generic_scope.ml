@@ -32,3 +32,44 @@ let register (names : string list) =
   List.iter (fun n -> Hashtbl.replace table n ()) names
 
 let mem name = Hashtbl.mem table name
+
+(* The TYPE-parameter counterpart of `table`, for array_size's
+   `sizeof(...)` case. That case evaluates eagerly at parse time, which
+   works for every concrete type but cannot work for a generic's own type
+   parameter: `T` has no layout until Monomorphize.run binds it. Knowing
+   which names are legally symbolic TYPE parameters is what lets the
+   parser tell "defer this one" apart from a genuine typo, and emit
+   Ast.ASSizeof instead of failing with "unknown type 'T' in sizeof".
+
+   Same accumulate-forever, whole-program, no-shadowing design as `table`
+   above, and for the same reason -- a generic FUNCTION has no parse-time
+   scope boundary either. Monomorphize.run's own per-instantiation
+   substitution is the real enforcement point: a `T` that does not
+   actually belong to the enclosing generic fails there rather than
+   silently resolving to something else. *)
+let type_table : (string, unit) Hashtbl.t = Hashtbl.create 4
+
+let register_types (names : string list) =
+  List.iter (fun n -> Hashtbl.replace type_table n ()) names
+
+let mem_type name = Hashtbl.mem type_table name
+
+(* Does this type mention a generic type parameter anywhere, and so have
+   no layout until monomorphization? Deliberately structural rather than
+   just checking for a bare `T`, so that `sizeof(Slot(T))` defers too. *)
+let rec mentions_type_param (t : Ast.type_expr) : bool =
+  match t with
+  | Ast.TypeNamed n | Ast.TypeIndexed (n, _) -> mem_type n
+  | Ast.TypeGenericInst (n, args) ->
+      mem_type n || List.exists mentions_type_param args
+  | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeArray (t, _)
+  | Ast.TypeSlice (t, _) | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+  | Ast.TypeSink t | Ast.TypeRef t | Ast.TypeRefMut t
+  | Ast.TypeAlignedPtr (_, t) | Ast.TypeSingleton (t, _)
+  | Ast.TypeExists (_, _, t) | Ast.TypeRefined (_, _, t)
+  | Ast.TypeArraySym (t, _) | Ast.TypeSliceSym (t, _) ->
+      mentions_type_param t
+  | Ast.TypeTuple ts -> List.exists mentions_type_param ts
+  | Ast.TypeFn (ps, r, _) ->
+      List.exists mentions_type_param ps || mentions_type_param r
+  | _ -> false

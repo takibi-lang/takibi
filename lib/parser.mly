@@ -265,7 +265,12 @@ item:
          found. *)
       let literal = match n with
         | Ast.ASLit v -> v
-        | Ast.ASParam _ | Ast.ASAdd _ | Ast.ASSub _
+        (* ASSizeof is unreachable here for the same reason ASParam is: it
+           is produced only when the type mentions an enclosing generic's
+           own type parameter, and a top-level const has no enclosing
+           generic. A `sizeof(ConcreteType)` initializer folds to ASLit
+           above and is entirely legal. *)
+        | Ast.ASParam _ | Ast.ASSizeof _ | Ast.ASAdd _ | Ast.ASSub _
         | Ast.ASMul _ | Ast.ASDiv _ ->
             raise (Types.TypeError (loc,
               Printf.sprintf
@@ -393,6 +398,11 @@ generic_struct_intro:
        registration is the Freelist redesign's own further follow-up. *)
     { Generic_scope.register (List.filter_map (function
         | (n, GPValue _) -> Some n | (_, GPType) -> None) tps);
+      (* ...and this struct's own TYPE parameter names, so array_size's
+         `sizeof(...)` case can tell "defer, T has no layout yet" from a
+         genuine unknown type. See lib/generic_scope.ml's type_table. *)
+      Generic_scope.register_types (List.filter_map (function
+        | (n, GPType) -> Some n | (_, GPValue _) -> None) tps);
       (name, tps) }
 
 owned_kind:
@@ -953,7 +963,15 @@ array_size:
                (declare it earlier as `const %s: T = N;`)"
               name name)) }
   | SIZEOF LPAREN t = type_expr RPAREN
-    { Ast.ASLit (Type_layout.sizeof_type $symbolstartpos t) }
+    (* Eager whenever it can be: for a concrete type the layout is already
+       known here, and folding to an ASLit keeps every downstream pass
+       seeing a plain integer, exactly as before. A type mentioning the
+       enclosing generic's own type parameter has no layout until
+       Monomorphize.run binds it, so that case -- and only that case --
+       defers to a symbolic ASSizeof, the type-parameter counterpart of
+       the ASParam the IDENT case above produces for value parameters. *)
+    { if Generic_scope.mentions_type_param t then Ast.ASSizeof t
+      else Ast.ASLit (Type_layout.sizeof_type $symbolstartpos t) }
   | LPAREN n = array_size RPAREN { n }
   | a = array_size PLUS  b = array_size
     { match a, b with

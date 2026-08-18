@@ -220,6 +220,16 @@ and array_size_expr =
      concrete int until monomorphization) can appear in an array size. *)
   | ASLit of int
   | ASParam of ident
+  | ASSizeof of type_expr
+    (* sizeof(T) where T mentions one of the ENCLOSING generic's own
+       not-yet-bound TYPE parameters, e.g. `storage: [u8; sizeof(T)]`.
+       The type-parameter counterpart of ASParam: array_size's SIZEOF
+       case evaluates eagerly to an ASLit whenever it can (the common,
+       non-generic case), and only defers to this node when eager
+       evaluation is impossible because T has no layout yet.
+       Monomorphize.run substitutes T and rewrites this to an ordinary
+       TypeArray before type_inf.ml/llvm_gen.ml ever run -- the same
+       contract TypeArraySym itself has. *)
   | ASAdd of array_size_expr * array_size_expr
   | ASSub of array_size_expr * array_size_expr
   | ASMul of array_size_expr * array_size_expr

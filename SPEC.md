@@ -333,12 +333,20 @@ parameter value, or top-level declaration name.
   fixed type, not a polymorphic literal -- compare/assign against another
   integer type needs an explicit `as` cast). Reflects `packed`/`align(N)`
   layout correctly (reads the same LLVM DataLayout used for struct
-  codegen). Cannot be used in an array-size position (`[T; sizeof(Foo)]`)
-  -- array sizes resolve in the parser, before struct layout exists.
+  codegen). Usable in an array-size position (`[u8; sizeof(Foo)]`), where
+  it folds to a literal in the parser. Inside a `generic struct`, a
+  `sizeof` naming one of that generic's own type parameters
+  (`[u8; sizeof(T)]`, or `sizeof(Slot(T))`) has no layout to read yet, so
+  it stays symbolic and is resolved per instantiation by
+  `Monomorphize.run` -- the type-parameter counterpart of the value
+  parameters an array size could already reference symbolically. This is
+  what lets a generic container size a field from its payload type
+  without the caller passing that size in (GitHub issue #348).
 - `offsetof(StructName, field)` -- compile-time byte offset of `field`
   within `StructName`'s actual layout, type `usize`. Same DataLayout
-  -based resolution as `sizeof`; same "not usable in an array-size
-  position" restriction.
+  -based resolution as `sizeof`. It has no symbolic form: unlike
+  `sizeof`, it names a specific field of a specific struct, so it cannot
+  appear in an array size that depends on a generic's own type parameter.
 - Function call, `*expr` (dereference), `&ident` (address-of; taking the
   address of an immutable *local* variable is a compile error, but
   `&global_var` is always allowed since globals are always mutable
@@ -2640,11 +2648,10 @@ investigations behind any of these, see `HISTORY.md`.
   single whole-program unit; `use` only changes how the file list is
   computed, not the compilation model itself. See HISTORY.md's issue #55
   entries for the full design.
-- **`sizeof`/`offsetof` cannot appear in an array-size position**
-  (`[T; sizeof(Foo)]`) -- array sizes resolve in the parser, before
-  struct layout exists. See HISTORY.md's "sizeof(T) Spans 4 Files" entry
-  for why (parser-time vs. codegen-time resolution mismatch) and what
-  combining them would require.
+- **`offsetof` cannot appear in an array-size position.** `sizeof` can
+  (see "Expressions" above, including the per-instantiation `sizeof(T)`
+  form inside a generic); `offsetof` names a specific field of a specific
+  struct and has no symbolic counterpart.
 - **No general constant-expression arithmetic** between two named
   globals (`let X: i32 = A + B;`) -- see "Global Constant Folding" above
   for exactly what *is* supported.
