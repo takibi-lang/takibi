@@ -70,6 +70,7 @@ rule read = parse
   | "match"   { MATCH }
   | "align"   { ALIGN }
   | "sizeof"  { SIZEOF }
+  | "alignof" { ALIGNOF }
   | "use"     { USE }
   | "offsetof" { OFFSETOF }
   | "static_assert" { STATIC_ASSERT }

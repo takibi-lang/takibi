@@ -786,6 +786,30 @@ let parser_tests = [
           Alcotest.(check bool) "mentions the unknown type" true
             (contains_substring msg "NoSuchType"));
 
+  (* `alignof(T)` reads the LLVM DataLayout and has no OCaml-computed
+     counterpart, deliberately: SizeOf needs a disagreement guard exactly
+     because it has a second formula, and alignment sidesteps that by
+     never growing one. These check it against layouts whose alignment is
+     not guessable from size alone. *)
+  Alcotest.test_case
+    "alignof of an unknown type is a source error, like sizeof" `Quick
+    (fun () ->
+      match infer "fn probe() -> usize { return alignof(NoSuchType); }" with
+      | _ -> Alcotest.fail "expected an unknown type to be rejected"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) "names the type and the operator" true
+            (contains_substring msg "NoSuchType" && contains_substring msg "alignof"));
+
+  Alcotest.test_case
+    "alignof of an erased view is rejected -- a view has no layout" `Quick
+    (fun () ->
+      match infer
+        "linear view Perm; fn probe() -> usize { return alignof(Perm); }" with
+      | _ -> Alcotest.fail "expected an erased view to be rejected"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) "says it has no runtime layout" true
+            (contains_substring msg "no runtime size or layout"));
+
   Alcotest.test_case "array size referencing unknown identifier is a syntax error" `Quick (fun () ->
     match parse "let ring: [u8; UNDEFINED];" with
     | _ -> Alcotest.fail "expected an error, but parsing succeeded"
@@ -8782,6 +8806,56 @@ let codegen_tests = [
          (contains_substring (function_ir "offset_normal_value") "ret i64 4");
        Alcotest.(check bool) "packed field offset has no padding" true
          (contains_substring (function_ir "offset_packed_value") "ret i64 1"));
+
+  (* `alignof(T)` (issue #348's alignment follow-up) reads the LLVM
+     DataLayout and, unlike sizeof, has no OCaml-computed counterpart to
+     disagree with. What must hold is that it never lies about the layout
+     actually emitted, so this checks it RELATIONALLY: a field placed
+     after a single byte lands at exactly its own alignment, so
+     `offsetof(H, v)` and `alignof(A)` must agree whatever that value is.
+     Stated that way on purpose -- `struct A align(32)` currently reports
+     8, because a struct's `align(N)` tail-pads its size without raising
+     the alignment it is embedded at, and this test stays correct if and
+     when that gap closes rather than pinning today's number. *)
+  Alcotest.test_case
+    "alignof matches the offset a field is actually placed at, including \
+     for an align(N) struct" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
+       in
+       let _ = gen_codegen
+         "struct AlignPlain { a: u8; b: u32; }
+          struct AlignDeclared align(32) { a: usize; }
+          struct HoldPlain { pad: u8; v: AlignPlain; }
+          struct HoldDeclared { pad: u8; v: AlignDeclared; }
+          fn plain_align() usize { return alignof(AlignPlain); }
+          fn plain_offset() usize { return offsetof(HoldPlain, v); }
+          fn declared_align() usize { return alignof(AlignDeclared); }
+          fn declared_offset() usize { return offsetof(HoldDeclared, v); }
+          fn byte_align() usize { return alignof(u8); }"
+       in
+       let ret_of name =
+         match Hashtbl.find_opt Llvm_gen.functions name with
+         | Some (_, fn) -> Llvm.string_of_llvalue fn
+         | None -> Alcotest.failf "function '%s' not found" name
+       in
+       let agrees a b =
+         let ir_a = ret_of a and ir_b = ret_of b in
+         let rec find n = n <= 64 &&
+           (let needle = Printf.sprintf "ret i64 %d" n in
+            (contains_substring ir_a needle && contains_substring ir_b needle)
+            || find (n * 2))
+         in find 1
+       in
+       Alcotest.(check bool) "alignof(u8) is 1" true
+         (contains_substring (ret_of "byte_align") "ret i64 1");
+       Alcotest.(check bool)
+         "a plain struct's alignof equals where it is embedded" true
+         (agrees "plain_align" "plain_offset");
+       Alcotest.(check bool)
+         "an align(N) struct's alignof still equals where it is embedded" true
+         (agrees "declared_align" "declared_offset"));
 
   (* GitHub issue #77: sizeof(...)/offsetof(...) from a packed struct must
      prove a subslice bound with zero trap sites, whether used directly or

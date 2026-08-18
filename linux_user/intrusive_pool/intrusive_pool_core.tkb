@@ -343,16 +343,6 @@ generic struct IntrusiveSlot(T: type) {
     storage: [u8; sizeof(T)];
 }
 
-// Measures T's alignment, which the language has no `alignof` for yet:
-// laying a T after a single byte forces exactly `alignof(T) - 1` bytes of
-// padding, so `sizeof(IntrusiveSlotAlignProbe(T)) - sizeof(T)` IS
-// `alignof(T)`. Used only by intrusive_pool_slots_per_chunk's
-// static_assert; no value of this type is ever created.
-generic struct IntrusiveSlotAlignProbe(T: type) {
-    pad: u8;
-    value: T;
-}
-
 // Scalars only. No array, no N, no MAX_CHUNKS -- this struct's size does
 // not depend on how many objects the pool will hold.
 //
@@ -494,9 +484,11 @@ fn intrusive_pool_slots_per_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id
     //    contributes nothing to IntrusiveSlot(T)'s alignment -- unlike
     //    the `payload: T` field it replaced, which used to force it. The
     //    slot is therefore aligned to `generation`'s 8, and a T wanting
-    //    more than that would be handed a misaligned address. Measured
-    //    rather than assumed, via the align probe, since the language has
-    //    no `alignof`.
+    //    more than that would be handed a misaligned address. Stated
+    //    against `alignof(usize)` rather than a literal 8, because 8 is
+    //    not the constant that matters -- what the slot guarantees is
+    //    exactly `generation`'s own alignment, and saying so keeps this
+    //    correct on a target where that is not 8.
     //
     //    No T can violate this TODAY, and the assert is deliberately here
     //    anyway. Every takibi type currently tops out at 8-byte alignment
@@ -510,7 +502,7 @@ fn intrusive_pool_slots_per_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id
     //    expressible, and it is exactly then that a silently misaligned
     //    payload would appear here. Cheaper to write it now, while the
     //    reasoning is in hand, than to remember later.
-    static_assert(sizeof(IntrusiveSlotAlignProbe(T)) - sizeof(T) <= sizeof(usize),
+    static_assert(alignof(T) <= alignof(usize),
                   "IntrusivePool(T): T needs stronger alignment than the slot layout guarantees");
     return (PAGE_SIZE - INTRUSIVE_CHUNK_HEADER_SIZE) / sizeof(IntrusiveSlot(T));
 }

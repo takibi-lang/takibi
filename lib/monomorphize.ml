@@ -217,6 +217,7 @@ let rec relocate_expr (mangled : string) (e : expr) : expr =
     | SliceOf (id, lo, hi) -> SliceOf (id, ex lo, ex hi)
     | Unsafe a -> Unsafe (ex a)
     | SizeOf t -> SizeOf t
+    | AlignOf t -> AlignOf t
     | OffsetOf (t, f) -> OffsetOf (t, f)
     | Assign (l, r) -> Assign (ex l, ex r)
   in
@@ -301,6 +302,7 @@ let rec walk_expr ~subst ~vsubst ~resolve_inst (e : expr) : expr =
     | SliceOf (id, lo, hi) -> SliceOf (id, ex lo, ex hi)
     | Unsafe a -> Unsafe (ex a)
     | SizeOf t -> SizeOf (ty t)
+    | AlignOf t -> AlignOf (ty t)
     | OffsetOf (t, f) -> OffsetOf (ty t, f)
     | Assign (l, r) -> Assign (ex l, ex r)
   in
@@ -924,6 +926,7 @@ let run (prog : toplevel list) : toplevel list =
         | SliceOf (id, lo, hi) -> SliceOf (id, ex lo, ex hi)
         | Unsafe a -> Unsafe (ex a)
         | SizeOf t -> SizeOf (ty t)
+        | AlignOf t -> AlignOf (ty t)
         | OffsetOf (t, f) -> OffsetOf (ty t, f)
         | Assign (l, r) -> Assign (ex l, ex r)
       in

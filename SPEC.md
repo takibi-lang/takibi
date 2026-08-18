@@ -342,6 +342,13 @@ parameter value, or top-level declaration name.
   parameters an array size could already reference symbolically. This is
   what lets a generic container size a field from its payload type
   without the caller passing that size in (GitHub issue #348).
+- `alignof(T)` -- compile-time ABI alignment of `T` in bytes, type
+  `usize`. Read from the LLVM DataLayout only, with no independently
+  computed counterpart, so it always reports the alignment the emitted
+  layout actually has. Note that a struct's own `align(N)` tail-pads its
+  size without raising the alignment it is embedded at, so `alignof` of
+  such a struct reports its natural alignment rather than `N`. Expression
+  position only: it is not usable in an array size.
 - `offsetof(StructName, field)` -- compile-time byte offset of `field`
   within `StructName`'s actual layout, type `usize`. Same DataLayout
   -based resolution as `sizeof`. It has no symbolic form: unlike
@@ -2648,10 +2655,25 @@ investigations behind any of these, see `HISTORY.md`.
   single whole-program unit; `use` only changes how the file list is
   computed, not the compilation model itself. See HISTORY.md's issue #55
   entries for the full design.
-- **`offsetof` cannot appear in an array-size position.** `sizeof` can
-  (see "Expressions" above, including the per-instantiation `sizeof(T)`
-  form inside a generic); `offsetof` names a specific field of a specific
-  struct and has no symbolic counterpart.
+- **`offsetof` and `alignof` cannot appear in an array-size position.**
+  `sizeof` can (see "Expressions" above, including the per-instantiation
+  `sizeof(T)` form inside a generic). `offsetof` names a specific field
+  of a specific struct and has no symbolic counterpart; `alignof` is
+  excluded for a different reason -- an array size is answered at parse
+  time by `lib/type_layout.ml`, which is the one layout path nothing
+  cross-checks against the real DataLayout, and alignment is exactly
+  where the two currently disagree (next bullet).
+- **A struct's `align(N)` does not raise the alignment it is embedded
+  at.** It tail-pads the struct's own size to a multiple of `N`, so
+  `sizeof` reflects it, but `struct A align(32) { a: usize; }` inside
+  `struct H { pad: u8; v: A; }` still lands at offset 8, not 32 -- which
+  the "every instance/array element aligned to N" wording under "Structs"
+  reads as promising. The two layout paths also disagree about it: the
+  same `sizeof(H)` is 40 in an expression (DataLayout, and what the
+  emitted code really does) and 64 in an array size (`type_layout.ml`,
+  which applies `align(N)` as a true alignment). `alignof` deliberately
+  follows the DataLayout, so it never promises more than the layout
+  delivers.
 - **No general constant-expression arithmetic** between two named
   globals (`let X: i32 = A + B;`) -- see "Global Constant Folding" above
   for exactly what *is* supported.

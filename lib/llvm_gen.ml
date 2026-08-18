@@ -1191,7 +1191,7 @@ let slice_rebind_names (stmts : Ast.stmt list) : string list =
          | _ -> go_expr lhs);
         go_expr rhs
     | IntLit _ | BoolLit _ | StringLit _ | Var _ | ViewLit _
-    | EnumVariant _ | SizeOf _
+    | EnumVariant _ | SizeOf _ | AlignOf _
     | OffsetOf _ | EmbedFile _ ->
         ()
   in
@@ -3169,6 +3169,20 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | None -> TypeUsize
       in
       (result_ty, const_int (ltype_of_ast TypeUsize) sz)
+
+  | AlignOf ty ->
+      (* The DataLayout is the ONLY source here -- no OCaml-computed
+         counterpart to cross-check against, because there deliberately
+         is none (see type_inf.ml's AlignOf case). SizeOf needs its
+         disagreement guard precisely because it has a second formula;
+         alignment avoids the problem by never growing one. *)
+      let elem_llty = ltype_of_ast ty in
+      let dl = match !target_data with
+        | Some dl -> dl
+        | None -> raise (Error "alignof: target data layout not initialized")
+      in
+      let al = Llvm_target.DataLayout.abi_align elem_llty dl in
+      (TypeUsize, const_int (ltype_of_ast TypeUsize) al)
 
   | OffsetOf (ty, field) ->
       let (name, llty) = match ty with
@@ -5713,6 +5727,13 @@ let rec eval_const_int (e : Ast.expr) : Int64.t =
         | None -> raise (Error "sizeof: target data layout not initialized")
       in
       Llvm_target.DataLayout.abi_size elem_llty dl
+  | AlignOf ty ->
+      let elem_llty = ltype_of_ast ty in
+      let dl = match !target_data with
+        | Some dl -> dl
+        | None -> raise (Error "alignof: target data layout not initialized")
+      in
+      Int64.of_int (Llvm_target.DataLayout.abi_align elem_llty dl)
   | OffsetOf (ty, field) ->
       let (name, llty) = match ty with
         | TypeNamed name -> (name, ltype_of_ast ty)

@@ -306,6 +306,14 @@ and expr_desc =
                                   type checker accepts. *)
   | EnumVariant of string * string  (* EtherType::IPv4 -- enum name, variant name *)
   | SizeOf of type_expr        (* sizeof(T) -- compile-time size in bytes, type usize *)
+  | AlignOf of type_expr
+      (* alignof(T) -- compile-time ABI alignment in bytes, type usize.
+         Read from the same LLVM DataLayout the emitted code actually
+         uses, never from an independent OCaml formula, so it can never
+         promise an alignment the generated layout does not deliver. That
+         matters today: a struct's own `align(N)` tail-pads its size
+         without raising the alignment it is embedded at, so alignof
+         reports the real 8 rather than the declared N. *)
   | OffsetOf of type_expr * string
       (* offsetof(T, field) -- compile-time field offset in bytes, type usize *)
   | EmbedFile of string
@@ -764,7 +772,7 @@ let written_names (stmts : stmt list) : string list =
          | _ -> go_expr lhs);
         go_expr rhs
     | IntLit _ | BoolLit _ | StringLit _ | Var _ | ViewLit _
-    | EnumVariant _ | SizeOf _
+    | EnumVariant _ | SizeOf _ | AlignOf _
     | OffsetOf _ | EmbedFile _ ->
         ()
   in

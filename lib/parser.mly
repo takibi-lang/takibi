@@ -137,7 +137,7 @@ let promote_be_field_type = function
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
-%token FN INLINE NOINLINE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE IO ENUM MATCH ALIGN SIZEOF OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
+%token FN INLINE NOINLINE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE IO ENUM MATCH ALIGN SIZEOF ALIGNOF OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
 %token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
@@ -795,6 +795,13 @@ expr:
     { { desc = VariantCtor ($1, $3, payload); loc = $symbolstartpos } }
   | SIZEOF LPAREN t = type_expr RPAREN
     { { desc = SizeOf t; loc = $symbolstartpos } }
+  (* Expression position only, deliberately -- see SPEC.md. An array-size
+     `alignof` would have to be answered by Type_layout at parse time,
+     which is the one layout path nothing cross-checks against the real
+     DataLayout, and alignment is exactly where those two currently
+     disagree. *)
+  | ALIGNOF LPAREN t = type_expr RPAREN
+    { { desc = AlignOf t; loc = $symbolstartpos } }
   | OFFSETOF LPAREN t = type_expr COMMA field = IDENT RPAREN
     { { desc = OffsetOf (t, field); loc = $symbolstartpos } }
   | EMBED_FILE LPAREN path = STRING RPAREN

@@ -69,7 +69,8 @@ let rec count_var_occurrences name (e : Ast.expr) =
   | Ast.Assign (lhs, rhs) ->
       count_var_occurrences name lhs + count_var_occurrences name rhs
   | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.ViewLit _
-  | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.OffsetOf _ | Ast.EmbedFile _ -> 0
+  | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.AlignOf _ | Ast.OffsetOf _
+  | Ast.EmbedFile _ -> 0
 
 (* Type environment: immutable map from variable name to (type, is_mutable) *)
 type tyenv = (ty * bool) StringMap.t
@@ -2644,6 +2645,27 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       (match const_type_size senv ty with
        | Some v -> TRefinedInt (v, v + 1, TUsize)
        | None -> TUsize)
+
+  | AlignOf ty ->
+      (* Same existence check as SizeOf, so an unknown name is a source
+         error rather than an internal codegen one. *)
+      (match ty with
+       | Ast.TypeNamed name when not (StringMap.mem name senv)
+                                  && not (StringMap.mem name eenv)
+                                  && not (Hashtbl.mem variant_defs name) ->
+           raise (TypeError (e.loc, Printf.sprintf "unknown type '%s' in alignof" name))
+       | _ -> ());
+      (* Deliberately NOT refined to a singleton range, unlike SizeOf.
+         Refining means committing to a value here, in OCaml, and this
+         value has no target-independent formula worth committing to:
+         alignment is whatever the DataLayout says, and llvm_gen is the
+         only place that knows it. A plain TUsize defers to codegen and
+         keeps a second, independently-computed alignment from existing
+         at all -- which is the whole point, since a duplicated layout
+         formula disagreeing with the emitted one is exactly the bug
+         `align(N)` structs already exhibit for sizeof in an array-size
+         position. *)
+      TUsize
 
   | OffsetOf (ty, field) ->
       (* offsetof is meaningful only for a named struct. Validate both the
@@ -5980,7 +6002,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             here too, same as validate_let_type already does for a `let`
             annotation. *)
          validate_nonparam_type ~allow_ref:true e.loc ty; validate_expr_types x
-     | Ast.SizeOf ty | Ast.OffsetOf (ty, _) ->
+     | Ast.SizeOf ty | Ast.AlignOf ty | Ast.OffsetOf (ty, _) ->
          if type_mentions_view ty then
            raise (TypeError (e.loc,
              "an erased view has no runtime size or layout"));
@@ -7690,8 +7712,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.SliceOf (base, lo, hi) ->
           require_region_live_base e.loc taints moved base;
           check_expr taints (check_expr taints moved false lo) false hi
-      | Ast.SizeOf _ | Ast.OffsetOf _ | Ast.IntLit _ | Ast.BoolLit _
-      | Ast.StringLit _ | Ast.EmbedFile _ -> moved
+      | Ast.SizeOf _ | Ast.AlignOf _ | Ast.OffsetOf _ | Ast.IntLit _
+      | Ast.BoolLit _ | Ast.StringLit _ | Ast.EmbedFile _ -> moved
       | Ast.EnumVariant (vtype, _) ->
           if (Hashtbl.find_opt variant_kinds vtype = Some Ast.KindLinear
               || Hashtbl.mem must_use_variants vtype)
@@ -8285,8 +8307,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.SliceOf (_, lo, hi) -> visit_expr lo; visit_expr hi
       | Ast.Assign (lhs, rhs) -> visit_expr lhs; visit_expr rhs
       | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.Var _
-      | Ast.ViewLit _ | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.OffsetOf _
-      | Ast.EmbedFile _ -> ()
+      | Ast.ViewLit _ | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.AlignOf _
+      | Ast.OffsetOf _ | Ast.EmbedFile _ -> ()
     and visit_stmt (s : Ast.stmt) =
       match s.desc with
       | Ast.Return (Some e) | Ast.Expr e | Ast.LetTuple (_, e) | Ast.Yield e ->
