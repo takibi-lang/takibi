@@ -79,10 +79,21 @@ $(TAKIBI): FORCE
 # ALCOTEST_COMPACT=1 collapses each passing test to a single '.' instead of
 # a full "[OK] suite N description..." line -- with 1100+ tests, the
 # uncompacted form buried real failures in thousands of lines of routine
-# pass output. Alcotest still prints full failure detail regardless of this
-# setting, so nothing about diagnosing a real failure is lost.
+# pass output.
+#
+# Routed through scripts/list_dune_test_failures.sh, not a bare `dune
+# test`, because Alcotest's own terminal reporter prints only the FIRST
+# failing case's detail box when several fail in one run -- discovered
+# investigating issue #325 (33 real failures, one ever visible), and
+# rediscovered the hard way again in the #344 session despite this script
+# already existing, which is why `make test` calls it automatically now
+# instead of leaving that up to whoever remembers. The script re-derives
+# every failure's detail by grepping dune's own per-test `.output` log
+# files (`--force`'d fresh on every run so a stale log is never mistaken
+# for a current one) and still exits 0/1 like a bare `dune test` would, so
+# nothing downstream that depends on `test`'s exit code changes.
 test: build
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env ALCOTEST_COMPACT=1 dune test
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env ALCOTEST_COMPACT=1 bash scripts/list_dune_test_failures.sh
 
 ## langcheck: verify that all source files contain only ASCII characters.
 ## Repo-wide (kernel/, examples/, the compiler itself), so this is the one

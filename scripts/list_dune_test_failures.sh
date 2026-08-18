@@ -20,6 +20,12 @@
 # session that motivated this script -- 33 reported failures, only one
 # ever visible in the terminal, the rest found this way).
 #
+# `make test` already calls this script (see the Makefile's own `test`
+# target), so most callers never need to invoke it directly -- it exists
+# standalone for anything that bypasses `make test` (a bare `dune test`,
+# or `dune exec test/test_takibi.exe` to target one specific case) and
+# still wants every failure listed, not just the first.
+#
 # Usage: scripts/list_dune_test_failures.sh
 # Runs `dune test --force` (force, so stale .output files from a
 # previous run are never mistaken for current ones), then prints every
