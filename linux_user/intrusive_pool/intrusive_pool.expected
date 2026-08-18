@@ -18,5 +18,9 @@ cursor walk found every live payload exactly once (count, checksum): 200 20100
 two chunks filled before the drain (live, chunks, pages): 4 2 2
 draining gave one page back and kept one empty chunk in reserve (live, chunks, released, pages still held): 0 1 1 1
 reallocating after the drain reused the reserved chunk without asking for a page: true
-1960-byte objects placed before the PROVIDER ran out (objects, chunks, pages left): 8 4 0
+the poisoned slot is itself still handed out normally: true
+a corrupted next_free is rejected, not returned (rejected, handed back the poison, counted): true false 1
+the pool keeps working from a fresh chunk instead: true
+emptying it neither re-admits it nor returns its page (allocated elsewhere, chunks, released): true 2 0
+1960-byte objects placed before the PROVIDER ran out (objects, chunks, pages left): 4 2 0
 done

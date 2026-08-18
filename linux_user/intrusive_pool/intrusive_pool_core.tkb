@@ -115,6 +115,33 @@
 // deleted: linearity plus the brand would then prove everything, and
 // remove becomes an unconditional O(1) unlink.
 //
+// A CORRUPTED FREE CHAIN
+//
+// The free path above is about a handle of unknown provenance. The ALLOC
+// path has a separate exposure that no handle is involved in at all
+// (GitHub issue #352): intrusive_pool_insert pops `header.free_head`,
+// which is a pointer read out of a free slot's own memory. A single stray
+// write into that `next_free` word -- or into `free_head` itself -- would
+// otherwise make the next insert hand the caller an arbitrary,
+// attacker-chosen `*T`. That is the classic freelist-poisoning primitive,
+// and it is exactly what Linux SLUB's CONFIG_SLAB_FREELIST_HARDENED
+// obfuscates its own chain pointers to blunt.
+//
+// The intrusive design is what introduces it: an array-indexed pool
+// (kernel/lib/freelist.tkb, slotmap.tkb) corrupted the same way yields a
+// wrong INDEX, which its own bounds check catches. Here it yields a wrong
+// POINTER. So insert validates the popped address before returning it --
+// but it needs no chunk walk to do so, because it already knows which
+// chunk it is allocating from: intrusive_chunk_slot_in_range is O(1)
+// arithmetic on values the chunk header already holds. On failure the
+// pointer is not handed out, the event is counted, and that chunk is
+// QUARANTINED -- see IntrusiveChunkHeader.corrupt_free_chain_count.
+//
+// Not attempted here, deliberately: XOR-obfuscating the chain pointer
+// with a per-pool random cookie, which is real defence in depth but needs
+// an entropy source this kernel has no story for yet, and randomizing a
+// chunk's initial free order.
+//
 // Current limitations (2026-08-17). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
@@ -135,6 +162,21 @@
 //   and if the same page comes back later as a chunk of this same pool,
 //   the pool-global (never per-chunk) generation counter is what still
 //   rejects a stale handle.
+// - A chunk quarantined by the alloc-path check (issue #352) is leaked on
+//   purpose: its page is never returned to the provider and it is never
+//   allocated from again. That is bounded by the number of corruption
+//   events, which is zero on a correctly behaving system -- but it does
+//   mean a pool under a repeated stray write bleeds a page per event
+//   rather than failing loudly. Revisit if that ever stops being the
+//   right trade.
+// - The alloc-path check proves the popped address is a well-formed slot
+//   ADDRESS in the chunk it came from. It does NOT prove the slot was
+//   actually free: a `next_free` corrupted to the address of a LIVE slot
+//   in the same chunk passes, and the pool would then hand out a second
+//   handle to it. The generation word makes that detectable at remove
+//   time (the older handle stops matching), not preventable here. Closing
+//   it needs the free/live bit to be checkable independently of the chain
+//   itself, which is issue #348's state-dependent-view question.
 // - `intrusive_pool_ref` does NOT re-validate. It is the fast path, with
 //   the same contract kernel/lib/freelist.tkb's freelist_ref has: the
 //   `borrow IntrusiveOwner[pool_id, _]` parameter proves, through
@@ -187,6 +229,23 @@ const INTRUSIVE_CHUNK_HEADER_SIZE: usize = 128;
 // that a chunk emptying is a local fact -- with one global chain, giving a
 // page back would have meant walking every slot of every other chunk to
 // unthread this one's.
+//
+// `corrupt_free_chain_count` (GitHub issue #352) does two jobs with one
+// word, because 0 is unambiguously "clean": it counts the free-chain
+// entries this chunk offered that failed intrusive_pool_insert's range
+// check, and being nonzero IS this chunk's QUARANTINE flag -- see
+// intrusive_pool_link_partial, which refuses to re-admit a quarantined
+// chunk as an allocation source, and intrusive_pool_remove, which refuses
+// to hand its page back. It lives here rather than in IntrusivePool(T)
+// for two reasons. It costs nothing: INTRUSIVE_CHUNK_HEADER_SIZE reserves
+// 128 bytes for a header that uses 88, so this field consumes slack that
+// was already paid for, and IntrusivePool(T)'s advertised 80-byte static
+// footprint does not move (the point of issues #348/#349 is that bytes
+// per OBJECT and per PAGE are what scale; a per-pool byte is the cheap
+// axis, but this one turned out to be free on either). And a per-chunk
+// quarantine flag is needed regardless, since without it the very next
+// intrusive_pool_remove into this chunk would link it straight back onto
+// the partial list.
 struct IntrusiveChunkHeader {
     pool_tag: usize;
     next_chunk: usize;
@@ -198,6 +257,7 @@ struct IntrusiveChunkHeader {
     slot_count: usize;
     slot_stride: usize;
     live_count: usize;
+    corrupt_free_chain_count: usize;
 }
 
 // `next_free` is the intrusive link: meaningful only while this slot is
@@ -395,6 +455,29 @@ fn intrusive_pool_slot_is_valid(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     return slot_offset / header.slot_stride < header.slot_count;
 }
 
+// GitHub issue #352: the O(1) half of validation, for the alloc fast path.
+// `intrusive_pool_slot_is_valid` above proves an address of UNKNOWN
+// provenance belongs to this pool at all -- O(chunks), because it has to
+// walk the chunk list to find out. This function does not need that walk:
+// the caller (intrusive_pool_insert) already knows `base` and `header`,
+// because the address under suspicion is `header.free_head` -- popped from
+// the very chunk it is validating against. So this is pure arithmetic on
+// values already in hand: does the popped address land in THIS chunk's
+// carved slot range, at an exact slot boundary? A corrupted `next_free`
+// word (or a corrupted `free_head` itself) fails this the same way a
+// corrupted index fails an array pool's bounds check -- see this file's
+// header, "Problem".
+fn intrusive_chunk_slot_in_range(base: usize, header: *IntrusiveChunkHeader,
+                                 slot_address: usize) -> bool !{unsafe} {
+    if (slot_address < base) { return false; }
+    let offset: usize = slot_address - base;
+    if (offset < INTRUSIVE_CHUNK_HEADER_SIZE) { return false; }
+    if (header.slot_stride == 0) { return false; }
+    let slot_offset: usize = offset - INTRUSIVE_CHUNK_HEADER_SIZE;
+    if (slot_offset % header.slot_stride != 0) { return false; }
+    return slot_offset / header.slot_stride < header.slot_count;
+}
+
 // -- The two chunk lists -----------------------------------------------
 // All four of these are O(1); both lists are doubly linked precisely so
 // that reclaim (issue #346) never has to search for the chunk it is about
@@ -404,6 +487,12 @@ fn intrusive_pool_link_partial(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                                base: usize) !{unsafe} {
     let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(base);
     if (header.on_partial != 0) { return; }
+    // GitHub issue #352: a quarantined chunk never becomes an allocation
+    // source again. This is the guard that makes the quarantine stick --
+    // allocation only ever takes from the partial list, and every path
+    // that would re-admit a chunk (notably intrusive_pool_remove freeing a
+    // slot back into it) goes through here.
+    if (header.corrupt_free_chain_count != 0) { return; }
     header.prev_partial = 0;
     header.next_partial = pool.partial_head;
     if (pool.partial_head != 0) {
@@ -506,6 +595,7 @@ fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id)
             header.slot_count = slot_count;
             header.slot_stride = stride;
             header.live_count = 0;
+            header.corrupt_free_chain_count = 0;
             if (pool.chunk_head != 0) {
                 intrusive_chunk_header_at(pool.chunk_head).prev_chunk = base;
             }
@@ -551,6 +641,27 @@ fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id)
     let slot_address: usize = header.free_head;
     if (slot_address == 0) {
         // Also unreachable: partial-list membership IS "free_head != 0".
+        return IntrusivePoolInsertResult::OutOfMemory;
+    }
+    // GitHub issue #352: a stray write into this free slot's own
+    // `next_free` word, or into the chunk header's `free_head`, would
+    // otherwise hand the caller an arbitrary `*T` with no check at all --
+    // the freelist-poisoning primitive SLUB's hardened configs exist to
+    // block. Reject it here, before it is ever dereferenced or handed out:
+    // count it, and take the chunk off the partial list so it stops being
+    // an allocation source rather than being silently reused. O(1)
+    // arithmetic, no chunk walk -- see intrusive_chunk_slot_in_range.
+    //
+    // The rejection is reported through the EXISTING OutOfMemory case
+    // rather than a third variant case. That is this file's own stated
+    // rule (see intrusive_pool_slots_per_chunk): do not make every caller
+    // match on an outcome it cannot act on differently. A caller's
+    // OutOfMemory path is already "I could not get a slot"; the pool
+    // itself is not out of memory, and the very next insert proves it by
+    // growing a fresh chunk, since quarantining left partial_head empty.
+    if (intrusive_chunk_slot_in_range(base, header, slot_address) == false) {
+        header.corrupt_free_chain_count = header.corrupt_free_chain_count + 1;
+        intrusive_pool_unlink_partial(pool, base);
         return IntrusivePoolInsertResult::OutOfMemory;
     }
     let slot: *IntrusiveSlot(T) = intrusive_slot_at(pool, slot_address);
@@ -599,10 +710,19 @@ fn intrusive_pool_remove(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     header.live_count = header.live_count - 1;
     // Was full, now has a free slot again.
     intrusive_pool_link_partial(pool, base);
-    if (header.live_count == 0) {
+    if (header.live_count == 0 && header.corrupt_free_chain_count == 0) {
         // GitHub issue #346's hysteresis, stated once, here: hold back the
         // FIRST chunk to empty, give every later one straight back. See
         // IntrusivePool's own comment for why one is the right number.
+        //
+        // A quarantined chunk (issue #352) takes neither branch: it is not
+        // recycled as the held-back reserve, since nothing can ever be
+        // allocated from it again, and its page is NOT handed back to the
+        // provider, since that would put a page with known-corrupt
+        // contents back into general circulation and destroy the only
+        // record that the corruption happened. It is deliberately leaked,
+        // bounded by the number of corruption events -- which is zero on
+        // any system behaving correctly.
         if (pool.empty_chunk == 0) {
             pool.empty_chunk = base;
         } else {
@@ -695,6 +815,28 @@ fn intrusive_pool_double_remove_count(T: type, pool: &mut IntrusivePool(T) @ poo
 
 fn intrusive_pool_foreign_handle_count(T: type, pool: &mut IntrusivePool(T) @ pool_id) -> usize {
     return pool.foreign_handle_count;
+}
+
+// GitHub issue #352: how many times a popped free-chain entry failed the
+// alloc-path range check -- a corrupted `next_free` word, or a corrupted
+// chunk `free_head`, caught before its address was ever handed out.
+//
+// Summed over the chunk list (O(chunks)) rather than read from a pool
+// field, because the count lives in the chunk headers' already-reserved
+// slack: see IntrusiveChunkHeader's own comment for why that is the free
+// place to put it. This is a diagnostic observer, never an allocation
+// path, so the walk costs nothing that matters -- and it is the same
+// O(chunks) intrusive_pool_slot_is_valid already spends on every free.
+fn intrusive_pool_corrupt_free_chain_count(T: type, pool: &mut IntrusivePool(T) @ pool_id)
+        -> usize !{unsafe} {
+    let mut total: usize = 0;
+    let mut cursor: usize = pool.chunk_head;
+    while (cursor != 0) {
+        let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(cursor);
+        total = total + header.corrupt_free_chain_count;
+        cursor = header.next_chunk;
+    }
+    return total;
 }
 
 // How many chunks this pool has given back to the page provider, for a

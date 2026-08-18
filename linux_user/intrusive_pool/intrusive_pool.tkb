@@ -27,6 +27,10 @@
 //   exactly the two pages that many objects need, then walked back with
 //   the iteration cursor a scanning consumer (kernel/net/tcp.tkb's
 //   connection lookup) would use in place of `for i in 0..<N`.
+// - pool_c: a stray write into a free slot's `next_free` word does not
+//   turn into an arbitrary returned pointer -- the alloc-path check
+//   (GitHub issue #352) rejects it, counts it, and quarantines the chunk
+//   that offered it without taking the pool down with it.
 // - pool_x: the only ceiling left is the physical one -- keep inserting
 //   until the page provider is empty, and confirm the pool stopped
 //   because the PROVIDER ran out, not because the pool did.
@@ -37,8 +41,10 @@
 //   reuses that reserve without asking for a page.
 //
 // Page budget across the whole run: pool_a 1 + pool_b 1 + pool_g 2 +
-// pool_r 2 of which 1 comes back + pool_x whatever is left, for exactly
-// the provider's 9.
+// pool_r 2 of which 1 comes back + pool_c 2 of which neither does (the
+// quarantined chunk is leaked on purpose -- see intrusive_pool_core.tkb's
+// "Current limitations") + pool_x whatever is left, for exactly the
+// provider's 9.
 use "linux_user/intrusive_pool/intrusive_pool_core.tkb";
 use "linux_user/growable_pool/growable_pool_core.tkb";
 
@@ -326,6 +332,120 @@ fn app_main() {
         }
         IntrusivePoolInsertResult::OutOfMemory => {
             uart_puts("pool_r reuse failed\n");
+            return;
+        }
+    }
+
+    // -- pool_c: a corrupted free-chain word never becomes a returned
+    // pointer (GitHub issue #352). This is the one exposure that involves
+    // no handle at all: insert pops `free_head`, which is a pointer read
+    // out of a free slot's own memory, so a single stray write into that
+    // memory would otherwise steer the next allocation anywhere. An
+    // array-indexed pool corrupted the same way yields a wrong INDEX,
+    // which its own bounds check catches; the intrusive design is what
+    // turns it into a wrong POINTER.
+    let mut pool_c: IntrusivePool(usize);
+    intrusive_pool_init(&pool_c);
+    let c0 = match intrusive_pool_insert(&pool_c) {
+        IntrusivePoolInsertResult::Allocated(o) => { o }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_c insert 0 failed\n");
+            return;
+        }
+    };
+    // Kept live deliberately -- freeing it would push it back onto the
+    // very chain this test is about to poison.
+    intrusive_owner_drop(c0);
+
+    // Slot #0 is the live one above, so slot #1 is free and is this
+    // chunk's free_head. Scribble over its intrusive link, exactly as a
+    // stray write into freed memory would.
+    let c_slot0: usize = intrusive_pool_first_slot(&pool_c);
+    let c_slot1: usize = intrusive_pool_next_slot(&pool_c, c_slot0);
+    let poison: usize = 0x4141414141410;
+    intrusive_slot_at(&pool_c, c_slot1).next_free = poison;
+
+    // The poisoned slot is itself a perfectly legitimate free slot, so
+    // this allocation must still succeed -- it is the one AFTER it that
+    // pops the corrupted word.
+    let c1 = match intrusive_pool_insert(&pool_c) {
+        IntrusivePoolInsertResult::Allocated(o) => { o }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_c insert 1 failed\n");
+            return;
+        }
+    };
+    uart_puts("the poisoned slot is itself still handed out normally: ");
+    uart_print_bool(intrusive_owner_slot(c1) == c_slot1);
+    uart_puts("\n");
+    intrusive_owner_drop(c1);
+
+    let corrupt_before: usize = intrusive_pool_corrupt_free_chain_count(&pool_c);
+    let mut rejected: bool = false;
+    let mut returned_poison: bool = false;
+    match intrusive_pool_insert(&pool_c) {
+        IntrusivePoolInsertResult::Allocated(o) => {
+            if (intrusive_owner_slot(o) == poison) { returned_poison = true; }
+            intrusive_owner_drop(o);
+        }
+        IntrusivePoolInsertResult::OutOfMemory => { rejected = true; }
+    }
+    uart_puts("a corrupted next_free is rejected, not returned ");
+    uart_puts("(rejected, handed back the poison, counted): ");
+    uart_print_bool(rejected);
+    uart_puts(" ");
+    uart_print_bool(returned_poison);
+    uart_puts(" ");
+    uart_print(intrusive_pool_corrupt_free_chain_count(&pool_c) - corrupt_before);
+    uart_puts("\n");
+
+    // Quarantine, not a dead pool: the poisoned chunk left the partial
+    // list, so the next allocation comes from a fresh one.
+    let pages_before_recovery: usize = page_allocator_live_count();
+    let poisoned_base: usize = intrusive_chunk_base_of(c_slot0);
+    match intrusive_pool_insert(&pool_c) {
+        IntrusivePoolInsertResult::Allocated(o) => {
+            let fresh: usize = intrusive_owner_slot(o);
+            intrusive_owner_drop(o);
+            uart_puts("the pool keeps working from a fresh chunk instead: ");
+            uart_print_bool(page_allocator_live_count() == pages_before_recovery + 1 &&
+                            intrusive_chunk_base_of(fresh) != poisoned_base);
+            uart_puts("\n");
+        }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_c recovery failed\n");
+            return;
+        }
+    }
+
+    // Emptying the poisoned chunk must not rehabilitate it. Freeing a slot
+    // back into a chunk is the one path that re-links it onto the partial
+    // list, and an emptied chunk is normally either held as the reserve or
+    // handed back to the provider -- a quarantined chunk does none of the
+    // three, so the corruption stays contained and stays visible.
+    let occupant0: usize = intrusive_pool_slot_generation(&pool_c, c_slot0);
+    if (occupant0 != 0) {
+        intrusive_pool_remove(&pool_c, intrusive_owner_new(&pool_c, c_slot0, occupant0));
+    }
+    let occupant1: usize = intrusive_pool_slot_generation(&pool_c, c_slot1);
+    if (occupant1 != 0) {
+        intrusive_pool_remove(&pool_c, intrusive_owner_new(&pool_c, c_slot1, occupant1));
+    }
+    match intrusive_pool_insert(&pool_c) {
+        IntrusivePoolInsertResult::Allocated(o) => {
+            let after: usize = intrusive_owner_slot(o);
+            intrusive_owner_drop(o);
+            uart_puts("emptying it neither re-admits it nor returns its page ");
+            uart_puts("(allocated elsewhere, chunks, released): ");
+            uart_print_bool(intrusive_chunk_base_of(after) != poisoned_base);
+            uart_puts(" ");
+            uart_print(intrusive_pool_chunk_count(&pool_c));
+            uart_puts(" ");
+            uart_print(intrusive_pool_released_chunk_count(&pool_c));
+            uart_puts("\n");
+        }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_c post-drain insert failed\n");
             return;
         }
     }
