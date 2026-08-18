@@ -93,6 +93,13 @@ in `examples/Makefile`'s history, and HISTORY.md, for that trajectory).
    compiled program.  Use this for pure syntax/type-system questions: "does
    this refined-type narrowing survive an early return", "is this construct
    even parseable", "does this ownership rule reject the unsound case".
+   **When more than one case fails, `make test`/`dune test` only prints the
+   FIRST failure's detail box** (Alcotest's own terminal reporter, not a
+   truncation bug) -- run `bash scripts/list_dune_test_failures.sh` instead
+   whenever you need to see every failure at once (verifying a fix by
+   reverting it and confirming ALL of its regression tests fail, triaging
+   an unexpected multi-failure count, etc.); it also exits 0/1, so it is a
+   safe drop-in for `make test` itself, not just a reporting upgrade.
 2. **`linux_user/`** (`make linuxbuild`/`make linuxcheck`) -- compiles AND
    *executes* a small host-native x86_64 program, diffing real stdout
    against `<name>.expected`.  Still cheap (no QEMU/hardware), but catches
