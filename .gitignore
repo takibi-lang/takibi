@@ -58,3 +58,7 @@ _opam/
 
 # Python
 __pycache__
+
+# Slides
+.watch_list
+*.pdf
