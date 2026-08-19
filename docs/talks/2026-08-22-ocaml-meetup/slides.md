@@ -25,7 +25,7 @@ style: |
 <!-- _paginate: false -->
 <!-- _footer: "" -->
 
-# Create your own programming language and OS using OCaml, LLVM, and Generative AI -- accessible to everyone.
+# Create your own programming language and OS using OCaml, LLVM, and Generative AI -- accessible to everyone
 
 Kiwamu Okabe
 
