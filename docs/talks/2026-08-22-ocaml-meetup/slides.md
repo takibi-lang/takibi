@@ -1,24 +1,8 @@
 ---
 marp: true
-theme: default
+theme: takibi
 paginate: true
 footer: "OCaml Meeting 2026 in Tokyo"
-style: |
-  section {
-    font-family: "Aptos", "Helvetica Neue", sans-serif;
-    font-size: 29px;
-    padding: 54px 68px;
-  }
-  section.lead {
-    text-align: center;
-  }
-  h1 { color: #c2410c; }
-  h2 { color: #9a3412; }
-  strong { color: #c2410c; }
-  code { background: #fff7ed; }
-  pre { font-size: 21px; }
-  footer { font-size: 15px; }
-  .small { font-size: 20px; }
 ---
 
 <!-- _class: lead -->
@@ -45,6 +29,8 @@ assumptions from **C**.
 > What if the kernel's runtime-error surface became a compile-time problem?
 
 ---
+
+<!-- _class: invert -->
 
 # Are we at a local maximum?
 
@@ -110,6 +96,8 @@ OCaml compiler turns the pattern into a checked abstraction
 **The kernel is not merely a demo. It is the language-design workload.**
 
 ---
+
+<!-- _class: invert -->
 
 # AI is a workload generator
 
@@ -194,6 +182,8 @@ Takibi asks a different research question:
 This is an experiment, not a claim of production superiority.
 
 ---
+
+<!-- _class: invert -->
 
 # Why keep the Linux syscall ABI?
 
@@ -295,6 +285,8 @@ do not expose all the metadata APIs needed for natural source debugging.
 Details: [open DWARF issues in the Takibi repository](https://github.com/takibi-lang/takibi/issues?q=is%3Aissue%20is%3Aopen%20DWARF)
 
 ---
+
+<!-- _class: invert -->
 
 # The stack is open again
 
