@@ -53,6 +53,10 @@ let struct_lltypes : (string, lltype) Hashtbl.t = Hashtbl.create 8
 let struct_fields  : (string, (string * Ast.type_expr) list) Hashtbl.t = Hashtbl.create 8
 (* Struct type-level alignment registry: name -> N (set when struct has align(N)) *)
 let struct_alignments : (string, int) Hashtbl.t = Hashtbl.create 4
+(* GitHub issue #362: AST field position -> LLVM member position. They
+   differ whenever inter-field alignment padding was emitted, so every
+   GEP has to go through this rather than counting declared fields. *)
+let struct_llvm_field_index : (string, int array) Hashtbl.t = Hashtbl.create 8
 (* Struct packed-ness registry: name -> is_packed. Used only by
    const_type_size/const_field_offset below (GitHub issue #77) -- every
    other codegen use of "is this struct packed" already goes through
@@ -1858,9 +1862,18 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
                  |> List.mapi (fun i (fname, fty) ->
                    let f_llty = ltype_of_ast fty in
                    let (f_size_bits, f_align_bits) = di_size_align_bits f_llty in
+                   (* Issue #362: same declared-vs-LLVM member mapping the
+                      GEPs use -- a debugger reading the wrong offset for
+                      a field after alignment padding is exactly the kind
+                      of quiet wrongness DWARF is supposed to remove. *)
+                   let member = match Hashtbl.find_opt struct_llvm_field_index sname with
+                     | Some map when i < Array.length map -> map.(i)
+                     | _ -> i
+                   in
                    let offset_bits =
                      match !target_data with
-                     | Some dl -> Int64.to_int (Llvm_target.DataLayout.offset_of_element llty i dl) * 8
+                     | Some dl ->
+                         Int64.to_int (Llvm_target.DataLayout.offset_of_element llty member dl) * 8
                      | None ->
                          (match const_field_offset sname fname with
                           | Some off -> off * 8
@@ -2225,7 +2238,13 @@ let field_info struct_name fname =
     | (n, t) :: _ when n = fname -> (i, t)
     | _ :: rest -> find (i + 1) rest
   in
-  find 0 fields
+  let (ast_index, ty) = find 0 fields in
+  (* Issue #362: alignment padding makes these diverge. *)
+  let llvm_index = match Hashtbl.find_opt struct_llvm_field_index struct_name with
+    | Some map when ast_index < Array.length map -> map.(ast_index)
+    | _ -> ast_index
+  in
+  (llvm_index, ty)
 
 (* Pre-scan only mutable Let bindings -- immutable ones need no alloca.
    For-loop counters ("__for_<name>") are also pre-allocated here.
@@ -3181,7 +3200,26 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | Some dl -> dl
         | None -> raise (Error "alignof: target data layout not initialized")
       in
-      let al = Llvm_target.DataLayout.abi_align elem_llty dl in
+      (* The DataLayout knows a struct type's NATURAL alignment, computed
+         from its members, and has nowhere to record a declared `align(N)`
+         -- see register_struct, which is why the padding is emitted here
+         rather than deferred. So the effective alignment has to come from
+         the same table register_struct records it in, or alignof would
+         report 8 for a struct this compiler is placing on 64-byte
+         boundaries (GitHub issue #362). Arrays inherit their element's,
+         which is what makes an array of aligned structs keep every
+         element aligned. *)
+      let rec effective_align t =
+        match t with
+        | TypeNamed n | TypeIndexed (n, _) -> Hashtbl.find_opt struct_alignments n
+        | TypeArray (t', _) -> effective_align t'
+        | _ -> None
+      in
+      let natural = Llvm_target.DataLayout.abi_align elem_llty dl in
+      let al = match effective_align ty with
+        | Some declared -> max declared natural
+        | None -> natural
+      in
       (TypeUsize, const_int (ltype_of_ast TypeUsize) al)
 
   | OffsetOf (ty, field) ->
@@ -4960,8 +4998,14 @@ let gen_func ?prog_types fdef =
         let llty = Hashtbl.find struct_lltypes sname in
         let fields = Hashtbl.find struct_fields sname in
         List.iteri (fun i ((_, ft), ei) ->
+          (* Issue #362: declared position is not LLVM member position
+             wherever alignment padding was emitted. *)
+          let member = match Hashtbl.find_opt struct_llvm_field_index sname with
+            | Some map when i < Array.length map -> map.(i)
+            | _ -> i
+          in
           let fptr = build_in_bounds_gep llty ptr
-            [| const_int (i32_type context) 0; const_int (i32_type context) i |]
+            [| const_int (i32_type context) 0; const_int (i32_type context) member |]
             ("fld" ^ string_of_int i) builder in
           init_memory ~preserve_for_debug fptr ft ei
         ) (List.combine fields exprs)
@@ -5733,7 +5777,18 @@ let rec eval_const_int (e : Ast.expr) : Int64.t =
         | Some dl -> dl
         | None -> raise (Error "alignof: target data layout not initialized")
       in
-      Int64.of_int (Llvm_target.DataLayout.abi_align elem_llty dl)
+      (* Same effective-vs-natural distinction as the expression case
+         above (issue #362); static_assert must see the same number. *)
+      let rec effective_align t =
+        match t with
+        | TypeNamed n | TypeIndexed (n, _) -> Hashtbl.find_opt struct_alignments n
+        | TypeArray (t', _) -> effective_align t'
+        | _ -> None
+      in
+      let natural = Llvm_target.DataLayout.abi_align elem_llty dl in
+      (match effective_align ty with
+       | Some declared -> Int64.of_int (max declared natural)
+       | None -> Int64.of_int natural)
   | OffsetOf (ty, field) ->
       let (name, llty) = match ty with
         | TypeNamed name -> (name, ltype_of_ast ty)
@@ -5925,8 +5980,19 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable decl_loc =
         let fields = match Hashtbl.find_opt struct_fields sname with
           | Some fs -> fs | None -> raise (Error (Printf.sprintf "unknown struct '%s'" sname))
         in
-        const_named_struct llty
-          (Array.of_list (List.map2 (fun (_, ft) e -> eval_const ft e) fields exprs))
+        (* Issue #362: the LLVM type may carry alignment padding members
+           the source never mentions, so build the whole member array and
+           zero the padding rather than assuming a 1:1 correspondence. *)
+        let members = Array.map (fun t -> const_null t) (struct_element_types llty) in
+        List.iteri (fun i ((_, ft), e) ->
+          let member = match Hashtbl.find_opt struct_llvm_field_index sname with
+            | Some map when i < Array.length map -> map.(i)
+            | _ -> i
+          in
+          if member < Array.length members then
+            members.(member) <- eval_const ft e
+        ) (List.combine fields exprs);
+        const_named_struct llty members
     | StructLit exprs, TypeArray (elem_ty, _) ->
         let lelem = ltype_of_ast elem_ty in
         const_array lelem (Array.of_list (List.map (eval_const elem_ty) exprs))
@@ -6137,9 +6203,16 @@ let struct_layout name =
     | None -> raise (Error "struct_layout: target data layout not initialized")
   in
   let llty = ltype_of_ast (TypeNamed name) in
+  (* Issue #362: the declared field order and the LLVM member order differ
+     wherever alignment padding was emitted, so go through the same
+     mapping every GEP does rather than counting declared fields. *)
   let offsets =
     List.mapi (fun index (field, _) ->
-      (field, Llvm_target.DataLayout.offset_of_element llty index dl)
+      let member = match Hashtbl.find_opt struct_llvm_field_index name with
+        | Some map when index < Array.length map -> map.(index)
+        | _ -> index
+      in
+      (field, Llvm_target.DataLayout.offset_of_element llty member dl)
     ) fields
   in
   let total = Llvm_target.DataLayout.abi_size llty dl in
@@ -6289,6 +6362,7 @@ let gen_program ?prog_types prog =
   Hashtbl.reset struct_lltypes;
   Hashtbl.reset struct_fields;
   Hashtbl.reset struct_alignments;
+  Hashtbl.reset struct_llvm_field_index;
   Hashtbl.reset struct_is_packed;
   Hashtbl.reset global_const_defs;
   (* setup_target/enable_debug_info are one-way switches that may have run
@@ -6352,24 +6426,89 @@ let gen_program ?prog_types prog =
                       |> Array.of_list in
     let mk_struct fltys = if is_packed then packed_struct_type context fltys
                           else struct_type context fltys in
-    let llty = mk_struct field_lltys in
-    (* Tail-pad the struct so sizeof(struct) is a multiple of align(N). *)
-    let llty = match align_opt with
-      | None -> llty
-      | Some n ->
-          (match !target_data with
-           | None -> llty
-           | Some dl ->
-               let sz = Int64.to_int (Llvm_target.DataLayout.abi_size llty dl) in
-               let pad = (n - (sz mod n)) mod n in
-               if pad = 0 then llty
-               else mk_struct (Array.append field_lltys
-                     [| array_type (i8_type context) pad |]))
+    (* GitHub issue #362: a struct's own `align(N)` has to survive being
+       EMBEDDED, not only being a variable or an array element. LLVM takes
+       a struct type's alignment from its members and has nowhere to
+       record a declared one, so `struct A align(64)` lowered as
+       `{i64, [56 x i8]}` has LLVM alignment 8, and a field of type `A`
+       landed at offset 8 -- a silently misaligned DMA descriptor or
+       cache-line-separated mailbox, which is the entire reason anyone
+       writes align(N).
+
+       So the layout is computed here and the padding emitted explicitly,
+       rather than deferred to LLVM. This mirrors what lib/type_layout.ml
+       already computed for the same struct, which is why the two used to
+       disagree about sizeof (40 vs 64 for the issue's example); after
+       this they agree, and type_layout was the one that had been right.
+
+       Alignment also PROPAGATES: a struct containing a 64-aligned member
+       is itself 64-aligned, or placing it at offset 8 would misalign that
+       member. `struct_alignments` therefore records the effective
+       alignment rather than only a declared one, which is what carries
+       the property up through nesting. *)
+    let declared_align_of ty =
+      let rec go t = match t with
+        | Ast.TypeNamed n | Ast.TypeIndexed (n, _) ->
+            Hashtbl.find_opt struct_alignments n
+        | Ast.TypeArray (t', _) -> go t'
+        | _ -> None
+      in go ty
+    in
+    let align_up n a = if a <= 1 then n else ((n + a - 1) / a) * a in
+    let (padded_lltys, llvm_index_of_field, effective_align) =
+      match !target_data with
+      | None | Some _ when is_packed ->
+          (* packed means no inter-field padding, by definition. *)
+          (field_lltys, Array.init (Array.length field_lltys) (fun i -> i),
+           Option.value align_opt ~default:1)
+      | None ->
+          (field_lltys, Array.init (Array.length field_lltys) (fun i -> i),
+           Option.value align_opt ~default:1)
+      | Some dl ->
+          let members = ref [] in
+          let index_of = Array.make (List.length fields) 0 in
+          let offset = ref 0 in
+          let emitted = ref 0 in
+          let max_align = ref (Option.value align_opt ~default:1) in
+          List.iteri (fun i (_, ty) ->
+            let fllty = field_lltys.(i) in
+            let natural = Llvm_target.DataLayout.abi_align fllty dl in
+            let want = match declared_align_of ty with
+              | Some n -> max n natural
+              | None -> natural
+            in
+            if want > !max_align then max_align := want;
+            let at = align_up !offset want in
+            if at > !offset then begin
+              members := array_type (i8_type context) (at - !offset) :: !members;
+              incr emitted
+            end;
+            index_of.(i) <- !emitted;
+            members := fllty :: !members;
+            incr emitted;
+            offset := at + Int64.to_int (Llvm_target.DataLayout.abi_size fllty dl)
+          ) fields;
+          (Array.of_list (List.rev !members), index_of, !max_align)
+    in
+    let llty = mk_struct padded_lltys in
+    (* Tail-pad so sizeof(struct) is a multiple of its alignment, which is
+       what makes an ARRAY of it keep every element aligned. *)
+    let llty =
+      if effective_align <= 1 then llty
+      else match !target_data with
+        | None -> llty
+        | Some dl ->
+            let sz = Int64.to_int (Llvm_target.DataLayout.abi_size llty dl) in
+            let pad = (effective_align - (sz mod effective_align)) mod effective_align in
+            if pad = 0 then llty
+            else mk_struct (Array.append padded_lltys
+                  [| array_type (i8_type context) pad |])
     in
     Hashtbl.add struct_lltypes name llty;
     Hashtbl.add struct_fields name fields;
     Hashtbl.add struct_is_packed name is_packed;
-    Option.iter (fun n -> Hashtbl.add struct_alignments name n) align_opt
+    Hashtbl.add struct_llvm_field_index name llvm_index_of_field;
+    if effective_align > 1 then Hashtbl.replace struct_alignments name effective_align
   in
   let register_struct_if has_variant = function
     | StructDef (name, fields, is_packed, align_opt, _, _)

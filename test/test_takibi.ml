@@ -8857,6 +8857,43 @@ let codegen_tests = [
          "an align(N) struct's alignof still equals where it is embedded" true
          (agrees "declared_align" "declared_offset"));
 
+  (* GitHub issue #362: a struct's own `align(N)` used to survive being a
+     variable or an array element but not being EMBEDDED -- LLVM takes a
+     struct type's alignment from its members and has nowhere to record a
+     declared one, so `struct A align(64)` as a field landed at offset 8.
+     That is a silently misaligned DMA descriptor or cache-line-separated
+     mailbox, which is the entire reason anyone writes align(N).
+
+     Checked as absolute offsets rather than relationally, because here
+     the whole point is the specific number the old lowering got wrong. *)
+  Alcotest.test_case
+    "an align(N) struct embedded as a field lands on an N boundary, and \
+     the containing struct inherits N (issue #362)" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
+       in
+       ignore (gen_codegen
+         "struct Aligned64 align(64) { a: usize; }
+          struct HoldsAligned { pad: u8; v: Aligned64; }
+          struct Plain { a: u8; b: usize; }");
+       let offset name field =
+         let (fields, _) = Llvm_gen.struct_layout name in
+         List.assoc field fields
+       in
+       let total name = let (_, t) = Llvm_gen.struct_layout name in t in
+       Alcotest.(check int64) "the aligned field starts on its own boundary"
+         64L (offset "HoldsAligned" "v");
+       Alcotest.(check int64) "and the container is padded to a multiple of it"
+         128L (total "HoldsAligned");
+       (* The declared alignment must PROPAGATE: a struct holding a
+          64-aligned member is itself 64-aligned, or placing it at offset 8
+          somewhere would misalign that member. *)
+       Alcotest.(check int64) "an ordinary struct's fields are unaffected"
+         8L (offset "Plain" "b");
+       Alcotest.(check int64) "and it is padded only to its own alignment"
+         16L (total "Plain"));
+
   (* GitHub issue #77: sizeof(...)/offsetof(...) from a packed struct must
      prove a subslice bound with zero trap sites, whether used directly or
      threaded through a local `let` -- reproduces the exact shapes reported
