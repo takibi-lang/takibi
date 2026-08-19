@@ -256,6 +256,12 @@ section.invert code {
   color: #ffc16c;
 }
 
+section.invert blockquote {
+  background: rgba(255, 193, 108, 0.1);
+  border-left-color: var(--takibi-ember);
+  color: #f9f5eb;
+}
+
 section.invert footer,
 section.invert:not(.lead)::before {
   color: #c8cce0;
@@ -277,4 +283,38 @@ section.statement h1 {
 
 .small {
   font-size: 0.72em;
+}
+
+.diagram-placeholder {
+  align-items: center;
+  background:
+    linear-gradient(135deg, rgba(17, 25, 54, 0.96), rgba(32, 43, 87, 0.92));
+  border: 2px dashed rgba(255, 193, 108, 0.8);
+  border-radius: 14px;
+  box-shadow: 0 12px 30px rgba(17, 25, 54, 0.16);
+  color: white;
+  display: flex;
+  flex-direction: column;
+  height: 350px;
+  justify-content: center;
+  line-height: 1.55;
+  margin: 0 auto 0.7em;
+  text-align: center;
+  width: 88%;
+}
+
+.diagram-placeholder strong {
+  color: #ffc16c;
+  font-size: 1.25em;
+}
+
+section.video-slide video {
+  background: #080d20;
+  border: 3px solid var(--takibi-ember);
+  border-radius: 12px;
+  box-shadow: 0 14px 34px rgba(17, 25, 54, 0.22);
+  display: block;
+  height: 500px;
+  margin: 0 auto;
+  max-width: 100%;
 }
