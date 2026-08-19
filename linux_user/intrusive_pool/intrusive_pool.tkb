@@ -23,10 +23,13 @@
 //   rejected as foreign without ever dereferencing it. growable_pool/
 //   slotmap cannot see this case at all: one pool's slot index is a
 //   perfectly plausible index in another.
-// - pool_g: 200 live objects from a pool declared with no capacity, over
-//   exactly the two pages that many objects need, then walked back with
-//   the iteration cursor a scanning consumer (kernel/net/tcp.tkb's
-//   connection lookup) would use in place of `for i in 0..<N`.
+// - pool_g: 200 live objects from a pool declared with no capacity, then
+//   walked back with the iteration cursor a scanning consumer
+//   (kernel/net/tcp.tkb's connection lookup) would use in place of `for i
+//   in 0..<N`. That walk is also where issue #348's liveness view earns
+//   its keep: the payload can only be reached through the Live case of
+//   intrusive_pool_probe_slot, so "skip the free slots" is a thing the
+//   compiler checks rather than a thing the caller remembers.
 // - pool_c: a stray write into a free slot's `next_free` word does not
 //   turn into an arbitrary returned pointer -- the alloc-path check
 //   (GitHub issue #352) rejects it, counts it, and quarantines the chunk
@@ -252,14 +255,26 @@ fn app_main() {
     uart_puts("\n");
 
     // The scan a consumer does in place of `for i in 0..<N`: walk the
-    // chunk list, skip free slots, and check every live payload.
+    // chunk list, skip slots with no payload, and check every live one.
+    //
+    // The `match` is the point (GitHub issue #348). This used to be an
+    // `if` on a liveness integer, with reading the payload a separate
+    // call the caller was trusted to guard -- and once the payload and
+    // the free-chain link share storage, forgetting that guard reads a
+    // chain pointer as a T. Now the payload accessor takes a slot_view, the
+    // only source of a view is this probe, and the probe only mints one
+    // on the branch where it has already established the slot is live.
+    // Skipping the check is no longer something a caller can express.
     let mut cursor: usize = intrusive_pool_first_slot(&pool_g);
     let mut seen: usize = 0;
     let mut sum: usize = 0;
     while (cursor != 0) {
-        if (intrusive_pool_slot_generation(&pool_g, cursor) != 0) {
-            seen = seen + 1;
-            sum = sum + *intrusive_pool_payload_at(&pool_g, cursor);
+        match intrusive_pool_probe_slot(&pool_g, cursor) {
+            IntrusiveSlotProbe::NoPayload => {}
+            IntrusiveSlotProbe::Live(slot_view) => {
+                seen = seen + 1;
+                sum = sum + *intrusive_pool_payload_of(&pool_g, slot_view);
+            }
         }
         cursor = intrusive_pool_next_slot(&pool_g, cursor);
     }
@@ -309,13 +324,22 @@ fn app_main() {
         let mut cursor: usize = intrusive_pool_first_slot(&pool_r);
         let mut freed_one: bool = false;
         while (cursor != 0 && freed_one == false) {
-            let occupant: usize = intrusive_pool_slot_generation(&pool_r, cursor);
-            if (occupant != 0) {
-                let victim = intrusive_owner_new(&pool_r, cursor, occupant);
-                intrusive_pool_remove(&pool_r, victim);
-                freed_one = true;
-            } else {
-                cursor = intrusive_pool_next_slot(&pool_r, cursor);
+            // The other thing a scanning consumer does with what it
+            // finds: rebuild the handle. The view carries the occupant
+            // stamp the probe read, so this needs no second look at the
+            // slot -- and no way to name a generation the pool did not
+            // just report.
+            match intrusive_pool_probe_slot(&pool_r, cursor) {
+                IntrusiveSlotProbe::NoPayload => {
+                    cursor = intrusive_pool_next_slot(&pool_r, cursor);
+                }
+                IntrusiveSlotProbe::Live(slot_view) => {
+                    let occupant: usize = intrusive_view_generation(slot_view);
+                    intrusive_view_drop(slot_view);
+                    let victim = intrusive_owner_new(&pool_r, cursor, occupant);
+                    intrusive_pool_remove(&pool_r, victim);
+                    freed_one = true;
+                }
             }
         }
         if (freed_one == false) { draining = false; }
@@ -436,13 +460,21 @@ fn app_main() {
     // list, and an emptied chunk is normally either held as the reserve or
     // handed back to the provider -- a quarantined chunk does none of the
     // three, so the corruption stays contained and stays visible.
-    let occupant0: usize = intrusive_pool_slot_generation(&pool_c, c_slot0);
-    if (occupant0 != 0) {
-        intrusive_pool_remove(&pool_c, intrusive_owner_new(&pool_c, c_slot0, occupant0));
+    match intrusive_pool_probe_slot(&pool_c, c_slot0) {
+        IntrusiveSlotProbe::NoPayload => {}
+        IntrusiveSlotProbe::Live(slot_view) => {
+            let occupant: usize = intrusive_view_generation(slot_view);
+            intrusive_view_drop(slot_view);
+            intrusive_pool_remove(&pool_c, intrusive_owner_new(&pool_c, c_slot0, occupant));
+        }
     }
-    let occupant1: usize = intrusive_pool_slot_generation(&pool_c, c_slot1);
-    if (occupant1 != 0) {
-        intrusive_pool_remove(&pool_c, intrusive_owner_new(&pool_c, c_slot1, occupant1));
+    match intrusive_pool_probe_slot(&pool_c, c_slot1) {
+        IntrusiveSlotProbe::NoPayload => {}
+        IntrusiveSlotProbe::Live(slot_view) => {
+            let occupant: usize = intrusive_view_generation(slot_view);
+            intrusive_view_drop(slot_view);
+            intrusive_pool_remove(&pool_c, intrusive_owner_new(&pool_c, c_slot1, occupant));
+        }
     }
     match intrusive_pool_insert(&pool_c) {
         IntrusivePoolInsertResult::Allocated(o) => {
@@ -476,14 +508,21 @@ fn app_main() {
     let live_slot: usize = intrusive_pool_first_slot(&pool_c);
     let live_next: usize = intrusive_pool_next_slot(&pool_c, live_slot);
     let free_head: usize = intrusive_pool_next_slot(&pool_c, live_next);
+    let mut live_generation: usize = 0;
+    match intrusive_pool_probe_slot(&pool_c, live_slot) {
+        IntrusiveSlotProbe::NoPayload => {}
+        IntrusiveSlotProbe::Live(slot_view) => {
+            live_generation = intrusive_view_generation(slot_view);
+            intrusive_view_drop(slot_view);
+        }
+    }
     uart_puts("the aliasing target really is a live slot in the fresh chunk: ");
-    uart_print_bool(intrusive_pool_slot_generation(&pool_c, live_slot) != 0 &&
+    uart_print_bool(live_generation != 0 &&
                     intrusive_chunk_base_of(live_slot) != poisoned_base);
     uart_puts("\n");
     *intrusive_slot_link_at(&pool_c, free_head) = live_slot;
 
     let alias_before: usize = intrusive_pool_corrupt_free_chain_count(&pool_c);
-    let live_generation: usize = intrusive_pool_slot_generation(&pool_c, live_slot);
     match intrusive_pool_insert(&pool_c) {
         IntrusivePoolInsertResult::Allocated(o) => { intrusive_owner_drop(o); }
         IntrusivePoolInsertResult::OutOfMemory => {
@@ -508,8 +547,7 @@ fn app_main() {
     uart_puts(" ");
     uart_print(intrusive_pool_corrupt_free_chain_count(&pool_c) - alias_before);
     uart_puts(" ");
-    uart_print_bool(
-        intrusive_pool_slot_generation(&pool_c, live_slot) == live_generation);
+    uart_print_bool(intrusive_pool_matches(&pool_c, live_slot, live_generation));
     uart_puts("\n");
 
     // -- pool_x: the last remaining ceiling is the page provider's.

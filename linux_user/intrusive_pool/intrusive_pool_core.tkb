@@ -223,7 +223,17 @@
 //   linearity and the brand, that the caller holds a live allocation from
 //   THIS pool. A caller that round-trips a handle through
 //   intrusive_owner_into_parts (the only way to fabricate one) must
-//   re-validate with intrusive_pool_matches first.
+//   re-validate with intrusive_pool_matches first. The SCANNING path has
+//   no such caveat left: intrusive_pool_probe_slot validates and reads
+//   the generation itself, and its Live view is the only key to the
+//   payload.
+// - A view is a SNAPSHOT. It says the slot was live when probed, which a
+//   later insert or remove can undo -- which is why
+//   intrusive_pool_payload_of sinks it rather than borrowing it, so one
+//   probe cannot justify a second look. Holding the resulting `*T` across
+//   a mutation is the caller's problem, exactly as it is for
+//   intrusive_pool_ref's; what changed is that getting the pointer at all
+//   now requires having looked.
 // - A freshly allocated payload is UNINITIALIZED -- write it before
 //   reading it. It holds whatever the free chain last left there, which
 //   since issue #348 is a link pointer rather than a previous occupant's
@@ -921,11 +931,103 @@ fn intrusive_pool_ref(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     return intrusive_pool_payload_at(pool, intrusive_owner_slot(owner));
 }
 
-fn intrusive_pool_payload_at(T: type, pool: &mut IntrusivePool(T) @ pool_id,
-                             slot_address: usize) -> *T !{unsafe} {
+// PRIVATE since GitHub issue #348's second half. This is the raw form --
+// an address in, a `*T` out, no proof of anything -- and once the payload
+// and the free-chain link share storage, calling it on a FREE slot reads
+// a chain pointer as a T. Callers outside this file go through
+// intrusive_pool_probe_slot instead, which is the same work with the
+// result they have to look at.
+private fn intrusive_pool_payload_at(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                                     slot_address: usize) -> *T !{unsafe} {
     return unsafe {
         (slot_address + offsetof(IntrusiveSlot(T), storage)) as *T
     };
+}
+
+// -- Proving a slot is live --------------------------------------------
+// GitHub issue #348: with the payload and the free-chain link sharing one
+// storage word, "is this slot live?" stopped being advisory. Reading a
+// free slot's payload used to give a previous occupant's remains --
+// wrong, but inert. It now gives a pointer reinterpreted as a T.
+//
+// The old contract was a comment: callers of intrusive_pool_payload_at
+// filter on intrusive_pool_slot_generation() != 0 first. Nothing checked
+// that they did. IntrusiveSlotView turns it into an obligation the
+// compiler tracks -- the payload accessor takes a view, the only way to
+// get one is intrusive_pool_probe_slot, and the only way probe_slot mints
+// one is on the branch where it has just read a nonzero generation.
+//
+// The private fields are what make that airtight: a struct with private
+// fields cannot be literal-constructed outside its declaring file, so no
+// other file can forge a view for an address of its choosing. `pool_id`
+// carries the same brand IntrusiveOwner does (issue #345), so a view
+// minted by one pool cannot be spent on another.
+//
+// It is a linear STRUCT rather than an erased `linear view`, and that is
+// forced rather than chosen. An erased view carries its subject as a
+// static index, and opening the existential a variant payload needs mints
+// a FRESH identity -- the compiler rejects using the resulting permission
+// with the address it came from ("static value mismatch: s vs slot").
+// examples/tcp_conn_view never hits that because nothing in it uses the
+// concrete connection; an allocator's whole purpose is to touch memory at
+// the address, so it does. Carrying the address as a runtime field
+// sidesteps the comparison entirely. The cost is 16 stack bytes per probe
+// in flight, never anything per slot.
+private linear struct IntrusiveSlotView[pool_id: addr] {
+    private slot: usize;
+    private generation: usize;
+}
+
+// Two cases, not three. "Not ours" and "free" are both "there is no
+// payload here" to every caller a scan has, and this file's own rule --
+// stated at intrusive_pool_slots_per_chunk and again at insert's
+// corruption path -- is not to make callers match on outcomes they
+// cannot act on differently.
+must_use variant IntrusiveSlotProbe[pool_id: addr] {
+    NoPayload;
+    Live(IntrusiveSlotView[pool_id]);
+}
+
+// The one entry point that mints a view, and the replacement for
+// "intrusive_pool_slot_generation() != 0, then intrusive_pool_payload_at".
+// Safe on an address of unknown provenance: validation happens before the
+// generation is read, exactly as intrusive_pool_slot_generation did.
+// Costs the caller nothing extra -- it is the same validate-and-read that
+// filter already performed, with the result in a form that cannot be
+// skipped.
+fn intrusive_pool_probe_slot(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                             slot_address: usize) -> IntrusiveSlotProbe[pool_id] !{unsafe} {
+    if (intrusive_pool_slot_is_valid(pool, slot_address) == false) {
+        return IntrusiveSlotProbe::NoPayload;
+    }
+    let generation: usize = intrusive_slot_at(pool, slot_address).generation;
+    if (generation == 0) {
+        return IntrusiveSlotProbe::NoPayload;
+    }
+    let mut minted: IntrusiveSlotView[pool_id] = { slot_address, generation };
+    return IntrusiveSlotProbe::Live(minted);
+}
+
+fn intrusive_view_slot(slot_view: borrow IntrusiveSlotView[pool_id]) -> usize {
+    return slot_view.slot;
+}
+
+// The occupant stamp the view was minted against -- what a caller needs
+// to rebuild an owner for a slot it found by scanning.
+fn intrusive_view_generation(slot_view: borrow IntrusiveSlotView[pool_id]) -> usize {
+    return slot_view.generation;
+}
+
+// Discharges the obligation for a caller that looked and moved on.
+fn intrusive_view_drop(slot_view: sink IntrusiveSlotView[pool_id]) {}
+
+// The gated payload accessor. `sink` rather than `borrow` on purpose: the
+// view is a snapshot of a fact that a later insert or remove can undo, so
+// spending it here keeps a `*T` from being justified by a proof the
+// caller kept holding after it went stale.
+fn intrusive_pool_payload_of(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                             slot_view: sink IntrusiveSlotView[pool_id]) -> *T !{unsafe} {
+    return intrusive_pool_payload_at(pool, intrusive_view_slot(slot_view));
 }
 
 // -- Iteration ---------------------------------------------------------
@@ -934,9 +1036,9 @@ fn intrusive_pool_payload_at(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 // With a fixed `[T; N]` that is `for i in 0..<N`; here it is a cursor walk
 // over the chunk list. Both intrusive_pool_first_slot and
 // intrusive_pool_next_slot return 0 for "no more", and visit FREE slots
-// too -- callers filter on intrusive_pool_slot_generation() != 0, the
-// direct analogue of today's `if (slotmap_matches(...))` guard inside such
-// a scan.
+// too -- so a scan matches on intrusive_pool_probe_slot and reads the
+// payload only through the view its Live case carries. That match IS the
+// filter this section used to describe as a convention.
 
 fn intrusive_pool_first_slot(T: type, pool: &mut IntrusivePool(T) @ pool_id) -> usize !{unsafe} {
     if (pool.chunk_head == 0) { return 0; }
@@ -958,8 +1060,14 @@ fn intrusive_pool_next_slot(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 }
 
 // 0 means "this slot is free". Safe on an address of unknown provenance.
-fn intrusive_pool_slot_generation(T: type, pool: &mut IntrusivePool(T) @ pool_id,
-                                  slot_address: usize) -> usize !{unsafe} {
+//
+// PRIVATE since issue #348's second half: handing out a bare liveness
+// integer is what let a caller decide, on its own, that reading the
+// payload was fine. intrusive_pool_probe_slot returns the same
+// observation in a form that carries the permission with it. Kept for
+// this file's own use, where the surrounding code is the proof.
+private fn intrusive_pool_slot_generation(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                                          slot_address: usize) -> usize !{unsafe} {
     if (intrusive_pool_slot_is_valid(pool, slot_address) == false) { return 0; }
     return intrusive_slot_at(pool, slot_address).generation;
 }
