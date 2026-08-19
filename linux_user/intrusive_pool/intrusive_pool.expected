@@ -18,6 +18,7 @@ an address from another pool, rebranded by hand, is still rejected without deref
 cursor walk found every live payload exactly once (count, checksum): 200 20100
 two chunks filled before the drain (live, chunks, pages): 4 2 2
 draining gave one page back and kept one empty chunk in reserve (live, chunks, released, pages still held): 0 1 1 1
+the released chunk's addresses stop validating at once, and the retained one's do not (both before, exactly one after): true true
 reallocating after the drain reused the reserved chunk without asking for a page: true
 the poisoned slot is itself still handed out normally: true
 a corrupted next_free is rejected, not returned (rejected, handed back the poison, counted): true false 1

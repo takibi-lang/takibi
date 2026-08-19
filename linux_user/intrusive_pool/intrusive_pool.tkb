@@ -365,6 +365,20 @@ fn app_main() {
     uart_print(page_allocator_live_count() - pages_before_reclaim);
     uart_puts("\n");
 
+    // One slot address out of each of the two chunks, taken while both are
+    // still live. After the drain exactly one chunk goes back to the
+    // provider, and the addresses in it must stop validating the moment it
+    // does -- which is the property the whole reclaim design rests on
+    // (GitHub issues #346/#353), and since #349 it is the per-page
+    // metadata being cleared that enforces it rather than a list the
+    // address was removed from.
+    let r_a0: usize = intrusive_pool_first_slot(&pool_r);
+    let r_a1: usize = intrusive_pool_next_slot(&pool_r, r_a0);
+    let r_b0: usize = intrusive_pool_next_slot(&pool_r, r_a1);
+    let r_both_valid_before: bool =
+        intrusive_pool_slot_is_valid(&pool_r, r_a0) &&
+        intrusive_pool_slot_is_valid(&pool_r, r_b0);
+
     let mut draining: bool = true;
     while (draining) {
         let mut cursor: usize = intrusive_pool_first_slot(&pool_r);
@@ -399,6 +413,20 @@ fn app_main() {
     uart_print(intrusive_pool_released_chunk_count(&pool_r));
     uart_puts(" ");
     uart_print(page_allocator_live_count() - pages_before_reclaim);
+    uart_puts("\n");
+
+    // Both addresses validated before the drain; exactly one chunk went
+    // back, so exactly one of them must validate now. A released page's
+    // addresses being rejected IMMEDIATELY is what keeps a stale handle
+    // into a reclaimed chunk from ever being dereferenced.
+    let r_a_valid: bool = intrusive_pool_slot_is_valid(&pool_r, r_a0);
+    let r_b_valid: bool = intrusive_pool_slot_is_valid(&pool_r, r_b0);
+    uart_puts("the released chunk's addresses stop validating at once, and ");
+    uart_puts("the retained one's do not (both before, exactly one after): ");
+    uart_print_bool(r_both_valid_before);
+    uart_puts(" ");
+    uart_print_bool((r_a_valid && r_b_valid == false) ||
+                    (r_a_valid == false && r_b_valid));
     uart_puts("\n");
 
     // The reserved chunk is the whole point of holding one back: this
