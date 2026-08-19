@@ -55,18 +55,16 @@
 use "linux_user/intrusive_pool/intrusive_pool_core.tkb";
 use "linux_user/growable_pool/growable_pool_core.tkb";
 
-// 1960 bytes of payload -> a 1968-byte slot -> 2 slots per 4096-byte
-// chunk (which is what the 128-byte chunk header leaves room for). Big
+// 1960 bytes of payload -> a 1968-byte slot -> 2 slots per page. Big
 // enough that a chunk boundary is crossed after two inserts instead of
-// after 248, and a case where "one page per object" would have been the
+// after 256, and a case where "one page per object" would have been the
 // naive alternative.
 //
-// It is also where issue #348's overlay buys nothing: the slot shrank
-// from 1976 to 1968 bytes and the count stayed at 2, because 3968/1968
-// and 3968/1976 both floor to 2. What costs a slot at this size is the
-// 128-byte in-page header (#349's cliff), not the bookkeeping word --
-// the two density issues dominate at opposite ends of the size range,
-// which is worth knowing before sequencing them.
+// It is also the size at which issue #348's overlay bought nothing: the
+// slot shrank from 1976 to 1968 bytes and the count stayed at 2, because
+// 4096/1968 and 4096/1976 both floor to 2. What used to cost a slot at
+// this size was the in-page header, which issue #349 removed -- the two
+// density issues dominated at opposite ends of the size range.
 struct BigPayload {
     tag: usize;
     filler: [u8; 1952];
@@ -677,6 +675,37 @@ fn app_main() {
     uart_print_bool(intrusive_pool_ref(&pool_u, u1).c == 3);
     uart_puts("\n");
     intrusive_owner_drop(u1);
+
+    // GitHub issue #361: validation no longer computes its bounds from
+    // anything a stray write can reach. It used to read `slot_stride` and
+    // `slot_count` out of the chunk header, so a header corrupted to
+    // stride 1 would have made almost every address in the page look
+    // slot-aligned -- the check meant to catch stray writes weakened by
+    // one. Both are compile-time constants after monomorphization, so
+    // they are derived now and simply not stored.
+    //
+    // Scribbling over every remaining header field except `pool_tag`
+    // (which is the ownership question, not the bounds question) must
+    // therefore change no answer. pool_u is finished with by this point,
+    // so its chunk is free to wreck.
+    let u_base: usize = intrusive_chunk_base_of(u0_slot);
+    let u_header: *IntrusiveChunkHeader = intrusive_chunk_header_at(u_base);
+    u_header.next_chunk = 1;
+    u_header.prev_chunk = 1;
+    u_header.next_partial = 1;
+    u_header.prev_partial = 1;
+    u_header.on_partial = 1;
+    u_header.free_head = 1;
+    u_header.live_count = 0xFFFF;
+    uart_puts("a wrecked chunk header cannot widen what validates ");
+    uart_puts("(real slot yes, off-by-one no, past the chunk no): ");
+    uart_print_bool(intrusive_pool_slot_is_valid(&pool_u, u0_slot));
+    uart_puts(" ");
+    uart_print_bool(intrusive_pool_slot_is_valid(&pool_u, u0_slot + 1) == false);
+    uart_puts(" ");
+    uart_print_bool(
+        intrusive_pool_slot_is_valid(&pool_u, u_base + PAGE_SIZE) == false);
+    uart_puts("\n");
 
     // -- pool_x: the last remaining ceiling is the page provider's.
     let mut pool_x: IntrusivePool(BigPayload);

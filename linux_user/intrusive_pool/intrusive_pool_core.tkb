@@ -19,8 +19,9 @@
 //   page provider's per-page metadata, indexed by page number
 //   +----------------------------------------------------------+
 //   | IntrusiveChunkHeader: chunk-list and partial-list links,  |
-//   |   this chunk's own free_head, slot_count, slot_stride,    |
-//   |   live_count, pool_tag                    (GitHub #349)   |
+//   |   this chunk's own free_head, live_count, pool_tag        |
+//   |   (GitHub #349; the slot bounds are derived, not stored --|
+//   |    GitHub #361)                                           |
 //   +----------------------------------------------------------+
 //                            | describes
 //                            v
@@ -256,15 +257,15 @@
 //   mean a pool under a repeated stray write bleeds a page per event
 //   rather than failing loudly. Revisit if that ever stops being the
 //   right trade.
-// - The alloc-path check reads `slot_stride` and `slot_count` out of the
-//   chunk header and trusts them. A stray write into the HEADER rather
-//   than into a slot therefore weakens the check itself -- a `slot_stride`
-//   of 1 makes almost every address in the page look slot-aligned. Both
-//   fields are in fact compile-time constants after monomorphization
-//   (`sizeof(IntrusiveSlot(T))` and intrusive_pool_slots_per_chunk()), so
-//   cross-checking them costs nothing; it is not done here only because
-//   it belongs to hardening the header as a whole -- every function in
-//   this file trusts it, not just insert.
+// - Validation derives its bounds and stores none, so the chunk header
+//   cannot weaken it (issue #361). What the header IS still trusted for
+//   is the free chain itself: `free_head` and the links. A corrupted
+//   `free_head` is caught on the alloc path (issue #352); a corrupted
+//   chunk or partial link is not, and would misdirect iteration or
+//   reclaim rather than a dereference. Defending those needs something
+//   the derivation trick cannot give, since unlike the bounds they are
+//   genuinely dynamic -- a header checksum, or the invariant probe issue
+//   #355 asks for.
 // - `intrusive_pool_ref` does NOT re-validate. It is the fast path, with
 //   the same contract kernel/lib/freelist.tkb's freelist_ref has: the
 //   `borrow IntrusiveOwner[pool_id, _]` parameter proves, through
@@ -361,8 +362,6 @@ struct IntrusiveChunkHeader {
     prev_partial: usize;
     on_partial: usize;
     free_head: usize;
-    slot_count: usize;
-    slot_stride: usize;
     live_count: usize;
     corrupt_free_chain_count: usize;
 }
@@ -652,37 +651,41 @@ fn intrusive_pool_slot_is_valid(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     if (slot_address == 0) { return false; }
     let base: usize = intrusive_chunk_base_of(slot_address);
     if (intrusive_pool_owns_chunk(pool, base) == false) { return false; }
-    return intrusive_chunk_slot_in_range(base, intrusive_chunk_header_at(base),
-                                         slot_address);
+    return intrusive_chunk_slot_in_range(pool, base, slot_address);
 }
 
 // GitHub issue #352: the O(1) core of validation, and the alloc fast
 // path's whole check. Does `slot_address` land in the chunk at `base`, on
-// an exact slot boundary, below that chunk's slot_count?
+// an exact slot boundary, below the number of slots a chunk holds?
 //
-// intrusive_pool_slot_is_valid above wraps this in a chunk-list walk
-// because it starts from an address of UNKNOWN provenance and has to
-// discover which chunk to check against. intrusive_pool_insert needs no
-// such walk: the address under suspicion is `header.free_head`, popped
-// from the very chunk it is being checked against, so `base` and `header`
-// are already in hand and this is pure arithmetic. A corrupted
-// `next_free` word (or a corrupted `free_head` itself) fails it the same
-// way a corrupted index fails an array pool's bounds check -- see this
-// file's header, "A CORRUPTED FREE CHAIN".
+// intrusive_pool_slot_is_valid above wraps this in the "which chunk, and
+// is it mine" step, because it starts from an address of UNKNOWN
+// provenance. intrusive_pool_insert needs none of that: the address under
+// suspicion is its own chunk's `free_head`, so `base` is already in hand
+// and this is pure arithmetic.
 //
-// `base` is trusted to be a real chunk base: either the caller proved it
-// (slot_is_valid's owns_chunk walk) or it is reading its own partial-list
-// head. The header's slot_stride/slot_count are trusted too -- see
-// "Current limitations".
-fn intrusive_chunk_slot_in_range(base: usize, header: *IntrusiveChunkHeader,
-                                 slot_address: usize) -> bool !{unsafe} {
+// GitHub issue #361: the two bounds are DERIVED, not read. They used to
+// be `header.slot_stride` and `header.slot_count`, which made a stray
+// write into the header weaken the very check meant to catch stray
+// writes -- a `slot_stride` of 1 makes almost every address in the page
+// look slot-aligned. Both are compile-time constants after
+// monomorphization, so loading them was never buying anything: this is
+// the same "delete the corruptible copy rather than check it" move that
+// removed SLOTS_PER_CHUNK from the caller's hands in the first place.
+// There is now no failure path for a corrupted bound, because there is no
+// stored bound.
+//
+// `base` is still trusted to be a real chunk base: either the caller
+// proved it (slot_is_valid) or it is reading its own partial-list head.
+fn intrusive_chunk_slot_in_range(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                                 base: usize, slot_address: usize) -> bool !{unsafe} {
     if (slot_address < base) { return false; }
     // Slots start at the page's own offset 0 now that nothing else lives
     // there (issue #349), so the offset IS the slot offset.
     let slot_offset: usize = slot_address - base;
-    if (header.slot_stride == 0) { return false; }
-    if (slot_offset % header.slot_stride != 0) { return false; }
-    return slot_offset / header.slot_stride < header.slot_count;
+    let stride: usize = sizeof(IntrusiveSlot(T));
+    if (slot_offset % stride != 0) { return false; }
+    return slot_offset / stride < intrusive_pool_slots_per_chunk(pool);
 }
 
 // -- The two chunk lists -----------------------------------------------
@@ -823,8 +826,6 @@ fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id)
             header.prev_partial = 0;
             header.on_partial = 0;
             header.free_head = 0;
-            header.slot_count = slot_count;
-            header.slot_stride = stride;
             header.live_count = 0;
             header.corrupt_free_chain_count = 0;
             if (pool.chunk_head != 0) {
@@ -892,7 +893,7 @@ fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id)
     // OutOfMemory path is already "I could not get a slot"; the pool
     // itself is not out of memory, and the very next insert proves it by
     // growing a fresh chunk, since quarantining left partial_head empty.
-    if (intrusive_chunk_slot_in_range(base, header, slot_address) == false) {
+    if (intrusive_chunk_slot_in_range(pool, base, slot_address) == false) {
         header.corrupt_free_chain_count = header.corrupt_free_chain_count + 1;
         intrusive_pool_unlink_partial(pool, base);
         return IntrusivePoolInsertResult::OutOfMemory;
@@ -1139,9 +1140,9 @@ fn intrusive_pool_next_slot(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     let base: usize = intrusive_chunk_base_of(slot_address);
     let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(base);
     let index: usize =
-        (slot_address - base) / header.slot_stride;
-    if (index + 1 < header.slot_count) {
-        return slot_address + header.slot_stride;
+        (slot_address - base) / sizeof(IntrusiveSlot(T));
+    if (index + 1 < intrusive_pool_slots_per_chunk(pool)) {
+        return slot_address + sizeof(IntrusiveSlot(T));
     }
     if (header.next_chunk == 0) { return 0; }
     return header.next_chunk;
