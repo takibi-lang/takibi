@@ -14,7 +14,21 @@ use "kernel/lib/freelist.tkb";
 const PAGE_SIZE: usize = 4096;
 const PAGE_COUNT: usize = 9;
 
+// GitHub issue #349: per-page storage whose MEANING belongs to whoever
+// currently holds the page, and whose lifetime belongs to this allocator.
+// The shape Linux's `struct page` has: the allocator owns an array indexed
+// by page number, and each page's current owner decides what the bytes in
+// its entry mean.
+//
+// Declared as words rather than bytes because `[u8; N]` has alignment 1,
+// which would leave an owner's `usize` fields misaligned. Sixteen words
+// (128 bytes, 3.1% of a page) is what intrusive_pool_core.tkb's chunk
+// header needs today with room to spare; consumers static_assert their own
+// metadata against PAGE_META_WORDS rather than assuming.
+const PAGE_META_WORDS: usize = 16;
+
 private let mut fake_pages: [u8; PAGE_SIZE * PAGE_COUNT] align(PAGE_SIZE);
+private let mut fake_page_meta: [usize; PAGE_META_WORDS * PAGE_COUNT];
 private let mut fake_page_pool: SlotMap(PAGE_COUNT);
 
 linear struct PageOwner[page: usize] {
@@ -72,7 +86,13 @@ fn page_owner_transfer_index(owner: sink PageOwner[page])
 // plain-physical-address argument, so a file prototyped against this
 // provider still ports there by swapping one `use` line. Added for
 // GitHub issue #346, the first caller that ever gives a page back.
-fn page_transferred_release_physical(physical: usize) {
+fn page_transferred_release_physical(physical: usize) !{unsafe} {
+    // Metadata is scoped to the current owner (issue #349), so it goes
+    // back to zero before the page does. Without this, the next owner of
+    // this page would inherit an entry still claiming to belong to the
+    // last one -- and a pool's "is this chunk mine?" test is exactly a
+    // read of that entry.
+    page_meta_clear(physical);
     let base: usize = (fake_pages as *u8) as usize;
     let pool_bytes: usize = PAGE_SIZE * PAGE_COUNT;
     if (physical < base || physical >= base + pool_bytes ||
@@ -92,4 +112,40 @@ fn page_transferred_release_physical(physical: usize) {
 
 fn page_allocator_live_count() -> usize {
     return slotmap_live_count(&fake_page_pool);
+}
+
+// GitHub issue #349: the address of this page's metadata words, or 0 if
+// `physical` is not one of this allocator's page-aligned pages.
+//
+// Returning 0 rather than trapping is what lets a consumer use this as
+// its OWN validation step on an address of unknown provenance: the
+// bounds check here dereferences nothing, and a caller that gets 0 knows
+// the address is not a page of ours without ever having touched it. That
+// is a stronger position than the chunk-list walk it replaces, which had
+// to know a pool's own list to answer the same question.
+fn page_meta_at(physical: usize) -> usize {
+    let base: usize = (fake_pages as *u8) as usize;
+    let pool_bytes: usize = PAGE_SIZE * PAGE_COUNT;
+    if (physical < base || physical >= base + pool_bytes ||
+        (physical - base) % PAGE_SIZE != 0) {
+        return 0;
+    }
+    let index: usize = (physical - base) / PAGE_SIZE;
+    let meta_base: usize = (fake_page_meta as *usize) as usize;
+    return meta_base + index * PAGE_META_WORDS * sizeof(usize);
+}
+
+// Clears one page's metadata. The allocator owns this storage, so it is
+// the allocator that must not leave a freed page describing itself as
+// something an owner still holds -- see page_transferred_release_physical,
+// which is the only caller and calls it before the page rejoins the free
+// supply.
+private fn page_meta_clear(physical: usize) !{unsafe} {
+    let meta: usize = page_meta_at(physical);
+    if (meta == 0) { return; }
+    let words: *usize = unsafe { meta as *usize };
+    let count: isize = PAGE_META_WORDS as isize;
+    for i: isize in 0..<count {
+        words[i] = 0;
+    }
 }

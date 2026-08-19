@@ -1,7 +1,8 @@
 intrusive_pool
 slot stride for usize (8-byte payload + 1 bookkeeping word): 16
-slots per chunk, derived from sizeof(T) alone: 248
+slots per chunk, derived from sizeof(T) alone: 256
 same pool type, 1960-byte payload, same derivation: 2
+page-dividing strides no longer lose a slot to the header (1024 -> was 3, 2048 -> was 1, 4096 -> was impossible): 4 2 1
 static bytes of bookkeeping for a 336-object pool -- growable: 5440, intrusive: 80
 intrusive pool size is the same for a 1960-byte payload: true
 pages consumed before the first insert: 0

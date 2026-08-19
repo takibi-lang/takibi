@@ -16,15 +16,19 @@
 // memory inside each chunk's page, one chain per chunk -- so there is no
 // separate table to size. Concretely:
 //
-//   chunk (exactly one page, page-aligned, from page_alloc())
+//   page provider's per-page metadata, indexed by page number
 //   +----------------------------------------------------------+
-//   | IntrusiveChunkHeader: chunk-list and partial-list links,  |  <- 128 B
+//   | IntrusiveChunkHeader: chunk-list and partial-list links,  |
 //   |   this chunk's own free_head, slot_count, slot_stride,    |
-//   |   live_count, pool_tag                                    |
+//   |   live_count, pool_tag                    (GitHub #349)   |
+//   +----------------------------------------------------------+
+//                            | describes
+//                            v
+//   chunk (exactly one page, page-aligned, from page_alloc())
 //   +----------------------------------------------------------+
 //   | IntrusiveSlot(T) #0: generation, storage (payload OR link)|
 //   | IntrusiveSlot(T) #1: generation, storage (payload OR link)|
-//   | ...                                                       |
+//   | ...                     -- all 4096 bytes, no reservation |
 //   +----------------------------------------------------------+
 //
 // and IntrusivePool(T) itself holds plain scalars and not one array: two
@@ -103,13 +107,16 @@
 // the motivating shape) can pair this pool's brand with another pool's
 // address. That now takes explicitly naming both pools, but it is still
 // expressible, so intrusive_pool_remove validates before touching any
-// memory the handle names: intrusive_pool_slot_is_valid walks THIS pool's
-// own chunk list looking for the page the address falls in, then checks
-// the offset lands exactly on a slot boundary inside that chunk's carved
-// range. It never dereferences an address it has not already proven
-// belongs to this pool. Rejections are counted in
-// intrusive_pool_foreign_handle_count. The cost is O(chunks) -- chunks,
-// not slots, and only on the free path.
+// memory the handle names: intrusive_pool_slot_is_valid asks the page
+// provider which page the address falls in, checks that page's chunk
+// header says THIS pool owns it, then checks the offset lands exactly on
+// a slot boundary. It never dereferences an address it has not already
+// proven belongs to this pool -- the provider answers "is this one of my
+// pages" by arithmetic, and the header it hands back is the provider's
+// own memory, not memory the suspect address points at. Rejections are
+// counted in intrusive_pool_foreign_handle_count. The cost is O(1) since
+// issue #349 moved the header out of the page; it used to be O(chunks),
+// because finding the header meant walking this pool's chunk list.
 //
 // A pool that never needs that round trip can have the whole check
 // deleted: linearity plus the brand would then prove everything, and
@@ -279,15 +286,22 @@
 //   8-byte alignment, both because the free-chain link shares its
 //   storage and because `[u8; N]` contributes no alignment of its own
 //   (issue #348). Both are static_asserts in
-//   intrusive_pool_slots_per_chunk, measured rather than assumed -- the
-//   alignment one via IntrusiveSlotAlignProbe, since the language has no
-//   `alignof` yet. A T that violates either does not compile; neither is
-//   a runtime failure path, and neither can be silently misaligned.
-// - A T larger than one page minus the chunk header cannot be pooled at
-//   all. That is a compile-time property of T, and it is enforced as one:
-//   see intrusive_pool_slots_per_chunk's static_assert, which also pins
-//   the two INTRUSIVE_CHUNK_HEADER_SIZE invariants this layout depends on.
-//   No runtime failure path exists for any of the three.
+//   intrusive_pool_slots_per_chunk, measured rather than assumed. A T
+//   that violates either does not compile; neither is a runtime failure
+//   path, and neither can be silently misaligned.
+// - A T whose SLOT exceeds one whole page cannot be pooled at all -- a
+//   page-sized slot is now exactly poolable, since issue #349 took the
+//   header out of the page. That is a compile-time property of T and is
+//   enforced as one, alongside the check that the provider's per-page
+//   metadata is large enough for a chunk header. No runtime failure path
+//   exists for any of them.
+// - The chunk header lives in storage the PAGE PROVIDER owns, so this
+//   file's memory footprint is no longer self-contained: a pool costs its
+//   80 static bytes, its pages, and PAGE_META_WORDS words per page held.
+//   That reservation exists whether or not anyone pools anything, which
+//   is the trade issue #349 made -- it is what buys back the slot an
+//   in-page header used to cost at page-dividing strides, and what makes
+//   address-to-chunk O(1).
 //
 // Prototyped against linux_user/growable_pool/fake_page_provider.tkb, the
 // same small fake page_alloc() stand-in issue #26's own prototype used, so
@@ -296,17 +310,9 @@
 // became kernel/lib/growable_pool.tkb.
 use "linux_user/growable_pool/fake_page_provider.tkb";
 
-// Rounded up from sizeof(IntrusiveChunkHeader) (80) so the slot area
-// begins on a 128-byte boundary whatever alignment T turns out to need.
-// Both halves of that sentence are checked, not assumed -- see
-// intrusive_pool_slots_per_chunk's static_asserts. 128 bytes is 3% of a
-// page; the alternative (packing the header down) would buy back at most
-// one slot for a small T and cost the reclaim bookkeeping issue #346
-// needs.
-const INTRUSIVE_CHUNK_HEADER_SIZE: usize = 128;
-
-// One per chunk, living at offset 0 of that chunk's own page -- never in a
-// pool-side array indexed by chunk number, which is the whole point.
+// One per chunk, living in the page provider's per-page metadata (GitHub
+// issue #349) -- never at offset 0 of the chunk's own page, and never in a
+// pool-side array indexed by chunk number.
 //
 // Two intrusive doubly-linked lists run through these headers:
 //
@@ -336,12 +342,14 @@ const INTRUSIVE_CHUNK_HEADER_SIZE: usize = 128;
 // intrusive_pool_link_partial, which refuses to re-admit a quarantined
 // chunk as an allocation source, and intrusive_pool_remove, which refuses
 // to hand its page back. It lives here rather than in IntrusivePool(T)
-// for two reasons. It costs nothing: INTRUSIVE_CHUNK_HEADER_SIZE reserves
-// 128 bytes for a header that uses 88, so this field consumes slack that
-// was already paid for, and IntrusivePool(T)'s advertised 80-byte static
-// footprint does not move (the point of issues #348/#349 is that bytes
-// per OBJECT and per PAGE are what scale; a per-pool byte is the cheap
-// axis, but this one turned out to be free on either). And a per-chunk
+// for two reasons. It costs nothing: the page provider reserves
+// PAGE_META_WORDS words per page for a header that uses 88 bytes, so this
+// field consumes room already set aside, and IntrusivePool(T)'s
+// advertised 80-byte static footprint does not move (the point of issues
+// #348/#349 is that bytes per OBJECT and per PAGE are what scale; a
+// per-pool byte is the cheap axis, but this one turned out to be free on
+// either). Since issue #349 that reservation is out of line, so unlike
+// the in-page version it costs no slot at any stride. And a per-chunk
 // quarantine flag is needed regardless, since without it the very next
 // intrusive_pool_remove into this chunk would link it straight back onto
 // the partial list.
@@ -504,15 +512,17 @@ fn intrusive_pool_slots_per_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id
     // through IntrusivePoolGrowResult and IntrusivePoolInsertResult
     // instead, making every CALLER match on a runtime outcome that could
     // never actually occur for a T that compiled once.
-    static_assert(sizeof(IntrusiveSlot(T)) <= PAGE_SIZE - INTRUSIVE_CHUNK_HEADER_SIZE,
+    // A whole page is available now that the header is out of it (GitHub
+    // issue #349), so a page-sized T is exactly poolable rather than
+    // exactly impossible.
+    static_assert(sizeof(IntrusiveSlot(T)) <= PAGE_SIZE,
                   "IntrusivePool(T): one T-sized slot does not fit in a single chunk");
-    // The chunk header is at offset 0 of the page and the slot area
-    // follows it, so this reservation has to cover the header and land on
-    // an alignment every payload type can live at.
-    static_assert(sizeof(IntrusiveChunkHeader) <= INTRUSIVE_CHUNK_HEADER_SIZE,
-                  "INTRUSIVE_CHUNK_HEADER_SIZE is smaller than the header it reserves space for");
-    static_assert(INTRUSIVE_CHUNK_HEADER_SIZE % 16 == 0,
-                  "INTRUSIVE_CHUNK_HEADER_SIZE must keep the slot area maximally aligned");
+    // The header now lives in storage the page provider reserves, so what
+    // has to be checked is that the provider reserved enough. Same shape
+    // as the in-page reservation this replaces -- a fact about a constant,
+    // settled here rather than trusted.
+    static_assert(sizeof(IntrusiveChunkHeader) <= PAGE_META_WORDS * sizeof(usize),
+                  "IntrusivePool(T): the page provider's per-page metadata is smaller than a chunk header");
     // GitHub issue #348, the two conditions the payload/link overlay
     // needs. Both are properties of T alone, so both are settled here
     // rather than being anything a caller or a runtime path can get
@@ -547,7 +557,7 @@ fn intrusive_pool_slots_per_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id
     //    reasoning is in hand, than to remember later.
     static_assert(alignof(T) <= alignof(usize),
                   "IntrusivePool(T): T needs stronger alignment than the slot layout guarantees");
-    return (PAGE_SIZE - INTRUSIVE_CHUNK_HEADER_SIZE) / sizeof(IntrusiveSlot(T));
+    return PAGE_SIZE / sizeof(IntrusiveSlot(T));
 }
 
 // The chunk a slot address belongs to, given that every chunk is exactly
@@ -558,11 +568,23 @@ fn intrusive_chunk_base_of(slot_address: usize) -> usize {
     return slot_address - (slot_address % PAGE_SIZE);
 }
 
-// The one provenance boundary on the chunk side: `base` is only ever a
-// value this pool itself recorded from page_physical_address(), or one
-// already proven to be on this pool's chunk list.
+// The chunk header for a page, in the provider's per-page table (GitHub
+// issue #349) rather than at the page's own offset 0.
+//
+// The cast is to memory the ALLOCATOR owns and sized, which is what makes
+// this the safe direction: page_meta_at answers "is this one of my pages"
+// by arithmetic on `base`, never by reading through it, so a garbage
+// `base` yields 0 here instead of a wild header. `PAGE_META_WORDS`
+// covering sizeof(IntrusiveChunkHeader) is checked once per
+// instantiation, in intrusive_pool_slots_per_chunk.
+//
+// Callers pass either a page this pool recorded from
+// page_physical_address(), or one intrusive_pool_owns_chunk has just
+// accepted. Passing anything else returns a pointer into the metadata
+// table's own zeroed entry for that page, which reads as pool_tag 0 --
+// wrong for every pool, and harmless.
 fn intrusive_chunk_header_at(base: usize) -> *IntrusiveChunkHeader !{unsafe} {
-    return unsafe { base as *IntrusiveChunkHeader };
+    return unsafe { page_meta_at(base) as *IntrusiveChunkHeader };
 }
 
 // Same for the slot side. Callers hold either an address they just
@@ -592,19 +614,28 @@ fn intrusive_slot_link_at(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     };
 }
 
-// Is `base` a chunk this pool actually owns? Walks this pool's own chunk
-// list rather than reading a header at `base` and trusting what it finds
-// there -- the difference matters, because the whole point of validating
-// is that `base` may be garbage, and a header read would already be the
-// wild dereference we are trying to prevent. O(chunks).
+// Is `base` a chunk this pool actually owns? O(1) since GitHub issue
+// #349, and safer than the O(chunks) list walk it replaces rather than
+// merely faster.
+//
+// The old walk existed to avoid reading a header at `base` when `base`
+// might be garbage -- the header lived IN the page, so trusting it was
+// the wild dereference being guarded against. With the header in the
+// provider's own per-page table that inversion goes away:
+// page_meta_at bounds-checks `base` against the page range without
+// dereferencing it at all, and what it returns is memory the ALLOCATOR
+// owns, not memory `base` points at. So there is no longer a moment
+// where an unproven address is trusted, and the answer costs a division
+// and a comparison instead of a list walk.
+//
+// The tag is the authority. A page not currently a chunk of anyone's has
+// zeroed metadata (the provider clears it on release) and pool_tag
+// counts from 1, so tag 0 never matches a live pool.
 fn intrusive_pool_owns_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id, base: usize)
         -> bool !{unsafe} {
-    let mut cursor: usize = pool.chunk_head;
-    while (cursor != 0) {
-        if (cursor == base) { return true; }
-        cursor = intrusive_chunk_header_at(cursor).next_chunk;
-    }
-    return false;
+    let meta: usize = page_meta_at(base);
+    if (meta == 0) { return false; }
+    return intrusive_chunk_header_at(base).pool_tag == pool.pool_tag;
 }
 
 // Full validation of a raw slot address: it names a chunk on this pool's
@@ -646,10 +677,10 @@ fn intrusive_pool_slot_is_valid(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 fn intrusive_chunk_slot_in_range(base: usize, header: *IntrusiveChunkHeader,
                                  slot_address: usize) -> bool !{unsafe} {
     if (slot_address < base) { return false; }
-    let offset: usize = slot_address - base;
-    if (offset < INTRUSIVE_CHUNK_HEADER_SIZE) { return false; }
+    // Slots start at the page's own offset 0 now that nothing else lives
+    // there (issue #349), so the offset IS the slot offset.
+    let slot_offset: usize = slot_address - base;
     if (header.slot_stride == 0) { return false; }
-    let slot_offset: usize = offset - INTRUSIVE_CHUNK_HEADER_SIZE;
     if (slot_offset % header.slot_stride != 0) { return false; }
     return slot_offset / header.slot_stride < header.slot_count;
 }
@@ -805,7 +836,7 @@ fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id)
             while (remaining > 0) {
                 remaining = remaining - 1;
                 let slot_address: usize =
-                    base + INTRUSIVE_CHUNK_HEADER_SIZE + remaining * stride;
+                    base + remaining * stride;
                 let slot: *IntrusiveSlot(T) = intrusive_slot_at(pool, slot_address);
                 slot.generation = 0;
                 // generation is 0, so this slot's storage is the link's,
@@ -1099,7 +1130,7 @@ fn intrusive_pool_payload_of(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 
 fn intrusive_pool_first_slot(T: type, pool: &mut IntrusivePool(T) @ pool_id) -> usize !{unsafe} {
     if (pool.chunk_head == 0) { return 0; }
-    return pool.chunk_head + INTRUSIVE_CHUNK_HEADER_SIZE;
+    return pool.chunk_head;
 }
 
 fn intrusive_pool_next_slot(T: type, pool: &mut IntrusivePool(T) @ pool_id,
@@ -1108,12 +1139,12 @@ fn intrusive_pool_next_slot(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     let base: usize = intrusive_chunk_base_of(slot_address);
     let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(base);
     let index: usize =
-        (slot_address - base - INTRUSIVE_CHUNK_HEADER_SIZE) / header.slot_stride;
+        (slot_address - base) / header.slot_stride;
     if (index + 1 < header.slot_count) {
         return slot_address + header.slot_stride;
     }
     if (header.next_chunk == 0) { return 0; }
-    return header.next_chunk + INTRUSIVE_CHUNK_HEADER_SIZE;
+    return header.next_chunk;
 }
 
 // 0 means "this slot is free". Safe on an address of unknown provenance.
@@ -1153,10 +1184,11 @@ fn intrusive_pool_foreign_handle_count(T: type, pool: &mut IntrusivePool(T) @ po
 //
 // Summed over the chunk list (O(chunks)) rather than read from a pool
 // field, because the count lives in the chunk headers' already-reserved
-// slack: see IntrusiveChunkHeader's own comment for why that is the free
+// room: see IntrusiveChunkHeader's own comment for why that is the free
 // place to put it. This is a diagnostic observer, never an allocation
-// path, so the walk costs nothing that matters -- and it is the same
-// O(chunks) intrusive_pool_slot_is_valid already spends on every free.
+// path, so the walk costs nothing that matters -- and it is now the only
+// O(chunks) walk left in the file, since issue #349 made validation
+// O(1).
 fn intrusive_pool_corrupt_free_chain_count(T: type, pool: &mut IntrusivePool(T) @ pool_id)
         -> usize !{unsafe} {
     let mut total: usize = 0;
