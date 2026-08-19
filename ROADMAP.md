@@ -11,245 +11,386 @@ order so that work already driven by a real requirement is done in a sensible
 sequence, not a license to build ahead of demand. Where a milestone is
 deliberately speculative, it says so.
 
-Written 2026-08-05 against the 52 open GitHub issues at that date. `HISTORY.md`
-remains the engineering log; `kernel/README.md` remains the description of what
-the kernel actually does today.
+Written 2026-08-19 against the 91 open GitHub issues at that date. The previous
+snapshot was written 2026-08-05 against 52 open issues. The increase is not 39
+undifferentiated regressions: the intervening kernel work closed its old latent
+defects, brought up QEMU, expanded the process/VM/filesystem model, and exposed
+more precise compiler, allocator, and proof-boundary debts while doing so.
+`HISTORY.md` remains the engineering log; `kernel/README.md` remains the
+description of what the kernel actually does today.
 
 **This is the one file in the repository where enumerating issue numbers is the
 point** (see `AGENTS.md`'s "Issue Numbers Do Not Belong in Tracked Files"). It
 is a dated snapshot, refreshed occasionally and wholesale rather than
 maintained incrementally: being visibly out of date here is expected and
-harmless, which is exactly why the same references are not allowed to leak into
-files that are read as descriptions of current behavior. Live status --
-what is in progress, what is blocked, who is on it -- lives on the
-[project board](https://github.com/orgs/takibi-lang/projects/2), not here.
+harmless. Live status -- what is in progress, what is blocked, and who is on it
+-- lives on the [project board](https://github.com/orgs/takibi-lang/projects/2),
+not here.
 
 ## Baseline at the time of writing
 
 | Measure | Value |
 |---|---|
-| `kernel/` Takibi source | 13,881 lines, all built with `--forbid-trap` |
-| `kernel/arch/arm64` assembly | 1,300 lines (`user_entry.S` alone is 574, of which 312 are an EL0 test payload) |
-| `unsafe { }` blocks in `kernel/` | 39, across 7 files |
-| Linux syscalls | 28 Implemented, 10 Partial, 5 deliberately Unsupported (`kernel/SYSCALLS.md`) |
-| RPi5 integration views | 24 expected-file projections over one boot |
-| Regression detection | one physical RPi5; no CI |
+| Open GitHub issues | 91 |
+| `kernel/` Takibi source | 22,962 lines, built with `--forbid-trap` |
+| `kernel/arch/arm64` assembly/includes | 1,095 lines, including generated offsets and test payloads |
+| Explicit `unsafe { }` sites in `kernel/` | 203, after raw-pointer/MMIO boundaries were made explicit |
+| Linux syscalls | 29 Implemented, 10 Partial, 5 Unsupported-by-design (`kernel/SYSCALLS.md`) |
+| Hardware-independent kernel integration | QEMU/AArch64 with ext2, BusyBox, process, UART, ARP/ICMP/TCP, and debug-build lanes |
+| Real-hardware authority | one physical RPi5; no CI yet |
 
-The last row is the one worth staring at. Issue #209's three frame-management
-bugs were diagnosable only by reading a parked core's registers over SWD, and
-issue #223 documents a latent FP/SIMD corruption that no current test can
-observe. As the kernel gets more concurrent, hardware-only failure modes become
-the main failure modes.
+Two counts need care. Assembly lines now include generated ABI material and
+deliberate fixture payloads, so a future trusted-base metric must distinguish
+handwritten production assembly from generated and test-only code. Likewise,
+the rise in `unsafe` sites from the previous snapshot is primarily the result
+of making previously implicit raw-pointer and MMIO trust explicit (#218,
+#315, #316), not evidence that the kernel became less safe. Issue #236 should
+replace both raw counts with a categorized proof-boundary inventory.
+
+The biggest baseline change is QEMU. Issue #237 landed a maintained AArch64
+kernel target, and `kernelcheck-qemu`, `kernelcheck-shell-qemu`, and the DWARF
+lane now exercise substantial kernel behavior without SWD or physical storage.
+Real hardware remains authoritative for cache, DMA, interrupt timing, and true
+concurrency, but ordinary kernel work no longer has to wait for it.
+
+## What changed since the previous snapshot
+
+The previous roadmap's immediate correctness milestone is complete:
+
+- #219 initialized forked-child demand-stack metadata.
+- #223 saved FP/SIMD state on Current-EL IRQ entry.
+- #224 deduplicated primary/secondary CPU initialization.
+
+Its assembly-reduction chain also landed: #225 added external symbol addresses,
+#226 added the closed system-register/barrier/TLBI intrinsic set and lifted
+`timer.S`/`mmu.S`, and #227 generated the vector-table/exception-entry shape
+from `.tkb`. The remaining assembly is no longer accurately described by the
+old serial #225 -> #226 -> #227 plan.
+
+Kernel capability advanced at the same time. The kernel now has an interactive
+BusyBox ash UART path, blocking input, a real ext2-root executable path, larger
+and nested process trees, per-process address spaces, demand-grown page tables,
+private fork COW, single-indirect ext2 reads, and directory enumeration. The
+old milestones that described these as future work must not remain as if none
+of them happened.
 
 ## Issue inventory
 
-52 open issues at the time of writing. 29 of them (56%) predate the standalone
-`kernel/` tree and were filed while `examples/` was the product surface; their
-relative priority no longer reflects where the project is. No labels or
-milestones are in use.
+The 91 open issues are better read as themes than as one priority queue. The
+project board had 75 Backlog, 5 Ready, and 11 In progress open items at this
+snapshot; most In progress items belonged to one intrusive-pool investigation
+and should converge as one milestone rather than masquerading as ten parallel
+product priorities.
 
-| Axis | Issues | Note |
+| Axis | Issues | Roadmap treatment |
 |---|---|---|
-| A. Kernel features | #209 #220 #204 #182 #208 #207 | the current front line |
-| B. Kernel defects / structure | #219 #223 #224 #222 #202 #199 | #219 and #223 are latent bugs |
-| C. Shrinking the assembly core | #225 -> #226 -> #227 | serial dependency, fixed by #221's completion |
-| D. Proof capability (research) | #200 #201 #203 #216 #109 #90 #13 | five research issues open in parallel |
-| E. Language ergonomics | #212 #217 #218 #155 #214 | #217/#218 were split out of #15 |
-| F. Portability / infrastructure | #50 #85 #95 #56 #149 #171 #9 #122 #123 #124 | #237 (QEMU kernel target) landed; #56/#149 below can now build on it |
-| G. Older backlog, needs triage | #5 #8 #17 #19 #26 #28 #36 #58 #65 #91 #103 #129 #131 #132 #15 | some promote, some park |
+| A. Known correctness and test-trust defects | #361 #362 #331 #333 #334 | M0: fix before relying on nearby machinery |
+| B. Allocator/resource-limit debt | #257 #344 #348 #349 #350 #351 #353 #354 #355 #356 | M1: finish a minimum production-ready slice, park optional generality |
+| C. QEMU, CI, and debugging | #56 #149 #290 #300 #338 #339 #341 | M2: turn the QEMU port into the default development safety net |
+| D. Proof boundary and kernel safety | #236 #171 #203 #298 #308 #342 #343 | M3: the project's central thesis, driven by concrete kernel risks |
+| E. User-visible kernel capability | #204 #220 #270 #281 #283 #285 #287 | M4: resume a bounded product milestone after stabilization |
+| F. Filesystem and scalability | #182 #208 #250 #252 | caller-driven follow-ups, not one pre-committed subsystem rewrite |
+| G. SMP and concurrency | #17 #222 #261 #274 #299 | M5: a coherent future milestone with real dependencies |
+| H. Deeper proof/language research | #13 #109 #131 #132 #200 #201 #216 #267 #282 #297 | keep concrete motivators, do not run all as active research tracks |
+| I. Portability and long-range infrastructure | #50 #85 #95 #122 #123 #124 | deferred by explicit triggers |
+
+The inventory is intentionally not exhaustive issue-by-issue. Diagnostics,
+ergonomics, and older language requests remain useful backlog, but listing each
+one in a milestone would confuse issue existence with a commitment to schedule
+it.
 
 ## The engine this roadmap is built around
 
-The project's demonstrated working pattern is a loop, not a list: a concrete
-kernel requirement exposes a real bug or an unprovable pattern, and that becomes
-a language or type-system issue, which then makes the next kernel milestone
-cheaper.
+The project's demonstrated working pattern is a loop:
 
-- #209's frame bugs -> #221 (migrate syscall paths into `.tkb`) -> #225/#226/#227
-- #196's syscall boundary work -> #199/#200/#201/#202/#203
-- #207's freelist redesign -> const generics -> #214/#216/#217
-- `kernel/net/` wire headers -> #186 (`u16be`/`u32be`)
+1. A concrete kernel requirement exercises real behavior.
+2. QEMU, Linux-native, or hardware tests expose a failure or unprovable access.
+3. The smallest suitable type-system, ownership, or diagnostic improvement
+   moves that failure toward compile time.
+4. The kernel adopts the improvement at the real call site, and the regression
+   enters the cheapest faithful test tier.
 
-Milestones below are ordered so this loop keeps running, rather than separating
-"kernel work" and "compiler work" into tracks that stop feeding each other.
+QEMU makes this loop substantially cheaper, but does not change the tier rule:
+pure algorithms belong in `linux_user/`, hardware-independent kernel behavior
+belongs in QEMU, and cache/DMA/interrupt/concurrency claims stay on real
+hardware. The roadmap therefore does not split "kernel features" and
+"language research" into independent tracks that stop feeding each other.
 
-## M0: pay down latent defects
+## M0: restore confidence in the checking machinery
 
-Immediate. Each of these is a known-wrong thing that has not fired yet.
+Immediate. These are known correctness or test-isolation defects, not optional
+cleanup.
 
-- **#223** -- `el1_current_irq_entry` does not save q0-q31/FPSR/FPCR, unlike the
-  EL0 paths. Currently safe only because no function reachable from
-  `rpi5_irq_dispatch` happens to use SIMD. Nothing enforces that.
-- **#219** -- `process_image_clone_vm_begin` never initializes root 1's
-  demand-stack metadata, so a forked child that grows its stack fail-stops the
-  core. Blocks M1.
-- **#224** -- primary and secondary CPU init configure the same registers in two
-  places. The issue itself argues for doing this before #222, not after.
+- **#362** -- `struct align(N)` does not raise embedded alignment, and the
+  compiler's DataLayout and OCaml `sizeof` implementations disagree. A layout
+  proof is not meaningful while two compiler paths compute different answers.
+- **#361** -- intrusive-pool address validation derives its bounds from mutable
+  chunk-header fields that the validation is meant to defend. Derive the
+  monomorphized constants instead of trusting corruptible copies.
+- **#331** -- `SHUFFLE_TESTS` found six cross-test ordering failures, including
+  target-triple state leaks. Tests must not validate whichever target happened
+  to run before them.
+- **#333/#334** -- make module-scoped checker state exception-safe and remove
+  non-exhaustive syntactic type-shape handling where new AST constructors can
+  silently escape a pass.
 
-Done when: `make kernelcheck-rpi5` is green with a new fixture that holds live
-SIMD across an IRQ, and a fixture where a forked child grows its stack past the
-parent's fork-time high-water mark.
+Done when: the layout implementations agree by construction or by a checked
+single source of truth; pool validation no longer trusts its own mutable
+header; randomized test order is green across repeated runs; and the identified
+checker-state/type-shape gaps have regression tests.
 
-## M1: a kernel a human can log into
+## M1: finish one production-ready count-unbounded allocator
 
-- **#209** -- interactive BusyBox ash REPL over UART (blocking UART input,
-  terminal descriptor behavior). Blocked by #219.
-- **#204** -- `writev`/`readv` parity with `write`/`read` for connected TCP and
-  inetd-mode fds. Falls out naturally while doing the above.
-- **#220** -- BusyBox telnet service, i.e. listener/session lifecycle on top of
-  #209's process primitives.
+The current allocator work is valuable but at risk of becoming an open-ended
+comparison with every facility in SLUB, UMA, and `pool_cache(9)`. Issue #344's
+intrusive design needs a bounded closing bar before it replaces real kernel
+pools.
 
-Done when: a telnet session reaches a BusyBox ash prompt and runs external
-applets. This is the most externally legible milestone the project has: not
-"the kernel serves a page", but "you can log into it".
+Required for the first production adoption:
 
-## M2: a practical root filesystem
+1. **#361** -- validation must not trust mutable layout metadata.
+2. **#356** -- choose and enforce one payload initialization/reuse contract.
+3. **#355** -- provide an invariant probe that catches free-chain and
+   partial-list corruption in `linux_user/`.
+4. Adopt the primitive in exactly one current fixed-capacity kernel consumer,
+   selected from #257, and exercise exhaustion/growth/reuse in QEMU plus the
+   applicable hardware lane.
+5. Continue #257 consumer by consumer only after that first adoption is stable.
 
-- **#182** -- ext2 indirect blocks, multiple block groups, nested directories.
-- **#208** -- block buffer cache (today every ext2 operation re-reads the
-  superblock and group descriptor from the device).
-- **#207** -- O(1) free-slot allocation. `page_alloc`'s 1024-entry linear scan
-  is the acute case and gets worse as processes multiply.
+The following are not automatically part of the closing bar:
 
-Done when: a real Alpine-shaped tree with a `/bin` symlink farm boots and
-multiple applets dispatch normally.
+- #349's off-page headers;
+- #350's multi-page chunks;
+- #353's O(1) address-to-owner lookup;
+- #354's configurable reclaim policy.
 
-## M2': QEMU/AArch64 kernel target, then CI
+Promote one only when a current consumer, measured cost, or correctness
+requirement needs it. A comparison with a mature general-purpose allocator is
+useful evidence, but is not by itself a present Takibi requirement.
 
-**#237 landed**: `make kernelbuild-qemu`/`kernelcheck-qemu` build and run a
-31-view integration suite (self-tests, ext2/BusyBox/HTTPd, init.sh, real
-ARP/ICMP/TCP against a host-side peer) with no RPi5 hardware, SWD, or NIC
-needed -- see `kernel/README.md`'s "QEMU/AArch64 integration" section. Two
-of the three problems that motivated this milestone are resolved by that
-alone (iteration no longer pays the ~one-minute SWD transfer per attempt;
-a QEMU target existing at all is the prerequisite for CI). Still open:
+**#351 synchronization is a dependency of multi-context adoption, not of the
+single-context first adoption.** Complete it before the allocator is reachable
+from multiple cores or interrupt/process contexts. Do not pull atomics, SMP,
+and general lock-invariant research into M1 solely to make the primitive
+hypothetically universal.
 
-1. **#56 (CI)** -- wiring `kernelcheck-qemu` into an actual CI runner.
-2. **#149 (GDB without JTAG)** -- `gdb-multiarch` against QEMU's gdbstub
-   works today for interactive debugging (`kernel/README.md`), but this
-   issue's own original scope may cover more than that.
-3. Hardware-specific RP1 GEM and USB Mass Storage coverage remains RPi5-only;
-   QEMU covers the corresponding behavior through virtio-net and virtio-blk.
+Done when: one count-unbounded pool implementation has a uniform object
+contract, checked invariants, corruption regression tests, and at least one
+real kernel consumer with no guessed object-count ceiling.
 
-Real hardware stays the authority for anything involving cache, DMA, interrupt
-timing, or true concurrency (`AGENTS.md`'s tier-3 rule is unchanged). QEMU is a
-second net, not a replacement.
+## M2: make QEMU the continuous development safety net
 
-## M3: real SMP
+Issue #237 made hardware-independent kernel execution possible. This milestone
+turns that capability into the ordinary way regressions are prevented and
+debugged.
 
-- **#222** -- generalize `execution_*`/`scheduled_process_*` globals to per-core
-  state, using the existing `PerCore(T, N)`-shaped const generics. After #224.
-- **#17** -- atomics. A genuine multi-core scheduler needs them.
-- Then: cores 1-3 actually run processes, rather than core 1 proving EL1 entry
-  and parking.
-- **#202** (UserRange TOCTOU across preemption) stops being theoretical once
-  genuine concurrency exists; **#85** (lost-wakeup-safe event waiting) is the
-  design question for non-AArch64 targets.
+1. **#56** -- run `kernelcheck-qemu` in CI. This is the highest-leverage
+   remaining consequence of the QEMU port.
+2. **#338** -- extract only the pure USB configuration-descriptor parser and
+   execute its exact-end/truncation cases in `linux_user/`; keep the kernel
+   implementation as the single source of truth.
+3. **#290** -- build kernel-aware QEMU/RPi5 debugging around the existing
+   gdbstub, DWARF build, crash snapshot, process trace, and page-table state.
+4. **#339/#300** -- improve structured hardware initialization failures and
+   Takibi enum debug metadata where the debugger work demonstrates a concrete
+   visibility gap.
+5. Re-scope **#149**. QEMU already provides GDB without JTAG; the remaining
+   request should state whether it means an in-kernel debugger on hardware,
+   postmortem state without a probe, or another concrete target.
 
+Coverage tooling (#341) is useful only after identifying the exact branch or
+module question it should answer; it is not a prerequisite for CI.
 
-Done when: independent EL0 processes run on 4 cores with real-hardware
-preemption evidence.
+Done when: every commit can run the maintained QEMU kernel suite in CI, the USB
+parser regression runs at the Linux-native tier, and documented debugger
+workflows can inspect a failed process and its address-space/crash state on
+QEMU without JTAG.
 
-## M4: minimize the hand-verified core
+## M3: define and shrink the trusted kernel boundary
 
-This is the framekernel thesis stated in `AGENTS.md` made measurable, and it can
-proceed in parallel with M1-M3. Serial internally:
+This is the project's central safety milestone, not speculative infrastructure.
+The current code has accumulated effective techniques -- refined indices,
+checked slices, mode-distinct user ranges, references, indexed owners, explicit
+`unsafe`, interrupt effects, and DMA builtins -- but no single precise statement
+of what their composition proves.
 
-1. **#225** -- first-class symbol addresses and embedded blobs. Deletes six
-   `adrp/add` accessor functions and makes `mmu.S`'s page-table regions nameable
-   from `.tkb`, which is the prerequisite for step 2.
-2. **#226** -- a closed, enumerated set of system-register/barrier/TLBI
-   intrinsics, each carrying its mandatory barrier. Explicitly *not* general
-   inline assembly. Lifts `timer.S` and most of `mmu.S`.
-3. **#227** -- declare the exception frame and vector table in `.tkb` and
-   generate save/restore. The frame's offset constants (`EXC_CONTEXT_SIZE` and
-   friends) are compiler-emitted now, not hand-maintained; the SAVE/RESTORE
-   macro bodies themselves (`kernel/arch/arm64/kernel/exception_context.inc`)
-   remain hand-written assembly, which is most of what keeps this item open.
+1. **#236** -- document the trusted base and proof boundaries first. Classify
+   statically rejected operations, runtime-checked operations, explicit trusted
+   boundaries, target-lowering assumptions, and properties outside the
+   language. Categorize `unsafe` and handwritten assembly instead of optimizing
+   a raw count.
+2. **#343** -- audit real pool/reference call sites for references that outlive
+   a free or reuse. The existence of a real growable heap invalidated #15's old
+   premise that dangling pointers were only hypothetical. Add the smallest
+   lifetime/authority rule justified by an actual failing shape; do not design
+   a general lifetime calculus in advance.
+3. **#342** -- design nullability around the actual remaining sentinel-pointer
+   sites and closed variants. Decide whether ordinary references/pointers are
+   non-null by default only after the audit establishes the migration shape.
+4. **#203** -- make "no uninitialized kernel memory reaches userspace" a static
+   property of syscall output buffers. This remains the strongest bounded
+   proof-research candidate: it has a concrete security payoff, existing
+   `user_zero_fill` sites, and a plausible initialized-state design without
+   requiring an SMT solver.
+5. **#171/#298** -- close concrete DMA ownership/cache-line and interrupt-effect
+   gaps before new concurrent or driver consumers depend on them.
 
-Done when: `kernel/arch/arm64` assembly drops from 1,300 lines to under ~300,
-and the remaining lines are genuine instruction emissions. Unlike most of this
-roadmap, progress here is a number, which is exactly what a claim about a
-minimal hand-verified core needs.
+Issue #308's `ProcessRecord` invariant memo is a useful source of concrete
+examples, but not a request to build a general invariant language. Likewise,
+#200, #201, #216, #267, #282, and #297 stay as research records until one is the
+smallest solution to a current kernel requirement. Do not run them all in
+parallel as if every plausible proof direction were scheduled work.
 
-## M5: raise the proof ceiling
+Done when: the repository can state exactly what a successful `--forbid-trap`
+kernel build does and does not guarantee; each trusted escape category has a
+rationale; present heap references have been audited for dangling use; and one
+additional high-value kernel property is enforced statically at its real
+boundary.
 
-Cheap and concrete first:
+## M4: resume a visible kernel capability
 
-- **#199** -- split `UserRange` into `UserReadRange`/`UserWriteRange`.
-- **#218** -- require `unsafe` for integer-to-pointer casts from calculated
-  values (literal-address casts stay ordinary).
-- **#217** -- index expressions targeting a struct field, and bounds-checked
-  struct array fields. Both #207 and #216 hit this directly.
-- **#131** -- arbitrary stored indexed owners. This is a *promotion*, not
-  backlog: the same wall appears in #156's "indexed owners cannot be array
-  elements" finding, in #207's freelist, and in #216.
+Stabilization and proof work must keep feeding a kernel that does something
+recognizably useful. Choose one bounded external milestone at a time.
 
-Then, research. Five parallel research issues (#200 #201 #203 #216 #109) is too
-many to be a plan. Recommendation: drive exactly one to a real implementation.
+### M4a: serve real root-filesystem content
 
-**Suggested pick: #203** (prove no syscall copies uninitialized kernel memory to
-userspace). It has the clearest security payoff, it is a top-severity real-OS
-vulnerability class, an existing runtime discipline (`user_zero_fill`) already
-marks every site that would need the static property, and a plausible design
-exists that does not require a solver -- initialized-ness as a type state on a
-scratch buffer. #200 and #201 both need real solver work (#13) and are a
-different order of magnitude.
+- **#285** -- serve SD-card/rootfs demo assets through BusyBox httpd, using the
+  ext2, shell, and HTTP paths that already exist.
+- **#281/#283** -- coalesce/type block transfers only where the real workload
+  demonstrates an iteration or boundary problem.
+- **#270/#287** -- run BusyBox `init` as PID 1 and add shebang execution when
+  the selected userspace tree actually requires those semantics.
 
-## M6: a third architecture
+This is the smaller near-term milestone and should be preferred before opening
+a new session-lifecycle front.
 
-Deliberately speculative; recorded as direction, not as scheduled work.
+### M4b: log in over the network
 
-- **#50** RISC-V, or AMD64 (#222's per-core design already anticipates 24
-  logical cores).
-- **#95** true separate compilation. Suggested numeric trigger for re-evaluation
-  rather than a date: `kernel/` exceeding roughly 20,000 lines, or build time
-  becoming an actual complaint.
+- **#204** -- extend `readv`/`writev` to connected TCP and inetd-mode file
+  descriptors when the traced service requires them.
+- **#220** -- run one BusyBox telnet service/session through the existing
+  clone/exec/exit/wait4 machinery.
 
-## Proposed issue hygiene
+The old roadmap's "a kernel a human can log into" milestone is half complete:
+a human can already use BusyBox ash over UART. The remaining headline is a
+network login, not the process-model foundation that has already landed.
 
-None of this has been applied; it is recorded here as the recommendation.
+Done when: M4a serves a real asset from the maintained root filesystem on QEMU
+and RPi5; then M4b reaches and uses a BusyBox ash prompt over a network session.
+Do not silently turn either into full POSIX service management.
 
-**Close or merge**
+## Filesystem growth stays caller-driven
 
-- **#5 (inline assembler)** -- close. #226 makes general inline assembly an
-  explicit non-goal, with a specific argument: #209's second bug was caused by a
-  human choosing which register would survive a call, and general inline asm
-  hands that burden back to `.tkb`. Keeping an issue open that contradicts a
-  settled design decision is worse than having no issue.
-- **#90 and #200** -- substantially the same request (relational/correlated
-  bounds). Merge into #200, with #13 (Z3) as the umbrella for that axis.
-- **#15** -- after #217/#218 were split out, what remains is null safety,
-  use-after-free, and address-space typing; the last is already partly real in
-  `kernel/mm/user_memory.tkb`. Re-scope against what `kernel/` actually has.
+Issue #182's original umbrella now mixes completed and unrequested work.
+Single-indirect regular-file reads and directory enumeration have landed;
+multiple block groups, write-side indirect allocation, nested directory
+mutation, double/triple indirection, and additional syscalls remain distinct
+possible requirements. Re-scope #182 around the next real rootfs image that
+fails, and split only the concrete closing bar it supplies.
 
-**Create** -- none outstanding; the one item this section used to list (a
-QEMU/AArch64 kernel target issue) is #237, now landed.
+Similarly, **#208's block buffer cache needs a measured workload**, not merely
+the observation that uncached metadata reads are inefficient. Design it when
+M4 or a reproducible benchmark shows the cost or when write ordering requires a
+cache contract. The cache introduces dirty-state, eviction, ownership, and
+eventual synchronization obligations; those are not free architectural
+preparation.
 
-**Project board**
+## M5: real SMP
 
-The [project board](https://github.com/orgs/takibi-lang/projects/2) is the
-intended home for status, kept by hand. The axes above (A through G) and the
-milestones M0 through M6 map onto board fields directly; `blocked` and
-`latent-bug` are worth having as their own field or label, since both change
-what should be worked on next rather than merely describing a topic.
+Deliberately later, but not vague. SMP is one coherent milestone whose open
+dependencies should not leak piecemeal into unrelated work:
 
-The division of labor: the board answers "where is this now", this file answers
-"why in this order". Neither should try to answer the other's question.
+1. **#222** -- make scheduler/execution state explicitly per-core.
+2. **#17** -- provide the required closed atomic operations.
+3. **#261/#351** -- establish synchronization and typed guard authority for
+   page, MMU, allocator, and shared kernel state.
+4. **#274/#299** -- make network frame disposition and atomic publication
+   explicit where concurrent receivers demonstrate the need.
+5. Run independent EL0 processes on all four RPi5 cores and retain
+   real-hardware preemption/concurrency evidence.
+
+Issue #202's user-range TOCTOU question becomes urgent here: a validated range
+cannot be assumed stable across concurrent address-space mutation without an
+epoch, lock, pin, or equivalent authority. Resolve it as part of the actual SMP
+design, not as solver research in isolation.
+
+Done when: independent EL0 processes run on four RPi5 cores, the shared-state
+access paths are rejected without their required authority, and real-hardware
+tests exercise actual overlap rather than sequential secondary-core bring-up.
+
+## Deferred by explicit triggers
+
+These are directions, not scheduled milestones.
+
+- **Third architecture (#50/#85):** revisit when a concrete board or platform
+  is selected and maintained. Do not build generic portability layers without
+  that caller.
+- **True separate compilation (#95):** revisit when `kernel/` build latency is
+  an actual complaint or source size/build measurements demonstrate the current
+  whole-program path is obstructing work. The old rough 20,000-line trigger has
+  been crossed, but line count alone has not established pain; measure before
+  scheduling an architecture change.
+- **Solver-backed proof obligations (#13/#109/#200/#201):** begin only when a
+  current, high-value property cannot be expressed by the established refined,
+  indexed-owner, typestate, or explicit-narrowing techniques. Start with one
+  property and one acceptance test, not a general solver integration program.
+- **General lock/heap invariant logic (#132):** retain its stated rule: start
+  from one real API that cannot be expressed with current narrow contracts.
+
+## Issue hygiene to apply with the refresh
+
+The roadmap records recommendations; issue/board changes are separate actions.
+
+**Re-scope or close stale umbrellas**
+
+- **#15** -- its remaining subjects have been split into #342 and #343, while
+  user-address-space typing substantially landed elsewhere. Close it if it no
+  longer owns an unsplit acceptance criterion.
+- **#26** -- its growable-pool primitive landed; #344/#257 now describe the
+  remaining count ceiling and adoption work. Its open state should not imply
+  the original primitive is absent.
+- **#182** -- mark completed single-indirect read and directory-enumeration
+  slices, then state the next caller-driven filesystem requirement.
+- **#149** -- separate already-working QEMU gdbstub use from any remaining
+  no-JTAG hardware debugger requirement.
+- **#5** -- close unless a present kernel call site needs general inline
+  assembly. The closed intrinsic set from #226 deliberately avoids reopening
+  arbitrary register/clobber obligations in `.tkb`.
+- **#90/#200** -- retain one relational-bounds issue and treat #13 as the
+  solver umbrella rather than maintaining duplicate active requests.
+
+**Project-board shape**
+
+- Keep at most one allocator umbrella and its immediate correctness blockers In
+  progress; optional allocator generalizations return to Backlog.
+- Make M0 items Ready/In progress before new compiler ergonomics.
+- Promote #56 and #236: they convert the two largest recent advances -- QEMU
+  and explicit trust boundaries -- into durable project infrastructure.
+- Keep M4a as the next product-facing Ready milestone; keep M4b queued behind
+  it rather than treating every BusyBox extension as simultaneous work.
+
+The division of labor remains: the board answers "where is this now", this file
+answers "why in this order". Neither should try to answer the other's question.
 
 ## Relationship to YAGNI
 
-`AGENTS.md`'s YAGNI principle is a durable project stance, and this file is in
-tension with it by construction. The intended reading:
+`AGENTS.md`'s YAGNI principle remains a durable project stance.
 
-- **M0 and M1 are present requirements**: known defects and a stated near-term
-  goal.
-- **M4 and M5 are not exempted by YAGNI, they are outside it**: the compile-time
-  proof machinery is the project's own stated purpose, which that principle
-  explicitly carves out.
-- **M6 is speculative** and is recorded so that decisions made now (e.g. #222's
-  per-core shape) do not accidentally foreclose it. It is not a commitment to
-  start.
+- **M0 is mandatory correctness work.** Known compiler/layout/test-isolation
+  defects undermine evidence from everything built on them.
+- **M1 is bounded debt repayment.** A production consumer and explicit closing
+  bar justify the allocator; optional allocator generality does not inherit
+  that justification.
+- **M2 is exploitation of an already-landed capability.** CI and debugger use
+  make QEMU pay for itself; they are not a second emulator project.
+- **M3 is the project's stated purpose.** Compile-time proof boundaries are not
+  optional future-proofing, but each new mechanism must still start from a real
+  kernel property.
+- **M4 is current product work.** It keeps the proof loop grounded in actual
+  userspace and device behavior.
+- **M5 and the deferred section are not commitments to start.** They preserve
+  dependency order and explicit re-evaluation triggers without authorizing
+  speculative implementation.
 
-When a milestone here conflicts with a concrete requirement in front of you, the
-concrete requirement wins and this file gets updated.
+When a milestone here conflicts with a concrete requirement in front of the
+project, the concrete requirement wins and this dated snapshot gets refreshed.
