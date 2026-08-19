@@ -1,0 +1,125 @@
+// Exerciser for the contiguous multi-page allocation GitHub issue #363
+// adds to the fake page provider.
+//
+// The claim under test is the one every DMA buffer in kernel/ currently
+// answers with a static BSS array: N pages the device can walk as one
+// physical range, aligned the way the device demands, released as the
+// unit they were taken as. The four buffers that need it today are both
+// virtio queues (8 KB each), the virtio-blk queue (8 KB) and usb_xhci's
+// bounce buffer (64 KB) -- see that issue for the measurements.
+//
+// Fragmentation is exercised deliberately, because an allocator that can
+// only ever satisfy a request proves nothing: a first-fit scan must be
+// shown FAILING when the free pages exist but are not adjacent, rather
+// than quietly returning something discontiguous.
+use "linux_user/growable_pool/fake_page_provider.tkb";
+
+fn app_main() !{unsafe} {
+    page_allocator_init();
+    uart_puts("page_run\n");
+
+    // -- A run really is contiguous, and really is aligned.
+    let r = match page_run_alloc(4, 4) {
+        PageRunAllocResult::Allocated(o) => { o }
+        PageRunAllocResult::OutOfMemory => {
+            uart_puts("4-page run failed\n");
+            return;
+        }
+    };
+    let r_base: usize = page_run_physical_address(r);
+    uart_puts("a 4-page run is page-aligned, 4-page aligned, and 4 pages ");
+    uart_puts("long (aligned, run alignment, count, pages taken): ");
+    uart_print_bool(r_base % PAGE_SIZE == 0);
+    uart_puts(" ");
+    uart_print_bool(r_base % (4 * PAGE_SIZE) == 0);
+    uart_puts(" ");
+    uart_print(page_run_page_count(r));
+    uart_puts(" ");
+    uart_print(page_allocator_live_count());
+    uart_puts("\n");
+
+    // Writing ACROSS a page boundary inside the run is the property a
+    // static array gives for free and a page-at-a-time allocator cannot:
+    // stamp every page's first byte and its last byte, then read back.
+    let bytes: *u8 = unsafe { r_base as *u8 };
+    let span: isize = (4 * PAGE_SIZE) as isize;
+    for i: isize in 0..<span {
+        bytes[i] = ((i % 251) & 0xFF) as u8;
+    }
+    let mut intact: bool = true;
+    for i: isize in 0..<span {
+        if (bytes[i] != ((i % 251) & 0xFF) as u8) { intact = false; }
+    }
+    uart_puts("the whole run is one writable range across its page ");
+    uart_puts("boundaries: ");
+    uart_print_bool(intact);
+    uart_puts("\n");
+
+    // -- Released as a unit.
+    let pages_before_release: usize = page_allocator_live_count();
+    page_run_release(r);
+    uart_puts("releasing gives back every page of the run at once ");
+    uart_puts("(pages returned, provider back to empty): ");
+    uart_print(pages_before_release - page_allocator_live_count());
+    uart_puts(" ");
+    uart_print_bool(page_allocator_live_count() == 0);
+    uart_puts("\n");
+
+    // -- Fragmentation: enough free pages, none of them adjacent.
+    // Take every page, then give back every other one. PAGE_COUNT is 9,
+    // so pages 0, 2, 4, 6, 8 come back -- five free pages, no two
+    // adjacent -- and a 2-page run must fail rather than lie.
+    let mut addrs: [usize; PAGE_COUNT];
+    let mut taken: usize = 0;
+    // A `for` over the page count rather than a `while`, so the index
+    // carries its proven range into the array write -- a mutable counter
+    // cannot, and --forbid-trap wants the proof rather than a check.
+    for i: usize in 0..<PAGE_COUNT {
+        addrs[i] = 0;
+        match page_alloc() {
+            PageAllocResult::Allocated(o) => {
+                addrs[i] = page_physical_address(o);
+                let _index = page_owner_transfer_index(o);
+                taken = taken + 1;
+            }
+            PageAllocResult::OutOfMemory => {}
+        }
+    }
+    for i: usize in 0..<PAGE_COUNT {
+        if (i % 2 == 0 && addrs[i] != 0) {
+            page_transferred_release_physical(addrs[i]);
+        }
+    }
+    let free_pages: usize = PAGE_COUNT - page_allocator_live_count();
+    let mut two_run_failed: bool = false;
+    match page_run_alloc(2, 1) {
+        PageRunAllocResult::Allocated(o) => { page_run_release(o); }
+        PageRunAllocResult::OutOfMemory => { two_run_failed = true; }
+    }
+    // A single page must still be available -- the failure has to be
+    // about adjacency, not about being out of memory.
+    let mut single_ok: bool = false;
+    match page_alloc() {
+        PageAllocResult::Allocated(o) => {
+            single_ok = true;
+            let addr: usize = page_physical_address(o);
+            let _i = page_owner_transfer_index(o);
+            page_transferred_release_physical(addr);
+        }
+        PageAllocResult::OutOfMemory => {}
+    }
+    uart_puts("a 2-page run fails when free pages exist but none adjoin ");
+    uart_puts("(free pages, run refused, a single page still works): ");
+    uart_print(free_pages);
+    uart_puts(" ");
+    uart_print_bool(two_run_failed);
+    uart_puts(" ");
+    uart_print_bool(single_ok);
+    uart_puts("\n");
+
+    uart_puts("done\n");
+}
+
+fn uart_print_bool(value: bool) {
+    if (value) { uart_puts("true"); } else { uart_puts("false"); }
+}

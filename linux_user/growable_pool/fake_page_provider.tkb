@@ -27,9 +27,47 @@ const PAGE_COUNT: usize = 9;
 // metadata against PAGE_META_WORDS rather than assuming.
 const PAGE_META_WORDS: usize = 16;
 
-private let mut fake_pages: [u8; PAGE_SIZE * PAGE_COUNT] align(PAGE_SIZE);
+// Aligned to 16 pages rather than 1 (GitHub issue #363). A run's
+// alignment can only ever be as strong as the arena it is carved from,
+// and this arena is a BSS array rather than real physical memory -- ask
+// for a 4-page-aligned run out of a merely page-aligned array and the
+// answer is arithmetically impossible, not merely unavailable. A real
+// page allocator does not have this problem because page 0 sits at a
+// known physical address; a stand-in has to say so out loud.
+private let mut fake_pages: [u8; PAGE_SIZE * PAGE_COUNT] align(65536);   // 16 pages
 private let mut fake_page_meta: [usize; PAGE_META_WORDS * PAGE_COUNT];
-private let mut fake_page_pool: SlotMap(PAGE_COUNT);
+
+// GitHub issue #363: occupancy is an array INDEXED BY PAGE NUMBER, not a
+// free list, and that is the whole point rather than an implementation
+// detail.
+//
+// A free list can only answer "give me some free page". It has no way to
+// express "give me page 6", and therefore no way to find `n` free pages
+// that happen to be adjacent -- so an allocator built on one cannot
+// serve a contiguous request at all. That is not a limitation of this
+// stand-in: `kernel/mm/page.tkb` is `FreelistCore(BOOT_PAGE_COUNT)` and
+// has exactly the same hole, which is why every DMA buffer in the kernel
+// is a static BSS array today.
+//
+// It is also why real kernels use a buddy allocator here rather than a
+// list: bolting "claim this specific index" onto a singly-linked free
+// chain costs an O(N) walk per page claimed, and a bitmap scan makes the
+// single-page path O(N) instead of O(1). Buddy is the structure that
+// makes both O(log N) and hands back naturally-aligned runs for free.
+// This prototype scans, because at PAGE_COUNT pages the constant factor
+// is irrelevant and the API is what needs proving; the real allocator
+// should not.
+//
+// 0 means free. A nonzero generation is the occupant stamp, kept because
+// it is what makes a stale PageOwner detectable -- the same role
+// SlotMap's occupant_generation played before this file stopped being
+// able to use it.
+private let mut fake_page_generation: [usize; PAGE_COUNT];
+// Nonzero on every page of a multi-page run, holding that run's length,
+// so a page belonging to a run cannot be released as if it were single.
+private let mut fake_page_run_length: [usize; PAGE_COUNT];
+private let mut fake_page_next_generation: usize = 1;
+private let mut fake_page_live: usize = 0;
 
 linear struct PageOwner[page: usize] {
     private index: {0..<PAGE_COUNT as usize};
@@ -48,21 +86,31 @@ fn page_owner_new(index: {0..<PAGE_COUNT as usize},
 }
 
 fn page_allocator_init() {
-    slotmap_init(&fake_page_pool);
+    for i: usize in 0..<PAGE_COUNT {
+        fake_page_generation[i] = 0;
+        fake_page_run_length[i] = 0;
+    }
+    fake_page_next_generation = 1;
+    fake_page_live = 0;
+}
+
+private fn fake_page_claim(index: {0..<PAGE_COUNT as usize}) -> usize {
+    let generation: usize = fake_page_next_generation;
+    fake_page_next_generation = generation + 1;
+    fake_page_generation[index] = generation;
+    fake_page_live = fake_page_live + 1;
+    return generation;
 }
 
 fn page_alloc() -> PageAllocResult {
-    match slotmap_insert(&fake_page_pool) {
-        FreelistPopResult::Empty => { return PageAllocResult::OutOfMemory; }
-        FreelistPopResult::Popped(slot) => {
-            let (index, generation) = freelist_owner_into_parts(slot);
-            if (index < PAGE_COUNT) {
-                let checked: {0..<PAGE_COUNT as usize} = index;
-                return PageAllocResult::Allocated(page_owner_new(checked, generation));
-            }
-            return PageAllocResult::OutOfMemory;
+    for i: usize in 0..<PAGE_COUNT {
+        if (fake_page_generation[i] == 0) {
+            let checked: {0..<PAGE_COUNT as usize} = i;
+            let generation: usize = fake_page_claim(i);
+            return PageAllocResult::Allocated(page_owner_new(checked, generation));
         }
     }
+    return PageAllocResult::OutOfMemory;
 }
 
 fn page_physical_address(owner: borrow PageOwner[page]) -> usize {
@@ -100,18 +148,24 @@ fn page_transferred_release_physical(physical: usize) !{unsafe} {
         return;
     }
     let index: usize = (physical - base) / PAGE_SIZE;
-    // The real page.tkb reconstructs a generation-agnostic owner because
-    // its own occupancy bit is the authority. This provider's authority is
-    // SlotMap's occupant_generation, so recover the live generation and
-    // hand slotmap_remove a well-formed owner -- which keeps its
-    // double-free detection working on this path too.
-    let generation: usize = slotmap_occupant_generation(&fake_page_pool, index);
-    if (generation == 0) { return; }
-    slotmap_remove(&fake_page_pool, freelist_owner_new(index, generation));
+    // The range check above bounds this, but through a division the
+    // checker cannot see it -- so say it, and let the guard narrow the
+    // binding for the three indexings below.
+    if (index >= PAGE_COUNT) { return; }
+    // Already free: a double release, ignored rather than acted on, the
+    // same stance slotmap_remove's own double-free path takes.
+    if (fake_page_generation[index] == 0) { return; }
+    // Part of a contiguous run (issue #363), which must be released as
+    // the unit it was allocated as -- releasing one page out of the
+    // middle would leave the rest owned by a PageRunOwner that no longer
+    // describes reality.
+    if (fake_page_run_length[index] != 0) { return; }
+    fake_page_generation[index] = 0;
+    fake_page_live = fake_page_live - 1;
 }
 
 fn page_allocator_live_count() -> usize {
-    return slotmap_live_count(&fake_page_pool);
+    return fake_page_live;
 }
 
 // GitHub issue #349: the address of this page's metadata words, or 0 if
@@ -147,5 +201,137 @@ private fn page_meta_clear(physical: usize) !{unsafe} {
     let count: isize = PAGE_META_WORDS as isize;
     for i: isize in 0..<count {
         words[i] = 0;
+    }
+}
+
+// -- Contiguous runs ---------------------------------------------------
+// THE DMA BUFFER INVENTORY this replaces, recorded so the next reader
+// knows which static arrays are workarounds and which are simply right
+// (GitHub issue #363's own acceptance criterion):
+//
+//   virtio_net rx_queue_mem      8 KB, 2 pages  -- wants this
+//   virtio_net tx_queue_mem      8 KB, 2 pages  -- wants this
+//   virtio_blk virtio_blk_queue  8 KB, 2 pages  -- wants this
+//   usb_xhci   msc_bounce_buf   64 KB, 16 pages -- wants this
+//   usb_xhci   scratchpad_buf0/1 4 KB each      -- wants page_alloc(),
+//       not contiguity: the COUNT is what should be dynamic, since it
+//       comes from HCSPARAMS2 and the driver hardcodes two
+//   rp1_gem    descriptors and buffers, <= 2 KB -- static is right, one
+//       device, one fixed ring
+//   virtio_net tx_ready_buf      1526 B          -- static is right
+//
+// None of these are converted here; that is per-driver work and is
+// deliberately out of this issue's scope. What is in scope is that the
+// capability now exists, so "static because the allocator cannot" stops
+// being the reason.
+
+// GitHub issue #363. DMA does not want "some pages"; it wants N pages the
+// device can walk as one physical range, aligned the way the device
+// demands. This kernel already needs four such buffers -- both virtio
+// queues at 8 KB, the virtio-blk queue at 8 KB, and usb_xhci's 64 KB
+// bounce buffer -- and meets all four with static BSS arrays, because
+// page_alloc() hands out one page at a time and nothing else.
+//
+// `align_pages` is in PAGES and must be a power of two; 1 means "anywhere".
+// It also covers the "must not cross a boundary" constraint several
+// controllers impose, without a second parameter: a run placed at a
+// multiple of its own rounded-up size cannot straddle a boundary of that
+// size. Ask for alignment >= the run length and the boundary question
+// answers itself.
+//
+// First fit, which is honest about what it gives: a run IS aligned when
+// one was asked for, but unlike a buddy allocator it does not hand back
+// naturally-aligned runs for free. That distinction matters to issue
+// #350, whose O(1) address-to-chunk step needs chunks aligned to their
+// own size -- under this allocator that is something the caller must
+// request, not something it inherits.
+
+linear struct PageRunOwner[run: usize] {
+    private index: {0..<PAGE_COUNT as usize};
+    private count: usize;
+    private generation: usize @ run;
+}
+
+must_use variant PageRunAllocResult {
+    OutOfMemory;
+    Allocated(exists run: usize. PageRunOwner[run]);
+}
+
+private fn page_run_owner_new(index: {0..<PAGE_COUNT as usize}, count: usize,
+                              generation: usize @ run) -> PageRunOwner[run] {
+    let mut owner: PageRunOwner[run] = { index, count, generation };
+    return owner;
+}
+
+// Is a run of `count` pages starting at `start` entirely free?
+private fn fake_page_run_is_free(start: usize, count: usize) -> bool {
+    if (start + count > PAGE_COUNT) { return false; }
+    for i: usize in 0..<PAGE_COUNT {
+        if (i >= start && i < start + count) {
+            if (fake_page_generation[i] != 0) { return false; }
+        }
+    }
+    return true;
+}
+
+fn page_run_alloc(count: usize, align_pages: usize) -> PageRunAllocResult {
+    if (count == 0 || align_pages == 0 || count > PAGE_COUNT) {
+        return PageRunAllocResult::OutOfMemory;
+    }
+    for start: usize in 0..<PAGE_COUNT {
+        if (start % align_pages == 0 && fake_page_run_is_free(start, count)) {
+            // One generation for the whole run: the pages are handed out
+            // and taken back together, so they share one occupant stamp,
+            // and PageRunOwner carries it exactly as PageOwner does.
+            let generation: usize = fake_page_next_generation;
+            fake_page_next_generation = generation + 1;
+            for i: usize in 0..<PAGE_COUNT {
+                if (i >= start && i < start + count) {
+                    fake_page_generation[i] = generation;
+                    fake_page_run_length[i] = count;
+                }
+            }
+            fake_page_live = fake_page_live + count;
+            let checked: {0..<PAGE_COUNT as usize} = start;
+            return PageRunAllocResult::Allocated(
+                page_run_owner_new(checked, count, generation));
+        }
+    }
+    return PageRunAllocResult::OutOfMemory;
+}
+
+fn page_run_physical_address(owner: borrow PageRunOwner[run]) -> usize {
+    let base: usize = (fake_pages as *u8) as usize;
+    return base + owner.index * PAGE_SIZE;
+}
+
+fn page_run_page_count(owner: borrow PageRunOwner[run]) -> usize {
+    return owner.count;
+}
+
+// Releases the whole run, which is the only granularity this owner can
+// express -- and page_transferred_release_physical refuses a page that
+// belongs to one, so there is no way to take a run apart by halves.
+fn page_run_release(owner: sink PageRunOwner[run]) {
+    let start: usize = owner.index;
+    let count: usize = owner.count;
+    for i: usize in 0..<PAGE_COUNT {
+        if (i >= start && i < start + count) {
+            if (fake_page_generation[i] != 0) {
+                fake_page_generation[i] = 0;
+                fake_page_run_length[i] = 0;
+                fake_page_live = fake_page_live - 1;
+            }
+        }
+    }
+    page_run_clear_meta(start, count);
+}
+
+private fn page_run_clear_meta(start: usize, count: usize) !{unsafe} {
+    let base: usize = (fake_pages as *u8) as usize;
+    for i: usize in 0..<PAGE_COUNT {
+        if (i >= start && i < start + count) {
+            page_meta_clear(base + i * PAGE_SIZE);
+        }
     }
 }
