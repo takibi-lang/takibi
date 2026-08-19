@@ -213,6 +213,15 @@
 // on reuse, and on first use whatever the page provider handed over.
 // `pool_u` in the exerciser pins both halves.
 //
+// One thing this pool does still clear, and it is not a promise to
+// anybody: intrusive_pool_release_chunk scrubs a page before handing it
+// back to the provider, so a pool's freed objects cannot be read by
+// whichever pool is given that page next. That is hygiene owed to the
+// data, not a guarantee owed to the next allocation -- see its own
+// comment. It is also why removing grow's clear did not simply move a
+// cost around: grow paid on every chunk a pool ever creates, release
+// pays only when a page actually leaves.
+//
 // Current limitations (2026-08-17). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
@@ -714,11 +723,44 @@ fn intrusive_pool_release_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     intrusive_pool_unlink_chunk(pool, base);
     pool.chunk_count = pool.chunk_count - 1;
     pool.released_chunk_count = pool.released_chunk_count + 1;
+    // Scrub before handing the page over. The payloads that lived here
+    // belonged to THIS pool, and once the page is back in the provider's
+    // supply any other pool can be given it -- so without this, one
+    // pool's freed objects are readable as another pool's freshly
+    // allocated ones. Verified: a pool that filled and drained two chunks
+    // left 0xDEAD/0xBEEF/0xCAFE visible in the next pool's first
+    // allocation.
+    //
+    // Release is the right place for it rather than grow, which is where
+    // an equivalent clear used to sit (removed for issue #356). Grow pays
+    // on every chunk a pool ever creates; release pays only when a page
+    // actually leaves, which is rarer in a growing pool and equal at
+    // worst. It also puts the cost on the component that knows the data
+    // was sensitive, instead of making every future consumer of a page
+    // defensively clear it.
+    //
+    // This does NOT weaken issue #356's contract. A freshly allocated
+    // payload is still whatever the provider supplied -- this pool
+    // promises nothing about it, and a page arriving from the provider
+    // for the first time was never touched here at all.
+    //
+    // If the page provider ever grows a scrub-on-free policy of its own
+    // (Linux's init_on_free, which lives in the page allocator rather
+    // than in each slab cache), this becomes redundant and should go.
+    intrusive_pool_scrub_page(base);
     // The chunk base IS the page's physical address (one page-aligned page
     // backs exactly one chunk), which is exactly what the provider's
     // transferred-page release entry point takes -- this pool gave up its
     // PageOwner at grow time, keeping only the address.
     page_transferred_release_physical(base);
+}
+
+private fn intrusive_pool_scrub_page(base: usize) !{unsafe} {
+    let bytes: *u8 = unsafe { base as *u8 };
+    let page_size: isize = PAGE_SIZE as isize;
+    for i: isize in 0..<page_size {
+        bytes[i] = 0;
+    }
 }
 
 // Pulls one more page, carves it into slots, threads them onto that
