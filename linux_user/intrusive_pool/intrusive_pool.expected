@@ -24,5 +24,7 @@ the pool keeps working from a fresh chunk instead: true
 emptying it neither re-admits it nor returns its page (allocated elsewhere, chunks, released): true 2 0
 the aliasing target really is a live slot in the fresh chunk: true
 a chain pointing at a LIVE slot is refused, and its existing occupant is untouched (rejected, aliased, counted, occupant kept): true false 1 true
-1960-byte objects placed before the PROVIDER ran out (objects, chunks, pages left): 6 3 0
+first use of a slot: the payload's first word is the chain link it was carrying, not a blank: true
+reuse of that same slot: previous occupant survives past the link word (same slot, b == 2, c == 3): true true true
+1960-byte objects placed before the PROVIDER ran out (objects, chunks, pages left): 4 2 0
 done

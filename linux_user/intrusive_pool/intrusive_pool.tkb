@@ -34,6 +34,10 @@
 //   turn into an arbitrary returned pointer -- the alloc-path check
 //   (GitHub issue #352) rejects it, counts it, and quarantines the chunk
 //   that offered it without taking the pool down with it.
+// - pool_u: what a freshly allocated payload contains, on a slot's first
+//   use and again on its reuse (GitHub issue #356). The contract is that
+//   the pool promises nothing and zeroes nothing; this is where that gets
+//   teeth rather than staying a sentence in a comment.
 // - pool_x: the only ceiling left is the physical one -- keep inserting
 //   until the page provider is empty, and confirm the pool stopped
 //   because the PROVIDER ran out, not because the pool did.
@@ -43,11 +47,11 @@
 //   is deliberately held in reserve, then confirm the next allocation
 //   reuses that reserve without asking for a page.
 //
-// Page budget across the whole run: pool_a 1 + pool_b 1 + pool_g 2 +
+// Page budget across the whole run: pool_a 1 + pool_b 1 + pool_g 1 +
 // pool_r 2 of which 1 comes back + pool_c 2 of which neither does (the
 // quarantined chunk is leaked on purpose -- see intrusive_pool_core.tkb's
-// "Current limitations") + pool_x whatever is left, for exactly the
-// provider's 9.
+// "Current limitations") + pool_u 1 + pool_x whatever is left, for
+// exactly the provider's 9.
 use "linux_user/intrusive_pool/intrusive_pool_core.tkb";
 use "linux_user/growable_pool/growable_pool_core.tkb";
 
@@ -66,6 +70,15 @@ use "linux_user/growable_pool/growable_pool_core.tkb";
 struct BigPayload {
     tag: usize;
     filler: [u8; 1952];
+}
+
+// GitHub issue #356: three words, so pool_u can tell apart the payload
+// region that shares storage with the free-chain link (the first) from
+// the region that does not (the rest).
+struct UninitProbe {
+    a: usize;
+    b: usize;
+    c: usize;
 }
 
 fn app_main() {
@@ -549,6 +562,60 @@ fn app_main() {
     uart_puts(" ");
     uart_print_bool(intrusive_pool_matches(&pool_c, live_slot, live_generation));
     uart_puts("\n");
+
+    // -- pool_u: what a freshly allocated payload actually contains
+    // (GitHub issue #356). Reads the payload BEFORE writing it, which is
+    // exactly what the contract forbids -- the point is to see what a
+    // caller who breaks the rule would get, on a slot's first use and
+    // again on its reuse.
+    //
+    // A 24-byte payload so the two regions are distinguishable: the first
+    // word shares storage with the free-chain link (issue #348), the rest
+    // does not.
+    let mut pool_u: IntrusivePool(UninitProbe);
+    intrusive_pool_init(&pool_u);
+    let u0 = match intrusive_pool_insert(&pool_u) {
+        IntrusivePoolInsertResult::Allocated(o) => { o }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_u insert failed\n");
+            return;
+        }
+    };
+    // What the pool itself put there, stated so it does not depend on
+    // what the page provider happened to hand over: the first word is the
+    // free-chain link this slot was carrying, which for the first slot
+    // popped is the address of the second. Nothing else in the payload
+    // was written by anyone -- deliberately, which is what the reuse case
+    // below makes visible.
+    let first_a: usize = intrusive_pool_ref(&pool_u, u0).a;
+    let u_slot0: usize = intrusive_pool_first_slot(&pool_u);
+    let u_slot1: usize = intrusive_pool_next_slot(&pool_u, u_slot0);
+    uart_puts("first use of a slot: the payload's first word is the chain ");
+    uart_puts("link it was carrying, not a blank: ");
+    uart_print_bool(first_a == u_slot1 && first_a != 0);
+    uart_puts("\n");
+
+    let u0_slot: usize = intrusive_owner_slot(u0);
+    intrusive_pool_ref(&pool_u, u0).a = 1;
+    intrusive_pool_ref(&pool_u, u0).b = 2;
+    intrusive_pool_ref(&pool_u, u0).c = 3;
+    intrusive_pool_remove(&pool_u, u0);
+    let u1 = match intrusive_pool_insert(&pool_u) {
+        IntrusivePoolInsertResult::Allocated(o) => { o }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_u reinsert failed\n");
+            return;
+        }
+    };
+    uart_puts("reuse of that same slot: previous occupant survives past the ");
+    uart_puts("link word (same slot, b == 2, c == 3): ");
+    uart_print_bool(intrusive_owner_slot(u1) == u0_slot);
+    uart_puts(" ");
+    uart_print_bool(intrusive_pool_ref(&pool_u, u1).b == 2);
+    uart_puts(" ");
+    uart_print_bool(intrusive_pool_ref(&pool_u, u1).c == 3);
+    uart_puts("\n");
+    intrusive_owner_drop(u1);
 
     // -- pool_x: the last remaining ceiling is the page provider's.
     let mut pool_x: IntrusivePool(BigPayload);

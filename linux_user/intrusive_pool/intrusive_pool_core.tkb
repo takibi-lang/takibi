@@ -181,6 +181,38 @@
 // `sizeof` at parse time, which cannot work for a generic's own type
 // parameter, since T has no layout until monomorphization binds it.
 //
+// WHAT A FRESHLY ALLOCATED PAYLOAD CONTAINS
+//
+// Nothing this pool promises anything about. Write it before reading it
+// (GitHub issue #356).
+//
+// That is a contract, not an accident, and the interesting part is that
+// it is UNCONDITIONAL. The earlier behaviour was "zeroed on a slot's
+// first use, stale afterwards" -- the worst combination, because code
+// written against the first half keeps working until the pool wraps and
+// then stops. This pool now zeroes nothing, anywhere: not on free, not
+// on reuse, and not at grow time either. The page-clearing loop grow used
+// to run is gone, so a chunk costs one page_alloc() and the carve loop
+// rather than one page_alloc(), a PAGE_SIZE-byte clear, and the carve
+// loop. Every field of IntrusiveChunkHeader is written explicitly by
+// grow, and every slot gets its generation and its chain link written, so
+// the clear was covering nothing that is not covered by construction.
+//
+// Per-allocation cost of the contract: zero. That is the reason to
+// prefer it over "always clean" (which pays sizeof(T) of writes on every
+// operation) given that this pool has no way to run a caller's
+// constructor. SLAB/UMA's "always constructed" answer is the one that
+// adds real capability -- expensive per-object setup paid once per chunk
+// instead of once per allocation -- and it is incompatible with the
+// overlay above, since a payload cannot stay constructed in storage the
+// free chain is using. Choosing the overlay chose this.
+//
+// What a caller who ignores the contract actually sees, for the record:
+// the payload's first word is the free-chain link the slot was carrying,
+// and the rest is whatever was last there -- a previous occupant's bytes
+// on reuse, and on first use whatever the page provider handed over.
+// `pool_u` in the exerciser pins both halves.
+//
 // Current limitations (2026-08-17). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
@@ -234,14 +266,6 @@
 //   a mutation is the caller's problem, exactly as it is for
 //   intrusive_pool_ref's; what changed is that getting the pointer at all
 //   now requires having looked.
-// - A freshly allocated payload is UNINITIALIZED -- write it before
-//   reading it. It holds whatever the free chain last left there, which
-//   since issue #348 is a link pointer rather than a previous occupant's
-//   remains. This is uniform: it holds for a slot's first use as much as
-//   for its reuse, because insert deliberately does not zero storage it
-//   would have to invent a T's worth of value for. (The page IS zeroed at
-//   grow time, but the chain is threaded through it immediately after, so
-//   nothing may depend on first-use zeroes.)
 // - T must be at least pointer-sized and must not need stronger than
 //   8-byte alignment, both because the free-chain link shares its
 //   storage and because `[u8; N]` contributes no alignment of its own
@@ -697,14 +721,6 @@ fn intrusive_pool_release_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     page_transferred_release_physical(base);
 }
 
-fn intrusive_pool_zero_page(base: usize) !{unsafe} {
-    let bytes: *u8 = unsafe { base as *u8 };
-    let page_size: isize = PAGE_SIZE as isize;
-    for i: isize in 0..<page_size {
-        bytes[i] = 0;
-    }
-}
-
 // Pulls one more page, carves it into slots, threads them onto that
 // chunk's OWN free chain, and puts the chunk at the head of the partial
 // list -- the pool's only growth step. Slots are linked in descending
@@ -726,7 +742,6 @@ fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id)
             // intrusive_pool_release_chunk is what eventually gives the
             // page itself back.
             let _page_index: usize = page_owner_transfer_index(page_owner) as usize;
-            intrusive_pool_zero_page(base);
             let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(base);
             header.pool_tag = pool.pool_tag;
             header.next_chunk = pool.chunk_head;
