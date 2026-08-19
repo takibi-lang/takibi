@@ -9,7 +9,7 @@ IMAGES := ../../../img/takibi-icon-v3.png ../../../img/takibi-icon-back-v3.png
 all: $(PDF)
 
 $(PDF): $(SRC) $(THEME) $(IMAGES)
-	npx @marp-team/marp-cli@latest $(SRC) --theme-set $(THEME) --allow-local-files --pdf
+	npx -y @marp-team/marp-cli@latest $(SRC) --theme-set $(THEME) --allow-local-files --pdf
 
 show: $(PDF)
 	evince $(PDF)
