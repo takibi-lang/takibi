@@ -1,22 +1,19 @@
 TARGET := slides
 SRC    := $(TARGET).md
 PDF    := $(TARGET).pdf
+HTML   := $(TARGET).html
 THEME  := ../theme/takibi.css
 IMAGES := ../../../img/takibi-icon-v3.png ../../../img/takibi-icon-back-v3.png
 
-.PHONY: all show watch clean
+.PHONY: all show pdf clean
 
-all: $(PDF)
+all: show
 
-$(PDF): $(SRC) $(THEME) $(IMAGES)
+show:
+	npx -y @marp-team/marp-cli@latest $(SRC)  --theme-set $(THEME) --allow-local-files --preview
+
+pdf: $(SRC) $(THEME) $(IMAGES)
 	npx -y @marp-team/marp-cli@latest $(SRC) --theme-set $(THEME) --allow-local-files --pdf
 
-show: $(PDF)
-	evince $(PDF)
-
-watch:
-	@echo "$(SRC)" >> .watch_list
-	@cat .watch_list | entr make
-
 clean:
-	rm -f $(PDF) .watch_list
+	rm -f $(PDF) $(HTML)

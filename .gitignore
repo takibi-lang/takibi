@@ -61,4 +61,5 @@ __pycache__
 
 # Slides
 .watch_list
-*.pdf
+slides.html
+slides.pdf
