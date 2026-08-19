@@ -1194,10 +1194,15 @@ fn intrusive_pool_corrupt_free_chain_count(T: type, pool: &mut IntrusivePool(T) 
         -> usize !{unsafe} {
     let mut total: usize = 0;
     let mut cursor: usize = pool.chunk_head;
-    while (cursor != 0) {
-        let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(cursor);
-        total = total + header.corrupt_free_chain_count;
-        cursor = header.next_chunk;
+    let mut steps: usize = 0;
+    while (cursor != 0 && intrusive_pool_owns_chunk(pool, cursor) &&
+           steps <= pool.chunk_count) {
+        // Same defensiveness as intrusive_pool_probe's walk, and for the
+        // same reason: this observer is read when something has already
+        // gone wrong, so it must not assume the list survived.
+        steps = steps + 1;
+        total = total + intrusive_chunk_header_at(cursor).corrupt_free_chain_count;
+        cursor = intrusive_chunk_header_at(cursor).next_chunk;
     }
     return total;
 }
@@ -1208,4 +1213,154 @@ fn intrusive_pool_corrupt_free_chain_count(T: type, pool: &mut IntrusivePool(T) 
 fn intrusive_pool_released_chunk_count(T: type, pool: &mut IntrusivePool(T) @ pool_id)
         -> usize {
     return pool.released_chunk_count;
+}
+
+// -- Invariant probe ---------------------------------------------------
+// GitHub issue #355. The counters above say how much; this says whether
+// what they say is still coherent. Allocator bugs surface arbitrarily far
+// from their cause, and the first question is always "what does the pool
+// look like right now" -- a question five scalars cannot answer.
+//
+// What it checks is deliberately narrow, because most of what a
+// `slabinfo` exists to find is unreachable here by construction: leaks
+// and double frees are linearity violations, and cross-pool frees are
+// type errors. What is NOT ruled out by construction is exactly the list
+// and chain surgery reclaim does (issue #346), so that is what this
+// verifies:
+//
+//   per chunk  every free-chain entry is a well-formed slot of THIS chunk
+//   per chunk  the chain terminates -- a cycle would otherwise hang any
+//              walk of it, including this one, which is why the walk is
+//              bounded rather than trusting termination
+//   per chunk  chain length + live_count == slots per chunk
+//   per chunk  partial-list membership matches "has a free slot"
+//   per chunk  live_count does not exceed the chunk
+//   per pool   the chunk-list length and the live total agree with
+//              chunk_count and live_count
+//
+// The first two are what issue #361 could not reach by deriving. The
+// slot BOUNDS became underivable-corruption-proof by not being stored;
+// `free_head` and the links are genuinely dynamic, so the only defence
+// available is to check them, and this is where that happens.
+//
+// A QUARANTINED chunk (issue #352) is exempted from the chain and
+// partial-list checks, and that is not a loophole: quarantine means the
+// pool has already ruled the chain untrustworthy, refused to allocate
+// from it, and counted the event. Demanding coherence from it here would
+// report the corruption the pool already caught and handled as a fresh
+// failure.
+//
+// Cost is O(all slots) -- the free chains are walked entry by entry. A
+// diagnostic, never a hot path; call it between operations, not inside
+// them.
+fn intrusive_pool_probe(T: type, pool: &mut IntrusivePool(T) @ pool_id) -> bool !{unsafe} {
+    let slots: usize = intrusive_pool_slots_per_chunk(pool);
+    let mut ok: bool = true;
+    let mut chunks_seen: usize = 0;
+    let mut live_seen: usize = 0;
+    let mut cursor: usize = pool.chunk_head;
+    let mut steps: usize = 0;
+    while (cursor != 0) {
+        // Corruption is the case this exists FOR, so the walk cannot
+        // assume the list is well-formed. Each link is checked before it
+        // is followed -- a link pointing outside this pool ends the walk
+        // rather than steering a dereference -- and the whole walk is
+        // bounded, so a cycle is reported instead of hanging. Without
+        // both, a probe run on a damaged pool crashes, which is exactly
+        // when someone is running it.
+        if (intrusive_pool_owns_chunk(pool, cursor) == false) {
+            ok = false;
+            cursor = 0;
+        } else if (steps > pool.chunk_count) {
+            ok = false;
+            cursor = 0;
+        } else {
+        steps = steps + 1;
+        let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(cursor);
+        chunks_seen = chunks_seen + 1;
+        live_seen = live_seen + header.live_count;
+        if (header.live_count > slots) { ok = false; }
+        let quarantined: bool = header.corrupt_free_chain_count != 0;
+        let chain_len: usize = intrusive_chunk_free_chain_length(pool, cursor);
+        if (quarantined == false) {
+            // A chain that did not terminate cleanly reports slots + 1,
+            // which cannot equal slots - live_count for any live_count.
+            if (chain_len + header.live_count != slots) { ok = false; }
+            let has_free: bool = header.free_head != 0;
+            let listed: bool = header.on_partial != 0;
+            if (has_free && listed == false) { ok = false; }
+            if (has_free == false && listed) { ok = false; }
+        }
+        cursor = header.next_chunk;
+        }
+    }
+    if (chunks_seen != pool.chunk_count) { ok = false; }
+    if (live_seen != pool.live_count) { ok = false; }
+    return ok;
+}
+
+// -- Dump surface ------------------------------------------------------
+// The facts a human-readable dump wants, without this file taking on an
+// output dependency -- kernel/lib/growable_pool.tkb keeps itself free of
+// one too, and a pool primitive that can only be inspected on a target
+// with a working console is a worse primitive. The caller formats.
+//
+// This is also the gating issue #355 asks for: these are ordinary
+// functions nobody has to call, so an unused dump costs exactly nothing.
+
+fn intrusive_pool_first_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id) -> usize {
+    return pool.chunk_head;
+}
+
+fn intrusive_pool_next_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                             base: usize) -> usize !{unsafe} {
+    if (intrusive_pool_owns_chunk(pool, base) == false) { return 0; }
+    return intrusive_chunk_header_at(base).next_chunk;
+}
+
+fn intrusive_chunk_live_count(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                              base: usize) -> usize !{unsafe} {
+    if (intrusive_pool_owns_chunk(pool, base) == false) { return 0; }
+    return intrusive_chunk_header_at(base).live_count;
+}
+
+fn intrusive_chunk_on_partial(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                              base: usize) -> bool !{unsafe} {
+    if (intrusive_pool_owns_chunk(pool, base) == false) { return false; }
+    return intrusive_chunk_header_at(base).on_partial != 0;
+}
+
+fn intrusive_chunk_is_quarantined(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                                  base: usize) -> bool !{unsafe} {
+    if (intrusive_pool_owns_chunk(pool, base) == false) { return false; }
+    return intrusive_chunk_header_at(base).corrupt_free_chain_count != 0;
+}
+
+// How many slots this chunk's free chain actually holds. Bounded by the
+// slot count and reporting `slots + 1` on overrun, so a corrupted chain
+// -- including one that cycles -- terminates the walk and is visible as
+// an impossible length rather than hanging the caller. Entries that are
+// not well-formed slots of this chunk stop the walk at that point, which
+// is what makes a truncated chain show up as a length mismatch.
+fn intrusive_chunk_free_chain_length(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                                     base: usize) -> usize !{unsafe} {
+    if (intrusive_pool_owns_chunk(pool, base) == false) { return 0; }
+    let slots: usize = intrusive_pool_slots_per_chunk(pool);
+    let mut entry: usize = intrusive_chunk_header_at(base).free_head;
+    let mut length: usize = 0;
+    let mut walking: bool = true;
+    while (walking) {
+        if (entry == 0) {
+            walking = false;
+        } else if (length >= slots) {
+            length = slots + 1;
+            walking = false;
+        } else if (intrusive_chunk_slot_in_range(pool, base, entry) == false) {
+            walking = false;
+        } else {
+            length = length + 1;
+            entry = *intrusive_slot_link_at(pool, entry);
+        }
+    }
+    return length;
 }

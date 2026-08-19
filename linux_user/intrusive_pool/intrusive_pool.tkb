@@ -92,6 +92,17 @@ fn app_main() {
     page_allocator_init();
     uart_puts("intrusive_pool\n");
 
+    // GitHub issue #355: every phase below ends by asking its pool
+    // whether its own bookkeeping is still coherent -- free-chain lengths
+    // against live counts, partial-list membership against "has a free
+    // slot", and the per-chunk totals against the pool's own counters.
+    // Accumulated rather than printed per phase so the output stays
+    // readable, but the count is printed too: a phase that stopped
+    // calling it would show up as a smaller number rather than silently
+    // checking less.
+    let mut probes_ok: bool = true;
+    let mut probes_run: usize = 0;
+
     // -- Derived layout, and the static footprint the ceiling used to cost.
     let mut pool_s: IntrusivePool(usize);
     intrusive_pool_init(&pool_s);
@@ -271,6 +282,12 @@ fn app_main() {
     intrusive_pool_remove(&pool_a, a0);
     intrusive_pool_remove(&pool_b, b0);
 
+    if (intrusive_pool_probe(&pool_a) == false) { probes_ok = false; }
+    probes_run = probes_run + 1;
+
+    if (intrusive_pool_probe(&pool_b) == false) { probes_ok = false; }
+    probes_run = probes_run + 1;
+
     // -- pool_g: 200 objects out of a declaration that names no capacity.
     // Owners are deliberately dropped rather than freed, so the
     // allocations stay live and the pool has to keep growing.
@@ -328,6 +345,9 @@ fn app_main() {
     uart_puts(" ");
     uart_print(sum);
     uart_puts("\n");
+
+    if (intrusive_pool_probe(&pool_g) == false) { probes_ok = false; }
+    probes_run = probes_run + 1;
 
     // -- pool_r: growth is not one-way. Fill two chunks, drain them, and
     // watch exactly one page go back while one empty chunk is held in
@@ -444,6 +464,9 @@ fn app_main() {
             return;
         }
     }
+
+    if (intrusive_pool_probe(&pool_r) == false) { probes_ok = false; }
+    probes_run = probes_run + 1;
 
     // -- pool_c: a corrupted free-chain word never becomes a returned
     // pointer (GitHub issue #352). This is the one exposure that involves
@@ -622,6 +645,38 @@ fn app_main() {
     uart_print_bool(intrusive_pool_matches(&pool_c, live_slot, live_generation));
     uart_puts("\n");
 
+    if (intrusive_pool_probe(&pool_c) == false) { probes_ok = false; }
+    probes_run = probes_run + 1;
+
+    // GitHub issue #355's other half: the dump. Formatted here rather
+    // than in the core file, which stays free of an output dependency the
+    // way kernel/lib/growable_pool.tkb does -- a pool primitive that can
+    // only be inspected on a target with a working console is a worse
+    // primitive.
+    //
+    // pool_c is the interesting pool to dump: one quarantined chunk that
+    // will never allocate again and one healthy chunk, which is a state
+    // no counter reports. Chunk indices rather than addresses, so this
+    // says something about the pool instead of about where the binary
+    // happened to put its pages.
+    let mut dump_cursor: usize = intrusive_pool_first_chunk(&pool_c);
+    let mut dump_index: usize = 0;
+    while (dump_cursor != 0) {
+        uart_puts("pool_c chunk ");
+        uart_print(dump_index);
+        uart_puts(": live ");
+        uart_print(intrusive_chunk_live_count(&pool_c, dump_cursor));
+        uart_puts(", free chain ");
+        uart_print(intrusive_chunk_free_chain_length(&pool_c, dump_cursor));
+        uart_puts(", on partial list ");
+        uart_print_bool(intrusive_chunk_on_partial(&pool_c, dump_cursor));
+        uart_puts(", quarantined ");
+        uart_print_bool(intrusive_chunk_is_quarantined(&pool_c, dump_cursor));
+        uart_puts("\n");
+        dump_index = dump_index + 1;
+        dump_cursor = intrusive_pool_next_chunk(&pool_c, dump_cursor);
+    }
+
     // -- pool_u: what a freshly allocated payload actually contains
     // (GitHub issue #356). Reads the payload BEFORE writing it, which is
     // exactly what the contract forbids -- the point is to see what a
@@ -676,6 +731,9 @@ fn app_main() {
     uart_puts("\n");
     intrusive_owner_drop(u1);
 
+    if (intrusive_pool_probe(&pool_u) == false) { probes_ok = false; }
+    probes_run = probes_run + 1;
+
     // GitHub issue #361: validation no longer computes its bounds from
     // anything a stray write can reach. It used to read `slot_stride` and
     // `slot_count` out of the chunk header, so a header corrupted to
@@ -707,6 +765,16 @@ fn app_main() {
         intrusive_pool_slot_is_valid(&pool_u, u_base + PAGE_SIZE) == false);
     uart_puts("\n");
 
+    // GitHub issue #355: and the probe must SAY so, having survived
+    // walking the wreckage. A diagnostic that faults on a damaged pool is
+    // no diagnostic, since a damaged pool is the only reason to run one --
+    // an earlier draft of the probe followed the corrupted next_chunk link
+    // above straight into a null dereference.
+    uart_puts("the invariant probe reports the wrecked chunk and survives ");
+    uart_puts("walking it: ");
+    uart_print_bool(intrusive_pool_probe(&pool_u) == false);
+    uart_puts("\n");
+
     // -- pool_x: the last remaining ceiling is the page provider's.
     let mut pool_x: IntrusivePool(BigPayload);
     intrusive_pool_init(&pool_x);
@@ -729,6 +797,15 @@ fn app_main() {
     uart_print(intrusive_pool_chunk_count(&pool_x));
     uart_puts(" ");
     uart_print(PAGE_COUNT - page_allocator_live_count());
+    uart_puts("\n");
+
+    if (intrusive_pool_probe(&pool_x) == false) { probes_ok = false; }
+    probes_run = probes_run + 1;
+    uart_puts("every phase left its pool's own bookkeeping coherent ");
+    uart_puts("(all passed, phases checked): ");
+    uart_print_bool(probes_ok);
+    uart_puts(" ");
+    uart_print(probes_run);
     uart_puts("\n");
 
     uart_puts("done\n");
