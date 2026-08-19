@@ -465,6 +465,74 @@ fn app_main() {
         }
     }
 
+    // GitHub issue #354: reclaim on demand. Everything above is REACTIVE
+    // -- a page went back only when a chunk happened to empty through an
+    // ordinary free, and the reserve was unreachable by design. Under
+    // memory pressure that is the wrong shape: every pool hoards its
+    // reserve at exactly the moment memory is scarce.
+    //
+    // Drain the one live object so the chunk empties (and is retained,
+    // since this pool keeps one), then ask for it back explicitly.
+    let mut r_final: bool = true;
+    while (r_final) {
+        let mut cursor: usize = intrusive_pool_first_slot(&pool_r);
+        let mut freed: bool = false;
+        while (cursor != 0 && freed == false) {
+            match intrusive_pool_probe_slot(&pool_r, cursor) {
+                IntrusiveSlotProbe::NoPayload => {
+                    cursor = intrusive_pool_next_slot(&pool_r, cursor);
+                }
+                IntrusiveSlotProbe::Live(slot_view) => {
+                    let g: usize = intrusive_view_generation(slot_view);
+                    intrusive_view_drop(slot_view);
+                    intrusive_pool_remove(&pool_r, intrusive_owner_new(&pool_r, cursor, g));
+                    freed = true;
+                }
+            }
+        }
+        if (freed == false) { r_final = false; }
+    }
+    let pages_before_reclaim_call: usize = page_allocator_live_count();
+    let held_before: usize = intrusive_pool_empty_chunk_count(&pool_r);
+    let reclaimed: usize = intrusive_pool_reclaim(&pool_r);
+    uart_puts("reclaim hands back the retained reserve too (held before, ");
+    uart_puts("pages returned, chunks left, provider delta): ");
+    uart_print(held_before);
+    uart_puts(" ");
+    uart_print(reclaimed);
+    uart_puts(" ");
+    uart_print(intrusive_pool_chunk_count(&pool_r));
+    uart_puts(" ");
+    uart_print(pages_before_reclaim_call - page_allocator_live_count());
+    uart_puts("\n");
+
+    // A pool told to retain nothing gives a page back the moment its
+    // chunk empties, with no reclaim call at all -- the same mechanism,
+    // driven by policy instead of by an explicit ask.
+    let mut pool_z: IntrusivePool(usize);
+    intrusive_pool_init_retaining(&pool_z, 0);
+    let pages_before_z: usize = page_allocator_live_count();
+    match intrusive_pool_insert(&pool_z) {
+        IntrusivePoolInsertResult::Allocated(o) => {
+            let z_grew: bool = page_allocator_live_count() == pages_before_z + 1;
+            intrusive_pool_remove(&pool_z, o);
+            uart_puts("a pool retaining 0 returns its page as soon as the ");
+            uart_puts("chunk empties (grew, back to start, chunks, retained): ");
+            uart_print_bool(z_grew);
+            uart_puts(" ");
+            uart_print_bool(page_allocator_live_count() == pages_before_z);
+            uart_puts(" ");
+            uart_print(intrusive_pool_chunk_count(&pool_z));
+            uart_puts(" ");
+            uart_print(intrusive_pool_retained_chunks(&pool_z));
+            uart_puts("\n");
+        }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_z insert failed\n");
+            return;
+        }
+    }
+
     if (intrusive_pool_probe(&pool_r) == false) { probes_ok = false; }
     probes_run = probes_run + 1;
 

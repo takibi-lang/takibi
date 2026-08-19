@@ -36,7 +36,8 @@
 // list heads, the held-back empty chunk, a generation counter, and
 // counters. Its whole static footprint is 80 bytes regardless of how many
 // objects will ever live in it, and its runtime footprint is
-// `ceil(live / slots_per_chunk)` pages plus at most one held in reserve
+// `ceil(live / slots_per_chunk)` pages plus the reserve it was told to
+// hold (issue #354)
 // -- in both directions, since an emptied chunk's page goes back to the
 // provider (issue #346). The only remaining ceiling is the real, physical
 // one -- page.tkb running out of pages -- which is what issue #344 asked
@@ -237,11 +238,14 @@
 //   and growable_pool.tkb all carry: no locking of its own. Safe only for
 //   a single execution context, which is a fact about callers, not
 //   something this file enforces.
-// - Reclaim (issue #346) holds back exactly ONE fully-empty chunk per
+// - Reclaim holds back up to `retained_chunks` fully-empty chunks per
 //   pool and returns every later one, so steady-state memory is
-//   `ceil(live / slots_per_chunk)` pages plus at most one. That reserve
-//   is a deliberate anti-thrash choice, not an accounting slip: see
-//   IntrusivePool's own comment.
+//   `ceil(live / slots_per_chunk)` pages plus that reserve. It defaults
+//   to 1 -- the anti-thrash choice issue #346 argued for -- and is set
+//   per pool at init since issue #354, because how much churn a pool sees
+//   is a property of what it holds. `intrusive_pool_reclaim` gives the
+//   reserve back on demand; there is no global sweep, and that entry
+//   point's comment says why not.
 // - Slot addresses are NOT stable across reclaim. A cursor walk that
 //   frees as it goes can have the chunk under it released; the exerciser
 //   restarts its walk after every free for exactly this reason. What
@@ -396,18 +400,24 @@ generic struct IntrusiveSlot(T: type) {
 // Scalars only. No array, no N, no MAX_CHUNKS -- this struct's size does
 // not depend on how many objects the pool will hold.
 //
-// `empty_chunk` is the hysteresis decision issue #346 asks to be made
-// explicitly: this pool holds back exactly ONE fully-empty chunk instead
-// of returning its page the moment it empties. A pool oscillating around
-// a chunk boundary -- allocate, free, allocate -- would otherwise hand a
-// page back and immediately ask for another on every cycle. One chunk is
-// the smallest cache that removes that thrash, and it is a per-pool cost
-// bounded by one page, not a tunable.
+// `empty_chunk_count` and `retained_chunks` are the hysteresis decision
+// issue #346 asked to be made explicit, and issue #354 then made
+// adjustable: the pool holds back up to `retained_chunks` fully-empty
+// chunks instead of returning every page the moment it empties. A pool
+// oscillating around a chunk boundary -- allocate, free, allocate --
+// would otherwise hand a page back and immediately ask for another on
+// every cycle. One is the smallest cache that removes that thrash and so
+// is the default, but it is the caller's to choose now, because whether
+// that oscillation happens at all is a property of what the pool holds
+// rather than of this file. `empty_chunk_count` is a COUNT rather than
+// the single held address it replaced, which is what generalizing to
+// more than one required.
 generic struct IntrusivePool(T: type) {
     pool_tag: usize;
     chunk_head: usize;
     partial_head: usize;
-    empty_chunk: usize;
+    empty_chunk_count: usize;
+    retained_chunks: usize;
     next_generation: usize;
     live_count: usize;
     chunk_count: usize;
@@ -482,12 +492,33 @@ fn intrusive_owner_into_parts(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 // (see intrusive_pool_remove's own rejection paths).
 fn intrusive_owner_drop(owner: sink IntrusiveOwner[pool_id, allocation]) {}
 
+// Retains one empty chunk, which is the anti-thrash default issue #346
+// argued for and what every existing caller expects.
 fn intrusive_pool_init(T: type, pool: &mut IntrusivePool(T) @ pool_id) {
+    intrusive_pool_init_retaining(pool, 1);
+}
+
+// GitHub issue #354: the reserve is a per-pool policy now, not a constant
+// baked into this file. How much churn a pool sees is a property of what
+// it holds -- a pool oscillating across a chunk boundary wants a reserve,
+// a pool that fills once and drains once at shutdown wants none -- and
+// this file cannot know which. 0 gives every page back the moment a chunk
+// empties.
+//
+// A runtime field rather than a generic value parameter, deliberately.
+// It is policy, not layout: nothing about the pool's shape depends on it,
+// so making it a type parameter would split one type into many and put a
+// number back in a caller's type signature, which is what #344's whole
+// design fought to remove. It costs the pool struct 8 bytes, which is the
+// per-POOL axis and the cheap one -- see this file's header.
+fn intrusive_pool_init_retaining(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                                 retained_chunks: usize) {
     pool.pool_tag = intrusive_pool_next_tag;
     intrusive_pool_next_tag = intrusive_pool_next_tag + 1;
     pool.chunk_head = 0;
     pool.partial_head = 0;
-    pool.empty_chunk = 0;
+    pool.empty_chunk_count = 0;
+    pool.retained_chunks = retained_chunks;
     pool.next_generation = 1;
     pool.live_count = 0;
     pool.chunk_count = 0;
@@ -931,9 +962,13 @@ fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id)
     // payload is uninitialized, write it before reading it. See "Current
     // limitations".
     pool.live_count = pool.live_count + 1;
+    // Read BEFORE the increment: allocating out of a chunk that was empty
+    // spends one of the held-back reserve, and after `+ 1` there is no
+    // way left to tell that it had been empty (GitHub issue #354).
+    if (header.live_count == 0 && pool.empty_chunk_count > 0) {
+        pool.empty_chunk_count = pool.empty_chunk_count - 1;
+    }
     header.live_count = header.live_count + 1;
-    // This chunk is no longer the one empty chunk being held back.
-    if (pool.empty_chunk == base) { pool.empty_chunk = 0; }
     // Full now: it has nothing left to hand out, so it leaves the partial
     // list and rejoins on its next free.
     if (header.free_head == 0) { intrusive_pool_unlink_partial(pool, base); }
@@ -975,9 +1010,10 @@ fn intrusive_pool_remove(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     // Was full, now has a free slot again.
     intrusive_pool_link_partial(pool, base);
     if (header.live_count == 0 && header.corrupt_free_chain_count == 0) {
-        // GitHub issue #346's hysteresis, stated once, here: hold back the
-        // FIRST chunk to empty, give every later one straight back. See
-        // IntrusivePool's own comment for why one is the right number.
+        // GitHub issue #346's hysteresis, stated once, here: hold back
+        // empty chunks up to this pool's configured reserve (issue #354),
+        // give every later one straight back. See IntrusivePool's own
+        // comment for why the default is one.
         //
         // A quarantined chunk (issue #352) takes neither branch: it is not
         // recycled as the held-back reserve, since nothing can ever be
@@ -987,12 +1023,10 @@ fn intrusive_pool_remove(T: type, pool: &mut IntrusivePool(T) @ pool_id,
         // record that the corruption happened. It is deliberately leaked,
         // bounded by the number of corruption events -- which is zero on
         // any system behaving correctly.
-        if (pool.empty_chunk == 0) {
-            pool.empty_chunk = base;
+        if (pool.empty_chunk_count < pool.retained_chunks) {
+            pool.empty_chunk_count = pool.empty_chunk_count + 1;
         } else {
-            if (pool.empty_chunk != base) {
-                intrusive_pool_release_chunk(pool, base);
-            }
+            intrusive_pool_release_chunk(pool, base);
         }
     }
     intrusive_owner_drop(owner);
@@ -1363,4 +1397,79 @@ fn intrusive_chunk_free_chain_length(T: type, pool: &mut IntrusivePool(T) @ pool
         }
     }
     return length;
+}
+
+// -- Reclaim on demand -------------------------------------------------
+// GitHub issue #354. Reclaim was reactive only: a page went back when a
+// chunk happened to empty through an ordinary free, and the reserve was
+// unreachable. Under memory pressure every pool in the system would hoard
+// its reserve at exactly the moment memory was scarce, with no way to ask
+// for it back.
+//
+// This is that ask. It returns every empty chunk INCLUDING the retained
+// reserve, and resets the reserve count so the pool starts hoarding again
+// from zero rather than believing it still holds pages it gave away.
+// Returns how many pages went back, which is what a caller under pressure
+// wants to know.
+//
+// Quarantined chunks stay, for the reason they always stay (issue #352):
+// handing a page with known-corrupt contents back into general
+// circulation trades a bounded leak for an unbounded problem.
+//
+// The walk captures `next` before releasing, because releasing unlinks --
+// and it is the same defensive walk intrusive_pool_probe uses, for the
+// same reason: a pool under memory pressure is not obviously a pool in
+// good health.
+//
+// NO GLOBAL SWEEP, and that is a decision rather than an omission. A
+// "reclaim from every pool" entry point needs a registry of live pools,
+// and three things make that the wrong shape here:
+//
+//   - Pools are typed. A registry would be heterogeneous, so calling back
+//     into each pool needs type erasure plus dispatch through a function
+//     pointer -- machinery this codebase has consistently declined.
+//   - The brand is the problem, not an obstacle to route around. Every
+//     entry point takes `&mut IntrusivePool(T) @ pool_id`, a COMPILE-TIME
+//     identity; an address stored in a registry and reconstituted later
+//     cannot carry it, so a sweep would have to give up exactly the
+//     guarantee issue #345 added.
+//   - The registry is itself a growable collection, so its natural
+//     storage is this primitive -- the same regress issue #349's
+//     header-pool bootstrap ran into.
+//
+// The shape that works instead needs nothing new: a kernel's pools are a
+// fixed, statically known set, so a memory-pressure path calls
+// intrusive_pool_reclaim on each by name. That is a list at the call
+// site, checked by the compiler, with every brand intact -- strictly
+// better than a runtime registry, and it is why this file stops here.
+fn intrusive_pool_reclaim(T: type, pool: &mut IntrusivePool(T) @ pool_id)
+        -> usize !{unsafe} {
+    let released_before: usize = pool.released_chunk_count;
+    let mut cursor: usize = pool.chunk_head;
+    let mut steps: usize = 0;
+    while (cursor != 0 && intrusive_pool_owns_chunk(pool, cursor) &&
+           steps <= pool.chunk_count) {
+        steps = steps + 1;
+        let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(cursor);
+        let next: usize = header.next_chunk;
+        if (header.live_count == 0 && header.corrupt_free_chain_count == 0) {
+            intrusive_pool_release_chunk(pool, cursor);
+        }
+        cursor = next;
+    }
+    pool.empty_chunk_count = 0;
+    return pool.released_chunk_count - released_before;
+}
+
+// What this pool is currently allowed to hold empty, and what it actually
+// holds -- the pair a caller deciding whether reclaim is worth calling
+// wants, without walking anything.
+fn intrusive_pool_retained_chunks(T: type, pool: &mut IntrusivePool(T) @ pool_id)
+        -> usize {
+    return pool.retained_chunks;
+}
+
+fn intrusive_pool_empty_chunk_count(T: type, pool: &mut IntrusivePool(T) @ pool_id)
+        -> usize {
+    return pool.empty_chunk_count;
 }
