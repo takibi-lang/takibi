@@ -113,6 +113,74 @@ fn retx_link_occupied(l: RetxLink) -> bool {
     }
 }
 
+// Give a parked frame back. This is where #370's cost is paid in full:
+// the handle came out of a stable slot, so its brand is existential, and
+// `intrusive_pool_remove` wants one branded to THIS pool. Opening the
+// existential mints a fresh identity that will not match, so the only
+// route is to take the slot and generation off the handle, discharge it,
+// and rebuild a branded owner -- which is exactly the ONE way to produce
+// a handle the pool did not mint, and exactly why remove() validates
+// before it trusts one. The compile-time check is gone; the runtime
+// check that replaces it is intrusive_pool_slot_is_valid, and
+// foreign_handle_count is where a mistake surfaces.
+fn free_frame(link: FrameLink) -> usize !{unsafe} {
+    match link {
+        FrameLink::None => { return 0; }
+        FrameLink::Some(parked) => {
+            let slot: usize = intrusive_owner_slot(parked);
+            let generation: usize = intrusive_owner_generation(parked);
+            intrusive_owner_drop(parked);
+            let branded = intrusive_owner_new(&frames, slot, generation);
+            let g = intrusive_pool_lock(&frames);
+            intrusive_pool_remove(&frames, g, branded);
+            intrusive_pool_unlock(&frames, g);
+            return 1;
+        }
+    }
+}
+
+// Walk one connection's retransmit chain, returning each entry's frame
+// and then the entry. tcp.tkb's pending_tcp_reset_all() over
+// PENDING_TCP_MAX fixed slots, with the ceiling taken out.
+fn free_retx_chain(head: RetxLink) -> (usize, usize) !{unsafe} {
+    let mut link: RetxLink = head;
+    let mut entries: usize = 0;
+    let mut freed_frames: usize = 0;
+    let mut walking: bool = true;
+    while (walking) {
+        match link {
+            RetxLink::End => { walking = false; link = RetxLink::End; }
+            RetxLink::More(parked) => {
+                let slot: usize = intrusive_owner_slot(parked);
+                let generation: usize = intrusive_owner_generation(parked);
+                intrusive_owner_drop(parked);
+                let branded = intrusive_owner_new(&retxs, slot, generation);
+                let e: *RetxEntry = intrusive_pool_ref(&retxs, branded);
+                let g1 = slot_lock(&e.mutex);
+                let carried: FrameLink =
+                    stable_replace(g1, &e.mutex, e.frame, FrameLink::None);
+                slot_unlock(g1, &e.mutex);
+                freed_frames = freed_frames + free_frame(carried);
+                let e2: *RetxEntry = intrusive_pool_ref(&retxs, branded);
+                let g2 = slot_lock(&e2.mutex);
+                let following: RetxLink =
+                    stable_replace(g2, &e2.mutex, e2.next, RetxLink::End);
+                slot_unlock(g2, &e2.mutex);
+                let g3 = intrusive_pool_lock(&retxs);
+                intrusive_pool_remove(&retxs, g3, branded);
+                intrusive_pool_unlock(&retxs, g3);
+                entries = entries + 1;
+                link = following;
+            }
+        }
+    }
+    match link {
+        RetxLink::End => {}
+        RetxLink::More(leftover) => { intrusive_owner_drop(leftover); }
+    }
+    return (entries, freed_frames);
+}
+
 fn uart_print_bool(value: bool) {
     if (value) { uart_puts("true"); } else { uart_puts("false"); }
 }
@@ -296,6 +364,101 @@ fn app_main() !{unsafe} {
     uart_puts("every transmit frame reached its retransmit entry by handle, ");
     uart_puts("not by copy: ");
     uart_print_bool(moved_frames == built);
+    uart_puts("\n");
+
+    // -- Teardown. Connections are found by SCANNING the pool, which is
+    // what the kernel does with a received segment -- there is no array
+    // to walk and no chain kept on the side. The build loop dropped every
+    // conn_owner, so nothing here is holding one: the scan mints them
+    // back from (slot, generation), the same round trip the fd table will
+    // do through transport_slot.
+    let mut conns_freed: usize = 0;
+    let mut frames_freed: usize = 0;
+    let mut retxs_freed: usize = 0;
+    let mut cursor: usize = intrusive_pool_first_slot(&conns);
+    while (cursor != 0) {
+        let next_cursor: usize = intrusive_pool_next_slot(&conns, cursor);
+        match intrusive_pool_probe_slot(&conns, cursor) {
+            IntrusiveSlotProbe::NoPayload => {}
+            IntrusiveSlotProbe::Live(slot_view) => {
+                let generation: usize = intrusive_view_generation(slot_view);
+                let conn: *TcpConnection =
+                    intrusive_pool_payload_of(&conns, slot_view);
+
+                let g1 = slot_lock(&conn.mutex);
+                let parked_rx: FrameLink =
+                    stable_replace(g1, &conn.mutex, conn.rx, FrameLink::None);
+                slot_unlock(g1, &conn.mutex);
+                frames_freed = frames_freed + free_frame(parked_rx);
+
+                let g2 = slot_lock(&conn.mutex);
+                let parked_inetd: FrameLink =
+                    stable_replace(g2, &conn.mutex, conn.inetd, FrameLink::None);
+                slot_unlock(g2, &conn.mutex);
+                frames_freed = frames_freed + free_frame(parked_inetd);
+
+                let g3 = slot_lock(&conn.mutex);
+                let chain: RetxLink =
+                    stable_replace(g3, &conn.mutex, conn.retx, RetxLink::End);
+                slot_unlock(g3, &conn.mutex);
+                let (entries, chain_frames) = free_retx_chain(chain);
+                retxs_freed = retxs_freed + entries;
+                frames_freed = frames_freed + chain_frames;
+
+                let owner = intrusive_owner_new(&conns, cursor, generation);
+                let g4 = intrusive_pool_lock(&conns);
+                intrusive_pool_remove(&conns, g4, owner);
+                intrusive_pool_unlock(&conns, g4);
+                conns_freed = conns_freed + 1;
+            }
+        }
+        cursor = next_cursor;
+    }
+
+    uart_puts("teardown by scanning, no array and no side chain ");
+    uart_puts("(conns, frames, retx entries freed): ");
+    uart_print(conns_freed);
+    uart_puts(" ");
+    uart_print(frames_freed);
+    uart_puts(" ");
+    uart_print(retxs_freed);
+    uart_puts("\n");
+
+    uart_puts("every pool is empty: ");
+    uart_print_bool(intrusive_pool_live_count(&conns) == 0 &&
+                    intrusive_pool_live_count(&frames) == 0 &&
+                    intrusive_pool_live_count(&retxs) == 0);
+    uart_puts("\n");
+
+    // Empty is not the same as given back: issue #346's anti-thrash
+    // default retains one empty chunk per pool, so a kernel that opened
+    // and closed connections holds three pages, not nine. Printed rather
+    // than asserted to zero, because the retention is the design.
+    uart_puts("pages still held after teardown, and retained chunks ");
+    uart_puts("(pages, conns, frames, retxs): ");
+    uart_print(page_allocator_live_count());
+    uart_puts(" ");
+    uart_print(intrusive_pool_retained_chunks(&conns));
+    uart_puts(" ");
+    uart_print(intrusive_pool_retained_chunks(&frames));
+    uart_puts(" ");
+    uart_print(intrusive_pool_retained_chunks(&retxs));
+    uart_puts("\n");
+
+    // The check that replaces the brand #370 took away. A frame-pool
+    // handle rebuilt against a retx-pool address is exactly the mixup the
+    // existential no longer catches at compile time; remove() must refuse
+    // it and count it rather than corrupt the free chain.
+    let alien_slot: usize = intrusive_pool_first_slot(&retxs);
+    let before: usize = intrusive_pool_foreign_handle_count(&frames);
+    let alien = intrusive_owner_new(&frames, alien_slot, 1);
+    let g5 = intrusive_pool_lock(&frames);
+    intrusive_pool_remove(&frames, g5, alien);
+    intrusive_pool_unlock(&frames, g5);
+    uart_puts("a cross-pool handle the erased brand cannot catch is ");
+    uart_puts("refused at runtime: ");
+    uart_print_bool(intrusive_pool_foreign_handle_count(&frames) == before + 1 &&
+                    intrusive_pool_corrupt_free_chain_count(&frames) == 0);
     uart_puts("\n");
 
     uart_puts("done\n");

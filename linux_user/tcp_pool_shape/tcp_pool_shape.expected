@@ -4,4 +4,8 @@ connections built with no N in any declaration, array or ceiling (connections, p
 more live connections than the old ceiling of 2: true
 every stable slot was empty when it was handed out: true
 every transmit frame reached its retransmit entry by handle, not by copy: true
+teardown by scanning, no array and no side chain (conns, frames, retx entries freed): 8 14 7
+every pool is empty: true
+pages still held after teardown, and retained chunks (pages, conns, frames, retxs): 3 1 1 1
+a cross-pool handle the erased brand cannot catch is refused at runtime: true
 done
