@@ -11,6 +11,135 @@
 // out to remove; growable_pool only moved it one layer down. Issue #344
 // asks for the layer to go away.
 //
+// Current limitations (2026-08-17). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none, since it
+// invites relying on a guarantee that quietly stopped holding.
+// - Mutation requires this pool's guard, and that is enforced rather than
+//   asked for (issue #351): insert, remove and reclaim take `borrow
+//   IntrusivePoolGuard[pool_id]`, obtainable only from
+//   intrusive_pool_lock on the same pool. What the guard does NOT do is
+//   exclude: intrusive_pool_lock delegates to pool_lock_acquire, which
+//   the file list supplies (issue #364), and linux_user's supplies
+//   checking rather than exclusion. The port supplies disable_irq on one
+//   core or a real acquire for SMP; nothing in this file changes when it
+//   does.
+// - READS are not guarded. A caller that reads while another context
+//   mutates -- a cursor walk racing an insert, a counter racing a
+//   reclaim -- must hold the guard across both, and this file cannot
+//   make it. Guarding the observers too was tried and rejected: it costs
+//   every caller a release on every early-return path, for a race the
+//   mutation guard already makes impossible to reach WITHOUT a
+//   deliberate concurrent reader. Revisit when there is one.
+// - The guard is not re-entrant, and taking one twice on a path would
+//   deadlock under a real lock. It is not a compile error -- both
+//   acquires are individually correct, so nothing in the type ties the
+//   second to the first -- but linux_user's lock body counts it, along
+//   with two pools acquired in inconsistent orders at different sites,
+//   which is the deadlock that only appears under the interleaving that
+//   hits it (issue #365, linux_user/intrusive_pool/pool_lock_check.tkb).
+//   A kernel build supplies a different body and pays none of that, so
+//   the checking is thorough exactly where it is free.
+// - Reclaim holds back up to `retained_chunks` fully-empty chunks per
+//   pool and returns every later one, so steady-state memory is
+//   `ceil(live / slots_per_chunk)` pages plus that reserve. It defaults
+//   to 1 -- the anti-thrash choice issue #346 argued for -- and is set
+//   per pool at init since issue #354, because how much churn a pool sees
+//   is a property of what it holds. `intrusive_pool_reclaim` gives the
+//   reserve back on demand; there is no global sweep, and that entry
+//   point's comment says why not.
+// - Slot addresses are NOT stable across reclaim. A cursor walk that
+//   frees as it goes can have the chunk under it released; the exerciser
+//   restarts its walk after every free for exactly this reason. What
+//   stays sound regardless is validation: the moment a chunk is
+//   unlinked, intrusive_pool_slot_is_valid rejects every address in it,
+//   and if the same page comes back later as a chunk of this same pool,
+//   the pool-global (never per-chunk) generation counter is what still
+//   rejects a stale handle.
+// - A chunk quarantined by the alloc-path check (issue #352) is leaked on
+//   purpose: its page is never returned to the provider and it is never
+//   allocated from again. That is bounded by the number of corruption
+//   events, which is zero on a correctly behaving system -- but it does
+//   mean a pool under a repeated stray write bleeds a page per event
+//   rather than failing loudly. Revisit if that ever stops being the
+//   right trade.
+// - Validation derives its bounds and stores none, so the chunk header
+//   cannot weaken it (issue #361). What the header IS still trusted for
+//   is the free chain itself: `free_head` and the links. A corrupted
+//   `free_head` is caught on the alloc path (issue #352); a corrupted
+//   chunk or partial link is not, and would misdirect iteration or
+//   reclaim rather than a dereference. Defending those needs something
+//   the derivation trick cannot give, since unlike the bounds they are
+//   genuinely dynamic -- a header checksum, or the invariant probe issue
+//   #355 asks for.
+// - `intrusive_pool_ref` does NOT re-validate. It is the fast path, with
+//   the same contract kernel/lib/freelist.tkb's freelist_ref has: the
+//   `borrow IntrusiveOwner[pool_id, _]` parameter proves, through
+//   linearity and the brand, that the caller holds a live allocation from
+//   THIS pool. A caller that round-trips a handle through
+//   intrusive_owner_into_parts (the only way to fabricate one) must
+//   re-validate with intrusive_pool_matches first. The SCANNING path has
+//   no such caveat left: intrusive_pool_probe_slot validates and reads
+//   the generation itself, and its Live view is the only key to the
+//   payload.
+// - A view is a SNAPSHOT. It says the slot was live when probed, which a
+//   later insert or remove can undo -- which is why
+//   intrusive_pool_payload_of sinks it rather than borrowing it, so one
+//   probe cannot justify a second look. Holding the resulting `*T` across
+//   a mutation is the caller's problem, exactly as it is for
+//   intrusive_pool_ref's; what changed is that getting the pointer at all
+//   now requires having looked.
+// - T must be at least pointer-sized and must not need stronger than
+//   8-byte alignment, both because the free-chain link shares its
+//   storage and because `[u8; N]` contributes no alignment of its own
+//   (issue #348). Both are static_asserts in
+//   intrusive_pool_slots_per_chunk, measured rather than assumed. A T
+//   that violates either does not compile; neither is a runtime failure
+//   path, and neither can be silently misaligned.
+// - A T whose SLOT exceeds one whole page cannot be pooled at all -- a
+//   page-sized slot is now exactly poolable, since issue #349 took the
+//   header out of the page. That is a compile-time property of T and is
+//   enforced as one, alongside the check that the provider's per-page
+//   metadata is large enough for a chunk header. No runtime failure path
+//   exists for any of them.
+// - The chunk header lives in storage the PAGE PROVIDER owns, so this
+//   file's memory footprint is no longer self-contained: a pool costs its
+//   80 static bytes, its pages, and PAGE_META_WORDS words per page held.
+//   That reservation exists whether or not anyone pools anything, which
+//   is the trade issue #349 made -- it is what buys back the slot an
+//   in-page header used to cost at page-dividing strides, and what makes
+//   address-to-chunk O(1).
+//
+// THE PAGE PROVIDER IS NOT NAMED HERE, DELIBERATELY (GitHub issue #364)
+//
+// This file `use`s no provider. It names the nine symbols it needs and
+// binds to whichever provider is on the compiler's file list:
+//
+//   PAGE_SIZE  PAGE_USABLE_BYTES  PAGE_META_BYTES
+//   PageAllocResult  PageOwner
+//   page_alloc  page_physical_address  page_owner_transfer_index
+//   page_transferred_release_physical  page_meta_at
+//   pool_lock_acquire  pool_lock_release
+//
+// linux_user passes linux_user/growable_pool/fake_page_provider.tkb; a
+// kernel build passes kernel/mm/page.tkb once that file grows page_meta_at
+// and PAGE_META_WORDS (issue #353). One source, two providers, and
+// nothing to keep in sync.
+//
+// The alternative -- copy the file on promotion, as growable_pool was --
+// is what this avoids, and the evidence is that growable_pool's two
+// copies now differ by 329 lines of code: its linux_user half is still on
+// the pre-#314 `*T` style, still carries issue-#15 workarounds, and is
+// missing a variant case, while passing its tests the whole time. A
+// prototype that has quietly stopped describing what ships is worse than
+// no prototype.
+//
+// ORDER MATTERS: the provider must appear BEFORE this file on the
+// command line, because constants resolve as the parser walks the list
+// left to right. Reversed, the build stops at the first array size or
+// static_assert naming PAGE_SIZE -- loudly, and pointing at the
+// constant, which is why this is a build-file convention rather than a
+// hazard.
+//
 // The mechanism is the one Linux's SLUB and NetBSD's pool_cache/uma use:
 // the free list is INTRUSIVE -- threaded through the free slots' own
 // memory inside each chunk's page, one chain per chunk -- so there is no
@@ -231,134 +360,6 @@
 // cost around: grow paid on every chunk a pool ever creates, release
 // pays only when a page actually leaves.
 //
-// Current limitations (2026-08-17). Keep this list current as call sites
-// change; a limitation that goes stale here is worse than none, since it
-// invites relying on a guarantee that quietly stopped holding.
-// - Mutation requires this pool's guard, and that is enforced rather than
-//   asked for (issue #351): insert, remove and reclaim take `borrow
-//   IntrusivePoolGuard[pool_id]`, obtainable only from
-//   intrusive_pool_lock on the same pool. What the guard does NOT do is
-//   exclude: intrusive_pool_lock delegates to pool_lock_acquire, which
-//   the file list supplies (issue #364), and linux_user's supplies
-//   checking rather than exclusion. The port supplies disable_irq on one
-//   core or a real acquire for SMP; nothing in this file changes when it
-//   does.
-// - READS are not guarded. A caller that reads while another context
-//   mutates -- a cursor walk racing an insert, a counter racing a
-//   reclaim -- must hold the guard across both, and this file cannot
-//   make it. Guarding the observers too was tried and rejected: it costs
-//   every caller a release on every early-return path, for a race the
-//   mutation guard already makes impossible to reach WITHOUT a
-//   deliberate concurrent reader. Revisit when there is one.
-// - The guard is not re-entrant, and taking one twice on a path would
-//   deadlock under a real lock. It is not a compile error -- both
-//   acquires are individually correct, so nothing in the type ties the
-//   second to the first -- but linux_user's lock body counts it, along
-//   with two pools acquired in inconsistent orders at different sites,
-//   which is the deadlock that only appears under the interleaving that
-//   hits it (issue #365, linux_user/intrusive_pool/pool_lock_check.tkb).
-//   A kernel build supplies a different body and pays none of that, so
-//   the checking is thorough exactly where it is free.
-// - Reclaim holds back up to `retained_chunks` fully-empty chunks per
-//   pool and returns every later one, so steady-state memory is
-//   `ceil(live / slots_per_chunk)` pages plus that reserve. It defaults
-//   to 1 -- the anti-thrash choice issue #346 argued for -- and is set
-//   per pool at init since issue #354, because how much churn a pool sees
-//   is a property of what it holds. `intrusive_pool_reclaim` gives the
-//   reserve back on demand; there is no global sweep, and that entry
-//   point's comment says why not.
-// - Slot addresses are NOT stable across reclaim. A cursor walk that
-//   frees as it goes can have the chunk under it released; the exerciser
-//   restarts its walk after every free for exactly this reason. What
-//   stays sound regardless is validation: the moment a chunk is
-//   unlinked, intrusive_pool_slot_is_valid rejects every address in it,
-//   and if the same page comes back later as a chunk of this same pool,
-//   the pool-global (never per-chunk) generation counter is what still
-//   rejects a stale handle.
-// - A chunk quarantined by the alloc-path check (issue #352) is leaked on
-//   purpose: its page is never returned to the provider and it is never
-//   allocated from again. That is bounded by the number of corruption
-//   events, which is zero on a correctly behaving system -- but it does
-//   mean a pool under a repeated stray write bleeds a page per event
-//   rather than failing loudly. Revisit if that ever stops being the
-//   right trade.
-// - Validation derives its bounds and stores none, so the chunk header
-//   cannot weaken it (issue #361). What the header IS still trusted for
-//   is the free chain itself: `free_head` and the links. A corrupted
-//   `free_head` is caught on the alloc path (issue #352); a corrupted
-//   chunk or partial link is not, and would misdirect iteration or
-//   reclaim rather than a dereference. Defending those needs something
-//   the derivation trick cannot give, since unlike the bounds they are
-//   genuinely dynamic -- a header checksum, or the invariant probe issue
-//   #355 asks for.
-// - `intrusive_pool_ref` does NOT re-validate. It is the fast path, with
-//   the same contract kernel/lib/freelist.tkb's freelist_ref has: the
-//   `borrow IntrusiveOwner[pool_id, _]` parameter proves, through
-//   linearity and the brand, that the caller holds a live allocation from
-//   THIS pool. A caller that round-trips a handle through
-//   intrusive_owner_into_parts (the only way to fabricate one) must
-//   re-validate with intrusive_pool_matches first. The SCANNING path has
-//   no such caveat left: intrusive_pool_probe_slot validates and reads
-//   the generation itself, and its Live view is the only key to the
-//   payload.
-// - A view is a SNAPSHOT. It says the slot was live when probed, which a
-//   later insert or remove can undo -- which is why
-//   intrusive_pool_payload_of sinks it rather than borrowing it, so one
-//   probe cannot justify a second look. Holding the resulting `*T` across
-//   a mutation is the caller's problem, exactly as it is for
-//   intrusive_pool_ref's; what changed is that getting the pointer at all
-//   now requires having looked.
-// - T must be at least pointer-sized and must not need stronger than
-//   8-byte alignment, both because the free-chain link shares its
-//   storage and because `[u8; N]` contributes no alignment of its own
-//   (issue #348). Both are static_asserts in
-//   intrusive_pool_slots_per_chunk, measured rather than assumed. A T
-//   that violates either does not compile; neither is a runtime failure
-//   path, and neither can be silently misaligned.
-// - A T whose SLOT exceeds one whole page cannot be pooled at all -- a
-//   page-sized slot is now exactly poolable, since issue #349 took the
-//   header out of the page. That is a compile-time property of T and is
-//   enforced as one, alongside the check that the provider's per-page
-//   metadata is large enough for a chunk header. No runtime failure path
-//   exists for any of them.
-// - The chunk header lives in storage the PAGE PROVIDER owns, so this
-//   file's memory footprint is no longer self-contained: a pool costs its
-//   80 static bytes, its pages, and PAGE_META_WORDS words per page held.
-//   That reservation exists whether or not anyone pools anything, which
-//   is the trade issue #349 made -- it is what buys back the slot an
-//   in-page header used to cost at page-dividing strides, and what makes
-//   address-to-chunk O(1).
-//
-// THE PAGE PROVIDER IS NOT NAMED HERE, DELIBERATELY (GitHub issue #364)
-//
-// This file `use`s no provider. It names the nine symbols it needs and
-// binds to whichever provider is on the compiler's file list:
-//
-//   PAGE_SIZE  PAGE_USABLE_BYTES  PAGE_META_BYTES
-//   PageAllocResult  PageOwner
-//   page_alloc  page_physical_address  page_owner_transfer_index
-//   page_transferred_release_physical  page_meta_at
-//   pool_lock_acquire  pool_lock_release
-//
-// linux_user passes linux_user/growable_pool/fake_page_provider.tkb; a
-// kernel build passes kernel/mm/page.tkb once that file grows page_meta_at
-// and PAGE_META_WORDS (issue #353). One source, two providers, and
-// nothing to keep in sync.
-//
-// The alternative -- copy the file on promotion, as growable_pool was --
-// is what this avoids, and the evidence is that growable_pool's two
-// copies now differ by 329 lines of code: its linux_user half is still on
-// the pre-#314 `*T` style, still carries issue-#15 workarounds, and is
-// missing a variant case, while passing its tests the whole time. A
-// prototype that has quietly stopped describing what ships is worse than
-// no prototype.
-//
-// ORDER MATTERS: the provider must appear BEFORE this file on the
-// command line, because constants resolve as the parser walks the list
-// left to right. Reversed, the build stops at the first array size or
-// static_assert naming PAGE_SIZE -- loudly, and pointing at the
-// constant, which is why this is a build-file convention rather than a
-// hazard.
 
 // One per chunk, living in the page provider's per-page metadata (GitHub
 // issue #349) -- never at offset 0 of the chunk's own page, and never in a
@@ -586,7 +587,28 @@ fn intrusive_owner_drop(owner: sink IntrusiveOwner[pool_id, allocation]) {}
 // lock that cannot be taken from an interrupt handler would have to be
 // taken with interrupts already masked by the caller, which is the same
 // masking one layer up and one place easier to forget.
-private linear view IntrusivePoolGuard[pool_id: addr];
+// A linear STRUCT, not an erased view, and the reason is the same one
+// issue #348's slot permission hit: an erased view has no runtime
+// payload, so it cannot carry anything -- and a lock that RESTORES the
+// interrupt mask rather than unconditionally enabling it has to carry
+// the mask it found. That is Linux's `local_irq_save(flags)`, where
+// `flags` lives in the caller's frame; here the guard is that frame slot.
+//
+// Storing it globally instead was the first design and it is racy: a
+// thread that reads the mask, is interrupted before it can set it, and
+// resumes after a handler has overwritten the global would restore the
+// handler's value and leave interrupts masked forever. Per-guard state
+// has no such window, needs no depth counter, and makes nesting fall out
+// -- an inner acquire records "already masked" and its release does
+// nothing, while the outermost records the truth and restores it.
+//
+// The cost is that the guard stops being free: 8 stack bytes while held,
+// which is the per-ACQUIRE axis and the cheapest one. What it does NOT
+// cost is the identity checking -- `[pool_id: addr]` still makes another
+// pool's guard a compile error, exactly as it did when this was a view.
+private linear struct IntrusivePoolGuard[pool_id: addr] {
+    private flags: usize;
+}
 
 // Acquires this pool. The body delegates to pool_lock_acquire, which the
 // FILE LIST supplies (issue #364): linux_user gives it a checking
@@ -599,8 +621,9 @@ private linear view IntrusivePoolGuard[pool_id: addr];
 // Deliberately NOT `!{may_block}`: see above.
 fn intrusive_pool_lock(T: type, pool: &mut IntrusivePool(T) @ pool_id)
         -> IntrusivePoolGuard[pool_id] {
-    pool_lock_acquire(pool.pool_tag);
-    return view IntrusivePoolGuard[pool_id];
+    let mut guard: IntrusivePoolGuard[pool_id] =
+        { pool_lock_acquire(pool.pool_tag) };
+    return guard;
 }
 
 // Releases it. Linear, so forgetting this is a compile error on every
@@ -608,7 +631,7 @@ fn intrusive_pool_lock(T: type, pool: &mut IntrusivePool(T) @ pool_id)
 // that review comments are worst at catching.
 fn intrusive_pool_unlock(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                          guard: sink IntrusivePoolGuard[pool_id]) {
-    pool_lock_release(pool.pool_tag);
+    pool_lock_release(pool.pool_tag, guard.flags);
 }
 
 fn intrusive_pool_init(T: type, pool: &mut IntrusivePool(T) @ pool_id) {

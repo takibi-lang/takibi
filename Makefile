@@ -231,14 +231,14 @@ $(LINUX_USER_DIR)/growable_pool/growable_pool_exe.o: kernel/lib/freelist.tkb ker
 # static-footprint comparison (it `use`s kernel/lib/growable_pool.tkb too, purely
 # to take sizeof of a GrowablePool holding the same object count) a
 # like-for-like one.
-# intrusive_pool_core.tkb names no provider (issue #364), so the stand-in
+# kernel/lib/intrusive_pool.tkb names no provider (issue #364), so the
 # is supplied here and must precede it.
 $(LINUX_USER_DIR)/growable_pool/growable_pool_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
 $(LINUX_USER_DIR)/growable_pool/growable_pool_exe.o: kernel/lib/growable_pool.tkb kernel/lib/freelist.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
 $(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 $(LINUX_USER_DIR)/intrusive_pool_portable/intrusive_pool_portable_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
-$(LINUX_USER_DIR)/intrusive_pool_portable/intrusive_pool_portable_exe.o: kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_core.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
-$(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_exe.o: $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_core.tkb kernel/lib/growable_pool.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
+$(LINUX_USER_DIR)/intrusive_pool_portable/intrusive_pool_portable_exe.o: kernel/lib/freelist.tkb kernel/lib/slotmap.tkb kernel/lib/intrusive_pool.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
+$(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_exe.o: $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb kernel/lib/intrusive_pool.tkb kernel/lib/growable_pool.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
 # GitHub issue #363: the contiguous-run allocator lives in the same fake
 # provider both pool prototypes draw from, so this exerciser shares it
 # rather than copying -- and a change there is meant to be seen by all

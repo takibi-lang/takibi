@@ -58,10 +58,15 @@ fn pool_lock_check_reset() {
 
 // The pool calls this from intrusive_pool_lock. `tag` is the pool's own
 // pool_tag, which is unique per pool and assigned at init.
-fn pool_lock_acquire(tag: usize) {
+// Returns the state a matching release must restore. linux_user has no
+// interrupt mask to save, so this is always 0 -- the value exists so the
+// SHAPE matches the kernel backend, where it is the DAIF.I bit read
+// before masking. A stand-in whose signature differs from the real thing
+// is a stand-in that stops catching signature drift.
+fn pool_lock_acquire(tag: usize) -> usize {
     if (tag == 0 || tag >= POOL_LOCK_MAX_TAGS) {
         pool_lock_untracked = pool_lock_untracked + 1;
-        return;
+        return 0;
     }
     let slot: {0..<POOL_LOCK_MAX_TAGS as usize} = tag;
     let mut depth: usize = pool_lock_held_depth;
@@ -93,13 +98,14 @@ fn pool_lock_acquire(tag: usize) {
     } else {
         pool_lock_untracked = pool_lock_untracked + 1;
     }
+    return 0;
 }
 
 // Removes `tag` from the held set wherever it is, not only from the top:
 // a linear guard is released where its holder chooses, and releasing in a
 // different order than acquired is legal even though acquiring in a
 // different order is what this file is looking for.
-fn pool_lock_release(tag: usize) {
+fn pool_lock_release(tag: usize, flags: usize) {
     if (tag == 0 || tag >= POOL_LOCK_MAX_TAGS) { return; }
     let mut found: bool = false;
     let mut depth: usize = pool_lock_held_depth;

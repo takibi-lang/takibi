@@ -1,4 +1,4 @@
-// End-to-end exerciser for intrusive_pool_core.tkb (design prototype for
+// End-to-end exerciser for kernel/lib/intrusive_pool.tkb (prototyped for
 // GitHub issue #344). Everything here draws from the same 9-page
 // fake_page_provider.tkb that issue #26's growable_pool prototype uses,
 // which is also what makes the side-by-side size comparison below fair:
@@ -52,7 +52,7 @@
 // quarantined chunk is leaked on purpose -- see intrusive_pool_core.tkb's
 // "Current limitations") + pool_u 1 + pool_x whatever is left, for
 // exactly the provider's 9.
-use "linux_user/intrusive_pool/intrusive_pool_core.tkb";
+use "kernel/lib/intrusive_pool.tkb";
 use "kernel/lib/growable_pool.tkb";
 
 // 1960 bytes of payload -> a 1968-byte slot -> 2 slots per page. Big

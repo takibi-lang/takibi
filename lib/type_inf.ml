@@ -40,7 +40,7 @@ let compiler_builtins = StringSet.of_list [
   "mrs_esr_el1"; "mrs_far_el1"; "mrs_elr_el1"; "mrs_spsr_el1";
   "msr_cntp_tval_el0"; "msr_cntp_ctl_el0"; "msr_sctlr_el1";
   "msr_mair_el1"; "msr_tcr_el1"; "msr_ttbr0_el1";
-  "msr_daifclr_irq"; "msr_daifset_irq";
+  "msr_daifclr_irq"; "msr_daifset_irq"; "mrs_daif";
   "tlbi_vmalle1"; "tlbi_vaae1is"; "tlbi_vae1is"; "tlbi_aside1is";
   "dsb_ish"; "dsb_ishst"; "isb";
   "smc4"; "hvc4"; "svc5";
@@ -2827,7 +2827,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            Printf.sprintf "%s expects no arguments: %s()" fname fname)))
 
   | Call (("mrs_cntfrq_el0" | "mrs_cntpct_el0" | "mrs_sctlr_el1"
-          | "mrs_esr_el1" | "mrs_far_el1" | "mrs_elr_el1" | "mrs_spsr_el1") as fname, args) ->
+          | "mrs_esr_el1" | "mrs_far_el1" | "mrs_elr_el1" | "mrs_spsr_el1"
+          | "mrs_daif") as fname, args) ->
       (* GitHub issue #226/#227: closed system-register read intrinsics. Zero
          arguments, like dma_publish/etc. above -- a runtime value must not
          be able to select which register gets read. *)

@@ -1,4 +1,4 @@
-// GitHub issue #364: intrusive_pool_core.tkb names NO page provider. It
+// GitHub issue #364: kernel/lib/intrusive_pool.tkb names NO page
 // binds to whichever one is on the compiler's file list, which is what
 // lets the same source serve a kernel build and this suite once it moves
 // to kernel/lib/ -- rather than being copied and left to rot, as
@@ -13,7 +13,7 @@
 //
 // Kept small on purpose. What it proves is the binding, not the pool --
 // intrusive_pool/ is where the behaviour is exercised.
-use "linux_user/intrusive_pool/intrusive_pool_core.tkb";
+use "kernel/lib/intrusive_pool.tkb";
 
 struct Payload { a: usize; b: usize; }
 

@@ -1,0 +1,61 @@
+// GitHub issue #351: the kernel's lock backend for kernel/lib/'s pool
+// primitives.
+//
+// Current limitations (2026-08-20). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none, since it
+// invites relying on a guarantee that quietly stopped holding.
+// - SINGLE CORE ONLY. Masking interrupts excludes the only other
+//   execution context there is on one core, and nothing here excludes a
+//   second CPU. An SMP port has to add a real acquire; the signature
+//   does not change when it does, because `flags` is already the thing a
+//   spin_lock_irqsave-shaped API hands back.
+// - The mask is DAIF.I only. FIQ, SError and debug exceptions are not
+//   masked, matching enable_irq/disable_irq's own scope.
+// - Nothing here detects a deadlock. Taking a second pool's lock while
+//   holding one is legal and correct as far as this file is concerned;
+//   whether the ORDER is consistent across call sites is checked by
+//   linux_user/intrusive_pool/pool_lock_check.tkb, in the suite that can
+//   afford to look.
+//
+// This is `local_irq_save`, and the reason it can be is that the caller
+// keeps `flags` -- the pool's guard is a linear struct carrying it, which
+// is the frame slot Linux's own `unsigned long flags` occupies. That is
+// what makes the pair correct where a bare disable/enable is not:
+//
+//   in an interrupt handler, DAIF.I is already set on entry, so the
+//   acquire records "was masked" and the matching release leaves it
+//   masked instead of enabling interrupts inside a handler;
+//
+//   nested across two pools, the inner acquire records "already masked"
+//   and its release does nothing, while the outermost records the truth
+//   and restores it.
+//
+// Storing the saved state globally instead was considered and is racy: a
+// thread that reads the mask, takes an interrupt before it can set it,
+// and resumes after the handler has overwritten the global would restore
+// the handler's value and leave interrupts masked for good. Per-guard
+// state has no such window and needs no depth counter.
+use "kernel/arch/arm64/boot/cpu.tkb";
+
+// Bit 7 of DAIF is the I (IRQ) mask.
+const DAIF_IRQ_BIT: usize = 7;
+
+// Returns the state a matching pool_lock_release must restore: 1 if IRQs
+// were already masked when this was called, 0 if they were enabled.
+//
+// `tag` identifies the pool for the checking backend linux_user
+// substitutes here; this one has no use for it, and says so rather than
+// dropping it from the signature -- a stand-in whose shape differs from
+// the real thing stops catching drift.
+fn pool_lock_acquire(tag: usize) -> usize {
+    let flags: usize = (mrs_daif() >> DAIF_IRQ_BIT) & 1;
+    disable_irq();
+    return flags;
+}
+
+// Restores what the matching acquire found. Enables ONLY if this acquire
+// is the one that masked -- never unconditionally, which is the whole
+// difference between this and a bare enable_irq().
+fn pool_lock_release(tag: usize, flags: usize) {
+    if (flags == 0) { enable_irq(); }
+}
