@@ -14,6 +14,17 @@
 // Current limitations (2026-08-17). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
+// - A T CONTAINING STABLE OWNER STORAGE must be allocated through
+//   intrusive_pool_insert_zeroed, not intrusive_pool_insert. The
+//   language's empty state for such a field is "declaration-order tag
+//   zero", inherited from a zero-initialized global rather than written
+//   by anyone, and a recycled slot is neither zero nor fresh -- the
+//   second use of one otherwise hands back a linear value no allocation
+//   produced (issue #369, demonstrated). The requirement is DOCUMENTED,
+//   not checked: type_inf.ml has the predicate
+//   (contains_stable_owner_value) but a static_assert cannot reach it,
+//   so nothing yet rejects the plain insert for such a T. That is what
+//   stands between this being a discipline and a guarantee.
 // - A CONSUMER MUST SUPPLY A LOCK BACKEND. This file names
 //   pool_lock_acquire/pool_lock_release without saying who provides them
 //   (issue #364), so a kernel consumer must have kernel/lib/pool_lock.tkb
@@ -1032,6 +1043,52 @@ fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id)
 // Always allocates from the head of the partial list, which by
 // construction has a free slot -- O(1), no search over chunks (GitHub
 // issue #346).
+// GitHub issue #369: the same allocation, with the payload's bytes
+// zeroed before the handle is returned.
+//
+// A T that contains STABLE OWNER STORAGE -- a `private` field whose type
+// is a linear variant, the one durable home a linear value has -- must be
+// allocated through this and not through intrusive_pool_insert. The
+// reason is that the language's empty state for such a field is
+// "declaration-order tag zero", inherited from a zero-initialized global
+// rather than written by anyone. A pool slot is neither zero-initialized
+// nor fresh: reuse it and the next stable_replace reads the previous
+// occupant's tag and hands back a linear value no allocation ever
+// produced. Demonstrated, not theorised -- see issue #369.
+//
+// It is a separate entry point rather than a change to insert because the
+// cost is only owed by types that hold linear handles. Everything else
+// keeps issue #356's contract exactly: a freshly allocated payload is
+// uninitialized, and this pool does not invent values for a T it knows
+// nothing about.
+//
+// The requirement is DOCUMENTED, not checked. The compiler has the
+// predicate -- type_inf.ml's contains_stable_owner_value -- but it is not
+// reachable from a static_assert, so nothing yet rejects allocating such
+// a T through the plain insert. Making it checked is what would let this
+// be a guarantee rather than a discipline; until then this comment and
+// issue #369 are the whole of the enforcement.
+fn intrusive_pool_insert_zeroed(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                                guard: borrow IntrusivePoolGuard[pool_id])
+        -> IntrusivePoolInsertResult[pool_id] !{unsafe} {
+    match intrusive_pool_insert(pool, guard) {
+        IntrusivePoolInsertResult::OutOfMemory => {
+            return IntrusivePoolInsertResult::OutOfMemory;
+        }
+        IntrusivePoolInsertResult::Allocated(owner) => {
+            let bytes: *u8 = unsafe {
+                (intrusive_owner_slot(owner)
+                 + offsetof(IntrusiveSlot(T), storage)) as *u8
+            };
+            let span: isize = sizeof(T) as isize;
+            for i: isize in 0..<span {
+                bytes[i] = 0;
+            }
+            return IntrusivePoolInsertResult::Allocated(owner);
+        }
+    }
+}
+
 fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                          guard: borrow IntrusivePoolGuard[pool_id])
         -> IntrusivePoolInsertResult[pool_id] !{unsafe} {

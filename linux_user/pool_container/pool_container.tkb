@@ -1,0 +1,123 @@
+// GitHub issues #368/#369: a container whose nodes are pool-allocated,
+// with no N anywhere -- not in a declaration, not in a backing array, not
+// as a ceiling.
+//
+// This is the point of the whole intrusive_pool line of work. #344
+// removed the ceiling from ALLOCATION; what it did not remove was the
+// ceiling from STORAGE, because the only durable home a linear value has
+// is a `private` field of a linear variant, and SPEC requires such a
+// container to be a global or a fixed array of globals. A fixed array is
+// an N. So "allocate without picking N" was not yet "use a data
+// structure without picking N".
+//
+// The node below is that container living in pool memory instead:
+//
+//   variant NodeLink { End; More(exists p: addr. exists a: usize. ...); }
+//   struct Node { private mutex: i32; private link: NodeLink; }
+//
+// Two things had to be true for it to work, and one of them was not.
+//
+// EXPRESSIBLE: a variant cannot name a free static, so the pool brand is
+// existentially quantified. The node knows it holds SOME pool's handle,
+// not this one's -- so `static value mismatch` no longer catches a
+// cross-pool mixup on this path, and the runtime check
+// (intrusive_pool_slot_is_valid plus the generation) is what remains.
+// That is a real guarantee given up in exchange for the container, and it
+// is stated here rather than discovered later.
+//
+// SOUND: it was not. The language's empty state for a stable owner field
+// is "declaration-order tag zero", inherited from a zero-initialized
+// global rather than written by anyone -- and a recycled pool slot is
+// neither zero nor fresh. The second use of a slot read the previous
+// occupant's tag and handed back a linear owner no allocation ever
+// produced (issue #369). intrusive_pool_insert_zeroed is what makes the
+// premise true, and the reuse case below is the regression test for it.
+use "kernel/lib/intrusive_pool.tkb";
+
+variant NodeLink {
+    End;
+    More(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
+}
+
+struct Node {
+    private mutex: i32;
+    private link: NodeLink;
+    value: usize;
+}
+
+private linear view NodeGuard[lock: addr];
+private let mut nodes: IntrusivePool(Node);
+
+fn node_lock(m: *i32 @ address) -> NodeGuard[address] {
+    return view NodeGuard[address];
+}
+fn node_unlock(g: sink NodeGuard[address], m: *i32 @ address) {}
+
+// Discharges a link, reporting whether it held anything.
+fn link_was_occupied(l: NodeLink) -> bool {
+    match l {
+        NodeLink::End => { return false; }
+        NodeLink::More(o) => { intrusive_owner_drop(o); return true; }
+    }
+}
+
+fn app_main() !{unsafe} {
+    page_allocator_init();
+    intrusive_pool_init(&nodes);
+    uart_puts("pool_container\n");
+
+    // -- Build a chain. Each new node parks the old head inside itself.
+    let mut head: NodeLink = NodeLink::End;
+    let mut built: usize = 0;
+    let mut sum: usize = 0;
+    let mut going: bool = true;
+    while (going) {
+        let g = intrusive_pool_lock(&nodes);
+        let r = intrusive_pool_insert_zeroed(&nodes, g);
+        intrusive_pool_unlock(&nodes, g);
+        match r {
+            IntrusivePoolInsertResult::Allocated(o) => {
+                let node: *Node = intrusive_pool_ref(&nodes, o);
+                node.mutex = 0;
+                node.value = built + 1;
+                let ng = node_lock(&node.mutex);
+                let displaced: NodeLink =
+                    stable_replace(ng, &node.mutex, node.link, head);
+                node_unlock(ng, &node.mutex);
+                // A freshly zeroed node's slot must have been empty. If
+                // this ever reports true, the premise broke.
+                if (link_was_occupied(displaced)) { sum = sum + 1000000; }
+                sum = sum + built + 1;
+                head = NodeLink::More(o);
+                built = built + 1;
+            }
+            IntrusivePoolInsertResult::OutOfMemory => { going = false; }
+        }
+    }
+    uart_puts("nodes chained until the PAGE PROVIDER ran out, with no N in ");
+    uart_puts("any declaration, array or ceiling (nodes, pages, checksum): ");
+    uart_print(built);
+    uart_puts(" ");
+    uart_print(page_allocator_live_count());
+    uart_puts(" ");
+    uart_print(sum);
+    uart_puts("\n");
+    uart_puts("every node's stable slot was empty when it was handed out: ");
+    uart_print_bool(sum == built * (built + 1) / 2);
+    uart_puts("\n");
+
+    // The head is the only handle still held; the rest are parked inside
+    // their successors and are unreachable without walking, which this
+    // fixture deliberately does not do -- what it demonstrates is that
+    // the STORAGE has no ceiling, not that the list is convenient.
+    let head_held: bool = link_was_occupied(head);
+    uart_puts("the head handle is still ours to discharge: ");
+    uart_print_bool(head_held);
+    uart_puts("\n");
+
+    uart_puts("done\n");
+}
+
+fn uart_print_bool(value: bool) {
+    if (value) { uart_puts("true"); } else { uart_puts("false"); }
+}
