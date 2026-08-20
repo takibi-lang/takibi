@@ -151,7 +151,21 @@
 //   growable_pool_remove (a freed-then-reused slot in the self-directed
 //   mode can still observe a previous occupant's stale content).
 use "kernel/lib/freelist.tkb";
-use "kernel/mm/page.tkb";
+// THE PAGE PROVIDER IS NOT NAMED HERE, DELIBERATELY (GitHub issues
+// #364/#366). This file names the symbols it needs -- PAGE_SIZE,
+// PageAllocResult, PageOwner, page_alloc, page_bytes,
+// page_physical_address, page_owner_transfer_index,
+// page_transferred_release_physical, page_allocator_live_count -- and
+// binds to whichever provider is on the compiler's file list. A kernel
+// build has kernel/mm/page.tkb there via five other files' `use` lines;
+// linux_user/growable_pool/ passes its own stand-in.
+//
+// This replaced a COPY. linux_user used to carry its own edition of this
+// file, and the two drifted 329 lines apart: the copy was still on the
+// pre-#314 `*T` pointer style, still carried issue-#15 workarounds, and
+// was missing GrowablePoolGrowResult's ChunkLimitReached case -- so the
+// suite that runs in seconds had quietly stopped describing the code
+// that ships, while passing the whole time.
 
 generic struct GrowablePool(T: type, SLOTS_PER_CHUNK: usize, MAX_CHUNKS: usize, N: usize) {
     core: FreelistCore(N);

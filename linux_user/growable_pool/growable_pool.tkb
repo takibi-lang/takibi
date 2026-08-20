@@ -47,7 +47,7 @@
 // first), same as every other freelist.tkb-backed pool in this codebase,
 // so which exact index a given insert receives is an implementation
 // detail this test does not pin down.
-use "linux_user/growable_pool/growable_pool_core.tkb";
+use "kernel/lib/growable_pool.tkb";
 
 fn app_main() {
     page_allocator_init();
@@ -206,12 +206,12 @@ fn app_main() {
     uart_print(growable_pool_active_chunks(&pool_d));
     uart_puts("\n");
 
-    if (growable_pool_ensure(&pool_d, 0) == false) {
+    if (ensure_ok(&pool_d, 0) == false) {
         uart_puts("pool_d ensure(0) failed\n");
         return;
     }
     let chunks_after_first_ensure: usize = growable_pool_active_chunks(&pool_d);
-    if (growable_pool_ensure(&pool_d, 1) == false) {
+    if (ensure_ok(&pool_d, 1) == false) {
         uart_puts("pool_d ensure(1) failed\n");
         return;
     }
@@ -219,7 +219,7 @@ fn app_main() {
     uart_print_bool(growable_pool_active_chunks(&pool_d) == chunks_after_first_ensure);
     uart_puts("\n");
 
-    if (growable_pool_ensure(&pool_d, 3) == false) {
+    if (ensure_ok(&pool_d, 3) == false) {
         uart_puts("pool_d ensure(3) failed\n");
         return;
     }
@@ -237,10 +237,20 @@ fn app_main() {
     uart_print_bool(pool_d_read0 == 111 && pool_d_read2 == 0 && pool_d_read3 == 333);
     uart_puts("\n");
 
-    uart_puts("pool_d ensure(index >= N) rejected without touching the ");
-    uart_puts("page provider: ");
+    // Named, not merely rejected: an index past N is IndexOutOfRange, and
+    // saying so distinguishes it from the pool's own chunk ceiling and
+    // from the provider running out -- three failures this file used to
+    // see as one `false` (issue #366, and the distinction #295 asked for).
+    uart_puts("pool_d ensure(index >= N) is rejected AS out-of-range, ");
+    uart_puts("without touching the page provider: ");
     let pages_before_pool_d_ceiling: usize = page_allocator_live_count();
-    let pool_d_ceiling_ok: bool = growable_pool_ensure(&pool_d, 6) == false;
+    let mut pool_d_ceiling_ok: bool = false;
+    match growable_pool_ensure(&pool_d, 6) {
+        GrowablePoolEnsureResult::IndexOutOfRange => { pool_d_ceiling_ok = true; }
+        GrowablePoolEnsureResult::ChunkLimitReached => {}
+        GrowablePoolEnsureResult::OutOfMemory => {}
+        GrowablePoolEnsureResult::Ok => {}
+    }
     uart_print_bool(
         pool_d_ceiling_ok && page_allocator_live_count() == pages_before_pool_d_ceiling);
     uart_puts("\n");
@@ -249,7 +259,7 @@ fn app_main() {
     // having been asked for the indices below it.
     let mut pool_e: GrowablePool(usize, 1, 3, 3);
     growable_pool_init(&pool_e);
-    if (growable_pool_ensure(&pool_e, 1) == false) {
+    if (ensure_ok(&pool_e, 1) == false) {
         uart_puts("pool_e ensure(1) failed\n");
         return;
     }
@@ -263,7 +273,7 @@ fn app_main() {
     let mut pool_f: GrowablePool(usize, 1, 3, 3);
     growable_pool_init(&pool_f);
     let pages_before_pool_f: usize = page_allocator_live_count();
-    if (growable_pool_ensure(&pool_f, 0) == false) {
+    if (ensure_ok(&pool_f, 0) == false) {
         uart_puts("pool_f ensure(0) failed\n");
         return;
     }
@@ -271,13 +281,44 @@ fn app_main() {
     uart_puts("exhausting the shared provider: ");
     uart_print_bool(page_allocator_live_count() == pages_before_pool_f + 1);
     uart_puts("\n");
-    let pool_f_ensure_1: bool = growable_pool_ensure(&pool_f, 1);
-    uart_puts("pool_f ensure(1) hit the underlying page provider's ");
-    uart_puts("ceiling, not its own (own chunks used < own MAX_CHUNKS): ");
-    uart_print_bool(pool_f_ensure_1 == false && growable_pool_active_chunks(&pool_f) < 3);
+    // This is the assertion the old copy could not make. It wanted to say
+    // "the PROVIDER ran out, not this pool's own ceiling", and had to
+    // infer it from a bare false plus a chunk count. The variant says it.
+    let mut pool_f_provider_ran_out: bool = false;
+    let mut pool_f_own_ceiling: bool = false;
+    match growable_pool_ensure(&pool_f, 1) {
+        GrowablePoolEnsureResult::OutOfMemory => { pool_f_provider_ran_out = true; }
+        GrowablePoolEnsureResult::ChunkLimitReached => { pool_f_own_ceiling = true; }
+        GrowablePoolEnsureResult::IndexOutOfRange => {}
+        GrowablePoolEnsureResult::Ok => {}
+    }
+    uart_puts("pool_f ensure(1) reports the PROVIDER out of memory, not ");
+    uart_puts("its own chunk ceiling (provider, own ceiling, chunks < MAX): ");
+    uart_print_bool(pool_f_provider_ran_out);
+    uart_puts(" ");
+    uart_print_bool(pool_f_own_ceiling);
+    uart_puts(" ");
+    uart_print_bool(growable_pool_active_chunks(&pool_f) < 3);
     uart_puts("\n");
 
     uart_puts("done\n");
+}
+
+// GitHub issue #366: growable_pool_ensure returns a four-case variant --
+// IndexOutOfRange, ChunkLimitReached, OutOfMemory, Ok -- and this file
+// used to compare it against `false`, because the copy of the library it
+// tested predated the distinction. Three of those four collapse into
+// "not Ok" only at the sites where anything but success means the test
+// itself is broken; the sites BELOW that are about which failure it is
+// now say so.
+fn ensure_ok(pool: &mut GrowablePool(usize, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+             index: usize) -> bool {
+    match growable_pool_ensure(pool, index) {
+        GrowablePoolEnsureResult::Ok => { return true; }
+        GrowablePoolEnsureResult::IndexOutOfRange => { return false; }
+        GrowablePoolEnsureResult::ChunkLimitReached => { return false; }
+        GrowablePoolEnsureResult::OutOfMemory => { return false; }
+    }
 }
 
 fn uart_print_bool(value: bool) {

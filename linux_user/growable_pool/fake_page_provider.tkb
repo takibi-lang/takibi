@@ -181,6 +181,21 @@ fn page_transferred_release_physical(physical: usize) !{unsafe} {
     fake_page_live = fake_page_live - 1;
 }
 
+// Mirrors kernel/mm/page.tkb's page_bytes: the page's own storage as a
+// length-refined slice branded to the page it came from, so a caller
+// cannot pass one page's owner and another page's bytes.
+fn page_bytes(owner: borrow PageOwner[page]) -> [u8; PAGE_SIZE..] @ page !{unsafe} {
+    let base_address: usize = (fake_pages as *u8) as usize;
+    let address: usize = base_address + owner.index * PAGE_SIZE;
+    let base: *u8 = unsafe { address as *u8 };
+    // Bare literals rather than `PAGE_SIZE as isize`, for the reason
+    // page.tkb's own copy gives: a Cast node defeats Const_env's folding
+    // and the result decays to an unrefined []u8. Must stay numerically
+    // equal to PAGE_SIZE.
+    let bytes: [u8; PAGE_SIZE..] = unsafe { base[0..<4096] };
+    return bytes;
+}
+
 fn page_allocator_live_count() -> usize {
     return fake_page_live;
 }

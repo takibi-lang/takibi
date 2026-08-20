@@ -13,8 +13,8 @@ pool_d chunks active before first ensure (want 0): 0
 pool_d ensure(1) after ensure(0) grows nothing new (idempotent): true
 pool_d chunks active after crossing a chunk boundary (want 2): 2
 pool_d cross-chunk values distinct, and slot 2 (never written, same fresh chunk as slot 3) reads back zeroed: true
-pool_d ensure(index >= N) rejected without touching the page provider: true
+pool_d ensure(index >= N) is rejected AS out-of-range, without touching the page provider: true
 pool_e chunks active after ensure(1) alone (want 2): 2
 pool_f ensure(0) consumed exactly one more page, now fully exhausting the shared provider: true
-pool_f ensure(1) hit the underlying page provider's ceiling, not its own (own chunks used < own MAX_CHUNKS): true
+pool_f ensure(1) reports the PROVIDER out of memory, not its own chunk ceiling (provider, own ceiling, chunks < MAX): true false true
 done

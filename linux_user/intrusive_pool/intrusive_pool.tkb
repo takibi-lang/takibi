@@ -53,7 +53,7 @@
 // "Current limitations") + pool_u 1 + pool_x whatever is left, for
 // exactly the provider's 9.
 use "linux_user/intrusive_pool/intrusive_pool_core.tkb";
-use "linux_user/growable_pool/growable_pool_core.tkb";
+use "kernel/lib/growable_pool.tkb";
 
 // 1960 bytes of payload -> a 1968-byte slot -> 2 slots per page. Big
 // enough that a chunk boundary is crossed after two inserts instead of
