@@ -234,10 +234,25 @@
 // Current limitations (2026-08-17). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
-// - NOT SYNCHRONIZED, the same caveat kernel/lib/freelist.tkb, slotmap.tkb
-//   and growable_pool.tkb all carry: no locking of its own. Safe only for
-//   a single execution context, which is a fact about callers, not
-//   something this file enforces.
+// - Mutation requires this pool's guard, and that is enforced rather than
+//   asked for (issue #351): insert, remove and reclaim take `borrow
+//   IntrusivePoolGuard[pool_id]`, obtainable only from
+//   intrusive_pool_lock on the same pool. What the guard does NOT yet do
+//   is exclude: intrusive_pool_lock's body is empty in this prototype,
+//   as kernel/kernel/process.tkb's ScheduledProcessGuard's still is, so
+//   the discipline is proven and the exclusion is the port's to supply
+//   (disable_irq on one core; a real acquire for SMP). Nothing else in
+//   this file changes when it does.
+// - READS are not guarded. A caller that reads while another context
+//   mutates -- a cursor walk racing an insert, a counter racing a
+//   reclaim -- must hold the guard across both, and this file cannot
+//   make it. Guarding the observers too was tried and rejected: it costs
+//   every caller a release on every early-return path, for a race the
+//   mutation guard already makes impossible to reach WITHOUT a
+//   deliberate concurrent reader. Revisit when there is one.
+// - The guard is not re-entrant. Acquiring twice on one path is a
+//   deadlock under a real lock and is not diagnosed here, because
+//   nothing ties the second acquire to the first.
 // - Reclaim holds back up to `retained_chunks` fully-empty chunks per
 //   pool and returns every later one, so steady-state memory is
 //   `ceil(live / slots_per_chunk)` pages plus that reserve. It defaults
@@ -494,6 +509,72 @@ fn intrusive_owner_drop(owner: sink IntrusiveOwner[pool_id, allocation]) {}
 
 // Retains one empty chunk, which is the anti-thrash default issue #346
 // argued for and what every existing caller expects.
+// -- Mutual exclusion -------------------------------------------------
+// GitHub issue #351. Every pool primitive in this tree carries a "NOT
+// SYNCHRONIZED" caveat in a comment, and a comment is exactly the wrong
+// place for it: the failure mode is a library that works by accident
+// until a caller who is not single-context adopts it, and here a
+// corrupted free chain is a wild pointer rather than a wrong index.
+//
+// So the guard is a TYPE, not a note. Every entry point that reads or
+// writes this pool's own state takes `borrow IntrusivePoolGuard[pool_id]`,
+// and the only way to obtain one is intrusive_pool_lock on THIS pool.
+// Calling unguarded is a missing argument; calling with another pool's
+// guard is a static value mismatch. Both are compile errors.
+//
+// The guard is an erased view, so it costs nothing at runtime -- it is
+// the same mechanism SPEC.md's MutexGuard uses, and the same one
+// kernel/kernel/process.tkb's ScheduledProcessGuard already uses for the
+// process table.
+//
+// WHAT THIS PROVES, AND WHAT IT DOES NOT
+//
+// It proves the DISCIPLINE: no path reaches pool state without having
+// acquired, and every acquire is released exactly once on every path,
+// because the view is linear. It does not by itself provide mutual
+// EXCLUSION -- that is whatever intrusive_pool_lock's body does, and in
+// this prototype the body is empty, exactly as ScheduledProcessGuard's
+// is today. Porting has to fill it in, and the honest bar is that
+// nothing else in this file needs to change when it does.
+//
+// USABLE FROM AN INTERRUPT HANDLER, DELIBERATELY
+//
+// The kernel's exclusion primitive on one core is DAIF.I masking
+// (kernel/arch/arm64/boot/cpu.tkb's disable_irq/enable_irq), which is
+// what intrusive_pool_lock should become there. That flavour of lock is
+// safe to take from BOTH thread and interrupt context -- Linux's
+// spin_lock_irqsave -- so this pool composes with `!{interrupt}` rather
+// than being excluded from it.
+//
+// That is the choice, and the alternative is worth naming because the
+// compiler would have enforced it for free: marking intrusive_pool_lock
+// `!{may_block}` would make every `!{interrupt}` handler that reaches it
+// a compile error, since SPEC.md's effect rules say an `interrupt` root's
+// reachable call graph must not contain `may_block`. That is the right
+// answer for a SLEEPING lock and the wrong one here, because this issue
+// exists precisely to unblock adoption in interrupt-reachable paths. A
+// lock that cannot be taken from an interrupt handler would have to be
+// taken with interrupts already masked by the caller, which is the same
+// masking one layer up and one place easier to forget.
+private linear view IntrusivePoolGuard[pool_id: addr];
+
+// Acquires this pool. The body is where a port puts disable_irq() (single
+// core) or a real spinlock acquire (SMP); it is empty here because
+// linux_user has neither, and because what this prototype is testing is
+// that no caller can skip the acquire.
+//
+// Deliberately NOT `!{may_block}`: see above.
+fn intrusive_pool_lock(T: type, pool: &mut IntrusivePool(T) @ pool_id)
+        -> IntrusivePoolGuard[pool_id] {
+    return view IntrusivePoolGuard[pool_id];
+}
+
+// Releases it. Linear, so forgetting this is a compile error on every
+// path, including early returns -- which is the half of lock discipline
+// that review comments are worst at catching.
+fn intrusive_pool_unlock(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                         guard: sink IntrusivePoolGuard[pool_id]) {}
+
 fn intrusive_pool_init(T: type, pool: &mut IntrusivePool(T) @ pool_id) {
     intrusive_pool_init_retaining(pool, 1);
 }
@@ -885,7 +966,8 @@ fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id)
 // Always allocates from the head of the partial list, which by
 // construction has a free slot -- O(1), no search over chunks (GitHub
 // issue #346).
-fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id)
+fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                         guard: borrow IntrusivePoolGuard[pool_id])
         -> IntrusivePoolInsertResult[pool_id] !{unsafe} {
     if (pool.partial_head == 0) {
         match intrusive_pool_grow_one_chunk(pool) {
@@ -982,6 +1064,7 @@ fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id)
 // distinction kernel/lib/slotmap.tkb's slotmap_remove draws, plus the
 // cross-pool case slotmap has no way to see.
 fn intrusive_pool_remove(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                         guard: borrow IntrusivePoolGuard[pool_id],
                          owner: sink IntrusiveOwner[pool_id, allocation]) !{unsafe} {
     let slot_address: usize = intrusive_owner_slot(owner);
     let generation: usize = intrusive_owner_generation(owner);
@@ -1442,7 +1525,8 @@ fn intrusive_chunk_free_chain_length(T: type, pool: &mut IntrusivePool(T) @ pool
 // intrusive_pool_reclaim on each by name. That is a list at the call
 // site, checked by the compiler, with every brand intact -- strictly
 // better than a runtime registry, and it is why this file stops here.
-fn intrusive_pool_reclaim(T: type, pool: &mut IntrusivePool(T) @ pool_id)
+fn intrusive_pool_reclaim(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                          guard: borrow IntrusivePoolGuard[pool_id])
         -> usize !{unsafe} {
     let released_before: usize = pool.released_chunk_count;
     let mut cursor: usize = pool.chunk_head;
