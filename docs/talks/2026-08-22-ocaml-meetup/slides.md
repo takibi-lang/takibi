@@ -60,11 +60,11 @@ xxx Add figure
 
 AI agent / development host
 <br>&lt;-&gt; JTAG/SWD + UART + Ethernet<br>
-STM32F746 / Raspberry Pi 5 / QEMU-AArch64
+Raspberry Pi 5 (QEMU-AArch64)
 
 </div>
 
-Let the AI debug Raspberry Pi and STM32 directly over **JTAG/SWD**.
+Let the AI to debug Raspberry Pi directly over **JTAG/SWD**.
 
 ---
 
@@ -80,24 +80,14 @@ Let the AI debug Raspberry Pi and STM32 directly over **JTAG/SWD**.
 
 # The kernel is the language-design workload
 
-```text
-xxx Add figure
+<style scoped>
+img {
+  display: block;
+  margin: 0 auto;
+}
+</style>
 
-AI implements a real kernel path
-             |
-             v
-Repeated .tkb patterns expose missing guarantees
-             |
-             v
-The OCaml compiler learns a checked abstraction
-             |
-             v
-The next kernel path becomes safer and simpler
-```
-
-Takibi types do not stop at memory ownership.
-
-They represent **authority, identity, state, and mandatory transitions**.
+![w:950](kernel-learning-loop.svg)
 
 ---
 
@@ -203,149 +193,6 @@ let packet = net_rx_frame(frame);
 let ready = net_rx_release(frame);
 parse(packet); // compile error
 ```
-
----
-
-# C technique: who owns a mapped page now?
-
-```c
-page = alloc_page();
-install_pte(process, page);
-
-/* Does the allocator still own it? */
-/* Does the page table own it? */
-/* Who decrements the COW reference? */
-```
-
-An integer address does not encode lifecycle responsibility.
-
-Comments must define the handoff, and every failure path must reproduce it.
-
----
-
-# Takibi technique 3: transfer page ownership into a mapping
-
-```rust
-fn page_mapping_install(owner: sink PageOwner[page]);
-```
-
-```text
-exclusive PageOwner[page]
-           |
-           | install PTE; consume owner
-           v
-page-table mapping reference + map_refcount
-```
-
-After installation, the caller cannot keep using `PageOwner[page]`.
-
-> A lifecycle boundary becomes an ownership transfer in the signature.
-
----
-
-# Copy-on-write failure is not one boolean
-
-```rust
-must_use variant PageMappingRetainResult {
-  NotMapped;
-  RefCeilingReached;
-  Retained;
-}
-```
-
-| Result | Meaning |
-|---|---|
-| `NotMapped` | Possible broken kernel invariant |
-| `RefCeilingReached` | Defined resource limit |
-| `Retained` | COW mapping reference acquired |
-
-`must_use` makes ignoring the distinction a compile error.
-
----
-
-# C technique: trust a syscall pointer too early
-
-Userspace supplies only numbers:
-
-```c
-uintptr_t address;
-size_t length;
-```
-
-A cast can turn them into a kernel pointer before proving:
-
-- the range belongs to the calling address space;
-- every page exists;
-- overflow and window bounds are safe;
-- the requested read or write permission is present.
-
-Validation becomes a convention repeated by syscall handlers.
-
----
-
-# Takibi technique 4: validate first, then obtain a type
-
-```rust
-must_use variant UserReadRangeResult {
-  Fault;
-  Ok(UserReadRange);
-}
-
-must_use variant UserWriteRangeResult {
-  Fault;
-  Ok(UserWriteRange);
-}
-```
-
-Only a validated value can enter the copy API:
-
-```rust
-fn copy_from_user(range: UserReadRange, destination: []u8);
-fn copy_to_user(range: UserWriteRange, source: []u8);
-```
-
----
-
-# Read and write authority are different types
-
-```rust
-copy_to_user(read_validated_range, data);
-// compile error: UserReadRange is not UserWriteRange
-```
-
-This prevents a real class of direction mismatch that a runtime mode once
-allowed.
-
-```text
-UserWriteRange
-      |
-      | explicit downgrade
-      v
-UserReadRange
-```
-
-There is no conversion in the other direction.
-
----
-
-# A validated range is a proof-carrying value
-
-```rust
-struct UserWriteRange {
-  private root: AddressSpaceRoot;
-  private address: usize;
-  private length: usize;
-}
-```
-
-Its existence means:
-
-- the correct process page table was checked;
-- every page is present and writable, or resolvable through COW;
-- `address + length` cannot overflow;
-- the range stays inside the userspace window.
-
-Syscall bodies reuse the proof instead of reimplementing validation.
 
 ---
 
