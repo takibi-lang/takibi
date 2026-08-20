@@ -323,12 +323,34 @@
 //   in-page header used to cost at page-dividing strides, and what makes
 //   address-to-chunk O(1).
 //
-// Prototyped against linux_user/growable_pool/fake_page_provider.tkb, the
-// same small fake page_alloc() stand-in issue #26's own prototype used, so
-// that porting this file to kernel/lib/ needs only the `use` line below
-// swapped for "kernel/mm/page.tkb" -- exactly how growable_pool_core.tkb
-// became kernel/lib/growable_pool.tkb.
-use "linux_user/growable_pool/fake_page_provider.tkb";
+// THE PAGE PROVIDER IS NOT NAMED HERE, DELIBERATELY (GitHub issue #364)
+//
+// This file `use`s no provider. It names the nine symbols it needs and
+// binds to whichever provider is on the compiler's file list:
+//
+//   PAGE_SIZE  PAGE_META_WORDS  PageAllocResult  PageOwner
+//   page_alloc  page_physical_address  page_owner_transfer_index
+//   page_transferred_release_physical  page_meta_at
+//
+// linux_user passes linux_user/growable_pool/fake_page_provider.tkb; a
+// kernel build passes kernel/mm/page.tkb once that file grows page_meta_at
+// and PAGE_META_WORDS (issue #353). One source, two providers, and
+// nothing to keep in sync.
+//
+// The alternative -- copy the file on promotion, as growable_pool was --
+// is what this avoids, and the evidence is that growable_pool's two
+// copies now differ by 329 lines of code: its linux_user half is still on
+// the pre-#314 `*T` style, still carries issue-#15 workarounds, and is
+// missing a variant case, while passing its tests the whole time. A
+// prototype that has quietly stopped describing what ships is worse than
+// no prototype.
+//
+// ORDER MATTERS: the provider must appear BEFORE this file on the
+// command line, because constants resolve as the parser walks the list
+// left to right. Reversed, the build stops at the first array size or
+// static_assert naming PAGE_SIZE -- loudly, and pointing at the
+// constant, which is why this is a build-file convention rather than a
+// hazard.
 
 // One per chunk, living in the page provider's per-page metadata (GitHub
 // issue #349) -- never at offset 0 of the chunk's own page, and never in a

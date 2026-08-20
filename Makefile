@@ -159,7 +159,7 @@ COMMON_LINUX_PRINT_BASE  := $(LINUX_USER_DIR)/common/print.tkb $(LINUX_USER_DIR)
 # adding new linux_user/ tests for a new algorithm or data structure.
 LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump percpu page_pool \
                              freelist_pool freelist_generic slotmap refcount_slotmap growable_pool \
-                             intrusive_pool page_run \
+                             intrusive_pool intrusive_pool_portable page_run \
                              hello print_int print_hex print_ptr mem array struct struct_refined \
                              nonexhaustive refined narrow enum align packed struct_align const_global \
                              sizeof_offsetof int64 bitops indexed_view tcp_conn_view \
@@ -231,6 +231,11 @@ $(LINUX_USER_DIR)/growable_pool/growable_pool_exe.o: kernel/lib/freelist.tkb ker
 # static-footprint comparison (it `use`s growable_pool_core.tkb too, purely
 # to take sizeof of a GrowablePool holding the same object count) a
 # like-for-like one.
+# intrusive_pool_core.tkb names no provider (issue #364), so the stand-in
+# is supplied here and must precede it.
+$(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
+$(LINUX_USER_DIR)/intrusive_pool_portable/intrusive_pool_portable_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
+$(LINUX_USER_DIR)/intrusive_pool_portable/intrusive_pool_portable_exe.o: kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_core.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
 $(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_exe.o: kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_core.tkb $(LINUX_USER_DIR)/growable_pool/growable_pool_core.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
 # GitHub issue #363: the contiguous-run allocator lives in the same fake
 # provider both pool prototypes draw from, so this exerciser shares it
@@ -255,8 +260,15 @@ $(COMMON_LINUX_SYSCALL_O): $(COMMON_LINUX_SYSCALL_S) | $(LINUX_USER_BUILD_DIR)
 # Every linux_user test only ever needs the same minimal uart+print HAL --
 # unlike examples/'s many hardware-HAL groupings, there is no MMIO/interrupt
 # surface here to vary by test.
+# GitHub issue #364: LINUX_USER_EXTRA_SRCS lets a test name sources that
+# must be compiled BEFORE its own, which is how a provider-agnostic
+# library binds to a stand-in here and to the real thing in a kernel
+# build. The ordering is the whole point -- constants resolve as the
+# parser walks the list left to right -- so these go ahead of `$<`.
+LINUX_USER_EXTRA_SRCS :=
+
 $(LINUX_USER_DIR)/%_exe.o: $(LINUX_USER_DIR)/%.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE) $(TAKIBI)
-	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $< --target $(LINUX_AMD64_TARGET) -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(LINUX_USER_EXTRA_SRCS) $< --target $(LINUX_AMD64_TARGET) -o $@ --forbid-trap
 
 $(LINUX_USER_DIR)/%.exe: $(LINUX_USER_DIR)/%_exe.o $(COMMON_LINUX_STARTUP_O) $(COMMON_LINUX_SYSCALL_O)
 	$(LLD) -static -nostdlib -e _start $^ -o $@

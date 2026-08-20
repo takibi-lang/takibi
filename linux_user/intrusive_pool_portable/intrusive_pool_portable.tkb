@@ -1,0 +1,65 @@
+// GitHub issue #364: intrusive_pool_core.tkb names NO page provider. It
+// binds to whichever one is on the compiler's file list, which is what
+// lets the same source serve a kernel build and this suite once it moves
+// to kernel/lib/ -- rather than being copied and left to rot, as
+// growable_pool's own linux_user half was (329 lines of drift, still on
+// the pre-#314 pointer style, passing its tests the whole time).
+//
+// This exerciser exists to keep that wiring honest. It deliberately does
+// NOT `use` growable_pool_core.tkb, so the provider cannot arrive by
+// inheritance through some other file's `use` chain: it is supplied by
+// the Makefile, ahead of the pool, and if that line is ever dropped this
+// test stops compiling rather than silently falling back.
+//
+// Kept small on purpose. What it proves is the binding, not the pool --
+// intrusive_pool/ is where the behaviour is exercised.
+use "linux_user/intrusive_pool/intrusive_pool_core.tkb";
+
+struct Payload { a: usize; b: usize; }
+
+fn app_main() !{unsafe} {
+    page_allocator_init();
+    uart_puts("intrusive_pool_portable\n");
+
+    let mut pool: IntrusivePool(Payload);
+    intrusive_pool_init(&pool);
+
+    // Layout comes from the provider's PAGE_SIZE, so this number is only
+    // right if the pool really did bind to the provider on the file list.
+    uart_puts("slots per chunk, from the provider's own PAGE_SIZE: ");
+    uart_print(intrusive_pool_slots_per_chunk(&pool));
+    uart_puts("\n");
+
+    let g = intrusive_pool_lock(&pool);
+    let r = intrusive_pool_insert(&pool, g);
+    intrusive_pool_unlock(&pool, g);
+    match r {
+        IntrusivePoolInsertResult::Allocated(o) => {
+            intrusive_pool_ref(&pool, o).a = 7;
+            intrusive_pool_ref(&pool, o).b = 9;
+            uart_puts("allocate, write and read back through the bound ");
+            uart_puts("provider (values, pages taken): ");
+            uart_print_bool(intrusive_pool_ref(&pool, o).a == 7 &&
+                            intrusive_pool_ref(&pool, o).b == 9);
+            uart_puts(" ");
+            uart_print(page_allocator_live_count());
+            uart_puts("\n");
+            let g2 = intrusive_pool_lock(&pool);
+            intrusive_pool_remove(&pool, g2, o);
+            intrusive_pool_unlock(&pool, g2);
+        }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("insert failed\n");
+            return;
+        }
+    }
+
+    uart_puts("the pool's own invariants hold under this provider too: ");
+    uart_print_bool(intrusive_pool_probe(&pool));
+    uart_puts("\n");
+    uart_puts("done\n");
+}
+
+fn uart_print_bool(value: bool) {
+    if (value) { uart_puts("true"); } else { uart_puts("false"); }
+}
