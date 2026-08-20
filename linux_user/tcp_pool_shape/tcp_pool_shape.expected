@@ -1,10 +1,11 @@
 tcp_pool_shape
 slots per chunk (TcpConnection, NetFrame, RetxEntry): 29 2 41
-connections built with no N in any declaration, array or ceiling (connections, pages, conn/frame/retx live): 7 9 8 14 7
+connections built with no N in any declaration, array or ceiling (connections, pages, conn/frame/retx live): 6 9 7 14 8
+one connection carries a retransmit chain longer than one, so the walk that replaces PENDING_TCP_MAX is exercised: true
 more live connections than the old ceiling of 2: true
 every stable slot was empty when it was handed out: true
 every transmit frame reached its retransmit entry by handle, not by copy: true
-teardown by scanning, no array and no side chain (conns, frames, retx entries freed): 8 14 7
+teardown by scanning, no array and no side chain (conns, frames, retx entries freed): 7 14 8
 every pool is empty: true
 pages still held after teardown, and retained chunks (pages, conns, frames, retxs): 3 1 1 1
 a cross-pool handle the erased brand cannot catch is refused at runtime: true

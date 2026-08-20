@@ -181,6 +181,67 @@ fn free_retx_chain(head: RetxLink) -> (usize, usize) !{unsafe} {
     return (entries, freed_frames);
 }
 
+// Splice one more entry onto the head of a connection's retransmit chain.
+// PENDING_TCP_MAX is 4 today, so a chain of one would leave the iteration
+// that replaces it -- free_retx_chain()'s walk, and the entry-to-entry
+// `next` link it follows -- never actually exercised.
+fn push_retx(conn: *TcpConnection) -> bool !{unsafe} {
+    let fg = intrusive_pool_lock(&frames);
+    let fr = intrusive_pool_insert_zeroed(&frames, fg);
+    intrusive_pool_unlock(&frames, fg);
+    match fr {
+        IntrusivePoolInsertResult::OutOfMemory => { return false; }
+        IntrusivePoolInsertResult::Allocated(frame_owner) => {
+            let rg = intrusive_pool_lock(&retxs);
+            let rr = intrusive_pool_insert_zeroed(&retxs, rg);
+            intrusive_pool_unlock(&retxs, rg);
+            match rr {
+                IntrusivePoolInsertResult::OutOfMemory => {
+                    intrusive_owner_drop(frame_owner);
+                    return false;
+                }
+                IntrusivePoolInsertResult::Allocated(entry_owner) => {
+                    let e: *RetxEntry = intrusive_pool_ref(&retxs, entry_owner);
+                    e.mutex = 0;
+                    e.kind = 2;
+                    e.expected_ack = 2000;
+                    e.sent_at = 0;
+                    e.retries = 0;
+                    let g1 = slot_lock(&e.mutex);
+                    let d1: FrameLink = stable_replace(
+                        g1, &e.mutex, e.frame, FrameLink::Some(frame_owner));
+                    slot_unlock(g1, &e.mutex);
+                    if (frame_link_occupied(d1)) {
+                        intrusive_owner_drop(entry_owner);
+                        return false;
+                    }
+                    // Splice: entry.next takes the old head, then the
+                    // connection points at the entry.
+                    let g2 = slot_lock(&conn.mutex);
+                    let old_head: RetxLink = stable_replace(
+                        g2, &conn.mutex, conn.retx, RetxLink::End);
+                    slot_unlock(g2, &conn.mutex);
+                    let e2: *RetxEntry = intrusive_pool_ref(&retxs, entry_owner);
+                    let g3 = slot_lock(&e2.mutex);
+                    let d3: RetxLink =
+                        stable_replace(g3, &e2.mutex, e2.next, old_head);
+                    slot_unlock(g3, &e2.mutex);
+                    if (retx_link_occupied(d3)) {
+                        intrusive_owner_drop(entry_owner);
+                        return false;
+                    }
+                    let g4 = slot_lock(&conn.mutex);
+                    let d4: RetxLink = stable_replace(
+                        g4, &conn.mutex, conn.retx, RetxLink::More(entry_owner));
+                    slot_unlock(g4, &conn.mutex);
+                    if (retx_link_occupied(d4)) { return false; }
+                    return true;
+                }
+            }
+        }
+    }
+}
+
 fn uart_print_bool(value: bool) {
     if (value) { uart_puts("true"); } else { uart_puts("false"); }
 }
@@ -211,6 +272,7 @@ fn app_main() !{unsafe} {
     let mut built: usize = 0;
     let mut stale_slots: usize = 0;
     let mut moved_frames: usize = 0;
+    let mut chain_extended: usize = 0;
     let mut going: bool = true;
     while (going) {
         let cg = intrusive_pool_lock(&conns);
@@ -323,6 +385,18 @@ fn app_main() !{unsafe} {
                                             stale_slots = stale_slots + 1;
                                         }
                                         built = built + 1;
+                                        // Done on the first connection,
+                                        // while capacity is plentiful --
+                                        // the loop below runs the page
+                                        // provider dry on purpose.
+                                        if (built == 1) {
+                                            if (push_retx(conn)) {
+                                                chain_extended = chain_extended + 1;
+                                            }
+                                            if (push_retx(conn)) {
+                                                chain_extended = chain_extended + 1;
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -348,6 +422,11 @@ fn app_main() !{unsafe} {
     uart_puts("\n");
 
     // The claim TCP_CONNECTION_MAX = 2 exists to deny.
+    uart_puts("one connection carries a retransmit chain longer than one, ");
+    uart_puts("so the walk that replaces PENDING_TCP_MAX is exercised: ");
+    uart_print_bool(chain_extended == 2);
+    uart_puts("\n");
+
     uart_puts("more live connections than the old ceiling of 2: ");
     uart_print_bool(built > 2);
     uart_puts("\n");
