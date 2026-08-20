@@ -10149,6 +10149,61 @@ let codegen_tests = [
           return s.len;
         }");
 
+  (* GitHub issue #372: the length evidence a slice cast needs is the
+     SOURCE PLACE's declared array type, and a struct field has one just as
+     a binding does. Motivated by issue #257's NetFrame: a pooled payload is
+     only ever reached as `*T`, so a field is the only place its buffer can
+     live, and without this the whole pool-of-buffers shape needs `unsafe`
+     for evidence the compiler already holds. Three shapes, because they
+     take three different paths through gen_field_access: a value struct, a
+     pointer to one, and an array element's field. *)
+  Alcotest.test_case
+    "an array-typed struct field is a slice source: value struct, through \
+     a pointer, and an array element's field (issue #372)" `Quick
+    (expect_trap_sites 0
+       "struct Ftp372 { ip: [u8; 4]; port: u16; }
+        let mut ftp372_one: Ftp372;
+        let mut ftp372_many: [Ftp372; 3];
+        let mut ftp372_src: [u8; 4];
+        fn ftp372_via_ptr(p: *Ftp372) -> usize {
+          return slice_copy(p.ip as []u8, ftp372_src as []u8);
+        }
+        fn ftp372_all(i: {0..<3 as usize}) -> usize {
+          let a: usize = slice_copy(ftp372_one.ip as []u8, ftp372_src as []u8);
+          let b: usize = slice_copy(ftp372_many[i].ip as []u8, ftp372_src as []u8);
+          return a + b + ftp372_via_ptr(&ftp372_one);
+        }");
+
+  Alcotest.test_case
+    "an array-typed struct field's slice carries the field's own declared \
+     length as its minimum, so a shorter field is rejected against a \
+     required minimum (issue #372)" `Quick
+    (fun () ->
+       expect_codegen_ok
+         "struct Ftp372b { two: [u8; 2]; four: [u8; 4]; }
+          let mut ftp372b_s: Ftp372b;
+          fn ftp372b_ok() -> u8 {
+            let f: [u8; 4..] = ftp372b_s.four as [u8; 4..];
+            return f[3];
+          }" ();
+       expect_type_error "array is shorter than the required minimum"
+         "struct Ftp372c { two: [u8; 2]; }
+          let mut ftp372c_s: Ftp372c;
+          fn ftp372c_bad() -> [u8; 4..] {
+            return ftp372c_s.two as [u8; 4..];
+          }" ());
+
+  Alcotest.test_case
+    "a struct field that is not an array is still not a slice source, and \
+     the error still names the unsafe escape hatch (issue #372)" `Quick
+    (expect_type_error "carries no length evidence"
+       "struct Ftp372d { n: usize; }
+        let mut ftp372d_s: Ftp372d;
+        fn ftp372d_bad() -> usize {
+          let s = ftp372d_s.n as []u8;
+          return s.len;
+        }");
+
   (* -- P4a: interval extensions + same-base subslice rule ---------------- *)
 
   Alcotest.test_case

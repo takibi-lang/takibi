@@ -1692,8 +1692,14 @@ type's own `N` is a compile-time-proven *lower bound* on that runtime
 length, not the exact length.
 
 **Creation**:
-- `arr as []T` / `arr as [T; N..]` -- from an array variable; the
-  array's static size becomes the slice's minimum.
+- `arr as []T` / `arr as [T; N..]` -- from an array-typed **place**; the
+  array's static size becomes the slice's minimum. A place is a variable,
+  or (GitHub issue #372) a struct field of array type, reached through a
+  pointer (`frame.bytes`), a value struct (`one.remote_ip`), or an array
+  element (`conns[i].remote_ip`). A field carries the same static length
+  a binding does, which is what makes a pooled buffer -- whose payload
+  has no variable to name it, only a `*T` from the pool -- usable without
+  `unsafe`.
 - `s[a..<b]` on a slice or array -- subslice. When `a`/`b` are provably
   in range (constant bounds, including checked `+`/`-`/`*`/`/` expressions
   over literals and `const` names, or a proven `{lo..<hi}` range, including the
@@ -1730,9 +1736,9 @@ length, not the exact length.
   check / this specific cast just can't be proven target-independently).
 
   **The bridge is one-way.** A bare `*T` carries no length evidence, so
-  `p as []T` for a raw pointer `p` is a compile error -- only an array
-  variable, a string literal, or an existing slice can become a slice
-  (see the three forms above). If a length is known some other way,
+  `p as []T` for a raw pointer `p` is a compile error -- only an
+  array-typed place (variable or struct field), a string literal, or an
+  existing slice can become a slice (see the forms above). If a length is known some other way,
   `unsafe { p[lo..<hi] }` is the escape hatch, same as any other raw-
   pointer slice construction.
 

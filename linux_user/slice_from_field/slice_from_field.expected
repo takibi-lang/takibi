@@ -1,0 +1,10 @@
+slice_from_field
+a frame written through *NetFrame reads back its own bytes (first, last, len): 100 107 8
+two pooled frames are distinct storage: true
+a subslice of a field slice writes at its offset, not at 0 (copied, [1], [2], [5], [6]): 4 101 69 173 106
+each array element's field is its own storage (len, conns[2].remote_ip): 4 20 21 22 23 
+slice_eq over two element fields separates them: true
+a field of a field is a place too (len, [0], [3]): 64 1 4
+a sibling field is undisturbed by the nested write: true
+the slice's minimum is the field's own declared length: true
+done

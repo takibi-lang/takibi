@@ -3436,9 +3436,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 (* slice -> slice: min-length relaxation is a no-op on the value *)
                 (TypeSlice (el, m), v)
             | _ ->
-                (* array variable -> slice: gen_expr already decayed the value
+                (* array place -> slice: gen_expr already decayed the value
                    to an elem-0 pointer (exactly the ptr half we need); the
-                   static length comes from the declared binding, which the
+                   static length comes from the declared place, which the
                    decayed TYPE no longer carries. *)
                 (match src_e.desc with
                  | Var name ->
@@ -3454,8 +3454,28 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                           (TypeSlice (el, n),
                            make_slice v (const_int (usize_lltype ()) n))
                       | None -> raise (Error
-                          "slice cast source must be an array variable, string \
-                           literal, or slice"))
+                          "slice cast source must be an array variable, an \
+                           array-typed struct field, a string literal, or a \
+                           slice"))
+                 | FieldGet _ ->
+                     (* GitHub issue #372: an array-typed struct field is a
+                        place with the same static length a binding has, and
+                        gen_field_access ~decay:true has already produced its
+                        elem-0 pointer above -- only the length is missing.
+                        Read the one type_inf proved rather than walking the
+                        struct's field table again here: the field's declared
+                        [T; N] is reachable from this file too, but a second
+                        derivation of the same fact is exactly the shape
+                        issues #296/#311 found real divergences in, and the
+                        base expression would have to be re-generated to get
+                        at it (emitting a duplicate GEP). *)
+                     (match Hashtbl.find_opt Type_inf.slice_cast_len src_e.loc with
+                      | Some n ->
+                          (TypeSlice (el, n),
+                           make_slice v (const_int (usize_lltype ()) n))
+                      | None -> raise (Error
+                          "BUG: no slice length recorded for an array-typed \
+                           struct field the type checker accepted"))
                  | StringLit str ->
                      (* v is the literal's global pointer; the compile-time
                         byte length (NUL excluded) becomes the minimum. *)
@@ -3463,8 +3483,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                      (TypeSlice (el, n),
                       make_slice v (const_int (usize_lltype ()) n))
                  | _ -> raise (Error
-                     "slice cast source must be an array variable, string \
-                      literal, or slice")))
+                     "slice cast source must be an array variable, an \
+                      array-typed struct field, a string literal, or a \
+                      slice")))
        | TypePtr pointee_ty when (match src_ty with TypeSlice _ -> true | _ -> false) ->
            (* slice -> pointer: the explicit bridge back into the pointer
               world; just the ptr half of the fat value. GitHub issue #218

@@ -1617,6 +1617,17 @@ let guard_narrow_hints : (string, string) Hashtbl.t = Hashtbl.create 8
    in different functions never collide. *)
 let index_resolved_ty : (Lexing.position, Ast.type_expr) Hashtbl.t = Hashtbl.create 64
 
+(* GitHub issue #372: the static length a slice-creation cast proved for its
+   source place, keyed by that source expression's location. llvm_gen.ml's
+   own Cast case already holds the elem-0 pointer it needs (gen_expr decays
+   an array-typed place to exactly that) but not the length, and the place's
+   declared type is no longer visible there -- a struct field's un-decayed
+   [T; N] would have to be walked a second time to recover it. Recorded here
+   instead, on the same reasoning (and with the same loc-keyed shape) as
+   index_resolved_ty above: two independent derivations of one static fact
+   is what issues #296/#311 found real gaps in. Reset with it below. *)
+let slice_cast_len : (Lexing.position, int) Hashtbl.t = Hashtbl.create 64
+
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
@@ -2055,10 +2066,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            (match target_ty with
             | Ast.TypeSlice (el_ast, want_min) ->
                 (* Slice creation cast. Sources:
-                   - an array VARIABLE (its declared [T; N] carries the static
-                     length; note infer_expr's Var case decays arrays to *T,
-                     so the length must be recovered from the binding, not
-                     from src_ty -- llvm_gen's Cast case does the same)
+                   - an array-typed PLACE: a variable, or (issue #372) a
+                     struct field, through a pointer or a value struct. Its
+                     declared [T; N] carries the static length; note both
+                     infer_expr's Var case and its FieldGet case decay arrays
+                     to *T, so the length must be recovered from the place,
+                     not from src_ty -- llvm_gen's Cast case needs the same
+                     length and reads slice_cast_len rather than walking to
+                     it a second time
                    - another slice (min-length may only be relaxed) *)
                 let el_want = of_ast el_ast in
                 (match repr src_ty with
@@ -2071,25 +2086,37 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      TSlice (el_want, m)
                  | _ ->
                      (match e.desc with
-                      | Ast.Var name ->
-                          (match StringMap.find_opt name tyenv with
-                           | Some (t, _) ->
-                               (match repr t with
-                                | TArray (el_a, n) ->
-                                    unify_at e.loc el_a el_want;
-                                    if n < want_min then
-                                      raise (TypeError (e.loc, Printf.sprintf
-                                        "cannot cast [_; %d] to %s: array is shorter \
-                                         than the required minimum %d" n (to_string tgt) want_min));
-                                    TSlice (el_want, n)
-                                | t' -> raise (TypeError (e.loc, Printf.sprintf
-                                    "cannot cast '%s' to a slice: a raw pointer alone \
-                                     carries no length evidence -- only an array \
-                                     variable, a string literal, or an existing slice \
-                                     can become a slice; use `unsafe { p[lo..<hi] }` if \
-                                     the length is known another way" (to_string t'))))
-                           | None -> raise (TypeError (e.loc,
-                               Printf.sprintf "Unbound variable: %s" name)))
+                      | Ast.Var _ | Ast.FieldGet _ ->
+                          (* GitHub issue #372: the length evidence is the
+                             SOURCE PLACE's un-decayed declared type, which a
+                             struct field of array type carries exactly as a
+                             variable binding does -- `p.bytes as []u8` for a
+                             pooled payload has as much static length as
+                             `buffer as []u8` for a global, and is what a
+                             pool of buffers (issue #257's NetFrame) needs to
+                             be usable at all. Recovered through the same
+                             place_undecayed_type walk indexing already uses
+                             (issue #217) rather than a second dispatch of
+                             this case's own, so the two can never disagree
+                             about what counts as a place. *)
+                          let place_ty =
+                            place_undecayed_type senv eenv tyenv fenv e in
+                          (match repr place_ty with
+                           | TArray (el_a, n) ->
+                               unify_at e.loc el_a el_want;
+                               if n < want_min then
+                                 raise (TypeError (e.loc, Printf.sprintf
+                                   "cannot cast [_; %d] to %s: array is shorter \
+                                    than the required minimum %d" n (to_string tgt) want_min));
+                               Hashtbl.replace slice_cast_len e.loc n;
+                               TSlice (el_want, n)
+                           | t' -> raise (TypeError (e.loc, Printf.sprintf
+                               "cannot cast '%s' to a slice: it carries no length \
+                                evidence -- only an array variable, an array-typed \
+                                struct field, a string literal, or an existing \
+                                slice can become a slice; if a raw pointer's length \
+                                is known another way, use `unsafe { p[lo..<hi] }`"
+                               (to_string t'))))
                       | Ast.StringLit str ->
                           (* String literal as a slice: the compile-time
                              byte length (NUL excluded) becomes the minimum,
@@ -2104,11 +2131,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                               n (to_string tgt)));
                           TSlice (el_want, n)
                       | _ -> raise (TypeError (e.loc,
-                          "slice cast requires an array variable, string \
-                           literal, or slice source -- a raw pointer alone \
-                           carries no length evidence; use \
-                           `unsafe { p[lo..<hi] }` if the length is known \
-                           another way"))))
+                          "slice cast requires an array variable, an \
+                           array-typed struct field, a string literal, or a \
+                           slice source -- a raw pointer alone carries no \
+                           length evidence; use `unsafe { p[lo..<hi] }` if \
+                           the length is known another way"))))
             | _ ->
            (* GitHub issue #186: u16be/u32be cast ONLY to/from their own
               plain or refined host type (u16be<->u16, u32be<->u32) --
@@ -5021,6 +5048,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   type_checker_lint_active := false;
   Hashtbl.reset type_checker_consumed_unsafe_at;
   Hashtbl.reset index_resolved_ty;  (* GitHub issue #311, fresh per compilation / per unit test *)
+  Hashtbl.reset slice_cast_len;     (* GitHub issue #372, same lifetime *)
   enclosing_future_writes := StringSet.empty;  (* fresh per compilation / per unit test *)
   resolved_call_targets := StringMap.empty;
   resolved_indirect_call_effects := StringMap.empty;
