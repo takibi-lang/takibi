@@ -1704,3 +1704,98 @@ fn intrusive_pool_empty_chunk_count(T: type, pool: &mut IntrusivePool(T) @ pool_
         -> usize {
     return pool.empty_chunk_count;
 }
+
+// GitHub issue #257: the boot-time probe that runs this file against the
+// REAL page provider, mirroring growable_pool.tkb's own growable_pool_probe.
+//
+// linux_user/intrusive_pool exercises far more of this file than this
+// does, and it does it against a stand-in provider with a five-page
+// supply. What it structurally cannot reach is the thing this probe is
+// for: whether the nine symbols issue #364 left unnamed actually bind to
+// kernel/mm/page.tkb, whether a chunk's header really lands in that
+// provider's per-page metadata, and whether a slot address computed from
+// a real physical page is one the MMU has mapped. Those are exactly the
+// facts that a fake provider agrees with regardless of the truth.
+//
+// So this checks the seam, not the algorithm: one real page per chunk,
+// payload that survives a write and a read back through a real mapping,
+// a stale handle refused after the slot is recycled, the invariant probe
+// clean, and the pages given back.
+//
+// Reports a page-count DELTA rather than an absolute, and never calls
+// page_allocator_reclaim_all() -- other probes run earlier in boot and
+// hold pages of their own, exactly as growable_pool_probe's own comment
+// records.
+fn intrusive_pool_boot_probe() -> bool !{unsafe} {
+    let mut pool: IntrusivePool(usize);
+    intrusive_pool_init(&pool);
+    let live_before: usize = page_allocator_live_count();
+
+    let g0 = intrusive_pool_lock(&pool);
+    let first = intrusive_pool_insert(&pool, g0);
+    intrusive_pool_unlock(&pool, g0);
+    let a0 = match first {
+        IntrusivePoolInsertResult::OutOfMemory => { return false; }
+        IntrusivePoolInsertResult::Allocated(o) => { o }
+    };
+    // One chunk is one page, and the provider is the real one.
+    if (page_allocator_live_count() != live_before + 1 ||
+        intrusive_pool_chunk_count(&pool) != 1) {
+        let gx = intrusive_pool_lock(&pool);
+        intrusive_pool_remove(&pool, gx, a0);
+        intrusive_pool_unlock(&pool, gx);
+        return false;
+    }
+
+    // The payload is reached through a pointer into a real physical page
+    // this kernel has mapped; a write and a read back is the cheapest
+    // thing that fails loudly if it is not.
+    let p0: *usize = intrusive_pool_ref(&pool, a0);
+    *p0 = 0xFEEDFACE;
+    let slot0: usize = intrusive_owner_slot(a0);
+    let generation0: usize = intrusive_owner_generation(a0);
+    let p0_again: *usize = intrusive_pool_ref(&pool, a0);
+    let stored_ok: bool = *p0_again == 0xFEEDFACE;
+
+    let g1 = intrusive_pool_lock(&pool);
+    intrusive_pool_remove(&pool, g1, a0);
+    intrusive_pool_unlock(&pool, g1);
+
+    // The freed slot comes back (the chunk free list is LIFO), and the
+    // handle that named its previous occupant must not.
+    let g2 = intrusive_pool_lock(&pool);
+    let second = intrusive_pool_insert(&pool, g2);
+    intrusive_pool_unlock(&pool, g2);
+    let a1 = match second {
+        IntrusivePoolInsertResult::OutOfMemory => { return false; }
+        IntrusivePoolInsertResult::Allocated(o) => { o }
+    };
+    let recycled: bool = intrusive_owner_slot(a1) == slot0;
+    let stale_refused: bool =
+        intrusive_pool_matches(&pool, slot0, generation0) == false;
+    let removes_before: usize = intrusive_pool_double_remove_count(&pool);
+    let stale = intrusive_owner_new(&pool, slot0, generation0);
+    let g3 = intrusive_pool_lock(&pool);
+    intrusive_pool_remove(&pool, g3, stale);
+    intrusive_pool_unlock(&pool, g3);
+    let stale_counted: bool =
+        intrusive_pool_double_remove_count(&pool) == removes_before + 1 &&
+        intrusive_pool_live_count(&pool) == 1;
+
+    let invariants_ok: bool = intrusive_pool_probe(&pool);
+
+    let g4 = intrusive_pool_lock(&pool);
+    intrusive_pool_remove(&pool, g4, a1);
+    intrusive_pool_unlock(&pool, g4);
+    // The default reserve holds the emptied chunk, so ask for it back
+    // explicitly -- otherwise this probe leaves a page behind for the
+    // rest of boot, which is the accounting other probes read.
+    let g5 = intrusive_pool_lock(&pool);
+    let released: usize = intrusive_pool_reclaim(&pool, g5);
+    intrusive_pool_unlock(&pool, g5);
+    let pages_returned: bool =
+        released == 1 && page_allocator_live_count() == live_before;
+
+    return stored_ok && recycled && stale_refused && stale_counted &&
+           invariants_ok && pages_returned;
+}

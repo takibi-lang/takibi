@@ -1,0 +1,1 @@
+intrusive pool: real page per chunk, payload through a real mapping, recycled-slot handle refused, invariants clean, pages returned ok

@@ -7,6 +7,16 @@ use "kernel/fs/elf64.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/mm/process_image.tkb";
 use "kernel/lib/growable_pool.tkb";
+// GitHub issue #257: the kernel's first consumer of kernel/lib/
+// intrusive_pool.tkb. That file names its page provider's symbols without
+// `use`ing anyone (issue #364), so the provider has to be reached FIRST --
+// growable_pool.tkb above pulls in kernel/mm/page.tkb, which is what
+// supplies all nine. pool_lock.tkb is the other half of adopting it: the
+// lock backend it names is likewise unbound until a file list supplies
+// one, and forgetting is an undefined-function error rather than a silent
+// fallback.
+use "kernel/lib/pool_lock.tkb";
+use "kernel/lib/intrusive_pool.tkb";
 use "kernel/arch/arm64/mm/asid.tkb";
 use "kernel/printk/log.tkb";
 use "kernel/fs/ext2/ext2.tkb";
@@ -568,6 +578,11 @@ fn kernel_test_common_probes() {
         kernel_boot_log("growable pool: zero-start growth, cross-chunk data, generation-safe reuse, double-free counted, own ceiling ok\n");
     } else {
         kernel_boot_log("growable pool: failed\n");
+    }
+    if (intrusive_pool_boot_probe()) {
+        kernel_boot_log("intrusive pool: real page per chunk, payload through a real mapping, recycled-slot handle refused, invariants clean, pages returned ok\n");
+    } else {
+        kernel_boot_log("intrusive pool: failed\n");
     }
     if (asid_pool_probe()) {
         kernel_boot_log("asid pool: exhaustion, reuse-after-free, transfer round-trip, double-free counted ok\n");
