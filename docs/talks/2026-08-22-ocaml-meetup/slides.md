@@ -53,18 +53,14 @@ LLVM IR is still hard. AI made it easy.
 
 # The setup, keeps the human on the loop
 
-<div class="diagram-placeholder">
-xxx Add figure
+<style scoped>
+img {
+  display: block;
+  margin: 0 auto;
+}
+</style>
 
-**Architecture diagram goes here**
-
-AI agent / development host
-<br>&lt;-&gt; JTAG/SWD + UART + Ethernet<br>
-Raspberry Pi 5 (QEMU-AArch64)
-
-</div>
-
-Let the AI to debug Raspberry Pi directly over **JTAG/SWD**.
+![w:930](human-on-the-loop.svg)
 
 ---
 
