@@ -101,6 +101,23 @@ struct TcpConnection {
     rcv_nxt: u32;               // next expected seq
     received_length: usize;
     data_segment_counter: usize;
+    // GitHub issue #257: the syscall layer's own per-connection state,
+    // which was four more [T; TCP_CONNECTION_MAX] arrays (private ones)
+    // in kernel/kernel/syscall.tkb until it moved here. They are public
+    // fields rather than private ones because their only readers are in
+    // that other file -- the privacy they had as file-local globals
+    // cannot survive the move, and pretending otherwise with a wall of
+    // accessors would buy nothing. connection_open is the fd-visible
+    // "this slot is a live socket", distinct from state == Established:
+    // close(2) clears it while the TCP machine is still finishing
+    // LAST_ACK. socket_buffer_length/_offset are the read(2) cursor into
+    // the connection's receive buffer, and are NOT received_length above
+    // -- that one is the last segment's payload size as the TCP layer
+    // saw it, these two are how much of the buffer userspace has drained.
+    connection_open: bool;
+    socket_buffer_length: usize;
+    socket_buffer_offset: usize;
+    inetd_response_length: usize;
     // Which pending-retransmit queue slot (see PENDING_TCP_MAX below) is
     // the one currently armed for drop-recovery observation, -1 if none.
     // A slot INDEX rather than a bool: pending_tcp_service_once below can

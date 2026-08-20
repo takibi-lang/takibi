@@ -142,13 +142,17 @@ private let mut syscall_ext2_ready: bool;
 private let mut syscall_file_buffer: [u8; KERNEL_BLOCK_SIZE];
 private let mut syscall_path_buffer: [u8; 256];
 private let mut syscall_sockaddr_buffer: [u8; 28];
-private let mut syscall_connection_open: [bool; TCP_CONNECTION_MAX];
+// GitHub issue #257: connection_open, socket_buffer_length/_offset and
+// inetd_response_length used to be four more [T; TCP_CONNECTION_MAX]
+// arrays here. They are fields of kernel/net/tcp.tkb's TcpConnection now,
+// reached as tcp_connections[slot].<field>, so this file keys nothing but
+// the two 1460-byte buffers below off a connection index. Those two are
+// what step 4 of the migration turns into pooled NetFrame handles; they
+// stay flat until then because 1460 bytes per connection is exactly what
+// does not fit alongside everything else in one pool chunk.
 private let mut syscall_socket_buffer: [u8; 1460 * TCP_CONNECTION_MAX];
-private let mut syscall_socket_buffer_length: [usize; TCP_CONNECTION_MAX];
-private let mut syscall_socket_buffer_offset: [usize; TCP_CONNECTION_MAX];
 private let mut syscall_inetd_mode: bool;
 private let mut syscall_inetd_response: [u8; 1460 * TCP_CONNECTION_MAX];
-private let mut syscall_inetd_response_length: [usize; TCP_CONNECTION_MAX];
 
 // Issue #196: scratch buffer for uname(2)'s struct utsname reply, sized
 // with headroom over sizeof(Utsname) (390 bytes) since array declarations
@@ -183,10 +187,10 @@ fn kernel_syscall_daemon_start() {
     // lifecycle below.
     tcp_connection_pool_init();
     for connection_index: usize in 0..<TCP_CONNECTION_MAX {
-        syscall_connection_open[connection_index] = false;
-        syscall_socket_buffer_length[connection_index] = 0;
-        syscall_socket_buffer_offset[connection_index] = 0;
-        syscall_inetd_response_length[connection_index] = 0;
+        tcp_connections[connection_index].connection_open = false;
+        tcp_connections[connection_index].socket_buffer_length = 0;
+        tcp_connections[connection_index].socket_buffer_offset = 0;
+        tcp_connections[connection_index].inetd_response_length = 0;
     }
     syscall_inetd_mode = false;
     syscall_test_lifecycle_daemon_reset();
@@ -382,10 +386,10 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     for path_index: usize in 0..<256 { syscall_exec_path[path_index] = 0; }
     tcp_connection_pool_init();
     for connection_index: usize in 0..<TCP_CONNECTION_MAX {
-        syscall_connection_open[connection_index] = false;
-        syscall_socket_buffer_length[connection_index] = 0;
-        syscall_socket_buffer_offset[connection_index] = 0;
-        syscall_inetd_response_length[connection_index] = 0;
+        tcp_connections[connection_index].connection_open = false;
+        tcp_connections[connection_index].socket_buffer_length = 0;
+        tcp_connections[connection_index].socket_buffer_offset = 0;
+        tcp_connections[connection_index].inetd_response_length = 0;
     }
     syscall_test_evidence_reset_socket_counters();
     syscall_inetd_mode = false;
@@ -620,10 +624,10 @@ fn kernel_connected_descriptor_release(fd: usize) -> bool {
           if (found_slot < TCP_CONNECTION_MAX) {
               let slot: {0..<TCP_CONNECTION_MAX as usize} = found_slot;
               if (references == 0) { return false; }
-              if (references == 1 && syscall_connection_open[slot]) {
+              if (references == 1 && tcp_connections[slot].connection_open) {
                   let closed: bool = kernel_connected_transport_release(
                       slot, generation);
-                  if (closed) { syscall_connection_open[slot] = false; }
+                  if (closed) { tcp_connections[slot].connection_open = false; }
                   return closed;
               }
               return true;
@@ -669,7 +673,7 @@ fn kernel_syscall_daemon_teardown() -> KernelDaemonTeardownResult {
         return KernelDaemonTeardownResult::Invalid;
     }
     for connection_index: usize in 0..<TCP_CONNECTION_MAX {
-        if (syscall_connection_open[connection_index]) {
+        if (tcp_connections[connection_index].connection_open) {
             return KernelDaemonTeardownResult::Invalid;
         }
     }
@@ -725,7 +729,7 @@ fn kernel_syscall_inetd_accept(port: u16)
                                                 return KernelInetdAcceptResult::TimedOut;
                                             }
                                             syscall_inetd_mode = true;
-                                            syscall_connection_open[slot] = true;
+                                            tcp_connections[slot].connection_open = true;
                                             match unified_connection_create(
                                                     kernel_syscall_process_slot(),
                                                     0, slot, generation) {
@@ -751,9 +755,9 @@ fn kernel_syscall_inetd_accept(port: u16)
                                                 }
                                                 UnifiedFdInstallResult::Ok => {}
                                             }
-                                            syscall_socket_buffer_length[slot] = 0;
-                                            syscall_socket_buffer_offset[slot] = 0;
-                                            syscall_inetd_response_length[slot] = 0;
+                                            tcp_connections[slot].socket_buffer_length = 0;
+                                            tcp_connections[slot].socket_buffer_offset = 0;
+                                            tcp_connections[slot].inetd_response_length = 0;
                                             return KernelInetdAcceptResult::Accepted;
                                         }
                                     }
@@ -784,11 +788,11 @@ fn kernel_syscall_socket_evidence() -> bool {
            syscall_test_evidence_listen_calls() == 1 &&
            syscall_test_evidence_accept_calls() == 2 &&
            syscall_test_evidence_accept_capability_roundtrips() == 2 &&
-           syscall_connection_open[0] == false &&
+           tcp_connections[0].connection_open == false &&
            kernel_connected_fd_is_open(0) == false &&
            kernel_connected_fd_is_open(1) == false &&
            kernel_connected_fd_is_open(5) == false &&
-           syscall_connection_open[1] == false &&
+           tcp_connections[1].connection_open == false &&
            kernel_connected_fd_is_open(6) == false &&
            syscall_test_evidence_connected_close_calls() == 2 &&
            syscall_test_evidence_connected_read_calls() == 3 &&
@@ -985,9 +989,9 @@ fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
                 return (false, POLLNVAL);
             }
             KernelConnectionLookupResult::Found(slot) => {
-                if (syscall_connection_open[slot] &&
-                        syscall_socket_buffer_offset[slot] <
-                            syscall_socket_buffer_length[slot]) {
+                if (tcp_connections[slot].connection_open &&
+                        tcp_connections[slot].socket_buffer_offset <
+                            tcp_connections[slot].socket_buffer_length) {
                     return (true, POLLIN);
                 }
                 return (true, 0);
@@ -1466,7 +1470,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
             let write_generation: usize = kernel_connection_fd_identity(fd);
-            if (syscall_connection_open[write_slot] == false || length == 0) {
+            if (tcp_connections[write_slot].connection_open == false || length == 0) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
             let mut amount: usize = length;
@@ -1474,7 +1478,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             if (amount < length) {
                 syscall_test_evidence_record_partial_write();
             }
-            let received_length: usize = syscall_socket_buffer_length[write_slot];
+            let received_length: usize = tcp_connections[write_slot].socket_buffer_length;
             match tcp_connection_take(write_slot, write_generation) {
                 TcpConnectionTakeResult::Missing => {
                     return SyscallAction::Resume(LINUX_EAGAIN);
@@ -1562,14 +1566,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     }
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
-            if (syscall_connection_open[inetd_write_slot] == false ||
+            if (tcp_connections[inetd_write_slot].connection_open == false ||
                 length > 1460 -
-                    syscall_inetd_response_length[inetd_write_slot]) {
+                    tcp_connections[inetd_write_slot].inetd_response_length) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
             let response_base: *u8 = (syscall_inetd_response as *u8) +
                 ((inetd_write_slot * 1460 +
-                  syscall_inetd_response_length[inetd_write_slot]) as isize);
+                  tcp_connections[inetd_write_slot].inetd_response_length) as isize);
             match user_range_check_read(kernel_process_current_root(), address, length) {
                 UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserReadRangeResult::Ok(range) => {
@@ -1577,8 +1581,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         copy_from_user_raw(range, response_base, length);
                 }
             }
-            syscall_inetd_response_length[inetd_write_slot] =
-                syscall_inetd_response_length[inetd_write_slot] + length;
+            tcp_connections[inetd_write_slot].inetd_response_length =
+                tcp_connections[inetd_write_slot].inetd_response_length + length;
             return SyscallAction::Resume(length);
         }
         if (kernel_syscall_file_is_open(fd)) {
@@ -1960,18 +1964,18 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
             let read_generation: usize = kernel_connection_fd_identity(fd);
-            if (syscall_connection_open[read_slot] == false || requested == 0) {
+            if (tcp_connections[read_slot].connection_open == false || requested == 0) {
                 return SyscallAction::Resume(LINUX_EBADF);
             }
-            if (syscall_socket_buffer_offset[read_slot] <
-                    syscall_socket_buffer_length[read_slot]) {
-                let available: usize = syscall_socket_buffer_length[read_slot] -
-                    syscall_socket_buffer_offset[read_slot];
+            if (tcp_connections[read_slot].socket_buffer_offset <
+                    tcp_connections[read_slot].socket_buffer_length) {
+                let available: usize = tcp_connections[read_slot].socket_buffer_length -
+                    tcp_connections[read_slot].socket_buffer_offset;
                 let mut amount: usize = requested;
                 if (amount > available) { amount = available; }
                 let source_base: *u8 = (syscall_socket_buffer as *u8) +
                     ((read_slot * 1460 +
-                      syscall_socket_buffer_offset[read_slot]) as isize);
+                      tcp_connections[read_slot].socket_buffer_offset) as isize);
                 match user_range_check_write(kernel_process_current_root(), address, amount) {
                     UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                     UserWriteRangeResult::Ok(range) => {
@@ -1979,8 +1983,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             copy_to_user_raw(range, source_base, amount);
                     }
                 }
-                syscall_socket_buffer_offset[read_slot] =
-                    syscall_socket_buffer_offset[read_slot] + amount;
+                tcp_connections[read_slot].socket_buffer_offset =
+                    tcp_connections[read_slot].socket_buffer_offset + amount;
                 return SyscallAction::Resume(amount);
             }
             match tcp_connection_take(read_slot, read_generation) {
@@ -2021,7 +2025,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 KernelTcpReceiveResult::Received(next) => {
                     let received: usize =
                         kernel_tcp_received_length(owner);
-                    syscall_socket_buffer_length[read_slot] = received;
+                    tcp_connections[read_slot].socket_buffer_length = received;
                     let mut amount: usize = received;
                     if (amount > requested) { amount = requested; }
                     let source_base: *u8 = (syscall_socket_buffer as *u8) +
@@ -2043,7 +2047,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 copy_to_user_raw(range, source_base, amount);
                         }
                     }
-                    syscall_socket_buffer_offset[read_slot] = amount;
+                    tcp_connections[read_slot].socket_buffer_offset = amount;
                     match network_capability_put(next) {
                         NetworkCapabilityPutResult::Stored => {
                             match tcp_connection_put(owner) {
@@ -2457,7 +2461,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                     if (slot >= TCP_CONNECTION_MAX) {
                                         return SyscallAction::Resume(LINUX_EINVAL);
                                     }
-                                    syscall_connection_open[slot] = true;
+                                    tcp_connections[slot].connection_open = true;
                                     match unified_connection_create(
                                             kernel_syscall_process_slot(),
                                             connected_fd, slot, generation) {
@@ -2472,8 +2476,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                         }
                                         UnifiedOpenResult::Ok => {}
                                     }
-                                    syscall_socket_buffer_length[slot] = 0;
-                                    syscall_socket_buffer_offset[slot] = 0;
+                                    tcp_connections[slot].socket_buffer_length = 0;
+                                    tcp_connections[slot].socket_buffer_offset = 0;
                                     return SyscallAction::Resume(connected_fd);
                                   }
                                 }
@@ -2559,12 +2563,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 };
             let direct_shutdown_generation: usize =
                 kernel_connection_fd_identity(1);
-            if (syscall_connection_open[direct_shutdown_slot] == false ||
+            if (tcp_connections[direct_shutdown_slot].connection_open == false ||
                 kernel_connected_transport_release(
                     direct_shutdown_slot, direct_shutdown_generation) == false) {
                 return SyscallAction::Resume(LINUX_EAGAIN);
             }
-            syscall_connection_open[direct_shutdown_slot] = false;
+            tcp_connections[direct_shutdown_slot].connection_open = false;
             return SyscallAction::Resume(0);
         }
         let inetd_shutdown_slot: {0..<TCP_CONNECTION_MAX as usize} =
@@ -2576,12 +2580,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             };
         let inetd_shutdown_generation: usize = kernel_connection_fd_identity(1);
         if (x0 != 1 || syscall_inetd_mode == false ||
-            syscall_connection_open[inetd_shutdown_slot] == false ||
-            syscall_inetd_response_length[inetd_shutdown_slot] == 0) {
+            tcp_connections[inetd_shutdown_slot].connection_open == false ||
+            tcp_connections[inetd_shutdown_slot].inetd_response_length == 0) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
         let received_length: usize =
-            syscall_socket_buffer_length[inetd_shutdown_slot];
+            tcp_connections[inetd_shutdown_slot].socket_buffer_length;
         match tcp_connection_take(
                 inetd_shutdown_slot, inetd_shutdown_generation) {
           TcpConnectionTakeResult::Missing => { return SyscallAction::Resume(LINUX_EAGAIN); }
@@ -2602,7 +2606,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         owner, ready, inetd_responses[
                             response_base..<response_base + 1460],
                         received_length,
-                        syscall_inetd_response_length[inetd_shutdown_slot]) {
+                        tcp_connections[inetd_shutdown_slot].inetd_response_length) {
                     KernelTcpSendResult::Invalid(after_invalid) => {
                         match network_capability_put(after_invalid) {
                             NetworkCapabilityPutResult::Stored => { }
@@ -2627,8 +2631,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                     }
                                     NetworkCapabilityPutResult::Stored => {
                                         tcp_connection_free(owner);
-                                        syscall_connection_open[
-                                            inetd_shutdown_slot] = false;
+                                        tcp_connections[inetd_shutdown_slot].connection_open = false;
                                         return SyscallAction::Resume(0);
                                     }
                                 }
