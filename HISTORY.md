@@ -15,6 +15,101 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-20: Issue #372 and the First Two Steps of the #257 Migration
+
+Starting the `tcp_connection_pool` migration ran into a language gap on
+the first file it touched, and then into a sequencing error in the
+migration plan itself. Both are worth recording, because both were
+invisible until real code was written against the design.
+
+#### #372: a slice could only come from a variable
+
+`kernel/net/tcp.tkb` slices `conn_remote_ip`/`conn_remote_mac` at eleven
+sites. Moving them into a `TcpConnection` struct -- step 1 of the
+migration, a pure data move -- did not compile: takibi minted slices only
+from a **variable binding** (or a string literal, or another slice), and a
+struct field of array type was rejected with "a raw pointer alone carries
+no length evidence."
+
+The message was accurate about the check and wrong about the premise. A
+field access is not a raw pointer; its declared `[T; N]` is right there.
+`infer_field_access ~decay:false` (issue #217) had been recovering exactly
+that un-decayed type for indexing bases since August 15. The slice cast
+simply never asked.
+
+This is not a tcp.tkb inconvenience. It blocks the whole point of #257:
+`intrusive_pool_ref` hands back a `*T`, so a pooled buffer's bytes live in
+a field and nowhere else, and every consumer in `kernel/net/` takes a
+slice. A pool of buffers was unusable without spending an `unsafe` on
+evidence the compiler already held -- in a file whose own header records
+being free of unsafe blocks.
+
+Fixed in commit `838db34`:
+
+- `type_inf.ml` routes the source through `place_undecayed_type` rather
+  than growing a second dispatch of its own, so the slice cast and
+  indexing can never disagree about what counts as a place.
+- `llvm_gen.ml` already had the pointer it needed (`gen_field_access
+  ~decay:true` returns the elem-0 field pointer, exactly the ptr half of
+  the fat value) and was missing only the length. It reads
+  `Type_inf.slice_cast_len`, keyed by loc, rather than walking the struct
+  field table a second time -- the same single-source-of-truth reasoning
+  as `index_resolved_ty` (issues #296/#311).
+- Three shapes work: a value struct, a pointer to one, and an array
+  element's field. `linux_user/slice_from_field` executes all three,
+  because each one's failure mode -- addressing the containing struct, or
+  element 0 rather than element i -- type-checks perfectly and shows up
+  only as wrong bytes.
+
+**The testing lesson, and it is the same one as the entry below.**
+`linux_user/tcp_pool_shape` was built specifically to find holes like this
+before the migration, and passed. It missed this one because it only ever
+wrote **single bytes** into a payload (`tx.bytes[0] = 0x45`) where the
+real code does `slice_copy`/`slice_eq` over the frame. Every claim the
+fixture made was true; none was the claim that mattered. A shape fixture
+has to perform the operations its consumer will perform, not a
+convenient subset -- if one of them is awkward to express, that
+awkwardness IS the finding.
+
+#### #257 steps 1 and 2: the arrays stop being arrays
+
+`3b647b5` gathers eleven parallel `[T; TCP_CONNECTION_MAX]` arrays in
+`tcp.tkb` into one `struct TcpConnection`. `3f6f5d7` does the same for
+`syscall.tkb`'s four per-connection scalars (`connection_open`,
+`socket_buffer_length`, `socket_buffer_offset`,
+`inetd_response_length`), which become fields on that same struct -- 47 of
+that file's 60 connection-indexed sites. Both are pure data moves: the
+`SlotMap`, `TcpConnectionOwner`'s refined `pool_index`, the
+`tcp_connection_store` parking lot and `TCP_CONNECTION_MAX` itself all
+still stand. Verified on QEMU and on real RPi5 hardware, 38 views each.
+
+The four scalars became **public** fields where they had been `private`
+globals. Privacy that only worked because the state was file-local cannot
+survive the move to another file, and a wall of accessors would buy
+nothing back; said in the struct rather than left to be noticed.
+
+#### The plan's step order was wrong
+
+The migration plan on issue #257 put "pool the connection, delete the
+parking lot" second, ahead of the `syscall.tkb` arrays and the retransmit
+pool. That order cannot run. A pooled connection is identified by an
+**address**, and both of those later steps still key storage off a
+connection **index**: `pending_tcp_*` at `connection_slot *
+PENDING_TCP_MAX + pending_slot`, and `syscall.tkb`'s six arrays at 60
+sites. Both are prerequisites of the connection pool, not follow-ups to
+it. The corrected order is recorded in a comment on the issue; the
+analysis it rests on -- the parking-lot insight, the 10490-byte budget,
+the three-pool split -- is unchanged, and only the sequencing was written
+before there was any code to check it against.
+
+One retired constraint was cleaned up in passing: `pending_tcp_*`'s header
+comment justified staying flat on the grounds that "indexed writes into a
+nested/structured target are not reliably supported." #372 retired that
+reason. Those arrays stay flat only until step 3 moves them into a pool,
+and the comment now says so.
+
+---
+
 ### 2026-08-19 to 2026-08-20: Issues #368/#369 -- Removing the Ceiling from STORAGE, and Scaffolding the #257 Migration
 
 #344 removed the ceiling from *allocation*: `kernel/lib/intrusive_pool.tkb`
