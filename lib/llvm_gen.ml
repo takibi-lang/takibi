@@ -1195,7 +1195,7 @@ let slice_rebind_names (stmts : Ast.stmt list) : string list =
          | _ -> go_expr lhs);
         go_expr rhs
     | IntLit _ | BoolLit _ | StringLit _ | Var _ | ViewLit _
-    | EnumVariant _ | SizeOf _ | AlignOf _
+    | EnumVariant _ | SizeOf _ | AlignOf _ | ContainsStableOwner _
     | OffsetOf _ | EmbedFile _ ->
         ()
   in
@@ -3188,6 +3188,15 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | None -> TypeUsize
       in
       (result_ty, const_int (ltype_of_ast TypeUsize) sz)
+
+  | ContainsStableOwner ty ->
+      (* GitHub issue #369. A whole-program fact -- which structs were
+         registered as stable owner storage -- so it comes from type_inf's
+         registry rather than from anything layout knows. Reachable
+         because llvm_gen depends on type_inf and not the reverse, which
+         is what makes this expressible as a static_assert at all. *)
+      let held = if Type_inf.type_contains_stable_owner ty then 1 else 0 in
+      (TypeUsize, const_int (ltype_of_ast TypeUsize) held)
 
   | AlignOf ty ->
       (* The DataLayout is the ONLY source here -- no OCaml-computed
@@ -5776,6 +5785,10 @@ let rec eval_const_int (e : Ast.expr) : Int64.t =
         | None -> raise (Error "sizeof: target data layout not initialized")
       in
       Llvm_target.DataLayout.abi_size elem_llty dl
+  | ContainsStableOwner ty ->
+      (* Same registry as the expression case; this is the path a
+         static_assert folds through (issue #369). *)
+      if Type_inf.type_contains_stable_owner ty then 1L else 0L
   | AlignOf ty ->
       let elem_llty = ltype_of_ast ty in
       let dl = match !target_data with

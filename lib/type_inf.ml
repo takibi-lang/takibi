@@ -69,7 +69,8 @@ let rec count_var_occurrences name (e : Ast.expr) =
   | Ast.Assign (lhs, rhs) ->
       count_var_occurrences name lhs + count_var_occurrences name rhs
   | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.ViewLit _
-  | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.AlignOf _ | Ast.OffsetOf _
+  | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.AlignOf _ | Ast.ContainsStableOwner _
+  | Ast.OffsetOf _
   | Ast.EmbedFile _ -> 0
 
 (* Type environment: immutable map from variable name to (type, is_mutable) *)
@@ -1148,6 +1149,35 @@ let stable_owner_structs : (string, unit) Hashtbl.t = Hashtbl.create 8
 
 let is_stable_owner_field sname fname =
   Hashtbl.mem stable_owner_fields (sname, fname)
+
+(* GitHub issue #369: is this type, or anything reachable inside it,
+   stable owner storage?
+
+   The predicate already existed as a local inside the validation pass
+   (ast_contains_stable_owner_value), used to REJECT such a type in
+   positions that cannot hold it. This is the same question asked from
+   outside, so that a compile-time assertion can act on it -- the
+   difference between "a caller must remember which allocation entry
+   point to use" and the compiler saying so.
+
+   Answers against the registry directly rather than through the
+   validation pass's declared-type resolution: by the time this is asked,
+   monomorphization has substituted every type parameter, so what arrives
+   is a concrete name. *)
+let rec type_contains_stable_owner (ty : Ast.type_expr) : bool =
+  match ty with
+  | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
+      Hashtbl.mem stable_owner_structs name
+  | Ast.TypeIo t | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _)
+  | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
+  | Ast.TypeSingleton (t, _) | Ast.TypeRefined (_, _, t)
+  | Ast.TypeExists (_, _, t) | Ast.TypeArraySym (t, _)
+  | Ast.TypeSliceSym (t, _) -> type_contains_stable_owner t
+  | Ast.TypeTuple ts -> List.exists type_contains_stable_owner ts
+  | Ast.TypeFn (args, ret, _) ->
+      List.exists type_contains_stable_owner args
+      || type_contains_stable_owner ret
+  | _ -> false
 
 (* Stable owner containers are locations, not ordinary values. A pointer to
    one is the intended API surface, but wrapping the value in another runtime
@@ -2645,6 +2675,22 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       (match const_type_size senv ty with
        | Some v -> TRefinedInt (v, v + 1, TUsize)
        | None -> TUsize)
+
+  | ContainsStableOwner ty ->
+      (* GitHub issue #369: 1 if T is (or reaches) stable owner storage,
+         0 otherwise. A plain usize rather than a bool so it composes with
+         static_assert's integer comparisons the way sizeof and alignof
+         already do. Never refined: the answer depends on which structs
+         have been registered, which is a whole-program fact rather than a
+         target-independent formula. *)
+      (match ty with
+       | Ast.TypeNamed name when not (StringMap.mem name senv)
+                                  && not (StringMap.mem name eenv)
+                                  && not (Hashtbl.mem variant_defs name) ->
+           raise (TypeError (e.loc,
+             Printf.sprintf "unknown type '%s' in contains_stable_owner" name))
+       | _ -> ());
+      TUsize
 
   | AlignOf ty ->
       (* Same existence check as SizeOf, so an unknown name is a source
@@ -6003,7 +6049,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             here too, same as validate_let_type already does for a `let`
             annotation. *)
          validate_nonparam_type ~allow_ref:true e.loc ty; validate_expr_types x
-     | Ast.SizeOf ty | Ast.AlignOf ty | Ast.OffsetOf (ty, _) ->
+     | Ast.SizeOf ty | Ast.AlignOf ty | Ast.ContainsStableOwner ty
+     | Ast.OffsetOf (ty, _) ->
          if type_mentions_view ty then
            raise (TypeError (e.loc,
              "an erased view has no runtime size or layout"));
@@ -7713,7 +7760,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.SliceOf (base, lo, hi) ->
           require_region_live_base e.loc taints moved base;
           check_expr taints (check_expr taints moved false lo) false hi
-      | Ast.SizeOf _ | Ast.AlignOf _ | Ast.OffsetOf _ | Ast.IntLit _
+      | Ast.SizeOf _ | Ast.AlignOf _ | Ast.ContainsStableOwner _ | Ast.OffsetOf _ | Ast.IntLit _
       | Ast.BoolLit _ | Ast.StringLit _ | Ast.EmbedFile _ -> moved
       | Ast.EnumVariant (vtype, _) ->
           if (Hashtbl.find_opt variant_kinds vtype = Some Ast.KindLinear
@@ -8309,6 +8356,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Assign (lhs, rhs) -> visit_expr lhs; visit_expr rhs
       | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.Var _
       | Ast.ViewLit _ | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.AlignOf _
+      | Ast.ContainsStableOwner _
       | Ast.OffsetOf _ | Ast.EmbedFile _ -> ()
     and visit_stmt (s : Ast.stmt) =
       match s.desc with

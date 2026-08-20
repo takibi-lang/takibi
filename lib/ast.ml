@@ -306,6 +306,12 @@ and expr_desc =
                                   type checker accepts. *)
   | EnumVariant of string * string  (* EtherType::IPv4 -- enum name, variant name *)
   | SizeOf of type_expr        (* sizeof(T) -- compile-time size in bytes, type usize *)
+  | ContainsStableOwner of type_expr
+      (* contains_stable_owner(T) -- 1 if T is, or reaches, stable owner
+         storage (a private field whose type is a linear variant); 0
+         otherwise. Type usize. Exists so a static_assert can reject a
+         type in a position that cannot honour the zero-initialisation
+         its empty state depends on -- see GitHub issue #369. *)
   | AlignOf of type_expr
       (* alignof(T) -- compile-time ABI alignment in bytes, type usize.
          Read from the same LLVM DataLayout the emitted code actually
@@ -772,7 +778,7 @@ let written_names (stmts : stmt list) : string list =
          | _ -> go_expr lhs);
         go_expr rhs
     | IntLit _ | BoolLit _ | StringLit _ | Var _ | ViewLit _
-    | EnumVariant _ | SizeOf _ | AlignOf _
+    | EnumVariant _ | SizeOf _ | AlignOf _ | ContainsStableOwner _
     | OffsetOf _ | EmbedFile _ ->
         ()
   in

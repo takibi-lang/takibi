@@ -8857,6 +8857,42 @@ let codegen_tests = [
          "an align(N) struct's alignof still equals where it is embedded" true
          (agrees "declared_align" "declared_offset"));
 
+  (* GitHub issue #369: `contains_stable_owner(T)` exposes to a
+     static_assert what the checker already knew -- whether T is, or
+     reaches, stable owner storage (a private field whose type is a
+     linear variant). It exists so an allocator can REJECT a T whose
+     empty state depends on zero-initialisation it cannot provide,
+     turning a documented discipline into a compile error. *)
+  Alcotest.test_case
+    "contains_stable_owner(T) is 1 for stable owner storage, 0 otherwise, \
+     and propagates through arrays (issue #369)" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
+       in
+       ignore (gen_codegen
+         "linear struct SoHandle[a: usize] { private s: usize; private g: usize @ a; }
+          variant SoLink { End; More(exists a: usize. SoHandle[a]); }
+          struct SoHolder { private mutex: i32; private link: SoLink; }
+          struct SoPlain { a: usize; }
+          fn holds() usize { return contains_stable_owner(SoHolder); }
+          fn plain() usize { return contains_stable_owner(SoPlain); }
+          fn arrayed() usize { return contains_stable_owner([SoHolder; 4]); }
+          fn primitive() usize { return contains_stable_owner(usize); }");
+       let ret name =
+         match Hashtbl.find_opt Llvm_gen.functions name with
+         | Some (_, fn) -> Llvm.string_of_llvalue fn
+         | None -> Alcotest.failf "function '%s' not found" name
+       in
+       Alcotest.(check bool) "a struct holding stable owner storage" true
+         (contains_substring (ret "holds") "ret i64 1");
+       Alcotest.(check bool) "an ordinary struct" true
+         (contains_substring (ret "plain") "ret i64 0");
+       Alcotest.(check bool) "propagates through an array" true
+         (contains_substring (ret "arrayed") "ret i64 1");
+       Alcotest.(check bool) "a primitive" true
+         (contains_substring (ret "primitive") "ret i64 0"));
+
   (* GitHub issue #362: a struct's own `align(N)` used to survive being a
      variable or an array element but not being EMBEDDED -- LLVM takes a
      struct type's alignment from its members and has nowhere to record a

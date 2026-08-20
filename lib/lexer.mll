@@ -71,6 +71,7 @@ rule read = parse
   | "align"   { ALIGN }
   | "sizeof"  { SIZEOF }
   | "alignof" { ALIGNOF }
+  | "contains_stable_owner" { CONTAINS_STABLE_OWNER }
   | "use"     { USE }
   | "offsetof" { OFFSETOF }
   | "static_assert" { STATIC_ASSERT }

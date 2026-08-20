@@ -347,6 +347,17 @@ parameter value, or top-level declaration name.
   including a struct's declared `align(N)` and any alignment it inherits
   from a member. An array reports its element's. Expression position
   only: it is not usable in an array size.
+- `contains_stable_owner(T)` -- 1 if `T` is, or reaches through arrays,
+  tuples and the other transparent wrappers, **stable owner storage** (a
+  `private` field whose type is a linear variant -- see "Stable Owner
+  Slots" below); 0 otherwise. Type `usize`. Its purpose is to let a
+  `static_assert` reject such a `T` in a position that cannot honour the
+  zero-initialisation its empty state depends on: the empty state is
+  declaration-order tag zero, inherited from a zero-initialized global
+  rather than written by anyone, so a `T` placed in recycled storage
+  would read a previous occupant's tag as a live payload. Expression
+  position only. `kernel/lib/intrusive_pool.tkb`'s two allocation entry
+  points are the worked example (GitHub issue #369).
 - `offsetof(StructName, field)` -- compile-time byte offset of `field`
   within `StructName`'s actual layout, type `usize`. Same DataLayout
   -based resolution as `sizeof`. It has no symbolic form: unlike
