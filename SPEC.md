@@ -411,6 +411,7 @@ C. `%` shares precedence with `*`/`/`.
 struct Name { field: type; ... }             // plain struct
 struct packed Name { field: type; ... }      // no inter-field padding
 struct Name align(N) { field: type; ... }    // every instance, array element, and embedded field aligned to N
+struct Name[n: usize] { field: type; ... }   // ordinary struct carrying erased static parameters
 struct packed Name align(N) { ... }          // both
 struct packed be Name { field: u16; ... }    // packed + auto-promote u16/u32 fields to u16be/u32be
 struct packed be Name align(N) { ... }       // packed + be + align, all three
@@ -420,6 +421,19 @@ affine struct Name[n: usize] { field: T; }   // indexed runtime owner
 linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
 ```
 
+- An ordinary struct may carry static parameters (`struct Name[n: sort]
+  { ... }`), the same erased indices an `affine`/`linear` struct or a
+  variant can. They let a container name the identity of what it holds --
+  a cell storing `Owner[pool]` rather than `exists p. Owner[p]` -- and
+  they erase exactly as elsewhere. The field restrictions an owned struct
+  carries (no nested variant, view, or indexed owner) do NOT apply: those
+  exist because an owned aggregate tracks its fields' ownership, which an
+  ordinary one does not. **A static argument is a name bound by the
+  enclosing signature, an integer, or an enum case** -- there is no form
+  for a concrete address, so a GLOBAL cannot pin such a parameter to a
+  particular object (`let mut c: Cell[&pool];` does not parse). Static
+  identity therefore travels through signatures and cannot yet be
+  anchored in durable storage (GitHub issue #368).
 - `let mut s: Name;` -- struct variable (local or global; a struct
   variable is always mutable storage regardless of the `let`/`let mut`
   keyword used to declare it, matching how array variables work).

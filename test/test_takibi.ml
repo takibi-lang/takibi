@@ -8857,6 +8857,49 @@ let codegen_tests = [
          "an align(N) struct's alignof still equals where it is embedded" true
          (agrees "declared_align" "declared_offset"));
 
+  (* GitHub issue #368: an ORDINARY struct can carry static parameters, so
+     a container can name the identity of what it stores rather than
+     quantifying it away. Three things had to line up and two were
+     broken: an indexed variant is a legal field type (it lowers through
+     variant_lltypes, not only struct_lltypes), and a struct holding one
+     must be registered AFTER that variant -- ast_mentions_variant only
+     looked at TypeNamed, so an indexed one slipped past the ordering and
+     surfaced much later as "Unknown indexed type". *)
+  Alcotest.test_case
+    "an ordinary struct can take static parameters and hold an indexed \
+     variant field (issue #368)" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
+       in
+       match gen_codegen
+         "linear struct BrHandle[o: addr, a: usize] { private s: usize; private g: usize @ a; }
+          variant BrLink[o: addr] { End; More(exists a: usize. BrHandle[o, a]); }
+          struct BrNode[o: addr] { private mutex: i32; private link: BrLink[o]; }
+          fn probe() i32 { return 0; }"
+       with
+       | _ -> ()
+       | exception e ->
+           Alcotest.failf "expected an indexed ordinary struct to compile, got: %s"
+             (Printexc.to_string e));
+
+  (* The restrictions an affine/linear struct's fields carry must NOT have
+     followed the static parameters over: they exist because an owned
+     aggregate tracks its fields' ownership, which an ordinary one does
+     not. *)
+  Alcotest.test_case
+    "an affine struct still rejects a nested variant field, indexed or not \
+     (issue #368)" `Quick
+    (fun () ->
+       match infer
+         "variant Plain2 { A; B; }
+          affine struct Owned2[o: addr] { private v: Plain2; }"
+       with
+       | _ -> Alcotest.fail "expected an affine struct to reject a nested variant"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the nested variant" true
+             (contains_substring msg "nested variant"));
+
   (* GitHub issue #369: `contains_stable_owner(T)` exposes to a
      static_assert what the checker already knew -- whether T is, or
      reaches, stable owner storage (a private field whose type is a

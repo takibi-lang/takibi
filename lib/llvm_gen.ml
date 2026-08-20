@@ -1600,7 +1600,14 @@ let rec ltype_of_ast = function
            | Some llty -> llty
            | None -> raise (Error (Printf.sprintf "Unknown named type: %s" sname)))
   | TypeIndexed (sname, _) ->
-      (match Hashtbl.find_opt struct_lltypes sname with
+      (* A variant can carry static indices too (GitHub issue #368's
+         branded container node holds one), so look there first, the same
+         order TypeNamed above uses. Indices erase either way; what
+         differs is only which table holds the layout. *)
+      (match Hashtbl.find_opt variant_lltypes sname with
+       | Some llty -> llty
+       | None ->
+      match Hashtbl.find_opt struct_lltypes sname with
        | Some llty -> llty
        | None -> raise (Error (Printf.sprintf "Unknown indexed type: %s" sname)))
   | TypeSingleton (t, _) -> ltype_of_ast t
@@ -6428,7 +6435,12 @@ let gen_program ?prog_types prog =
   ) prog;
   let rec ast_mentions_variant = function
     | TypeVariant _ -> true
-    | TypeNamed name -> Hashtbl.mem variant_defs name
+    (* TypeIndexed alongside TypeNamed: a variant can carry static indices
+       (GitHub issue #368), and missing it here would register a struct
+       holding one BEFORE the variant exists, which surfaces much later as
+       "Unknown indexed type". Same TypeNamed/TypeIndexed asymmetry issue
+       #357 is about, one table over. *)
+    | TypeNamed name | TypeIndexed (name, _) -> Hashtbl.mem variant_defs name
     | TypePtr t | TypeIo t | TypeArray (t, _) | TypeSlice (t, _)
     | TypeBorrow t | TypeBorrowMut t | TypeSink t
     | TypeRefined (_, _, t) | TypeAlignedPtr (_, t)

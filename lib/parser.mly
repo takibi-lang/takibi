@@ -382,6 +382,26 @@ owned_struct_intro:
   | p = private_flag k = owned_kind STRUCT name = IDENT ps = static_params
     { Type_layout.begin_struct name;
       (name, k, ps, p) }
+  (* GitHub issue #368: an ORDINARY struct carrying static parameters.
+     `static_params` is a non-empty bracketed list, so `struct Foo` and
+     `struct Foo[p: addr]` never collide.
+
+     It routes through OwnedStructDef with KindPlain rather than
+     StructDef because that constructor already carries a static_param
+     list; StructDef does not, and adding one would touch every one of
+     the eighty-odd sites that pattern-match it. The kind is what tells
+     the checker this is an ordinary aggregate that happens to be
+     indexed, not an affine/linear one -- see type_inf.ml's
+     OwnedStructDef validation, which applies the owned-struct field
+     restrictions only to the owned kinds.
+
+     What this buys: a container can name the brand of the handles it
+     stores. Before it, a node holding a pool handle had to quantify the
+     pool identity existentially -- `exists p: addr.` -- which compiled
+     but threw away exactly the cross-pool guarantee issue #345 added. *)
+  | p = private_flag STRUCT name = IDENT ps = static_params
+    { Type_layout.begin_struct name;
+      (name, Ast.KindPlain, ps, p) }
 
 generic_struct_intro:
   | GENERIC STRUCT name = IDENT LPAREN tps = generic_params RPAREN

@@ -5312,8 +5312,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   ) prog;
   Hashtbl.reset stable_owner_fields;
   Hashtbl.reset stable_owner_structs;
-  List.iter (function
-    | Ast.StructDef (sname, fields, _, _, private_fields, _) ->
+  (* GitHub issue #368: an indexed ordinary struct is an OwnedStructDef
+     carrying KindPlain (see parser.mly), so stable owner registration has
+     to see both spellings or an indexed container silently stops being
+     stable owner storage. *)
+  let register_stable_owner sname fields private_fields =
         List.iter (fun (fname, ty) ->
           let variant_name = match resolve_declared_type ty with
             | Ast.TypeVariant (name, _) -> Some name
@@ -5327,6 +5330,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               Hashtbl.replace stable_owner_structs sname ()
           | _ -> ()
         ) fields
+  in
+  List.iter (function
+    | Ast.StructDef (sname, fields, _, _, private_fields, _) ->
+        register_stable_owner sname fields private_fields
+    | Ast.OwnedStructDef (sname, Ast.KindPlain, _, fields, _, _, private_fields, _, _) ->
+        register_stable_owner sname fields private_fields
     | _ -> ()
   ) prog;
   let ast_is_stable_owner_struct = function
@@ -6302,7 +6311,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                not storage (OWNERSHIP_KERNEL.md 5.9)" sname fname));
           check_struct_field_pointer sname fname sloc ty;
           validate_nonparam_type sloc ty) fields
-    | Ast.OwnedStructDef (sname, _, params, fields, _, _, _, _, sloc) ->
+    | Ast.OwnedStructDef (sname, okind, params, fields, _, _, _, _, sloc) ->
+        let owned = okind <> Ast.KindPlain in
         let scope = Hashtbl.create 8 in
         List.iter (fun (name, sort) ->
           validate_static_sort sloc sort;
@@ -6314,19 +6324,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         validation_static_scope := Some scope;
         allow_implicit_static := false;
         List.iter (fun (fname, ty) ->
-          if ast_contains_stable_owner_value ty then
+          if owned && ast_contains_stable_owner_value ty then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot contain stable owner storage '%s'"
               sname fname (Ast.show_type_expr ty)));
-          if type_mentions_view ty then
+          if owned && type_mentions_view ty then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold a nested erased view"
               sname fname));
-          if type_mentions_variant ty then
+          if owned && type_mentions_variant ty then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold a nested variant"
               sname fname));
-          if type_mentions_indexed_owner ty then
+          if owned && type_mentions_indexed_owner ty then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold a nested indexed owner"
               sname fname));
