@@ -1,0 +1,302 @@
+// GitHub issue #257: the three-pool shape for kernel/net/tcp.tkb, checked
+// in linux_user before any of the 19 syscall.tkb call sites are touched.
+//
+// tcp.tkb today keys ~10.7 KB of state off TCP_CONNECTION_MAX = 2. That
+// does not fit one intrusive_pool chunk (PAGE_USABLE_BYTES = 3968), so
+// `IntrusivePool(TcpConnection)` with everything inlined fails
+// intrusive_pool_slots_per_chunk's own static_assert. The migration has
+// to split, and this fixture is that split standing up on its own:
+//
+//   TcpConnection  -- control block, holds handles to the rest
+//   NetFrame       -- one MTU; serves the rx buffer, the inetd response,
+//                     and every retransmit copy (the mbuf/PCB split)
+//   RetxEntry      -- retransmit metadata + a frame handle + the chain
+//
+// Three things are being checked, none of which were certain when the
+// split was written down:
+//
+//   1. a struct can hold SEVERAL stable owner fields (three here), under
+//      one mutex -- stable_owner_fields is keyed by (struct, field), so
+//      nothing forbids it, but nothing had done it either;
+//   2. the density estimates in the issue survive contact with real
+//      sizeof -- they are printed rather than asserted, because being
+//      wrong about them is the reason to measure;
+//   3. a frame moves from the connection into a retransmit entry as a
+//      HANDLE, replacing pending_tcp_record()'s 1514-byte slice_copy.
+//
+// What this fixture is not: the migration. No TCP logic, no wire format.
+// It is the shape, so that finding a hole costs an afternoon here rather
+// than a bisect through kernel/net/.
+use "kernel/lib/intrusive_pool.tkb";
+
+const MTU: usize = 1514;
+
+struct NetFrame {
+    len: usize;
+    bytes: [u8; MTU];
+}
+
+// A parked handle into some pool. The brand is existentially quantified
+// (issue #370): the field knows it holds SOME pool's handle, not this
+// one's, so a cross-pool mixup falls to intrusive_pool_slot_is_valid at
+// runtime rather than to `static value mismatch` at compile time. Stated
+// here because it is the price of the container, not a surprise.
+variant FrameLink {
+    None;
+    Some(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
+}
+
+variant RetxLink {
+    End;
+    More(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
+}
+
+// pending_tcp_kind/_frame/_frame_length/_expected_ack/_remote_ip/
+// _remote_port/_local_port/_sent_at/_retries, one entry instead of nine
+// arrays indexed by PENDING_TCP_MAX * TCP_CONNECTION_MAX -- and the chain
+// is what removes PENDING_TCP_MAX itself.
+struct RetxEntry {
+    private mutex: i32;
+    private frame: FrameLink;
+    private next: RetxLink;
+    kind: usize;
+    expected_ack: u32;
+    sent_at: i64;
+    retries: usize;
+}
+
+// conn_state/_remote_ip/_remote_mac/_remote_port/_local_port/_snd_nxt/
+// _rcv_nxt plus syscall.tkb's connection_open/buffer_length/buffer_offset/
+// inetd_response_length. The three link fields are what tcp.tkb spells as
+// tcp_connection_store today, except they are per-connection storage that
+// no array sizes.
+struct TcpConnection {
+    private mutex: i32;
+    private rx: FrameLink;
+    private inetd: FrameLink;
+    private retx: RetxLink;
+    state: usize;
+    remote_port: u16;
+    local_port: u16;
+    snd_nxt: u32;
+    rcv_nxt: u32;
+    rx_len: usize;
+    rx_off: usize;
+    open: bool;
+}
+
+private linear view SlotGuard[lock: addr];
+
+private let mut conns: IntrusivePool(TcpConnection);
+private let mut frames: IntrusivePool(NetFrame);
+private let mut retxs: IntrusivePool(RetxEntry);
+
+fn slot_lock(m: *i32 @ address) -> SlotGuard[address] {
+    return view SlotGuard[address];
+}
+fn slot_unlock(g: sink SlotGuard[address], m: *i32 @ address) {}
+
+// Discharges a link, reporting whether it held anything. The fixture
+// leaks the underlying slots on purpose (as pool_container does): what is
+// being shown is that the STORAGE has no ceiling.
+fn frame_link_occupied(l: FrameLink) -> bool {
+    match l {
+        FrameLink::None => { return false; }
+        FrameLink::Some(o) => { intrusive_owner_drop(o); return true; }
+    }
+}
+
+fn retx_link_occupied(l: RetxLink) -> bool {
+    match l {
+        RetxLink::End => { return false; }
+        RetxLink::More(o) => { intrusive_owner_drop(o); return true; }
+    }
+}
+
+fn uart_print_bool(value: bool) {
+    if (value) { uart_puts("true"); } else { uart_puts("false"); }
+}
+
+fn app_main() !{unsafe} {
+    page_allocator_init();
+    intrusive_pool_init(&conns);
+    intrusive_pool_init(&frames);
+    intrusive_pool_init(&retxs);
+    uart_puts("tcp_pool_shape\n");
+
+    // -- 2. Density, measured. The issue predicted 45 / 2 / 70 from a
+    // byte budget done by hand; these are what the compiler actually
+    // lays out.
+    uart_puts("slots per chunk (TcpConnection, NetFrame, RetxEntry): ");
+    uart_print(intrusive_pool_slots_per_chunk(&conns));
+    uart_puts(" ");
+    uart_print(intrusive_pool_slots_per_chunk(&frames));
+    uart_puts(" ");
+    uart_print(intrusive_pool_slots_per_chunk(&retxs));
+    uart_puts("\n");
+
+    // -- Build connections until the page provider is out. Each costs a
+    // control block, an rx frame, an inetd frame and one retransmit entry
+    // carrying its own frame -- the SYN-ACK copy that tcp.tkb keeps in
+    // tcp_stream_tx_frame with a hand-rolled retry beside the general
+    // queue.
+    let mut built: usize = 0;
+    let mut stale_slots: usize = 0;
+    let mut moved_frames: usize = 0;
+    let mut going: bool = true;
+    while (going) {
+        let cg = intrusive_pool_lock(&conns);
+        let cr = intrusive_pool_insert_zeroed(&conns, cg);
+        intrusive_pool_unlock(&conns, cg);
+        match cr {
+            IntrusivePoolInsertResult::OutOfMemory => { going = false; }
+            IntrusivePoolInsertResult::Allocated(conn_owner) => {
+                let conn: *TcpConnection = intrusive_pool_ref(&conns, conn_owner);
+                conn.mutex = 0;
+                conn.state = 1;
+                conn.local_port = 80;
+                conn.remote_port = (40000 + built) as u16;
+                conn.snd_nxt = 1000;
+                conn.rcv_nxt = 1;
+                conn.rx_len = 0;
+                conn.rx_off = 0;
+                conn.open = true;
+
+                // rx buffer: syscall_socket_buffer[slot * 1460 ..]
+                let fg = intrusive_pool_lock(&frames);
+                let fr = intrusive_pool_insert_zeroed(&frames, fg);
+                intrusive_pool_unlock(&frames, fg);
+                match fr {
+                    IntrusivePoolInsertResult::OutOfMemory => {
+                        going = false;
+                        intrusive_owner_drop(conn_owner);
+                    }
+                    IntrusivePoolInsertResult::Allocated(rx_owner) => {
+                        let rx: *NetFrame = intrusive_pool_ref(&frames, rx_owner);
+                        rx.len = 0;
+                        let g1 = slot_lock(&conn.mutex);
+                        let d1: FrameLink = stable_replace(
+                            g1, &conn.mutex, conn.rx,
+                            FrameLink::Some(rx_owner));
+                        slot_unlock(g1, &conn.mutex);
+                        if (frame_link_occupied(d1)) { stale_slots = stale_slots + 1; }
+
+                        // The transmit frame, then its move into a
+                        // retransmit entry -- 3. of the header. tcp.tkb
+                        // copies MTU bytes here; this is the same frame,
+                        // reached through a handle that changed owner.
+                        let tg = intrusive_pool_lock(&frames);
+                        let tr = intrusive_pool_insert_zeroed(&frames, tg);
+                        intrusive_pool_unlock(&frames, tg);
+                        match tr {
+                            IntrusivePoolInsertResult::OutOfMemory => { going = false; }
+                            IntrusivePoolInsertResult::Allocated(tx_owner) => {
+                                let tx: *NetFrame = intrusive_pool_ref(&frames, tx_owner);
+                                tx.len = 54;                 // a SYN-ACK
+                                tx.bytes[0] = 0x45;
+                                let tx_slot: usize = intrusive_owner_slot(tx_owner);
+
+                                let rg = intrusive_pool_lock(&retxs);
+                                let rr = intrusive_pool_insert_zeroed(&retxs, rg);
+                                intrusive_pool_unlock(&retxs, rg);
+                                match rr {
+                                    IntrusivePoolInsertResult::OutOfMemory => {
+                                        going = false;
+                                        intrusive_owner_drop(tx_owner);
+                                    }
+                                    IntrusivePoolInsertResult::Allocated(retx_owner) => {
+                                        let e: *RetxEntry =
+                                            intrusive_pool_ref(&retxs, retx_owner);
+                                        e.mutex = 0;
+                                        e.kind = 1;
+                                        e.expected_ack = 1001;
+                                        e.sent_at = 0;
+                                        e.retries = 0;
+                                        let g2 = slot_lock(&e.mutex);
+                                        let d2: FrameLink = stable_replace(
+                                            g2, &e.mutex, e.frame,
+                                            FrameLink::Some(tx_owner));
+                                        slot_unlock(g2, &e.mutex);
+                                        if (frame_link_occupied(d2)) {
+                                            stale_slots = stale_slots + 1;
+                                        }
+                                        // The frame the connection built is
+                                        // the frame the entry now holds: same
+                                        // slot address, no bytes copied.
+                                        let e2: *RetxEntry =
+                                            intrusive_pool_ref(&retxs, retx_owner);
+                                        let g3 = slot_lock(&e2.mutex);
+                                        let held: FrameLink = stable_replace(
+                                            g3, &e2.mutex, e2.frame, FrameLink::None);
+                                        slot_unlock(g3, &e2.mutex);
+                                        match held {
+                                            FrameLink::None => {}
+                                            FrameLink::Some(back) => {
+                                                if (intrusive_owner_slot(back) == tx_slot) {
+                                                    moved_frames = moved_frames + 1;
+                                                }
+                                                let g4 = slot_lock(&e2.mutex);
+                                                let d4: FrameLink = stable_replace(
+                                                    g4, &e2.mutex, e2.frame,
+                                                    FrameLink::Some(back));
+                                                slot_unlock(g4, &e2.mutex);
+                                                if (frame_link_occupied(d4)) {
+                                                    stale_slots = stale_slots + 1;
+                                                }
+                                            }
+                                        }
+
+                                        let g5 = slot_lock(&conn.mutex);
+                                        let d5: RetxLink = stable_replace(
+                                            g5, &conn.mutex, conn.retx,
+                                            RetxLink::More(retx_owner));
+                                        slot_unlock(g5, &conn.mutex);
+                                        if (retx_link_occupied(d5)) {
+                                            stale_slots = stale_slots + 1;
+                                        }
+                                        built = built + 1;
+                                    }
+                                }
+                            }
+                        }
+                        intrusive_owner_drop(conn_owner);
+                    }
+                }
+            }
+        }
+    }
+
+    uart_puts("connections built with no N in any declaration, array or ");
+    uart_puts("ceiling (connections, pages, conn/frame/retx live): ");
+    uart_print(built);
+    uart_puts(" ");
+    uart_print(page_allocator_live_count());
+    uart_puts(" ");
+    uart_print(intrusive_pool_live_count(&conns));
+    uart_puts(" ");
+    uart_print(intrusive_pool_live_count(&frames));
+    uart_puts(" ");
+    uart_print(intrusive_pool_live_count(&retxs));
+    uart_puts("\n");
+
+    // The claim TCP_CONNECTION_MAX = 2 exists to deny.
+    uart_puts("more live connections than the old ceiling of 2: ");
+    uart_print_bool(built > 2);
+    uart_puts("\n");
+
+    // 1. of the header: three stable owner fields in one struct, each
+    // handed out empty by intrusive_pool_insert_zeroed. Any non-empty
+    // displacement means the #369 premise broke again.
+    uart_puts("every stable slot was empty when it was handed out: ");
+    uart_print_bool(stale_slots == 0);
+    uart_puts("\n");
+
+    // 3. of the header: the retransmit entry holds the very frame the
+    // connection built, not a copy of it.
+    uart_puts("every transmit frame reached its retransmit entry by handle, ");
+    uart_puts("not by copy: ");
+    uart_print_bool(moved_frames == built);
+    uart_puts("\n");
+
+    uart_puts("done\n");
+}
