@@ -15,6 +15,164 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-19 to 2026-08-20: Issues #368/#369 -- Removing the Ceiling from STORAGE, and Scaffolding the #257 Migration
+
+#344 removed the ceiling from *allocation*: `kernel/lib/intrusive_pool.tkb`
+takes one generic argument and grows by the page. What it did not remove
+was the ceiling from *storage*. A linear value's only durable home is a
+`private` field of a linear variant, and SPEC requires such a container to
+be a global or a fixed array of globals -- and a fixed array is an N. So
+"allocate without picking N" was not yet "use a data structure without
+picking N", which is the constraint that actually blocks
+`kernel/net/tcp.tkb`.
+
+Three candidate language changes were proposed for this. **None of them
+was the fix.** The existential spelling a pool-allocated container needs
+already existed; what was missing was not expressiveness but soundness.
+`linux_user/pool_container/pool_container.tkb` chains 738 nodes with no N
+in any declaration, array or ceiling -- and the second use of every
+recycled slot was unsound.
+
+#### The bug (#369): a stable owner slot in memory that is neither zero nor fresh
+
+The language's empty state for a stable owner field is "declaration-order
+tag zero", *inherited from a zero-initialized global* rather than written
+by anyone. `intrusive_pool` deliberately does not zero payload storage
+(#356 -- it scrubs on release instead, which is cheaper and closes a
+cross-pool disclosure). A recycled pool slot is therefore neither zero nor
+fresh: the second use read the previous occupant's tag and handed back a
+linear owner **no allocation ever produced**.
+
+Severity, recorded because it is easy to under-read: the forged handle in
+the reproduction was caught by the *pool* (`intrusive_pool_remove`
+validates and counts it in `foreign_handle_count`), not by the language. A
+linear type without such runtime revalidation would have had a forged
+capability.
+
+Two changes, and deliberately not one:
+
+- `intrusive_pool_insert_zeroed` zeroes the payload, making the
+  zero-initialization premise true. A **separate entry point**, because
+  the cost is owed only by types that hold linear handles; everything else
+  keeps #356's contract and pays nothing.
+- `contains_stable_owner(T)` (commit b1421e6) makes the requirement
+  checked rather than documented. `intrusive_pool_insert` carries
+  `static_assert(contains_stable_owner(T) == 0, ...)`, so allocating such
+  a `T` through the plain path stops the build naming the entry point to
+  use instead.
+
+The predicate already existed in `type_inf.ml` -- used to *reject* such
+types in positions that cannot hold them -- as a local inside the
+validation pass, so nothing outside could ask. Exposing it was the whole
+change, and it is reachable from a `static_assert` because `llvm_gen`
+depends on `type_inf` and not the reverse.
+
+`stable_replace` itself is unchanged. Its container rules are verified
+where the storage is syntactically visible (a local is rejected, so is a
+by-value parameter), but "passing a pointer to its stable global location
+is supported" and nothing distinguishes such a pointer from one into other
+storage. Proving it names a stable global is place tracking, which
+`OWNERSHIP_KERNEL.md` lists as outlook. **SPEC.md now states that rule as
+the caller obligation it is** rather than in the same voice as the rules
+the checker verifies (commit 11e1cee).
+
+#### Three compiler fixes found on the way
+
+Attempting to recover the compile-time brand produced real fixes even
+though the brand itself was not recovered (split to #370):
+
+- ordinary structs can carry static parameters (commit dfb838c);
+- an indexed variant used as a field type failed with "Unknown indexed
+  type" -- `TypeIndexed` now checks `variant_lltypes`;
+- registration order for the same.
+
+The latter two are the same `TypeNamed`/`TypeIndexed` asymmetry as #357,
+surfacing far from their cause. Anyone touching indexed types should
+expect a third.
+
+#### #257: what the scoping pass found before any code was written
+
+The migration's Ask -- one `IntrusivePool(T)` with `T` holding what the
+nine per-connection arrays hold -- **does not compile**. Four byte arrays
+alone are 10490 B per connection (`pending_tcp_frame` 6056,
+`tcp_stream_tx_frame` 1514, `syscall_socket_buffer` 1460,
+`syscall_inetd_response` 1460) against `PAGE_USABLE_BYTES` of 3968, and
+`intrusive_pool_slots_per_chunk` carries
+`static_assert(sizeof(IntrusiveSlot(T)) <= PAGE_USABLE_BYTES)`. The guard
+does its job; the shape has to change. The split is the mbuf/PCB one:
+a small control block, MTU-sized `NetFrame`s serving the rx buffer, the
+inetd response and every retransmit copy, and `RetxEntry` chained rather
+than `PENDING_TCP_MAX`-fixed.
+
+Two further findings worth not re-deriving:
+
+- **`TCP_CONNECTION_MAX` is not confined to `kernel/net/tcp.tkb`.** It
+  also sizes six arrays in `kernel/kernel/syscall.tkb` (60 use sites), so
+  the original acceptance criterion could be satisfied while removing no
+  bound at all.
+- **`tcp_stream_tx_frame` is not scratch.** It holds the SYN-ACK across
+  retry iterations, which makes it a *retransmit* buffer -- and
+  `kernel_tcp_accept_once`'s `syn_ack_sent_at`/`syn_ack_retries` a second
+  hand-rolled retransmit mechanism beside the general queue. Once that
+  queue is a pool chain, both collapse into one path. Also,
+  `pending_tcp_record`'s 1514-byte `slice_copy` per transmitted segment
+  becomes a handle move.
+
+`linux_user/tcp_pool_shape/` stands the whole shape up: three pools,
+several stable owner fields per struct (three, under one mutex -- allowed
+because `stable_owner_fields` is keyed by `(struct, field)`, but nothing
+had done it before), teardown by pool scan, and the runtime refusals that
+replace the brand. Measured densities are **29 / 2 / 41** slots per chunk
+against a hand estimate of 45 / 2 / 70; the link variants cost 24 B each
+and the control block carries three.
+
+#### A testing lesson worth generalizing: "the assertion passed" is not "the property held"
+
+Three separate times in this work, a check reported success while proving
+something weaker than its own wording claimed. This is the recurring
+shape, and it is cheap to defend against:
+
+1. **The vacuous pass.** `tcp_pool_shape`'s cross-pool check rebuilt a
+   frame-pool handle against `intrusive_pool_first_slot(&retxs)` and
+   asserted `foreign_handle_count` moved. A **zero** address takes that
+   same counter, so had #346's retained-chunk default ever become zero,
+   the check would have passed while testing nothing about cross-pool
+   addresses.
+2. **The weaker reading.** A stale-`(slot, generation)` check was written
+   against the *first* connection freed. The chunk free list is LIFO, so
+   the next insert returns the *last* one -- the test was measuring a
+   merely-freed slot, not the recycled slot it claimed. It reported
+   `recycled = false` only because that flag was printed.
+3. **The untraversed loop.** `free_retx_chain` walks a chain and is the
+   function that replaces `PENDING_TCP_MAX`; every chain handed to it was
+   one element long, so the entry-to-entry `next` link it follows was
+   never once followed. No assertion gave a wrong answer.
+
+**The defence that caught all three, and it is not more assertions:
+report the discriminating fact alongside the verdict.** Print
+`recycled`, print `chain_extended`, assert the alien address is really in
+the other pool. A boolean that is true for both the strong and the weak
+reading of a test is not evidence for the strong one, and the only cheap
+way to tell them apart is to make the test say which one it got. Where a
+setup step can silently no-op -- extending a chain after the page
+provider has been run dry, for instance -- that step's success is itself a
+fact worth printing.
+
+Related: the linear checker found three real leaks in this fixture on
+"can't happen" error branches that review had passed over. The same
+branches get written by hand during the #257 migration.
+
+Issues closed across this work: #348, #349, #351, #352, #354, #355, #356,
+#361, #362, #363, #364, #365, #366, #368, #369. Filed and left open:
+#367 (the other three pools), #370 (static arguments cannot name a
+concrete address, so a durable container cannot be branded to what it
+stores), #371 (`intrusive_pool_remove` refuses for two reasons and
+returns neither). #257 itself is scoped, planned and scaffolded but **not
+started** -- read its comments, not its body, before touching
+`kernel/net/tcp.tkb`.
+
+---
+
 ### 2026-08-17 to 2026-08-18: GitHub Issue #344 -- a Count-Unbounded Pool
 Primitive, Branded to Its Owner, Reclaiming Its Own Memory
 
