@@ -144,15 +144,18 @@ private let mut syscall_path_buffer: [u8; 256];
 private let mut syscall_sockaddr_buffer: [u8; 28];
 // GitHub issue #257: connection_open, socket_buffer_length/_offset and
 // inetd_response_length used to be four more [T; TCP_CONNECTION_MAX]
-// arrays here. They are fields of kernel/net/tcp.tkb's TcpConnection now,
-// reached as tcp_connections[slot].<field>, so this file keys nothing but
-// the two 1460-byte buffers below off a connection index. Those two are
-// what step 4 of the migration turns into pooled NetFrame handles; they
-// stay flat until then because 1460 bytes per connection is exactly what
-// does not fit alongside everything else in one pool chunk.
-private let mut syscall_socket_buffer: [u8; 1460 * TCP_CONNECTION_MAX];
+// arrays here (step 2), and syscall_socket_buffer/syscall_inetd_response
+// two more, at 1460 bytes per connection each (step 4b). All six are gone.
+// The scalars are fields of kernel/net/tcp.tkb's TcpConnection; the two
+// buffers are pooled NetFrames owned there, reached through
+// tcp_connection_rx_slice()/tcp_connection_inetd_slice(). **No storage in
+// this file is keyed by a connection index any more.** TCP_CONNECTION_MAX
+// itself still appears, as the refinement on slot values passed across the
+// tcp.tkb boundary ({0..<TCP_CONNECTION_MAX as usize}) and the loops that
+// reset every connection -- proofs about an index, not the size of
+// anything here. Those go when step 5 makes a connection's identity an
+// address.
 private let mut syscall_inetd_mode: bool;
-private let mut syscall_inetd_response: [u8; 1460 * TCP_CONNECTION_MAX];
 
 // Issue #196: scratch buffer for uname(2)'s struct utsname reply, sized
 // with headroom over sizeof(Utsname) (390 bytes) since array declarations
@@ -1493,11 +1496,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         return SyscallAction::Resume(LINUX_EAGAIN);
                     }
                     NetworkCapabilityTakeResult::Ready(ready) => {
-                    let destination_base: *u8 =
-                        (syscall_socket_buffer as *u8) +
-                        ((write_slot * 1460) as isize);
-                    let buffer_base: {0..<1461 as usize} = write_slot * 1460;
-                    let socket_buffers = syscall_socket_buffer as []u8;
+                    let socket_buffers = tcp_connection_rx_slice(write_slot);
+                    let destination_base: *u8 = socket_buffers as *u8;
                     match user_range_check_read(kernel_process_current_root(), address, amount) {
                         UserReadRangeResult::Fault => {
                             match tcp_connection_put(owner) {
@@ -1517,8 +1517,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     }
                     match kernel_tcp_send_received(
                             owner, ready,
-                            socket_buffers[
-                                buffer_base..<buffer_base + 1460],
+                            socket_buffers[0..<1460],
                             received_length, amount) {
                         KernelTcpSendResult::Invalid(after_invalid) => {
                             match network_capability_put(after_invalid) {
@@ -1571,9 +1570,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     tcp_connections[inetd_write_slot].inetd_response_length) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
-            let response_base: *u8 = (syscall_inetd_response as *u8) +
-                ((inetd_write_slot * 1460 +
-                  tcp_connections[inetd_write_slot].inetd_response_length) as isize);
+            let response_base: *u8 =
+                (tcp_connection_inetd_slice(inetd_write_slot) as *u8) +
+                (tcp_connections[inetd_write_slot].inetd_response_length as isize);
             match user_range_check_read(kernel_process_current_root(), address, length) {
                 UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserReadRangeResult::Ok(range) => {
@@ -1973,9 +1972,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     tcp_connections[read_slot].socket_buffer_offset;
                 let mut amount: usize = requested;
                 if (amount > available) { amount = available; }
-                let source_base: *u8 = (syscall_socket_buffer as *u8) +
-                    ((read_slot * 1460 +
-                      tcp_connections[read_slot].socket_buffer_offset) as isize);
+                let source_base: *u8 =
+                    (tcp_connection_rx_slice(read_slot) as *u8) +
+                    (tcp_connections[read_slot].socket_buffer_offset as isize);
                 match user_range_check_write(kernel_process_current_root(), address, amount) {
                     UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                     UserWriteRangeResult::Ok(range) => {
@@ -2002,11 +2001,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                  }
                  NetworkCapabilityTakeResult::Ready(r) => { r }
                };
-               let buffer_base: {0..<1461 as usize} = read_slot * 1460;
-               let socket_buffers = syscall_socket_buffer as []u8;
+               let socket_buffers = tcp_connection_rx_slice(read_slot);
                match kernel_tcp_receive_once(
-                    owner, ready, socket_buffers[
-                        buffer_base..<buffer_base + 1460]) {
+                    owner, ready, socket_buffers[0..<1460]) {
                 KernelTcpReceiveResult::TimedOut(next) => {
                     match network_capability_put(next) {
                         NetworkCapabilityPutResult::Stored => {
@@ -2028,8 +2025,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     tcp_connections[read_slot].socket_buffer_length = received;
                     let mut amount: usize = received;
                     if (amount > requested) { amount = requested; }
-                    let source_base: *u8 = (syscall_socket_buffer as *u8) +
-                        ((read_slot * 1460) as isize);
+                    let source_base: *u8 =
+                        tcp_connection_rx_slice(read_slot) as *u8;
                     match user_range_check_write(kernel_process_current_root(), address, amount) {
                         UserWriteRangeResult::Fault => {
                             match network_capability_put(next) {
@@ -2599,12 +2596,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return SyscallAction::Resume(LINUX_EAGAIN);
             }
             NetworkCapabilityTakeResult::Ready(ready) => {
-                let response_base: {0..<1461 as usize} =
-                    inetd_shutdown_slot * 1460;
-                let inetd_responses = syscall_inetd_response as []u8;
+                let inetd_responses =
+                    tcp_connection_inetd_slice(inetd_shutdown_slot);
                 match kernel_tcp_send_received(
-                        owner, ready, inetd_responses[
-                            response_base..<response_base + 1460],
+                        owner, ready, inetd_responses[0..<1460],
                         received_length,
                         tcp_connections[inetd_shutdown_slot].inetd_response_length) {
                     KernelTcpSendResult::Invalid(after_invalid) => {

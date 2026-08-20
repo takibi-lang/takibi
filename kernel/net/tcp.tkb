@@ -153,6 +153,10 @@ struct TcpConnection {
     // found, and it is deliberately an erased address rather than a
     // second copy of the handle -- validated by the pool on every use.
     tx_frame: usize;
+    // Step 4b, same shape: the receive buffer read(2) drains, and the
+    // response buffer inetd-mode write(2) appends to.
+    rx_frame: usize;
+    inetd_frame: usize;
     connection_open: bool;
     socket_buffer_length: usize;
     socket_buffer_offset: usize;
@@ -379,6 +383,12 @@ variant FrameLink {
 struct ConnectionFrames {
     private mutex: i32;
     private tx: FrameLink;
+    // Step 4b: kernel/kernel/syscall.tkb's two 1460-byte
+    // [u8; 1460 * TCP_CONNECTION_MAX] arrays. Three stable owner fields in
+    // one struct, which is the first of the three things
+    // linux_user/tcp_pool_shape was built to check.
+    private rx: FrameLink;
+    private inetd: FrameLink;
 }
 
 private linear view FrameGuard[lock: addr];
@@ -426,56 +436,124 @@ fn tcp_frame_release_link(link: FrameLink) !{unsafe} {
 // changed nothing. Called from tcp_connection_alloc, whose Full result is
 // exactly the right thing to report when it fails -- a connection with no
 // frame to transmit from is not a connection this stack can serve.
-fn tcp_connection_frames_acquire(
-        connection_slot: {0..<TCP_CONNECTION_MAX as usize}) -> bool !{unsafe} {
-    tcp_connection_frames[connection_slot].mutex = 0;
+// One frame from the pool, or 0. insert_zeroed is not required (NetFrame
+// holds no stable owner storage) but is used anyway: a transmit frame is
+// filled header-first and a short segment leaves the tail untouched, so a
+// recycled slot would otherwise put a previous connection's bytes on the
+// wire past the length the caller meant to send -- and the same argument
+// covers a receive buffer read back past its recorded length.
+fn tcp_frame_take() -> (FrameLink, usize) !{unsafe} {
     let pool_guard = intrusive_pool_lock(&tcp_frame_pool);
-    // insert_zeroed is not required here (NetFrame holds no stable owner
-    // storage) but is used anyway: a transmit frame is filled header-first
-    // and a short segment leaves the tail untouched, so a recycled slot
-    // would otherwise put a previous connection's bytes on the wire past
-    // the length the caller meant to send.
     let inserted = intrusive_pool_insert_zeroed(&tcp_frame_pool, pool_guard);
     intrusive_pool_unlock(&tcp_frame_pool, pool_guard);
     match inserted {
         IntrusivePoolInsertResult::OutOfMemory => {
             kernel_boot_log_resource_exhausted(
                 "TCP frame pool (out of pages)" as *u8, 0);
-            return false;
+            return (FrameLink::None, 0);
         }
         IntrusivePoolInsertResult::Allocated(owner) => {
+            // The address comes back beside the link because a link is
+            // linear: reading it out of the parked handle later would mean
+            // consuming the handle to look at it.
             let address: usize = intrusive_owner_slot(owner);
-            let guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
-            let displaced: FrameLink = stable_replace(
-                guard, &tcp_connection_frames[connection_slot].mutex,
-                tcp_connection_frames[connection_slot].tx,
-                FrameLink::Some(owner));
-            tcp_frame_unlock(guard, &tcp_connection_frames[connection_slot].mutex);
-            match displaced {
-                FrameLink::None => {}
-                FrameLink::Some(stale) => {
-                    // Acquiring over a frame this connection already had.
-                    // Release rather than leak it, and say so: the
-                    // acquire/release pairing is supposed to prevent this.
-                    kernel_boot_log("tcp frames: acquire displaced a live frame\n");
-                    tcp_frame_release_link(FrameLink::Some(stale));
-                }
-            }
-            tcp_connections[connection_slot].tx_frame = address;
-            return true;
+            return (FrameLink::Some(owner), address);
+        }
+    }
+}
+
+// Hands this connection its three frames, or returns false having released
+// whatever it managed to take. Called from tcp_connection_alloc, whose Full
+// result is exactly the right thing to report when it fails -- a connection
+// with no frame to transmit from is not one this stack can serve.
+fn tcp_connection_frames_acquire(
+        connection_slot: {0..<TCP_CONNECTION_MAX as usize}) -> bool !{unsafe} {
+    tcp_connection_frames[connection_slot].mutex = 0;
+    let (tx, tx_address) = tcp_frame_take();
+    if (tx_address == 0) {
+        tcp_frame_release_link(tx);
+        return false;
+    }
+    let (rx, rx_address) = tcp_frame_take();
+    if (rx_address == 0) {
+        tcp_frame_release_link(rx);
+        tcp_frame_release_link(tx);
+        return false;
+    }
+    let (inetd, inetd_address) = tcp_frame_take();
+    if (inetd_address == 0) {
+        tcp_frame_release_link(inetd);
+        tcp_frame_release_link(rx);
+        tcp_frame_release_link(tx);
+        return false;
+    }
+
+    let tx_guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
+    let displaced_tx: FrameLink = stable_replace(
+        tx_guard, &tcp_connection_frames[connection_slot].mutex,
+        tcp_connection_frames[connection_slot].tx, tx);
+    tcp_frame_unlock(tx_guard, &tcp_connection_frames[connection_slot].mutex);
+    tcp_frame_release_displaced(displaced_tx);
+
+    let rx_guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
+    let displaced_rx: FrameLink = stable_replace(
+        rx_guard, &tcp_connection_frames[connection_slot].mutex,
+        tcp_connection_frames[connection_slot].rx, rx);
+    tcp_frame_unlock(rx_guard, &tcp_connection_frames[connection_slot].mutex);
+    tcp_frame_release_displaced(displaced_rx);
+
+    let inetd_guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
+    let displaced_inetd: FrameLink = stable_replace(
+        inetd_guard, &tcp_connection_frames[connection_slot].mutex,
+        tcp_connection_frames[connection_slot].inetd, inetd);
+    tcp_frame_unlock(inetd_guard, &tcp_connection_frames[connection_slot].mutex);
+    tcp_frame_release_displaced(displaced_inetd);
+
+    tcp_connections[connection_slot].tx_frame = tx_address;
+    tcp_connections[connection_slot].rx_frame = rx_address;
+    tcp_connections[connection_slot].inetd_frame = inetd_address;
+    return true;
+}
+
+// Acquiring over a frame this connection already had. Release rather than
+// leak it, and say so: the acquire/release pairing is supposed to make
+// this unreachable.
+fn tcp_frame_release_displaced(link: FrameLink) !{unsafe} {
+    match link {
+        FrameLink::None => {}
+        FrameLink::Some(stale) => {
+            kernel_boot_log("tcp frames: acquire displaced a live frame\n");
+            tcp_frame_release_link(FrameLink::Some(stale));
         }
     }
 }
 
 fn tcp_connection_frames_release(
         connection_slot: {0..<TCP_CONNECTION_MAX as usize}) !{unsafe} {
-    let guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
-    let held: FrameLink = stable_replace(
-        guard, &tcp_connection_frames[connection_slot].mutex,
+    let tx_guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
+    let held_tx: FrameLink = stable_replace(
+        tx_guard, &tcp_connection_frames[connection_slot].mutex,
         tcp_connection_frames[connection_slot].tx, FrameLink::None);
-    tcp_frame_unlock(guard, &tcp_connection_frames[connection_slot].mutex);
-    tcp_frame_release_link(held);
+    tcp_frame_unlock(tx_guard, &tcp_connection_frames[connection_slot].mutex);
+    tcp_frame_release_link(held_tx);
+
+    let rx_guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
+    let held_rx: FrameLink = stable_replace(
+        rx_guard, &tcp_connection_frames[connection_slot].mutex,
+        tcp_connection_frames[connection_slot].rx, FrameLink::None);
+    tcp_frame_unlock(rx_guard, &tcp_connection_frames[connection_slot].mutex);
+    tcp_frame_release_link(held_rx);
+
+    let inetd_guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
+    let held_inetd: FrameLink = stable_replace(
+        inetd_guard, &tcp_connection_frames[connection_slot].mutex,
+        tcp_connection_frames[connection_slot].inetd, FrameLink::None);
+    tcp_frame_unlock(inetd_guard, &tcp_connection_frames[connection_slot].mutex);
+    tcp_frame_release_link(held_inetd);
+
     tcp_connections[connection_slot].tx_frame = 0;
+    tcp_connections[connection_slot].rx_frame = 0;
+    tcp_connections[connection_slot].inetd_frame = 0;
 }
 
 // The transmit frame as a slice, reached by ADDRESS rather than by taking
@@ -485,12 +563,10 @@ fn tcp_connection_frames_release(
 // intrusive_pool_probe_slot validates the address and gates the payload
 // behind a view it has to spend. So ownership stays linear and access
 // stays cheap, without either one pretending to be the other.
-fn tcp_connection_tx_slice(connection_slot: {0..<TCP_CONNECTION_MAX as usize})
-        -> [u8; 1514..] !{unsafe} {
-    match intrusive_pool_probe_slot(&tcp_frame_pool,
-                                    tcp_connections[connection_slot].tx_frame) {
+fn tcp_frame_slice(address: usize) -> [u8; 1514..] !{unsafe} {
+    match intrusive_pool_probe_slot(&tcp_frame_pool, address) {
         IntrusiveSlotProbe::NoPayload => {
-            kernel_boot_log("tcp frames: transmit frame missing\n");
+            kernel_boot_log("tcp frames: frame missing\n");
             return tcp_frame_absent_fallback as [u8; 1514..];
         }
         IntrusiveSlotProbe::Live(slot_view) => {
@@ -499,6 +575,26 @@ fn tcp_connection_tx_slice(connection_slot: {0..<TCP_CONNECTION_MAX as usize})
             return frame.bytes as [u8; 1514..];
         }
     }
+}
+
+fn tcp_connection_tx_slice(connection_slot: {0..<TCP_CONNECTION_MAX as usize})
+        -> [u8; 1514..] !{unsafe} {
+    return tcp_frame_slice(tcp_connections[connection_slot].tx_frame);
+}
+
+// The two syscall-side buffers. 1460 rather than 1514 because that is what
+// the callers bound their lengths by; the frame behind them is one MTU, so
+// the extra 54 bytes are headroom nobody addresses, not a second size.
+fn tcp_connection_rx_slice(connection_slot: {0..<TCP_CONNECTION_MAX as usize})
+        -> [u8; 1460..] !{unsafe} {
+    let frame = tcp_frame_slice(tcp_connections[connection_slot].rx_frame);
+    return frame[0..<1460];
+}
+
+fn tcp_connection_inetd_slice(connection_slot: {0..<TCP_CONNECTION_MAX as usize})
+        -> [u8; 1460..] !{unsafe} {
+    let frame = tcp_frame_slice(tcp_connections[connection_slot].inetd_frame);
+    return frame[0..<1460];
 }
 
 fn tcp_connection_owner_new(
