@@ -14,6 +14,13 @@
 // Current limitations (2026-08-17). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
+// - A CONSUMER MUST SUPPLY A LOCK BACKEND. This file names
+//   pool_lock_acquire/pool_lock_release without saying who provides them
+//   (issue #364), so a kernel consumer must have kernel/lib/pool_lock.tkb
+//   on its file list and linux_user has its own checking stand-in.
+//   Forgetting is an undefined-function error at the first `use`, not a
+//   silent fallback -- but it is the one thing adopting this file costs
+//   beyond `use`ing it.
 // - Mutation requires this pool's guard, and that is enforced rather than
 //   asked for (issue #351): insert, remove and reclaim take `borrow
 //   IntrusivePoolGuard[pool_id]`, obtainable only from

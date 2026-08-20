@@ -2108,6 +2108,26 @@ inline asm with a memory clobber, no hardware barrier instruction).
 on ARM/AArch64 (`wfe`/`sev`); unsupported targets reject these builtins
 at codegen time rather than silently lowering to a racy `wfi`.
 
+**AArch64 system-register and barrier builtins**, also with no
+`extern fn` needed, each lowering to the one instruction it names with
+the register chosen by LLVM's allocator rather than by the caller:
+`mrs_cntfrq_el0`, `mrs_cntpct_el0`, `mrs_sctlr_el1`, `mrs_esr_el1`,
+`mrs_far_el1`, `mrs_elr_el1`, `mrs_spsr_el1`, `mrs_daif`;
+`msr_cntp_tval_el0`, `msr_cntp_ctl_el0`, `msr_sctlr_el1`, `msr_mair_el1`,
+`msr_tcr_el1`, `msr_ttbr0_el1`, `msr_daifclr_irq`, `msr_daifset_irq`;
+`tlbi_vmalle1`, `tlbi_vaae1is`, `tlbi_vae1is`, `tlbi_aside1is`;
+`dsb_ish`, `dsb_ishst`, `isb`; and the call gates `smc4`, `hvc4`,
+`svc5`. A non-AArch64 target rejects them during type checking.
+
+`mrs_daif` is what makes an interrupt-masking lock able to RESTORE the
+mask rather than unconditionally enable it: `msr_daifset_irq` /
+`msr_daifclr_irq` alone can only mask and unmask, which is wrong inside
+an interrupt handler (where the hardware masked on entry) and wrong when
+two such locks nest. Reading the mask first is the `local_irq_save` half
+of the pair -- see `kernel/lib/pool_lock.tkb`, and note that the saved
+value has to live in the caller's frame, which is why the guard holding
+it is a linear struct rather than an erased view.
+
 ## Function Pointers, extern fn, and Overloading
 
 - `fn(T...) -> R`, `fn !{}(T...) -> R`, and
