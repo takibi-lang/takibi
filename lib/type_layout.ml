@@ -179,3 +179,43 @@ let rec size_align_of_type pos seen ty =
 let sizeof_type pos ty =
   let (sz, _) = size_align_of_type pos [] ty in
   sz
+
+(* GitHub issue #362: prove this file and codegen still agree.
+
+   There are three implementations of "how big is this struct" in the
+   tree -- this one (used for array sizes, at parse time), llvm_gen's own
+   const_type_size, and the LLVM DataLayout that the emitted code
+   actually obeys. llvm_gen already cross-checks the second against the
+   third, and raises "BUG: sizeof(...) OCaml-computed value disagrees
+   with DataLayout value" when they part. Nothing checked THIS one, and
+   it drifted: for a struct embedding an `align(N)` member, an array-size
+   `sizeof` said 64 while an expression `sizeof` said 40, for years,
+   silently.
+
+   Both are 64 now. This is what keeps them there. Run after codegen has
+   registered its struct types, when all three are answerable, and
+   compare every struct the program actually declared.
+
+   A struct this file cannot size at all (recursive, or mentioning a
+   type it has no layout for) is skipped rather than failed: the point
+   is to catch DISAGREEMENT, and "one side declined to answer" is not
+   that. *)
+let check_against_codegen () =
+  match !Llvm_gen.target_data with
+  | None -> ()
+  | Some dl ->
+      Hashtbl.iter (fun name _ ->
+        match Hashtbl.find_opt Llvm_gen.struct_lltypes name with
+        | None -> ()
+        | Some llty ->
+            let codegen_size = Int64.to_int (Llvm_target.DataLayout.abi_size llty dl) in
+            (match sizeof_type Lexing.dummy_pos (Ast.TypeNamed name) with
+             | exception _ -> ()
+             | ours when ours <> codegen_size ->
+                 raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
+                   "BUG: sizeof(%s) is %d by lib/type_layout.ml (what an array \
+                    size would use) but %d in the emitted layout -- the two \
+                    have diverged, which is GitHub issue #362's bug class"
+                   name ours codegen_size))
+             | _ -> ())
+      ) structs

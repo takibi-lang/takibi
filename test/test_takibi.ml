@@ -8894,6 +8894,31 @@ let codegen_tests = [
        Alcotest.(check int64) "and it is padded only to its own alignment"
          16L (total "Plain"));
 
+  (* The guard that keeps issue #362 from recurring. There are three
+     implementations of "how big is this struct": type_layout.ml (what an
+     array-size `sizeof` uses, at parse time), llvm_gen's own
+     const_type_size, and the DataLayout the emitted code obeys. The
+     second and third were already cross-checked; the first was not, and
+     drifted silently for exactly the aligned-struct case above. *)
+  Alcotest.test_case
+    "the three struct-layout implementations agree, including for \
+     aligned and packed structs (issue #362)" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
+       in
+       ignore (gen_codegen
+         "struct CrossAligned align(32) { a: usize; }
+          struct CrossHolder { pad: u8; v: CrossAligned; tail: u16; }
+          struct CrossNested { inner: CrossHolder; n: usize; }
+          struct packed CrossPacked { a: u8; b: u32; }
+          struct CrossPlain { a: u8; b: usize; }
+          struct CrossArray { items: [CrossAligned; 3]; n: u8; }");
+       match Type_layout.check_against_codegen () with
+       | () -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf "layout implementations disagree: %s" msg);
+
   (* GitHub issue #77: sizeof(...)/offsetof(...) from a packed struct must
      prove a subslice bound with zero trap sites, whether used directly or
      threaded through a local `let` -- reproduces the exact shapes reported

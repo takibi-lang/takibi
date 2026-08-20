@@ -202,6 +202,14 @@ let () =
 
     Llvm_gen.gen_program ~prog_types prog;
 
+    (* GitHub issue #362: the three layout implementations must still
+       agree. llvm_gen already checks its own OCaml formula against the
+       DataLayout at every sizeof; this checks the third one, which array
+       sizes use at parse time and which nothing had been comparing. See
+       Type_layout.check_against_codegen for what drifted and for how
+       long. *)
+    Type_layout.check_against_codegen ();
+
     (* GitHub issue #286 follow-up (2026-08-13): dump a struct's field
        offsets as GAS `.equ` constants instead of emitting an object file.
        This exists so a hand-written assembly consumer (kernel/arch/arm64/
