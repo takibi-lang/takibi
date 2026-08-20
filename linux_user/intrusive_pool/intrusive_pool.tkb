@@ -79,14 +79,15 @@ struct UninitProbe {
     c: usize;
 }
 
-// GitHub issue #349's cliff, in the three sizes where it used to bite.
+// GitHub issue #349's cliff, at the two sizes where it bites hardest.
 // Each is chosen so the SLOT (8 bytes of generation plus the payload)
-// lands exactly on a divisor of the page: 1024, 2048, 4096. Those are
-// precisely the strides an in-page header punished worst, because losing
-// 128 bytes off the top cost a whole slot rather than a fraction of one.
+// lands exactly on a divisor of the page. Those are the strides an
+// in-page header punishes worst, because losing 128 bytes off the top
+// costs a whole slot rather than a fraction of one. A page-SIZED slot
+// used to be poolable when metadata was out of line; with it back in the
+// page it is not, and there is no third struct here any more.
 struct Stride1024 { filler: [u8; 1016]; }
 struct Stride2048 { filler: [u8; 2040]; }
-struct Stride4096 { filler: [u8; 4088]; }
 
 fn app_main() {
     page_allocator_init();
@@ -125,28 +126,33 @@ fn app_main() {
     uart_print(intrusive_pool_slots_per_chunk(&pool_big));
     uart_puts("\n");
 
-    // GitHub issue #349: the cliff is gone. With a 128-byte header at the
-    // top of every page these were 3, 1 and "does not compile" -- an
-    // in-page header costs a whole slot exactly when the stride divides
-    // the page, which is the case a caller is most likely to have chosen
-    // deliberately. The header lives in the provider's per-page metadata
-    // now, so a chunk is a whole page and the arithmetic is unsurprising.
+    // GitHub issue #349, and what issue #353 taught it. The chunk header
+    // is out of the pool's hands -- the provider says where per-page
+    // metadata lives and how much of the page is the owner's -- but this
+    // provider puts it in the page's own tail, so the cliff is BACK: a
+    // stride that divides the page still loses a slot.
+    //
+    // That is deliberate. The side-array placement removed the cliff by
+    // reserving metadata for every page in the machine, which is 25 MB of
+    // BSS on the kernel's 204800 pages whether or not anything is pooled.
+    // In-page charges only the pages that are actually chunks, and the
+    // kernel pools a handful. Break-even is around 450 MB of pooled
+    // memory. So the numbers below are the price, and at the payload
+    // sizes the kernel actually pools (16-96 bytes) it is about 3% of
+    // slots.
+    //
     // No pages are consumed here: slots-per-chunk is a function of
-    // sizeof(T) and nothing else, which is the same reason it needs no
-    // caller-supplied parameter.
+    // sizeof(T) and the provider's constants, which is the same reason it
+    // needs no caller-supplied parameter.
     let mut pool_1k: IntrusivePool(Stride1024);
     intrusive_pool_init(&pool_1k);
     let mut pool_2k: IntrusivePool(Stride2048);
     intrusive_pool_init(&pool_2k);
-    let mut pool_4k: IntrusivePool(Stride4096);
-    intrusive_pool_init(&pool_4k);
-    uart_puts("page-dividing strides no longer lose a slot to the header ");
-    uart_puts("(1024 -> was 3, 2048 -> was 1, 4096 -> was impossible): ");
+    uart_puts("what the in-page header costs at page-dividing strides ");
+    uart_puts("(1024, 2048; 4 and 2 if metadata were out of line): ");
     uart_print(intrusive_pool_slots_per_chunk(&pool_1k));
     uart_puts(" ");
     uart_print(intrusive_pool_slots_per_chunk(&pool_2k));
-    uart_puts(" ");
-    uart_print(intrusive_pool_slots_per_chunk(&pool_4k));
     uart_puts("\n");
 
     // A GrowablePool able to hold the same 336 objects must pre-commit

@@ -24,9 +24,10 @@ fn app_main() !{unsafe} {
     let mut pool: IntrusivePool(Payload);
     intrusive_pool_init(&pool);
 
-    // Layout comes from the provider's PAGE_SIZE, so this number is only
-    // right if the pool really did bind to the provider on the file list.
-    uart_puts("slots per chunk, from the provider's own PAGE_SIZE: ");
+    // Layout comes from the provider's PAGE_USABLE_BYTES, so this number
+    // is only right if the pool really did bind to the provider on the
+    // file list.
+    uart_puts("slots per chunk, from the provider's own usable size: ");
     uart_print(intrusive_pool_slots_per_chunk(&pool));
     uart_puts("\n");
 

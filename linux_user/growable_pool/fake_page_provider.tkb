@@ -14,18 +14,36 @@ use "kernel/lib/freelist.tkb";
 const PAGE_SIZE: usize = 4096;
 const PAGE_COUNT: usize = 9;
 
-// GitHub issue #349: per-page storage whose MEANING belongs to whoever
-// currently holds the page, and whose lifetime belongs to this allocator.
-// The shape Linux's `struct page` has: the allocator owns an array indexed
-// by page number, and each page's current owner decides what the bytes in
-// its entry mean.
+// GitHub issue #349, resized for kernel scale (issue #353): per-page
+// storage whose MEANING belongs to whoever currently holds the page --
+// `struct page`'s shape -- reserved at the END OF THE PAGE ITSELF rather
+// than in a side array indexed by page number.
 //
-// Declared as words rather than bytes because `[u8; N]` has alignment 1,
-// which would leave an owner's `usize` fields misaligned. Sixteen words
-// (128 bytes, 3.1% of a page) is what intrusive_pool_core.tkb's chunk
-// header needs today with room to spare; consumers static_assert their own
-// metadata against PAGE_META_WORDS rather than assuming.
-const PAGE_META_WORDS: usize = 16;
+// The side array was the first design and it does not survive contact
+// with a real kernel. kernel/mm/page.tkb manages 204800 pages, so a
+// 128-byte side entry per page is 25 MB of BSS reserved whether or not
+// anything is ever pooled. In-page costs 128 bytes per page that is
+// ACTUALLY a chunk, and the kernel's pooled types (ProcessRecord x16,
+// TcpConnectionStore x2, ...) come to a handful of pages. Break-even is
+// around 115200 chunk pages -- 450 MB of pooled memory -- so the side
+// array is right only in a world where nearly every page is a chunk,
+// which is exactly the 9-page world this prototype started in and not
+// the one it is a prototype OF.
+//
+// What issue #349 durably bought is not the placement but the
+// ABSTRACTION: the pool asks page_meta_at where its metadata lives and
+// does not care, so placement is the provider's policy. This one says
+// "the tail of the page". The cliff #349 removed comes back with it --
+// a stride that divides the page loses a slot again -- which is the
+// trade, and at the kernel's actual payload sizes (16-96 bytes) it costs
+// about 3% of slots against 25 MB of standing reservation.
+//
+// This stand-in and the kernel use the SAME placement, deliberately: a
+// prototype exercising a layout the kernel does not use is issue #366's
+// drift one level down.
+const PAGE_META_BYTES: usize = 128;
+// What an owner may use for its own data; the metadata sits above it.
+const PAGE_USABLE_BYTES: usize = PAGE_SIZE - PAGE_META_BYTES;
 
 // Aligned to 16 pages rather than 1 (GitHub issue #363). A run's
 // alignment can only ever be as strong as the arena it is carved from,
@@ -35,7 +53,6 @@ const PAGE_META_WORDS: usize = 16;
 // page allocator does not have this problem because page 0 sits at a
 // known physical address; a stand-in has to say so out loud.
 private let mut fake_pages: [u8; PAGE_SIZE * PAGE_COUNT] align(65536);   // 16 pages
-private let mut fake_page_meta: [usize; PAGE_META_WORDS * PAGE_COUNT];
 
 // GitHub issue #363: occupancy is an array INDEXED BY PAGE NUMBER, not a
 // free list, and that is the whole point rather than an implementation
@@ -184,9 +201,7 @@ fn page_meta_at(physical: usize) -> usize {
         (physical - base) % PAGE_SIZE != 0) {
         return 0;
     }
-    let index: usize = (physical - base) / PAGE_SIZE;
-    let meta_base: usize = (fake_page_meta as *usize) as usize;
-    return meta_base + index * PAGE_META_WORDS * sizeof(usize);
+    return physical + PAGE_USABLE_BYTES;
 }
 
 // Clears one page's metadata. The allocator owns this storage, so it is
@@ -197,10 +212,10 @@ fn page_meta_at(physical: usize) -> usize {
 private fn page_meta_clear(physical: usize) !{unsafe} {
     let meta: usize = page_meta_at(physical);
     if (meta == 0) { return; }
-    let words: *usize = unsafe { meta as *usize };
-    let count: isize = PAGE_META_WORDS as isize;
+    let bytes: *u8 = unsafe { meta as *u8 };
+    let count: isize = PAGE_META_BYTES as isize;
     for i: isize in 0..<count {
-        words[i] = 0;
+        bytes[i] = 0;
     }
 }
 

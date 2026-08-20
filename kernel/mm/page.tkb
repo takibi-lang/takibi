@@ -63,6 +63,70 @@ const BOOT_PAGE_COUNT: usize = 204800;
 
 extern symbol usable_ram_start;
 
+// GitHub issue #353: per-page storage whose MEANING belongs to whoever
+// currently holds the page -- `struct page`'s shape -- reserved at the
+// END OF THE PAGE ITSELF.
+//
+// kernel/lib/ pool primitives need somewhere to keep per-chunk
+// bookkeeping that is not a side array sized by the number of chunks
+// (issue #344's whole premise). The prototype in linux_user/ first put
+// this in an array indexed by page number, and that does not survive
+// here: 128 bytes per page across BOOT_PAGE_COUNT is 25 MB of BSS
+// reserved whether or not anything is ever pooled. In-page charges only
+// the pages that are actually chunks, and this kernel's pooled types
+// come to a handful. Break-even is around 115200 chunk pages -- 450 MB
+// of pooled memory -- so a side array is right only where nearly every
+// page is a chunk.
+//
+// The cost of in-page is that an owner loses PAGE_META_BYTES of every
+// page it holds, so a payload whose stride divides the page loses a
+// whole slot rather than a fraction of one. At the sizes this kernel
+// pools (ProcessRecord 96, TcpConnectionStore 32, ...) that is about 3%.
+//
+// Nothing in PageMeta changes: an owner asks page_meta_at where its
+// metadata is, which is arithmetic, and reads its own tag from there,
+// which is one load. That is exactly what this issue asked for, and it
+// costs no bytes at all.
+const PAGE_META_BYTES: usize = 128;
+
+// What an owner may use for its own data. The metadata sits above it.
+const PAGE_USABLE_BYTES: usize = PAGE_SIZE - PAGE_META_BYTES;
+
+// The address of this page's owner metadata, or 0 if `physical` is not
+// one of this allocator's page-aligned pages.
+//
+// Returning 0 rather than trapping is what lets a consumer use this as
+// its own validation step on an address of unknown provenance: the range
+// check here dereferences nothing, so a caller that gets 0 knows the
+// address is not one of ours without ever having touched it. The read
+// that follows is then at a computed offset into a page this allocator
+// has already confirmed it owns -- not through an address the caller
+// supplied, which is the distinction that makes the in-page placement as
+// safe as a side array would have been.
+fn page_meta_at(physical: usize) -> usize {
+    let base: usize = usable_ram_start;
+    let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
+    if (physical < base || physical >= base + pool_bytes ||
+        (physical - base) % PAGE_SIZE != 0) {
+        return 0;
+    }
+    return physical + PAGE_USABLE_BYTES;
+}
+
+// Clears one page's owner metadata. The allocator owns this storage, so
+// it is the allocator that must not leave a freed page describing itself
+// as something an owner still holds -- a pool's "is this chunk mine?"
+// test is exactly a read of that region.
+private fn page_meta_clear(physical: usize) !{unsafe} {
+    let meta: usize = page_meta_at(physical);
+    if (meta == 0) { return; }
+    let bytes: *u8 = unsafe { meta as *u8 };
+    let count: isize = PAGE_META_BYTES as isize;
+    for i: isize in 0..<count {
+        bytes[i] = 0;
+    }
+}
+
 // This file's struct-page equivalent. The occupancy bit is needed because
 // page_transferred_release() and page_transferred_release_physical() accept
 // plain integers after linear ownership has been intentionally erased. Add
@@ -374,7 +438,12 @@ fn page_transferred_release(index: {0..<BOOT_PAGE_COUNT as usize}) {
     freelist_core_remove(&boot_page_pool.core, freelist_owner_new(index, 0));
 }
 
-fn page_transferred_release_physical(physical: usize) {
+fn page_transferred_release_physical(physical: usize) !{unsafe} {
+    // Owner metadata is scoped to the current owner (issue #353), so it
+    // goes back to zero before the page does. Without this, the next
+    // owner of this page would inherit a region still claiming to belong
+    // to the last one.
+    page_meta_clear(physical);
     let base: usize = usable_ram_start;
     let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
     if (physical < base || physical >= base + pool_bytes ||

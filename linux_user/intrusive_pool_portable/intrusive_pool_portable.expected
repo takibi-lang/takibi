@@ -1,5 +1,5 @@
 intrusive_pool_portable
-slots per chunk, from the provider's own PAGE_SIZE: 170
+slots per chunk, from the provider's own usable size: 165
 allocate, write and read back through the bound provider (values, pages taken): true 1
 the pool's own invariants hold under this provider too: true
 done

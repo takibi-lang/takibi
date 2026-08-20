@@ -334,7 +334,8 @@
 // This file `use`s no provider. It names the nine symbols it needs and
 // binds to whichever provider is on the compiler's file list:
 //
-//   PAGE_SIZE  PAGE_META_WORDS  PageAllocResult  PageOwner
+//   PAGE_SIZE  PAGE_USABLE_BYTES  PAGE_META_BYTES
+//   PageAllocResult  PageOwner
 //   page_alloc  page_physical_address  page_owner_transfer_index
 //   page_transferred_release_physical  page_meta_at
 //   pool_lock_acquire  pool_lock_release
@@ -661,13 +662,13 @@ fn intrusive_pool_slots_per_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id
     // A whole page is available now that the header is out of it (GitHub
     // issue #349), so a page-sized T is exactly poolable rather than
     // exactly impossible.
-    static_assert(sizeof(IntrusiveSlot(T)) <= PAGE_SIZE,
+    static_assert(sizeof(IntrusiveSlot(T)) <= PAGE_USABLE_BYTES,
                   "IntrusivePool(T): one T-sized slot does not fit in a single chunk");
     // The header now lives in storage the page provider reserves, so what
     // has to be checked is that the provider reserved enough. Same shape
     // as the in-page reservation this replaces -- a fact about a constant,
     // settled here rather than trusted.
-    static_assert(sizeof(IntrusiveChunkHeader) <= PAGE_META_WORDS * sizeof(usize),
+    static_assert(sizeof(IntrusiveChunkHeader) <= PAGE_META_BYTES,
                   "IntrusivePool(T): the page provider's per-page metadata is smaller than a chunk header");
     // GitHub issue #348, the two conditions the payload/link overlay
     // needs. Both are properties of T alone, so both are settled here
@@ -703,7 +704,7 @@ fn intrusive_pool_slots_per_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id
     //    reasoning is in hand, than to remember later.
     static_assert(alignof(T) <= alignof(usize),
                   "IntrusivePool(T): T needs stronger alignment than the slot layout guarantees");
-    return PAGE_SIZE / sizeof(IntrusiveSlot(T));
+    return PAGE_USABLE_BYTES / sizeof(IntrusiveSlot(T));
 }
 
 // The chunk a slot address belongs to, given that every chunk is exactly
