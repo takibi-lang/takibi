@@ -1227,7 +1227,22 @@ private let mut owner_chan: OwnerChan;
 
 The first variant case must have no payload. Stable containers are
 zero-initialized globals without an explicit initializer, so declaration-order
-tag zero is the empty state. The container itself must be a `private let mut`
+tag zero is the empty state.
+
+**That premise is a caller obligation where it cannot be checked.** The
+container rules below are enforced where the storage is syntactically
+visible -- a local is rejected, and so is passing one by value -- but
+"passing a pointer to its stable global location is supported", and
+nothing distinguishes such a pointer from one into any other storage.
+A container reached through a pointer into memory that is neither
+zero-initialized nor fresh therefore compiles, and its first
+`stable_replace` reads whatever was there as the previous value: for a
+recycled slot that means a linear payload nobody created. Proving the
+pointer names a stable global is place tracking, which is outlook (see
+`OWNERSHIP_KERNEL.md`). Until then, an allocator handing out such storage
+owes the zeroing itself -- `kernel/lib/intrusive_pool.tkb` does, and
+rejects the unzeroed path with `contains_stable_owner(T)` (GitHub issue
+#369). The container itself must be a `private let mut`
 global, OR a fixed-size array of one (`private let mut slots: [OwnerChan; N];`
 -- GitHub issue #158): each array element is then its own independently
 stable_replace-able slot, addressed by a runtime index (`&slots[i].mutex`,
