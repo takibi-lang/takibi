@@ -957,6 +957,69 @@ fn app_main() {
     uart_print(probes_run);
     uart_puts("\n");
 
+    // -- GitHub issue #365: what the guard type cannot see.
+    //
+    // #351 made forgetting the lock a compile error. Two mistakes survive
+    // that and only a RUNNING lock reveals them -- by hanging, which is
+    // the worst way to learn. The linux_user lock body checks for both;
+    // a kernel build supplies a different body and pays nothing.
+    //
+    // Everything above ran through the same checker, so these counts
+    // start from whatever the rest of this file did -- which is the first
+    // thing worth asserting.
+    uart_puts("every lock above was balanced, singly held and consistently ");
+    uart_puts("ordered (reentrant, order violations, unbalanced, still held, ");
+    uart_puts("untracked): ");
+    uart_print(pool_lock_reentrant_count());
+    uart_puts(" ");
+    uart_print(pool_lock_order_violation_count());
+    uart_puts(" ");
+    uart_print(pool_lock_unbalanced_count());
+    uart_puts(" ");
+    uart_print(pool_lock_held_depth_now());
+    uart_puts(" ");
+    uart_print(pool_lock_untracked_count());
+    uart_puts("\n");
+
+    // Re-entrancy: the same pool's guard twice on one path. A compile
+    // error cannot see this -- both acquires are individually correct --
+    // and a real spinlock would deadlock here.
+    let reentrant_before: usize = pool_lock_reentrant_count();
+    let ra = intrusive_pool_lock(&pool_a);
+    let rb = intrusive_pool_lock(&pool_a);
+    intrusive_pool_unlock(&pool_a, rb);
+    intrusive_pool_unlock(&pool_a, ra);
+    uart_puts("taking one pool's guard twice on a path is caught: ");
+    uart_print_bool(pool_lock_reentrant_count() == reentrant_before + 1);
+    uart_puts("\n");
+
+    // Lock ORDER. Neither site below is wrong on its own; the pair is.
+    // First establish a-then-b as the order this program uses...
+    let order_before: usize = pool_lock_order_violation_count();
+    let oa = intrusive_pool_lock(&pool_a);
+    let ob = intrusive_pool_lock(&pool_b);
+    intrusive_pool_unlock(&pool_b, ob);
+    intrusive_pool_unlock(&pool_a, oa);
+    // ...then repeat it, which must NOT be reported. A checker that fires
+    // on correct code is worse than none.
+    let oa2 = intrusive_pool_lock(&pool_a);
+    let ob2 = intrusive_pool_lock(&pool_b);
+    intrusive_pool_unlock(&pool_b, ob2);
+    intrusive_pool_unlock(&pool_a, oa2);
+    let consistent_ok: bool =
+        pool_lock_order_violation_count() == order_before;
+    // ...and only now take them the other way round.
+    let ob3 = intrusive_pool_lock(&pool_b);
+    let oa3 = intrusive_pool_lock(&pool_a);
+    intrusive_pool_unlock(&pool_a, oa3);
+    intrusive_pool_unlock(&pool_b, ob3);
+    uart_puts("the same two pools in a consistent order are not reported, ");
+    uart_puts("the reversed pair is (consistent quiet, reversal caught): ");
+    uart_print_bool(consistent_ok);
+    uart_puts(" ");
+    uart_print_bool(pool_lock_order_violation_count() == order_before + 1);
+    uart_puts("\n");
+
     uart_puts("done\n");
 }
 

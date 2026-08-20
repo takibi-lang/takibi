@@ -237,12 +237,12 @@
 // - Mutation requires this pool's guard, and that is enforced rather than
 //   asked for (issue #351): insert, remove and reclaim take `borrow
 //   IntrusivePoolGuard[pool_id]`, obtainable only from
-//   intrusive_pool_lock on the same pool. What the guard does NOT yet do
-//   is exclude: intrusive_pool_lock's body is empty in this prototype,
-//   as kernel/kernel/process.tkb's ScheduledProcessGuard's still is, so
-//   the discipline is proven and the exclusion is the port's to supply
-//   (disable_irq on one core; a real acquire for SMP). Nothing else in
-//   this file changes when it does.
+//   intrusive_pool_lock on the same pool. What the guard does NOT do is
+//   exclude: intrusive_pool_lock delegates to pool_lock_acquire, which
+//   the file list supplies (issue #364), and linux_user's supplies
+//   checking rather than exclusion. The port supplies disable_irq on one
+//   core or a real acquire for SMP; nothing in this file changes when it
+//   does.
 // - READS are not guarded. A caller that reads while another context
 //   mutates -- a cursor walk racing an insert, a counter racing a
 //   reclaim -- must hold the guard across both, and this file cannot
@@ -250,9 +250,15 @@
 //   every caller a release on every early-return path, for a race the
 //   mutation guard already makes impossible to reach WITHOUT a
 //   deliberate concurrent reader. Revisit when there is one.
-// - The guard is not re-entrant. Acquiring twice on one path is a
-//   deadlock under a real lock and is not diagnosed here, because
-//   nothing ties the second acquire to the first.
+// - The guard is not re-entrant, and taking one twice on a path would
+//   deadlock under a real lock. It is not a compile error -- both
+//   acquires are individually correct, so nothing in the type ties the
+//   second to the first -- but linux_user's lock body counts it, along
+//   with two pools acquired in inconsistent orders at different sites,
+//   which is the deadlock that only appears under the interleaving that
+//   hits it (issue #365, linux_user/intrusive_pool/pool_lock_check.tkb).
+//   A kernel build supplies a different body and pays none of that, so
+//   the checking is thorough exactly where it is free.
 // - Reclaim holds back up to `retained_chunks` fully-empty chunks per
 //   pool and returns every later one, so steady-state memory is
 //   `ceil(live / slots_per_chunk)` pages plus that reserve. It defaults
@@ -331,6 +337,7 @@
 //   PAGE_SIZE  PAGE_META_WORDS  PageAllocResult  PageOwner
 //   page_alloc  page_physical_address  page_owner_transfer_index
 //   page_transferred_release_physical  page_meta_at
+//   pool_lock_acquire  pool_lock_release
 //
 // linux_user passes linux_user/growable_pool/fake_page_provider.tkb; a
 // kernel build passes kernel/mm/page.tkb once that file grows page_meta_at
@@ -580,14 +587,18 @@ fn intrusive_owner_drop(owner: sink IntrusiveOwner[pool_id, allocation]) {}
 // masking one layer up and one place easier to forget.
 private linear view IntrusivePoolGuard[pool_id: addr];
 
-// Acquires this pool. The body is where a port puts disable_irq() (single
-// core) or a real spinlock acquire (SMP); it is empty here because
-// linux_user has neither, and because what this prototype is testing is
-// that no caller can skip the acquire.
+// Acquires this pool. The body delegates to pool_lock_acquire, which the
+// FILE LIST supplies (issue #364): linux_user gives it a checking
+// implementation that catches re-entrancy and inconsistent lock order
+// (issue #365), and a kernel build gives it disable_irq() on one core or
+// a real acquire for SMP. This file does not know or care which, which
+// is what lets the checking be thorough where it is free and absent
+// where it would cost.
 //
 // Deliberately NOT `!{may_block}`: see above.
 fn intrusive_pool_lock(T: type, pool: &mut IntrusivePool(T) @ pool_id)
         -> IntrusivePoolGuard[pool_id] {
+    pool_lock_acquire(pool.pool_tag);
     return view IntrusivePoolGuard[pool_id];
 }
 
@@ -595,7 +606,9 @@ fn intrusive_pool_lock(T: type, pool: &mut IntrusivePool(T) @ pool_id)
 // path, including early returns -- which is the half of lock discipline
 // that review comments are worst at catching.
 fn intrusive_pool_unlock(T: type, pool: &mut IntrusivePool(T) @ pool_id,
-                         guard: sink IntrusivePoolGuard[pool_id]) {}
+                         guard: sink IntrusivePoolGuard[pool_id]) {
+    pool_lock_release(pool.pool_tag);
+}
 
 fn intrusive_pool_init(T: type, pool: &mut IntrusivePool(T) @ pool_id) {
     intrusive_pool_init_retaining(pool, 1);

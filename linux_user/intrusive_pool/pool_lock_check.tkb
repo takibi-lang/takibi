@@ -1,0 +1,132 @@
+// GitHub issue #365: the checking lock backend for linux_user.
+//
+// intrusive_pool's guard (issue #351) makes forgetting the lock a compile
+// error. What it cannot see is the two mistakes that only a RUNNING lock
+// reveals, and that a real lock reveals by hanging:
+//
+//   RE-ENTRANCY   taking the same pool's guard twice on one path. Under a
+//                 real spinlock that is a deadlock; under the prototype's
+//                 empty body it silently works, so the bug survives right
+//                 up to the port.
+//   LOCK ORDER    two pools acquired as A-then-B at one call site and
+//                 B-then-A at another. Neither site is wrong alone; the
+//                 pair is, and it deadlocks only under the interleaving
+//                 that hits it. This is what lockdep exists for.
+//
+// Both are cheap here and expensive later, which is the argument for
+// doing it before there is a second pool to get wrong -- nothing today
+// holds two pools' guards at once, and the moment something does, the
+// order is already whatever it happened to be.
+//
+// This file is the STAND-IN's lock body, not the library's. Since issue
+// #364 the pool names pool_lock_acquire/pool_lock_release without saying
+// who supplies them, so a kernel build supplies disable_irq/enable_irq
+// and pays none of this. That split is why the checking can be this
+// thorough: it costs nothing where it would matter.
+//
+// Reported through counters and observers rather than a trap, matching
+// how this pool already reports double frees, foreign handles and
+// corrupted chains -- and keeping the suite free of trap sites under
+// --forbid-trap.
+
+// Enough for far more pools than any exerciser creates; a tag beyond it
+// is counted rather than silently skipped, so the checker never quietly
+// stops checking.
+const POOL_LOCK_MAX_TAGS: usize = 32;
+
+// Bit b of order_edge[a] means "a was acquired while b was already held".
+// A pair with both directions set is the violation.
+private let mut pool_lock_order_edge: [usize; POOL_LOCK_MAX_TAGS];
+private let mut pool_lock_held: [usize; POOL_LOCK_MAX_TAGS];
+private let mut pool_lock_held_depth: usize = 0;
+private let mut pool_lock_reentrant: usize = 0;
+private let mut pool_lock_order_violations: usize = 0;
+private let mut pool_lock_untracked: usize = 0;
+private let mut pool_lock_unbalanced: usize = 0;
+
+fn pool_lock_check_reset() {
+    for i: usize in 0..<POOL_LOCK_MAX_TAGS {
+        pool_lock_order_edge[i] = 0;
+        pool_lock_held[i] = 0;
+    }
+    pool_lock_held_depth = 0;
+    pool_lock_reentrant = 0;
+    pool_lock_order_violations = 0;
+    pool_lock_untracked = 0;
+    pool_lock_unbalanced = 0;
+}
+
+// The pool calls this from intrusive_pool_lock. `tag` is the pool's own
+// pool_tag, which is unique per pool and assigned at init.
+fn pool_lock_acquire(tag: usize) {
+    if (tag == 0 || tag >= POOL_LOCK_MAX_TAGS) {
+        pool_lock_untracked = pool_lock_untracked + 1;
+        return;
+    }
+    let slot: {0..<POOL_LOCK_MAX_TAGS as usize} = tag;
+    let mut depth: usize = pool_lock_held_depth;
+    if (depth > POOL_LOCK_MAX_TAGS) { depth = POOL_LOCK_MAX_TAGS; }
+    for i: usize in 0..<POOL_LOCK_MAX_TAGS {
+        if (i < depth) {
+            let other: usize = pool_lock_held[i];
+            if (other == tag) {
+                // Already held by this very path: the acquire a real lock
+                // would deadlock on.
+                pool_lock_reentrant = pool_lock_reentrant + 1;
+            } else if (other != 0 && other < POOL_LOCK_MAX_TAGS) {
+                let held_slot: {0..<POOL_LOCK_MAX_TAGS as usize} = other;
+                // Have we ever seen the opposite order? Check BEFORE
+                // recording this one, or a pair would report against
+                // itself.
+                if ((pool_lock_order_edge[held_slot] >> tag) & 1 == 1) {
+                    pool_lock_order_violations = pool_lock_order_violations + 1;
+                }
+                pool_lock_order_edge[slot] = pool_lock_order_edge[slot] | (1 << other);
+            }
+        }
+    }
+    let top: usize = pool_lock_held_depth;
+    if (top < POOL_LOCK_MAX_TAGS) {
+        let top_slot: {0..<POOL_LOCK_MAX_TAGS as usize} = top;
+        pool_lock_held[top_slot] = tag;
+        pool_lock_held_depth = top + 1;
+    } else {
+        pool_lock_untracked = pool_lock_untracked + 1;
+    }
+}
+
+// Removes `tag` from the held set wherever it is, not only from the top:
+// a linear guard is released where its holder chooses, and releasing in a
+// different order than acquired is legal even though acquiring in a
+// different order is what this file is looking for.
+fn pool_lock_release(tag: usize) {
+    if (tag == 0 || tag >= POOL_LOCK_MAX_TAGS) { return; }
+    let mut found: bool = false;
+    let mut depth: usize = pool_lock_held_depth;
+    if (depth > POOL_LOCK_MAX_TAGS) { depth = POOL_LOCK_MAX_TAGS; }
+    for i: usize in 0..<POOL_LOCK_MAX_TAGS {
+        if (i < depth && found == false && pool_lock_held[i] == tag) {
+            found = true;
+            // Close the gap so the held set stays a prefix.
+            for j: usize in 0..<POOL_LOCK_MAX_TAGS {
+                let next: usize = j + 1;
+                if (j >= i && next < depth && next < POOL_LOCK_MAX_TAGS) {
+                    pool_lock_held[j] = pool_lock_held[next];
+                }
+            }
+            pool_lock_held_depth = depth - 1;
+        }
+    }
+    if (found == false) { pool_lock_unbalanced = pool_lock_unbalanced + 1; }
+}
+
+// -- Observers ---------------------------------------------------------
+
+fn pool_lock_reentrant_count() -> usize { return pool_lock_reentrant; }
+fn pool_lock_order_violation_count() -> usize { return pool_lock_order_violations; }
+fn pool_lock_held_depth_now() -> usize { return pool_lock_held_depth; }
+// Acquires the checker could not track -- a tag of 0, a tag beyond
+// POOL_LOCK_MAX_TAGS, or nesting deeper than it can hold. Nonzero means
+// the two counts above are answering about less than the whole program.
+fn pool_lock_untracked_count() -> usize { return pool_lock_untracked; }
+fn pool_lock_unbalanced_count() -> usize { return pool_lock_unbalanced; }
