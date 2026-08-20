@@ -8,4 +8,5 @@ teardown by scanning, no array and no side chain (conns, frames, retx entries fr
 every pool is empty: true
 pages still held after teardown, and retained chunks (pages, conns, frames, retxs): 3 1 1 1
 a cross-pool handle the erased brand cannot catch is refused at runtime: true
+a stale (slot, generation) pair against a recycled slot is refused, and the new occupant survives (recycled, refused): true true
 done
