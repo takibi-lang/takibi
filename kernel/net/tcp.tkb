@@ -116,11 +116,14 @@ enum PendingTcpKind: u8 { None; Data; Fin; }
 // ceiling to be the size of.
 //
 // The byte arrays deliberately stay outside: tcp_stream_tx_frame (1514),
-// pending_tcp_frame (6056) and syscall.tkb's own six come to 10490 bytes
+// pending_tcp_frame (6056) and syscall.tkb's own six came to 10490 bytes
 // per connection, against the 3968 an intrusive_pool chunk holds.  That
-// is what forces this issue's control-block/frame/retransmit split rather
-// than one payload, and it is why they are moved separately, later, into
-// pools of their own rather than inlined here.
+// is what forced this issue's control-block/frame/retransmit split rather
+// than one payload, and it is why they move separately, into pools of
+// their own, rather than being inlined here.  Two of the three are gone
+// already: the retransmit queue (step 3b) and the transmit frame (step
+// 4a, see NetFrame below).  syscall.tkb's two 1460-byte buffers are step
+// 4b, and are all that is left.
 struct TcpConnection {
     state: ConnState;
     remote_ip: [u8; 4];
@@ -144,6 +147,12 @@ struct TcpConnection {
     // the connection's receive buffer, and are NOT received_length above
     // -- that one is the last segment's payload size as the TCP layer
     // saw it, these two are how much of the buffer userspace has drained.
+    // GitHub issue #257 step 4a: the pool slot address of this
+    // connection's transmit frame, 0 if it has none. The OWNER is parked
+    // in tcp_connection_frames (see there); this is how the bytes are
+    // found, and it is deliberately an erased address rather than a
+    // second copy of the handle -- validated by the pool on every use.
+    tx_frame: usize;
     connection_open: bool;
     socket_buffer_length: usize;
     socket_buffer_offset: usize;
@@ -337,7 +346,160 @@ must_use variant KernelTcpCloseResult {
     Closed(NetRxCanAcquire);
 }
 
-let mut tcp_stream_tx_frame: [u8; 1514 * TCP_CONNECTION_MAX];
+// GitHub issue #257, step 4a: the transmit frame a connection builds its
+// outgoing segment in was `[u8; 1514 * TCP_CONNECTION_MAX]`. It is a
+// pooled NetFrame now, so the bytes are not committed at link time and
+// their number is not a multiple of a constant anyone picked.
+//
+// One MTU, and the same struct will serve the two 1460-byte syscall-side
+// buffers in step 4b -- there is no reason for three sizes when the
+// difference is 54 bytes of header and the pool's slot rounding eats it
+// anyway.
+struct NetFrame {
+    len: usize;
+    bytes: [u8; 1514];
+}
+
+// A parked handle. The brand is existentially quantified (issue #370):
+// the field knows it holds SOME pool's handle, not this pool's, so a
+// cross-pool mixup falls to intrusive_pool_slot_is_valid at runtime
+// rather than to `static value mismatch` at compile time. Stated here
+// because it is the price of the container, not a surprise.
+variant FrameLink {
+    None;
+    Some(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
+}
+
+// Where a connection's frames are OWNED. Kept apart from TcpConnection
+// rather than in it, for the same reason the retransmit chain head is:
+// a global holding linear owners must be `private`, and tcp_connections
+// is read from kernel/kernel/syscall.tkb. Step 5 puts the connection
+// itself in a private pool, at which point these three fields move into
+// it and this array goes away with TCP_CONNECTION_MAX.
+struct ConnectionFrames {
+    private mutex: i32;
+    private tx: FrameLink;
+}
+
+private linear view FrameGuard[lock: addr];
+private let mut tcp_connection_frames: [ConnectionFrames; TCP_CONNECTION_MAX];
+private let mut tcp_frame_pool: IntrusivePool(NetFrame);
+private let mut tcp_frame_pool_ready: bool = false;
+
+// Reached only when a frame is missing from a connection that should have
+// one -- which the acquire/release pairing below is meant to make
+// impossible. A real buffer rather than a null pointer so that the
+// impossible case is harmless instead of undefined: the caller writes a
+// segment nobody sends, rather than faulting or scribbling on whatever
+// address 0 maps to. Every arrival is logged.
+private let mut tcp_frame_absent_fallback: [u8; 1514];
+
+fn tcp_frame_lock(m: *i32 @ address) -> FrameGuard[address] {
+    return view FrameGuard[address];
+}
+
+fn tcp_frame_unlock(guard: sink FrameGuard[address], m: *i32 @ address) {}
+
+// Give a parked frame back. #370's cost in full: the handle came out of a
+// stable slot, so its brand is existential, and intrusive_pool_remove
+// wants one branded to THIS pool. Opening the existential mints a fresh
+// identity that will not match, so the only route is to take the slot and
+// generation off the handle, discharge it, and rebuild -- which is
+// exactly the one way to produce a handle the pool did not mint, and
+// exactly why remove validates before it trusts one.
+fn tcp_frame_release_link(link: FrameLink) !{unsafe} {
+    match link {
+        FrameLink::None => {}
+        FrameLink::Some(parked) => {
+            let slot: usize = intrusive_owner_slot(parked);
+            let generation: usize = intrusive_owner_generation(parked);
+            intrusive_owner_drop(parked);
+            let branded = intrusive_owner_new(&tcp_frame_pool, slot, generation);
+            let guard = intrusive_pool_lock(&tcp_frame_pool);
+            intrusive_pool_remove(&tcp_frame_pool, guard, branded);
+            intrusive_pool_unlock(&tcp_frame_pool, guard);
+        }
+    }
+}
+
+// Hands this connection its transmit frame, or returns false having
+// changed nothing. Called from tcp_connection_alloc, whose Full result is
+// exactly the right thing to report when it fails -- a connection with no
+// frame to transmit from is not a connection this stack can serve.
+fn tcp_connection_frames_acquire(
+        connection_slot: {0..<TCP_CONNECTION_MAX as usize}) -> bool !{unsafe} {
+    tcp_connection_frames[connection_slot].mutex = 0;
+    let pool_guard = intrusive_pool_lock(&tcp_frame_pool);
+    // insert_zeroed is not required here (NetFrame holds no stable owner
+    // storage) but is used anyway: a transmit frame is filled header-first
+    // and a short segment leaves the tail untouched, so a recycled slot
+    // would otherwise put a previous connection's bytes on the wire past
+    // the length the caller meant to send.
+    let inserted = intrusive_pool_insert_zeroed(&tcp_frame_pool, pool_guard);
+    intrusive_pool_unlock(&tcp_frame_pool, pool_guard);
+    match inserted {
+        IntrusivePoolInsertResult::OutOfMemory => {
+            kernel_boot_log_resource_exhausted(
+                "TCP frame pool (out of pages)" as *u8, 0);
+            return false;
+        }
+        IntrusivePoolInsertResult::Allocated(owner) => {
+            let address: usize = intrusive_owner_slot(owner);
+            let guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
+            let displaced: FrameLink = stable_replace(
+                guard, &tcp_connection_frames[connection_slot].mutex,
+                tcp_connection_frames[connection_slot].tx,
+                FrameLink::Some(owner));
+            tcp_frame_unlock(guard, &tcp_connection_frames[connection_slot].mutex);
+            match displaced {
+                FrameLink::None => {}
+                FrameLink::Some(stale) => {
+                    // Acquiring over a frame this connection already had.
+                    // Release rather than leak it, and say so: the
+                    // acquire/release pairing is supposed to prevent this.
+                    kernel_boot_log("tcp frames: acquire displaced a live frame\n");
+                    tcp_frame_release_link(FrameLink::Some(stale));
+                }
+            }
+            tcp_connections[connection_slot].tx_frame = address;
+            return true;
+        }
+    }
+}
+
+fn tcp_connection_frames_release(
+        connection_slot: {0..<TCP_CONNECTION_MAX as usize}) !{unsafe} {
+    let guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
+    let held: FrameLink = stable_replace(
+        guard, &tcp_connection_frames[connection_slot].mutex,
+        tcp_connection_frames[connection_slot].tx, FrameLink::None);
+    tcp_frame_unlock(guard, &tcp_connection_frames[connection_slot].mutex);
+    tcp_frame_release_link(held);
+    tcp_connections[connection_slot].tx_frame = 0;
+}
+
+// The transmit frame as a slice, reached by ADDRESS rather than by taking
+// the parked handle out and putting it back. The owner stays parked --
+// what it carries is the obligation to free, which nothing here wants to
+// borrow; what a caller wants is the bytes, and
+// intrusive_pool_probe_slot validates the address and gates the payload
+// behind a view it has to spend. So ownership stays linear and access
+// stays cheap, without either one pretending to be the other.
+fn tcp_connection_tx_slice(connection_slot: {0..<TCP_CONNECTION_MAX as usize})
+        -> [u8; 1514..] !{unsafe} {
+    match intrusive_pool_probe_slot(&tcp_frame_pool,
+                                    tcp_connections[connection_slot].tx_frame) {
+        IntrusiveSlotProbe::NoPayload => {
+            kernel_boot_log("tcp frames: transmit frame missing\n");
+            return tcp_frame_absent_fallback as [u8; 1514..];
+        }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            let frame: *NetFrame =
+                intrusive_pool_payload_of(&tcp_frame_pool, slot_view);
+            return frame.bytes as [u8; 1514..];
+        }
+    }
+}
 
 fn tcp_connection_owner_new(
         slot: {0..<TCP_CONNECTION_MAX as usize},
@@ -376,6 +538,12 @@ fn tcp_connection_unlock(guard: sink TcpConnectionGuard[address],
 // pending_tcp_reset_all returns their pages properly.
 fn tcp_connection_pool_init() !{unsafe} {
     slotmap_init(&tcp_connection_pool);
+    if (tcp_frame_pool_ready == false) {
+        // Same once-not-per-reset reasoning as the retransmit pool below,
+        // and the same retained_chunks = 0.
+        intrusive_pool_init_retaining(&tcp_frame_pool, 0);
+        tcp_frame_pool_ready = true;
+    }
     if (tcp_retx_pool_ready == false) {
         tcp_retx_chain.mutex = 0;
         // Retain NOTHING. #346's one-empty-chunk reserve is the right
@@ -390,6 +558,7 @@ fn tcp_connection_pool_init() !{unsafe} {
     }
     for connection_index: usize in 0..<TCP_CONNECTION_MAX {
         pending_tcp_reset_all(connection_index);
+        tcp_connection_frames_release(connection_index);
         tcp_connections[connection_index].state = ConnState::Listen;
         tcp_connections[connection_index].local_port = TCP_ECHO_PORT;
     }
@@ -402,6 +571,17 @@ fn tcp_connection_alloc() -> TcpConnectionAllocResult {
             let (index, generation) = freelist_owner_into_parts(popped);
             if (index < TCP_CONNECTION_MAX) {
                 let connection_index: {0..<TCP_CONNECTION_MAX as usize} = index;
+                // GitHub issue #257 step 4a: a connection with no frame to
+                // transmit from is not one this stack can serve, so a
+                // frame the pool cannot supply is reported as Full -- the
+                // result callers already handle by retrying, which is the
+                // right answer to memory pressure and matches what
+                // dropping a SYN under pressure means in TCP.
+                if (tcp_connection_frames_acquire(connection_index) == false) {
+                    slotmap_remove(&tcp_connection_pool,
+                                   freelist_owner_new(connection_index, generation));
+                    return TcpConnectionAllocResult::Full;
+                }
                 tcp_connections[connection_index].state = ConnState::Listen;
                 return TcpConnectionAllocResult::Allocated(
                     tcp_connection_owner_new(connection_index, generation));
@@ -493,8 +673,9 @@ fn tcp_connection_take(slot_value: usize, generation: usize)
     return TcpConnectionTakeResult::Missing;
 }
 
-fn tcp_connection_free(owner: sink TcpConnectionOwner[connection]) {
+fn tcp_connection_free(owner: sink TcpConnectionOwner[connection]) !{unsafe} {
     tcp_connections[owner.pool_index].state = ConnState::Listen;
+    tcp_connection_frames_release(owner.pool_index);
     slotmap_remove(&tcp_connection_pool,
                    freelist_owner_new(owner.pool_index, owner.generation));
 }
@@ -838,10 +1019,8 @@ fn pending_tcp_record(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
             entry.local_port = tcp_connections[connection_slot].local_port;
             entry.sent_at = read_cntpct();
             entry.retries = 0;
-            let stream_base: usize = connection_slot * 1514;
-            let stream_frames = tcp_stream_tx_frame as []u8;
             slice_copy(entry.frame as []u8,
-                       stream_frames[stream_base..<stream_base + 1514]);
+                       tcp_connection_tx_slice(connection_slot));
 
             // Append at the tail, keeping the queue oldest-first: reverse,
             // push, reverse back. Two extra walks of a chain that holds
@@ -873,11 +1052,33 @@ fn pending_tcp_record(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
 // Drives the queue directly rather than through real TCP timing, for the
 // same reason the old probe did: reaching this through genuine network
 // loss and retry would need a materially larger QEMU-peer-driven test.
+// GitHub issue #257 step 4a: pending_tcp_record copies the connection's
+// transmit frame into each entry, so a connection without one is not a
+// state this probe should exercise -- it would take the missing-frame
+// fallback and prove nothing about the copy. The frames are acquired here,
+// exactly as accept() does, and given back on every exit; the body is a
+// separate function purely so that its eight failure returns cannot each
+// forget to.
 fn pending_tcp_chain_probe() -> bool !{unsafe} {
     let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = 0;
     let other_slot: {0..<TCP_CONNECTION_MAX as usize} = 1;
     pending_tcp_reset_all(connection_slot);
     pending_tcp_reset_all(other_slot);
+    if (tcp_connection_frames_acquire(connection_slot) == false) { return false; }
+    if (tcp_connection_frames_acquire(other_slot) == false) {
+        tcp_connection_frames_release(connection_slot);
+        return false;
+    }
+    let ok: bool = pending_tcp_chain_probe_body(connection_slot, other_slot);
+    tcp_connection_frames_release(connection_slot);
+    tcp_connection_frames_release(other_slot);
+    // Both frames back, and no other connection left one behind either.
+    return ok && intrusive_pool_live_count(&tcp_frame_pool) == 0;
+}
+
+fn pending_tcp_chain_probe_body(
+        connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+        other_slot: {0..<TCP_CONNECTION_MAX as usize}) -> bool !{unsafe} {
     let live_before: usize = intrusive_pool_live_count(&tcp_retx_pool);
 
     // One past the old ceiling of 4, plus one belonging to a DIFFERENT
@@ -1644,8 +1845,7 @@ fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
         tcp_connections[connection_slot].remote_ip as []u8;
     let remote_mac_bytes =
         tcp_connections[connection_slot].remote_mac as []u8;
-    let stream_base: usize = connection_slot * 1514;
-    let stream_frames = tcp_stream_tx_frame as []u8;
+    let stream_frames = tcp_connection_tx_slice(connection_slot);
     tcp_connections[connection_slot].state = ConnState::Listen;
     tcp_connections[connection_slot].local_port = port;
     // GitHub issue #180: a fresh connection never inherits a stale queue
@@ -1704,9 +1904,8 @@ fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
                                     tcp_connections[connection_slot].snd_nxt =
                                         TCP_INITIAL_SEQ + 1;
                                     build_syn_ack(connection_slot, frame, header.ihl);
-                                    slice_copy(stream_frames[
-                                        stream_base..<stream_base + 54],
-                                        frame[0..<54]);
+                                    slice_copy(stream_frames[0..<54],
+                                               frame[0..<54]);
                                     if (tcp_drop_next_syn_ack) {
                                         tcp_drop_next_syn_ack = false;
                                         tcp_injected_syn_pending = true;
@@ -1769,7 +1968,7 @@ fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
             syn_ack_retries < TCP_RETRY_LIMIT &&
             retry_now - syn_ack_sent_at >= retry_ticks) {
             ready = net_transmit_ready(
-                ready, stream_frames[stream_base..<stream_base + 1514], 54);
+                ready, stream_frames[0..<1514], 54);
             syn_ack_sent_at = retry_now;
             syn_ack_retries = syn_ack_retries + 1;
             if (tcp_injected_syn_pending) {
@@ -1951,16 +2150,14 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
                             payload_length: usize)
         -> KernelTcpSendResult !{may_block} {
     let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = owner.pool_index;
-    let stream_base: usize = connection_slot * 1514;
     let remote_ip_bytes =
         tcp_connections[connection_slot].remote_ip as []u8;
     let remote_mac_bytes =
         tcp_connections[connection_slot].remote_mac as []u8;
-    let stream_frames = tcp_stream_tx_frame as []u8;
     if (payload_length >= 1 && payload_length <= 1460 &&
         received_length >= 1 && received_length <= 1460) {
         let length: usize = payload_length;
-        let frame_bytes = stream_frames[stream_base..<stream_base + 1514];
+        let frame_bytes = tcp_connection_tx_slice(connection_slot);
         slice_copy(frame_bytes[0..<6],
                    remote_mac_bytes[0..<6]);
         slice_copy(frame_bytes[6..<12], our_mac as []u8);
@@ -2049,13 +2246,11 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
         -> KernelTcpCloseResult !{may_block} {
     let mut ready = ready_in;
     let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = owner.pool_index;
-    let stream_base: usize = connection_slot * 1514;
     let remote_ip_bytes =
         tcp_connections[connection_slot].remote_ip as []u8;
     let remote_mac_bytes =
         tcp_connections[connection_slot].remote_mac as []u8;
-    let stream_frames = tcp_stream_tx_frame as []u8;
-    let frame = stream_frames[stream_base..<stream_base + 1514];
+    let frame = tcp_connection_tx_slice(connection_slot);
     slice_copy(frame[0..<6],
                remote_mac_bytes[0..<6]);
     slice_copy(frame[6..<12], our_mac as []u8);
