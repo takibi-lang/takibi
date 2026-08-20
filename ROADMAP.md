@@ -1,396 +1,404 @@
 # Takibi roadmap
 
-This file is a mid-term plan for the project's stated ultimate goal: a
+This file is a dated mid-term plan for the project's ultimate goal: a
 practical, monolithic, Linux-syscall-ABI-compatible Unix-like kernel written in
-Takibi, whose runtime-error surface is lifted to compile time (see `README.md`
-and `AGENTS.md`'s "Design Principle: Detect Errors at Compile Time").
+Takibi, whose runtime-error surface is lifted to compile time. It is a plan,
+not a contract. `AGENTS.md`'s YAGNI principle still decides what gets built:
+the ordering below does not authorize speculative implementation.
 
-It is a *plan*, not a contract. `AGENTS.md`'s YAGNI principle still governs what
-actually gets built: the milestones below describe direction and dependency
-order so that work already driven by a real requirement is done in a sensible
-sequence, not a license to build ahead of demand. Where a milestone is
-deliberately speculative, it says so.
+Written 2026-08-20 against the 85 open GitHub issues at that date. The previous
+snapshot was written one day earlier, but the priority has materially changed:
+defining and measuring the trusted base now precedes further allocator,
+language, and user-visible kernel expansion. Without that boundary, safety
+claims require a reader to reconstruct the compiler and kernel from source and
+cannot be evaluated, reviewed, or used as research evidence.
 
-Written 2026-08-19 against the 91 open GitHub issues at that date. The previous
-snapshot was written 2026-08-05 against 52 open issues. The increase is not 39
-undifferentiated regressions: the intervening kernel work closed its old latent
-defects, brought up QEMU, expanded the process/VM/filesystem model, and exposed
-more precise compiler, allocator, and proof-boundary debts while doing so.
-`HISTORY.md` remains the engineering log; `kernel/README.md` remains the
-description of what the kernel actually does today.
-
-**This is the one file in the repository where enumerating issue numbers is the
-point** (see `AGENTS.md`'s "Issue Numbers Do Not Belong in Tracked Files"). It
-is a dated snapshot, refreshed occasionally and wholesale rather than
-maintained incrementally: being visibly out of date here is expected and
-harmless. Live status -- what is in progress, what is blocked, and who is on it
--- lives on the [project board](https://github.com/orgs/takibi-lang/projects/2),
-not here.
+**This is the one tracked file where open issue numbers are intentionally
+listed.** It is refreshed wholesale and is expected to become stale. Live
+status belongs on the [project board](https://github.com/orgs/takibi-lang/projects/2);
+`HISTORY.md` records what happened; `kernel/README.md` describes current
+behavior.
 
 ## Baseline at the time of writing
 
 | Measure | Value |
 |---|---|
-| Open GitHub issues | 91 |
-| `kernel/` Takibi source | 22,962 lines, built with `--forbid-trap` |
-| `kernel/arch/arm64` assembly/includes | 1,095 lines, including generated offsets and test payloads |
-| Explicit `unsafe { }` sites in `kernel/` | 203, after raw-pointer/MMIO boundaries were made explicit |
+| Open GitHub issues | 85 |
+| Kernel Takibi code built under `--forbid-trap` | 22,747 lines in 53 files (RPi5/QEMU union) |
+| Explicit `unsafe { }` sites in `kernel/` | 203 |
+| Raw-pointer casts in `kernel/` | 445 |
+| Handwritten assembly currently counted by the metric | 861 lines |
 | Linux syscalls | 29 Implemented, 10 Partial, 5 Unsupported-by-design (`kernel/SYSCALLS.md`) |
-| Hardware-independent kernel integration | QEMU/AArch64 with ext2, BusyBox, process, UART, ARP/ICMP/TCP, and debug-build lanes |
-| Real-hardware authority | one physical RPi5; no CI yet |
+| Hardware-independent kernel execution | QEMU/AArch64 with ext2, BusyBox, processes, UART, ARP/ICMP/TCP, and debug lanes |
+| Real-hardware authority | one physical RPi5; no unattended hardware CI |
 
-Two counts need care. Assembly lines now include generated ABI material and
-deliberate fixture payloads, so a future trusted-base metric must distinguish
-handwritten production assembly from generated and test-only code. Likewise,
-the rise in `unsafe` sites from the previous snapshot is primarily the result
-of making previously implicit raw-pointer and MMIO trust explicit (#218,
-#315, #316), not evidence that the kernel became less safe. Issue #236 should
-replace both raw counts with a categorized proof-boundary inventory.
+`make trustedbasecheck` already makes these raw counts repeatable. They are not
+yet a definition of the trusted base. In particular, a count does not explain
+what is trusted, why it must be trusted, which property depends on it, or
+whether a site is production, generated, or test-only. A rising `unsafe` count
+can also mean that an implicit trust boundary was made explicit rather than
+that the kernel became less safe. M0 turns these measurements into evidence
+that has a precise interpretation.
 
-The biggest baseline change is QEMU. Issue #237 landed a maintained AArch64
-kernel target, and `kernelcheck-qemu`, `kernelcheck-shell-qemu`, and the DWARF
-lane now exercise substantial kernel behavior without SWD or physical storage.
-Real hardware remains authoritative for cache, DMA, interrupt timing, and true
-concurrency, but ordinary kernel work no longer has to wait for it.
+The other major baseline change remains QEMU. Ordinary kernel work and external
+evaluation no longer require SWD, physical storage, or an RPi5. Real hardware
+continues to be authoritative for DMA, cache coherency, interrupt timing, and
+true concurrency.
 
-## What changed since the previous snapshot
+## Priority order
 
-The previous roadmap's immediate correctness milestone is complete:
+1. Define the trusted base and make its classification measurable.
+2. Restore confidence in the compiler/test machinery used as evidence.
+3. Finish and adopt the count-unbounded kernel resource primitive.
+4. Preserve real kernel failures as reproducible compiler-safety evidence.
+5. Make QEMU CI and a bounded PR policy the safe entry point for contributors.
+6. Resume one visible kernel capability at a time, while retaining RPi5 parity.
+7. Turn the accumulated evidence into a research artifact and seek expert
+   collaboration before expanding formal machinery.
 
-- #219 initialized forked-child demand-stack metadata.
-- #223 saved FP/SIMD state on Current-EL IRQ entry.
-- #224 deduplicated primary/secondary CPU initialization.
+This order deliberately places claims and evidence before publicity. Talks,
+papers, and sponsorship should report a boundary the repository can reproduce,
+not a safety interpretation that exists only in the maintainer's head.
 
-Its assembly-reduction chain also landed: #225 added external symbol addresses,
-#226 added the closed system-register/barrier/TLBI intrinsic set and lifted
-`timer.S`/`mmu.S`, and #227 generated the vector-table/exception-entry shape
-from `.tkb`. The remaining assembly is no longer accurately described by the
-old serial #225 -> #226 -> #227 plan.
+## The development and research loop
 
-Kernel capability advanced at the same time. The kernel now has an interactive
-BusyBox ash UART path, blocking input, a real ext2-root executable path, larger
-and nested process trees, per-process address spaces, demand-grown page tables,
-private fork COW, single-indirect ext2 reads, and directory enumeration. The
-old milestones that described these as future work must not remain as if none
-of them happened.
+The project does not have independent "kernel feature" and "language research"
+tracks. Its useful loop is:
 
-## Issue inventory
+1. A real kernel requirement exercises nontrivial behavior.
+2. Linux-native, QEMU, or RPi5 testing exposes a failure or an unprovable
+   operation.
+3. The failure and the violated invariant are preserved before the fix erases
+   the evidence.
+4. The smallest suitable type, ownership, effect, or diagnostic improvement
+   moves the failure toward compile time.
+5. The real kernel call site adopts it and a regression enters the cheapest
+   faithful test tier.
+6. Trusted-base measurements show whether the guarantee grew or the failure
+   was merely moved behind an escape hatch.
 
-The 91 open issues are better read as themes than as one priority queue. The
-project board had 75 Backlog, 5 Ready, and 11 In progress open items at this
-snapshot; most In progress items belonged to one intrusive-pool investigation
-and should converge as one milestone rather than masquerading as ten parallel
-product priorities.
+QEMU makes this loop cheaper but does not change the tier rule: pure behavior
+belongs in `linux_user/`; hardware-independent kernel behavior belongs in QEMU;
+DMA/cache/interrupt/concurrency claims stay on real hardware.
 
-| Axis | Issues | Roadmap treatment |
-|---|---|---|
-| A. Known correctness and test-trust defects | #361 #362 #331 #333 #334 | M0: fix before relying on nearby machinery |
-| B. Allocator/resource-limit debt | #257 #344 #348 #349 #350 #351 #353 #354 #355 #356 | M1: finish a minimum production-ready slice, park optional generality |
-| C. QEMU, CI, and debugging | #56 #149 #290 #300 #338 #339 #341 | M2: turn the QEMU port into the default development safety net |
-| D. Proof boundary and kernel safety | #236 #171 #203 #298 #308 #342 #343 | M3: the project's central thesis, driven by concrete kernel risks |
-| E. User-visible kernel capability | #204 #220 #270 #281 #283 #285 #287 | M4: resume a bounded product milestone after stabilization |
-| F. Filesystem and scalability | #182 #208 #250 #252 | caller-driven follow-ups, not one pre-committed subsystem rewrite |
-| G. SMP and concurrency | #17 #222 #261 #274 #299 | M5: a coherent future milestone with real dependencies |
-| H. Deeper proof/language research | #13 #109 #131 #132 #200 #201 #216 #267 #282 #297 | keep concrete motivators, do not run all as active research tracks |
-| I. Portability and long-range infrastructure | #50 #85 #95 #122 #123 #124 | deferred by explicit triggers |
+## M0: define and measure the trusted base
 
-The inventory is intentionally not exhaustive issue-by-issue. Diagnostics,
-ergonomics, and older language requests remain useful backlog, but listing each
-one in a milestone would confuse issue existence with a commitment to schedule
-it.
+Immediate, and now the highest priority.
 
-## The engine this roadmap is built around
+### M0a: write the claim before optimizing the count
 
-The project's demonstrated working pattern is a loop:
+Complete **#236** as a natural-language threat model and proof-boundary
+document. It must distinguish:
 
-1. A concrete kernel requirement exercises real behavior.
-2. QEMU, Linux-native, or hardware tests expose a failure or unprovable access.
-3. The smallest suitable type-system, ownership, or diagnostic improvement
-   moves that failure toward compile time.
-4. The kernel adopts the improvement at the real call site, and the regression
-   enters the cheapest faithful test tier.
+- properties rejected statically by refinement, ownership, effects,
+  exhaustiveness, and `must_use` checking;
+- operations that remain runtime-checked;
+- explicit trusted escapes such as `unsafe`, raw pointers, casts, MMIO, DMA,
+  boot code, exception entry, context switching, and handwritten assembly;
+- compiler and toolchain components trusted to implement those checks,
+  including OCaml, Takibi's frontend and LLVM lowering, LLVM, and the linker;
+- target and hardware assumptions that Takibi does not prove; and
+- properties presently outside the language.
 
-QEMU makes this loop substantially cheaper, but does not change the tier rule:
-pure algorithms belong in `linux_user/`, hardware-independent kernel behavior
-belongs in QEMU, and cache/DMA/interrupt/concurrency claims stay on real
-hardware. The roadmap therefore does not split "kernel features" and
-"language research" into independent tracks that stop feeding each other.
+The document must state exactly what successful kernel builds with
+`--forbid-trap` and `--forbid-unsafe` do and do not establish. It must not claim
+a mechanized soundness theorem that the project does not have.
 
-## M0: restore confidence in the checking machinery
+### M0b: make every trusted site classifiable
 
-Immediate. These are known correctness or test-isolation defects, not optional
-cleanup.
+Extend `make trustedbasecheck` so the document's boundary is reproducible. At a
+minimum, report and distinguish:
 
-- **#362** -- `struct align(N)` does not raise embedded alignment, and the
-  compiler's DataLayout and OCaml `sizeof` implementations disagree. A layout
-  proof is not meaningful while two compiler paths compute different answers.
-- **#361** -- intrusive-pool address validation derives its bounds from mutable
-  chunk-header fields that the validation is meant to defend. Derive the
-  monomorphized constants instead of trusting corruptible copies.
-- **#331** -- `SHUFFLE_TESTS` found six cross-test ordering failures, including
-  target-triple state leaks. Tests must not validate whichever target happened
-  to run before them.
-- **#333/#334** -- make module-scoped checker state exception-safe and remove
-  non-exhaustive syntactic type-shape handling where new AST constructors can
-  silently escape a pass.
+- production, generated, and fixture assembly;
+- `unsafe` sites by rationale category;
+- raw-pointer/cast, FFI/extern, MMIO, DMA, ABI, and target-lowering boundaries;
+- the exact source set compiled under `--forbid-trap`;
+- exemptions or files outside the checked set; and
+- unclassified trusted sites.
 
-Done when: the layout implementations agree by construction or by a checked
-single source of truth; pool validation no longer trusts its own mutable
-header; randomized test order is green across repeated runs; and the identified
-checker-state/type-shape gaps have regression tests.
+Counts remain useful trends, but the primary regression condition is that a
+new trusted site cannot appear without a category and local rationale.
+Machine-readable output is desirable only if the same implementation also
+produces a concise human-readable report; do not build a general metrics
+platform.
 
-## M1: finish one production-ready count-unbounded allocator
+Done when: a reviewer can start from one document and one `make` target, learn
+what is claimed, reproduce the inventory supporting it, find every explicit
+escape category, and see zero unexplained sites. This establishes an auditable
+boundary, not complete compiler correctness.
 
-The current allocator work is valuable but at risk of becoming an open-ended
-comparison with every facility in SLUB, UMA, and `pool_cache(9)`. Issue #344's
-intrusive design needs a bounded closing bar before it replaces real kernel
-pools.
+## M1: repair evidence machinery that is already known to be unsound
 
-Required for the first production adoption:
+Known compiler and test-isolation defects invalidate nearby evidence and stay
+ahead of feature work:
 
-1. **#361** -- validation must not trust mutable layout metadata.
-2. **#356** -- choose and enforce one payload initialization/reuse contract.
-3. **#355** -- provide an invariant probe that catches free-chain and
-   partial-list corruption in `linux_user/`.
-4. Adopt the primitive in exactly one current fixed-capacity kernel consumer,
-   selected from #257, and exercise exhaustion/growth/reuse in QEMU plus the
-   applicable hardware lane.
-5. Continue #257 consumer by consumer only after that first adoption is stable.
+- **#331** -- eliminate randomized test-order failures and target-state leaks.
+- **#333** -- make module-scoped checker state exception-safe and audit the
+  remaining mutable counters.
+- **#334** -- prevent new AST type constructors from silently escaping
+  monomorphization's syntactic type-shape handling.
+- **#335/#337** -- add narrow consistency/watchdog checks where the concrete
+  past failures justify them.
 
-The following are not automatically part of the closing bar:
+Issues #361 and #362 closed the previously immediate pool-validation and
+layout-disagreement hazards. Keep their regressions as part of the evidence;
+do not leave completed blockers in the active milestone.
 
-- #349's off-page headers;
-- #350's multi-page chunks;
-- #353's O(1) address-to-owner lookup;
-- #354's configurable reclaim policy.
+Done when: repeated shuffled tests are green, identified mutable checker state
+cannot leak across failures, and the relevant compiler representations fail
+loudly rather than drift silently.
 
-Promote one only when a current consumer, measured cost, or correctness
-requirement needs it. A comparison with a mature general-purpose allocator is
-useful evidence, but is not by itself a present Takibi requirement.
+## M2: finish and adopt one count-unbounded kernel resource primitive
 
-**#351 synchronization is a dependency of multi-context adoption, not of the
-single-context first adoption.** Complete it before the allocator is reachable
-from multiple cores or interrupt/process contexts. Do not pull atomics, SMP,
-and general lock-invariant research into M1 solely to make the primitive
-hypothetically universal.
+The `linux_user/intrusive_pool` investigation has completed important pieces:
+slot layout, off-page metadata, synchronization authority, invariant probing,
+reuse initialization, reclaim policy, validation hardening, and a contiguous
+multi-page provider. The next value comes from convergence and real kernel use,
+not more allocator feature comparison.
 
-Done when: one count-unbounded pool implementation has a uniform object
-contract, checked invariants, corruption regression tests, and at least one
-real kernel consumer with no guessed object-count ceiling.
+Required closing sequence:
 
-## M2: make QEMU the continuous development safety net
+1. **#364** -- make the pool provider-agnostic before promotion. The kernel and
+   `linux_user/` must compile the same core source against different providers;
+   do not repeat `growable_pool`'s copied-and-drifted implementation.
+2. **#353** -- supply the kernel page-owner metadata needed by the promoted
+   pool and make address-to-owner lookup explicit.
+3. Move the single pool implementation into the maintained kernel library and
+   retain the fast host-native exerciser against that exact source.
+4. Adopt it in one real fixed-capacity kernel consumer from **#257**, exercising
+   growth, exhaustion, reuse, corruption detection, and synchronization in
+   QEMU and the applicable RPi5 lane.
+5. Continue #257 consumer by consumer only after the first adoption is stable.
 
-Issue #237 made hardware-independent kernel execution possible. This milestone
-turns that capability into the ordinary way regressions are prevented and
-debugged.
+**#350** remains deferred until an actual pooled type exceeds a single page.
+Contiguous multi-page allocation now exists, but capability alone is not a
+reason to make every pool chunk multi-page.
 
-1. **#56** -- run `kernelcheck-qemu` in CI. This is the highest-leverage
-   remaining consequence of the QEMU port.
-2. **#338** -- extract only the pure USB configuration-descriptor parser and
-   execute its exact-end/truncation cases in `linux_user/`; keep the kernel
-   implementation as the single source of truth.
-3. **#290** -- build kernel-aware QEMU/RPi5 debugging around the existing
-   gdbstub, DWARF build, crash snapshot, process trace, and page-table state.
-4. **#339/#300** -- improve structured hardware initialization failures and
-   Takibi enum debug metadata where the debugger work demonstrates a concrete
-   visibility gap.
-5. Re-scope **#149**. QEMU already provides GDB without JTAG; the remaining
-   request should state whether it means an in-kernel debugger on hardware,
-   postmortem state without a probe, or another concrete target.
+Done when: one source implementation has a checked object contract and
+invariants, is tested cheaply through `linux_user/`, and removes a guessed
+object-count ceiling from at least one real kernel resource.
 
-Coverage tooling (#341) is useful only after identifying the exact branch or
-module question it should answer; it is not a prerequisite for CI.
+## M3: preserve failures and turn resource safety into compiler evidence
 
-Done when: every commit can run the maintained QEMU kernel suite in CI, the USB
-parser regression runs at the Linux-native tier, and documented debugger
-workflows can inspect a failed process and its address-space/crash state on
-QEMU without JTAG.
+Finishing resource management is not only allocator work. It is the next source
+of concrete evidence for Takibi's central claim.
 
-## M3: define and shrink the trusted kernel boundary
+### M3a: lightweight case records
 
-This is the project's central safety milestone, not speculative infrastructure.
-The current code has accumulated effective techniques -- refined indices,
-checked slices, mode-distinct user ranges, references, indexed owners, explicit
-`unsafe`, interrupt effects, and DMA builtins -- but no single precise statement
-of what their composition proves.
+For a real kernel defect that could plausibly be prevented by the language,
+preserve enough evidence to reconstruct it without writing a paper during the
+fix:
 
-1. **#236** -- document the trusted base and proof boundaries first. Classify
-   statically rejected operations, runtime-checked operations, explicit trusted
-   boundaries, target-lowering assumptions, and properties outside the
-   language. Categorize `unsafe` and handwritten assembly instead of optimizing
-   a raw count.
-2. **#343** -- audit real pool/reference call sites for references that outlive
-   a free or reuse. The existence of a real growable heap invalidated #15's old
-   premise that dangling pointers were only hypothetical. Add the smallest
-   lifetime/authority rule justified by an actual failing shape; do not design
-   a general lifetime calculus in advance.
-3. **#342** -- design nullability around the actual remaining sentinel-pointer
-   sites and closed variants. Decide whether ordinary references/pointers are
-   non-null by default only after the audit establishes the migration shape.
-4. **#203** -- make "no uninitialized kernel memory reaches userspace" a static
-   property of syscall output buffers. This remains the strongest bounded
-   proof-research candidate: it has a concrete security payoff, existing
-   `user_zero_fill` sites, and a plausible initialized-state design without
-   requiring an SMT solver.
-5. **#171/#298** -- close concrete DMA ownership/cache-line and interrupt-effect
-   gaps before new concurrent or driver consumers depend on them.
+- observed symptom and triggering workload;
+- violated kernel/resource invariant;
+- why the compiler accepted the original program;
+- the language/checker change, if any;
+- a minimal compile-fail case and the real kernel regression;
+- whether the change reduced risk or merely moved it into the trusted base;
+- annotation, build-time, or usability cost where measurable.
 
-Issue #308's `ProcessRecord` invariant memo is a useful source of concrete
-examples, but not a request to build a general invariant language. Likewise,
-#200, #201, #216, #267, #282, and #297 stay as research records until one is the
-smallest solution to a current kernel requirement. Do not run them all in
-parallel as if every plausible proof direction were scheduled work.
+Use the existing engineering history and tests as primary evidence. Introduce
+only a small stable case-record format if those sources cannot answer the
+questions above; do not create a second issue tracker or impose a long report
+on every ordinary bug.
 
-Done when: the repository can state exactly what a successful `--forbid-trap`
-kernel build does and does not guarantee; each trusted escape category has a
-rationale; present heap references have been audited for dangling use; and one
-additional high-value kernel property is enforced statically at its real
-boundary.
+### M3b: close the concrete resource-safety gaps
 
-## M4: resume a visible kernel capability
+- **#343** -- audit pool/reference call sites for references that outlive free
+  or reuse, then add the smallest lifetime/authority rule justified by a real
+  failing shape.
+- **#342** -- design nullability around remaining sentinel-pointer sites after
+  the audit establishes the migration shape.
+- **#203** -- make "no uninitialized kernel memory reaches userspace" a static
+  property of syscall output buffers; it is a bounded security property with
+  real call sites and does not require beginning with a general SMT system.
+- **#171/#298** -- close concrete DMA ownership/cache-line and interrupt-effect
+  gaps before adding consumers that depend on them.
 
-Stabilization and proof work must keep feeding a kernel that does something
-recognizably useful. Choose one bounded external milestone at a time.
+Issue #308 supplies possible real invariants, but does not authorize a general
+invariant language. Issues #200, #201, #216, #267, #282, and #297 remain
+research records until one is the smallest answer to a current kernel failure.
 
-### M4a: serve real root-filesystem content
+Done when: adopted heap resources cannot reproduce the selected dangling-use
+shape, at least one further high-value runtime failure is statically rejected
+at its real kernel boundary, and the before/after evidence is reproducible.
 
-- **#285** -- serve SD-card/rootfs demo assets through BusyBox httpd, using the
-  ext2, shell, and HTTP paths that already exist.
-- **#281/#283** -- coalesce/type block transfers only where the real workload
-  demonstrates an iteration or boundary problem.
-- **#270/#287** -- run BusyBox `init` as PID 1 and add shebang execution when
-  the selected userspace tree actually requires those semantics.
+## M4: make QEMU and contribution policy the safe public entry point
 
-This is the smaller near-term milestone and should be preferred before opening
-a new session-lifecycle front.
+QEMU is the contributor-acquisition strategy as well as a test target.
 
-### M4b: log in over the network
+1. **#56** -- run `kernelcheck-qemu` in CI so an external PR cannot bypass the
+   maintained hardware-independent kernel suite.
+2. Define a contribution and AI-assisted-PR policy before actively soliciting
+   implementation volume: small agreed scope, declared generation/verification
+   method, mandatory checks, no batch of speculative PRs, and maintainer RPi5
+   confirmation for hardware-sensitive changes.
+3. Keep the first-run path short: devcontainer, QEMU BusyBox, and the browser
+   HTTP demonstration. Treat successful reproduction reports and documentation
+   fixes as useful first contributions.
+4. **#338** -- run the pure USB descriptor parser cases at the Linux-native
+   tier while keeping the kernel implementation as the single source of truth.
+5. **#290** -- document kernel-aware QEMU/RPi5 debugging around the existing
+   gdbstub, DWARF build, crash state, process trace, and page tables.
+6. Use **#339/#300** only where this workflow exposes a concrete diagnostic or
+   debug-metadata gap.
 
-- **#204** -- extend `readv`/`writev` to connected TCP and inetd-mode file
-  descriptors when the traced service requires them.
+Do not promise native macOS or Windows toolchains. Windows through WSL2 and
+macOS-hosted Linux containers may be documented as unverified or
+community-supported after real users reproduce the QEMU path. Buy machines or
+promote a host to maintained status only after repeated demand, an actual PR
+verification bottleneck, or a contributor willing to maintain that lane.
+Native PowerShell/MSVC and Homebrew build systems are not current roadmap work.
+
+Done when: an external contributor on the maintained Linux environment can run
+the demonstration, select a bounded task, submit a small PR under a documented
+policy, and receive automated QEMU evidence before maintainer review.
+
+## M5: resume one visible kernel capability without weakening RPi5
+
+Safety work must continue to be driven by a useful kernel. Choose one bounded
+external milestone at a time.
+
+### M5a: serve real root-filesystem content
+
+- **#285** -- serve rootfs assets through BusyBox httpd on QEMU and RPi5.
+- **#281/#283** -- coalesce and type block transfers only where that workload
+  demonstrates the need.
+- **#270/#287** -- add BusyBox `init` and shebang semantics when the selected
+  userspace tree actually requires them.
+
+### M5b: log in over the network
+
+- **#204** -- extend `readv`/`writev` to connected TCP/inetd descriptors when
+  the traced service requires them.
 - **#220** -- run one BusyBox telnet service/session through the existing
-  clone/exec/exit/wait4 machinery.
+  process machinery.
 
-The old roadmap's "a kernel a human can log into" milestone is half complete:
-a human can already use BusyBox ash over UART. The remaining headline is a
-network login, not the process-model foundation that has already landed.
+The maintained ports remain QEMU/AArch64 and RPi5. QEMU is the default fast
+development target; RPi5 remains indispensable evidence that Takibi is not an
+emulator-only kernel. Do not slow RPi5 work in order to begin AMD64, RISC-V, or
+additional board ports.
 
-Done when: M4a serves a real asset from the maintained root filesystem on QEMU
-and RPi5; then M4b reaches and uses a BusyBox ash prompt over a network session.
-Do not silently turn either into full POSIX service management.
+Filesystem growth remains caller-driven. Re-scope **#182** around the next
+rootfs that actually fails. Build **#208** only when a measured workload or
+write-ordering requirement justifies the dirty-state, eviction, ownership, and
+synchronization obligations of a block cache.
 
-## Filesystem growth stays caller-driven
+Done when: M5a serves a real maintained-rootfs asset on both QEMU and RPi5;
+then M5b reaches a BusyBox ash prompt through one network session. Neither is a
+commitment to full POSIX service management.
 
-Issue #182's original umbrella now mixes completed and unrequested work.
-Single-indirect regular-file reads and directory enumeration have landed;
-multiple block groups, write-side indirect allocation, nested directory
-mutation, double/triple indirection, and additional syscalls remain distinct
-possible requirements. Re-scope #182 around the next real rootfs image that
-fails, and split only the concrete closing bar it supplies.
+## M6: prepare a research artifact and seek collaboration
 
-Similarly, **#208's block buffer cache needs a measured workload**, not merely
-the observation that uncached metadata reads are inefficient. Design it when
-M4 or a reproducible benchmark shows the cost or when write ordering requires a
-cache contract. The cache introduces dirty-state, eviction, ownership, and
-eventual synchronization obligations; those are not free architectural
-preparation.
+Research publication follows M0 and the resource-safety evidence; it does not
+wait for a feature-complete Unix kernel.
 
-## M5: real SMP
+1. Select a narrow claim, initially the strongest resource-management case
+   rather than "the Takibi language" as a whole.
+2. Assemble a short English draft or extended abstract containing the threat
+   model, trusted-base inventory, original kernel failure, compile-time
+   countermeasure, remaining assumptions, evaluation cost, and reproducible
+   QEMU/RPi5 artifact.
+3. Compare the claim carefully with ATS/ATS2, Rust, SPARK, and relevant
+   verified-kernel and systems-language work; do not present inspiration as
+   novelty.
+4. Ask an appropriate programming-languages/systems/formal-methods researcher
+   to critique the claim and evaluation. A prior collaborator such as Hongwei
+   Xi is a natural person to approach once the short artifact is concrete;
+   propose substantive collaboration, not authorship in exchange for English
+   editing.
+5. Use focused community meetings, posters, demos, and workshops to improve the
+   question and find collaborators. Treat international publication and its
+   artifact as high-quality outreach, not as a substitute for maintainership.
 
-Deliberately later, but not vague. SMP is one coherent milestone whose open
-dependencies should not leak piecemeal into unrelated work:
+No mechanized proof project is implied by this milestone. Add an SMT solver,
+proof assistant, or formal compiler semantics only when the chosen claim has a
+specific obligation that present tests and narrow type rules cannot establish.
 
-1. **#222** -- make scheduler/execution state explicitly per-core.
+Done when: a technically honest PDF and reproducible artifact can be sent for
+expert review, and every central empirical claim traces back to a maintained
+test or classified trusted assumption.
+
+## M7: real SMP
+
+Deliberately later. Treat SMP as one coherent milestone:
+
+1. **#222** -- make scheduler/execution state per-core.
 2. **#17** -- provide the required closed atomic operations.
-3. **#261/#351** -- establish synchronization and typed guard authority for
-   page, MMU, allocator, and shared kernel state.
+3. **#261** -- establish synchronization and typed guard authority for page,
+   MMU, allocator, and shared kernel state.
 4. **#274/#299** -- make network frame disposition and atomic publication
    explicit where concurrent receivers demonstrate the need.
-5. Run independent EL0 processes on all four RPi5 cores and retain
-   real-hardware preemption/concurrency evidence.
+5. Run independent EL0 processes on all four RPi5 cores with real overlap.
 
 Issue #202's user-range TOCTOU question becomes urgent here: a validated range
-cannot be assumed stable across concurrent address-space mutation without an
-epoch, lock, pin, or equivalent authority. Resolve it as part of the actual SMP
-design, not as solver research in isolation.
+cannot remain trusted across concurrent address-space mutation without an
+epoch, lock, pin, or equivalent authority.
 
-Done when: independent EL0 processes run on four RPi5 cores, the shared-state
-access paths are rejected without their required authority, and real-hardware
-tests exercise actual overlap rather than sequential secondary-core bring-up.
+Done when: independent EL0 processes run on four RPi5 cores, shared-state paths
+are rejected without their authority, and hardware tests exercise concurrent
+rather than sequential secondary-core behavior.
 
 ## Deferred by explicit triggers
 
-These are directions, not scheduled milestones.
+- **Additional architectures (#50/#85):** revisit only when the QEMU/RPi5
+  kernel and contributor base are mature and a concrete maintained machine is
+  available. AMD64 and RISC-V hardware remain long-range ambitions.
+- **Native macOS/Windows development:** revisit after real demand or a named
+  maintainer appears. A host OS running the common Linux environment is a much
+  smaller commitment than a native toolchain.
+- **Unattended multi-platform hardware CI:** build incrementally when multiple
+  maintained boards or host platforms create a real verification queue. The
+  current RPi5 remains a maintainer-run authority lane.
+- **Paid exhibition booths:** revisit when there is a defined product,
+  collaboration offer, stable demonstration, follow-up capacity, and plausible
+  contract value. Grass-roots technical meetings are the current outreach
+  channel.
+- **True separate compilation (#95):** revisit when measurements show current
+  whole-program build latency obstructing work; source line count alone is not
+  the trigger.
+- **Solver-backed proof obligations (#13/#109/#200/#201):** begin with one
+  current high-value property that established refinement, ownership, typestate,
+  or narrowing techniques cannot express.
+- **General lock/heap invariant logic (#132):** begin from one real API that
+  cannot be expressed with current narrow contracts.
 
-- **Third architecture (#50/#85):** revisit when a concrete board or platform
-  is selected and maintained. Do not build generic portability layers without
-  that caller.
-- **True separate compilation (#95):** revisit when `kernel/` build latency is
-  an actual complaint or source size/build measurements demonstrate the current
-  whole-program path is obstructing work. The old rough 20,000-line trigger has
-  been crossed, but line count alone has not established pain; measure before
-  scheduling an architecture change.
-- **Solver-backed proof obligations (#13/#109/#200/#201):** begin only when a
-  current, high-value property cannot be expressed by the established refined,
-  indexed-owner, typestate, or explicit-narrowing techniques. Start with one
-  property and one acceptance test, not a general solver integration program.
-- **General lock/heap invariant logic (#132):** retain its stated rule: start
-  from one real API that cannot be expressed with current narrow contracts.
+## Issue and board hygiene for this snapshot
 
-## Issue hygiene to apply with the refresh
+- Promote **#236** to the only immediate foundational milestone, with the
+  measurement/classification extension explicitly included in its closing bar
+  or split into one direct follow-up.
+- Keep **#331/#333/#334** ahead of compiler ergonomics because they protect the
+  evidence used by every later claim.
+- Keep **#344** as the allocator umbrella and **#364/#353** as its immediate
+  closing sequence; return optional #350 generality to Backlog.
+- Promote **#56** after M0-M2 so QEMU becomes the external PR gate before active
+  contributor recruitment.
+- Re-scope or close stale umbrellas whose completed work has moved elsewhere:
+  **#15**, **#26**, **#149**, and **#182**.
+- Keep M5a as the next product-facing milestone, with M5b queued behind it.
 
-The roadmap records recommendations; issue/board changes are separate actions.
-
-**Re-scope or close stale umbrellas**
-
-- **#15** -- its remaining subjects have been split into #342 and #343, while
-  user-address-space typing substantially landed elsewhere. Close it if it no
-  longer owns an unsplit acceptance criterion.
-- **#26** -- its growable-pool primitive landed; #344/#257 now describe the
-  remaining count ceiling and adoption work. Its open state should not imply
-  the original primitive is absent.
-- **#182** -- mark completed single-indirect read and directory-enumeration
-  slices, then state the next caller-driven filesystem requirement.
-- **#149** -- separate already-working QEMU gdbstub use from any remaining
-  no-JTAG hardware debugger requirement.
-- **#5** -- close unless a present kernel call site needs general inline
-  assembly. The closed intrinsic set from #226 deliberately avoids reopening
-  arbitrary register/clobber obligations in `.tkb`.
-- **#90/#200** -- retain one relational-bounds issue and treat #13 as the
-  solver umbrella rather than maintaining duplicate active requests.
-
-**Project-board shape**
-
-- Keep at most one allocator umbrella and its immediate correctness blockers In
-  progress; optional allocator generalizations return to Backlog.
-- Make M0 items Ready/In progress before new compiler ergonomics.
-- Promote #56 and #236: they convert the two largest recent advances -- QEMU
-  and explicit trust boundaries -- into durable project infrastructure.
-- Keep M4a as the next product-facing Ready milestone; keep M4b queued behind
-  it rather than treating every BusyBox extension as simultaneous work.
-
-The division of labor remains: the board answers "where is this now", this file
-answers "why in this order". Neither should try to answer the other's question.
+The board answers "where is this now"; this file answers "why in this order".
+Board changes are separate actions and are not performed merely by documenting
+the recommendation here.
 
 ## Relationship to YAGNI
 
-`AGENTS.md`'s YAGNI principle remains a durable project stance.
+- M0 is not premature formalization. The project already makes safety claims
+  and already has hundreds of explicit trust sites; defining their meaning is
+  a present requirement.
+- M1 repairs known defects in the machinery used as evidence.
+- M2 closes an active resource-management implementation and adopts it once;
+  it does not authorize every allocator feature.
+- M3 records and prevents real failures rather than inventing a general proof
+  language.
+- M4 exploits the already-landed QEMU port and limits review load before
+  inviting contributions.
+- M5 keeps language research accountable to useful kernel behavior and real
+  hardware.
+- M6 packages evidence already produced by the project; it does not begin a
+  theorem-proving program without a concrete obligation.
+- M7 and the deferred items preserve dependency order without authorizing work.
 
-- **M0 is mandatory correctness work.** Known compiler/layout/test-isolation
-  defects undermine evidence from everything built on them.
-- **M1 is bounded debt repayment.** A production consumer and explicit closing
-  bar justify the allocator; optional allocator generality does not inherit
-  that justification.
-- **M2 is exploitation of an already-landed capability.** CI and debugger use
-  make QEMU pay for itself; they are not a second emulator project.
-- **M3 is the project's stated purpose.** Compile-time proof boundaries are not
-  optional future-proofing, but each new mechanism must still start from a real
-  kernel property.
-- **M4 is current product work.** It keeps the proof loop grounded in actual
-  userspace and device behavior.
-- **M5 and the deferred section are not commitments to start.** They preserve
-  dependency order and explicit re-evaluation triggers without authorizing
-  speculative implementation.
-
-When a milestone here conflicts with a concrete requirement in front of the
-project, the concrete requirement wins and this dated snapshot gets refreshed.
+When this ordering conflicts with a concrete present requirement, the concrete
+requirement wins and this dated snapshot should be refreshed again.
