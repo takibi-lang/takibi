@@ -1,0 +1,1 @@
+tcp retransmit queue: five outstanding segments past the old ceiling of 4, per-segment records intact and in order, one connection's reset leaves another's ok

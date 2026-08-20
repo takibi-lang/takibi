@@ -594,10 +594,10 @@ fn kernel_test_common_probes() {
     } else {
         kernel_boot_log("tcp connection pool: failed\n");
     }
-    if (pending_tcp_exhaustion_probe()) {
-        kernel_boot_log("tcp pending-retransmit queue: exhaustion at capacity=4, no corruption, reuse-after-free ok\n");
+    if (pending_tcp_chain_probe()) {
+        kernel_boot_log("tcp retransmit queue: five outstanding segments past the old ceiling of 4, per-segment records intact and in order, one connection's reset leaves another's ok\n");
     } else {
-        kernel_boot_log("tcp pending-retransmit queue: failed\n");
+        kernel_boot_log("tcp retransmit queue: failed\n");
     }
 }
 

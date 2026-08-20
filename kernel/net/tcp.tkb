@@ -10,15 +10,36 @@
 // prototype implementation needed to mark unsafe, keeping this path free
 // of unsafe blocks and clean under the kernel's --forbid-trap build.
 //
-// Current limitations (2026-08-13, issue #295). Keep this list current as
-// call sites change; a limitation that goes stale here is worse than
-// none.
+// Current limitations (2026-08-20, issues #295 and #257). Keep this list
+// current as call sites change; a limitation that goes stale here is
+// worse than none.
 // - NOT SYNCHRONIZED, single-core only, same as every kernel/lib/-backed
-//   pool this file uses (SlotMap for tcp_connection_pool).
-// - TCP_CONNECTION_MAX=2, PENDING_TCP_MAX=4 (per connection): see
-//   `kernel/RESOURCE_LIMITS.md` for the exhaustion-result/boundary-test
-//   contract for both. Exhaustion is logged via
-//   kernel_boot_log_resource_exhausted at both find_free_slot call sites.
+//   pool this file uses (SlotMap for tcp_connection_pool,
+//   IntrusivePool for the retransmit queue). The retransmit pool's own
+//   mutation is at least IRQ-safe now (kernel/lib/pool_lock.tkb masks
+//   DAIF.I), which the nine arrays it replaced were not; excluding a
+//   second CPU is still nobody's job here -- see issue #261.
+// - TCP_CONNECTION_MAX=2 remains: see `kernel/RESOURCE_LIMITS.md` for its
+//   exhaustion-result/boundary-test contract. PENDING_TCP_MAX is GONE
+//   (issue #257): the retransmit queue is a chain of pool-allocated
+//   entries with no ceiling, and the only exhaustion left is the page
+//   allocator being empty, still logged via
+//   kernel_boot_log_resource_exhausted and still reported to callers the
+//   same way a full queue was.
+// - THE RECEIVE PATH NOW ALLOCATES. Queuing a segment for retransmission
+//   takes a page from kernel/mm/page.tkb when the current chunk is full.
+//   That is reached from net_rx_wait() onward -- `!{may_block}` thread
+//   context, the one context that touches TCP -- never from an interrupt
+//   handler. The retransmit pool retains no empty chunk (retained_chunks
+//   = 0, unlike kernel/lib/intrusive_pool.tkb's own default) so that a
+//   drained queue holds no page: this kernel checks "no page held at
+//   rest" as an invariant, and issue #373 is a live reason not to hold
+//   one anyway.
+// - This file has the `unsafe` EFFECT now, and no unsafe BLOCKS. Every
+//   entry point of kernel/lib/intrusive_pool.tkb that reaches a payload
+//   or a chunk header carries it, so anything calling them inherits it.
+//   The distinction is worth keeping straight: nothing here elides a
+//   check of its own.
 // - Exactly one physical RX capability (NetRxCanAcquire,
 //   kernel/net/socket_capability.tkb) exists for the whole kernel; every
 //   connection's send/receive path borrows and returns it sequentially --
@@ -38,6 +59,15 @@ use "kernel/net/wire.tkb";
 use "kernel/net/icmp.tkb";
 use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
+// GitHub issue #257: the retransmit queue is a pool now, not an array.
+// kernel/lib/intrusive_pool.tkb names its page provider's symbols without
+// `use`ing anyone (issue #364), so kernel/mm/page.tkb has to be reached
+// FIRST -- the order of these three lines is load-bearing, and getting it
+// wrong fails with an unbound constant rather than silently. pool_lock is
+// the lock backend that file likewise names without binding.
+use "kernel/mm/page.tkb";
+use "kernel/lib/pool_lock.tkb";
+use "kernel/lib/intrusive_pool.tkb";
 
 let mut our_mac: [u8; 6];
 
@@ -118,15 +148,27 @@ struct TcpConnection {
     socket_buffer_length: usize;
     socket_buffer_offset: usize;
     inetd_response_length: usize;
-    // Which pending-retransmit queue slot (see PENDING_TCP_MAX below) is
-    // the one currently armed for drop-recovery observation, -1 if none.
-    // A slot INDEX rather than a bool: pending_tcp_service_once below can
-    // then require the retransmit+ack it observed came from THIS specific
-    // slot, not merely "some Data/Fin slot or other" -- meaningful now
-    // that several slots can be in flight for one connection at once
-    // (GitHub issue #180).
-    injected_data_slot: i32;
-    injected_fin_slot: i32;
+    // How many retransmit entries this connection still has on the queue.
+    // Counted rather than walked: the chain is stable-owner storage, so
+    // even a read-only walk of it has to take and put every link, and
+    // kernel_tcp_close_stream polls this in a loop.
+    retx_count: usize;
+    // Which retransmit entry is the one currently armed for
+    // drop-recovery observation, 0 if none -- an entry's pool slot
+    // ADDRESS, where issue #180 used a queue slot index (and -1). Same
+    // role: pending_tcp_service_once can require the retransmit+ack it
+    // observed came from THIS specific entry, not merely "some Data/Fin
+    // entry or other", which matters because several can be in flight for
+    // one connection at once. A pool slot address is never 0, so 0 is the
+    // "none" sentinel that -1 used to be.
+    //
+    // Same staleness caveat the slot index had, neither better nor worse:
+    // an entry is freed when its ack arrives, and its slot can be handed
+    // back to a later entry, so a value left armed across that would match
+    // the wrong entry. Every injection resets it, and nothing outside the
+    // deliberate-drop tests reads it.
+    injected_data_entry: usize;
+    injected_fin_entry: usize;
 }
 
 // Issue #189: TCP connections have dynamic lifetimes even though this first
@@ -180,20 +222,75 @@ let mut tcp_injected_syn_pending: bool = false;
 let mut tcp_injected_syn_retransmitted: bool = false;
 let mut tcp_injected_syn_accepted: bool = false;
 // GitHub issue #180: a single write() (up to TCP_MAX_PAYLOAD) used to be
-// the only unit of retransmission tracking (one pending_tcp_* slot).
+// the only unit of retransmission tracking (one pending slot).
 // Consecutive write()s on one connection -- exactly what
 // kernel/arch/arm64/kernel/user_entry.S's EL0 fixture already does (19 +
 // 1460 + 1 bytes, three separate write() calls) -- silently overwrote an
-// earlier segment's still-unacknowledged retransmission record. Now
-// PENDING_TCP_MAX independent slots, one per in-flight segment. Still flat
-// arrays with manual slot*WIDTH offsets: the reason this comment used to
-// give -- that indexed writes into a nested/structured target are not
-// reliably supported -- was retired by GitHub issue #372, which made an
-// array-typed struct field a slice source (TcpConnection's own remote_ip/
-// remote_mac above are exactly that). These stay flat because issue #257
-// moves them into a pool of their own rather than into a struct, not
-// because they cannot be nested.
-const PENDING_TCP_MAX: usize = 4;
+// earlier segment's still-unacknowledged retransmission record. #180 fixed
+// that with PENDING_TCP_MAX = 4 independent slots per connection, held in
+// nine flat [T; PENDING_TCP_MAX * TCP_CONNECTION_MAX] arrays.
+//
+// GitHub issue #257: there is no PENDING_TCP_MAX now. An in-flight segment
+// is a RetxEntry allocated from a pool with no ceiling, and the queue is a
+// chain those entries thread among themselves -- so "how many segments may
+// be outstanding" stopped being a number anyone picks and became a
+// question about how many pages the machine has.
+//
+// The chain is GLOBAL, not per connection, and each entry names the
+// connection it belongs to. Not a design preference: a global holding
+// linear owners must be `private` (SPEC's stable-owner storage rule), and
+// tcp_connections is read from kernel/kernel/syscall.tkb, so a per-
+// connection chain head could not live in it. It is also the better shape
+// -- one retransmit queue for the stack is what a real kernel keeps -- and
+// it is what makes this step add no array of its own to replace the nine
+// it removes. Every walk below filters on connection_slot, so what each
+// connection sees is exactly what it saw when the queue was its own.
+//
+// The 1514-byte frame lives INLINE in the entry rather than in a second
+// pool of NetFrames. tcp_pool_shape's three-pool sketch has the frames
+// separate so a frame can move from a connection into an entry by handle
+// instead of by copy -- worth having, and it needs the connection's own
+// transmit frame to be pooled first, which is the step after this one.
+// Copying here keeps this commit's behaviour identical to what it
+// replaces, and an entry's slot is 2 to a page either way.
+variant RetxLink {
+    End;
+    More(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
+}
+
+// pending_tcp_kind/_frame/_frame_length/_expected_ack/_remote_ip/
+// _remote_port/_local_port/_sent_at/_retries, one entry instead of nine
+// arrays -- plus connection_slot, which the arrays encoded in the index
+// arithmetic, and `next`, which is what removes the ceiling.
+struct RetxEntry {
+    private mutex: i32;
+    private next: RetxLink;
+    connection_slot: usize;
+    kind: PendingTcpKind;
+    frame_length: usize;
+    expected_ack: u32;
+    remote_ip: [u8; 4];
+    remote_port: u16;
+    local_port: u16;
+    sent_at: i64;
+    retries: usize;
+    frame: [u8; 1514];
+}
+
+// A bare global cannot hold a variant, so the chain head is wrapped the
+// same way tcp_connection_store wraps its own: a struct carrying the
+// mutex its stable_replace needs.
+struct RetxChain {
+    private mutex: i32;
+    private head: RetxLink;
+}
+
+private linear view RetxGuard[lock: addr];
+private let mut tcp_retx_chain: RetxChain;
+private let mut tcp_retx_pool: IntrusivePool(RetxEntry);
+// See tcp_connection_pool_init: that function is a reset called many
+// times, and the pool must be constructed exactly once.
+private let mut tcp_retx_pool_ready: bool = false;
 
 let mut tcp_drop_data_segment_index: i32 = -1;
 let mut tcp_injected_data_retransmitted: bool = false;
@@ -204,15 +301,6 @@ let mut tcp_injected_fin_recovery_observed: bool = false;
 let mut tcp_advertised_window: u16 = 65535;
 let mut tcp_ack_each_stream_segment: bool = false;
 let mut tcp_split_request_segments: usize = 0;
-let mut pending_tcp_kind:         [PendingTcpKind; PENDING_TCP_MAX * TCP_CONNECTION_MAX];
-let mut pending_tcp_frame:        [u8; 1514 * PENDING_TCP_MAX * TCP_CONNECTION_MAX];
-let mut pending_tcp_frame_length: [usize; PENDING_TCP_MAX * TCP_CONNECTION_MAX];
-let mut pending_tcp_expected_ack: [u32; PENDING_TCP_MAX * TCP_CONNECTION_MAX];
-let mut pending_tcp_remote_ip:    [u8; 4 * PENDING_TCP_MAX * TCP_CONNECTION_MAX];
-let mut pending_tcp_remote_port:  [u16; PENDING_TCP_MAX * TCP_CONNECTION_MAX];
-let mut pending_tcp_local_port:   [u16; PENDING_TCP_MAX * TCP_CONNECTION_MAX];
-let mut pending_tcp_sent_at:      [i64; PENDING_TCP_MAX * TCP_CONNECTION_MAX];
-let mut pending_tcp_retries:      [usize; PENDING_TCP_MAX * TCP_CONNECTION_MAX];
 
 must_use variant KernelTcpResult {
     TimedOut(NetRxCanAcquire);
@@ -268,13 +356,42 @@ fn tcp_connection_lock(lock: *i32 @ address)
 fn tcp_connection_unlock(guard: sink TcpConnectionGuard[address],
                          lock: *i32 @ address) {}
 
-fn tcp_connection_pool_init() {
+// Despite the name, this is a RESET, not a one-time constructor: it is
+// called again on every kernel_syscall_daemon_start() and
+// kernel_syscall_process_configure(), which is how a fresh daemon or a
+// reconfigured process gets clean connection state.
+//
+// GitHub issue #257: that matters to the retransmit pool in a way it did
+// not matter to anything here before. Re-running intrusive_pool_init on a
+// pool that holds pages does not FREE them, it FORGETS them -- chunk_head
+// goes to zero, the pool takes a new tag, and every page it was holding is
+// still marked live in the page allocator with nobody left who can give it
+// back. The `resources` view catches that as a page leak, which is how
+// this was found; the arrays it replaced had no such failure mode because
+// they were static storage and re-initialising them cost nothing.
+//
+// So the pool is constructed once and DRAINED afterwards. Draining is the
+// operation that actually wanted doing anyway: a daemon restarting has no
+// use for the previous one's unacknowledged segments, and
+// pending_tcp_reset_all returns their pages properly.
+fn tcp_connection_pool_init() !{unsafe} {
     slotmap_init(&tcp_connection_pool);
+    if (tcp_retx_pool_ready == false) {
+        tcp_retx_chain.mutex = 0;
+        // Retain NOTHING. #346's one-empty-chunk reserve is the right
+        // default for a pool in steady churn, and the wrong one here: this
+        // kernel checks "no page is held at rest" as an invariant (the
+        // `resources` view's pages=0), and a retransmit queue is empty at
+        // rest by definition -- every segment is eventually acknowledged
+        // or given up on. Holding a page across that shows up as a leak,
+        // correctly.
+        intrusive_pool_init_retaining(&tcp_retx_pool, 0);
+        tcp_retx_pool_ready = true;
+    }
     for connection_index: usize in 0..<TCP_CONNECTION_MAX {
+        pending_tcp_reset_all(connection_index);
         tcp_connections[connection_index].state = ConnState::Listen;
         tcp_connections[connection_index].local_port = TCP_ECHO_PORT;
-        tcp_connections[connection_index].injected_data_slot = -1;
-        tcp_connections[connection_index].injected_fin_slot = -1;
     }
 }
 
@@ -461,7 +578,7 @@ fn kernel_tcp_injected_syn_ack_recovered() -> bool {
 fn kernel_tcp_inject_drop_data_segment(index: usize) {
     tcp_drop_data_segment_index = index as i32;
     for connection_slot: usize in 0..<TCP_CONNECTION_MAX {
-        tcp_connections[connection_slot].injected_data_slot = -1;
+        tcp_connections[connection_slot].injected_data_entry = 0;
     }
     tcp_injected_data_retransmitted = false;
     tcp_injected_data_recovery_observed = false;
@@ -474,7 +591,7 @@ fn kernel_tcp_injected_data_recovered() -> bool {
 fn kernel_tcp_inject_drop_next_fin() {
     tcp_drop_next_fin = true;
     for connection_slot: usize in 0..<TCP_CONNECTION_MAX {
-        tcp_connections[connection_slot].injected_fin_slot = -1;
+        tcp_connections[connection_slot].injected_fin_entry = 0;
     }
     tcp_injected_fin_retransmitted = false;
     tcp_injected_fin_recovery_observed = false;
@@ -499,180 +616,371 @@ fn kernel_tcp_restore_stream_policy() {
     tcp_ack_each_stream_segment = false;
 }
 
-// Resets every slot to free. Called once per connection (from
-// kernel_tcp_accept_once, alongside its own state = Listen reset)
-// so a new connection never inherits a stale slot from a previous one.
-fn pending_tcp_reset_all(connection_slot: {0..<TCP_CONNECTION_MAX as usize}) {
-    let mut pending_slot: usize = 0;
-    while (pending_slot < 4) {
-        if (pending_slot < 4) {
-            let pending_index: usize =
-                connection_slot * PENDING_TCP_MAX + pending_slot;
-            if (pending_index < PENDING_TCP_MAX * TCP_CONNECTION_MAX) {
-                pending_tcp_kind[pending_index] = PendingTcpKind::None;
-            }
-        }
-        pending_slot = pending_slot + 1;
-    }
-    tcp_connections[connection_slot].data_segment_counter = 0;
+fn retx_lock(m: *i32 @ address) -> RetxGuard[address] {
+    return view RetxGuard[address];
 }
 
-// Finds a free (PendingTcpKind::None) slot and returns its index, or -1 if
-// every slot is genuinely occupied (shouldn't happen at PENDING_TCP_MAX=4
-// against the 3-segment EL0 fixture this was sized for, and
-// pending_tcp_service_once already opportunistically reclaims any
-// already-acked slot right before every call here -- see this function's
-// one caller). i32, not a refined usize: -1 is a real, valid "not found"
-// result here (unlike this file's other {0..<N as usize} slot types),
-// matching this file's own existing sentinel idiom (tcp_drop_data_segment_
-// index, TcpConnection's injected_data_slot/injected_fin_slot all use i32 -1 for
-// "none").
+fn retx_unlock(guard: sink RetxGuard[address], m: *i32 @ address) {}
+
+// Detach the whole queue. Every walk below is "take the chain, decide
+// entry by entry, put back what survives", rather than unlinking a node
+// where it stands: unlinking needs the PREVIOUS entry's link held open
+// across the step that replaces it, and a link is stable owner storage,
+// which can only be swapped, never held.
+fn retx_chain_take() -> RetxLink {
+    let guard = retx_lock(&tcp_retx_chain.mutex);
+    let head: RetxLink = stable_replace(
+        guard, &tcp_retx_chain.mutex, tcp_retx_chain.head, RetxLink::End);
+    retx_unlock(guard, &tcp_retx_chain.mutex);
+    return head;
+}
+
+// Install a chain as the queue. The displaced link must be End -- every
+// caller took the chain first, and one context touches TCP (see this
+// file's header), so nothing can have put one back in between. Returns
+// false if that was violated anyway, having CONSUMED the stray rather
+// than leaking it; the callers below treat that as the corruption it
+// would be.
+fn retx_chain_put(link: RetxLink) -> bool {
+    let guard = retx_lock(&tcp_retx_chain.mutex);
+    let displaced: RetxLink = stable_replace(
+        guard, &tcp_retx_chain.mutex, tcp_retx_chain.head, link);
+    retx_unlock(guard, &tcp_retx_chain.mutex);
+    match displaced {
+        RetxLink::End => { return true; }
+        RetxLink::More(stray) => { intrusive_owner_drop(stray); return false; }
+    }
+}
+
+fn retx_entry_take_next(entry: *RetxEntry) -> RetxLink {
+    let guard = retx_lock(&entry.mutex);
+    let next: RetxLink = stable_replace(
+        guard, &entry.mutex, entry.next, RetxLink::End);
+    retx_unlock(guard, &entry.mutex);
+    return next;
+}
+
+fn retx_entry_put_next(entry: *RetxEntry, link: RetxLink) -> bool {
+    let guard = retx_lock(&entry.mutex);
+    let displaced: RetxLink = stable_replace(
+        guard, &entry.mutex, entry.next, link);
+    retx_unlock(guard, &entry.mutex);
+    match displaced {
+        RetxLink::End => { return true; }
+        RetxLink::More(stray) => { intrusive_owner_drop(stray); return false; }
+    }
+}
+
+// Frees one entry, given the (slot, generation) its link carried. Split
+// out because it is the same three lines in four places, and because the
+// rebranding it does is the one genuinely delicate step in this file.
 //
-// GitHub issue #295: this used to fall back to slot 0 on exhaustion, and
-// pending_tcp_record's caller unconditionally overwrote whatever occupied
-// the returned slot -- silently clobbering slot 0's still-unacknowledged
-// retransmission record with the new segment's. That segment then never
-// got retransmitted if its own ACK was lost, surfacing later as an
-// inexplicable stall or wrong-data retransmit, not as a resource-limit
-// symptom. Now reports -1 instead of guessing a victim slot to corrupt;
-// pending_tcp_record's own doc comment explains what -1 means for the new
-// segment itself.
-fn pending_tcp_find_free_slot(
-        connection_slot: {0..<TCP_CONNECTION_MAX as usize}) -> i32 {
-    let mut pending_slot: usize = 0;
-    while (pending_slot < 4) {
-        if (pending_slot < 4) {
-            let pending_index: usize =
-                connection_slot * PENDING_TCP_MAX + pending_slot;
-            if (pending_index < PENDING_TCP_MAX * TCP_CONNECTION_MAX) {
-                if (pending_tcp_kind[pending_index] == PendingTcpKind::None) {
-                return pending_slot as i32;
+// A parked handle's brand is EXISTENTIAL (GitHub issue #370): the field
+// knows it holds some pool's handle, not this pool's, and opening the
+// existential mints a fresh identity that will not match. So the only
+// route to a handle intrusive_pool_remove will accept is to take the slot
+// and generation off the parked one, discharge it, and rebuild -- which
+// is exactly the one way to produce a handle the pool did not mint, and
+// exactly why remove validates before it trusts one.
+fn retx_entry_free(slot: usize, generation: usize) !{unsafe} {
+    let branded = intrusive_owner_new(&tcp_retx_pool, slot, generation);
+    let guard = intrusive_pool_lock(&tcp_retx_pool);
+    intrusive_pool_remove(&tcp_retx_pool, guard, branded);
+    intrusive_pool_unlock(&tcp_retx_pool, guard);
+}
+
+// Reverses a detached chain. Every walk below rebuilds by pushing, which
+// reverses; this puts the result back the way round it was found, so the
+// queue's order is a property of the code rather than of how many times
+// it has been serviced. The order it preserves is oldest-first, which is
+// the order the nine arrays gave (pending_tcp_record took the lowest free
+// slot and pending_tcp_service_once scanned 0 upward) -- and the order
+// that retransmits the gap-filling segment first.
+fn retx_chain_reverse(link_in: RetxLink) -> RetxLink !{unsafe} {
+    let mut link: RetxLink = link_in;
+    let mut reversed: RetxLink = RetxLink::End;
+    let mut walking: bool = true;
+    while (walking) {
+        match link {
+            RetxLink::End => { walking = false; link = RetxLink::End; }
+            RetxLink::More(parked) => {
+                let slot: usize = intrusive_owner_slot(parked);
+                let generation: usize = intrusive_owner_generation(parked);
+                intrusive_owner_drop(parked);
+                if (intrusive_pool_matches(&tcp_retx_pool, slot, generation)) {
+                    let branded =
+                        intrusive_owner_new(&tcp_retx_pool, slot, generation);
+                    let entry: *RetxEntry =
+                        intrusive_pool_ref(&tcp_retx_pool, branded);
+                    let following: RetxLink = retx_entry_take_next(entry);
+                    if (retx_entry_put_next(entry, reversed) == false) {
+                        kernel_boot_log("tcp retx: chain link was not empty\n");
+                    }
+                    reversed = RetxLink::More(branded);
+                    link = following;
+                } else {
+                    // The chain named a slot the pool does not recognize.
+                    // Nothing further along it can be trusted either, so
+                    // stop rather than follow it; the entries beyond are
+                    // leaked, which is the bounded outcome.
+                    kernel_boot_log("tcp retx: chain names an unknown slot\n");
+                    walking = false;
+                    link = RetxLink::End;
                 }
             }
         }
-        pending_slot = pending_slot + 1;
     }
-    kernel_boot_log_resource_exhausted(
-        "TCP pending-retransmit queue" as *u8, PENDING_TCP_MAX);
-    return -1;
+    match link {
+        RetxLink::End => {}
+        RetxLink::More(leftover) => { intrusive_owner_drop(leftover); }
+    }
+    return reversed;
 }
 
-// GitHub issue #295: returns -1 (not i32 min: this file's own "no slot"
-// sentinel, see pending_tcp_find_free_slot) instead of always claiming a
-// slot, when PENDING_TCP_MAX is exhausted for this connection. The new
-// segment is still sent by both callers below regardless of this return
-// value -- what -1 means is narrower: this specific segment will not be
-// automatically retransmitted by pending_tcp_service_once if its own ACK
-// is lost (no worse than every prior segment's reliability was already
-// bounded by PENDING_TCP_MAX concurrent tracking), and no OTHER segment's
-// still-live tracking record is touched. Both callers guard their
-// test-injection branch (which otherwise arms a deliberate drop-and-
-// verify-retransmit check) on this being a real slot, since arming that
-// check against slot -1 would mean the frame is never transmitted at all.
-fn pending_tcp_record(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
-                      kind: PendingTcpKind, frame_length: usize) -> i32 {
-    let found: i32 = pending_tcp_find_free_slot(connection_slot);
-    if (found >= 0 && found < 4) {
-        let slot: {0..<4 as usize} = found as usize;
-        let pending_index: usize = connection_slot * PENDING_TCP_MAX + slot;
-        // Same-base subslice rule (see pending_tcp_ack_matches's identical
-        // comment): "slot * 1514" computed twice would not itself prove in
-        // range, so it is bound once into `base` and both the write loop
-        // below and any later `base..<base + N` subslice reference that one
-        // local instead of recomputing the multiply.
-        let base: usize = pending_index * 1514;
-        let frame_dest = pending_tcp_frame as []u8;
-        let stream_base: usize = connection_slot * 1514;
-        let stream_frames = tcp_stream_tx_frame as []u8;
-        slice_copy(frame_dest[base..<base + 1514],
-                   stream_frames[stream_base..<stream_base + 1514]);
-        pending_tcp_kind[pending_index] = kind;
-        pending_tcp_frame_length[pending_index] = frame_length;
-        pending_tcp_expected_ack[pending_index] = tcp_connections[connection_slot].snd_nxt;
-        let ip_base: usize = pending_index * 4;
-        let remote_ip_bytes = pending_tcp_remote_ip as []u8;
-        let conn_ip_bytes =
-            tcp_connections[connection_slot].remote_ip as []u8;
-        slice_copy(remote_ip_bytes[ip_base..<ip_base + 4],
-                   conn_ip_bytes[0..<4]);
-        pending_tcp_remote_port[pending_index] = tcp_connections[connection_slot].remote_port;
-        pending_tcp_local_port[pending_index] = tcp_connections[connection_slot].local_port;
-        pending_tcp_sent_at[pending_index] = read_cntpct();
-        pending_tcp_retries[pending_index] = 0;
-        return slot as i32;
-    }
-    return -1;
-}
-
-// GitHub issue #295 boundary test: fills connection slot 0's PENDING_TCP_MAX
-// (4) retransmit-tracking slots directly (bypassing the real send path,
-// which this probe has no network peer to drive), then proves
-// pending_tcp_record reports exhaustion via -1 rather than corrupting an
-// existing slot's still-unacknowledged frame_length -- the actual bug this
-// issue's audit found and fixed. Also proves a freed slot is reused.
-fn pending_tcp_exhaustion_probe() -> bool {
-    let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = 0;
-    pending_tcp_reset_all(connection_slot);
-    let base_index: usize = connection_slot * PENDING_TCP_MAX;
-    for i: usize in 0..<PENDING_TCP_MAX {
-        let pending_index: usize = base_index + i;
-        if (pending_index < PENDING_TCP_MAX * TCP_CONNECTION_MAX) {
-            pending_tcp_kind[pending_index] = PendingTcpKind::Data;
-            // Distinct per-slot sentinel: slot i's own frame_length, so a
-            // corrupted-by-the-wrong-slot overwrite (not just any write)
-            // would be caught below, not just "something changed".
-            pending_tcp_frame_length[pending_index] = 1000 + i;
+// Frees every entry belonging to this connection and leaves the rest of
+// the queue alone. Called once per connection from kernel_tcp_accept_once
+// (alongside its own state = Listen reset), so a new connection never
+// inherits a previous one's outstanding segments.
+fn pending_tcp_reset_all(connection_slot: {0..<TCP_CONNECTION_MAX as usize})
+        !{unsafe} {
+    let mut link: RetxLink = retx_chain_take();
+    let mut kept: RetxLink = RetxLink::End;
+    let mut walking: bool = true;
+    while (walking) {
+        match link {
+            RetxLink::End => { walking = false; link = RetxLink::End; }
+            RetxLink::More(parked) => {
+                let slot: usize = intrusive_owner_slot(parked);
+                let generation: usize = intrusive_owner_generation(parked);
+                intrusive_owner_drop(parked);
+                if (intrusive_pool_matches(&tcp_retx_pool, slot, generation)) {
+                    let branded =
+                        intrusive_owner_new(&tcp_retx_pool, slot, generation);
+                    let entry: *RetxEntry =
+                        intrusive_pool_ref(&tcp_retx_pool, branded);
+                    let following: RetxLink = retx_entry_take_next(entry);
+                    let mine: bool = entry.connection_slot == connection_slot;
+                    if (mine) {
+                        intrusive_owner_drop(branded);
+                        retx_entry_free(slot, generation);
+                    } else {
+                        if (retx_entry_put_next(entry, kept) == false) {
+                            kernel_boot_log("tcp retx: chain link was not empty\n");
+                        }
+                        kept = RetxLink::More(branded);
+                    }
+                    link = following;
+                } else {
+                    kernel_boot_log("tcp retx: chain names an unknown slot\n");
+                    walking = false;
+                    link = RetxLink::End;
+                }
+            }
         }
     }
+    match link {
+        RetxLink::End => {}
+        RetxLink::More(leftover) => { intrusive_owner_drop(leftover); }
+    }
+    if (retx_chain_put(retx_chain_reverse(kept)) == false) {
+        kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
+    }
+    tcp_connections[connection_slot].retx_count = 0;
+    tcp_connections[connection_slot].data_segment_counter = 0;
+    tcp_connections[connection_slot].injected_data_entry = 0;
+    tcp_connections[connection_slot].injected_fin_entry = 0;
+}
 
-    let untracked: i32 = pending_tcp_record(connection_slot,
-                                            PendingTcpKind::Fin, 9999);
-    if (untracked != -1) { return false; }
-    for i: usize in 0..<PENDING_TCP_MAX {
-        let pending_index: usize = base_index + i;
-        if (pending_index < PENDING_TCP_MAX * TCP_CONNECTION_MAX) {
-            if (pending_tcp_kind[pending_index] != PendingTcpKind::Data ||
-                pending_tcp_frame_length[pending_index] != 1000 + i) {
+// Queues one just-transmitted segment for retransmission and returns the
+// entry's pool slot ADDRESS, or 0 if it could not be queued.
+//
+// GitHub issue #295 gave this a -1 return when PENDING_TCP_MAX was
+// exhausted, so that a full queue could not silently clobber another
+// segment's still-live record. The ceiling is gone, so the only way to
+// get 0 now is the page allocator being empty -- but the contract is
+// deliberately unchanged, because it is the callers' contract too: the
+// segment is still SENT either way, what 0 means is narrower (this one
+// will not be retransmitted automatically if its ACK is lost), and both
+// callers still guard their deliberate-drop test injection on getting a
+// real entry, since arming that against "not queued" would mean the
+// frame is never transmitted at all.
+fn pending_tcp_record(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+                      kind: PendingTcpKind, frame_length: usize)
+        -> usize !{unsafe} {
+    let pool_guard = intrusive_pool_lock(&tcp_retx_pool);
+    // insert_zeroed, not insert: RetxEntry holds a stable owner field
+    // (`next`), and a recycled slot is neither zero nor fresh. This is
+    // checked, not remembered -- plain insert does not compile for such a
+    // T (GitHub issue #369).
+    let inserted = intrusive_pool_insert_zeroed(&tcp_retx_pool, pool_guard);
+    intrusive_pool_unlock(&tcp_retx_pool, pool_guard);
+    match inserted {
+        IntrusivePoolInsertResult::OutOfMemory => {
+            // capacity=0: there is no capacity to report any more, which
+            // is the point of the change. The line still names the
+            // resource, which is what an operator reading a boot log
+            // needs.
+            kernel_boot_log_resource_exhausted(
+                "TCP retransmit queue (out of pages)" as *u8, 0);
+            return 0;
+        }
+        IntrusivePoolInsertResult::Allocated(owner) => {
+            let entry_address: usize = intrusive_owner_slot(owner);
+            let entry: *RetxEntry = intrusive_pool_ref(&tcp_retx_pool, owner);
+            entry.mutex = 0;
+            entry.connection_slot = connection_slot;
+            entry.kind = kind;
+            entry.frame_length = frame_length;
+            entry.expected_ack = tcp_connections[connection_slot].snd_nxt;
+            slice_copy(entry.remote_ip as []u8,
+                       tcp_connections[connection_slot].remote_ip as []u8);
+            entry.remote_port = tcp_connections[connection_slot].remote_port;
+            entry.local_port = tcp_connections[connection_slot].local_port;
+            entry.sent_at = read_cntpct();
+            entry.retries = 0;
+            let stream_base: usize = connection_slot * 1514;
+            let stream_frames = tcp_stream_tx_frame as []u8;
+            slice_copy(entry.frame as []u8,
+                       stream_frames[stream_base..<stream_base + 1514]);
+
+            // Append at the tail, keeping the queue oldest-first: reverse,
+            // push, reverse back. Two extra walks of a chain that holds
+            // one segment per unacknowledged write, against a retransmit
+            // order that then matches what the fixed slots gave.
+            let reversed: RetxLink = retx_chain_reverse(retx_chain_take());
+            if (retx_entry_put_next(entry, reversed) == false) {
+                kernel_boot_log("tcp retx: fresh entry had a link\n");
+            }
+            if (retx_chain_put(
+                    retx_chain_reverse(RetxLink::More(owner))) == false) {
+                kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
+            }
+            tcp_connections[connection_slot].retx_count =
+                tcp_connections[connection_slot].retx_count + 1;
+            return entry_address;
+        }
+    }
+}
+
+// GitHub issue #257: what the old pending_tcp_exhaustion_probe proved was
+// that the queue reported exhaustion at exactly PENDING_TCP_MAX without
+// corrupting an existing slot. There is no PENDING_TCP_MAX to reach any
+// more, so the boundary it tested no longer exists -- and the claim worth
+// testing in its place is the opposite one: that a connection can hold
+// MORE outstanding segments than the old ceiling allowed, that each one
+// keeps its own record, and that the queue is still exactly emptied.
+//
+// Drives the queue directly rather than through real TCP timing, for the
+// same reason the old probe did: reaching this through genuine network
+// loss and retry would need a materially larger QEMU-peer-driven test.
+fn pending_tcp_chain_probe() -> bool !{unsafe} {
+    let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = 0;
+    let other_slot: {0..<TCP_CONNECTION_MAX as usize} = 1;
+    pending_tcp_reset_all(connection_slot);
+    pending_tcp_reset_all(other_slot);
+    let live_before: usize = intrusive_pool_live_count(&tcp_retx_pool);
+
+    // One past the old ceiling of 4, plus one belonging to a DIFFERENT
+    // connection, interleaved so that reset_all below has to pick its own
+    // entries out of a mixed chain rather than truncate a prefix.
+    let mut queued: usize = 0;
+    for i: usize in 0..<5 {
+        if (pending_tcp_record(connection_slot, PendingTcpKind::Data,
+                               1000 + i) != 0) {
+            queued = queued + 1;
+        }
+        if (i == 2) {
+            if (pending_tcp_record(other_slot, PendingTcpKind::Fin, 9999)
+                    == 0) {
                 return false;
             }
         }
     }
-
-    let free_index: usize = base_index + 2;
-    if (free_index < PENDING_TCP_MAX * TCP_CONNECTION_MAX) {
-        pending_tcp_kind[free_index] = PendingTcpKind::None;
+    if (queued != 5 ||
+        tcp_connections[connection_slot].retx_count != 5 ||
+        tcp_connections[other_slot].retx_count != 1 ||
+        intrusive_pool_live_count(&tcp_retx_pool) != live_before + 6) {
+        return false;
     }
-    let reused: i32 = pending_tcp_record(connection_slot,
-                                         PendingTcpKind::Fin, 9999);
-    if (reused != 2) { return false; }
-    for i: usize in 0..<PENDING_TCP_MAX {
-        if (i != 2) {
-            let pending_index: usize = base_index + i;
-            if (pending_index < PENDING_TCP_MAX * TCP_CONNECTION_MAX) {
-                if (pending_tcp_kind[pending_index] != PendingTcpKind::Data ||
-                    pending_tcp_frame_length[pending_index] != 1000 + i) {
-                    return false;
+
+    // Every entry kept its own frame_length -- the record the old
+    // fall-back-to-slot-0 bug used to clobber (issue #295) -- and they are
+    // in the order they were queued.
+    let mut walked: usize = 0;
+    let mut lengths_ok: bool = true;
+    let mut link: RetxLink = retx_chain_take();
+    let mut kept: RetxLink = RetxLink::End;
+    let mut walking: bool = true;
+    while (walking) {
+        match link {
+            RetxLink::End => { walking = false; link = RetxLink::End; }
+            RetxLink::More(parked) => {
+                let slot: usize = intrusive_owner_slot(parked);
+                let generation: usize = intrusive_owner_generation(parked);
+                intrusive_owner_drop(parked);
+                if (intrusive_pool_matches(&tcp_retx_pool, slot, generation)) {
+                    let branded =
+                        intrusive_owner_new(&tcp_retx_pool, slot, generation);
+                    let entry: *RetxEntry =
+                        intrusive_pool_ref(&tcp_retx_pool, branded);
+                    let following: RetxLink = retx_entry_take_next(entry);
+                    if (entry.connection_slot == connection_slot) {
+                        if (entry.frame_length != 1000 + walked) {
+                            lengths_ok = false;
+                        }
+                        walked = walked + 1;
+                    }
+                    if (retx_entry_put_next(entry, kept) == false) {
+                        lengths_ok = false;
+                    }
+                    kept = RetxLink::More(branded);
+                    link = following;
+                } else {
+                    lengths_ok = false;
+                    walking = false;
+                    link = RetxLink::End;
                 }
             }
         }
     }
+    match link {
+        RetxLink::End => {}
+        RetxLink::More(leftover) => { intrusive_owner_drop(leftover); }
+    }
+    if (retx_chain_put(retx_chain_reverse(kept)) == false) { return false; }
+    if (lengths_ok == false || walked != 5) { return false; }
 
+    // Resetting one connection takes its five and leaves the other's one.
     pending_tcp_reset_all(connection_slot);
+    if (tcp_connections[connection_slot].retx_count != 0 ||
+        tcp_connections[other_slot].retx_count != 1 ||
+        intrusive_pool_live_count(&tcp_retx_pool) != live_before + 1) {
+        return false;
+    }
+    pending_tcp_reset_all(other_slot);
+    if (intrusive_pool_live_count(&tcp_retx_pool) != live_before ||
+        intrusive_pool_probe(&tcp_retx_pool) == false) {
+        return false;
+    }
+    // Give the pages back rather than leaving this probe's chunks held.
+    // #346's anti-thrash default retains one empty chunk per pool, which
+    // is the right policy for a queue in steady use and the wrong one for
+    // a boot probe that will not queue anything again for a while.
+    let reclaim_guard = intrusive_pool_lock(&tcp_retx_pool);
+    intrusive_pool_reclaim(&tcp_retx_pool, reclaim_guard);
+    intrusive_pool_unlock(&tcp_retx_pool, reclaim_guard);
     return true;
 }
 
-// slot: {0..<4 as usize} (not plain usize + an internal `if (slot >= 4)
-// return false` guard, tried first): a refined PARAMETER type is what
-// lets every pending_tcp_*[slot] access below prove in range under
-// --forbid-trap, matching http_server_common.tkb's tcp_remote_matches
-// (idx: {0..<MAX_CONNS as usize}) precedent -- a runtime bounds check
-// alone does not carry the same compile-time information forward.
+
+// Takes the entry itself rather than a pair of indices into nine arrays:
+// what used to need `connection_slot * PENDING_TCP_MAX + slot` -- and a
+// refined slot type so every one of those accesses could prove in range
+// under --forbid-trap -- is now a struct the caller already has a pointer
+// to, and there is no index to bound.
 fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
-                           connection_slot: {0..<TCP_CONNECTION_MAX as usize},
-                           slot: {0..<4 as usize}) -> bool {
-    let pending_index: usize = connection_slot * PENDING_TCP_MAX + slot;
-    if (pending_tcp_kind[pending_index] == PendingTcpKind::None ||
-        len < 54 || len > 1514) {
+                           entry: *RetxEntry) -> bool {
+    if (entry.kind == PendingTcpKind::None || len < 54 || len > 1514) {
         return false;
     }
     let len_n: i32 = len;
@@ -683,12 +991,11 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
     let ihl: u16 = (ip_hdr.version_ihl & 0x0F) * 4;
     let len16: u16 = len_n as u16;
     let total_len: u16 = ip_hdr.total_len as u16;
-    let ip_base: usize = pending_index * 4;
-    let remote_ip_bytes = pending_tcp_remote_ip as []u8;
+    let entry_ip = entry.remote_ip as []u8;
     if ((ip_hdr.version_ihl >> 4) != 4 || ihl != 20 || total_len != 40 ||
         total_len > len16 - 14 || ip_hdr.protocol != PROTO_TCP ||
         inet_checksum(ip) != 0 ||
-        slice_eq(ip[IP_SRC..<IP_DST], remote_ip_bytes[ip_base..<ip_base + 4]) == false ||
+        slice_eq(ip[IP_SRC..<IP_DST], entry_ip[0..<4]) == false ||
         slice_eq(ip[IP_DST..<20], OUR_IP as []u8) == false) {
         return false;
     }
@@ -700,128 +1007,218 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
     pseudo[8] = 0;
     pseudo[9] = PROTO_TCP;
     write_u16be(pseudo[10..<12], 20);
-    return (tcp_hdr.src_port as u16) == pending_tcp_remote_port[pending_index] &&
-           (tcp_hdr.dst_port as u16) == pending_tcp_local_port[pending_index] &&
+    return (tcp_hdr.src_port as u16) == entry.remote_port &&
+           (tcp_hdr.dst_port as u16) == entry.local_port &&
            (tcp_hdr.flags & TCP_FLAG_ACK) != 0 &&
-           (tcp_hdr.ack as u32) >= pending_tcp_expected_ack[pending_index] &&
+           (tcp_hdr.ack as u32) >= entry.expected_ack &&
            checksum_fold(checksum_add(
                tcp, checksum_add(pseudo as []u8, 0))) == 0;
 }
 
 // One non-blocking net_rx acquire attempt: if a frame is already
-// waiting, checks it against every active slot (a real ACK is
-// cumulative -- one frame can clear several older slots at once, exactly
-// what happens here since these are same-direction sequential
-// segments), then separately retransmits any slot still active past its
-// own retry_ticks deadline (bumping its retry count, giving up and
-// freeing the slot silently at TCP_RETRY_LIMIT -- same exhaustion
-// behavior this file always had for its one slot). A frame that matches
-// no active slot is simply released: TCP's own retry semantics already
-// assume any frame can be safely dropped, so an opportunistic caller
+// waiting, checks it against every entry this connection still has
+// outstanding (a real ACK is cumulative -- one frame can clear several
+// older entries at once, exactly what happens here since these are
+// same-direction sequential segments), then separately retransmits any
+// entry still outstanding past its own retry_ticks deadline (bumping its
+// retry count, giving up and freeing it silently at TCP_RETRY_LIMIT --
+// same exhaustion behavior this file always had). A frame that matches
+// no entry is simply released: TCP's own retry semantics already assume
+// any frame can be safely dropped, so an opportunistic caller
 // (kernel_tcp_send_received) stealing an unrelated frame here is no
 // worse than that frame never having arrived at all.
+//
+// GitHub issue #257: the queue is one chain for the whole stack now, so
+// both passes below skip entries belonging to another connection. That
+// keeps what a connection sees identical to when the queue was its own
+// four slots -- a deliberate choice, since servicing every connection's
+// deadlines from whichever one happens to be running would be a timing
+// change on a path with a history of them.
 fn pending_tcp_service_once(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
                             ready_in: sink NetRxCanAcquire,
                              retry_ticks: i64)
-        -> NetRxCanAcquire !{may_block} {
+        -> NetRxCanAcquire !{may_block, unsafe} {
     let mut ready = ready_in;
     match net_rx_acquire(ready) {
         NetRxAcquire::None(next) => { ready = next; }
         NetRxAcquire::Acquired(acquired) => {
             let len: i32 = net_rx_len(acquired);
             let frame = net_rx_frame(acquired);
-            let mut ack_slot: usize = 0;
-            while (ack_slot < 4) {
-                if (ack_slot < 4) {
-                    let pending_index: usize =
-                        connection_slot * PENDING_TCP_MAX + ack_slot;
-                    if (pending_tcp_ack_matches(
-                            frame, len, connection_slot, ack_slot)) {
-                        // A real peer ACK, not a synthetic flag flip: this
-                        // is what makes kernel_tcp_injected_data_recovered()
-                        // / kernel_tcp_injected_fin_recovered() genuinely
-                        // prove recovery, matching the same rigor
-                        // kernel_tcp_injected_syn_ack_recovered() already
-                        // had.
-                        if (ack_slot as i32 ==
-                                tcp_connections[connection_slot].injected_data_slot &&
-                            tcp_injected_data_retransmitted) {
-                            tcp_injected_data_recovery_observed = true;
+            let mut link: RetxLink = retx_chain_take();
+            let mut kept: RetxLink = RetxLink::End;
+            let mut walking: bool = true;
+            while (walking) {
+                match link {
+                    RetxLink::End => { walking = false; link = RetxLink::End; }
+                    RetxLink::More(parked) => {
+                        let slot: usize = intrusive_owner_slot(parked);
+                        let generation: usize =
+                            intrusive_owner_generation(parked);
+                        intrusive_owner_drop(parked);
+                        if (intrusive_pool_matches(
+                                &tcp_retx_pool, slot, generation)) {
+                            let branded = intrusive_owner_new(
+                                &tcp_retx_pool, slot, generation);
+                            let entry: *RetxEntry =
+                                intrusive_pool_ref(&tcp_retx_pool, branded);
+                            let following: RetxLink =
+                                retx_entry_take_next(entry);
+                            let mut acked: bool = false;
+                            if (entry.connection_slot == connection_slot &&
+                                pending_tcp_ack_matches(frame, len, entry)) {
+                                // A real peer ACK, not a synthetic flag
+                                // flip: this is what makes
+                                // kernel_tcp_injected_data_recovered() /
+                                // kernel_tcp_injected_fin_recovered()
+                                // genuinely prove recovery, matching the
+                                // same rigor
+                                // kernel_tcp_injected_syn_ack_recovered()
+                                // already had.
+                                if (slot == tcp_connections[connection_slot]
+                                        .injected_data_entry &&
+                                    tcp_injected_data_retransmitted) {
+                                    tcp_injected_data_recovery_observed = true;
+                                }
+                                if (slot == tcp_connections[connection_slot]
+                                        .injected_fin_entry &&
+                                    tcp_injected_fin_retransmitted) {
+                                    tcp_injected_fin_recovery_observed = true;
+                                }
+                                acked = true;
+                            }
+                            if (acked) {
+                                intrusive_owner_drop(branded);
+                                retx_entry_free(slot, generation);
+                                tcp_connections[connection_slot].retx_count =
+                                    retx_count_after_release(connection_slot);
+                            } else {
+                                if (retx_entry_put_next(entry, kept) == false) {
+                                    kernel_boot_log("tcp retx: chain link was not empty\n");
+                                }
+                                kept = RetxLink::More(branded);
+                            }
+                            link = following;
+                        } else {
+                            kernel_boot_log("tcp retx: chain names an unknown slot\n");
+                            walking = false;
+                            link = RetxLink::End;
                         }
-                        if (ack_slot as i32 ==
-                                tcp_connections[connection_slot].injected_fin_slot &&
-                            tcp_injected_fin_retransmitted) {
-                            tcp_injected_fin_recovery_observed = true;
-                        }
-                        pending_tcp_kind[pending_index] = PendingTcpKind::None;
                     }
                 }
-                ack_slot = ack_slot + 1;
+            }
+            match link {
+                RetxLink::End => {}
+                RetxLink::More(leftover) => { intrusive_owner_drop(leftover); }
+            }
+            if (retx_chain_put(retx_chain_reverse(kept)) == false) {
+                kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
             }
             ready = net_rx_release(acquired);
         }
     }
     let now: i64 = read_cntpct();
-    let mut retry_slot: usize = 0;
-    while (retry_slot < 4) {
-        if (retry_slot < 4) {
-            let pending_index: usize =
-                connection_slot * PENDING_TCP_MAX + retry_slot;
-            if (pending_tcp_kind[pending_index] != PendingTcpKind::None) {
-                if (pending_tcp_retries[pending_index] < TCP_RETRY_LIMIT &&
-                    now - pending_tcp_sent_at[pending_index] >= retry_ticks) {
-                    let base: usize = pending_index * 1514;
-                    let length: usize = pending_tcp_frame_length[pending_index];
-                    let frame_bytes = pending_tcp_frame as []u8;
-                    ready = net_transmit_ready(
-                        ready, frame_bytes[base..<base + 1514],
-                        length as i32);
-                    pending_tcp_sent_at[pending_index] = now;
-                    pending_tcp_retries[pending_index] =
-                        pending_tcp_retries[pending_index] + 1;
-                    if (retry_slot as i32 ==
-                        tcp_connections[connection_slot].injected_data_slot) {
-                        tcp_injected_data_retransmitted = true;
+    let mut link: RetxLink = retx_chain_take();
+    let mut kept: RetxLink = RetxLink::End;
+    let mut walking: bool = true;
+    while (walking) {
+        match link {
+            RetxLink::End => { walking = false; link = RetxLink::End; }
+            RetxLink::More(parked) => {
+                let slot: usize = intrusive_owner_slot(parked);
+                let generation: usize = intrusive_owner_generation(parked);
+                intrusive_owner_drop(parked);
+                if (intrusive_pool_matches(&tcp_retx_pool, slot, generation)) {
+                    let branded =
+                        intrusive_owner_new(&tcp_retx_pool, slot, generation);
+                    let entry: *RetxEntry =
+                        intrusive_pool_ref(&tcp_retx_pool, branded);
+                    let following: RetxLink = retx_entry_take_next(entry);
+                    let mut expired: bool = false;
+                    if (entry.connection_slot == connection_slot &&
+                        now - entry.sent_at >= retry_ticks) {
+                        if (entry.retries < TCP_RETRY_LIMIT) {
+                            let length: usize = entry.frame_length;
+                            let frame_bytes = entry.frame as []u8;
+                            ready = net_transmit_ready(
+                                ready, frame_bytes[0..<1514], length as i32);
+                            entry.sent_at = now;
+                            entry.retries = entry.retries + 1;
+                            if (slot == tcp_connections[connection_slot]
+                                    .injected_data_entry) {
+                                tcp_injected_data_retransmitted = true;
+                            }
+                            if (slot == tcp_connections[connection_slot]
+                                    .injected_fin_entry) {
+                                tcp_injected_fin_retransmitted = true;
+                            }
+                        } else {
+                            // Give up silently on this one segment -- same
+                            // per-segment exhaustion behavior this file
+                            // always had, just scoped to this entry
+                            // instead of the whole queue.
+                            expired = true;
+                        }
                     }
-                    if (retry_slot as i32 ==
-                        tcp_connections[connection_slot].injected_fin_slot) {
-                        tcp_injected_fin_retransmitted = true;
+                    if (expired) {
+                        intrusive_owner_drop(branded);
+                        retx_entry_free(slot, generation);
+                        tcp_connections[connection_slot].retx_count =
+                            retx_count_after_release(connection_slot);
+                    } else {
+                        if (retx_entry_put_next(entry, kept) == false) {
+                            kernel_boot_log("tcp retx: chain link was not empty\n");
+                        }
+                        kept = RetxLink::More(branded);
                     }
-                } else if (pending_tcp_retries[pending_index] == TCP_RETRY_LIMIT &&
-                           now - pending_tcp_sent_at[pending_index] >= retry_ticks) {
-                    // Give up silently on this one slot -- same per-slot
-                    // exhaustion behavior this file always had for its one
-                    // pending slot, just scoped to this slot instead of the
-                    // whole queue.
-                    pending_tcp_kind[pending_index] = PendingTcpKind::None;
+                    link = following;
+                } else {
+                    kernel_boot_log("tcp retx: chain names an unknown slot\n");
+                    walking = false;
+                    link = RetxLink::End;
                 }
             }
         }
-        retry_slot = retry_slot + 1;
+    }
+    match link {
+        RetxLink::End => {}
+        RetxLink::More(leftover) => { intrusive_owner_drop(leftover); }
+    }
+    if (retx_chain_put(retx_chain_reverse(kept)) == false) {
+        kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
     }
     return ready;
 }
 
-// True while any slot (Data or Fin) is still outstanding -- the
-// condition kernel_tcp_close_stream's own bounded wait drains toward
-// before returning, so close() genuinely waits for its FIN (and any
-// Data segment still outstanding when it was called) to be acknowledged
-// or give up, instead of returning immediately with unfinished business.
+// One decrement, guarded. The count is bookkeeping beside the chain
+// rather than derived from it, so an underflow would be a real bug in
+// this file rather than a harmless miscount -- and usize underflow wraps
+// to an enormous number that would make kernel_tcp_close_stream spin to
+// its deadline every time.
+fn retx_count_after_release(
+        connection_slot: {0..<TCP_CONNECTION_MAX as usize}) -> usize {
+    let current: usize = tcp_connections[connection_slot].retx_count;
+    if (current == 0) {
+        kernel_boot_log("tcp retx: released an entry with an empty count\n");
+        return 0;
+    }
+    return current - 1;
+}
+
+// True while any segment (Data or Fin) is still outstanding for this
+// connection -- the condition kernel_tcp_close_stream's own bounded wait
+// drains toward before returning, so close() genuinely waits for its FIN
+// (and any Data segment still outstanding when it was called) to be
+// acknowledged or give up, instead of returning immediately with
+// unfinished business.
+//
+// A counter rather than a walk: the chain is stable owner storage, so
+// even a read-only walk has to take and put every link, and this is
+// polled in a loop.
 fn pending_tcp_any_active(
         connection_slot: {0..<TCP_CONNECTION_MAX as usize}) -> bool {
-    let mut active_slot: usize = 0;
-    while (active_slot < 4) {
-        if (active_slot < 4) {
-            let pending_index: usize =
-                connection_slot * PENDING_TCP_MAX + active_slot;
-            if (pending_tcp_kind[pending_index] != PendingTcpKind::None) {
-                return true;
-            }
-        }
-        active_slot = active_slot + 1;
-    }
-    return false;
+    return tcp_connections[connection_slot].retx_count != 0;
 }
+
 
 // Recomputes the TCP checksum over the pseudo-header implied by `ip` and
 // the full segment `tcp_seg` (header + data -- ITS OWN LENGTH, read back
@@ -1609,15 +2006,17 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
         let this_index: usize = tcp_connections[connection_slot].data_segment_counter;
         tcp_connections[connection_slot].data_segment_counter =
             tcp_connections[connection_slot].data_segment_counter + 1;
-        let this_slot: i32 = pending_tcp_record(
+        let this_entry: usize = pending_tcp_record(
             connection_slot, PendingTcpKind::Data, frame_length);
-        // GitHub issue #295: this_slot == -1 means PENDING_TCP_MAX was
-        // exhausted (pending_tcp_record's own doc comment) -- there is no
-        // tracked slot to ever retransmit from, so the deliberate-drop
-        // test injection below must not arm in that case, or this segment
+        // GitHub issue #295: this_entry == 0 means the segment could not
+        // be queued (pending_tcp_record's own doc comment) -- there is
+        // nothing to ever retransmit from, so the deliberate-drop test
+        // injection below must not arm in that case, or this segment
         // would never be transmitted at all (skipped here, and never
         // retried since nothing tracks it). Fall through to the real send.
-        if (this_slot >= 0 &&
+        // The condition was `this_slot >= 0` when the sentinel was -1;
+        // issue #257 made it an entry address, whose sentinel is 0.
+        if (this_entry != 0 &&
                 this_index as i32 == tcp_drop_data_segment_index) {
             // Skip only this segment's initial transmit -- it stays
             // queued (pending_tcp_record already ran above), so its
@@ -1625,7 +2024,7 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
             // both come from pending_tcp_service_once's real timeout+
             // peer-ack path, the same one every other segment uses.
             tcp_drop_data_segment_index = -1;
-            tcp_connections[connection_slot].injected_data_slot = this_slot;
+            tcp_connections[connection_slot].injected_data_entry = this_entry;
             return KernelTcpSendResult::Sent(serviced);
         }
         return KernelTcpSendResult::Sent(net_transmit_ready(
@@ -1689,15 +2088,15 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
     tcp_hdr.urgent = 0;
     fix_tcp_checksum(ip, tcp);
     tcp_connections[connection_slot].snd_nxt = tcp_connections[connection_slot].snd_nxt + 1;
-    let fin_slot: i32 = pending_tcp_record(
+    let fin_entry: usize = pending_tcp_record(
         connection_slot, PendingTcpKind::Fin, 54);
     // GitHub issue #295: same reasoning as the Data-segment send site --
-    // fin_slot == -1 means nothing tracks this FIN, so the deliberate-drop
+    // fin_entry == 0 means nothing tracks this FIN, so the deliberate-drop
     // injection must not arm (that would skip the only transmission this
     // FIN would ever get). Falls through to the real send instead.
-    if (tcp_drop_next_fin && fin_slot >= 0) {
+    if (tcp_drop_next_fin && fin_entry != 0) {
         tcp_drop_next_fin = false;
-        tcp_connections[connection_slot].injected_fin_slot = fin_slot;
+        tcp_connections[connection_slot].injected_fin_entry = fin_entry;
     } else {
         ready = net_transmit_ready(ready, frame, 54);
     }
