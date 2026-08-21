@@ -87,6 +87,15 @@ fn crash_snapshot_render() !{unsafe} {
     kernel_boot_log(" elr="); crash_snapshot_put_hex(crash_snapshot.elr_el1);
     kernel_boot_log("\n");
     crash_snapshot_put_data_abort(crash_snapshot.esr_el1);
+    // GitHub issue #384: WHO owns the pages this fault names. Both
+    // addresses are user VAs when the fault came from EL0, so each is
+    // translated through the faulting process's own page table first and
+    // only then asked about -- printing the owner of the VA itself would
+    // answer "not a page from this allocator" for exactly the case worth
+    // reporting. Issue #373 was a process's text page that was also a
+    // kernel stack; that reads here as one line.
+    crash_snapshot_put_page_owner("far", crash_snapshot.far_el1);
+    crash_snapshot_put_page_owner("elr", crash_snapshot.elr_el1);
     kernel_boot_log("oops: live sp_el0="); crash_snapshot_put_hex(crash_snapshot.sp_el0);
     kernel_boot_log(" tpidr_el0="); crash_snapshot_put_hex(crash_snapshot.tpidr_el0);
     kernel_boot_log(" ttbr0="); crash_snapshot_put_hex(crash_snapshot.ttbr0_el1);
@@ -152,6 +161,40 @@ fn crash_snapshot_render() !{unsafe} {
             kernel_boot_log("\n");
         }
     }
+}
+
+// One "oops: <what> page ..." line. Reports the identity-mapped address
+// directly when it is one of the allocator's pages, and otherwise tries
+// the faulting process's address space, saying which reading it used --
+// a report that silently switches between two meanings of an address is
+// worse than one that prints nothing.
+private fn crash_snapshot_put_page_owner(what: *u8, address: usize) {
+    kernel_boot_log("oops: ");
+    kernel_boot_log(what);
+    kernel_boot_log(" page ");
+    if (page_owner_tag_at(address) != PageOwnerTag::Unowned) {
+        kernel_boot_log("(physical) is ");
+        kernel_boot_log(page_owner_description(address));
+        kernel_boot_log("\n");
+        return;
+    }
+    let physical: usize =
+        address_space_user_physical(crash_snapshot.root_slot, address);
+    if (physical == 0) {
+        kernel_boot_log("is ");
+        kernel_boot_log(page_owner_description(address));
+        kernel_boot_log(", not mapped in root ");
+        uart_put_udec(crash_snapshot.root_slot);
+        kernel_boot_log("\n");
+        return;
+    }
+    kernel_boot_log("(via root ");
+    uart_put_udec(crash_snapshot.root_slot);
+    kernel_boot_log(" -> ");
+    crash_snapshot_put_hex(physical);
+    kernel_boot_log(") is ");
+    kernel_boot_log(page_owner_description(physical));
+    kernel_boot_log("\n");
 }
 
 fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {

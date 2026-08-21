@@ -141,6 +141,33 @@ if [ "$MODE" = child_exec ] &&
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi
+# GitHub issue #384: the report says WHO owns the pages it names, which is
+# the lookup #373 spent a day doing by hand.  Both addresses are user VAs
+# here, so this also proves the translation through the faulting process's
+# own page table happened -- an untranslated VA would report "neither one
+# of this allocator's pages nor mapped".
+# Which of the two addresses resolves depends on the mode, and that is the
+# point rather than an inconvenience: a fault injected at the first user
+# instruction names a user text page in ELR, while a kernel-side fail-stop
+# after an exec commit names one in FAR and has a kernel ELR.
+case "$MODE" in
+    child_exec) resolved=far ;;
+    *)          resolved=elr ;;
+esac
+if ! grep -Eq "^oops: $resolved page \(via root [0-9]+ -> 0x[0-9a-f]+\) is mapped into a process address space\$" \
+        "$UART_LOG"; then
+    echo "FAIL kernel/qemu oops: expected the $resolved page's owner, resolved through the faulting root" >&2
+    sed 's/^/  /' "$UART_LOG" >&2 || true
+    exit 1
+fi
+for line in far elr; do
+    if ! grep -Eq "^oops: $line page " "$UART_LOG"; then
+        echo "FAIL kernel/qemu oops: expected a $line-page owner line" >&2
+        sed 's/^/  /' "$UART_LOG" >&2 || true
+        exit 1
+    fi
+done
+
 if [ -n "$expected_detail" ] && ! grep -Eq "$expected_detail" "$UART_LOG"; then
     echo "FAIL kernel/qemu oops: expected decoded data-abort write" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true

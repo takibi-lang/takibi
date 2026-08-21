@@ -119,7 +119,21 @@ private fn fake_page_claim(index: {0..<PAGE_COUNT as usize}) -> usize {
     return generation;
 }
 
-fn page_alloc() -> PageAllocResult {
+// GitHub issue #384: the real page.tkb requires every allocation to name
+// its owner, so this stand-in requires it too. It does not RECORD the tag
+// -- nothing here reports a fault -- but it has to demand the same
+// argument, or a kernel/lib file compiled against this provider would
+// type-check with a call the real provider rejects. Issue #366's fossil
+// is what a stand-in that drifts from its original looks like.
+enum PageOwnerTag: u8 {
+    Unowned;
+    PageTable;
+    UserPage;
+    PoolChunk;
+    KernelStack;
+}
+
+fn page_alloc(owner: PageOwnerTag) -> PageAllocResult {
     for i: usize in 0..<PAGE_COUNT {
         if (fake_page_generation[i] == 0) {
             let checked: {0..<PAGE_COUNT as usize} = i;

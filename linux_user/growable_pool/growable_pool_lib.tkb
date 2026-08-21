@@ -295,7 +295,7 @@ fn growable_pool_grow_one_chunk(
     if (pool.active_chunks >= MAX_CHUNKS) {
         return GrowablePoolGrowResult::ChunkLimitReached;
     }
-    match page_alloc() {
+    match page_alloc(PageOwnerTag::PoolChunk) {
         PageAllocResult::OutOfMemory => {
             return GrowablePoolGrowResult::OutOfMemory;
         }

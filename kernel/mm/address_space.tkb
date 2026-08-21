@@ -147,12 +147,12 @@ must_use variant AddressSpaceAllocateResult {
 // process-slot allocation cannot leave an unreachable table or ASID live.
 fn address_space_allocate_root(slot: {0..<ADDRESS_SPACE_MAX as usize})
         -> AddressSpaceAllocateResult {
-    match page_alloc() {
+    match page_alloc(PageOwnerTag::PageTable) {
         PageAllocResult::OutOfMemory => {
             return AddressSpaceAllocateResult::OutOfMemory;
         }
         PageAllocResult::Allocated(l1) => {
-            match page_alloc() {
+            match page_alloc(PageOwnerTag::PageTable) {
                 PageAllocResult::OutOfMemory => {
                     page_free(l1);
                     return AddressSpaceAllocateResult::OutOfMemory;
@@ -265,7 +265,7 @@ fn address_space_pte_write(slot: usize, index: usize, value: usize)
         // Clearing a never-populated branch is already complete and must
         // not spend a physical page merely to hold an all-zero table.
         if (value == 0) { return AddressSpacePteWriteResult::Written; }
-        match page_alloc() {
+        match page_alloc(PageOwnerTag::PageTable) {
             PageAllocResult::OutOfMemory => {
                 return AddressSpacePteWriteResult::OutOfMemory;
             }
@@ -300,6 +300,25 @@ fn address_space_pte_read(slot: usize, index: usize) -> usize {
         return mmu_pte_read(l3_physical, index % USER_L3_PAGE_COUNT);
     }
     return 0;
+}
+
+// GitHub issue #384: the physical page behind a user virtual address in
+// `slot`'s address space, or 0 if the address is not in the user window or
+// is not mapped.
+//
+// A fail-stop report has a faulting address and an ELR, and both are user
+// VAs when the fault came from EL0. Printing who owns the PHYSICAL page
+// behind them is the question issue #373 spent a day answering by hand --
+// a process's text page that is simultaneously a kernel stack shows up
+// here as one line.
+fn address_space_user_physical(slot: usize, va: usize) -> usize {
+    if (va < USER_TEXT_VA) { return 0; }
+    let offset: usize = va - USER_TEXT_VA;
+    let index: usize = offset / PAGE_SIZE;
+    if (index >= USER_SPACE_PAGE_COUNT) { return 0; }
+    let pte: usize = address_space_pte_read(slot, index);
+    if (pte == 0) { return 0; }
+    return pte & USER_PAGE_PHYS_MASK;
 }
 
 fn address_space_tlb_invalidate(slot: usize, va: usize) {
@@ -370,7 +389,7 @@ fn address_space_resolve_cow(slot: usize, index: usize) -> bool !{unsafe} {
             }
         }
     }
-    match page_alloc() {
+    match page_alloc(PageOwnerTag::PageTable) {
         PageAllocResult::OutOfMemory => { return false; }
         PageAllocResult::Allocated(page) => {
             if (page_copy_mapped_physical(old_physical, page) == false) {
@@ -521,7 +540,7 @@ fn process_address_space_probe_map(
 // user pages and proves the old 512-page limit is gone without a shadow list.
 fn process_address_space_probe_fill_first_branch(root: usize) -> bool {
     for index: usize in 0..<511 {
-        match page_alloc() {
+        match page_alloc(PageOwnerTag::PageTable) {
             PageAllocResult::OutOfMemory => { return false; }
             PageAllocResult::Allocated(page) => {
                 if (process_address_space_probe_map(root, index, page) == false) {
@@ -578,14 +597,14 @@ fn process_address_space_probe() -> bool !{unsafe} {
         address_space_release_root(1);
         return false;
     }
-    match page_alloc() {
+    match page_alloc(PageOwnerTag::PageTable) {
         PageAllocResult::OutOfMemory => {
             address_space_release_root(2);
             address_space_release_root(1);
             return false;
         }
         PageAllocResult::Allocated(page1) => {
-            match page_alloc() {
+            match page_alloc(PageOwnerTag::PageTable) {
                 PageAllocResult::OutOfMemory => {
                     page_free(page1);
                     address_space_release_root(2);
@@ -593,7 +612,7 @@ fn process_address_space_probe() -> bool !{unsafe} {
                     return false;
                 }
                 PageAllocResult::Allocated(page2) => {
-                    match page_alloc() {
+                    match page_alloc(PageOwnerTag::PageTable) {
                         PageAllocResult::OutOfMemory => {
                             page_free(page2);
                             page_free(page1);

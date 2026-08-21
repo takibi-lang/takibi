@@ -160,6 +160,34 @@ private fn page_meta_clear(physical: usize) !{unsafe} {
 // plain integers after linear ownership has been intentionally erased. Add
 // future per-page fields (reference counts, COW/shared flags, and similar)
 // here, not as a new parallel array.
+// GitHub issue #384: WHO this page was handed to.
+//
+// Issue #373's diagnosis started from recognizing a byte pattern -- kernel
+// addresses repeating on a 16-byte stride, which had to be READ as
+// `stp x29, x30` frames and therefore as a kernel stack. That guess
+// happened to be right and took several rounds to confirm. With a tag the
+// first question is a lookup instead: this physical page was handed to
+// the kernel-stack allocator, and it is also mapped as a process's text.
+//
+// A `u8`, not a `usize`, and it costs nothing: PageMeta's `usize` field
+// forces 8-byte alignment, so bytes 2..7 were padding already
+// (`--emit-struct-layout PageMeta`). 204800 pages x 0 bytes.
+enum PageOwnerTag: u8 {
+    // A free page, or one never handed out. Never passed to page_alloc:
+    // every allocation names a real owner, which is what makes a page
+    // reading as Unowned while occupied a detectable invariant break
+    // rather than an ordinary state.
+    Unowned;
+    // kernel/mm/address_space.tkb's L1/L2/L3 tables.
+    PageTable;
+    // Mapped into a process's address space: image, heap, stack, COW.
+    UserPage;
+    // A kernel/lib pool's chunk.
+    PoolChunk;
+    // A process's kernel stack run (kernel/kernel/process.tkb).
+    KernelStack;
+}
+
 struct PageMeta {
     occupied: bool;
     // GitHub issue #377: this page is one of a contiguous run's, so it
@@ -168,6 +196,7 @@ struct PageMeta {
     // back on the free list, so "free" and "in a run" can never both be
     // true.
     in_run: bool;
+    owner: PageOwnerTag;
     map_refcount: usize;
 }
 
@@ -269,7 +298,8 @@ private fn page_run_is_free(first: usize, count: usize) -> bool {
 // non-goals rule out a general buddy unless it turns out to be the
 // smaller change, and the caller today is process creation -- rare, and
 // already doing far more expensive work.
-fn page_alloc_contiguous(count: usize) -> PageRunAllocResult !{unsafe} {
+fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
+        -> PageRunAllocResult !{unsafe} {
     if (count == 0) { return PageRunAllocResult::OutOfMemory; }
     // The alignment that matters is the ADDRESS's, and page INDEX zero is
     // not at an aligned address: both linker scripts only promise
@@ -289,6 +319,7 @@ fn page_alloc_contiguous(count: usize) -> PageRunAllocResult !{unsafe} {
                     let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
                     boot_page_pool.meta[checked].occupied = true;
                     boot_page_pool.meta[checked].in_run = true;
+                    boot_page_pool.meta[checked].owner = owner;
                     boot_page_pool.meta[checked].map_refcount = 0;
                 }
             }
@@ -340,6 +371,7 @@ fn page_run_free(owner: sink PageRunOwner[run]) !{unsafe} {
             } else {
                 boot_page_pool.meta[checked].occupied = false;
                 boot_page_pool.meta[checked].in_run = false;
+                boot_page_pool.meta[checked].owner = PageOwnerTag::Unowned;
                 boot_page_pool.meta[checked].map_refcount = 0;
                 // After in_run, never before: see page_meta_clear.
                 page_meta_clear(base + index * PAGE_SIZE);
@@ -362,6 +394,7 @@ fn page_allocator_init() {
     for i: usize in 0..<BOOT_PAGE_COUNT {
         boot_page_pool.meta[i].occupied = false;
         boot_page_pool.meta[i].in_run = false;
+        boot_page_pool.meta[i].owner = PageOwnerTag::Unowned;
         boot_page_pool.meta[i].map_refcount = 0;
     }
     boot_page_pool.double_remove_count = 0;
@@ -378,7 +411,7 @@ fn page_run_probe() -> bool !{unsafe} {
     let count: usize = 4;
 
     let run: exists r: usize. PageRunOwner[r] =
-            match page_alloc_contiguous(count) {
+            match page_alloc_contiguous(count, PageOwnerTag::KernelStack) {
         PageRunAllocResult::OutOfMemory => { return false; }
         PageRunAllocResult::Allocated(owner) => { owner }
     };
@@ -394,6 +427,14 @@ fn page_run_probe() -> bool !{unsafe} {
     // the reservation is what a consumer's contiguity claim rests on, and
     // a run whose interior pages still answered would be exactly the
     // forged-chunk-header hazard, one page further in.
+    // GitHub issue #384: the tag is the allocation's, so every page of a
+    // run carries it -- a fault anywhere inside a multi-page stack has to
+    // answer the same way as a fault at its base.
+    let mut tagged: bool = true;
+    for k: usize in 0..<count {
+        if (page_owner_tag_at(base + k * PAGE_SIZE) !=
+            PageOwnerTag::KernelStack) { tagged = false; }
+    }
     let mut payload_only: bool = true;
     for k: usize in 0..<count {
         if (page_meta_at(base + k * PAGE_SIZE) != 0) { payload_only = false; }
@@ -412,15 +453,22 @@ fn page_run_probe() -> bool !{unsafe} {
     // already given away, without draining the pool.
     let mut overlap: bool = false;
     let mut singles: usize = 0;
-    let mut probe_a = page_alloc();
-    let mut probe_b = page_alloc();
+    let mut probe_a = page_alloc(PageOwnerTag::UserPage);
+    let mut probe_b = page_alloc(PageOwnerTag::UserPage);
     match probe_a {
         PageAllocResult::OutOfMemory => {}
         PageAllocResult::Allocated(owner) => {
             let at: usize = page_physical_address(owner);
             if (at >= base && at < base + count * PAGE_SIZE) { overlap = true; }
+            // A single page carries its own caller's tag, not the run's.
+            if (page_owner_tag_at(at) != PageOwnerTag::UserPage) {
+                tagged = false;
+            }
             singles = singles + 1;
             page_free(owner);
+            if (page_owner_tag_at(at) != PageOwnerTag::Unowned) {
+                tagged = false;
+            }
         }
     }
     match probe_b {
@@ -440,6 +488,12 @@ fn page_run_probe() -> bool !{unsafe} {
     // ...and giving the run back restores the metadata regions, so a page
     // that was once part of a run can still become an ordinary pooled
     // chunk later.
+    // ...and a freed page reports no owner, so a stale tag cannot outlive
+    // the allocation that set it and mislead the next report.
+    for k: usize in 0..<count {
+        if (page_owner_tag_at(base + k * PAGE_SIZE) !=
+            PageOwnerTag::Unowned) { tagged = false; }
+    }
     let mut meta_restored: bool = true;
     for k: usize in 0..<count {
         if (page_meta_at(base + k * PAGE_SIZE) !=
@@ -458,19 +512,24 @@ fn page_run_probe() -> bool !{unsafe} {
     // And the pool still works afterwards: a run that unlinked pages and
     // pushed them back must leave the list usable.
     let mut reusable: bool = false;
-    match page_alloc_contiguous(count) {
+    match page_alloc_contiguous(count, PageOwnerTag::KernelStack) {
         PageRunAllocResult::OutOfMemory => {}
         PageRunAllocResult::Allocated(again) => {
             reusable = page_run_physical_address(again) % (count * PAGE_SIZE) == 0;
             page_run_free(again);
         }
     }
-    return aligned && counted && payload_only && overlap == false &&
+    return aligned && counted && tagged && payload_only && overlap == false &&
            singles == 2 && restored && meta_restored && reusable &&
            page_allocator_live_count() == pages_before;
 }
 
-fn page_alloc() -> PageAllocResult {
+// `owner` is a required argument, not a field a caller may remember to set
+// afterwards (issue #384). page_alloc cannot see its caller, and a tag that
+// can be forgotten degrades to Unowned exactly where a new subsystem is
+// least understood -- which is when the tag is worth the most. Making it a
+// parameter puts the question to the compiler instead.
+fn page_alloc(owner: PageOwnerTag) -> PageAllocResult {
     match freelist_core_insert(&boot_page_pool.core) {
         FreelistPopResult::Empty => { return PageAllocResult::OutOfMemory; }
         FreelistPopResult::Popped(slot) => {
@@ -479,6 +538,7 @@ fn page_alloc() -> PageAllocResult {
                 let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
                 // GitHub issue #217: checked indexing, see page_allocator_init's own comment.
                 boot_page_pool.meta[checked].occupied = true;
+                boot_page_pool.meta[checked].owner = owner;
                 boot_page_pool.meta[checked].map_refcount = 0;
                 return PageAllocResult::Allocated(
                     page_owner_new(checked, generation));
@@ -506,6 +566,7 @@ fn page_free(owner: sink PageOwner[page]) !{unsafe} {
     // on every path back to the list rather than argued from who calls
     // which one.
     boot_page_pool.meta[index].in_run = false;
+    boot_page_pool.meta[index].owner = PageOwnerTag::Unowned;
     boot_page_pool.meta[index].map_refcount = 0;
     // GitHub issue #383: the asymmetry with
     // page_transferred_release_physical was real, and this is the side
@@ -639,7 +700,7 @@ fn page_mapping_retain_physical(physical: usize) -> PageMappingRetainResult {
 // probe already exercises via genuine repeated retains) fires at exactly
 // PAGE_MAP_REF_MAX and not one off in either direction.
 fn page_mapping_ref_ceiling_probe() -> bool {
-    match page_alloc() {
+    match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => { return false; }
         PageAllocResult::Allocated(owner) => {
             let physical: usize = page_physical_address(owner);
@@ -735,6 +796,7 @@ fn page_transferred_release(index: {0..<BOOT_PAGE_COUNT as usize}) {
     }
     boot_page_pool.meta[index].occupied = false;
     boot_page_pool.meta[index].in_run = false;  // see page_free
+    boot_page_pool.meta[index].owner = PageOwnerTag::Unowned;
     boot_page_pool.meta[index].map_refcount = 0;
     freelist_core_remove(&boot_page_pool.core, freelist_owner_new(index, 0));
 }
@@ -756,6 +818,72 @@ fn page_transferred_release_physical(physical: usize) !{unsafe} {
         let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
         page_transferred_release(checked);
     }
+}
+
+// Who holds the page an arbitrary address falls in, or Unowned if the
+// address is not one of this allocator's pages at all.
+//
+// Takes any address, not a page-aligned one: the caller of this is
+// holding a faulting address or a stack pointer, and requiring it to round
+// first would put the arithmetic at the call site, where getting it wrong
+// is a wrong answer rather than a compile error.
+fn page_owner_tag_at(address: usize) -> PageOwnerTag {
+    let base: usize = usable_ram_start;
+    let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
+    if (address < base || address >= base + pool_bytes) {
+        return PageOwnerTag::Unowned;
+    }
+    let index: usize = (address - base) / PAGE_SIZE;
+    if (index >= BOOT_PAGE_COUNT) { return PageOwnerTag::Unowned; }
+    let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+    if (boot_page_pool.meta[checked].occupied == false) {
+        return PageOwnerTag::Unowned;
+    }
+    return boot_page_pool.meta[checked].owner;
+}
+
+// The tag as a phrase a fail-stop report can print. Distinguishes "not one
+// of ours" from "ours and free" from "ours and occupied but tagged
+// Unowned" -- the last being an invariant break, since every allocation
+// names an owner, and worth saying out loud rather than rendering as the
+// same word.
+fn page_owner_description(address: usize) -> *u8 {
+    let base: usize = usable_ram_start;
+    let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
+    // Zero is worth its own answer rather than falling into "outside":
+    // it is what an exception class with no faulting address reports, and
+    // it is also what a null dereference reports, and those two readings
+    // are the reader's next question.
+    if (address == 0) { return "address zero" as *u8; }
+    // Below the pool is the statically laid-out kernel: image sections and
+    // the three linker-provided stacks. Saying so beats "not one of ours",
+    // because the reader's next question ("then what IS it") has an answer
+    // this file already holds half of. kernel/MEMORY_MAP.md has the other
+    // half, down to which stack and which half of its run.
+    if (address < base) {
+        return "in the kernel image or a linker-provided stack, below usable_ram_start" as *u8;
+    }
+    if (address < base || address >= base + pool_bytes) {
+        return "outside this allocator's pages entirely" as *u8;
+    }
+    let index: usize = (address - base) / PAGE_SIZE;
+    if (index >= BOOT_PAGE_COUNT) {
+        return "outside this allocator's pages entirely" as *u8;
+    }
+    let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+    if (boot_page_pool.meta[checked].occupied == false) {
+        return "a free page" as *u8;
+    }
+    let owner: PageOwnerTag = boot_page_pool.meta[checked].owner;
+    if (owner == PageOwnerTag::PageTable) { return "a page table" as *u8; }
+    if (owner == PageOwnerTag::UserPage) {
+        return "mapped into a process address space" as *u8;
+    }
+    if (owner == PageOwnerTag::PoolChunk) { return "a pool chunk" as *u8; }
+    if (owner == PageOwnerTag::KernelStack) {
+        return "part of a kernel stack run" as *u8;
+    }
+    return "occupied but UNTAGGED (invariant break)" as *u8;
 }
 
 fn page_allocator_live_count() -> usize {

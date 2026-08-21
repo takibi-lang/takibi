@@ -481,7 +481,8 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                 // scheduled_process_stack_runs' own note on why a reused
                 // slot must reuse its run.
                 if (scheduled_process_stack_runs[slot] == 0) {
-                    match page_alloc_contiguous(KERNEL_STACK_RUN_PAGES) {
+                    match page_alloc_contiguous(KERNEL_STACK_RUN_PAGES,
+                                              PageOwnerTag::KernelStack) {
                         PageRunAllocResult::OutOfMemory => {
                             kernel_boot_log_resource_exhausted(
                                 "physical page allocator" as *u8,
@@ -1540,7 +1541,11 @@ private fn kernel_stack_owner_name(sp: usize) -> *u8 {
             return "below a process kernel stack" as *u8;
         }
     }
-    return "not inside any known kernel stack run" as *u8;
+    // Not a stack this file knows about. The page allocator may still
+    // know what it is, and on this path that answer is worth more than
+    // "unknown" -- an SP that landed in a page table or a pool chunk is a
+    // different bug from one that landed nowhere (issue #384).
+    return page_owner_description(sp);
 }
 
 // Slack left unpoisoned below the reported SP: kernel_boot_stack_arm's

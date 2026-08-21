@@ -76,7 +76,7 @@ fn app_main() !{unsafe} {
     // cannot, and --forbid-trap wants the proof rather than a check.
     for i: usize in 0..<PAGE_COUNT {
         addrs[i] = 0;
-        match page_alloc() {
+        match page_alloc(PageOwnerTag::PoolChunk) {
             PageAllocResult::Allocated(o) => {
                 addrs[i] = page_physical_address(o);
                 let _index = page_owner_transfer_index(o);
@@ -99,7 +99,7 @@ fn app_main() !{unsafe} {
     // A single page must still be available -- the failure has to be
     // about adjacency, not about being out of memory.
     let mut single_ok: bool = false;
-    match page_alloc() {
+    match page_alloc(PageOwnerTag::PoolChunk) {
         PageAllocResult::Allocated(o) => {
             single_ok = true;
             let addr: usize = page_physical_address(o);

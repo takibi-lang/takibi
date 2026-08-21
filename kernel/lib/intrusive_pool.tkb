@@ -999,7 +999,7 @@ fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id)
         -> IntrusivePoolGrowResult !{unsafe} {
     let stride: usize = sizeof(IntrusiveSlot(T));
     let slot_count: usize = intrusive_pool_slots_per_chunk(pool);
-    match page_alloc() {
+    match page_alloc(PageOwnerTag::PoolChunk) {
         PageAllocResult::OutOfMemory => {
             return IntrusivePoolGrowResult::OutOfMemory;
         }

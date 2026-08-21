@@ -3271,7 +3271,7 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
         UserVaRunResult::None => { return false; }
         UserVaRunResult::Found(index) => { index }
     };
-    match page_alloc() {
+    match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => { return false; }
         PageAllocResult::Allocated(page) => {
             match address_space_map_page(

@@ -504,7 +504,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         AddressSpaceEnsureResult::OutOfMemory => { return false; }
         AddressSpaceEnsureResult::AsidExhausted => { return false; }
     }
-    match page_alloc() {
+    match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => {
             address_space_release_root(1);
             return false;
@@ -1208,7 +1208,7 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
             process_image_pte_read(l3_index) != 0) {
             return false;
         }
-        match page_alloc() {
+        match page_alloc(PageOwnerTag::UserPage) {
             PageAllocResult::OutOfMemory => { return false; }
             PageAllocResult::Allocated(stack_page) => {
                 let bytes = page_bytes(stack_page);
@@ -1291,7 +1291,7 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
                     process_image_cleanup();
                     return ProcessImageSegmentsResult::Invalid;
                 }
-                match page_alloc() {
+                match page_alloc(PageOwnerTag::UserPage) {
                     PageAllocResult::OutOfMemory => {
                         process_image_cleanup();
                         return ProcessImageSegmentsResult::OutOfMemory;
@@ -1386,7 +1386,7 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                             process_image_cleanup();
                             return ProcessImagePairProbeResult::Invalid;
                         }
-                        match page_alloc() {
+                        match page_alloc(PageOwnerTag::UserPage) {
                             PageAllocResult::OutOfMemory => {
                                 process_image_cleanup();
                                 return ProcessImagePairProbeResult::Invalid;
@@ -1417,7 +1417,7 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                             process_image_cleanup();
                             return ProcessImagePairProbeResult::Invalid;
                         }
-                        match page_alloc() {
+                        match page_alloc(PageOwnerTag::UserPage) {
                             PageAllocResult::OutOfMemory => {
                                 process_image_cleanup();
                                 return ProcessImagePairProbeResult::Invalid;
@@ -1435,7 +1435,7 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                             }
                         }
                     }
-                    match page_alloc() {
+                    match page_alloc(PageOwnerTag::UserPage) {
                         PageAllocResult::OutOfMemory => {
                             process_image_cleanup();
                             return ProcessImagePairProbeResult::Invalid;
@@ -1575,7 +1575,7 @@ fn process_image_map_current(plan: DistroElfLoadPlan,
             process_image_cleanup();
             return ProcessImageMapResult::InvalidImage;
         }
-        match page_alloc() {
+        match page_alloc(PageOwnerTag::UserPage) {
             PageAllocResult::OutOfMemory => {
                 process_image_cleanup();
                 return ProcessImageMapResult::OutOfMemory;
@@ -1596,7 +1596,7 @@ fn process_image_map_current(plan: DistroElfLoadPlan,
         process_image_cleanup();
         return ProcessImageMapResult::InvalidImage;
     }
-    match page_alloc() {
+    match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => {
             process_image_cleanup();
             return ProcessImageMapResult::OutOfMemory;
