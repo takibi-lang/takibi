@@ -450,6 +450,20 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                         as usize;
                 scheduled_process_records[slot].saved_sp =
                     stack_base + KERNEL_PROCESS_STACK_SIZE;
+                // GitHub issue #375: growable_pool zeroes a chunk's
+                // payload when it GROWS, which is once per slot ever --
+                // a reused slot inherits the previous occupant's stack.
+                // Re-arm the low-water witness here so the guard's answer
+                // is about THIS process rather than about whoever had the
+                // slot before.
+                let stack: *KernelStackPage =
+                    growable_pool_ref_at(&scheduled_process_kernel_stacks, slot);
+                for i: usize in 0..<KERNEL_STACK_WITNESS_BYTES {
+                    if (i < KERNEL_PROCESS_STACK_SIZE) {
+                        let byte: {0..<KERNEL_PROCESS_STACK_SIZE as usize} = i;
+                        stack.bytes[byte] = 0;
+                    }
+                }
                 let mut handle: ProcessHandle = { slot, generation };
                 match scheduled_process_identity_put(
                         scheduled_process_owner_new(slot, generation)) {
@@ -1158,6 +1172,101 @@ fn kernel_process_current_has_relative() -> bool {
     let slot: usize = execution_current_handle.pool_index;
     return scheduled_process_records[slot].has_child ||
            scheduled_process_records[slot].has_parent;
+}
+
+// GitHub issue #375: make a kernel stack overflow LOUD.
+//
+// #373 diagnosed the failure this catches: a one-page kernel stack grows
+// down past its own page base and writes into whatever page precedes it.
+// When that page is a process's text the process executes kernel frames;
+// when it is anything else the corruption is silent. Which page it is
+// depends on allocation order, so the tree passes or fails on luck.
+//
+// The check: the stack's lowest words are no longer zero. growable_pool
+// zeroes a chunk's payload when it grows, so those words stay zero until
+// something pushes that far -- reaching them means the next push leaves
+// the page.
+//
+// Comparing SP against the stack's own range was tried first and is
+// WRONG here: `execution_current_live` says a process exists, not that
+// the kernel is currently running on that process's stack. Plenty of
+// kernel work (the distro exec path, every boot fixture) runs on the boot
+// stack entry.S set up, whose SP is nowhere near a pooled stack -- so the
+// range test reported a 7-page overflow on a healthy boot. The low-word
+// test asks a question about the STACK rather than about who is standing
+// on it, and has no such ambiguity.
+//
+// NetBSD ships the same idea as `options KSTACK_CHECK_MAGIC`. This is a
+// detector, not a fix: a guard page (#377) is what makes the overflow
+// impossible, and it needs aligned multi-page allocation (#350). Sizing
+// it needs a measurement (#376).
+//
+// Called from the places that hold a REAL frame pointer -- the timer IRQ
+// handlers and the syscall return path -- rather than from
+// kernel_process_timer_schedule/_syscall_return_schedule, which
+// scheduled_process_probe_cycle drives with synthetic values (0x1000,
+// 0x2000) to exercise scheduling without a frame. A guard that fires on
+// those is reporting the test, not the kernel.
+// How much of the bottom of a stack is kept zeroed as the witness the
+// guard reads. Two words is what the check looks at; the rest is margin
+// against a single frame stepping over the witness in one push.
+const KERNEL_STACK_WITNESS_BYTES: usize = 64;
+
+// Reported once per boot rather than on every check: the condition
+// LATCHES (the witness is only re-armed when a slot is allocated), so
+// repeating it would bury the rest of the log without adding a fact.
+private let mut kernel_stack_guard_reported: bool = false;
+
+// REPORTS, and does not stop.
+//
+// It should stop -- an overflow means the kernel has written outside its
+// stack, and every other unrecoverable state in this kernel fail-stops.
+// It cannot yet: this kernel trips this check on a NORMAL boot, with no
+// reproducer and no injection, because 3968 bytes is not enough for its
+// deepest path. Halting here today would make every run red for a reason
+// that is already tracked, and would hide anything else the suite finds.
+//
+// So this is the detector half of issue #375 and the halt lands with the
+// guard page in #377, once #376 has sized the stack so that reaching the
+// bottom means something is wrong rather than something is Tuesday.
+private fn kernel_stack_guard_fail(reason: *u8, slot: usize, base: usize,
+                                   sp: usize) {
+    if (kernel_stack_guard_reported) { return; }
+    kernel_stack_guard_reported = true;
+    kernel_boot_log("kernel stack: BOTTOM REACHED -- ");
+    kernel_boot_log(reason);
+    kernel_boot_log(" (issues #373/#376/#377) slot=");
+    uart_put_udec(slot);
+    kernel_boot_log(" base=");
+    uart_put_udec(base);
+    kernel_boot_log(" sp=");
+    uart_put_udec(sp);
+    kernel_boot_log(" size=");
+    uart_put_udec(KERNEL_PROCESS_STACK_SIZE);
+    kernel_boot_log("\n");
+}
+
+fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
+    if (execution_current_live == false) { return; }
+    let slot: usize = execution_current_handle.pool_index;
+    if (slot >= KERNEL_PROCESS_MAX) { return; }
+    let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+    let base: usize =
+        growable_pool_ref_at(&scheduled_process_kernel_stacks, checked) as usize;
+    // A slot whose stack has not been backed yet, or a path still on the
+    // boot stack from entry.S, has nothing to check here.
+    if (base == 0) { return; }
+    // A chunk base is a page address by construction. If it is not
+    // page-aligned then it is not the thing this check thinks it is, and
+    // reading through it would report on unrelated memory -- which is how
+    // a first RPi5 run produced base=89984, page-unaligned and therefore
+    // not a stack.
+    if (base % PAGE_SIZE != 0) { return; }
+    let low: *usize = unsafe { base as *usize };
+    if (low[0] != 0 || low[1] != 0) {
+        kernel_stack_guard_fail("stack reached the bottom of its page" as *u8,
+                                checked, base, current_sp);
+    }
 }
 
 fn kernel_process_timer_schedule(current_sp: usize) -> usize !{interrupt} {

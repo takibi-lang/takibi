@@ -1324,6 +1324,7 @@ fn kernel_syscall_block_return(frame_sp: usize) {
 // skipped just because it arrived via clone rather than an ordinary return.
 fn kernel_syscall_resume_return(frame_sp: usize, value: usize) {
     el0_context_set_x0(frame_sp, value);
+    kernel_stack_guard_check(frame_sp);  // issue #375
     let resume_sp: usize = kernel_process_syscall_return_schedule(frame_sp);
     el0_context_resume(resume_sp);
 }

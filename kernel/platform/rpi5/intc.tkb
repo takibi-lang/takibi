@@ -283,6 +283,7 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     } else if (id == RPI5_TIMER_GIC_INTID) {
         timer_irq_handler();
         if (lower_el) {
+            kernel_stack_guard_check(frame_sp);  // issue #375
             let next_sp: usize = kernel_process_timer_schedule(frame_sp);
             *gicc_eoir = id;
             return next_sp;
