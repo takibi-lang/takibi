@@ -111,14 +111,20 @@ kernel-wide object table it indexes into).
 
 ### Network (`kernel/net/`)
 
-`net/tcp.tkb`'s `tcp_connection_store` (linear ownership/locking,
-mirrors `process.tkb`'s own deliberate
-`scheduled_process_store`/`scheduled_process_records` split) plus the
-per-connection `conn_*` parallel arrays (`conn_state`/`conn_remote_ip`/
-`conn_remote_mac`/`conn_remote_port`/`conn_local_port`/`conn_snd_nxt`/
-`conn_rcv_nxt`); `net/socket_capability.tkb`'s `network_capability_store`
-(the kernel owns exactly one physical RX capability, by hardware
-design, not by choice).
+`net/tcp.tkb`'s `tcp_connection_pool` (`IntrusivePool(TcpConnection)`,
+private), `tcp_frame_pool`, `tcp_retx_pool` and `tcp_retx_chain`;
+`net/socket_capability.tkb`'s `network_capability_store` (the kernel owns
+exactly one physical RX capability, by hardware design, not by choice).
+
+**Updated by issue #257 (2026-08-20/21).** What stood here before --
+`tcp_connection_store` and the `conn_*` parallel arrays -- no longer
+exists. `tcp_connection_store` was the parking lot: somewhere for a linear
+owner to live between syscalls. A pool removes the NEED rather than the
+mechanism (the connection IS the slot, the fd table holds its (address,
+generation), and an owner is minted on demand), so it was deleted rather
+than ported, along with `TcpConnectionValue`, `TcpConnectionGuard` and
+`TcpConnectionPutResult`. The `conn_*` arrays are fields of one
+`TcpConnection`, which lives in the pool.
 
 **Investigated and explicitly NOT split for #294:**
 
@@ -132,12 +138,14 @@ design, not by choice).
   no diagnosability gain -- this is delicate, load-bearing protocol logic
   wearing test-injection clothing, not unowned state.
 - The `conn_*` parallel arrays initially looked like a duplicate of
-  `tcp_connection_store`. They are not: `tcp_connection_store` holds only
+  `tcp_connection_store`. They were not: `tcp_connection_store` held only
   linear ownership/locking bookkeeping (mutex + `TcpConnectionValue`),
   the same ownership-record-vs-data-record split `process.tkb` uses
-  deliberately. A `conn_*`-into-one-struct consolidation (mirroring
-  #305's `SharedObject`) could still be legitimate future work, but needs
-  its own fresh proposal -- it was not attempted here.
+  deliberately. The `conn_*`-into-one-struct consolidation this bullet
+  called "legitimate future work needing its own fresh proposal" is what
+  issue #257 did -- and it went further, since a pooled connection needs
+  no ownership record beside it at all. Both are gone; see the paragraph
+  above.
 
 ### Filesystem (`kernel/fs/`)
 

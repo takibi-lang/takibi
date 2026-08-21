@@ -250,9 +250,25 @@ fn page_alloc_contiguous(count: usize) -> PageRunAllocResult !{unsafe} {
                 &boot_page_pool.core, candidate, count);
             if (unlinked != count) {
                 // The scan said every page was free and the list says
-                // otherwise. That is an invariant break, not a resource
-                // limit, and it is worth saying so where it happens.
-                kernel_boot_log("page run: free-list disagreed with occupancy\n");
+                // otherwise: an invariant break, not a resource limit.
+                //
+                // QUARANTINE rather than hand the run out or try to undo
+                // it. `count - unlinked` pages are now occupied AND still
+                // on the free list, and there is no way to tell WHICH --
+                // so pushing them back on free would put a page on the
+                // list twice, which is a page handed to two owners, which
+                // is precisely the aliasing that issue #373 cost this
+                // project a day of bisecting. Leaving them occupied leaks
+                // at most `count` pages per event, and a leak is bounded
+                // and diagnosable where a double hand-out is neither.
+                //
+                // Same trade kernel/lib/intrusive_pool.tkb makes for a
+                // corrupt free chain (issue #352): quarantine the storage,
+                // count the event, never reuse it.
+                kernel_boot_log_resource_exhausted(
+                    "page run (free list disagreed with occupancy; run quarantined)" as *u8,
+                    count);
+                return PageRunAllocResult::OutOfMemory;
             }
             let generation: usize = boot_page_pool.run_generation;
             boot_page_pool.run_generation = generation + 1;
