@@ -211,16 +211,23 @@ Given an address from a boot log or an oops line:
    table above: an address in a run's LOWER half is an overflow that has
    already happened.
 4. At or above `usable_ram_start`, below the pool end? A physical page
-   from `kernel/mm/page.tkb`. Whether it is live, and whether it is part
-   of a run, is in `boot_page_pool.meta[(pa - usable_ram_start) / 4096]`.
+   from `kernel/mm/page.tkb`. **Ask it who holds the page**:
+   `page_owner_description(pa)` answers in a phrase -- a page table, a
+   user mapping, a pool chunk, a kernel stack run -- and
+   `page_owner_tag_at(pa)` answers as a value. Whether it is live and
+   whether it is part of a run are in
+   `boot_page_pool.meta[(pa - usable_ram_start) / 4096]` beside the tag.
 5. In `[USER_TEXT_VA, USER_TEXT_VA + 1 GiB)`? A user virtual address --
-   which process's depends on the live ASID/TTBR0.
+   which process's depends on the live ASID/TTBR0. Translate it with
+   `address_space_user_physical(root, va)` and then go back to step 4:
+   "this process's text page is also a kernel stack run" is a sentence
+   those two steps produce and that nothing else does.
 6. `PA >> 30` in a device row? MMIO.
 
 ## Related documents
 
 - `kernel/RESOURCE_LIMITS.md` -- how much of each resource exists, and
   what happens when it runs out. This document says where; that one says
-  how many.
+  how many. `page_owner_description` says who.
 - `kernel/RUNTIME_STATE.md` -- the mutable global state and who owns it.
 - `kernel/README.md` -- the kernel's own overview and current limits.
