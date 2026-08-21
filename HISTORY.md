@@ -15,6 +15,118 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-21: Issue #378 -- Interrupts Got Their Own Stack, and the Measurement Refuted the Reason
+
+#378 asked for a dedicated IRQ stack on the argument that a kernel stack
+"has to hold the deepest syscall path AND, on top of it, whatever an
+interrupt arriving at that moment pushes", so splitting them "roughly
+halves what one kernel stack must hold".
+
+It was built. The claim did not survive the measurement, and that is the
+useful part of this entry.
+
+#### What moved
+
+```
+before  QEMU deepest=4368                    RPi5 deepest=3648
+after   QEMU deepest=4272  irq=352/16384     RPi5 deepest=3648  irq=352/16384
+```
+
+**96 bytes on QEMU, nothing measurable on RPi5.** The interrupt path's own
+depth is 352 bytes, on both platforms, identically.
+
+#### Why the premise was wrong here
+
+Two reasons, and neither is a defect in the change:
+
+1. **The deepest path on a process's kernel stack is a syscall path, not
+   an interrupt.** The "sum of two independent worst cases" argument
+   assumes the two are comparable. Here one is 4272 and the other is 352.
+2. **This kernel's interrupt handlers are notify-and-return.**
+   `rpi5_irq_dispatch_inner` calls `uart_irq_handler`, `xhci_irq_handler`,
+   or `gem_irq_handler`, each of which acknowledges the device and wakes
+   whoever was waiting; the actual USB and network work already happened
+   on the interrupted thread's own stack, via `interrupt_wait()`. The
+   deepest ISR branch is the timer's, which reaches
+   `kernel_process_timer_schedule`. That branch is shared by both
+   platforms, which is why both report exactly 352.
+
+The identical number across QEMU and RPi5 was the tell: if a platform's
+own device handlers had been contributing, the two would differ.
+
+#### And the frame cannot move, which the issue's acceptance asked for
+
+*"IRQ entry switches SP to a dedicated stack and back, with the thread's
+stack untouched by the frame."* The second half is not achievable without
+copying the frame, and the reference implementation does not do it either.
+
+The `ExceptionFrame` IS the interrupted context. `dispatch` returns the
+frame address to resume from, and on a scheduler switch that is a
+DIFFERENT process's frame -- each process's `saved_sp` points into its own
+kernel stack. A frame parked on a stack the next interrupt reuses is a
+context the next timer tick destroys. Linux pushes `pt_regs` on the task
+stack in `kernel_entry` and switches to the per-CPU IRQ stack only for the
+handler call, for exactly this reason.
+
+So 816 bytes of frame stay where they land, and what moved is the
+handler's depth. That is also part of why the saving is small.
+
+#### What was actually gained
+
+Not nothing:
+
+- The two depths are now **measured separately**, which is the other half
+  of this issue's own acceptance. A per-slot watermark that no longer
+  mixes in interrupt depth is a number that means one thing.
+- An interrupt arriving at a process's deepest moment can no longer be
+  the push that leaves the stack. It is 352 bytes of headroom bought
+  structurally rather than by guessing.
+- The measurement itself: "the interrupt path costs 352 bytes" is now a
+  fact rather than an unknown, and it is the fact that says a future
+  deeper ISR would be visible rather than silent.
+
+#### Implementation, as a compiler key
+
+`exception_entry` grew `dispatch_stack: <extern symbol>` (#227's generated
+entry is where an entry-time change has to go). It emits, after the frame
+save:
+
+```
+	mov	x19, sp			// the frame, across `before`
+	adrp	x1, irq_stack_top
+	add	x1, x1, :lo12:irq_stack_top
+	mov	sp, x1
+	[bl before]
+	mov	x0, x19
+	bl	dispatch
+	mov	sp, x0			// the frame dispatch chose
+```
+
+`x19` rather than `x0` because `before` is an ordinary call and may
+clobber `x0`-`x18`; both are already in the frame by that point, so
+clobbering either is free.
+
+**One stack, not one per core.** Core 1 parks in `wfe` with DAIF masked
+(`spsr_el2 = 0x3c5`) and never takes an interrupt, and no `.tkb` file
+unmasks -- the only `DAIFClr` in the tree is on the syscall path, a
+different vector. So interrupts neither nest nor overlap. Both facts are
+written where the stack is declared, since either changing makes this
+per-core work.
+
+#### The memory-map check earned its keep one commit after being written
+
+Adding a fourth linker-provided stack shifted every symbol after it, and
+`make kernelbuild` failed:
+
+```
+`usable_ram_start` on RPi5: document says 0x00b28000, build says 0x00b30000
+`usable_ram_start` on QEMU: document says 0x40930000, build says 0x40938000
+FAIL kernel/memory-map: 2 row(s) disagree with the build
+```
+
+That is precisely the rot #379 was filed about, caught by the check that
+issue asked for, on the very next change to touch the layout.
+
 ### 2026-08-21: Issue #377 -- Sizing a Kernel Stack From a Measurement, and Testing SP in One Bit
 
 The follow-up to #373. That issue proved a kernel stack was overflowing
