@@ -15,6 +15,129 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-21: Issue #373 -- A Kernel Stack Overflowing Into Somebody Else's Page
+
+Filed during #257 as "holding any small number of pages across boot
+deterministically breaks a later execve", with a precise reproducer and no
+diagnosis. Chasing it produced one root cause, two other real bugs, and
+five issues.
+
+#### The symptom was four steps from the cause
+
+A freshly exec'd process executed an all-zero instruction word, which on
+AArch64 is `UDF #0` and raises `EC=0b000000`. Dumping the bytes at ELR and
+diffing them against `busybox-static` on disk showed **every other 8-byte
+word, on a 16-byte stride, overwritten with kernel addresses** -- repeated
+return addresses interleaved with kernel data pointers, with the words
+between them still the process's instructions.
+
+That is `stp x29, x30, [sp, #-16]!` frames. A physical page was a kernel
+stack and a process's text at the same time.
+
+#### Everything that looked like a cause was a perturbation
+
+- **Holding N pages across boot.** 0 passes, 1/2/4 fail, 512/513 pass,
+  allocate-then-immediately-free-of-four passes.
+- **Issue #362's explicit struct padding.** Reverting it made the
+  reproducer stop firing, and a one-variable A/B confirmed the compiler
+  was the difference.
+
+Both wrong. Forcing padding back on for kernel structs via a temporary env
+switch brought the failure back -- and **the first half of the struct list
+and the second half each reproduced it ALONE**, which rules out any single
+struct. They were moving the kernel's allocations around, and the thing
+that mattered was which page happened to sit below a stack.
+
+**The lesson is about what "the fix stopped the reproducer" is worth.** It
+is worth nothing on its own. A perturbation-sensitive bug will go quiet
+for any change of the same size as the one that woke it.
+
+#### Root cause, found with a canary
+
+`growable_pool` zeroes a chunk's payload on growth, so a fresh stack's
+lowest words are 0; anything else there means the stack reached the bottom
+of its page. It had:
+
+```
+page373: STACK REACHED BOTTOM slot=1 base=0x40906000
+```
+
+The one-page kernel stack grows down from `base + SIZE` and keeps going
+past `base`, into whatever page precedes it. When that page is a
+process's text, the process runs kernel frames.
+
+#### A second real bug found on the way
+
+`intrusive_pool` has asserted `sizeof(IntrusiveSlot(T)) <=
+PAGE_USABLE_BYTES` since #349. `growable_pool` never got the equivalent,
+and #353 then moved every page's owner metadata INTO the page's last
+`PAGE_META_BYTES`. Nothing rechecked the pool that was already handing out
+whole pages, so `KernelStackPage { bytes: [u8; 4096] }` compiled and every
+kernel stack's FIRST push landed inside its own page's metadata -- the
+region `intrusive_chunk_header_at` reads to decide whether a page is one
+of its chunks.
+
+Harmless until something read it, and nothing in a kernel build had `use`d
+intrusive_pool until three weeks later. **A guard added to one primitive
+is not added to its sibling, and an invariant changed underneath both is
+rechecked against neither.**
+
+Worse, `scheduled_process_table_probe` required the stack top to be PAGE
+aligned -- which is the same thing as "ends where the payload ends" only
+while a page is entirely payload. The check meant to catch this was
+asserting the bug.
+
+#### What shipped
+
+- `8c62189`: the missing `static_assert`, a zeroing loop bounded by
+  `PAGE_USABLE_BYTES`, `KERNEL_PROCESS_STACK_SIZE` derived from it, and a
+  probe that names the payload boundary.
+- `ec536d7` (#375): a bottom-reached detector, at the three call sites
+  that hold a real frame pointer. An earlier version compared SP against
+  the stack's range and was wrong -- `execution_current_live` says a
+  process exists, not that the kernel is standing on its stack, and the
+  boot stack made it report a seven-page overflow on a healthy boot.
+  Asking about the STACK rather than about who is standing on it has no
+  such ambiguity.
+- `41f25e4` (#376): the whole stack poisoned at allocation, so the deepest
+  non-poison byte is the high-water mark. **92-100% consumed on both
+  platforms.** A saturated watermark is a floor, not a requirement, and
+  the report says so.
+- `f8b3b2b` (#380): contiguous, aligned multi-page runs from
+  `page.tkb` -- the primitive #377 and #350 both need, split out of #350
+  because #350's own acceptance criteria could never unblock kernel
+  stacks.
+
+The detector deliberately does NOT halt: this kernel trips it on a normal
+boot, so halting would make every run red for a reason already tracked.
+
+#### The alignment trap #380 walked into on its first run
+
+Choosing candidate runs at multiples of `count` gives runs that are
+contiguous and **not aligned**: both linker scripts promise only
+`ALIGN(4096)` for `usable_ram_start`, which lands at `0x40903000` on QEMU,
+so page index 0 is not at an aligned address and index arithmetic inherits
+the skew.
+
+Alignment is the half that matters. Linux aligns each kernel stack to
+twice its size so an overflow flips one bit of SP -- a single-bit test at
+every exception entry, and no MMU change, which matters here because this
+kernel runs on a block-mapped identity map where a 4K guard hole would
+mean splitting a 2 MB block. A silently-unaligned run would have taken
+that option away while looking correct. The probe asserts alignment rather
+than assuming it, which is how it surfaced.
+
+#### Where it stands
+
+Open: #377 (size it, and either a guard page or the alignment test), #378
+(interrupts on their own stack, which halves the requirement), #350's
+remaining half, #58 (prove the depth at compile time -- the one thing this
+tree can do that Linux cannot, because its call graph is closed at build
+time), #379 (write the memory map down; two of this session's hours went
+to questions a table would have answered), #374, #375's RPi5 base anomaly.
+
+---
+
 ### 2026-08-21: Two Failures `make -f examples/Makefile allcheck` Found After #257
 
 Neither was caused by #257. Both were found only because the examples
