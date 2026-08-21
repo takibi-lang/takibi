@@ -474,10 +474,23 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   exactly. **`packed be`** additionally auto-promotes eligible fields to
   `u16be`/`u32be` (see "Endian-Aware Integer Types" below) -- pure sugar,
   not a distinct mechanism.
-- **`align(N)`** (N a power of two) aligns every variable and every
-  element of a `[Name; K]` array of that struct type to N bytes, with
-  tail padding automatically appended so `sizeof(struct) % N == 0`. Use
-  for DMA descriptor rings, cache-line-separated data, SIMD types.
+- **`align(N)`** (N a power of two) aligns every variable, every element
+  of a `[Name; K]` array, and every embedded field of that struct type to
+  N bytes, with tail padding automatically appended so
+  `sizeof(struct) % N == 0` (GitHub issue #362). The alignment
+  PROPAGATES: a struct holding an N-aligned member is itself N-aligned,
+  since otherwise placing IT at a smaller boundary would misalign that
+  member. Use for DMA descriptor rings, cache-line-separated data, SIMD
+  types.
+  - Padding is materialized as explicit members **only for structs that
+    ask for more alignment than their fields already have**. Everywhere
+    else the compiler defers to the backend's own layout, which produces
+    identical offsets. This is not an implementation detail: a struct's
+    member list is what a by-value argument is lowered from, so
+    materializing padding that changes nothing about offsets still
+    changes how the struct is PASSED (`{u8, u32}` in two registers versus
+    five, one per member with the pad bytes counted). Offsets are the
+    contract; the member list is not.
 - **A struct field of pointer type is rejected unless that pointer is
   already structurally incapable of forgery** (GitHub issue #240): `*T`,
   `*align(N) T`, or `*io T` is a compile error there unless `T` is an

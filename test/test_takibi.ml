@@ -8973,6 +8973,45 @@ let codegen_tests = [
        Alcotest.(check int64) "and it is padded only to its own alignment"
          16L (total "Plain"));
 
+  (* Issue #362's fix computed every struct's layout and emitted the
+     padding as MEMBERS, including for structs whose offsets LLVM would
+     have produced unaided. That is not a no-op: an LLVM struct type is
+     what a by-value argument is lowered from, so `{u8, u32}` grew from
+     two members to three and was passed in five registers instead of two
+     -- one per member, padding bytes included.
+
+     It surfaced as examples/dwarf_debug's GDB probe failing: three extra
+     prologue instructions pushed the arguments past the eight `stepi`
+     the probe takes to reach the body, so it read them before they were
+     stored. That test cannot run here (it needs QEMU and gdb), so this
+     one holds the property directly: a struct that asks for no special
+     alignment is lowered to exactly its declared fields. *)
+  Alcotest.test_case
+    "a struct with no alignment demand is lowered to exactly its declared \
+     fields, so its by-value ABI is not inflated by materialized padding \
+     (issue #362 follow-up)" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
+       in
+       ignore (gen_codegen
+         "struct PadPair { state: u8; count: u32; }
+          struct PadAligned align(64) { a: usize; }
+          struct PadHolder { pad: u8; v: PadAligned; }
+          fn pad_takes(p: PadPair) -> u32 { return p.count; }");
+       let members name =
+         match Hashtbl.find_opt Llvm_gen.struct_lltypes name with
+         | Some llty -> Array.length (Llvm.struct_element_types llty)
+         | None -> Alcotest.failf "no LLVM type registered for %s" name
+       in
+       Alcotest.(check int) "an ordinary struct keeps one member per field"
+         2 (members "PadPair");
+       (* The structs that DO need it must still get explicit padding --
+          this is the same fix's own case, and the point is that only they
+          pay for it. *)
+       Alcotest.(check bool) "an align(N) container still carries padding"
+         true (members "PadHolder" > 2));
+
   (* The guard that keeps issue #362 from recurring. There are three
      implementations of "how big is this struct": type_layout.ml (what an
      array-size `sizeof` uses, at parse time), llvm_gen's own

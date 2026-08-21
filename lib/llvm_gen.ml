@@ -6506,6 +6506,30 @@ let gen_program ?prog_types prog =
       in go ty
     in
     let align_up n a = if a <= 1 then n else ((n + a - 1) / a) * a in
+    (* Does this struct's layout actually differ from the one LLVM would
+       produce on its own? It does exactly when something asks for more
+       alignment than its type naturally has: a member whose own type
+       carries align(N) (directly or inherited), or this struct's declared
+       align(N) exceeding what its members give it. Everywhere else the
+       computed offsets and LLVM's agree field for field, and the explicit
+       members are pure ABI churn -- see the deferring branch below. *)
+    let needs_explicit_layout dl fields align_opt =
+      let member_wants_more =
+        List.exists (fun (_, ty) ->
+          match declared_align_of ty with
+          | None -> false
+          | Some n -> n > Llvm_target.DataLayout.abi_align (ltype_of_ast ty) dl)
+          fields
+      in
+      let struct_wants_more = match align_opt with
+        | None -> false
+        | Some n ->
+            n > Llvm_target.DataLayout.abi_align
+                  (mk_struct (Array.of_list
+                     (List.map (fun (_, ty) -> ltype_of_ast ty) fields))) dl
+      in
+      member_wants_more || struct_wants_more
+    in
     let (padded_lltys, llvm_index_of_field, effective_align) =
       match !target_data with
       | None | Some _ when is_packed ->
@@ -6515,6 +6539,21 @@ let gen_program ?prog_types prog =
       | None ->
           (field_lltys, Array.init (Array.length field_lltys) (fun i -> i),
            Option.value align_opt ~default:1)
+      | Some dl when not (needs_explicit_layout dl fields align_opt) ->
+          (* Nothing here wants more alignment than LLVM already gives it,
+             so LLVM's own implicit padding puts every field at exactly the
+             offset this code would compute. Emitting that padding as
+             members anyway is not a no-op: it changes the LLVM struct
+             TYPE, and a by-value struct argument is lowered from the type.
+             `DwarfPair { state: u8, count: u32 }` went from two registers
+             to five -- one per member, padding bytes included -- which is
+             how this was found, as three extra instructions in
+             examples/dwarf_debug's prologue that pushed its GDB probe past
+             the eight `stepi` it takes to reach the body.
+             So: defer to LLVM unless deferring is what was wrong. *)
+          (field_lltys, Array.init (Array.length field_lltys) (fun i -> i),
+           max (Option.value align_opt ~default:1)
+               (Llvm_target.DataLayout.abi_align (mk_struct field_lltys) dl))
       | Some dl ->
           let members = ref [] in
           let index_of = Array.make (List.length fields) 0 in
