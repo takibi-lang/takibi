@@ -168,7 +168,7 @@ fn freelist_core_unlink_range(core: &mut FreelistCore(N), first: usize,
         head_steps = head_steps + 1;
         let head: usize = core.free_head;
         if (head < N && head >= first && head - first < count) {
-            core.free_head = unsafe { core.next_free[head] };
+            core.free_head = core.next_free[head];
             unlinked = unlinked + 1;
         } else {
             walking = false;
