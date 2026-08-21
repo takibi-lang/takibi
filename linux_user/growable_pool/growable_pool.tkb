@@ -47,7 +47,7 @@
 // first), same as every other freelist.tkb-backed pool in this codebase,
 // so which exact index a given insert receives is an implementation
 // detail this test does not pin down.
-use "kernel/lib/growable_pool.tkb";
+use "linux_user/growable_pool/growable_pool_lib.tkb";
 
 fn app_main() {
     page_allocator_init();

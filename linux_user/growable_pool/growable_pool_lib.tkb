@@ -1,3 +1,22 @@
+// NOT A PRODUCT-SURFACE LIBRARY. This file lived in `kernel/lib/` while
+// the kernel had a consumer for it -- kernel stacks, which were one page
+// each. Issue #377 gave every kernel stack four pages in an aligned run,
+// and a chunk's payload must fit in one page by construction
+// (growable_pool_grow_one_chunk's own static_assert), so that consumer
+// could not come back even if someone wanted it to. With none left, a
+// `kernel/lib/` file would have been a product-surface library
+// maintained for its own test -- which is precisely the shape issue #366
+// had to dig out, when this file's `linux_user/` half drifted 329 lines
+// from its twin while passing its tests the whole time.
+//
+// It stays HERE because it is still earning two things: the `linux_user/`
+// test beside it, and the static-footprint comparand in
+// linux_user/intrusive_pool -- sizeof(GrowablePool(usize, 168, 2, 336))
+// is 5440 bytes before a single object exists, against IntrusivePool's
+// 80. Deleting the file would turn that measurement back into an
+// assertion. Read every "kernel/" reference below as history: they
+// describe what this primitive was built against, not where it now runs.
+//
 // A slot pool that starts with zero backing storage and grows on demand by
 // pulling one more physical page from kernel/mm/page.tkb's page_alloc()
 // whenever its current capacity fills up, carving that page into

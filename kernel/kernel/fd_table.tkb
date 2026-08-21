@@ -23,7 +23,8 @@ use "kernel/lib/refcount_slotmap.tkb";
 // ProcessHandle.pool_index. One ProcessFdContext keeps the descriptor and
 // heap state for that process together, instead of coupling parallel globals
 // through a flat process * PROCESS_FD_MAX + fd index. These small records are
-// eagerly sized; growable_pool.tkb remains for genuinely expensive resources.
+// eagerly sized; on-demand page allocation is for genuinely expensive
+// resources, such as process.tkb's kernel stacks.
 const PROCESS_CONTEXT_MAX: usize = 16;
 // Ash reserves a script fd at 10 with F_DUPFD_CLOEXEC. Keep a small but real
 // per-process descriptor namespace rather than treating fd 3 as a special

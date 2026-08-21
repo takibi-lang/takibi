@@ -1,7 +1,6 @@
 use "kernel/mm/page.tkb";
 use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
-use "kernel/lib/growable_pool.tkb";
 use "kernel/kernel/process_test_evidence.tkb";
 // A process slot remains the temporary address-space key, but process.tkb
 // owns no table details. scheduled_process_alloc/reap are the lifecycle
@@ -15,9 +14,9 @@ use "kernel/mm/address_space.tkb";
 // - NOT SYNCHRONIZED, single-core scheduler: only core 0 ever runs the
 //   scheduler/dispatches syscalls. Core 1 proves autonomous EL1 entry and
 //   shared-MMU visibility via PSCI CPU_ON, then parks permanently.
-// - KERNEL_PROCESS_MAX=16 fixed scheduler-table capacity; kernel stacks
-//   are lazily backed via growable_pool.tkb and never returned to the
-//   physical page allocator once grown. See `kernel/RESOURCE_LIMITS.md`
+// - KERNEL_PROCESS_MAX=16 fixed scheduler-table capacity; a kernel stack
+//   is allocated on a slot's first use and never returned to the physical
+//   page allocator, so a reused slot reuses its run. See `kernel/RESOURCE_LIMITS.md`
 //   for the full exhaustion-result/boundary-test contract for this and
 //   every other backing resource scheduled_process_alloc() touches
 //   (address-space roots, ASIDs, physical pages).
@@ -38,20 +37,18 @@ enum ProcessWaitReason: u8 { None; UartRx; ChildExit; }
 
 // GitHub issue #246: a generous compile-time ceiling, not a razor-thin one
 // bumped by hand each time a workload needs one more (see issue #245's 2
-// -> 3 bump, and this file's own header note on kernel/lib/growable_pool.
-// tkb for why "one fixed N picked by guesswork" was the actual recurring
-// cost). This is still a compile-time array size -- this compiler has no
+// -> 3 bump for why "one fixed N picked by guesswork" was the actual
+// recurring cost). This is still a compile-time array size -- this compiler has no
 // runtime-unbounded array -- but 3 -> 16 moves the ceiling from "the very
 // next real workload" to "comfortably past any workload this project has
 // exercised so far," matching how kernel/mm/page.tkb's own BOOT_PAGE_COUNT
 // (1024) is large enough that nobody thinks of it as "the page limit."
-// Kernel stacks (below) cost real per-slot memory (4096+ bytes each).
-// Page-table backing is separately owned by address_space.tkb; the plain
-// bookkeeping arrays below cost only a few bytes per slot even at this
-// larger N, so that state stays in an eagerly-sized plain record array --
-// growable_pool.tkb's lazy, page_alloc()-backed growth is reserved for
-// the genuinely expensive per-slot resources, not applied uniformly just
-// because it exists. Must match kernel/mm/process_image.tkb's
+// Kernel stacks (below) cost real per-slot memory -- 32768 bytes each
+// once a slot has been used, and nothing until then. Page-table backing
+// is separately owned by address_space.tkb; the plain bookkeeping arrays
+// below cost only a few bytes per slot even at this larger N, so that
+// state stays eagerly sized. Allocating on first use is reserved for the
+// genuinely expensive per-slot resources, not applied uniformly. Must match kernel/mm/process_image.tkb's
 // PROCESS_IMAGE_ROOT_MAX and kernel/mm/address_space.tkb's
 // ADDRESS_SPACE_MAX -- root index == this file's own
 // ProcessHandle.pool_index everywhere.
@@ -783,7 +780,7 @@ fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool {
 // shape served KERNEL_PROCESS_MAX up through 3, issue #245), impractical
 // at the larger ceiling #246 moved to. ProcessHandle is a plain struct
 // (not an indexed/existential owner type), so an array of them is legal
-// storage, unlike kernel/lib/growable_pool.tkb's own FreelistOwner values.
+// storage, unlike a linear owner such as PageRunOwner or FreelistOwner.
 fn scheduled_process_table_probe() -> bool {
     scheduled_process_table_init();
     let mut handles: [ProcessHandle; KERNEL_PROCESS_MAX];

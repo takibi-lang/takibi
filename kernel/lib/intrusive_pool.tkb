@@ -1,8 +1,10 @@
 // Design prototype for GitHub issue #344: a slot pool with NO compile-time
 // ceiling on the number of live objects at all -- not even a hidden one.
 //
-// kernel/lib/growable_pool.tkb already made the PAYLOAD storage lazy (one
-// physical page per chunk, pulled on demand), but its own identity
+// growable_pool -- now linux_user/growable_pool/growable_pool_lib.tkb,
+// off the product surface since kernel stacks outgrew a one-page chunk --
+// already made the PAYLOAD storage lazy (one physical page per chunk,
+// pulled on demand), but its own identity
 // bookkeeping stayed a pair of `[usize; N]` arrays (FreelistCore(N)'s
 // next_free plus its own occupant_generation), so a caller still had to
 // pick N -- and MAX_CHUNKS, and SLOTS_PER_CHUNK, and keep
@@ -508,7 +510,7 @@ must_use variant IntrusivePoolInsertResult[pool_id: addr] {
     Allocated(exists allocation: usize. IntrusiveOwner[pool_id, allocation]);
 }
 
-// kernel/lib/growable_pool.tkb's own grow result has to distinguish THREE
+// growable_pool's own grow result has to distinguish THREE
 // outcomes (issue #295): its own MAX_CHUNKS ceiling, the global page
 // allocator being empty, and success. Two of those three collapse here --
 // this pool has no ceiling of its own to reach, and the one remaining
@@ -1565,7 +1567,7 @@ fn intrusive_pool_probe(T: type, pool: &mut IntrusivePool(T) @ pool_id) -> bool 
 
 // -- Dump surface ------------------------------------------------------
 // The facts a human-readable dump wants, without this file taking on an
-// output dependency -- kernel/lib/growable_pool.tkb keeps itself free of
+// output dependency -- growable_pool keeps itself free of
 // one too, and a pool primitive that can only be inspected on a target
 // with a working console is a worse primitive. The caller formats.
 //

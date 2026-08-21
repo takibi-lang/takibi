@@ -16,9 +16,9 @@ use "kernel/fs/ext2/ext2.tkb";
 // GitHub issue #253's 2026-08-09 comment for why per-root page ownership
 // moved off a dedicated array), not a dedicated physical resource of its
 // own -- unlike process.tkb's kernel stacks or address_space.tkb's actual
-// page-table backing, so this stays a plain eagerly-sized array rather than
-// a growable_pool.tkb shadow pool; the real per-root physical cost lives in
-// address_space.tkb.
+// page-table backing, so this stays a plain eagerly-sized array rather
+// than anything backed by real pages; the real per-root physical cost
+// lives in address_space.tkb.
 const PROCESS_IMAGE_ROOT_MAX: usize = 16;
 
 // User-page ownership is recorded only in the page tables. Address-space

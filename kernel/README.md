@@ -29,8 +29,10 @@ and the development container verifies the response with real `curl`.
   explicit affine or linear ownership.
 - A fixed 16-slot scheduler table (`ProcessRecord`) gives each live process a
   dedicated address-space root, ASID, and unified descriptor table. Kernel
-  stacks are backed lazily by a bounded `GrowablePool`; page-table pages are
-  directly owned by each address space. The generic timer preempts EL0
+  stacks are 16 KiB, allocated on a slot's first use as the upper half of a
+  32 KiB-aligned page run whose lower half contains an overflow instead of
+  letting it reach a neighbour; page-table pages are directly owned by each
+  address space. The generic timer preempts EL0
   round-robin once more than one slot is runnable; a UART RX wait demonstrates
   a typed Blocked-to-Ready transition.
 - Kernel Takibi sources build with `--forbid-trap`; fallible internal
