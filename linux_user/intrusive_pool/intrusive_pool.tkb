@@ -89,6 +89,27 @@ struct UninitProbe {
 struct Stride1024 { filler: [u8; 1016]; }
 struct Stride2048 { filler: [u8; 2040]; }
 
+// GitHub issue #371: which refusal. A removal this file EXPECTS to be
+// refused asserts the reason, so "refused" and "refused for the reason
+// the test is about" stop being the same observation. Removals expected
+// to succeed keep the shape used below instead -- silent when correct,
+// loud when not -- which is the other half of not discarding the answer.
+fn removal_was_foreign(result: IntrusivePoolRemoveResult) -> bool {
+    match result {
+        IntrusivePoolRemoveResult::Removed => { return false; }
+        IntrusivePoolRemoveResult::ForeignAddress => { return true; }
+        IntrusivePoolRemoveResult::StaleHandle => { return false; }
+    }
+}
+
+fn removal_was_stale(result: IntrusivePoolRemoveResult) -> bool {
+    match result {
+        IntrusivePoolRemoveResult::Removed => { return false; }
+        IntrusivePoolRemoveResult::ForeignAddress => { return false; }
+        IntrusivePoolRemoveResult::StaleHandle => { return true; }
+    }
+}
+
 fn app_main() {
     page_allocator_init();
     uart_puts("intrusive_pool\n");
@@ -218,7 +239,9 @@ fn app_main() {
     uart_print_bool(intrusive_pool_matches(&pool_a, a1_slot, a1_generation));
     uart_puts("\n");
     let g3 = intrusive_pool_lock(&pool_a);
-    intrusive_pool_remove(&pool_a, g3, a1);
+    let removed1: bool =
+        intrusive_remove_succeeded(intrusive_pool_remove(&pool_a, g3, a1));
+    if (removed1 == false) { uart_puts("remove refused\n"); }
     intrusive_pool_unlock(&pool_a, g3);
     uart_puts("same handle rejected immediately after free: ");
     uart_print_bool(
@@ -254,16 +277,19 @@ fn app_main() {
     let first =
         intrusive_owner_new(&pool_a, a1b_slot, a1b_generation);
     let g5 = intrusive_pool_lock(&pool_a);
-    intrusive_pool_remove(&pool_a, g5, first);
+    let removed2: bool =
+        intrusive_remove_succeeded(intrusive_pool_remove(&pool_a, g5, first));
+    if (removed2 == false) { uart_puts("remove refused\n"); }
     intrusive_pool_unlock(&pool_a, g5);
     let again =
         intrusive_owner_new(&pool_a, a1b_slot, a1b_generation);
     let doubles_before: usize = intrusive_pool_double_remove_count(&pool_a);
     let g6 = intrusive_pool_lock(&pool_a);
-    intrusive_pool_remove(&pool_a, g6, again);
+    let again_result = intrusive_pool_remove(&pool_a, g6, again);
     intrusive_pool_unlock(&pool_a, g6);
     uart_puts("double free of an already-freed slot counted, not acted on: ");
     uart_print_bool(
+        removal_was_stale(again_result) &&
         intrusive_pool_double_remove_count(&pool_a) == doubles_before + 1 &&
         intrusive_pool_live_count(&pool_a) == 1);
     uart_puts("\n");
@@ -296,20 +322,25 @@ fn app_main() {
     let a0_generation: usize = intrusive_owner_generation(a0);
     let forged = intrusive_owner_new(&pool_b, a0_slot, a0_generation);
     let g8 = intrusive_pool_lock(&pool_b);
-    intrusive_pool_remove(&pool_b, g8, forged);
+    let forged_result = intrusive_pool_remove(&pool_b, g8, forged);
     intrusive_pool_unlock(&pool_b, g8);
     uart_puts("an address from another pool, rebranded by hand, is still ");
     uart_puts("rejected without dereferencing it: ");
-    uart_print_bool(intrusive_pool_foreign_handle_count(&pool_b) == 1 &&
+    uart_print_bool(removal_was_foreign(forged_result) &&
+                    intrusive_pool_foreign_handle_count(&pool_b) == 1 &&
                     intrusive_pool_live_count(&pool_b) == 1 &&
                     intrusive_pool_matches(&pool_a, a0_slot, a0_generation) &&
                     *intrusive_pool_ref(&pool_a, a0) == 111);
     uart_puts("\n");
     let g9 = intrusive_pool_lock(&pool_a);
-    intrusive_pool_remove(&pool_a, g9, a0);
+    let removed5: bool =
+        intrusive_remove_succeeded(intrusive_pool_remove(&pool_a, g9, a0));
+    if (removed5 == false) { uart_puts("remove refused\n"); }
     intrusive_pool_unlock(&pool_a, g9);
     let g10 = intrusive_pool_lock(&pool_b);
-    intrusive_pool_remove(&pool_b, g10, b0);
+    let removed6: bool =
+        intrusive_remove_succeeded(intrusive_pool_remove(&pool_b, g10, b0));
+    if (removed6 == false) { uart_puts("remove refused\n"); }
     intrusive_pool_unlock(&pool_b, g10);
 
     if (intrusive_pool_probe(&pool_a) == false) { probes_ok = false; }
@@ -452,7 +483,9 @@ fn app_main() {
                     intrusive_view_drop(slot_view);
                     let victim = intrusive_owner_new(&pool_r, cursor, occupant);
                     let g13 = intrusive_pool_lock(&pool_r);
-                    intrusive_pool_remove(&pool_r, g13, victim);
+                    let removed7: bool =
+                        intrusive_remove_succeeded(intrusive_pool_remove(&pool_r, g13, victim));
+                    if (removed7 == false) { uart_puts("remove refused\n"); }
                     intrusive_pool_unlock(&pool_r, g13);
                     freed_one = true;
                 }
@@ -527,7 +560,9 @@ fn app_main() {
                     let g: usize = intrusive_view_generation(slot_view);
                     intrusive_view_drop(slot_view);
                     let g15 = intrusive_pool_lock(&pool_r);
-                    intrusive_pool_remove(&pool_r, g15, intrusive_owner_new(&pool_r, cursor, g));
+                    let removed8: bool =
+                        intrusive_remove_succeeded(intrusive_pool_remove(&pool_r, g15, intrusive_owner_new(&pool_r, cursor, g)));
+                    if (removed8 == false) { uart_puts("remove refused\n"); }
                     intrusive_pool_unlock(&pool_r, g15);
                     freed = true;
                 }
@@ -565,7 +600,9 @@ fn app_main() {
         IntrusivePoolInsertResult::Allocated(o) => {
             let z_grew: bool = page_allocator_live_count() == pages_before_z + 1;
             let g18 = intrusive_pool_lock(&pool_z);
-            intrusive_pool_remove(&pool_z, g18, o);
+            let removed9: bool =
+                intrusive_remove_succeeded(intrusive_pool_remove(&pool_z, g18, o));
+            if (removed9 == false) { uart_puts("remove refused\n"); }
             intrusive_pool_unlock(&pool_z, g18);
             uart_puts("a pool retaining 0 returns its page as soon as the ");
             uart_puts("chunk empties (grew, back to start, chunks, retained): ");
@@ -692,7 +729,9 @@ fn app_main() {
             let occupant: usize = intrusive_view_generation(slot_view);
             intrusive_view_drop(slot_view);
             let g23 = intrusive_pool_lock(&pool_c);
-            intrusive_pool_remove(&pool_c, g23, intrusive_owner_new(&pool_c, c_slot0, occupant));
+            let removed10: bool =
+                intrusive_remove_succeeded(intrusive_pool_remove(&pool_c, g23, intrusive_owner_new(&pool_c, c_slot0, occupant)));
+            if (removed10 == false) { uart_puts("remove refused\n"); }
             intrusive_pool_unlock(&pool_c, g23);
         }
     }
@@ -702,7 +741,9 @@ fn app_main() {
             let occupant: usize = intrusive_view_generation(slot_view);
             intrusive_view_drop(slot_view);
             let g24 = intrusive_pool_lock(&pool_c);
-            intrusive_pool_remove(&pool_c, g24, intrusive_owner_new(&pool_c, c_slot1, occupant));
+            let removed11: bool =
+                intrusive_remove_succeeded(intrusive_pool_remove(&pool_c, g24, intrusive_owner_new(&pool_c, c_slot1, occupant)));
+            if (removed11 == false) { uart_puts("remove refused\n"); }
             intrusive_pool_unlock(&pool_c, g24);
         }
     }
@@ -861,7 +902,9 @@ fn app_main() {
     intrusive_pool_ref(&pool_u, u0).b = 2;
     intrusive_pool_ref(&pool_u, u0).c = 3;
     let g29 = intrusive_pool_lock(&pool_u);
-    intrusive_pool_remove(&pool_u, g29, u0);
+    let removed12: bool =
+        intrusive_remove_succeeded(intrusive_pool_remove(&pool_u, g29, u0));
+    if (removed12 == false) { uart_puts("remove refused\n"); }
     intrusive_pool_unlock(&pool_u, g29);
     let g30 = intrusive_pool_lock(&pool_u);
     let r30 = intrusive_pool_insert(&pool_u, g30);

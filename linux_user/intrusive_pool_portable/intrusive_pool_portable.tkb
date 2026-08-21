@@ -46,7 +46,9 @@ fn app_main() !{unsafe} {
             uart_print(page_allocator_live_count());
             uart_puts("\n");
             let g2 = intrusive_pool_lock(&pool);
-            intrusive_pool_remove(&pool, g2, o);
+            let removed1: bool =
+                intrusive_remove_succeeded(intrusive_pool_remove(&pool, g2, o));
+            if (removed1 == false) { uart_puts("remove refused\n"); }
             intrusive_pool_unlock(&pool, g2);
         }
         IntrusivePoolInsertResult::OutOfMemory => {

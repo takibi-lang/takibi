@@ -452,10 +452,33 @@ fn tcp_frame_release_link(link: FrameLink) !{unsafe} {
             intrusive_owner_drop(parked);
             let branded = intrusive_owner_new(&tcp_frame_pool, slot, generation);
             let guard = intrusive_pool_lock(&tcp_frame_pool);
-            intrusive_pool_remove(&tcp_frame_pool, guard, branded);
+            tcp_pool_remove_expected(
+                intrusive_pool_remove(&tcp_frame_pool, guard, branded),
+                "parked frame release" as *u8);
             intrusive_pool_unlock(&tcp_frame_pool, guard);
         }
     }
+}
+
+// GitHub issue #371: every intrusive_pool_remove in this file discharges a
+// handle this file just minted, or rebuilt from a record it still holds.
+// So a refusal is a kernel bug in this file, not a race a caller could
+// have caused -- there is nothing to return it to and nothing to do
+// differently, but there is everything to be gained by saying it out
+// loud. Being quiet about a pool refusing a handle is what the counters
+// left behind: a number nobody reads until they are already debugging.
+//
+// The pool has not touched its free chain by this point, so continuing is
+// safe; what is lost is one slot, which the leak shows up as.
+private fn tcp_pool_remove_expected(result: IntrusivePoolRemoveResult,
+                                    site: *u8) {
+    let (ok, reason) = intrusive_remove_outcome(result);
+    if (ok) { return; }
+    kernel_boot_log("tcp: pool remove at ");
+    kernel_boot_log(site);
+    kernel_boot_log(" -- ");
+    kernel_boot_log(reason);
+    kernel_boot_log("\n");
 }
 
 // Hands this connection its transmit frame, or returns false having
@@ -800,7 +823,10 @@ fn tcp_connection_alloc() -> TcpConnectionAllocResult !{unsafe} {
             conn.local_port = TCP_ECHO_PORT;
             if (tcp_connection_frames_acquire(conn) == false) {
                 let undo_guard = intrusive_pool_lock(&tcp_connection_pool);
-                intrusive_pool_remove(&tcp_connection_pool, undo_guard, pool_owner);
+                tcp_pool_remove_expected(
+                    intrusive_pool_remove(&tcp_connection_pool, undo_guard,
+                                          pool_owner),
+                    "connection alloc undo" as *u8);
                 intrusive_pool_unlock(&tcp_connection_pool, undo_guard);
                 return TcpConnectionAllocResult::Full;
             }
@@ -868,7 +894,9 @@ fn tcp_connection_free(owner: sink TcpConnectionOwner[connection]) !{unsafe} {
     tcp_connection_frames_release(conn);
     let branded = intrusive_owner_new(&tcp_connection_pool, address, generation);
     let guard = intrusive_pool_lock(&tcp_connection_pool);
-    intrusive_pool_remove(&tcp_connection_pool, guard, branded);
+    tcp_pool_remove_expected(
+        intrusive_pool_remove(&tcp_connection_pool, guard, branded),
+        "connection free" as *u8);
     intrusive_pool_unlock(&tcp_connection_pool, guard);
 }
 
@@ -1121,7 +1149,9 @@ fn retx_entry_put_next(entry: *RetxEntry, link: RetxLink) -> bool {
 fn retx_entry_free(slot: usize, generation: usize) !{unsafe} {
     let branded = intrusive_owner_new(&tcp_retx_pool, slot, generation);
     let guard = intrusive_pool_lock(&tcp_retx_pool);
-    intrusive_pool_remove(&tcp_retx_pool, guard, branded);
+    tcp_pool_remove_expected(
+        intrusive_pool_remove(&tcp_retx_pool, guard, branded),
+        "retransmit entry free" as *u8);
     intrusive_pool_unlock(&tcp_retx_pool, guard);
 }
 

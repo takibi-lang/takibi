@@ -132,10 +132,35 @@ fn free_frame(link: FrameLink) -> usize !{unsafe} {
             intrusive_owner_drop(parked);
             let branded = intrusive_owner_new(&frames, slot, generation);
             let g = intrusive_pool_lock(&frames);
-            intrusive_pool_remove(&frames, g, branded);
+            let freed: bool =
+                intrusive_remove_succeeded(intrusive_pool_remove(&frames, g, branded));
             intrusive_pool_unlock(&frames, g);
+            if (freed == false) { return 0; }
             return 1;
         }
+    }
+}
+
+// GitHub issue #371: which refusal, asked as a yes/no the assertions
+// below can print. Local to this file rather than added to the library:
+// the library offers intrusive_remove_outcome for "did it work, and what
+// would I say about it", and a test wanting one specific arm is a test
+// concern. The result is `must_use` and therefore affine, so each of
+// these consumes it -- one question per removal, which is all any site
+// here needs.
+fn removal_was_foreign(result: IntrusivePoolRemoveResult) -> bool {
+    match result {
+        IntrusivePoolRemoveResult::Removed => { return false; }
+        IntrusivePoolRemoveResult::ForeignAddress => { return true; }
+        IntrusivePoolRemoveResult::StaleHandle => { return false; }
+    }
+}
+
+fn removal_was_stale(result: IntrusivePoolRemoveResult) -> bool {
+    match result {
+        IntrusivePoolRemoveResult::Removed => { return false; }
+        IntrusivePoolRemoveResult::ForeignAddress => { return false; }
+        IntrusivePoolRemoveResult::StaleHandle => { return true; }
     }
 }
 
@@ -167,7 +192,9 @@ fn free_retx_chain(head: RetxLink) -> (usize, usize) !{unsafe} {
                     stable_replace(g2, &e2.mutex, e2.next, RetxLink::End);
                 slot_unlock(g2, &e2.mutex);
                 let g3 = intrusive_pool_lock(&retxs);
-                intrusive_pool_remove(&retxs, g3, branded);
+                let removed1: bool =
+                    intrusive_remove_succeeded(intrusive_pool_remove(&retxs, g3, branded));
+                if (removed1 == false) { uart_puts("remove refused\n"); }
                 intrusive_pool_unlock(&retxs, g3);
                 entries = entries + 1;
                 link = following;
@@ -497,7 +524,9 @@ fn app_main() !{unsafe} {
                 stale_generation = generation;
                 let owner = intrusive_owner_new(&conns, cursor, generation);
                 let g4 = intrusive_pool_lock(&conns);
-                intrusive_pool_remove(&conns, g4, owner);
+                let removed2: bool =
+                    intrusive_remove_succeeded(intrusive_pool_remove(&conns, g4, owner));
+                if (removed2 == false) { uart_puts("remove refused\n"); }
                 intrusive_pool_unlock(&conns, g4);
                 conns_freed = conns_freed + 1;
             }
@@ -549,12 +578,22 @@ fn app_main() !{unsafe} {
     let before: usize = intrusive_pool_foreign_handle_count(&frames);
     let alien = intrusive_owner_new(&frames, alien_slot, 1);
     let g5 = intrusive_pool_lock(&frames);
-    intrusive_pool_remove(&frames, g5, alien);
+    let alien_result = intrusive_pool_remove(&frames, g5, alien);
     intrusive_pool_unlock(&frames, g5);
-    uart_puts("a cross-pool handle the erased brand cannot catch is ");
-    uart_puts("refused at runtime: ");
+    // GitHub issue #371: the two halves of this claim are now reported
+    // separately, because they were previously one conjunction in which
+    // either half could carry the other. That the address is genuinely
+    // the OTHER pool's is what makes this a cross-pool test at all (a
+    // zero address would be refused too, and by the same counter); that
+    // remove() answered ForeignAddress is what says WHY it refused, which
+    // no counter delta could.
+    uart_puts("the alien address is a real slot of the other pool: ");
     uart_print_bool(alien_slot != 0 &&
-                    intrusive_pool_slot_is_valid(&retxs, alien_slot) &&
+                    intrusive_pool_slot_is_valid(&retxs, alien_slot));
+    uart_puts("\n");
+    uart_puts("a cross-pool handle the erased brand cannot catch is ");
+    uart_puts("refused at runtime, as foreign: ");
+    uart_print_bool(removal_was_foreign(alien_result) &&
                     intrusive_pool_foreign_handle_count(&frames) == before + 1 &&
                     intrusive_pool_corrupt_free_chain_count(&frames) == 0);
     uart_puts("\n");
@@ -579,7 +618,7 @@ fn app_main() !{unsafe} {
             let live_before: usize = intrusive_pool_live_count(&conns);
             let stale = intrusive_owner_new(&conns, stale_slot, stale_generation);
             let g6 = intrusive_pool_lock(&conns);
-            intrusive_pool_remove(&conns, g6, stale);
+            let stale_result = intrusive_pool_remove(&conns, g6, stale);
             intrusive_pool_unlock(&conns, g6);
             // recycled proves the slot was reused rather than merely
             // freed, which is the stronger of the two readings; it is
@@ -589,14 +628,20 @@ fn app_main() !{unsafe} {
             uart_puts("(recycled, refused): ");
             uart_print_bool(recycled);
             uart_puts(" ");
+            // "on the generation rather than on the address" was
+            // previously inferred from one counter moving while another
+            // did not. removal_was_stale says it (issue #371).
             uart_print_bool(matched == false &&
+                            removal_was_stale(stale_result) &&
                             intrusive_pool_double_remove_count(&conns)
                                 == before_stale + 1 &&
                             intrusive_pool_foreign_handle_count(&conns) == 0 &&
                             intrusive_pool_live_count(&conns) == live_before);
             uart_puts("\n");
             let g7 = intrusive_pool_lock(&conns);
-            intrusive_pool_remove(&conns, g7, fresh);
+            let removed3: bool =
+                intrusive_remove_succeeded(intrusive_pool_remove(&conns, g7, fresh));
+            if (removed3 == false) { uart_puts("remove refused\n"); }
             intrusive_pool_unlock(&conns, g7);
         }
     }

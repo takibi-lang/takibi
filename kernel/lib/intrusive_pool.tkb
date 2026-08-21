@@ -1212,21 +1212,80 @@ private fn intrusive_pool_insert_unchecked(T: type, pool: &mut IntrusivePool(T) 
 // already free or has been reused since (double_remove_count) -- the same
 // distinction kernel/lib/slotmap.tkb's slotmap_remove draws, plus the
 // cross-pool case slotmap has no way to see.
+// GitHub issue #371: WHICH refusal, not just that there was one.
+//
+// The two rejections below mean genuinely different things to a caller.
+// "This address is not in any chunk I own" is a cross-pool mixup or a
+// corrupted pointer -- a kernel bug. "This slot is mine but holds a
+// different occupant than you think" is a use-after-free of a handle,
+// which for a descriptor-shaped consumer is an ordinary race with close()
+// and should become EBADF rather than trip anything.
+//
+// The counters stay: they are the aggregate view, and
+// intrusive_pool_probe reads them. What changes is that a caller no
+// longer has to diff two counters to learn which happened -- and neither
+// does a test, which is how a cross-pool check in
+// linux_user/tcp_pool_shape came to pass vacuously (a zero address takes
+// the same counter as a foreign one).
+must_use variant IntrusivePoolRemoveResult {
+    Removed;
+    // Not one of this pool's slots at all.
+    ForeignAddress;
+    // One of this pool's slots, but it no longer holds this handle's
+    // occupant -- either free, or already reissued to someone else.
+    StaleHandle;
+}
+
+// The two questions most callers of intrusive_pool_remove actually ask,
+// so a site needing only one of them is a line rather than a three-arm
+// match. Neither replaces matching the variant: a site that must ACT
+// differently per reason -- the descriptor-shaped case, where a foreign
+// address is a kernel bug and a stale handle is an ordinary close() race
+// -- still matches it directly.
+fn intrusive_remove_succeeded(result: IntrusivePoolRemoveResult) -> bool {
+    match result {
+        IntrusivePoolRemoveResult::Removed => { return true; }
+        IntrusivePoolRemoveResult::ForeignAddress => { return false; }
+        IntrusivePoolRemoveResult::StaleHandle => { return false; }
+    }
+}
+
+// Both answers from ONE look, because the result is `must_use` and
+// therefore affine: consuming it to ask "did it work" leaves nothing to
+// ask "why not" with. Two separate accessors would force every reporting
+// caller to pick one question, which is the shape this issue set out to
+// remove. The phrase lives here rather than at each reporting site so two
+// reports cannot describe the same refusal differently.
+fn intrusive_remove_outcome(result: IntrusivePoolRemoveResult) -> (bool, *u8) {
+    match result {
+        IntrusivePoolRemoveResult::Removed => {
+            return (true, "removed" as *u8);
+        }
+        IntrusivePoolRemoveResult::ForeignAddress => {
+            return (false, "refused: not an address this pool owns" as *u8);
+        }
+        IntrusivePoolRemoveResult::StaleHandle => {
+            return (false, "refused: this pool's slot, but not this occupant" as *u8);
+        }
+    }
+}
+
 fn intrusive_pool_remove(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                          guard: borrow IntrusivePoolGuard[pool_id],
-                         owner: sink IntrusiveOwner[pool_id, allocation]) !{unsafe} {
+                         owner: sink IntrusiveOwner[pool_id, allocation])
+        -> IntrusivePoolRemoveResult !{unsafe} {
     let slot_address: usize = intrusive_owner_slot(owner);
     let generation: usize = intrusive_owner_generation(owner);
     if (intrusive_pool_slot_is_valid(pool, slot_address) == false) {
         pool.foreign_handle_count = pool.foreign_handle_count + 1;
         intrusive_owner_drop(owner);
-        return;
+        return IntrusivePoolRemoveResult::ForeignAddress;
     }
     let slot: *IntrusiveSlot(T) = intrusive_slot_at(pool, slot_address);
     if (slot.generation == 0 || slot.generation != generation) {
         pool.double_remove_count = pool.double_remove_count + 1;
         intrusive_owner_drop(owner);
-        return;
+        return IntrusivePoolRemoveResult::StaleHandle;
     }
     let base: usize = intrusive_chunk_base_of(slot_address);
     let header: *IntrusiveChunkHeader = intrusive_chunk_header_at(base);
@@ -1262,6 +1321,7 @@ fn intrusive_pool_remove(T: type, pool: &mut IntrusivePool(T) @ pool_id,
         }
     }
     intrusive_owner_drop(owner);
+    return IntrusivePoolRemoveResult::Removed;
 }
 
 // The capability kernel/lib/slotmap.tkb's slotmap_matches and
@@ -1744,8 +1804,13 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
     if (page_allocator_live_count() != live_before + 1 ||
         intrusive_pool_chunk_count(&pool) != 1) {
         let gx = intrusive_pool_lock(&pool);
-        intrusive_pool_remove(&pool, gx, a0);
+        // The probe is already failing; this is only tidying up after
+        // itself, so the answer is looked at and discarded deliberately
+        // rather than left unasked.
+        let tidy: bool =
+            intrusive_remove_succeeded(intrusive_pool_remove(&pool, gx, a0));
         intrusive_pool_unlock(&pool, gx);
+        if (tidy == false) { return false; }
         return false;
     }
 
@@ -1760,7 +1825,8 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
     let stored_ok: bool = *p0_again == 0xFEEDFACE;
 
     let g1 = intrusive_pool_lock(&pool);
-    intrusive_pool_remove(&pool, g1, a0);
+    let removed_ok: bool =
+        intrusive_remove_succeeded(intrusive_pool_remove(&pool, g1, a0));
     intrusive_pool_unlock(&pool, g1);
 
     // The freed slot comes back (the chunk free list is LIFO), and the
@@ -1778,16 +1844,27 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
     let removes_before: usize = intrusive_pool_double_remove_count(&pool);
     let stale = intrusive_owner_new(&pool, slot0, generation0);
     let g3 = intrusive_pool_lock(&pool);
-    intrusive_pool_remove(&pool, g3, stale);
+    let stale_result = intrusive_pool_remove(&pool, g3, stale);
     intrusive_pool_unlock(&pool, g3);
-    let stale_counted: bool =
+    // GitHub issue #371: the REASON, not a counter delta. A use-after-free
+    // of a handle and a pointer from another pool both moved a counter
+    // before this; only one of them is this case, and only the returned
+    // reason says so.
+    let mut stale_named: bool = false;
+    match stale_result {
+        IntrusivePoolRemoveResult::Removed => {}
+        IntrusivePoolRemoveResult::ForeignAddress => {}
+        IntrusivePoolRemoveResult::StaleHandle => { stale_named = true; }
+    }
+    let stale_counted: bool = stale_named &&
         intrusive_pool_double_remove_count(&pool) == removes_before + 1 &&
         intrusive_pool_live_count(&pool) == 1;
 
     let invariants_ok: bool = intrusive_pool_probe(&pool);
 
     let g4 = intrusive_pool_lock(&pool);
-    intrusive_pool_remove(&pool, g4, a1);
+    let removed_a1_ok: bool =
+        intrusive_remove_succeeded(intrusive_pool_remove(&pool, g4, a1));
     intrusive_pool_unlock(&pool, g4);
     // The default reserve holds the emptied chunk, so ask for it back
     // explicitly -- otherwise this probe leaves a page behind for the
@@ -1798,6 +1875,6 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
     let pages_returned: bool =
         released == 1 && page_allocator_live_count() == live_before;
 
-    return stored_ok && recycled && stale_refused && stale_counted &&
-           invariants_ok && pages_returned;
+    return stored_ok && removed_ok && removed_a1_ok && recycled &&
+           stale_refused && stale_counted && invariants_ok && pages_returned;
 }

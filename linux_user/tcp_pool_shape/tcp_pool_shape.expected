@@ -8,6 +8,7 @@ every transmit frame reached its retransmit entry by handle, not by copy: true
 teardown by scanning, no array and no side chain (conns, frames, retx entries freed): 7 14 8
 every pool is empty: true
 pages still held after teardown, and retained chunks (pages, conns, frames, retxs): 3 1 1 1
-a cross-pool handle the erased brand cannot catch is refused at runtime: true
+the alien address is a real slot of the other pool: true
+a cross-pool handle the erased brand cannot catch is refused at runtime, as foreign: true
 a stale (slot, generation) pair against a recycled slot is refused, and the new occupant survives (recycled, refused): true true
 done
