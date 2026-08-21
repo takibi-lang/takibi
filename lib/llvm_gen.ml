@@ -6312,7 +6312,7 @@ let emit_exception_restore off total =
    instruction-count increase for not depending on declaration order,
    correctness over micro-optimization for what is an interrupt/fail-stop
    path, not a hot loop). *)
-let gen_exception_entry name frame dispatch before =
+let gen_exception_entry name frame dispatch before guard =
   let triple = target_triple !the_module in
   if not (starts_with triple "aarch64") then
     raise (Error
@@ -6321,6 +6321,28 @@ let gen_exception_entry name frame dispatch before =
   let (off, total) = exception_frame_offsets "exception_entry" name frame in
   let a fmt = Printf.ksprintf (Buffer.add_string raw_asm_buf) fmt in
   a "\t.section .text, \"ax\"\n\t.global %s\n%s:\n\tsub\tsp, sp, #%d\n" name name total;
+  (* GitHub issue #377: a kernel stack overflow check that costs one
+     branch and touches no memory.
+     Every kernel stack in the image occupies the UPPER half of a
+     `2 << shift`-aligned region twice its size, so bit `shift` of any
+     address inside a stack is 1, and of any address below it is 0 -- with
+     no per-stack base to load and compare against. Testing AFTER the frame
+     subtraction above is what makes an exactly-full stack the failure
+     rather than a false alarm: SP at the top of a run has the bit clear,
+     and one frame down has it set.
+     The register shuffle is Linux arm64's, and its point is that there is
+     nowhere to spill a scratch register when the question is whether the
+     stack is usable at all:
+       add sp, sp, x0   -> sp' = sp + x0
+       sub x0, sp, x0   -> x0' = sp' - x0 = sp        (the SP being tested)
+     and on the good path the same two subtractions undo it exactly. On the
+     bad path x0 is left holding the offending SP, which is the handler's
+     argument, and the interrupted x0 is gone -- acceptable on a path that
+     never resumes. *)
+  Option.iter (fun (shift, _, _) ->
+    a "\tadd\tsp, sp, x0\n\tsub\tx0, sp, x0\n";
+    a "\ttbz\tx0, #%d, .L%s_stack_overflow\n" shift name;
+    a "\tsub\tx0, sp, x0\n\tsub\tsp, sp, x0\n") guard;
   for i = 0 to 30 do
     a "\tstr\tx%d, [sp, #%d]\n" i (off (Printf.sprintf "x%d" i))
   done;
@@ -6343,7 +6365,26 @@ let gen_exception_entry name frame dispatch before =
      EXC_CONTEXT_RESTORE macro, which unconditionally re-masks here too. *)
   a "\tmov\tx0, sp\n\tbl\t%s\n\tmov\tsp, x0\n" dispatch;
   a "\tmsr\tDAIFSet, #0x2\n";
-  emit_exception_restore off total
+  emit_exception_restore off total;
+  (* Placed after the eret so the good path falls straight through the
+     entry sequence and never branches over this. DAIF is masked before
+     the handler runs: it reports and parks, and an interrupt arriving on
+     the way there would re-enter this same check on the guard stack. The
+     guard stack has the same shape as every other kernel stack (it is
+     held to it by the same runtime check), so re-entry would pass the
+     test rather than loop here -- but masking means the question does not
+     arise. *)
+  Option.iter (fun (_, guard_stack, handler) ->
+    a ".L%s_stack_overflow:\n" name;
+    a "\tmsr\tDAIFSet, #0xf\n";
+    a "\tadrp\tx1, %s\n\tadd\tx1, x1, :lo12:%s\n\tmov\tsp, x1\n"
+      guard_stack guard_stack;
+    (* x0 already holds the offending SP: the handler's only argument. *)
+    a "\tbl\t%s\n" handler;
+    (* The handler is checked to return void and is expected never to come
+       back at all. If one ever does, park rather than eret through a
+       frame that was never saved. *)
+    a "\tb\t.\n") guard
 
 (* GitHub issue #227 item 1 follow-up: generates just the restore-frame/
    eret half, for a standalone resume entry point reached via an ordinary
@@ -6734,12 +6775,21 @@ let gen_program ?prog_types prog =
     | VectorTableDef (entries, _) -> gen_vector_table entries
     | ExceptionEntryDef (name, fields, _) ->
         let frame = ref "" and dispatch = ref "" and before = ref None in
+        let guard_shift = ref None and guard_stack = ref None
+        and guard_handler = ref None in
         List.iter (function
           | ("frame", v) -> frame := v
           | ("dispatch", v) -> dispatch := v
           | ("before", v) -> before := Some v
+          | ("stack_guard_shift", v) -> guard_shift := Const_env.find v
+          | ("stack_guard_stack", v) -> guard_stack := Some v
+          | ("stack_guard_handler", v) -> guard_handler := Some v
           | _ -> ()) fields;
-        gen_exception_entry name !frame !dispatch !before
+        let guard = match (!guard_shift, !guard_stack, !guard_handler) with
+          | (Some sh, Some st, Some h) -> Some (sh, st, h)
+          | _ -> None
+        in
+        gen_exception_entry name !frame !dispatch !before guard
     | ExceptionRestoreDef (name, fields, _) ->
         let frame = ref "" in
         List.iter (function ("frame", v) -> frame := v | _ -> ()) fields;

@@ -6535,15 +6535,29 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            built until a later pass. Revisit if this graduates past
            prototype. *)
         let frame_name = ref None and dispatch_name = ref None
-        and before_name = ref None in
+        and before_name = ref None and guard_shift = ref None
+        and guard_stack = ref None and guard_handler = ref None in
         List.iter (fun (key, value) -> match key with
           | "frame" -> frame_name := Some value
           | "dispatch" -> dispatch_name := Some value
           | "before" -> before_name := Some value
+          | "stack_guard_shift" -> guard_shift := Some value
+          | "stack_guard_stack" -> guard_stack := Some value
+          | "stack_guard_handler" -> guard_handler := Some value
           | other -> raise (TypeError (loc, Printf.sprintf
-              "exception_entry '%s' has unknown key '%s' (expected frame, dispatch, or before)"
+              "exception_entry '%s' has unknown key '%s' (expected frame, dispatch, before, stack_guard_shift, stack_guard_stack, or stack_guard_handler)"
               name other))
         ) fields;
+        (* GitHub issue #377: the three stack_guard keys describe ONE
+           mechanism -- test a bit of SP, and if it is wrong, land on a
+           stack that is not the one being reported. Two of the three
+           would generate a check with nowhere to go, so they are
+           all-or-nothing rather than independently optional. *)
+        (match (!guard_shift, !guard_stack, !guard_handler) with
+         | (None, None, None) | (Some _, Some _, Some _) -> ()
+         | _ -> raise (TypeError (loc, Printf.sprintf
+             "exception_entry '%s' must give all three of stack_guard_shift, stack_guard_stack and stack_guard_handler, or none of them"
+             name)));
         let frame = match !frame_name with
           | Some f -> f
           | None -> raise (TypeError (loc, Printf.sprintf
@@ -6564,6 +6578,29 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         in
         check_fn_target "dispatch" dispatch;
         Option.iter (check_fn_target "before") !before_name;
+        Option.iter (check_fn_target "stack_guard_handler") !guard_handler;
+        (* The shift is the log of a kernel stack's size, so it has to be a
+           number the generated `tbz` can carry -- a recorded `const` with
+           a bare integer literal initializer, not a `let` and not an
+           expression. Naming a constant rather than writing the number
+           here keeps the fact in the kernel that owns the stack size. *)
+        Option.iter (fun c ->
+          match Const_env.find c with
+          | Some v when v >= 0 && v < 64 -> ()
+          | Some v -> raise (TypeError (loc, Printf.sprintf
+              "exception_entry '%s' stack_guard_shift '%s' is %d, which is not a bit position in a 64-bit address"
+              name c v))
+          | None -> raise (TypeError (loc, Printf.sprintf
+              "exception_entry '%s' stack_guard_shift '%s' is not a compile-time integer constant"
+              name c))) !guard_shift;
+        Option.iter (fun sym ->
+          match Hashtbl.find_opt toplevel_names sym with
+          | Some "symbol" -> ()
+          | Some other -> raise (TypeError (loc, Printf.sprintf
+              "exception_entry '%s' stack_guard_stack '%s' is %s %s, not an extern symbol"
+              name sym (article_for other) other))
+          | None -> raise (TypeError (loc, Printf.sprintf
+              "exception_entry '%s' stack_guard_stack '%s' is not defined" name sym))) !guard_stack;
         validate_exception_frame "exception_entry" name loc frame
     | Ast.ExceptionRestoreDef (name, fields, loc) ->
         let frame_name = ref None in
@@ -6785,6 +6822,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             entry_name key target
             (match key with
              | "dispatch" -> "fn(usize) -> usize"
+             | "stack_guard_handler" -> "fn(usize)"
              | _ -> "fn()")))
     | Some _ -> raise (TypeError (loc, Printf.sprintf
         "exception_entry '%s' %s target '%s' is overloaded, which a raw branch cannot resolve"
@@ -6799,6 +6837,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           | "before" ->
               check_exception_entry_target_signature loc entry_name "before" target
                 ~want_params:[] ~want_ret:TVoid
+          | "stack_guard_handler" ->
+              (* Takes the offending SP and never comes back: the stack it
+                 would return onto is the one that just overflowed. *)
+              check_exception_entry_target_signature loc entry_name
+                "stack_guard_handler" target ~want_params:[TUsize] ~want_ret:TVoid
           | _ -> ()
         ) fields
     | _ -> ()

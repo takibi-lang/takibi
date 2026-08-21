@@ -2272,6 +2272,33 @@ it is a linear struct rather than an erased view.
   their real signature (`fn(usize) -> usize` / `fn()`), not just existence.
   `exception_entry` only covers the uniform save -> dispatch -> restore ->
   `eret` shape.
+
+  Three further optional keys -- `stack_guard_shift: CONST_NAME;`,
+  `stack_guard_stack: extern_symbol;`, `stack_guard_handler: fn_name;` --
+  add a kernel-stack overflow test at the top of the generated entry,
+  immediately after the frame allocation and before anything is saved.
+  They describe one mechanism and must all be given or all be omitted.
+
+  The test assumes a stack discipline the language does not enforce and
+  cannot check: every stack the target may take an exception on occupies
+  the UPPER half of a `2 << stack_guard_shift`-aligned region twice its
+  size. Under that discipline bit `stack_guard_shift` of an address is 1
+  inside a stack and 0 below it, so one `tbz` decides membership with no
+  per-stack base to load and no memory access -- which is the point, since
+  the question being asked is whether the stack is usable at all. The
+  frame allocation happens first so that an exactly-full stack fails
+  rather than an empty one.
+
+  `stack_guard_shift` names a `const` with a bare integer literal
+  initializer (the value must be a bit position in a 64-bit address), not
+  a literal written in place: the number is a property of the target's
+  stacks, so it belongs with them. `stack_guard_stack` names an `extern
+  symbol` giving the TOP of a stack the handler runs on -- a report about
+  a stack cannot be written using that stack. `stack_guard_handler` names
+  an `fn(usize)`, called with the offending stack pointer, with DAIF fully
+  masked and SP already switched; it must never return, because the
+  interrupted context is not recoverable (the register shuffle that makes
+  a memory-free SP test possible consumes the interrupted `x0`).
 - `exception_restore name { frame: FrameStruct; }` (same issue, same
   prototype-syntax caveat) generates just the restore-frame/`eret` half,
   for a standalone resume entry point reached via an ordinary call with

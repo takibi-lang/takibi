@@ -89,6 +89,15 @@ const KERNEL_PROCESS_STACK_SIZE: usize = KERNEL_STACK_PAGES * PAGE_SIZE;
 const KERNEL_STACK_RUN_PAGES: usize = KERNEL_STACK_PAGES * 2;
 const KERNEL_STACK_RUN_BYTES: usize = KERNEL_STACK_RUN_PAGES * PAGE_SIZE;
 
+// WHICH bit, for the generated exception-entry check. log2 of
+// KERNEL_PROCESS_STACK_SIZE, written as a bare literal because an
+// `exception_entry` declaration can only name a compile-time integer
+// constant -- and named there rather than written into the compiler,
+// because it is a fact about this kernel's stacks, not about AArch64.
+// scheduled_process_table_init checks it against the size it claims to be
+// the log of.
+const KERNEL_STACK_SHIFT: usize = 14;
+
 // Issue #188 Stage 2: the stable store holds one generation-indexed process
 // identity. A separate linear state token carries Ready/Running/Exited, so
 // adding a later Blocked state does not require another copy of the stable
@@ -425,6 +434,11 @@ fn scheduled_process_table_init() {
     // run, and the promise is the whole basis of the test above.
     static_assert(KERNEL_STACK_RUN_PAGES == 8,
                   "KERNEL_STACK_RUN_PAGES must be a power of two for page_alloc_contiguous to align the run");
+    // The generated exception-entry check tests exactly this bit, and a
+    // wrong shift would test some unrelated address bit on every
+    // exception this kernel takes.
+    static_assert(1 << KERNEL_STACK_SHIFT == KERNEL_PROCESS_STACK_SIZE,
+                  "KERNEL_STACK_SHIFT must be log2(KERNEL_PROCESS_STACK_SIZE)");
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
         scheduled_process_records[slot].saved_sp = 0;
         scheduled_process_records[slot].state = ProcessSlotState::Free;
@@ -1450,6 +1464,9 @@ extern symbol boot_stack_top;
 extern symbol secondary_stack_run_bottom;
 extern symbol secondary_stack_bottom;
 extern symbol secondary_stack_top;
+extern symbol overflow_stack_run_bottom;
+extern symbol overflow_stack_bottom;
+extern symbol overflow_stack_top;
 
 // Do the two linker-provided stacks have the same shape as the ones this
 // file allocates -- KERNEL_PROCESS_STACK_SIZE of usable stack occupying
@@ -1466,11 +1483,64 @@ fn kernel_linker_stacks_well_shaped() -> bool {
         boot_stack_bottom - boot_stack_run_bottom != KERNEL_PROCESS_STACK_SIZE) {
         return false;
     }
-    return secondary_stack_top % KERNEL_STACK_RUN_BYTES == 0 &&
-           secondary_stack_top - secondary_stack_bottom ==
+    if (secondary_stack_top % KERNEL_STACK_RUN_BYTES != 0 ||
+        secondary_stack_top - secondary_stack_bottom !=
+            KERNEL_PROCESS_STACK_SIZE ||
+        secondary_stack_bottom - secondary_stack_run_bottom !=
+            KERNEL_PROCESS_STACK_SIZE) {
+        return false;
+    }
+    // Including the stack the overflow report itself runs on. It is the
+    // one stack that could plausibly be exempted -- nothing is supposed
+    // to overflow it -- and exempting it is exactly what would turn a
+    // second exception during the report into a loop on the check that
+    // brought it there.
+    return overflow_stack_top % KERNEL_STACK_RUN_BYTES == 0 &&
+           overflow_stack_top - overflow_stack_bottom ==
                KERNEL_PROCESS_STACK_SIZE &&
-           secondary_stack_bottom - secondary_stack_run_bottom ==
+           overflow_stack_bottom - overflow_stack_run_bottom ==
                KERNEL_PROCESS_STACK_SIZE;
+}
+
+// GitHub issue #377: where the generated exception-entry check lands.
+//
+// Reached from generated code with SP already switched to a stack of its
+// own, which is the whole reason what it prints can be believed: a report
+// about a stack written using that stack proves nothing. DAIF is masked
+// before it is called.
+//
+// It never returns. It cannot: the register shuffle that made a
+// memory-free SP test possible spent the interrupted x0, so there is no
+// context left to resume even if the stack were sound.
+fn kernel_stack_overflow_fail_stop(sp: usize) !{unsafe} {
+    kernel_boot_log("kernel stack: OVERFLOW at exception entry (issue #377) sp=");
+    uart_put_udec(sp);
+    kernel_boot_log(" ");
+    kernel_boot_log(kernel_stack_owner_name(sp));
+    kernel_boot_log("\n");
+    while (true) { }
+}
+
+// Which stack an address that failed the entry check fell out of. Named
+// rather than numbered wherever it is not a process slot, because "boot"
+// and "slot 3" answer different questions about what to look at next.
+private fn kernel_stack_owner_name(sp: usize) -> *u8 {
+    if (sp >= boot_stack_run_bottom && sp < boot_stack_top) {
+        return "below the boot stack" as *u8;
+    }
+    if (sp >= secondary_stack_run_bottom && sp < secondary_stack_top) {
+        return "below the secondary-core stack" as *u8;
+    }
+    if (sp >= overflow_stack_run_bottom && sp < overflow_stack_top) {
+        return "below the overflow stack itself" as *u8;
+    }
+    for slot: usize in 0..<KERNEL_PROCESS_MAX {
+        let base: usize = scheduled_process_stack_runs[slot];
+        if (base != 0 && sp >= base && sp < base + KERNEL_STACK_RUN_BYTES) {
+            return "below a process kernel stack" as *u8;
+        }
+    }
+    return "not inside any known kernel stack run" as *u8;
 }
 
 // Slack left unpoisoned below the reported SP: kernel_boot_stack_arm's

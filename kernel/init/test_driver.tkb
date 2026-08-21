@@ -516,7 +516,14 @@ fn httpd_image_mapping_check(httpd: Ext2ExecImage,
 
 fn kernel_test_common_probes() {
     if (scheduled_process_table_probe()) {
-        kernel_boot_log("process table: slots=16 stacks=3968 (page payload, not the whole page) generation reuse safe\n");
+        // Printed from the constant rather than written into the string:
+        // the previous version said 3968 for as long as that was true and
+        // then went on saying it, which is the failure mode a view test
+        // cannot catch by itself -- the expectation matched a line that
+        // had become a lie.
+        kernel_boot_log("process table: slots=16 stacks=");
+        uart_put_udec(KERNEL_PROCESS_STACK_SIZE);
+        kernel_boot_log(" (upper half of an aligned run) generation reuse safe\n");
     } else {
         kernel_boot_log("process table: failed\n");
     }

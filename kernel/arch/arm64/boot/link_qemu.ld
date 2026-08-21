@@ -63,6 +63,17 @@ SECTIONS {
         secondary_stack_bottom = .;
         . += 0x4000;
         secondary_stack_top = .;
+        /* Where the exception-entry stack-overflow check lands.  A report
+           about a stack cannot be trusted if it is written using that
+           stack, which is why this exists at all.  Same shape as the
+           others deliberately: if a second exception ever reached the
+           entry check while running here, it would pass rather than loop
+           on the check that brought it. */
+        overflow_stack_run_bottom = .;
+        . += 0x4000;
+        overflow_stack_bottom = .;
+        . += 0x4000;
+        overflow_stack_top = .;
     }
 
     /* Same rationale as link.ld: the first PAGE_SIZE-aligned physical

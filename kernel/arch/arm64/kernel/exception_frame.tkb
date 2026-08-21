@@ -54,16 +54,31 @@ struct packed ExceptionFrame {
 // entirely). `before: fpsimd_irq_clobber` runs after the frame save,
 // before dispatch, matching entry.S's own former ordering exactly (see
 // that hook's own comment in fpsimd_probe_extern.tkb).
+// GitHub issue #377: the three stack_guard keys add a single-bit SP test
+// at the top of the generated entry, before anything is saved. Every
+// kernel stack in this image -- the boot stack, the secondary core's, the
+// overflow stack, and every process's -- is the upper half of a
+// KERNEL_STACK_SHIFT+1-aligned region, so bit KERNEL_STACK_SHIFT of an
+// address says which half it is in with no base to load. A frame that
+// would leave its stack lands on overflow_stack_top instead, and reports
+// from there: a report about a stack written using that stack proves
+// nothing, which is why the second key exists.
 exception_entry el1_current_irq_entry {
     frame: ExceptionFrame;
     before: fpsimd_irq_clobber;
     dispatch: platform_irq_dispatch;
+    stack_guard_shift: KERNEL_STACK_SHIFT;
+    stack_guard_stack: overflow_stack_top;
+    stack_guard_handler: kernel_stack_overflow_fail_stop;
 }
 
 // Lower-EL AArch64 IRQ entry: the same frame, no fixture hook.
 exception_entry el0_irq_entry {
     frame: ExceptionFrame;
     dispatch: platform_el0_irq_dispatch;
+    stack_guard_shift: KERNEL_STACK_SHIFT;
+    stack_guard_stack: overflow_stack_top;
+    stack_guard_handler: kernel_stack_overflow_fail_stop;
 }
 
 // GitHub issue #227 item 1 follow-up: el0_context_resume is a standalone

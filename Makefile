@@ -708,6 +708,15 @@ kernelcheck-oops-qemu: kernelbuild-qemu $(KERNEL_CRASH_SNAPSHOT_LAYOUT)
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=data_abort_write KERNEL_QEMU_OOPS_GDB_PORT=18675 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-data-abort" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec KERNEL_QEMU_OOPS_GDB_PORT=18676 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-child-exec" bash scripts/run_kernel_oops_qemutest.sh
 
+## Issue #377 regression: the exception-entry stack guard.  Deliberately
+## separate from the ordinary QEMU suite for the same reason as
+## kernelcheck-oops-qemu -- its expected result is a parked fail-stop.  GDB
+## moves SP to just above the boot stack's bottom at a real IRQ entry and
+## sends PC back to the entry symbol; the generated single-bit test then
+## fires on the ordinary path, with nothing about the kernel modified.
+kernelcheck-stack-overflow-qemu: kernelbuild-qemu
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_stack_overflow_qemutest.sh
+
 ## Issue #289 negative-path regression: GDB pokes the exec-commit lifecycle
 ## checkpoint's own one-shot guard so its print is skipped while the real
 ## exec-commit logic runs untouched, proving the interactive-HTTPd harness's
@@ -729,7 +738,7 @@ kernelsh-qemu: kernelbuild-qemu
 kernelsh-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_shell_rpi5.sh
 
-kernelcheck: kernelcheck-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-rpi5
+kernelcheck: kernelcheck-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kernelcheck-stack-overflow-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-rpi5
 
 ## allcheck: run every check this Makefile knows about -- langcheck, test,
 ## linuxcheck, kernelcheck -- so a single command surfaces a failure
@@ -761,7 +770,7 @@ kernelcheck: kernelcheck-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kerne
 allcheck:
 	@status=0; $(MAKE) langcheck test linuxcheck kernelcheck || status=$$?; \
 	if [ $$status -eq 0 ]; then \
-		echo "PASS allcheck: langcheck + compiler unit + linux_user + QEMU + QEMU debug + QEMU oops + RPi5 integration"; \
+		echo "PASS allcheck: langcheck + compiler unit + linux_user + QEMU + QEMU debug + QEMU oops + QEMU stack overflow + RPi5 integration"; \
 	else \
 		echo "FAIL allcheck: one or more checks failed (see the lane output above)" >&2; \
 		exit $$status; \

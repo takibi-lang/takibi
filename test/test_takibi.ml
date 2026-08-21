@@ -10719,6 +10719,125 @@ let codegen_tests = [
          (contains_substring asm "sub\tsp, sp, #816");
        Target_info.configure "thumbv7em-none-eabi");
 
+  (* GitHub issue #377: the three stack_guard keys add a single-bit SP test
+     at the top of the entry. They describe one mechanism -- test a bit,
+     and if it is wrong land somewhere that is not the stack being
+     reported -- so a partial configuration is rejected rather than
+     generating a check with nowhere to go. *)
+  Alcotest.test_case "exception_entry emits a single-bit stack guard and an overflow landing" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       ignore (gen_codegen
+         (exc_frame_src ^
+          "const STACK_SHIFT: usize = 14;
+           extern symbol guard_stack_top;
+           fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           fn my_overflow(sp: usize) {}
+           exception_entry el1_current_irq_entry {
+             frame: ExcFrame;
+             dispatch: my_dispatch;
+             stack_guard_shift: STACK_SHIFT;
+             stack_guard_stack: guard_stack_top;
+             stack_guard_handler: my_overflow;
+           }"));
+       let asm = Buffer.contents Llvm_gen.raw_asm_buf in
+       (* Tested AFTER the frame allocation, so an exactly-full stack fails
+          rather than an empty one. *)
+       Alcotest.(check bool) "frame allocated before the test" true
+         (contains_substring asm "sub\tsp, sp, #816\n\tadd\tsp, sp, x0");
+       Alcotest.(check bool) "tests the named bit" true
+         (contains_substring asm "tbz\tx0, #14, .Lel1_current_irq_entry_stack_overflow");
+       Alcotest.(check bool) "undoes the shuffle on the good path" true
+         (contains_substring asm "sub\tx0, sp, x0\n\tsub\tsp, sp, x0");
+       Alcotest.(check bool) "lands on the named stack" true
+         (contains_substring asm "adrp\tx1, guard_stack_top");
+       Alcotest.(check bool) "masks before reporting" true
+         (contains_substring asm "msr\tDAIFSet, #0xf");
+       Alcotest.(check bool) "calls the named handler" true
+         (contains_substring asm "bl\tmy_overflow");
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_entry without stack_guard keys emits no test" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       ignore (gen_codegen
+         (exc_frame_src ^
+          "fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           exception_entry el1_current_irq_entry {
+             frame: ExcFrame;
+             dispatch: my_dispatch;
+           }"));
+       let asm = Buffer.contents Llvm_gen.raw_asm_buf in
+       Alcotest.(check bool) "no bit test" false (contains_substring asm "tbz\tx0,");
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_entry rejects a partial stack_guard configuration" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "all three of stack_guard_shift"
+         (exc_frame_src ^
+          "const STACK_SHIFT: usize = 14;
+           fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           exception_entry el1_current_irq_entry {
+             frame: ExcFrame;
+             dispatch: my_dispatch;
+             stack_guard_shift: STACK_SHIFT;
+           }") ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_entry rejects a stack_guard_shift that is not a constant" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "not a compile-time integer constant"
+         (exc_frame_src ^
+          "let stack_shift: usize = 14;
+           extern symbol guard_stack_top;
+           fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           fn my_overflow(sp: usize) {}
+           exception_entry el1_current_irq_entry {
+             frame: ExcFrame;
+             dispatch: my_dispatch;
+             stack_guard_shift: stack_shift;
+             stack_guard_stack: guard_stack_top;
+             stack_guard_handler: my_overflow;
+           }") ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_entry rejects a stack_guard_handler with the wrong signature" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "wrong signature"
+         (exc_frame_src ^
+          "const STACK_SHIFT: usize = 14;
+           extern symbol guard_stack_top;
+           fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           fn bad_overflow() {}
+           exception_entry el1_current_irq_entry {
+             frame: ExcFrame;
+             dispatch: my_dispatch;
+             stack_guard_shift: STACK_SHIFT;
+             stack_guard_stack: guard_stack_top;
+             stack_guard_handler: bad_overflow;
+           }") ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_entry rejects a stack_guard_stack that is not an extern symbol" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "not an extern symbol"
+         (exc_frame_src ^
+          "const STACK_SHIFT: usize = 14;
+           fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           fn my_overflow(sp: usize) {}
+           exception_entry el1_current_irq_entry {
+             frame: ExcFrame;
+             dispatch: my_dispatch;
+             stack_guard_shift: STACK_SHIFT;
+             stack_guard_stack: my_dispatch;
+             stack_guard_handler: my_overflow;
+           }") ();
+       Target_info.configure "thumbv7em-none-eabi");
+
   Alcotest.test_case "exception_entry rejects a dispatch target with the wrong signature" `Quick
     (fun () ->
        Target_info.configure "aarch64-none-elf";
