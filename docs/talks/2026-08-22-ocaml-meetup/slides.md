@@ -233,12 +233,13 @@ The human changed the source of evidence, not the amount of logging.
 
 Takibi emits DWARF and supports source debugging through GDB.
 
-LLVM's current OCaml bindings still lack convenient APIs for:
+LLVM's OCaml bindings still lack convenient APIs for:
 
 - `dbg.value` locations for SSA and entry parameter values;
-- natural `DISubrange` metadata for fixed arrays;
-- replacing debug-only allocas and preservation stores;
-- some future lexical-scope and optimized-debug policies.
+- `DISubrange` construction for natural fixed-array display.
+
+Takibi currently works around those gaps with debug-only allocas,
+volatile preservation stores, and GDB artificial arrays.
 
 We would like to contribute these capabilities upstream.
 
