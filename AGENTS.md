@@ -1089,6 +1089,46 @@ for `http_server` -- now lives in `HISTORY.md`. See
 examples share, and each example's own header comment for a
 one-line description of what it does.
 
+## Debugging Techniques That Have Paid Off Here
+
+Collected from real incidents in this tree, each of which cost hours the
+first time. HISTORY.md has the full story behind each; this is the index
+so it is findable while you are stuck rather than only afterwards.
+
+**Re-read the evidence you already have before running another
+experiment.** Issue #237's virtio work spent hours testing hypotheses and
+found nothing; a fresh read of the SAME diagnostic output, with no new
+run, found the bug in one pass. Ask what the data you already collected
+would say if you had not already decided what it meant.
+
+**Bisect a cheap proxy, not the expensive reproduction.** An
+`examples/dwarf_debug` failure needed QEMU plus gdb to observe. What
+actually changed was one number -- how many instructions the prologue
+was -- so the bisection was "build the compiler at commit X and print
+which source line the address eight instructions past the breakpoint
+belongs to", three lines of Python, seconds per commit, culprit named in
+one pass over seven candidates. An expensive reproduction usually sits
+downstream of a cheap invariant.
+
+**A fix that merely stops a perturbation-sensitive reproducer proves
+nothing.** Issue #373 stopped reproducing when an unrelated compiler
+change landed, and that was reported as a fix. It was not: the bug was
+sensitive to memory layout, so ANY change of similar size silenced it.
+Verify against the mechanism (a measurement, a canary, an invariant),
+never against "the failing test stopped failing".
+
+**When a network test flakes, suspect the harness's readiness assumption
+before the protocol code.** Three flakes in this tree so far: one was
+genuinely `tcp.tkb`, two were the host-side harness starting before the
+kernel or the PHY was ready. Check what the runner waits for -- often
+nothing -- before reading the stack.
+
+**Grep the whole repo before calling code dead.** A whole-program build
+means callers live in other subtrees, and `examples/` and `linux_user/`
+have their own Makefiles. `make allbuild` finds what a regex survey does
+not: it compiles everything and reports every shape that broke, including
+the ones nobody thought to look for.
+
 ## Debug Info and Execution Profiling (QEMU)
 
 `-g` emits full DWARF intended to be useful in real `gdb-multiarch`
