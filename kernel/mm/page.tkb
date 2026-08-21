@@ -93,7 +93,8 @@ const PAGE_META_BYTES: usize = 128;
 const PAGE_USABLE_BYTES: usize = PAGE_SIZE - PAGE_META_BYTES;
 
 // The address of this page's owner metadata, or 0 if `physical` is not
-// one of this allocator's page-aligned pages.
+// one of this allocator's page-aligned pages, or if it belongs to a
+// contiguous run.
 //
 // Returning 0 rather than trapping is what lets a consumer use this as
 // its own validation step on an address of unknown provenance: the range
@@ -103,6 +104,16 @@ const PAGE_USABLE_BYTES: usize = PAGE_SIZE - PAGE_META_BYTES;
 // has already confirmed it owns -- not through an address the caller
 // supplied, which is the distinction that makes the in-page placement as
 // safe as a side array would have been.
+//
+// GitHub issue #377: a run has NO owner-metadata regions at all -- the
+// whole `count * PAGE_SIZE` is payload. Reserving the tail of every page
+// of a run is incoherent for the consumer runs exist for: a kernel stack
+// needs one contiguous span, and holes every 4096 bytes is not one. So
+// the reservation is made per-ALLOCATION rather than per-page, and the
+// answer here is the one that makes that safe -- a run's page is not a
+// candidate chunk for anybody, so no pool can read a stack frame as its
+// own chunk header. That misreading is exactly what issue #373 cost a day
+// of bisecting, when a stack running to PAGE_SIZE forged one.
 fn page_meta_at(physical: usize) -> usize {
     let base: usize = usable_ram_start;
     let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
@@ -110,6 +121,10 @@ fn page_meta_at(physical: usize) -> usize {
         (physical - base) % PAGE_SIZE != 0) {
         return 0;
     }
+    let index: usize = (physical - base) / PAGE_SIZE;
+    if (index >= BOOT_PAGE_COUNT) { return 0; }
+    let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+    if (boot_page_pool.meta[checked].in_run) { return 0; }
     return physical + PAGE_USABLE_BYTES;
 }
 
@@ -134,6 +149,12 @@ private fn page_meta_clear(physical: usize) !{unsafe} {
 // here, not as a new parallel array.
 struct PageMeta {
     occupied: bool;
+    // GitHub issue #377: this page is one of a contiguous run's, so it
+    // has no owner-metadata region -- see page_meta_at. Set only by
+    // page_alloc_contiguous, cleared only on the paths that put a page
+    // back on the free list, so "free" and "in a run" can never both be
+    // true.
+    in_run: bool;
     map_refcount: usize;
 }
 
@@ -243,6 +264,7 @@ fn page_alloc_contiguous(count: usize) -> PageRunAllocResult !{unsafe} {
                 if (index < BOOT_PAGE_COUNT) {
                     let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
                     boot_page_pool.meta[checked].occupied = true;
+                    boot_page_pool.meta[checked].in_run = true;
                     boot_page_pool.meta[checked].map_refcount = 0;
                 }
             }
@@ -292,6 +314,7 @@ fn page_run_free(owner: sink PageRunOwner[run]) !{unsafe} {
                     boot_page_pool.double_remove_count + 1;
             } else {
                 boot_page_pool.meta[checked].occupied = false;
+                boot_page_pool.meta[checked].in_run = false;
                 boot_page_pool.meta[checked].map_refcount = 0;
                 freelist_core_remove(&boot_page_pool.core,
                                      freelist_owner_new(checked, 0));
@@ -311,6 +334,7 @@ fn page_allocator_init() {
     // manual `let`/raw-pointer-arithmetic workaround (issue #15) needed.
     for i: usize in 0..<BOOT_PAGE_COUNT {
         boot_page_pool.meta[i].occupied = false;
+        boot_page_pool.meta[i].in_run = false;
         boot_page_pool.meta[i].map_refcount = 0;
     }
     boot_page_pool.double_remove_count = 0;
@@ -337,6 +361,16 @@ fn page_run_probe() -> bool !{unsafe} {
     let aligned: bool = base % (count * PAGE_SIZE) == 0;
     let counted: bool = page_run_count(run) == count &&
                         page_allocator_live_count() == pages_before + count;
+    // GitHub issue #377: no page of a live run has an owner-metadata
+    // region, so the whole run is payload and no pool can read a byte of
+    // it as a chunk header. Checked on EVERY page, not just the first:
+    // the reservation is what a consumer's contiguity claim rests on, and
+    // a run whose interior pages still answered would be exactly the
+    // forged-chunk-header hazard, one page further in.
+    let mut payload_only: bool = true;
+    for k: usize in 0..<count {
+        if (page_meta_at(base + k * PAGE_SIZE) != 0) { payload_only = false; }
+    }
 
     // Every page of the run must be withheld: allocate singles until one
     // would have to come from inside the run, and check none does. Four
@@ -369,6 +403,14 @@ fn page_run_probe() -> bool !{unsafe} {
     let restored: bool =
         page_allocator_live_count() == pages_before &&
         page_allocator_double_free_count() == doubles_before;
+    // ...and giving the run back restores the metadata regions, so a page
+    // that was once part of a run can still become an ordinary pooled
+    // chunk later.
+    let mut meta_restored: bool = true;
+    for k: usize in 0..<count {
+        if (page_meta_at(base + k * PAGE_SIZE) !=
+            base + k * PAGE_SIZE + PAGE_USABLE_BYTES) { meta_restored = false; }
+    }
 
     // And the pool still works afterwards: a run that unlinked pages and
     // pushed them back must leave the list usable.
@@ -380,8 +422,8 @@ fn page_run_probe() -> bool !{unsafe} {
             page_run_free(again);
         }
     }
-    return aligned && counted && overlap == false && singles == 2 &&
-           restored && reusable &&
+    return aligned && counted && payload_only && overlap == false &&
+           singles == 2 && restored && meta_restored && reusable &&
            page_allocator_live_count() == pages_before;
 }
 
@@ -416,6 +458,11 @@ fn page_free(owner: sink PageOwner[page]) {
         return;
     }
     boot_page_pool.meta[index].occupied = false;
+    // Already false for a single page, and the invariant page_meta_at
+    // depends on is "a page on the free list is not in a run" -- stated
+    // on every path back to the list rather than argued from who calls
+    // which one.
+    boot_page_pool.meta[index].in_run = false;
     boot_page_pool.meta[index].map_refcount = 0;
     freelist_core_remove(&boot_page_pool.core,
                          freelist_owner_new(index, owner.generation));
@@ -638,6 +685,7 @@ fn page_transferred_release(index: {0..<BOOT_PAGE_COUNT as usize}) {
         return;
     }
     boot_page_pool.meta[index].occupied = false;
+    boot_page_pool.meta[index].in_run = false;  // see page_free
     boot_page_pool.meta[index].map_refcount = 0;
     freelist_core_remove(&boot_page_pool.core, freelist_owner_new(index, 0));
 }
