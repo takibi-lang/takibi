@@ -17,6 +17,10 @@ extern fn kernel_syscall_fail_stop(frame_sp: usize) !{noreturn};
 // intrinsics: the only caller is exception_evidence.tkb while interrupts are
 // masked on the terminal path.
 extern fn crash_snapshot_read_sp_el0() -> usize;
+// The EL1 stack pointer. Same boundary and the same reason as the reads
+// above -- SP is not a system register, so this cannot be an `mrs` at a
+// call site even if one wanted it to be.
+extern fn kernel_stack_read_sp_el1() -> usize;
 extern fn crash_snapshot_read_tpidr_el0() -> usize;
 extern fn crash_snapshot_read_ttbr0_el1() -> usize;
 extern fn crash_snapshot_read_mpidr_el1() -> usize;

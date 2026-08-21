@@ -528,6 +528,10 @@ fn kernel_test_platform_storage() {
 }
 
 fn main() {
+    // First, before anything has had a chance to go deep: fill the unused
+    // part of the boot stack with poison so its high-water mark can be
+    // measured at the end of the run, exactly as a process stack's is.
+    kernel_boot_stack_arm();
     platform_init();
     kernel_boot_log("takibi kernel: EL1\n");
 

@@ -293,6 +293,14 @@ crash_snapshot_read_sp_el0:
     mrs     x0, sp_el0
     ret
 
+/* The CURRENT (EL1) stack pointer, which no MRS reads -- SP is not a system
+ * register.  A leaf with no frame, so SP here is still the caller's: the
+ * return address is in x30 and nothing has been pushed. */
+    .global kernel_stack_read_sp_el1
+kernel_stack_read_sp_el1:
+    mov     x0, sp
+    ret
+
     .global crash_snapshot_read_tpidr_el0
 crash_snapshot_read_tpidr_el0:
     mrs     x0, tpidr_el0

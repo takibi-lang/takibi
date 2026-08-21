@@ -805,6 +805,11 @@ fn scheduled_process_table_probe() -> bool {
     }
     if (capacity_ok == false) { return false; }
 
+    // The boot and secondary stacks are held to the same shape as the
+    // ones allocated below, checked here because this is the probe that
+    // owns "a kernel stack is where it says it is".
+    if (kernel_linker_stacks_well_shaped() == false) { return false; }
+
     // Every live slot's stack must be distinct, and must END exactly
     // where its run ends. Both loops bound by the same literal
     // (KERNEL_PROCESS_MAX), not one loop bound by the other's variable,
@@ -1363,20 +1368,34 @@ private fn kernel_stack_guard_fail(reason: *u8, slot: usize, base: usize,
     kernel_boot_log(" size=");
     uart_put_udec(KERNEL_PROCESS_STACK_SIZE);
     // How far past the bottom, when it is already past: the number a
-    // guard page would have read off the faulting address.
+    // guard page would have read off the faulting address. A slot of
+    // KERNEL_PROCESS_MAX means the boot stack, which has no slot -- it is
+    // out of the array's range by exactly one, deliberately, so that a
+    // real slot and "not a slot" cannot be confused.
+    let mut over: usize = kernel_boot_stack_overflow_bytes();
     if (slot < KERNEL_PROCESS_MAX) {
         let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        let over: usize = kernel_stack_overflow_bytes(checked);
-        if (over != 0) {
-            kernel_boot_log(" past-end=");
-            uart_put_udec(over);
-        }
+        over = kernel_stack_overflow_bytes(checked);
+    }
+    if (over != 0) {
+        kernel_boot_log(" past-end=");
+        uart_put_udec(over);
     }
     kernel_boot_log("\n");
     while (true) { }
 }
 
 fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
+    // The boot stack first, and unconditionally: it is the stack every
+    // path that is not a running process stands on, so the test below --
+    // which needs a current process to have a stack to ask about -- can
+    // never see it.
+    if (kernel_boot_stack_witness_disturbed()) {
+        kernel_stack_guard_fail("boot stack wrote past its end" as *u8,
+                                KERNEL_PROCESS_MAX, boot_stack_bottom,
+                                current_sp);
+        return;
+    }
     if (execution_current_live == false) { return; }
     let slot: usize = execution_current_handle.pool_index;
     if (slot >= KERNEL_PROCESS_MAX) { return; }
@@ -1414,6 +1433,132 @@ fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
         kernel_stack_guard_fail("stack reached its own bottom" as *u8,
                                 checked, bottom, current_sp);
     }
+}
+
+// ---- The boot stack ----
+//
+// entry.S sets SP to the linker's boot_stack_top before any Takibi code
+// runs, and everything that is not standing on a process's stack runs
+// there: every fixture, the distro exec path, the whole of main(). The
+// guard above says nothing about it, and until it is measured the same
+// way there is no basis for choosing its size either -- which is the
+// same argument that produced 16384 for the process stacks, applied to
+// the stack that was never measured at all.
+extern symbol boot_stack_run_bottom;
+extern symbol boot_stack_bottom;
+extern symbol boot_stack_top;
+extern symbol secondary_stack_run_bottom;
+extern symbol secondary_stack_bottom;
+extern symbol secondary_stack_top;
+
+// Do the two linker-provided stacks have the same shape as the ones this
+// file allocates -- KERNEL_PROCESS_STACK_SIZE of usable stack occupying
+// the upper half of a KERNEL_STACK_RUN_BYTES-aligned run?
+//
+// It is a linker-script fact, so nothing at compile time can see it, and
+// everything a single-bit membership test would assume rests on it. A
+// stack of some other size or alignment answers that test wrongly on
+// every path that is not standing on a process's stack, which is most of
+// them.
+fn kernel_linker_stacks_well_shaped() -> bool {
+    if (boot_stack_top % KERNEL_STACK_RUN_BYTES != 0 ||
+        boot_stack_top - boot_stack_bottom != KERNEL_PROCESS_STACK_SIZE ||
+        boot_stack_bottom - boot_stack_run_bottom != KERNEL_PROCESS_STACK_SIZE) {
+        return false;
+    }
+    return secondary_stack_top % KERNEL_STACK_RUN_BYTES == 0 &&
+           secondary_stack_top - secondary_stack_bottom ==
+               KERNEL_PROCESS_STACK_SIZE &&
+           secondary_stack_bottom - secondary_stack_run_bottom ==
+               KERNEL_PROCESS_STACK_SIZE;
+}
+
+// Slack left unpoisoned below the reported SP: kernel_boot_stack_arm's
+// own frame lives there, and so does anything the compiler placed below
+// SP without adjusting it.
+const KERNEL_BOOT_STACK_MARGIN_BYTES: usize = 512;
+
+// A byte range of the boot stack, filled with poison. A raw pointer
+// because both ends are linker symbols -- there is no array to index,
+// and the length is not a compile-time constant. Same boundary as
+// kernel/mm/page.tkb's own page_meta_clear.
+private fn kernel_boot_stack_fill(from: usize, to: usize) !{unsafe} {
+    if (from >= to) { return; }
+    let bytes: *u8 = unsafe { from as *u8 };
+    let count: isize = (to - from) as isize;
+    for i: isize in 0..<count {
+        bytes[i] = KERNEL_STACK_POISON;
+    }
+}
+
+// Poison everything below the caller's frame. Meant to be main()'s first
+// statement, where "below the caller's frame" is nearly the whole stack.
+// Whatever is left unpoisoned above it reads back as used, so the
+// measurement is a lower bound rather than a guess -- which is the
+// honest direction for a stack that is already in use by the time
+// anything can poison it.
+fn kernel_boot_stack_arm() !{unsafe} {
+    let sp: usize = kernel_stack_read_sp_el1();
+    let bottom: usize = boot_stack_bottom;
+    let top: usize = boot_stack_top;
+    // A caller that is not standing on the boot stack would poison memory
+    // some other stack is using. Nothing calls it that way today; the
+    // check is here because the cost of being wrong is silent corruption
+    // of whatever is below, which is the bug this whole area exists over.
+    if (sp <= bottom || sp > top ||
+        sp < bottom + KERNEL_BOOT_STACK_MARGIN_BYTES) { return; }
+    // From the bottom of the RUN, so the reserved half below the stack is
+    // poisoned in the same pass and an overflow into it is measurable
+    // rather than merely harmless.
+    kernel_boot_stack_fill(boot_stack_run_bottom,
+                           sp - KERNEL_BOOT_STACK_MARGIN_BYTES);
+}
+
+// How far the boot stack has ever gone past its own bottom, into the
+// reserved half below it. The boot-stack twin of
+// kernel_stack_overflow_bytes, and 0 on a kernel that is behaving.
+fn kernel_boot_stack_overflow_bytes() -> usize !{unsafe} {
+    let run_bottom: usize = boot_stack_run_bottom;
+    let bottom: usize = boot_stack_bottom;
+    if (bottom <= run_bottom) { return 0; }
+    let size: usize = bottom - run_bottom;
+    let bytes: *u8 = unsafe { run_bottom as *u8 };
+    let count: isize = size as isize;
+    for i: isize in 0..<count {
+        if (bytes[i] != KERNEL_STACK_POISON) { return size - (i as usize); }
+    }
+    return 0;
+}
+
+// Has the boot stack written below its own bottom? Read on the same
+// schedule as a process stack's witness, and the same width, because the
+// boot stack is where everything that is not a process runs -- gating
+// this on `execution_current_live` the way the process check must be
+// gated would exempt exactly the paths that used to be unmeasurable.
+private fn kernel_boot_stack_witness_disturbed() -> bool !{unsafe} {
+    let bottom: usize = boot_stack_bottom;
+    if (bottom <= boot_stack_run_bottom) { return false; }
+    let witness: *KernelStackWitness =
+        unsafe { (bottom - KERNEL_STACK_WITNESS_BYTES) as *KernelStackWitness };
+    for i: usize in 0..<KERNEL_STACK_WITNESS_BYTES {
+        if (witness.bytes[i] != KERNEL_STACK_POISON) { return true; }
+    }
+    return false;
+}
+
+// How deep the boot stack has ever been, by the same rule as
+// kernel_stack_used_bytes: the lowest byte that is no longer poison.
+fn kernel_boot_stack_used_bytes() -> usize !{unsafe} {
+    let bottom: usize = boot_stack_bottom;
+    let top: usize = boot_stack_top;
+    if (top <= bottom) { return 0; }
+    let size: usize = top - bottom;
+    let bytes: *u8 = unsafe { bottom as *u8 };
+    let count: isize = size as isize;
+    for i: isize in 0..<count {
+        if (bytes[i] != KERNEL_STACK_POISON) { return size - (i as usize); }
+    }
+    return 0;
 }
 
 // GitHub issue #376: how deep this slot's stack has ever been, in bytes.
@@ -1489,6 +1634,19 @@ fn kernel_stack_watermark_report() !{unsafe} {
     // faulting access was (#377).
     if (deepest >= KERNEL_PROCESS_STACK_SIZE) {
         kernel_boot_log(" SATURATED (a floor, not the requirement)");
+    }
+    // The boot stack, measured the same way and reported beside them: it
+    // is the deepest stack this kernel actually has, and the one nothing
+    // used to be able to say anything about.
+    kernel_boot_log(" boot=");
+    uart_put_udec(kernel_boot_stack_used_bytes());
+    kernel_boot_log("/");
+    uart_put_udec(boot_stack_top - boot_stack_bottom);
+    let boot_over: usize = kernel_boot_stack_overflow_bytes();
+    if (boot_over != 0) {
+        kernel_boot_log("+");
+        uart_put_udec(boot_over);
+        kernel_boot_log("OVER");
     }
     kernel_boot_log(" per-slot=");
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
