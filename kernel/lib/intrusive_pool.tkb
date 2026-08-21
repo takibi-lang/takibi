@@ -883,17 +883,19 @@ fn intrusive_slot_link_at(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 //
 // The old walk existed to avoid reading a header at `base` when `base`
 // might be garbage -- the header lived IN the page, so trusting it was
-// the wild dereference being guarded against. With the header in the
-// provider's own per-page table that inversion goes away:
-// page_meta_at bounds-checks `base` against the page range without
-// dereferencing it at all, and what it returns is memory the ALLOCATOR
-// owns, not memory `base` points at. So there is no longer a moment
-// where an unproven address is trusted, and the answer costs a division
-// and a comparison instead of a list walk.
+// the wild dereference being guarded against. The header is back in the
+// chunk since issue #350, and the inversion still holds, because what is
+// consulted FIRST is not the header: page_owner_tag_at bounds-checks
+// `base` against the page range and reads the allocator's own per-page
+// tag, dereferencing `base` not at all. Only a page the allocator says
+// is somebody's pool chunk gets read through. So there is still no
+// moment where an unproven address is trusted, and the answer costs a
+// division and two comparisons instead of a list walk.
 //
-// The tag is the authority. A page not currently a chunk of anyone's has
-// zeroed metadata (the provider clears it on release) and pool_tag
-// counts from 1, so tag 0 never matches a live pool.
+// The tag is the authority, twice over: the allocator's says whether the
+// page is any pool's chunk, and the header's pool_tag says WHICH pool's.
+// pool_tag counts from 1, so a zeroed header never matches a live pool
+// even if a page were somehow tagged without one.
 fn intrusive_pool_owns_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id, base: usize)
         -> bool !{unsafe} {
     // The allocator's own per-page tag, read without dereferencing
