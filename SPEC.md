@@ -2273,6 +2273,18 @@ it is a linear struct rather than an erased view.
   `exception_entry` only covers the uniform save -> dispatch -> restore ->
   `eret` shape.
 
+  One further optional key, `dispatch_stack: extern_symbol;`, runs
+  `dispatch` on a stack of its own: the generated code switches SP to that
+  symbol's address after the frame save and calls `dispatch` there, then
+  takes SP from `dispatch`'s return value as usual. The FRAME is
+  deliberately not moved -- it is the interrupted context, and `dispatch`
+  may hand back a different one, so a frame on a stack the next exception
+  reuses would be a context destroyed by that exception. What moves is the
+  handler's own depth, which is what otherwise makes one stack hold the
+  deepest ordinary path and the deepest interrupt path at once.
+  `before`, if given, also runs on the new stack; the frame's address is
+  carried across it in `x19`, which is already saved in the frame.
+
   Three further optional keys -- `stack_guard_shift: CONST_NAME;`,
   `stack_guard_stack: extern_symbol;`, `stack_guard_handler: fn_name;` --
   add a kernel-stack overflow test at the top of the generated entry,

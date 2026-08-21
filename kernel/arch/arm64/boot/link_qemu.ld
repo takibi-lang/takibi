@@ -74,6 +74,23 @@ SECTIONS {
         overflow_stack_bottom = .;
         . += 0x4000;
         overflow_stack_top = .;
+        /* Where an IRQ handler runs.  The frame stays on whichever stack
+           was interrupted -- it is the interrupted context, and a
+           preempted process's context cannot live on a stack the next
+           interrupt reuses -- but everything the handler itself does
+           happens here, so one kernel stack no longer has to hold the
+           deepest syscall path and the deepest interrupt path at once.
+           Same arrangement as Linux's per-CPU IRQ stack.
+
+           ONE stack, not one per core: core 1 parks with DAIF masked and
+           never takes an interrupt, and nothing unmasks inside an IRQ
+           entry, so interrupts neither nest nor overlap.  If either
+           changes this must become per-core. */
+        irq_stack_run_bottom = .;
+        . += 0x4000;
+        irq_stack_bottom = .;
+        . += 0x4000;
+        irq_stack_top = .;
     }
 
     /* Same rationale as link.ld: the first PAGE_SIZE-aligned physical

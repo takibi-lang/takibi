@@ -54,6 +54,14 @@ struct packed ExceptionFrame {
 // entirely). `before: fpsimd_irq_clobber` runs after the frame save,
 // before dispatch, matching entry.S's own former ordering exactly (see
 // that hook's own comment in fpsimd_probe_extern.tkb).
+// GitHub issue #378: `dispatch_stack` runs the handler on a stack of its
+// own. The FRAME still lands on whichever kernel stack was interrupted --
+// it IS the interrupted context, and dispatch may hand back a different
+// process's frame, so a frame on a shared stack would be a context the
+// next tick destroys. What moves is everything the handler does, which is
+// the part that used to make one kernel stack hold the deepest syscall
+// path and the deepest interrupt path at the same time.
+//
 // GitHub issue #377: the three stack_guard keys add a single-bit SP test
 // at the top of the generated entry, before anything is saved. Every
 // kernel stack in this image -- the boot stack, the secondary core's, the
@@ -70,6 +78,7 @@ exception_entry el1_current_irq_entry {
     stack_guard_shift: KERNEL_STACK_SHIFT;
     stack_guard_stack: overflow_stack_top;
     stack_guard_handler: kernel_stack_overflow_fail_stop;
+    dispatch_stack: irq_stack_top;
 }
 
 // Lower-EL AArch64 IRQ entry: the same frame, no fixture hook.
@@ -79,6 +88,7 @@ exception_entry el0_irq_entry {
     stack_guard_shift: KERNEL_STACK_SHIFT;
     stack_guard_stack: overflow_stack_top;
     stack_guard_handler: kernel_stack_overflow_fail_stop;
+    dispatch_stack: irq_stack_top;
 }
 
 // GitHub issue #227 item 1 follow-up: el0_context_resume is a standalone

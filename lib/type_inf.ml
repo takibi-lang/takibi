@@ -6536,7 +6536,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            prototype. *)
         let frame_name = ref None and dispatch_name = ref None
         and before_name = ref None and guard_shift = ref None
-        and guard_stack = ref None and guard_handler = ref None in
+        and guard_stack = ref None and guard_handler = ref None
+        and dispatch_stack = ref None in
         List.iter (fun (key, value) -> match key with
           | "frame" -> frame_name := Some value
           | "dispatch" -> dispatch_name := Some value
@@ -6544,8 +6545,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           | "stack_guard_shift" -> guard_shift := Some value
           | "stack_guard_stack" -> guard_stack := Some value
           | "stack_guard_handler" -> guard_handler := Some value
+          | "dispatch_stack" -> dispatch_stack := Some value
           | other -> raise (TypeError (loc, Printf.sprintf
-              "exception_entry '%s' has unknown key '%s' (expected frame, dispatch, before, stack_guard_shift, stack_guard_stack, or stack_guard_handler)"
+              "exception_entry '%s' has unknown key '%s' (expected frame, dispatch, before, dispatch_stack, stack_guard_shift, stack_guard_stack, or stack_guard_handler)"
               name other))
         ) fields;
         (* GitHub issue #377: the three stack_guard keys describe ONE
@@ -6593,14 +6595,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           | None -> raise (TypeError (loc, Printf.sprintf
               "exception_entry '%s' stack_guard_shift '%s' is not a compile-time integer constant"
               name c))) !guard_shift;
-        Option.iter (fun sym ->
+        let check_symbol_target key sym =
           match Hashtbl.find_opt toplevel_names sym with
           | Some "symbol" -> ()
           | Some other -> raise (TypeError (loc, Printf.sprintf
-              "exception_entry '%s' stack_guard_stack '%s' is %s %s, not an extern symbol"
-              name sym (article_for other) other))
+              "exception_entry '%s' %s '%s' is %s %s, not an extern symbol"
+              name key sym (article_for other) other))
           | None -> raise (TypeError (loc, Printf.sprintf
-              "exception_entry '%s' stack_guard_stack '%s' is not defined" name sym))) !guard_stack;
+              "exception_entry '%s' %s '%s' is not defined" name key sym))
+        in
+        Option.iter (check_symbol_target "stack_guard_stack") !guard_stack;
+        (* GitHub issue #378: the stack `dispatch` runs on. The FRAME stays
+           where it was saved -- it is the interrupted context, and a
+           preempted process's context cannot live on a stack the next
+           interrupt reuses -- so this moves the handler, not the frame. *)
+        Option.iter (check_symbol_target "dispatch_stack") !dispatch_stack;
         validate_exception_frame "exception_entry" name loc frame
     | Ast.ExceptionRestoreDef (name, fields, loc) ->
         let frame_name = ref None in

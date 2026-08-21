@@ -10757,6 +10757,69 @@ let codegen_tests = [
          (contains_substring asm "bl\tmy_overflow");
        Target_info.configure "thumbv7em-none-eabi");
 
+  (* GitHub issue #378: `dispatch_stack` runs the handler on a stack of its
+     own. The FRAME is deliberately NOT moved -- it is the interrupted
+     context, and dispatch may hand back a different process's frame. *)
+  Alcotest.test_case "exception_entry dispatch_stack switches SP for the handler only" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       ignore (gen_codegen
+         (exc_frame_src ^
+          "extern symbol my_irq_stack_top;
+           fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           fn my_before() {}
+           exception_entry el1_current_irq_entry {
+             frame: ExcFrame;
+             before: my_before;
+             dispatch: my_dispatch;
+             dispatch_stack: my_irq_stack_top;
+           }"));
+       let asm = Buffer.contents Llvm_gen.raw_asm_buf in
+       (* The frame is still allocated on the interrupted stack. *)
+       Alcotest.(check bool) "frame still on the interrupted stack" true
+         (contains_substring asm "sub\tsp, sp, #816\n\tstr\tx0,");
+       Alcotest.(check bool) "switches to the named stack" true
+         (contains_substring asm "adrp\tx1, my_irq_stack_top");
+       (* x19, not x0, across `before`: an ordinary call may clobber
+          x0-x18, and both are already in the frame by this point. *)
+       Alcotest.(check bool) "frame address survives before()" true
+         (contains_substring asm "mov\tx19, sp");
+       Alcotest.(check bool) "dispatch gets the frame address" true
+         (contains_substring asm "mov\tx0, x19\n\tbl\tmy_dispatch");
+       Alcotest.(check bool) "returns to the frame dispatch chose" true
+         (contains_substring asm "bl\tmy_dispatch\n\tmov\tsp, x0");
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_entry without dispatch_stack keeps the interrupted stack" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       ignore (gen_codegen
+         (exc_frame_src ^
+          "fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           exception_entry el1_current_irq_entry {
+             frame: ExcFrame;
+             dispatch: my_dispatch;
+           }"));
+       let asm = Buffer.contents Llvm_gen.raw_asm_buf in
+       Alcotest.(check bool) "dispatch called with sp itself" true
+         (contains_substring asm "mov\tx0, sp\n\tbl\tmy_dispatch");
+       Alcotest.(check bool) "no stack switch" false
+         (contains_substring asm "mov\tx19, sp");
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_entry rejects a dispatch_stack that is not an extern symbol" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "not an extern symbol"
+         (exc_frame_src ^
+          "fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           exception_entry el1_current_irq_entry {
+             frame: ExcFrame;
+             dispatch: my_dispatch;
+             dispatch_stack: my_dispatch;
+           }") ();
+       Target_info.configure "thumbv7em-none-eabi");
+
   Alcotest.test_case "exception_entry without stack_guard keys emits no test" `Quick
     (fun () ->
        Target_info.configure "aarch64-none-elf";

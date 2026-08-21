@@ -1468,6 +1468,14 @@ extern symbol secondary_stack_top;
 extern symbol overflow_stack_run_bottom;
 extern symbol overflow_stack_bottom;
 extern symbol overflow_stack_top;
+// GitHub issue #378: the stack an IRQ handler runs on. The frame stays on
+// whichever kernel stack was interrupted -- it is the interrupted
+// context, and dispatch may hand back a different process's frame -- so
+// what moved here is the handler's own depth, which is the half that used
+// to add to every process's worst case.
+extern symbol irq_stack_run_bottom;
+extern symbol irq_stack_bottom;
+extern symbol irq_stack_top;
 
 // Do the two linker-provided stacks have the same shape as the ones this
 // file allocates -- KERNEL_PROCESS_STACK_SIZE of usable stack occupying
@@ -1496,11 +1504,19 @@ fn kernel_linker_stacks_well_shaped() -> bool {
     // to overflow it -- and exempting it is exactly what would turn a
     // second exception during the report into a loop on the check that
     // brought it there.
-    return overflow_stack_top % KERNEL_STACK_RUN_BYTES == 0 &&
-           overflow_stack_top - overflow_stack_bottom ==
-               KERNEL_PROCESS_STACK_SIZE &&
-           overflow_stack_bottom - overflow_stack_run_bottom ==
-               KERNEL_PROCESS_STACK_SIZE;
+    if (overflow_stack_top % KERNEL_STACK_RUN_BYTES != 0 ||
+        overflow_stack_top - overflow_stack_bottom !=
+            KERNEL_PROCESS_STACK_SIZE ||
+        overflow_stack_bottom - overflow_stack_run_bottom !=
+            KERNEL_PROCESS_STACK_SIZE) {
+        return false;
+    }
+    // And the IRQ stack, which every interrupt this kernel takes stands
+    // on: it is the one an entry-time test is most likely to be asked
+    // about, since an interrupt can arrive at any instruction.
+    return irq_stack_top % KERNEL_STACK_RUN_BYTES == 0 &&
+           irq_stack_top - irq_stack_bottom == KERNEL_PROCESS_STACK_SIZE &&
+           irq_stack_bottom - irq_stack_run_bottom == KERNEL_PROCESS_STACK_SIZE;
 }
 
 // GitHub issue #377: where the generated exception-entry check lands.
@@ -1534,6 +1550,9 @@ private fn kernel_stack_owner_name(sp: usize) -> *u8 {
     }
     if (sp >= overflow_stack_run_bottom && sp < overflow_stack_top) {
         return "below the overflow stack itself" as *u8;
+    }
+    if (sp >= irq_stack_run_bottom && sp < irq_stack_top) {
+        return "below the IRQ stack" as *u8;
     }
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
         let base: usize = scheduled_process_stack_runs[slot];
@@ -1621,11 +1640,12 @@ private fn kernel_boot_stack_witness_disturbed() -> bool !{unsafe} {
     return false;
 }
 
-// How deep the boot stack has ever been, by the same rule as
-// kernel_stack_used_bytes: the lowest byte that is no longer poison.
-fn kernel_boot_stack_used_bytes() -> usize !{unsafe} {
-    let bottom: usize = boot_stack_bottom;
-    let top: usize = boot_stack_top;
+// How deep a poisoned stack has ever been: the lowest byte that is no
+// longer poison, measured from the top. Shared by the boot stack and the
+// IRQ stack, which are measured the same way and differ only in which
+// pair of linker symbols bound them.
+private fn kernel_linker_stack_used_bytes(bottom: usize, top: usize)
+        -> usize !{unsafe} {
     if (top <= bottom) { return 0; }
     let size: usize = top - bottom;
     let bytes: *u8 = unsafe { bottom as *u8 };
@@ -1634,6 +1654,33 @@ fn kernel_boot_stack_used_bytes() -> usize !{unsafe} {
         if (bytes[i] != KERNEL_STACK_POISON) { return size - (i as usize); }
     }
     return 0;
+}
+
+fn kernel_boot_stack_used_bytes() -> usize !{unsafe} {
+    return kernel_linker_stack_used_bytes(boot_stack_bottom, boot_stack_top);
+}
+
+// GitHub issue #378's own acceptance: the interrupt path's depth, reported
+// SEPARATELY from the syscall path's. Before this stack existed the two
+// were one number, and the only honest thing to say about it was that a
+// kernel stack had to hold the sum of two independent worst cases.
+//
+// Poisoned outright rather than from below a live frame (see
+// kernel_boot_stack_arm): nothing is standing on it when the kernel arms
+// it, so there is no frame to preserve and the measurement has no
+// unpoisoned margin counted as used.
+fn kernel_irq_stack_arm() !{unsafe} {
+    kernel_boot_stack_fill(irq_stack_run_bottom, irq_stack_top);
+}
+
+fn kernel_irq_stack_used_bytes() -> usize !{unsafe} {
+    return kernel_linker_stack_used_bytes(irq_stack_bottom, irq_stack_top);
+}
+
+fn kernel_irq_stack_overflow_bytes() -> usize !{unsafe} {
+    let used: usize = kernel_linker_stack_used_bytes(irq_stack_run_bottom,
+                                                     irq_stack_bottom);
+    return used;
 }
 
 // GitHub issue #376: how deep this slot's stack has ever been, in bytes.
@@ -1721,6 +1768,19 @@ fn kernel_stack_watermark_report() !{unsafe} {
     if (boot_over != 0) {
         kernel_boot_log("+");
         uart_put_udec(boot_over);
+        kernel_boot_log("OVER");
+    }
+    // The interrupt path, separately -- which is the whole point of it
+    // having a stack of its own. A per-slot number that no longer
+    // includes this is a per-slot number that means something.
+    kernel_boot_log(" irq=");
+    uart_put_udec(kernel_irq_stack_used_bytes());
+    kernel_boot_log("/");
+    uart_put_udec(irq_stack_top - irq_stack_bottom);
+    let irq_over: usize = kernel_irq_stack_overflow_bytes();
+    if (irq_over != 0) {
+        kernel_boot_log("+");
+        uart_put_udec(irq_over);
         kernel_boot_log("OVER");
     }
     kernel_boot_log(" per-slot=");

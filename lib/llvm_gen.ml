@@ -6312,7 +6312,7 @@ let emit_exception_restore off total =
    instruction-count increase for not depending on declaration order,
    correctness over micro-optimization for what is an interrupt/fail-stop
    path, not a hot loop). *)
-let gen_exception_entry name frame dispatch before guard =
+let gen_exception_entry name frame dispatch before guard dispatch_stack =
   let triple = target_triple !the_module in
   if not (starts_with triple "aarch64") then
     raise (Error
@@ -6353,7 +6353,25 @@ let gen_exception_entry name frame dispatch before guard =
   done;
   List.iter (fun sysreg -> a "\tmrs\tx9, %s\n\tstr\tx9, [sp, #%d]\n" sysreg (off sysreg))
     ["fpsr"; "fpcr"];
-  Option.iter (fun b -> a "\tbl\t%s\n" b) before;
+  (* GitHub issue #378: run the handler on a stack of its own, so one
+     kernel stack no longer has to hold the deepest syscall path and the
+     deepest interrupt path at once. The FRAME stays where it was saved:
+     it is the interrupted context, and dispatch may hand back a DIFFERENT
+     process's frame, so a frame on a stack the next interrupt reuses
+     would be a context destroyed by the next tick. Linux's per-CPU IRQ
+     stack is the same arrangement for the same reason.
+
+     x19 rather than x0 across `before`, which is an ordinary call and may
+     clobber x0-x18. Both are already in the frame by this point, so
+     clobbering either is free -- the restore loop below reloads them. *)
+  (match dispatch_stack with
+   | Some sym ->
+       a "\tmov\tx19, sp\n";
+       a "\tadrp\tx1, %s\n\tadd\tx1, x1, :lo12:%s\n\tmov\tsp, x1\n" sym sym;
+       Option.iter (fun b -> a "\tbl\t%s\n" b) before;
+       a "\tmov\tx0, x19\n"
+   | None ->
+       Option.iter (fun b -> a "\tbl\t%s\n" b) before);
   (* mov sp, x0 (switching SP_EL1 to the dispatch-selected frame, possibly a
      DIFFERENT process's stack on a scheduler switch) happening BEFORE
      msr DAIFSet is only safe here because DAIF.I is already masked for this
@@ -6363,7 +6381,9 @@ let gen_exception_entry name frame dispatch before guard =
      sp already points at. The msr DAIFSet below is then a same-behavior-
      either-way re-assertion, matching exception_context.inc's own
      EXC_CONTEXT_RESTORE macro, which unconditionally re-masks here too. *)
-  a "\tmov\tx0, sp\n\tbl\t%s\n\tmov\tsp, x0\n" dispatch;
+  (match dispatch_stack with
+   | Some _ -> a "\tbl\t%s\n\tmov\tsp, x0\n" dispatch
+   | None -> a "\tmov\tx0, sp\n\tbl\t%s\n\tmov\tsp, x0\n" dispatch);
   a "\tmsr\tDAIFSet, #0x2\n";
   emit_exception_restore off total;
   (* Placed after the eret so the good path falls straight through the
@@ -6776,11 +6796,12 @@ let gen_program ?prog_types prog =
     | ExceptionEntryDef (name, fields, _) ->
         let frame = ref "" and dispatch = ref "" and before = ref None in
         let guard_shift = ref None and guard_stack = ref None
-        and guard_handler = ref None in
+        and guard_handler = ref None and dispatch_stack = ref None in
         List.iter (function
           | ("frame", v) -> frame := v
           | ("dispatch", v) -> dispatch := v
           | ("before", v) -> before := Some v
+          | ("dispatch_stack", v) -> dispatch_stack := Some v
           | ("stack_guard_shift", v) -> guard_shift := Const_env.find v
           | ("stack_guard_stack", v) -> guard_stack := Some v
           | ("stack_guard_handler", v) -> guard_handler := Some v
@@ -6789,7 +6810,7 @@ let gen_program ?prog_types prog =
           | (Some sh, Some st, Some h) -> Some (sh, st, h)
           | _ -> None
         in
-        gen_exception_entry name !frame !dispatch !before guard
+        gen_exception_entry name !frame !dispatch !before guard !dispatch_stack
     | ExceptionRestoreDef (name, fields, _) ->
         let frame = ref "" in
         List.iter (function ("frame", v) -> frame := v | _ -> ()) fields;

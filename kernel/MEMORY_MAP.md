@@ -74,11 +74,14 @@ build; the boundaries are what matter.
 | `overflow_stack_run_bottom` | `0x00b20000` | `0x40928000` | linker script `.stack` | CHECKED (ELF) |
 | `overflow_stack_bottom` | `0x00b24000` | `0x4092c000` | linker script `.stack` | CHECKED (ELF) |
 | `overflow_stack_top` | `0x00b28000` | `0x40930000` | linker script `.stack` | CHECKED (ELF) |
-| `usable_ram_start` | `0x00b28000` | `0x40930000` | linker script, `ALIGN(4096)` | CHECKED (ELF) |
+| `irq_stack_run_bottom` | `0x00b28000` | `0x40930000` | linker script `.stack` | CHECKED (ELF) |
+| `irq_stack_bottom` | `0x00b2c000` | `0x40934000` | linker script `.stack` | CHECKED (ELF) |
+| `irq_stack_top` | `0x00b30000` | `0x40938000` | linker script `.stack` | CHECKED (ELF) |
+| `usable_ram_start` | `0x00b30000` | `0x40938000` | linker script, `ALIGN(4096)` | CHECKED (ELF) |
 
 `stack_top` is an alias of `boot_stack_top`, kept because `entry.S` names
-it. `overflow_stack_top` and `usable_ram_start` are the same address:
-`.stack` ends where the page pool begins, and it is already page-aligned.
+it. `irq_stack_top` and `usable_ram_start` are the same address: `.stack`
+ends where the page pool begins, and it is already page-aligned.
 
 ### An address between `_start` and `usable_ram_start` is kernel image
 
@@ -104,6 +107,7 @@ on every exception taken while standing on it.
 | Boot | `.stack`, symbols above | `kernel_linker_stacks_well_shaped()` at runtime |
 | Secondary core | `.stack`, symbols above | same |
 | Overflow report | `.stack`, symbols above | same |
+| IRQ handler | `.stack`, symbols above | same |
 | Per process | a `page_alloc_contiguous(8)` run, anywhere at or above `usable_ram_start` | `scheduled_process_table_probe` |
 
 State: **HAND**. The numbers behind it are CHECKED (const) below.
@@ -134,8 +138,8 @@ because these are the numbers people actually quote:
 | `KERNEL_PROCESS_STACK_SIZE` | 16384 | `KERNEL_STACK_PAGES * PAGE_SIZE` |
 | `KERNEL_STACK_RUN_BYTES` | 32768 | twice the above |
 | Page pool extent | 800 MiB | `BOOT_PAGE_COUNT * PAGE_SIZE` |
-| Page pool end (RPi5) | `0x32b28000` | `usable_ram_start + 800 MiB` |
-| Page pool end (QEMU) | `0x72930000` | `usable_ram_start + 800 MiB` |
+| Page pool end (RPi5) | `0x32b30000` | `usable_ram_start + 800 MiB` |
+| Page pool end (QEMU) | `0x72938000` | `usable_ram_start + 800 MiB` |
 
 ## A page is 3968 bytes of payload, not 4096
 
@@ -206,7 +210,7 @@ Given an address from a boot log or an oops line:
    under `0x200000`, which is where a bad "kernel stack base" landed once.
 2. Between `_start` and `__bss_end`? Kernel image -- text, rodata, data,
    or bss.
-3. Between `__bss_end` and `usable_ram_start`? One of the three
+3. Between `__bss_end` and `usable_ram_start`? One of the four
    linker-provided stacks. Which one, and which half, from the symbol
    table above: an address in a run's LOWER half is an overflow that has
    already happened.
