@@ -14,6 +14,11 @@
 # opened browser tab takes -- rather than reusing a cache entry left over
 # from an earlier manual `curl`/browser session.
 #
+# Waits (bounded) for the board's Ethernet link before that first request,
+# because the runner starts the board and runs this script with nothing in
+# between. See fetch_once_link_is_up for why only the unreachable errnos
+# are waited out and why that keeps the counter check below honest.
+#
 # Sends two requests and checks the request counter increments between them
 # (same determinism argument as scripts/http_server_test.py's QEMU version:
 # a fresh board always starts at 0, and the retry-safe duplicate-suppression
@@ -26,17 +31,26 @@
 #
 # Exit code only (0 = pass, 1 = fail).
 
+import errno
 import http.client
 import os
 import re
 import subprocess
 import sys
+import time
 
 IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
 SERVER_IP = os.environ.get("ETH_TEST_SUBNET", "192.168.10") + ".2"
 SERVER_PORT = 80
 
 REQUEST_TIMEOUT_SECS = 5
+
+# How long to keep waiting for the board to become reachable at all before
+# giving up on it. This is not slack added to the request itself -- see
+# fetch_once_link_is_up below for what it is actually waiting for, and why
+# waiting is not the same as retrying.
+LINK_WAIT_SECS = 20
+LINK_POLL_SECS = 0.25
 
 
 def flush_arp_entry():
@@ -61,6 +75,50 @@ def fetch() -> tuple:
         conn.close()
 
 
+def fetch_once_link_is_up() -> tuple:
+    """The first fetch, waiting out the board's PHY link negotiation.
+
+    This runner starts the board and runs this script immediately, with no
+    readiness step in between (scripts/run_hwtest_net_ram.sh's
+    run_net_hw_test), so the first request races the board's boot and
+    `phy_init`'s Ethernet auto-negotiation -- which takes long enough that
+    AGENTS.md records this lane's "occasional link-negotiation flakiness"
+    as a known property. The other four STM32 Ethernet tests never saw it
+    because they are raw AF_PACKET scripts that retry every frame
+    (eth_tcp_echo_test.py's send_and_wait); this one goes through the host
+    kernel's own stack and had exactly one attempt.
+
+    Retrying is only sound because of WHICH errors are retried.
+    EHOSTUNREACH and ENETUNREACH are generated locally, by the neighbour
+    subsystem, when nothing can be sent to the address -- so the board
+    cannot have seen a request, and its counter cannot have moved. That
+    keeps the #1/#2 counter check below meaning what it means. A timeout or
+    a refused connection is NOT retried: those can mean the request
+    arrived and its response was lost, which would silently break exactly
+    that check.
+
+    The ARP flush and the cold resolution it forces are untouched: this
+    waits for the LINK, and the first request that gets through still does
+    a genuine from-scratch ARP resolution.
+    """
+    deadline = time.monotonic() + LINK_WAIT_SECS
+    waited = False
+    while True:
+        try:
+            result = fetch()
+            if waited:
+                print("  (waited %.1fs for the board's link)"
+                      % (LINK_WAIT_SECS - (deadline - time.monotonic())))
+            return result
+        except OSError as e:
+            if e.errno not in (errno.EHOSTUNREACH, errno.ENETUNREACH):
+                raise
+            if time.monotonic() >= deadline:
+                raise
+            waited = True
+            time.sleep(LINK_POLL_SECS)
+
+
 def extract_count(body: str) -> int:
     m = re.search(r"Request <span class='count'>#(\d+)</span>", body)
     if m is None:
@@ -72,7 +130,7 @@ def main() -> int:
     flush_arp_entry()
 
     try:
-        status1, ctype1, body1 = fetch()
+        status1, ctype1, body1 = fetch_once_link_is_up()
     except OSError as e:
         print(f"  first request failed: {e}")
         return 1
