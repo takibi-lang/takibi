@@ -20,6 +20,11 @@ Rows are in one of three states, and which one is always stated:
 - **CHECKED (ELF)** -- read out of the linked `kernel.elf` by
   `scripts/check_kernel_memory_map.py`, which fails the build if this
   document and the build disagree. Run as part of `make kernelbuild`.
+  After a change that legitimately moves the layout, refresh these rows
+  with `python3 scripts/check_kernel_memory_map.py --update` -- a separate
+  command on purpose, because the point of the check is that somebody
+  looks at a layout change, and a document that heals itself is one nobody
+  reads.
 - **CHECKED (const)** -- the named `const` is read out of the named `.tkb`
   file by the same script and compared.
 - **HAND** -- written by a person, checked by nobody. Treat as suspect
@@ -63,21 +68,21 @@ build; the boundaries are what matter.
 | Symbol | RPi5 | QEMU `virt` | Defined by | State |
 |---|---|---|---|---|
 | `_start` | `0x00200000` | `0x40000000` | linker script `.` assignment | CHECKED (ELF) |
-| `__bss_start` | `0x0062d000` | `0x4042c000` | linker script `.bss` | CHECKED (ELF) |
-| `__bss_end` | `0x00b0f030` | `0x40915740` | linker script `.bss` | CHECKED (ELF) |
-| `boot_stack_run_bottom` | `0x00b10000` | `0x40918000` | linker script `.stack` | CHECKED (ELF) |
-| `boot_stack_bottom` | `0x00b14000` | `0x4091c000` | linker script `.stack` | CHECKED (ELF) |
-| `boot_stack_top` | `0x00b18000` | `0x40920000` | linker script `.stack` | CHECKED (ELF) |
-| `secondary_stack_run_bottom` | `0x00b18000` | `0x40920000` | linker script `.stack` | CHECKED (ELF) |
-| `secondary_stack_bottom` | `0x00b1c000` | `0x40924000` | linker script `.stack` | CHECKED (ELF) |
-| `secondary_stack_top` | `0x00b20000` | `0x40928000` | linker script `.stack` | CHECKED (ELF) |
-| `overflow_stack_run_bottom` | `0x00b20000` | `0x40928000` | linker script `.stack` | CHECKED (ELF) |
-| `overflow_stack_bottom` | `0x00b24000` | `0x4092c000` | linker script `.stack` | CHECKED (ELF) |
-| `overflow_stack_top` | `0x00b28000` | `0x40930000` | linker script `.stack` | CHECKED (ELF) |
-| `irq_stack_run_bottom` | `0x00b28000` | `0x40930000` | linker script `.stack` | CHECKED (ELF) |
-| `irq_stack_bottom` | `0x00b2c000` | `0x40934000` | linker script `.stack` | CHECKED (ELF) |
-| `irq_stack_top` | `0x00b30000` | `0x40938000` | linker script `.stack` | CHECKED (ELF) |
-| `usable_ram_start` | `0x00b30000` | `0x40938000` | linker script, `ALIGN(4096)` | CHECKED (ELF) |
+| `__bss_start` | `0x0062e000` | `0x4042d000` | linker script `.bss` | CHECKED (ELF) |
+| `__bss_end` | `0x00b10030` | `0x40916740` | linker script `.bss` | CHECKED (ELF) |
+| `boot_stack_run_bottom` | `0x00b18000` | `0x40918000` | linker script `.stack` | CHECKED (ELF) |
+| `boot_stack_bottom` | `0x00b1c000` | `0x4091c000` | linker script `.stack` | CHECKED (ELF) |
+| `boot_stack_top` | `0x00b20000` | `0x40920000` | linker script `.stack` | CHECKED (ELF) |
+| `secondary_stack_run_bottom` | `0x00b20000` | `0x40920000` | linker script `.stack` | CHECKED (ELF) |
+| `secondary_stack_bottom` | `0x00b24000` | `0x40924000` | linker script `.stack` | CHECKED (ELF) |
+| `secondary_stack_top` | `0x00b28000` | `0x40928000` | linker script `.stack` | CHECKED (ELF) |
+| `overflow_stack_run_bottom` | `0x00b28000` | `0x40928000` | linker script `.stack` | CHECKED (ELF) |
+| `overflow_stack_bottom` | `0x00b2c000` | `0x4092c000` | linker script `.stack` | CHECKED (ELF) |
+| `overflow_stack_top` | `0x00b30000` | `0x40930000` | linker script `.stack` | CHECKED (ELF) |
+| `irq_stack_run_bottom` | `0x00b30000` | `0x40930000` | linker script `.stack` | CHECKED (ELF) |
+| `irq_stack_bottom` | `0x00b34000` | `0x40934000` | linker script `.stack` | CHECKED (ELF) |
+| `irq_stack_top` | `0x00b38000` | `0x40938000` | linker script `.stack` | CHECKED (ELF) |
+| `usable_ram_start` | `0x00b38000` | `0x40938000` | linker script, `ALIGN(4096)` | CHECKED (ELF) |
 
 `stack_top` is an alias of `boot_stack_top`, kept because `entry.S` names
 it. `irq_stack_top` and `usable_ram_start` are the same address: `.stack`
@@ -109,6 +114,11 @@ on every exception taken while standing on it.
 | Overflow report | `.stack`, symbols above | same |
 | IRQ handler | `.stack`, symbols above | same |
 | Per process | a `page_alloc_contiguous(8)` run, anywhere at or above `usable_ram_start` | `scheduled_process_table_probe` |
+
+Pool chunks (`kernel/lib/intrusive_pool.tkb`) are also aligned page runs,
+of 1 to 8 pages depending on the pooled type's size. They are not stacks,
+but they share the property that makes an address answerable: a run is
+aligned to its own size, so masking an address gives its chunk base.
 
 State: **HAND**. The numbers behind it are CHECKED (const) below.
 

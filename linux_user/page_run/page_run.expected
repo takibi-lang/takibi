@@ -2,5 +2,5 @@ page_run
 a 4-page run is page-aligned, 4-page aligned, and 4 pages long (aligned, run alignment, count, pages taken): true true 4 4
 the whole run is one writable range across its page boundaries: true
 releasing gives back every page of the run at once (pages returned, provider back to empty): 4 true
-a 2-page run fails when free pages exist but none adjoin (free pages, run refused, a single page still works): 5 true true
+a 2-page run fails when free pages exist but none adjoin (free pages, run refused, a single page still works): 32 true true
 done

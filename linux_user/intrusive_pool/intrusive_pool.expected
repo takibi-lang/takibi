@@ -1,8 +1,12 @@
 intrusive_pool
 slot stride for usize (8-byte payload + 1 bookkeeping word): 16
 slots per chunk, derived from sizeof(T) alone: 248
-same pool type, 1960-byte payload, same derivation: 2
-what the in-page header costs at page-dividing strides (1024, 2048; 4 and 2 if metadata were out of line): 3 1
+same pool type, 1960-byte payload, same derivation: 8
+page-dividing strides no longer lose a slot to the header (1024, 2048 -- slots, chunk pages): 15 4 15 8
+the chosen order differs between a small and a large T (usize pages, BigPayload pages): 1 4
+a payload larger than a page pools, in a chunk of several pages (slot bytes, chunk pages, slots, placed): 5008 8 6 6
+slots starting beyond the chunk's first page validate and name the same chunk (beyond first page, base+valid, values): 5 true true
+reclaiming a multi-page chunk gives back every page of it (chunks released, provider delta): 1 0
 static bytes of bookkeeping for a 336-object pool -- growable: 5440, intrusive: 88
 intrusive pool size is the same for a 1960-byte payload: true
 pages consumed before the first insert: 0
@@ -16,11 +20,11 @@ double free of an already-freed slot counted, not acted on: true
 an address from another pool, rebranded by hand, is still rejected without dereferencing it: true
 200 live objects from a pool declared with no capacity (live, chunks, pages used): 200 1 1
 cursor walk found every live payload exactly once (count, checksum): 200 20100
-two chunks filled before the drain (live, chunks, pages): 4 2 2
-draining gave one page back and kept one empty chunk in reserve (live, chunks, released, pages still held): 0 1 1 1
+two chunks filled before the drain (live, chunks, pages): 16 2 8
+draining gave one chunk back and kept one empty chunk in reserve (live, chunks, released, pages still held): 0 1 1 4
 the released chunk's addresses stop validating at once, and the retained one's do not (both before, exactly one after): true true
 reallocating after the drain reused the reserved chunk without asking for a page: true
-reclaim hands back the retained reserve too (held before, pages returned, chunks left, provider delta): 1 1 0 1
+reclaim hands back the retained reserve too (held before, pages returned, chunks left, provider delta): 1 1 0 4
 a pool retaining 0 returns its page as soon as the chunk empties (grew, back to start, chunks, retained): true true 0 0
 the poisoned slot is itself still handed out normally: true
 a corrupted next_free is rejected, not returned (rejected, handed back the poison, counted): true false 1
@@ -34,7 +38,7 @@ first use of a slot: the payload's first word is the chain link it was carrying,
 reuse of that same slot: previous occupant survives past the link word (same slot, b == 2, c == 3): true true true
 a wrecked chunk header cannot widen what validates (real slot yes, off-by-one no, past the chunk no): true true true
 the invariant probe reports the wrecked chunk and survives walking it: true
-1960-byte objects placed before the PROVIDER ran out (objects, chunks, pages left): 6 3 0
+1960-byte objects placed before the PROVIDER ran out (objects, chunks, pages left): 112 14 2
 every phase left its pool's own bookkeeping coherent (all passed, phases checked): true 7
 every lock above was balanced, singly held and consistently ordered (reentrant, order violations, unbalanced, still held, untracked): 0 0 0 0 0
 taking one pool's guard twice on a path is caught: true

@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Fail the build when kernel/MEMORY_MAP.md and the build disagree.
 
+Run with --update to rewrite the ELF-symbol rows from the current build
+instead of failing. That is the maintenance action after a change that
+moves the layout, and it is deliberately a separate command rather than
+something the check does for you: the point of the check is that somebody
+LOOKS at a layout change, and a self-healing document is one nobody
+reads.
+
 A memory map is the kind of document that is written once, is correct for a
 month, and is then quietly wrong at the moment someone trusts it.  The rows
 it can check are checked; the rows it cannot are required to say so, which
@@ -98,6 +105,27 @@ def check_state(cells, marker, name):
              f"if nothing verifies it")
 
 
+def update_elf_symbols(text):
+    """Rewrite the ELF rows from the build. Returns the new document text."""
+    marker = "<!-- checked: elf-symbols -->"
+    symbols = {name: nm_symbols(elf) for name, elf in ELFS.items()}
+    out = []
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("|") and not all(
+                set(c) <= set("-: ") for c in stripped.strip("|").split("|")):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            name = unbacktick(cells[0])
+            if (len(cells) >= 3 and any("CHECKED (ELF)" in c for c in cells)
+                    and name in symbols["RPi5"] and name in symbols["QEMU"]):
+                cells[1] = f"`0x{symbols['RPi5'][name]:08x}`"
+                cells[2] = f"`0x{symbols['QEMU'][name]:08x}`"
+                indent = line[:len(line) - len(line.lstrip())]
+                line = indent + "| " + " | ".join(cells) + " |\n"
+        out.append(line)
+    return "".join(out)
+
+
 def check_elf_symbols(text, problems):
     marker = "<!-- checked: elf-symbols -->"
     symbols = {name: nm_symbols(elf) for name, elf in ELFS.items()}
@@ -159,6 +187,14 @@ def main():
     if not DOC.exists():
         fail(f"{DOC} does not exist")
     text = DOC.read_text()
+    if "--update" in sys.argv[1:]:
+        updated = update_elf_symbols(text)
+        DOC.write_text(updated)
+        if updated == text:
+            print("kernel/memory-map: no ELF row needed updating")
+        else:
+            print("kernel/memory-map: ELF rows refreshed from the current build")
+        text = updated
     problems = []
     check_elf_symbols(text, problems)
     check_consts(text, problems)

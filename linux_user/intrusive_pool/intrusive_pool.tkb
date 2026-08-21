@@ -89,6 +89,18 @@ struct UninitProbe {
 struct Stride1024 { filler: [u8; 1016]; }
 struct Stride2048 { filler: [u8; 2040]; }
 
+// GitHub issue #350: a payload LARGER THAN A PAGE, which could not be
+// pooled at all before -- the pool's own static_assert rejected it, and
+// the only recourse was allocating whole pages by hand, the pattern this
+// primitive exists to replace. Its tail word is the far end of the
+// payload, so writing and reading both proves the slot really spans the
+// pages it claims to.
+struct HugePayload {
+    tag: usize;
+    filler: [u8; 4984];
+    tail: usize;
+}
+
 // GitHub issue #371: which refusal. A removal this file EXPECTS to be
 // refused asserts the reason, so "refused" and "refused for the reason
 // the test is about" stop being the same observation. Removals expected
@@ -147,33 +159,150 @@ fn app_main() {
     uart_print(intrusive_pool_slots_per_chunk(&pool_big));
     uart_puts("\n");
 
-    // GitHub issue #349, and what issue #353 taught it. The chunk header
-    // is out of the pool's hands -- the provider says where per-page
-    // metadata lives and how much of the page is the owner's -- but this
-    // provider puts it in the page's own tail, so the cliff is BACK: a
-    // stride that divides the page still loses a slot.
+    // GitHub issue #350: the page-dividing-stride cliff is gone, and the
+    // order is where it went.
     //
-    // That is deliberate. The side-array placement removed the cliff by
-    // reserving metadata for every page in the machine, which is 25 MB of
-    // BSS on the kernel's 204800 pages whether or not anything is pooled.
-    // In-page charges only the pages that are actually chunks, and the
-    // kernel pools a handful. Break-even is around 450 MB of pooled
-    // memory. So the numbers below are the price, and at the payload
-    // sizes the kernel actually pools (16-96 bytes) it is about 3% of
-    // slots.
+    // A 1024- or 2048-byte payload used to be the worst case for a
+    // one-page chunk: the header took the page's tail, so a stride that
+    // divided the page lost a whole slot (3 and 1 respectively, against
+    // the 4 and 2 the arithmetic promises). The order rule now pushes
+    // both up until a chunk holds INTRUSIVE_MIN_SLOTS_PER_CHUNK, and one
+    // 128-byte header amortized over 4 or 8 pages costs a fraction of a
+    // slot rather than a whole one.
     //
-    // No pages are consumed here: slots-per-chunk is a function of
-    // sizeof(T) and the provider's constants, which is the same reason it
-    // needs no caller-supplied parameter.
+    // The chosen order is printed beside the count, because it is the
+    // thing that changed and a slot count alone cannot show it.
+    //
+    // No pages are consumed here: both are functions of sizeof(T) and
+    // this file's own constants, which is the same reason they need no
+    // caller-supplied parameter.
     let mut pool_1k: IntrusivePool(Stride1024);
     intrusive_pool_init(&pool_1k);
     let mut pool_2k: IntrusivePool(Stride2048);
     intrusive_pool_init(&pool_2k);
-    uart_puts("what the in-page header costs at page-dividing strides ");
-    uart_puts("(1024, 2048; 4 and 2 if metadata were out of line): ");
+    uart_puts("page-dividing strides no longer lose a slot to the header ");
+    uart_puts("(1024, 2048 -- slots, chunk pages): ");
     uart_print(intrusive_pool_slots_per_chunk(&pool_1k));
     uart_puts(" ");
+    uart_print(intrusive_pool_chunk_pages(&pool_1k));
+    uart_puts(" ");
     uart_print(intrusive_pool_slots_per_chunk(&pool_2k));
+    uart_puts(" ");
+    uart_print(intrusive_pool_chunk_pages(&pool_2k));
+    uart_puts("\n");
+    // GitHub issue #350's own acceptance: the order is observable, and it
+    // differs between a small and a large T. A `usize` takes the smallest
+    // chunk this pool builds; a 1960-byte payload does not.
+    uart_puts("the chosen order differs between a small and a large T ");
+    uart_puts("(usize pages, BigPayload pages): ");
+    uart_print(intrusive_pool_chunk_pages(&pool_s));
+    uart_puts(" ");
+    uart_print(intrusive_pool_chunk_pages(&pool_big));
+    uart_puts("\n");
+
+    // GitHub issue #350's headline: a T larger than one page. This did not
+    // COMPILE before -- the ceiling was a static_assert, not a runtime
+    // failure -- so the fact that this stage exists at all is half the
+    // claim. The other half is that a slot in the second and later pages
+    // of a chunk behaves exactly like one in the first, which is what the
+    // O(1) address-to-chunk step has to keep true once a chunk is bigger
+    // than the granularity it masks with.
+    let mut pool_huge: IntrusivePool(HugePayload);
+    intrusive_pool_init(&pool_huge);
+    let huge_pages_before: usize = page_allocator_live_count();
+    let mut huge_placed: usize = 0;
+    let mut huge_beyond_first_page: usize = 0;
+    let mut huge_base_ok: bool = true;
+    let mut huge_values_ok: bool = true;
+    let mut huge_base: usize = 0;
+    let mut huge_going: bool = true;
+    while (huge_going && huge_placed < intrusive_pool_slots_per_chunk(&pool_huge)) {
+        let hg = intrusive_pool_lock(&pool_huge);
+        let hr = intrusive_pool_insert(&pool_huge, hg);
+        intrusive_pool_unlock(&pool_huge, hg);
+        match hr {
+            IntrusivePoolInsertResult::OutOfMemory => { huge_going = false; }
+            IntrusivePoolInsertResult::Allocated(h) => {
+                let address: usize = intrusive_owner_slot(h);
+                if (huge_base == 0) { huge_base = intrusive_chunk_base_of(&pool_huge, address); }
+                // Every slot must answer with the SAME chunk base, whichever
+                // page of the chunk it starts in.
+                if (intrusive_chunk_base_of(&pool_huge, address) != huge_base) {
+                    huge_base_ok = false;
+                }
+                if (intrusive_pool_slot_is_valid(&pool_huge, address) == false) {
+                    huge_base_ok = false;
+                }
+                if (address - huge_base >= PAGE_SIZE) {
+                    huge_beyond_first_page = huge_beyond_first_page + 1;
+                }
+                let payload: *HugePayload = intrusive_pool_ref(&pool_huge, h);
+                payload.tag = huge_placed + 1;
+                payload.tail = 0xC0FFEE + huge_placed;
+                if (intrusive_pool_ref(&pool_huge, h).tag != huge_placed + 1 ||
+                    intrusive_pool_ref(&pool_huge, h).tail != 0xC0FFEE + huge_placed) {
+                    huge_values_ok = false;
+                }
+                intrusive_owner_drop(h);
+                huge_placed = huge_placed + 1;
+            }
+        }
+    }
+    uart_puts("a payload larger than a page pools, in a chunk of several ");
+    uart_puts("pages (slot bytes, chunk pages, slots, placed): ");
+    uart_print(intrusive_pool_slot_stride(&pool_huge));
+    uart_puts(" ");
+    uart_print(intrusive_pool_chunk_pages(&pool_huge));
+    uart_puts(" ");
+    uart_print(intrusive_pool_slots_per_chunk(&pool_huge));
+    uart_puts(" ");
+    uart_print(huge_placed);
+    uart_puts("\n");
+    uart_puts("slots starting beyond the chunk's first page validate and ");
+    uart_puts("name the same chunk (beyond first page, base+valid, values): ");
+    uart_print(huge_beyond_first_page);
+    uart_puts(" ");
+    uart_print_bool(huge_base_ok);
+    uart_puts(" ");
+    uart_print_bool(huge_values_ok);
+    uart_puts("\n");
+    // Reclaim returns the WHOLE chunk, not a page of it (issue #350's own
+    // acceptance): the provider must be exactly back where it started.
+    // Restart the walk after every free, exactly as the drain below does:
+    // the chunk can vanish underneath a cursor.
+    let mut huge_draining: bool = true;
+    while (huge_draining) {
+        let mut huge_freed_one: bool = false;
+        let mut huge_cursor: usize = intrusive_pool_first_slot(&pool_huge);
+        while (huge_cursor != 0 && huge_freed_one == false) {
+            match intrusive_pool_probe_slot(&pool_huge, huge_cursor) {
+                IntrusiveSlotProbe::NoPayload => {
+                    huge_cursor = intrusive_pool_next_slot(&pool_huge, huge_cursor);
+                }
+                IntrusiveSlotProbe::Live(huge_view) => {
+                    let occupant: usize = intrusive_view_generation(huge_view);
+                    intrusive_view_drop(huge_view);
+                    let victim =
+                        intrusive_owner_new(&pool_huge, huge_cursor, occupant);
+                    let hgf = intrusive_pool_lock(&pool_huge);
+                    let gone: bool = intrusive_remove_succeeded(
+                        intrusive_pool_remove(&pool_huge, hgf, victim));
+                    intrusive_pool_unlock(&pool_huge, hgf);
+                    if (gone == false) { huge_values_ok = false; }
+                    huge_freed_one = true;
+                }
+            }
+        }
+        if (huge_freed_one == false) { huge_draining = false; }
+    }
+    let hgr = intrusive_pool_lock(&pool_huge);
+    let huge_released: usize = intrusive_pool_reclaim(&pool_huge, hgr);
+    intrusive_pool_unlock(&pool_huge, hgr);
+    uart_puts("reclaiming a multi-page chunk gives back every page of it ");
+    uart_puts("(chunks released, provider delta): ");
+    uart_print(huge_released);
+    uart_puts(" ");
+    uart_print(page_allocator_live_count() - huge_pages_before);
     uart_puts("\n");
 
     // A GrowablePool able to hold the same 336 objects must pre-commit
@@ -427,9 +556,15 @@ fn app_main() {
     let mut pool_r: IntrusivePool(BigPayload);
     intrusive_pool_init(&pool_r);
     let pages_before_reclaim: usize = page_allocator_live_count();
+    // GitHub issue #350: derived, not the literal 4 this used to be. A
+    // chunk's slot count is now a function of T and of the order the pool
+    // picks, so "enough to fill two chunks" is a question only the pool
+    // can answer -- and a hardcoded count silently stopped filling two of
+    // them the moment BigPayload's chunk grew from 2 slots to 8.
+    let fill_target: usize = intrusive_pool_slots_per_chunk(&pool_r) * 2;
     let mut filled: usize = 0;
     let mut fill_failed: bool = false;
-    while (filled < 4 && fill_failed == false) {
+    while (filled < fill_target && fill_failed == false) {
         let g12 = intrusive_pool_lock(&pool_r);
         let r12 = intrusive_pool_insert(&pool_r, g12);
         intrusive_pool_unlock(&pool_r, g12);
@@ -457,9 +592,21 @@ fn app_main() {
     // (GitHub issues #346/#353), and since #349 it is the per-page
     // metadata being cleared that enforces it rather than a list the
     // address was removed from.
+    // GitHub issue #350: "the third slot" used to be in the second chunk
+    // because a chunk held two. It holds eight now, and a fixed ordinal
+    // silently stopped naming a second chunk at all -- so the second
+    // address is found by walking until the CHUNK differs, which is what
+    // this check always meant.
     let r_a0: usize = intrusive_pool_first_slot(&pool_r);
-    let r_a1: usize = intrusive_pool_next_slot(&pool_r, r_a0);
-    let r_b0: usize = intrusive_pool_next_slot(&pool_r, r_a1);
+    let r_a_base: usize = intrusive_chunk_base_of(&pool_r, r_a0);
+    let mut r_b0: usize = 0;
+    let mut r_scan: usize = intrusive_pool_next_slot(&pool_r, r_a0);
+    while (r_scan != 0 && r_b0 == 0) {
+        if (intrusive_chunk_base_of(&pool_r, r_scan) != r_a_base) {
+            r_b0 = r_scan;
+        }
+        r_scan = intrusive_pool_next_slot(&pool_r, r_scan);
+    }
     let r_both_valid_before: bool =
         intrusive_pool_slot_is_valid(&pool_r, r_a0) &&
         intrusive_pool_slot_is_valid(&pool_r, r_b0);
@@ -493,7 +640,7 @@ fn app_main() {
         }
         if (freed_one == false) { draining = false; }
     }
-    uart_puts("draining gave one page back and kept one empty chunk in ");
+    uart_puts("draining gave one chunk back and kept one empty chunk in ");
     uart_puts("reserve (live, chunks, released, pages still held): ");
     uart_print(intrusive_pool_live_count(&pool_r));
     uart_puts(" ");
@@ -699,7 +846,7 @@ fn app_main() {
     // Quarantine, not a dead pool: the poisoned chunk left the partial
     // list, so the next allocation comes from a fresh one.
     let pages_before_recovery: usize = page_allocator_live_count();
-    let poisoned_base: usize = intrusive_chunk_base_of(c_slot0);
+    let poisoned_base: usize = intrusive_chunk_base_of(&pool_c, c_slot0);
     let g22 = intrusive_pool_lock(&pool_c);
     let r22 = intrusive_pool_insert(&pool_c, g22);
     intrusive_pool_unlock(&pool_c, g22);
@@ -709,7 +856,7 @@ fn app_main() {
             intrusive_owner_drop(o);
             uart_puts("the pool keeps working from a fresh chunk instead: ");
             uart_print_bool(page_allocator_live_count() == pages_before_recovery + 1 &&
-                            intrusive_chunk_base_of(fresh) != poisoned_base);
+                            intrusive_chunk_base_of(&pool_c, fresh) != poisoned_base);
             uart_puts("\n");
         }
         IntrusivePoolInsertResult::OutOfMemory => {
@@ -756,7 +903,7 @@ fn app_main() {
             intrusive_owner_drop(o);
             uart_puts("emptying it neither re-admits it nor returns its page ");
             uart_puts("(allocated elsewhere, chunks, released): ");
-            uart_print_bool(intrusive_chunk_base_of(after) != poisoned_base);
+            uart_print_bool(intrusive_chunk_base_of(&pool_c, after) != poisoned_base);
             uart_puts(" ");
             uart_print(intrusive_pool_chunk_count(&pool_c));
             uart_puts(" ");
@@ -792,7 +939,7 @@ fn app_main() {
     }
     uart_puts("the aliasing target really is a live slot in the fresh chunk: ");
     uart_print_bool(live_generation != 0 &&
-                    intrusive_chunk_base_of(live_slot) != poisoned_base);
+                    intrusive_chunk_base_of(&pool_c, live_slot) != poisoned_base);
     uart_puts("\n");
     *intrusive_slot_link_at(&pool_c, free_head) = live_slot;
 
@@ -941,8 +1088,8 @@ fn app_main() {
     // (which is the ownership question, not the bounds question) must
     // therefore change no answer. pool_u is finished with by this point,
     // so its chunk is free to wreck.
-    let u_base: usize = intrusive_chunk_base_of(u0_slot);
-    let u_header: *IntrusiveChunkHeader = intrusive_chunk_header_at(u_base);
+    let u_base: usize = intrusive_chunk_base_of(&pool_u, u0_slot);
+    let u_header: *IntrusiveChunkHeader = intrusive_chunk_header_at(&pool_u, u_base);
     u_header.next_chunk = 1;
     u_header.prev_chunk = 1;
     u_header.next_partial = 1;

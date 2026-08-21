@@ -19,7 +19,7 @@ fn app_main() !{unsafe} {
     uart_puts("page_run\n");
 
     // -- A run really is contiguous, and really is aligned.
-    let r = match page_run_alloc(4, 4) {
+    let r = match page_alloc_contiguous(4, PageOwnerTag::PoolChunk) {
         PageRunAllocResult::Allocated(o) => { o }
         PageRunAllocResult::OutOfMemory => {
             uart_puts("4-page run failed\n");
@@ -33,7 +33,7 @@ fn app_main() !{unsafe} {
     uart_puts(" ");
     uart_print_bool(r_base % (4 * PAGE_SIZE) == 0);
     uart_puts(" ");
-    uart_print(page_run_page_count(r));
+    uart_print(page_run_count(r));
     uart_puts(" ");
     uart_print(page_allocator_live_count());
     uart_puts("\n");
@@ -57,7 +57,7 @@ fn app_main() !{unsafe} {
 
     // -- Released as a unit.
     let pages_before_release: usize = page_allocator_live_count();
-    page_run_release(r);
+    page_run_free(r);
     uart_puts("releasing gives back every page of the run at once ");
     uart_puts("(pages returned, provider back to empty): ");
     uart_print(pages_before_release - page_allocator_live_count());
@@ -66,7 +66,8 @@ fn app_main() !{unsafe} {
     uart_puts("\n");
 
     // -- Fragmentation: enough free pages, none of them adjacent.
-    // Take every page, then give back every other one. PAGE_COUNT is 9,
+    // Take every page, then give back every other one (PAGE_COUNT is 64
+    // since issue #350 grew the arena),
     // so pages 0, 2, 4, 6, 8 come back -- five free pages, no two
     // adjacent -- and a 2-page run must fail rather than lie.
     let mut addrs: [usize; PAGE_COUNT];
@@ -92,8 +93,8 @@ fn app_main() !{unsafe} {
     }
     let free_pages: usize = PAGE_COUNT - page_allocator_live_count();
     let mut two_run_failed: bool = false;
-    match page_run_alloc(2, 1) {
-        PageRunAllocResult::Allocated(o) => { page_run_release(o); }
+    match page_alloc_contiguous(2, PageOwnerTag::PoolChunk) {
+        PageRunAllocResult::Allocated(o) => { page_run_free(o); }
         PageRunAllocResult::OutOfMemory => { two_run_failed = true; }
     }
     // A single page must still be available -- the failure has to be

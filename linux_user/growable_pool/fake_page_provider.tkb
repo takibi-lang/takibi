@@ -12,7 +12,12 @@ use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
 
 const PAGE_SIZE: usize = 4096;
-const PAGE_COUNT: usize = 9;
+// GitHub issue #350: a chunk is up to INTRUSIVE_MAX_CHUNK_PAGES (8)
+// pages, aligned to its own size, so the arena has to be able to hold
+// several of them AND to start on a 32768-byte boundary. Nine pages was
+// enough while every chunk was one page; it cannot express the thing this
+// stand-in now exists to exercise.
+const PAGE_COUNT: usize = 64;
 
 // GitHub issue #349, resized for kernel scale (issue #353): per-page
 // storage whose MEANING belongs to whoever currently holds the page --
@@ -83,6 +88,12 @@ private let mut fake_page_generation: [usize; PAGE_COUNT];
 // Nonzero on every page of a multi-page run, holding that run's length,
 // so a page belonging to a run cannot be released as if it were single.
 private let mut fake_page_run_length: [usize; PAGE_COUNT];
+// GitHub issue #384: who the page was handed to. The real provider keeps
+// this in PageMeta; here it is its own array, because this stand-in has
+// no PageMeta. What matters is that page_owner_tag_at answers the same
+// question with the same values, since kernel/lib/intrusive_pool.tkb
+// validates a chunk base through it before dereferencing anything.
+private let mut fake_page_owner: [PageOwnerTag; PAGE_COUNT];
 private let mut fake_page_next_generation: usize = 1;
 private let mut fake_page_live: usize = 0;
 
@@ -106,15 +117,18 @@ fn page_allocator_init() {
     for i: usize in 0..<PAGE_COUNT {
         fake_page_generation[i] = 0;
         fake_page_run_length[i] = 0;
+        fake_page_owner[i] = PageOwnerTag::Unowned;
     }
     fake_page_next_generation = 1;
     fake_page_live = 0;
 }
 
-private fn fake_page_claim(index: {0..<PAGE_COUNT as usize}) -> usize {
+private fn fake_page_claim(index: {0..<PAGE_COUNT as usize},
+                           owner: PageOwnerTag) -> usize {
     let generation: usize = fake_page_next_generation;
     fake_page_next_generation = generation + 1;
     fake_page_generation[index] = generation;
+    fake_page_owner[index] = owner;
     fake_page_live = fake_page_live + 1;
     return generation;
 }
@@ -137,7 +151,7 @@ fn page_alloc(owner: PageOwnerTag) -> PageAllocResult {
     for i: usize in 0..<PAGE_COUNT {
         if (fake_page_generation[i] == 0) {
             let checked: {0..<PAGE_COUNT as usize} = i;
-            let generation: usize = fake_page_claim(i);
+            let generation: usize = fake_page_claim(checked, owner);
             return PageAllocResult::Allocated(page_owner_new(checked, generation));
         }
     }
@@ -233,6 +247,26 @@ fn page_meta_at(physical: usize) -> usize {
     return physical + PAGE_USABLE_BYTES;
 }
 
+// GitHub issue #384: who holds the page an arbitrary address falls in.
+// Same contract as the real provider's: any address, not a page-aligned
+// one, and Unowned for anything that is not a live page of this
+// allocator's. kernel/lib/intrusive_pool.tkb validates a chunk base
+// through this before dereferencing a header inside it, so a stand-in
+// that answered loosely would let the prototype pass a check the kernel
+// fails.
+fn page_owner_tag_at(address: usize) -> PageOwnerTag {
+    let base: usize = (fake_pages as *u8) as usize;
+    let pool_bytes: usize = PAGE_SIZE * PAGE_COUNT;
+    if (address < base || address >= base + pool_bytes) {
+        return PageOwnerTag::Unowned;
+    }
+    let index: usize = (address - base) / PAGE_SIZE;
+    if (index >= PAGE_COUNT) { return PageOwnerTag::Unowned; }
+    let checked: {0..<PAGE_COUNT as usize} = index;
+    if (fake_page_generation[checked] == 0) { return PageOwnerTag::Unowned; }
+    return fake_page_owner[checked];
+}
+
 // Clears one page's metadata. The allocator owns this storage, so it is
 // the allocator that must not leave a freed page describing itself as
 // something an owner still holds -- see page_transferred_release_physical,
@@ -318,7 +352,20 @@ private fn fake_page_run_is_free(start: usize, count: usize) -> bool {
     return true;
 }
 
-fn page_run_alloc(count: usize, align_pages: usize) -> PageRunAllocResult {
+// GitHub issue #350: the real provider's name and contract --
+// page_alloc_contiguous(count, owner), aligned to `count * PAGE_SIZE`
+// when `count` is a power of two, with no separate alignment argument.
+// The earlier page_run_alloc(count, align_pages) let a caller ASK for
+// alignment; the kernel's does not, because a consumer that has to ask is
+// a consumer that can forget, and intrusive_pool's O(1)
+// address-to-chunk step depends on the alignment being unconditional.
+fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
+        -> PageRunAllocResult {
+    return fake_page_run_alloc(count, count, owner);
+}
+
+private fn fake_page_run_alloc(count: usize, align_pages: usize,
+                               owner: PageOwnerTag) -> PageRunAllocResult {
     if (count == 0 || align_pages == 0 || count > PAGE_COUNT) {
         return PageRunAllocResult::OutOfMemory;
     }
@@ -333,6 +380,7 @@ fn page_run_alloc(count: usize, align_pages: usize) -> PageRunAllocResult {
                 if (i >= start && i < start + count) {
                     fake_page_generation[i] = generation;
                     fake_page_run_length[i] = count;
+                    fake_page_owner[i] = owner;
                 }
             }
             fake_page_live = fake_page_live + count;
@@ -349,21 +397,47 @@ fn page_run_physical_address(owner: borrow PageRunOwner[run]) -> usize {
     return base + owner.index * PAGE_SIZE;
 }
 
-fn page_run_page_count(owner: borrow PageRunOwner[run]) -> usize {
+fn page_run_count(owner: borrow PageRunOwner[run]) -> usize {
     return owner.count;
+}
+
+// The run-sized twin of page_owner_transfer_index, same name and shape as
+// the real provider's: a holder keeping the run for as long as it lives
+// has nothing to do with a linear value it can never give back, and a
+// linear value cannot live in an array.
+fn page_run_owner_transfer_index(owner: sink PageRunOwner[run])
+        -> {0..<PAGE_COUNT as usize} {
+    return owner.index;
 }
 
 // Releases the whole run, which is the only granularity this owner can
 // express -- and page_transferred_release_physical refuses a page that
 // belongs to one, so there is no way to take a run apart by halves.
-fn page_run_release(owner: sink PageRunOwner[run]) {
-    let start: usize = owner.index;
-    let count: usize = owner.count;
+fn page_run_free(owner: sink PageRunOwner[run]) {
+    fake_page_run_release(owner.index, owner.count);
+}
+
+// Give back a run whose linear owner was consumed at allocation, named by
+// base address and page count. The real provider's
+// page_run_transferred_release_physical, same name and shape.
+fn page_run_transferred_release_physical(physical: usize, count: usize)
+        !{unsafe} {
+    let base: usize = (fake_pages as *u8) as usize;
+    let pool_bytes: usize = PAGE_SIZE * PAGE_COUNT;
+    if (physical < base || physical >= base + pool_bytes ||
+        (physical - base) % PAGE_SIZE != 0) {
+        return;
+    }
+    fake_page_run_release((physical - base) / PAGE_SIZE, count);
+}
+
+private fn fake_page_run_release(start: usize, count: usize) !{unsafe} {
     for i: usize in 0..<PAGE_COUNT {
         if (i >= start && i < start + count) {
             if (fake_page_generation[i] != 0) {
                 fake_page_generation[i] = 0;
                 fake_page_run_length[i] = 0;
+                fake_page_owner[i] = PageOwnerTag::Unowned;
                 fake_page_live = fake_page_live - 1;
             }
         }

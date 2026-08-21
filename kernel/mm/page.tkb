@@ -358,9 +358,33 @@ fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
 }
 
 fn page_run_free(owner: sink PageRunOwner[run]) !{unsafe} {
+    page_run_release_indices(owner.first, owner.count);
+}
+
+// Give back a run whose linear owner was consumed at allocation, named by
+// its base ADDRESS and page count. The run-sized twin of
+// page_transferred_release_physical, and for the same reason: a holder
+// that erased the owner to keep the run in an array still has to be able
+// to hand it back. `count` is the holder's, not the allocator's -- a run
+// is not recorded as a unit anywhere, so a caller passing the wrong count
+// releases the wrong pages, exactly as the single-page entry point trusts
+// the caller's address.
+fn page_run_transferred_release_physical(physical: usize, count: usize)
+        !{unsafe} {
     let base: usize = usable_ram_start;
-    let first: usize = owner.first;
-    let count: usize = owner.count;
+    let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
+    if (physical < base || physical >= base + pool_bytes ||
+        (physical - base) % PAGE_SIZE != 0) {
+        return;
+    }
+    let index: usize = (physical - base) / PAGE_SIZE;
+    if (index >= BOOT_PAGE_COUNT) { return; }
+    let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+    page_run_release_indices(checked, count);
+}
+
+private fn page_run_release_indices(first: usize, count: usize) !{unsafe} {
+    let base: usize = usable_ram_start;
     for k: usize in 0..<count {
         let index: usize = first + k;
         if (index < BOOT_PAGE_COUNT) {

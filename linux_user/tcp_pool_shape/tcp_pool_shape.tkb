@@ -481,10 +481,6 @@ fn app_main() !{unsafe} {
     let mut conns_freed: usize = 0;
     let mut frames_freed: usize = 0;
     let mut retxs_freed: usize = 0;
-    // Kept across teardown to build the stale pair below -- the fd table
-    // will hold exactly this shape for a connection that has since closed.
-    let mut stale_slot: usize = 0;
-    let mut stale_generation: usize = 0;
     let mut cursor: usize = intrusive_pool_first_slot(&conns);
     while (cursor != 0) {
         let next_cursor: usize = intrusive_pool_next_slot(&conns, cursor);
@@ -515,13 +511,6 @@ fn app_main() !{unsafe} {
                 retxs_freed = retxs_freed + entries;
                 frames_freed = frames_freed + chain_frames;
 
-                // Overwritten every iteration on purpose, so this ends up
-                // holding the LAST connection freed. The chunk free list is
-                // LIFO, so that is the slot the next insert hands back --
-                // keeping the stale-pair check below on its recycled-slot
-                // reading rather than the weaker freed-slot one.
-                stale_slot = cursor;
-                stale_generation = generation;
                 let owner = intrusive_owner_new(&conns, cursor, generation);
                 let g4 = intrusive_pool_lock(&conns);
                 let removed2: bool =
@@ -603,6 +592,34 @@ fn app_main() !{unsafe} {
     // it names, and after a close the slot is recycled to a NEW occupant.
     // Presenting the old pair must fail, and must fail on the generation
     // rather than on the address, since the address is perfectly valid.
+    //
+    // GitHub issue #350: the pair is built HERE, from a slot this stage
+    // allocates and frees itself, rather than carried out of the teardown
+    // loop above. It used to be the last connection freed, on the
+    // reasoning that a chunk's free list is LIFO -- true, but it assumed
+    // that slot's CHUNK still belonged to the pool, and once a pool can
+    // span several chunks the last one to empty is exactly the one handed
+    // back to the page provider. The pair then named a released chunk,
+    // and remove() answered ForeignAddress: a correct answer to a
+    // question the test did not mean to ask. Allocating the slot here
+    // makes the precondition this stage's own business.
+    let seed_g = intrusive_pool_lock(&conns);
+    let seed = intrusive_pool_insert_zeroed(&conns, seed_g);
+    intrusive_pool_unlock(&conns, seed_g);
+    let mut stale_slot: usize = 0;
+    let mut stale_generation: usize = 0;
+    match seed {
+        IntrusivePoolInsertResult::OutOfMemory => {}
+        IntrusivePoolInsertResult::Allocated(seed_owner) => {
+            stale_slot = intrusive_owner_slot(seed_owner);
+            stale_generation = intrusive_owner_generation(seed_owner);
+            let seed_free_g = intrusive_pool_lock(&conns);
+            let seed_freed: bool = intrusive_remove_succeeded(
+                intrusive_pool_remove(&conns, seed_free_g, seed_owner));
+            intrusive_pool_unlock(&conns, seed_free_g);
+            if (seed_freed == false) { uart_puts("seed free refused\n"); }
+        }
+    }
     let refill_g = intrusive_pool_lock(&conns);
     let refill = intrusive_pool_insert_zeroed(&conns, refill_g);
     intrusive_pool_unlock(&conns, refill_g);
