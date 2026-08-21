@@ -8986,6 +8986,30 @@ let codegen_tests = [
      stored. That test cannot run here (it needs QEMU and gdb), so this
      one holds the property directly: a struct that asks for no special
      alignment is lowered to exactly its declared fields. *)
+  (* The compile-time half of SPEC's "`&&` and `||` do not short-circuit".
+     linux_user/logical_eval pins that both operands RUN; this pins that
+     the checker knows it -- it must NOT narrow the right-hand side using
+     the left, because the generated code evaluates the right-hand side
+     either way. If it ever did, `i < 4 && arr[i]` would compile under
+     --forbid-trap with the bounds check elided and read out of bounds for
+     any i. The two halves agreeing is what keeps non-short-circuit a
+     readability hazard rather than a soundness one. *)
+  Alcotest.test_case
+    "the refinement checker does not narrow across `&&`, which is what \
+     keeps non-short-circuit evaluation sound" `Quick
+    (expect_trap_sites 1
+       "let mut sc_guard_arr: [u8; 4];
+        fn sc_guarded(i: usize) -> bool {
+          return i < 4 && sc_guard_arr[i] == 7;
+        }
+        fn sc_guarded_if(i: usize) -> bool {
+          // The same guard as an enclosing `if` DOES narrow, and leaves
+          // no trap site -- so the one site above belongs to the `&&`
+          // form specifically, not to the shape of the access.
+          if (i < 4) { return sc_guard_arr[i] == 7; }
+          return false;
+        }");
+
   Alcotest.test_case
     "a struct with no alignment demand is lowered to exactly its declared \
      fields, so its by-value ABI is not inflated by materialized padding \

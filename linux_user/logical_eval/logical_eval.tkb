@@ -1,0 +1,45 @@
+// SPEC's "`&&` and `||` do NOT short-circuit", pinned by execution.
+//
+// The property is easy to change by accident (a codegen rewrite of
+// logical operators into branches would introduce short-circuiting), easy
+// to assume the other way round (every C-family language short-circuits),
+// and load-bearing: `p != 0 && p.field` dereferences `p` either way, so
+// kernel code must not write a guard that way.
+//
+// Counted rather than observed through a side effect's VALUE, because
+// what is being pinned is whether the operand RAN.
+let mut calls: usize = 0;
+
+fn side(value: bool) -> bool {
+    calls = calls + 1;
+    return value;
+}
+
+fn uart_print_bool(value: bool) {
+    if (value) { uart_puts("true"); } else { uart_puts("false"); }
+}
+
+fn app_main() {
+    calls = 0;
+    let and_false: bool = side(false) && side(true);
+    uart_puts("&& with a false left operand: result=");
+    uart_print_bool(and_false);
+    uart_puts(" operands evaluated=");
+    uart_print(calls);
+    uart_puts("\n");
+
+    calls = 0;
+    let or_true: bool = side(true) || side(false);
+    uart_puts("|| with a true left operand:  result=");
+    uart_print_bool(or_true);
+    uart_puts(" operands evaluated=");
+    uart_print(calls);
+    uart_puts("\n");
+
+    // The half that keeps this a readability hazard and not a soundness
+    // one: the refinement checker does not narrow across `&&` either, so
+    // it never proves a bound the generated code would not honour. That
+    // is a compile-time property and lives in test/test_takibi.ml; this
+    // file states where to look rather than restating it.
+    uart_puts("both operands always run, so a guard must be an enclosing if\n");
+}

@@ -1,0 +1,3 @@
+&& with a false left operand: result=false operands evaluated=2
+|| with a true left operand:  result=true operands evaluated=2
+both operands always run, so a guard must be an enclosing if

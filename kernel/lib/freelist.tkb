@@ -163,7 +163,9 @@ fn freelist_core_unlink_range(core: &mut FreelistCore(N), first: usize,
     // Entries at the HEAD first, so the walk below always has a real
     // predecessor to rewrite.
     let mut walking: bool = true;
-    while (walking) {
+    let mut head_steps: usize = 0;
+    while (walking && head_steps <= N) {
+        head_steps = head_steps + 1;
         let head: usize = core.free_head;
         if (head < N && head >= first && head - first < count) {
             core.free_head = unsafe { core.next_free[head] };
@@ -172,8 +174,17 @@ fn freelist_core_unlink_range(core: &mut FreelistCore(N), first: usize,
             walking = false;
         }
     }
+    // Bounded, not trusting termination: a corrupted `next_free` can make
+    // this list cyclic, and an unbounded walk over one hangs the kernel
+    // with no diagnosis. kernel/lib/intrusive_pool.tkb bounds every chain
+    // walk it does for the same reason (issue #355's invariant probe says
+    // so explicitly); this one was written without that and should not
+    // have been. N steps is a full traversal of the longest possible
+    // list, so reaching it means the list is not a list.
     let mut prev: usize = core.free_head;
-    while (prev < N) {
+    let mut steps: usize = 0;
+    while (prev < N && steps <= N) {
+        steps = steps + 1;
         let next: usize = unsafe { core.next_free[prev] };
         if (next < N && next >= first && next - first < count) {
             unsafe { core.next_free[prev] = core.next_free[next] };
