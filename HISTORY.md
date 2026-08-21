@@ -15,6 +15,98 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-21: Two Failures `make -f examples/Makefile allcheck` Found After #257
+
+Neither was caused by #257. Both were found only because the examples
+tree is checked on its own lane, which is the argument for keeping that
+lane -- `make allcheck` at the root was green through both.
+
+#### A struct's member list is its by-value ABI
+
+Issue #362's fix (`bbddb6d`) computed every struct's layout and emitted
+the padding as MEMBERS, deferring to LLVM nowhere. For structs that
+declare `align(N)` that was the point. For every other struct it changed
+the LLVM struct TYPE while changing no offset -- and a by-value argument
+is lowered from the type, not from the offsets. `DwarfPair { state: u8,
+count: u32 }` went from `{i8, i32}` to `{i8, pad, i32}`, and from two
+argument registers to **five**: one per member, the padding bytes counted
+as arguments of their own.
+
+It surfaced four steps downstream, as `examples/dwarf_debug`'s GDB probe
+printing `{ptr = 0x712345678 <error: Cannot access memory>, len =
+38654705672}` for a slice argument. The probe reads arguments after eight
+`stepi`, and the prologue had grown from 13 instructions to 16, so it was
+reading them before they were stored. The step count is brittle, but it
+was reporting something real.
+
+Bisected by building each compiler commit and asking a three-line
+question -- what line does the address eight instructions past the
+breakpoint belong to -- rather than by running the QEMU/gdb probe each
+time. 13 instructions and line 42 before `bbddb6d`, 16 and line 41 after.
+
+Fixed in `567e94d`: padding is materialized only when something asks for
+more alignment than its type naturally has (a member whose type carries
+`align(N)`, directly or inherited, or the struct's own `align(N)`
+exceeding what its members give it). Everywhere else the computed offsets
+and the backend's agree field for field, so deferring is both correct and
+free.
+
+**The lesson is the one the bug's shape teaches**: offsets are the
+contract, the member list is not -- but the member list is what the ABI
+is derived from, so a layout change that preserves every offset can still
+change how a value is PASSED. SPEC.md now says this where `align(N)` is
+defined. The regression test holds the property directly (a struct with
+no alignment demand lowers to exactly its declared fields) rather than
+through a probe that needs QEMU and gdb.
+
+#### The third time a network flake was the harness, not the stack
+
+`FAIL http_server (stm32/ram)`, "first request failed: [Errno 113] No
+route to host". `scripts/run_hwtest_net_ram.sh`'s `run_net_hw_test`
+starts the board and runs the test script with nothing in between -- no
+boot-log wait, no link check -- and this test flushes the ARP entry and
+then makes exactly one attempt. `phy_init`'s Ethernet auto-negotiation
+takes long enough that AGENTS.md already records this lane's "occasional
+link-negotiation flakiness" as a known property.
+
+Every other STM32 Ethernet test survives it by retrying every frame
+(`eth_tcp_echo_test.py`'s `send_and_wait`). This one goes through the
+host kernel's own TCP/IP stack, which is deliberate and is the entire
+point of the test, and had no retry at all.
+
+The log ruled out the compiler change above without touching hardware:
+the same example's **Flash** build passed on the same run (`st-flash
+write` + reset gives the PHY seconds of slack the RAM path does not),
+`tcp_echo` passed a full handshake on the same board minutes earlier, and
+`http_server_sdcard` passed three requests immediately after. A
+miscompile produces wrong bytes, not an unreachable host.
+
+Fixed in `01b78a5` by waiting out the link, and **which errors are waited
+out is the whole of the correctness argument**: `EHOSTUNREACH` and
+`ENETUNREACH` are raised locally by the neighbour subsystem when nothing
+can be sent, so the board cannot have seen a request and its counter
+cannot have moved -- which keeps the `#1`/`#2` counter check meaning what
+it means. A timeout or a refused connection is deliberately not retried:
+either can mean the request arrived and its response was lost, and
+retrying through one would break exactly the check the test exists for.
+
+This is the third network flake in this tree to be the harness rather
+than the stack (see the 2026-08-01 and 2026-08-02 entries: the first was
+genuinely `tcp.tkb`, the second was the harness firing `curl` before the
+kernel was ready). **Check what the harness assumes about readiness
+before reading the protocol code.**
+
+#### One false positive worth naming
+
+`grep -r FAIL` over the artifact logs also reports
+`_build/hwtest-stm32/fatfs_stm32_ram_/uart.log:dump: FAIL`. That line is
+in `examples/fatfs/fatfs_stm32.expected` -- the test deliberately
+exercises the host-I/O error path, and the same run reports `PASS fatfs
+(stm32/ram)`. Grepping artifacts for FAIL finds expectations as well as
+failures.
+
+---
+
 ### 2026-08-20/21: Issue #257 -- The TCP Connection Ceiling Is Gone
 
 `TCP_CONNECTION_MAX` and `PENDING_TCP_MAX` no longer exist. A connection is
