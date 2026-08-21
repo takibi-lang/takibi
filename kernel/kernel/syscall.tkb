@@ -188,13 +188,12 @@ fn kernel_syscall_daemon_start() {
     // shell's descriptors or the HTTPD child's clone-reap record. Interactive
     // HTTPd uses this same handoff, but does not opt into the bounded test
     // lifecycle below.
+    // GitHub issue #257 step 5: the per-connection reset loop that stood
+    // here is gone with the connections it walked. A connection exists only
+    // while it is allocated, and tcp_connection_pool_init drains every one
+    // -- there is no fixed set of slots left to put back into a clean
+    // state.
     tcp_connection_pool_init();
-    for connection_index: usize in 0..<TCP_CONNECTION_MAX {
-        tcp_connections[connection_index].connection_open = false;
-        tcp_connections[connection_index].socket_buffer_length = 0;
-        tcp_connections[connection_index].socket_buffer_offset = 0;
-        tcp_connections[connection_index].inetd_response_length = 0;
-    }
     syscall_inetd_mode = false;
     syscall_test_lifecycle_daemon_reset();
 }
@@ -225,9 +224,17 @@ fn kernel_syscall_exec_path_matches(name: []u8) -> bool !{unsafe} {
 
 must_use variant KernelFdReapResult { Failed; Reaped; }
 must_use variant KernelDaemonTeardownResult { Invalid; Reclaimed; }
+// GitHub issue #257 step 5: the payload was
+// `{0..<TCP_CONNECTION_MAX as usize}` -- a proof that the value indexed a
+// real element of an array that no longer exists. It is a pool ADDRESS
+// now, and plain `usize` is the honest type for one: what used to be a
+// bounds proof is intrusive_pool_matches, which the take path performs on
+// every use and which also catches the case a bounds proof never could,
+// an address that is in range but names a connection that has since
+// closed.
 must_use variant KernelConnectionLookupResult {
     Missing;
-    Found({0..<TCP_CONNECTION_MAX as usize});
+    Found(usize);
 }
 must_use variant KernelSocketFdAllocResult {
     Full;
@@ -388,12 +395,6 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     }
     for path_index: usize in 0..<256 { syscall_exec_path[path_index] = 0; }
     tcp_connection_pool_init();
-    for connection_index: usize in 0..<TCP_CONNECTION_MAX {
-        tcp_connections[connection_index].connection_open = false;
-        tcp_connections[connection_index].socket_buffer_length = 0;
-        tcp_connections[connection_index].socket_buffer_offset = 0;
-        tcp_connections[connection_index].inetd_response_length = 0;
-    }
     syscall_test_evidence_reset_socket_counters();
     syscall_inetd_mode = false;
     for context: usize in 0..<PROCESS_CONTEXT_MAX {
@@ -446,11 +447,11 @@ fn kernel_connection_fd_lookup(fd: usize) -> KernelConnectionLookupResult {
                                 UnifiedFdKind::Connection) {
         UnifiedSocketResult::Missing => {}
         UnifiedSocketResult::Found(handle) => {
-          let slot_value: usize = unified_connection_slot(handle);
-          if (slot_value < TCP_CONNECTION_MAX) {
-            let slot: {0..<TCP_CONNECTION_MAX as usize} = slot_value;
-            return KernelConnectionLookupResult::Found(slot);
-          }
+          // No range test: an address is not in a range, and the check
+          // that replaced one runs where the address is USED (see this
+          // variant's own comment).
+          return KernelConnectionLookupResult::Found(
+              unified_connection_slot(handle));
         }
     }
     return KernelConnectionLookupResult::Missing;
@@ -589,10 +590,7 @@ fn kernel_connected_transport_release(slot: usize, generation: usize)
         TcpConnectionTakeResult::Ready(owner) => {
             match network_capability_take() {
                 NetworkCapabilityTakeResult::Empty => {
-                    match tcp_connection_put(owner) {
-                        TcpConnectionPutResult::Stored => {}
-                        TcpConnectionPutResult::Conflict => {}
-                    }
+                    tcp_connection_put(owner);
                     return false;
                 }
                 NetworkCapabilityTakeResult::Ready(ready) => {
@@ -621,17 +619,21 @@ fn kernel_connected_descriptor_release(fd: usize) -> bool {
                                 UnifiedFdKind::Connection) {
       UnifiedSocketResult::Missing => { return false; }
       UnifiedSocketResult::Found(handle) => {
-          let found_slot: usize = unified_connection_slot(handle);
+          let slot: usize = unified_connection_slot(handle);
           let generation: usize = unified_connection_generation(handle);
           let references: usize = unified_object_references(handle);
-          if (found_slot < TCP_CONNECTION_MAX) {
-              let slot: {0..<TCP_CONNECTION_MAX as usize} = found_slot;
+          {
               if (references == 0) { return false; }
-              if (references == 1 && tcp_connections[slot].connection_open) {
-                  let closed: bool = kernel_connected_transport_release(
-                      slot, generation);
-                  if (closed) { tcp_connections[slot].connection_open = false; }
-                  return closed;
+              if (references == 1 && tcp_connection_open_at(slot)) {
+                  // GitHub issue #257 step 5: `connection_open = false`
+                  // used to be written here, into an array element that
+                  // outlived the connection. It cannot be written now,
+                  // because on success there is no connection left to
+                  // write it to -- kernel_connected_transport_release
+                  // frees it, and tcp_connection_free clears the flag on
+                  // its way out for exactly the readers that used to need
+                  // this line.
+                  return kernel_connected_transport_release(slot, generation);
               }
               return true;
           }
@@ -675,10 +677,8 @@ fn kernel_syscall_daemon_teardown() -> KernelDaemonTeardownResult {
         kernel_syscall_any_file_is_open()) {
         return KernelDaemonTeardownResult::Invalid;
     }
-    for connection_index: usize in 0..<TCP_CONNECTION_MAX {
-        if (tcp_connections[connection_index].connection_open) {
-            return KernelDaemonTeardownResult::Invalid;
-        }
+    if (tcp_any_connection_open()) {
+        return KernelDaemonTeardownResult::Invalid;
     }
     match unified_fd_close(kernel_syscall_process_slot(), 4) {
         UnifiedFdResult::Invalid => {
@@ -695,7 +695,7 @@ fn kernel_syscall_inetd_accept(port: u16)
     match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => {
             kernel_boot_log_resource_exhausted(
-                "TCP connection pool" as *u8, TCP_CONNECTION_MAX);
+                "TCP connection pool" as *u8, 0);
             return KernelInetdAcceptResult::TimedOut;
         }
         TcpConnectionAllocResult::Allocated(owner) => {
@@ -723,47 +723,49 @@ fn kernel_syscall_inetd_accept(port: u16)
                                     return KernelInetdAcceptResult::TimedOut;
                                 }
                                 NetworkCapabilityPutResult::Stored => {
-                                    match tcp_connection_put(owner) {
-                                        TcpConnectionPutResult::Conflict => {
-                                            return KernelInetdAcceptResult::TimedOut;
-                                        }
-                                        TcpConnectionPutResult::Stored => {
-                                            if (slot >= TCP_CONNECTION_MAX) {
+                                    // GitHub issue #257 step 5: the
+                                    // Conflict arm that stood here
+                                    // described the parking lot already
+                                    // holding an owner for this slot, and
+                                    // there is no parking lot. The
+                                    // `slot >= TCP_CONNECTION_MAX` guard
+                                    // it wrapped is gone too, and not
+                                    // silently: what bounded the slot was
+                                    // the array it indexed, and what
+                                    // validates the address that replaced
+                                    // it is the pool, on every use.
+                                    tcp_connection_put(owner);
+                                        syscall_inetd_mode = true;
+                                        tcp_connection_payload(slot).connection_open = true;
+                                        match unified_connection_create(
+                                                kernel_syscall_process_slot(),
+                                                0, slot, generation) {
+                                            UnifiedOpenResult::Invalid => {
                                                 return KernelInetdAcceptResult::TimedOut;
                                             }
-                                            syscall_inetd_mode = true;
-                                            tcp_connections[slot].connection_open = true;
-                                            match unified_connection_create(
-                                                    kernel_syscall_process_slot(),
-                                                    0, slot, generation) {
-                                                UnifiedOpenResult::Invalid => {
-                                                    return KernelInetdAcceptResult::TimedOut;
-                                                }
-                                                UnifiedOpenResult::Full => {
-                                                    kernel_boot_log_resource_exhausted(
-                                                        "shared object pool" as *u8,
-                                                        SHARED_OBJECT_MAX);
-                                                    return KernelInetdAcceptResult::TimedOut;
-                                                }
-                                                UnifiedOpenResult::Ok => {}
+                                            UnifiedOpenResult::Full => {
+                                                kernel_boot_log_resource_exhausted(
+                                                    "shared object pool" as *u8,
+                                                    SHARED_OBJECT_MAX);
+                                                return KernelInetdAcceptResult::TimedOut;
                                             }
-                                            match unified_fd_duplicate(
-                                                    kernel_syscall_process_slot(),
-                                                    0, 1) {
-                                                UnifiedFdInstallResult::Invalid => {
-                                                    return KernelInetdAcceptResult::TimedOut;
-                                                }
-                                                UnifiedFdInstallResult::RefOverflow => {
-                                                    return KernelInetdAcceptResult::TimedOut;
-                                                }
-                                                UnifiedFdInstallResult::Ok => {}
-                                            }
-                                            tcp_connections[slot].socket_buffer_length = 0;
-                                            tcp_connections[slot].socket_buffer_offset = 0;
-                                            tcp_connections[slot].inetd_response_length = 0;
-                                            return KernelInetdAcceptResult::Accepted;
+                                            UnifiedOpenResult::Ok => {}
                                         }
-                                    }
+                                        match unified_fd_duplicate(
+                                                kernel_syscall_process_slot(),
+                                                0, 1) {
+                                            UnifiedFdInstallResult::Invalid => {
+                                                return KernelInetdAcceptResult::TimedOut;
+                                            }
+                                            UnifiedFdInstallResult::RefOverflow => {
+                                                return KernelInetdAcceptResult::TimedOut;
+                                            }
+                                            UnifiedFdInstallResult::Ok => {}
+                                        }
+                                        tcp_connection_payload(slot).socket_buffer_length = 0;
+                                        tcp_connection_payload(slot).socket_buffer_offset = 0;
+                                        tcp_connection_payload(slot).inetd_response_length = 0;
+                                        return KernelInetdAcceptResult::Accepted;
                                 }
                             }
                         }
@@ -785,17 +787,20 @@ fn kernel_syscall_file_evidence()
     return syscall_test_evidence_file_counts();
 }
 
-fn kernel_syscall_socket_evidence() -> bool {
+// GitHub issue #257 step 5: this used to assert on connection slots 0 and
+// 1 by hand -- a test that enumerated the capacity, which was defensible
+// only while the capacity was 2. What it was actually checking is that no
+// connection is left open, which is now one question rather than a list.
+fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
     return syscall_test_evidence_socket_calls() == 1 &&
            syscall_test_evidence_bind_calls() == 1 &&
            syscall_test_evidence_listen_calls() == 1 &&
            syscall_test_evidence_accept_calls() == 2 &&
            syscall_test_evidence_accept_capability_roundtrips() == 2 &&
-           tcp_connections[0].connection_open == false &&
+           tcp_any_connection_open() == false &&
            kernel_connected_fd_is_open(0) == false &&
            kernel_connected_fd_is_open(1) == false &&
            kernel_connected_fd_is_open(5) == false &&
-           tcp_connections[1].connection_open == false &&
            kernel_connected_fd_is_open(6) == false &&
            syscall_test_evidence_connected_close_calls() == 2 &&
            syscall_test_evidence_connected_read_calls() == 3 &&
@@ -992,9 +997,7 @@ fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
                 return (false, POLLNVAL);
             }
             KernelConnectionLookupResult::Found(slot) => {
-                if (tcp_connections[slot].connection_open &&
-                        tcp_connections[slot].socket_buffer_offset <
-                            tcp_connections[slot].socket_buffer_length) {
+                if (tcp_connection_has_pending_read(slot)) {
                     return (true, POLLIN);
                 }
                 return (true, 0);
@@ -1465,7 +1468,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             if (kernel_connected_fd_is_open(fd) == false) {
                 return SyscallAction::Resume(LINUX_EBADF);
             }
-            let write_slot: {0..<TCP_CONNECTION_MAX as usize} =
+            let write_slot: usize =
                 match kernel_connection_fd_lookup(fd) {
                     KernelConnectionLookupResult::Missing => {
                         return SyscallAction::Resume(LINUX_EBADF);
@@ -1473,7 +1476,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
             let write_generation: usize = kernel_connection_fd_identity(fd);
-            if (tcp_connections[write_slot].connection_open == false || length == 0) {
+            if (tcp_connection_open_at(write_slot) == false || length == 0) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
             let mut amount: usize = length;
@@ -1481,7 +1484,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             if (amount < length) {
                 syscall_test_evidence_record_partial_write();
             }
-            let received_length: usize = tcp_connections[write_slot].socket_buffer_length;
+            let received_length: usize = tcp_connection_payload(write_slot).socket_buffer_length;
             match tcp_connection_take(write_slot, write_generation) {
                 TcpConnectionTakeResult::Missing => {
                     return SyscallAction::Resume(LINUX_EAGAIN);
@@ -1489,21 +1492,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 TcpConnectionTakeResult::Ready(owner) => {
                   match network_capability_take() {
                     NetworkCapabilityTakeResult::Empty => {
-                        match tcp_connection_put(owner) {
-                            TcpConnectionPutResult::Stored => {}
-                            TcpConnectionPutResult::Conflict => {}
-                        }
+                        tcp_connection_put(owner);
                         return SyscallAction::Resume(LINUX_EAGAIN);
                     }
                     NetworkCapabilityTakeResult::Ready(ready) => {
-                    let socket_buffers = tcp_connection_rx_slice(write_slot);
+                    let socket_buffers = tcp_connection_rx_slice(tcp_connection_payload(write_slot));
                     let destination_base: *u8 = socket_buffers as *u8;
                     match user_range_check_read(kernel_process_current_root(), address, amount) {
                         UserReadRangeResult::Fault => {
-                            match tcp_connection_put(owner) {
-                                TcpConnectionPutResult::Stored => {}
-                                TcpConnectionPutResult::Conflict => {}
-                            }
+                            tcp_connection_put(owner);
                             match network_capability_put(ready) {
                                 NetworkCapabilityPutResult::Stored => {}
                                 NetworkCapabilityPutResult::Conflict => {}
@@ -1522,10 +1519,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         KernelTcpSendResult::Invalid(after_invalid) => {
                             match network_capability_put(after_invalid) {
                                 NetworkCapabilityPutResult::Stored => {
-                                    match tcp_connection_put(owner) {
-                                        TcpConnectionPutResult::Stored => {}
-                                        TcpConnectionPutResult::Conflict => {}
-                                    }
+                                    tcp_connection_put(owner);
                                     return SyscallAction::Resume(LINUX_EINVAL);
                                 }
                                 NetworkCapabilityPutResult::Conflict => {
@@ -1541,12 +1535,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                     return SyscallAction::Resume(LINUX_EINVAL);
                                 }
                                 NetworkCapabilityPutResult::Stored => {
-                                    match tcp_connection_put(owner) {
-                                        TcpConnectionPutResult::Stored => {}
-                                        TcpConnectionPutResult::Conflict => {
-                                            return SyscallAction::Resume(LINUX_EINVAL);
-                                        }
-                                    }
+                                    tcp_connection_put(owner);
                                     return SyscallAction::Resume(amount);
                                 }
                             }
@@ -1558,21 +1547,21 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
         }
         if (fd == 1 && syscall_inetd_mode) {
-            let inetd_write_slot: {0..<TCP_CONNECTION_MAX as usize} =
+            let inetd_write_slot: usize =
                 match kernel_connection_fd_lookup(fd) {
                     KernelConnectionLookupResult::Missing => {
                         return SyscallAction::Resume(LINUX_EBADF);
                     }
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
-            if (tcp_connections[inetd_write_slot].connection_open == false ||
+            if (tcp_connection_open_at(inetd_write_slot) == false ||
                 length > 1460 -
-                    tcp_connections[inetd_write_slot].inetd_response_length) {
+                    tcp_connection_payload(inetd_write_slot).inetd_response_length) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
             let response_base: *u8 =
-                (tcp_connection_inetd_slice(inetd_write_slot) as *u8) +
-                (tcp_connections[inetd_write_slot].inetd_response_length as isize);
+                (tcp_connection_inetd_slice(tcp_connection_payload(inetd_write_slot)) as *u8) +
+                (tcp_connection_payload(inetd_write_slot).inetd_response_length as isize);
             match user_range_check_read(kernel_process_current_root(), address, length) {
                 UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserReadRangeResult::Ok(range) => {
@@ -1580,8 +1569,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         copy_from_user_raw(range, response_base, length);
                 }
             }
-            tcp_connections[inetd_write_slot].inetd_response_length =
-                tcp_connections[inetd_write_slot].inetd_response_length + length;
+            tcp_connection_payload(inetd_write_slot).inetd_response_length =
+                tcp_connection_payload(inetd_write_slot).inetd_response_length + length;
             return SyscallAction::Resume(length);
         }
         if (kernel_syscall_file_is_open(fd)) {
@@ -1955,7 +1944,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // UART fallback.
         if (kernel_connected_fd_is_open(fd)) {
             syscall_test_evidence_record_connected_read();
-            let read_slot: {0..<TCP_CONNECTION_MAX as usize} =
+            let read_slot: usize =
                 match kernel_connection_fd_lookup(fd) {
                     KernelConnectionLookupResult::Missing => {
                         return SyscallAction::Resume(LINUX_EBADF);
@@ -1963,18 +1952,18 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
             let read_generation: usize = kernel_connection_fd_identity(fd);
-            if (tcp_connections[read_slot].connection_open == false || requested == 0) {
+            if (tcp_connection_open_at(read_slot) == false || requested == 0) {
                 return SyscallAction::Resume(LINUX_EBADF);
             }
-            if (tcp_connections[read_slot].socket_buffer_offset <
-                    tcp_connections[read_slot].socket_buffer_length) {
-                let available: usize = tcp_connections[read_slot].socket_buffer_length -
-                    tcp_connections[read_slot].socket_buffer_offset;
+            if (tcp_connection_payload(read_slot).socket_buffer_offset <
+                    tcp_connection_payload(read_slot).socket_buffer_length) {
+                let available: usize = tcp_connection_payload(read_slot).socket_buffer_length -
+                    tcp_connection_payload(read_slot).socket_buffer_offset;
                 let mut amount: usize = requested;
                 if (amount > available) { amount = available; }
                 let source_base: *u8 =
-                    (tcp_connection_rx_slice(read_slot) as *u8) +
-                    (tcp_connections[read_slot].socket_buffer_offset as isize);
+                    (tcp_connection_rx_slice(tcp_connection_payload(read_slot)) as *u8) +
+                    (tcp_connection_payload(read_slot).socket_buffer_offset as isize);
                 match user_range_check_write(kernel_process_current_root(), address, amount) {
                     UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                     UserWriteRangeResult::Ok(range) => {
@@ -1982,8 +1971,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             copy_to_user_raw(range, source_base, amount);
                     }
                 }
-                tcp_connections[read_slot].socket_buffer_offset =
-                    tcp_connections[read_slot].socket_buffer_offset + amount;
+                tcp_connection_payload(read_slot).socket_buffer_offset =
+                    tcp_connection_payload(read_slot).socket_buffer_offset + amount;
                 return SyscallAction::Resume(amount);
             }
             match tcp_connection_take(read_slot, read_generation) {
@@ -1993,24 +1982,18 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
               TcpConnectionTakeResult::Ready(owner) => {
                let ready: NetRxCanAcquire = match network_capability_take() {
                  NetworkCapabilityTakeResult::Empty => {
-                    match tcp_connection_put(owner) {
-                        TcpConnectionPutResult::Stored => {}
-                        TcpConnectionPutResult::Conflict => {}
-                    }
+                    tcp_connection_put(owner);
                     return SyscallAction::Resume(LINUX_EAGAIN);
                  }
                  NetworkCapabilityTakeResult::Ready(r) => { r }
                };
-               let socket_buffers = tcp_connection_rx_slice(read_slot);
+               let socket_buffers = tcp_connection_rx_slice(tcp_connection_payload(read_slot));
                match kernel_tcp_receive_once(
                     owner, ready, socket_buffers[0..<1460]) {
                 KernelTcpReceiveResult::TimedOut(next) => {
                     match network_capability_put(next) {
                         NetworkCapabilityPutResult::Stored => {
-                            match tcp_connection_put(owner) {
-                                TcpConnectionPutResult::Stored => {}
-                                TcpConnectionPutResult::Conflict => {}
-                            }
+                            tcp_connection_put(owner);
                             return SyscallAction::Resume(LINUX_EAGAIN);
                         }
                         NetworkCapabilityPutResult::Conflict => {
@@ -2022,21 +2005,18 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 KernelTcpReceiveResult::Received(next) => {
                     let received: usize =
                         kernel_tcp_received_length(owner);
-                    tcp_connections[read_slot].socket_buffer_length = received;
+                    tcp_connection_payload(read_slot).socket_buffer_length = received;
                     let mut amount: usize = received;
                     if (amount > requested) { amount = requested; }
                     let source_base: *u8 =
-                        tcp_connection_rx_slice(read_slot) as *u8;
+                        tcp_connection_rx_slice(tcp_connection_payload(read_slot)) as *u8;
                     match user_range_check_write(kernel_process_current_root(), address, amount) {
                         UserWriteRangeResult::Fault => {
                             match network_capability_put(next) {
                                 NetworkCapabilityPutResult::Stored => {}
                                 NetworkCapabilityPutResult::Conflict => {}
                             }
-                            match tcp_connection_put(owner) {
-                                TcpConnectionPutResult::Stored => {}
-                                TcpConnectionPutResult::Conflict => {}
-                            }
+                            tcp_connection_put(owner);
                             return SyscallAction::Resume(LINUX_EFAULT);
                         }
                         UserWriteRangeResult::Ok(range) => {
@@ -2044,15 +2024,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 copy_to_user_raw(range, source_base, amount);
                         }
                     }
-                    tcp_connections[read_slot].socket_buffer_offset = amount;
+                    tcp_connection_payload(read_slot).socket_buffer_offset = amount;
                     match network_capability_put(next) {
                         NetworkCapabilityPutResult::Stored => {
-                            match tcp_connection_put(owner) {
-                                TcpConnectionPutResult::Stored => {}
-                                TcpConnectionPutResult::Conflict => {
-                                    return SyscallAction::Resume(LINUX_EINVAL);
-                                }
-                            }
+                            tcp_connection_put(owner);
                             return SyscallAction::Resume(amount);
                         }
                         NetworkCapabilityPutResult::Conflict => {
@@ -2415,7 +2390,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match tcp_connection_alloc() {
           TcpConnectionAllocResult::Full => {
             kernel_boot_log_resource_exhausted(
-                "TCP connection pool" as *u8, TCP_CONNECTION_MAX);
+                "TCP connection pool" as *u8, 0);
             return SyscallAction::Resume(LINUX_EAGAIN);
           }
           TcpConnectionAllocResult::Allocated(owner) => {
@@ -2450,34 +2425,30 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             }
                             NetworkCapabilityPutResult::Stored => {
                                 syscall_test_evidence_record_accept_capability_roundtrip();
-                                match tcp_connection_put(owner) {
-                                  TcpConnectionPutResult::Conflict => {
-                                    return SyscallAction::Resume(LINUX_EINVAL);
-                                  }
-                                  TcpConnectionPutResult::Stored => {
-                                    if (slot >= TCP_CONNECTION_MAX) {
-                                        return SyscallAction::Resume(LINUX_EINVAL);
+                                // Issue #257 step 5: no Conflict arm and no
+                                // `slot >= TCP_CONNECTION_MAX` guard -- see
+                                // the identical site in the inetd accept
+                                // path above for why neither is a check
+                                // quietly dropped.
+                                tcp_connection_put(owner);
+                                tcp_connection_payload(slot).connection_open = true;
+                                match unified_connection_create(
+                                        kernel_syscall_process_slot(),
+                                        connected_fd, slot, generation) {
+                                    UnifiedOpenResult::Invalid => {
+                                        return SyscallAction::Resume(LINUX_EAGAIN);
                                     }
-                                    tcp_connections[slot].connection_open = true;
-                                    match unified_connection_create(
-                                            kernel_syscall_process_slot(),
-                                            connected_fd, slot, generation) {
-                                        UnifiedOpenResult::Invalid => {
-                                            return SyscallAction::Resume(LINUX_EAGAIN);
-                                        }
-                                        UnifiedOpenResult::Full => {
-                                            kernel_boot_log_resource_exhausted(
-                                                "shared object pool" as *u8,
-                                                SHARED_OBJECT_MAX);
-                                            return SyscallAction::Resume(LINUX_EAGAIN);
-                                        }
-                                        UnifiedOpenResult::Ok => {}
+                                    UnifiedOpenResult::Full => {
+                                        kernel_boot_log_resource_exhausted(
+                                            "shared object pool" as *u8,
+                                            SHARED_OBJECT_MAX);
+                                        return SyscallAction::Resume(LINUX_EAGAIN);
                                     }
-                                    tcp_connections[slot].socket_buffer_length = 0;
-                                    tcp_connections[slot].socket_buffer_offset = 0;
-                                    return SyscallAction::Resume(connected_fd);
-                                  }
+                                    UnifiedOpenResult::Ok => {}
                                 }
+                                tcp_connection_payload(slot).socket_buffer_length = 0;
+                                tcp_connection_payload(slot).socket_buffer_offset = 0;
+                                return SyscallAction::Resume(connected_fd);
                             }
                         }
                     }
@@ -2551,7 +2522,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // boundary. Its writes are transmitted independently of RX ownership.
         if (x0 == 1 && syscall_inetd_mode == false &&
             kernel_connected_fd_is_open(1) && x1 == 1) {
-            let direct_shutdown_slot: {0..<TCP_CONNECTION_MAX as usize} =
+            let direct_shutdown_slot: usize =
                 match kernel_connection_fd_lookup(1) {
                     KernelConnectionLookupResult::Missing => {
                         return SyscallAction::Resume(LINUX_EINVAL);
@@ -2560,15 +2531,17 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 };
             let direct_shutdown_generation: usize =
                 kernel_connection_fd_identity(1);
-            if (tcp_connections[direct_shutdown_slot].connection_open == false ||
+            if (tcp_connection_open_at(direct_shutdown_slot) == false ||
                 kernel_connected_transport_release(
                     direct_shutdown_slot, direct_shutdown_generation) == false) {
                 return SyscallAction::Resume(LINUX_EAGAIN);
             }
-            tcp_connections[direct_shutdown_slot].connection_open = false;
+            // The release above freed the connection; the flag it used to
+            // clear here goes out with it (see the identical site in
+            // kernel_connected_descriptor_release).
             return SyscallAction::Resume(0);
         }
-        let inetd_shutdown_slot: {0..<TCP_CONNECTION_MAX as usize} =
+        let inetd_shutdown_slot: usize =
             match kernel_connection_fd_lookup(1) {
                 KernelConnectionLookupResult::Missing => {
                     return SyscallAction::Resume(LINUX_EINVAL);
@@ -2577,31 +2550,28 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             };
         let inetd_shutdown_generation: usize = kernel_connection_fd_identity(1);
         if (x0 != 1 || syscall_inetd_mode == false ||
-            tcp_connections[inetd_shutdown_slot].connection_open == false ||
-            tcp_connections[inetd_shutdown_slot].inetd_response_length == 0) {
+            tcp_connection_open_at(inetd_shutdown_slot) == false ||
+            tcp_connection_payload(inetd_shutdown_slot).inetd_response_length == 0) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
         let received_length: usize =
-            tcp_connections[inetd_shutdown_slot].socket_buffer_length;
+            tcp_connection_payload(inetd_shutdown_slot).socket_buffer_length;
         match tcp_connection_take(
                 inetd_shutdown_slot, inetd_shutdown_generation) {
           TcpConnectionTakeResult::Missing => { return SyscallAction::Resume(LINUX_EAGAIN); }
           TcpConnectionTakeResult::Ready(owner) => {
            match network_capability_take() {
             NetworkCapabilityTakeResult::Empty => {
-                match tcp_connection_put(owner) {
-                    TcpConnectionPutResult::Stored => {}
-                    TcpConnectionPutResult::Conflict => {}
-                }
+                tcp_connection_put(owner);
                 return SyscallAction::Resume(LINUX_EAGAIN);
             }
             NetworkCapabilityTakeResult::Ready(ready) => {
                 let inetd_responses =
-                    tcp_connection_inetd_slice(inetd_shutdown_slot);
+                    tcp_connection_inetd_slice(tcp_connection_payload(inetd_shutdown_slot));
                 match kernel_tcp_send_received(
                         owner, ready, inetd_responses[0..<1460],
                         received_length,
-                        tcp_connections[inetd_shutdown_slot].inetd_response_length) {
+                        tcp_connection_payload(inetd_shutdown_slot).inetd_response_length) {
                     KernelTcpSendResult::Invalid(after_invalid) => {
                         match network_capability_put(after_invalid) {
                             NetworkCapabilityPutResult::Stored => { }
@@ -2610,10 +2580,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 return SyscallAction::Resume(LINUX_EINVAL);
                             }
                         }
-                        match tcp_connection_put(owner) {
-                            TcpConnectionPutResult::Stored => {}
-                            TcpConnectionPutResult::Conflict => {}
-                        }
+                        tcp_connection_put(owner);
                         return SyscallAction::Resume(LINUX_EINVAL);
                     }
                     KernelTcpSendResult::Sent(after_send) => {
@@ -2626,7 +2593,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                     }
                                     NetworkCapabilityPutResult::Stored => {
                                         tcp_connection_free(owner);
-                                        tcp_connections[inetd_shutdown_slot].connection_open = false;
                                         return SyscallAction::Resume(0);
                                     }
                                 }

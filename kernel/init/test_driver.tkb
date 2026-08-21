@@ -589,8 +589,8 @@ fn kernel_test_common_probes() {
     } else {
         kernel_boot_log("asid pool: failed\n");
     }
-    if (tcp_connection_pool_exhaustion_probe()) {
-        kernel_boot_log("tcp connection pool: exhaustion at capacity=2, reuse-after-free ok\n");
+    if (tcp_connection_pool_probe()) {
+        kernel_boot_log("tcp connection pool: five concurrent connections past the old ceiling of 2, each its own storage, stale address refused, everything given back ok\n");
     } else {
         kernel_boot_log("tcp connection pool: failed\n");
     }

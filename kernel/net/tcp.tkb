@@ -19,13 +19,23 @@
 //   mutation is at least IRQ-safe now (kernel/lib/pool_lock.tkb masks
 //   DAIF.I), which the nine arrays it replaced were not; excluding a
 //   second CPU is still nobody's job here -- see issue #261.
-// - TCP_CONNECTION_MAX=2 remains: see `kernel/RESOURCE_LIMITS.md` for its
-//   exhaustion-result/boundary-test contract. PENDING_TCP_MAX is GONE
-//   (issue #257): the retransmit queue is a chain of pool-allocated
-//   entries with no ceiling, and the only exhaustion left is the page
-//   allocator being empty, still logged via
-//   kernel_boot_log_resource_exhausted and still reported to callers the
-//   same way a full queue was.
+// - THERE IS NO CEILING LEFT. TCP_CONNECTION_MAX and PENDING_TCP_MAX are
+//   both gone (issue #257): a connection is a slot in
+//   IntrusivePool(TcpConnection), its frames are slots in a NetFrame pool,
+//   and its unacknowledged segments are a chain of pooled entries. The
+//   only exhaustion left is the page allocator being empty, still logged
+//   via kernel_boot_log_resource_exhausted and still reported to callers
+//   exactly as a full fixed pool was -- TcpConnectionAllocResult::Full
+//   and pending_tcp_record's "not tracked", both unchanged, because the
+//   caller's correct response to memory pressure is the same one it had
+//   to a hand-picked limit.
+// - A CONNECTION'S IDENTITY IS AN ADDRESS. What used to be
+//   `{0..<TCP_CONNECTION_MAX as usize}` -- a proof that an index named a
+//   real array element -- is intrusive_pool_matches, which proves more:
+//   that the address names a live slot of THIS pool whose occupant is
+//   still the one the generation names. See kernel/kernel/fd_table.tkb's
+//   transport_slot for what that means at the boundary where the pair is
+//   stored.
 // - THE RECEIVE PATH NOW ALLOCATES. Queuing a segment for retransmission
 //   takes a page from kernel/mm/page.tkb when the current chunk is full.
 //   That is reached from net_rx_wait() onward -- `!{may_block}` thread
@@ -57,8 +67,10 @@ use "kernel/net/checksum.tkb";
 use "kernel/net/arp.tkb";
 use "kernel/net/wire.tkb";
 use "kernel/net/icmp.tkb";
-use "kernel/lib/slotmap.tkb";
-use "kernel/lib/freelist.tkb";
+// GitHub issue #257 step 5: kernel/lib/slotmap.tkb and its freelist are
+// gone from this file -- a SlotMap(N) is exactly the compile-time ceiling
+// this issue set out to remove, and the pool below replaces both the
+// allocation and the generation bookkeeping it provided.
 // GitHub issue #257: the retransmit queue is a pool now, not an array.
 // kernel/lib/intrusive_pool.tkb names its page provider's symbols without
 // `use`ing anyone (issue #364), so kernel/mm/page.tkb has to be reached
@@ -94,7 +106,6 @@ const TCP_ECHO_PORT: u16 = 7;
 // see that function's comment.
 const TCP_MAX_PAYLOAD: u16 = 1460;
 const TCP_RETRY_LIMIT: usize = 3;
-const TCP_CONNECTION_MAX: usize = 2;
 
 enum ConnState: u8 {
     Listen;
@@ -147,11 +158,15 @@ struct TcpConnection {
     // the connection's receive buffer, and are NOT received_length above
     // -- that one is the last segment's payload size as the TCP layer
     // saw it, these two are how much of the buffer userspace has drained.
-    // GitHub issue #257 step 4a: the pool slot address of this
-    // connection's transmit frame, 0 if it has none. The OWNER is parked
-    // in tcp_connection_frames (see there); this is how the bytes are
-    // found, and it is deliberately an erased address rather than a
-    // second copy of the handle -- validated by the pool on every use.
+    // GitHub issue #257 step 5: this connection's own pool address, so
+    // that a *TcpConnection is enough to name it -- a retransmit entry
+    // records which connection it belongs to, and with no index left there
+    // is nothing else to record.
+    self_address: usize;
+    // Step 4: the pool slot address of this connection's transmit frame,
+    // 0 if it has none. The OWNER is `tx` below; this is how the bytes are
+    // found, and it is deliberately an erased address rather than a second
+    // copy of the handle -- validated by the pool on every use.
     tx_frame: usize;
     // Step 4b, same shape: the receive buffer read(2) drains, and the
     // response buffer inetd-mode write(2) appends to.
@@ -182,15 +197,40 @@ struct TcpConnection {
     // deliberate-drop tests reads it.
     injected_data_entry: usize;
     injected_fin_entry: usize;
+    // Step 5: the three frame owners, which step 4 had to keep in a
+    // separate private array (ConnectionFrames) because a global holding
+    // linear owners must be `private` and tcp_connections was read from
+    // kernel/kernel/syscall.tkb. The connection lives in a private pool
+    // now, so they come home. Three stable owner fields under one mutex --
+    // linux_user/tcp_pool_shape's first claim.
+    //
+    // Their presence is why every allocation of a TcpConnection must go
+    // through intrusive_pool_insert_zeroed: a recycled slot is neither
+    // zero nor fresh, and the language's empty state for such a field is
+    // an inherited zero tag (issue #369). That is checked, not remembered
+    // -- plain insert does not compile for this T.
+    private frames_mutex: i32;
+    private tx: FrameLink;
+    private rx: FrameLink;
+    private inetd: FrameLink;
 }
 
-// Issue #189: TCP connections have dynamic lifetimes even though this first
-// pool has a deliberately tiny fixed capacity.  Callers receive a linear
-// owner whose static identity is a monotonically increasing generation; the
-// runtime slot is only the pool location.  Reusing a freed slot therefore
-// cannot make a stale (slot,generation) descriptor refer to the new stream.
+// Issue #189: TCP connections have dynamic lifetimes. Callers receive a
+// linear owner whose static identity is a monotonically increasing
+// generation; the runtime slot is only the pool location. Reusing a freed
+// slot therefore cannot make a stale (slot, generation) descriptor refer
+// to the new stream.
+//
+// GitHub issue #257: `pool_index` was `{0..<TCP_CONNECTION_MAX as usize}`
+// -- a proof that the index named a real array element. There is no array
+// and no index now: `slot` is the pool ADDRESS of the connection, and what
+// used to be a bounds proof is intrusive_pool_matches, which checks that
+// the address lands on a real slot of THIS pool and that the occupant is
+// still the one the generation names. Strictly more than the refinement
+// proved, since a refinement could not tell a live connection from a
+// recycled one -- that was always the generation's job.
 linear struct TcpConnectionOwner[connection: usize] {
-    private pool_index: {0..<TCP_CONNECTION_MAX as usize};
+    private slot: usize;
     private generation: usize @ connection;
 }
 
@@ -199,34 +239,36 @@ must_use variant TcpConnectionAllocResult {
     Allocated(exists connection: usize. TcpConnectionOwner[connection]);
 }
 
-variant TcpConnectionValue {
-    Empty;
-    Ready(exists connection: usize. TcpConnectionOwner[connection]);
-}
-
-struct TcpConnectionStore {
-    private mutex: i32;
-    private value: TcpConnectionValue;
-}
-
-private linear view TcpConnectionGuard[lock: addr];
-private let mut tcp_connection_store: [TcpConnectionStore; TCP_CONNECTION_MAX];
-
 must_use variant TcpConnectionTakeResult {
     Missing;
     Ready(exists connection: usize. TcpConnectionOwner[connection]);
 }
 
-must_use variant TcpConnectionPutResult { Stored; Conflict; }
+// GitHub issue #257: THE PARKING LOT IS GONE.
+//
+// `tcp_connection_store` was a [TcpConnectionStore; TCP_CONNECTION_MAX] of
+// { mutex, TcpConnectionValue } -- somewhere for a linear owner to live
+// between syscalls, since a syscall returns to userspace and cannot hold
+// one. `tcp_connection_take` pulled the owner out of a stable slot,
+// `tcp_connection_put` shoved it back, and TcpConnectionPutResult::Conflict
+// described "the slot already had one", which the stable_replace /
+// displaced / Ready(incoming) dance existed to handle.
+//
+// With a pool there is nowhere to park and nothing to conflict with: the
+// connection IS the slot, the fd table already holds its (address,
+// generation), and an owner is MINTED from that pair on demand and
+// discharged when the operation ends. So `take` is a validation,
+// `put` is a drop, `Conflict` is unreachable, and TcpConnectionValue,
+// TcpConnectionStore, TcpConnectionGuard, tcp_connection_lock/_unlock and
+// TcpConnectionPutResult are deleted rather than ported.
+private let mut tcp_connection_pool: IntrusivePool(TcpConnection);
+private let mut tcp_connection_pool_ready: bool = false;
 
-// Slot allocation is O(1) via kernel/lib/slotmap.tkb's SlotMap(N) (issue
-// #207) instead of a hand-rolled used[]/generation[] linear scan.
-// slotmap_matches() also covers tcp_connection_matches()'s revalidation of
-// a plain (slot, generation) pair against the current occupant, which is
-// needed because such a pair crosses the tcp_connection_store lock /
-// stable_replace boundary without the linear owner.
-let mut tcp_connection_pool: SlotMap(TCP_CONNECTION_MAX);
-let mut tcp_connections: [TcpConnection; TCP_CONNECTION_MAX];
+// Reached only when an address that should name a live connection does
+// not. A real struct rather than a null pointer so the impossible case is
+// harmless instead of undefined, exactly as tcp_frame_absent_fallback is
+// for frames. Private because it holds stable owner storage.
+private let mut tcp_connection_absent_fallback: TcpConnection;
 let mut tcp_completed_handshakes: usize = 0;
 let mut tcp_completed_echoes: usize = 0;
 let mut tcp_completed_closes: usize = 0;
@@ -256,7 +298,7 @@ let mut tcp_injected_syn_accepted: bool = false;
 // connection chain head could not live in it. It is also the better shape
 // -- one retransmit queue for the stack is what a real kernel keeps -- and
 // it is what makes this step add no array of its own to replace the nine
-// it removes. Every walk below filters on connection_slot, so what each
+// it removes. Every walk below filters on conn, so what each
 // connection sees is exactly what it saw when the queue was its own.
 //
 // The 1514-byte frame lives INLINE in the entry rather than in a second
@@ -273,12 +315,14 @@ variant RetxLink {
 
 // pending_tcp_kind/_frame/_frame_length/_expected_ack/_remote_ip/
 // _remote_port/_local_port/_sent_at/_retries, one entry instead of nine
-// arrays -- plus connection_slot, which the arrays encoded in the index
-// arithmetic, and `next`, which is what removes the ceiling.
+// arrays -- plus `connection`, the pool address of the connection this
+// entry belongs to (the arrays encoded that in their index arithmetic,
+// and step 5 left no index to encode), and `next`, which is what removes
+// the ceiling.
 struct RetxEntry {
     private mutex: i32;
     private next: RetxLink;
-    connection_slot: usize;
+    connection: usize;
     kind: PendingTcpKind;
     frame_length: usize;
     expected_ack: u32;
@@ -374,25 +418,7 @@ variant FrameLink {
     Some(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
 }
 
-// Where a connection's frames are OWNED. Kept apart from TcpConnection
-// rather than in it, for the same reason the retransmit chain head is:
-// a global holding linear owners must be `private`, and tcp_connections
-// is read from kernel/kernel/syscall.tkb. Step 5 puts the connection
-// itself in a private pool, at which point these three fields move into
-// it and this array goes away with TCP_CONNECTION_MAX.
-struct ConnectionFrames {
-    private mutex: i32;
-    private tx: FrameLink;
-    // Step 4b: kernel/kernel/syscall.tkb's two 1460-byte
-    // [u8; 1460 * TCP_CONNECTION_MAX] arrays. Three stable owner fields in
-    // one struct, which is the first of the three things
-    // linux_user/tcp_pool_shape was built to check.
-    private rx: FrameLink;
-    private inetd: FrameLink;
-}
-
 private linear view FrameGuard[lock: addr];
-private let mut tcp_connection_frames: [ConnectionFrames; TCP_CONNECTION_MAX];
 private let mut tcp_frame_pool: IntrusivePool(NetFrame);
 private let mut tcp_frame_pool_ready: bool = false;
 
@@ -466,9 +492,8 @@ fn tcp_frame_take() -> (FrameLink, usize) !{unsafe} {
 // whatever it managed to take. Called from tcp_connection_alloc, whose Full
 // result is exactly the right thing to report when it fails -- a connection
 // with no frame to transmit from is not one this stack can serve.
-fn tcp_connection_frames_acquire(
-        connection_slot: {0..<TCP_CONNECTION_MAX as usize}) -> bool !{unsafe} {
-    tcp_connection_frames[connection_slot].mutex = 0;
+fn tcp_connection_frames_acquire(conn: *TcpConnection) -> bool !{unsafe} {
+    conn.frames_mutex = 0;
     let (tx, tx_address) = tcp_frame_take();
     if (tx_address == 0) {
         tcp_frame_release_link(tx);
@@ -488,30 +513,27 @@ fn tcp_connection_frames_acquire(
         return false;
     }
 
-    let tx_guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
+    let tx_guard = tcp_frame_lock(&conn.frames_mutex);
     let displaced_tx: FrameLink = stable_replace(
-        tx_guard, &tcp_connection_frames[connection_slot].mutex,
-        tcp_connection_frames[connection_slot].tx, tx);
-    tcp_frame_unlock(tx_guard, &tcp_connection_frames[connection_slot].mutex);
+        tx_guard, &conn.frames_mutex, conn.tx, tx);
+    tcp_frame_unlock(tx_guard, &conn.frames_mutex);
     tcp_frame_release_displaced(displaced_tx);
 
-    let rx_guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
+    let rx_guard = tcp_frame_lock(&conn.frames_mutex);
     let displaced_rx: FrameLink = stable_replace(
-        rx_guard, &tcp_connection_frames[connection_slot].mutex,
-        tcp_connection_frames[connection_slot].rx, rx);
-    tcp_frame_unlock(rx_guard, &tcp_connection_frames[connection_slot].mutex);
+        rx_guard, &conn.frames_mutex, conn.rx, rx);
+    tcp_frame_unlock(rx_guard, &conn.frames_mutex);
     tcp_frame_release_displaced(displaced_rx);
 
-    let inetd_guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
+    let inetd_guard = tcp_frame_lock(&conn.frames_mutex);
     let displaced_inetd: FrameLink = stable_replace(
-        inetd_guard, &tcp_connection_frames[connection_slot].mutex,
-        tcp_connection_frames[connection_slot].inetd, inetd);
-    tcp_frame_unlock(inetd_guard, &tcp_connection_frames[connection_slot].mutex);
+        inetd_guard, &conn.frames_mutex, conn.inetd, inetd);
+    tcp_frame_unlock(inetd_guard, &conn.frames_mutex);
     tcp_frame_release_displaced(displaced_inetd);
 
-    tcp_connections[connection_slot].tx_frame = tx_address;
-    tcp_connections[connection_slot].rx_frame = rx_address;
-    tcp_connections[connection_slot].inetd_frame = inetd_address;
+    conn.tx_frame = tx_address;
+    conn.rx_frame = rx_address;
+    conn.inetd_frame = inetd_address;
     return true;
 }
 
@@ -528,32 +550,28 @@ fn tcp_frame_release_displaced(link: FrameLink) !{unsafe} {
     }
 }
 
-fn tcp_connection_frames_release(
-        connection_slot: {0..<TCP_CONNECTION_MAX as usize}) !{unsafe} {
-    let tx_guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
+fn tcp_connection_frames_release(conn: *TcpConnection) !{unsafe} {
+    let tx_guard = tcp_frame_lock(&conn.frames_mutex);
     let held_tx: FrameLink = stable_replace(
-        tx_guard, &tcp_connection_frames[connection_slot].mutex,
-        tcp_connection_frames[connection_slot].tx, FrameLink::None);
-    tcp_frame_unlock(tx_guard, &tcp_connection_frames[connection_slot].mutex);
+        tx_guard, &conn.frames_mutex, conn.tx, FrameLink::None);
+    tcp_frame_unlock(tx_guard, &conn.frames_mutex);
     tcp_frame_release_link(held_tx);
 
-    let rx_guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
+    let rx_guard = tcp_frame_lock(&conn.frames_mutex);
     let held_rx: FrameLink = stable_replace(
-        rx_guard, &tcp_connection_frames[connection_slot].mutex,
-        tcp_connection_frames[connection_slot].rx, FrameLink::None);
-    tcp_frame_unlock(rx_guard, &tcp_connection_frames[connection_slot].mutex);
+        rx_guard, &conn.frames_mutex, conn.rx, FrameLink::None);
+    tcp_frame_unlock(rx_guard, &conn.frames_mutex);
     tcp_frame_release_link(held_rx);
 
-    let inetd_guard = tcp_frame_lock(&tcp_connection_frames[connection_slot].mutex);
+    let inetd_guard = tcp_frame_lock(&conn.frames_mutex);
     let held_inetd: FrameLink = stable_replace(
-        inetd_guard, &tcp_connection_frames[connection_slot].mutex,
-        tcp_connection_frames[connection_slot].inetd, FrameLink::None);
-    tcp_frame_unlock(inetd_guard, &tcp_connection_frames[connection_slot].mutex);
+        inetd_guard, &conn.frames_mutex, conn.inetd, FrameLink::None);
+    tcp_frame_unlock(inetd_guard, &conn.frames_mutex);
     tcp_frame_release_link(held_inetd);
 
-    tcp_connections[connection_slot].tx_frame = 0;
-    tcp_connections[connection_slot].rx_frame = 0;
-    tcp_connections[connection_slot].inetd_frame = 0;
+    conn.tx_frame = 0;
+    conn.rx_frame = 0;
+    conn.inetd_frame = 0;
 }
 
 // The transmit frame as a slice, reached by ADDRESS rather than by taking
@@ -577,42 +595,51 @@ fn tcp_frame_slice(address: usize) -> [u8; 1514..] !{unsafe} {
     }
 }
 
-fn tcp_connection_tx_slice(connection_slot: {0..<TCP_CONNECTION_MAX as usize})
-        -> [u8; 1514..] !{unsafe} {
-    return tcp_frame_slice(tcp_connections[connection_slot].tx_frame);
+fn tcp_connection_tx_slice(conn: *TcpConnection) -> [u8; 1514..] !{unsafe} {
+    return tcp_frame_slice(conn.tx_frame);
 }
 
 // The two syscall-side buffers. 1460 rather than 1514 because that is what
 // the callers bound their lengths by; the frame behind them is one MTU, so
 // the extra 54 bytes are headroom nobody addresses, not a second size.
-fn tcp_connection_rx_slice(connection_slot: {0..<TCP_CONNECTION_MAX as usize})
-        -> [u8; 1460..] !{unsafe} {
-    let frame = tcp_frame_slice(tcp_connections[connection_slot].rx_frame);
+fn tcp_connection_rx_slice(conn: *TcpConnection) -> [u8; 1460..] !{unsafe} {
+    let frame = tcp_frame_slice(conn.rx_frame);
     return frame[0..<1460];
 }
 
-fn tcp_connection_inetd_slice(connection_slot: {0..<TCP_CONNECTION_MAX as usize})
-        -> [u8; 1460..] !{unsafe} {
-    let frame = tcp_frame_slice(tcp_connections[connection_slot].inetd_frame);
+fn tcp_connection_inetd_slice(conn: *TcpConnection) -> [u8; 1460..] !{unsafe} {
+    let frame = tcp_frame_slice(conn.inetd_frame);
     return frame[0..<1460];
 }
 
-fn tcp_connection_owner_new(
-        slot: {0..<TCP_CONNECTION_MAX as usize},
-        generation: usize @ connection) -> TcpConnectionOwner[connection] {
+fn tcp_connection_owner_new(slot: usize, generation: usize @ connection)
+        -> TcpConnectionOwner[connection] {
     let mut owner: TcpConnectionOwner[connection] = { slot, generation };
     return owner;
 }
 
 fn tcp_connection_owner_drop(owner: sink TcpConnectionOwner[connection]) {}
 
-fn tcp_connection_lock(lock: *i32 @ address)
-        -> TcpConnectionGuard[address] {
-    return view TcpConnectionGuard[address];
+// The connection a pool address names. Validated on every call: the
+// address may have come from an fd table entry that outlived the
+// connection it describes, and intrusive_pool_probe_slot rejects both a
+// bogus address and a live slot whose occupant has moved on.
+fn tcp_connection_payload(address: usize) -> *TcpConnection !{unsafe} {
+    match intrusive_pool_probe_slot(&tcp_connection_pool, address) {
+        IntrusiveSlotProbe::NoPayload => {
+            kernel_boot_log("tcp: connection address names no live slot\n");
+            return &tcp_connection_absent_fallback;
+        }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            return intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
+        }
+    }
 }
 
-fn tcp_connection_unlock(guard: sink TcpConnectionGuard[address],
-                         lock: *i32 @ address) {}
+fn tcp_connection_of(owner: borrow TcpConnectionOwner[connection])
+        -> *TcpConnection !{unsafe} {
+    return tcp_connection_payload(owner.slot);
+}
 
 // Despite the name, this is a RESET, not a one-time constructor: it is
 // called again on every kernel_syscall_daemon_start() and
@@ -633,7 +660,6 @@ fn tcp_connection_unlock(guard: sink TcpConnectionGuard[address],
 // use for the previous one's unacknowledged segments, and
 // pending_tcp_reset_all returns their pages properly.
 fn tcp_connection_pool_init() !{unsafe} {
-    slotmap_init(&tcp_connection_pool);
     if (tcp_frame_pool_ready == false) {
         // Same once-not-per-reset reasoning as the retransmit pool below,
         // and the same retained_chunks = 0.
@@ -652,45 +678,147 @@ fn tcp_connection_pool_init() !{unsafe} {
         intrusive_pool_init_retaining(&tcp_retx_pool, 0);
         tcp_retx_pool_ready = true;
     }
-    for connection_index: usize in 0..<TCP_CONNECTION_MAX {
-        pending_tcp_reset_all(connection_index);
-        tcp_connection_frames_release(connection_index);
-        tcp_connections[connection_index].state = ConnState::Listen;
-        tcp_connections[connection_index].local_port = TCP_ECHO_PORT;
+    if (tcp_connection_pool_ready == false) {
+        intrusive_pool_init_retaining(&tcp_connection_pool, 0);
+        tcp_connection_pool_ready = true;
     }
+    // Draining IS the reset now. There is no fixed set of connections to
+    // put back into Listen: a connection exists only while it is
+    // allocated, so a daemon restarting simply has none, and every page
+    // its predecessor's connections held goes back.
+    tcp_connection_drain_all();
 }
 
-fn tcp_connection_alloc() -> TcpConnectionAllocResult {
-    match slotmap_insert(&tcp_connection_pool) {
-        FreelistPopResult::Empty => { return TcpConnectionAllocResult::Full; }
-        FreelistPopResult::Popped(popped) => {
-            let (index, generation) = freelist_owner_into_parts(popped);
-            if (index < TCP_CONNECTION_MAX) {
-                let connection_index: {0..<TCP_CONNECTION_MAX as usize} = index;
-                // GitHub issue #257 step 4a: a connection with no frame to
-                // transmit from is not one this stack can serve, so a
-                // frame the pool cannot supply is reported as Full -- the
-                // result callers already handle by retrying, which is the
-                // right answer to memory pressure and matches what
-                // dropping a SYN under pressure means in TCP.
-                if (tcp_connection_frames_acquire(connection_index) == false) {
-                    slotmap_remove(&tcp_connection_pool,
-                                   freelist_owner_new(connection_index, generation));
-                    return TcpConnectionAllocResult::Full;
-                }
-                tcp_connections[connection_index].state = ConnState::Listen;
-                return TcpConnectionAllocResult::Allocated(
-                    tcp_connection_owner_new(connection_index, generation));
+// Frees the first live connection, reporting whether it found one. The
+// walk restarts on every free rather than carrying a cursor across it:
+// with retained_chunks = 0 an emptied chunk goes straight back to the page
+// allocator, so an address computed before a free can name a page this
+// pool no longer owns (kernel/lib/intrusive_pool.tkb's own header says so,
+// and its exerciser restarts for the same reason). O(live^2) over a
+// handful of connections, once per reset.
+fn tcp_connection_free_first_live() -> bool !{unsafe} {
+    let mut cursor: usize = intrusive_pool_first_slot(&tcp_connection_pool);
+    while (cursor != 0) {
+        match intrusive_pool_probe_slot(&tcp_connection_pool, cursor) {
+            IntrusiveSlotProbe::NoPayload => {}
+            IntrusiveSlotProbe::Live(slot_view) => {
+                let generation: usize = intrusive_view_generation(slot_view);
+                intrusive_view_drop(slot_view);
+                tcp_connection_free(
+                    tcp_connection_owner_new(cursor, generation));
+                return true;
             }
-            return TcpConnectionAllocResult::Full;
+        }
+        cursor = intrusive_pool_next_slot(&tcp_connection_pool, cursor);
+    }
+    return false;
+}
+
+// Is the connection at this address open? An fd can outlive the connection
+// it names -- close() frees the connection while the descriptor is still
+// installed -- so "the address names nothing live" is a NORMAL answer
+// here, not a fault, and it is exactly what the caller wants to hear:
+// not open. tcp_connection_payload's own missing case is the one that
+// should never happen and says so; this one must not borrow its voice.
+fn tcp_connection_open_at(address: usize) -> bool !{unsafe} {
+    match intrusive_pool_probe_slot(&tcp_connection_pool, address) {
+        IntrusiveSlotProbe::NoPayload => { return false; }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            let conn: *TcpConnection =
+                intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
+            return conn.connection_open;
         }
     }
-    return TcpConnectionAllocResult::Full;
 }
 
-fn tcp_connection_slot(owner: borrow TcpConnectionOwner[connection])
-        -> {0..<TCP_CONNECTION_MAX as usize} {
-    return owner.pool_index;
+// Has this connection buffered data userspace has not drained? One probe,
+// where the caller would otherwise need two payload lookups joined by
+// `&&` -- and `&&` does not short-circuit here, so the second ran even
+// when the first said the connection was gone. That was six spurious
+// "names no live slot" lines per boot, from a poll on a closed
+// connection, which is a normal thing to do.
+fn tcp_connection_has_pending_read(address: usize) -> bool !{unsafe} {
+    match intrusive_pool_probe_slot(&tcp_connection_pool, address) {
+        IntrusiveSlotProbe::NoPayload => { return false; }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            let conn: *TcpConnection =
+                intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
+            return conn.connection_open &&
+                   conn.socket_buffer_offset < conn.socket_buffer_length;
+        }
+    }
+}
+
+// "Is any connection still open" -- kernel/kernel/syscall.tkb's daemon
+// teardown check, which was a loop over TCP_CONNECTION_MAX array slots.
+fn tcp_any_connection_open() -> bool !{unsafe} {
+    let mut cursor: usize = intrusive_pool_first_slot(&tcp_connection_pool);
+    while (cursor != 0) {
+        match intrusive_pool_probe_slot(&tcp_connection_pool, cursor) {
+            IntrusiveSlotProbe::NoPayload => {}
+            IntrusiveSlotProbe::Live(slot_view) => {
+                let conn: *TcpConnection =
+                    intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
+                if (conn.connection_open) { return true; }
+            }
+        }
+        cursor = intrusive_pool_next_slot(&tcp_connection_pool, cursor);
+    }
+    return false;
+}
+
+fn tcp_connection_drain_all() !{unsafe} {
+    let mut draining: bool = true;
+    while (draining) {
+        draining = tcp_connection_free_first_live();
+    }
+}
+
+// `Full` no longer means "all TCP_CONNECTION_MAX slots are taken" -- there
+// is no such number. It means the page allocator could not supply what
+// this connection needs, which is the only way to run out now. Callers
+// keep the result they always had: the accept path retries, which is the
+// right answer to memory pressure and what dropping a SYN under pressure
+// means in TCP.
+fn tcp_connection_alloc() -> TcpConnectionAllocResult !{unsafe} {
+    let pool_guard = intrusive_pool_lock(&tcp_connection_pool);
+    let inserted = intrusive_pool_insert_zeroed(&tcp_connection_pool, pool_guard);
+    intrusive_pool_unlock(&tcp_connection_pool, pool_guard);
+    match inserted {
+        IntrusivePoolInsertResult::OutOfMemory => {
+            kernel_boot_log_resource_exhausted(
+                "TCP connection pool (out of pages)" as *u8, 0);
+            return TcpConnectionAllocResult::Full;
+        }
+        IntrusivePoolInsertResult::Allocated(pool_owner) => {
+            let address: usize = intrusive_owner_slot(pool_owner);
+            let generation: usize = intrusive_owner_generation(pool_owner);
+            let conn: *TcpConnection =
+                intrusive_pool_ref(&tcp_connection_pool, pool_owner);
+            conn.self_address = address;
+            conn.state = ConnState::Listen;
+            conn.local_port = TCP_ECHO_PORT;
+            if (tcp_connection_frames_acquire(conn) == false) {
+                let undo_guard = intrusive_pool_lock(&tcp_connection_pool);
+                intrusive_pool_remove(&tcp_connection_pool, undo_guard, pool_owner);
+                intrusive_pool_unlock(&tcp_connection_pool, undo_guard);
+                return TcpConnectionAllocResult::Full;
+            }
+            // The pool's own handle is discharged here and TcpConnection's
+            // is handed out in its place: from now on the obligation to
+            // free this slot rides on TcpConnectionOwner, and
+            // tcp_connection_free rebuilds the pool handle to discharge
+            // it. That round trip is the documented one, and the reason
+            // intrusive_pool_remove validates what it is given.
+            intrusive_owner_drop(pool_owner);
+            return TcpConnectionAllocResult::Allocated(
+                tcp_connection_owner_new(address, generation));
+        }
+    }
+}
+
+fn tcp_connection_slot(owner: borrow TcpConnectionOwner[connection]) -> usize {
+    return owner.slot;
 }
 
 fn tcp_connection_identity(owner: borrow TcpConnectionOwner[connection])
@@ -699,134 +827,150 @@ fn tcp_connection_identity(owner: borrow TcpConnectionOwner[connection])
 }
 
 fn tcp_connection_matches(owner: borrow TcpConnectionOwner[connection],
-                          slot: usize, generation: usize) -> bool {
-    return owner.pool_index == slot && owner.generation == generation &&
-           slotmap_matches(&tcp_connection_pool, owner.pool_index, generation);
+                          slot: usize, generation: usize) -> bool !{unsafe} {
+    return owner.slot == slot && owner.generation == generation &&
+           intrusive_pool_matches(&tcp_connection_pool, owner.slot, generation);
 }
 
-fn tcp_connection_put(owner: sink TcpConnectionOwner[connection])
-        -> TcpConnectionPutResult {
-    let slot: {0..<TCP_CONNECTION_MAX as usize} = owner.pool_index;
-    let guard = tcp_connection_lock(&tcp_connection_store[slot].mutex);
-    let previous: TcpConnectionValue = stable_replace(
-        guard, &tcp_connection_store[slot].mutex,
-        tcp_connection_store[slot].value,
-        TcpConnectionValue::Ready(owner));
-    match previous {
-        TcpConnectionValue::Empty => {
-            tcp_connection_unlock(
-                guard, &tcp_connection_store[slot].mutex);
-            return TcpConnectionPutResult::Stored;
-        }
-        TcpConnectionValue::Ready(stale) => {
-            let displaced: TcpConnectionValue = stable_replace(
-                guard, &tcp_connection_store[slot].mutex,
-                tcp_connection_store[slot].value,
-                TcpConnectionValue::Ready(stale));
-            tcp_connection_unlock(
-                guard, &tcp_connection_store[slot].mutex);
-            match displaced {
-                TcpConnectionValue::Empty => {
-                    return TcpConnectionPutResult::Stored;
-                }
-                TcpConnectionValue::Ready(incoming) => {
-                    // The stable slot kept the pre-existing owner. Consume
-                    // the impossible duplicate without clearing that live
-                    // slot's pool bookkeeping.
-                    tcp_connection_owner_drop(incoming);
-                    return TcpConnectionPutResult::Conflict;
-                }
-            }
-        }
-    }
+// What used to store the owner in a stable slot and describe the
+// impossible duplicate. With no parking lot there is nothing to store and
+// nothing to conflict with: an owner that has done its work is simply
+// discharged, and the connection stays exactly where it is.
+fn tcp_connection_put(owner: sink TcpConnectionOwner[connection]) {
+    tcp_connection_owner_drop(owner);
 }
 
+// What used to pull an owner out of a stable slot and revalidate the pair
+// it was found under. Now it mints one from the pair directly, after the
+// same check -- intrusive_pool_matches, which is what the old
+// slotmap_matches call inside tcp_connection_matches was.
 fn tcp_connection_take(slot_value: usize, generation: usize)
-        -> TcpConnectionTakeResult {
-    if (slot_value >= 0 && slot_value < TCP_CONNECTION_MAX) {
-        let slot: {0..<TCP_CONNECTION_MAX as usize} = slot_value;
-        let guard = tcp_connection_lock(&tcp_connection_store[slot].mutex);
-        let previous: TcpConnectionValue = stable_replace(
-            guard, &tcp_connection_store[slot].mutex,
-            tcp_connection_store[slot].value, TcpConnectionValue::Empty);
-        tcp_connection_unlock(guard, &tcp_connection_store[slot].mutex);
-        match previous {
-            TcpConnectionValue::Empty => {
-                return TcpConnectionTakeResult::Missing;
-            }
-            TcpConnectionValue::Ready(owner) => {
-                if (tcp_connection_matches(owner, slot, generation)) {
-                    return TcpConnectionTakeResult::Ready(owner);
-                }
-                match tcp_connection_put(owner) {
-                    TcpConnectionPutResult::Stored => {}
-                    TcpConnectionPutResult::Conflict => {}
-                }
-                return TcpConnectionTakeResult::Missing;
-            }
-        }
+        -> TcpConnectionTakeResult !{unsafe} {
+    if (intrusive_pool_matches(&tcp_connection_pool, slot_value, generation)) {
+        return TcpConnectionTakeResult::Ready(
+            tcp_connection_owner_new(slot_value, generation));
     }
     return TcpConnectionTakeResult::Missing;
 }
 
 fn tcp_connection_free(owner: sink TcpConnectionOwner[connection]) !{unsafe} {
-    tcp_connections[owner.pool_index].state = ConnState::Listen;
-    tcp_connection_frames_release(owner.pool_index);
-    slotmap_remove(&tcp_connection_pool,
-                   freelist_owner_new(owner.pool_index, owner.generation));
+    let address: usize = owner.slot;
+    let generation: usize = owner.generation;
+    tcp_connection_owner_drop(owner);
+    // Give back what this connection holds before the slot itself: the
+    // retransmit entries name it by address, and the frames are owned in
+    // its own stable fields, so both have to go while it is still there
+    // to be found.
+    pending_tcp_reset_all(address);
+    let conn: *TcpConnection = tcp_connection_payload(address);
+    conn.state = ConnState::Listen;
+    conn.connection_open = false;
+    tcp_connection_frames_release(conn);
+    let branded = intrusive_owner_new(&tcp_connection_pool, address, generation);
+    let guard = intrusive_pool_lock(&tcp_connection_pool);
+    intrusive_pool_remove(&tcp_connection_pool, guard, branded);
+    intrusive_pool_unlock(&tcp_connection_pool, guard);
 }
 
-// GitHub issue #295 boundary test: TCP_CONNECTION_MAX is deliberately tiny
-// (2, issue #189), so unlike kernel/arch/arm64/mm/asid.tkb's asid_pool_probe
-// this test names each held owner explicitly instead of transferring into a
-// plain array -- there is no transfer-to-usize helper for TcpConnectionOwner
-// and two named locals cover this pool's whole capacity. Proves the pool
-// reports Full exactly at TCP_CONNECTION_MAX concurrently held connections
-// (not just sequentially, which the QEMU network fixture's own
-// open/close/reconnect coverage already exercises) and that a freed slot is
-// reused, mirroring asid_pool_probe's structure.
-fn tcp_connection_pool_exhaustion_probe() -> bool {
+// GitHub issue #257: what this probe used to prove was that the pool
+// reported Full at exactly TCP_CONNECTION_MAX = 2 concurrently held
+// connections (issue #295's boundary test). There is no such number to
+// reach, so the claim worth testing is the one that number existed to
+// deny: that a connection past the old ceiling can be opened at all, that
+// each is its own storage, and that closing them gives everything back.
+//
+// Eight rather than three, and held all at once: three would pass on a
+// pool that had merely been bumped to 4, which is the outcome this issue
+// exists to rule out. Names each owner explicitly for the same reason the
+// old probe did -- there is no transfer-to-usize helper for
+// TcpConnectionOwner -- which is also why the count is a literal here
+// rather than a loop bound.
+fn tcp_connection_pool_probe() -> bool !{unsafe} {
     tcp_connection_pool_init();
-    let owner_a: exists connection: usize. TcpConnectionOwner[connection] =
+    let pages_before: usize = page_allocator_live_count();
+
+    let owner_a: exists a: usize. TcpConnectionOwner[a] =
             match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => { return false; }
         TcpConnectionAllocResult::Allocated(owner) => { owner }
     };
-    let owner_b: exists connection2: usize. TcpConnectionOwner[connection2] =
+    let owner_b: exists b: usize. TcpConnectionOwner[b] =
+            match tcp_connection_alloc() {
+        TcpConnectionAllocResult::Full => { tcp_connection_free(owner_a); return false; }
+        TcpConnectionAllocResult::Allocated(owner) => { owner }
+    };
+    let owner_c: exists c: usize. TcpConnectionOwner[c] =
             match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => {
             tcp_connection_free(owner_a);
+            tcp_connection_free(owner_b);
+            return false;
+        }
+        TcpConnectionAllocResult::Allocated(owner) => { owner }
+    };
+    let owner_d: exists d: usize. TcpConnectionOwner[d] =
+            match tcp_connection_alloc() {
+        TcpConnectionAllocResult::Full => {
+            tcp_connection_free(owner_a);
+            tcp_connection_free(owner_b);
+            tcp_connection_free(owner_c);
+            return false;
+        }
+        TcpConnectionAllocResult::Allocated(owner) => { owner }
+    };
+    let owner_e: exists e: usize. TcpConnectionOwner[e] =
+            match tcp_connection_alloc() {
+        TcpConnectionAllocResult::Full => {
+            tcp_connection_free(owner_a);
+            tcp_connection_free(owner_b);
+            tcp_connection_free(owner_c);
+            tcp_connection_free(owner_d);
             return false;
         }
         TcpConnectionAllocResult::Allocated(owner) => { owner }
     };
 
-    let mut capacity_ok: bool = false;
-    match tcp_connection_alloc() {
-        TcpConnectionAllocResult::Full => { capacity_ok = true; }
-        TcpConnectionAllocResult::Allocated(extra) => {
-            tcp_connection_free(extra);
-        }
-    }
-    if (capacity_ok == false) {
-        tcp_connection_free(owner_a);
-        tcp_connection_free(owner_b);
-        return false;
-    }
+    // Each is its own connection: distinct addresses, and a field written
+    // through one is not readable through another.
+    let slot_a: usize = tcp_connection_slot(owner_a);
+    let slot_e: usize = tcp_connection_slot(owner_e);
+    tcp_connection_of(owner_a).local_port = 1111;
+    tcp_connection_of(owner_e).local_port = 5555;
+    let distinct: bool =
+        slot_a != slot_e &&
+        tcp_connection_of(owner_a).local_port == 1111 &&
+        tcp_connection_of(owner_e).local_port == 5555 &&
+        intrusive_pool_live_count(&tcp_connection_pool) == 5;
 
-    let freed_slot: usize = tcp_connection_slot(owner_a);
+    // A freed connection's address is refused afterwards, on the
+    // generation rather than on the address -- the address is perfectly
+    // real, and is exactly what an fd table entry outliving its connection
+    // presents.
+    let stale_generation: usize = tcp_connection_identity(owner_a);
     tcp_connection_free(owner_a);
-    let mut reused_ok: bool = false;
-    match tcp_connection_alloc() {
-        TcpConnectionAllocResult::Full => {}
-        TcpConnectionAllocResult::Allocated(reused) => {
-            if (tcp_connection_slot(reused) == freed_slot) { reused_ok = true; }
-            tcp_connection_free(reused);
-        }
-    }
+    let stale_refused: bool =
+        match tcp_connection_take(slot_a, stale_generation) {
+            TcpConnectionTakeResult::Missing => { true }
+            TcpConnectionTakeResult::Ready(owner) => {
+                tcp_connection_put(owner);
+                false
+            }
+        };
+
     tcp_connection_free(owner_b);
-    tcp_connection_pool_init();
-    return reused_ok;
+    tcp_connection_free(owner_c);
+    tcp_connection_free(owner_d);
+    tcp_connection_free(owner_e);
+
+    // Everything back: no connection, no frame, no retransmit entry, and
+    // no page any of them stood on.
+    let drained: bool =
+        intrusive_pool_live_count(&tcp_connection_pool) == 0 &&
+        intrusive_pool_live_count(&tcp_frame_pool) == 0 &&
+        intrusive_pool_live_count(&tcp_retx_pool) == 0 &&
+        page_allocator_live_count() == pages_before &&
+        intrusive_pool_probe(&tcp_connection_pool);
+    return distinct && stale_refused && drained;
 }
 
 fn kernel_tcp_inject_drop_next_syn_ack() {
@@ -852,11 +996,28 @@ fn kernel_tcp_injected_syn_ack_recovered() -> bool {
 // segment uses (pending_tcp_service_once), so
 // kernel_tcp_injected_data_recovered() below only reports true once a
 // real peer ACK actually cleared that slot after at least one retry.
-fn kernel_tcp_inject_drop_data_segment(index: usize) {
-    tcp_drop_data_segment_index = index as i32;
-    for connection_slot: usize in 0..<TCP_CONNECTION_MAX {
-        tcp_connections[connection_slot].injected_data_entry = 0;
+// GitHub issue #257: "clear the marker on every connection" was a loop
+// over TCP_CONNECTION_MAX array slots. With a pool it is a scan, and it
+// visits only connections that actually exist.
+fn kernel_tcp_clear_injection_markers() !{unsafe} {
+    let mut cursor: usize = intrusive_pool_first_slot(&tcp_connection_pool);
+    while (cursor != 0) {
+        match intrusive_pool_probe_slot(&tcp_connection_pool, cursor) {
+            IntrusiveSlotProbe::NoPayload => {}
+            IntrusiveSlotProbe::Live(slot_view) => {
+                let conn: *TcpConnection =
+                    intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
+                conn.injected_data_entry = 0;
+                conn.injected_fin_entry = 0;
+            }
+        }
+        cursor = intrusive_pool_next_slot(&tcp_connection_pool, cursor);
     }
+}
+
+fn kernel_tcp_inject_drop_data_segment(index: usize) !{unsafe} {
+    tcp_drop_data_segment_index = index as i32;
+    kernel_tcp_clear_injection_markers();
     tcp_injected_data_retransmitted = false;
     tcp_injected_data_recovery_observed = false;
 }
@@ -865,11 +1026,9 @@ fn kernel_tcp_injected_data_recovered() -> bool {
     return tcp_injected_data_recovery_observed;
 }
 
-fn kernel_tcp_inject_drop_next_fin() {
+fn kernel_tcp_inject_drop_next_fin() !{unsafe} {
     tcp_drop_next_fin = true;
-    for connection_slot: usize in 0..<TCP_CONNECTION_MAX {
-        tcp_connections[connection_slot].injected_fin_entry = 0;
-    }
+    kernel_tcp_clear_injection_markers();
     tcp_injected_fin_retransmitted = false;
     tcp_injected_fin_recovery_observed = false;
 }
@@ -1018,8 +1177,7 @@ fn retx_chain_reverse(link_in: RetxLink) -> RetxLink !{unsafe} {
 // the queue alone. Called once per connection from kernel_tcp_accept_once
 // (alongside its own state = Listen reset), so a new connection never
 // inherits a previous one's outstanding segments.
-fn pending_tcp_reset_all(connection_slot: {0..<TCP_CONNECTION_MAX as usize})
-        !{unsafe} {
+fn pending_tcp_reset_all(connection_address: usize) !{unsafe} {
     let mut link: RetxLink = retx_chain_take();
     let mut kept: RetxLink = RetxLink::End;
     let mut walking: bool = true;
@@ -1036,7 +1194,7 @@ fn pending_tcp_reset_all(connection_slot: {0..<TCP_CONNECTION_MAX as usize})
                     let entry: *RetxEntry =
                         intrusive_pool_ref(&tcp_retx_pool, branded);
                     let following: RetxLink = retx_entry_take_next(entry);
-                    let mine: bool = entry.connection_slot == connection_slot;
+                    let mine: bool = entry.connection == connection_address;
                     if (mine) {
                         intrusive_owner_drop(branded);
                         retx_entry_free(slot, generation);
@@ -1062,10 +1220,11 @@ fn pending_tcp_reset_all(connection_slot: {0..<TCP_CONNECTION_MAX as usize})
     if (retx_chain_put(retx_chain_reverse(kept)) == false) {
         kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
     }
-    tcp_connections[connection_slot].retx_count = 0;
-    tcp_connections[connection_slot].data_segment_counter = 0;
-    tcp_connections[connection_slot].injected_data_entry = 0;
-    tcp_connections[connection_slot].injected_fin_entry = 0;
+    let conn: *TcpConnection = tcp_connection_payload(connection_address);
+    conn.retx_count = 0;
+    conn.data_segment_counter = 0;
+    conn.injected_data_entry = 0;
+    conn.injected_fin_entry = 0;
 }
 
 // Queues one just-transmitted segment for retransmission and returns the
@@ -1081,7 +1240,7 @@ fn pending_tcp_reset_all(connection_slot: {0..<TCP_CONNECTION_MAX as usize})
 // callers still guard their deliberate-drop test injection on getting a
 // real entry, since arming that against "not queued" would mean the
 // frame is never transmitted at all.
-fn pending_tcp_record(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+fn pending_tcp_record(conn: *TcpConnection,
                       kind: PendingTcpKind, frame_length: usize)
         -> usize !{unsafe} {
     let pool_guard = intrusive_pool_lock(&tcp_retx_pool);
@@ -1105,18 +1264,18 @@ fn pending_tcp_record(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
             let entry_address: usize = intrusive_owner_slot(owner);
             let entry: *RetxEntry = intrusive_pool_ref(&tcp_retx_pool, owner);
             entry.mutex = 0;
-            entry.connection_slot = connection_slot;
+            entry.connection = conn.self_address;
             entry.kind = kind;
             entry.frame_length = frame_length;
-            entry.expected_ack = tcp_connections[connection_slot].snd_nxt;
+            entry.expected_ack = conn.snd_nxt;
             slice_copy(entry.remote_ip as []u8,
-                       tcp_connections[connection_slot].remote_ip as []u8);
-            entry.remote_port = tcp_connections[connection_slot].remote_port;
-            entry.local_port = tcp_connections[connection_slot].local_port;
+                       conn.remote_ip as []u8);
+            entry.remote_port = conn.remote_port;
+            entry.local_port = conn.local_port;
             entry.sent_at = read_cntpct();
             entry.retries = 0;
             slice_copy(entry.frame as []u8,
-                       tcp_connection_tx_slice(connection_slot));
+                       tcp_connection_tx_slice(conn));
 
             // Append at the tail, keeping the queue oldest-first: reverse,
             // push, reverse back. Two extra walks of a chain that holds
@@ -1130,8 +1289,8 @@ fn pending_tcp_record(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
                     retx_chain_reverse(RetxLink::More(owner))) == false) {
                 kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
             }
-            tcp_connections[connection_slot].retx_count =
-                tcp_connections[connection_slot].retx_count + 1;
+            conn.retx_count =
+                conn.retx_count + 1;
             return entry_address;
         }
     }
@@ -1156,25 +1315,31 @@ fn pending_tcp_record(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
 // separate function purely so that its eight failure returns cannot each
 // forget to.
 fn pending_tcp_chain_probe() -> bool !{unsafe} {
-    let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = 0;
-    let other_slot: {0..<TCP_CONNECTION_MAX as usize} = 1;
-    pending_tcp_reset_all(connection_slot);
-    pending_tcp_reset_all(other_slot);
-    if (tcp_connection_frames_acquire(connection_slot) == false) { return false; }
-    if (tcp_connection_frames_acquire(other_slot) == false) {
-        tcp_connection_frames_release(connection_slot);
-        return false;
-    }
-    let ok: bool = pending_tcp_chain_probe_body(connection_slot, other_slot);
-    tcp_connection_frames_release(connection_slot);
-    tcp_connection_frames_release(other_slot);
-    // Both frames back, and no other connection left one behind either.
-    return ok && intrusive_pool_live_count(&tcp_frame_pool) == 0;
+    let owner_a: exists a: usize. TcpConnectionOwner[a] =
+            match tcp_connection_alloc() {
+        TcpConnectionAllocResult::Full => { return false; }
+        TcpConnectionAllocResult::Allocated(owner) => { owner }
+    };
+    let owner_b: exists b: usize. TcpConnectionOwner[b] =
+            match tcp_connection_alloc() {
+        TcpConnectionAllocResult::Full => {
+            tcp_connection_free(owner_a);
+            return false;
+        }
+        TcpConnectionAllocResult::Allocated(owner) => { owner }
+    };
+    let conn: *TcpConnection = tcp_connection_of(owner_a);
+    let other: *TcpConnection = tcp_connection_of(owner_b);
+    let ok: bool = pending_tcp_chain_probe_body(conn, other);
+    tcp_connection_free(owner_a);
+    tcp_connection_free(owner_b);
+    // Every frame and every retransmit entry back where it came from.
+    return ok && intrusive_pool_live_count(&tcp_frame_pool) == 0 &&
+           intrusive_pool_live_count(&tcp_retx_pool) == 0;
 }
 
-fn pending_tcp_chain_probe_body(
-        connection_slot: {0..<TCP_CONNECTION_MAX as usize},
-        other_slot: {0..<TCP_CONNECTION_MAX as usize}) -> bool !{unsafe} {
+fn pending_tcp_chain_probe_body(conn: *TcpConnection, other: *TcpConnection)
+        -> bool !{unsafe} {
     let live_before: usize = intrusive_pool_live_count(&tcp_retx_pool);
 
     // One past the old ceiling of 4, plus one belonging to a DIFFERENT
@@ -1182,20 +1347,20 @@ fn pending_tcp_chain_probe_body(
     // entries out of a mixed chain rather than truncate a prefix.
     let mut queued: usize = 0;
     for i: usize in 0..<5 {
-        if (pending_tcp_record(connection_slot, PendingTcpKind::Data,
+        if (pending_tcp_record(conn, PendingTcpKind::Data,
                                1000 + i) != 0) {
             queued = queued + 1;
         }
         if (i == 2) {
-            if (pending_tcp_record(other_slot, PendingTcpKind::Fin, 9999)
+            if (pending_tcp_record(other, PendingTcpKind::Fin, 9999)
                     == 0) {
                 return false;
             }
         }
     }
     if (queued != 5 ||
-        tcp_connections[connection_slot].retx_count != 5 ||
-        tcp_connections[other_slot].retx_count != 1 ||
+        conn.retx_count != 5 ||
+        other.retx_count != 1 ||
         intrusive_pool_live_count(&tcp_retx_pool) != live_before + 6) {
         return false;
     }
@@ -1221,7 +1386,7 @@ fn pending_tcp_chain_probe_body(
                     let entry: *RetxEntry =
                         intrusive_pool_ref(&tcp_retx_pool, branded);
                     let following: RetxLink = retx_entry_take_next(entry);
-                    if (entry.connection_slot == connection_slot) {
+                    if (entry.connection == conn.self_address) {
                         if (entry.frame_length != 1000 + walked) {
                             lengths_ok = false;
                         }
@@ -1248,13 +1413,13 @@ fn pending_tcp_chain_probe_body(
     if (lengths_ok == false || walked != 5) { return false; }
 
     // Resetting one connection takes its five and leaves the other's one.
-    pending_tcp_reset_all(connection_slot);
-    if (tcp_connections[connection_slot].retx_count != 0 ||
-        tcp_connections[other_slot].retx_count != 1 ||
+    pending_tcp_reset_all(conn.self_address);
+    if (conn.retx_count != 0 ||
+        other.retx_count != 1 ||
         intrusive_pool_live_count(&tcp_retx_pool) != live_before + 1) {
         return false;
     }
-    pending_tcp_reset_all(other_slot);
+    pending_tcp_reset_all(other.self_address);
     if (intrusive_pool_live_count(&tcp_retx_pool) != live_before ||
         intrusive_pool_probe(&tcp_retx_pool) == false) {
         return false;
@@ -1271,7 +1436,7 @@ fn pending_tcp_chain_probe_body(
 
 
 // Takes the entry itself rather than a pair of indices into nine arrays:
-// what used to need `connection_slot * PENDING_TCP_MAX + slot` -- and a
+// what used to need `conn * PENDING_TCP_MAX + slot` -- and a
 // refined slot type so every one of those accesses could prove in range
 // under --forbid-trap -- is now a struct the caller already has a pointer
 // to, and there is no index to bound.
@@ -1331,7 +1496,7 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
 // four slots -- a deliberate choice, since servicing every connection's
 // deadlines from whichever one happens to be running would be a timing
 // change on a path with a history of them.
-fn pending_tcp_service_once(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+fn pending_tcp_service_once(conn: *TcpConnection,
                             ready_in: sink NetRxCanAcquire,
                              retry_ticks: i64)
         -> NetRxCanAcquire !{may_block, unsafe} {
@@ -1361,7 +1526,7 @@ fn pending_tcp_service_once(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
                             let following: RetxLink =
                                 retx_entry_take_next(entry);
                             let mut acked: bool = false;
-                            if (entry.connection_slot == connection_slot &&
+                            if (entry.connection == conn.self_address &&
                                 pending_tcp_ack_matches(frame, len, entry)) {
                                 // A real peer ACK, not a synthetic flag
                                 // flip: this is what makes
@@ -1371,13 +1536,11 @@ fn pending_tcp_service_once(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
                                 // same rigor
                                 // kernel_tcp_injected_syn_ack_recovered()
                                 // already had.
-                                if (slot == tcp_connections[connection_slot]
-                                        .injected_data_entry &&
+                                if (slot == conn.injected_data_entry &&
                                     tcp_injected_data_retransmitted) {
                                     tcp_injected_data_recovery_observed = true;
                                 }
-                                if (slot == tcp_connections[connection_slot]
-                                        .injected_fin_entry &&
+                                if (slot == conn.injected_fin_entry &&
                                     tcp_injected_fin_retransmitted) {
                                     tcp_injected_fin_recovery_observed = true;
                                 }
@@ -1386,8 +1549,8 @@ fn pending_tcp_service_once(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
                             if (acked) {
                                 intrusive_owner_drop(branded);
                                 retx_entry_free(slot, generation);
-                                tcp_connections[connection_slot].retx_count =
-                                    retx_count_after_release(connection_slot);
+                                conn.retx_count =
+                                    retx_count_after_release(conn);
                             } else {
                                 if (retx_entry_put_next(entry, kept) == false) {
                                     kernel_boot_log("tcp retx: chain link was not empty\n");
@@ -1431,7 +1594,7 @@ fn pending_tcp_service_once(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
                         intrusive_pool_ref(&tcp_retx_pool, branded);
                     let following: RetxLink = retx_entry_take_next(entry);
                     let mut expired: bool = false;
-                    if (entry.connection_slot == connection_slot &&
+                    if (entry.connection == conn.self_address &&
                         now - entry.sent_at >= retry_ticks) {
                         if (entry.retries < TCP_RETRY_LIMIT) {
                             let length: usize = entry.frame_length;
@@ -1440,12 +1603,10 @@ fn pending_tcp_service_once(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
                                 ready, frame_bytes[0..<1514], length as i32);
                             entry.sent_at = now;
                             entry.retries = entry.retries + 1;
-                            if (slot == tcp_connections[connection_slot]
-                                    .injected_data_entry) {
+                            if (slot == conn.injected_data_entry) {
                                 tcp_injected_data_retransmitted = true;
                             }
-                            if (slot == tcp_connections[connection_slot]
-                                    .injected_fin_entry) {
+                            if (slot == conn.injected_fin_entry) {
                                 tcp_injected_fin_retransmitted = true;
                             }
                         } else {
@@ -1459,8 +1620,8 @@ fn pending_tcp_service_once(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
                     if (expired) {
                         intrusive_owner_drop(branded);
                         retx_entry_free(slot, generation);
-                        tcp_connections[connection_slot].retx_count =
-                            retx_count_after_release(connection_slot);
+                        conn.retx_count =
+                            retx_count_after_release(conn);
                     } else {
                         if (retx_entry_put_next(entry, kept) == false) {
                             kernel_boot_log("tcp retx: chain link was not empty\n");
@@ -1491,9 +1652,8 @@ fn pending_tcp_service_once(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
 // this file rather than a harmless miscount -- and usize underflow wraps
 // to an enormous number that would make kernel_tcp_close_stream spin to
 // its deadline every time.
-fn retx_count_after_release(
-        connection_slot: {0..<TCP_CONNECTION_MAX as usize}) -> usize {
-    let current: usize = tcp_connections[connection_slot].retx_count;
+fn retx_count_after_release(conn: *TcpConnection) -> usize {
+    let current: usize = conn.retx_count;
     if (current == 0) {
         kernel_boot_log("tcp retx: released an entry with an empty count\n");
         return 0;
@@ -1511,9 +1671,8 @@ fn retx_count_after_release(
 // A counter rather than a walk: the chain is stable owner storage, so
 // even a read-only walk has to take and put every link, and this is
 // polled in a loop.
-fn pending_tcp_any_active(
-        connection_slot: {0..<TCP_CONNECTION_MAX as usize}) -> bool {
-    return tcp_connections[connection_slot].retx_count != 0;
+fn pending_tcp_any_active(conn: *TcpConnection) -> bool {
+    return conn.retx_count != 0;
 }
 
 
@@ -1538,7 +1697,7 @@ fn fix_tcp_checksum(ip: borrow [u8; 20..], tcp_seg: borrow [u8; 20..]) {
 // Rewrites a SYN request into a SYN-ACK reply in place. Only called from
 // TCP_LISTEN after the caller has already validated the request (IP/TCP
 // checksums, dst port, SYN flag set).
-fn build_syn_ack(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+fn build_syn_ack(conn: *TcpConnection,
                  eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
@@ -1556,10 +1715,10 @@ fn build_syn_ack(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
     ip_hdr.checksum = (inet_checksum(ip[0..<ihl as usize]) as u16) as u16be;
 
     let client_port: u16 = tcp_hdr.src_port as u16;
-    tcp_hdr.src_port = tcp_connections[connection_slot].local_port as u16be;
+    tcp_hdr.src_port = conn.local_port as u16be;
     tcp_hdr.dst_port = client_port as u16be;
     tcp_hdr.seq = TCP_INITIAL_SEQ as u32be;
-    tcp_hdr.ack = tcp_connections[connection_slot].rcv_nxt as u32be;
+    tcp_hdr.ack = conn.rcv_nxt as u32be;
     tcp_hdr.data_offset = (5 << 4) as u8; // 20-byte header, no options
     tcp_hdr.flags = TCP_FLAG_SYN | TCP_FLAG_ACK;
     tcp_hdr.window = tcp_advertised_window as u16be;
@@ -1579,7 +1738,7 @@ fn build_syn_ack(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
 // given the caller's own tcp_len bound, but see the explicit check below
 // for why this needs to be enforced, not assumed, to construct tcp_seg
 // with a proven minimum).
-fn build_data_reply(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+fn build_data_reply(conn: *TcpConnection,
         eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
         tcp_seg: borrow [u8; 20..], response_len: u16,
         received_len: u16) -> bool {
@@ -1610,10 +1769,10 @@ fn build_data_reply(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
         ip_hdr.checksum = (inet_checksum(ip[0..<ihl as usize]) as u16) as u16be;
 
         let client_port: u16 = tcp_hdr.src_port as u16;
-        tcp_hdr.src_port = tcp_connections[connection_slot].local_port as u16be;
+        tcp_hdr.src_port = conn.local_port as u16be;
         tcp_hdr.dst_port = client_port as u16be;
-        tcp_hdr.seq = tcp_connections[connection_slot].snd_nxt as u32be;
-        tcp_hdr.ack = (tcp_connections[connection_slot].rcv_nxt +
+        tcp_hdr.seq = conn.snd_nxt as u32be;
+        tcp_hdr.ack = (conn.rcv_nxt +
                        (received_len as u32)) as u32be;
         tcp_hdr.data_offset = (5 << 4) as u8;
         tcp_hdr.flags = TCP_FLAG_ACK | TCP_FLAG_PSH;
@@ -1631,7 +1790,7 @@ fn build_data_reply(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
 // rcv_nxt by the caller) and sends our own FIN in the same segment.
 // Only called from TCP_ESTABLISHED after the caller has already validated
 // the request and confirmed seq == rcv_nxt (before incrementing it).
-fn build_fin_ack(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+fn build_fin_ack(conn: *TcpConnection,
                  eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
@@ -1649,10 +1808,10 @@ fn build_fin_ack(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
     ip_hdr.checksum = (inet_checksum(ip[0..<ihl as usize]) as u16) as u16be;
 
     let client_port: u16 = tcp_hdr.src_port as u16;
-    tcp_hdr.src_port = tcp_connections[connection_slot].local_port as u16be;
+    tcp_hdr.src_port = conn.local_port as u16be;
     tcp_hdr.dst_port = client_port as u16be;
-    tcp_hdr.seq = tcp_connections[connection_slot].snd_nxt as u32be;
-    tcp_hdr.ack = tcp_connections[connection_slot].rcv_nxt as u32be;
+    tcp_hdr.seq = conn.snd_nxt as u32be;
+    tcp_hdr.ack = conn.rcv_nxt as u32be;
     tcp_hdr.data_offset = (5 << 4) as u8;
     tcp_hdr.flags = TCP_FLAG_FIN | TCP_FLAG_ACK;
     tcp_hdr.window = tcp_advertised_window as u16be;
@@ -1664,7 +1823,7 @@ fn build_fin_ack(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
 // Rewrites a received data frame into an ACK with no payload.  This releases
 // the sole GEM RX capability between non-final stream segments while keeping
 // the already-copied bytes in the caller's reconstruction buffer.
-fn build_receive_ack(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
+fn build_receive_ack(conn: *TcpConnection,
                      eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
@@ -1681,10 +1840,10 @@ fn build_receive_ack(connection_slot: {0..<TCP_CONNECTION_MAX as usize},
     ip_hdr.checksum = (inet_checksum(ip[0..<ihl as usize]) as u16) as u16be;
 
     let client_port: u16 = tcp_hdr.src_port as u16;
-    tcp_hdr.src_port = tcp_connections[connection_slot].local_port as u16be;
+    tcp_hdr.src_port = conn.local_port as u16be;
     tcp_hdr.dst_port = client_port as u16be;
-    tcp_hdr.seq = tcp_connections[connection_slot].snd_nxt as u32be;
-    tcp_hdr.ack = tcp_connections[connection_slot].rcv_nxt as u32be;
+    tcp_hdr.seq = conn.snd_nxt as u32be;
+    tcp_hdr.ack = conn.rcv_nxt as u32be;
     tcp_hdr.data_offset = (5 << 4) as u8;
     tcp_hdr.flags = TCP_FLAG_ACK;
     tcp_hdr.window = tcp_advertised_window as u16be;
@@ -1774,15 +1933,27 @@ fn tcp_parse_segment(frame: borrow [u8; 1514..], len: i32) -> TcpSegmentParseRes
     return TcpSegmentParseResult::Reject;
 }
 
+// GitHub issue #257 step 5: this legacy echo path used to work directly on
+// connection slot 0, which existed whether anyone had allocated it or not.
+// A connection is an allocation now, so it takes one out and gives it back
+// -- the same thing accept() does, and the reason the pool needs no
+// special case for "the connection nobody asked for".
 fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
-        -> KernelTcpResult !{may_block} {
+        -> KernelTcpResult !{may_block, unsafe} {
     let mut ready = ready_in;
-    let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = 0;
+    let echo_owner: exists e: usize. TcpConnectionOwner[e] =
+            match tcp_connection_alloc() {
+        TcpConnectionAllocResult::Full => {
+            return KernelTcpResult::TimedOut(ready);
+        }
+        TcpConnectionAllocResult::Allocated(owner) => { owner }
+    };
+    let conn: *TcpConnection = tcp_connection_of(echo_owner);
     let remote_ip_bytes =
-        tcp_connections[connection_slot].remote_ip as []u8;
+        conn.remote_ip as []u8;
     net_read_mac(our_mac as []u8);
-    tcp_connections[connection_slot].state = ConnState::Listen;
-    tcp_connections[connection_slot].local_port = TCP_ECHO_PORT;
+    conn.state = ConnState::Listen;
+    conn.local_port = TCP_ECHO_PORT;
     tcp_completed_handshakes = 0;
     tcp_completed_echoes = 0;
     tcp_completed_closes = 0;
@@ -1804,49 +1975,49 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                         match tcp_parse_segment(frame, len) {
                             TcpSegmentParseResult::Reject => { }
                             TcpSegmentParseResult::Parsed(header) => {
-                                if (header.dst_port == tcp_connections[connection_slot].local_port) {
+                                if (header.dst_port == conn.local_port) {
                                     let ip = frame[14..<34];
-                                    if (tcp_connections[connection_slot].state == ConnState::Listen) {
+                                    if (conn.state == ConnState::Listen) {
                                         if ((header.flags & TCP_FLAG_SYN) != 0) {
                                             slice_copy(remote_ip_bytes[0..<4],
                                                 ip[IP_SRC..<IP_DST]);
-                                            tcp_connections[connection_slot].remote_port = header.src_port;
-                                            tcp_connections[connection_slot].rcv_nxt = header.seq + 1;
-                                            tcp_connections[connection_slot].snd_nxt = TCP_INITIAL_SEQ + 1;
+                                            conn.remote_port = header.src_port;
+                                            conn.rcv_nxt = header.seq + 1;
+                                            conn.snd_nxt = TCP_INITIAL_SEQ + 1;
 
-                                            build_syn_ack(connection_slot, frame, header.ihl);
+                                            build_syn_ack(conn, frame, header.ihl);
                                             plan = TcpRxPlan::Send(14 + (header.ihl as i32) + 20);
-                                            tcp_connections[connection_slot].state = ConnState::SynRcvd;
+                                            conn.state = ConnState::SynRcvd;
                                         }
                                     } else {
                                         // SYN_RCVD, ESTABLISHED, or LAST_ACK: only the
                                         // recorded connection's segments matter.
                                         if (slice_eq(ip[IP_SRC..<IP_DST],
                                                 remote_ip_bytes[0..<4]) &&
-                                            header.src_port == tcp_connections[connection_slot].remote_port) {
+                                            header.src_port == conn.remote_port) {
                                             if ((header.flags & TCP_FLAG_RST) != 0) {
                                                 // Abrupt close from the client: drop the
                                                 // connection with no reply and free the slot.
-                                                tcp_connections[connection_slot].state = ConnState::Listen;
-                                            } else if (tcp_connections[connection_slot].state == ConnState::SynRcvd) {
+                                                conn.state = ConnState::Listen;
+                                            } else if (conn.state == ConnState::SynRcvd) {
                                                 if ((header.flags & TCP_FLAG_ACK) != 0 &&
                                                     (header.flags & TCP_FLAG_SYN) == 0 &&
-                                                    header.ack == tcp_connections[connection_slot].snd_nxt &&
-                                                    header.seq == tcp_connections[connection_slot].rcv_nxt) {
-                                                    tcp_connections[connection_slot].state = ConnState::Established;
+                                                    header.ack == conn.snd_nxt &&
+                                                    header.seq == conn.rcv_nxt) {
+                                                    conn.state = ConnState::Established;
                                                     tcp_completed_handshakes =
                                                         tcp_completed_handshakes + 1;
                                                 }
-                                            } else if (tcp_connections[connection_slot].state == ConnState::Established) {
+                                            } else if (conn.state == ConnState::Established) {
                                                 if ((header.flags & TCP_FLAG_FIN) != 0 &&
-                                                    header.seq == tcp_connections[connection_slot].rcv_nxt) {
-                                                    tcp_connections[connection_slot].rcv_nxt =
-                                                        tcp_connections[connection_slot].rcv_nxt + 1;
-                                                    build_fin_ack(connection_slot, frame, header.ihl);
+                                                    header.seq == conn.rcv_nxt) {
+                                                    conn.rcv_nxt =
+                                                        conn.rcv_nxt + 1;
+                                                    build_fin_ack(conn, frame, header.ihl);
                                                     plan = TcpRxPlan::Send(14 + (header.ihl as i32) + 20);
-                                                    tcp_connections[connection_slot].snd_nxt =
-                                                        tcp_connections[connection_slot].snd_nxt + 1;
-                                                    tcp_connections[connection_slot].state = ConnState::LastAck;
+                                                    conn.snd_nxt =
+                                                        conn.snd_nxt + 1;
+                                                    conn.state = ConnState::LastAck;
                                                 } else {
                                                     // max(.., 0): tcp_len - tcp_hdr_len's raw
                                                     // Sub-derived range has a spuriously negative
@@ -1872,10 +2043,10 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                                                     if (data_len > 0 &&
                                                         header.tcp_hdr_len == 20 &&
                                                         (header.flags & TCP_FLAG_ACK) != 0 &&
-                                                        header.seq == tcp_connections[connection_slot].rcv_nxt) {
+                                                        header.seq == conn.rcv_nxt) {
                                                         let tcp_len_idx: usize = header.tcp_len as usize;
                                                         let tcp_seg = frame[34..<34 + tcp_len_idx];
-                                                        if (build_data_reply(connection_slot, frame, header.ihl, tcp_seg,
+                                                        if (build_data_reply(conn, frame, header.ihl, tcp_seg,
                                                                 data_len, data_len)) {
                                                             plan = TcpRxPlan::Send(14 + (header.ihl as i32) + 20 + (data_len as i32));
                                                             // rcv_nxt/snd_nxt are u32
@@ -1885,20 +2056,20 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                                                             // but neither counter is ever used as a
                                                             // slice bound/index, so no proof depends
                                                             // on their refined-ness).
-                                                            tcp_connections[connection_slot].rcv_nxt =
-                                                                tcp_connections[connection_slot].rcv_nxt + (data_len as u32);
-                                                            tcp_connections[connection_slot].snd_nxt =
-                                                                tcp_connections[connection_slot].snd_nxt + (data_len as u32);
+                                                            conn.rcv_nxt =
+                                                                conn.rcv_nxt + (data_len as u32);
+                                                            conn.snd_nxt =
+                                                                conn.snd_nxt + (data_len as u32);
                                                             tcp_completed_echoes =
                                                                 tcp_completed_echoes + 1;
                                                         }
                                                     }
                                                 }
-                                            } else if (tcp_connections[connection_slot].state == ConnState::LastAck) {
+                                            } else if (conn.state == ConnState::LastAck) {
                                                 if ((header.flags & TCP_FLAG_ACK) != 0 &&
-                                                    header.ack == tcp_connections[connection_slot].snd_nxt) {
+                                                    header.ack == conn.snd_nxt) {
                                                     // Close complete; ready for a new client.
-                                                    tcp_connections[connection_slot].state = ConnState::Listen;
+                                                    conn.state = ConnState::Listen;
                                                     tcp_completed_closes =
                                                         tcp_completed_closes + 1;
                                                 }
@@ -1921,11 +2092,13 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                         if (tcp_completed_handshakes >= 2 &&
                             tcp_completed_echoes >= 1 &&
                             tcp_completed_closes >= 1) {
+                            tcp_connection_free(echo_owner);
                             return KernelTcpResult::Verified(ready);
                         }
                     }
                 }
     }
+    tcp_connection_free(echo_owner);
     return KernelTcpResult::TimedOut(ready);
 }
 
@@ -1936,20 +2109,20 @@ fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
                           ready_in: sink NetRxCanAcquire, port: u16)
         -> KernelTcpAcceptResult !{may_block} {
     let mut ready = ready_in;
-    let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = owner.pool_index;
+    let conn: *TcpConnection = tcp_connection_of(owner);
     let remote_ip_bytes =
-        tcp_connections[connection_slot].remote_ip as []u8;
+        conn.remote_ip as []u8;
     let remote_mac_bytes =
-        tcp_connections[connection_slot].remote_mac as []u8;
-    let stream_frames = tcp_connection_tx_slice(connection_slot);
-    tcp_connections[connection_slot].state = ConnState::Listen;
-    tcp_connections[connection_slot].local_port = port;
+        conn.remote_mac as []u8;
+    let stream_frames = tcp_connection_tx_slice(conn);
+    conn.state = ConnState::Listen;
+    conn.local_port = port;
     // GitHub issue #180: a fresh connection never inherits a stale queue
     // slot from a previous one. kernel_tcp_close_stream now drains its
     // own pending queue synchronously before it ever returns (see that
     // function), so -- unlike before -- this loop no longer needs to
     // opportunistically service leftover pending_tcp state itself.
-    pending_tcp_reset_all(connection_slot);
+    pending_tcp_reset_all(conn.self_address);
     let start: i64 = read_cntpct();
     let counter_frequency: i64 = read_cntfrq();
     let deadline_ticks: i64 = counter_frequency * 30;
@@ -1989,17 +2162,17 @@ fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
                         TcpSegmentParseResult::Parsed(header) => {
                             let ip = frame[14..<34];
                             if (header.dst_port == port) {
-                                if (tcp_connections[connection_slot].state == ConnState::Listen &&
+                                if (conn.state == ConnState::Listen &&
                                     (header.flags & TCP_FLAG_SYN) != 0) {
                                     slice_copy(remote_ip_bytes[0..<4],
                                         ip[IP_SRC..<IP_DST]);
                                     slice_copy(remote_mac_bytes[0..<6],
                                         frame[6..<12]);
-                                    tcp_connections[connection_slot].remote_port = header.src_port;
-                                    tcp_connections[connection_slot].rcv_nxt = header.seq + 1;
-                                    tcp_connections[connection_slot].snd_nxt =
+                                    conn.remote_port = header.src_port;
+                                    conn.rcv_nxt = header.seq + 1;
+                                    conn.snd_nxt =
                                         TCP_INITIAL_SEQ + 1;
-                                    build_syn_ack(connection_slot, frame, header.ihl);
+                                    build_syn_ack(conn, frame, header.ihl);
                                     slice_copy(stream_frames[0..<54],
                                                frame[0..<54]);
                                     if (tcp_drop_next_syn_ack) {
@@ -2014,26 +2187,26 @@ fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
                                     syn_ack_sent_at =
                                         read_cntpct();
                                     syn_ack_retries = 0;
-                                    tcp_connections[connection_slot].state =
+                                    conn.state =
                                         ConnState::SynRcvd;
                                 } else if (
-                                    tcp_connections[connection_slot].state == ConnState::SynRcvd &&
-                                    header.src_port == tcp_connections[connection_slot].remote_port &&
+                                    conn.state == ConnState::SynRcvd &&
+                                    header.src_port == conn.remote_port &&
                                     slice_eq(ip[IP_SRC..<IP_DST],
                                         remote_ip_bytes[0..<4]) &&
                                     (header.flags & TCP_FLAG_RST) != 0) {
-                                    tcp_connections[connection_slot].state = ConnState::Listen;
+                                    conn.state = ConnState::Listen;
                                     tcp_injected_syn_pending = false;
                                 } else if (
-                                    tcp_connections[connection_slot].state == ConnState::SynRcvd &&
-                                    header.src_port == tcp_connections[connection_slot].remote_port &&
+                                    conn.state == ConnState::SynRcvd &&
+                                    header.src_port == conn.remote_port &&
                                     slice_eq(ip[IP_SRC..<IP_DST],
                                         remote_ip_bytes[0..<4]) &&
                                     (header.flags & TCP_FLAG_ACK) != 0 &&
                                     (header.flags & TCP_FLAG_SYN) == 0 &&
-                                    header.ack == tcp_connections[connection_slot].snd_nxt &&
-                                    header.seq == tcp_connections[connection_slot].rcv_nxt) {
-                                    tcp_connections[connection_slot].state =
+                                    header.ack == conn.snd_nxt &&
+                                    header.seq == conn.rcv_nxt) {
+                                    conn.state =
                                         ConnState::Established;
                                     if (tcp_injected_syn_pending &&
                                         tcp_injected_syn_retransmitted) {
@@ -2060,7 +2233,7 @@ fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
             }
         }
         let retry_now: i64 = read_cntpct();
-        if (tcp_connections[connection_slot].state == ConnState::SynRcvd &&
+        if (conn.state == ConnState::SynRcvd &&
             syn_ack_retries < TCP_RETRY_LIMIT &&
             retry_now - syn_ack_sent_at >= retry_ticks) {
             ready = net_transmit_ready(
@@ -2070,7 +2243,7 @@ fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
             if (tcp_injected_syn_pending) {
                 tcp_injected_syn_retransmitted = true;
             }
-        } else if (tcp_connections[connection_slot].state == ConnState::SynRcvd &&
+        } else if (conn.state == ConnState::SynRcvd &&
                    syn_ack_retries == TCP_RETRY_LIMIT &&
                    retry_now - syn_ack_sent_at >= retry_ticks) {
             // The half-open peer did not acknowledge any bounded attempt.
@@ -2094,7 +2267,7 @@ fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
             if (tcp_injected_syn_pending) {
                 tcp_drop_next_syn_ack = true;
             }
-            tcp_connections[connection_slot].state = ConnState::Listen;
+            conn.state = ConnState::Listen;
             tcp_injected_syn_pending = false;
         }
     }
@@ -2106,9 +2279,9 @@ fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection],
                            destination: borrow [u8; 1460..])
         -> KernelTcpReceiveResult !{may_block} {
     let mut ready = ready_in;
-    let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = owner.pool_index;
+    let conn: *TcpConnection = tcp_connection_of(owner);
     let remote_ip_bytes =
-        tcp_connections[connection_slot].remote_ip as []u8;
+        conn.remote_ip as []u8;
     let start: i64 = read_cntpct();
     let deadline_ticks: i64 = read_cntfrq() * 30;
     while ((read_cntpct() - start) < deadline_ticks) {
@@ -2154,13 +2327,13 @@ fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection],
                                 let source_port: u16 = tcp_hdr.src_port as u16;
                                 let destination_port: u16 = tcp_hdr.dst_port as u16;
                                 let sequence: u32 = tcp_hdr.seq as u32;
-                                if (source_port == tcp_connections[connection_slot].remote_port &&
-                                    destination_port == tcp_connections[connection_slot].local_port &&
+                                if (source_port == conn.remote_port &&
+                                    destination_port == conn.local_port &&
                                     (tcp_hdr.flags & TCP_FLAG_ACK) != 0 &&
                                     checksum_fold(checksum_add(
                                         tcp_segment,
                                         checksum_add(pseudo as []u8, 0))) == 0) {
-                                    if (sequence != tcp_connections[connection_slot].rcv_nxt) {
+                                    if (sequence != conn.rcv_nxt) {
                                         // Duplicate (sequence behind rcv_nxt) and
                                         // out-of-order (ahead) data both elicit the
                                         // same cumulative ACK. Neither advances the
@@ -2204,19 +2377,19 @@ fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection],
                     }
                     TcpReceiveDisposition::AckOnly => {
                         build_receive_ack(
-                            connection_slot, net_rx_frame(acquired), 20);
+                            conn, net_rx_frame(acquired), 20);
                         ready = net_rx_send_reply(
                             net_rx_reply_ready(acquired, 54));
                     }
                     TcpReceiveDisposition::Payload(payload_length) => {
-                        tcp_connections[connection_slot].rcv_nxt =
-                            tcp_connections[connection_slot].rcv_nxt + (payload_length as u32);
-                        tcp_connections[connection_slot].received_length = payload_length;
+                        conn.rcv_nxt =
+                            conn.rcv_nxt + (payload_length as u32);
+                        conn.received_length = payload_length;
                         if (tcp_ack_each_stream_segment) {
                             tcp_split_request_segments =
                                 tcp_split_request_segments + 1;
                             build_receive_ack(
-                                connection_slot, net_rx_frame(acquired), 20);
+                                conn, net_rx_frame(acquired), 20);
                             return KernelTcpReceiveResult::Received(
                                 net_rx_send_reply(
                                     net_rx_reply_ready(acquired, 54)));
@@ -2235,8 +2408,8 @@ fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection],
 }
 
 fn kernel_tcp_received_length(owner: borrow TcpConnectionOwner[connection])
-        -> usize {
-    return tcp_connections[owner.pool_index].received_length;
+        -> usize !{unsafe} {
+    return tcp_connection_of(owner).received_length;
 }
 
 fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
@@ -2245,15 +2418,15 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
                             received_length: usize,
                             payload_length: usize)
         -> KernelTcpSendResult !{may_block} {
-    let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = owner.pool_index;
+    let conn: *TcpConnection = tcp_connection_of(owner);
     let remote_ip_bytes =
-        tcp_connections[connection_slot].remote_ip as []u8;
+        conn.remote_ip as []u8;
     let remote_mac_bytes =
-        tcp_connections[connection_slot].remote_mac as []u8;
+        conn.remote_mac as []u8;
     if (payload_length >= 1 && payload_length <= 1460 &&
         received_length >= 1 && received_length <= 1460) {
         let length: usize = payload_length;
-        let frame_bytes = tcp_connection_tx_slice(connection_slot);
+        let frame_bytes = tcp_connection_tx_slice(conn);
         slice_copy(frame_bytes[0..<6],
                    remote_mac_bytes[0..<6]);
         slice_copy(frame_bytes[6..<12], our_mac as []u8);
@@ -2275,10 +2448,10 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
         ip_hdr.checksum = (inet_checksum(ip) as u16) as u16be;
         let tcp = frame_bytes[34..<54];
         let tcp_hdr: *TcpHdr = tcp as *TcpHdr;
-        tcp_hdr.src_port = tcp_connections[connection_slot].local_port as u16be;
-        tcp_hdr.dst_port = tcp_connections[connection_slot].remote_port as u16be;
-        tcp_hdr.seq = tcp_connections[connection_slot].snd_nxt as u32be;
-        tcp_hdr.ack = tcp_connections[connection_slot].rcv_nxt as u32be;
+        tcp_hdr.src_port = conn.local_port as u16be;
+        tcp_hdr.dst_port = conn.remote_port as u16be;
+        tcp_hdr.seq = conn.snd_nxt as u32be;
+        tcp_hdr.ack = conn.rcv_nxt as u32be;
         tcp_hdr.data_offset = (5 << 4) as u8;
         tcp_hdr.flags = TCP_FLAG_ACK | TCP_FLAG_PSH;
         tcp_hdr.window = 65535;
@@ -2286,8 +2459,8 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
         tcp_hdr.urgent = 0;
         slice_copy(frame_bytes[54..<54 + length], source[0..<length]);
         fix_tcp_checksum(ip, frame_bytes[34..<54 + length]);
-        tcp_connections[connection_slot].snd_nxt =
-            tcp_connections[connection_slot].snd_nxt + (length as u32);
+        conn.snd_nxt =
+            conn.snd_nxt + (length as u32);
         let frame_length: usize = 54 + length;
         // GitHub issue #180: opportunistically retire any already-acked
         // older segment (and retry any overdue one) before queuing this
@@ -2295,12 +2468,12 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
         // retransmission record now that pending_tcp_record finds its own
         // free slot instead of always overwriting slot 0.
         let mut serviced = pending_tcp_service_once(
-            connection_slot, ready, read_cntfrq() / 5);
-        let this_index: usize = tcp_connections[connection_slot].data_segment_counter;
-        tcp_connections[connection_slot].data_segment_counter =
-            tcp_connections[connection_slot].data_segment_counter + 1;
+            conn, ready, read_cntfrq() / 5);
+        let this_index: usize = conn.data_segment_counter;
+        conn.data_segment_counter =
+            conn.data_segment_counter + 1;
         let this_entry: usize = pending_tcp_record(
-            connection_slot, PendingTcpKind::Data, frame_length);
+            conn, PendingTcpKind::Data, frame_length);
         // GitHub issue #295: this_entry == 0 means the segment could not
         // be queued (pending_tcp_record's own doc comment) -- there is
         // nothing to ever retransmit from, so the deliberate-drop test
@@ -2317,7 +2490,7 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
             // both come from pending_tcp_service_once's real timeout+
             // peer-ack path, the same one every other segment uses.
             tcp_drop_data_segment_index = -1;
-            tcp_connections[connection_slot].injected_data_entry = this_entry;
+            conn.injected_data_entry = this_entry;
             return KernelTcpSendResult::Sent(serviced);
         }
         return KernelTcpSendResult::Sent(net_transmit_ready(
@@ -2341,12 +2514,12 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
                            ready_in: sink NetRxCanAcquire)
         -> KernelTcpCloseResult !{may_block} {
     let mut ready = ready_in;
-    let connection_slot: {0..<TCP_CONNECTION_MAX as usize} = owner.pool_index;
+    let conn: *TcpConnection = tcp_connection_of(owner);
     let remote_ip_bytes =
-        tcp_connections[connection_slot].remote_ip as []u8;
+        conn.remote_ip as []u8;
     let remote_mac_bytes =
-        tcp_connections[connection_slot].remote_mac as []u8;
-    let frame = tcp_connection_tx_slice(connection_slot);
+        conn.remote_mac as []u8;
+    let frame = tcp_connection_tx_slice(conn);
     slice_copy(frame[0..<6],
                remote_mac_bytes[0..<6]);
     slice_copy(frame[6..<12], our_mac as []u8);
@@ -2368,26 +2541,26 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
     ip_hdr.checksum = (inet_checksum(ip) as u16) as u16be;
     let tcp = frame[34..<54];
     let tcp_hdr: *TcpHdr = tcp as *TcpHdr;
-    tcp_hdr.src_port = tcp_connections[connection_slot].local_port as u16be;
-    tcp_hdr.dst_port = tcp_connections[connection_slot].remote_port as u16be;
-    tcp_hdr.seq = tcp_connections[connection_slot].snd_nxt as u32be;
-    tcp_hdr.ack = tcp_connections[connection_slot].rcv_nxt as u32be;
+    tcp_hdr.src_port = conn.local_port as u16be;
+    tcp_hdr.dst_port = conn.remote_port as u16be;
+    tcp_hdr.seq = conn.snd_nxt as u32be;
+    tcp_hdr.ack = conn.rcv_nxt as u32be;
     tcp_hdr.data_offset = (5 << 4) as u8;
     tcp_hdr.flags = TCP_FLAG_FIN | TCP_FLAG_ACK;
     tcp_hdr.window = 65535;
     tcp_hdr.checksum = 0;
     tcp_hdr.urgent = 0;
     fix_tcp_checksum(ip, tcp);
-    tcp_connections[connection_slot].snd_nxt = tcp_connections[connection_slot].snd_nxt + 1;
+    conn.snd_nxt = conn.snd_nxt + 1;
     let fin_entry: usize = pending_tcp_record(
-        connection_slot, PendingTcpKind::Fin, 54);
+        conn, PendingTcpKind::Fin, 54);
     // GitHub issue #295: same reasoning as the Data-segment send site --
     // fin_entry == 0 means nothing tracks this FIN, so the deliberate-drop
     // injection must not arm (that would skip the only transmission this
     // FIN would ever get). Falls through to the real send instead.
     if (tcp_drop_next_fin && fin_entry != 0) {
         tcp_drop_next_fin = false;
-        tcp_connections[connection_slot].injected_fin_entry = fin_entry;
+        conn.injected_fin_entry = fin_entry;
     } else {
         ready = net_transmit_ready(ready, frame, 54);
     }
@@ -2395,10 +2568,10 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
     let counter_frequency: i64 = read_cntfrq();
     let deadline_ticks: i64 = counter_frequency * 5;
     let retry_ticks: i64 = counter_frequency / 5;
-    while (pending_tcp_any_active(connection_slot) &&
+    while (pending_tcp_any_active(conn) &&
            (read_cntpct() - start) < deadline_ticks) {
         net_rx_wait();
-        ready = pending_tcp_service_once(connection_slot, ready, retry_ticks);
+        ready = pending_tcp_service_once(conn, ready, retry_ticks);
     }
     return KernelTcpCloseResult::Closed(ready);
 }

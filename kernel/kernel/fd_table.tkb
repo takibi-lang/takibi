@@ -90,6 +90,31 @@ struct SharedObject {
     writable: bool;
     listener_state: UnifiedListenerState;
     port: u16;
+    // GitHub issue #257 step 5: transport_slot is the connection's POOL
+    // ADDRESS now, not an index into a [TcpConnection; TCP_CONNECTION_MAX].
+    // The type did not change -- it was always a plain usize here -- but
+    // what checked it did.
+    //
+    // Every consumer used to narrow it to {0..<TCP_CONNECTION_MAX as usize}
+    // before indexing, so a wrong value was caught by the refinement
+    // before the generation check ever ran. An address is not in a range
+    // and there is nothing left for a refinement to say. What replaces it
+    // is intrusive_pool_matches / intrusive_pool_probe_slot in
+    // kernel/net/tcp.tkb, run on every use, which checks that the address
+    // lands on a real slot of that pool AND that the occupant is still the
+    // one transport_generation names.
+    //
+    // That is not a weaker check, it is a different and stronger one: the
+    // refinement could only say "in range", and being in range was never
+    // the interesting question -- a recycled slot is in range too. It IS
+    // one layer fewer, in that a garbage value now meets one check instead
+    // of two. The pair is written by exactly one place
+    // (unified_connection_create, from a value the pool minted at accept
+    // time) and read only through that validation, so the defence-in-depth
+    // the refinement provided was against kernel bugs, not against
+    // anything userspace supplies -- userspace supplies the fd, and that
+    // path is separately bounds-checked (handle.slot: {0..<SHARED_OBJECT_MAX})
+    // and generation-validated before this field is ever reached.
     transport_slot: usize;
     transport_generation: usize;
 }

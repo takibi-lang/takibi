@@ -1,1 +1,1 @@
-tcp connection pool: exhaustion at capacity=2, reuse-after-free ok
+tcp connection pool: five concurrent connections past the old ceiling of 2, each its own storage, stale address refused, everything given back ok
