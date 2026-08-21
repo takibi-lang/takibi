@@ -145,6 +145,10 @@ struct BootPagePool {
     core: FreelistCore(BOOT_PAGE_COUNT);
     meta: [PageMeta; BOOT_PAGE_COUNT];
     double_remove_count: usize;
+    // GitHub issue #380: runs get their own identity counter. The list's
+    // own next_generation belongs to popping the head, and a run is not
+    // popped -- it is chosen by position and unlinked.
+    run_generation: usize;
 }
 
 private let mut boot_page_pool: BootPagePool;
@@ -165,6 +169,121 @@ fn page_owner_new(index: {0..<BOOT_PAGE_COUNT as usize},
     return owner;
 }
 
+// GitHub issue #380: a run of `count` CONTIGUOUS pages, aligned to
+// `count * PAGE_SIZE` when `count` is a power of two.
+//
+// One linear owner for the whole run rather than `count` PageOwners: the
+// point of a run is that its pages are not independently disposable, and
+// handing back N separate owners would say the opposite. Alignment is not
+// a bonus -- it is what lets a consumer test a pointer's membership with
+// one masked compare instead of a range check, which is how Linux's arm64
+// kernel-stack overflow check costs a single bit test.
+linear struct PageRunOwner[run: usize] {
+    private first: {0..<BOOT_PAGE_COUNT as usize};
+    private count: usize;
+    private generation: usize @ run;
+}
+
+must_use variant PageRunAllocResult {
+    OutOfMemory;
+    Allocated(exists run: usize. PageRunOwner[run]);
+}
+
+fn page_run_owner_new(first: {0..<BOOT_PAGE_COUNT as usize}, count: usize,
+                      generation: usize @ run) -> PageRunOwner[run] {
+    let mut owner: PageRunOwner[run] = { first, count, generation };
+    return owner;
+}
+
+fn page_run_physical_address(owner: borrow PageRunOwner[run]) -> usize {
+    let base: usize = usable_ram_start;
+    return base + owner.first * PAGE_SIZE;
+}
+
+fn page_run_count(owner: borrow PageRunOwner[run]) -> usize {
+    return owner.count;
+}
+
+// Is every page of an aligned candidate run free? `first` is a multiple
+// of `count`, so `first + k` cannot wrap past the pool while
+// `first + count <= BOOT_PAGE_COUNT`, which the caller checks.
+private fn page_run_is_free(first: usize, count: usize) -> bool {
+    for k: usize in 0..<count {
+        let index: usize = first + k;
+        if (index >= BOOT_PAGE_COUNT) { return false; }
+        let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+        if (boot_page_pool.meta[checked].occupied) { return false; }
+    }
+    return true;
+}
+
+// Scans for the first aligned run of free pages, marks it occupied, and
+// takes those pages off the free list in one pass.
+//
+// A linear scan rather than a buddy allocator, deliberately: #350's own
+// non-goals rule out a general buddy unless it turns out to be the
+// smaller change, and the caller today is process creation -- rare, and
+// already doing far more expensive work.
+fn page_alloc_contiguous(count: usize) -> PageRunAllocResult !{unsafe} {
+    if (count == 0) { return PageRunAllocResult::OutOfMemory; }
+    // The alignment that matters is the ADDRESS's, and page INDEX zero is
+    // not at an aligned address: both linker scripts only promise
+    // `ALIGN(4096)` for usable_ram_start, and on QEMU it lands at
+    // 0x40903000 -- page-aligned and not 16K-aligned. Choosing candidates
+    // at multiples of `count` therefore produces runs that are contiguous
+    // and NOT aligned, which is the half of this that consumers actually
+    // need. Skew the choice by where the pool itself starts.
+    let skew: usize = (usable_ram_start / PAGE_SIZE) % count;
+    for candidate: usize in 0..<BOOT_PAGE_COUNT {
+        if ((candidate + skew) % count == 0 &&
+            candidate + count <= BOOT_PAGE_COUNT &&
+            page_run_is_free(candidate, count)) {
+            for k: usize in 0..<count {
+                let index: usize = candidate + k;
+                if (index < BOOT_PAGE_COUNT) {
+                    let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+                    boot_page_pool.meta[checked].occupied = true;
+                    boot_page_pool.meta[checked].map_refcount = 0;
+                }
+            }
+            let unlinked: usize = freelist_core_unlink_range(
+                &boot_page_pool.core, candidate, count);
+            if (unlinked != count) {
+                // The scan said every page was free and the list says
+                // otherwise. That is an invariant break, not a resource
+                // limit, and it is worth saying so where it happens.
+                kernel_boot_log("page run: free-list disagreed with occupancy\n");
+            }
+            let generation: usize = boot_page_pool.run_generation;
+            boot_page_pool.run_generation = generation + 1;
+            let checked_first: {0..<BOOT_PAGE_COUNT as usize} = candidate;
+            return PageRunAllocResult::Allocated(
+                page_run_owner_new(checked_first, count, generation));
+        }
+    }
+    return PageRunAllocResult::OutOfMemory;
+}
+
+fn page_run_free(owner: sink PageRunOwner[run]) !{unsafe} {
+    let first: usize = owner.first;
+    let count: usize = owner.count;
+    for k: usize in 0..<count {
+        let index: usize = first + k;
+        if (index < BOOT_PAGE_COUNT) {
+            let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+            if (boot_page_pool.meta[checked].occupied == false) {
+                boot_page_pool.double_remove_count =
+                    boot_page_pool.double_remove_count + 1;
+            } else {
+                boot_page_pool.meta[checked].occupied = false;
+                boot_page_pool.meta[checked].map_refcount = 0;
+                freelist_core_remove(&boot_page_pool.core,
+                                     freelist_owner_new(checked, 0));
+            }
+        }
+    }
+}
+
 fn page_allocator_init() {
     // GitHub issue #259 (2026-08-16): a nested-field address
     // (&boot_page_pool.core) now infers the generic call's N directly, no
@@ -179,6 +298,75 @@ fn page_allocator_init() {
         boot_page_pool.meta[i].map_refcount = 0;
     }
     boot_page_pool.double_remove_count = 0;
+    boot_page_pool.run_generation = 1;
+}
+
+// GitHub issue #380's acceptance criteria, as a boot probe: a run is
+// contiguous and aligned, its pages are genuinely withheld from
+// page_alloc() while it is live, and giving it back restores the pool
+// exactly.
+fn page_run_probe() -> bool !{unsafe} {
+    let pages_before: usize = page_allocator_live_count();
+    let doubles_before: usize = page_allocator_double_free_count();
+    let count: usize = 4;
+
+    let run: exists r: usize. PageRunOwner[r] =
+            match page_alloc_contiguous(count) {
+        PageRunAllocResult::OutOfMemory => { return false; }
+        PageRunAllocResult::Allocated(owner) => { owner }
+    };
+    let base: usize = page_run_physical_address(run);
+    // Aligned to the whole run, which is what makes a masked membership
+    // test possible, and contiguous by construction of the scan.
+    let aligned: bool = base % (count * PAGE_SIZE) == 0;
+    let counted: bool = page_run_count(run) == count &&
+                        page_allocator_live_count() == pages_before + count;
+
+    // Every page of the run must be withheld: allocate singles until one
+    // would have to come from inside the run, and check none does. Four
+    // singles is enough to catch the list handing back a page it has
+    // already given away, without draining the pool.
+    let mut overlap: bool = false;
+    let mut singles: usize = 0;
+    let mut probe_a = page_alloc();
+    let mut probe_b = page_alloc();
+    match probe_a {
+        PageAllocResult::OutOfMemory => {}
+        PageAllocResult::Allocated(owner) => {
+            let at: usize = page_physical_address(owner);
+            if (at >= base && at < base + count * PAGE_SIZE) { overlap = true; }
+            singles = singles + 1;
+            page_free(owner);
+        }
+    }
+    match probe_b {
+        PageAllocResult::OutOfMemory => {}
+        PageAllocResult::Allocated(owner) => {
+            let at: usize = page_physical_address(owner);
+            if (at >= base && at < base + count * PAGE_SIZE) { overlap = true; }
+            singles = singles + 1;
+            page_free(owner);
+        }
+    }
+
+    page_run_free(run);
+    let restored: bool =
+        page_allocator_live_count() == pages_before &&
+        page_allocator_double_free_count() == doubles_before;
+
+    // And the pool still works afterwards: a run that unlinked pages and
+    // pushed them back must leave the list usable.
+    let mut reusable: bool = false;
+    match page_alloc_contiguous(count) {
+        PageRunAllocResult::OutOfMemory => {}
+        PageRunAllocResult::Allocated(again) => {
+            reusable = page_run_physical_address(again) % (count * PAGE_SIZE) == 0;
+            page_run_free(again);
+        }
+    }
+    return aligned && counted && overlap == false && singles == 2 &&
+           restored && reusable &&
+           page_allocator_live_count() == pages_before;
 }
 
 fn page_alloc() -> PageAllocResult {

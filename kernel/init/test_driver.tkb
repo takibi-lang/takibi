@@ -574,6 +574,11 @@ fn kernel_test_common_probes() {
     } else {
         kernel_boot_log("crash trace: failed\n");
     }
+    if (page_run_probe()) {
+        kernel_boot_log("page runs: 4 contiguous pages aligned to the run, withheld from page_alloc while live, returned exactly\n");
+    } else {
+        kernel_boot_log("page runs: failed\n");
+    }
     if (growable_pool_probe()) {
         kernel_boot_log("growable pool: zero-start growth, cross-chunk data, generation-safe reuse, double-free counted, own ceiling ok\n");
     } else {
