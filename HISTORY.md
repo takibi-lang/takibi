@@ -15,6 +15,172 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-21: Issue #377 -- Sizing a Kernel Stack From a Measurement, and Testing SP in One Bit
+
+The follow-up to #373. That issue proved a kernel stack was overflowing
+into a neighbouring page; this one made the overflow impossible to reach a
+neighbour, sized the stack from a number instead of a guess, and put the
+test at exception entry where it costs a single branch.
+
+#### The measurement was saturated, so it was a floor and not a number
+
+Issue #376 had shipped a poison fill and a high-water scan. What it
+reported was:
+
+```
+QEMU  size=3968 deepest=3968 SATURATED
+RPi5  size=3968 deepest=3968 SATURATED
+```
+
+Every byte consumed on both platforms. A saturated watermark says nothing
+about the requirement -- once the poison runs out there is nothing left to
+measure with -- so the size had to be raised first and re-measured after.
+Four pages, matching Linux arm64's `THREAD_SIZE` and FreeBSD's
+`kern.kstack_pages` default, and this stack carries two worst cases at
+once because interrupts still share it.
+
+Re-measured:
+
+```
+QEMU  size=16384 deepest=4368  boot=4432/16384
+RPi5  size=16384 deepest=3648  boot=4432/16384
+```
+
+**4368 against 3968.** The one-page stack was 400 bytes short of what the
+deepest path actually needs, which settles that #373's corruption was a
+real overflow and not an accident of allocation order.
+
+#### The upper half, not the lower half
+
+Linux aligns each kernel stack to TWICE its size so that one bit of SP
+says which half an address is in, then relies on an unmapped guard page
+below the stack to trap the overflow. Only half of that is available
+here: this kernel's identity map is block-mapped, so punching a 4K hole
+costs a 2 MB block split, and the fault handler would then need a stack
+that is not the one it is reporting on.
+
+So the halves are swapped. A stack is the UPPER half of a
+32768-byte-aligned 32768-byte page run, and the lower half belongs to the
+same run and is handed to nobody. The same one bit still answers -- it is
+1 inside the stack and 0 below it -- and an overflow is CONTAINED rather
+than trapped: it writes into 16384 bytes that are not anybody's.
+
+Both halves are poisoned, not just the stack. Containment alone would
+make an overflow harmless *and invisible*, which is how #373 stayed silent
+for as long as it did. `kernel_stack_overflow_bytes` reports how far past
+the end a stack went, which is the number a guard page would have read off
+the faulting address.
+
+#### A run is all payload, which was the first design question here
+
+Issue #353 reserved the last 128 bytes of every page for owner metadata;
+issue #380 then added multi-page runs. Applying the first rule to the
+second gives a stack with a 128-byte hole every 4096 bytes, which is not a
+stack. Reserving only the last page's tail is incoherent for the same
+reason -- the interior pages' tails are in the middle of the stack.
+
+The answer was to make the reservation per-ALLOCATION: a run's pages are
+marked, `page_meta_at` answers 0 for them, and the whole `count *
+PAGE_SIZE` is payload. That is also the half that makes it safe. A run's
+page is not a candidate chunk for any pool, so no pool can read a stack
+frame as its own chunk header -- which is exactly what #373's kernel
+stacks were doing when they ran into their own page's metadata.
+
+#### Which took kernel stacks off growable_pool, and growable_pool off kernel/
+
+A `growable_pool` chunk's payload must fit in one page by construction
+(`static_assert`, added by #373's own investigation), so a four-page stack
+cannot be one. Kernel stacks were that pool's only consumer in `kernel/`
+outside its own probe, so it was demoted to `linux_user/` in the same
+change rather than left hovering as a product-surface library maintained
+for its own test -- the shape #366 had to dig out when this file's
+`linux_user/` half drifted 329 lines from its twin while passing its
+tests the whole time. It was not deleted: it is still the static-footprint
+comparand behind #344's claim (5440 bytes before a single object exists,
+against `IntrusivePool`'s 80), and deleting it would turn that measurement
+back into an assertion.
+
+#### The boot stack had never been measured at all
+
+The boot stack is where everything that is not a running process runs --
+every fixture, the distro exec path, the whole of `main()`. It was 0x10000
+because that is what it had always been. Poisoning it from `main()`'s
+first statement and scanning it at the end of the suite says **4432
+bytes**, within a hundred of what the deepest process path needs.
+
+It, the secondary core's stack, and the stack the overflow report runs on
+are now all the same shape as a process's: 0x4000 usable in the upper half
+of a 0x8000-aligned 0x8000 region. The uniformity is not tidiness. It is
+what lets one bit decide membership for EVERY kernel stack; a boot stack
+of some other size or alignment would answer the test wrongly on exactly
+the paths that are not standing on a process stack, which is most of them.
+
+The shape is a linker-script fact, so nothing at compile time can see it.
+`scheduled_process_table_probe` checks it at runtime, being the probe that
+already owns "a kernel stack is where it says it is".
+
+#### The entry-time test is compiler work, and it landed as three keys
+
+Exception entry on this kernel is generated (`gen_exception_entry`, issue
+#227), so a check at entry is a compiler change, not an assembly one.
+`exception_entry` grew three optional keys -- `stack_guard_shift`,
+`stack_guard_stack`, `stack_guard_handler` -- which emit, immediately
+after the frame allocation and before anything is saved:
+
+```
+	sub	sp, sp, #816
+	add	sp, sp, x0		// sp' = sp + x0
+	sub	x0, sp, x0		// x0' = sp' - x0 = sp
+	tbz	x0, #14, .L..._stack_overflow
+	sub	x0, sp, x0		// restore x0
+	sub	sp, sp, x0		// restore sp
+```
+
+The register shuffle is Linux arm64's, and its point is that there is
+nowhere to spill a scratch register when the question being asked is
+whether the stack is usable at all. Testing AFTER the frame allocation is
+what makes an exactly-full stack the failure rather than an empty one: SP
+at the top of a run has bit 14 clear, and one frame down has it set.
+
+The three keys are all-or-nothing -- two of them would generate a check
+with nowhere to go. The shift names a `const` rather than being a literal
+in the declaration, because it is a fact about this kernel's stacks and
+not about AArch64; `scheduled_process_table_init` `static_assert`s it
+against the size it claims to be the log of.
+
+On failure SP switches to a stack of its own before the handler runs, with
+DAIF fully masked. A report about a stack cannot be trusted if it is
+written using that stack. The interrupted `x0` is gone by then -- the
+shuffle spent it -- so the handler never returns, which is checked as part
+of its signature only in the sense that it returns void; the generated
+code parks behind it regardless.
+
+#### Two things the effect checker and the disassembler caught
+
+- Turning `kernel_stack_guard_fail` into a fail-stop with the
+  crash-snapshot path's `while (true) { interrupt_wait(); }` did not
+  compile: *"interrupt function 'platform_el0_irq_dispatch' may block via
+  ... -> kernel_stack_guard_fail -> interrupt_wait"*. Two of the three
+  call sites are inside `!{interrupt}` handlers. The rule is about
+  handlers that intend to return and this one does not, so it spins
+  instead -- and the disassembly was checked for `b .` rather than
+  assuming an empty infinite loop survives codegen.
+- The process-table probe printed `stacks=3968` from a **string literal**,
+  and its view expectation matched it happily after the stacks became
+  16384. A view test cannot catch a line that has become a lie about
+  itself. It prints the constant now.
+
+#### The regression test injects a real overflow
+
+`kernelcheck-stack-overflow-qemu`, in the same deliberate-fail-stop lane
+as `kernelcheck-oops-qemu`: GDB moves SP to just above the boot stack's
+bottom at a real IRQ entry and sends PC back to the entry symbol, so the
+ordinary generated path fires with nothing about the kernel modified. It
+asserts the report names the right stack, and then reads the parked SP
+back to confirm the handler did not run on the overflowed one -- which is
+the acceptance criterion that is easiest to claim and hardest to believe
+without reading the register.
+
 ### 2026-08-21: Issue #373 -- A Kernel Stack Overflowing Into Somebody Else's Page
 
 Filed during #257 as "holding any small number of pages across boot
