@@ -15,6 +15,121 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-20/21: Issue #257 -- The TCP Connection Ceiling Is Gone
+
+`TCP_CONNECTION_MAX` and `PENDING_TCP_MAX` no longer exist. A connection is
+a slot in `IntrusivePool(TcpConnection)`, its three frames are slots in a
+`NetFrame` pool, and its unacknowledged segments are a chain of pooled
+entries. Nothing in `kernel/net/` or `kernel/kernel/` picks a number.
+
+Six commits, each green on QEMU and on real RPi5 hardware on its own:
+`3b647b5` (the connection struct), `3f6f5d7` (syscall.tkb's scalars),
+`a8561bc` (the kernel's first intrusive_pool consumer), `33daa56` (the
+retransmit chain), `3abef56`/`0eb18c0` (the frames), `cab836c` (the pool
+and the parking lot).
+
+#### The parking lot was deleted, not ported
+
+`tcp_connection_store` was a `[TcpConnectionStore; TCP_CONNECTION_MAX]` of
+`{ mutex, TcpConnectionValue }` -- somewhere for a linear owner to live
+between syscalls, since a syscall returns to userspace and cannot hold
+one. With a pool there is nowhere to park and nothing to conflict with:
+the connection IS the slot, the fd table already holds its `(address,
+generation)`, and an owner is minted from that pair on demand. `take`
+became a validation, `put` became a drop, `Conflict` became unreachable,
+and 13 of the 17 call sites collapsed to one line each instead of being
+rewritten. That insight -- recorded on the issue before any code was
+written -- is what made a 17-site change tractable.
+
+#### Ownership is linear; access is by address
+
+The pattern that settled for pooled resources, and the one to copy:
+
+- the OWNER is parked in a stable field (`FrameLink`, `RetxLink`), so
+  forgetting to free is a compile error;
+- the ADDRESS is kept beside it as a plain `usize`, and every read goes
+  through `intrusive_pool_probe_slot`, which validates it and gates the
+  payload behind a view the caller has to spend.
+
+The alternative -- take the parked handle out and put it straight back on
+every access -- works, and would put a linear value in the hand of every
+read and write path, each of which could then drop it. Splitting the two
+means the linear half carries the obligation, the erased half carries the
+location, and the pool validates what the erased half claims.
+
+#### What replaced the refinement
+
+`TcpConnectionOwner`'s `pool_index` was `{0..<TCP_CONNECTION_MAX as usize}`
+-- a proof that an index named a real array element. `intrusive_pool_matches`
+proves more: that the address names a live slot of THIS pool whose occupant
+is still the one the generation names. Being in range was never the
+interesting question, since a recycled slot is in range too. The honest
+part is written down at `kernel/kernel/fd_table.tkb`'s `transport_slot`:
+it is one layer of defence fewer against a garbage value, in a field
+written by exactly one place from a value the pool minted.
+
+#### Four bugs the migration found
+
+**Re-initialising a pool that holds pages forgets them; it does not free
+them.** `tcp_connection_pool_init` looks like a constructor and is a RESET
+-- called again on every daemon start and process configure. Calling
+`intrusive_pool_init` there zeroed `chunk_head` and left every page marked
+live with nobody able to give it back; the `resources` view caught it as a
+page leak. Construct once, DRAIN afterwards. **Any pool adopted by a
+subsystem whose "init" is really a reset has this failure mode**, and the
+arrays being replaced never did, so nothing at the call sites warns you.
+
+**Three writes to freed connections.** `connection_open = false` was
+written after the connection had been freed, in
+`kernel_connected_descriptor_release` and both shutdown paths. Against an
+array that was a harmless write to storage outliving its meaning; against
+a pool it hit the missing-payload fallback, which is how it was found. All
+three were already redundant -- `tcp_connection_free` clears the flag on
+its way out.
+
+**Issue #373 (open, and NOT this issue's bug): holding a page across boot
+breaks a later `execve`.** It cost most of step 3b's debugging. Measured:
+0 pages held passes, 1/2/4 fail with an identical undefined-instruction
+fail-stop at EL0 (same ELR/ESR every run), 512/513 pass, and
+allocate-then-immediately-free of the same four passes. So it is WHICH
+pages the allocator hands out afterwards -- not timing, not the count.
+Reproducible with a plain `page_alloc()` leak in any file. Every pool this
+issue added uses `intrusive_pool_init_retaining(&pool, 0)`, which is
+independently right for storage that is empty at rest, so the workaround
+is not load-bearing.
+
+**The compiler could not slice a struct field's array** -- issue #372,
+closed, and a prerequisite nobody had noticed. See its own entry below.
+
+#### The step order in the plan could not run
+
+The migration plan put "pool the connection, delete the parking lot"
+second. A pooled connection is identified by an ADDRESS, and both later
+steps still keyed storage off a connection INDEX (`pending_tcp_*` at
+`connection_slot * PENDING_TCP_MAX + slot`; `syscall.tkb`'s six arrays at
+60 sites). Both were prerequisites, not follow-ups. The corrected order --
+arrays first, pool last -- is on the issue, along with why each step was
+split further when it turned out to introduce a mechanism and a set of
+call sites at the same time.
+
+#### What the fixture proves, and what it cannot
+
+`tcp_connection_pool_probe` holds five concurrent connections past the old
+ceiling of 2, checks each is its own storage, presents a freed
+connection's address afterwards and confirms it is refused on the
+GENERATION rather than on the address, and confirms every page comes back.
+It runs at boot, on hardware.
+
+It is not a wire-level five-connection test, and cannot be: this stack has
+exactly one physical RX capability for the whole kernel (`NetRxCanAcquire`),
+so packet processing across connections is sequential by construction.
+That is a separate limitation, documented in `kernel/net/tcp.tkb`'s own
+header, and it is unrelated to the ceiling this issue removed -- what the
+ceiling bounded was how many connections could EXIST, which is exactly
+what the probe exercises.
+
+---
+
 ### 2026-08-20: Issue #372 and the First Two Steps of the #257 Migration
 
 Starting the `tcp_connection_pool` migration ran into a language gap on
