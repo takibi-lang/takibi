@@ -56,7 +56,19 @@ enum ProcessWaitReason: u8 { None; UartRx; ChildExit; }
 // ADDRESS_SPACE_MAX -- root index == this file's own
 // ProcessHandle.pool_index everywhere.
 const KERNEL_PROCESS_MAX: usize = 16;
-const KERNEL_PROCESS_STACK_SIZE: usize = 4096;
+// GitHub issue #373: a page's PAYLOAD, not a page. kernel/mm/page.tkb
+// reserves the last PAGE_META_BYTES of every page for owner metadata
+// (issue #353), so a stack that ran to PAGE_SIZE started its first push
+// 128 bytes INSIDE that metadata -- and kernel/lib/intrusive_pool.tkb
+// reads exactly that region to decide whether a page is one of its
+// chunks. Every kernel stack was forging a chunk header.
+//
+// Derived rather than written as 3968, so it cannot drift if the
+// allocator's reservation changes again; the divisibility this needs is
+// checked below rather than assumed, since SP must stay 16-byte aligned
+// on AArch64 and `stack_base + KERNEL_PROCESS_STACK_SIZE` is where it
+// starts.
+const KERNEL_PROCESS_STACK_SIZE: usize = PAGE_USABLE_BYTES;
 
 // Issue #188 Stage 2: the stable store holds one generation-indexed process
 // identity. A separate linear state token carries Ready/Running/Exited, so
@@ -154,6 +166,7 @@ fn scheduled_process_record_wait4_status_ptr(slot: usize) -> usize {
 struct KernelStackPage {
     bytes: [u8; KERNEL_PROCESS_STACK_SIZE];
 }
+
 
 // Genuinely expensive per-slot (one whole 4096-byte page each, unlike the
 // tiny bookkeeping arrays above), so this one -- unlike the others in this
@@ -341,6 +354,12 @@ fn scheduled_process_identity_take(handle: ProcessHandle)
 
 fn scheduled_process_table_init() {
     slotmap_init(&scheduled_process_pool);
+    // AArch64 requires SP to be 16-byte aligned, and
+    // scheduled_process_alloc sets saved_sp to
+    // stack_base + KERNEL_PROCESS_STACK_SIZE. The page base is
+    // page-aligned, so the size is what has to divide (issue #373).
+    static_assert(KERNEL_PROCESS_STACK_SIZE % 16 == 0,
+                  "KERNEL_PROCESS_STACK_SIZE must keep saved_sp 16-byte aligned");
     growable_pool_init(&scheduled_process_kernel_stacks);
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
         scheduled_process_records[slot].saved_sp = 0;
@@ -689,14 +708,25 @@ fn scheduled_process_table_probe() -> bool {
     }
     if (capacity_ok == false) { return false; }
 
-    // Every live slot's stack must be distinct and page-aligned. Both
-    // loops bound by the same literal (KERNEL_PROCESS_MAX), not one loop
-    // bound by the other's variable, so --forbid-trap can prove both
-    // `handles[i]`/`handles[j]` accesses in one pass (a variable inner
-    // bound like `0..<i` does not carry a provable range here).
+    // Every live slot's stack must be distinct, and must END where its
+    // page's PAYLOAD ends. Both loops bound by the same literal
+    // (KERNEL_PROCESS_MAX), not one loop bound by the other's variable,
+    // so --forbid-trap can prove both `handles[i]`/`handles[j]` accesses
+    // in one pass (a variable inner bound like `0..<i` does not carry a
+    // provable range here).
+    //
+    // GitHub issue #373: this used to require the stack top to be
+    // PAGE-aligned, which is the same thing only while a page is entirely
+    // payload. Since issue #353 the last PAGE_META_BYTES belong to the
+    // allocator, so a page-aligned top means the first push lands INSIDE
+    // that metadata -- which is exactly the bug, expressed as the check
+    // that was supposed to catch it. The invariant now names the payload
+    // boundary, so it fails if a stack ever reaches into the metadata
+    // again.
     for i: usize in 0..<KERNEL_PROCESS_MAX {
         let stack: usize = scheduled_process_stack_top(handles[i]);
-        if (stack == 0 || (stack & 4095) != 0) { return false; }
+        if (stack == 0 || stack % PAGE_SIZE != PAGE_USABLE_BYTES ||
+            stack % 16 != 0) { return false; }
         for j: usize in 0..<KERNEL_PROCESS_MAX {
             if (j != i && stack == scheduled_process_stack_top(handles[j])) {
                 return false;

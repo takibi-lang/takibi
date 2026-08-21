@@ -514,7 +514,7 @@ fn httpd_image_mapping_check(httpd: Ext2ExecImage,
 
 fn kernel_test_common_probes() {
     if (scheduled_process_table_probe()) {
-        kernel_boot_log("process table: slots=16 stacks=4096 generation reuse safe\n");
+        kernel_boot_log("process table: slots=16 stacks=3968 (page payload, not the whole page) generation reuse safe\n");
     } else {
         kernel_boot_log("process table: failed\n");
     }
