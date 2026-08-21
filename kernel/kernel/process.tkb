@@ -1271,10 +1271,9 @@ fn kernel_process_current_has_relative() -> bool {
 // when it is anything else the corruption is silent. Which page it is
 // depends on allocation order, so the tree passes or fails on luck.
 //
-// The check: the stack's lowest words are no longer zero. growable_pool
-// zeroes a chunk's payload when it grows, so those words stay zero until
-// something pushes that far -- reaching them means the next push leaves
-// the page.
+// The check: the poison at the stack's bottom, and in the witness just
+// below it, is no longer intact. Both halves of the run are filled at
+// allocation, so nothing disturbs either until a frame reaches that far.
 //
 // Comparing SP against the stack's own range was tried first and is
 // WRONG here: `execution_current_live` says a process exists, not that
@@ -1285,10 +1284,10 @@ fn kernel_process_current_has_relative() -> bool {
 // test asks a question about the STACK rather than about who is standing
 // on it, and has no such ambiguity.
 //
-// NetBSD ships the same idea as `options KSTACK_CHECK_MAGIC`. This is a
-// detector, not a fix: a guard page (#377) is what makes the overflow
-// impossible, and it needs aligned multi-page allocation (#350). Sizing
-// it needs a measurement (#376).
+// NetBSD ships the same idea as `options KSTACK_CHECK_MAGIC`. It is a
+// poll, not a trap: it answers at the three call sites below rather than
+// at the moment of the write, and what bounds the damage in between is
+// the quarantine half of the run, not this check.
 //
 // Called from the places that hold a REAL frame pointer -- the timer IRQ
 // handlers and the syscall return path -- rather than from
@@ -1326,38 +1325,58 @@ private fn kernel_stack_below_witness(bottom: usize)
     return unsafe { (bottom - KERNEL_STACK_WITNESS_BYTES) as *KernelStackWitness };
 }
 
-// Reported once per boot rather than on every check: the condition
-// LATCHES (the witness is only re-armed when a slot is allocated), so
-// repeating it would bury the rest of the log without adding a fact.
-private let mut kernel_stack_guard_reported: bool = false;
-
-// REPORTS, and does not stop.
+// FAIL-STOPS.
 //
-// It should stop -- an overflow means the kernel has written outside its
-// stack, and every other unrecoverable state in this kernel fail-stops.
-// It cannot yet: this kernel trips this check on a NORMAL boot, with no
-// reproducer and no injection, because 3968 bytes is not enough for its
-// deepest path. Halting here today would make every run red for a reason
-// that is already tracked, and would hide anything else the suite finds.
+// It reported and returned for as long as this kernel tripped the check
+// on a NORMAL boot, with no reproducer and no injection: 3968 bytes was
+// not enough for its deepest path, so halting would have made every run
+// red for a reason already tracked and hidden anything else the suite
+// found. Four pages removed that -- the deepest path measures 4368 bytes
+// against 16384 -- so reaching the bottom now means something is wrong
+// rather than something is Tuesday, and this joins every other
+// unrecoverable state in this kernel.
 //
-// So this is the detector half of issue #375 and the halt lands with the
-// guard page in #377, once #376 has sized the stack so that reaching the
-// bottom means something is wrong rather than something is Tuesday.
+// Parking is for the same reason the crash-snapshot path parks: the
+// kernel has written outside a bound it maintains, so there is nothing
+// left it can honestly do, and continuing would be a guess about which
+// of its own invariants still hold.
+//
+// A bare spin rather than that path's `interrupt_wait()`, because two of
+// the three call sites are inside `!{interrupt}` handlers and this
+// kernel's effect checker refuses a blocking wfe there -- correctly, and
+// it caught this on the first build. The rule is about handlers that
+// intend to return; this one does not, so it spins instead of arguing
+// with it.
+//
+// This report still runs on the stack it is reporting about, which the
+// quarantine half is what makes survivable -- 16384 bytes of headroom
+// against a report that costs a few frames. A handler on a stack of its
+// own is the proper answer and belongs with the entry-time check, not
+// here.
 private fn kernel_stack_guard_fail(reason: *u8, slot: usize, base: usize,
-                                   sp: usize) {
-    if (kernel_stack_guard_reported) { return; }
-    kernel_stack_guard_reported = true;
-    kernel_boot_log("kernel stack: BOTTOM REACHED -- ");
+                                   sp: usize) !{unsafe} {
+    kernel_boot_log("kernel stack: OVERFLOW -- ");
     kernel_boot_log(reason);
-    kernel_boot_log(" (issues #373/#376/#377) slot=");
+    kernel_boot_log(" (issues #373/#377) slot=");
     uart_put_udec(slot);
-    kernel_boot_log(" base=");
+    kernel_boot_log(" bottom=");
     uart_put_udec(base);
     kernel_boot_log(" sp=");
     uart_put_udec(sp);
     kernel_boot_log(" size=");
     uart_put_udec(KERNEL_PROCESS_STACK_SIZE);
+    // How far past the bottom, when it is already past: the number a
+    // guard page would have read off the faulting address.
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        let over: usize = kernel_stack_overflow_bytes(checked);
+        if (over != 0) {
+            kernel_boot_log(" past-end=");
+            uart_put_udec(over);
+        }
+    }
     kernel_boot_log("\n");
+    while (true) { }
 }
 
 fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
