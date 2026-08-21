@@ -225,6 +225,17 @@ fn page_run_count(owner: borrow PageRunOwner[run]) -> usize {
     return owner.count;
 }
 
+// The run's first page index, after its linear owner has been consumed.
+// The run-sized twin of page_owner_transfer_index, and for the same
+// reason: a holder that keeps a run for the lifetime of the kernel has
+// nothing to do with a linear value it can never give back, and a linear
+// value cannot be stored in an array anyway. The pages stay occupied,
+// which is exactly what the holder wants.
+fn page_run_owner_transfer_index(owner: sink PageRunOwner[run])
+        -> {0..<BOOT_PAGE_COUNT as usize} {
+    return owner.first;
+}
+
 // Is every page of an aligned candidate run free? `first` is a multiple
 // of `count`, so `first + k` cannot wrap past the pool while
 // `first + count <= BOOT_PAGE_COUNT`, which the caller checks.

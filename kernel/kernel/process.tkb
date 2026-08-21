@@ -56,19 +56,41 @@ enum ProcessWaitReason: u8 { None; UartRx; ChildExit; }
 // ADDRESS_SPACE_MAX -- root index == this file's own
 // ProcessHandle.pool_index everywhere.
 const KERNEL_PROCESS_MAX: usize = 16;
-// GitHub issue #373: a page's PAYLOAD, not a page. kernel/mm/page.tkb
-// reserves the last PAGE_META_BYTES of every page for owner metadata
-// (issue #353), so a stack that ran to PAGE_SIZE started its first push
-// 128 bytes INSIDE that metadata -- and kernel/lib/intrusive_pool.tkb
-// reads exactly that region to decide whether a page is one of its
-// chunks. Every kernel stack was forging a chunk header.
+// GitHub issue #377: four pages. Linux arm64's THREAD_SIZE is 16K and
+// FreeBSD's kern.kstack_pages defaults to four, and this stack carries
+// two worst cases at once because interrupts still run on it.
 //
-// Derived rather than written as 3968, so it cannot drift if the
-// allocator's reservation changes again; the divisibility this needs is
-// checked below rather than assumed, since SP must stay 16-byte aligned
-// on AArch64 and `stack_base + KERNEL_PROCESS_STACK_SIZE` is where it
-// starts.
-const KERNEL_PROCESS_STACK_SIZE: usize = PAGE_USABLE_BYTES;
+// NOT derived from issue #376's measurement. That measurement came back
+// SATURATED on both QEMU and RPi5 -- every byte of the old 3968 was
+// consumed -- and a saturated watermark is a FLOOR, not a requirement:
+// once the poison runs out there is nothing left to measure with. So the
+// size is generous first and re-measured after, which is only possible
+// because there is now room for the measurement to land inside.
+const KERNEL_STACK_PAGES: usize = 4;
+const KERNEL_PROCESS_STACK_SIZE: usize = KERNEL_STACK_PAGES * PAGE_SIZE;
+
+// ...and the page RUN behind each stack is twice that, with the stack in
+// its UPPER half. Two properties fall out of one allocation:
+//
+// - Containment. The lower half belongs to the same run, so the
+//   allocator never hands it to anyone else. A stack that runs past its
+//   end writes into 16384 bytes that are nobody's -- which is precisely
+//   what issue #373 did not have, when it wrote into a process's text
+//   and the process executed kernel frames.
+// - Detection, in one bit. page_alloc_contiguous aligns a power-of-two
+//   run to its own size, so bit 14 of an address is 1 everywhere in the
+//   upper half and 0 everywhere in the lower half. That single bit is
+//   Linux arm64's kernel-stack overflow test
+//   (https://lkml.iu.edu/hypermail/linux/kernel/1708.0/05410.html), and
+//   it needs no per-stack base to compare against.
+//
+// Linux puts the stack in the LOWER half and relies on an unmapped guard
+// page below it. There is no unmapped page to be had here -- this
+// kernel's identity map is block-mapped, so punching a 4K hole means
+// splitting a 2 MB block -- so the halves are swapped: the same one bit
+// answers, and an overflow is CONTAINED rather than trapped.
+const KERNEL_STACK_RUN_PAGES: usize = KERNEL_STACK_PAGES * 2;
+const KERNEL_STACK_RUN_BYTES: usize = KERNEL_STACK_RUN_PAGES * PAGE_SIZE;
 
 // Issue #188 Stage 2: the stable store holds one generation-indexed process
 // identity. A separate linear state token carries Ready/Running/Exited, so
@@ -156,38 +178,76 @@ fn scheduled_process_record_wait4_status_ptr(slot: usize) -> usize {
     }
     return 0;
 }
-// A generic type argument to GrowablePool(T, ...) can only be a primitive
-// integer type, bool, a plain struct name, or a plain pointer to one of
-// those (issue #207's generics limitation) -- an array type like
-// [u8; KERNEL_PROCESS_STACK_SIZE] is not directly usable, hence this
-// one-field wrapper struct purely to name the page's size to the type
-// system; nothing ever reads its `bytes` field, only the struct's own
-// base address (see growable_pool_ref_at's callers below).
-struct KernelStackPage {
+// One half of a run, named as a struct purely so that the poison fill,
+// the guard and the watermark scan keep ordinary checked indexing over a
+// region whose address is computed. Nothing reads `bytes` as a whole;
+// the struct exists to give `[u8; KERNEL_PROCESS_STACK_SIZE]` a name a
+// cast can produce.
+//
+// Both halves are exactly this size by construction, so one struct
+// serves the stack and the region below it. Which one a given cast means
+// is stated by the accessor that produces it -- kernel_stack_span versus
+// kernel_stack_quarantine_span -- not by the type.
+struct KernelStackHalf {
     bytes: [u8; KERNEL_PROCESS_STACK_SIZE];
 }
 
+// GitHub issue #377: one KERNEL_STACK_RUN_BYTES page run per slot, kept
+// as its base physical address. 0 means this slot has never been backed.
+//
+// The linear PageRunOwner is consumed at allocation
+// (page_run_owner_transfer_index) rather than stored. A linear value
+// cannot live in an array -- the same storage rule that made
+// growable_pool keep flat index arrays -- and there is nothing for an
+// owner to do here in any case: a slot's run is never given back, so
+// there is no release path for it to guard.
+//
+// Never reset by scheduled_process_table_clear() (called several times
+// per boot). Keeping the base is what makes a reused slot reuse the SAME
+// run instead of allocating a fresh one and leaking the old, which is
+// exactly the property growable_pool_ensure's idempotence used to
+// provide.
+private let mut scheduled_process_stack_runs: [usize; KERNEL_PROCESS_MAX];
 
-// Genuinely expensive per-slot (one whole 4096-byte page each, unlike the
-// tiny bookkeeping arrays above), so this one -- unlike the others in this
-// file -- is a growable_pool.tkb "shadow" pool (issue #246):
-// growable_pool_ensure/_ref_at, keyed directly by this file's own
-// pool_index, no separate allocation of its own. Safe to use from this
-// global's plain zero-initialized .bss state with no explicit
-// growable_pool_init() call on the real (non-probe) path: the
-// ensure/_ref_at access mode only ever reads/writes active_chunks/
-// chunk_data_base/chunk_page_index, all correctly "nothing grown yet" at
-// zero already -- see kernel/lib/growable_pool.tkb's own header. Must NOT
-// be re-initialized from scheduled_process_table_clear() (called several
-// times per boot, see main.tkb): a chunk's physical page, once given to a
-// pool_index, is never returned to page.tkb (growable_pool.tkb's own
-// "never shrink" policy), so a stale generation reusing the same
-// pool_index correctly reuses the SAME physical stack page via
-// growable_pool_ensure's idempotence -- re-running growable_pool_init()
-// here instead would forget that bookkeeping and leak a fresh page on
-// every reuse.
-private let mut scheduled_process_kernel_stacks:
-    GrowablePool(KernelStackPage, 1, KERNEL_PROCESS_MAX, KERNEL_PROCESS_MAX);
+// A run base this file is willing to read through.
+//
+// Alignment is the invariant everything else rests on: the single-bit
+// membership test, the probe's stack-top check, and the containment
+// claim all assume the run begins on a KERNEL_STACK_RUN_BYTES boundary.
+// A base that is not so aligned is not one of these runs, and reading
+// through it would report on unrelated memory -- which is how a first
+// RPi5 run under issue #375 produced base=89984, neither page-aligned
+// nor above that platform's kernel image.
+private fn kernel_stack_run_usable(base: usize) -> bool {
+    return base != 0 && base % KERNEL_STACK_RUN_BYTES == 0;
+}
+
+// The lowest address this slot's stack may occupy: the run's midpoint.
+// 0 for a slot with no usable run, so every caller's existing "0 means
+// there is nothing to look at" test still holds.
+private fn kernel_stack_bottom(slot: {0..<KERNEL_PROCESS_MAX as usize})
+        -> usize {
+    let base: usize = scheduled_process_stack_runs[slot];
+    if (kernel_stack_run_usable(base) == false) { return 0; }
+    return base + KERNEL_PROCESS_STACK_SIZE;
+}
+
+// The stack region itself, [bottom, bottom + KERNEL_PROCESS_STACK_SIZE).
+// Callers establish `bottom != 0` first; this file's own accessor is the
+// only producer, so the cast is over storage page.tkb has already
+// confirmed it owns and has withheld from every other consumer.
+private fn kernel_stack_span(bottom: usize) -> *KernelStackHalf !{unsafe} {
+    return unsafe { bottom as *KernelStackHalf };
+}
+
+// The region BELOW the stack, which belongs to the same run and to
+// nothing else. Poisoned with the stack and never written by anything
+// that is behaving: a disturbed byte here is an overflow that already
+// happened, as opposed to a stack merely standing at its own bottom.
+private fn kernel_stack_quarantine_span(bottom: usize)
+        -> *KernelStackHalf !{unsafe} {
+    return unsafe { (bottom - KERNEL_PROCESS_STACK_SIZE) as *KernelStackHalf };
+}
 
 must_use variant ScheduledProcessAllocResult {
     Full;
@@ -355,12 +415,19 @@ fn scheduled_process_identity_take(handle: ProcessHandle)
 fn scheduled_process_table_init() {
     slotmap_init(&scheduled_process_pool);
     // AArch64 requires SP to be 16-byte aligned, and
-    // scheduled_process_alloc sets saved_sp to
-    // stack_base + KERNEL_PROCESS_STACK_SIZE. The page base is
-    // page-aligned, so the size is what has to divide (issue #373).
+    // scheduled_process_alloc sets saved_sp to the run's END. The run
+    // base is aligned to the whole run, so the size is what has to
+    // divide (issue #373).
     static_assert(KERNEL_PROCESS_STACK_SIZE % 16 == 0,
                   "KERNEL_PROCESS_STACK_SIZE must keep saved_sp 16-byte aligned");
-    growable_pool_init(&scheduled_process_kernel_stacks);
+    // The one-bit overflow test is a statement about the run's shape, so
+    // state it here rather than leaving it implied by two `* 2`s.
+    static_assert(KERNEL_STACK_RUN_BYTES == KERNEL_PROCESS_STACK_SIZE * 2,
+                  "the stack must be exactly half its run, or bit-testing an address does not decide which half it is in");
+    // page_alloc_contiguous only promises alignment for a power-of-two
+    // run, and the promise is the whole basis of the test above.
+    static_assert(KERNEL_STACK_RUN_PAGES == 8,
+                  "KERNEL_STACK_RUN_PAGES must be a power of two for page_alloc_contiguous to align the run");
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
         scheduled_process_records[slot].saved_sp = 0;
         scheduled_process_records[slot].state = ProcessSlotState::Free;
@@ -399,27 +466,41 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
             let (index, generation) = freelist_owner_into_parts(popped);
             if (index < KERNEL_PROCESS_MAX) {
                 let slot: {0..<KERNEL_PROCESS_MAX as usize} = index;
-                match growable_pool_ensure(
-                        &scheduled_process_kernel_stacks, slot) {
-                    GrowablePoolEnsureResult::Ok => {}
-                    GrowablePoolEnsureResult::IndexOutOfRange => {
-                        slotmap_remove(&scheduled_process_pool,
-                                       freelist_owner_new(slot, generation));
-                        return ScheduledProcessAllocResult::Full;
-                    }
-                    GrowablePoolEnsureResult::ChunkLimitReached => {
-                        kernel_boot_log_resource_exhausted(
-                            "kernel stack pool" as *u8, KERNEL_PROCESS_MAX);
-                        slotmap_remove(&scheduled_process_pool,
-                                       freelist_owner_new(slot, generation));
-                        return ScheduledProcessAllocResult::Full;
-                    }
-                    GrowablePoolEnsureResult::OutOfMemory => {
-                        kernel_boot_log_resource_exhausted(
-                            "physical page allocator" as *u8, BOOT_PAGE_COUNT);
-                        slotmap_remove(&scheduled_process_pool,
-                                       freelist_owner_new(slot, generation));
-                        return ScheduledProcessAllocResult::Full;
+                // Backed once per slot and kept: see
+                // scheduled_process_stack_runs' own note on why a reused
+                // slot must reuse its run.
+                if (scheduled_process_stack_runs[slot] == 0) {
+                    match page_alloc_contiguous(KERNEL_STACK_RUN_PAGES) {
+                        PageRunAllocResult::OutOfMemory => {
+                            kernel_boot_log_resource_exhausted(
+                                "physical page allocator" as *u8,
+                                BOOT_PAGE_COUNT);
+                            slotmap_remove(&scheduled_process_pool,
+                                           freelist_owner_new(slot, generation));
+                            return ScheduledProcessAllocResult::Full;
+                        }
+                        PageRunAllocResult::Allocated(run) => {
+                            let base: usize = page_run_physical_address(run);
+                            if (kernel_stack_run_usable(base)) {
+                                page_run_owner_transfer_index(run);
+                                scheduled_process_stack_runs[slot] = base;
+                            } else {
+                                // An unaligned run from an allocator that
+                                // promises alignment is an invariant
+                                // break, not a resource limit. Give it
+                                // back and refuse the slot: a stack built
+                                // on it would answer the one-bit
+                                // membership test with a lie, which is
+                                // worse than not having the slot.
+                                page_run_free(run);
+                                kernel_boot_log_resource_exhausted(
+                                    "kernel stack run (unaligned; refused)" as *u8,
+                                    KERNEL_STACK_RUN_PAGES);
+                                slotmap_remove(&scheduled_process_pool,
+                                               freelist_owner_new(slot, generation));
+                                return ScheduledProcessAllocResult::Full;
+                            }
+                        }
                     }
                 }
                 match address_space_ensure_root(slot) {
@@ -445,21 +526,29 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                     }
                 }
                 scheduled_process_records[slot].state = ProcessSlotState::Ready;
-                let stack_base: usize =
-                    growable_pool_ref_at(&scheduled_process_kernel_stacks, slot)
-                        as usize;
+                let bottom: usize = kernel_stack_bottom(slot);
+                // Unreachable given the branch above stored only a base
+                // kernel_stack_run_usable accepted, but the two casts
+                // below are the ones that must never be handed 0, so the
+                // guarantee is checked where it is used rather than
+                // argued from ten lines away.
+                if (bottom == 0) {
+                    slotmap_remove(&scheduled_process_pool,
+                                   freelist_owner_new(slot, generation));
+                    return ScheduledProcessAllocResult::Full;
+                }
                 scheduled_process_records[slot].saved_sp =
-                    stack_base + KERNEL_PROCESS_STACK_SIZE;
-                // GitHub issues #375/#376: growable_pool zeroes a
-                // chunk's payload when it GROWS, which is once per slot
-                // ever -- a reused slot would inherit the previous
-                // occupant's marks. Re-poison the whole stack here so both
-                // the bottom-reached guard and the high-water measurement
+                    bottom + KERNEL_PROCESS_STACK_SIZE;
+                // GitHub issues #375/#376: a reused slot reuses its run,
+                // so it would otherwise inherit the previous occupant's
+                // marks. Re-poison BOTH halves here so the guard, the
+                // high-water measurement and the overflow depth all
                 // answer about THIS process.
-                let stack: *KernelStackPage =
-                    growable_pool_ref_at(&scheduled_process_kernel_stacks, slot);
+                let stack: *KernelStackHalf = kernel_stack_span(bottom);
+                let below: *KernelStackHalf = kernel_stack_quarantine_span(bottom);
                 for i: usize in 0..<KERNEL_PROCESS_STACK_SIZE {
                     stack.bytes[i] = KERNEL_STACK_POISON;
+                    below.bytes[i] = KERNEL_STACK_POISON;
                 }
                 let mut handle: ProcessHandle = { slot, generation };
                 match scheduled_process_identity_put(
@@ -719,24 +808,27 @@ fn scheduled_process_table_probe() -> bool {
     }
     if (capacity_ok == false) { return false; }
 
-    // Every live slot's stack must be distinct, and must END where its
-    // page's PAYLOAD ends. Both loops bound by the same literal
+    // Every live slot's stack must be distinct, and must END exactly
+    // where its run ends. Both loops bound by the same literal
     // (KERNEL_PROCESS_MAX), not one loop bound by the other's variable,
     // so --forbid-trap can prove both `handles[i]`/`handles[j]` accesses
     // in one pass (a variable inner bound like `0..<i` does not carry a
     // provable range here).
     //
-    // GitHub issue #373: this used to require the stack top to be
-    // PAGE-aligned, which is the same thing only while a page is entirely
-    // payload. Since issue #353 the last PAGE_META_BYTES belong to the
-    // allocator, so a page-aligned top means the first push lands INSIDE
-    // that metadata -- which is exactly the bug, expressed as the check
-    // that was supposed to catch it. The invariant now names the payload
-    // boundary, so it fails if a stack ever reaches into the metadata
-    // again.
+    // GitHub issue #377: the run is KERNEL_STACK_RUN_BYTES-aligned and
+    // the stack is its upper half, so the top is a multiple of the whole
+    // run -- and that one equation is the same fact the single-bit
+    // overflow test relies on. Asserting it here is asserting that test's
+    // premise on every slot the kernel ever hands out.
+    //
+    // Two earlier versions of this check were each true only of the
+    // layout of their day: PAGE-alignment (issue #373 -- true only while
+    // a page was entirely payload, so it required the first push to land
+    // inside the allocator's metadata), then the payload boundary. Both
+    // named an offset within one page. This one names the allocation.
     for i: usize in 0..<KERNEL_PROCESS_MAX {
         let stack: usize = scheduled_process_stack_top(handles[i]);
-        if (stack == 0 || stack % PAGE_SIZE != PAGE_USABLE_BYTES ||
+        if (stack == 0 || stack % KERNEL_STACK_RUN_BYTES != 0 ||
             stack % 16 != 0) { return false; }
         for j: usize in 0..<KERNEL_PROCESS_MAX {
             if (j != i && stack == scheduled_process_stack_top(handles[j])) {
@@ -1219,6 +1311,21 @@ const KERNEL_STACK_POISON: u8 = 0xA5;
 // single large frame cannot step over the whole witness in one push.
 const KERNEL_STACK_WITNESS_BYTES: usize = 64;
 
+// The overflow witness sits immediately BELOW the stack, at the top of
+// the quarantine half, and gets its own overlay so the scan indexes from
+// zero. Expressing it as an offset into KernelStackHalf instead would
+// put arithmetic inside an array index for no gain -- and this is code
+// that runs on every timer interrupt, so it reads 64 bytes rather than
+// the whole 16384-byte region.
+struct KernelStackWitness {
+    bytes: [u8; KERNEL_STACK_WITNESS_BYTES];
+}
+
+private fn kernel_stack_below_witness(bottom: usize)
+        -> *KernelStackWitness !{unsafe} {
+    return unsafe { (bottom - KERNEL_STACK_WITNESS_BYTES) as *KernelStackWitness };
+}
+
 // Reported once per boot rather than on every check: the condition
 // LATCHES (the witness is only re-armed when a slot is allocated), so
 // repeating it would bury the rest of the log without adding a fact.
@@ -1258,19 +1365,28 @@ fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
     let slot: usize = execution_current_handle.pool_index;
     if (slot >= KERNEL_PROCESS_MAX) { return; }
     let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-    let base: usize =
-        growable_pool_ref_at(&scheduled_process_kernel_stacks, checked) as usize;
-    // A slot whose stack has not been backed yet, or a path still on the
-    // boot stack from entry.S, has nothing to check here.
-    if (base == 0) { return; }
-    // A chunk base is a page address by construction. If it is not
-    // page-aligned then it is not the thing this check thinks it is, and
-    // reading through it would report on unrelated memory -- which is how
-    // a first RPi5 run produced base=89984, page-unaligned and therefore
-    // not a stack.
-    if (base % PAGE_SIZE != 0) { return; }
-    let stack: *KernelStackPage =
-        growable_pool_ref_at(&scheduled_process_kernel_stacks, checked);
+    // A slot whose run has not been allocated yet, or a path still on the
+    // boot stack from entry.S, has nothing to check here. An unaligned
+    // base is rejected by the same test (see kernel_stack_run_usable).
+    let bottom: usize = kernel_stack_bottom(checked);
+    if (bottom == 0) { return; }
+    // Two distinct questions, asked in the order of severity, because
+    // they mean different things and only one of them is recoverable in
+    // principle. The region below the stack is written by nothing that is
+    // behaving, so a disturbed byte there is an overflow that has ALREADY
+    // happened; the stack's own lowest bytes being disturbed means the
+    // next push would be that overflow.
+    let below: *KernelStackWitness = kernel_stack_below_witness(bottom);
+    let mut overflowed: bool = false;
+    for i: usize in 0..<KERNEL_STACK_WITNESS_BYTES {
+        if (below.bytes[i] != KERNEL_STACK_POISON) { overflowed = true; }
+    }
+    if (overflowed) {
+        kernel_stack_guard_fail("stack wrote past its end, into the run below it" as *u8,
+                                checked, bottom, current_sp);
+        return;
+    }
+    let stack: *KernelStackHalf = kernel_stack_span(bottom);
     let mut disturbed: bool = false;
     for i: usize in 0..<KERNEL_STACK_WITNESS_BYTES {
         if (i < KERNEL_PROCESS_STACK_SIZE) {
@@ -1279,8 +1395,8 @@ fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
         }
     }
     if (disturbed) {
-        kernel_stack_guard_fail("stack reached the bottom of its page" as *u8,
-                                checked, base, current_sp);
+        kernel_stack_guard_fail("stack reached its own bottom" as *u8,
+                                checked, bottom, current_sp);
     }
 }
 
@@ -1294,12 +1410,11 @@ fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
 //
 // Returns 0 for a slot with no backing page. A slot that has never run
 // reports 0 as well, which is correct rather than a special case.
-fn kernel_stack_used_bytes(slot: {0..<KERNEL_PROCESS_MAX as usize}) -> usize {
-    let base: usize =
-        growable_pool_ref_at(&scheduled_process_kernel_stacks, slot) as usize;
-    if (base == 0 || base % PAGE_SIZE != 0) { return 0; }
-    let stack: *KernelStackPage =
-        growable_pool_ref_at(&scheduled_process_kernel_stacks, slot);
+fn kernel_stack_used_bytes(slot: {0..<KERNEL_PROCESS_MAX as usize})
+        -> usize !{unsafe} {
+    let bottom: usize = kernel_stack_bottom(slot);
+    if (bottom == 0) { return 0; }
+    let stack: *KernelStackHalf = kernel_stack_span(bottom);
     for i: usize in 0..<KERNEL_PROCESS_STACK_SIZE {
         if (stack.bytes[i] != KERNEL_STACK_POISON) {
             return KERNEL_PROCESS_STACK_SIZE - i;
@@ -1308,9 +1423,31 @@ fn kernel_stack_used_bytes(slot: {0..<KERNEL_PROCESS_MAX as usize}) -> usize {
     return 0;
 }
 
+// GitHub issue #377: how far past its end this slot's stack has ever
+// gone, in bytes, or 0 if it never has.
+//
+// This is the number a guard page would have reported from the faulting
+// address, and it is the reason the region below the stack is poisoned
+// too rather than merely reserved: containment alone would make an
+// overflow harmless AND invisible, which is how issue #373's corruption
+// stayed silent for as long as it did. Scanning DOWN from the top of
+// that region finds the deepest byte the stack reached below its bottom.
+fn kernel_stack_overflow_bytes(slot: {0..<KERNEL_PROCESS_MAX as usize})
+        -> usize !{unsafe} {
+    let bottom: usize = kernel_stack_bottom(slot);
+    if (bottom == 0) { return 0; }
+    let below: *KernelStackHalf = kernel_stack_quarantine_span(bottom);
+    for i: usize in 0..<KERNEL_PROCESS_STACK_SIZE {
+        if (below.bytes[i] != KERNEL_STACK_POISON) {
+            return KERNEL_PROCESS_STACK_SIZE - i;
+        }
+    }
+    return 0;
+}
+
 // The deepest any slot has been, which is the number that decides how big
 // a kernel stack has to be (issues #376/#377).
-fn kernel_stack_deepest_bytes() -> usize {
+fn kernel_stack_deepest_bytes() -> usize !{unsafe} {
     let mut deepest: usize = 0;
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
         let used: usize = kernel_stack_used_bytes(slot);
@@ -1323,7 +1460,7 @@ fn kernel_stack_deepest_bytes() -> usize {
 // point every scenario this kernel exercises has already run. Per slot as
 // well as the maximum: one slot being near the limit while the rest are
 // shallow says something different from all of them being near it.
-fn kernel_stack_watermark_report() {
+fn kernel_stack_watermark_report() !{unsafe} {
     let deepest: usize = kernel_stack_deepest_bytes();
     kernel_boot_log("kernel stack watermark: size=");
     uart_put_udec(KERNEL_PROCESS_STACK_SIZE);
@@ -1344,6 +1481,16 @@ fn kernel_stack_watermark_report() {
             uart_put_udec(slot);
             kernel_boot_log(":");
             uart_put_udec(used);
+            // Depth PAST the end, which only the region below the stack
+            // can answer and which the old one-page stack had no way to
+            // report at all. Printed only when nonzero: on a healthy
+            // kernel this half of the line never appears.
+            let over: usize = kernel_stack_overflow_bytes(slot);
+            if (over != 0) {
+                kernel_boot_log("+");
+                uart_put_udec(over);
+                kernel_boot_log("OVER");
+            }
             kernel_boot_log(" ");
         }
     }
