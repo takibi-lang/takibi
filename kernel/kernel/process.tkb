@@ -450,19 +450,16 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                         as usize;
                 scheduled_process_records[slot].saved_sp =
                     stack_base + KERNEL_PROCESS_STACK_SIZE;
-                // GitHub issue #375: growable_pool zeroes a chunk's
-                // payload when it GROWS, which is once per slot ever --
-                // a reused slot inherits the previous occupant's stack.
-                // Re-arm the low-water witness here so the guard's answer
-                // is about THIS process rather than about whoever had the
-                // slot before.
+                // GitHub issues #375/#376: growable_pool zeroes a
+                // chunk's payload when it GROWS, which is once per slot
+                // ever -- a reused slot would inherit the previous
+                // occupant's marks. Re-poison the whole stack here so both
+                // the bottom-reached guard and the high-water measurement
+                // answer about THIS process.
                 let stack: *KernelStackPage =
                     growable_pool_ref_at(&scheduled_process_kernel_stacks, slot);
-                for i: usize in 0..<KERNEL_STACK_WITNESS_BYTES {
-                    if (i < KERNEL_PROCESS_STACK_SIZE) {
-                        let byte: {0..<KERNEL_PROCESS_STACK_SIZE as usize} = i;
-                        stack.bytes[byte] = 0;
-                    }
+                for i: usize in 0..<KERNEL_PROCESS_STACK_SIZE {
+                    stack.bytes[i] = KERNEL_STACK_POISON;
                 }
                 let mut handle: ProcessHandle = { slot, generation };
                 match scheduled_process_identity_put(
@@ -1207,9 +1204,19 @@ fn kernel_process_current_has_relative() -> bool {
 // scheduled_process_probe_cycle drives with synthetic values (0x1000,
 // 0x2000) to exercise scheduling without a frame. A guard that fires on
 // those is reporting the test, not the kernel.
-// How much of the bottom of a stack is kept zeroed as the witness the
-// guard reads. Two words is what the check looks at; the rest is margin
-// against a single frame stepping over the witness in one push.
+// GitHub issue #376: the whole stack is filled with this at allocation,
+// so the deepest byte that is no longer it IS the high-water mark. Issue
+// #375's bottom-reached guard reads the same fill rather than keeping a
+// witness of its own -- one fact, one source.
+//
+// Linux does this as CONFIG_DEBUG_STACK_USAGE and NetBSD as
+// KSTACK_CHECK_MAGIC. The value only has to be something a stack frame is
+// unlikely to write by coincidence; 0xA5 is the traditional choice and
+// stays recognizable in a hex dump.
+const KERNEL_STACK_POISON: u8 = 0xA5;
+
+// How many bytes at the BOTTOM the guard checks. Wider than one word so a
+// single large frame cannot step over the whole witness in one push.
 const KERNEL_STACK_WITNESS_BYTES: usize = 64;
 
 // Reported once per boot rather than on every check: the condition
@@ -1262,11 +1269,85 @@ fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
     // a first RPi5 run produced base=89984, page-unaligned and therefore
     // not a stack.
     if (base % PAGE_SIZE != 0) { return; }
-    let low: *usize = unsafe { base as *usize };
-    if (low[0] != 0 || low[1] != 0) {
+    let stack: *KernelStackPage =
+        growable_pool_ref_at(&scheduled_process_kernel_stacks, checked);
+    let mut disturbed: bool = false;
+    for i: usize in 0..<KERNEL_STACK_WITNESS_BYTES {
+        if (i < KERNEL_PROCESS_STACK_SIZE) {
+            let byte: {0..<KERNEL_PROCESS_STACK_SIZE as usize} = i;
+            if (stack.bytes[byte] != KERNEL_STACK_POISON) { disturbed = true; }
+        }
+    }
+    if (disturbed) {
         kernel_stack_guard_fail("stack reached the bottom of its page" as *u8,
                                 checked, base, current_sp);
     }
+}
+
+// GitHub issue #376: how deep this slot's stack has ever been, in bytes.
+//
+// The stack grows DOWN from base + KERNEL_PROCESS_STACK_SIZE, so the
+// deepest point reached is the LOWEST address that no longer holds the
+// poison, and the depth is the distance from there to the top. Scanning
+// upward from the base stops at the first disturbed byte, which is that
+// address.
+//
+// Returns 0 for a slot with no backing page. A slot that has never run
+// reports 0 as well, which is correct rather than a special case.
+fn kernel_stack_used_bytes(slot: {0..<KERNEL_PROCESS_MAX as usize}) -> usize {
+    let base: usize =
+        growable_pool_ref_at(&scheduled_process_kernel_stacks, slot) as usize;
+    if (base == 0 || base % PAGE_SIZE != 0) { return 0; }
+    let stack: *KernelStackPage =
+        growable_pool_ref_at(&scheduled_process_kernel_stacks, slot);
+    for i: usize in 0..<KERNEL_PROCESS_STACK_SIZE {
+        if (stack.bytes[i] != KERNEL_STACK_POISON) {
+            return KERNEL_PROCESS_STACK_SIZE - i;
+        }
+    }
+    return 0;
+}
+
+// The deepest any slot has been, which is the number that decides how big
+// a kernel stack has to be (issues #376/#377).
+fn kernel_stack_deepest_bytes() -> usize {
+    let mut deepest: usize = 0;
+    for slot: usize in 0..<KERNEL_PROCESS_MAX {
+        let used: usize = kernel_stack_used_bytes(slot);
+        if (used > deepest) { deepest = used; }
+    }
+    return deepest;
+}
+
+// Reported once, at the end of the boot fixtures, because that is the
+// point every scenario this kernel exercises has already run. Per slot as
+// well as the maximum: one slot being near the limit while the rest are
+// shallow says something different from all of them being near it.
+fn kernel_stack_watermark_report() {
+    let deepest: usize = kernel_stack_deepest_bytes();
+    kernel_boot_log("kernel stack watermark: size=");
+    uart_put_udec(KERNEL_PROCESS_STACK_SIZE);
+    kernel_boot_log(" deepest=");
+    uart_put_udec(deepest);
+    // A watermark equal to the size is SATURATED: the poison ran out, so
+    // this is a floor on what the deepest path needs and not the number
+    // itself. Learning the real requirement needs a bigger stack to
+    // measure in, or a guard page that reports how far past the end the
+    // faulting access was (#377).
+    if (deepest >= KERNEL_PROCESS_STACK_SIZE) {
+        kernel_boot_log(" SATURATED (a floor, not the requirement)");
+    }
+    kernel_boot_log(" per-slot=");
+    for slot: usize in 0..<KERNEL_PROCESS_MAX {
+        let used: usize = kernel_stack_used_bytes(slot);
+        if (used != 0) {
+            uart_put_udec(slot);
+            kernel_boot_log(":");
+            uart_put_udec(used);
+            kernel_boot_log(" ");
+        }
+    }
+    kernel_boot_log("\n");
 }
 
 fn kernel_process_timer_schedule(current_sp: usize) -> usize !{interrupt} {

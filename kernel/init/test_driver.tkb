@@ -856,6 +856,12 @@ irq_uart_rx_unmask();
                     // demo shell starts.
                     if (page_allocator_live_count() == page_baseline) {
                         kernel_boot_log("resources: pages=0\n");
+                        // GitHub issue #376: reported beside the other
+                        // end-of-run resource facts, and for the same
+                        // reason -- this is the point every scenario has
+                        // already run, so the deepest path has been taken
+                        // by whichever fixture takes it.
+                        kernel_stack_watermark_report();
                     } else {
                         kernel_boot_log("resources: pages leaked\n");
                     }
