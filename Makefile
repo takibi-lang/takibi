@@ -660,7 +660,15 @@ kernel-verify-exception-frame: $(KERNEL_EXC_CONTEXT_OFFSETS)
 
 kernelbuild-rpi5: kernel-lib-check kernel-verify-exception-frame $(KERNEL_RPI5_ELF)
 
-kernelbuild: kernelbuild-rpi5 kernelbuild-qemu
+## kernel/MEMORY_MAP.md's checkable rows against both linked kernels.  Here
+## rather than in a check lane because it needs both ELFs and nothing else,
+## and because a memory map that is only verified when someone runs the
+## slow suite is a memory map that is wrong when someone trusts it.
+.PHONY: kernel-memory-map-check
+kernel-memory-map-check: kernelbuild-rpi5 kernelbuild-qemu
+	python3 scripts/check_kernel_memory_map.py
+
+kernelbuild: kernelbuild-rpi5 kernelbuild-qemu kernel-memory-map-check
 
 ## trustedbasecheck: GitHub issue #238 -- repeatable trusted-base metrics
 ## (unsafe block count, handwritten assembly lines, --forbid-trap kernel

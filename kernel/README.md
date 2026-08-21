@@ -530,7 +530,10 @@ fixed-capacity pool -- process slots, descriptors, shared objects,
 connections, pages, and more -- with its exhaustion behavior and boundary
 test), `RUNTIME_STATE.md` is the per-global-state-ownership authority
 (every retained runtime `let mut` global, grouped by owner and why it
-stays global instead of moving behind a per-slot record), and the
+stays global instead of moving behind a per-slot record),
+`MEMORY_MAP.md` is the where-is-this-address authority (both platforms'
+physical and virtual layouts, with the rows a build check verifies marked
+apart from the ones nobody verifies), and the
 common/platform view `.expected` files are the actual contracts; the
 list below is orientation for a reader deciding whether a workload will
 run, not a specification.
