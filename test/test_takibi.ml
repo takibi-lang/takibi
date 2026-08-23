@@ -36,12 +36,12 @@ let parse src =
   let lexbuf = Lexing.from_string src in
   Parser.program Lexer.read lexbuf
 
-(* GitHub issue #207: mirrors bin/main.ml's own pipeline order (parse ->
-   Monomorphize.run -> Type_inf.infer_program). A no-op for any program
-   with no `generic struct` template at all, so this is safe to run
-   unconditionally ahead of every existing (non-generic) test too. *)
+(* Mirrors bin/main.ml's pipeline order: monomorphize, then resolve the
+   parser's ambiguous declared-type spellings before type inference. Both
+   passes are no-ops when the program does not use their feature. *)
 let infer src =
-  Type_inf.infer_program (Monomorphize.run (parse src))
+  Type_inf.infer_program
+    (Declared_type_resolver.run (Monomorphize.run (parse src)))
 
 (* Parses each (filename, src) pair as if it were a distinct source file
    (Lexing.set_filename, matching bin/main.ml's own parse_file) and
@@ -60,7 +60,7 @@ let infer_files files =
     Lexing.set_filename lexbuf filename;
     Parser.program Lexer.read lexbuf
   ) files in
-  Type_inf.infer_program (Monomorphize.run prog)
+  Type_inf.infer_program (Declared_type_resolver.run (Monomorphize.run prog))
 
 (* Runs the full pipeline through LLVM codegen (no object-file emission).
    A test that did not select a target gets the project's primary AArch64
@@ -73,7 +73,7 @@ let infer_files files =
 let gen_codegen src =
   if Option.is_none !Llvm_gen.target_data then
     ignore (Llvm_gen.setup_target ~triple:"aarch64-none-elf" ());
-  let prog = Monomorphize.run (parse src) in
+  let prog = Declared_type_resolver.run (Monomorphize.run (parse src)) in
   let prog_types = Type_inf.infer_program prog in
   Llvm_gen.gen_program ~prog_types prog
 
@@ -2142,6 +2142,48 @@ let async_tx_fixture =
    "
 
 let infer_tests = [
+  (* GitHub issue #358: the parser cannot know whether Name[args] denotes
+     an indexed owner, view, or variant. Lock down the post-registration
+     invariant directly: views/variants are canonical everywhere in the
+     AST, while a real indexed owner deliberately keeps TypeIndexed. *)
+  Alcotest.test_case
+    "declared type resolution canonicalizes view/variant but preserves indexed owner"
+    `Quick
+    (fun () ->
+      let arg = Ast.StaticName "x" in
+      let prog = Declared_type_resolver.run (Monomorphize.run (parse
+        "linear view Issue358View[x: usize];
+         variant Issue358Variant[x: usize] { None; }
+         linear struct Issue358Owner[x: usize] { value: usize @ x; }
+         struct Issue358Holder[x: usize] { value: Issue358Variant[x]; }
+         fn issue358(v: borrow Issue358View[x],
+                     o: borrow Issue358Owner[x]) -> Issue358Variant[x] {
+           let local: Issue358Variant[x];
+         }")) in
+      let holder_field = Option.get (List.find_map (function
+        | Ast.OwnedStructDef ("Issue358Holder", _, _, [(_, ty)], _, _, _, _, _) ->
+            Some ty
+        | _ -> None) prog) in
+      let params, ret, local = Option.get (List.find_map (function
+        | Ast.FuncDef { name = "issue358"; params; ret_type = Some ret;
+                        body = [{ desc = Ast.Let (_, _, Some local, _, _); _ }]; _ } ->
+            Some (params, ret, local)
+        | _ -> None) prog) in
+      Alcotest.(check type_t) "variant struct field"
+        (Ast.TypeVariant ("Issue358Variant", [arg])) holder_field;
+      Alcotest.(check type_t) "view parameter"
+        (Ast.TypeBorrow (Ast.TypeView ("Issue358View", [arg])))
+        (Option.get (List.assoc "v" params));
+      Alcotest.(check type_t) "indexed owner parameter remains indexed"
+        (Ast.TypeBorrow (Ast.TypeIndexed ("Issue358Owner", [arg])))
+        (Option.get (List.assoc "o" params));
+      Alcotest.(check type_t) "variant return"
+        (Ast.TypeVariant ("Issue358Variant", [arg])) ret;
+      Alcotest.(check type_t) "variant local"
+        (Ast.TypeVariant ("Issue358Variant", [arg])) local;
+      Alcotest.(check bool) "resolver is idempotent" true
+        (Declared_type_resolver.run prog = prog));
+
   (* GitHub issue #327 Stage 1: two independently-broken functions in one
      program both get reported, instead of the second's error being
      hidden by the first aborting the whole compilation. *)

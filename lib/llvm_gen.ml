@@ -6453,6 +6453,9 @@ let gen_exception_restore name frame =
   emit_exception_restore off total
 
 let gen_program ?prog_types prog =
+  (* GitHub issue #358: keep this public phase safe for direct callers as
+     well as bin/main.ml. The pass is idempotent. *)
+  let prog = Declared_type_resolver.run prog in
   (* GitHub issue #326: dispose and recreate the_module itself before
      anything else, rather than trying to reset the per-program Hashtables
      in place. bin/main.exe only ever reaches this function once per

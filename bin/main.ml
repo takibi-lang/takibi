@@ -186,6 +186,12 @@ let () =
        templates at all. *)
     let prog = Monomorphize.run prog in
 
+    (* GitHub issue #358: the parser cannot disambiguate `Name[args]`
+       between an indexed struct, view, and variant. Resolve that spelling
+       once from the complete declaration set before either downstream
+       phase sees it. *)
+    let prog = Declared_type_resolver.run prog in
+
     (* HM type inference -- catches type errors and produces resolved types *)
     let prog_types = Typechecker.infer_program prog in
 

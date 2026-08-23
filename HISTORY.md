@@ -15,6 +15,18 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-23: Eager Declared-Type Resolution (GitHub Issue #358)
+
+Added one whole-AST pass after monomorphization that resolves the parser's
+ambiguous `Name`/`Name[args]` type spellings from the complete declaration
+set. Erased views and variants now reach type inference and LLVM generation
+only as `TypeView` and `TypeVariant`; a genuine indexed owner remains
+`TypeIndexed`. The former late `type_inf.ml` resolver and the duplicated
+view/variant interpretations in affine, linear, must-use, and nested-variant
+predicates were removed. The pass covers signatures, fields, local
+annotations, and type-bearing expressions, is idempotent, and is applied
+defensively at both public compiler phase entry points.
+
 ### 2026-08-23: Historical RPi5 Example Execution Became Opt-In
 
 Changed `make -f examples/Makefile allcheck` to execute only its QEMU and STM32
