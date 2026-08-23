@@ -2604,21 +2604,21 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
 
   | Unsafe e1 ->
       (* Transparent to typing except for permitting unchecked-assertion
-         constructs inside. No exception-safe decrement needed: a TypeError
-         aborts this top-level item's own checking (infer_program's Pass 3
-         resets both unsafe_depth and this function's partial results
-         before moving to the next FuncDef -- see issue #327/#328's own
-         history for why that reset exists).
+         constructs inside. Restore unsafe_depth at this scope boundary even
+         when checking e1 raises: infer_program deliberately continues with
+         later functions after a TypeError, so leaking this grant would make
+         unrelated unsafe-gated operations type-check.
          GitHub issue #328: whole-expression granularity, mirroring
          llvm_gen.ml's own Unsafe-expr codegen case (unconditional, not
          gated by type_checker_lint_active -- that flag only matters for
          UnsafeBlock's per-STATEMENT checking below). *)
       incr unsafe_depth;
       let before = !type_checker_unsafe_use_marker in
-      let t = infer_expr senv eenv tyenv fenv e1 in
+      let t = Fun.protect ~finally:(fun () -> decr unsafe_depth) (fun () ->
+        infer_expr senv eenv tyenv fenv e1)
+      in
       if !type_checker_unsafe_use_marker <> before then
         Hashtbl.replace type_checker_consumed_unsafe_at e.loc ();
-      decr unsafe_depth;
       t
 
   | EnumVariant (ename, vname) ->
@@ -4352,10 +4352,8 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
   | UnsafeBlock stmts ->
       (* GitHub issue #315: same as Block, except every statement inside
          is checked with unsafe_depth raised -- the block-granularity
-         grant. No exception-safe decrement needed, same rationale as
-         Ast.Unsafe's own case: a TypeError aborts this top-level item's
-         own checking and infer_program's Pass 3 resets unsafe_depth
-         before moving to the next FuncDef.
+         grant. Both module-scoped grants are restored at this scope
+         boundary even when checking a nested statement raises.
          GitHub issue #328: type_checker_lint_active turns on per-statement
          "unnecessary unsafe" tracking (via fold_stmts_with_future_writes,
          above) for every statement inside this scope, including ones
@@ -4366,12 +4364,13 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       let was_lint_active = !type_checker_lint_active in
       type_checker_lint_active := true;
       incr unsafe_depth;
-      let (_, raw_locals') = fold_stmts_with_future_writes
-        (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
-        (tyenv, raw_locals) stmts
+      let (_, raw_locals') = Fun.protect ~finally:(fun () ->
+        decr unsafe_depth;
+        type_checker_lint_active := was_lint_active) (fun () ->
+        fold_stmts_with_future_writes
+          (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
+          (tyenv, raw_locals) stmts)
       in
-      decr unsafe_depth;
-      type_checker_lint_active := was_lint_active;
       (tyenv, raw_locals')
   | If (cond, then_s, else_s) ->
       let ct = infer_expr senv eenv tyenv fenv cond in
@@ -4990,6 +4989,11 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
   List.iter go_stmt fdef.body
 
 let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
+  (* An unsafe grant is lexical and must never cross a function boundary.
+     The scope-local Fun.protect calls enforce this; these assertions make
+     any future unprotected grant fail closed at the boundary. *)
+  assert (!unsafe_depth = 0);
+  assert (not !type_checker_lint_active);
   let previous_scope = !active_static_scope in
   let previous_readonly = !active_readonly_borrows in
   let scope = create_static_scope () in
@@ -7064,25 +7068,6 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         (try StringMap.add key (infer_func senv eenv fenv genv fdef) m
          with Types.TypeError (loc, msg) ->
            collected_type_errors := (loc, msg) :: !collected_type_errors;
-           (* unsafe_depth is deliberately not exception-safe within a
-              single infer_func call (see its own Unsafe/UnsafeBlock case
-              comments: "a TypeError aborts this compilation, and
-              infer_program resets the counter") -- true before this Stage
-              1 change made this fold catch-and-continue rather than
-              letting the first exception abort infer_program outright. A
-              function that raised while unsafe_depth was > 0 would
-              otherwise leak that non-zero depth into every function
-              checked AFTER it in this same fold, silently authorizing
-              their unrelated unsafe-gated casts as if they were inside an
-              unsafe block they never wrote. Reset here restores the
-              "every function starts outside any unsafe scope" invariant
-              that was implicitly true before this fold could continue
-              past a failure. GitHub issue #328's type_checker_lint_active
-              is the same class of non-exception-safe flag (its own
-              save/restore only runs on UnsafeBlock's normal exit path),
-              so it needs the same reset here for the same reason. *)
-           unsafe_depth := 0;
-           type_checker_lint_active := false;
            m)
     | _ -> m
   ) StringMap.empty prog in
