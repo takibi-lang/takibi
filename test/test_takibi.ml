@@ -8213,6 +8213,42 @@ let codegen_tests = [
         (contains_substring ir "store i64 0"));
 
   Alcotest.test_case
+    "same-spelling mutable locals have distinct declaration storage" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "fn cg_binding_ids(flag: bool) {
+           if (flag) {
+             let mut item: i32 = 1;
+             item = item + 1;
+           }
+           if (flag == false) {
+             let mut item: i32 = 2;
+             item = item + 1;
+           }
+         }");
+      let fn = match Hashtbl.find_opt Llvm_gen.functions "cg_binding_ids" with
+        | Some (_, fn) -> fn
+        | None -> Alcotest.fail "cg_binding_ids not found"
+      in
+      Alcotest.(check int) "one alloca per source binder" 2
+        (count_substring (Llvm.string_of_llvalue fn) "alloca i32"));
+
+  Alcotest.test_case
+    "same-spelling mutable pattern binders have distinct storage" `Quick
+    (expect_codegen_ok
+      "variant CgBindingPayloads { Left(i32); Right(i32); }
+       fn cg_pattern_binding_ids(v: CgBindingPayloads) {
+         match v {
+           CgBindingPayloads::Left(mut payload) => {
+             payload = payload + 1;
+           }
+           CgBindingPayloads::Right(mut payload) => {
+             payload = payload + 2;
+           }
+         }
+       }");
+
+  Alcotest.test_case
     "all-return nested if/else terminates its unreachable merge blocks" `Quick
     (expect_codegen_ok
       "variant CgAllReturnResult { First(i32); Second(i32); Third(i32); }

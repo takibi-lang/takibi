@@ -2291,9 +2291,6 @@ let rec collect_lets stmts =
     | _                           -> []
   ) stmts
 
-let mutable_pattern_key loc vtype cname name =
-  Printf.sprintf "%s:%s:%s:%s" (Types.loc_key loc) vtype cname name
-
 (* Mutable variant payloads need stable storage because `borrow mut` passes
    their address to callees. Pre-collect them just like mutable lets so a
    match inside a loop does not execute an alloca on every iteration. *)
@@ -2320,8 +2317,7 @@ let rec collect_mutable_pattern_binders stmts =
                     in
                     let payload_ty = runtime_payload_type schema in
                     if is_erased_view_type payload_ty then []
-                    else [(mutable_pattern_key s.loc vtype cname name,
-                           name, payload_ty, s.loc)]
+                    else [(name, payload_ty, s.loc, vtype, cname)]
                 | _ -> []
               in
               here @ collect_mutable_pattern_binders body
@@ -2341,8 +2337,8 @@ let rec collect_mutable_pattern_binders stmts =
 let rec collect_immutable_lets stmts =
   List.concat_map (fun s ->
     match s.desc with
-    | Let (false, name, ty_opt, Some _, _) -> [(name, ty_opt, s.loc)]
-    | LetTuple (names, _)          -> List.map (fun name -> (name, None, s.loc)) names
+    | Let (false, name, ty_opt, Some _, _) -> [(name, ty_opt, s.loc, 0)]
+    | LetTuple (names, _)          -> List.mapi (fun slot name -> (name, None, s.loc, slot)) names
     | Block ss | UnsafeBlock ss   -> collect_immutable_lets ss
     | If (_, t, e)                -> collect_immutable_lets t @ collect_immutable_lets e
     | While (_, b)                -> collect_immutable_lets b
@@ -4850,6 +4846,35 @@ let gen_func ?prog_types fdef =
   let key = function_key prog_types fdef in
   let res name ty_opt = resolve_local_ast prog_types key name ty_opt in
 
+  (* Binding identities are allocated once, in lexical declaration order,
+     before LLVM storage is created. Source names remain useful for lexical
+     lookup and diagnostics, but are never keys for pre-allocated storage. *)
+  let next_binding_id = ref 0 in
+  let fresh_binding_id () =
+    let id = !next_binding_id in
+    incr next_binding_id;
+    id
+  in
+  let mutable_let_decls = List.map (fun decl -> (fresh_binding_id (), decl))
+      (collect_lets fdef.body) in
+  let immutable_let_decls = List.map (fun decl -> (fresh_binding_id (), decl))
+      (collect_immutable_lets fdef.body) in
+  let mutable_pattern_decls = List.map (fun decl -> (fresh_binding_id (), decl))
+      (collect_mutable_pattern_binders fdef.body) in
+  let mutable_let_ids : ((Ast.loc * int), int) Hashtbl.t = Hashtbl.create 16 in
+  List.iter (fun (id, (_, _, loc, _)) ->
+    Hashtbl.add mutable_let_ids (loc, 0) id
+  ) mutable_let_decls;
+  let immutable_let_ids : ((Ast.loc * int), int) Hashtbl.t = Hashtbl.create 16 in
+  List.iter (fun (id, (_, _, loc, slot)) ->
+    Hashtbl.add immutable_let_ids (loc, slot) id
+  ) immutable_let_decls;
+  let mutable_pattern_ids : ((Ast.loc * string * string), int) Hashtbl.t =
+    Hashtbl.create 8 in
+  List.iter (fun (id, (_, _, loc, vtype, cname)) ->
+    Hashtbl.add mutable_pattern_ids (loc, vtype, cname) id
+  ) mutable_pattern_decls;
+
   (* gen_program's Pass 1 (declare_func) registers every FuncDef's signature
      -- in `functions`, `func_ret_ast_types`, AND `func_param_ast_types`
      together -- before Pass 2 calls gen_func on that same fdef; this
@@ -4953,12 +4978,9 @@ let gen_func ?prog_types fdef =
      declaration site as well as exposing the first one through `locals`;
      the Let(true) case restores its own entry before initializing it. *)
   let mutable_let_allocas :
-      (string, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16 in
-  let mutable_let_key loc name =
-    Printf.sprintf "%s:%s" (Types.loc_key loc) name
-  in
-  let debug_immutable_allocas : (string, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16 in
-  let mutable_pattern_allocas : (string, Ast.type_expr * llvalue) Hashtbl.t =
+      (int, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16 in
+  let debug_immutable_allocas : (int, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16 in
+  let mutable_pattern_allocas : (int, Ast.type_expr * llvalue) Hashtbl.t =
     Hashtbl.create 8 in
 
   (* Apply struct type-level alignment to an alloca if the type has one registered. *)
@@ -5025,7 +5047,7 @@ let gen_func ?prog_types fdef =
   ) fdef.params param_abi_types;
 
   (* Pre-alloca every mutable Let declared in the body *)
-  List.iter (fun (name, ty_opt, let_loc, align_opt) ->
+  List.iter (fun (binding_id, (name, ty_opt, let_loc, align_opt)) ->
     let ast_ty = res name ty_opt in
     if not (is_erased_view_type ast_ty) then begin
       let ptr = build_alloca (ltype_of_ast ast_ty) name builder in
@@ -5035,8 +5057,7 @@ let gen_func ?prog_types fdef =
       (match align_opt with
        | Some n -> set_alignment n ptr
        | None   -> apply_struct_align ast_ty ptr);
-      Hashtbl.add mutable_let_allocas
-        (mutable_let_key let_loc name) (ast_ty, ptr);
+      Hashtbl.add mutable_let_allocas binding_id (ast_ty, ptr);
       if not (Hashtbl.mem locals name) then begin
         Hashtbl.add locals name (Mut (ast_ty, ptr));
         if not (is_for_counter name) then
@@ -5044,32 +5065,32 @@ let gen_func ?prog_types fdef =
             ~line:let_loc.Lexing.pos_lnum ~ptr
       end
     end
-  ) (collect_lets fdef.body);
+  ) mutable_let_decls;
 
-  List.iter (fun (pattern_key, name, ast_ty, _) ->
-    if not (Hashtbl.mem mutable_pattern_allocas pattern_key) then begin
+  List.iter (fun (binding_id, (name, ast_ty, _, _, _)) ->
+    if not (Hashtbl.mem mutable_pattern_allocas binding_id) then begin
       let ptr = build_alloca (ltype_of_ast ast_ty) (name ^ ".payload") builder in
       apply_struct_align ast_ty ptr;
-      Hashtbl.add mutable_pattern_allocas pattern_key (ast_ty, ptr)
+      Hashtbl.add mutable_pattern_allocas binding_id (ast_ty, ptr)
     end
-  ) (collect_mutable_pattern_binders fdef.body);
+  ) mutable_pattern_decls;
 
   (* Debug-only storage for immutable lets. The real codegen binding remains
      Imm/SSA; this alloca exists solely so GDB has a concrete location. *)
   if !debug_info_enabled then
-    List.iter (fun (name, ty_opt, let_loc) ->
-      if not (Hashtbl.mem debug_immutable_allocas name) then begin
+    List.iter (fun (binding_id, (name, ty_opt, let_loc, _)) ->
+      if not (Hashtbl.mem debug_immutable_allocas binding_id) then begin
         let ast_ty = res name ty_opt in
         match ast_ty with
         | TypeTuple _ | TypeView _ -> ()
         | _ ->
             let ptr = build_alloca (ltype_of_ast ast_ty) (name ^ ".dbg") builder in
             apply_struct_align ast_ty ptr;
-            Hashtbl.add debug_immutable_allocas name (ast_ty, ptr);
+            Hashtbl.add debug_immutable_allocas binding_id (ast_ty, ptr);
             declare_var ~is_param:false ~argno:0 ~name ~ast_ty
               ~line:let_loc.Lexing.pos_lnum ~ptr
       end
-    ) (collect_immutable_lets fdef.body);
+    ) immutable_let_decls;
 
   emit_profile_enter key;
 
@@ -5164,8 +5185,12 @@ let gen_func ?prog_types fdef =
                "BUG: erased view '%s' has no initializer" name)));
           Hashtbl.replace locals name (Imm (ast_ty, erased_view_value ()))
         end else
-        (match Hashtbl.find_opt mutable_let_allocas
-                 (mutable_let_key s.loc name) with
+        let binding_id = match Hashtbl.find_opt mutable_let_ids (s.loc, 0) with
+          | Some id -> id
+          | None -> raise (Error (Printf.sprintf
+              "BUG: no binding identity for mutable local %s" name))
+        in
+        (match Hashtbl.find_opt mutable_let_allocas binding_id with
          | None -> raise (Error (Printf.sprintf "BUG: no alloca for %s" name))
          | Some (alloca_ty, ptr) ->
              Hashtbl.replace locals name (Mut (alloca_ty, ptr));
@@ -5185,7 +5210,12 @@ let gen_func ?prog_types fdef =
                Hashtbl.add locals name (Imm (ast_ty, erased_view_value ()))
              else begin
                let coerced = coerce v ast_ty in
-               (match Hashtbl.find_opt debug_immutable_allocas name with
+               let binding_id = match Hashtbl.find_opt immutable_let_ids (s.loc, 0) with
+                 | Some id -> id
+                 | None -> raise (Error (Printf.sprintf
+                     "BUG: no binding identity for immutable local %s" name))
+               in
+               (match Hashtbl.find_opt debug_immutable_allocas binding_id with
                 | Some (_, ptr) ->
                     let inst = build_store coerced ptr builder in
                     set_volatile true inst
@@ -5206,7 +5236,12 @@ let gen_func ?prog_types fdef =
         List.iteri (fun i n ->
           let cty = List.nth comp_tys i in
           let cv = build_extractvalue v i ("tup_" ^ n) builder in
-          (match Hashtbl.find_opt debug_immutable_allocas n with
+          let binding_id = match Hashtbl.find_opt immutable_let_ids (s.loc, i) with
+            | Some id -> id
+            | None -> raise (Error (Printf.sprintf
+                "BUG: no binding identity for tuple local %s" n))
+          in
+          (match Hashtbl.find_opt debug_immutable_allocas binding_id with
            | Some (_, ptr) ->
                let inst = build_store cv ptr builder in
                set_volatile true inst
@@ -5215,7 +5250,7 @@ let gen_func ?prog_types fdef =
         ) names
 
     | Block stmts ->
-        run_stmts_with_future_writes stmts
+        run_scoped_stmts stmts
 
     | UnsafeBlock stmts ->
         (* GitHub issue #315: mirrors type_inf.ml's UnsafeBlock case (sync
@@ -5234,7 +5269,7 @@ let gen_func ?prog_types fdef =
         let was_lint_active = !unsafe_lint_active in
         unsafe_lint_active := true;
         incr unsafe_depth;
-        run_stmts_with_future_writes stmts;
+        run_scoped_stmts stmts;
         decr unsafe_depth;
         unsafe_lint_active := was_lint_active
 
@@ -5261,7 +5296,7 @@ let gen_func ?prog_types fdef =
         let saved_mut  = apply_narrowing_mut locals cond killed in
         let saved_idx  = apply_slice_index_narrowing cond killed_idx in
         let saved_end  = apply_slice_endpoint_narrowing cond killed_idx in
-        run_stmts_with_future_writes then_stmts;
+        run_scoped_stmts then_stmts;
         restore_narrowing     locals saved;
         restore_narrowing_mut saved_mut;
         restore_slice_index_narrowing saved_idx;
@@ -5272,7 +5307,7 @@ let gen_func ?prog_types fdef =
         end;
 
         position_at_end else_bb builder;
-        run_stmts_with_future_writes else_stmts;
+        run_scoped_stmts else_stmts;
         if block_terminator (insertion_block builder) = None then begin
           merge_reachable := true;
           ignore (build_br merge_bb builder)
@@ -5357,7 +5392,7 @@ let gen_func ?prog_types fdef =
         let saved     = apply_narrowing     locals cond killed in
         let saved_mut = apply_narrowing_mut locals cond killed in
         Stack.push (after_bb, cond_bb) loop_stack;
-        run_stmts_with_future_writes body;
+        run_scoped_stmts body;
         ignore (Stack.pop loop_stack);
         restore_narrowing     locals saved;
         restore_narrowing_mut saved_mut;
@@ -5439,14 +5474,17 @@ let gen_func ?prog_types fdef =
                     | None -> counter_base)
                | _ -> counter_base)
         in
-        Hashtbl.add locals name (Imm (loop_ty, i_val));
+        let old_loop_binding = Hashtbl.find_opt locals name in
+        Hashtbl.replace locals name (Imm (loop_ty, i_val));
         Stack.push (exit_bb, incr_bb) loop_stack;
         let killed_idx = slice_rebind_names body in
         let saved_idx  = apply_for_slice_index_narrowing name hi_expr killed_idx in
-        run_stmts_with_future_writes body;
+        run_scoped_stmts body;
         restore_slice_index_narrowing saved_idx;
         ignore (Stack.pop loop_stack);
-        Hashtbl.remove locals name;
+        (match old_loop_binding with
+         | Some prior -> Hashtbl.replace locals name prior
+         | None -> Hashtbl.remove locals name);
         if block_terminator (insertion_block builder) = None then
           ignore (build_br incr_bb builder);
 
@@ -5496,11 +5534,14 @@ let gen_func ?prog_types fdef =
         position_at_end body_bb builder;
         let ep = build_gep (ltype_of_ast elem_ty) ptr [| i_val |] "fe_ptr" builder in
         let ev = build_load (ltype_of_ast elem_ty) ep "fe_val" builder in
-        Hashtbl.add locals name (Imm (elem_ty, to_arith_width elem_ty ev));
+        let old_loop_binding = Hashtbl.find_opt locals name in
+        Hashtbl.replace locals name (Imm (elem_ty, to_arith_width elem_ty ev));
         Stack.push (exit_bb, incr_bb) loop_stack;
-        run_stmts_with_future_writes body;
+        run_scoped_stmts body;
         ignore (Stack.pop loop_stack);
-        Hashtbl.remove locals name;
+        (match old_loop_binding with
+         | Some prior -> Hashtbl.replace locals name prior
+         | None -> Hashtbl.remove locals name);
         if block_terminator (insertion_block builder) = None then
           ignore (build_br incr_bb builder);
 
@@ -5617,8 +5658,13 @@ let gen_func ?prog_types fdef =
                     in
                     let old = Hashtbl.find_opt locals name in
                     if is_mutable && not (is_erased_view_type payload_ty) then begin
-                      let pattern_key = mutable_pattern_key s.loc vtype cname name in
-                      let (_, ptr) = match Hashtbl.find_opt mutable_pattern_allocas pattern_key with
+                      let binding_id = match Hashtbl.find_opt mutable_pattern_ids
+                          (s.loc, vtype, cname) with
+                        | Some id -> id
+                        | None -> raise (Error (Printf.sprintf
+                            "BUG: no binding identity for mutable variant binder '%s'" name))
+                      in
+                      let (_, ptr) = match Hashtbl.find_opt mutable_pattern_allocas binding_id with
                         | Some entry -> entry
                         | None -> raise (Error (Printf.sprintf
                             "BUG: mutable variant binder '%s' was not pre-allocated" name))
@@ -5627,16 +5673,16 @@ let gen_func ?prog_types fdef =
                       Hashtbl.replace locals name (Mut (payload_ty, ptr))
                     end else
                       Hashtbl.replace locals name (Imm (payload_ty, payload_v));
-                    run_stmts_with_future_writes body;
+                    run_scoped_stmts body;
                     (match old with
                      | Some prior -> Hashtbl.replace locals name prior
                      | None -> Hashtbl.remove locals name)
-                | Some _, None -> run_stmts_with_future_writes body
-                | None, None -> run_stmts_with_future_writes body
+                | Some _, None -> run_scoped_stmts body
+                | None, None -> run_scoped_stmts body
                 | None, Some _ -> raise (Error
                     "BUG: numeric enum match arm has a payload binder"))
-           | ArmWild body            -> run_stmts_with_future_writes body
-           | ArmIntLit (_, body)     -> run_stmts_with_future_writes body);
+           | ArmWild body            -> run_scoped_stmts body
+           | ArmIntLit (_, body)     -> run_scoped_stmts body);
           if block_terminator (insertion_block builder) = None then begin
             merge_reachable := true;
             ignore (build_br merge_bb builder)
@@ -5699,6 +5745,14 @@ let gen_func ?prog_types fdef =
      never past the end of it), then restore the accumulator refs
      themselves so a nested list's own accumulation doesn't leak into the
      list that contains it. *)
+  and run_scoped_stmts (stmts : Ast.stmt list) : unit =
+    let saved = Hashtbl.copy locals in
+    Fun.protect
+      ~finally:(fun () ->
+        Hashtbl.reset locals;
+        Hashtbl.iter (Hashtbl.add locals) saved)
+      (fun () -> run_stmts_with_future_writes stmts)
+
   and run_stmts_with_future_writes (stmts : Ast.stmt list) : unit =
     let saved_pending_ctx = !pending_fallthrough_narrowing_ctx in
     let saved_pending_locals = !pending_fallthrough_locals in
