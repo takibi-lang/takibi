@@ -164,17 +164,13 @@ private let mut syscall_uname_buffer: [u8; 512];
 
 must_use variant KernelInetdAcceptResult { TimedOut; Accepted; }
 
-// GitHub issue #264 fifth stage: nested clones need separate bookkeeping for
-// each child. One record holds the values keyed by the child fd-table slot;
-// the exit handler reaps that child before switching execution to its parent.
-struct CloneFileState {
-    file_state_live: bool;
-    parent_inetd_mode: bool;
-}
-
-private let mut clone_file_state: [CloneFileState; KERNEL_PROCESS_MAX];
-enum UartBlockDelivery: u8 { Scalar; Read; }
-private let mut syscall_uart_block_delivery: [UartBlockDelivery; KERNEL_PROCESS_MAX];
+// GitHub issue #392: CloneFileState and UartBlockDelivery, and the two
+// `[T; KERNEL_PROCESS_MAX]` arrays that held them, are gone from this
+// file. Both were keyed by process slot, which is a key that stops
+// existing when the process table becomes a pool; the values are fields
+// of ProcessRecord now, reached through
+// scheduled_process_clone_file_state()/_uart_block_delivery() and their
+// setters. Every decision made with them is still made here.
 private let mut syscall_exec_pending: bool;
 private let mut syscall_exec_argc: usize;
 private let mut syscall_exec_argv: [u8; 512];
@@ -407,15 +403,19 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
     syscall_exec_argc = 0;
     syscall_test_lifecycle_persistent_shell_clear();
     for process_slot: usize in 0..<KERNEL_PROCESS_MAX {
-        syscall_uart_block_delivery[process_slot] = UartBlockDelivery::Scalar;
+        scheduled_process_set_uart_block_delivery(
+            process_slot, UartBlockDelivery::Scalar);
     }
     for path_index: usize in 0..<256 { syscall_exec_path[path_index] = 0; }
     tcp_connection_pool_init();
     syscall_test_evidence_reset_socket_counters();
     syscall_inetd_mode = false;
+    // Configure is a whole-world reset and can run while processes
+    // already exist, so it still clears every slot rather than relying on
+    // scheduled_process_alloc's own per-process reset.
     for context: usize in 0..<KERNEL_PROCESS_MAX {
-        clone_file_state[context].file_state_live = false;
-        clone_file_state[context].parent_inetd_mode = false;
+        let mut fresh: CloneFileState = { false, false };
+        scheduled_process_set_clone_file_state(context, fresh);
     }
 }
 
@@ -426,18 +426,17 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
 // which now calls kernel_process_clone_begin() first for exactly this).
 fn kernel_syscall_clone_files_begin(parent_slot: usize, child_slot: usize)
         -> UnifiedFdResult {
-    if (child_slot < KERNEL_PROCESS_MAX) {
-        let child: {0..<KERNEL_PROCESS_MAX as usize} = child_slot;
+    if (scheduled_process_slot_valid(child_slot)) {
         match unified_fd_clone(parent_slot, child_slot) {
             UnifiedFdResult::Invalid => {
-                clone_file_state[child].file_state_live = false;
+                let mut failed: CloneFileState = { false, syscall_inetd_mode };
+                scheduled_process_set_clone_file_state(child_slot, failed);
                 return UnifiedFdResult::Invalid;
             }
-            UnifiedFdResult::Ok => {
-                clone_file_state[child].file_state_live = true;
-            }
+            UnifiedFdResult::Ok => {}
         }
-        clone_file_state[child].parent_inetd_mode = syscall_inetd_mode;
+        let mut cloned: CloneFileState = { true, syscall_inetd_mode };
+        scheduled_process_set_clone_file_state(child_slot, cloned);
         return UnifiedFdResult::Ok;
     }
     return UnifiedFdResult::Invalid;
@@ -664,9 +663,10 @@ fn kernel_connected_descriptor_release(fd: usize) -> bool {
 // CloneFileState this reaps.
 fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
     let child_slot: usize = kernel_syscall_process_slot();
-    if (child_slot < KERNEL_PROCESS_MAX) {
-        let child: {0..<KERNEL_PROCESS_MAX as usize} = child_slot;
-        if (clone_file_state[child].file_state_live == false) {
+    if (scheduled_process_slot_valid(child_slot)) {
+        let mut state: CloneFileState =
+            scheduled_process_clone_file_state(child_slot);
+        if (state.file_state_live == false) {
             return KernelFdReapResult::Failed;
         }
         for fd: usize in 0..<KERNEL_SOCKET_FD_MAX {
@@ -681,8 +681,9 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
             UnifiedFdResult::Invalid => { return KernelFdReapResult::Failed; }
             UnifiedFdResult::Ok => {}
         }
-        syscall_inetd_mode = clone_file_state[child].parent_inetd_mode;
-        clone_file_state[child].file_state_live = false;
+        syscall_inetd_mode = state.parent_inetd_mode;
+        let mut reaped: CloneFileState = { false, state.parent_inetd_mode };
+        scheduled_process_set_clone_file_state(child_slot, reaped);
         return KernelFdReapResult::Reaped;
     }
     return KernelFdReapResult::Failed;
@@ -1101,12 +1102,9 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
                 }
                 if (kernel_process_current_has_live_child()) {
                     let process_slot: usize = kernel_syscall_process_slot();
-                    if (process_slot >= 0 &&
-                        process_slot < KERNEL_PROCESS_MAX) {
-                        let slot: {0..<KERNEL_PROCESS_MAX as usize} =
-                            process_slot;
-                        syscall_uart_block_delivery[slot] =
-                            UartBlockDelivery::Read;
+                    if (scheduled_process_slot_valid(process_slot)) {
+                        scheduled_process_set_uart_block_delivery(
+                            process_slot, UartBlockDelivery::Read);
                         kernel_process_current_set_pending_block(
                             ProcessWaitReason::UartRx, 0);
                         return SyscallAction::Block;
@@ -1279,16 +1277,15 @@ must_use variant KernelUartDeliveryResult { Consumed; RetryRead; }
 fn kernel_syscall_uart_deliver(frame_sp: usize, process_slot: usize,
                                value: usize)
         -> KernelUartDeliveryResult !{interrupt} {
-    if (process_slot >= 0 && process_slot < KERNEL_PROCESS_MAX) {
-        let slot: {0..<KERNEL_PROCESS_MAX as usize} = process_slot;
-        match syscall_uart_block_delivery[slot] {
+    if (scheduled_process_slot_valid(process_slot)) {
+        match scheduled_process_uart_block_delivery(process_slot) {
             UartBlockDelivery::Scalar => {
                 el0_context_set_x0(frame_sp, value);
                 return KernelUartDeliveryResult::Consumed;
             }
             UartBlockDelivery::Read => {
-                syscall_uart_block_delivery[slot] =
-                    UartBlockDelivery::Scalar;
+                scheduled_process_set_uart_block_delivery(
+                    process_slot, UartBlockDelivery::Scalar);
                 return KernelUartDeliveryResult::RetryRead;
             }
         }
@@ -1299,9 +1296,8 @@ fn kernel_syscall_uart_deliver(frame_sp: usize, process_slot: usize,
 
 fn kernel_syscall_uart_block_prepare(frame_sp: usize) {
     let process_slot: usize = kernel_syscall_process_slot();
-    if (process_slot >= 0 && process_slot < KERNEL_PROCESS_MAX) {
-        let slot: {0..<KERNEL_PROCESS_MAX as usize} = process_slot;
-        match syscall_uart_block_delivery[slot] {
+    if (scheduled_process_slot_valid(process_slot)) {
+        match scheduled_process_uart_block_delivery(process_slot) {
             UartBlockDelivery::Scalar => {}
             UartBlockDelivery::Read => {
                 el0_context_retry_syscall(frame_sp);

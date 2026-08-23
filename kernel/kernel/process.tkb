@@ -41,6 +41,25 @@ enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
 // hand control to the parent early).
 enum ProcessWaitReason: u8 { None; UartRx; ChildExit; }
 
+// GitHub issue #392: declared here, with the rest of a process's
+// lifecycle state, rather than in kernel/kernel/syscall.tkb where the
+// logic that uses them lives. Both were `[T; KERNEL_PROCESS_MAX]` arrays
+// keyed by process slot -- the last two of those outside this file -- and
+// a field of ProcessRecord cannot name a type declared in a file parsed
+// after this one. The concepts already belonged next to
+// ProcessWaitReason: UartBlockDelivery is the delivery half of
+// ProcessWaitReason::UartRx (how the blocked read is resumed once the
+// byte arrives), and CloneFileState is fork bookkeeping for one child.
+enum UartBlockDelivery: u8 { Scalar; Read; }
+
+// GitHub issue #264 fifth stage: nested clones need separate bookkeeping
+// for each child. One record holds the values for one child; the exit
+// handler reaps that child before switching execution to its parent.
+struct CloneFileState {
+    file_state_live: bool;
+    parent_inetd_mode: bool;
+}
+
 // GitHub issue #246: a generous compile-time ceiling, not a razor-thin one
 // bumped by hand each time a workload needs one more (see issue #245's 2
 // -> 3 bump for why "one fixed N picked by guesswork" was the actual
@@ -163,6 +182,12 @@ struct ProcessRecord {
     child_exit_status: usize;
     child_waitable: bool;
     exec_image_live: bool;
+    // GitHub issue #392: kernel/kernel/syscall.tkb's own per-process
+    // state, which had nowhere to live but an array keyed by this
+    // record's slot. It is reached through the accessors below; that file
+    // still owns every decision made with it.
+    uart_block_delivery: UartBlockDelivery;
+    clone_file_state: CloneFileState;
     // GitHub issue #392 stage 1: the run backing this slot's kernel
     // stack, as its base physical address (0 = never backed). It was a
     // parallel [usize; KERNEL_PROCESS_MAX] beside this array, indexed in
@@ -242,6 +267,52 @@ fn scheduled_process_record_state(
 fn scheduled_process_record_wait_reason(
         slot: {0..<KERNEL_PROCESS_MAX as usize}) -> ProcessWaitReason {
     return scheduled_process_records[slot].wait_reason;
+}
+
+// GitHub issue #392: kernel/kernel/syscall.tkb's two per-process values,
+// asked for by slot. Out of range answers with the same default a fresh
+// record has, so a caller that cannot name a process is never handed
+// another process's state.
+fn scheduled_process_uart_block_delivery(slot: usize) -> UartBlockDelivery {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        return scheduled_process_records[checked].uart_block_delivery;
+    }
+    return UartBlockDelivery::Scalar;
+}
+
+fn scheduled_process_set_uart_block_delivery(
+        slot: usize, delivery: UartBlockDelivery) {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        scheduled_process_records[checked].uart_block_delivery = delivery;
+    }
+}
+
+fn scheduled_process_clone_file_state(slot: usize) -> CloneFileState {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        return scheduled_process_records[checked].clone_file_state;
+    }
+    let mut absent: CloneFileState = { false, false };
+    return absent;
+}
+
+fn scheduled_process_set_clone_file_state(slot: usize,
+                                          state: CloneFileState) {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        scheduled_process_records[checked].clone_file_state = state;
+    }
+}
+
+// The fresh value of both, in one place, so a slot handed out again does
+// not inherit the previous occupant's blocking or clone bookkeeping.
+private fn scheduled_process_record_reset_syscall_state(slot: usize) {
+    scheduled_process_set_uart_block_delivery(slot,
+                                              UartBlockDelivery::Scalar);
+    let mut fresh: CloneFileState = { false, false };
+    scheduled_process_set_clone_file_state(slot, fresh);
 }
 
 // GitHub issue #392: both directions between a pid and a slot, asked
@@ -649,6 +720,7 @@ fn scheduled_process_table_init() {
         scheduled_process_records[slot].saved_sp = 0;
         scheduled_process_records[slot].state = ProcessSlotState::Free;
         scheduled_process_records[slot].wait_reason = ProcessWaitReason::None;
+        scheduled_process_record_reset_syscall_state(slot);
     }
 }
 
@@ -674,6 +746,7 @@ fn scheduled_process_table_clear() {
         scheduled_process_records[slot].saved_sp = 0;
         scheduled_process_records[slot].state = ProcessSlotState::Free;
         scheduled_process_records[slot].wait_reason = ProcessWaitReason::None;
+        scheduled_process_record_reset_syscall_state(slot);
     }
     scheduled_process_next_pid = 1;
     slotmap_init(&scheduled_process_pool);
@@ -790,6 +863,7 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                 scheduled_process_records[slot].pid =
                     scheduled_process_next_pid;
                 scheduled_process_next_pid = scheduled_process_next_pid + 1;
+                scheduled_process_record_reset_syscall_state(slot);
                 // GitHub issues #375/#376: a reused slot reuses its run,
                 // so it would otherwise inherit the previous occupant's
                 // marks. Re-poison BOTH halves here so the guard, the
