@@ -14,6 +14,12 @@
 #   The `!{unsafe}` function-effect annotation (a different thing: marks a
 #   function as calling into unsafe code, not a use site itself) does not
 #   match this pattern, so it is correctly excluded.
+#   Note this counts BLOCKS, not the operations inside them: a block
+#   wrapping ten stores counts once and a block wrapping one counts once.
+#   That is deliberate -- a block is the unit a reviewer audits, and issue
+#   #315's scoping discipline exists to keep a block from sweeping in
+#   unrelated proven code -- but it means the number tracks how many places
+#   need auditing, not how much unproven work happens.
 # - "handwritten assembly" = total lines of kernel/**/*.S. These are
 #   hand-written source, never generated (generated fragments in this repo
 #   are .inc files, `.include`d from the containing .S, not standalone .S
