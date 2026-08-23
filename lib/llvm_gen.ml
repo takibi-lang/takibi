@@ -2200,16 +2200,10 @@ let as_cond v =
      bool-only condition invariant was violated" (string_of_lltype (type_of v))))
 
 (* GitHub issue #321: the "does this type wrap a struct, and if so by what
-   name" pattern, otherwise hand-duplicated across three call sites below
-   (AddrOf's FieldGet sub-case, gen_field_access's read path, and the
-   Assign/FieldGet write path) as three independent, non-exhaustive
-   Ast.type_expr matches -- each ending in a wildcard `_ -> raise`, so
-   OCaml's own exhaustiveness check never catches a missing case. Found
-   the hard way while implementing &T/&mut T (#314/#319/#320): adding
-   TypeRef/TypeRefMut meant finding and fixing all three sites one at a
-   time via codegen test failures ("field access '.count' on non-struct
-   type", "field assignment '.%s' on non-struct type"), not a single
-   `dune build` error.
+   name" pattern used to be duplicated across address, read, and write
+   lowering.  Field access now has one typed place/value path, but this
+   helper remains the single source of truth for the wrappers that may
+   contain a struct type.
 
    Deliberately does NOT cover TypeIo-wrapped (`*io Struct`, which also
    needs a "field access is volatile" flag no plain string can carry) or
@@ -2586,9 +2580,32 @@ let effective_slice_min id m =
    TArray/TSlice/TPtr classification, but at the codegen level (an actual
    address/value, not just a type). *)
 type index_storage =
-  | IdxArray of Ast.type_expr * int * llvalue
-  | IdxSlice of Ast.type_expr * int * llvalue
-  | IdxPtr   of Ast.type_expr * llvalue * bool
+  | IdxArray of Ast.type_expr * int * llvm_place
+  | IdxSlice of Ast.type_expr * int * llvm_value
+  | IdxPtr   of Ast.type_expr * llvm_value * bool
+
+(* LLVM's OCaml bindings intentionally expose pointers and ordinary SSA
+   values through the same [llvalue] type.  Keep that erasure at the final
+   binding boundary, not in Takibi's lowering API: an addressable place must
+   be explicitly loaded (or have its address requested) before a value-only
+   operation can consume it. *)
+and llvm_place = Place of llvalue
+and llvm_value = Value of llvalue
+
+type field_access =
+  | FieldPlace of Ast.type_expr * llvm_place * bool
+      (* declared field type, address, volatile-through-base *)
+  | FieldValue of Ast.type_expr * llvm_value
+
+let place_ptr (Place ptr) = ptr
+let value_ll (Value value) = value
+
+let load_place ?(name="place") ty (Place ptr) is_volatile =
+  let storage_ty = match ty with TypeIo inner -> inner | _ -> ty in
+  let loaded = build_load (ltype_of_ast storage_ty) ptr name builder in
+  if is_volatile || (match ty with TypeIo _ -> true | _ -> false) then
+    set_volatile true loaded;
+  Value (to_arith_width storage_ty loaded)
 
 (* -- Expression codegen --------------------------------------------------- *)
 (* Returns (ast_type, llvalue).  ast_type is needed for Deref to know
@@ -2720,7 +2737,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let v  = build_load (ltype_of_ast ut) ptr name builder in
                 (ast_ty, v)
             | TypeNamed _ ->
-                (ast_ty, ptr)
+                let v = build_load (ltype_of_ast ast_ty) ptr name builder in
+                (ast_ty, v)
             | TypeIo inner_ty ->
                 let inst = build_load (ltype_of_ast inner_ty) ptr name builder in
                 set_volatile true inst;
@@ -2740,7 +2758,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let v  = build_load (ltype_of_ast ut) ptr name builder in
                 (ast_ty, v)
             | Some (TypeNamed _ as ast_ty, ptr) ->
-                (ast_ty, ptr)
+                let v = build_load (ltype_of_ast ast_ty) ptr name builder in
+                (ast_ty, v)
             | Some (TypeIo inner_ty, ptr) ->
                 let inst = build_load (ltype_of_ast inner_ty) ptr name builder in
                 set_volatile true inst;
@@ -2793,20 +2812,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 | Some (ast_ty, ptr) -> (TypePtr ast_ty, ptr)
                 | None -> raise (Error (Printf.sprintf "cannot take address of '%s'" name)))
        | FieldGet (base_expr, fname) ->
-           (* &expr.field -- get a pointer to the field via GEP (no load) *)
-           let (base_ty, base_v) = gen_expr locals base_expr in
-           let sname = match struct_name_of_type base_ty with
-             | Some s -> s
-             | None -> raise (Error (Printf.sprintf
-                 "field address '.%s' on non-struct type" fname))
-           in
-           let (idx, field_ty) = field_info sname fname in
-           let llty = Hashtbl.find struct_lltypes sname in
-           let field_ptr = build_in_bounds_gep llty base_v
-             [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
-             (fname ^ "_addr") builder
-           in
-           (TypePtr field_ty, field_ptr)
+           (match gen_field_access locals base_expr fname with
+            | FieldPlace (field_ty, place, _) ->
+                (TypePtr field_ty, place_ptr place)
+            | FieldValue _ ->
+                raise (Error (Printf.sprintf
+                  "BUG: field '.%s' has no addressable place" fname)))
        | _ ->
            raise (Error "& requires a variable or struct field"))
 
@@ -3448,7 +3459,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                  | FieldGet _ ->
                      (* GitHub issue #372: an array-typed struct field is a
                         place with the same static length a binding has, and
-                        gen_field_access ~decay:true has already produced its
+                        field_access_value has already produced its
                         elem-0 pointer above -- only the length is missing.
                         Read the one type_inf proved rather than walking the
                         struct's field table again here: the field's declared
@@ -3529,7 +3540,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (target_ty, to_arith_width target_ty (coerce v target_ty))))
 
   | FieldGet (base_expr, fname) ->
-      gen_field_access ~decay:true locals base_expr fname
+      field_access_value ~decay:true
+        (gen_field_access locals base_expr fname) fname
 
   | Index (base, idx) ->
       let (idx_ty_raw, idx_raw) = gen_expr locals idx in
@@ -3587,7 +3599,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
             let ut = Hashtbl.find enum_underlying sname in
             let v  = build_load (ltype_of_ast ut) ep "idx_val" builder in
             (elem_ty, v)
-        | TypeNamed _ -> (elem_ty, ep)
+        | TypeNamed _ ->
+            let v = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
+            (elem_ty, v)
         | _ ->
             let v = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
             (elem_ty, to_arith_width elem_ty v)
@@ -3601,8 +3615,10 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
             let v  = build_load (ltype_of_ast ut) ep "idx_val" builder in
             if is_volatile then set_volatile true v;
             (elem_ty, v)
-        | TypeNamed _ when is_volatile -> (TypePtr (TypeIo elem_ty), ep)
-        | TypeNamed _ -> (elem_ty, ep)
+        | TypeNamed _ ->
+            let v = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
+            if is_volatile then set_volatile true v;
+            (elem_ty, v)
         | _ ->
             let v = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
             if is_volatile then set_volatile true v;
@@ -3639,9 +3655,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         (elem_ty, to_arith_width elem_ty v)
       in
       (match resolve_index_storage ~op:"Index" locals base with
-       | IdxArray (elem_ty, n, arr_ptr) -> load_from_array elem_ty n arr_ptr
-       | IdxSlice (elem_ty, min_len, fat) -> load_from_slice elem_ty min_len fat
-       | IdxPtr (elem_ty, ptr_v, is_volatile) -> load_through_ptr elem_ty ptr_v is_volatile)
+       | IdxArray (elem_ty, n, arr_place) ->
+           load_from_array elem_ty n (place_ptr arr_place)
+       | IdxSlice (elem_ty, min_len, fat) ->
+           load_from_slice elem_ty min_len (value_ll fat)
+       | IdxPtr (elem_ty, ptr_v, is_volatile) ->
+           load_through_ptr elem_ty (value_ll ptr_v) is_volatile)
 
   | SliceOf (base, lo_e, hi_e) ->
       (* Sync rule: the proven/checked decision below uses the same
@@ -3843,9 +3862,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         finish_sub elem_ty base_ptr lo_v hi_v min_len
       in
       (match resolve_index_storage ~op:"SliceOf" locals base with
-       | IdxSlice (el, m, fat) -> sub_of_slice el m fat
-       | IdxArray (el, n, ptr) -> sub_of_array el n ptr
-       | IdxPtr (el, ptr_v, _is_volatile) -> sub_of_ptr el ptr_v)
+       | IdxSlice (el, m, fat) -> sub_of_slice el m (value_ll fat)
+       | IdxArray (el, n, place) -> sub_of_array el n (place_ptr place)
+       | IdxPtr (el, ptr_v, _is_volatile) -> sub_of_ptr el (value_ll ptr_v))
 
   | Unsafe e1 ->
       (* Mostly a type-checker gate (see Ast.Unsafe): for the pointer->slice
@@ -4077,21 +4096,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          place identity and guarantees it belongs to the stable container. *)
       ignore (gen_expr locals guard_e);
       ignore (gen_expr locals lock_e);
-      let (base_ty, base_v) = gen_expr locals base_e in
-      let sname = match base_ty with
-        | TypeNamed name | TypePtr (TypeNamed name)
-        | TypePtr (TypeIo (TypeNamed name))
-        | TypeAlignedPtr (_, TypeNamed name) -> name
-        | _ -> raise (Error
-            "BUG: stable_replace base is not a struct place")
+      let (field_ty, field_place, is_volatile) =
+        match gen_field_access locals base_e fname with
+        | FieldPlace (ty, place, is_volatile) -> (ty, place, is_volatile)
+        | FieldValue _ ->
+            raise (Error "BUG: stable_replace field has no stable address")
       in
-      let (idx, field_ty) = field_info sname fname in
-      let llty = Hashtbl.find struct_lltypes sname in
-      if type_of base_v = llty then
-        raise (Error "BUG: stable_replace base has no stable address");
-      let field_ptr = build_in_bounds_gep llty base_v
-        [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
-        (fname ^ ".stable_ptr") builder in
+      let field_ptr = place_ptr field_place in
       let value_ty = resolve_special_type field_ty in
       let (_, replacement_v) =
         gen_expr ~expected_ty:value_ty locals replacement_e in
@@ -4099,7 +4110,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          slot, matching ordinary left-to-right call evaluation. *)
       let old_value = build_load (ltype_of_ast value_ty) field_ptr
         (fname ^ ".stable_old") builder in
-      ignore (build_store (coerce replacement_v value_ty) field_ptr builder);
+      if is_volatile then set_volatile true old_value;
+      let store = build_store (coerce replacement_v value_ty) field_ptr builder in
+      if is_volatile then set_volatile true store;
       (value_ty, old_value)
 
   | Call (("checked_add_usize" | "checked_mul_usize") as name,
@@ -4557,203 +4570,248 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              ignore (build_store (coerce rhs_v elem_ty) ep builder)
            in
            (match resolve_index_storage ~op:"AssignIndex" locals base with
-            | IdxArray (elem_ty, n, arr_ptr) -> store_to_array elem_ty n arr_ptr
-            | IdxSlice (elem_ty, min_len, fat) -> store_to_slice elem_ty min_len fat
-            | IdxPtr (elem_ty, ptr_v, is_volatile) -> store_through_ptr elem_ty ptr_v is_volatile);
+            | IdxArray (elem_ty, n, arr_place) ->
+                store_to_array elem_ty n (place_ptr arr_place)
+            | IdxSlice (elem_ty, min_len, fat) ->
+                store_to_slice elem_ty min_len (value_ll fat)
+            | IdxPtr (elem_ty, ptr_v, is_volatile) ->
+                store_through_ptr elem_ty (value_ll ptr_v) is_volatile);
            (TypeVoid, const_null (i1_type context))
        | FieldGet (base_expr, fname) ->
-           (* GitHub issue #211: a dereferenced-pointer field assignment's
-              base is syntactically a Deref. Evaluating it with the general
-              gen_expr (as the read path does) loads the whole struct into
-              an SSA value -- correct for a read (gen_expr's own FieldGet
-              case recovers from this with extractvalue), but an assignment
-              needs an address to store into, and a loaded value has none.
-              A dereferenced pointer's address is just the pointer itself,
-              so evaluate the pointer being dereferenced directly instead
-              of loading through it. *)
-           let (base_ty, base_v) = match base_expr.desc with
-             | Deref inner -> gen_expr locals inner
-             | _ -> gen_expr locals base_expr
+           let (field_ty, place, through_io) =
+             match gen_field_access locals base_expr fname with
+             | FieldPlace (field_ty, place, through_io) ->
+                 (field_ty, place, through_io)
+             | FieldValue _ -> raise (Error (Printf.sprintf
+                 "BUG: field assignment '.%s' has no addressable place" fname))
            in
-           let (sname, through_io, base_ptr) = match base_ty with
-             | TypePtr (TypeIo (TypeNamed s))   -> (s, true, base_v)
-             | TypeIndexed (s, _) ->
-                 (match base_expr.desc with
-                  | Var name ->
-                      (match Hashtbl.find_opt locals name with
-                       | Some (Mut (TypeIndexed _, ptr)) -> (s, false, ptr)
-                       | _ -> raise (Error (Printf.sprintf
-                           "BUG: indexed owner '%s' field assignment has no mutable storage"
-                           name)))
-                  | _ -> raise (Error
-                      "BUG: indexed owner field assignment has no stable base"))
-             | _ ->
-                 (match struct_name_of_type base_ty with
-                  | Some s -> (s, false, base_v)
-                  | None -> raise (Error (Printf.sprintf
-                      "field assignment '.%s' on non-struct type" fname)))
-           in
-           let (idx, field_ty) = field_info sname fname in
-           let llty = Hashtbl.find struct_lltypes sname in
            let (_, val_v) = gen_expr ~expected_ty:field_ty locals rhs in
-           let field_ptr = build_in_bounds_gep llty base_ptr
-             [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
-             (fname ^ "_ptr") builder
-           in
-           let inst = build_store (coerce val_v field_ty) field_ptr builder in
+           let inst = build_store (coerce val_v field_ty) (place_ptr place) builder in
            if through_io || (match field_ty with TypeIo _ -> true | _ -> false)
            then set_volatile true inst;
            (TypeVoid, const_null (i1_type context))
        | _ ->
            raise (Error "BUG: not an assignable expression (should have been rejected by type_inf.ml)"))
 
-(* GitHub issue #217: shared struct-field-access codegen for both an
-   ordinary field READ (FieldGet -- decays an array-typed field to a bare
-   element pointer, `decay:true`, exactly as before this issue) and an
-   Index/SliceOf base's UN-DECAYED address recovery (`decay:false`, used
-   by resolve_index_storage below). Single-sourced from the pre-existing
-   FieldGet codegen rather than duplicated, so the struct-layout GEP logic
-   can never drift between the two call sites -- the only actual
-   difference is the TypeArray arm at the end (an array field's own
-   address, not the decayed-to-pointer value). *)
-and gen_field_access ~decay locals (base_expr : Ast.expr) (fname : string)
-    : Ast.type_expr * llvalue =
-  let (base_ty, base_v) = gen_expr locals base_expr in
+(* Shared field lowering produces either an SSA value or an addressable
+   place. Reads explicitly pass the result through [field_access_value];
+   writes, address-of, stable replacement, and indexing require
+   [FieldPlace]. Keeping the struct-layout GEP here makes those consumers
+   share both layout and place/value classification. *)
+and gen_field_access locals (base_expr : Ast.expr) (fname : string)
+    : field_access =
+  let (base_ty, base_v, inherited_volatile) = match base_expr.desc with
+    | Deref inner ->
+        let (ty, value) = gen_expr locals inner in
+        (ty, value, match ty with TypePtr (TypeIo _) -> true | _ -> false)
+    | FieldGet (parent, parent_field) ->
+        (match gen_field_access locals parent parent_field with
+         | FieldPlace (ty, place, is_volatile) ->
+             (ty, place_ptr place, is_volatile)
+         | FieldValue (ty, value) -> (ty, value_ll value, false))
+    | Index (indexed_base, index) ->
+        let (ty, place, is_volatile) =
+          gen_index_place locals indexed_base index base_expr.loc in
+        (ty, place_ptr place, is_volatile)
+    | Var name ->
+        (match Hashtbl.find_opt locals name with
+         | Some (Mut (((TypeNamed _ | TypeIndexed _) as ty), ptr)) ->
+             (ty, ptr, false)
+         | _ ->
+             (match Hashtbl.find_opt global_vars name with
+              | Some (((TypeNamed _ | TypeIndexed _) as ty), ptr) ->
+                  (ty, ptr, false)
+              | _ -> let (ty, value) = gen_expr locals base_expr in
+                     (ty, value, false)))
+    | _ -> let (ty, value) = gen_expr locals base_expr in
+           (ty, value, false)
+  in
   match base_ty, fname with
   | TypeSlice _, "len" ->
-      (TypeUsize, slice_len base_v)
+      FieldValue (TypeUsize, Value (slice_len base_v))
   | TypeIndexed (sname, _), _ ->
       let (idx, field_ty) = field_info sname fname in
-      if not decay && (match field_ty with TypeArray _ -> true | _ -> false) then
-        raise (Error (Printf.sprintf
-          "cannot index field '.%s': it is held by value (a generic struct \
-           value, not reached through a pointer), so it has no address to \
-           index into" fname));
-      let v = build_extractvalue base_v idx fname builder in
-      let value_ty = erase_singleton_type field_ty in
-      (value_ty, to_arith_width value_ty v)
+      let llty = Hashtbl.find struct_lltypes sname in
+      if type_of base_v = llty then begin
+        let v = build_extractvalue base_v idx fname builder in
+        let value_ty = erase_singleton_type field_ty in
+        FieldValue (value_ty, Value (to_arith_width value_ty v))
+      end else begin
+        let field_ptr = build_in_bounds_gep llty base_v
+          [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
+          (fname ^ "_ptr") builder in
+        FieldPlace (field_ty, Place field_ptr, false)
+      end
   | _ ->
       let (sname, through_io) = match base_ty with
         | TypePtr (TypeIo (TypeNamed s)) -> (s, true)   (* field access through *io Struct is volatile *)
         | _ ->
             (match struct_name_of_type base_ty with
-             | Some s -> (s, false)
+             | Some s -> (s, inherited_volatile)
              | None -> raise (Error (Printf.sprintf
                  "field access '.%s' on non-struct type" fname)))
       in
       let (idx, field_ty) = field_info sname fname in
       let llty = Hashtbl.find struct_lltypes sname in
       if type_of base_v = llty then begin
-        if not decay && (match field_ty with TypeArray _ -> true | _ -> false) then
-          raise (Error (Printf.sprintf
-            "cannot index field '.%s': the containing struct is held by \
-             value, not reached through a pointer, so it has no address to \
-             index into" fname));
         let value_ty = resolve_special_type field_ty in
         let v = build_extractvalue base_v idx fname builder in
-        (value_ty, to_arith_width value_ty v)
+        FieldValue (value_ty, Value (to_arith_width value_ty v))
       end else begin
         let field_ptr = build_in_bounds_gep llty base_v
           [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
           (fname ^ "_ptr") builder
         in
-        (match field_ty with
-       | TypeNamed ename when Hashtbl.mem enum_underlying ename ->
-           (* Enum struct field reached through a POINTER to the struct
-              (an array element, a *Struct parameter) rather than an
-              in-register struct value: load the underlying integer, the
-              same distinction the array-element Index case above already
-              makes for a bare enum element. Falling through to the
-              "nested struct field" branch below returned the field
-              POINTER typed as the enum itself, which every consumer then
-              used as if it were the value: `match` emitted `switch ptr`
-              and `== Enum::Variant` emitted a pointer-vs-integer icmp,
-              both rejected by LLVM's verifier (an internal compiler
-              error rather than a miscompile). A `return` of such a field
-              happened to work anyway -- the return path coerces the
-              pointer by loading it -- which is why this stayed hidden. *)
-           let ut = Hashtbl.find enum_underlying ename in
-           let v = build_load (ltype_of_ast ut) field_ptr fname builder in
-           if through_io then set_volatile true v;
-           (field_ty, v)
-       | TypeNamed _ ->
-           (* Nested struct field: return the pointer as-is (same approach as array decay) *)
-           (TypePtr field_ty, field_ptr)
-       | TypeArray (elem_ty, n) ->
-           if decay then (TypePtr elem_ty, field_ptr)  (* array field decays to *elem *)
-           else (TypeArray (elem_ty, n), field_ptr)     (* issue #217: un-decayed address *)
-       | TypeIo inner_ty ->
-           let v = build_load (ltype_of_ast inner_ty) field_ptr fname builder in
-           set_volatile true v;
-           (inner_ty, to_arith_width inner_ty v)
-       | _ ->
-           let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
-           if through_io then set_volatile true v;
-           (field_ty, to_arith_width field_ty v))
+        FieldPlace (field_ty, Place field_ptr, through_io)
       end
+
+and field_access_value ~decay access name : Ast.type_expr * llvalue =
+  match access with
+  | FieldValue (ty, value) -> (ty, value_ll value)
+  | FieldPlace (TypeArray (elem_ty, n), place, _) when decay ->
+      let arr_ty = array_type (ltype_of_ast elem_ty) n in
+      let zero = const_int (i32_type context) 0 in
+      let ptr = build_in_bounds_gep arr_ty (place_ptr place) [| zero; zero |]
+        (name ^ "_decay") builder in
+      (TypePtr elem_ty, ptr)
+  | FieldPlace (ty, place, is_volatile) ->
+      let value = load_place ~name ty place is_volatile |> value_ll in
+      let value_ty = match ty with TypeIo inner -> inner | _ -> ty in
+      (value_ty, value)
+
+and gen_index_place locals (base : Ast.expr) (idx : Ast.expr) loc
+    : Ast.type_expr * llvm_place * bool =
+  let (idx_ty_raw, idx_raw) = gen_expr locals idx in
+  let idx_v = to_index_width ~is_signed:(not (is_unsigned idx_ty_raw)) idx_raw in
+  let idx_ty = match Const_env.folded_value idx with
+    | Some k -> TypeRefined (k, k + 1, TypeUsize)
+    | None ->
+        (match Hashtbl.find_opt Type_inf.index_resolved_ty idx.loc with
+         | Some t -> t
+         | None ->
+             (match idx.desc with
+              | Var n -> Option.value
+                  (Hashtbl.find_opt narrowing_ctx n) ~default:idx_ty_raw
+              | _ -> idx_ty_raw))
+  in
+  let same_base_key = match base.desc with Ast.Var n -> Some n | _ -> None in
+  match resolve_index_storage ~op:"Index" locals base with
+  | IdxArray (elem_ty, n, array_place) ->
+      let needs_check = match refinement_range idx_ty with
+        | Some (lo, hi) -> lo < 0 || hi > n
+        | None -> true
+      in
+      if needs_check && !unsafe_depth = 0 then
+        emit_bounds_check loc idx_ty idx_v n
+      else if needs_check then note_unsafe_use ();
+      let arr_ty = array_type (ltype_of_ast elem_ty) n in
+      let zero = const_int (i32_type context) 0 in
+      let ptr = build_in_bounds_gep arr_ty (place_ptr array_place)
+        [| zero; idx_v |] "idx_ptr" builder in
+      (elem_ty, Place ptr, false)
+  | IdxSlice (elem_ty, min_len, fat_value) ->
+      let fat = value_ll fat_value in
+      let proven =
+        (match refinement_range idx_ty with
+         | Some (lo, hi) -> lo >= 0 && hi <= min_len
+         | None -> false)
+        || (match idx.desc with
+            | Var v ->
+                (match Hashtbl.find_opt slice_index_ctx v with
+                 | Some s -> Some s = same_base_key
+                 | None -> false)
+            | _ -> false)
+      in
+      if not proven && !unsafe_depth = 0 then
+        emit_bounds_check_dyn loc idx_ty idx_v min_len (slice_len fat)
+      else if not proven then note_unsafe_use ();
+      let ptr = build_gep (ltype_of_ast elem_ty) (slice_ptr fat)
+        [| idx_v |] "idx_ptr" builder in
+      (elem_ty, Place ptr, false)
+  | IdxPtr (elem_ty, ptr_value, is_volatile) ->
+      let ptr = build_gep (ltype_of_ast elem_ty) (value_ll ptr_value)
+        [| idx_v |] "idx_ptr" builder in
+      (elem_ty, Place ptr, is_volatile)
 
 (* GitHub issue #217: resolve an Index/SliceOf base -- a bare variable
    (the ONLY shape possible before this issue; exact same lookup/error
    messages as before, just now returning index_storage instead of
    dispatching straight into a load/store closure) or a struct field path
-   (via gen_field_access ~decay:false, whose TypeArray/TypeSlice/TypePtr
-   result classifies identically). `op` names the caller in "BUG"-style
+   (via gen_field_access, whose FieldPlace/FieldValue result makes the
+   address-versus-value choice explicit). `op` names the caller in "BUG"-style
    error messages (these should be unreachable in any program type_inf.ml
    already accepted -- it validates the exact same shapes first). *)
 and resolve_index_storage ~op locals (base : Ast.expr) : index_storage =
   match base.desc with
   | Ast.Var id ->
       (match Hashtbl.find_opt locals id with
-       | Some (Mut (TypeArray (elem_ty, n), ptr)) -> IdxArray (elem_ty, n, ptr)
+       | Some (Mut (TypeArray (elem_ty, n), ptr)) ->
+           IdxArray (elem_ty, n, Place ptr)
        | Some (Mut (TypeSlice (elem_ty, m), alloca_ptr)) ->
            let fat = build_load (ltype_of_ast (TypeSlice (elem_ty, m))) alloca_ptr id builder in
-           IdxSlice (elem_ty, effective_slice_min id m, fat)
-       | Some (Imm (TypeSlice (elem_ty, m), fat)) -> IdxSlice (elem_ty, m, fat)
+           IdxSlice (elem_ty, effective_slice_min id m, Value fat)
+       | Some (Imm (TypeSlice (elem_ty, m), fat)) ->
+           IdxSlice (elem_ty, m, Value fat)
        | Some (Mut (TypePtr (TypeIo elem_ty), alloca_ptr))
        | Some (Mut (TypeAlignedPtr (_, TypeIo elem_ty), alloca_ptr)) ->
            let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
-           IdxPtr (elem_ty, ptr_v, true)
+           IdxPtr (elem_ty, Value ptr_v, true)
        | Some (Mut (TypePtr elem_ty, alloca_ptr))
        | Some (Mut (TypeAlignedPtr (_, elem_ty), alloca_ptr)) ->
            let ptr_v = build_load (pointer_type context) alloca_ptr id builder in
-           IdxPtr (elem_ty, ptr_v, false)
+           IdxPtr (elem_ty, Value ptr_v, false)
        | Some (Imm (TypePtr (TypeIo elem_ty), ptr_v))
        | Some (Imm (TypeAlignedPtr (_, TypeIo elem_ty), ptr_v)) ->
-           IdxPtr (elem_ty, ptr_v, true)
+           IdxPtr (elem_ty, Value ptr_v, true)
        | Some (Imm (TypePtr elem_ty, ptr_v))
        | Some (Imm (TypeAlignedPtr (_, elem_ty), ptr_v)) ->
-           IdxPtr (elem_ty, ptr_v, false)
+           IdxPtr (elem_ty, Value ptr_v, false)
        | Some _ ->
            raise (Error (Printf.sprintf "%s: '%s' is not an array or pointer" op id))
        | None ->
            (match Hashtbl.find_opt global_vars id with
-            | Some (TypeArray (elem_ty, n), gptr) -> IdxArray (elem_ty, n, gptr)
+            | Some (TypeArray (elem_ty, n), gptr) ->
+                IdxArray (elem_ty, n, Place gptr)
             | Some (TypeSlice (elem_ty, m), gptr) ->
                 let fat = build_load (ltype_of_ast (TypeSlice (elem_ty, m))) gptr id builder in
-                IdxSlice (elem_ty, effective_slice_min id m, fat)
+                IdxSlice (elem_ty, effective_slice_min id m, Value fat)
             | Some (TypePtr (TypeIo elem_ty), gptr)
             | Some (TypeAlignedPtr (_, TypeIo elem_ty), gptr) ->
                 let ptr_v = build_load (pointer_type context) gptr id builder in
-                IdxPtr (elem_ty, ptr_v, true)
+                IdxPtr (elem_ty, Value ptr_v, true)
             | Some (TypePtr elem_ty, gptr)
             | Some (TypeAlignedPtr (_, elem_ty), gptr) ->
                 let ptr_v = build_load (pointer_type context) gptr id builder in
-                IdxPtr (elem_ty, ptr_v, false)
+                IdxPtr (elem_ty, Value ptr_v, false)
             | Some _ ->
                 raise (Error (Printf.sprintf "%s: '%s' is not an array or pointer" op id))
             | None ->
                 raise (Error (Printf.sprintf "%s: undefined variable '%s'" op id))))
   | Ast.FieldGet (base_expr, fname) ->
-      (match gen_field_access ~decay:false locals base_expr fname with
-       | (TypeArray (elem_ty, n), field_ptr) -> IdxArray (elem_ty, n, field_ptr)
-       | (TypeSlice (elem_ty, m), fat) -> IdxSlice (elem_ty, m, fat)
-       | (TypePtr (TypeIo elem_ty), ptr_v)
-       | (TypeAlignedPtr (_, TypeIo elem_ty), ptr_v) -> IdxPtr (elem_ty, ptr_v, true)
-       | (TypePtr elem_ty, ptr_v)
-       | (TypeAlignedPtr (_, elem_ty), ptr_v) -> IdxPtr (elem_ty, ptr_v, false)
-       | (t, _) -> raise (Error (Printf.sprintf
-           "%s: field '.%s' is not an array, slice, or pointer (has type %s)"
-           op fname (Ast.show_type_expr t))))
+      (match gen_field_access locals base_expr fname with
+       | FieldPlace (TypeArray (elem_ty, n), place, _) ->
+           IdxArray (elem_ty, n, place)
+       | FieldPlace (TypeSlice (elem_ty, m) as ty, place, is_volatile) ->
+           IdxSlice (elem_ty, m, load_place ~name:fname ty place is_volatile)
+       | FieldPlace ((TypePtr (TypeIo elem_ty)
+                    | TypeAlignedPtr (_, TypeIo elem_ty)) as ty,
+                    place, is_volatile) ->
+           IdxPtr (elem_ty, load_place ~name:fname ty place is_volatile, true)
+       | FieldPlace ((TypePtr elem_ty | TypeAlignedPtr (_, elem_ty)) as ty,
+                    place, is_volatile) ->
+           IdxPtr (elem_ty, load_place ~name:fname ty place is_volatile, false)
+       | FieldValue (TypeSlice (elem_ty, m), fat) ->
+           IdxSlice (elem_ty, m, fat)
+       | FieldValue (TypePtr (TypeIo elem_ty), ptr_v)
+       | FieldValue (TypeAlignedPtr (_, TypeIo elem_ty), ptr_v) ->
+           IdxPtr (elem_ty, ptr_v, true)
+       | FieldValue (TypePtr elem_ty, ptr_v)
+       | FieldValue (TypeAlignedPtr (_, elem_ty), ptr_v) ->
+           IdxPtr (elem_ty, ptr_v, false)
+       | FieldPlace (t, _, _) | FieldValue (t, _) ->
+           raise (Error (Printf.sprintf
+             "%s: field '.%s' is not an addressable array, slice, or pointer (has type %s)"
+             op fname (Ast.show_type_expr t))))
   | _ ->
       raise (Error (Printf.sprintf
         "BUG: %s base should have been rejected by type_inf.ml" op))

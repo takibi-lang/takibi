@@ -5166,6 +5166,37 @@ let infer_tests = [
          return enum_field_items[slot].tag == Color::Red;
        }");
 
+  (* GitHub issue #272: exercise the place/value boundary as one matrix.
+     Every field/index/dereference producer below yields an addressable
+     place internally; comparison, match, return, and call operands require
+     an explicitly loaded value, while assignment requires the place.  The
+     OCaml lowering types now make crossing those roles implicit impossible;
+     LLVM verification remains the end-to-end regression oracle here. *)
+  Alcotest.test_case
+    "place/value lowering matrix verifies reads writes comparisons matches and calls"
+    `Quick
+    (expect_codegen_ok
+      "enum PlaceState: u8 { Empty; Ready; }
+       struct PlaceEntry { state: PlaceState; value: usize; }
+       let mut place_entries: [PlaceEntry; 2];
+       fn place_consume(state: PlaceState) -> usize {
+         match state {
+           PlaceState::Empty => { return 0; }
+           PlaceState::Ready => { return 1; }
+         }
+       }
+       fn place_matrix(p: *PlaceEntry, i: {0..<2 as usize}) -> usize {
+         place_entries[i].state = PlaceState::Ready;
+         (*p).value = place_entries[i].value;
+         if ((*p).state == PlaceState::Ready) {
+           return place_consume(place_entries[i].state);
+         }
+         match place_entries[i].state {
+           PlaceState::Empty => { return (*p).value; }
+           PlaceState::Ready => { return place_entries[i].value; }
+         }
+       }");
+
   (* -- OR-pattern match arms (GitHub issue #156) ---------------------- *)
 
   Alcotest.test_case "int match OR-pattern arm type-checks, positive and negative mixed" `Quick
@@ -8314,8 +8345,10 @@ let codegen_tests = [
         1 (Array.length (Llvm.params complete));
       Alcotest.(check int) "in-flight owner keeps RX index and TX slot"
         2 (Array.length (Llvm.struct_element_types tx_layout));
-      Alcotest.(check bool) "start reads RX runtime fields" true
-        (contains_substring start_ir "extractvalue");
+      Alcotest.(check bool) "start addresses RX runtime fields" true
+        (contains_substring start_ir "getelementptr");
+      Alcotest.(check bool) "start loads RX runtime fields" true
+        (contains_substring start_ir "load");
       Alcotest.(check bool) "completion permit erases to void" true
         (contains_substring complete_ir "define void @cg_async_tx_complete"));
 
@@ -8614,8 +8647,10 @@ let codegen_tests = [
       | None -> Alcotest.fail "cg_read not found"
       | Some (_, f) ->
           let ir = Llvm.string_of_llvalue f in
-          Alcotest.(check bool) "runtime field is extracted" true
-            (contains_substring ir "extractvalue");
+          Alcotest.(check bool) "runtime field has an explicit address" true
+            (contains_substring ir "getelementptr");
+          Alcotest.(check bool) "runtime field is loaded as a value" true
+            (contains_substring ir "load");
           Alcotest.(check bool) "no pointer-bit encoding" false
             (contains_substring ir "inttoptr" || contains_substring ir "ptrtoint"));
 
