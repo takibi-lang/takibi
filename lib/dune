@@ -1,7 +1,7 @@
 (library
  (name takibi)
  (public_name takibi)
- (modules ast target_info const_env generic_scope type_layout types monomorphize declared_type_resolver takibi_core type_inf typechecker llvm_gen lexer parser use_resolver)
+ (modules ast target_info const_env generic_scope type_layout local_bindings types monomorphize declared_type_resolver takibi_core type_inf typechecker llvm_gen lexer parser use_resolver)
  (libraries menhirLib llvm llvm.analysis llvm.target llvm.all_backends llvm.passbuilder llvm.debuginfo)
  (preprocess
   (pps ppx_deriving.show)))

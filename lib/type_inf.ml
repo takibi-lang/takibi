@@ -76,6 +76,17 @@ let rec count_var_occurrences name (e : Ast.expr) =
 (* Type environment: immutable map from variable name to (type, is_mutable) *)
 type tyenv = (ty * bool) StringMap.t
 
+let active_local_bindings : Local_bindings.resolution option ref = ref None
+let active_binding_types : (Local_bindings.id, ty) Hashtbl.t = Hashtbl.create 32
+
+let record_stmt_binding_type (stmt : Ast.stmt) slot ty =
+  match !active_local_bindings with
+  | None -> ()
+  | Some resolution ->
+      (match List.nth_opt (Local_bindings.ids_for_stmt resolution stmt) slot with
+       | Some id -> Hashtbl.replace active_binding_types id ty
+       | None -> ())
+
 (* Struct environment: maps struct name to (ordered field list, is_packed,
    align_bytes) -- is_packed/align_bytes are needed by const_type_size/
    const_field_offset below (see their comment for why). *)
@@ -891,11 +902,13 @@ let linear_opaque_names = ref StringSet.empty
    distinctness from another index without relational reasoning (the same
    identity between arbitrary runtime indices) -- that is later place/
    proposition work, not this increment. *)
-type path = PVar of string | PField of string * string
+type path =
+  | PVar of Local_bindings.id * string
+  | PField of Local_bindings.id * string * string
 
 let path_to_string = function
-  | PVar n -> n
-  | PField (b, f) -> b ^ "." ^ f
+  | PVar (_, n) -> n
+  | PField (_, b, f) -> b ^ "." ^ f
 
 module ResourceFlow = Takibi_core.Delta.Legacy_flow(struct
   type t = path
@@ -4258,6 +4271,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
        | Some n -> var_align_bytes := StringMap.add name n !var_align_bytes
        | None -> ());
       locally_bound_names := StringSet.add name !locally_bound_names;  (* issue #214 *)
+      record_stmt_binding_type s 0 bind_ty;
       ( StringMap.add name (bind_ty, is_mut) tyenv,
         StringMap.add name bind_ty raw_locals )
   | LetTuple (names, rhs) ->
@@ -4296,6 +4310,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       List.iter (fun n ->
         locally_bound_names := StringSet.add n !locally_bound_names  (* issue #214 *)
       ) names;
+      List.iteri (fun slot ty -> record_stmt_binding_type s slot ty) comp_tys;
       ( List.fold_left2 (fun env n t -> StringMap.add n (t, false) env)
           tyenv names comp_tys,
         List.fold_left2 (fun m n t -> StringMap.add n t m)
@@ -4590,6 +4605,8 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
        | _ -> raise (TypeError (lo_expr.loc,
            Printf.sprintf "for-loop bounds must be an integer type, got '%s'"
              (to_string base_raw))));
+      record_stmt_binding_type s 0 idx_ty;
+      record_stmt_binding_type s 1 idx_ty;
       (tyenv, raw_locals')
 
   | ForEach (name, se, body) ->
@@ -4598,6 +4615,8 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
        | TSlice (el, _) ->
            (* Element is an immutable per-iteration value of the element type. *)
            locally_bound_names := StringSet.add name !locally_bound_names;  (* issue #214 *)
+           record_stmt_binding_type s 0 TUsize;
+           record_stmt_binding_type s 1 el;
            let body_env = StringMap.add name (el, false) tyenv in
            let (_, raw_locals') = fold_stmts_with_future_writes
              (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
@@ -4851,6 +4870,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       if contains_stable_owner_value_ty ty then
         raise (TypeError (s.loc,
           "stable owner container storage must be a private mutable global, not a local value"));
+      record_stmt_binding_type s 0 ty;
       let tyenv''' =
         if is_mut then tyenv'' else StringMap.add name (ty, false) tyenv''
       in
@@ -4977,6 +4997,11 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
     ) fdef.params;
     let param_tys = List.map (fun (_, ty_opt) -> of_ast_opt ty_opt) fdef.params in
     let ret_ty    = ret_of_ast_opt fdef.ret_type in
+    let bindings = Local_bindings.resolve_func fdef in
+    active_local_bindings := Some bindings;
+    Hashtbl.reset active_binding_types;
+    List.iter2 (fun id ty -> Hashtbl.replace active_binding_types id ty)
+      bindings.param_ids param_tys;
     (* Start with globals visible, then shadow them with params (params are mutable) *)
     let init_env  = List.fold_left2
       (fun m (name, _) ty -> StringMap.add name (ty, true) m)
@@ -4998,6 +5023,10 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
       param_types = List.map2 (fun (name, _) ty -> (name, to_ast ty))
                       fdef.params param_tys;
       local_types = StringMap.map to_ast raw_locals;
+      bindings;
+      binding_types = Hashtbl.fold (fun id ty types ->
+          Types.IntMap.add id (to_ast ty) types)
+        active_binding_types Types.IntMap.empty;
       effects     = Option.value fdef.effects ~default:[];
     })
 
@@ -7184,6 +7213,34 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   ) StringSet.empty prog in
   let check_affine_func fdef =
     let finfo = StringMap.find (overload_key fdef.Ast.name fdef.params) functions in
+    let binding_resolution = finfo.bindings in
+    let visible_bindings = Hashtbl.create 16 in
+    let nonlocal_bindings = Hashtbl.create 16 in
+    let next_nonlocal_binding = ref (-1) in
+    List.iter2 (fun (name, _) id -> Hashtbl.replace visible_bindings name id)
+      fdef.params binding_resolution.param_ids;
+    let pvar name = match Hashtbl.find_opt visible_bindings name with
+      | Some id -> PVar (id, name)
+      | None ->
+          let id = match Hashtbl.find_opt nonlocal_bindings name with
+            | Some id -> id
+            | None ->
+                let id = !next_nonlocal_binding in
+                decr next_nonlocal_binding;
+                Hashtbl.add nonlocal_bindings name id;
+                id
+          in
+          PVar (id, name)
+    in
+    let pvar_expr (e : Ast.expr) name =
+      match Local_bindings.id_for_expr binding_resolution e with
+      | Some id -> PVar (id, name)
+      | None -> pvar name
+    in
+    let pfield name field = match pvar name with
+      | PVar (id, _) -> PField (id, name, field)
+      | PField _ -> assert false
+    in
     let var_types = ref finfo.local_types in
     List.iter2 (fun (name, _) (_, ty) ->
       var_types := StringMap.add name ty !var_types
@@ -7192,12 +7249,6 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       StringSet.add name names) StringSet.empty fdef.params in
     let is_stack_local name =
       StringMap.mem name !var_types && not (StringSet.mem name param_names)
-    in
-    let var_kind name = match StringMap.find_opt name !var_types with
-      | Some ty when is_linear_type ty -> Some Ast.KindLinear
-      | Some ty when is_must_use_type ty -> Some Ast.KindLinear
-      | Some ty when is_affine_type ty -> Some Ast.KindAffine
-      | _ -> None
     in
     (* OWNERSHIP_KERNEL.md Stage 3a (GitHub issue #89 Hurdle 3): a field
        access `h.t` through a bare local/parameter `h` is trackable the
@@ -7215,13 +7266,18 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        This function is intentionally the ONLY place struct field types
        get read for kind purposes -- no interprocedural reasoning, no
        aliasing between two different local variables of the same struct
-       type (each `path` is keyed by the LOCAL NAME, not a resolved
-       address, so `h1.t` and `h2.t` are always distinct paths even if
+       type (each `path` is keyed by the resolved LOCAL BINDING, not a
+       runtime address, so `h1.t` and `h2.t` are always distinct paths even if
        they happened to alias at runtime through pointers -- a real but
        narrow gap, honestly the same shape as Stage 1's affine
        restriction to named locals, not solved here). *)
-    let field_affine_type base_name fname =
-      match StringMap.find_opt base_name !var_types with
+    let binding_type id name =
+      Option.value (Types.IntMap.find_opt id finfo.binding_types)
+        ~default:(Option.value (StringMap.find_opt name !var_types)
+          ~default:Ast.TypeVoid)
+    in
+    let field_affine_type base_id base_name fname =
+      match Some (binding_type base_id base_name) with
       | None -> None
       | Some base_ty ->
           let sname = match strip_borrow base_ty with
@@ -7242,24 +7298,26 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                      | _ -> None)))
     in
     let path_kind = function
-      | PVar name -> var_kind name
-      | PField (base, fname) ->
-          (match field_affine_type base fname with
+      | PVar (id, name) ->
+          let ty = binding_type id name in
+          if is_linear_type ty || is_must_use_type ty then Some Ast.KindLinear
+          else if is_affine_type ty then Some Ast.KindAffine else None
+      | PField (id, base, fname) ->
+          (match field_affine_type id base fname with
            | Some _ -> Some Ast.KindAffine
            | None -> None)
     in
     let is_tracked_path p = path_kind p <> None in
     let is_stack_origin = function
-      | PVar name -> is_stack_local name && not (is_tracked_path (PVar name))
-      | PField (name, _) ->
-          is_stack_local name && not (is_tracked_path (PVar name))
+      | (PVar (_, name) as path) -> is_stack_local name && not (is_tracked_path path)
+      | PField (id, name, _) ->
+          is_stack_local name && not (is_tracked_path (PVar (id, name)))
     in
     let is_linear_path p = path_kind p = Some Ast.KindLinear in
     let is_must_use_path = function
-      | PVar name ->
-          (match StringMap.find_opt name !var_types with
-           | Some ty -> is_must_use_type ty && not (is_linear_type ty)
-           | None -> false)
+      | PVar (id, name) ->
+          let ty = binding_type id name in
+          is_must_use_type ty && not (is_linear_type ty)
       | PField _ -> false
     in
     let requires_all_paths p = is_linear_path p in
@@ -7275,18 +7333,18 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let exempt_params = List.fold_left (fun s (name, ty_opt) ->
       match ty_opt with
       | Some (Ast.TypeBorrow _) | Some (Ast.TypeBorrowMut _)
-      | Some (Ast.TypeSink _) -> PathSet.add (PVar name) s
+      | Some (Ast.TypeSink _) -> PathSet.add (pvar name) s
       | _ -> s
     ) PathSet.empty fdef.params in
     let borrowed_params = List.fold_left (fun s (name, ty_opt) ->
       match ty_opt with
       | Some (Ast.TypeBorrow _) | Some (Ast.TypeBorrowMut _) ->
-          PathSet.add (PVar name) s
+          PathSet.add (pvar name) s
       | _ -> s
     ) PathSet.empty fdef.params in
     let sink_params = List.fold_left (fun s (name, ty_opt) ->
       match ty_opt with
-      | Some (Ast.TypeSink _) -> PathSet.add (PVar name) s
+      | Some (Ast.TypeSink _) -> PathSet.add (pvar name) s
       | _ -> s
     ) PathSet.empty fdef.params in
     (* A sink-indexed owner -> linear indexed owner transition carrying the
@@ -7300,7 +7358,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           List.fold_left (fun paths (name, ty_opt) ->
             match ty_opt with
             | Some (Ast.TypeSink (Ast.TypeIndexed (_, in_args)))
-              when in_args = ret_args -> PathSet.add (PVar name) paths
+              when in_args = ret_args -> PathSet.add (pvar name) paths
             | _ -> paths)
             PathSet.empty fdef.params
       | _ -> PathSet.empty
@@ -7465,7 +7523,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                List.fold_left (fun paths i ->
                  match List.nth_opt args i with
                  | Some { Ast.desc = Ast.Var authority; _ } ->
-                     PathSet.add (PVar authority) paths
+                     PathSet.add (pvar authority) paths
                  | _ -> paths)
                  PathSet.empty indices
            | None when target = "min" || target = "max" ->
@@ -7601,8 +7659,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let require_no_authority_rebind loc declared taints name =
       let live_dependent =
         List.find_opt (fun dependent ->
-          PathSet.mem (PVar dependent) declared)
-          (TaintEnv.dependents (PVar name) taints)
+          PathSet.mem (pvar dependent) declared)
+          (TaintEnv.dependents (pvar name) taints)
       in
       match live_dependent with
       | Some dependent ->
@@ -7676,7 +7734,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               name));
           moved
       | Ast.Var name ->
-          let p = PVar name in
+          let p = pvar_expr e name in
           require_available e.loc moved p;
           require_region_live e.loc taints moved name;
           if consume && PathSet.mem p borrowed_params then
@@ -7688,8 +7746,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           require_no_region_aggregate_load e.loc e
             (expr_taint taints base_expr);
           (match base_expr.desc with
-           | Ast.Var base_name when is_tracked_path (PField (base_name, fname)) ->
-               let p = PField (base_name, fname) in
+           | (Ast.Var base_name as base_desc) when is_tracked_path (pfield base_name fname) ->
+               let _ = base_desc in
+               let p = pfield base_name fname in
                require_available e.loc moved p;
                if consume then mv_consume p moved else moved
            | _ -> check_expr taints moved false base_expr)
@@ -7845,13 +7904,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              in the old code either -- those are handled fully here,
              identically to check_stmt's own case. *)
           (match lhs.desc with
-           | Ast.Var name when is_tracked_path (PVar name) ->
+           | Ast.Var name when is_tracked_path (pvar_expr e name) ->
                raise (TypeError (e.loc, Printf.sprintf
                  "assignment to linear/affine/must-use value '%s' is only \
                   supported as a standalone statement, not nested inside \
                   a larger expression" name))
            | Ast.FieldGet (Ast.{ desc = Var base_name; _ }, fname)
-             when is_tracked_path (PField (base_name, fname)) ->
+             when is_tracked_path (pfield base_name fname) ->
                raise (TypeError (e.loc,
                  "assignment to a linear/affine indexed-owner field is \
                   only supported as a standalone statement, not nested \
@@ -7902,6 +7961,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let rec check_stmts moved declared taints stmts =
       let initial_declared = declared in
       let initial_var_types = !var_types in
+      let initial_visible_bindings = Hashtbl.copy visible_bindings in
       let (moved, declared, taints) =
         List.fold_left (fun (moved, declared, taints) s ->
             check_stmt moved declared taints s)
@@ -7929,13 +7989,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               raise (TypeError (loc (), msg))
         | _ -> ()
       ) newly_declared;
-      (* local_types is name-keyed for inference, but source bindings are
-         lexically scoped and disjoint match/if arms may legitimately reuse
-         one spelling with different types. Let annotations below refine the
-         active binding while its statement list is checked; restore the
-         outer map on scope exit so an arm-local status cannot make a later
-         same-named integer look like a must-use obligation. *)
+      (* var_types remains a source-name view for diagnostics and field-type
+         lookup. Resource paths use binding IDs; restore both views at the
+         lexical scope boundary. *)
       var_types := initial_var_types;
+      Hashtbl.reset visible_bindings;
+      Hashtbl.iter (Hashtbl.add visible_bindings) initial_visible_bindings;
       (moved, declared, taints)
     and check_stmt moved declared taints (s : Ast.stmt) =
       match s.desc with
@@ -7969,7 +8028,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              handled instead. *)
           (match lhs.desc with
            | Ast.Var name ->
-               let p = PVar name in
+               let p = pvar name in
                require_no_authority_rebind loc declared taints name;
                if PathSet.mem p borrowed_params then
                  raise (TypeError (loc, Printf.sprintf
@@ -8014,7 +8073,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            | Ast.FieldGet (base_expr, fname) ->
                require_no_taint_escape loc taints `Store rhs;
                (match base_expr.desc with
-                | Ast.Var base_name when is_tracked_path (PField (base_name, fname)) ->
+                | Ast.Var base_name when is_tracked_path (pfield base_name fname) ->
                     (* Stage 3a: this field is the producing site for a
                        fresh obligation, the field-path equivalent of a
                        `let`. The RHS is consumed if it is itself a tracked
@@ -8025,7 +8084,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                        path-generic in is_tracked_path/is_linear_path above
                        so lifting that ban later is a small diff, not a
                        redesign. *)
-                    let p = PField (base_name, fname) in
+                    let p = pfield base_name fname in
                     set_decl_loc p loc;
                     let moved = check_expr taints moved true rhs in
                     (mv_clear p moved, PathSet.add p declared, taints)
@@ -8049,8 +8108,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           Option.iter (fun ty ->
             var_types := StringMap.add name ty !var_types)
             ty_opt;
-          let p = PVar name in
           require_no_authority_rebind s.loc declared taints name;
+          Hashtbl.replace visible_bindings name
+            (List.hd (Local_bindings.ids_for_stmt binding_resolution s));
+          let p = pvar name in
           set_decl_loc p s.loc;
           (match init with
            | None when requires_all_paths p ->
@@ -8068,7 +8129,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 to a pointer, and SliceOf builds a fat pointer into the same
                 storage, so seed the backing array itself as a region origin.
                 Globals deliberately never pass through this Let branch. *)
-             | Some (Ast.TypeArray _), _ -> PathSet.singleton (PVar name)
+             | Some (Ast.TypeArray _), _ -> PathSet.singleton (pvar name)
              | _, Some e -> expr_taint taints e
              | _, None -> PathSet.empty)
             taints
@@ -8077,17 +8138,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.LetTuple (names, rhs) ->
           List.iter
             (require_no_authority_rebind s.loc declared taints) names;
-          List.iter (fun n -> set_decl_loc (PVar n) s.loc) names;
+          List.iter2 (fun n id -> Hashtbl.replace visible_bindings n id)
+            names (Local_bindings.ids_for_stmt binding_resolution s);
+          List.iter (fun n -> set_decl_loc (pvar n) s.loc) names;
           (* Destructuring consumes the tuple (consume=true moves an RHS
              variable, or propagates into a direct TupleLit's tracked
              components); each bound name starts as a fresh obligation/
              handle of its component type. *)
           let moved = check_expr taints moved true rhs in
-          let moved = List.fold_left (fun m n -> mv_clear (PVar n) m) moved names in
+          let moved = List.fold_left (fun m n -> mv_clear (pvar n) m) moved names in
           let taints = List.fold_left
             (fun t n -> TaintEnv.set n PathSet.empty t) taints names in
           (moved,
-           List.fold_left (fun d n -> PathSet.add (PVar n) d) declared names,
+           List.fold_left (fun d n -> PathSet.add (pvar n) d) declared names,
            taints)
       | Ast.Block body | Ast.UnsafeBlock body ->
           let (out, _, taints_out) = check_stmts moved declared taints body in
@@ -8120,7 +8183,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.For (name, _, lo, hi, body) ->
           require_no_authority_rebind s.loc declared taints name;
           let moved = check_expr taints (check_expr taints moved false lo) false hi in
-          let declared_body = PathSet.add (PVar name) declared in
+          let old_binding = Hashtbl.find_opt visible_bindings name in
+          Hashtbl.replace visible_bindings name
+            (List.nth (Local_bindings.ids_for_stmt binding_resolution s) 1);
+          let declared_body = PathSet.add (pvar name) declared in
           (* The counter rebinds `name` for the body, so any outer taint on
              that name must not leak into it (same rebinding treatment
              written_names gives narrowing kills). *)
@@ -8134,13 +8200,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
+          (match old_binding with
+           | Some id -> Hashtbl.replace visible_bindings name id
+           | None -> Hashtbl.remove visible_bindings name);
           (moved, declared, TaintEnv.join_branches taints body_taints)
       | Ast.ForEach (name, collection, body) ->
           require_no_authority_rebind s.loc declared taints name;
           let moved = check_expr taints moved false collection in
+          let old_binding = Hashtbl.find_opt visible_bindings name in
+          Hashtbl.replace visible_bindings name
+            (List.nth (Local_bindings.ids_for_stmt binding_resolution s) 1);
           let body_taints_in = TaintEnv.set name PathSet.empty taints in
           let (body_moved, _, body_taints) =
-            check_stmts moved (PathSet.add (PVar name) declared)
+            check_stmts moved (PathSet.add (pvar name) declared)
               body_taints_in body in
           let newly_moved_outer =
             PathSet.inter declared
@@ -8149,10 +8221,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
+          (match old_binding with
+           | Some id -> Hashtbl.replace visible_bindings name id
+           | None -> Hashtbl.remove visible_bindings name);
           (moved, declared, TaintEnv.join_branches taints body_taints)
       | Ast.Match (e, arms) ->
           let moved = check_expr taints moved true e in
-          let results = List.map (fun arm ->
+          let results = List.mapi (fun arm_index arm ->
             let (binding, binding_ty, body) = match arm with
               | Ast.ArmVariant (vtype, cname, binding, b) ->
                   let payload_ty = match binding with
@@ -8176,9 +8251,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               | Some (name, _) -> StringMap.find_opt name !var_types
               | None -> None
             in
+            let previous_binding_id = match binding with
+              | Some (name, _) -> Hashtbl.find_opt visible_bindings name
+              | None -> None
+            in
             Option.iter (fun (name, _) ->
               require_no_authority_rebind s.loc declared taints name)
               binding;
+            (match binding with
+             | Some (name, _) ->
+                 (match Local_bindings.id_for_arm binding_resolution s.loc arm_index with
+                  | Some id -> Hashtbl.replace visible_bindings name id
+                  | None -> ())
+             | None -> ());
             (match binding, binding_ty with
              | Some (name, _), Some ty ->
                  var_types := StringMap.add name ty !var_types
@@ -8186,7 +8271,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             let (arm_moved, arm_declared, binding_path) = match binding with
               | None -> (moved, declared, None)
               | Some (name, _) ->
-                  let p = PVar name in
+                  let p = pvar name in
                   set_decl_loc p s.loc;
                   (mv_clear p moved, PathSet.add p declared, Some p)
             in
@@ -8220,6 +8305,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                    | Some ty -> StringMap.add name ty !var_types
                    | None -> StringMap.remove name !var_types)
              | None -> ());
+            (match binding, previous_binding_id with
+             | Some (name, _), Some id -> Hashtbl.replace visible_bindings name id
+             | Some (name, _), None -> Hashtbl.remove visible_bindings name
+             | None, _ -> ());
             (always_terminates body, out, out_taints)
           ) arms in
           (* Same reasoning as `If` above: a terminating arm never reaches
@@ -8285,8 +8374,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           Option.iter (fun ty ->
             var_types := StringMap.add name ty !var_types)
             ty_expr;
-          let p = PVar name in
           require_no_authority_rebind s.loc declared taints name;
+          Hashtbl.replace visible_bindings name
+            (List.hd (Local_bindings.ids_for_stmt binding_resolution s));
+          let p = pvar name in
           set_decl_loc p s.loc;
           let moved = mv_consume p moved in
           let declared = PathSet.add p declared in
@@ -8307,12 +8398,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     end;
     let initial_region_taints = List.fold_left (fun taints (name, ty_opt) ->
       if accepts_region_borrow ty_opt then
-        TaintEnv.set name (PathSet.singleton (PVar name)) taints
+        TaintEnv.set name (PathSet.singleton (pvar name)) taints
       else taints)
       TaintEnv.empty fdef.params
     in
     let (final_moved, _, _) = check_stmts mv_empty
-      (List.fold_left (fun d (name, _) -> PathSet.add (PVar name) d)
+      (List.fold_left (fun d (name, _) -> PathSet.add (pvar name) d)
          PathSet.empty fdef.params) initial_region_taints fdef.body
     in
     (* A plain LINEAR or MUST_USE parameter is an accepted all-path
@@ -8328,8 +8419,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       in
       match owned_kind with
       | Some Ast.KindLinear when
-          not (ResourceFlow.is_consumed_on_all_paths (PVar name) final_moved) ->
-          let msg = if is_must_use_path (PVar name) then Printf.sprintf
+          not (ResourceFlow.is_consumed_on_all_paths (pvar name) final_moved) ->
+          let msg = if is_must_use_path (pvar name) then Printf.sprintf
             "must-use parameter '%s' is not handled on every path of this function"
             name
           else Printf.sprintf

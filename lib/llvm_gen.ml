@@ -804,6 +804,39 @@ type local_binding =
   | Imm of Ast.type_expr * llvalue  (* direct SSA value -- no alloca *)
   | Mut of Ast.type_expr * llvalue  (* alloca pointer -- load/store *)
 
+type local_env = {
+  resolution : Local_bindings.resolution;
+  visible : (string, Local_bindings.id) Hashtbl.t;
+  values : (Local_bindings.id, local_binding) Hashtbl.t;
+}
+
+let local_find_opt locals name =
+  match Hashtbl.find_opt locals.visible name with
+  | Some id -> Hashtbl.find_opt locals.values id
+  | None -> None
+
+let local_find_expr_opt locals expr =
+  match Local_bindings.id_for_expr locals.resolution expr with
+  | Some id ->
+      (match Hashtbl.find_opt locals.values id with
+       | Some binding -> Some binding
+       | None -> raise (Error
+           "BUG: resolved local reference has no codegen storage"))
+  | None -> None
+
+let local_bind locals name id value =
+  Hashtbl.replace locals.visible name id;
+  Hashtbl.replace locals.values id value
+
+let local_replace locals name value =
+  match Hashtbl.find_opt locals.visible name with
+  | Some id -> Hashtbl.replace locals.values id value
+  | None -> raise (Error (Printf.sprintf
+      "BUG: cannot replace unresolved local binding '%s'" name))
+
+let local_remove locals name = Hashtbl.remove locals.visible name
+let local_mem locals name = Hashtbl.mem locals.visible name
+
 (* Module-level table for Mut binding narrowing from if-conditions.
    Compilation is single-threaded, so a module-level Hashtbl is safe.
    gen_expr cannot access locals directly, so type overrides are passed through here.
@@ -910,7 +943,7 @@ let rec stmt_always_returns (s : Ast.stmt) : bool = match s.desc with
   | _ -> false
 and stmt_list_always_returns stmts = List.exists stmt_always_returns stmts
 
-let collect_bounds_cond (locals : (string, local_binding) Hashtbl.t)
+let collect_bounds_cond (locals : local_env)
     (cond : Ast.expr) =
   let take_lo a b = match a, b with
     | Some x, Some y -> Some (max x y)
@@ -936,7 +969,7 @@ let collect_bounds_cond (locals : (string, local_binding) Hashtbl.t)
              (match Hashtbl.find_opt narrowing_ctx m with
               | Some t -> refined t
               | None ->
-                  (match Hashtbl.find_opt locals m with
+                  (match local_find_opt locals m with
                    | Some (Imm (t, _)) | Some (Mut (t, _)) -> refined t
                    | None -> None))
          | _ -> None)
@@ -991,13 +1024,13 @@ let is_unsigned_ast_ty = function
    be assigned or aliased, but the body can REBIND the name (let / for
    counter), and the narrowed entry must not leak into that fresh binding's
    uses -- so killed names are skipped here too. *)
-let apply_narrowing (locals : (string, local_binding) Hashtbl.t)
+let apply_narrowing (locals : local_env)
     (cond : Ast.expr) (killed : string list) =
   let bounds = collect_bounds_cond locals cond in
   let saved =
     Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
       if List.mem name killed then saved
-      else match Hashtbl.find_opt locals name with
+      else match local_find_opt locals name with
       | Some (Imm (TypeSlice _, _)) -> saved  (* handled below *)
       | Some (Imm (TypeRefined (elo, ehi, base), v) as old) ->
           (* Already refined (sync rule with type_inf.ml's
@@ -1009,9 +1042,9 @@ let apply_narrowing (locals : (string, local_binding) Hashtbl.t)
              (lo_opt = None) still narrows, falling back to the
              already-proven `elo`. *)
           (match lo_opt, hi_opt with
-           | Some lo, Some hi -> Hashtbl.replace locals name (Imm (TypeRefined (max lo elo, min hi ehi, base), v)); (name, old) :: saved
-           | None, Some hi    -> Hashtbl.replace locals name (Imm (TypeRefined (elo, min hi ehi, base), v)); (name, old) :: saved
-           | Some lo, None    -> Hashtbl.replace locals name (Imm (TypeRefined (max lo elo, ehi, base), v)); (name, old) :: saved
+           | Some lo, Some hi -> local_replace locals name (Imm (TypeRefined (max lo elo, min hi ehi, base), v)); (name, old) :: saved
+           | None, Some hi    -> local_replace locals name (Imm (TypeRefined (elo, min hi ehi, base), v)); (name, old) :: saved
+           | Some lo, None    -> local_replace locals name (Imm (TypeRefined (max lo elo, ehi, base), v)); (name, old) :: saved
            | None, None       -> saved)
       | Some (Imm (((TypeI8|TypeI16|TypeI32|TypeI64|TypeIsize
                     |TypeU8|TypeU16|TypeU32|TypeU64|TypeUsize) as base), v) as old) ->
@@ -1026,7 +1059,7 @@ let apply_narrowing (locals : (string, local_binding) Hashtbl.t)
           in
           (match lo_opt, hi_opt with
            | Some lo, Some hi ->
-               Hashtbl.replace locals name (Imm (TypeRefined (lo, hi, base), v));
+               local_replace locals name (Imm (TypeRefined (lo, hi, base), v));
                (name, old) :: saved
            | _ -> saved)
       | _ -> saved
@@ -1037,16 +1070,16 @@ let apply_narrowing (locals : (string, local_binding) Hashtbl.t)
      Ast.slice_len_mins (sync rule). *)
   List.fold_left (fun saved (name, k) ->
     if List.mem name killed then saved
-    else match Hashtbl.find_opt locals name with
+    else match local_find_opt locals name with
       | Some (Imm (TypeSlice (el, m), v) as old) when k > m ->
-          Hashtbl.replace locals name (Imm (TypeSlice (el, k), v));
+          local_replace locals name (Imm (TypeSlice (el, k), v));
           (name, old) :: saved
       | _ -> saved
   ) saved (Ast.slice_len_mins ~resolve_const:Const_env.find
              ~resolve_bound:static_slice_bound cond)
 
-let restore_narrowing (locals : (string, local_binding) Hashtbl.t) saved =
-  List.iter (fun (name, old) -> Hashtbl.replace locals name old) saved
+let restore_narrowing (locals : local_env) saved =
+  List.iter (fun (name, old) -> local_replace locals name old) saved
 
 (* Record narrowed types for Mut bindings into narrowing_ctx.
    Returns [(name, old_opt)] -- pass to restore_narrowing_mut after the then-branch.
@@ -1057,13 +1090,13 @@ let restore_narrowing (locals : (string, local_binding) Hashtbl.t) saved =
    its bounds check). [killed] comes from Ast.written_names on the branch
    body; type_inf.ml's narrow_from_cond applies the same rule through the
    same function (sync rule -- see written_names' comment). *)
-let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t)
+let apply_narrowing_mut (locals : local_env)
     (cond : Ast.expr) (killed : string list) =
   let bounds = collect_bounds_cond locals cond in
   let saved =
     Types.StringMap.fold (fun name (lo_opt, hi_opt) saved ->
       if List.mem name killed then saved
-      else match Hashtbl.find_opt locals name with
+      else match local_find_opt locals name with
       | Some (Mut (((TypeI8|TypeI16|TypeI32|TypeI64|TypeIsize
                     |TypeU8|TypeU16|TypeU32|TypeU64|TypeUsize) as base), _)) ->
           let old = Hashtbl.find_opt narrowing_ctx name in
@@ -1112,7 +1145,7 @@ let apply_narrowing_mut (locals : (string, local_binding) Hashtbl.t)
      and type_inf.ml (sync rule). *)
   List.fold_left (fun saved (name, k) ->
     if List.mem name killed then saved
-    else match Hashtbl.find_opt locals name with
+    else match local_find_opt locals name with
       | Some (Mut (TypeSlice (el, m), _)) when k > m ->
           let old = Hashtbl.find_opt narrowing_ctx name in
           Hashtbl.replace narrowing_ctx name (TypeSlice (el, max m k));
@@ -2247,7 +2280,7 @@ let field_info struct_name fname =
 let rec collect_lets stmts =
   List.concat_map (fun s ->
     match s.desc with
-    | Let (true, name, ty_opt, _, align_opt) -> [(name, ty_opt, s.loc, align_opt)]
+    | Let (true, name, ty_opt, _, align_opt) -> [(s, name, ty_opt, s.loc, align_opt)]
     | Block ss | UnsafeBlock ss   -> collect_lets ss
     | If (_, t, e)                -> collect_lets t @ collect_lets e
     | While (_, b)                -> collect_lets b
@@ -2258,8 +2291,8 @@ let rec collect_lets stmts =
            `None` here is a dead fallback, never actually consulted, but
            kept `None` (rather than the old hardcoded `Some TypeI32`) so
            it doesn't misleadingly suggest i32 is still the answer. *)
-        ("__for_" ^ name, None, s.loc, None) :: collect_lets body
-    | ForEach (name, _, body)     -> ("__foreach_" ^ name, Some TypeUsize, s.loc, None) :: collect_lets body
+        (s, "__for_" ^ name, None, s.loc, None) :: collect_lets body
+    | ForEach (name, _, body)     -> (s, "__foreach_" ^ name, Some TypeUsize, s.loc, None) :: collect_lets body
     | Match (_, arms)             ->
         List.concat_map (fun arm ->
           match arm with
@@ -2281,7 +2314,7 @@ let rec collect_lets stmts =
            resolves the real (type-inferred) type at alloca time either
            way, exactly the same established mechanism an unannotated
            plain `let` already relies on. *)
-        (name, ty_opt, s.loc, None) ::
+        (s, name, ty_opt, s.loc, None) ::
         List.concat_map (fun arm ->
           match arm with
           | ArmVariant (_, _, _, body) -> collect_lets body
@@ -2294,16 +2327,16 @@ let rec collect_lets stmts =
 (* Mutable variant payloads need stable storage because `borrow mut` passes
    their address to callees. Pre-collect them just like mutable lets so a
    match inside a loop does not execute an alloca on every iteration. *)
-let rec collect_mutable_pattern_binders stmts =
+let rec collect_mutable_pattern_binders resolution stmts =
   List.concat_map (fun (s : Ast.stmt) ->
     match s.desc with
     | Block body | UnsafeBlock body | While (_, body) | For (_, _, _, _, body)
-    | ForEach (_, _, body) -> collect_mutable_pattern_binders body
+    | ForEach (_, _, body) -> collect_mutable_pattern_binders resolution body
     | If (_, yes, no) ->
-        collect_mutable_pattern_binders yes
-        @ collect_mutable_pattern_binders no
+        collect_mutable_pattern_binders resolution yes
+        @ collect_mutable_pattern_binders resolution no
     | Match (_, arms) | LetMatch (_, _, _, _, arms) ->
-        List.concat_map (fun arm ->
+        List.mapi (fun index arm ->
           match arm with
           | ArmVariant (vtype, cname, binding, body) ->
               let here = match binding with
@@ -2317,13 +2350,19 @@ let rec collect_mutable_pattern_binders stmts =
                     in
                     let payload_ty = runtime_payload_type schema in
                     if is_erased_view_type payload_ty then []
-                    else [(name, payload_ty, s.loc, vtype, cname)]
+                    else
+                      let id = match Local_bindings.id_for_arm resolution s.loc index with
+                        | Some id -> id
+                        | None -> raise (Error (Printf.sprintf
+                            "BUG: no binding identity for mutable variant binder '%s'" name))
+                      in
+                      [(id, name, payload_ty, s.loc)]
                 | _ -> []
               in
-              here @ collect_mutable_pattern_binders body
-          | ArmWild body -> collect_mutable_pattern_binders body
-          | ArmIntLit (_, body) -> collect_mutable_pattern_binders body
-        ) arms
+              here @ collect_mutable_pattern_binders resolution body
+          | ArmWild body -> collect_mutable_pattern_binders resolution body
+          | ArmIntLit (_, body) -> collect_mutable_pattern_binders resolution body
+        ) arms |> List.concat
     | Let _ | LetTuple _ | Return _ | Expr _ | Yield _ | Break | Continue
     | StaticAssert _ -> []
   ) stmts
@@ -2337,8 +2376,8 @@ let rec collect_mutable_pattern_binders stmts =
 let rec collect_immutable_lets stmts =
   List.concat_map (fun s ->
     match s.desc with
-    | Let (false, name, ty_opt, Some _, _) -> [(name, ty_opt, s.loc, 0)]
-    | LetTuple (names, _)          -> List.mapi (fun slot name -> (name, None, s.loc, slot)) names
+    | Let (false, name, ty_opt, Some _, _) -> [(s, name, ty_opt, s.loc, 0)]
+    | LetTuple (names, _)          -> List.mapi (fun slot name -> (s, name, None, s.loc, slot)) names
     | Block ss | UnsafeBlock ss   -> collect_immutable_lets ss
     | If (_, t, e)                -> collect_immutable_lets t @ collect_immutable_lets e
     | While (_, b)                -> collect_immutable_lets b
@@ -2717,7 +2756,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (TypePtr TypeU8, ptr)
 
   | Var name ->
-      (match Hashtbl.find_opt locals name with
+      let local = match local_find_expr_opt locals e with
+        | Some binding -> Some binding
+        | None -> local_find_opt locals name
+      in
+      (match local with
        | Some (Imm (ast_ty, v)) ->
            (ast_ty, to_arith_width ast_ty v)
        | Some (Mut (ast_ty, ptr)) ->
@@ -2798,7 +2841,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
   | AddrOf inner ->
       (match inner.desc with
        | Var name ->
-           (match Hashtbl.find_opt locals name with
+           (match local_find_opt locals name with
             | Some (Mut (ast_ty, alloca)) -> (TypePtr ast_ty, alloca)
             | Some (Imm _) ->
                 raise (Error (Printf.sprintf "BUG: addrof immutable '%s' (should be caught by type_inf)" name))
@@ -3437,7 +3480,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                    decayed TYPE no longer carries. *)
                 (match src_e.desc with
                  | Var name ->
-                     let arr_len = match Hashtbl.find_opt locals name with
+                     let arr_len = match local_find_opt locals name with
                        | Some (Mut (TypeArray (_, n), _)) -> Some n
                        | _ ->
                            (match Hashtbl.find_opt global_vars name with
@@ -3698,7 +3741,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              | Some w ->
                  let is_io = function TypeIo _ -> true | _ -> false in
                  let base_is_io =
-                   match Hashtbl.find_opt locals v1 with
+                   match local_find_opt locals v1 with
                    | Some (Imm (t, _)) | Some (Mut (t, _)) -> is_io t
                    | None ->
                        (match Hashtbl.find_opt global_vars v1 with
@@ -3727,7 +3770,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                             let wty = match Hashtbl.find_opt narrowing_ctx w_name with
                               | Some t -> Some t
                               | None ->
-                                  (match Hashtbl.find_opt locals w_name with
+                                  (match local_find_opt locals w_name with
                                    | Some (Imm (t, _)) | Some (Mut (t, _)) -> Some t
                                    | None ->
                                        (match Hashtbl.find_opt global_vars w_name with
@@ -4393,7 +4436,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                | TypeBorrowMut _ ->
                    (match a.desc with
                     | Var name ->
-                        (match Hashtbl.find_opt locals name with
+                        (match local_find_opt locals name with
                          | Some (Mut (_, ptr)) -> Some ptr
                          | _ -> raise (Error (Printf.sprintf
                              "BUG: borrow mut argument '%s' has no mutable storage"
@@ -4423,7 +4466,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | None ->
            (* Indirect call: local or global function pointer variable *)
            let (fn_ast_ty, fn_ptr) =
-             match Hashtbl.find_opt locals fname with
+             match (match local_find_expr_opt locals e with
+               | Some binding -> Some binding
+               | None -> local_find_opt locals fname) with
              | Some (Imm (ast_ty, v)) -> (ast_ty, v)
              | Some (Mut (ast_ty, ptr)) ->
                  (ast_ty, build_load (ltype_of_ast ast_ty) ptr fname builder)
@@ -4464,7 +4509,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (match lhs.desc with
        | Var name ->
            let target_ty_opt =
-             match Hashtbl.find_opt locals name with
+             match local_find_opt locals name with
              | Some (Mut (ast_ty, _)) -> Some ast_ty
              | Some (Imm (ast_ty, _)) when is_erased_view_type ast_ty -> Some ast_ty
              | Some (Imm _) | None ->
@@ -4473,12 +4518,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                   | None -> None)
            in
            let (_, v) = gen_expr ?expected_ty:target_ty_opt locals rhs in
-           (match Hashtbl.find_opt locals name with
+           (match local_find_opt locals name with
             | Some (Mut (ast_ty, ptr)) ->
                 let inst = build_store (coerce v ast_ty) ptr builder in
                 (match ast_ty with TypeIo _ -> set_volatile true inst | _ -> ())
             | Some (Imm (ast_ty, _)) when is_erased_view_type ast_ty ->
-                Hashtbl.replace locals name (Imm (ast_ty, erased_view_value ()))
+                local_replace locals name (Imm (ast_ty, erased_view_value ()))
             | Some (Imm _) ->
                 raise (Error (Printf.sprintf "BUG: assign to immutable '%s'" name))
             | None ->
@@ -4610,7 +4655,7 @@ and gen_field_access locals (base_expr : Ast.expr) (fname : string)
           gen_index_place locals indexed_base index base_expr.loc in
         (ty, place_ptr place, is_volatile)
     | Var name ->
-        (match Hashtbl.find_opt locals name with
+        (match local_find_opt locals name with
          | Some (Mut (((TypeNamed _ | TypeIndexed _) as ty), ptr)) ->
              (ty, ptr, false)
          | _ ->
@@ -4740,7 +4785,7 @@ and gen_index_place locals (base : Ast.expr) (idx : Ast.expr) loc
 and resolve_index_storage ~op locals (base : Ast.expr) : index_storage =
   match base.desc with
   | Ast.Var id ->
-      (match Hashtbl.find_opt locals id with
+      (match local_find_opt locals id with
        | Some (Mut (TypeArray (elem_ty, n), ptr)) ->
            IdxArray (elem_ty, n, Place ptr)
        | Some (Mut (TypeSlice (elem_ty, m), alloca_ptr)) ->
@@ -4825,7 +4870,7 @@ and resolve_index_storage ~op locals (base : Ast.expr) : index_storage =
 and peek_index_elem_ty locals (base : Ast.expr) : Ast.type_expr option =
   match base.desc with
   | Ast.Var id ->
-      (match Hashtbl.find_opt locals id with
+      (match local_find_opt locals id with
        | Some (Mut (TypeArray (elem_ty, _), _))
        | Some (Mut (TypeSlice (elem_ty, _), _))
        | Some (Imm (TypeSlice (elem_ty, _), _))
@@ -4845,35 +4890,35 @@ and peek_index_elem_ty locals (base : Ast.expr) : Ast.type_expr option =
 let gen_func ?prog_types fdef =
   let key = function_key prog_types fdef in
   let res name ty_opt = resolve_local_ast prog_types key name ty_opt in
-
-  (* Binding identities are allocated once, in lexical declaration order,
-     before LLVM storage is created. Source names remain useful for lexical
-     lookup and diagnostics, but are never keys for pre-allocated storage. *)
-  let next_binding_id = ref 0 in
-  let fresh_binding_id () =
-    let id = !next_binding_id in
-    incr next_binding_id;
-    id
+  let binding_resolution = match prog_types with
+    | Some pt ->
+        (match Types.StringMap.find_opt key pt.Types.functions with
+         | Some info -> info.Types.bindings
+         | None -> raise (Error (Printf.sprintf
+             "BUG: no binding resolution for function '%s'" key)))
+    | None -> Local_bindings.resolve_func fdef
   in
-  let mutable_let_decls = List.map (fun decl -> (fresh_binding_id (), decl))
-      (collect_lets fdef.body) in
-  let immutable_let_decls = List.map (fun decl -> (fresh_binding_id (), decl))
+  let res_binding id name ty_opt = match prog_types with
+    | Some pt ->
+        (match Types.StringMap.find_opt key pt.Types.functions with
+         | Some info ->
+             Option.value (Types.IntMap.find_opt id info.Types.binding_types)
+               ~default:(res name ty_opt)
+         | None -> res name ty_opt)
+    | None -> res name ty_opt
+  in
+  let stmt_binding_id stmt slot =
+    match List.nth_opt (Local_bindings.ids_for_stmt binding_resolution stmt) slot with
+    | Some id -> id
+    | None -> raise (Error "BUG: local declaration has no resolved binding identity")
+  in
+  let mutable_let_decls = List.map (fun (stmt, name, ty, loc, align) ->
+    (stmt_binding_id stmt 0, (name, ty, loc, align))) (collect_lets fdef.body) in
+  let immutable_let_decls = List.map (fun (stmt, name, ty, loc, slot) ->
+    (stmt_binding_id stmt slot, (name, ty, loc, slot)))
       (collect_immutable_lets fdef.body) in
-  let mutable_pattern_decls = List.map (fun decl -> (fresh_binding_id (), decl))
-      (collect_mutable_pattern_binders fdef.body) in
-  let mutable_let_ids : ((Ast.loc * int), int) Hashtbl.t = Hashtbl.create 16 in
-  List.iter (fun (id, (_, _, loc, _)) ->
-    Hashtbl.add mutable_let_ids (loc, 0) id
-  ) mutable_let_decls;
-  let immutable_let_ids : ((Ast.loc * int), int) Hashtbl.t = Hashtbl.create 16 in
-  List.iter (fun (id, (_, _, loc, slot)) ->
-    Hashtbl.add immutable_let_ids (loc, slot) id
-  ) immutable_let_decls;
-  let mutable_pattern_ids : ((Ast.loc * string * string), int) Hashtbl.t =
-    Hashtbl.create 8 in
-  List.iter (fun (id, (_, _, loc, vtype, cname)) ->
-    Hashtbl.add mutable_pattern_ids (loc, vtype, cname) id
-  ) mutable_pattern_decls;
+  let mutable_pattern_decls =
+    collect_mutable_pattern_binders binding_resolution fdef.body in
 
   (* gen_program's Pass 1 (declare_func) registers every FuncDef's signature
      -- in `functions`, `func_ret_ast_types`, AND `func_param_ast_types`
@@ -4968,15 +5013,15 @@ let gen_func ?prog_types fdef =
      wrote -- see collect_lets -- so they're deliberately excluded here. *)
   let is_for_counter name = String.length name > 6 && String.sub name 0 6 = "__for_" in
 
-  (* locals maps name -> local_binding *)
-  let locals : (string, local_binding) Hashtbl.t = Hashtbl.create 16 in
-  (* `locals` deliberately tracks the binding currently visible at the
-     statement being generated. It is therefore not a safe registry for
-     pre-allocated mutable lets: an immutable local of the same name in an
-     earlier, disjoint branch may have replaced the visible entry by the
-     time the mutable declaration is reached. Keep the alloca identity by
-     declaration site as well as exposing the first one through `locals`;
-     the Let(true) case restores its own entry before initializing it. *)
+  (* Source names select the currently-visible binding ID; runtime storage
+     is keyed only by that ID. *)
+  let locals = {
+    resolution = binding_resolution;
+    visible = Hashtbl.create 16;
+    values = Hashtbl.create 16;
+  } in
+  (* Pre-allocated storage is keyed by resolved binding ID and is not made
+     visible until its declaration is lowered. *)
   let mutable_let_allocas :
       (int, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16 in
   let debug_immutable_allocas : (int, Ast.type_expr * llvalue) Hashtbl.t = Hashtbl.create 16 in
@@ -5022,17 +5067,17 @@ let gen_func ?prog_types fdef =
   let param_abi_types = Option.value
     (Hashtbl.find_opt func_param_ast_types key)
     ~default:(List.map (fun (name, ty) -> res name ty) fdef.params) in
-  List.iter2 (fun (name, ty_opt) abi_ty ->
-    let ast_ty = res name ty_opt in
+  List.iter2 (fun ((name, ty_opt), binding_id) abi_ty ->
+    let ast_ty = res_binding binding_id name ty_opt in
     if is_erased_view_type abi_ty then
-      Hashtbl.add locals name (Imm (ast_ty, erased_view_value ()))
+      local_bind locals name binding_id (Imm (ast_ty, erased_view_value ()))
     else begin
       let i = !runtime_param_index in
       incr runtime_param_index;
       match abi_ty with
       | TypeBorrowMut _ ->
           let ptr = param f i in
-          Hashtbl.add locals name (Mut (ast_ty, ptr));
+          local_bind locals name binding_id (Mut (ast_ty, ptr));
           declare_var ~is_param:true ~argno:(i + 1) ~name ~ast_ty
             ~line:fdef.def_loc.Lexing.pos_lnum ~ptr
       | _ ->
@@ -5040,15 +5085,15 @@ let gen_func ?prog_types fdef =
           apply_struct_align ast_ty ptr;
           let inst = build_store (param f i) ptr builder in
           if !debug_info_enabled && is_debug_aggregate_ty ast_ty then set_volatile true inst;
-          Hashtbl.add locals name (Mut (ast_ty, ptr));
+          local_bind locals name binding_id (Mut (ast_ty, ptr));
           declare_var ~is_param:true ~argno:(i + 1) ~name ~ast_ty
             ~line:fdef.def_loc.Lexing.pos_lnum ~ptr
     end
-  ) fdef.params param_abi_types;
+  ) (List.combine fdef.params binding_resolution.param_ids) param_abi_types;
 
   (* Pre-alloca every mutable Let declared in the body *)
   List.iter (fun (binding_id, (name, ty_opt, let_loc, align_opt)) ->
-    let ast_ty = res name ty_opt in
+    let ast_ty = res_binding binding_id name ty_opt in
     if not (is_erased_view_type ast_ty) then begin
       let ptr = build_alloca (ltype_of_ast ast_ty) name builder in
       (* An explicit `let ... align(N)` wins over the type's own struct-level
@@ -5058,16 +5103,14 @@ let gen_func ?prog_types fdef =
        | Some n -> set_alignment n ptr
        | None   -> apply_struct_align ast_ty ptr);
       Hashtbl.add mutable_let_allocas binding_id (ast_ty, ptr);
-      if not (Hashtbl.mem locals name) then begin
-        Hashtbl.add locals name (Mut (ast_ty, ptr));
-        if not (is_for_counter name) then
-          declare_var ~is_param:false ~argno:0 ~name ~ast_ty
-            ~line:let_loc.Lexing.pos_lnum ~ptr
-      end
+      Hashtbl.replace locals.values binding_id (Mut (ast_ty, ptr));
+      if not (is_for_counter name) then
+        declare_var ~is_param:false ~argno:0 ~name ~ast_ty
+          ~line:let_loc.Lexing.pos_lnum ~ptr
     end
   ) mutable_let_decls;
 
-  List.iter (fun (binding_id, (name, ast_ty, _, _, _)) ->
+  List.iter (fun (binding_id, name, ast_ty, _) ->
     if not (Hashtbl.mem mutable_pattern_allocas binding_id) then begin
       let ptr = build_alloca (ltype_of_ast ast_ty) (name ^ ".payload") builder in
       apply_struct_align ast_ty ptr;
@@ -5080,7 +5123,7 @@ let gen_func ?prog_types fdef =
   if !debug_info_enabled then
     List.iter (fun (binding_id, (name, ty_opt, let_loc, _)) ->
       if not (Hashtbl.mem debug_immutable_allocas binding_id) then begin
-        let ast_ty = res name ty_opt in
+        let ast_ty = res_binding binding_id name ty_opt in
         match ast_ty with
         | TypeTuple _ | TypeView _ -> ()
         | _ ->
@@ -5177,23 +5220,19 @@ let gen_func ?prog_types fdef =
 
     | Let (true, name, ty_opt, expr_opt, _) ->
         (* Mutable: alloca was pre-allocated; store the initial value via init_memory *)
-        let ast_ty = res name ty_opt in
+        let binding_id = stmt_binding_id s 0 in
+        let ast_ty = res_binding binding_id name ty_opt in
         if is_erased_view_type ast_ty then begin
           (match expr_opt with
            | Some e -> ignore (gen_expr ~expected_ty:ast_ty locals e)
            | None -> raise (Error (Printf.sprintf
                "BUG: erased view '%s' has no initializer" name)));
-          Hashtbl.replace locals name (Imm (ast_ty, erased_view_value ()))
+          local_bind locals name binding_id (Imm (ast_ty, erased_view_value ()))
         end else
-        let binding_id = match Hashtbl.find_opt mutable_let_ids (s.loc, 0) with
-          | Some id -> id
-          | None -> raise (Error (Printf.sprintf
-              "BUG: no binding identity for mutable local %s" name))
-        in
         (match Hashtbl.find_opt mutable_let_allocas binding_id with
          | None -> raise (Error (Printf.sprintf "BUG: no alloca for %s" name))
          | Some (alloca_ty, ptr) ->
-             Hashtbl.replace locals name (Mut (alloca_ty, ptr));
+             local_bind locals name binding_id (Mut (alloca_ty, ptr));
              let preserve_for_debug = !debug_info_enabled && is_debug_aggregate_ty ast_ty in
              Option.iter (init_memory ~preserve_for_debug ptr ast_ty) expr_opt
         )
@@ -5204,23 +5243,19 @@ let gen_func ?prog_types fdef =
          | None ->
              raise (Error (Printf.sprintf "BUG: immutable '%s' has no initializer" name))
          | Some e ->
-             let ast_ty = res name ty_opt in
+             let binding_id = stmt_binding_id s 0 in
+             let ast_ty = res_binding binding_id name ty_opt in
              let (_, v) = gen_expr ~expected_ty:ast_ty locals e in
              if is_erased_view_type ast_ty then
-               Hashtbl.add locals name (Imm (ast_ty, erased_view_value ()))
+               local_bind locals name binding_id (Imm (ast_ty, erased_view_value ()))
              else begin
                let coerced = coerce v ast_ty in
-               let binding_id = match Hashtbl.find_opt immutable_let_ids (s.loc, 0) with
-                 | Some id -> id
-                 | None -> raise (Error (Printf.sprintf
-                     "BUG: no binding identity for immutable local %s" name))
-               in
                (match Hashtbl.find_opt debug_immutable_allocas binding_id with
                 | Some (_, ptr) ->
                     let inst = build_store coerced ptr builder in
                     set_volatile true inst
                 | None -> ());
-               Hashtbl.add locals name (Imm (ast_ty, coerced))
+               local_bind locals name binding_id (Imm (ast_ty, coerced))
              end)
 
     | LetTuple (names, rhs) ->
@@ -5229,24 +5264,21 @@ let gen_func ?prog_types fdef =
            component, mirroring Let(false, ...) above. Component types come
            from local_types (res with no annotation), the same source any
            unannotated let uses, so kind tracking and codegen agree. *)
-        let comp_tys = List.map (fun n -> res n None) names in
+        let comp_tys = List.mapi (fun slot n ->
+          res_binding (stmt_binding_id s slot) n None) names in
         let tuple_ty = TypeTuple comp_tys in
         let (_, v) = gen_expr ~expected_ty:tuple_ty locals rhs in
         let v = coerce v tuple_ty in
         List.iteri (fun i n ->
           let cty = List.nth comp_tys i in
           let cv = build_extractvalue v i ("tup_" ^ n) builder in
-          let binding_id = match Hashtbl.find_opt immutable_let_ids (s.loc, i) with
-            | Some id -> id
-            | None -> raise (Error (Printf.sprintf
-                "BUG: no binding identity for tuple local %s" n))
-          in
+          let binding_id = stmt_binding_id s i in
           (match Hashtbl.find_opt debug_immutable_allocas binding_id with
            | Some (_, ptr) ->
                let inst = build_store cv ptr builder in
                set_volatile true inst
            | None -> ());
-          Hashtbl.add locals n (Imm (cty, cv))
+          local_bind locals n binding_id (Imm (cty, cv))
         ) names
 
     | Block stmts ->
@@ -5417,14 +5449,15 @@ let gen_func ?prog_types fdef =
            whole-function StringMap keyed by plain "i" would collide with
            an unrelated local, or a second for-loop, also named "i"). *)
         let ctr_name     = "__for_" ^ name in
-        let counter_ty   = res ctr_name None in
+        let counter_ty   = res_binding (stmt_binding_id s 0) ctr_name None in
         let counter_base = canon_ty counter_ty in
         let is_uns       = is_unsigned counter_base in
         let (lo_ty0, lo_v0) = gen_expr ~expected_ty:counter_base locals lo_expr in
         let (hi_ty0, hi_v0) = gen_expr ~expected_ty:counter_base locals hi_expr in
         let lo_w      = to_arith_width counter_base lo_v0 in
         let hi_w      = to_arith_width counter_base hi_v0 in
-        let ctr_ptr   = match Hashtbl.find_opt locals ctr_name with
+        let counter_id = stmt_binding_id s 0 in
+        let ctr_ptr   = match Hashtbl.find_opt locals.values counter_id with
           | Some (Mut (_, p)) -> p
           | _ -> raise (Error (Printf.sprintf "BUG: for counter '%s' not found" ctr_name))
         in
@@ -5474,17 +5507,17 @@ let gen_func ?prog_types fdef =
                     | None -> counter_base)
                | _ -> counter_base)
         in
-        let old_loop_binding = Hashtbl.find_opt locals name in
-        Hashtbl.replace locals name (Imm (loop_ty, i_val));
+        let old_loop_id = Hashtbl.find_opt locals.visible name in
+        local_bind locals name (stmt_binding_id s 1) (Imm (loop_ty, i_val));
         Stack.push (exit_bb, incr_bb) loop_stack;
         let killed_idx = slice_rebind_names body in
         let saved_idx  = apply_for_slice_index_narrowing name hi_expr killed_idx in
         run_scoped_stmts body;
         restore_slice_index_narrowing saved_idx;
         ignore (Stack.pop loop_stack);
-        (match old_loop_binding with
-         | Some prior -> Hashtbl.replace locals name prior
-         | None -> Hashtbl.remove locals name);
+        (match old_loop_id with
+         | Some prior -> Hashtbl.replace locals.visible name prior
+         | None -> local_remove locals name);
         if block_terminator (insertion_block builder) = None then
           ignore (build_br incr_bb builder);
 
@@ -5515,7 +5548,8 @@ let gen_func ?prog_types fdef =
         let len_v = slice_len fat in
         let usz   = usize_lltype () in
         let ctr_name = "__foreach_" ^ name in
-        let ctr_ptr  = match Hashtbl.find_opt locals ctr_name with
+        let counter_id = stmt_binding_id s 0 in
+        let ctr_ptr  = match Hashtbl.find_opt locals.values counter_id with
           | Some (Mut (_, p)) -> p
           | _ -> raise (Error (Printf.sprintf "BUG: foreach counter '%s' not found" ctr_name))
         in
@@ -5534,14 +5568,15 @@ let gen_func ?prog_types fdef =
         position_at_end body_bb builder;
         let ep = build_gep (ltype_of_ast elem_ty) ptr [| i_val |] "fe_ptr" builder in
         let ev = build_load (ltype_of_ast elem_ty) ep "fe_val" builder in
-        let old_loop_binding = Hashtbl.find_opt locals name in
-        Hashtbl.replace locals name (Imm (elem_ty, to_arith_width elem_ty ev));
+        let old_loop_id = Hashtbl.find_opt locals.visible name in
+        local_bind locals name (stmt_binding_id s 1)
+          (Imm (elem_ty, to_arith_width elem_ty ev));
         Stack.push (exit_bb, incr_bb) loop_stack;
         run_scoped_stmts body;
         ignore (Stack.pop loop_stack);
-        (match old_loop_binding with
-         | Some prior -> Hashtbl.replace locals name prior
-         | None -> Hashtbl.remove locals name);
+        (match old_loop_id with
+         | Some prior -> Hashtbl.replace locals.visible name prior
+         | None -> local_remove locals name);
         if block_terminator (insertion_block builder) = None then
           ignore (build_br incr_bb builder);
 
@@ -5636,7 +5671,7 @@ let gen_func ?prog_types fdef =
               List.iter (fun lit -> add_case sw (const_int switch_ll_ty lit) bb) lits
           | ArmWild _ -> ()
         ) arm_bbs;
-        List.iter (fun (arm, bb) ->
+        List.iteri (fun arm_index (arm, bb) ->
           position_at_end bb builder;
           (match arm with
            | ArmVariant (vtype, cname, binding, body) ->
@@ -5656,27 +5691,27 @@ let gen_func ?prog_types fdef =
                             ("variant." ^ name) builder
                       | None -> erased_view_value ()
                     in
-                    let old = Hashtbl.find_opt locals name in
+                    let old_id = Hashtbl.find_opt locals.visible name in
+                    let binding_id = match Local_bindings.id_for_arm
+                        binding_resolution s.loc arm_index with
+                      | Some id -> id
+                      | None -> raise (Error (Printf.sprintf
+                          "BUG: no binding identity for variant binder '%s'" name))
+                    in
                     if is_mutable && not (is_erased_view_type payload_ty) then begin
-                      let binding_id = match Hashtbl.find_opt mutable_pattern_ids
-                          (s.loc, vtype, cname) with
-                        | Some id -> id
-                        | None -> raise (Error (Printf.sprintf
-                            "BUG: no binding identity for mutable variant binder '%s'" name))
-                      in
                       let (_, ptr) = match Hashtbl.find_opt mutable_pattern_allocas binding_id with
                         | Some entry -> entry
                         | None -> raise (Error (Printf.sprintf
                             "BUG: mutable variant binder '%s' was not pre-allocated" name))
                       in
                       ignore (build_store (coerce payload_v payload_ty) ptr builder);
-                      Hashtbl.replace locals name (Mut (payload_ty, ptr))
+                      local_bind locals name binding_id (Mut (payload_ty, ptr))
                     end else
-                      Hashtbl.replace locals name (Imm (payload_ty, payload_v));
+                      local_bind locals name binding_id (Imm (payload_ty, payload_v));
                     run_scoped_stmts body;
-                    (match old with
-                     | Some prior -> Hashtbl.replace locals name prior
-                     | None -> Hashtbl.remove locals name)
+                    (match old_id with
+                     | Some prior -> Hashtbl.replace locals.visible name prior
+                     | None -> local_remove locals name)
                 | Some _, None -> run_scoped_stmts body
                 | None, None -> run_scoped_stmts body
                 | None, Some _ -> raise (Error
@@ -5721,9 +5756,15 @@ let gen_func ?prog_types fdef =
            so that first registration must happen here instead, or
            Assign's codegen finds no `locals` entry at all and raises
            "Undefined variable". *)
-        let ast_ty = res name ty_opt in
-        if is_erased_view_type ast_ty && not (Hashtbl.mem locals name) then
-          Hashtbl.add locals name (Imm (ast_ty, erased_view_value ()));
+        let binding_id = stmt_binding_id s 0 in
+        let ast_ty = res_binding binding_id name ty_opt in
+        if is_erased_view_type ast_ty then
+          local_bind locals name binding_id (Imm (ast_ty, erased_view_value ()))
+        else
+          (match Hashtbl.find_opt locals.values binding_id with
+           | Some binding -> local_bind locals name binding_id binding
+           | None -> raise (Error (Printf.sprintf
+               "BUG: no storage for let-match binding '%s'" name)));
         let arms = rewrite_letmatch_arm_bodies name arms in
         gen_stmt { desc = Match (disc, arms); loc = s.loc }
 
@@ -5746,11 +5787,11 @@ let gen_func ?prog_types fdef =
      themselves so a nested list's own accumulation doesn't leak into the
      list that contains it. *)
   and run_scoped_stmts (stmts : Ast.stmt list) : unit =
-    let saved = Hashtbl.copy locals in
+    let saved = Hashtbl.copy locals.visible in
     Fun.protect
       ~finally:(fun () ->
-        Hashtbl.reset locals;
-        Hashtbl.iter (Hashtbl.add locals) saved)
+        Hashtbl.reset locals.visible;
+        Hashtbl.iter (Hashtbl.add locals.visible) saved)
       (fun () -> run_stmts_with_future_writes stmts)
 
   and run_stmts_with_future_writes (stmts : Ast.stmt list) : unit =
@@ -5787,7 +5828,7 @@ let gen_func ?prog_types fdef =
       | None     -> Hashtbl.remove narrowing_ctx name
       | Some old -> Hashtbl.replace narrowing_ctx name old
     ) !pending_fallthrough_narrowing_ctx;
-    List.iter (fun (name, old) -> Hashtbl.replace locals name old)
+    List.iter (fun (name, old) -> local_replace locals name old)
       !pending_fallthrough_locals;
     restore_slice_endpoint_narrowing !pending_fallthrough_slice_endpoints;
     pending_fallthrough_narrowing_ctx := saved_pending_ctx;

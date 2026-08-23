@@ -8187,17 +8187,17 @@ let codegen_tests = [
        }");
 
   Alcotest.test_case
-    "disjoint same-name annotated locals retain their own pointer widths" `Quick
+    "disjoint same-name inferred locals retain their own pointer widths" `Quick
     (fun () ->
       let src =
         "fn cg_scoped_local_width(flag: bool, byte_out: *u8, word_out: *u64)
              !{unsafe} {
            if (flag) {
-             let previous: *u8 = byte_out;
+             let previous = byte_out;
              previous[0 as isize] = 0;
            }
            if (flag) {
-             let previous: *u64 = word_out;
+             let previous = word_out;
              previous[0 as isize] = 0;
            }
          }" in
@@ -8246,6 +8246,30 @@ let codegen_tests = [
              payload = payload + 2;
            }
          }
+       }");
+
+  Alcotest.test_case
+    "nested local shadowing does not replace the parameter binding" `Quick
+    (expect_codegen_ok
+      "fn cg_parameter_binding_id(value: i32, flag: bool) -> i32 {
+         if (flag) {
+           let value: u8 = 7;
+           if (value == 0) { return 0; }
+         }
+         return value;
+       }");
+
+  Alcotest.test_case
+    "same-spelling loop binders restore the enclosing parameter" `Quick
+    (expect_codegen_ok
+      "fn cg_loop_binding_ids(i: usize) -> usize {
+         for i: usize in 0..<2 {
+           if (i == 9) { return 0; }
+         }
+         for i: usize in 0..<3 {
+           if (i == 9) { return 0; }
+         }
+         return i;
        }");
 
   Alcotest.test_case

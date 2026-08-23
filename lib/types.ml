@@ -788,11 +788,14 @@ and static_to_ast t =
 (* -- Output structs passed to codegen ------------------------------------- *)
 
 module StringMap = Map.Make(String)
+module IntMap = Map.Make(Int)
 
 type func_info = {
   ret_type    : Ast.type_expr;
   param_types : (string * Ast.type_expr) list;
   local_types : Ast.type_expr StringMap.t;
+  bindings    : Local_bindings.resolution;
+  binding_types : Ast.type_expr IntMap.t;
   effects     : string list;
   (* Inferred checker effects. These have no runtime representation. *)
 }
