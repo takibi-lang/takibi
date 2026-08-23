@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Runs allcheck's independent QEMU, STM32, and Raspberry Pi 5 lanes in
-# parallel after Makefile's allcheck-build has produced every artifact once.
-# Tests sharing one physical board remain serial inside that board's lane.
+# Runs allcheck's independent QEMU and STM32 lanes in parallel after Makefile's
+# allcheck-build has produced every artifact, including historical RPi5 builds,
+# once. Tests sharing the STM32 board remain serial inside its lane.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -27,13 +27,6 @@ stm32_lane() {
     STM32_SERIAL_DEV="$STM32_SERIAL_DEV" bash "$REPO_ROOT/scripts/run_hwtest_net_ram.sh"
 }
 
-rpi5_lane() {
-    echo "[allcheck-stage] SWD/UART hardware checks"
-    RPI5_SERIAL_DEV="${RPI5_SERIAL_DEV:-}" bash "$REPO_ROOT/scripts/run_hwtest_rpi5.sh"
-    echo "[allcheck-stage] Ethernet hardware checks"
-    RPI5_SERIAL_DEV="${RPI5_SERIAL_DEV:-}" bash "$REPO_ROOT/scripts/run_hwtest_rpi5_net.sh"
-}
-
 # Keep complete raw output in LOG while showing only stable progress records
 # live. If a lane fails, its raw log is printed later without prefixes, so a
 # multi-line expected/actual diagnostic cannot be interleaved with another
@@ -54,7 +47,7 @@ run_lane() {
         done
 }
 
-declare -a lanes=(QEMU STM32 RPI5)
+declare -a lanes=(QEMU STM32)
 declare -A logs pids results
 
 for lane in "${lanes[@]}"; do

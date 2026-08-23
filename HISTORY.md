@@ -15,6 +15,15 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-23: Historical RPi5 Example Execution Became Opt-In
+
+Changed `make -f examples/Makefile allcheck` to execute only its QEMU and STM32
+lanes. The full historical RPi5 artifact set remains in `allcheck-build`, so
+compiler and linker regressions still fail the routine check; only the slow SWD
+reset and hardware execution were removed. The existing `hwcheck-rpi5` and
+`hwcheck-rpi5-net` targets remain available for explicit historical testing,
+while current RPi5 runtime behavior is maintained by the standalone kernel.
+
 ### 2026-08-23: Stale Depfile and Negative-Control Evidence Guards (GitHub Issue #397)
 
 Added a `make langcheck` preflight that parses every generated kernel depfile

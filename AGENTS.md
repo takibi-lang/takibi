@@ -51,16 +51,21 @@ bare-metal milestones that led to the standalone kernel and to `linux_user/`.
 It is not a target for new feature work: do not add features to it, port new
 `kernel/` behavior into it, refactor it, or update it merely to keep parity
 with `kernel/`.  It is, however, checked regularly (`make -f examples/Makefile
-allcheck`, roughly daily) and kept green: a genuine regression found that way
-(e.g. a compiler bug that breaks existing, unchanged example behavior) should
-be fixed, not left to bit-rot silently.  This is distinct from an example
-build/test failure caused by an *intentional* kernel-only or `linux_user/`-only
-change (e.g. deliberately renaming a shared concept that only `kernel/` still
-uses) -- that kind of failure does not justify modifying `examples/`; report
-the historical incompatibility instead.  Modify an example's own `.tkb`/build
-files only when the user explicitly asks for that exact historical artifact
-to be changed.  A test being extracted (copied or moved) into `linux_user/`
-is exactly such an explicit ask; see the extraction note below.
+allcheck`, roughly daily): every covered artifact, including the historical
+RPi5 set, is built, and the QEMU and STM32 runtime lanes are kept green. A
+genuine regression found that way (e.g. a compiler bug that breaks existing,
+unchanged example behavior) should be fixed, not left to bit-rot silently.
+Historical RPi5 hardware execution is opt-in
+(`hwcheck-rpi5`/`hwcheck-rpi5-net`) and is not part of this routine guarantee;
+current RPi5 hardware behavior is maintained under `kernel/`. This is distinct
+from an example build/test failure caused by an *intentional* kernel-only or
+`linux_user/`-only change (e.g. deliberately renaming a shared concept that
+only `kernel/` still uses) -- that kind of failure does not justify modifying
+`examples/`; report the historical incompatibility instead. Modify an
+example's own `.tkb`/build files only when the user explicitly asks for that
+exact historical artifact to be changed. A test being extracted (copied or
+moved) into `linux_user/` is exactly such an explicit ask; see the extraction
+note below.
 
 **Copy, don't blindly move, when extracting an example into `linux_user/`.**
 Some examples exist *only* for QEMU/host coverage (e.g. the now-removed
@@ -491,7 +496,7 @@ make -f examples/Makefile hwcheck-rpi3-net     # RPi3 real-Ethernet hardware tes
 make -f examples/Makefile hwcheck-rpi5   # opt-in RPi5 SWD + RP1-UART suite for the historical RPi5 example milestones (not kernel/ -- see kernelcheck-rpi5 above for that); reformats the attached USB drive, not in allcheck
 make -f examples/Makefile hwcheck-rpi5-net     # RPi5 real-Ethernet tests for the same example milestones, including USB-backed HTTP/KVS persistence; reformats the attached USB drive
 make -f examples/Makefile perfcheck      # real-hardware profiler smoke tests (not in allcheck -- shares phy_init's occasional link-negotiation flakiness with hwcheck-stm32-net, but adds no functional coverage beyond it)
-make -f examples/Makefile allcheck       # clean/build, then QEMU + STM32 + RPi5(examples) lanes in parallel
+make -f examples/Makefile allcheck       # build all examples targets (including RPi5), then run QEMU + STM32 lanes
 make -f examples/Makefile clean          # remove examples/ build artifacts
 ```
 

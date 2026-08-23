@@ -357,14 +357,15 @@ examples/inline_check/inline_check.o: examples/inline_check/inline_check.tkb $(T
 optimizercheck: examples/inline_check/inline_check.o
 	@bash scripts/run_qemutest.sh --host-only inline_check
 
-## allcheck: clean and build once, then run QEMU, STM32, and RPi5 lanes in
-## parallel. Each physical board remains serial within its own lane. The
-## allcheck-build prerequisite is defined with the target-specific RPi5
+## allcheck: clean and build every historical artifact once, then run the
+## maintained QEMU and STM32 lanes in parallel. Historical RPi5 artifacts
+## remain build-checked; their hardware suites are explicit opt-in targets.
+## The allcheck-build prerequisite is defined with the target-specific RPi5
 ## variables below, after those variables have been expanded.
 allcheck:
 	$(MAKE) -f examples/Makefile clean
 	$(MAKE) -f examples/Makefile allcheck-build
-	+@ALLCHECK_MAKE="$(MAKE) -f examples/Makefile" STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_allcheck.sh
+	+@ALLCHECK_MAKE="$(MAKE) -f examples/Makefile" STM32_SERIAL_DEV="$(STM32_SERIAL_DEV)" bash scripts/run_allcheck.sh
 
 # -- Shared assembly objects ---------------------------------------------------
 $(COMMON_STARTUP_O): $(COMMON_STARTUP_S)
@@ -2560,10 +2561,10 @@ hwcheck-rpi5-net-l2: $(RPI5_NET_L2_KERNELS)
 hwcheck-rpi5-net: $(RPI5_NET_KERNELS) $(RPI5_NET_STORAGE_KERNELS)
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" bash scripts/run_hwtest_rpi5_net.sh
 
-## allcheck-build: build every artifact needed by allcheck's QEMU, STM32,
-## and RPi5 runtime lanes in one Make graph. Keeping this separate prevents
-## concurrent recursive makes from racing over dune's workspace lock or the
-## same generated object.
+## allcheck-build: build the QEMU and STM32 runtime artifacts plus the
+## historical RPi5 artifact set in one Make graph. Keeping this separate
+## prevents concurrent recursive makes from racing over dune's workspace lock
+## or the same generated object.
 allcheck-build: qemubuild stm32build \
 	examples/http_server/kernel_stm32.bin \
 	examples/http_server_sdcard/kernel_stm32.bin \

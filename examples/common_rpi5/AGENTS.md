@@ -1,5 +1,13 @@
 # Raspberry Pi 5 (BCM2712) Bare-Metal Bring-Up
 
+This directory is historical heritage. `allcheck-build` continues compiling
+its RPi5 artifacts so compiler and build compatibility cannot silently rot,
+but `make -f examples/Makefile allcheck` does not execute them. The
+`hwcheck-rpi5` and `hwcheck-rpi5-net` suites remain available as explicit
+opt-in historical checks; routine RPi5 hardware coverage belongs to the
+standalone kernel under `kernel/`. The dated hardware results below remain an
+engineering record, not a current maintenance guarantee.
+
 The newest status sections are authoritative. Older dated sections are kept
 as an engineering record of measured intermediate failures; statements such
 as "still open", "next", or "out of scope" inside a section explicitly

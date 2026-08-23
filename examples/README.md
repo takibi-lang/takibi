@@ -99,13 +99,15 @@ make -f examples/Makefile hwcheck-stm32-net      # STM32 Ethernet and storage ne
 make -f examples/Makefile hwcheck-rpi5           # RPi5 SWD/UART suite
 make -f examples/Makefile hwcheck-rpi5-net       # RPi5 Ethernet and USB-backed server suite
 make -f examples/Makefile perfcheck              # real-board profiling mechanism smoke tests
-make -f examples/Makefile allcheck               # clean/build, then QEMU + STM32 + RPi5 lanes
+make -f examples/Makefile allcheck               # build all targets, then run QEMU + STM32 lanes
 ```
 
-`make -f examples/Makefile allcheck` requires both maintained physical boards. It builds artifacts
-once and runs the independent QEMU, STM32, and RPi5 lanes in parallel; tests
-sharing one board remain serial inside that lane. Raw logs are written under
-`_build/allcheck-logs/`.
+`make -f examples/Makefile allcheck` requires an STM32 board. It builds all
+covered artifacts once, including the historical RPi5 set, then runs the
+independent QEMU and STM32 lanes in parallel. Tests sharing the STM32 board
+remain serial inside that lane. RPi5 execution is available only through the
+explicit `hwcheck-rpi5` and `hwcheck-rpi5-net` targets and is not part of the
+routine green guarantee. Raw logs are written under `_build/allcheck-logs/`.
 
 The sustained STM32 KVS concurrency workload is deliberately separate:
 
