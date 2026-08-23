@@ -89,6 +89,12 @@ let variant_cases_tbl :
     (string, (string * variant_case_layout) list) Hashtbl.t =
   Hashtbl.create 8
 
+let assert_codegen_table_empty name table =
+  let size = Hashtbl.length table in
+  if size <> 0 then
+    raise (Error (Printf.sprintf
+      "BUG: per-program Llvm_gen.%s retained %d entries after reset" name size))
+
 let rec resolve_special_type = function
   | TypeNamed name when Hashtbl.mem erased_view_names name -> TypeView (name, [])
   | TypeIndexed (name, args) when Hashtbl.mem erased_view_names name ->
@@ -6489,6 +6495,9 @@ let gen_program ?prog_types prog =
   Hashtbl.reset struct_llvm_field_index;
   Hashtbl.reset struct_is_packed;
   Hashtbl.reset global_const_defs;
+  Hashtbl.reset enum_underlying;
+  Hashtbl.reset enum_variants_tbl;
+  Hashtbl.reset enum_nonexhaustive;
   (* setup_target/enable_debug_info are one-way switches that may have run
      before this call (or before an earlier gen_program call, in the same
      process) -- both applied their state to the now-disposed module, so it
@@ -6510,6 +6519,28 @@ let gen_program ?prog_types prog =
   Hashtbl.reset variant_lltypes;
   Hashtbl.reset variant_cases_tbl;
   Hashtbl.reset noreturn_functions;
+  (* Always-on watchdog for issue #326's bug class. Keeping this adjacent to
+     the reset preamble makes deleting or forgetting any reset fail on the
+     next compilation, before stale LLVM handles or name collisions are used. *)
+  assert_codegen_table_empty "functions" functions;
+  assert_codegen_table_empty "global_vars" global_vars;
+  assert_codegen_table_empty "extern_symbols" extern_symbols;
+  assert_codegen_table_empty "func_ret_ast_types" func_ret_ast_types;
+  assert_codegen_table_empty "func_param_ast_types" func_param_ast_types;
+  assert_codegen_table_empty "struct_lltypes" struct_lltypes;
+  assert_codegen_table_empty "struct_fields" struct_fields;
+  assert_codegen_table_empty "struct_alignments" struct_alignments;
+  assert_codegen_table_empty "struct_llvm_field_index" struct_llvm_field_index;
+  assert_codegen_table_empty "struct_is_packed" struct_is_packed;
+  assert_codegen_table_empty "global_const_defs" global_const_defs;
+  assert_codegen_table_empty "enum_underlying" enum_underlying;
+  assert_codegen_table_empty "enum_variants_tbl" enum_variants_tbl;
+  assert_codegen_table_empty "enum_nonexhaustive" enum_nonexhaustive;
+  assert_codegen_table_empty "erased_view_names" erased_view_names;
+  assert_codegen_table_empty "variant_defs" variant_defs;
+  assert_codegen_table_empty "variant_lltypes" variant_lltypes;
+  assert_codegen_table_empty "variant_cases_tbl" variant_cases_tbl;
+  assert_codegen_table_empty "noreturn_functions" noreturn_functions;
   List.iter (function
     | ViewDef (name, _, _, _, _) -> Hashtbl.replace erased_view_names name ()
     | VariantDef (name, _, cases, _, _) -> Hashtbl.replace variant_defs name cases

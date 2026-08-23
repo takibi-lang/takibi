@@ -5056,6 +5056,54 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   enclosing_future_writes := StringSet.empty;  (* fresh per compilation / per unit test *)
   resolved_call_targets := StringMap.empty;
   resolved_indirect_call_effects := StringMap.empty;
+  (* Reset every module-scoped per-program table up front. Some are reset
+     again immediately before their population below; this single preamble
+     plus the assertions makes omission visible instead of allowing a table
+     to grow silently across test compilations. *)
+  let reset_table table = Hashtbl.reset table in
+  reset_table view_kinds;
+  reset_table view_params;
+  reset_table variant_defs;
+  reset_table variant_kinds;
+  reset_table variant_params;
+  reset_table must_use_variants;
+  reset_table indexed_struct_params;
+  reset_table indexed_struct_kinds;
+  reset_table private_globals;
+  reset_table private_functions;
+  reset_table private_opaque_types;
+  reset_table private_struct_fields;
+  reset_table private_struct_lit;
+  reset_table private_views;
+  reset_table stable_owner_fields;
+  reset_table stable_owner_structs;
+  reset_table guard_narrow_hints;
+  List.iter (fun (name, size) ->
+    if size <> 0 then
+      raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+        "BUG: per-program Type_inf.%s retained %d entries after reset" name size))
+  ) [
+    "type_checker_consumed_unsafe_at", Hashtbl.length type_checker_consumed_unsafe_at;
+    "index_resolved_ty", Hashtbl.length index_resolved_ty;
+    "slice_cast_len", Hashtbl.length slice_cast_len;
+    "view_kinds", Hashtbl.length view_kinds;
+    "view_params", Hashtbl.length view_params;
+    "variant_defs", Hashtbl.length variant_defs;
+    "variant_kinds", Hashtbl.length variant_kinds;
+    "variant_params", Hashtbl.length variant_params;
+    "must_use_variants", Hashtbl.length must_use_variants;
+    "indexed_struct_params", Hashtbl.length indexed_struct_params;
+    "indexed_struct_kinds", Hashtbl.length indexed_struct_kinds;
+    "private_globals", Hashtbl.length private_globals;
+    "private_functions", Hashtbl.length private_functions;
+    "private_opaque_types", Hashtbl.length private_opaque_types;
+    "private_struct_fields", Hashtbl.length private_struct_fields;
+    "private_struct_lit", Hashtbl.length private_struct_lit;
+    "private_views", Hashtbl.length private_views;
+    "stable_owner_fields", Hashtbl.length stable_owner_fields;
+    "stable_owner_structs", Hashtbl.length stable_owner_structs;
+    "guard_narrow_hints", Hashtbl.length guard_narrow_hints;
+  ];
   (* GitHub issue #79 follow-up: ONE flat namespace for every top-level
      name, not just functions and globals (the two kinds fixed earlier in
      this same follow-up) -- struct, opaque struct, and enum names now
