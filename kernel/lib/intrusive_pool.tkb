@@ -532,6 +532,43 @@ must_use variant IntrusivePoolGrowResult {
 // point.
 private let mut intrusive_pool_next_tag: usize = 1;
 
+// GitHub issue #399: a pool tag is not 1, 2, 3, ...
+//
+// intrusive_pool_owns_chunk decides "is this page one of MY chunks" by
+// comparing the header's pool_tag with the pool's own, and a region whose
+// bytes happen to hold a small integer at the header offset had a
+// non-trivial chance of reading as some pool's chunk. Two things already
+// narrow that a lot -- issue #384's allocator-owned page tag is consulted
+// FIRST, without dereferencing the address at all, and issue #350 moved
+// the header outside the carved slot range so no legitimate payload write
+// reaches it -- leaving the residual case of a page genuinely tagged
+// PoolChunk whose header region was written by something misbehaving.
+// This subsystem has already paid once for "low probability, no
+// detection" (#373), and closing it costs two multiplies.
+//
+// The counter stays as the source of uniqueness and is MIXED, rather than
+// replaced by the pool's own address, for two reasons:
+//
+// - Re-initialising a pool must produce a DIFFERENT tag. That is what
+//   makes chunks a re-init forgot stop matching (see
+//   intrusive_pool_init_retaining, and issue #257's page-leak incident
+//   for what forgetting them means). An address repeats.
+// - A kernel address is precisely the byte pattern a corrupted region is
+//   most likely to contain. Issue #373's diagnosis started from
+//   recognising repeated kernel addresses on a 16-byte stride, which is
+//   the opposite of what a tag should look like.
+//
+// splitmix64's finaliser: every input bit avalanches, so consecutive
+// counter values land far apart. `| 1` keeps it nonzero, because 0 means
+// "no pool" and a zeroed header must never match.
+private fn intrusive_pool_mix_tag(value: usize) -> usize {
+    let mut x: usize = value ^ 0x9E3779B97F4A7C15;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EB;
+    x = x ^ (x >> 31);
+    return x | 1;
+}
+
 fn intrusive_owner_new(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                        slot: usize, generation: usize @ allocation)
         -> IntrusiveOwner[pool_id, allocation] {
@@ -678,7 +715,7 @@ fn intrusive_pool_init(T: type, pool: &mut IntrusivePool(T) @ pool_id) {
 // per-POOL axis and the cheap one -- see this file's header.
 fn intrusive_pool_init_retaining(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                                  retained_chunks: usize) {
-    pool.pool_tag = intrusive_pool_next_tag;
+    pool.pool_tag = intrusive_pool_mix_tag(intrusive_pool_next_tag);
     intrusive_pool_next_tag = intrusive_pool_next_tag + 1;
     pool.chunk_head = 0;
     pool.partial_head = 0;
@@ -918,7 +955,8 @@ fn intrusive_slot_link_at(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 //
 // The tag is the authority, twice over: the allocator's says whether the
 // page is any pool's chunk, and the header's pool_tag says WHICH pool's.
-// pool_tag counts from 1, so a zeroed header never matches a live pool
+// A tag is a mixed counter value and never 0 (issue #399), so a zeroed
+// header never matches a live pool
 // even if a page were somehow tagged without one.
 fn intrusive_pool_owns_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id, base: usize)
         -> bool !{unsafe} {
