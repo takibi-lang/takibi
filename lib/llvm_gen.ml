@@ -2242,14 +2242,10 @@ let as_cond v =
    `struct_instance` (a different representation, `Types.ty` not
    `Ast.type_expr`, already exhaustiveness-checked by OCaml since it's a
    compiler-internal type this file doesn't independently extend). *)
-let rec struct_name_of_type : Ast.type_expr -> string option = function
+let struct_name_of_type (ty : Ast.type_expr) : string option =
+  match Ast.strip_singleton ty with
   | TypeNamed s | TypePtr (TypeNamed s) | TypeAlignedPtr (_, TypeNamed s)
   | TypeRef (TypeNamed s) | TypeRefMut (TypeNamed s) -> Some s
-  (* GitHub issue #345: `*T @ place` has the same pointer representation as
-     `*T` -- the address identity is checker-only and erases here -- so
-     reaching a field through one is the same GEP. Mirrors type_inf.ml's
-     struct_instance, which is the type-side half of the same rule. *)
-  | TypeSingleton (base, _) -> struct_name_of_type base
   | _ -> None
 
 (* Look up a struct field by name; returns (field_index, field_ast_type) *)

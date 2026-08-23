@@ -108,31 +108,10 @@ type type_expr =
     (* T @ n -- a runtime integer, pointer, or reference T whose
        value/identity is also available as an erased static argument.
 
-       CHECKLIST -- this wrapper is meant to be structurally
-       TRANSPARENT: SPEC.md says outright "it has exactly the same LLVM
-       representation as T". Every session that has touched code needing
-       "the base type ignoring this wrapper" has independently
-       rediscovered that transparency is NOT automatic -- each call site
-       below has its OWN pattern match that must include a
-       TypeSingleton/TSingleton arm, and nothing enforces that a new one
-       remembers to. Found the hard way across five separate functions in
-       one session (GitHub issues #344/#345/#347): unify_arg
-       (monomorphize.ml, generic type-parameter inference through `@`),
-       struct_instance (type_inf.ml) and struct_name_of_type
-       (llvm_gen.ml) (field access through a singleton-wrapped pointer/
-       reference), is_affine_type/is_linear_type/is_must_use_type and
-       type_mentions_variant/type_mentions_kinded_variant (type_inf.ml,
-       ownership tracking on a raw signature type), check_expr's AddrOf
-       dispatch and adapt_actual_to_expected's is_address check
-       (type_inf.ml, minting `&x`/`*x` with the right wrapper and
-       identity). Before adding a NEW function that pattern-matches
-       type_expr/ty looking for a struct/variant/view/pointer/reference
-       shape, check whether it needs to see through TypeSingleton too --
-       and add it to this list. A single `Ast.strip_singleton` helper
-       that all of the above route through, rather than each repeating
-       the same one-line match arm, would turn this checklist into a
-       structural guarantee instead of a reminder; see GitHub issue
-       #357 for that consolidation. *)
+       This wrapper is structurally transparent: SPEC.md says it has the
+       same LLVM representation as T. Shape-oriented Ast.type_expr code
+       must use strip_singleton below rather than open-coding a match, so
+       the transparency rule has one implementation. *)
   | TypeRefined of int * int * type_expr
     (* {lo..<hi} -- refined int: lo <= x < hi. Third field is the
        underlying primitive type (mirrors Types.ty's TRefinedInt -- see
@@ -142,7 +121,7 @@ type type_expr =
        range propagation can construct refined types that preserve an
        operand's existing base. *)
   | TypeSlice of type_expr * int   (* []T / [T; N..] -- fat pointer (ptr + usize len);
-                                      int = compile-time MINIMUM length (0 = unknown).
+                                     int = compile-time MINIMUM length (0 = unknown).
                                       The runtime length is always >= the minimum; index
                                       proofs and constant subslices check against it. *)
   | TypeBorrow of type_expr        (* parameter-only, shared non-consuming borrow *)
@@ -235,6 +214,13 @@ and array_size_expr =
   | ASMul of array_size_expr * array_size_expr
   | ASDiv of array_size_expr * array_size_expr
 [@@deriving show]
+
+(* TypeSingleton is a checker-only identity wrapper.  Shape-oriented passes
+   must opt into seeing through it through this single helper.  Peel one
+   layer so callers retain control over recursive traversal. *)
+let strip_singleton = function
+  | TypeSingleton (base, _) -> base
+  | ty -> ty
 
 type static_param = ident * type_expr
 (* Static parameter sorts are addr, primitive integers, or exhaustive enums. *)

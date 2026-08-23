@@ -610,11 +610,12 @@ let rec unify_arg (type_params : string list) (value_params : string list)
      match is deliberately exhaustive on template_ty: adding an Ast.type_expr
      constructor must make dune build point here instead of silently falling
      through a two-type wildcard and contributing no generic binding. *)
+  let concrete_ty = Ast.strip_singleton concrete_ty in
   match concrete_ty with
-  | TypeBorrow b | TypeBorrowMut b | TypeSink b | TypeSingleton (b, _) ->
+  | TypeBorrow b | TypeBorrowMut b | TypeSink b ->
       u template_ty b
   | _ ->
-    match template_ty with
+    match Ast.strip_singleton template_ty with
   | TypeNamed n when List.mem n type_params ->
       (match Hashtbl.find_opt bindings n with
        | Some existing when existing <> concrete_ty ->
@@ -661,18 +662,6 @@ let rec unify_arg (type_params : string list) (value_params : string list)
      use in this codebase already relies on. This pass only needs a
      plausible T to mangle a name; real reference-mode checking happens
      later in type_inf.ml. *)
-  (* GitHub issue #344: `T @ n` / `*T @ place` is the SAME type plus a
-     checker-only static identity (SPEC.md: "It has exactly the same LLVM
-     representation as T"), so a singleton contributes its underlying type
-     here and nothing else -- peeled on either side, for the same reason
-     TypeBorrow/TypeSink are above. Without this arm, giving a generic
-     function's pool parameter an address identity (`p: *Pool(T) @ pool`,
-     the shape that brands an owner to the pool that minted it) made T
-     uninferable and the call failed with "cannot infer type parameter
-     'T'" -- the singleton annotation, which is erased and carries no
-     type information of its own, was hiding the one argument that
-     determines T. *)
-  | TypeSingleton (a, _) -> u a concrete_ty
   | TypeArray (a, _) ->
       (match concrete_ty with TypeArray (b, _) -> u a b | _ -> ())
   | TypeSlice (a, _) ->
@@ -685,7 +674,7 @@ let rec unify_arg (type_params : string list) (value_params : string list)
          when n1 = n2 && List.length args1 = List.length args2 ->
            List.iter2 u args1 args2
        | _ -> ())
-  | TypeArraySym _ | TypeSliceSym _ | TypeIntLit _
+  | TypeArraySym _ | TypeSliceSym _ | TypeIntLit _ | TypeSingleton _
   | TypeFn _ | TypeTuple _ | TypeExists _ | TypeRefined _
   | TypeIndexed _ | TypeBool
   | TypeI8 | TypeI16 | TypeI32 | TypeI64

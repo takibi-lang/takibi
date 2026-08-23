@@ -15,6 +15,16 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-23: Singleton-Transparency Consolidation (GitHub Issue #357)
+
+Added `Ast.strip_singleton` and routed the shape-oriented compiler checks that
+had independently learned to see through `T @ identity` through the shared
+AST/Types helpers: generic argument inference, struct field lookup in type
+checking and code generation, affine/linear/must-use and variant predicates,
+and address/reference adaptation. Representation-lowering sites that genuinely
+operate on the wrapper remain explicit. This is a behavior-preserving refactor;
+the existing singleton regressions and the full repository build pass.
+
 ### 2026-08-23: Trusted-Base Contract and Boundary Inventory (GitHub Issue #236)
 
 Added `TRUSTED_BASE.md` as the durable statement of what Takibi's current

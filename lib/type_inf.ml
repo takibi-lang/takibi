@@ -332,22 +332,16 @@ let field_type_for_instance sname args field_ast =
         formals args;
       of_ast_in_decl_scope scope field_ast
 
-let rec struct_instance = function
+let rec strip_singleton t = match repr t with
+  | TSingleton (base, _) -> strip_singleton base
+  | t -> t
+
+let struct_instance ty = match strip_singleton ty with
   | TStruct s -> Some (s, [])
   | TIndexedStruct (s, args) -> Some (s, args)
   | TPtr (TStruct s) | TPtr (TIo (TStruct s))
   | TAlignedPtr (_, TStruct s)
   | TRef (TStruct s) | TRefMut (TStruct s) -> Some (s, [])
-  (* GitHub issue #345: `*T @ place` is a pointer value carrying an extra
-     checker-only address identity (SPEC.md: "It has the same pointer
-     representation as T; the address identity is checker-only"), so
-     reaching a field through one is exactly reaching it through the bare
-     pointer. Reading or writing the POINTEE's fields cannot invalidate
-     the identity, which is a fact about the pointer itself -- the
-     restriction SPEC.md states is on addressing or storing a singleton,
-     not on using one. Without this, a pool branded to its handles
-     (`p: *Pool(T) @ pool`) could not touch its own fields. *)
-  | TSingleton (base, _) -> struct_instance base
   | _ -> None
 
 (* sizeof(T)/offsetof(T, field) are only ever a genuine OCaml-computable
@@ -433,10 +427,6 @@ let lookup loc name env = fst (lookup_binding loc name env)
 
 (* io T is a storage qualifier; strip it to get the value type for expression checks *)
 let strip_io t = match repr t with TIo inner -> inner | _ -> t
-
-let rec strip_singleton t = match repr t with
-  | TSingleton (base, _) -> strip_singleton base
-  | t -> t
 
 let unify_at loc t1 t2 =
   try unify t1 t2
@@ -581,7 +571,7 @@ let adapt_actual_to_expected (tyenv : tyenv) (e : Ast.expr)
   match repr expected, repr actual with
   | TSingleton _, TSingleton _ -> actual
   | TSingleton (expected_base, _), _ ->
-      let is_address = match repr expected_base with
+      let is_address = match strip_singleton expected_base with
         (* GitHub issue #347: a reference is an address value too, and its
            identity comes from the same `&name` place a pointer's does. *)
         | TPtr _ | TAlignedPtr _ | TRef _ | TRefMut _ -> true
@@ -3782,8 +3772,10 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
      wrapper hid the TRef/TRefMut from the dispatch, and `&x` fell to the
      generic branch below and produced a raw pointer. *)
   | AddrOf inner, TSingleton (ref_base, _)
-    when (match repr ref_base with TRef _ | TRefMut _ -> true | _ -> false) ->
-      let mode = match repr ref_base with TRefMut _ -> `RefMut | _ -> `Ref in
+    when (match strip_singleton ref_base with
+          | TRef _ | TRefMut _ -> true | _ -> false) ->
+      let mode = match strip_singleton ref_base with
+        | TRefMut _ -> `RefMut | _ -> `Ref in
       let actual = infer_addrof_wrapped senv eenv tyenv fenv e inner mode in
       let actual = adapt_actual_to_expected tyenv e actual expected in
       unify_at e.loc actual expected;
@@ -5760,7 +5752,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeView _ -> true
     | _ -> false
   in
-  let rec type_mentions_variant = function
+  let rec type_mentions_variant ty = match Ast.strip_singleton ty with
     | Ast.TypeVariant _ -> true
     (* GitHub issue #345: an indexed variant is still spelled TypeIndexed
        in a raw signature -- these predicates read fdef.ret_type/params
@@ -5772,7 +5764,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Hashtbl.mem variant_defs name
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeRefined (_, _, t)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_variant t
     | Ast.TypeTuple ts -> List.exists type_mentions_variant ts
@@ -5781,7 +5773,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeExists (_, _, body) -> type_mentions_variant body
     | _ -> false
   in
-  let rec type_mentions_kinded_variant = function
+  let rec type_mentions_kinded_variant ty = match Ast.strip_singleton ty with
     | Ast.TypeVariant (name, _) -> Hashtbl.mem variant_kinds name
     | Ast.TypeIndexed (name, _) when Hashtbl.mem variant_defs name ->
         Hashtbl.mem variant_kinds name
@@ -5789,7 +5781,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Hashtbl.mem variant_kinds name
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeRefined (_, _, t)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_kinded_variant t
     | Ast.TypeTuple ts -> List.exists type_mentions_kinded_variant ts
@@ -7161,7 +7153,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      maybe-consumed component is unioned at merges (governing double-use
      for both kinds), while its must-be-consumed component is intersected
      (governing linear discharge on every path). *)
-  let rec strip_borrow = function
+  let rec strip_borrow ty = match Ast.strip_singleton ty with
     | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t -> strip_borrow t
     | t -> t
   in
