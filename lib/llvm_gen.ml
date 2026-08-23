@@ -66,9 +66,7 @@ let struct_llvm_field_index : (string, int array) Hashtbl.t = Hashtbl.create 8
 let struct_is_packed : (string, bool) Hashtbl.t = Hashtbl.create 8
 
 (* Erased views are checked as affine/linear resources by type_inf.ml but
-   have no LLVM storage or ABI component. Source annotations initially parse
-   as TypeNamed; this registry lets codegen resolve them even in the supported
-   no-program_types test path. *)
+   have no LLVM storage or ABI component. *)
 let erased_view_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 
 (* Closed runtime variants are nominal at the source level.  The source
@@ -96,10 +94,6 @@ let assert_codegen_table_empty name table =
       "BUG: per-program Llvm_gen.%s retained %d entries after reset" name size))
 
 let rec resolve_special_type = function
-  | TypeNamed name when Hashtbl.mem erased_view_names name -> TypeView (name, [])
-  | TypeIndexed (name, args) when Hashtbl.mem erased_view_names name ->
-      TypeView (name, args)
-  | TypeNamed name when Hashtbl.mem variant_defs name -> TypeVariant (name, [])
   | TypePtr t -> TypePtr (resolve_special_type t)
   | TypeIo t -> TypeIo (resolve_special_type t)
   | TypeArray (t, n) -> TypeArray (resolve_special_type t, n)
@@ -1825,21 +1819,6 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
            in
            Hashtbl.add di_slice_types name slice_ty;
            slice_ty)
-  | TypeNamed sname when Hashtbl.mem variant_lltypes sname ->
-      (* Mirrors ltype_of_ast's own TypeNamed variant_lltypes check just
-         above -- resolve_special_type normally rewrites a variant's
-         TypeNamed into TypeVariant (handled above, deliberately null:
-         see that case's comment) before a type reaches here, but a
-         local `let` variable's own declared-type annotation reaches
-         DWARF emission via its raw, unresolved AST node, not through
-         that normalization. Without this case, any local variable
-         declared with a bare variant type name (e.g. `let previous:
-         ScheduledProcessValue = ...`) crashed -g kernel builds with
-         "Unknown named type" the first time a real, large program (not
-         just examples/dwarf_debug's own struct/enum-only fixture)
-         exercised it -- found building kernel/build/qemu/kernel-debug.elf
-         for scripts/run_kernel_qemutest_lifecycle_gap.sh. *)
-      Llvm_debuginfo.llmetadata_null ()
   | TypeNamed sname ->
       (match Hashtbl.find_opt enum_underlying sname with
        | Some ut ->
@@ -1937,7 +1916,6 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
    DILocalVariable. *)
 let rec ditype_for_local dib file = function
   | TypeView _ | TypeVariant _ | TypeTuple _ | TypeVoid -> None
-  | TypeNamed sname when Hashtbl.mem variant_lltypes sname -> None
   | TypeExists (_, _, body) -> ditype_for_local dib file body
   | TypeSingleton (base, _) | TypeRefined (_, _, base)
   | TypeBorrow base | TypeSink base | TypeIo base ->
@@ -2495,10 +2473,6 @@ let function_key (pt : Types.program_types option) (fdef : Ast.func) =
   | Some pt ->
       let declared = List.map snd fdef.params in
       let rec abi_type = function
-        | TypeNamed name when Hashtbl.mem erased_view_names name -> TypeView (name, [])
-        | TypeIndexed (name, _) when Hashtbl.mem erased_view_names name ->
-            TypeView (name, [])
-        | TypeNamed name when Hashtbl.mem variant_defs name -> TypeVariant (name, [])
         | TypeView (name, _) -> TypeView (name, [])
         | TypeVariant (name, args) -> TypeVariant (name, args)
         | TypeExists (_, _, body) -> abi_type body
@@ -4684,10 +4658,6 @@ and gen_field_access ~decay locals (base_expr : Ast.expr) (fname : string)
           (fname ^ "_ptr") builder
         in
         (match field_ty with
-       | TypeNamed name when Hashtbl.mem variant_defs name ->
-           let v = build_load (ltype_of_ast field_ty) field_ptr fname builder in
-           if through_io then set_volatile true v;
-           (TypeVariant (name, []), v)
        | TypeNamed ename when Hashtbl.mem enum_underlying ename ->
            (* Enum struct field reached through a POINTER to the struct
               (an array element, a *Struct parameter) rather than an
@@ -5492,7 +5462,6 @@ let gen_func ?prog_types fdef =
         ) arms in
         let variant_name = match disc_ty with
           | TypeVariant (name, _) -> Some name
-          | TypeNamed name when Hashtbl.mem variant_defs name -> Some name
           (* An existential binder can make the codegen-local expression type
              less precise than the already-checked match arms.  Recover the
              closed variant from those arms instead of misclassifying it as a
@@ -6453,9 +6422,9 @@ let gen_exception_restore name frame =
   emit_exception_restore off total
 
 let gen_program ?prog_types prog =
-  (* GitHub issue #358: keep this public phase safe for direct callers as
-     well as bin/main.ml. The pass is idempotent. *)
-  let prog = Declared_type_resolver.run prog in
+  (* The declared-type phase is a required boundary: silently repairing an
+     unresolved AST here would hide a caller that bypassed it. *)
+  Declared_type_resolver.validate prog;
   (* GitHub issue #326: dispose and recreate the_module itself before
      anything else, rather than trying to reset the per-program Hashtables
      in place. bin/main.exe only ever reaches this function once per
@@ -6564,12 +6533,6 @@ let gen_program ?prog_types prog =
   ) prog;
   let rec ast_mentions_variant = function
     | TypeVariant _ -> true
-    (* TypeIndexed alongside TypeNamed: a variant can carry static indices
-       (GitHub issue #368), and missing it here would register a struct
-       holding one BEFORE the variant exists, which surfaces much later as
-       "Unknown indexed type". Same TypeNamed/TypeIndexed asymmetry issue
-       #357 is about, one table over. *)
-    | TypeNamed name | TypeIndexed (name, _) -> Hashtbl.mem variant_defs name
     | TypePtr t | TypeIo t | TypeArray (t, _) | TypeSlice (t, _)
     | TypeBorrow t | TypeBorrowMut t | TypeSink t
     | TypeRefined (_, _, t) | TypeAlignedPtr (_, t)

@@ -5004,9 +5004,9 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
 (* -- Whole-program inference ----------------------------------------------- *)
 
 let infer_program (prog : Ast.toplevel list) : program_types =
-  (* GitHub issue #358: public phase entry points normalize defensively so
-     callers cannot accidentally bypass bin/main.ml's pipeline step. *)
-  let prog = Declared_type_resolver.run prog in
+  (* The declared-type phase is a required boundary: silently repairing an
+     unresolved AST here would hide a caller that bypassed it. *)
+  Declared_type_resolver.validate prog;
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
   collected_type_errors := [];  (* fresh per compilation / per unit test *)
   type_checker_unsafe_use_marker := 0;  (* GitHub issue #328, fresh per compilation / per unit test *)

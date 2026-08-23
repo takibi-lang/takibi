@@ -22,6 +22,13 @@ type declared_names = {
   variants : StringSet.t;
 }
 
+exception Noncanonical_type of string
+
+let noncanonical kind name ast_kind =
+  raise (Noncanonical_type (Printf.sprintf
+    "BUG: unresolved %s declaration '%s' remains %s after Declared_type_resolver.run"
+    kind name ast_kind))
+
 let collect_names prog =
   List.fold_left (fun names -> function
     | ViewDef (name, _, _, _, _) ->
@@ -218,3 +225,106 @@ let resolve_toplevel names = function
 let run prog =
   let names = collect_names prog in
   List.map (resolve_toplevel names) prog
+
+let validate prog =
+  let names = collect_names prog in
+  let rec check_type = function
+    | TypeNamed name when StringSet.mem name names.views ->
+        noncanonical "view" name "TypeNamed"
+    | TypeIndexed (name, _) when StringSet.mem name names.views ->
+        noncanonical "view" name "TypeIndexed"
+    | TypeNamed name when StringSet.mem name names.variants ->
+        noncanonical "variant" name "TypeNamed"
+    | TypeIndexed (name, _) when StringSet.mem name names.variants ->
+        noncanonical "variant" name "TypeIndexed"
+    | TypePtr t | TypeIo t | TypeArray (t, _) | TypeSlice (t, _)
+    | TypeBorrow t | TypeBorrowMut t | TypeSink t | TypeRef t | TypeRefMut t
+    | TypeRefined (_, _, t) | TypeAlignedPtr (_, t) | TypeSingleton (t, _) ->
+        check_type t
+    | TypeFn (args, ret, _) -> List.iter check_type args; check_type ret
+    | TypeTuple ts | TypeGenericInst (_, ts) -> List.iter check_type ts
+    | TypeExists (_, sort, body) -> check_type sort; check_type body
+    | TypeArraySym (t, size) | TypeSliceSym (t, size) ->
+        check_type t; check_array_size size
+    | TypeBool | TypeI8 | TypeI16 | TypeI32 | TypeI64
+    | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be
+    | TypeIsize | TypeUsize | TypeVoid | TypeNamed _ | TypeIndexed _
+    | TypeView _ | TypeVariant _ | TypeKind | TypeIntLit _ -> ()
+  and check_array_size = function
+    | ASLit _ | ASParam _ -> ()
+    | ASSizeof t -> check_type t
+    | ASAdd (a, b) | ASSub (a, b) | ASMul (a, b) | ASDiv (a, b) ->
+        check_array_size a; check_array_size b
+  in
+  let rec check_expr expr =
+    match expr.desc with
+    | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _
+    | EmbedFile _ | ViewLit _ -> ()
+    | Call (_, args) | StructLit args | TupleLit args -> List.iter check_expr args
+    | VariantCtor (_, _, payload) | Bnot payload | Deref payload
+    | AddrOf payload | Unsafe payload -> check_expr payload
+    | BinOp (_, left, right) | Assign (left, right) ->
+        check_expr left; check_expr right
+    | Cast (ty, value) -> check_type ty; check_expr value
+    | FieldGet (value, _) -> check_expr value
+    | Index (_, index) -> check_expr index
+    | SliceOf (_, lo, hi) -> check_expr lo; check_expr hi
+    | SizeOf ty | AlignOf ty | ContainsStableOwner ty -> check_type ty
+    | OffsetOf (ty, _) -> check_type ty
+  in
+  let rec check_stmt stmt =
+    let check_stmts = List.iter check_stmt in
+    match stmt.desc with
+    | Return value -> Option.iter check_expr value
+    | Expr value | Yield value -> check_expr value
+    | Block body | UnsafeBlock body -> check_stmts body
+    | Let (_, _, declared, init, _) ->
+        Option.iter check_type declared; Option.iter check_expr init
+    | If (condition, yes, no) ->
+        check_expr condition; check_stmts yes; check_stmts no
+    | While (condition, body) -> check_expr condition; check_stmts body
+    | For (_, declared, lo, hi, body) ->
+        Option.iter check_type declared; check_expr lo; check_expr hi;
+        check_stmts body
+    | ForEach (_, value, body) -> check_expr value; check_stmts body
+    | LetTuple (_, value) -> check_expr value
+    | Break | Continue -> ()
+    | StaticAssert (condition, _) -> check_expr condition
+    | Match (value, arms) -> check_expr value; List.iter check_arm arms
+    | LetMatch (_, _, declared, value, arms) ->
+        Option.iter check_type declared; check_expr value; List.iter check_arm arms
+  and check_arm = function
+    | ArmVariant (_, _, _, body) | ArmWild body | ArmIntLit (_, body) ->
+        List.iter check_stmt body
+  in
+  let check_static_params params =
+    List.iter (fun (_, sort) -> check_type sort) params in
+  let check_func func =
+    List.iter (fun (_, ty) -> Option.iter check_type ty) func.params;
+    Option.iter check_type func.ret_type;
+    List.iter check_stmt func.body
+  in
+  List.iter (function
+    | FuncDef func -> check_func func
+    | ConstDef (_, ty, init, _) -> check_type ty; check_expr init
+    | LetDef (_, ty, init, _, _, _, _) ->
+        Option.iter check_type ty; Option.iter check_expr init
+    | ExternFuncDef (_, params, ret, _) ->
+        List.iter (fun (_, ty) -> Option.iter check_type ty) params;
+        Option.iter check_type ret
+    | StructDef (_, fields, _, _, _, _) ->
+        List.iter (fun (_, ty) -> check_type ty) fields
+    | OwnedStructDef (_, _, params, fields, _, _, _, _, _) ->
+        check_static_params params;
+        List.iter (fun (_, ty) -> check_type ty) fields
+    | GenericStructDef (_, params, fields, _, _, _, _) ->
+        List.iter (fun (_, kind) -> match kind with
+          | GPType -> () | GPValue sort -> check_type sort) params;
+        List.iter (fun (_, ty) -> check_type ty) fields
+    | ViewDef (_, _, params, _, _) -> check_static_params params
+    | EnumDef (_, base, _, _) -> Option.iter check_type base
+    | VariantDef (_, params, cases, _, _) ->
+        check_static_params params;
+        List.iter (fun (_, payload) -> Option.iter check_type payload) cases
+    | ExternSymbolDef _ | VectorTableDef _ | ExceptionEntryDef _
+    | ExceptionRestoreDef _ | OpaqueStructDef _ | UseDef _ -> ()) prog

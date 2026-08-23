@@ -2184,6 +2184,48 @@ let infer_tests = [
       Alcotest.(check bool) "resolver is idempotent" true
         (Declared_type_resolver.run prog = prog));
 
+  Alcotest.test_case
+    "downstream phases reject noncanonical declared types at their boundary"
+    `Quick
+    (fun () ->
+      let expect_bad expected thunk =
+        match thunk () with
+        | _ -> Alcotest.failf "expected noncanonical-type BUG containing %S" expected
+        | exception Declared_type_resolver.Noncanonical_type msg ->
+            Alcotest.(check bool) msg true (contains_substring msg expected)
+      in
+      let cases = [
+        ("view declaration 'BoundaryView' remains TypeNamed",
+         "linear view BoundaryView; fn f(v: borrow BoundaryView) { }");
+        ("view declaration 'BoundaryView' remains TypeIndexed",
+         "linear view BoundaryView[n: usize];
+          fn f(v: borrow BoundaryView[1]) { }");
+        ("variant declaration 'BoundaryVariant' remains TypeNamed",
+         "variant BoundaryVariant { None; }
+          fn f(v: BoundaryVariant) { }");
+        ("variant declaration 'BoundaryVariant' remains TypeIndexed",
+         "variant BoundaryVariant[n: usize] { None; }
+          fn f(v: BoundaryVariant[1]) { }");
+      ] in
+      List.iter (fun (expected, src) ->
+        let raw = Monomorphize.run (parse src) in
+        expect_bad expected (fun () -> Type_inf.infer_program raw);
+        expect_bad expected (fun () -> Llvm_gen.gen_program raw)
+      ) cases;
+      let owner = Monomorphize.run (parse
+        "linear struct BoundaryOwner[n: usize] { value: usize @ n; }
+         fn f(v: borrow BoundaryOwner[1]) { }") in
+      Declared_type_resolver.validate owner;
+      let normalized = Declared_type_resolver.run
+        (Monomorphize.run (parse
+          "linear view BoundaryOkView[n: usize];
+           variant BoundaryOkVariant[n: usize] { None; }
+           fn f(v: borrow BoundaryOkView[1]) -> BoundaryOkVariant[1] {
+             return BoundaryOkVariant::None;
+           }") ) in
+      Declared_type_resolver.validate normalized;
+      ignore (Type_inf.infer_program normalized));
+
   (* GitHub issue #327 Stage 1: two independently-broken functions in one
      program both get reported, instead of the second's error being
      hidden by the first aborting the whole compilation. *)
