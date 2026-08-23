@@ -606,14 +606,22 @@ let rec unify_arg (type_params : string list) (value_params : string list)
                   (value_bindings : (string, int) Hashtbl.t)
                   (template_ty : type_expr) (concrete_ty : type_expr) : unit =
   let u = unify_arg type_params value_params bindings value_bindings in
-  match template_ty, concrete_ty with
-  | TypeNamed n, _ when List.mem n type_params ->
+  (* Peel concrete-side parameter-mode wrappers first. The remaining outer
+     match is deliberately exhaustive on template_ty: adding an Ast.type_expr
+     constructor must make dune build point here instead of silently falling
+     through a two-type wildcard and contributing no generic binding. *)
+  match concrete_ty with
+  | TypeBorrow b | TypeBorrowMut b | TypeSink b | TypeSingleton (b, _) ->
+      u template_ty b
+  | _ ->
+    match template_ty with
+  | TypeNamed n when List.mem n type_params ->
       (match Hashtbl.find_opt bindings n with
        | Some existing when existing <> concrete_ty ->
            raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
              "conflicting inference for generic type parameter '%s'" n))
        | _ -> Hashtbl.replace bindings n concrete_ty)
-  | TypeNamed n, _ when List.mem n value_params ->
+  | TypeNamed n when List.mem n value_params ->
       (match (try Some (value_arg_of_type_expr concrete_ty) with Types.TypeError _ -> None) with
        | None -> () (* not a resolvable value in this position; contributes nothing here *)
        | Some v ->
@@ -622,10 +630,10 @@ let rec unify_arg (type_params : string list) (value_params : string list)
                 raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
                   "conflicting inference for generic value parameter '%s'" n))
             | _ -> Hashtbl.replace value_bindings n v))
-  | TypePtr a, TypePtr b -> u a b
-  | TypeIo a, TypeIo b -> u a b
-  | TypeBorrow a, b | TypeBorrowMut a, b | TypeSink a, b -> u a b
-  | a, TypeBorrow b | a, TypeBorrowMut b | a, TypeSink b -> u a b
+  | TypeNamed _ -> ()
+  | TypePtr a -> (match concrete_ty with TypePtr b -> u a b | _ -> ())
+  | TypeIo a -> (match concrete_ty with TypeIo b -> u a b | _ -> ())
+  | TypeBorrow a | TypeBorrowMut a | TypeSink a -> u a concrete_ty
   (* GitHub issue #314/#319: derive_arg_type below always synthesizes a
      plain TypePtr for an AddrOf-shaped argument, regardless of the
      callee's actual declared parameter wrapper -- unlike TypeBorrow/
@@ -638,9 +646,14 @@ let rec unify_arg (type_params : string list) (value_params : string list)
      (including whether &T/&mut T is even the right wrapper for this
      parameter) happens later in type_inf.ml; this pass only needs a
      plausible T to mangle a name. *)
-  | TypeRef a, TypePtr b | TypeRefMut a, TypePtr b -> u a b
-  | TypeRef a, TypeRef b | TypeRefMut a, TypeRefMut b
-  | TypeRefMut a, TypeRef b
+  | TypeRef a ->
+      (match concrete_ty with
+       | TypePtr b | TypeRef b | TypeRefMut b -> u a b
+       | _ -> ())
+  | TypeRefMut a ->
+      (match concrete_ty with
+       | TypePtr b | TypeRef b | TypeRefMut b -> u a b
+       | _ -> ())
   (* GitHub issue #332: template=&T (shared ref expected), concrete=&mut T
      (exclusive ref argument) was the one missing combination -- passing an
      exclusive reference where a shared reference suffices is ordinary,
@@ -648,7 +661,6 @@ let rec unify_arg (type_params : string list) (value_params : string list)
      use in this codebase already relies on. This pass only needs a
      plausible T to mangle a name; real reference-mode checking happens
      later in type_inf.ml. *)
-  | TypeRef a, TypeRefMut b -> u a b
   (* GitHub issue #344: `T @ n` / `*T @ place` is the SAME type plus a
      checker-only static identity (SPEC.md: "It has exactly the same LLVM
      representation as T"), so a singleton contributes its underlying type
@@ -660,14 +672,27 @@ let rec unify_arg (type_params : string list) (value_params : string list)
      'T'" -- the singleton annotation, which is erased and carries no
      type information of its own, was hiding the one argument that
      determines T. *)
-  | TypeSingleton (a, _), b | a, TypeSingleton (b, _) -> u a b
-  | TypeArray (a, _), TypeArray (b, _) -> u a b
-  | TypeSlice (a, _), TypeSlice (b, _) -> u a b
-  | TypeAlignedPtr (_, a), TypeAlignedPtr (_, b) -> u a b
-  | TypeGenericInst (n1, args1), TypeGenericInst (n2, args2)
-    when n1 = n2 && List.length args1 = List.length args2 ->
-      List.iter2 u args1 args2
-  | _ -> () (* structural mismatch: contributes nothing, not an error here *)
+  | TypeSingleton (a, _) -> u a concrete_ty
+  | TypeArray (a, _) ->
+      (match concrete_ty with TypeArray (b, _) -> u a b | _ -> ())
+  | TypeSlice (a, _) ->
+      (match concrete_ty with TypeSlice (b, _) -> u a b | _ -> ())
+  | TypeAlignedPtr (_, a) ->
+      (match concrete_ty with TypeAlignedPtr (_, b) -> u a b | _ -> ())
+  | TypeGenericInst (n1, args1) ->
+      (match concrete_ty with
+       | TypeGenericInst (n2, args2)
+         when n1 = n2 && List.length args1 = List.length args2 ->
+           List.iter2 u args1 args2
+       | _ -> ())
+  | TypeArraySym _ | TypeSliceSym _ | TypeIntLit _
+  | TypeFn _ | TypeTuple _ | TypeExists _ | TypeRefined _
+  | TypeIndexed _ | TypeBool
+  | TypeI8 | TypeI16 | TypeI32 | TypeI64
+  | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be
+  | TypeIsize | TypeUsize | TypeVoid
+  | TypeView _ | TypeVariant _ | TypeKind ->
+      () (* structural mismatch: contributes nothing, not an error here *)
 
 (* -- run ---------------------------------------------------------------------
 
@@ -827,7 +852,19 @@ let run (prog : toplevel list) : toplevel list =
                 | Some fields ->
                     Option.map (fun ft -> TypePtr ft) (List.assoc_opt fname fields)
                 | None -> None)
-           | _ -> None)
+           (* Exhaustive by design: a new type wrapper must produce an OCaml
+              build-time reminder to decide whether &x.field can see through
+              it, rather than silently taking this no-contribution path. *)
+           | Some (TypeBool | TypeI8 | TypeI16 | TypeI32 | TypeI64
+                  | TypeU8 | TypeU16 | TypeU32 | TypeU64
+                  | TypeU16Be | TypeU32Be | TypeIsize | TypeUsize | TypeVoid
+                  | TypePtr _ | TypeIo _ | TypeArray _ | TypeFn _ | TypeView _
+                  | TypeVariant _ | TypeExists _ | TypeIndexed _ | TypeKind
+                  | TypeIntLit _ | TypeArraySym _ | TypeSliceSym _
+                  | TypeSlice _ | TypeTuple _ | TypeBorrow _ | TypeBorrowMut _
+                  | TypeSink _ | TypeRef _ | TypeRefMut _ | TypeAlignedPtr _
+                  | TypeSingleton _ | TypeRefined _) -> None
+           | None -> None)
       | _ -> None
     in
 
