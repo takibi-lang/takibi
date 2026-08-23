@@ -742,6 +742,11 @@ fn scheduled_process_table_clear() {
         }
         unified_fd_context_release(slot);
         address_space_release_root(slot);
+        // No exec teardown here, deliberately: a whole-world reset is not
+        // a process exiting, and address_space_release_root above has
+        // already freed the mappings an installed image would name. Adding
+        // one would count reaps that no process performed.
+        process_image_record_release(slot);
         scheduled_process_records[slot].pid = 0;
         scheduled_process_records[slot].saved_sp = 0;
         scheduled_process_records[slot].state = ProcessSlotState::Free;
@@ -1040,6 +1045,13 @@ fn scheduled_process_reap(
     scheduled_process_state_drop(state);
     unified_fd_context_release(owner.pool_index);
     address_space_release_root(owner.pool_index);
+    // GitHub issue #392: a root's image record dies with the process, as
+    // the fd context above already does -- so this is the last moment its
+    // installed exec image can be torn down and accounted for, and the
+    // teardown moved here from the parent's return for exactly that
+    // reason. Root 0 is exempt inside the release itself.
+    process_image_exec_teardown(owner.pool_index);
+    process_image_record_release(owner.pool_index);
     slotmap_remove(&scheduled_process_pool,
                    freelist_owner_new(owner.pool_index, owner.generation));
     scheduled_process_records[owner.pool_index].saved_sp = 0;
@@ -1111,7 +1123,7 @@ fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool {
 // at the larger ceiling #246 moved to. ProcessHandle is a plain struct
 // (not an indexed/existential owner type), so an array of them is legal
 // storage, unlike a linear owner such as PageRunOwner or FreelistOwner.
-fn scheduled_process_table_probe() -> bool {
+fn scheduled_process_table_probe() -> bool !{unsafe} {
     scheduled_process_table_init();
     let mut handles: [ProcessHandle; KERNEL_PROCESS_MAX];
     for i: usize in 0..<KERNEL_PROCESS_MAX {
@@ -1189,6 +1201,20 @@ fn scheduled_process_table_probe() -> bool {
         if (scheduled_process_probe_cycle(handles[i]) == false) {
             return false;
         }
+    }
+    // GitHub issue #392: an image record dies with its process now, so
+    // allocating every slot and then cycling every one of them must leave
+    // the pool holding exactly ONE record -- root 0's. That is the single
+    // record release exempts, because root 0 is the permanent bootstrap
+    // root whose image state is established once and read on every later
+    // stack fault. Stated as the surviving count rather than as a delta:
+    // the answer is 1 whether or not this probe is what created it.
+    //
+    // This is the detector for the release path, added with it. Sixteen
+    // records allocated and fifteen not given back is what the process
+    // table's own size used to hide.
+    if (process_image_record_live_count() != 1) {
+        return false;
     }
     return true;
 }

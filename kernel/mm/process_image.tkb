@@ -120,6 +120,15 @@ fn process_image_record_missing_uses() -> usize {
     return process_image_record_missing_count;
 }
 
+// GitHub issue #392: how many root records the pool is holding. A
+// create-and-reap cycle must give every one of them back, and
+// scheduled_process_table_probe asserts exactly that -- the detector for
+// this release path, built in with it rather than after the first leak.
+fn process_image_record_live_count() -> usize !{unsafe} {
+    process_image_pool_init();
+    return intrusive_pool_live_count(&process_image_pool);
+}
+
 private fn process_image_pool_init() {
     if (process_image_pool_ready) { return; }
     process_image_pool_ready = true;
@@ -158,23 +167,40 @@ private fn process_image_record_at(root: usize) -> *ProcessImageRecord !{unsafe}
     return record;
 }
 
+// The state a root's record starts in, written down rather than left as
+// whatever insert_zeroed produced (issue #392). Zero is not the fresh
+// value of stack_lowest_l3: the stack grows DOWNWARD from the top page,
+// so "nothing grown yet" is the top page, not 0. It is only unread today
+// because stack_growth_active gates it, which is an argument the next
+// reader should not have to reconstruct.
+private fn process_image_record_reset(record: *ProcessImageRecord) {
+    record.active_page_count = 0;
+    record.stack_growth_active = false;
+    record.stack_lowest_l3 = process_stack_top_page();
+    record.stack_top_page = process_stack_top_page();
+    record.stack_low_page = PROCESS_STACK_LOW_STATIC;
+    record.heap_page_count = PROCESS_HEAP_PAGES_DEFAULT;
+    record.exec_image_installed = false;
+    record.exec_image_page_count = 0;
+}
+
 // Acquired by scheduled_process_alloc for every process, by
 // kernel_syscall_process_configure for the bootstrap, and on demand by
 // process_image_record_at for any other root a caller names. Idempotent.
 //
-// NOTHING RELEASES. The array this replaces kept a root's record for the
-// life of the kernel -- a slot's entry survived reap and was reused as-is
-// by the next occupant -- so releasing at reap would be a LIFETIME change
-// smuggled in alongside a storage change. It is observable, not
-// theoretical: root 0's stack_growth_active is set once at bootstrap and
-// read on every later stack fault, and wiring a release in cost one boot
-// to find, via the "shell stack: demand-grown" evidence line going
-// missing.
+// Released by scheduled_process_reap and scheduled_process_table_clear,
+// beside the fd context and the address-space root, EXCEPT for root 0 --
+// the permanent bootstrap root, whose record is set up once during boot
+// and read on every later stack fault, exactly the exemption
+// address_space_release_root already makes one layer down.
 //
-// Bounded by the number of distinct roots, which is the process table's
-// size. That stops being a bound when the process table itself is pooled,
-// and deciding which fields must reset on reuse is the change that has to
-// happen first.
+// It did not always release. The array this replaced kept a root's record
+// for the life of the kernel, so a lifetime change had to be made
+// deliberately rather than smuggled in alongside a storage change -- and
+// it is observable: an earlier attempt without the root-0 exemption cost
+// one boot to find, via the "shell stack: demand-grown" evidence line
+// going missing. It has to release now, because what bounded the number
+// of live records was the process table's size.
 fn process_image_record_ensure(root: usize) -> bool !{unsafe} {
     process_image_pool_init();
     let address: usize = scheduled_process_image_record(root);
@@ -191,10 +217,37 @@ fn process_image_record_ensure(root: usize) -> bool !{unsafe} {
         IntrusivePoolInsertResult::Allocated(owner) => {
             let slot: usize = intrusive_owner_slot(owner);
             let stamp: usize = intrusive_owner_generation(owner);
+            let record: *ProcessImageRecord =
+                intrusive_pool_ref(&process_image_pool, owner);
+            process_image_record_reset(record);
             intrusive_owner_drop(owner);
             scheduled_process_set_image_record(root, slot, stamp);
             return true;
         }
+    }
+}
+
+// GitHub issue #392: gives a root's record back. Root 0 keeps its record
+// for the life of the kernel -- see process_image_record_ensure's own note
+// for why that is the bootstrap root's exemption and not a leak.
+fn process_image_record_release(root: usize) !{unsafe} {
+    if (root == 0) { return; }
+    let address: usize = scheduled_process_image_record(root);
+    if (address == 0) { return; }
+    // Read the generation BEFORE clearing the handle, or the owner
+    // rebuilt below names the right slot with the wrong occupant and the
+    // pool correctly refuses it.
+    let generation: usize = scheduled_process_image_record_generation(root);
+    scheduled_process_set_image_record(root, 0, 0);
+    let owner = intrusive_owner_new(&process_image_pool, address, generation);
+    let guard = intrusive_pool_lock(&process_image_pool);
+    let (ok, reason) = intrusive_remove_outcome(
+        intrusive_pool_remove(&process_image_pool, guard, owner));
+    intrusive_pool_unlock(&process_image_pool, guard);
+    if (ok == false) {
+        kernel_boot_log("process image: releasing a root record -- ");
+        kernel_boot_log(reason);
+        kernel_boot_log("\n");
     }
 }
 
@@ -806,7 +859,22 @@ fn process_image_exec_reap_evidence() -> (usize, usize, usize) {
             process_image_exec_reap_stack_growth_count);
 }
 
-fn process_image_exec_reap(root_index: usize) {
+// GitHub issue #392: split in two, because the two halves belong to two
+// different moments once a root's record dies with its process.
+//
+// The TEARDOWN half is about the child's own image, and now runs from
+// scheduled_process_reap -- immediately after address_space_release_root,
+// so the window-is-clear evidence still measures a fully torn-down root,
+// and before process_image_record_release, which is what makes it the last
+// moment the installed flag and page count still exist.
+//
+// It resets the target root on EVERY path, installed or not. Leaving it
+// pointing at the dead child's root is not a tidiness question: the next
+// EL0 COW permission fault resolves against process_image_root_index(),
+// and against the wrong root it cannot resolve at all. That was one
+// fail-stop in the busybox fixture, found the first time this release was
+// wired in.
+fn process_image_exec_teardown(root_index: usize) {
     if (root_index < KERNEL_PROCESS_MAX) {
         let root: {0..<KERNEL_PROCESS_MAX as usize} = root_index;
         process_image_target_root = root;
@@ -832,22 +900,28 @@ fn process_image_exec_reap(root_index: usize) {
                 process_image_exec_reap_clean_count =
                     process_image_exec_reap_clean_count + 1;
             }
-            // process_image_unmap only retargets later page-table writes at
-            // root 0; it leaves TTBR0 on the root it just emptied. The
-            // parent is resumed straight after this reap, so activate its
-            // root here exactly as process_image_clone_vm_reap does for
-            // the plain fork/exit path -- otherwise the parent returns to
-            // EL0 against the unmapped child root and faults on its own
-            // first instruction. GitHub issue #245: this runs from
-            // kernel_syscall_clone_parent_return(), reached only via
-            // kernel_process_child_exit()'s own return value -- by
-            // construction that has already switched execution_current_
-            // handle back to the parent, so kernel_process_current_root()
-            // is already correct here, not a fixed root 0.
-            process_image_activate_root(
-                address_space_root_slot(kernel_process_current_root()));
         }
+        process_image_target_root = 0;
     }
+}
+
+// The RESUME half stays where it was, at the parent's return, because that
+// is the only moment "current" means the parent.
+//
+// process_image_unmap only retargets later page-table writes at root 0; it
+// leaves TTBR0 on the root it just emptied. The parent is resumed straight
+// after this, so activate its root here exactly as process_image_clone_vm_
+// reap does for the plain fork/exit path -- otherwise the parent returns to
+// EL0 against the unmapped child root and faults on its own first
+// instruction. GitHub issue #245: this runs from
+// kernel_syscall_clone_parent_return(), reached only via
+// kernel_process_child_exit()'s own return value -- by construction that
+// has already switched execution_current_handle back to the parent, so
+// kernel_process_current_root() is already correct here, not a fixed
+// root 0.
+fn process_image_exec_resume_root() {
+    process_image_activate_root(
+        address_space_root_slot(kernel_process_current_root()));
 }
 
 // A flat, NUL-terminated argv blob is deliberately used instead of an array

@@ -387,17 +387,13 @@ fn kernel_process_child_exec_reap() {
     // child that just exited (kernel_process_last_child_pid()), not
     // "current" (which is now the parent itself).
     //
-    // GitHub issue #392: the root to reap is asked for, not computed as
-    // `exited_pid - 1`. A pid is a number of its own now, minted in
-    // creation order rather than read off the slot index.
+    // GitHub issue #392: the child's IMAGE is already torn down by then --
+    // scheduled_process_reap does it, which is the last moment the child's
+    // own record still exists. What is left here is the half that can only
+    // happen now: putting the parent's root back in TTBR0.
     let exited_pid: usize = kernel_process_last_child_pid();
     if (kernel_process_exec_image_live_for_pid(exited_pid)) {
-        match scheduled_process_slot_for_pid(exited_pid) {
-            ProcessSlotForPidResult::Missing => {}
-            ProcessSlotForPidResult::Found(slot) => {
-                process_image_exec_reap(slot);
-            }
-        }
+        process_image_exec_resume_root();
         kernel_process_exec_clear_for_pid(exited_pid);
     }
 }
