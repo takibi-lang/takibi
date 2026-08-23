@@ -138,7 +138,16 @@ if [ ! -s "$UART_LOG" ]; then
     echo "error: no UART output captured -- kernel did not boot" >&2
     exit 1
 fi
-sed -e 's|^/ # ||' <"$UART_LOG" | tr -d '\r' >"$UART_LOG.normalized"
+# The persistent-shell checkpoints name the tracked child's pid, and a pid
+# is minted monotonically rather than read off the process slot (issue
+# #392), so its VALUE counts how many processes the boot created before
+# this fixture -- an artifact of fixture order, not of what this view
+# means. That the four checkpoints all name the SAME child is enforced in
+# the kernel, which logs each of the last three only on a match against
+# the pid the fork checkpoint recorded.
+sed -e 's|^/ # ||' \
+    -e 's|^\(persistent shell: [a-z ]*\)pid=[0-9][0-9]*$|\1pid=<child>|' \
+    <"$UART_LOG" | tr -d '\r' >"$UART_LOG.normalized"
 
 # One boot, several independent views -- see this file's header and
 # scripts/run_kernel_hwtest_rpi5.sh's own identical loop.

@@ -1,1 +1,1 @@
-^persistent shell: (fork child|child selected|exec prepare|exec commit) pid=3$|^persistent server: listener ready port=8080$
+^persistent shell: (fork child|child selected|exec prepare|exec commit) pid=<child>$|^persistent server: listener ready port=8080$

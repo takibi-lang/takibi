@@ -417,6 +417,13 @@ HTTPd did not become ready" timeout, the kernel now prints a
 selected, exec prepare, and exec commit for that HTTPd child specifically
 (gated on `kernel_syscall_persistent_shell_active()`, not on any bounded
 self-test fork), plus a listener-ready line for the socket boundary.
+The view that compares those four lines normalizes the pid to `<child>`:
+a pid is minted in creation order rather than read off the process slot,
+so its value counts how many processes the boot created before this
+fixture, which is a fact about fixture order and not about the lifecycle.
+That all four checkpoints name the *same* child is enforced in the kernel
+-- the last three log only on a match against the pid the fork checkpoint
+recorded -- so the view does not need the number to say it.
 `scripts/run_kernel_uart_driver.py` tracks these in order alongside its own
 host-observed boundaries (command submitted, parent resumed) and, on a
 stall, names the last completed checkpoint and the next expected one

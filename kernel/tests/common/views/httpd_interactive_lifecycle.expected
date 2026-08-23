@@ -1,5 +1,5 @@
-persistent shell: fork child pid=3
-persistent shell: child selected pid=3
-persistent shell: exec prepare pid=3
-persistent shell: exec commit pid=3
+persistent shell: fork child pid=<child>
+persistent shell: child selected pid=<child>
+persistent shell: exec prepare pid=<child>
+persistent shell: exec commit pid=<child>
 persistent server: listener ready port=8080

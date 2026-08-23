@@ -20,6 +20,12 @@ use "kernel/mm/address_space.tkb";
 //   for the full exhaustion-result/boundary-test contract for this and
 //   every other backing resource scheduled_process_alloc() touches
 //   (address-space roots, ASIDs, physical pages).
+// - A pid is minted monotonically per run of the process table and is
+//   never recycled within one run, so a pid found in a record does not
+//   mean that process is still live -- scheduled_process_slot_for_pid
+//   answers "which slot last held this pid", which is what the exec-reap
+//   path needs and is all it promises. That lookup is a linear scan of
+//   the table; the slot -> pid direction is a field read.
 // - A process may have at most one live child at a time; wait4()
 //   concurrent multi-child wait/reap is out of scope (kernel/README.md's
 //   "Current limits" section is authoritative for this and other
@@ -125,6 +131,21 @@ struct ProcessHandle {
 // and growable kernel-stack pool remain separate and unchanged in this
 // behavior-preserving consolidation stage.
 struct ProcessRecord {
+    // GitHub issue #392: the pid this process reports to userspace, and
+    // the ONLY place it is written. It used to be computed as
+    // `pool_index + 1` at some twenty sites, which made the pid a second
+    // reading of the slot index rather than a number of its own -- and a
+    // slot index is exactly what the remaining stage of this issue stops
+    // being a small integer. A pid derived from a pool address would be
+    // an address: visible to userspace through getpid()/wait4(), printed
+    // into every oops line, and expected to be 1 for the bootstrap
+    // process by the oops lane's own pattern.
+    //
+    // Allocated monotonically from scheduled_process_next_pid, so a
+    // reused slot does NOT reuse its pid. That is a deliberate behaviour
+    // change and the Unix one: `pid - 1` was a valid way to find a
+    // process only while a pid named a table row.
+    pid: usize;
     saved_sp: usize;
     state: ProcessSlotState;
     wait_reason: ProcessWaitReason;
@@ -203,6 +224,13 @@ private let mut scheduled_process_store:
 private let mut scheduled_process_pool: SlotMap(KERNEL_PROCESS_MAX);
 private let mut scheduled_process_records:
     [ProcessRecord; KERNEL_PROCESS_MAX];
+// GitHub issue #392: the pid namespace, monotonic within one run of the
+// process table. Reset by scheduled_process_table_init/_clear -- the two
+// points that already restart slot numbering -- so the bootstrap process
+// created right after a reset is pid 1, which the oops lane matches
+// literally. Nothing recycles a pid inside one run: that is what makes it
+// independent of the slot it happens to occupy.
+private let mut scheduled_process_next_pid: usize = 1;
 
 // Keep enum field reads in their typed result context. Direct enum reads
 // through an array-of-struct field do not yet lower a load correctly.
@@ -214,6 +242,42 @@ fn scheduled_process_record_state(
 fn scheduled_process_record_wait_reason(
         slot: {0..<KERNEL_PROCESS_MAX as usize}) -> ProcessWaitReason {
     return scheduled_process_records[slot].wait_reason;
+}
+
+// GitHub issue #392: both directions between a pid and a slot, asked
+// rather than computed. `pool_index + 1` and `pid - 1` were the same
+// conversion written inline at some twenty sites, each of which silently
+// assumed a slot is a small integer.
+//
+// A reaped slot keeps its pid until the slot is handed out again, which
+// is what `pid - 1` also did and what the exec-reap path depends on: it
+// asks about a child that has already exited but whose image has not yet
+// been reclaimed.
+fn scheduled_process_pid_of_slot(slot: usize) -> usize {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        return scheduled_process_records[checked].pid;
+    }
+    return 0;
+}
+
+fn scheduled_process_pid_of_handle(handle: ProcessHandle) -> usize {
+    return scheduled_process_records[handle.pool_index].pid;
+}
+
+must_use variant ProcessSlotForPidResult {
+    Missing;
+    Found(usize);
+}
+
+fn scheduled_process_slot_for_pid(pid: usize) -> ProcessSlotForPidResult {
+    if (pid == 0) { return ProcessSlotForPidResult::Missing; }
+    for slot: usize in 0..<KERNEL_PROCESS_MAX {
+        if (scheduled_process_records[slot].pid == pid) {
+            return ProcessSlotForPidResult::Found(slot);
+        }
+    }
+    return ProcessSlotForPidResult::Missing;
 }
 
 // GitHub issue #392: where kernel/kernel/fd_table.tkb keeps this
@@ -579,7 +643,9 @@ fn scheduled_process_table_init() {
     // different change from swapping a pool primitive.
     static_assert(ASID_MAX == KERNEL_PROCESS_MAX,
                   "ASID_MAX must equal KERNEL_PROCESS_MAX: every live process slot must be able to hold an ASID");
+    scheduled_process_next_pid = 1;
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
+        scheduled_process_records[slot].pid = 0;
         scheduled_process_records[slot].saved_sp = 0;
         scheduled_process_records[slot].state = ProcessSlotState::Free;
         scheduled_process_records[slot].wait_reason = ProcessWaitReason::None;
@@ -604,10 +670,12 @@ fn scheduled_process_table_clear() {
         }
         unified_fd_context_release(slot);
         address_space_release_root(slot);
+        scheduled_process_records[slot].pid = 0;
         scheduled_process_records[slot].saved_sp = 0;
         scheduled_process_records[slot].state = ProcessSlotState::Free;
         scheduled_process_records[slot].wait_reason = ProcessWaitReason::None;
     }
+    scheduled_process_next_pid = 1;
     slotmap_init(&scheduled_process_pool);
 }
 
@@ -716,6 +784,12 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                 }
                 scheduled_process_records[slot].saved_sp =
                     bottom + KERNEL_PROCESS_STACK_SIZE;
+                // GitHub issue #392: the one place a pid is minted. Past
+                // every branch that can still refuse the slot except the
+                // put conflict below, which gives it back.
+                scheduled_process_records[slot].pid =
+                    scheduled_process_next_pid;
+                scheduled_process_next_pid = scheduled_process_next_pid + 1;
                 // GitHub issues #375/#376: a reused slot reuses its run,
                 // so it would otherwise inherit the previous occupant's
                 // marks. Re-poison BOTH halves here so the guard, the
@@ -735,6 +809,7 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                         slotmap_remove(&scheduled_process_pool,
                                        freelist_owner_new(slot, generation));
                         scheduled_process_records[slot].saved_sp = 0;
+                        scheduled_process_records[slot].pid = 0;
                         scheduled_process_records[slot].state =
                             ProcessSlotState::Free;
                         return ScheduledProcessAllocResult::Full;
@@ -885,8 +960,8 @@ fn scheduled_process_reap(
         owner: sink ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Exited]) {
     kernel_process_trace_record(
-        ProcessTraceReap, owner.pool_index + 1, owner.generation,
-        0, 0, 4, 0, owner.pool_index,
+        ProcessTraceReap, scheduled_process_pid_of_slot(owner.pool_index),
+        owner.generation, 0, 0, 4, 0, owner.pool_index,
         scheduled_process_records[owner.pool_index].saved_sp, 0);
     scheduled_process_state_drop(state);
     unified_fd_context_release(owner.pool_index);
@@ -1171,8 +1246,8 @@ fn kernel_process_trace_current(event: usize, peer: ProcessHandle,
     let state: usize = kernel_process_crash_state();
     let reason: usize = kernel_process_crash_wait_reason();
     kernel_process_trace_record(
-        event, current.pool_index + 1, current.generation,
-        peer.pool_index + 1, peer.generation, state, reason,
+        event, scheduled_process_pid_of_handle(current), current.generation,
+        scheduled_process_pid_of_handle(peer), peer.generation, state, reason,
         current.pool_index, scheduled_process_records[current.pool_index].saved_sp,
         aux);
 }
@@ -1181,7 +1256,8 @@ fn kernel_process_trace_address_space_activate(root: usize) {
     if (execution_current_live == false) { return; }
     let mut current: ProcessHandle = execution_current_handle;
     kernel_process_trace_record(
-        ProcessTraceAddressSpaceActivate, current.pool_index + 1,
+        ProcessTraceAddressSpaceActivate,
+        scheduled_process_pid_of_handle(current),
         current.generation, 0, 0, kernel_process_crash_state(),
         kernel_process_crash_wait_reason(), root,
         scheduled_process_records[current.pool_index].saved_sp, 0);
@@ -1191,8 +1267,9 @@ fn kernel_process_trace_exec_prepare() {
     if (execution_current_live == false) { return; }
     let mut current: ProcessHandle = execution_current_handle;
     kernel_process_trace_record(
-        ProcessTraceExecPrepare, current.pool_index + 1, current.generation,
-        0, 0, kernel_process_crash_state(), kernel_process_crash_wait_reason(),
+        ProcessTraceExecPrepare, scheduled_process_pid_of_handle(current),
+        current.generation, 0, 0, kernel_process_crash_state(),
+        kernel_process_crash_wait_reason(),
         current.pool_index, scheduled_process_records[current.pool_index].saved_sp,
         0);
 }
@@ -1208,9 +1285,10 @@ fn kernel_process_trace_handle(event: usize, subject: ProcessHandle,
     let state_code: usize = state_u8 as usize;
     let reason_code: usize = reason_u8 as usize;
     kernel_process_trace_record(
-        event, subject.pool_index + 1, subject.generation,
-        peer.pool_index + 1, peer.generation, state_code, reason_code,
-        subject.pool_index, scheduled_process_records[subject.pool_index].saved_sp,
+        event, scheduled_process_pid_of_handle(subject), subject.generation,
+        scheduled_process_pid_of_handle(peer), peer.generation, state_code,
+        reason_code, subject.pool_index,
+        scheduled_process_records[subject.pool_index].saved_sp,
         aux);
 }
 
@@ -1318,7 +1396,8 @@ fn kernel_process_execution_reset() {
             execution_current_live = kernel_process_start_handle(root);
             if (execution_current_live) {
                 kernel_process_trace_record(
-                    ProcessTraceResume, root.pool_index + 1, root.generation,
+                    ProcessTraceResume,
+                    scheduled_process_pid_of_handle(root), root.generation,
                     0, 0, 2, 0, root.pool_index,
                     scheduled_process_records[root.pool_index].saved_sp, 0);
             }
@@ -2412,7 +2491,8 @@ fn kernel_process_crash_trace_ring_probe() -> bool {
 // designated Parent -- the only real precondition is that current does
 // not already have a live child of its own (the same single-child-per-
 // parent invariant the old model enforced globally, now checked against
-// current's own slot). The new child's pid (its pool_index + 1) is
+// current's own slot). The new child's pid (minted by
+// scheduled_process_alloc, not derived from its slot) is
 // returned directly instead of the literal 2, so a process running on
 // any slot gets a correct child pid back, not just the original root.
 fn kernel_process_clone_begin(flags: usize, child_stack: usize)
@@ -2461,11 +2541,14 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             execution_current_handle = child;
             process_test_evidence_record_clone();
             kernel_process_trace_record(
-                ProcessTraceFork, child.pool_index + 1, child.generation,
-                parent.pool_index + 1, parent.generation, 1, 0,
-                child.pool_index, scheduled_process_records[child.pool_index].saved_sp,
+                ProcessTraceFork, scheduled_process_pid_of_handle(child),
+                child.generation,
+                scheduled_process_pid_of_handle(parent), parent.generation,
+                1, 0, child.pool_index,
+                scheduled_process_records[child.pool_index].saved_sp,
                 flags);
-            return ProcessCloneResult::ChildReady(child.pool_index + 1);
+            return ProcessCloneResult::ChildReady(
+                scheduled_process_pid_of_handle(child));
         }
     }
 }
@@ -2568,7 +2651,7 @@ fn kernel_process_parent_is_root() -> bool {
 
 fn kernel_process_current_pid() -> usize {
     if (execution_current_live) {
-        return execution_current_handle.pool_index + 1;
+        return scheduled_process_pid_of_handle(execution_current_handle);
     }
     return 1;
 }
@@ -2611,7 +2694,8 @@ fn kernel_process_crash_parent_pid() -> usize {
     if (execution_current_live == false) { return 0; }
     let slot: usize = execution_current_handle.pool_index;
     if (scheduled_process_records[slot].has_parent == false) { return 0; }
-    return scheduled_process_records[slot].parent.pool_index + 1;
+    return scheduled_process_pid_of_handle(
+        scheduled_process_records[slot].parent);
 }
 
 fn kernel_process_crash_state() -> usize {
@@ -2686,8 +2770,8 @@ fn kernel_process_current_child_pid() -> usize {
             false) {
         return 0;
     }
-    return scheduled_process_records[execution_current_handle.pool_index].child
-        .pool_index + 1;
+    return scheduled_process_pid_of_handle(
+        scheduled_process_records[execution_current_handle.pool_index].child);
 }
 
 fn kernel_process_child_exit(status: usize) -> usize {
@@ -2718,15 +2802,17 @@ fn kernel_process_child_exit(status: usize) -> usize {
     let mut parent: ProcessHandle =
         scheduled_process_records[child.pool_index].parent;
     kernel_process_trace_record(
-        ProcessTraceExit, child.pool_index + 1, child.generation,
-        parent.pool_index + 1, parent.generation, 2, 0, child.pool_index,
+        ProcessTraceExit, scheduled_process_pid_of_handle(child),
+        child.generation,
+        scheduled_process_pid_of_handle(parent), parent.generation, 2, 0,
+        child.pool_index,
         scheduled_process_records[child.pool_index].saved_sp, status);
     // GitHub issue #248: per-slot (indexed by the WAITING PARENT's own
     // pool_index), not a bare global -- see these fields' own header
     // comment for why a global here breaks a multi-level concurrent
     // wait4() chain.
     scheduled_process_records[parent.pool_index].last_child_pid =
-        child.pool_index + 1;
+        scheduled_process_pid_of_handle(child);
     scheduled_process_records[parent.pool_index].child_exit_status = status;
     scheduled_process_records[parent.pool_index].child_waitable = true;
     match scheduled_process_running_take(child) {
@@ -2846,28 +2932,18 @@ fn kernel_process_child_wait_status_consume_for(slot: usize) {
     }
 }
 
-fn scheduled_process_exec_narrow_slot(pid: usize)
-        -> {0..<KERNEL_PROCESS_MAX as usize} {
-    if (pid == 0) { return 0; }
-    let slot_value: usize = pid - 1;
-    if (slot_value < KERNEL_PROCESS_MAX) {
-        let slot: {0..<KERNEL_PROCESS_MAX as usize} = slot_value;
-        return slot;
-    }
-    return 0;
-}
-
 // Called from kernel_process_child_exec_prepare() right after that
 // process's own execve() succeeds -- execution_current_handle still
 // names it directly, no switch has happened yet.
 fn kernel_process_child_exec_mark() {
     if (execution_current_live) {
-        let slot = scheduled_process_exec_narrow_slot(
-            execution_current_handle.pool_index + 1);
+        let slot: {0..<KERNEL_PROCESS_MAX as usize} =
+            execution_current_handle.pool_index;
         scheduled_process_records[slot].exec_image_live = true;
         let mut current: ProcessHandle = execution_current_handle;
         kernel_process_trace_record(
-            ProcessTraceExecCommit, current.pool_index + 1, current.generation,
+            ProcessTraceExecCommit,
+            scheduled_process_pid_of_handle(current), current.generation,
             0, 0, kernel_process_crash_state(), kernel_process_crash_wait_reason(),
             current.pool_index, scheduled_process_records[current.pool_index].saved_sp,
             0);
@@ -2884,15 +2960,28 @@ fn kernel_process_child_exec_mark() {
 // parent). Taking an explicit pid removes the ambiguity instead of
 // guessing which one "current" means at the call site.
 fn kernel_process_exec_image_live_for_pid(pid: usize) -> bool {
-    if (pid == 0 || pid - 1 >= KERNEL_PROCESS_MAX) { return false; }
-    return scheduled_process_records[
-        scheduled_process_exec_narrow_slot(pid)].exec_image_live;
+    match scheduled_process_slot_for_pid(pid) {
+        ProcessSlotForPidResult::Missing => { return false; }
+        ProcessSlotForPidResult::Found(slot) => {
+            if (slot < KERNEL_PROCESS_MAX) {
+                let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+                return scheduled_process_records[checked].exec_image_live;
+            }
+            return false;
+        }
+    }
 }
 
 fn kernel_process_exec_clear_for_pid(pid: usize) {
-    if (pid == 0 || pid - 1 >= KERNEL_PROCESS_MAX) { return; }
-    scheduled_process_records[
-        scheduled_process_exec_narrow_slot(pid)].exec_image_live = false;
+    match scheduled_process_slot_for_pid(pid) {
+        ProcessSlotForPidResult::Missing => {}
+        ProcessSlotForPidResult::Found(slot) => {
+            if (slot < KERNEL_PROCESS_MAX) {
+                let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+                scheduled_process_records[checked].exec_image_live = false;
+            }
+        }
+    }
 }
 
 // GitHub issue #245: the old execution_process == Parent conjunct asserted

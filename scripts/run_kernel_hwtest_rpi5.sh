@@ -381,7 +381,16 @@ trap - EXIT INT TERM HUP
 # command's short output can arrive as `/ # repl-ok` rather than as a separate
 # line. Views describe semantic output, not the interactive prompt; normalize
 # that prefix before projecting the shared capture.
-sed -e 's|^/ # ||' <"$UART_LOG" | tr -d '\r' >"$UART_LOG.normalized"
+# The persistent-shell checkpoints name the tracked child's pid, and a pid
+# is minted monotonically rather than read off the process slot (issue
+# #392), so its VALUE counts how many processes the boot created before
+# this fixture -- an artifact of fixture order, not of what this view
+# means. That the four checkpoints all name the SAME child is enforced in
+# the kernel, which logs each of the last three only on a match against
+# the pid the fork checkpoint recorded.
+sed -e 's|^/ # ||' \
+    -e 's|^\(persistent shell: [a-z ]*\)pid=[0-9][0-9]*$|\1pid=<child>|' \
+    <"$UART_LOG" | tr -d '\r' >"$UART_LOG.normalized"
 
 # One boot, several independent views. Common views are supplemented by
 # platform-specific views; a platform file overrides a common file with the

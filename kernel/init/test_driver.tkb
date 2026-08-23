@@ -386,9 +386,18 @@ fn kernel_process_child_exec_reap() {
     // already switched to the parent, so the pid to ask about is the
     // child that just exited (kernel_process_last_child_pid()), not
     // "current" (which is now the parent itself).
+    //
+    // GitHub issue #392: the root to reap is asked for, not computed as
+    // `exited_pid - 1`. A pid is a number of its own now, minted in
+    // creation order rather than read off the slot index.
     let exited_pid: usize = kernel_process_last_child_pid();
     if (kernel_process_exec_image_live_for_pid(exited_pid)) {
-        process_image_exec_reap(exited_pid - 1);
+        match scheduled_process_slot_for_pid(exited_pid) {
+            ProcessSlotForPidResult::Missing => {}
+            ProcessSlotForPidResult::Found(slot) => {
+                process_image_exec_reap(slot);
+            }
+        }
         kernel_process_exec_clear_for_pid(exited_pid);
     }
 }
