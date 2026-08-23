@@ -403,8 +403,8 @@ Low to high: `||` < `|` < `^` < comparison < `&` < `as` < `+`/`-` < `>>`
 Notably different from C: `&` (bitwise AND) binds **tighter** than
 comparison, so `n & mask == 0` means `(n & mask) == 0` (this avoids a
 well-known C footgun). `^` and `|` are looser than comparison, matching
-C. Mixing `&`, `|`, or `^` directly with a comparison without parentheses
-produces a warning that states the grouping selected by these rules; add
+C. Mixing `&`, `|`, or `^` directly with a comparison without parentheses is
+a compile error that states the grouping selected by these rules; add
 parentheses around either reading to make it explicit. `%` shares precedence
 with `*`/`/`.
 
@@ -2723,18 +2723,17 @@ above): a function using only the block form still needs its own
 `!{unsafe}`, and the block form is not a way to make `!{unsafe}` alone
 sufficient for a whole function body.
 
-### Unnecessary-unsafe warning
+### Unnecessary-unsafe error
 
 The compiler tracks, per statement inside `unsafe { stmt* }` (recursively,
 at every nesting depth) and per `unsafe { expr }`, whether anything
 inside it actually elided a runtime check or asserted an otherwise-
-illegal construct. If nothing did, it prints a non-fatal warning (`File
-"...", line N, character C: warning: ...`) suggesting the statement be
-moved outside the scope -- the same "audit density should match real
+illegal construct. If nothing did, compilation fails with an error suggesting
+the statement be moved outside the scope -- the same "audit density should match real
 trust decisions" concern the block form's own scoping guidance above is
 about, now checked mechanically instead of only by review. Always on
 (not gated by a flag): cheap, reuses data the codegen already computes,
-and a real build should have zero such warnings.
+and a real build must have zero such sites.
 
 Two independent sources feed this determination. `llvm_gen.ml` tracks the
 categories it itself decides at codegen time (single-element index

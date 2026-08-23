@@ -31,7 +31,7 @@ let () =
 let parse src =
   Const_env.reset ();
   Type_layout.reset ();
-  Ast.reset_precedence_warnings ();
+  Ast.reset_precedence_errors ();
   let lexbuf = Lexing.from_string src in
   Parser.program Lexer.read lexbuf
 
@@ -52,7 +52,7 @@ let infer src =
 let infer_files files =
   Const_env.reset ();
   Type_layout.reset ();
-  Ast.reset_precedence_warnings ();
+  Ast.reset_precedence_errors ();
   let prog = List.concat_map (fun (filename, src) ->
     let lexbuf = Lexing.from_string src in
     Lexing.set_filename lexbuf filename;
@@ -389,7 +389,7 @@ let expect_ok src () =
 
 let parser_tests = [
   Alcotest.test_case
-    "bitwise/comparison precedence warns unless the reading is parenthesized (issue #398)"
+    "bitwise/comparison precedence is rejected unless the reading is parenthesized (issue #398)"
     `Quick (fun () ->
       ignore (parse
         "fn precedence(a: i32, b: i32, c: i32) {
@@ -397,9 +397,9 @@ let parser_tests = [
            static_assert(a != b | c);
            static_assert(a ^ b <= c);
          }");
-      let warnings = List.rev !Ast.precedence_warning_sites in
-      Alcotest.(check int) "one warning for each mixed operator" 3
-        (List.length warnings);
+      let errors = List.rev !Ast.precedence_error_sites in
+      Alcotest.(check int) "one error for each mixed operator" 3
+        (List.length errors);
       List.iter2 (fun (_, msg) (bitwise, comparison) ->
         Alcotest.(check bool) "names the bitwise operator" true
           (contains_substring msg (Printf.sprintf "`%s` binds" bitwise));
@@ -407,7 +407,7 @@ let parser_tests = [
           (contains_substring msg (Printf.sprintf "`%s` here" comparison));
         Alcotest.(check bool) "explains the chosen parse" true
           (contains_substring msg "inside")
-      ) warnings [("&", "=="); ("|", "!="); ("^", "<=")];
+      ) errors [("&", "=="); ("|", "!="); ("^", "<=")];
       ignore (parse
         "fn precedence_explicit(a: i32, b: i32, c: i32) {
            static_assert((a & b) == c);
@@ -415,8 +415,8 @@ let parser_tests = [
            static_assert((a != b) | c);
            static_assert(a ^ (b <= c));
          }");
-      Alcotest.(check int) "explicit readings do not warn" 0
-        (List.length !Ast.precedence_warning_sites));
+      Alcotest.(check int) "explicit readings compile" 0
+        (List.length !Ast.precedence_error_sites));
 
   Alcotest.test_case "erased view declaration and mint expression parse" `Quick
     (fun () ->

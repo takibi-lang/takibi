@@ -375,7 +375,7 @@ and expr_desc =
    semantic AST remains unchanged. Physical identity is intentional: two
    structurally equal subexpressions at different source sites must not share
    the parenthesized mark. The table is parse-lifetime state and is reset with
-   the warning list before each compilation/test parse. *)
+   the error list before each compilation/test parse. *)
 module PhysicalExpr = Hashtbl.Make (struct
   type t = expr
   let equal a b = a == b
@@ -383,11 +383,11 @@ module PhysicalExpr = Hashtbl.Make (struct
 end)
 
 let parenthesized_exprs : unit PhysicalExpr.t = PhysicalExpr.create 32
-let precedence_warning_sites : (Lexing.position * string) list ref = ref []
+let precedence_error_sites : (Lexing.position * string) list ref = ref []
 
-let reset_precedence_warnings () =
+let reset_precedence_errors () =
   PhysicalExpr.reset parenthesized_exprs;
-  precedence_warning_sites := []
+  precedence_error_sites := []
 
 let mark_parenthesized e =
   PhysicalExpr.replace parenthesized_exprs e ();
@@ -395,8 +395,8 @@ let mark_parenthesized e =
 
 let is_parenthesized e = PhysicalExpr.mem parenthesized_exprs e
 
-let record_precedence_warning loc msg =
-  precedence_warning_sites := (loc, msg) :: !precedence_warning_sites
+let record_precedence_error loc msg =
+  precedence_error_sites := (loc, msg) :: !precedence_error_sites
 
 type stmt = stmt_desc located
 and stmt_desc =

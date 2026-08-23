@@ -612,7 +612,9 @@ let unsafe_depth = ref 0
    (or, for the expr form, the wrapped expr): no change means that
    statement never actually needed to be inside the unsafe scope. Mirrors
    `trap_sites`' own "accumulate a list, let bin/main.ml report it"
-   pattern, deliberately non-fatal (a good-hygiene hint, not a rejection).
+   pattern. bin/main.ml rejects compilation when this list is non-empty:
+   an unsafe scope is an explicit trust boundary, so keeping a redundant one
+   is not merely a style warning.
 
    Scoped to the categories llvm_gen.ml itself decides (single-element
    index elision, subslice-with-unprovable-bounds elision, raw-pointer

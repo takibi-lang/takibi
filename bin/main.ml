@@ -11,12 +11,6 @@ let report_error pos msg =
   let file = pos.Lexing.pos_fname in
   Printf.eprintf "File \"%s\", line %d, character %d: %s\n" file line col msg
 
-let report_warning pos msg =
-  let line = pos.Lexing.pos_lnum in
-  let col = pos.Lexing.pos_cnum - pos.Lexing.pos_bol + 1 in
-  let file = pos.Lexing.pos_fname in
-  Printf.eprintf "File \"%s\", line %d, character %d: warning: %s\n" file line col msg
-
 let parse_file filename =
   let chan = open_in filename in
   let lexbuf = Lexing.from_channel chan in
@@ -144,7 +138,7 @@ let () =
   (try
     Const_env.reset ();
     Type_layout.reset ();
-    Ast.reset_precedence_warnings ();
+    Ast.reset_precedence_errors ();
     (* GitHub issue #55: every file named on the command line is an entry
        point into Use_resolver's `use "path";` closure -- if none of them
        (or anything they transitively `use`) has a single `use`
@@ -173,8 +167,14 @@ let () =
 
     let prog = List.concat_map snd resolved in
 
-    List.rev !Ast.precedence_warning_sites
-    |> List.iter (fun (loc, what) -> report_warning loc what);
+    if !Ast.precedence_error_sites <> [] then begin
+      let sites = List.rev !Ast.precedence_error_sites in
+      List.iter (fun (loc, what) -> report_error loc what) sites;
+      Printf.eprintf
+        "Error: %d ambiguous bitwise/comparison expression(s) require explicit parentheses\n"
+        (List.length sites);
+      exit 1
+    end;
 
     (* GitHub issue #207: compile-time generics. Expands every
        `generic struct` template actually instantiated into an ordinary,
@@ -299,18 +299,19 @@ let () =
       exit 0
     end;
 
-    (* GitHub issue #315 follow-up: "unnecessary unsafe" hygiene warnings.
-       Non-fatal (unlike --forbid-trap below) -- a good-hygiene hint that a
-       statement/expr inside `unsafe { }` never actually elided a check,
-       not a rejection, since the affine/aligned-cast unsafe category is
-       invisible to this check (see Llvm_gen.unsafe_use_marker's own
-       comment) and a false positive there should not block a build.
-       Always on, not gated by a flag: cheap (already-computed data), and
-       every kernel/ site is clean today, so this should not add noise to
-       an ordinary build. *)
+    (* GitHub issue #315/#328 follow-up: an unnecessary unsafe scope is a
+       compile error. Both codegen and type inference contribute evidence
+       that the scope was genuinely needed (see Llvm_gen.unsafe_use_marker),
+       so this is no longer the incomplete codegen-only heuristic whose
+       historical false positives required warning-only treatment. Always
+       on: unsafe marks an explicit trust decision, and a redundant trust
+       boundary has a one-line local fix rather than a compatibility cost. *)
     if !Llvm_gen.unnecessary_unsafe_sites <> [] then begin
       let sites = List.rev !Llvm_gen.unnecessary_unsafe_sites in
-      List.iter (fun (loc, what) -> report_warning loc what) sites
+      List.iter (fun (loc, what) -> report_error loc what) sites;
+      Printf.eprintf "Error: %d unnecessary unsafe site(s)\n"
+        (List.length sites);
+      exit 1
     end;
 
     (* --forbid-trap: reject the program if any runtime trap check remains.

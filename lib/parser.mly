@@ -29,7 +29,7 @@ let bitwise_operator = function
    Takibi deliberately makes bitwise & bind tighter than comparisons (unlike
    C; see SPEC.md). Either unparenthesized mixture is easy to misread.
    Parentheses are otherwise erased from the AST, so the grouping production
-   marks its returned expression out-of-band and this constructor warns only
+   marks its returned expression out-of-band and this constructor rejects only
    when the two operator classes are direct, unparenthesized neighbours. *)
 let make_binop loc op left right =
   let direct_operator classify e =
@@ -45,7 +45,7 @@ let make_binop loc op left right =
          | None -> direct_operator comparison_operator right
        in
        Option.iter (fun comparison ->
-         Ast.record_precedence_warning loc (Printf.sprintf
+         Ast.record_precedence_error loc (Printf.sprintf
            "`%s` binds looser than `%s` here, so this parses with the `%s` comparison inside `%s`. Add parentheses to say which you meant."
            bitwise comparison comparison bitwise)
        ) comparison
@@ -55,7 +55,7 @@ let make_binop loc op left right =
          | None -> direct_operator bitwise_operator right
        in
        Option.iter (fun bitwise ->
-         Ast.record_precedence_warning loc (Printf.sprintf
+         Ast.record_precedence_error loc (Printf.sprintf
            "`%s` binds tighter than `%s` here, so this parses with `%s` inside the `%s` comparison. Add parentheses to say which you meant."
            bitwise comparison bitwise comparison)
        ) bitwise
