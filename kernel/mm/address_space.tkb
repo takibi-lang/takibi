@@ -65,6 +65,9 @@ private fn address_space_backing_pool_init() {
 // not always a live scheduler slot, exactly as issue #392's image-record
 // stage found (1648 such accesses on one boot there). Idempotent.
 fn address_space_backing_ensure(slot: usize) -> bool !{unsafe} {
+    // See address_space_backing_root0: slot 0 needs no allocation, and
+    // must not attempt one, because it is created with the MMU off.
+    if (slot == 0) { return true; }
     address_space_backing_pool_init();
     let address: usize = scheduled_process_address_space_backing(slot);
     let generation: usize =
@@ -92,8 +95,26 @@ fn address_space_backing_ensure(slot: usize) -> bool !{unsafe} {
 // for the reason process_image_record_ensure states: these arrays kept a
 // slot's entry for the life of the kernel, and changing that is a lifetime
 // change rather than a storage one.
+// Root 0's backing is a plain static, NOT a pool slot.
+//
+// kernel_mmu_init creates root 0 with the MMU still OFF -- entry.S calls
+// it before main() -- and that window cannot take the stores pooled
+// storage needs. This file already carries the reason a few lines down:
+// "Rewriting this aggregate while the MMU is off permits LLVM to use an
+// unaligned 128-bit store on RPi5, which faults before the bootstrap root
+// exists." Allocating a page, carving a chunk and zeroing a payload is a
+// great deal more of exactly that, and it cost one hardware boot with
+// zero UART output to rediscover.
+//
+// It is not a wart on the pooling: root 0 is the permanent bootstrap root
+// everywhere else in this kernel too -- never released, named as a bare 0
+// by a dozen call sites. Being the one backing that exists before the
+// allocator does is the same fact, one layer down.
+private let mut address_space_backing_root0: AddressSpaceBacking;
+
 private fn address_space_backing_at(slot: usize)
         -> *AddressSpaceBacking !{unsafe} {
+    if (slot == 0) { return &address_space_backing_root0; }
     if (address_space_backing_ensure(slot) == false) {
         address_space_backing_missing_count =
             address_space_backing_missing_count + 1;
