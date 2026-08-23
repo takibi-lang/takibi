@@ -853,6 +853,16 @@ irq_uart_rx_unmask();
                     // down and before the persistent demo's image is
                     // mapped, rather than after init.sh returns (it no
                     // longer does).
+                    // GitHub issue #392: the image-record fallback exists
+                    // so sixty-odd accesses need no error path they could
+                    // not act on; printing its use count is what keeps it
+                    // from being a silent one. Zero on a healthy kernel,
+                    // and a line that should never appear.
+                    if (process_image_record_missing_uses() != 0) {
+                        kernel_boot_log("process image: records MISSING uses=");
+                        uart_put_udec(process_image_record_missing_uses());
+                        kernel_boot_log("\n");
+                    }
                     if (page_allocator_double_free_count() == 0) {
                         kernel_boot_log("resources: no double free\n");
                     } else {

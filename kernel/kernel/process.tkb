@@ -48,10 +48,13 @@ enum ProcessWaitReason: u8 { None; UartRx; ChildExit; }
 // is separately owned by address_space.tkb; the plain bookkeeping arrays
 // below cost only a few bytes per slot even at this larger N, so that
 // state stays eagerly sized. Allocating on first use is reserved for the
-// genuinely expensive per-slot resources, not applied uniformly. Must match kernel/mm/process_image.tkb's
-// PROCESS_IMAGE_ROOT_MAX and kernel/mm/address_space.tkb's
-// ADDRESS_SPACE_MAX -- root index == this file's own
-// ProcessHandle.pool_index everywhere.
+// genuinely expensive per-slot resources, not applied uniformly. Still
+// the bound on address-space roots (kernel/mm/address_space.tkb's
+// ADDRESS_SPACE_MAX, held equal by a static_assert below) -- root index
+// == this file's own ProcessHandle.pool_index everywhere. The fd context
+// and the image record used to have their own copies of this number and
+// no longer do (issue #392): both are pooled, keyed by a handle this
+// record holds.
 const KERNEL_PROCESS_MAX: usize = 16;
 // GitHub issue #377: four pages. Linux arm64's THREAD_SIZE is 16K and
 // FreeBSD's kern.kstack_pages defaults to four, and this stack carries
@@ -162,6 +165,11 @@ struct ProcessRecord {
     // ensure and release a context it cannot describe.
     fd_context: usize;
     fd_context_generation: usize;
+    // GitHub issue #392: and this process's image record, by the same
+    // rule and for the same reason -- kernel/mm/process_image.tkb is
+    // parsed after this file, so its struct is not nameable here.
+    image_record: usize;
+    image_record_generation: usize;
 }
 
 variant ScheduledProcessValue {
@@ -226,6 +234,31 @@ fn scheduled_process_set_fd_context(slot: usize, address: usize,
         let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
         scheduled_process_records[checked].fd_context = address;
         scheduled_process_records[checked].fd_context_generation = generation;
+    }
+}
+
+fn scheduled_process_image_record(slot: usize) -> usize {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        return scheduled_process_records[checked].image_record;
+    }
+    return 0;
+}
+
+fn scheduled_process_image_record_generation(slot: usize) -> usize {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        return scheduled_process_records[checked].image_record_generation;
+    }
+    return 0;
+}
+
+fn scheduled_process_set_image_record(slot: usize, address: usize,
+                                      generation: usize) {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        scheduled_process_records[checked].image_record = address;
+        scheduled_process_records[checked].image_record_generation = generation;
     }
 }
 
@@ -504,8 +537,6 @@ fn scheduled_process_table_init() {
     // different change from swapping a pool primitive.
     static_assert(ADDRESS_SPACE_MAX == KERNEL_PROCESS_MAX,
                   "ADDRESS_SPACE_MAX must equal KERNEL_PROCESS_MAX: an address-space root is keyed by process slot");
-    static_assert(PROCESS_IMAGE_ROOT_MAX == KERNEL_PROCESS_MAX,
-                  "PROCESS_IMAGE_ROOT_MAX must equal KERNEL_PROCESS_MAX: an image record is keyed by process slot");
     static_assert(ASID_MAX == KERNEL_PROCESS_MAX,
                   "ASID_MAX must equal KERNEL_PROCESS_MAX: every live process slot must be able to hold an ASID");
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
@@ -615,6 +646,14 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                 // has one, which is what lets every entry point there test
                 // "does this process have an fd table" instead of "is this
                 // index in range".
+                if (process_image_record_ensure(slot) == false) {
+                    kernel_boot_log_resource_exhausted(
+                        "physical page allocator" as *u8, BOOT_PAGE_COUNT);
+                    address_space_release_root(slot);
+                    slotmap_remove(&scheduled_process_pool,
+                                   freelist_owner_new(slot, generation));
+                    return ScheduledProcessAllocResult::Full;
+                }
                 if (unified_fd_context_ensure(slot) == false) {
                     kernel_boot_log_resource_exhausted(
                         "physical page allocator" as *u8, BOOT_PAGE_COUNT);
