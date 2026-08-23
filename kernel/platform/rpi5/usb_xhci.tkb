@@ -293,7 +293,7 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 !{unsafe} {
         // rather than literal milliseconds but a permanently wedged device
         // eventually returns 0 instead of sleeping forever.
         for i: usize in 0..<timeout_ms {
-            dma_finish_rx(xhci_evt_ring as *align(64) u8, EVT_RING_TRBS * 16);
+            dma_finish_rx(xhci_evt_ring, EVT_RING_TRBS * 16);
             let d3: u32 = evt_ring[xhci_evt_idx as isize].dw3;
             if ((d3 & 1) == xhci_evt_cycle) {
                 seen = true;
@@ -650,7 +650,7 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
         }
     }
 
-    dma_prepare_rx(msc_csw_buf as *align(64) u8, 64);
+    dma_prepare_rx(msc_csw_buf, 64);
     let mut csw_cc: u32 = usb_bulk_xfer(true, csw_dma, 13);
     // Special-cased STALL handling on the CSW stage specifically, kept
     // to a bounded retry LOOP -- not a single retry, and deliberately
@@ -672,13 +672,13 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
         }
         xhci_recover_bulk_stall(true, xhci_msc_bulk_in_ep, xhci_bulk_in_dci);
         delay_us(50000);
-        dma_prepare_rx(msc_csw_buf as *align(64) u8, 64);
+        dma_prepare_rx(msc_csw_buf, 64);
         csw_cc = usb_bulk_xfer(true, csw_dma, 13);
     }
     if (csw_cc != 1 && csw_cc != 13) {
         return 3;
     }
-    dma_finish_rx(msc_csw_buf as *align(64) u8, 64);
+    dma_finish_rx(msc_csw_buf, 64);
 
     let mut csw_sig: u32 = 0;
     let mut csw_tag: u32 = 0;
@@ -1033,7 +1033,7 @@ fn xhci_configure() -> bool {
     if (cfg9_cc != 1) {
         return false;
     }
-    dma_finish_rx(xhci_ctrl_buf as *align(64) u8, 256);
+    dma_finish_rx(xhci_ctrl_buf, 256);
     let total_len: usize = (control_bytes[2] as usize) |
                            ((control_bytes[3] as usize) << 8);
     // A configuration descriptor is indivisible input. Silently truncating
@@ -1048,7 +1048,7 @@ fn xhci_configure() -> bool {
     if (cfg_cc != 1) {
         return false;
     }
-    dma_finish_rx(xhci_ctrl_buf as *align(64) u8, 256);
+    dma_finish_rx(xhci_ctrl_buf, 256);
     let configuration = control_bytes[0..<total_len];
 
     let mut pos: usize = 0;
@@ -1133,7 +1133,7 @@ fn xhci_configure_endpoint(in_num: {1..<16 as usize},
 
     let input_ctx_base: usize = (xhci_input_ctx as *u8) as usize;
     let input_ctx_dma: usize = input_ctx_base + RP1_DMA_PCI_OFFSET;
-    dma_finish_rx(xhci_device_ctx as *align(64) u8, DEVICE_CTX_SIZE);
+    dma_finish_rx(xhci_device_ctx, DEVICE_CTX_SIZE);
 
     // Seed the Input Context from the controller's OUTPUT Device
     // Context (U-Boot's xhci_slot_copy/xhci_endpoint_copy) -- the Slot
@@ -1262,7 +1262,7 @@ fn disk_initialize() -> DiskIoResult {
     for i: usize in 0..<50 {
         msc_cbw_header(0, false, 6);
         msc_cbw_buf[15] = 0x00;
-        if (msc_run_command(0, false, msc_scratch_buf as *align(64) u8) == 0) {
+        if (msc_run_command(0, false, msc_scratch_buf) == 0) {
             ready = true;
             break;
         }
@@ -1276,7 +1276,7 @@ fn disk_initialize() -> DiskIoResult {
     // storage stack's own fixed assumption.
     msc_cbw_header(8, true, 10);
     msc_cbw_buf[15] = 0x25;
-    if (msc_run_command(8, true, msc_scratch_buf as *align(64) u8) != 0) {
+    if (msc_run_command(8, true, msc_scratch_buf) != 0) {
         return DiskIoResult::Err(-1);
     }
     let mut block_size: u32 = 0;
@@ -1337,13 +1337,13 @@ fn disk_read_sectors(sector: u32, buf: *u8, sectors: usize) -> DiskIoResult {
     msc_cbw_header(length as u32, true, 10);
     msc_scsi_lba_cdb(0x28, sector, sectors);
     let mut rc: u32 = msc_run_command(length as u32, true,
-                                       msc_bounce_buf as *align(64) u8);
+                                       msc_bounce_buf);
     if (rc != 0) {
         msc_recover_transport();
         msc_cbw_header(length as u32, true, 10);
         msc_scsi_lba_cdb(0x28, sector, sectors);
         rc = msc_run_command(length as u32, true,
-                             msc_bounce_buf as *align(64) u8);
+                             msc_bounce_buf);
     }
     if (rc != 0) {
         return DiskIoResult::Err(-1);
@@ -1384,7 +1384,7 @@ fn disk_write_sectors(sector: u32, buf: *u8, sectors: usize) -> DiskIoResult {
     msc_scsi_lba_cdb(0x2A, sector, sectors);
     msc_write10_command_count = msc_write10_command_count + 1;
     let rc1: u32 = msc_run_command(length as u32, false,
-                                    msc_bounce_buf as *align(64) u8);
+                                    msc_bounce_buf);
     if (rc1 == 0) {
         return DiskIoResult::Ok;
     }
@@ -1398,7 +1398,7 @@ fn disk_write_sectors(sector: u32, buf: *u8, sectors: usize) -> DiskIoResult {
     msc_scsi_lba_cdb(0x2A, sector, sectors);
     msc_write10_command_count = msc_write10_command_count + 1;
     let rc2: u32 = msc_run_command(length as u32,
-                                    false, msc_bounce_buf as *align(64) u8);
+                                    false, msc_bounce_buf);
     if (rc2 != 0) {
         return DiskIoResult::Err(-1);
     }

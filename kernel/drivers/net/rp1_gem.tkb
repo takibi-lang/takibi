@@ -132,7 +132,7 @@ fn gem_configure_link() {
 }
 
 fn gem_rearm_rx() {
-    dma_prepare_rx(gem_rx_buf as *align(64) u8, RX_BUF_SIZE);
+    dma_prepare_rx(gem_rx_buf, RX_BUF_SIZE);
     gem_rx_desc[0] = gem_rx_desc[0] & 0xFFFFFFFE;
     dma_prepare_tx(gem_rx_desc as *u8, 64);
 }
@@ -186,7 +186,7 @@ fn net_init() -> NetInitResult !{unsafe} {
     gem_tx_desc[5] = (1 << 31) | (1 << 30); // USED | WRAP
     gem_tx_desc[6] = 0;
     gem_tx_desc[7] = 0;
-    dma_prepare_rx(gem_rx_buf as *align(64) u8, RX_BUF_SIZE);
+    dma_prepare_rx(gem_rx_buf, RX_BUF_SIZE);
     dma_prepare_tx(gem_rx_desc as *u8, 64);
     dma_prepare_tx(gem_tx_desc as *u8, 64);
 
@@ -228,7 +228,7 @@ fn gem_irq_handler() !{interrupt} {
 }
 
 fn net_rx_wait() !{may_block} {
-    dma_finish_rx(gem_rx_desc as *align(64) u8, 64);
+    dma_finish_rx(gem_rx_desc, 64);
     if ((gem_rx_desc[0] & 1) != 0) { return; }
     // GitHub issue #187: wakes on a real GEM RX interrupt, or on
     // kernel/platform/rpi5/timer_irq.tkb's periodic ~15ms tick if nothing
@@ -239,12 +239,12 @@ fn net_rx_wait() !{may_block} {
 }
 
 fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
-    dma_finish_rx(gem_rx_desc as *align(64) u8, 64);
+    dma_finish_rx(gem_rx_desc, 64);
     if ((gem_rx_desc[0] & 1) == 0) {
         return NetRxAcquire::None(view NetRxCanAcquire);
     }
     let len: i32 = (gem_rx_desc[1] & 0x3FFF) as i32;
-    dma_finish_rx(gem_rx_buf as *align(64) u8, RX_BUF_SIZE);
+    dma_finish_rx(gem_rx_buf, RX_BUF_SIZE);
     let slot: {0..<1 as usize} = 0;
     if (len >= 0 && len <= 1514) {
         let valid_len: {0..<1515 as i32} = len;
@@ -316,7 +316,7 @@ fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may
     // rather than a real deadline -- TX completion is not expected to
     // ever genuinely take this long.
     for i: i32 in 0..<1000 {
-        dma_finish_rx(gem_tx_desc as *align(64) u8, 64);
+        dma_finish_rx(gem_tx_desc, 64);
         if (in_flight.slot == 0 && (gem_tx_desc[1] & (1 << 31)) != 0) { break; }
         if (in_flight.slot == 1 && (gem_tx_desc[5] & (1 << 31)) != 0) { break; }
         interrupt_wait();
@@ -361,7 +361,7 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
     // waits via interrupt_wait() (real TCOMP interrupt or the periodic
     // timer tick) instead of a tight CPU spin, bounded the same way.
     for i: i32 in 0..<1000 {
-        dma_finish_rx(gem_tx_desc as *align(64) u8, 64);
+        dma_finish_rx(gem_tx_desc, 64);
         if (slot == 0 && (gem_tx_desc[1] & (1 << 31)) != 0) { break; }
         if (slot == 1 && (gem_tx_desc[5] & (1 << 31)) != 0) { break; }
         interrupt_wait();

@@ -119,7 +119,7 @@ fn platform_memory_detect() -> PlatformMemoryResult {
     mem_msg[5] = 0;
     mem_msg[6] = 0;
     mem_msg[7] = 0;
-    if (mbox_call(mem_msg as *align(64) u32, 8 * 4, MBOX_CH_PROP) == false) {
+    if (mbox_call(mem_msg, 8 * 4, MBOX_CH_PROP) == false) {
         return PlatformMemoryResult::Failed;
     }
     return PlatformMemoryResult::Detected((mem_msg[5], mem_msg[6]));

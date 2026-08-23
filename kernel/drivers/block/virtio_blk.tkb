@@ -149,11 +149,11 @@ fn virtio_blk_submit(request_type: u32, sector: u32,
     descs[2].next = 0;
     dma_prepare_tx(virtio_blk_request_buf as *u8,
                    sizeof(VirtioBlkRequest));
-    dma_prepare_rx(virtio_blk_status_buf as *align(64) u8, 1);
+    dma_prepare_rx(virtio_blk_status_buf, 1);
     if (write) {
         dma_prepare_tx(virtio_blk_data_buf as *u8, 512);
     } else {
-        dma_prepare_rx(virtio_blk_data_buf as *align(64) u8, 512);
+        dma_prepare_rx(virtio_blk_data_buf, 512);
     }
     let avail: *VirtioBlkAvail =
         (queue + VIRTIO_QNUM * (sizeof(VirtioBlkDesc) as isize))
@@ -180,10 +180,10 @@ fn virtio_blk_submit(request_type: u32, sector: u32,
     }
     dma_consume();
     virtio_blk_used_seen = virtio_blk_index_next(virtio_blk_used_seen);
-    dma_finish_rx(virtio_blk_status_buf as *align(64) u8, 1);
+    dma_finish_rx(virtio_blk_status_buf, 1);
     if (virtio_blk_status_buf[0] != 0) { return false; }
     if (write == false) {
-        dma_finish_rx(virtio_blk_data_buf as *align(64) u8, 512);
+        dma_finish_rx(virtio_blk_data_buf, 512);
         slice_copy(sector_buffer, virtio_blk_data_buf as []u8);
     }
     return true;
