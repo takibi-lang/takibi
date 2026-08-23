@@ -15,6 +15,30 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-23: Trusted-Base Contract and Boundary Inventory (GitHub Issue #236)
+
+Added `TRUSTED_BASE.md` as the durable statement of what Takibi's current
+refinement, ownership, slice, and effect checks establish; the exact meanings
+of `--forbid-trap` and `--forbid-unsafe`; and the raw-pointer, MMIO, DMA,
+extern/ABI, assembly, LLVM, and hardware assumptions that remain trusted. It
+explicitly separates static rejection, generated runtime checks, reviewed
+unchecked boundaries, and properties outside the language model. The document
+does not freeze current counts or claim a mechanized soundness proof.
+
+Expanded `make trustedbasecheck` from three aggregate metrics into a
+depfile-derived review inventory. It now classifies unsafe blocks, raw casts,
+extern declarations, DMA/cache operations, and production/generated/fixture
+assembly; reports unclassified sites; and has a `--verbose` form listing the
+exact source union and every unsafe-site classification. The separately linked
+EL0 test payload now emits a depfile too, fixing the old main-kernel-only source
+definition: every kernel `.tkb` file is currently accounted for under a real
+`--forbid-trap` build.
+
+Removed the old "issue #218 audit warnings" metric. The diagnostic it counted
+had already been replaced by compile errors, so recompiling one target to prove
+that a retired warning stayed at zero was stale machinery and contradicted the
+project's compile-error-first diagnostic policy.
+
 ### 2026-08-21: Removing Ceilings -- Three Tables, Five Traps, and What the Numbers Were Saying
 
 The session that followed #377/#378 turned from "finish the stack work" into

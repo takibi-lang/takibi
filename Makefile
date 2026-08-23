@@ -479,7 +479,7 @@ $(KERNEL_RPI5_FPSIMD_O): $(KERNEL_RPI5_FPSIMD_S) | $(KERNEL_BUILD_DIR)
 # so the resulting ET_DYN ELF has zero dynamic relocations -- verified
 # empirically before this rule existed (see HISTORY.md's #241 entry).
 $(KERNEL_RPI5_USER_PAYLOAD_TKB_O): $(KERNEL_RPI5_USER_PAYLOAD_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap -o $@
+	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --emit-depfile $@.d -o $@
 
 $(KERNEL_RPI5_USER_PAYLOAD_ASM_O): $(KERNEL_RPI5_USER_PAYLOAD_ASM_S) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
@@ -671,10 +671,9 @@ kernel-memory-map-check: kernelbuild-rpi5 kernelbuild-qemu
 
 kernelbuild: kernelbuild-rpi5 kernelbuild-qemu kernel-memory-map-check
 
-## trustedbasecheck: GitHub issue #238 -- repeatable trusted-base metrics
-## (unsafe block count, handwritten assembly lines, --forbid-trap kernel
-## line count, plus supplementary counts). Reads kernelbuild's own depfiles,
-## so it depends on kernelbuild rather than re-scanning the tree by guess.
+## trustedbasecheck: repeatable inventory of the maintained kernel's checked
+## source coverage and explicit trusted boundaries. Reads build-produced
+## depfiles, so it depends on kernelbuild rather than guessing from the tree.
 .PHONY: trustedbasecheck
 trustedbasecheck: kernelbuild
 	python3 scripts/measure_trusted_base.py

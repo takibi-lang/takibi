@@ -124,7 +124,9 @@ fn clear(index: {0..<64 as usize}) {
 On bare metal, a failed bounds check becomes a trap rather than a recoverable
 application exception. `--forbid-trap` turns every remaining unproved bounds
 site into a compile error. All maintained kernel `.tkb` code is built under
-that policy.
+that policy. [TRUSTED_BASE.md](TRUSTED_BASE.md) states the exact guarantee,
+the remaining explicit trust boundaries, and the assumptions outside the
+language model.
 
 ### Linear values for kernel resources
 
