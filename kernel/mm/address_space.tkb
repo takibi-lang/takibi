@@ -51,6 +51,50 @@ private let mut address_space_backing_missing: AddressSpaceBacking;
 private let mut address_space_backing_missing_count: usize = 0;
 private let mut address_space_active_slot: usize;
 
+// GitHub issue #406: how many address spaces exist right now. Root 0's
+// backing is a static rather than a pool allocation -- it is created with
+// the MMU off, before any allocator -- so it is counted separately and not
+// forgotten.
+//
+// This is the number a physical page's mapping refcount is bounded by: a
+// page can be mapped into an address space at most once, so it cannot be
+// mapped into more address spaces than exist.
+fn address_space_live_count() -> usize !{unsafe} {
+    address_space_backing_pool_init();
+    return intrusive_pool_live_count(&address_space_backing_pool) + 1;
+}
+
+// GitHub issue #406: one MORE live address space, for a probe that needs
+// the mapping bound to move. Plain usizes in and out so
+// kernel/mm/page.tkb -- parsed before this file, and the home of the probe
+// because it needs the allocator's own metadata -- can call it: a function
+// resolves regardless of file order, a type does not.
+fn address_space_probe_root_acquire() -> usize !{unsafe} {
+    let slot: usize = scheduled_process_probe_slot_acquire();
+    if (slot == 0) { return 0; }
+    match address_space_ensure_root(slot) {
+        AddressSpaceEnsureResult::Ok => { return slot; }
+        AddressSpaceEnsureResult::SlotOutOfRange => {
+            scheduled_process_probe_slot_release(slot);
+            return 0;
+        }
+        AddressSpaceEnsureResult::OutOfMemory => {
+            scheduled_process_probe_slot_release(slot);
+            return 0;
+        }
+        AddressSpaceEnsureResult::AsidExhausted => {
+            scheduled_process_probe_slot_release(slot);
+            return 0;
+        }
+    }
+}
+
+fn address_space_probe_root_release(slot: usize) !{unsafe} {
+    if (slot == 0) { return; }
+    address_space_release_root(slot);
+    scheduled_process_probe_slot_release(slot);
+}
+
 fn address_space_backing_missing_uses() -> usize {
     return address_space_backing_missing_count;
 }

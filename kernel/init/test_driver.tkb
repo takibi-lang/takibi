@@ -570,7 +570,7 @@ fn kernel_test_common_probes() {
         kernel_boot_log("shared object refcount ceiling: failed\n");
     }
     if (page_mapping_ref_ceiling_probe()) {
-        kernel_boot_log("page mapping refcount ceiling: exact boundary at capacity=4194304 ok\n");
+        kernel_boot_log("page mapping refcount ceiling: bound tracks the address spaces that exist, refuses one past it ok\n");
     } else {
         kernel_boot_log("page mapping refcount ceiling: failed\n");
     }
@@ -885,6 +885,17 @@ irq_uart_rx_unmask();
                     // POSITIVELY, so a boot where it happened is a view
                     // that lost a line rather than one that gained an
                     // unmatched one.
+                    // GitHub issue #406: a physical page mapped into more
+                    // address spaces than exist is an invariant break, not
+                    // exhaustion. Positive report, same reasoning as the
+                    // shared-object line below.
+                    if (page_mapping_ref_bound_breaks_count() == 0) {
+                        kernel_boot_log("resources: page mappings within the address spaces that exist\n");
+                    } else {
+                        kernel_boot_log("resources: page mapping INVARIANT BREAKS=");
+                        uart_put_udec(page_mapping_ref_bound_breaks_count());
+                        kernel_boot_log("\n");
+                    }
                     if (unified_object_ref_bound_breaks_count() == 0) {
                         kernel_boot_log("resources: shared-object refs within the descriptor slots that exist\n");
                     } else {

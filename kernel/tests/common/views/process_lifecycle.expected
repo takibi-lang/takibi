@@ -2,6 +2,7 @@ process table: 24 concurrent processes past the old ceiling of 16, stacks=16384 
 fd table: processes=2 fds=16 shared-offset refs clean
 scheduler: rr immediate=2 deferred=1 staged
 crash trace: ring wrap oldest-to-newest ok
+resources: page mappings within the address spaces that exist
 resources: shared-object refs within the descriptor slots that exist
 resources: no double free
 resources: pages=0

@@ -1,1 +1,1 @@
-page mapping refcount ceiling: exact boundary at capacity=4194304 ok
+page mapping refcount ceiling: bound tracks the address spaces that exist, refuses one past it ok
