@@ -6266,6 +6266,11 @@ let struct_layout name =
   let total = Llvm_target.DataLayout.abi_size llty dl in
   (offsets, total)
 
+let struct_member_count name =
+  match Hashtbl.find_opt struct_lltypes name with
+  | Some llty -> Array.length (struct_element_types llty)
+  | None -> raise (Error (Printf.sprintf "struct '%s' not found" name))
+
 (* Shared by gen_exception_entry and gen_exception_restore: the
    restore-frame/eret half, assuming sp already points at the frame AND
    DAIF.I is already masked (both are the caller's responsibility -- see

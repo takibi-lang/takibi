@@ -290,6 +290,8 @@ let () =
           prefix field offset
       ) offsets;
       Printf.ksprintf (Buffer.add_string buf) "set $%ssize = %Ld\n" prefix total;
+      Printf.ksprintf (Buffer.add_string buf) "set $%smembers = %d\n"
+        prefix (Llvm_gen.struct_member_count struct_name);
       if !output_file <> "" then begin
         let oc = open_out !output_file in
         output_string oc (Buffer.contents buf);

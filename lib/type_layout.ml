@@ -180,6 +180,59 @@ let sizeof_type pos ty =
   let (sz, _) = size_align_of_type pos [] ty in
   sz
 
+(* The LLVM member list is part of the by-value ABI even when every declared
+   field offset and sizeof stay unchanged. Compute the member count implied by
+   this module's semantic alignment rules independently of register_struct's
+   emitted list, including one member for each explicit inter-field or tail
+   padding run. *)
+let expected_llvm_member_count name info dl =
+  let field_lltys =
+    List.map (fun (_, ty) -> Llvm_gen.ltype_of_ast ty) info.fields
+    |> Array.of_list
+  in
+  let mk_struct members =
+    if info.is_packed then Llvm.packed_struct_type Llvm_gen.context members
+    else Llvm.struct_type Llvm_gen.context members
+  in
+  let (_, effective_align) =
+    size_align_of_type Lexing.dummy_pos [] (Ast.TypeNamed name)
+  in
+  let plain = mk_struct field_lltys in
+  let needs_explicit_layout =
+    not info.is_packed &&
+    (List.exists2 (fun (_, ty) llty ->
+       let (_, semantic_align) = size_align_of_type Lexing.dummy_pos [name] ty in
+       semantic_align > Llvm_target.DataLayout.abi_align llty dl
+     ) info.fields (Array.to_list field_lltys)
+     || effective_align > Llvm_target.DataLayout.abi_align plain dl)
+  in
+  let emitted =
+    if not needs_explicit_layout then Array.to_list field_lltys
+    else begin
+      let members = ref [] in
+      let offset = ref 0 in
+      List.iter2 (fun (_, ty) llty ->
+        let (_, semantic_align) = size_align_of_type Lexing.dummy_pos [name] ty in
+        let natural_align = Llvm_target.DataLayout.abi_align llty dl in
+        let wanted_align = max semantic_align natural_align in
+        let at = align_up !offset wanted_align in
+        if at > !offset then
+          members := Llvm.array_type (Llvm.i8_type Llvm_gen.context)
+            (at - !offset) :: !members;
+        members := llty :: !members;
+        offset := at + Int64.to_int (Llvm_target.DataLayout.abi_size llty dl)
+      ) info.fields (Array.to_list field_lltys);
+      List.rev !members
+    end
+  in
+  let before_tail = mk_struct (Array.of_list emitted) in
+  let size = Int64.to_int (Llvm_target.DataLayout.abi_size before_tail dl) in
+  let tail =
+    if effective_align <= 1 then 0
+    else (effective_align - (size mod effective_align)) mod effective_align
+  in
+  List.length emitted + if tail = 0 then 0 else 1
+
 (* GitHub issue #362: prove this file and codegen still agree.
 
    There are three implementations of "how big is this struct" in the
@@ -204,18 +257,29 @@ let check_against_codegen () =
   match !Llvm_gen.target_data with
   | None -> ()
   | Some dl ->
-      Hashtbl.iter (fun name _ ->
+      Hashtbl.iter (fun name info ->
         match Hashtbl.find_opt Llvm_gen.struct_lltypes name with
         | None -> ()
         | Some llty ->
             let codegen_size = Int64.to_int (Llvm_target.DataLayout.abi_size llty dl) in
             (match sizeof_type Lexing.dummy_pos (Ast.TypeNamed name) with
              | exception _ -> ()
-             | ours when ours <> codegen_size ->
-                 raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
-                   "BUG: sizeof(%s) is %d by lib/type_layout.ml (what an array \
-                    size would use) but %d in the emitted layout -- the two \
-                    have diverged, which is GitHub issue #362's bug class"
-                   name ours codegen_size))
-             | _ -> ())
+             | ours ->
+                 if ours <> codegen_size then
+                   raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
+                     "BUG: sizeof(%s) is %d by lib/type_layout.ml (what an array \
+                      size would use) but %d in the emitted layout -- the two \
+                      have diverged, which is GitHub issue #362's bug class"
+                     name ours codegen_size));
+                 let expected_members = expected_llvm_member_count name info dl in
+                 let actual_members =
+                   Array.length (Llvm.struct_element_types llty)
+                 in
+                 if expected_members <> actual_members then
+                   raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
+                     "BUG: struct %s has %d LLVM members but \
+                      lib/type_layout.ml's semantic layout requires %d; \
+                      member-list drift changes the by-value ABI even when \
+                      every field offset and sizeof agree"
+                     name actual_members expected_members)))
       ) structs

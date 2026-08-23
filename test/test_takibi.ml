@@ -9093,6 +9093,39 @@ let codegen_tests = [
        | exception Types.TypeError (_, msg) ->
            Alcotest.failf "layout implementations disagree: %s" msg);
 
+  Alcotest.test_case
+    "the layout cross-check rejects LLVM member-list drift even when size is unchanged"
+    `Quick (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
+       in
+       ignore (gen_codegen "struct MemberDrift { a: u8; b: u32; }");
+       let original_llty = Hashtbl.find Llvm_gen.struct_lltypes "MemberDrift" in
+       let original_map =
+         Hashtbl.find Llvm_gen.struct_llvm_field_index "MemberDrift"
+       in
+       let corrupt_llty = Llvm.struct_type Llvm_gen.context [|
+         Llvm.i8_type Llvm_gen.context;
+         Llvm.array_type (Llvm.i8_type Llvm_gen.context) 3;
+         Llvm.i32_type Llvm_gen.context;
+       |] in
+       Hashtbl.replace Llvm_gen.struct_lltypes "MemberDrift" corrupt_llty;
+       Hashtbl.replace Llvm_gen.struct_llvm_field_index "MemberDrift" [|0; 2|];
+       Fun.protect ~finally:(fun () ->
+         Hashtbl.replace Llvm_gen.struct_lltypes "MemberDrift" original_llty;
+         Hashtbl.replace Llvm_gen.struct_llvm_field_index "MemberDrift" original_map)
+         (fun () ->
+           let dl = Option.get !Llvm_gen.target_data in
+           Alcotest.(check int64) "the corrupted type keeps sizeof" 8L
+             (Llvm_target.DataLayout.abi_size corrupt_llty dl);
+           match Type_layout.check_against_codegen () with
+           | () -> Alcotest.fail "member-list drift was not detected"
+           | exception Types.TypeError (_, msg) ->
+               Alcotest.(check bool) "diagnostic names member-list drift" true
+                 (contains_substring msg "3 LLVM members" &&
+                  contains_substring msg "requires 2" &&
+                  contains_substring msg "by-value ABI")));
+
   (* GitHub issue #77: sizeof(...)/offsetof(...) from a packed struct must
      prove a subslice bound with zero trap sites, whether used directly or
      threaded through a local `let` -- reproduces the exact shapes reported
@@ -12141,7 +12174,9 @@ let codegen_tests = [
        Alcotest.(check int64) "first offset" 0L (offset "first");
        Alcotest.(check int64) "usize alignment" 8L (offset "second");
        Alcotest.(check int64) "third offset" 16L (offset "third");
-       Alcotest.(check int64) "tail padding" 24L total);
+       Alcotest.(check int64) "tail padding" 24L total;
+       Alcotest.(check int) "LLVM member count" 3
+         (Llvm_gen.struct_member_count "LayoutProbe"));
 
   (* Companion to the test above, covering the parts of ditype_of_ast
      (lib/llvm_gen.ml) that one only exercises with a pointer-to-struct
