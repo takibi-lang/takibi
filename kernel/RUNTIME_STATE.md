@@ -76,8 +76,11 @@ global counter, not a per-process field.
 `mm/process_image.tkb`'s `process_image_pool`/`_ready` and its counted
 fallback pair `process_image_record_missing`/`_count` (issue #392 -- the
 per-root `ProcessImageRecord` array of #258/#264 is now pooled, keyed by a
-handle in `ProcessRecord`), `process_clone_vm_store`,
-`process_image_exec_stores`, the ext2-image-loading staging fields
+handle in `ProcessRecord`; `process_image_exec_stores`, the per-root
+parking lot for a linear exec image, is gone the same way
+`tcp_connection_store` went -- the root's own record holds what the reap
+path asks of an installed image), `process_clone_vm_store`,
+the ext2-image-loading staging fields
 (`process_image_ext2_*`/`process_image_pair_ext2_*`), the in-flight-clone
 scalars (`clone_page_count`/`clone_last_reaped_count`/`clone_source_root`/
 `clone_dest_root`); `mm/address_space.tkb`'s

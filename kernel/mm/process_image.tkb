@@ -89,6 +89,13 @@ struct ProcessImageRecord {
     stack_top_page: usize;       // highest page; the initial stack page
     stack_low_page: usize;       // lowest page the stack may ever occupy
     heap_page_count: usize;
+    // GitHub issue #392: the exec image installed against this root, as
+    // the two facts the reap path actually asks of it. It was a parked
+    // linear ProcessImagePages in an array keyed by root -- see
+    // process_image_exec_install for what that array was and why the
+    // parking lot is gone rather than pooled.
+    exec_image_installed: bool;
+    exec_image_page_count: usize;
 }
 
 // GitHub issue #392: pooled, not an array keyed by process slot. See
@@ -732,63 +739,45 @@ must_use variant ProcessImagePairProbeResult {
     Ready(exists image: usize. ProcessImagePages[image]);
 }
 
-private linear view ProcessImageExecGuard[lock: addr];
-private linear view ProcessImageExecOwner;
-variant ProcessImageExecValue {
-    Empty;
-    Ready(exists image: usize. ProcessImagePages[image]);
-}
-struct ProcessImageExecStore {
-    private mutex: i32;
-    private value: ProcessImageExecValue;
-}
-// An exec image remains live for the lifetime of the process that replaced
-// its fork copy. A shell can itself exec and then fork another command, so
-// this cannot be one global store: the outer shell's image must remain owned
-// while its child installs a distinct replacement image.
-private let mut process_image_exec_stores:
-    [ProcessImageExecStore; KERNEL_PROCESS_MAX];
-
-fn process_image_exec_lock(lock: *i32 @ address)
-        -> ProcessImageExecGuard[address] {
-    return view ProcessImageExecGuard[address];
-}
-
-fn process_image_exec_unlock(guard: sink ProcessImageExecGuard[address],
-                              lock: *i32 @ address) {}
+// GitHub issue #392: THE PARKING LOT IS GONE, for the same reason and in
+// the same shape as issue #257's on tcp.tkb.
+//
+// `process_image_exec_stores` was a [ProcessImageExecStore;
+// KERNEL_PROCESS_MAX] of { mutex, ProcessImageExecValue } -- somewhere for
+// a linear ProcessImagePages to live between the execve that mapped it and
+// the exit that unmaps it, since neither end can hold a linear value across
+// a return to userspace. It could not be one global store (a shell can exec
+// and then fork another command, so the outer shell's image must stay owned
+// while its child installs a distinct one), so it was one store per root,
+// keyed by an index -- the key that stops existing when the process table
+// becomes a pool.
+//
+// The root's own record is already the per-root, pooled home for exactly
+// this, so the two facts the reap path asks of a parked image live there.
+// What is deliberately given up: the parked value was linear, so the type
+// system proved an installed image is unmapped exactly once. A bool proves
+// nothing; process_image_exec_reap's own take-then-clear is what makes it
+// once. That is the same trade issue #257 made, and the reason it is
+// acceptable is the same -- the owner is still linear for the whole
+// map-and-install operation, which is where an image can actually be
+// duplicated or dropped.
+fn process_image_pages_discard(pages: sink ProcessImagePages[image]) {}
 
 fn process_image_exec_install(
         pages: sink ProcessImagePages[image]) -> bool {
     let root: {0..<KERNEL_PROCESS_MAX as usize} =
         process_image_root_index();
-    let guard = process_image_exec_lock(
-        &process_image_exec_stores[root].mutex);
-    let previous: ProcessImageExecValue = stable_replace(
-        guard, &process_image_exec_stores[root].mutex,
-        process_image_exec_stores[root].value,
-        ProcessImageExecValue::Ready(pages));
-    match previous {
-        ProcessImageExecValue::Empty => {
-            process_image_exec_unlock(
-                guard, &process_image_exec_stores[root].mutex);
-            return true;
-        }
-        ProcessImageExecValue::Ready(stale) => {
-            let displaced: ProcessImageExecValue = stable_replace(
-                guard, &process_image_exec_stores[root].mutex,
-                process_image_exec_stores[root].value,
-                ProcessImageExecValue::Ready(stale));
-            process_image_exec_unlock(
-                guard, &process_image_exec_stores[root].mutex);
-            match displaced {
-                ProcessImageExecValue::Empty => {}
-                ProcessImageExecValue::Ready(incoming) => {
-                    process_image_unmap(incoming);
-                }
-            }
-            return false;
-        }
+    if (process_image_record_at(root).exec_image_installed) {
+        // Unchanged: the INCOMING image is the one unmapped, and the
+        // already-installed one is left alone.
+        process_image_unmap(pages);
+        return false;
     }
+    process_image_record_at(root).exec_image_page_count =
+        process_image_page_count(pages);
+    process_image_record_at(root).exec_image_installed = true;
+    process_image_pages_discard(pages);
+    return true;
 }
 
 // GitHub issue #209: an applet used to be launched by the kernel itself,
@@ -821,44 +810,42 @@ fn process_image_exec_reap(root_index: usize) {
     if (root_index < KERNEL_PROCESS_MAX) {
         let root: {0..<KERNEL_PROCESS_MAX as usize} = root_index;
         process_image_target_root = root;
-        let guard = process_image_exec_lock(
-            &process_image_exec_stores[root].mutex);
-        let previous: ProcessImageExecValue = stable_replace(
-            guard, &process_image_exec_stores[root].mutex,
-            process_image_exec_stores[root].value, ProcessImageExecValue::Empty);
-        process_image_exec_unlock(
-            guard, &process_image_exec_stores[root].mutex);
-        match previous {
-            ProcessImageExecValue::Empty => {}
-            ProcessImageExecValue::Ready(pages) => {
-                let reaped_root: {0..<KERNEL_PROCESS_MAX as usize} =
-                    process_image_root_index();
-                if (process_image_stack_grew(pages)) {
-                    process_image_exec_reap_stack_growth_count =
-                        process_image_exec_reap_stack_growth_count + 1;
-                }
-                process_image_unmap(pages);
-                process_image_exec_reap_count =
-                    process_image_exec_reap_count + 1;
-                if (process_image_root_window_is_clear(reaped_root)) {
-                    process_image_exec_reap_clean_count =
-                        process_image_exec_reap_clean_count + 1;
-                }
-                // process_image_unmap only retargets later page-table writes at
-                // root 0; it leaves TTBR0 on the root it just emptied. The
-                // parent is resumed straight after this reap, so activate its
-                // root here exactly as process_image_clone_vm_reap does for
-                // the plain fork/exit path -- otherwise the parent returns to
-                // EL0 against the unmapped child root and faults on its own
-                // first instruction. GitHub issue #245: this runs from
-                // kernel_syscall_clone_parent_return(), reached only via
-                // kernel_process_child_exit()'s own return value -- by
-                // construction that has already switched execution_current_
-                // handle back to the parent, so kernel_process_current_root()
-                // is already correct here, not a fixed root 0.
-                process_image_activate_root(
-                    address_space_root_slot(kernel_process_current_root()));
+        // Take before acting, so an image is reaped once even though what
+        // says it exists is now a bool rather than a linear value.
+        let installed: bool =
+            process_image_record_at(root).exec_image_installed;
+        let count: usize =
+            process_image_record_at(root).exec_image_page_count;
+        process_image_record_at(root).exec_image_installed = false;
+        process_image_record_at(root).exec_image_page_count = 0;
+        if (installed) {
+            let reaped_root: {0..<KERNEL_PROCESS_MAX as usize} =
+                process_image_root_index();
+            if (process_image_stack_grew_pages(count)) {
+                process_image_exec_reap_stack_growth_count =
+                    process_image_exec_reap_stack_growth_count + 1;
             }
+            process_image_unmap_pages(count);
+            process_image_exec_reap_count =
+                process_image_exec_reap_count + 1;
+            if (process_image_root_window_is_clear(reaped_root)) {
+                process_image_exec_reap_clean_count =
+                    process_image_exec_reap_clean_count + 1;
+            }
+            // process_image_unmap only retargets later page-table writes at
+            // root 0; it leaves TTBR0 on the root it just emptied. The
+            // parent is resumed straight after this reap, so activate its
+            // root here exactly as process_image_clone_vm_reap does for
+            // the plain fork/exit path -- otherwise the parent returns to
+            // EL0 against the unmapped child root and faults on its own
+            // first instruction. GitHub issue #245: this runs from
+            // kernel_syscall_clone_parent_return(), reached only via
+            // kernel_process_child_exit()'s own return value -- by
+            // construction that has already switched execution_current_
+            // handle back to the parent, so kernel_process_current_root()
+            // is already correct here, not a fixed root 0.
+            process_image_activate_root(
+                address_space_root_slot(kernel_process_current_root()));
         }
     }
 }
@@ -1309,16 +1296,26 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
     return true;
 }
 
-fn process_image_unmap(pages: sink ProcessImagePages[image]) {
+// GitHub issue #392: the page count is all either of these ever needed of
+// the owner, so each has a half that takes the count on its own -- which
+// is what process_image_exec_reap calls, now that what it reaps is a
+// record field rather than a parked linear value.
+fn process_image_unmap_pages(count: usize) {
     let root: {0..<KERNEL_PROCESS_MAX as usize} = process_image_root_index();
     if (process_image_record_at(root).stack_growth_active ||
-        process_image_record_at(root).active_page_count > pages.count) {
+        process_image_record_at(root).active_page_count > count) {
         process_image_record_at(root).stack_growth_active = false;
         process_image_record_at(root).active_page_count = 0;
         process_image_record_at(root).stack_lowest_l3 = process_stack_top_page();
     }
     process_image_cleanup();
     process_image_target_root = 0;
+}
+
+fn process_image_unmap(pages: sink ProcessImagePages[image]) {
+    let count: usize = pages.count;
+    process_image_pages_discard(pages);
+    process_image_unmap_pages(count);
 }
 
 fn process_image_map_segments(plan: DistroElfLoadPlan,
@@ -1784,10 +1781,14 @@ fn process_image_stack_pointer(pages: borrow ProcessImagePages[image]) -> usize 
     return pages.stack_pointer;
 }
 
-fn process_image_stack_grew(pages: borrow ProcessImagePages[image]) -> bool {
+fn process_image_stack_grew_pages(count: usize) -> bool {
     let root: {0..<KERNEL_PROCESS_MAX as usize} = process_image_root_index();
     return process_image_record_at(root).stack_growth_active &&
-           process_image_record_at(root).active_page_count > pages.count;
+           process_image_record_at(root).active_page_count > count;
+}
+
+fn process_image_stack_grew(pages: borrow ProcessImagePages[image]) -> bool {
+    return process_image_stack_grew_pages(pages.count);
 }
 
 fn process_image_heap_range(pages: borrow ProcessImagePages[image])
