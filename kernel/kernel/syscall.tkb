@@ -117,22 +117,19 @@ const IOV_MAX: usize = 1024;
 // rationale and same off-by-one-avoiding `>=` check.
 const POLL_MAX: usize = 1024;
 
-// GitHub issue #295: this used to be a literal 8, an arbitrary ceiling with
-// no backing storage of its own -- kernel_socket_fd_alloc/
-// kernel_listener_fd_lookup/etc. only ever range-check against it and then
-// delegate the real work to unified_fd_alloc/unified_socket_lookup, which
-// are sized by fd_table.tkb's own PROCESS_FD_MAX. A process whose first 8
-// descriptors were already busy (inherited terminal fds, a background
-// job's /dev/null redirection, ...) could see socket()/accept() report
-// resource exhaustion while fd_table.tkb's real 16-wide table still had
-// free slots at fd>=8 -- exactly the kind of hidden, misleading exhaustion
-// issue #295 was filed over. First raised to a literal 16 (a duplicated
-// literal kept in sync by hand, since top-level const initializers could
-// not yet reference another const at all), then changed to a REAL
-// reference once the compiler grammar gained array_size-style const
-// arithmetic (same issue, follow-up pass) -- this can now never silently
-// drift below fd_table.tkb's own PROCESS_FD_MAX again.
-const KERNEL_SOCKET_FD_MAX: usize = PROCESS_FD_MAX;
+// GitHub issue #409: the socket paths name PROCESS_FD_MAX directly. There
+// was a PROCESS_FD_MAX here, a second name for the same capacity --
+// kernel_socket_fd_alloc/kernel_listener_fd_lookup and friends only ever
+// range-check against it and then delegate to unified_fd_alloc/
+// unified_socket_lookup, which are sized by fd_table.tkb's PROCESS_FD_MAX.
+//
+// The incident that makes the duplication worth remembering is recorded in
+// kernel/RESOURCE_LIMITS.md's PROCESS_FD_MAX row: it was a literal 8 while
+// the real table was 16, so socket()/accept() reported resource exhaustion
+// at fd>=8 while free slots existed -- a wrong refusal rather than a
+// compile error, hit by a shell whose first eight descriptors were busy.
+// Issue #295 made it a real reference so it could not drift numerically;
+// this removes the second name so there is nothing left to drift.
 
 private let mut syscall_ext2_mount: Ext2Mount;
 private let mut syscall_ext2_ready: bool;
@@ -234,11 +231,11 @@ must_use variant KernelConnectionLookupResult {
 }
 must_use variant KernelSocketFdAllocResult {
     Full;
-    Allocated({0..<KERNEL_SOCKET_FD_MAX as usize});
+    Allocated({0..<PROCESS_FD_MAX as usize});
 }
 must_use variant KernelListenerLookupResult {
     Missing;
-    Found({0..<KERNEL_SOCKET_FD_MAX as usize});
+    Found({0..<PROCESS_FD_MAX as usize});
 }
 
 // GitHub issue #245: fd-table process slot == process.tkb's own
@@ -470,8 +467,8 @@ fn kernel_socket_fd_alloc(first: usize) -> KernelSocketFdAllocResult {
     match unified_fd_alloc(kernel_syscall_process_slot(), first) {
         UnifiedFdAllocResult::Full => { return KernelSocketFdAllocResult::Full; }
         UnifiedFdAllocResult::Allocated(fd) => {
-            if (fd < KERNEL_SOCKET_FD_MAX) {
-                let socket_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} = fd;
+            if (fd < PROCESS_FD_MAX) {
+                let socket_fd: {0..<PROCESS_FD_MAX as usize} = fd;
                 return KernelSocketFdAllocResult::Allocated(socket_fd);
             }
             return KernelSocketFdAllocResult::Full;
@@ -480,8 +477,8 @@ fn kernel_socket_fd_alloc(first: usize) -> KernelSocketFdAllocResult {
 }
 
 fn kernel_listener_fd_lookup(fd: usize) -> KernelListenerLookupResult {
-    if (fd >= 0 && fd < KERNEL_SOCKET_FD_MAX) {
-        let index: {0..<KERNEL_SOCKET_FD_MAX as usize} = fd;
+    if (fd >= 0 && fd < PROCESS_FD_MAX) {
+        let index: {0..<PROCESS_FD_MAX as usize} = fd;
         match unified_socket_lookup(kernel_syscall_process_slot(), index,
                                     UnifiedFdKind::Listener) {
             UnifiedSocketResult::Missing => {}
@@ -543,8 +540,8 @@ fn kernel_listener_set_port(fd: usize, port: u16) -> bool {
 }
 
 fn kernel_connected_fd_duplicate(old_fd: usize, new_fd: usize) -> bool {
-    if (old_fd >= 0 && old_fd < KERNEL_SOCKET_FD_MAX &&
-        new_fd >= 0 && new_fd < KERNEL_SOCKET_FD_MAX) {
+    if (old_fd >= 0 && old_fd < PROCESS_FD_MAX &&
+        new_fd >= 0 && new_fd < PROCESS_FD_MAX) {
         match unified_fd_duplicate(kernel_syscall_process_slot(), old_fd,
                                    new_fd) {
             UnifiedFdInstallResult::Invalid => { return false; }
@@ -663,7 +660,7 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
         if (state.file_state_live == false) {
             return KernelFdReapResult::Failed;
         }
-        for fd: usize in 0..<KERNEL_SOCKET_FD_MAX {
+        for fd: usize in 0..<PROCESS_FD_MAX {
             if (kernel_connected_fd_is_open(fd)) {
                 if (kernel_connected_descriptor_release(fd) == false) {
                     return KernelFdReapResult::Failed;
@@ -2283,7 +2280,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
 
     if (number == 200) {
         syscall_test_evidence_record_bind();
-        let bind_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} =
+        let bind_fd: {0..<PROCESS_FD_MAX as usize} =
             match kernel_listener_fd_lookup(x0) {
                 KernelListenerLookupResult::Missing => {
                     return SyscallAction::Resume(LINUX_EINVAL);
@@ -2330,7 +2327,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
 
     if (number == 201) {
         syscall_test_evidence_record_listen();
-        let listen_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} =
+        let listen_fd: {0..<PROCESS_FD_MAX as usize} =
             match kernel_listener_fd_lookup(x0) {
                 KernelListenerLookupResult::Missing => {
                     return SyscallAction::Resume(LINUX_EINVAL);
@@ -2369,7 +2366,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return kernel_syscall_exit_current_process(0);
         }
         syscall_test_evidence_record_accept();
-        let accept_listener_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} =
+        let accept_listener_fd: {0..<PROCESS_FD_MAX as usize} =
             match kernel_listener_fd_lookup(x0) {
                 KernelListenerLookupResult::Missing => {
                     return SyscallAction::Resume(LINUX_EINVAL);
@@ -2389,7 +2386,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             kernel_process_request_reschedule();
             return SyscallAction::Resume(LINUX_EAGAIN);
         }
-        let connected_fd: {0..<KERNEL_SOCKET_FD_MAX as usize} =
+        let connected_fd: {0..<PROCESS_FD_MAX as usize} =
             match kernel_socket_fd_alloc(5) {
                 KernelSocketFdAllocResult::Full => {
                     kernel_boot_log_resource_exhausted(
