@@ -854,8 +854,9 @@ fn intrusive_chunk_base_of(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 // back into the chunk, at its tail, where the carve below stops short of
 // it.
 //
-// What replaces the safety #349 got from page_meta_at's
-// arithmetic-only bounds check is stronger, not weaker:
+// What replaces the safety #349 got from the allocator's own
+// arithmetic-only bounds check (page_meta_at, deleted by issue #390 once
+// this file stopped being its only consumer) is stronger, not weaker:
 // intrusive_pool_owns_chunk now asks the ALLOCATOR whether the page is
 // tagged PoolChunk (issue #384) before anything here is dereferenced.
 // That tag is allocator-owned per-page state, unforgeable by a consumer,

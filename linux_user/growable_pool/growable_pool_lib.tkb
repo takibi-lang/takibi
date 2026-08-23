@@ -276,22 +276,19 @@ fn growable_pool_finish_insert(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHU
 fn growable_pool_grow_one_chunk(
         T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N))
         -> GrowablePoolGrowResult {
-    // GitHub issue #373: the guard kernel/lib/intrusive_pool.tkb has had
-    // since #349 and this file never got. A chunk is one page, and since
-    // issue #353 a page's last PAGE_META_BYTES belong to the ALLOCATOR --
-    // so a payload that runs to the end of the page is handing out
-    // storage that page.tkb uses to describe the page, and that
-    // intrusive_pool reads to decide whether a page is one of ITS chunks
-    // (intrusive_chunk_header_at). Without this, KernelStackPage at
-    // exactly PAGE_SIZE compiled, and every kernel stack's first push
-    // landed inside its own page's metadata.
+    // GitHub issue #373: a chunk is one page, so a payload larger than a
+    // page cannot be handed out. Checked rather than documented, and
+    // checked HERE so it is per instantiation: the violating T is named
+    // in the message, which is what makes the failure actionable instead
+    // of a boot-time mystery four steps downstream.
     //
-    // Checked rather than documented, and checked HERE so it is per
-    // instantiation: the violating T is named in the message, which is
-    // what makes the failure actionable instead of a boot-time mystery
-    // four steps downstream.
-    static_assert(sizeof(T) * SLOTS_PER_CHUNK <= PAGE_USABLE_BYTES,
-                  "GrowablePool(T, SLOTS_PER_CHUNK, ...): one chunk's payload does not fit in a page's usable bytes (the allocator reserves PAGE_META_BYTES at the end of every page)");
+    // GitHub issue #390: the bound is PAGE_SIZE now, not a usable subset.
+    // The provider used to reserve the last 128 bytes of every page for
+    // owner metadata (#353) and this assert was against that remainder;
+    // that reservation is gone from kernel/mm/page.tkb and therefore from
+    // this stand-in, which mirrors it deliberately (#366).
+    static_assert(sizeof(T) * SLOTS_PER_CHUNK <= PAGE_SIZE,
+                  "GrowablePool(T, SLOTS_PER_CHUNK, ...): one chunk's payload does not fit in a page");
     if (pool.active_chunks >= MAX_CHUNKS) {
         return GrowablePoolGrowResult::ChunkLimitReached;
     }
@@ -300,14 +297,11 @@ fn growable_pool_grow_one_chunk(
             return GrowablePoolGrowResult::OutOfMemory;
         }
         PageAllocResult::Allocated(page_owner) => {
-            // GitHub issue #373: a chunk is a page's PAYLOAD area, not the
-            // whole page. kernel/mm/page.tkb reserves the last
-            // PAGE_META_BYTES of every page for owner metadata (issue
-            // #353), and this loop used to run to 4096 -- clearing storage
-            // this pool does not own, on its way to handing that storage
-            // out as payload.
+            // GitHub issue #390: the whole page is this chunk's, so the
+            // clear runs to PAGE_SIZE again. It ran to PAGE_USABLE_BYTES
+            // while the provider reserved the tail for owner metadata.
             let bytes = page_bytes(page_owner);
-            for i: usize in 0..<PAGE_USABLE_BYTES { bytes[i] = 0; }
+            for i: usize in 0..<PAGE_SIZE { bytes[i] = 0; }
             let base: usize = page_physical_address(page_owner);
             let page_index: usize =
                 page_owner_transfer_index(page_owner) as usize;

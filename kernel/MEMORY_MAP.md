@@ -127,7 +127,6 @@ State: **HAND**. The numbers behind it are CHECKED (const) below.
 | Constant | Value | Defined in | State |
 |---|---|---|---|
 | `PAGE_SIZE` | 4096 | `kernel/mm/page.tkb` | CHECKED (const) |
-| `PAGE_META_BYTES` | 128 | `kernel/mm/page.tkb` | CHECKED (const) |
 | `BOOT_PAGE_COUNT` | 204800 | `kernel/mm/page.tkb` | CHECKED (const) |
 | `KERNEL_STACK_PAGES` | 4 | `kernel/kernel/process.tkb` | CHECKED (const) |
 | `KERNEL_STACK_SHIFT` | 14 | `kernel/kernel/process.tkb` | CHECKED (const) |
@@ -143,32 +142,38 @@ because these are the numbers people actually quote:
 
 | | | |
 |---|---|---|
-| `PAGE_USABLE_BYTES` | 3968 | `PAGE_SIZE - PAGE_META_BYTES` |
 | `KERNEL_PROCESS_STACK_SIZE` | 16384 | `KERNEL_STACK_PAGES * PAGE_SIZE` |
 | `KERNEL_STACK_RUN_BYTES` | 32768 | twice the above |
 | Page pool extent | 800 MiB | `BOOT_PAGE_COUNT * PAGE_SIZE` |
 | Page pool end (RPi5) | `0x32b38000` | `usable_ram_start + 800 MiB` |
 | Page pool end (QEMU) | `0x72940000` | `usable_ram_start + 800 MiB` |
 
-## A page is 3968 bytes of payload, not 4096
+## A page is 4096 bytes of payload
 
-The last `PAGE_META_BYTES` (128) of **every** page belong to the
-allocator, not to whoever holds the page. `page_meta_at(physical)` names
-that region; pool primitives keep their per-chunk bookkeeping there
-instead of in a side array sized by the number of pages.
+All of it. The allocator keeps its per-page state -- occupancy, owner tag,
+mapping refcount -- in a side array (`PageMeta`), not inside the page.
 
-Two separate bugs came from code that assumed a page is 4096 bytes of
-payload, one of which was a kernel stack whose first push landed inside
-its own page's metadata and forged a pool chunk header. If you are about
-to write `4096` where a payload size belongs, this is the row you needed.
+It was not always so, and the history is the useful part. Issue #353 moved
+the allocator's owner metadata INTO the last `PAGE_META_BYTES` (128) of
+every page, so a page was 3968 bytes of payload; two bugs came from code
+that assumed 4096, one of them a kernel stack whose first push landed
+inside its own page's metadata and forged a pool chunk header. Issue #377
+then made a contiguous run all payload, because a multi-page kernel stack
+cannot have holes every 4096 bytes -- and issue #350 moved the one
+consumer's chunk header back inside its own chunk for the same reason.
 
-**Exception, and it is deliberate**: a run from `page_alloc_contiguous` is
-all payload. Its pages are marked `in_run` and `page_meta_at` answers 0
-for them, so the whole `count * PAGE_SIZE` is contiguous and usable --
-which is the only way a multi-page kernel stack can exist at all, and also
-what stops any pool reading a run's bytes as its own chunk header. The
-region goes back to being metadata when the run is freed, scrubbed on the
-way out.
+That left a reservation with no consumer, and worse: `intrusive_pool` sizes
+a chunk as `pages * PAGE_SIZE` with its header at the chunk's far end, so
+for a one-page chunk the pool's header and the allocator's "reserved"
+region were the same 128 bytes. Issue #390 deleted the reservation, and
+with it `PAGE_META_BYTES`, `PAGE_USABLE_BYTES`, `page_meta_at`,
+`page_meta_clear` and `PageMeta.in_run`. Every page got its last 128 bytes
+back: 25 MB across `BOOT_PAGE_COUNT`.
+
+**What still holds**: a pool asks `page_owner_tag_at` -- the side array --
+whether a page is tagged `PoolChunk` before it dereferences anything, and a
+freed page reads `Unowned`. That is what makes a forged chunk header
+unreachable, and it never depended on the in-page region.
 
 ## Virtual layout of a user process
 

@@ -24,10 +24,12 @@ fn app_main() !{unsafe} {
     let mut pool: IntrusivePool(Payload);
     intrusive_pool_init(&pool);
 
-    // Layout comes from the provider's PAGE_USABLE_BYTES, so this number
-    // is only right if the pool really did bind to the provider on the
-    // file list.
-    uart_puts("slots per chunk, from the provider's own usable size: ");
+    // Layout comes from the provider's PAGE_SIZE, so this number is only
+    // right if the pool really did bind to the provider on the file list.
+    // It was the provider's PAGE_USABLE_BYTES until issue #390 deleted the
+    // in-page metadata reservation from kernel/mm/page.tkb and from this
+    // stand-in with it.
+    uart_puts("slots per chunk, from the provider's own page size: ");
     uart_print(intrusive_pool_slots_per_chunk(&pool));
     uart_puts("\n");
 

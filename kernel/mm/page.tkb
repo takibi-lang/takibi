@@ -80,83 +80,36 @@ extern symbol usable_ram_start;
 // of pooled memory -- so a side array is right only where nearly every
 // page is a chunk.
 //
-// The cost of in-page is that an owner loses PAGE_META_BYTES of every
-// page it holds, so a payload whose stride divides the page loses a
-// whole slot rather than a fraction of one. At the sizes this kernel
-// pools (ProcessRecord 96, TcpConnectionStore 32, ...) that is about 3%.
+// GitHub issue #390: THE IN-PAGE RESERVATION IS GONE. PAGE_META_BYTES,
+// PAGE_USABLE_BYTES, page_meta_at and page_meta_clear are deleted, and a
+// page is 4096 bytes of payload again -- 25 MB across BOOT_PAGE_COUNT that
+// was withheld from every consumer for one that no longer exists.
 //
-// Nothing in PageMeta changes: an owner asks page_meta_at where its
-// metadata is, which is arithmetic, and reads its own tag from there,
-// which is one load. That is exactly what this issue asked for, and it
-// costs no bytes at all.
-const PAGE_META_BYTES: usize = 128;
-
-// What an owner may use for its own data. The metadata sits above it.
-const PAGE_USABLE_BYTES: usize = PAGE_SIZE - PAGE_META_BYTES;
-
-// The address of this page's owner metadata, or 0 if `physical` is not
-// one of this allocator's page-aligned pages, or if it belongs to a
-// contiguous run.
+// It was reserved for exactly one: kernel/lib/intrusive_pool.tkb kept its
+// chunk header there (#349). Issue #350 moved that header INTO the chunk,
+// because a multi-page run has no per-page metadata region by construction
+// (#377 made a run entirely payload precisely so no pool could read a
+// kernel stack's frames as a chunk header).
 //
-// Returning 0 rather than trapping is what lets a consumer use this as
-// its own validation step on an address of unknown provenance: the range
-// check here dereferences nothing, so a caller that gets 0 knows the
-// address is not one of ours without ever having touched it. The read
-// that follows is then at a computed offset into a page this allocator
-// has already confirmed it owns -- not through an address the caller
-// supplied, which is the distinction that makes the in-page placement as
-// safe as a side array would have been.
+// Two facts settled it rather than one. The first is that no code under
+// kernel/ named page_meta_at, PAGE_META_BYTES or PAGE_USABLE_BYTES any
+// more. The second is worse: intrusive_pool sizes a chunk as
+// `pages * PAGE_SIZE` and puts its header at the chunk's far END, so for a
+// one-page chunk the pool's header and this file's "reserved" region were
+// LITERALLY THE SAME 128 BYTES. The reservation was not merely unused, it
+// was contradicted -- and only harmlessly because nobody read this file's
+// version of them.
 //
-// GitHub issue #377: a run has NO owner-metadata regions at all -- the
-// whole `count * PAGE_SIZE` is payload. Reserving the tail of every page
-// of a run is incoherent for the consumer runs exist for: a kernel stack
-// needs one contiguous span, and holes every 4096 bytes is not one. So
-// the reservation is made per-ALLOCATION rather than per-page, and the
-// answer here is the one that makes that safe -- a run's page is not a
-// candidate chunk for anybody, so no pool can read a stack frame as its
-// own chunk header. That misreading is exactly what issue #373 cost a day
-// of bisecting, when a stack running to PAGE_SIZE forged one.
-fn page_meta_at(physical: usize) -> usize {
-    let base: usize = usable_ram_start;
-    let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
-    if (physical < base || physical >= base + pool_bytes ||
-        (physical - base) % PAGE_SIZE != 0) {
-        return 0;
-    }
-    let index: usize = (physical - base) / PAGE_SIZE;
-    if (index >= BOOT_PAGE_COUNT) { return 0; }
-    let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
-    if (boot_page_pool.meta[checked].in_run) { return 0; }
-    return physical + PAGE_USABLE_BYTES;
-}
-
-// Clears one page's owner metadata. The allocator owns this storage, so
-// it is the allocator that must not leave a freed page describing itself
-// as something an owner still holds -- a pool's "is this chunk mine?"
-// test is exactly a read of that region.
-//
-// GitHub issue #383: called from EVERY path back to the free list, not
-// just the one that erased a linear owner. The region is the ALLOCATOR's,
-// not the last holder's, and a page going back carrying whatever its last
-// holder wrote there is a page whose `pool_tag` reads as an arbitrary
-// value -- which is issue #373's forged-chunk-header mechanism with a
-// different author. The odds of an accidental match are low; #373 is the
-// reason not to settle for low.
-//
-// A run's pages need `in_run` cleared FIRST: page_meta_at deliberately
-// answers 0 for them (the whole run is payload while it is live), so a
-// clear before that would silently do nothing on exactly the pages whose
-// last holder had the most to write.
-private fn page_meta_clear(physical: usize) !{unsafe} {
-    let meta: usize = page_meta_at(physical);
-    if (meta == 0) { return; }
-    let bytes: *u8 = unsafe { meta as *u8 };
-    let count: isize = PAGE_META_BYTES as isize;
-    for i: isize in 0..<count {
-        bytes[i] = 0;
-    }
-}
-
+// What the deleted scrub was for, and what answers it now: page_meta_clear
+// zeroed those 128 bytes on every path back to the free list so a stale
+// `pool_tag` could not be read out of a page a pool had finished with
+// (#383, which is #373's forged-chunk-header hazard by a different
+// author). That is answered one layer up and does not depend on this: a
+// pool asks page_owner_tag_at -- the SIDE array (#384) -- before reading
+// any chunk header at all, and a freed page reads Unowned, so a forged
+// header cannot be reached to be believed. Pool slots are separately
+// scrubbed on release by intrusive_pool itself (#356). Nothing here was a
+// disclosure control: it only ever cleared 128 bytes of 4096.
 // This file's struct-page equivalent. The occupancy bit is needed because
 // page_transferred_release() and page_transferred_release_physical() accept
 // plain integers after linear ownership has been intentionally erased. Add
@@ -192,12 +145,11 @@ enum PageOwnerTag: u8 {
 
 struct PageMeta {
     occupied: bool;
-    // GitHub issue #377: this page is one of a contiguous run's, so it
-    // has no owner-metadata region -- see page_meta_at. Set only by
-    // page_alloc_contiguous, cleared only on the paths that put a page
-    // back on the free list, so "free" and "in a run" can never both be
-    // true.
-    in_run: bool;
+    // GitHub issue #390: `in_run` went with the metadata region. It
+    // existed so page_meta_at could answer 0 for a run's pages -- a run
+    // is entirely payload (#377) -- and page_meta_at was its only reader.
+    // What a run's pages are FOR is still answerable, from `owner`: every
+    // page of a kernel stack run carries PageOwnerTag::KernelStack.
     owner: PageOwnerTag;
     map_refcount: usize;
 }
@@ -320,7 +272,6 @@ fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
                 if (index < BOOT_PAGE_COUNT) {
                     let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
                     boot_page_pool.meta[checked].occupied = true;
-                    boot_page_pool.meta[checked].in_run = true;
                     boot_page_pool.meta[checked].owner = owner;
                     boot_page_pool.meta[checked].map_refcount = 0;
                 }
@@ -396,11 +347,8 @@ private fn page_run_release_indices(first: usize, count: usize) !{unsafe} {
                     boot_page_pool.double_remove_count + 1;
             } else {
                 boot_page_pool.meta[checked].occupied = false;
-                boot_page_pool.meta[checked].in_run = false;
                 boot_page_pool.meta[checked].owner = PageOwnerTag::Unowned;
                 boot_page_pool.meta[checked].map_refcount = 0;
-                // After in_run, never before: see page_meta_clear.
-                page_meta_clear(base + index * PAGE_SIZE);
                 freelist_core_remove(&boot_page_pool.core,
                                      freelist_owner_new(checked, 0));
             }
@@ -419,7 +367,6 @@ fn page_allocator_init() {
     // manual `let`/raw-pointer-arithmetic workaround (issue #15) needed.
     for i: usize in 0..<BOOT_PAGE_COUNT {
         boot_page_pool.meta[i].occupied = false;
-        boot_page_pool.meta[i].in_run = false;
         boot_page_pool.meta[i].owner = PageOwnerTag::Unowned;
         boot_page_pool.meta[i].map_refcount = 0;
     }
@@ -461,16 +408,24 @@ fn page_run_probe() -> bool !{unsafe} {
         if (page_owner_tag_at(base + k * PAGE_SIZE) !=
             PageOwnerTag::KernelStack) { tagged = false; }
     }
+    // GitHub issue #390: the run is payload to its LAST BYTE, checked by
+    // writing there rather than by asking whether a metadata region
+    // exists -- there are none now, so the old question answers itself
+    // and proves nothing. This one still fails if a page of a run is ever
+    // reserved again: the write is at PAGE_SIZE - 8, which is inside what
+    // the reservation used to claim.
     let mut payload_only: bool = true;
     for k: usize in 0..<count {
-        if (page_meta_at(base + k * PAGE_SIZE) != 0) { payload_only = false; }
-        // ...and write to it, because being payload is only interesting if
-        // a consumer may use it. This is what a kernel stack's deepest
-        // frames would leave here, and what must not survive the free
-        // below (issue #383).
         let tail: *u8 =
-            unsafe { (base + k * PAGE_SIZE + PAGE_USABLE_BYTES) as *u8 };
+            unsafe { (base + (k + 1) * PAGE_SIZE - 8) as *u8 };
         for i: isize in 0..<8 { tail[i] = 0xC3; }
+    }
+    for k: usize in 0..<count {
+        let tail: *u8 =
+            unsafe { (base + (k + 1) * PAGE_SIZE - 8) as *u8 };
+        for i: isize in 0..<8 {
+            if (tail[i] != 0xC3) { payload_only = false; }
+        }
     }
 
     // Every page of the run must be withheld: allocate singles until one
@@ -520,20 +475,13 @@ fn page_run_probe() -> bool !{unsafe} {
         if (page_owner_tag_at(base + k * PAGE_SIZE) !=
             PageOwnerTag::Unowned) { tagged = false; }
     }
-    let mut meta_restored: bool = true;
-    for k: usize in 0..<count {
-        if (page_meta_at(base + k * PAGE_SIZE) !=
-            base + k * PAGE_SIZE + PAGE_USABLE_BYTES) { meta_restored = false; }
-        // Restored AND scrubbed. A page going back to the free list still
-        // carrying what its last holder wrote is a page whose pool_tag
-        // reads as an arbitrary value -- issue #373's forged chunk header,
-        // by a different author (issue #383).
-        let tail: *u8 =
-            unsafe { (base + k * PAGE_SIZE + PAGE_USABLE_BYTES) as *u8 };
-        for i: isize in 0..<8 {
-            if (tail[i] != 0) { meta_restored = false; }
-        }
-    }
+    // GitHub issue #390: there is no metadata region to restore or scrub
+    // any more, so what stood here is gone rather than reworded. What it
+    // was defending -- a stale `pool_tag` read out of a page a pool had
+    // finished with -- is answered by the owner tag checked just above:
+    // a freed page reads Unowned, so no pool will look at its bytes at
+    // all. See this file's header for the fuller argument.
+    let meta_restored: bool = true;
 
     // And the pool still works afterwards: a run that unlinked pages and
     // pushed them back must leave the list usable.
@@ -587,19 +535,8 @@ fn page_free(owner: sink PageOwner[page]) !{unsafe} {
         return;
     }
     boot_page_pool.meta[index].occupied = false;
-    // Already false for a single page, and the invariant page_meta_at
-    // depends on is "a page on the free list is not in a run" -- stated
-    // on every path back to the list rather than argued from who calls
-    // which one.
-    boot_page_pool.meta[index].in_run = false;
     boot_page_pool.meta[index].owner = PageOwnerTag::Unowned;
     boot_page_pool.meta[index].map_refcount = 0;
-    // GitHub issue #383: the asymmetry with
-    // page_transferred_release_physical was real, and this is the side
-    // that was wrong. A page mapped into a user address space and written
-    // to its last byte used to go back still carrying those bytes where
-    // page_meta_at points.
-    page_meta_clear(usable_ram_start + index * PAGE_SIZE);
     freelist_core_remove(&boot_page_pool.core,
                          freelist_owner_new(index, owner.generation));
 }
@@ -821,18 +758,12 @@ fn page_transferred_release(index: {0..<BOOT_PAGE_COUNT as usize}) {
         return;
     }
     boot_page_pool.meta[index].occupied = false;
-    boot_page_pool.meta[index].in_run = false;  // see page_free
     boot_page_pool.meta[index].owner = PageOwnerTag::Unowned;
     boot_page_pool.meta[index].map_refcount = 0;
     freelist_core_remove(&boot_page_pool.core, freelist_owner_new(index, 0));
 }
 
 fn page_transferred_release_physical(physical: usize) !{unsafe} {
-    // Owner metadata is scoped to the current owner (issue #353), so it
-    // goes back to zero before the page does. Without this, the next
-    // owner of this page would inherit a region still claiming to belong
-    // to the last one.
-    page_meta_clear(physical);
     let base: usize = usable_ram_start;
     let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
     if (physical < base || physical >= base + pool_bytes ||

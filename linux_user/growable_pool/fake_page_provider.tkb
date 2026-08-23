@@ -35,21 +35,17 @@ const PAGE_COUNT: usize = 64;
 // which is exactly the 9-page world this prototype started in and not
 // the one it is a prototype OF.
 //
-// What issue #349 durably bought is not the placement but the
-// ABSTRACTION: the pool asks page_meta_at where its metadata lives and
-// does not care, so placement is the provider's policy. This one says
-// "the tail of the page". The cliff #349 removed comes back with it --
-// a stride that divides the page loses a slot again -- which is the
-// trade, and at the kernel's actual payload sizes (16-96 bytes) it costs
-// about 3% of slots against 25 MB of standing reservation.
+// GitHub issue #390: THE RESERVATION IS GONE HERE TOO, because it is gone
+// in kernel/mm/page.tkb. This stand-in and the kernel deliberately use the
+// same placement -- a prototype exercising a layout the kernel does not
+// use is issue #366's drift one level down -- so "no reservation at all"
+// has to be mirrored exactly like "the tail of the page" was.
 //
-// This stand-in and the kernel use the SAME placement, deliberately: a
-// prototype exercising a layout the kernel does not use is issue #366's
-// drift one level down.
-const PAGE_META_BYTES: usize = 128;
-// What an owner may use for its own data; the metadata sits above it.
-const PAGE_USABLE_BYTES: usize = PAGE_SIZE - PAGE_META_BYTES;
-
+// What issue #349 durably bought was never the placement but the
+// ABSTRACTION: where a pool's metadata lives is the provider's policy, and
+// a provider is free to have none. kernel/lib/intrusive_pool.tkb keeps its
+// chunk header inside the chunk since #350 and asks no provider anything.
+//
 // Aligned to 16 pages rather than 1 (GitHub issue #363). A run's
 // alignment can only ever be as strong as the arena it is carved from,
 // and this arena is a BSS array rather than real physical memory -- ask
@@ -180,12 +176,6 @@ fn page_owner_transfer_index(owner: sink PageOwner[page])
 // provider still ports there by swapping one `use` line. Added for
 // GitHub issue #346, the first caller that ever gives a page back.
 fn page_transferred_release_physical(physical: usize) !{unsafe} {
-    // Metadata is scoped to the current owner (issue #349), so it goes
-    // back to zero before the page does. Without this, the next owner of
-    // this page would inherit an entry still claiming to belong to the
-    // last one -- and a pool's "is this chunk mine?" test is exactly a
-    // read of that entry.
-    page_meta_clear(physical);
     let base: usize = (fake_pages as *u8) as usize;
     let pool_bytes: usize = PAGE_SIZE * PAGE_COUNT;
     if (physical < base || physical >= base + pool_bytes ||
@@ -228,25 +218,6 @@ fn page_allocator_live_count() -> usize {
     return fake_page_live;
 }
 
-// GitHub issue #349: the address of this page's metadata words, or 0 if
-// `physical` is not one of this allocator's page-aligned pages.
-//
-// Returning 0 rather than trapping is what lets a consumer use this as
-// its OWN validation step on an address of unknown provenance: the
-// bounds check here dereferences nothing, and a caller that gets 0 knows
-// the address is not a page of ours without ever having touched it. That
-// is a stronger position than the chunk-list walk it replaces, which had
-// to know a pool's own list to answer the same question.
-fn page_meta_at(physical: usize) -> usize {
-    let base: usize = (fake_pages as *u8) as usize;
-    let pool_bytes: usize = PAGE_SIZE * PAGE_COUNT;
-    if (physical < base || physical >= base + pool_bytes ||
-        (physical - base) % PAGE_SIZE != 0) {
-        return 0;
-    }
-    return physical + PAGE_USABLE_BYTES;
-}
-
 // GitHub issue #384: who holds the page an arbitrary address falls in.
 // Same contract as the real provider's: any address, not a page-aligned
 // one, and Unowned for anything that is not a live page of this
@@ -265,21 +236,6 @@ fn page_owner_tag_at(address: usize) -> PageOwnerTag {
     let checked: {0..<PAGE_COUNT as usize} = index;
     if (fake_page_generation[checked] == 0) { return PageOwnerTag::Unowned; }
     return fake_page_owner[checked];
-}
-
-// Clears one page's metadata. The allocator owns this storage, so it is
-// the allocator that must not leave a freed page describing itself as
-// something an owner still holds -- see page_transferred_release_physical,
-// which is the only caller and calls it before the page rejoins the free
-// supply.
-private fn page_meta_clear(physical: usize) !{unsafe} {
-    let meta: usize = page_meta_at(physical);
-    if (meta == 0) { return; }
-    let bytes: *u8 = unsafe { meta as *u8 };
-    let count: isize = PAGE_META_BYTES as isize;
-    for i: isize in 0..<count {
-        bytes[i] = 0;
-    }
 }
 
 // -- Contiguous runs ---------------------------------------------------
@@ -442,14 +398,5 @@ private fn fake_page_run_release(start: usize, count: usize) !{unsafe} {
             }
         }
     }
-    page_run_clear_meta(start, count);
 }
 
-private fn page_run_clear_meta(start: usize, count: usize) !{unsafe} {
-    let base: usize = (fake_pages as *u8) as usize;
-    for i: usize in 0..<PAGE_COUNT {
-        if (i >= start && i < start + count) {
-            page_meta_clear(base + i * PAGE_SIZE);
-        }
-    }
-}

@@ -2,7 +2,7 @@
 // in linux_user before any of the 19 syscall.tkb call sites are touched.
 //
 // tcp.tkb today keys ~10.7 KB of state off TCP_CONNECTION_MAX = 2. That
-// does not fit one intrusive_pool chunk (PAGE_USABLE_BYTES = 3968), so
+// does not fit one intrusive_pool chunk, so
 // `IntrusivePool(TcpConnection)` with everything inlined fails
 // intrusive_pool_slots_per_chunk's own static_assert. The migration has
 // to split, and this fixture is that split standing up on its own:
