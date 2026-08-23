@@ -50,7 +50,7 @@
 use "kernel/lib/freelist.tkb";
 
 const PAGE_SIZE: usize = 4096;
-// At most ADDRESS_SPACE_MAX (16) roots can each hold every page in the
+// At most KERNEL_PROCESS_MAX (16) roots can each hold every page in the
 // 262144-page user window. This is the real upper bound for one physical
 // page's user mappings, so retain rejects overflow instead of wrapping.
 const PAGE_MAP_REF_MAX: usize = 4194304;
@@ -676,7 +676,7 @@ fn page_mapping_install(owner: sink PageOwner[page]) {
 // asked to retain a mapping for a physical page this allocator does not
 // consider live -- an internal invariant violation (a real kernel bug, if
 // ever hit), not a resource limit. `current >= PAGE_MAP_REF_MAX` is the
-// actual ceiling (ADDRESS_SPACE_MAX * USER_SPACE_PAGE_COUNT, practically
+// actual ceiling (KERNEL_PROCESS_MAX * USER_SPACE_PAGE_COUNT, practically
 // unreachable by any real fork/COW fan-out). Both used to collapse into one
 // `bool false`, so the one caller (process_image.tkb's clone path) could
 // not tell "this hit a documented ceiling" from "page metadata is

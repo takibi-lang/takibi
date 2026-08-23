@@ -1,4 +1,5 @@
 use "kernel/mm/page.tkb";
+use "kernel/lib/intrusive_pool.tkb";
 use "kernel/arch/arm64/mm/mmu.tkb";
 use "kernel/arch/arm64/mm/asid.tkb";
 
@@ -9,19 +10,6 @@ const USER_L2_BRANCH_COUNT: usize = 512;
 const USER_L3_PAGE_COUNT: usize = 512;
 const USER_SPACE_PAGE_COUNT: usize = 262144;
 
-// Equal to process.tkb's KERNEL_PROCESS_MAX and asid.tkb's ASID_MAX, and
-// since issue #367 that is a static_assert in
-// scheduled_process_table_init rather than a promise made in four
-// comments. This bounded table is an intentional transitional owner:
-// callers still identify a process address space by its existing
-// scheduler slot, while the MMU layer below receives only physical table
-// addresses and an ASID.
-//
-// So it is not a pool with a ceiling of its own -- it is one record per
-// process slot, and its bound IS the process table's. Nothing here can be
-// made unbounded without first giving a process an identity that is not
-// an array index.
-const ADDRESS_SPACE_MAX: usize = 16;
 
 // nG is required once ASIDs distinguish roots: a global translation would
 // match regardless of the ASID and defeat same-VA isolation.
@@ -50,23 +38,87 @@ struct AddressSpaceBacking {
     asid: usize;
 }
 
-private let mut address_space_backing:
-    [AddressSpaceBacking; ADDRESS_SPACE_MAX];
+// GitHub issue #392: pooled, not an array keyed by process slot. Third of
+// the four per-process tables to stop being one; see
+// kernel/kernel/fd_table.tkb and kernel/mm/process_image.tkb for the same
+// move and what each cost. The handle lives in ProcessRecord.
+private let mut address_space_backing_pool: IntrusivePool(AddressSpaceBacking);
+private let mut address_space_backing_ready: bool = false;
+// Genuine allocation failure has nowhere to be reported from thirty-odd
+// field accesses, so it lands here and is COUNTED. Printed at the end of
+// the boot suite; 0 on a healthy kernel.
+private let mut address_space_backing_missing: AddressSpaceBacking;
+private let mut address_space_backing_missing_count: usize = 0;
 private let mut address_space_active_slot: usize;
 
-fn address_space_narrow_slot(value: usize)
-        -> {0..<ADDRESS_SPACE_MAX as usize} {
-    if (value < ADDRESS_SPACE_MAX) {
-        let slot: {0..<ADDRESS_SPACE_MAX as usize} = value;
-        return slot;
+fn address_space_backing_missing_uses() -> usize {
+    return address_space_backing_missing_count;
+}
+
+private fn address_space_backing_pool_init() {
+    if (address_space_backing_ready) { return; }
+    address_space_backing_ready = true;
+    intrusive_pool_init(&address_space_backing_pool);
+}
+
+// Acquired on demand rather than only at process creation: a slot here is
+// not always a live scheduler slot, exactly as issue #392's image-record
+// stage found (1648 such accesses on one boot there). Idempotent.
+fn address_space_backing_ensure(slot: usize) -> bool !{unsafe} {
+    address_space_backing_pool_init();
+    let address: usize = scheduled_process_address_space_backing(slot);
+    let generation: usize =
+        scheduled_process_address_space_backing_generation(slot);
+    if (address != 0 &&
+        intrusive_pool_matches(&address_space_backing_pool, address, generation)) {
+        return true;
     }
-    return 0;
+    let guard = intrusive_pool_lock(&address_space_backing_pool);
+    let result = intrusive_pool_insert_zeroed(&address_space_backing_pool, guard);
+    intrusive_pool_unlock(&address_space_backing_pool, guard);
+    match result {
+        IntrusivePoolInsertResult::OutOfMemory => { return false; }
+        IntrusivePoolInsertResult::Allocated(owner) => {
+            let address_new: usize = intrusive_owner_slot(owner);
+            let stamp: usize = intrusive_owner_generation(owner);
+            intrusive_owner_drop(owner);
+            scheduled_process_set_address_space_backing(slot, address_new, stamp);
+            return true;
+        }
+    }
+}
+
+// The backing for a slot, allocating one if it has none. Nothing releases,
+// for the reason process_image_record_ensure states: these arrays kept a
+// slot's entry for the life of the kernel, and changing that is a lifetime
+// change rather than a storage one.
+private fn address_space_backing_at(slot: usize)
+        -> *AddressSpaceBacking !{unsafe} {
+    if (address_space_backing_ensure(slot) == false) {
+        address_space_backing_missing_count =
+            address_space_backing_missing_count + 1;
+        return &address_space_backing_missing;
+    }
+    let address: usize = scheduled_process_address_space_backing(slot);
+    if (address == 0) {
+        address_space_backing_missing_count =
+            address_space_backing_missing_count + 1;
+        return &address_space_backing_missing;
+    }
+    let generation: usize =
+        scheduled_process_address_space_backing_generation(slot);
+    let owner =
+        intrusive_owner_new(&address_space_backing_pool, address, generation);
+    let backing: *AddressSpaceBacking =
+        intrusive_pool_ref(&address_space_backing_pool, owner);
+    intrusive_owner_drop(owner);
+    return backing;
 }
 
 fn address_space_is_live(slot: usize) -> bool {
-    if (slot < ADDRESS_SPACE_MAX) {
-        let checked = address_space_narrow_slot(slot);
-        return address_space_backing[checked].live;
+    if (scheduled_process_slot_valid(slot)) {
+        let checked: usize = slot;
+        return address_space_backing_at(checked).live;
     }
     return false;
 }
@@ -87,37 +139,37 @@ fn address_space_root_slot(root: AddressSpaceRoot) -> usize {
 }
 
 fn address_space_l1_physical(slot: usize) -> usize {
-    if (slot < ADDRESS_SPACE_MAX) {
-        let checked = address_space_narrow_slot(slot);
-        if (address_space_backing[checked].live) {
-            return address_space_backing[checked].l1_physical;
+    if (scheduled_process_slot_valid(slot)) {
+        let checked: usize = slot;
+        if (address_space_backing_at(checked).live) {
+            return address_space_backing_at(checked).l1_physical;
         }
     }
     return 0;
 }
 
 fn address_space_l2_physical(slot: usize) -> usize {
-    if (slot < ADDRESS_SPACE_MAX) {
-        let checked = address_space_narrow_slot(slot);
-        if (address_space_backing[checked].live) {
-            return address_space_backing[checked].l2_physical;
+    if (scheduled_process_slot_valid(slot)) {
+        let checked: usize = slot;
+        if (address_space_backing_at(checked).live) {
+            return address_space_backing_at(checked).l2_physical;
         }
     }
     return 0;
 }
 
 fn address_space_asid(slot: usize) -> usize {
-    if (slot < ADDRESS_SPACE_MAX) {
-        let checked = address_space_narrow_slot(slot);
-        if (address_space_backing[checked].live) {
-            return address_space_backing[checked].asid;
+    if (scheduled_process_slot_valid(slot)) {
+        let checked: usize = slot;
+        if (address_space_backing_at(checked).live) {
+            return address_space_backing_at(checked).asid;
         }
     }
     return 0;
 }
 
 fn address_space_record_backing(
-        slot: {0..<ADDRESS_SPACE_MAX as usize},
+        slot: usize,
         l1: sink PageOwner[l1_page], l2: sink PageOwner[l2_page],
         asid: sink AsidOwner[asid_owner]) {
     let l1_physical: usize = page_physical_address(l1);
@@ -127,10 +179,10 @@ fn address_space_record_backing(
     // Build before dropping the fine-grained owners into this coarser
     // record. mmu_init_root has no allocation or fallible operation.
     mmu_init_root(l1_physical, l2_physical);
-    address_space_backing[slot].l1_physical = l1_physical;
-    address_space_backing[slot].l2_physical = l2_physical;
-    address_space_backing[slot].asid = numeric_asid;
-    address_space_backing[slot].live = true;
+    address_space_backing_at(slot).l1_physical = l1_physical;
+    address_space_backing_at(slot).l2_physical = l2_physical;
+    address_space_backing_at(slot).asid = numeric_asid;
+    address_space_backing_at(slot).live = true;
     page_owner_transfer_index(l1);
     page_owner_transfer_index(l2);
     asid_owner_transfer(asid);
@@ -153,7 +205,7 @@ must_use variant AddressSpaceAllocateResult {
 // Allocate one complete root atomically from the caller's perspective. Any
 // partial page allocation is returned before reporting failure, so a failed
 // process-slot allocation cannot leave an unreachable table or ASID live.
-fn address_space_allocate_root(slot: {0..<ADDRESS_SPACE_MAX as usize})
+fn address_space_allocate_root(slot: usize)
         -> AddressSpaceAllocateResult {
     match page_alloc(PageOwnerTag::PageTable) {
         PageAllocResult::OutOfMemory => {
@@ -194,11 +246,11 @@ must_use variant AddressSpaceEnsureResult {
 // exists, then adopted by the initial scheduler slot. Every nonzero slot is
 // made real by scheduled_process_alloc and released when that slot is reaped.
 fn address_space_ensure_root(slot: usize) -> AddressSpaceEnsureResult {
-    if (slot >= ADDRESS_SPACE_MAX) {
+    if (scheduled_process_slot_valid(slot) == false) {
         return AddressSpaceEnsureResult::SlotOutOfRange;
     }
-    let checked = address_space_narrow_slot(slot);
-    if (address_space_backing[checked].live) {
+    let checked: usize = slot;
+    if (address_space_backing_at(checked).live) {
         return AddressSpaceEnsureResult::Ok;
     }
     match address_space_allocate_root(checked) {
@@ -213,20 +265,20 @@ fn address_space_ensure_root(slot: usize) -> AddressSpaceEnsureResult {
 }
 
 fn address_space_activate_root(slot: usize) {
-    if (slot < ADDRESS_SPACE_MAX) {
-        let checked = address_space_narrow_slot(slot);
-        if (address_space_backing[checked].live) {
-            mmu_activate_root(address_space_backing[checked].l1_physical,
-                              address_space_backing[checked].asid);
+    if (scheduled_process_slot_valid(slot)) {
+        let checked: usize = slot;
+        if (address_space_backing_at(checked).live) {
+            mmu_activate_root(address_space_backing_at(checked).l1_physical,
+                              address_space_backing_at(checked).asid);
             address_space_active_slot = checked;
             return;
         }
     }
     // Root 0 is permanently retained as the bootstrap/fallback root, so an
     // invalid or already-released slot never reaches TTBR0_EL1.
-    let fallback = address_space_narrow_slot(0);
-    mmu_activate_root(address_space_backing[fallback].l1_physical,
-                      address_space_backing[fallback].asid);
+    let fallback: usize = 0;
+    mmu_activate_root(address_space_backing_at(fallback).l1_physical,
+                      address_space_backing_at(fallback).asid);
     address_space_active_slot = 0;
 }
 
@@ -237,12 +289,12 @@ must_use variant AddressSpacePteWriteResult {
 }
 
 fn address_space_l3_physical_for_branch(slot: usize, branch: usize) -> usize {
-    if (slot >= ADDRESS_SPACE_MAX || branch >= USER_L2_BRANCH_COUNT) {
+    if (scheduled_process_slot_valid(slot) == false || branch >= USER_L2_BRANCH_COUNT) {
         return 0;
     }
-    let checked = address_space_narrow_slot(slot);
-    if (address_space_backing[checked].live == false) { return 0; }
-    return mmu_user_l3_physical(address_space_backing[checked].l2_physical,
+    let checked: usize = slot;
+    if (address_space_backing_at(checked).live == false) { return 0; }
+    return mmu_user_l3_physical(address_space_backing_at(checked).l2_physical,
                                 branch);
 }
 
@@ -257,16 +309,16 @@ fn address_space_l3_physical_for_index(slot: usize, index: usize) -> usize {
 // L3-allocation failure cannot silently discard a mapped user page.
 fn address_space_pte_write(slot: usize, index: usize, value: usize)
         -> AddressSpacePteWriteResult {
-    if (slot >= ADDRESS_SPACE_MAX || index >= USER_SPACE_PAGE_COUNT) {
+    if (scheduled_process_slot_valid(slot) == false || index >= USER_SPACE_PAGE_COUNT) {
         return AddressSpacePteWriteResult::Invalid;
     }
-    let checked = address_space_narrow_slot(slot);
-    if (address_space_backing[checked].live == false) {
+    let checked: usize = slot;
+    if (address_space_backing_at(checked).live == false) {
         return AddressSpacePteWriteResult::Invalid;
     }
     let branch: usize = index / USER_L3_PAGE_COUNT;
     let entry: usize = index % USER_L3_PAGE_COUNT;
-    let l2_physical: usize = address_space_backing[checked].l2_physical;
+    let l2_physical: usize = address_space_backing_at(checked).l2_physical;
     let mut l3_physical: usize =
         mmu_user_l3_physical(l2_physical, branch);
     if (l3_physical == 0) {
@@ -433,10 +485,10 @@ fn address_space_resolve_cow(slot: usize, index: usize) -> bool !{unsafe} {
 // owns one dynamic L3 page. This handles clone rollback, image cleanup, and
 // root destruction without a USER_SPACE_PAGE_COUNT-sized shadow array.
 fn address_space_release_user_mappings(slot: usize) {
-    if (slot >= ADDRESS_SPACE_MAX) { return; }
-    let checked = address_space_narrow_slot(slot);
-    if (address_space_backing[checked].live == false) { return; }
-    let l2_physical: usize = address_space_backing[checked].l2_physical;
+    if (scheduled_process_slot_valid(slot) == false) { return; }
+    let checked: usize = slot;
+    if (address_space_backing_at(checked).live == false) { return; }
+    let l2_physical: usize = address_space_backing_at(checked).l2_physical;
     for branch: usize in 0..<USER_L2_BRANCH_COUNT {
         let l3_physical: usize = mmu_user_l3_physical(l2_physical, branch);
         if (l3_physical != 0) {
@@ -452,7 +504,7 @@ fn address_space_release_user_mappings(slot: usize) {
             page_transferred_release_physical(l3_physical);
         }
     }
-    let asid: usize = address_space_backing[checked].asid;
+    let asid: usize = address_space_backing_at(checked).asid;
     if (asid != 0) { mmu_tlb_invalidate_asid(asid); }
 }
 
@@ -468,20 +520,20 @@ fn address_space_l3_branch_physical(slot: usize, branch: usize) -> usize {
 // across scheduler resets. All other fixed backing pages and their ASID are
 // released only after the boundary has switched away from that root.
 fn address_space_release_root(slot: usize) {
-    if (slot == 0 || slot >= ADDRESS_SPACE_MAX) { return; }
-    let checked = address_space_narrow_slot(slot);
-    if (address_space_backing[checked].live == false) { return; }
+    if (slot == 0 || scheduled_process_slot_valid(slot) == false) { return; }
+    let checked: usize = slot;
+    if (address_space_backing_at(checked).live == false) { return; }
     if (address_space_active_slot == checked) {
         address_space_activate_root(0);
     }
-    let l1_physical: usize = address_space_backing[checked].l1_physical;
-    let l2_physical: usize = address_space_backing[checked].l2_physical;
-    let asid: usize = address_space_backing[checked].asid;
+    let l1_physical: usize = address_space_backing_at(checked).l1_physical;
+    let l2_physical: usize = address_space_backing_at(checked).l2_physical;
+    let asid: usize = address_space_backing_at(checked).asid;
     address_space_release_user_mappings(checked);
-    address_space_backing[checked].live = false;
-    address_space_backing[checked].l1_physical = 0;
-    address_space_backing[checked].l2_physical = 0;
-    address_space_backing[checked].asid = 0;
+    address_space_backing_at(checked).live = false;
+    address_space_backing_at(checked).l1_physical = 0;
+    address_space_backing_at(checked).l2_physical = 0;
+    address_space_backing_at(checked).asid = 0;
     page_transferred_release_physical(l2_physical);
     page_transferred_release_physical(l1_physical);
     asid_transferred_release(asid);

@@ -863,6 +863,11 @@ irq_uart_rx_unmask();
                         uart_put_udec(process_image_record_missing_uses());
                         kernel_boot_log("\n");
                     }
+                    if (address_space_backing_missing_uses() != 0) {
+                        kernel_boot_log("address space: backings MISSING uses=");
+                        uart_put_udec(address_space_backing_missing_uses());
+                        kernel_boot_log("\n");
+                    }
                     if (page_allocator_double_free_count() == 0) {
                         kernel_boot_log("resources: no double free\n");
                     } else {

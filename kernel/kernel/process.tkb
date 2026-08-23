@@ -48,13 +48,13 @@ enum ProcessWaitReason: u8 { None; UartRx; ChildExit; }
 // is separately owned by address_space.tkb; the plain bookkeeping arrays
 // below cost only a few bytes per slot even at this larger N, so that
 // state stays eagerly sized. Allocating on first use is reserved for the
-// genuinely expensive per-slot resources, not applied uniformly. Still
-// the bound on address-space roots (kernel/mm/address_space.tkb's
-// ADDRESS_SPACE_MAX, held equal by a static_assert below) -- root index
-// == this file's own ProcessHandle.pool_index everywhere. The fd context
-// and the image record used to have their own copies of this number and
-// no longer do (issue #392): both are pooled, keyed by a handle this
-// record holds.
+// genuinely expensive per-slot resources, not applied uniformly. Root
+// index == this file's own ProcessHandle.pool_index everywhere, and this
+// is now the ONLY place that number is written: the fd context, the image
+// record and the address-space backing each used to keep a copy and no
+// longer do (issue #392). All three are pooled, keyed by a handle this
+// record holds, and ask scheduled_process_slot_valid rather than
+// restating the bound.
 const KERNEL_PROCESS_MAX: usize = 16;
 // GitHub issue #377: four pages. Linux arm64's THREAD_SIZE is 16K and
 // FreeBSD's kern.kstack_pages defaults to four, and this stack carries
@@ -170,6 +170,14 @@ struct ProcessRecord {
     // parsed after this file, so its struct is not nameable here.
     image_record: usize;
     image_record_generation: usize;
+    // GitHub issue #392: and this process's address-space backing. Unlike
+    // the two above, kernel/mm/address_space.tkb is parsed BEFORE this
+    // file, so AddressSpaceBacking IS nameable here -- but it is still a
+    // handle rather than an embedded field, because taking the address of
+    // a field of an array element is not expressible (issue #385) and
+    // that file needs a pointer to work through.
+    address_space_backing: usize;
+    address_space_backing_generation: usize;
 }
 
 variant ScheduledProcessValue {
@@ -259,6 +267,40 @@ fn scheduled_process_set_image_record(slot: usize, address: usize,
         let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
         scheduled_process_records[checked].image_record = address;
         scheduled_process_records[checked].image_record_generation = generation;
+    }
+}
+
+// Is this a slot the process table can hold? The question belongs here,
+// and asking it by FUNCTION is what lets kernel/mm/address_space.tkb --
+// parsed before this file, so unable to name KERNEL_PROCESS_MAX in a
+// bound -- stop keeping its own copy of the number (issue #392).
+fn scheduled_process_slot_valid(slot: usize) -> bool {
+    return slot < KERNEL_PROCESS_MAX;
+}
+
+fn scheduled_process_address_space_backing(slot: usize) -> usize {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        return scheduled_process_records[checked].address_space_backing;
+    }
+    return 0;
+}
+
+fn scheduled_process_address_space_backing_generation(slot: usize) -> usize {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        return scheduled_process_records[checked].address_space_backing_generation;
+    }
+    return 0;
+}
+
+fn scheduled_process_set_address_space_backing(slot: usize, address: usize,
+                                               generation: usize) {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        scheduled_process_records[checked].address_space_backing = address;
+        scheduled_process_records[checked].address_space_backing_generation =
+            generation;
     }
 }
 
@@ -535,8 +577,6 @@ fn scheduled_process_table_init() {
     // in its own right: they are per-process-slot state, not independently
     // allocated things, and giving any one of them its own identity is a
     // different change from swapping a pool primitive.
-    static_assert(ADDRESS_SPACE_MAX == KERNEL_PROCESS_MAX,
-                  "ADDRESS_SPACE_MAX must equal KERNEL_PROCESS_MAX: an address-space root is keyed by process slot");
     static_assert(ASID_MAX == KERNEL_PROCESS_MAX,
                   "ASID_MAX must equal KERNEL_PROCESS_MAX: every live process slot must be able to hold an ASID");
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
