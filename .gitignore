@@ -63,3 +63,4 @@ __pycache__
 .watch_list
 slides.html
 slides.pdf
+docs/talks/*/dist/

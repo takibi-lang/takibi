@@ -60,7 +60,7 @@ img {
 }
 </style>
 
-![w:930](human-on-the-loop.svg)
+![w:930](assets/human-on-the-loop.svg)
 
 ---
 
@@ -68,7 +68,7 @@ img {
 
 # Demo
 
-<video src="demo.mp4" autoplay muted loop controls></video>
+<video src="assets/demo.mp4" autoplay muted loop controls></video>
 
 ---
 
@@ -83,7 +83,7 @@ img {
 }
 </style>
 
-![w:950](kernel-learning-loop.svg)
+![w:950](assets/kernel-learning-loop.svg)
 
 ---
 
