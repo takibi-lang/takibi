@@ -225,6 +225,32 @@ the system will silently break or run amok. Nothing is communicated to the user.
 The finished form of code is when index ranges are pinned at the type level using
 `for i: usize in 0..<n` or `{lo..<hi as usize}` annotations.
 
+### Diagnostic Policy: Errors by Default, Warnings by Exception
+
+**A compiler diagnostic that identifies a construct the programmer should fix is a
+compile error by default, not a warning.** Takibi's compiler, language specification,
+kernel, and maintained tests live in one repository and are migrated together. Unlike
+using `-Werror` with an independently-versioned external compiler, there is no need to
+leave a correct rule non-fatal merely to absorb warning-set drift across repository or
+release boundaries.
+
+- If the compiler can determine that a construct is invalid, dangerously ambiguous,
+  redundant at a trust boundary, or contrary to a maintained project invariant, reject
+  it. This includes mechanically-fixable cases such as ambiguous operator grouping or
+  an `unsafe` scope that contains no operation requiring `unsafe`.
+- Do not introduce a warning as a compatibility or gradual-migration mechanism for
+  `kernel/` or `linux_user/`; update the compiler and every affected in-repository caller
+  in the same change. If experimental bring-up genuinely needs a permissive mode, make
+  that an explicit option with a documented purpose and boundary, as `--forbid-trap`
+  does, rather than an always-ignorable warning.
+- A warning is an exception reserved for information where the compiler cannot
+  establish that the program is wrong and rejecting it would exclude a legitimate,
+  presently-needed program. Every new warning needs an explicit rationale for why it
+  cannot be an error, plus repo-wide validation showing its expected signal and noise.
+- Prefer no diagnostic over a warning whose false-positive behavior is not understood.
+  First make the analysis precise enough to support a reliable error, or keep it behind
+  an explicit investigative/debug option.
+
 ## Development Process: Write `.tkb` Code Under `--forbid-trap` From the Start
 
 **New `.tkb` work is written and compiled with refinement types and `--forbid-trap` enabled
