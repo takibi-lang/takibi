@@ -710,7 +710,20 @@ fn intrusive_pool_slot_stride(T: type, pool: &mut IntrusivePool(T) @ pool_id) ->
 // SLUB's `slub_max_order` defaults to 3 (32 KB) and its `slub_min_objects`
 // pushes the order up until a slab holds enough objects; UMA does the
 // equivalent. These are the same two numbers.
-const INTRUSIVE_MAX_CHUNK_PAGES: usize = 8;
+// Two things at once, and the name says which is which because the older
+// one (MAX_CHUNK_PAGES) read as "a limit on pages" and was mistaken for
+// one:
+//
+//  - a POLICY knob -- how large one chunk may grow. Not a ceiling on
+//    anything: a pool may hold any number of chunks, so this bounds the
+//    slab size, not the memory.
+//  - a real functional CEILING on sizeof(T), asserted in
+//    intrusive_pool_slots_per_chunk: a T whose slot exceeds
+//    8 * PAGE_SIZE - INTRUSIVE_CHUNK_HEADER_BYTES (32640 bytes) cannot be
+//    pooled at all. Issue #350 raised that from one page's payload to
+//    this; it did not remove it. The largest T pooled today is
+//    NetFrame at ~1520 bytes.
+const INTRUSIVE_MAX_PAGES_PER_CHUNK: usize = 8;
 const INTRUSIVE_MIN_SLOTS_PER_CHUNK: usize = 8;
 
 // The chunk header now lives at the END of the chunk rather than in the
@@ -723,7 +736,7 @@ const INTRUSIVE_CHUNK_HEADER_BYTES: usize = 128;
 
 // How many pages back one chunk of this pool: the smallest power of two
 // holding INTRUSIVE_MIN_SLOTS_PER_CHUNK slots, capped at
-// INTRUSIVE_MAX_CHUNK_PAGES. Every operand is a compile-time property of
+// INTRUSIVE_MAX_PAGES_PER_CHUNK. Every operand is a compile-time property of
 // T, so this folds to a constant per instantiation -- it is a function
 // rather than a `const` only because `const` cannot depend on `sizeof(T)`
 // before monomorphization.
@@ -736,7 +749,7 @@ fn intrusive_pool_chunk_pages(T: type, pool: &mut IntrusivePool(T) @ pool_id)
         -> usize {
     let stride: usize = sizeof(IntrusiveSlot(T));
     let mut pages: usize = 1;
-    while (pages < INTRUSIVE_MAX_CHUNK_PAGES &&
+    while (pages < INTRUSIVE_MAX_PAGES_PER_CHUNK &&
            (pages * PAGE_SIZE - INTRUSIVE_CHUNK_HEADER_BYTES) / stride <
                INTRUSIVE_MIN_SLOTS_PER_CHUNK) {
         pages = pages * 2;
@@ -767,7 +780,7 @@ fn intrusive_pool_slots_per_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id
     // header. A T under about 32 KB pools; the one thing that still does
     // not compile is a T too large for any chunk this file will build.
     static_assert(sizeof(IntrusiveSlot(T)) <=
-                      INTRUSIVE_MAX_CHUNK_PAGES * PAGE_SIZE -
+                      INTRUSIVE_MAX_PAGES_PER_CHUNK * PAGE_SIZE -
                       INTRUSIVE_CHUNK_HEADER_BYTES,
                   "IntrusivePool(T): one T-sized slot does not fit in the largest chunk this pool will build");
     // The header's reservation is this file's own now, so this is a check
@@ -775,15 +788,15 @@ fn intrusive_pool_slots_per_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id
     static_assert(sizeof(IntrusiveChunkHeader) <= INTRUSIVE_CHUNK_HEADER_BYTES,
                   "IntrusivePool(T): the per-chunk header reservation is smaller than a chunk header");
     // intrusive_pool_chunk_pages doubles from 1 and stops at
-    // `pages < INTRUSIVE_MAX_CHUNK_PAGES`, so a cap that is not a power of
+    // `pages < INTRUSIVE_MAX_PAGES_PER_CHUNK`, so a cap that is not a power of
     // two is not a cap: at 6 the sequence runs 1, 2, 4, 8 and leaves 8.
     // The alignment page_alloc_contiguous promises -- which is what makes
     // intrusive_chunk_base_of an O(1) mask -- holds only for power-of-two
     // runs, so overshooting the cap would silently produce chunks whose
     // base cannot be recovered from a slot address.
-    static_assert((INTRUSIVE_MAX_CHUNK_PAGES &
-                   (INTRUSIVE_MAX_CHUNK_PAGES - 1)) == 0,
-                  "INTRUSIVE_MAX_CHUNK_PAGES must be a power of two, or the order search overshoots it and page_alloc_contiguous stops promising alignment");
+    static_assert((INTRUSIVE_MAX_PAGES_PER_CHUNK &
+                   (INTRUSIVE_MAX_PAGES_PER_CHUNK - 1)) == 0,
+                  "INTRUSIVE_MAX_PAGES_PER_CHUNK must be a power of two, or the order search overshoots it and page_alloc_contiguous stops promising alignment");
     // GitHub issue #348, the two conditions the payload/link overlay
     // needs. Both are properties of T alone, so both are settled here
     // rather than being anything a caller or a runtime path can get
