@@ -49,17 +49,28 @@ const SHARED_OBJECT_MAX: usize = 16;
 // object rather than new objects), so that is the real bound on
 // simultaneous holders -- see kernel/lib/refcount_slotmap.tkb's header
 // for why this is passed explicitly rather than left an unbounded usize.
-// GitHub issue #392: 4096, and for the first time a number of its own.
-// It was KERNEL_PROCESS_MAX * PROCESS_FD_MAX -- how many descriptors could
-// exist at all, so no reference count could reach it. There is no process
-// ceiling any more, so the product is unbounded and this becomes an
-// INDEPENDENT ceiling: the 4097th descriptor naming one shared object is
-// refused with RefcountRetainResult::Overflow, which the fd install and
-// duplicate paths already report distinctly (LINUX_EMFILE) and
-// unified_object_ref_ceiling_probe already boundary-tests. 4096 is 16x
-// what the old product came to; removing the ceiling rather than raising
-// it needs the refcount itself to stop being a counter, which is a
-// different change.
+// GitHub issue #392: 4096, and for the first time a number PICKED rather
+// than derived. It was KERNEL_PROCESS_MAX * PROCESS_FD_MAX -- an inventory
+// of every entry that could hold a reference at all, so no reference count
+// could reach it. There is no process ceiling any more, so that product is
+// unbounded and the derivation is what broke, not the check.
+//
+// The check itself costs nothing and should stay: MAX_REFS sizes no
+// storage (the refcount is one usize per slot either way), it is a single
+// `current >= MAX_REFS` in refcount_pool_retain, and what it catches is a
+// reference LEAK -- a retain with no matching release -- long before
+// memory notices. A saturating counter with no bound catches nothing.
+//
+// What can be recovered is the DERIVATION, and it does not need the
+// refcount to stop being a counter: every holder of a shared object is an
+// entry in some process's fd table, and those tables are pooled here, so
+// the exact bound is intrusive_pool_live_count(&fd_context_pool) *
+// PROCESS_FD_MAX -- a runtime value this file can compute, where MAX_REFS
+// is a const-generic parameter of the pool. Passing the bound per retain
+// instead would make the check exact and leave nobody picking a number.
+// Filed rather than done here: it is refcount_slotmap.tkb's signature,
+// which is a kernel/lib/ change with one other consideration (whether an
+// exact bound wants to be a hard refusal or a logged invariant break).
 const SHARED_OBJECT_MAX_REFS: usize = 4096;
 
 enum UnifiedFdKind: u8 {
