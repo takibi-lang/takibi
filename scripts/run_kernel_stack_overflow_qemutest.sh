@@ -25,6 +25,11 @@ UART_LOG="$ARTIFACT_DIR/uart.log"
 mkdir -p "$ARTIFACT_DIR"
 : >"$UART_LOG"
 
+# GitHub issue #407: see scripts/qemu_port_guard.py. Refuse to start if
+# somebody already owns this lane's ports, and say that rather than
+# reporting a kernel that was never asked anything.
+python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu stack-overflow" \
+    "tcp:$GDB_PORT" || exit 1
 if ! command -v gdb-multiarch >/dev/null 2>&1; then
     echo "error: gdb-multiarch is required for kernelcheck-stack-overflow-qemu" >&2
     exit 1

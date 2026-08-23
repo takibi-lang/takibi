@@ -66,6 +66,15 @@ if ! flock -n 9; then
     echo "FAIL $RUN_LABEL: another QEMU runner already owns $ARTIFACT_DIR" >&2
     exit 1
 fi
+# GitHub issue #407: refuse to start if somebody already owns the ports
+# this lane is about to use, and say so in those words. A peer that cannot
+# bind used to surface as "no UART output captured -- kernel did not
+# boot", which names the kernel for something it was never asked about.
+# An orphan of THIS lane -- a qemu-system whose own command line carries
+# this port, left behind by an interrupted run -- is reaped; anything else
+# is reported and left alone.
+python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "$RUN_LABEL" \
+    "tcp:$SERIAL_PORT" "udp:$NETDEV_LOCAL_PORT" "udp:$NETDEV_REMOTE_PORT" || exit 1
 if [ ! -f "$ELF" ]; then
     echo "error: kernel ELF not found: $ELF" >&2
     exit 1
@@ -135,7 +144,17 @@ stop_qemu
 trap - EXIT INT TERM HUP
 
 if [ ! -s "$UART_LOG" ]; then
-    echo "error: no UART output captured -- kernel did not boot" >&2
+    # GitHub issue #407: an empty UART log means the guest said nothing,
+    # which is a claim about the KERNEL -- so only make it when the host
+    # side actually got to ask. If the peer above failed too, it is the
+    # more likely cause and the one to read first: a lane whose peer
+    # cannot start never gets far enough to learn anything about the
+    # guest.
+    if [ "$peer_status" -ne 0 ]; then
+        echo "error: no UART output captured, and the host-side peer above failed too -- read the peer's error first; this says nothing about the kernel" >&2
+    else
+        echo "error: no UART output captured -- kernel did not boot" >&2
+    fi
     exit 1
 fi
 # The persistent-shell checkpoints name the tracked child's pid, and a pid

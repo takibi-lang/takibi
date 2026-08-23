@@ -103,6 +103,12 @@ if ! flock -n 9; then
     echo "FAIL kernel/qemu lifecycle-gap: another runner already owns $ARTIFACT_DIR" >&2
     exit 1
 fi
+# GitHub issue #407: see scripts/qemu_port_guard.py. Refuse to start if
+# somebody already owns this lane's ports, and say that rather than
+# reporting a kernel that was never asked anything.
+python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu lifecycle-gap" \
+    "tcp:$SERIAL_PORT" "tcp:$GDB_PORT" \
+    "udp:$NETDEV_LOCAL_PORT" "udp:$NETDEV_REMOTE_PORT" || exit 1
 if [ ! -f "$ELF" ]; then
     echo "error: kernel ELF not found: $ELF (run 'make kernelbuild-qemu-debug' first)" >&2
     exit 1

@@ -22,6 +22,16 @@ fi
 mkdir -p "$ARTIFACT_DIR"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 
+# GitHub issue #407: refuse to start if somebody already owns the ports
+# this lane is about to use, and say so in those words. A peer that cannot
+# bind used to surface as "no UART output captured -- kernel did not
+# boot", which names the kernel for something it was never asked about.
+# An orphan of THIS lane -- a qemu-system whose own command line carries
+# this port, left behind by an interrupted run -- is reaped; anything else
+# is reported and left alone.
+python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "$RUN_LABEL" \
+    "tcp:$SERIAL_PORT" "udp:$NETDEV_LOCAL_PORT" "udp:$NETDEV_REMOTE_PORT" || exit 1
+
 QEMU_PID=""
 PEER_PID=""
 cleanup() {
