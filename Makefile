@@ -100,6 +100,7 @@ test: build
 ## canonical implementation; examples/Makefile's own `langcheck` target
 ## just forwards here via `$(MAKE) -C .. langcheck`.
 langcheck:
+	@python3 scripts/check_compiler_sync_rules.py --quiet
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash -c ' \
 		echo "Checking for non-ASCII characters in source files..."; \
 		if LC_ALL=C grep -rnP "[^\x00-\x7F]" --exclude-dir=_build \

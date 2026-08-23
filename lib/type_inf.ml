@@ -1817,7 +1817,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 (* aligned_ptr - offset stays *align(N) T when either the
                    element stride or the offset itself proves it -- same
                    reasoning as Add's own TAlignedPtr case above (kept
-                   together, sync rule). *)
+                   together, sync rule with llvm_gen.ml). *)
                 unify_at e2.loc t2 TIsize;
                 if elem_stride_aligned senv n elem then TAlignedPtr (n, elem)
                 else (match provable_multiple_of e2 with
