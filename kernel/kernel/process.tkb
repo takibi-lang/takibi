@@ -151,6 +151,17 @@ struct ProcessRecord {
     // outlive the slot, and the slot is the ceiling this is on the way to
     // removing.
     stack_run: usize;
+    // GitHub issue #392: this process's fd context, as the pooled slot
+    // address and the occupant generation that says the slot is still
+    // ours. 0 means none yet.
+    //
+    // Two plain usizes rather than the record type, deliberately:
+    // kernel/kernel/fd_table.tkb is parsed AFTER this file, so its struct
+    // is not nameable here -- but a function is (functions resolve
+    // globally regardless of file order), which is how this file can
+    // ensure and release a context it cannot describe.
+    fd_context: usize;
+    fd_context_generation: usize;
 }
 
 variant ScheduledProcessValue {
@@ -187,6 +198,35 @@ fn scheduled_process_record_state(
 fn scheduled_process_record_wait_reason(
         slot: {0..<KERNEL_PROCESS_MAX as usize}) -> ProcessWaitReason {
     return scheduled_process_records[slot].wait_reason;
+}
+
+// GitHub issue #392: where kernel/kernel/fd_table.tkb keeps this
+// process's context handle. It cannot hold it itself without a table
+// keyed by process slot, which is the ceiling this is on the way to
+// removing -- so the process record holds it, and fd_table asks.
+fn scheduled_process_fd_context(slot: usize) -> usize {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        return scheduled_process_records[checked].fd_context;
+    }
+    return 0;
+}
+
+fn scheduled_process_fd_context_generation(slot: usize) -> usize {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        return scheduled_process_records[checked].fd_context_generation;
+    }
+    return 0;
+}
+
+fn scheduled_process_set_fd_context(slot: usize, address: usize,
+                                    generation: usize) {
+    if (slot < KERNEL_PROCESS_MAX) {
+        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+        scheduled_process_records[checked].fd_context = address;
+        scheduled_process_records[checked].fd_context_generation = generation;
+    }
 }
 
 fn scheduled_process_record_wait4_status_ptr(slot: usize) -> usize {
@@ -466,8 +506,6 @@ fn scheduled_process_table_init() {
                   "ADDRESS_SPACE_MAX must equal KERNEL_PROCESS_MAX: an address-space root is keyed by process slot");
     static_assert(PROCESS_IMAGE_ROOT_MAX == KERNEL_PROCESS_MAX,
                   "PROCESS_IMAGE_ROOT_MAX must equal KERNEL_PROCESS_MAX: an image record is keyed by process slot");
-    static_assert(PROCESS_CONTEXT_MAX == KERNEL_PROCESS_MAX,
-                  "PROCESS_CONTEXT_MAX must equal KERNEL_PROCESS_MAX: an fd context is keyed by process slot");
     static_assert(ASID_MAX == KERNEL_PROCESS_MAX,
                   "ASID_MAX must equal KERNEL_PROCESS_MAX: every live process slot must be able to hold an ASID");
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
@@ -493,6 +531,7 @@ fn scheduled_process_table_clear() {
                 }
             }
         }
+        unified_fd_context_release(slot);
         address_space_release_root(slot);
         scheduled_process_records[slot].saved_sp = 0;
         scheduled_process_records[slot].state = ProcessSlotState::Free;
@@ -567,6 +606,22 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                                        freelist_owner_new(slot, generation));
                         return ScheduledProcessAllocResult::Full;
                     }
+                }
+                // GitHub issue #392: the fd context is a per-process
+                // resource like the stack run and the address-space root
+                // above, so it is acquired here, in the same rollback
+                // chain, rather than materialising on first use inside
+                // kernel/kernel/fd_table.tkb. A live slot therefore always
+                // has one, which is what lets every entry point there test
+                // "does this process have an fd table" instead of "is this
+                // index in range".
+                if (unified_fd_context_ensure(slot) == false) {
+                    kernel_boot_log_resource_exhausted(
+                        "physical page allocator" as *u8, BOOT_PAGE_COUNT);
+                    address_space_release_root(slot);
+                    slotmap_remove(&scheduled_process_pool,
+                                   freelist_owner_new(slot, generation));
+                    return ScheduledProcessAllocResult::Full;
                 }
                 scheduled_process_records[slot].state = ProcessSlotState::Ready;
                 let bottom: usize = kernel_stack_bottom(slot);
@@ -755,6 +810,7 @@ fn scheduled_process_reap(
         0, 0, 4, 0, owner.pool_index,
         scheduled_process_records[owner.pool_index].saved_sp, 0);
     scheduled_process_state_drop(state);
+    unified_fd_context_release(owner.pool_index);
     address_space_release_root(owner.pool_index);
     slotmap_remove(&scheduled_process_pool,
                    freelist_owner_new(owner.pool_index, owner.generation));

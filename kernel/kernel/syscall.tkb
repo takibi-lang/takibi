@@ -172,9 +172,9 @@ struct CloneFileState {
     parent_inetd_mode: bool;
 }
 
-private let mut clone_file_state: [CloneFileState; PROCESS_CONTEXT_MAX];
+private let mut clone_file_state: [CloneFileState; KERNEL_PROCESS_MAX];
 enum UartBlockDelivery: u8 { Scalar; Read; }
-private let mut syscall_uart_block_delivery: [UartBlockDelivery; PROCESS_CONTEXT_MAX];
+private let mut syscall_uart_block_delivery: [UartBlockDelivery; KERNEL_PROCESS_MAX];
 private let mut syscall_exec_pending: bool;
 private let mut syscall_exec_argc: usize;
 private let mut syscall_exec_argv: [u8; 512];
@@ -371,8 +371,20 @@ fn kernel_syscall_process_configure_current(
     }
 }
 
-fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
+fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
+        !{unsafe} {
+    unified_fd_context_pool_init();
     unified_fd_table_init();
+    // GitHub issue #392: process slot 0 is the bootstrap, which this
+    // kernel sets up directly rather than through
+    // scheduled_process_alloc -- so it is the one process that does not
+    // get an fd context from the allocation path, and has to be given one
+    // here. It got one for free while contexts were an array with an entry
+    // per slot whether or not a process occupied it.
+    if (unified_fd_context_ensure(0) == false) {
+        kernel_boot_log_resource_exhausted(
+            "physical page allocator" as *u8, BOOT_PAGE_COUNT);
+    }
     match unified_terminal_stdio_open(0) {
         UnifiedOpenResult::Invalid => {}
         UnifiedOpenResult::Full => {
@@ -390,14 +402,14 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
     syscall_exec_pending = false;
     syscall_exec_argc = 0;
     syscall_test_lifecycle_persistent_shell_clear();
-    for process_slot: usize in 0..<PROCESS_CONTEXT_MAX {
+    for process_slot: usize in 0..<KERNEL_PROCESS_MAX {
         syscall_uart_block_delivery[process_slot] = UartBlockDelivery::Scalar;
     }
     for path_index: usize in 0..<256 { syscall_exec_path[path_index] = 0; }
     tcp_connection_pool_init();
     syscall_test_evidence_reset_socket_counters();
     syscall_inetd_mode = false;
-    for context: usize in 0..<PROCESS_CONTEXT_MAX {
+    for context: usize in 0..<KERNEL_PROCESS_MAX {
         clone_file_state[context].file_state_live = false;
         clone_file_state[context].parent_inetd_mode = false;
     }
@@ -410,8 +422,8 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize) {
 // which now calls kernel_process_clone_begin() first for exactly this).
 fn kernel_syscall_clone_files_begin(parent_slot: usize, child_slot: usize)
         -> UnifiedFdResult {
-    if (child_slot < PROCESS_CONTEXT_MAX) {
-        let child: {0..<PROCESS_CONTEXT_MAX as usize} = child_slot;
+    if (child_slot < KERNEL_PROCESS_MAX) {
+        let child: {0..<KERNEL_PROCESS_MAX as usize} = child_slot;
         match unified_fd_clone(parent_slot, child_slot) {
             UnifiedFdResult::Invalid => {
                 clone_file_state[child].file_state_live = false;
@@ -648,8 +660,8 @@ fn kernel_connected_descriptor_release(fd: usize) -> bool {
 // CloneFileState this reaps.
 fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
     let child_slot: usize = kernel_syscall_process_slot();
-    if (child_slot < PROCESS_CONTEXT_MAX) {
-        let child: {0..<PROCESS_CONTEXT_MAX as usize} = child_slot;
+    if (child_slot < KERNEL_PROCESS_MAX) {
+        let child: {0..<KERNEL_PROCESS_MAX as usize} = child_slot;
         if (clone_file_state[child].file_state_live == false) {
             return KernelFdReapResult::Failed;
         }
@@ -1086,8 +1098,8 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
                 if (kernel_process_current_has_live_child()) {
                     let process_slot: usize = kernel_syscall_process_slot();
                     if (process_slot >= 0 &&
-                        process_slot < PROCESS_CONTEXT_MAX) {
-                        let slot: {0..<PROCESS_CONTEXT_MAX as usize} =
+                        process_slot < KERNEL_PROCESS_MAX) {
+                        let slot: {0..<KERNEL_PROCESS_MAX as usize} =
                             process_slot;
                         syscall_uart_block_delivery[slot] =
                             UartBlockDelivery::Read;
@@ -1263,8 +1275,8 @@ must_use variant KernelUartDeliveryResult { Consumed; RetryRead; }
 fn kernel_syscall_uart_deliver(frame_sp: usize, process_slot: usize,
                                value: usize)
         -> KernelUartDeliveryResult !{interrupt} {
-    if (process_slot >= 0 && process_slot < PROCESS_CONTEXT_MAX) {
-        let slot: {0..<PROCESS_CONTEXT_MAX as usize} = process_slot;
+    if (process_slot >= 0 && process_slot < KERNEL_PROCESS_MAX) {
+        let slot: {0..<KERNEL_PROCESS_MAX as usize} = process_slot;
         match syscall_uart_block_delivery[slot] {
             UartBlockDelivery::Scalar => {
                 el0_context_set_x0(frame_sp, value);
@@ -1283,8 +1295,8 @@ fn kernel_syscall_uart_deliver(frame_sp: usize, process_slot: usize,
 
 fn kernel_syscall_uart_block_prepare(frame_sp: usize) {
     let process_slot: usize = kernel_syscall_process_slot();
-    if (process_slot >= 0 && process_slot < PROCESS_CONTEXT_MAX) {
-        let slot: {0..<PROCESS_CONTEXT_MAX as usize} = process_slot;
+    if (process_slot >= 0 && process_slot < KERNEL_PROCESS_MAX) {
+        let slot: {0..<KERNEL_PROCESS_MAX as usize} = process_slot;
         match syscall_uart_block_delivery[slot] {
             UartBlockDelivery::Scalar => {}
             UartBlockDelivery::Read => {
