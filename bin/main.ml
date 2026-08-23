@@ -144,6 +144,7 @@ let () =
   (try
     Const_env.reset ();
     Type_layout.reset ();
+    Ast.reset_precedence_warnings ();
     (* GitHub issue #55: every file named on the command line is an entry
        point into Use_resolver's `use "path";` closure -- if none of them
        (or anything they transitively `use`) has a single `use`
@@ -171,6 +172,9 @@ let () =
         (List.map fst resolved);
 
     let prog = List.concat_map snd resolved in
+
+    List.rev !Ast.precedence_warning_sites
+    |> List.iter (fun (loc, what) -> report_warning loc what);
 
     (* GitHub issue #207: compile-time generics. Expands every
        `generic struct` template actually instantiated into an ordinary,

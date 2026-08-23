@@ -16,6 +16,52 @@ let lift_singleton wrap = function
   | TypeSingleton (base, arg) -> TypeSingleton (wrap base, arg)
   | ty -> wrap ty
 
+let comparison_operator = function
+  | Lt -> Some "<" | Gt -> Some ">" | Le -> Some "<=" | Ge -> Some ">="
+  | Eq -> Some "==" | Ne -> Some "!="
+  | _ -> None
+
+let bitwise_operator = function
+  | Band -> Some "&" | Bor -> Some "|" | Bxor -> Some "^"
+  | _ -> None
+
+(* GitHub issue #398: comparisons bind tighter than bitwise | and ^, while
+   Takibi deliberately makes bitwise & bind tighter than comparisons (unlike
+   C; see SPEC.md). Either unparenthesized mixture is easy to misread.
+   Parentheses are otherwise erased from the AST, so the grouping production
+   marks its returned expression out-of-band and this constructor warns only
+   when the two operator classes are direct, unparenthesized neighbours. *)
+let make_binop loc op left right =
+  let direct_operator classify e =
+    if Ast.is_parenthesized e then None else
+    match e.desc with
+    | BinOp (nested, _, _) -> classify nested
+    | _ -> None
+  in
+  (match bitwise_operator op, comparison_operator op with
+   | Some bitwise, _ ->
+       let comparison = match direct_operator comparison_operator left with
+         | Some op -> Some op
+         | None -> direct_operator comparison_operator right
+       in
+       Option.iter (fun comparison ->
+         Ast.record_precedence_warning loc (Printf.sprintf
+           "`%s` binds looser than `%s` here, so this parses with the `%s` comparison inside `%s`. Add parentheses to say which you meant."
+           bitwise comparison comparison bitwise)
+       ) comparison
+   | _, Some comparison ->
+       let bitwise = match direct_operator bitwise_operator left with
+         | Some op -> Some op
+         | None -> direct_operator bitwise_operator right
+       in
+       Option.iter (fun bitwise ->
+         Ast.record_precedence_warning loc (Printf.sprintf
+           "`%s` binds tighter than `%s` here, so this parses with `%s` inside the `%s` comparison. Add parentheses to say which you meant."
+           bitwise comparison bitwise comparison)
+       ) bitwise
+   | None, None -> ());
+  { desc = BinOp (op, left, right); loc }
+
 (* Narrow an INT token's Int64.t value to a native int for grammar positions
    that only ever need a small, realistic value (alignment, enum
    discriminants, array sizes) -- see Ast.int_of_intlit's comment for why a
@@ -779,9 +825,9 @@ expr:
         loc = $symbolstartpos } }
   | expr OR      expr  { { desc = BinOp (Or,   $1, $3); loc = $symbolstartpos } }
   | expr DAMP    expr  { { desc = BinOp (And,  $1, $3); loc = $symbolstartpos } }
-  | expr PIPE    expr  { { desc = BinOp (Bor,  $1, $3); loc = $symbolstartpos } }
-  | expr HAT     expr  { { desc = BinOp (Bxor, $1, $3); loc = $symbolstartpos } }
-  | expr AMP     expr  { { desc = BinOp (Band, $1, $3); loc = $symbolstartpos } }
+  | expr PIPE    expr  { make_binop $symbolstartpos Bor  $1 $3 }
+  | expr HAT     expr  { make_binop $symbolstartpos Bxor $1 $3 }
+  | expr AMP     expr  { make_binop $symbolstartpos Band $1 $3 }
   | expr SHR     expr  { { desc = BinOp (Shr,  $1, $3); loc = $symbolstartpos } }
   | expr SHL     expr  { { desc = BinOp (Shl,  $1, $3); loc = $symbolstartpos } }
   | expr PLUS    expr  { { desc = BinOp (Add,  $1, $3); loc = $symbolstartpos } }
@@ -789,12 +835,12 @@ expr:
   | expr TIMES   expr  { { desc = BinOp (Mul,  $1, $3); loc = $symbolstartpos } }
   | expr DIV     expr  { { desc = BinOp (Div,  $1, $3); loc = $symbolstartpos } }
   | expr PERCENT expr  { { desc = BinOp (Mod,  $1, $3); loc = $symbolstartpos } }
-  | expr LT expr   { { desc = BinOp (Lt, $1, $3); loc = $symbolstartpos } }
-  | expr GT expr   { { desc = BinOp (Gt, $1, $3); loc = $symbolstartpos } }
-  | expr LE expr   { { desc = BinOp (Le, $1, $3); loc = $symbolstartpos } }
-  | expr GE expr   { { desc = BinOp (Ge, $1, $3); loc = $symbolstartpos } }
-  | expr EQ expr   { { desc = BinOp (Eq, $1, $3); loc = $symbolstartpos } }
-  | expr NE expr   { { desc = BinOp (Ne, $1, $3); loc = $symbolstartpos } }
+  | expr LT expr   { make_binop $symbolstartpos Lt $1 $3 }
+  | expr GT expr   { make_binop $symbolstartpos Gt $1 $3 }
+  | expr LE expr   { make_binop $symbolstartpos Le $1 $3 }
+  | expr GE expr   { make_binop $symbolstartpos Ge $1 $3 }
+  | expr EQ expr   { make_binop $symbolstartpos Eq $1 $3 }
+  | expr NE expr   { make_binop $symbolstartpos Ne $1 $3 }
   | TIMES e = expr %prec UNARY { { desc = Deref e;    loc = $symbolstartpos } }
   | AMP e = expr %prec UNARY { { desc = AddrOf e; loc = $symbolstartpos } }
   | TILDE e = expr %prec UNARY { { desc = Bnot e; loc = $symbolstartpos } }
@@ -828,7 +874,7 @@ expr:
     { { desc = OffsetOf (t, field); loc = $symbolstartpos } }
   | EMBED_FILE LPAREN path = STRING RPAREN
     { { desc = EmbedFile path; loc = $symbolstartpos } }
-  | LPAREN e = expr RPAREN { e }
+  | LPAREN e = expr RPAREN { Ast.mark_parenthesized e }
   | LPAREN e1 = expr COMMA e2 = expr es = rest_args RPAREN
     (* (e1, e2, ...) -- tuple literal, 2+ components (OWNERSHIP_KERNEL.md
        5.9, GitHub issue #120). Same "mandatory second element" shape as

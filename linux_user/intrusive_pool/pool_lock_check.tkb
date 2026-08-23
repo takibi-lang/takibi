@@ -83,7 +83,7 @@ fn pool_lock_acquire(tag: usize) -> usize {
                 // Have we ever seen the opposite order? Check BEFORE
                 // recording this one, or a pair would report against
                 // itself.
-                if ((pool_lock_order_edge[held_slot] >> tag) & 1 == 1) {
+                if (((pool_lock_order_edge[held_slot] >> tag) & 1) == 1) {
                     pool_lock_order_violations = pool_lock_order_violations + 1;
                 }
                 pool_lock_order_edge[slot] = pool_lock_order_edge[slot] | (1 << other);

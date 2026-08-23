@@ -369,6 +369,35 @@ and expr_desc =
          analysis that grounded this design. *)
 [@@deriving show]
 
+(* Parentheses are normally erased by the parser, but the precedence lint
+   needs to distinguish `a & b == 0` from the explicitly chosen
+   `a & (b == 0)`. Keep that one bit of surface syntax out-of-band so the
+   semantic AST remains unchanged. Physical identity is intentional: two
+   structurally equal subexpressions at different source sites must not share
+   the parenthesized mark. The table is parse-lifetime state and is reset with
+   the warning list before each compilation/test parse. *)
+module PhysicalExpr = Hashtbl.Make (struct
+  type t = expr
+  let equal a b = a == b
+  let hash = Hashtbl.hash
+end)
+
+let parenthesized_exprs : unit PhysicalExpr.t = PhysicalExpr.create 32
+let precedence_warning_sites : (Lexing.position * string) list ref = ref []
+
+let reset_precedence_warnings () =
+  PhysicalExpr.reset parenthesized_exprs;
+  precedence_warning_sites := []
+
+let mark_parenthesized e =
+  PhysicalExpr.replace parenthesized_exprs e ();
+  e
+
+let is_parenthesized e = PhysicalExpr.mem parenthesized_exprs e
+
+let record_precedence_warning loc msg =
+  precedence_warning_sites := (loc, msg) :: !precedence_warning_sites
+
 type stmt = stmt_desc located
 and stmt_desc =
   | Return of expr option

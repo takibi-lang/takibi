@@ -403,7 +403,10 @@ Low to high: `||` < `|` < `^` < comparison < `&` < `as` < `+`/`-` < `>>`
 Notably different from C: `&` (bitwise AND) binds **tighter** than
 comparison, so `n & mask == 0` means `(n & mask) == 0` (this avoids a
 well-known C footgun). `^` and `|` are looser than comparison, matching
-C. `%` shares precedence with `*`/`/`.
+C. Mixing `&`, `|`, or `^` directly with a comparison without parentheses
+produces a warning that states the grouping selected by these rules; add
+parentheses around either reading to make it explicit. `%` shares precedence
+with `*`/`/`.
 
 ## Structs
 
