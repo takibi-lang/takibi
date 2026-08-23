@@ -36,7 +36,7 @@ core, one UART, one boot-time filesystem mount).
 
 ### Process/scheduler core (`kernel/kernel/process.tkb`)
 
-`scheduled_process_store`/`scheduled_process_pool`/`scheduled_process_records`,
+`scheduled_process_pool`/`scheduled_process_records`,
 `execution_current_handle`/
 `execution_current_live`, `execution_scheduler_enabled`/
 `execution_reschedule_pending`.
@@ -51,7 +51,11 @@ for the three pooled per-process records (fd context, image record,
 address-space backing) there too, so the parallel arrays those replaced
 are gone. The former `scheduled_process_kernel_stacks` `GrowablePool` no
 longer exists: kernel stacks are page runs (#377) and that primitive left
-`kernel/` entirely (#381).
+`kernel/` entirely (#381). `scheduled_process_store` is gone too, the same
+way `tcp_connection_store` went: it was the parking lot, somewhere for a
+linear `ScheduledProcessOwner` to live between syscalls, and with the
+SlotMap already recording who is live an owner is minted from a handle's
+(slot, generation) pair on demand and discharged when the operation ends.
 `execution_current_handle`/`_live` name which slot is "current"; that is
 inherently a single, global fact on one core. `execution_scheduler_enabled`/
 `_reschedule_pending` gate real scheduling decisions

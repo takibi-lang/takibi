@@ -226,26 +226,37 @@ struct ProcessRecord {
     address_space_backing_generation: usize;
 }
 
-variant ScheduledProcessValue {
-    Empty;
-    Occupied(exists process: usize. ScheduledProcessOwner[process]);
-}
+// GitHub issue #392: THE PARKING LOT IS GONE, as issue #257's went.
+//
+// `scheduled_process_store` was a [ScheduledProcessStore;
+// KERNEL_PROCESS_MAX] of { mutex, ScheduledProcessValue } -- somewhere for
+// the linear ScheduledProcessOwner to live between syscalls, since a
+// syscall returns to userspace and cannot hold one. The take pulled the
+// owner out of a stable slot, the put shoved it back, and
+// ScheduledProcessPutResult::Conflict described "that slot already had
+// one", which the stable_replace / displaced / Occupied(incoming) dance
+// existed to handle.
+//
+// There is nowhere to park now and nothing to conflict with: the SlotMap
+// below is the record of who is live, a ProcessHandle is the (slot,
+// generation) pair every caller already carries, and an owner is MINTED
+// from that pair on demand and discharged when the operation ends. So a
+// take is a validation, a put is a drop, Conflict is unreachable, and
+// ScheduledProcessValue, ScheduledProcessStore, ScheduledProcessGuard,
+// scheduled_process_lock/_unlock and ScheduledProcessPutResult are deleted
+// rather than ported.
+//
+// This is deliberately separate from swapping the storage underneath: it
+// removes an array whose key is the process slot without touching what a
+// slot IS.
 
-struct ScheduledProcessStore {
-    private mutex: i32;
-    private value: ScheduledProcessValue;
-}
-
-private linear view ScheduledProcessGuard[lock: addr];
-private let mut scheduled_process_store:
-    [ScheduledProcessStore; KERNEL_PROCESS_MAX];
 // Slot allocation is O(1) via kernel/lib/slotmap.tkb's SlotMap(N) (issue
 // #207) instead of a hand-rolled used[]/generation[] linear scan.
 // slotmap_matches() also covers what the used[]+generation[] pair served
-// as: revalidating a plain ProcessHandle (index, generation) against the
-// current occupant without holding the linear ScheduledProcessOwner, which
-// is needed because a handle crosses the scheduled_process_store lock /
-// stable_replace boundary below.
+// as, and is now the whole of it: revalidating a plain ProcessHandle
+// (index, generation) against the current occupant. Every owner this file
+// hands out is minted after that check and discharged before the
+// operation returns.
 private let mut scheduled_process_pool: SlotMap(KERNEL_PROCESS_MAX);
 private let mut scheduled_process_records:
     [ProcessRecord; KERNEL_PROCESS_MAX];
@@ -549,16 +560,6 @@ must_use variant ScheduledProcessBlockedTakeResult {
              ScheduledProcessState[process, ProcessState::Blocked]));
 }
 
-must_use variant ScheduledProcessPutResult { Stored; Conflict; }
-
-fn scheduled_process_lock(lock: *i32 @ address)
-        -> ScheduledProcessGuard[address] {
-    return view ScheduledProcessGuard[address];
-}
-
-fn scheduled_process_unlock(guard: sink ScheduledProcessGuard[address],
-                            lock: *i32 @ address) {}
-
 fn scheduled_process_owner_new(
         slot: {0..<KERNEL_PROCESS_MAX as usize},
         generation: usize @ process) -> ScheduledProcessOwner[process] {
@@ -604,79 +605,20 @@ fn scheduled_process_exited_state(
     return state;
 }
 
-fn scheduled_process_matches(
-        owner: borrow ScheduledProcessOwner[process],
-        handle: ProcessHandle) -> bool {
-    return owner.pool_index == handle.pool_index &&
-           owner.generation == handle.generation &&
-           slotmap_matches(&scheduled_process_pool, owner.pool_index,
+// Does this handle still name the process it was minted for? What the
+// take path used to prove by finding an owner parked under the same pair,
+// asked of the SlotMap directly.
+fn scheduled_process_handle_matches(handle: ProcessHandle) -> bool {
+    return slotmap_matches(&scheduled_process_pool, handle.pool_index,
                            handle.generation);
 }
 
-fn scheduled_process_identity_put(
-        owner: sink ScheduledProcessOwner[process])
-        -> ScheduledProcessPutResult {
-    let slot: {0..<KERNEL_PROCESS_MAX as usize} = owner.pool_index;
-    let guard = scheduled_process_lock(&scheduled_process_store[slot].mutex);
-    let previous: ScheduledProcessValue = stable_replace(
-        guard, &scheduled_process_store[slot].mutex,
-        scheduled_process_store[slot].value,
-        ScheduledProcessValue::Occupied(owner));
-    match previous {
-        ScheduledProcessValue::Empty => {
-            scheduled_process_unlock(
-                guard, &scheduled_process_store[slot].mutex);
-            return ScheduledProcessPutResult::Stored;
-        }
-        ScheduledProcessValue::Occupied(stale) => {
-            let displaced: ScheduledProcessValue = stable_replace(
-                guard, &scheduled_process_store[slot].mutex,
-                scheduled_process_store[slot].value,
-                ScheduledProcessValue::Occupied(stale));
-            scheduled_process_unlock(
-                guard, &scheduled_process_store[slot].mutex);
-            match displaced {
-                ScheduledProcessValue::Empty => {}
-                ScheduledProcessValue::Occupied(incoming) => {
-                    scheduled_process_owner_drop(incoming);
-                }
-            }
-            return ScheduledProcessPutResult::Conflict;
-        }
-    }
-}
-
-fn scheduled_process_put(
+// A put is a drop: there is nowhere to put an owner back to.
+fn scheduled_process_release(
         owner: sink ScheduledProcessOwner[process],
-        state: sink ScheduledProcessState[process, process_state])
-        -> ScheduledProcessPutResult {
+        state: sink ScheduledProcessState[process, process_state]) {
     scheduled_process_state_drop(state);
-    return scheduled_process_identity_put(owner);
-}
-
-fn scheduled_process_identity_take(handle: ProcessHandle)
-        -> ScheduledProcessValue {
-    let slot: {0..<KERNEL_PROCESS_MAX as usize} = handle.pool_index;
-    let guard = scheduled_process_lock(&scheduled_process_store[slot].mutex);
-    let previous: ScheduledProcessValue = stable_replace(
-        guard, &scheduled_process_store[slot].mutex,
-        scheduled_process_store[slot].value, ScheduledProcessValue::Empty);
-    scheduled_process_unlock(guard, &scheduled_process_store[slot].mutex);
-    match previous {
-        ScheduledProcessValue::Empty => {
-            return ScheduledProcessValue::Empty;
-        }
-        ScheduledProcessValue::Occupied(owner) => {
-            if (scheduled_process_matches(owner, handle)) {
-                return ScheduledProcessValue::Occupied(owner);
-            }
-            match scheduled_process_identity_put(owner) {
-                ScheduledProcessPutResult::Stored => {}
-                ScheduledProcessPutResult::Conflict => {}
-            }
-            return ScheduledProcessValue::Empty;
-        }
-    }
+    scheduled_process_owner_drop(owner);
 }
 
 fn scheduled_process_table_init() {
@@ -733,11 +675,9 @@ fn scheduled_process_table_clear() {
             slotmap_occupant_generation(&scheduled_process_pool, slot);
         if (generation != 0) {
             let mut handle: ProcessHandle = { slot, generation };
-            match scheduled_process_identity_take(handle) {
-                ScheduledProcessValue::Empty => {}
-                ScheduledProcessValue::Occupied(owner) => {
-                    scheduled_process_owner_drop(owner);
-                }
+            if (scheduled_process_handle_matches(handle)) {
+                scheduled_process_owner_drop(
+                    scheduled_process_owner_new(slot, generation));
             }
         }
         unified_fd_context_release(slot);
@@ -880,23 +820,11 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                     stack.bytes[i] = KERNEL_STACK_POISON;
                     below.bytes[i] = KERNEL_STACK_POISON;
                 }
+                // The slot is the SlotMap's now, and the handle is the
+                // pair every caller carries. Nothing is stored anywhere,
+                // so there is no conflict branch and no rollback for one.
                 let mut handle: ProcessHandle = { slot, generation };
-                match scheduled_process_identity_put(
-                        scheduled_process_owner_new(slot, generation)) {
-                    ScheduledProcessPutResult::Conflict => {
-                        address_space_release_root(slot);
-                        slotmap_remove(&scheduled_process_pool,
-                                       freelist_owner_new(slot, generation));
-                        scheduled_process_records[slot].saved_sp = 0;
-                        scheduled_process_records[slot].pid = 0;
-                        scheduled_process_records[slot].state =
-                            ProcessSlotState::Free;
-                        return ScheduledProcessAllocResult::Full;
-                    }
-                    ScheduledProcessPutResult::Stored => {
-                        return ScheduledProcessAllocResult::Allocated(handle);
-                    }
-                }
+                return ScheduledProcessAllocResult::Allocated(handle);
             }
             return ScheduledProcessAllocResult::Full;
         }
@@ -909,16 +837,13 @@ fn scheduled_process_ready_take(handle: ProcessHandle)
             ProcessSlotState::Ready) {
         return ScheduledProcessReadyTakeResult::Missing;
     }
-    match scheduled_process_identity_take(handle) {
-        ScheduledProcessValue::Empty => {
-            return ScheduledProcessReadyTakeResult::Missing;
-        }
-        ScheduledProcessValue::Occupied(owner) => {
-            let state = scheduled_process_ready_state(owner);
-            return ScheduledProcessReadyTakeResult::Ready(
-                (owner, state));
-        }
+    if (scheduled_process_handle_matches(handle) == false) {
+        return ScheduledProcessReadyTakeResult::Missing;
     }
+    let owner = scheduled_process_owner_new(handle.pool_index,
+                                            handle.generation);
+    let state = scheduled_process_ready_state(owner);
+    return ScheduledProcessReadyTakeResult::Ready((owner, state));
 }
 
 fn scheduled_process_exited_take(handle: ProcessHandle)
@@ -927,16 +852,13 @@ fn scheduled_process_exited_take(handle: ProcessHandle)
             ProcessSlotState::Exited) {
         return ScheduledProcessExitedTakeResult::Missing;
     }
-    match scheduled_process_identity_take(handle) {
-        ScheduledProcessValue::Empty => {
-            return ScheduledProcessExitedTakeResult::Missing;
-        }
-        ScheduledProcessValue::Occupied(owner) => {
-            let state = scheduled_process_exited_state(owner);
-            return ScheduledProcessExitedTakeResult::Exited(
-                (owner, state));
-        }
+    if (scheduled_process_handle_matches(handle) == false) {
+        return ScheduledProcessExitedTakeResult::Missing;
     }
+    let owner = scheduled_process_owner_new(handle.pool_index,
+                                            handle.generation);
+    let state = scheduled_process_exited_state(owner);
+    return ScheduledProcessExitedTakeResult::Exited((owner, state));
 }
 
 fn scheduled_process_running_take(handle: ProcessHandle)
@@ -945,16 +867,13 @@ fn scheduled_process_running_take(handle: ProcessHandle)
             ProcessSlotState::Running) {
         return ScheduledProcessRunningTakeResult::Missing;
     }
-    match scheduled_process_identity_take(handle) {
-        ScheduledProcessValue::Empty => {
-            return ScheduledProcessRunningTakeResult::Missing;
-        }
-        ScheduledProcessValue::Occupied(owner) => {
-            let state = scheduled_process_running_state(owner);
-            return ScheduledProcessRunningTakeResult::Running(
-                (owner, state));
-        }
+    if (scheduled_process_handle_matches(handle) == false) {
+        return ScheduledProcessRunningTakeResult::Missing;
     }
+    let owner = scheduled_process_owner_new(handle.pool_index,
+                                            handle.generation);
+    let state = scheduled_process_running_state(owner);
+    return ScheduledProcessRunningTakeResult::Running((owner, state));
 }
 
 fn scheduled_process_blocked_take(handle: ProcessHandle)
@@ -963,15 +882,13 @@ fn scheduled_process_blocked_take(handle: ProcessHandle)
             ProcessSlotState::Blocked) {
         return ScheduledProcessBlockedTakeResult::Missing;
     }
-    match scheduled_process_identity_take(handle) {
-        ScheduledProcessValue::Empty => {
-            return ScheduledProcessBlockedTakeResult::Missing;
-        }
-        ScheduledProcessValue::Occupied(owner) => {
-            let state = scheduled_process_blocked_state(owner);
-            return ScheduledProcessBlockedTakeResult::Blocked((owner, state));
-        }
+    if (scheduled_process_handle_matches(handle) == false) {
+        return ScheduledProcessBlockedTakeResult::Missing;
     }
+    let owner = scheduled_process_owner_new(handle.pool_index,
+                                            handle.generation);
+    let state = scheduled_process_blocked_state(owner);
+    return ScheduledProcessBlockedTakeResult::Blocked((owner, state));
 }
 
 fn scheduled_process_start(
@@ -1085,10 +1002,7 @@ fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool {
             let (owner, ready) = resources;
             let running = scheduled_process_start(owner, ready);
             let ready_again = scheduled_process_yield(owner, running);
-            match scheduled_process_put(owner, ready_again) {
-                ScheduledProcessPutResult::Conflict => { return false; }
-                ScheduledProcessPutResult::Stored => {}
-            }
+            scheduled_process_release(owner, ready_again);
         }
     }
     match scheduled_process_ready_take(handle) {
@@ -1097,10 +1011,7 @@ fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool {
             let (owner, ready) = resources;
             let running = scheduled_process_start(owner, ready);
             let exited = scheduled_process_exit(owner, running);
-            match scheduled_process_put(owner, exited) {
-                ScheduledProcessPutResult::Conflict => { return false; }
-                ScheduledProcessPutResult::Stored => {}
-            }
+            scheduled_process_release(owner, exited);
         }
     }
     match scheduled_process_exited_take(handle) {
@@ -1442,10 +1353,8 @@ fn kernel_process_start_handle(handle: ProcessHandle) -> bool {
         ScheduledProcessReadyTakeResult::Ready(resources) => {
             let (owner, ready) = resources;
             let running = scheduled_process_start(owner, ready);
-            match scheduled_process_put(owner, running) {
-                ScheduledProcessPutResult::Conflict => { return false; }
-                ScheduledProcessPutResult::Stored => { return true; }
-            }
+            scheduled_process_release(owner, running);
+            return true;
         }
     }
 }
@@ -1456,10 +1365,8 @@ fn kernel_process_yield_handle(handle: ProcessHandle) -> bool {
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
             let ready = scheduled_process_yield(owner, running);
-            match scheduled_process_put(owner, ready) {
-                ScheduledProcessPutResult::Conflict => { return false; }
-                ScheduledProcessPutResult::Stored => { return true; }
-            }
+            scheduled_process_release(owner, ready);
+            return true;
         }
     }
 }
@@ -2203,10 +2110,7 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
                 let blocked = scheduled_process_block(owner, running);
                 scheduled_process_records[owner.pool_index].wait_reason =
                     ProcessWaitReason::UartRx;
-                match scheduled_process_put(owner, blocked) {
-                    ScheduledProcessPutResult::Conflict => { return 0; }
-                    ScheduledProcessPutResult::Stored => {}
-                }
+                scheduled_process_release(owner, blocked);
                 kernel_process_trace_handle(ProcessTraceBlock, parent, child,
                                             1);
             }
@@ -2242,10 +2146,7 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
             let blocked = scheduled_process_block(owner, running);
             scheduled_process_records[owner.pool_index].wait_reason =
                 ProcessWaitReason::UartRx;
-            match scheduled_process_put(owner, blocked) {
-                ScheduledProcessPutResult::Conflict => { return 0; }
-                ScheduledProcessPutResult::Stored => {}
-            }
+            scheduled_process_release(owner, blocked);
             kernel_process_trace_handle(ProcessTraceBlock, child, parent,
                                         1);
         }
@@ -2291,10 +2192,7 @@ fn kernel_process_block_wait4(current_sp: usize) -> usize {
             let blocked = scheduled_process_block(owner, running);
             scheduled_process_records[owner.pool_index].wait_reason =
                 ProcessWaitReason::ChildExit;
-            match scheduled_process_put(owner, blocked) {
-                ScheduledProcessPutResult::Conflict => { return 0; }
-                ScheduledProcessPutResult::Stored => {}
-            }
+            scheduled_process_release(owner, blocked);
             kernel_process_trace_handle(ProcessTraceBlock, parent, child,
                                         2);
         }
@@ -2369,12 +2267,7 @@ fn kernel_process_uart_wake(value: usize)
             let ready = scheduled_process_wake(owner, blocked);
             scheduled_process_records[owner.pool_index].wait_reason =
                 ProcessWaitReason::None;
-            match scheduled_process_put(owner, ready) {
-                ScheduledProcessPutResult::Conflict => {
-                    return ProcessUartWakeResult::Missing;
-                }
-                ScheduledProcessPutResult::Stored => {}
-            }
+            scheduled_process_release(owner, ready);
             kernel_process_trace_handle(ProcessTraceWake, waiter,
                                         execution_current_handle, value);
         }
@@ -2684,16 +2577,12 @@ fn kernel_process_clone_rollback() {
             let (owner, ready) = resources;
             let running = scheduled_process_start(owner, ready);
             let exited = scheduled_process_exit(owner, running);
-            match scheduled_process_put(owner, exited) {
-                ScheduledProcessPutResult::Conflict => {}
-                ScheduledProcessPutResult::Stored => {
-                    match scheduled_process_exited_take(child) {
-                        ScheduledProcessExitedTakeResult::Missing => {}
-                        ScheduledProcessExitedTakeResult::Exited(done) => {
-                            let (exited_owner, exited_state) = done;
-                            scheduled_process_reap(exited_owner, exited_state);
-                        }
-                    }
+            scheduled_process_release(owner, exited);
+            match scheduled_process_exited_take(child) {
+                ScheduledProcessExitedTakeResult::Missing => {}
+                ScheduledProcessExitedTakeResult::Exited(done) => {
+                    let (exited_owner, exited_state) = done;
+                    scheduled_process_reap(exited_owner, exited_state);
                 }
             }
         }
@@ -2920,21 +2809,16 @@ fn kernel_process_child_exit(status: usize) -> usize {
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
             let exited = scheduled_process_exit(owner, running);
-            match scheduled_process_put(owner, exited) {
-                ScheduledProcessPutResult::Conflict => {}
-                ScheduledProcessPutResult::Stored => {
-                    match scheduled_process_exited_take(child) {
-                        ScheduledProcessExitedTakeResult::Missing => {}
-                        ScheduledProcessExitedTakeResult::Exited(done) => {
-                            let (exited_owner, exited_state) = done;
-                            scheduled_process_reap(
-                                exited_owner, exited_state);
-                            scheduled_process_records[parent.pool_index]
-                                .has_child = false;
-                            scheduled_process_records[child.pool_index]
-                                .has_parent = false;
-                        }
-                    }
+            scheduled_process_release(owner, exited);
+            match scheduled_process_exited_take(child) {
+                ScheduledProcessExitedTakeResult::Missing => {}
+                ScheduledProcessExitedTakeResult::Exited(done) => {
+                    let (exited_owner, exited_state) = done;
+                    scheduled_process_reap(exited_owner, exited_state);
+                    scheduled_process_records[parent.pool_index]
+                        .has_child = false;
+                    scheduled_process_records[child.pool_index]
+                        .has_parent = false;
                 }
             }
         }
@@ -2967,10 +2851,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
                     scheduled_process_records[owner.pool_index].saved_sp,
                     scheduled_process_records[owner.pool_index].last_child_pid,
                     owner.pool_index);
-                match scheduled_process_put(owner, ready) {
-                    ScheduledProcessPutResult::Conflict => {}
-                    ScheduledProcessPutResult::Stored => {}
-                }
+                scheduled_process_release(owner, ready);
                 kernel_process_trace_handle(ProcessTraceWake, parent, child,
                                             status);
             }
