@@ -139,6 +139,18 @@ struct ProcessRecord {
     child_exit_status: usize;
     child_waitable: bool;
     exec_image_live: bool;
+    // GitHub issue #392 stage 1: the run backing this slot's kernel
+    // stack, as its base physical address (0 = never backed). It was a
+    // parallel [usize; KERNEL_PROCESS_MAX] beside this array, indexed in
+    // lockstep -- the shape issue #264 consolidated the rest of this
+    // file's per-process state out of, and which a new field walked
+    // straight back into.
+    //
+    // Being a field rather than a parallel array is also what lets the
+    // whole record eventually be pooled: an array keyed by slot cannot
+    // outlive the slot, and the slot is the ceiling this is on the way to
+    // removing.
+    stack_run: usize;
 }
 
 variant ScheduledProcessValue {
@@ -199,21 +211,20 @@ struct KernelStackHalf {
 }
 
 // GitHub issue #377: one KERNEL_STACK_RUN_BYTES page run per slot, kept
-// as its base physical address. 0 means this slot has never been backed.
+// as its base physical address in ProcessRecord.stack_run. 0 means this
+// slot has never been backed.
 //
 // The linear PageRunOwner is consumed at allocation
 // (page_run_owner_transfer_index) rather than stored. A linear value
-// cannot live in an array -- the same storage rule that made
-// growable_pool keep flat index arrays -- and there is nothing for an
-// owner to do here in any case: a slot's run is never given back, so
-// there is no release path for it to guard.
+// cannot live in a record like this, and there is nothing for an owner to
+// do here in any case: a slot's run is never given back, so there is no
+// release path for it to guard.
 //
 // Never reset by scheduled_process_table_clear() (called several times
 // per boot). Keeping the base is what makes a reused slot reuse the SAME
 // run instead of allocating a fresh one and leaking the old, which is
 // exactly the property growable_pool_ensure's idempotence used to
 // provide.
-private let mut scheduled_process_stack_runs: [usize; KERNEL_PROCESS_MAX];
 
 // A run base this file is willing to read through.
 //
@@ -233,7 +244,7 @@ private fn kernel_stack_run_usable(base: usize) -> bool {
 // there is nothing to look at" test still holds.
 private fn kernel_stack_bottom(slot: {0..<KERNEL_PROCESS_MAX as usize})
         -> usize {
-    let base: usize = scheduled_process_stack_runs[slot];
+    let base: usize = scheduled_process_records[slot].stack_run;
     if (kernel_stack_run_usable(base) == false) { return 0; }
     return base + KERNEL_PROCESS_STACK_SIZE;
 }
@@ -498,9 +509,9 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
             if (index < KERNEL_PROCESS_MAX) {
                 let slot: {0..<KERNEL_PROCESS_MAX as usize} = index;
                 // Backed once per slot and kept: see
-                // scheduled_process_stack_runs' own note on why a reused
-                // slot must reuse its run.
-                if (scheduled_process_stack_runs[slot] == 0) {
+                // ProcessRecord.stack_run's own note on why a reused slot
+                // must reuse its run.
+                if (scheduled_process_records[slot].stack_run == 0) {
                     match page_alloc_contiguous(KERNEL_STACK_RUN_PAGES,
                                               PageOwnerTag::KernelStack) {
                         PageRunAllocResult::OutOfMemory => {
@@ -515,7 +526,7 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
                             let base: usize = page_run_physical_address(run);
                             if (kernel_stack_run_usable(base)) {
                                 page_run_owner_transfer_index(run);
-                                scheduled_process_stack_runs[slot] = base;
+                                scheduled_process_records[slot].stack_run = base;
                             } else {
                                 // An unaligned run from an allocator that
                                 // promises alignment is an invariant
@@ -1575,7 +1586,7 @@ private fn kernel_stack_owner_name(sp: usize) -> *u8 {
         return "below the IRQ stack" as *u8;
     }
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        let base: usize = scheduled_process_stack_runs[slot];
+        let base: usize = scheduled_process_records[slot].stack_run;
         if (base != 0 && sp >= base && sp < base + KERNEL_STACK_RUN_BYTES) {
             return "below a process kernel stack" as *u8;
         }
