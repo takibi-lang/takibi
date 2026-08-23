@@ -138,6 +138,7 @@ let () =
   (try
     Const_env.reset ();
     Type_layout.reset ();
+    Generic_scope.reset ();
     Ast.reset_precedence_errors ();
     (* GitHub issue #55: every file named on the command line is an entry
        point into Use_resolver's `use "path";` closure -- if none of them

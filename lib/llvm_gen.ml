@@ -204,6 +204,16 @@ let target_data : Llvm_target.DataLayout.t option ref = ref None
    target is configured, every later gen_program call keeps using it. *)
 let configured_target_triple = ref ""
 let configured_datalayout_str = ref ""
+
+(* Test processes compile many independent programs. Return the target-facing
+   global state to the same unconfigured defaults a fresh compiler process has;
+   the next gen_program recreates its module and therefore also drops the old
+   module's triple and data layout. *)
+let reset_target () =
+  target_data := None;
+  configured_target_triple := "";
+  configured_datalayout_str := "";
+  Target_info.reset ()
 (* Enum underlying type registry: enum name -> underlying Ast type (u8/u16/u32/u64) *)
 let enum_underlying  : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 8
 (* Enum variant registry: enum name -> [(variant_name, discriminant_value)] *)

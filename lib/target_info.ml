@@ -23,6 +23,10 @@ type vector_table_contract =
 let dma_cache = ref (Cache_line 32)
 let vector_table = ref Unsupported
 
+let reset () =
+  dma_cache := Cache_line 32;
+  vector_table := Unsupported
+
 let starts_with s prefix =
   let n = String.length prefix in
   String.length s >= n && String.sub s 0 n = prefix

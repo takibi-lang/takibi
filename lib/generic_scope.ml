@@ -49,6 +49,10 @@ let mem name = Hashtbl.mem table name
    silently resolving to something else. *)
 let type_table : (string, unit) Hashtbl.t = Hashtbl.create 4
 
+let reset () =
+  Hashtbl.reset table;
+  Hashtbl.reset type_table
+
 let register_types (names : string list) =
   List.iter (fun n -> Hashtbl.replace type_table n ()) names
 

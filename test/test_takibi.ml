@@ -31,6 +31,7 @@ let () =
 let parse src =
   Const_env.reset ();
   Type_layout.reset ();
+  Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   let lexbuf = Lexing.from_string src in
   Parser.program Lexer.read lexbuf
@@ -52,6 +53,7 @@ let infer src =
 let infer_files files =
   Const_env.reset ();
   Type_layout.reset ();
+  Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   let prog = List.concat_map (fun (filename, src) ->
     let lexbuf = Lexing.from_string src in
@@ -60,14 +62,17 @@ let infer_files files =
   ) files in
   Type_inf.infer_program (Monomorphize.run prog)
 
-(* Runs the full pipeline through LLVM codegen (no target machine, no
-   object-file emission -- gen_program works without setup_target, see its
-   align_opt handling). GitHub issue #326: Llvm_gen.gen_program disposes and
+(* Runs the full pipeline through LLVM codegen (no object-file emission).
+   A test that did not select a target gets the project's primary AArch64
+   target, so target-sensitive lowering never depends on which unrelated
+   test happened to run first. GitHub issue #326: Llvm_gen.gen_program disposes and
    recreates Llvm_gen.the_module at the start of every call, so distinct test
    cases are free to reuse the same function/global names -- each gen_codegen
    call starts from a genuinely empty module, matching bin/main.exe's own
    single-compilation-per-process behavior. *)
 let gen_codegen src =
+  if Option.is_none !Llvm_gen.target_data then
+    ignore (Llvm_gen.setup_target ~triple:"aarch64-none-elf" ());
   let prog = Monomorphize.run (parse src) in
   let prog_types = Type_inf.infer_program prog in
   Llvm_gen.gen_program ~prog_types prog
@@ -12386,19 +12391,8 @@ let codegen_tests = [
           return codegen_isize_slice_buf[offset..<offset + 1514];
         }");
 
-  (* Kept last, in this exact order, for the same one-way-switch reason as
-     the DWARF tests above: Llvm_gen.setup_target permanently overwrites
-     Llvm_gen.target_data for the rest of this test process -- there is no
-     way to reset back to "no target machine" (GitHub issue #326:
-     Llvm_gen.the_module itself is recreated fresh per gen_program call, but
-     target_data and the configured triple/datalayout it implies are
-     deliberately reapplied to each new module, not reset). Every codegen
-     test registered above this point
-     relies on that state staying None (usize/pointer-int conversions
-     falling back to i64 -- see Llvm_gen.usize_lltype), so nothing may be
-     added after this group without re-checking that assumption.
-     Regression coverage for the Cortex-M7/STM32 bring-up's usize-width fix
-     (usize must be 32-bit on a 32-bit-pointer target, not hardcoded i64). *)
+  (* Target selection is isolated per test case by named_groups below. Each
+     target-dependent case therefore selects its own target explicitly. *)
   Alcotest.test_case
     "usize is i64-wide when no target machine has been configured \
      (the fallback every earlier codegen test above implicitly relies on)"
@@ -12425,17 +12419,22 @@ let codegen_tests = [
      -- so this belongs in this post-setup_target group, not with the
      type-check-only tests above. *)
   Alcotest.test_case "the unsafe wrapping an unprovable slice-to-struct cast is NOT flagged as unnecessary" `Quick
-    (expect_unnecessary_unsafe 0
-       "struct packed P4 { a: u32; }
-        fn f(s: []u8) -> u32 !{unsafe} {
-          let p: *P4 = unsafe { s as *P4 };
-          return p.a;
-        }");
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" () in
+       expect_unnecessary_unsafe 0
+         "struct packed P4 { a: u32; }
+          fn f(s: []u8) -> u32 !{unsafe} {
+            let p: *P4 = unsafe { s as *P4 };
+            return p.a;
+          }" ());
 
   Alcotest.test_case
     "array GEP preserves a usize index at i64 width on AArch64"
     `Quick
     (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" () in
        let _ = gen_codegen
          "let mut codegen_wide_index_buf: [u8; 4];
           fn codegen_wide_index(i: usize) -> u8 {
@@ -12467,6 +12466,8 @@ let codegen_tests = [
   Alcotest.test_case
     "DMA/device barriers lower to ARM DSB intrinsics on Cortex-M" `Quick
     (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"thumbv7em-none-eabi" ~cpu:"cortex-m7" () in
        let _ = gen_codegen
          "fn codegen_barriers_cortexm() {
             dma_publish();
@@ -12485,6 +12486,8 @@ let codegen_tests = [
   Alcotest.test_case
     "DMA cache builtins lower to Cortex-M7 SCB line maintenance loops" `Quick
     (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"thumbv7em-none-eabi" ~cpu:"cortex-m7" () in
        let _ = gen_codegen
          "fn codegen_dma_cache(p: *align(32) u8, n: usize) {
             dma_prepare_tx(p, n);
@@ -12512,19 +12515,22 @@ let codegen_tests = [
      coerce's TypeUsize case -- on a 64-bit target this same source would \
      have needed zext instead, so this specifically catches a \
      wrong-direction trunc/zext bug)" `Quick
-    (expect_codegen_ok
-       "fn codegen_usize_ptr_roundtrip_cortexm(p: *i32) -> *i32 !{unsafe} {
-          let addr: usize = p as usize;
-          return unsafe { addr as *i32 };
-        }
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"thumbv7em-none-eabi" ~cpu:"cortex-m7" () in
+       expect_codegen_ok
+         "fn codegen_usize_ptr_roundtrip_cortexm(p: *i32) -> *i32 !{unsafe} {
+            let addr: usize = p as usize;
+            return unsafe { addr as *i32 };
+          }
 
-        fn codegen_usize_narrowing_cast_cortexm(n: i64) -> usize {
-          return n as usize;
-        }
+          fn codegen_usize_narrowing_cast_cortexm(n: i64) -> usize {
+            return n as usize;
+          }
 
-        fn codegen_ptrdiff_cortexm(a: *u32, b: *u32) -> isize {
-          return b - a;
-        }");
+          fn codegen_ptrdiff_cortexm(a: *u32, b: *u32) -> isize {
+            return b - a;
+          }" ());
 
   (* Global initializer constant folding: `as` casts and references to
      earlier immutable global constants. Previously eval_const only
@@ -14653,7 +14659,7 @@ let core_tests = [
 
 (* -- Entry point ----------------------------------------------------------- *)
 
-let named_groups = [
+let named_groups_unisolated = [
   "core",     core_tests;
   "parser",   parser_tests;
   "type_inf", infer_tests;
@@ -14661,6 +14667,17 @@ let named_groups = [
   "depfile",      depfile_tests;
   "codegen",  codegen_tests;
 ]
+
+(* Each Alcotest case represents a fresh compiler invocation. In particular,
+   a target selected by one case must not change pointer widths, target
+   contracts, or lowering in a later case when SHUFFLE_TESTS changes their
+   order. Target-specific cases select their own target after this reset. *)
+let named_groups =
+  List.map (fun (group, cases) ->
+    (group, List.map (fun (doc, speed, fn) ->
+       (doc, speed, fun arg -> Llvm_gen.reset_target (); fn arg)
+     ) cases)
+  ) named_groups_unisolated
 
 (* GitHub issue #329: proactively surfaces cross-test state-leak bugs like
    issue #326's un-reset Hashtables, which sat dormant until a new test
