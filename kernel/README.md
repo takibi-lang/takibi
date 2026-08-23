@@ -526,9 +526,9 @@ bring-up. Host-side progress output is separate from kernel UART output.
 The passing HTTPd test is a concrete Linux compatibility milestone, not a
 claim of general Linux compatibility. `SYSCALLS.md` is the per-syscall
 authority, `RESOURCE_LIMITS.md` is the per-resource-pool authority (every
-fixed-capacity pool -- process slots, descriptors, shared objects,
-connections, pages, and more -- with its exhaustion behavior and boundary
-test), `RUNTIME_STATE.md` is the per-global-state-ownership authority
+resource pool -- process slots, descriptors, shared objects, connections,
+pages, and more -- with its exhaustion behavior, and its boundary test
+where it still has a boundary), `RUNTIME_STATE.md` is the per-global-state-ownership authority
 (every retained runtime `let mut` global, grouped by owner and why it
 stays global instead of moving behind a per-slot record),
 `MEMORY_MAP.md` is the where-is-this-address authority (both platforms'

@@ -6,8 +6,8 @@ after the #302-#307 consolidation pass, grouped by what actually owns it
 and why it stays a global instead of moving behind a per-process/
 per-connection/per-slot record.
 
-This file records the state of the kernel as of 2026-08-14 (commit
-`43873de`). Like `RESOURCE_LIMITS.md`, treat this as a living document:
+This file records the state of the kernel as of 2026-08-21 (issue #392's
+first three stages). Like `RESOURCE_LIMITS.md`, treat this as a living document:
 when a global is added, removed, or its ownership rationale changes,
 update this file in the same commit rather than letting it drift into a
 stale snapshot.
@@ -36,8 +36,8 @@ core, one UART, one boot-time filesystem mount).
 
 ### Process/scheduler core (`kernel/kernel/process.tkb`)
 
-`scheduled_process_store`/`scheduled_process_pool`/`scheduled_process_records`/
-`scheduled_process_kernel_stacks`, `execution_current_handle`/
+`scheduled_process_store`/`scheduled_process_pool`/`scheduled_process_records`,
+`execution_current_handle`/
 `execution_current_live`, `execution_scheduler_enabled`/
 `execution_reschedule_pending`.
 
@@ -45,7 +45,13 @@ core, one UART, one boot-time filesystem mount).
 (see the file's own "NOT SYNCHRONIZED, single-core scheduler" limitation
 header). `scheduled_process_records` is already the per-slot owner
 (#264) -- every process's state, wait reason, parent/child links, and
-saved SP live in one `ProcessRecord` per slot, not scattered scalars.
+saved SP live in one `ProcessRecord` per slot, not scattered scalars. Issue
+#392 folded the kernel stack's page run in as a field and put the handles
+for the three pooled per-process records (fd context, image record,
+address-space backing) there too, so the parallel arrays those replaced
+are gone. The former `scheduled_process_kernel_stacks` `GrowablePool` no
+longer exists: kernel stacks are page runs (#377) and that primitive left
+`kernel/` entirely (#381).
 `execution_current_handle`/`_live` name which slot is "current"; that is
 inherently a single, global fact on one core. `execution_scheduler_enabled`/
 `_reschedule_pending` gate real scheduling decisions
@@ -67,17 +73,22 @@ global counter, not a per-process field.
 
 ### VM / address-space (`kernel/mm/`, `kernel/arch/arm64/mm/`)
 
-`mm/process_image.tkb`'s `process_image_record` (per-root
-`ProcessImageRecord`, #258/#264), `process_clone_vm_store`,
+`mm/process_image.tkb`'s `process_image_pool`/`_ready` and its counted
+fallback pair `process_image_record_missing`/`_count` (issue #392 -- the
+per-root `ProcessImageRecord` array of #258/#264 is now pooled, keyed by a
+handle in `ProcessRecord`), `process_clone_vm_store`,
 `process_image_exec_stores`, the ext2-image-loading staging fields
 (`process_image_ext2_*`/`process_image_pair_ext2_*`), the in-flight-clone
 scalars (`clone_page_count`/`clone_last_reaped_count`/`clone_source_root`/
-`clone_dest_root`); `mm/address_space.tkb`'s `address_space_backing`/
-`_active_slot`; `mm/page.tkb`'s `boot_page_pool`;
+`clone_dest_root`); `mm/address_space.tkb`'s
+`address_space_backing_pool`/`_ready`, its counted fallback pair
+`address_space_backing_missing`/`_count`, the static
+`address_space_backing_root0`, and `address_space_active_slot`;
+`mm/page.tkb`'s `boot_page_pool`;
 `arch/arm64/mm/asid.tkb`'s `asid_pool`.
 
 **Why global:** investigated for #294 and found already well-scoped --
-`process_image_record`'s own header comment states the "one managed
+`ProcessImageRecord`'s own header comment states the "one managed
 thing, one struct" rule this file already follows (a future
 per-address-space field belongs in the struct, not a new parallel
 array). The clone-in-flight scalars are singleton by design (this
@@ -100,14 +111,23 @@ state genuinely hard to see.
 
 ### FD / socket (`kernel/kernel/fd_table.tkb`)
 
-`process_fd_context` (per-process, #264), `object_pool` + `object_records`
-(per-shared-object, #305).
+`fd_context_pool`/`fd_context_pool_ready` (issue #392 -- the per-process
+`ProcessFdContext` array of #264 is now pooled, keyed by a handle in
+`ProcessRecord`), `object_pool` + `object_records` (per-shared-object,
+#305).
 
-**Why global:** per-slot arrays, already record-owned. The pool
-allocators (`RefcountSlotMap`) are inherently global namespaces (a file
-descriptor number is meaningless without the one process-slot table it
-indexes into; a shared object handle is meaningless without the one
-kernel-wide object table it indexes into).
+**Why global:** already record-owned; what changed in #392 is that the
+records are allocations rather than array elements, which is why the
+per-process ones no longer need a table keyed by process slot. The pool
+allocators themselves are inherently global namespaces (a file descriptor
+number is meaningless without the one context it indexes into; a shared
+object handle is meaningless without the one kernel-wide object table it
+indexes into).
+
+The two `_ready` flags are one-shot initialisation guards, not state:
+their entry points are reachable per process configure, and
+re-initialising a pool would forget its pages while records still hold
+addresses into them (the hazard #257 hit).
 
 ### Network (`kernel/net/`)
 

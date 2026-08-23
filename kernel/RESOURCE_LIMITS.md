@@ -122,7 +122,7 @@ below).
 Per issue #295's "exhaustion tests exercise each allocator near its
 boundary" acceptance criterion -- which applies even to a reviewed static
 capacity that's kept as-is, per the issue's own design constraints -- every
-pool in this file now has a dedicated boundary test:
+pool in this file that still HAS a boundary has a dedicated boundary test:
 
 - `scheduled_process_table_probe` (`KERNEL_PROCESS_MAX`, pre-existing)
 - `asid_pool_probe` (`ASID_MAX`, pre-existing)
@@ -136,6 +136,22 @@ pool in this file now has a dedicated boundary test:
   network loss/retry would require a materially larger QEMU-peer-driven
   test, but it now proves the queue goes PAST the old ceiling rather
   than reporting exhaustion at it)
+
+Four resources have no entry here because they no longer have a ceiling to
+test at. `TCP_CONNECTION_MAX` and `PENDING_TCP_MAX` (#257) are covered by
+the past-the-old-ceiling probes above. The three per-process records pooled
+by #392 -- fd contexts, image records, address-space backings -- are
+different: their own ceilings were restatements of `KERNEL_PROCESS_MAX`, so
+there is no number of their own to exceed and no past-the-old-ceiling probe
+is possible until that constant goes too. What IS checked today is that
+they are genuinely pooled rather than silently falling back: the image
+record's and the address-space backing's counted fallbacks are printed at
+the end of the boot suite and are 0.
+
+Not covered, and worth knowing: the ROLLBACK path when one of those three
+allocations fails inside `scheduled_process_alloc`. The array they replaced
+could not fail, so this is a failure mode the change introduced, and
+reaching it needs the page allocator genuinely empty -- 800 MiB of it.
 - `unified_object_ref_ceiling_probe` (`SHARED_OBJECT_MAX_REFS`, new -- a
   real 256-iteration retain loop, not a shortcut)
 - `page_mapping_ref_ceiling_probe` (`PAGE_MAP_REF_MAX`, new -- writes the

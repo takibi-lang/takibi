@@ -774,6 +774,16 @@ fn intrusive_pool_slots_per_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id
     // that IT reserved enough rather than that the provider did.
     static_assert(sizeof(IntrusiveChunkHeader) <= INTRUSIVE_CHUNK_HEADER_BYTES,
                   "IntrusivePool(T): the per-chunk header reservation is smaller than a chunk header");
+    // intrusive_pool_chunk_pages doubles from 1 and stops at
+    // `pages < INTRUSIVE_MAX_CHUNK_PAGES`, so a cap that is not a power of
+    // two is not a cap: at 6 the sequence runs 1, 2, 4, 8 and leaves 8.
+    // The alignment page_alloc_contiguous promises -- which is what makes
+    // intrusive_chunk_base_of an O(1) mask -- holds only for power-of-two
+    // runs, so overshooting the cap would silently produce chunks whose
+    // base cannot be recovered from a slot address.
+    static_assert((INTRUSIVE_MAX_CHUNK_PAGES &
+                   (INTRUSIVE_MAX_CHUNK_PAGES - 1)) == 0,
+                  "INTRUSIVE_MAX_CHUNK_PAGES must be a power of two, or the order search overshoots it and page_alloc_contiguous stops promising alignment");
     // GitHub issue #348, the two conditions the payload/link overlay
     // needs. Both are properties of T alone, so both are settled here
     // rather than being anything a caller or a runtime path can get
