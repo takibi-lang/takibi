@@ -9,10 +9,18 @@ const USER_L2_BRANCH_COUNT: usize = 512;
 const USER_L3_PAGE_COUNT: usize = 512;
 const USER_SPACE_PAGE_COUNT: usize = 262144;
 
-// Kept equal to process.tkb's KERNEL_PROCESS_MAX and asid.tkb's ASID_MAX.
-// This bounded table is an intentional transitional owner: callers still
-// identify a process address space by its existing scheduler slot, while the
-// MMU layer below receives only physical table addresses and an ASID.
+// Equal to process.tkb's KERNEL_PROCESS_MAX and asid.tkb's ASID_MAX, and
+// since issue #367 that is a static_assert in
+// scheduled_process_table_init rather than a promise made in four
+// comments. This bounded table is an intentional transitional owner:
+// callers still identify a process address space by its existing
+// scheduler slot, while the MMU layer below receives only physical table
+// addresses and an ASID.
+//
+// So it is not a pool with a ceiling of its own -- it is one record per
+// process slot, and its bound IS the process table's. Nothing here can be
+// made unbounded without first giving a process an identity that is not
+// an array index.
 const ADDRESS_SPACE_MAX: usize = 16;
 
 // nG is required once ASIDs distinguish roots: a global translation would

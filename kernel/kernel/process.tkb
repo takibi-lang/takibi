@@ -439,6 +439,26 @@ fn scheduled_process_table_init() {
     // exception this kernel takes.
     static_assert(1 << KERNEL_STACK_SHIFT == KERNEL_PROCESS_STACK_SIZE,
                   "KERNEL_STACK_SHIFT must be log2(KERNEL_PROCESS_STACK_SIZE)");
+    // GitHub issue #367: a process slot index is ONE identity, used as the
+    // array key by four separate tables. Three files carried prose saying
+    // their constant "must match" this one, and nothing checked it -- so
+    // the agreement was a convention, and a convention between four
+    // separately-written literals is the shape that goes wrong silently
+    // (see issue #286's incident for what that costs). It is a build
+    // error now.
+    //
+    // These being equal is also the reason none of those tables is a pool
+    // in its own right: they are per-process-slot state, not independently
+    // allocated things, and giving any one of them its own identity is a
+    // different change from swapping a pool primitive.
+    static_assert(ADDRESS_SPACE_MAX == KERNEL_PROCESS_MAX,
+                  "ADDRESS_SPACE_MAX must equal KERNEL_PROCESS_MAX: an address-space root is keyed by process slot");
+    static_assert(PROCESS_IMAGE_ROOT_MAX == KERNEL_PROCESS_MAX,
+                  "PROCESS_IMAGE_ROOT_MAX must equal KERNEL_PROCESS_MAX: an image record is keyed by process slot");
+    static_assert(PROCESS_CONTEXT_MAX == KERNEL_PROCESS_MAX,
+                  "PROCESS_CONTEXT_MAX must equal KERNEL_PROCESS_MAX: an fd context is keyed by process slot");
+    static_assert(ASID_MAX == KERNEL_PROCESS_MAX,
+                  "ASID_MAX must equal KERNEL_PROCESS_MAX: every live process slot must be able to hold an ASID");
     for slot: usize in 0..<KERNEL_PROCESS_MAX {
         scheduled_process_records[slot].saved_sp = 0;
         scheduled_process_records[slot].state = ProcessSlotState::Free;
