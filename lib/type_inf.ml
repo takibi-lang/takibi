@@ -6768,7 +6768,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   let definition_files : (string, string) Hashtbl.t = Hashtbl.create 32 in
   let register_definition loc key name =
-    let file = loc.Lexing.pos_fname in
+    let file = Ast.source_file_of_loc loc in
     match Hashtbl.find_opt definition_files key with
     | Some previous ->
         (* Cross-file duplicates are rejected too, not just same-file ones

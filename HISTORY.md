@@ -15,6 +15,15 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-23: Raw Source-Filename Access Guard (GitHub Issue #359)
+
+Added a `make langcheck` lint that rejects direct `Lexing.pos_fname` access in
+the compiler except for exact allowlisted identity helpers: source-file suffix
+stripping, monomorphized-location construction, and unique location keys. It
+also found and converted the remaining definition-file comparison to
+`Ast.source_file_of_loc`, preventing a mangled generic location from being
+mistaken for a different source file.
+
 ### 2026-08-23: Singleton-Transparency Consolidation (GitHub Issue #357)
 
 Added `Ast.strip_singleton` and routed the shape-oriented compiler checks that
