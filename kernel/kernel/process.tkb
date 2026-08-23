@@ -14,12 +14,16 @@ use "kernel/mm/address_space.tkb";
 // - NOT SYNCHRONIZED, single-core scheduler: only core 0 ever runs the
 //   scheduler/dispatches syscalls. Core 1 proves autonomous EL1 entry and
 //   shared-MMU visibility via PSCI CPU_ON, then parks permanently.
-// - KERNEL_PROCESS_MAX=16 fixed scheduler-table capacity; a kernel stack
-//   is allocated on a slot's first use and never returned to the physical
-//   page allocator, so a reused slot reuses its run. See `kernel/RESOURCE_LIMITS.md`
-//   for the full exhaustion-result/boundary-test contract for this and
-//   every other backing resource scheduled_process_alloc() touches
-//   (address-space roots, ASIDs, physical pages).
+// - No fixed process-table capacity: a ProcessRecord is an
+//   IntrusivePool allocation, so the page allocator is the only limit
+//   (issue #392). The bootstrap is the exception and is a static record
+//   named by slot value 0, because root 0 exists before the MMU is on.
+//   ASID_MAX (255) is the one fixed ceiling left on the creation path.
+//   A kernel stack run is recycled through a one-deep spare rather than
+//   freed at reap, because a reap usually runs ON the stack it is
+//   reaping. See `kernel/RESOURCE_LIMITS.md` for the full
+//   exhaustion-result/boundary-test contract for every backing resource
+//   scheduled_process_alloc() touches.
 // - A pid is minted monotonically per run of the process table and is
 //   never recycled within one run, so a pid found in a record does not
 //   mean that process is still live -- scheduled_process_slot_for_pid
@@ -60,27 +64,15 @@ struct CloneFileState {
     parent_inetd_mode: bool;
 }
 
-// GitHub issue #246: a generous compile-time ceiling, not a razor-thin one
-// bumped by hand each time a workload needs one more (see issue #245's 2
-// -> 3 bump for why "one fixed N picked by guesswork" was the actual
-// recurring cost). This is still a compile-time array size -- this compiler has no
-// runtime-unbounded array -- but 3 -> 16 moves the ceiling from "the very
-// next real workload" to "comfortably past any workload this project has
-// exercised so far," matching how kernel/mm/page.tkb's own BOOT_PAGE_COUNT
-// (1024) is large enough that nobody thinks of it as "the page limit."
-// Kernel stacks (below) cost real per-slot memory -- 32768 bytes each
-// once a slot has been used, and nothing until then. Page-table backing
-// is separately owned by address_space.tkb; the plain bookkeeping arrays
-// below cost only a few bytes per slot even at this larger N, so that
-// state stays eagerly sized. Allocating on first use is reserved for the
-// genuinely expensive per-slot resources, not applied uniformly. Root
-// index == this file's own ProcessHandle.pool_index everywhere, and this
-// is now the ONLY place that number is written: the fd context, the image
-// record and the address-space backing each used to keep a copy and no
-// longer do (issue #392). All three are pooled, keyed by a handle this
-// record holds, and ask scheduled_process_slot_valid rather than
-// restating the bound.
-const KERNEL_PROCESS_MAX: usize = 16;
+// GitHub issue #392: KERNEL_PROCESS_MAX is GONE. It was 16 -- "a generous
+// compile-time ceiling, not a razor-thin one bumped by hand each time a
+// workload needs one more" (issue #246, after issue #245 bumped it from 2
+// to 3) -- and it was the array size of the process table, the bound on
+// the fd context table, the image record table, the address-space backing
+// table, and the ASID pool, all at once. Four of those became pools in
+// their own right in earlier stages of this issue; this is the fifth and
+// last, and with it there is no number anywhere in this kernel that says
+// how many processes there may be. What bounds them is the page allocator.
 // GitHub issue #377: four pages. Linux arm64's THREAD_SIZE is 16K and
 // FreeBSD's kern.kstack_pages defaults to four, and this stack carries
 // two worst cases at once because interrupts still run on it.
@@ -130,17 +122,24 @@ const KERNEL_STACK_SHIFT: usize = 14;
 // identity. A separate linear state token carries Ready/Running/Exited, so
 // adding a later Blocked state does not require another copy of the stable
 // store algorithm. The reusable table slot is never the static identity.
+// GitHub issue #392: pool_index is a pool SLOT ADDRESS now (or 0, the
+// bootstrap), not an index, so there is no array bound left to refine it
+// against. What the refinement proved -- that the value named a real
+// array element -- is proved by intrusive_pool_probe_slot on every use
+// instead, and strictly more of it: a refinement could not tell a live
+// process from a recycled slot, which was always the generation's job.
+// The name is kept because it is what a hundred call sites spell.
 linear struct ScheduledProcessOwner[process: usize] {
-    private pool_index: {0..<KERNEL_PROCESS_MAX as usize};
+    private pool_index: usize;
     private generation: usize @ process;
 }
 
 linear struct ScheduledProcessState[process: usize, state: ProcessState] {
-    private pool_index: {0..<KERNEL_PROCESS_MAX as usize};
+    private pool_index: usize;
 }
 
 struct ProcessHandle {
-    private pool_index: {0..<KERNEL_PROCESS_MAX as usize};
+    private pool_index: usize;
     private generation: usize;
 }
 
@@ -257,9 +256,56 @@ struct ProcessRecord {
 // (index, generation) against the current occupant. Every owner this file
 // hands out is minted after that check and discharged before the
 // operation returns.
-private let mut scheduled_process_pool: SlotMap(KERNEL_PROCESS_MAX);
-private let mut scheduled_process_records:
-    [ProcessRecord; KERNEL_PROCESS_MAX];
+private let mut scheduled_process_pool: IntrusivePool(ProcessRecord);
+private let mut scheduled_process_pool_ready: bool = false;
+
+// The bootstrap process's record, and the reason slot value 0 still means
+// something after every other slot became a pool address.
+//
+// A pool address is never 0, so the two namespaces are disjoint and `slot
+// == 0` keeps its meaning at the dozen call sites that already spell the
+// bootstrap that way. It has to: kernel/mm/address_space.tkb creates root
+// 0 from kernel_mmu_init, which runs with the MMU OFF, before anything may
+// allocate -- so the bootstrap's identity must exist before the pool does.
+// That file already keeps root 0's backing in a plain static for exactly
+// this reason; this is the same fact one layer up.
+private let mut scheduled_process_boot_record: ProcessRecord;
+private let mut scheduled_process_boot_live: bool = false;
+private let mut scheduled_process_boot_generation: usize = 0;
+
+// Reached only when a slot address names no live record. A real struct
+// rather than a null pointer so the impossible case is harmless instead of
+// undefined, and COUNTED so it cannot be silent -- the shape
+// kernel/mm/process_image.tkb's own fallback established, where an
+// uncounted one would have absorbed 1648 accesses on one boot.
+private let mut scheduled_process_record_absent: ProcessRecord;
+private let mut scheduled_process_record_missing_count: usize = 0;
+
+// The kernel stack run of a reaped process, held until something can
+// safely take it.
+//
+// MEASURED, not assumed: 18 of the 35 reaps in one QEMU boot run ON the
+// stack they are reaping -- an exiting process is still standing on its
+// own kernel stack when kernel_process_child_exit reaps it. Handing those
+// pages back to the allocator there gives away the memory under the
+// caller's own feet. So a run is parked here instead, taken by the next
+// process that needs one, and given back only from a context that has
+// checked it is not standing on it.
+//
+// One deep, which is enough to bound it: parking a second run gives the
+// first one back. The array this replaces never gave a run back at all --
+// it kept one per slot forever, which is a leak only because the number of
+// slots stopped being 16.
+private let mut scheduled_process_spare_stack_run: usize = 0;
+
+// The deepest a REAPED process's kernel stack ever got. The array this
+// replaces kept every slot's run for the life of the kernel, so the
+// end-of-boot watermark could still read the poison of a process that had
+// long exited; a pooled record's run is recycled, so the measurement has
+// to be taken while it still exists. Issues #376/#377 are about this
+// number specifically, so losing it to the storage change would be losing
+// the thing the storage change is measured against.
+private let mut scheduled_process_stack_deepest_reaped: usize = 0;
 // GitHub issue #392: the pid namespace, monotonic within one run of the
 // process table. Reset by scheduled_process_table_init/_clear -- the two
 // points that already restart slot numbering -- so the bootstrap process
@@ -268,16 +314,101 @@ private let mut scheduled_process_records:
 // independent of the slot it happens to occupy.
 private let mut scheduled_process_next_pid: usize = 1;
 
-// Keep enum field reads in their typed result context. Direct enum reads
-// through an array-of-struct field do not yet lower a load correctly.
-fn scheduled_process_record_state(
-        slot: {0..<KERNEL_PROCESS_MAX as usize}) -> ProcessSlotState {
-    return scheduled_process_records[slot].state;
+// -- The record a slot names ------------------------------------------
+
+private fn scheduled_process_pool_init() {
+    if (scheduled_process_pool_ready) { return; }
+    scheduled_process_pool_ready = true;
+    intrusive_pool_init(&scheduled_process_pool);
 }
 
-fn scheduled_process_record_wait_reason(
-        slot: {0..<KERNEL_PROCESS_MAX as usize}) -> ProcessWaitReason {
-    return scheduled_process_records[slot].wait_reason;
+fn scheduled_process_record_missing_uses() -> usize {
+    return scheduled_process_record_missing_count;
+}
+
+// Validated on every call, which is strictly more than the old
+// `{0..<KERNEL_PROCESS_MAX as usize}` refinement proved: a refinement said
+// the index named a real array element, never that a live process was in
+// it. Slot 0 is always answerable -- the bootstrap record is a static.
+private fn scheduled_process_record_at(slot: usize) -> *ProcessRecord
+        !{unsafe} {
+    if (slot == 0) { return &scheduled_process_boot_record; }
+    if (scheduled_process_pool_ready == false) {
+        scheduled_process_record_missing_count =
+            scheduled_process_record_missing_count + 1;
+        return &scheduled_process_record_absent;
+    }
+    match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
+        IntrusiveSlotProbe::NoPayload => {
+            scheduled_process_record_missing_count =
+                scheduled_process_record_missing_count + 1;
+            return &scheduled_process_record_absent;
+        }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            return intrusive_pool_payload_of(&scheduled_process_pool,
+                                             slot_view);
+        }
+    }
+}
+
+// Walking every live process. The bootstrap comes first and is not in the
+// pool, which is exactly the thing a hand-written walk would forget -- so
+// there is one walk and every caller uses it. Done rather than 0 for the
+// end, because 0 is a real slot here.
+variant ProcessSlotCursor {
+    Done;
+    At(usize);
+}
+
+private fn scheduled_process_live_pool_slot_from(cursor: usize)
+        -> ProcessSlotCursor !{unsafe} {
+    let mut probe: usize = cursor;
+    while (probe != 0) {
+        match intrusive_pool_probe_slot(&scheduled_process_pool, probe) {
+            IntrusiveSlotProbe::NoPayload => {}
+            IntrusiveSlotProbe::Live(slot_view) => {
+                intrusive_view_drop(slot_view);
+                return ProcessSlotCursor::At(probe);
+            }
+        }
+        probe = intrusive_pool_next_slot(&scheduled_process_pool, probe);
+    }
+    return ProcessSlotCursor::Done;
+}
+
+private fn scheduled_process_first_pool_slot() -> ProcessSlotCursor
+        !{unsafe} {
+    if (scheduled_process_pool_ready == false) {
+        return ProcessSlotCursor::Done;
+    }
+    return scheduled_process_live_pool_slot_from(
+        intrusive_pool_first_slot(&scheduled_process_pool));
+}
+
+fn scheduled_process_first_slot() -> ProcessSlotCursor !{unsafe} {
+    if (scheduled_process_boot_live) { return ProcessSlotCursor::At(0); }
+    return scheduled_process_first_pool_slot();
+}
+
+fn scheduled_process_next_slot(slot: usize) -> ProcessSlotCursor !{unsafe} {
+    if (slot == 0) { return scheduled_process_first_pool_slot(); }
+    if (scheduled_process_pool_ready == false) {
+        return ProcessSlotCursor::Done;
+    }
+    return scheduled_process_live_pool_slot_from(
+        intrusive_pool_next_slot(&scheduled_process_pool, slot));
+}
+
+// Keep enum field reads in their typed result context. Direct enum reads
+// through an array-of-struct field do not yet lower a load correctly.
+fn scheduled_process_record_state(slot: usize) -> ProcessSlotState
+        !{unsafe} {
+    return scheduled_process_record_at(slot).state;
+}
+
+fn scheduled_process_record_wait_reason(slot: usize) -> ProcessWaitReason
+        !{unsafe} {
+    return scheduled_process_record_at(slot).wait_reason;
 }
 
 // GitHub issue #392: kernel/kernel/syscall.tkb's two per-process values,
@@ -285,41 +416,46 @@ fn scheduled_process_record_wait_reason(
 // record has, so a caller that cannot name a process is never handed
 // another process's state.
 fn scheduled_process_uart_block_delivery(slot: usize) -> UartBlockDelivery {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        return scheduled_process_records[checked].uart_block_delivery;
-    }
-    return UartBlockDelivery::Scalar;
+    return scheduled_process_record_at(slot).uart_block_delivery;
 }
 
 fn scheduled_process_set_uart_block_delivery(
         slot: usize, delivery: UartBlockDelivery) {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        scheduled_process_records[checked].uart_block_delivery = delivery;
-    }
+    scheduled_process_record_at(slot).uart_block_delivery = delivery;
 }
 
-fn scheduled_process_clone_file_state(slot: usize) -> CloneFileState {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        return scheduled_process_records[checked].clone_file_state;
-    }
-    let mut absent: CloneFileState = { false, false };
-    return absent;
+fn scheduled_process_clone_file_state(slot: usize) -> CloneFileState
+        !{unsafe} {
+    return scheduled_process_record_at(slot).clone_file_state;
 }
 
 fn scheduled_process_set_clone_file_state(slot: usize,
                                           state: CloneFileState) {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        scheduled_process_records[checked].clone_file_state = state;
+    scheduled_process_record_at(slot).clone_file_state = state;
+}
+
+// The same reset applied to every live process, for
+// kernel_syscall_process_configure -- a whole-world reset that can run
+// while processes already exist. It walks rather than sweeping an index
+// range, because there is no index range.
+fn scheduled_process_reset_syscall_state_everywhere() !{unsafe} {
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                scheduled_process_record_reset_syscall_state(slot);
+                cursor = scheduled_process_next_slot(slot);
+            }
+        }
     }
 }
 
 // The fresh value of both, in one place, so a slot handed out again does
 // not inherit the previous occupant's blocking or clone bookkeeping.
-private fn scheduled_process_record_reset_syscall_state(slot: usize) {
+private fn scheduled_process_record_reset_syscall_state(slot: usize)
+        !{unsafe} {
     scheduled_process_set_uart_block_delivery(slot,
                                               UartBlockDelivery::Scalar);
     let mut fresh: CloneFileState = { false, false };
@@ -335,16 +471,52 @@ private fn scheduled_process_record_reset_syscall_state(slot: usize) {
 // is what `pid - 1` also did and what the exec-reap path depends on: it
 // asks about a child that has already exited but whose image has not yet
 // been reclaimed.
-fn scheduled_process_pid_of_slot(slot: usize) -> usize {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        return scheduled_process_records[checked].pid;
+// A pid lookup is a DIAGNOSTIC, and the crash/trace paths ask about a peer
+// that may already have been reaped -- so it reads through a peek that
+// tolerates a dead slot instead of the counted accessor, whose whole point
+// is to notice code that assumed a record outlives its process.
+private fn scheduled_process_record_peek(slot: usize) -> *ProcessRecord
+        !{unsafe} {
+    if (slot == 0) { return &scheduled_process_boot_record; }
+    if (scheduled_process_pool_ready == false) {
+        return &scheduled_process_record_absent;
     }
-    return 0;
+    match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
+        IntrusiveSlotProbe::NoPayload => {
+            return &scheduled_process_record_absent;
+        }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            return intrusive_pool_payload_of(&scheduled_process_pool,
+                                             slot_view);
+        }
+    }
 }
 
-fn scheduled_process_pid_of_handle(handle: ProcessHandle) -> usize {
-    return scheduled_process_records[handle.pool_index].pid;
+fn scheduled_process_pid_of_slot(slot: usize) -> usize !{unsafe} {
+    return scheduled_process_record_peek(slot).pid;
+}
+
+// The same tolerance for the other three fields a trace or a crash report
+// reads about a process that may already be gone. The scheduler's own
+// reads go through scheduled_process_record_state/_wait_reason, which
+// count -- these do not, because "the subject was reaped" is a normal
+// answer to a diagnostic and an abnormal one to the scheduler.
+fn scheduled_process_peek_state(slot: usize) -> ProcessSlotState !{unsafe} {
+    return scheduled_process_record_peek(slot).state;
+}
+
+fn scheduled_process_peek_wait_reason(slot: usize) -> ProcessWaitReason
+        !{unsafe} {
+    return scheduled_process_record_peek(slot).wait_reason;
+}
+
+fn scheduled_process_peek_saved_sp(slot: usize) -> usize !{unsafe} {
+    return scheduled_process_record_peek(slot).saved_sp;
+}
+
+fn scheduled_process_pid_of_handle(handle: ProcessHandle) -> usize
+        !{unsafe} {
+    return scheduled_process_record_peek(handle.pool_index).pid;
 }
 
 must_use variant ProcessSlotForPidResult {
@@ -352,11 +524,20 @@ must_use variant ProcessSlotForPidResult {
     Found(usize);
 }
 
-fn scheduled_process_slot_for_pid(pid: usize) -> ProcessSlotForPidResult {
+fn scheduled_process_slot_for_pid(pid: usize) -> ProcessSlotForPidResult
+        !{unsafe} {
     if (pid == 0) { return ProcessSlotForPidResult::Missing; }
-    for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        if (scheduled_process_records[slot].pid == pid) {
-            return ProcessSlotForPidResult::Found(slot);
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                if (scheduled_process_record_at(slot).pid == pid) {
+                    return ProcessSlotForPidResult::Found(slot);
+                }
+                cursor = scheduled_process_next_slot(slot);
+            }
         }
     }
     return ProcessSlotForPidResult::Missing;
@@ -367,95 +548,69 @@ fn scheduled_process_slot_for_pid(pid: usize) -> ProcessSlotForPidResult {
 // keyed by process slot, which is the ceiling this is on the way to
 // removing -- so the process record holds it, and fd_table asks.
 fn scheduled_process_fd_context(slot: usize) -> usize {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        return scheduled_process_records[checked].fd_context;
-    }
-    return 0;
+    return scheduled_process_record_at(slot).fd_context;
 }
 
 fn scheduled_process_fd_context_generation(slot: usize) -> usize {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        return scheduled_process_records[checked].fd_context_generation;
-    }
-    return 0;
+    return scheduled_process_record_at(slot).fd_context_generation;
 }
 
 fn scheduled_process_set_fd_context(slot: usize, address: usize,
                                     generation: usize) {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        scheduled_process_records[checked].fd_context = address;
-        scheduled_process_records[checked].fd_context_generation = generation;
-    }
+    scheduled_process_record_at(slot).fd_context = address;
+    scheduled_process_record_at(slot).fd_context_generation = generation;
 }
 
 fn scheduled_process_image_record(slot: usize) -> usize {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        return scheduled_process_records[checked].image_record;
-    }
-    return 0;
+    return scheduled_process_record_at(slot).image_record;
 }
 
 fn scheduled_process_image_record_generation(slot: usize) -> usize {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        return scheduled_process_records[checked].image_record_generation;
-    }
-    return 0;
+    return scheduled_process_record_at(slot).image_record_generation;
 }
 
 fn scheduled_process_set_image_record(slot: usize, address: usize,
                                       generation: usize) {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        scheduled_process_records[checked].image_record = address;
-        scheduled_process_records[checked].image_record_generation = generation;
-    }
+    scheduled_process_record_at(slot).image_record = address;
+    scheduled_process_record_at(slot).image_record_generation = generation;
 }
 
 // Is this a slot the process table can hold? The question belongs here,
 // and asking it by FUNCTION is what lets kernel/mm/address_space.tkb --
 // parsed before this file, so unable to name KERNEL_PROCESS_MAX in a
 // bound -- stop keeping its own copy of the number (issue #392).
-fn scheduled_process_slot_valid(slot: usize) -> bool {
-    return slot < KERNEL_PROCESS_MAX;
+fn scheduled_process_slot_valid(slot: usize) -> bool !{unsafe} {
+    // Slot 0 is the bootstrap, whose record is a static and therefore
+    // always answerable -- including from kernel_mmu_init, with the MMU
+    // off, before the pool exists.
+    if (slot == 0) { return true; }
+    if (scheduled_process_pool_ready == false) { return false; }
+    match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
+        IntrusiveSlotProbe::NoPayload => { return false; }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            intrusive_view_drop(slot_view);
+            return true;
+        }
+    }
 }
 
 fn scheduled_process_address_space_backing(slot: usize) -> usize {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        return scheduled_process_records[checked].address_space_backing;
-    }
-    return 0;
+    return scheduled_process_record_at(slot).address_space_backing;
 }
 
 fn scheduled_process_address_space_backing_generation(slot: usize) -> usize {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        return scheduled_process_records[checked].address_space_backing_generation;
-    }
-    return 0;
+    return scheduled_process_record_at(slot).address_space_backing_generation;
 }
 
 fn scheduled_process_set_address_space_backing(slot: usize, address: usize,
                                                generation: usize) {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        scheduled_process_records[checked].address_space_backing = address;
-        scheduled_process_records[checked].address_space_backing_generation =
-            generation;
-    }
+    scheduled_process_record_at(slot).address_space_backing = address;
+    scheduled_process_record_at(slot).address_space_backing_generation =
+        generation;
 }
 
 fn scheduled_process_record_wait4_status_ptr(slot: usize) -> usize {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        return scheduled_process_records[checked].wait4_status_ptr;
-    }
-    return 0;
+    return scheduled_process_record_at(slot).wait4_status_ptr;
 }
 // One half of a run, named as a struct purely so that the poison fill,
 // the guard and the watermark scan keep ordinary checked indexing over a
@@ -503,9 +658,9 @@ private fn kernel_stack_run_usable(base: usize) -> bool {
 // The lowest address this slot's stack may occupy: the run's midpoint.
 // 0 for a slot with no usable run, so every caller's existing "0 means
 // there is nothing to look at" test still holds.
-private fn kernel_stack_bottom(slot: {0..<KERNEL_PROCESS_MAX as usize})
+private fn kernel_stack_bottom(slot: usize)
         -> usize {
-    let base: usize = scheduled_process_records[slot].stack_run;
+    let base: usize = scheduled_process_record_at(slot).stack_run;
     if (kernel_stack_run_usable(base) == false) { return 0; }
     return base + KERNEL_PROCESS_STACK_SIZE;
 }
@@ -561,7 +716,7 @@ must_use variant ScheduledProcessBlockedTakeResult {
 }
 
 fn scheduled_process_owner_new(
-        slot: {0..<KERNEL_PROCESS_MAX as usize},
+        slot: usize,
         generation: usize @ process) -> ScheduledProcessOwner[process] {
     let mut owner: ScheduledProcessOwner[process] = { slot, generation };
     return owner;
@@ -609,8 +764,13 @@ fn scheduled_process_exited_state(
 // take path used to prove by finding an owner parked under the same pair,
 // asked of the SlotMap directly.
 fn scheduled_process_handle_matches(handle: ProcessHandle) -> bool {
-    return slotmap_matches(&scheduled_process_pool, handle.pool_index,
-                           handle.generation);
+    if (handle.pool_index == 0) {
+        return scheduled_process_boot_live &&
+               handle.generation == scheduled_process_boot_generation;
+    }
+    if (scheduled_process_pool_ready == false) { return false; }
+    return intrusive_pool_matches(&scheduled_process_pool, handle.pool_index,
+                                  handle.generation);
 }
 
 // A put is a drop: there is nowhere to put an owner back to.
@@ -621,8 +781,8 @@ fn scheduled_process_release(
     scheduled_process_owner_drop(owner);
 }
 
-fn scheduled_process_table_init() {
-    slotmap_init(&scheduled_process_pool);
+fn scheduled_process_table_init() !{unsafe} {
+    scheduled_process_pool_init();
     // AArch64 requires SP to be 16-byte aligned, and
     // scheduled_process_alloc sets saved_sp to the run's END. The run
     // base is aligned to the whole run, so the size is what has to
@@ -654,181 +814,296 @@ fn scheduled_process_table_init() {
     // in its own right: they are per-process-slot state, not independently
     // allocated things, and giving any one of them its own identity is a
     // different change from swapping a pool primitive.
-    static_assert(ASID_MAX == KERNEL_PROCESS_MAX,
-                  "ASID_MAX must equal KERNEL_PROCESS_MAX: every live process slot must be able to hold an ASID");
+    scheduled_process_release_every_process();
+}
+
+// The fresh state of one record, for the bootstrap's static -- a pool
+// record is destroyed rather than reset, so this is the only one that has
+// to be written back to zero. stack_run is deliberately NOT cleared: the
+// bootstrap keeps its run for the life of the kernel, as it always did.
+private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
+    let record: *ProcessRecord = scheduled_process_record_at(slot);
+    record.pid = 0;
+    record.saved_sp = 0;
+    record.state = ProcessSlotState::Free;
+    record.wait_reason = ProcessWaitReason::None;
+    record.wait4_status_ptr = 0;
+    record.has_parent = false;
+    record.has_child = false;
+    record.last_child_pid = 0;
+    record.child_exit_status = 0;
+    record.child_waitable = false;
+    record.exec_image_live = false;
+    scheduled_process_record_reset_syscall_state(slot);
+}
+
+// Everything scheduled_process_reap does for one process, done for every
+// live one. Slot 0 is visited whether or not the bootstrap is live,
+// because its per-process resources (an fd context from
+// kernel_syscall_process_configure, an image record) can outlive the
+// process the way the static record itself does.
+private fn scheduled_process_release_every_process() !{unsafe} {
+    scheduled_process_pool_init();
+    let mut cursor = scheduled_process_first_pool_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                let next = scheduled_process_next_slot(slot);
+                scheduled_process_release_slot_resources(slot);
+                scheduled_process_slot_remove(slot);
+                cursor = next;
+            }
+        }
+    }
+    scheduled_process_release_slot_resources(0);
+    scheduled_process_record_reset(0);
+    scheduled_process_boot_live = false;
     scheduled_process_next_pid = 1;
-    for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        scheduled_process_records[slot].pid = 0;
-        scheduled_process_records[slot].saved_sp = 0;
-        scheduled_process_records[slot].state = ProcessSlotState::Free;
-        scheduled_process_records[slot].wait_reason = ProcessWaitReason::None;
-        scheduled_process_record_reset_syscall_state(slot);
+}
+
+// No exec teardown here, deliberately: a whole-world reset is not a
+// process exiting, and address_space_release_root has already freed the
+// mappings an installed image would name. Adding one would count reaps
+// that no process performed.
+private fn scheduled_process_release_slot_resources(slot: usize) !{unsafe} {
+    unified_fd_context_release(slot);
+    address_space_release_root(slot);
+    process_image_record_release(slot);
+}
+
+// Gives a slot back. The bootstrap's record is a static and is only
+// marked free; a pool record is removed, and its kernel stack run is
+// parked rather than freed (see scheduled_process_spare_stack_run).
+private fn scheduled_process_slot_remove(slot: usize) !{unsafe} {
+    if (slot == 0) {
+        scheduled_process_boot_live = false;
+        return;
+    }
+    let mut generation: usize = 0;
+    match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
+        IntrusiveSlotProbe::NoPayload => { return; }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            generation = intrusive_view_generation(slot_view);
+            intrusive_view_drop(slot_view);
+        }
+    }
+    scheduled_process_park_stack_run(
+        scheduled_process_record_at(slot).stack_run);
+    let owner = intrusive_owner_new(&scheduled_process_pool, slot,
+                                    generation);
+    let guard = intrusive_pool_lock(&scheduled_process_pool);
+    let (ok, reason) = intrusive_remove_outcome(
+        intrusive_pool_remove(&scheduled_process_pool, guard, owner));
+    intrusive_pool_unlock(&scheduled_process_pool, guard);
+    if (ok == false) {
+        kernel_boot_log("process table: releasing a record -- ");
+        kernel_boot_log(reason);
+        kernel_boot_log("\n");
     }
 }
 
-fn scheduled_process_table_clear() {
+// Parking, not freeing: see scheduled_process_spare_stack_run's own note
+// for the measurement that says why. Parking a second run gives the first
+// one back, which is safe because it belonged to a process reaped before
+// this one -- checked anyway, since the cost of being wrong is the
+// allocator handing out memory a live stack is standing on.
+private fn scheduled_process_park_stack_run(base: usize) !{unsafe} {
+    if (base == 0) { return; }
+    let previous: usize = scheduled_process_spare_stack_run;
+    scheduled_process_spare_stack_run = base;
+    if (previous == 0 || previous == base) { return; }
+    let sp: usize = kernel_stack_read_sp_el1();
+    if (sp >= previous && sp < previous + KERNEL_STACK_RUN_BYTES) {
+        scheduled_process_spare_stack_run = previous;
+        return;
+    }
+    page_run_transferred_release_physical(previous, KERNEL_STACK_RUN_PAGES);
+}
+
+private fn scheduled_process_take_spare_stack_run() -> usize !{unsafe} {
+    let base: usize = scheduled_process_spare_stack_run;
+    if (base == 0) { return 0; }
+    let sp: usize = kernel_stack_read_sp_el1();
+    if (sp >= base && sp < base + KERNEL_STACK_RUN_BYTES) { return 0; }
+    scheduled_process_spare_stack_run = 0;
+    return base;
+}
+
+fn scheduled_process_table_clear() !{unsafe} {
     // Reset can enter while a child root is in TTBR0_EL1. Select the
     // permanent bootstrap root before releasing any nonzero backing record.
     process_image_activate_root(0);
-    for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        let generation: usize =
-            slotmap_occupant_generation(&scheduled_process_pool, slot);
-        if (generation != 0) {
-            let mut handle: ProcessHandle = { slot, generation };
-            if (scheduled_process_handle_matches(handle)) {
-                scheduled_process_owner_drop(
-                    scheduled_process_owner_new(slot, generation));
-            }
-        }
-        unified_fd_context_release(slot);
-        address_space_release_root(slot);
-        // No exec teardown here, deliberately: a whole-world reset is not
-        // a process exiting, and address_space_release_root above has
-        // already freed the mappings an installed image would name. Adding
-        // one would count reaps that no process performed.
-        process_image_record_release(slot);
-        scheduled_process_records[slot].pid = 0;
-        scheduled_process_records[slot].saved_sp = 0;
-        scheduled_process_records[slot].state = ProcessSlotState::Free;
-        scheduled_process_records[slot].wait_reason = ProcessWaitReason::None;
-        scheduled_process_record_reset_syscall_state(slot);
-    }
-    scheduled_process_next_pid = 1;
-    slotmap_init(&scheduled_process_pool);
+    scheduled_process_release_every_process();
 }
 
-fn scheduled_process_alloc() -> ScheduledProcessAllocResult {
-    match slotmap_insert(&scheduled_process_pool) {
-        FreelistPopResult::Empty => { return ScheduledProcessAllocResult::Full; }
-        FreelistPopResult::Popped(popped) => {
-            let (index, generation) = freelist_owner_into_parts(popped);
-            if (index < KERNEL_PROCESS_MAX) {
-                let slot: {0..<KERNEL_PROCESS_MAX as usize} = index;
-                // Backed once per slot and kept: see
-                // ProcessRecord.stack_run's own note on why a reused slot
-                // must reuse its run.
-                if (scheduled_process_records[slot].stack_run == 0) {
-                    match page_alloc_contiguous(KERNEL_STACK_RUN_PAGES,
-                                              PageOwnerTag::KernelStack) {
-                        PageRunAllocResult::OutOfMemory => {
-                            kernel_boot_log_resource_exhausted(
-                                "physical page allocator" as *u8,
-                                BOOT_PAGE_COUNT);
-                            slotmap_remove(&scheduled_process_pool,
-                                           freelist_owner_new(slot, generation));
-                            return ScheduledProcessAllocResult::Full;
-                        }
-                        PageRunAllocResult::Allocated(run) => {
-                            let base: usize = page_run_physical_address(run);
-                            if (kernel_stack_run_usable(base)) {
-                                page_run_owner_transfer_index(run);
-                                scheduled_process_records[slot].stack_run = base;
-                            } else {
-                                // An unaligned run from an allocator that
-                                // promises alignment is an invariant
-                                // break, not a resource limit. Give it
-                                // back and refuse the slot: a stack built
-                                // on it would answer the one-bit
-                                // membership test with a lie, which is
-                                // worse than not having the slot.
-                                page_run_free(run);
-                                kernel_boot_log_resource_exhausted(
-                                    "kernel stack run (unaligned; refused)" as *u8,
-                                    KERNEL_STACK_RUN_PAGES);
-                                slotmap_remove(&scheduled_process_pool,
-                                               freelist_owner_new(slot, generation));
-                                return ScheduledProcessAllocResult::Full;
-                            }
-                        }
-                    }
-                }
-                match address_space_ensure_root(slot) {
-                    AddressSpaceEnsureResult::Ok => {}
-                    AddressSpaceEnsureResult::SlotOutOfRange => {
-                        slotmap_remove(&scheduled_process_pool,
-                                       freelist_owner_new(slot, generation));
-                        return ScheduledProcessAllocResult::Full;
-                    }
-                    AddressSpaceEnsureResult::OutOfMemory => {
-                        kernel_boot_log_resource_exhausted(
-                            "physical page allocator" as *u8, BOOT_PAGE_COUNT);
-                        slotmap_remove(&scheduled_process_pool,
-                                       freelist_owner_new(slot, generation));
-                        return ScheduledProcessAllocResult::Full;
-                    }
-                    AddressSpaceEnsureResult::AsidExhausted => {
-                        kernel_boot_log_resource_exhausted(
-                            "ASID pool" as *u8, ASID_MAX);
-                        slotmap_remove(&scheduled_process_pool,
-                                       freelist_owner_new(slot, generation));
-                        return ScheduledProcessAllocResult::Full;
-                    }
-                }
-                // GitHub issue #392: the fd context is a per-process
-                // resource like the stack run and the address-space root
-                // above, so it is acquired here, in the same rollback
-                // chain, rather than materialising on first use inside
-                // kernel/kernel/fd_table.tkb. A live slot therefore always
-                // has one, which is what lets every entry point there test
-                // "does this process have an fd table" instead of "is this
-                // index in range".
-                if (process_image_record_ensure(slot) == false) {
-                    kernel_boot_log_resource_exhausted(
-                        "physical page allocator" as *u8, BOOT_PAGE_COUNT);
-                    address_space_release_root(slot);
-                    slotmap_remove(&scheduled_process_pool,
-                                   freelist_owner_new(slot, generation));
-                    return ScheduledProcessAllocResult::Full;
-                }
-                if (unified_fd_context_ensure(slot) == false) {
-                    kernel_boot_log_resource_exhausted(
-                        "physical page allocator" as *u8, BOOT_PAGE_COUNT);
-                    address_space_release_root(slot);
-                    slotmap_remove(&scheduled_process_pool,
-                                   freelist_owner_new(slot, generation));
-                    return ScheduledProcessAllocResult::Full;
-                }
-                scheduled_process_records[slot].state = ProcessSlotState::Ready;
-                let bottom: usize = kernel_stack_bottom(slot);
-                // Unreachable given the branch above stored only a base
-                // kernel_stack_run_usable accepted, but the two casts
-                // below are the ones that must never be handed 0, so the
-                // guarantee is checked where it is used rather than
-                // argued from ten lines away.
-                if (bottom == 0) {
-                    slotmap_remove(&scheduled_process_pool,
-                                   freelist_owner_new(slot, generation));
-                    return ScheduledProcessAllocResult::Full;
-                }
-                scheduled_process_records[slot].saved_sp =
-                    bottom + KERNEL_PROCESS_STACK_SIZE;
-                // GitHub issue #392: the one place a pid is minted. Past
-                // every branch that can still refuse the slot except the
-                // put conflict below, which gives it back.
-                scheduled_process_records[slot].pid =
-                    scheduled_process_next_pid;
-                scheduled_process_next_pid = scheduled_process_next_pid + 1;
-                scheduled_process_record_reset_syscall_state(slot);
-                // GitHub issues #375/#376: a reused slot reuses its run,
-                // so it would otherwise inherit the previous occupant's
-                // marks. Re-poison BOTH halves here so the guard, the
-                // high-water measurement and the overflow depth all
-                // answer about THIS process.
-                let stack: *KernelStackHalf = kernel_stack_span(bottom);
-                let below: *KernelStackHalf = kernel_stack_quarantine_span(bottom);
-                for i: usize in 0..<KERNEL_PROCESS_STACK_SIZE {
-                    stack.bytes[i] = KERNEL_STACK_POISON;
-                    below.bytes[i] = KERNEL_STACK_POISON;
-                }
-                // The slot is the SlotMap's now, and the handle is the
-                // pair every caller carries. Nothing is stored anywhere,
-                // so there is no conflict branch and no rollback for one.
-                let mut handle: ProcessHandle = { slot, generation };
-                return ScheduledProcessAllocResult::Allocated(handle);
+// GitHub issue #392: a process record is a pool allocation now, so
+// "Full" no longer means "the sixteenth slot was taken" -- it means the
+// page allocator is empty. The rollback chain is unchanged in shape: every
+// resource acquired below is given back on every later failure.
+fn scheduled_process_alloc() -> ScheduledProcessAllocResult !{unsafe} {
+    scheduled_process_pool_init();
+    let mut slot: usize = 0;
+    let mut generation: usize = 0;
+    let guard = intrusive_pool_lock(&scheduled_process_pool);
+    let inserted =
+        intrusive_pool_insert_zeroed(&scheduled_process_pool, guard);
+    intrusive_pool_unlock(&scheduled_process_pool, guard);
+    match inserted {
+        IntrusivePoolInsertResult::OutOfMemory => {
+            kernel_boot_log_resource_exhausted(
+                "physical page allocator" as *u8, BOOT_PAGE_COUNT);
+            return ScheduledProcessAllocResult::Full;
+        }
+        IntrusivePoolInsertResult::Allocated(pool_owner) => {
+            slot = intrusive_owner_slot(pool_owner);
+            generation = intrusive_owner_generation(pool_owner);
+            intrusive_owner_drop(pool_owner);
+        }
+    }
+    return scheduled_process_alloc_finish(slot, generation);
+}
+
+// The bootstrap process: the static record at slot 0, asked for by name.
+//
+// It used to be "whoever allocates first gets it", which is true of the
+// real boot path and false of anything else that allocates a process --
+// and a probe that acquires one silently took the bootstrap's record,
+// used it, and gave it back WITH slot 0's fd context and image record
+// attached, breaking a later probe that had set those up. One caller
+// wants the bootstrap; it says so.
+fn scheduled_process_alloc_bootstrap() -> ScheduledProcessAllocResult
+        !{unsafe} {
+    scheduled_process_pool_init();
+    if (scheduled_process_boot_live) {
+        return ScheduledProcessAllocResult::Full;
+    }
+    scheduled_process_boot_generation = scheduled_process_boot_generation + 1;
+    scheduled_process_boot_live = true;
+    return scheduled_process_alloc_finish(
+        0, scheduled_process_boot_generation);
+}
+
+// Everything a new process needs once it has a record: the same rollback
+// chain for both entry points above, so a bootstrap and an ordinary
+// process cannot drift apart in what they are given.
+private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
+        -> ScheduledProcessAllocResult !{unsafe} {
+    // A run the last reaped process left behind, before asking the page
+    // allocator for another one. This is also what preserves the old
+    // "a reused slot reuses its run" behaviour now that there are no
+    // slots to reuse: a new process reuses a dead one's run.
+    if (scheduled_process_record_at(slot).stack_run == 0) {
+        let spare: usize = scheduled_process_take_spare_stack_run();
+        if (spare != 0) {
+            scheduled_process_record_at(slot).stack_run = spare;
+        }
+    }
+    if (scheduled_process_record_at(slot).stack_run == 0) {
+        match page_alloc_contiguous(KERNEL_STACK_RUN_PAGES,
+                                  PageOwnerTag::KernelStack) {
+            PageRunAllocResult::OutOfMemory => {
+                kernel_boot_log_resource_exhausted(
+                    "physical page allocator" as *u8,
+                    BOOT_PAGE_COUNT);
+                scheduled_process_slot_remove(slot);
+                return ScheduledProcessAllocResult::Full;
             }
+            PageRunAllocResult::Allocated(run) => {
+                let base: usize = page_run_physical_address(run);
+                if (kernel_stack_run_usable(base)) {
+                    page_run_owner_transfer_index(run);
+                    scheduled_process_record_at(slot).stack_run = base;
+                } else {
+                    // An unaligned run from an allocator that promises
+                    // alignment is an invariant break, not a resource
+                    // limit. Give it back and refuse the slot: a stack
+                    // built on it would answer the one-bit membership
+                    // test with a lie, which is worse than not having
+                    // the slot.
+                    page_run_free(run);
+                    kernel_boot_log_resource_exhausted(
+                        "kernel stack run (unaligned; refused)" as *u8,
+                        KERNEL_STACK_RUN_PAGES);
+                    scheduled_process_slot_remove(slot);
+                    return ScheduledProcessAllocResult::Full;
+                }
+            }
+        }
+    }
+    match address_space_ensure_root(slot) {
+        AddressSpaceEnsureResult::Ok => {}
+        AddressSpaceEnsureResult::SlotOutOfRange => {
+            scheduled_process_slot_remove(slot);
+            return ScheduledProcessAllocResult::Full;
+        }
+        AddressSpaceEnsureResult::OutOfMemory => {
+            kernel_boot_log_resource_exhausted(
+                "physical page allocator" as *u8, BOOT_PAGE_COUNT);
+            scheduled_process_slot_remove(slot);
+            return ScheduledProcessAllocResult::Full;
+        }
+        AddressSpaceEnsureResult::AsidExhausted => {
+            kernel_boot_log_resource_exhausted("ASID pool" as *u8, ASID_MAX);
+            scheduled_process_slot_remove(slot);
             return ScheduledProcessAllocResult::Full;
         }
     }
+    // GitHub issue #392: the fd context is a per-process resource like
+    // the stack run and the address-space root above, so it is acquired
+    // here, in the same rollback chain, rather than materialising on
+    // first use inside kernel/kernel/fd_table.tkb. A live slot therefore
+    // always has one, which is what lets every entry point there test
+    // "does this process have an fd table" instead of "is this index in
+    // range".
+    if (process_image_record_ensure(slot) == false) {
+        kernel_boot_log_resource_exhausted(
+            "physical page allocator" as *u8, BOOT_PAGE_COUNT);
+        address_space_release_root(slot);
+        scheduled_process_slot_remove(slot);
+        return ScheduledProcessAllocResult::Full;
+    }
+    if (unified_fd_context_ensure(slot) == false) {
+        kernel_boot_log_resource_exhausted(
+            "physical page allocator" as *u8, BOOT_PAGE_COUNT);
+        process_image_record_release(slot);
+        address_space_release_root(slot);
+        scheduled_process_slot_remove(slot);
+        return ScheduledProcessAllocResult::Full;
+    }
+    scheduled_process_record_at(slot).state = ProcessSlotState::Ready;
+    let bottom: usize = kernel_stack_bottom(slot);
+    // Unreachable given the branch above stored only a base
+    // kernel_stack_run_usable accepted, but the two casts below are the
+    // ones that must never be handed 0, so the guarantee is checked where
+    // it is used rather than argued from ten lines away.
+    if (bottom == 0) {
+        unified_fd_context_release(slot);
+        process_image_record_release(slot);
+        address_space_release_root(slot);
+        scheduled_process_slot_remove(slot);
+        return ScheduledProcessAllocResult::Full;
+    }
+    scheduled_process_record_at(slot).saved_sp =
+        bottom + KERNEL_PROCESS_STACK_SIZE;
+    // GitHub issue #392: the one place a pid is minted. Past every branch
+    // that can still refuse the slot.
+    scheduled_process_record_at(slot).pid = scheduled_process_next_pid;
+    scheduled_process_next_pid = scheduled_process_next_pid + 1;
+    scheduled_process_record_reset_syscall_state(slot);
+    // GitHub issues #375/#376: a reused run would otherwise inherit the
+    // previous occupant's marks. Re-poison BOTH halves here so the guard,
+    // the high-water measurement and the overflow depth all answer about
+    // THIS process.
+    let stack: *KernelStackHalf = kernel_stack_span(bottom);
+    let below: *KernelStackHalf = kernel_stack_quarantine_span(bottom);
+    for i: usize in 0..<KERNEL_PROCESS_STACK_SIZE {
+        stack.bytes[i] = KERNEL_STACK_POISON;
+        below.bytes[i] = KERNEL_STACK_POISON;
+    }
+    let mut handle: ProcessHandle = { slot, generation };
+    return ScheduledProcessAllocResult::Allocated(handle);
 }
 
 fn scheduled_process_ready_take(handle: ProcessHandle)
@@ -896,7 +1171,7 @@ fn scheduled_process_start(
         state: sink ScheduledProcessState[process, ProcessState::Ready])
         -> ScheduledProcessState[process, ProcessState::Running] {
     scheduled_process_state_drop(state);
-    scheduled_process_records[owner.pool_index].state =
+    scheduled_process_record_at(owner.pool_index).state =
         ProcessSlotState::Running;
     let mut running:
         ScheduledProcessState[process, ProcessState::Running] =
@@ -909,7 +1184,7 @@ fn scheduled_process_yield(
         state: sink ScheduledProcessState[process, ProcessState::Running])
         -> ScheduledProcessState[process, ProcessState::Ready] {
     scheduled_process_state_drop(state);
-    scheduled_process_records[owner.pool_index].state =
+    scheduled_process_record_at(owner.pool_index).state =
         ProcessSlotState::Ready;
     let mut ready: ScheduledProcessState[process, ProcessState::Ready] =
         { owner.pool_index };
@@ -921,7 +1196,7 @@ fn scheduled_process_block(
         state: sink ScheduledProcessState[process, ProcessState::Running])
         -> ScheduledProcessState[process, ProcessState::Blocked] {
     scheduled_process_state_drop(state);
-    scheduled_process_records[owner.pool_index].state =
+    scheduled_process_record_at(owner.pool_index).state =
         ProcessSlotState::Blocked;
     let mut blocked: ScheduledProcessState[process, ProcessState::Blocked] =
         { owner.pool_index };
@@ -933,7 +1208,7 @@ fn scheduled_process_wake(
         state: sink ScheduledProcessState[process, ProcessState::Blocked])
         -> ScheduledProcessState[process, ProcessState::Ready] {
     scheduled_process_state_drop(state);
-    scheduled_process_records[owner.pool_index].state =
+    scheduled_process_record_at(owner.pool_index).state =
         ProcessSlotState::Ready;
     let mut ready: ScheduledProcessState[process, ProcessState::Ready] =
         { owner.pool_index };
@@ -945,7 +1220,7 @@ fn scheduled_process_exit(
         state: sink ScheduledProcessState[process, ProcessState::Running])
         -> ScheduledProcessState[process, ProcessState::Exited] {
     scheduled_process_state_drop(state);
-    scheduled_process_records[owner.pool_index].state =
+    scheduled_process_record_at(owner.pool_index).state =
         ProcessSlotState::Exited;
     let mut exited: ScheduledProcessState[process, ProcessState::Exited] =
         { owner.pool_index };
@@ -954,11 +1229,12 @@ fn scheduled_process_exit(
 
 fn scheduled_process_reap(
         owner: sink ScheduledProcessOwner[process],
-        state: sink ScheduledProcessState[process, ProcessState::Exited]) {
+        state: sink ScheduledProcessState[process, ProcessState::Exited])
+        !{unsafe} {
     kernel_process_trace_record(
         ProcessTraceReap, scheduled_process_pid_of_slot(owner.pool_index),
         owner.generation, 0, 0, 4, 0, owner.pool_index,
-        scheduled_process_records[owner.pool_index].saved_sp, 0);
+        scheduled_process_record_at(owner.pool_index).saved_sp, 0);
     scheduled_process_state_drop(state);
     unified_fd_context_release(owner.pool_index);
     address_space_release_root(owner.pool_index);
@@ -969,19 +1245,59 @@ fn scheduled_process_reap(
     // reason. Root 0 is exempt inside the release itself.
     process_image_exec_teardown(owner.pool_index);
     process_image_record_release(owner.pool_index);
-    slotmap_remove(&scheduled_process_pool,
-                   freelist_owner_new(owner.pool_index, owner.generation));
-    scheduled_process_records[owner.pool_index].saved_sp = 0;
-    scheduled_process_records[owner.pool_index].state =
-        ProcessSlotState::Free;
-    scheduled_process_records[owner.pool_index].wait_reason =
-        ProcessWaitReason::None;
+    // Read the watermark before the run is recycled -- see
+    // scheduled_process_stack_deepest_reaped.
+    let used: usize = kernel_stack_used_bytes(owner.pool_index);
+    if (used > scheduled_process_stack_deepest_reaped) {
+        scheduled_process_stack_deepest_reaped = used;
+    }
+    // The record itself goes last: everything above still needed to read
+    // it. Reset first, because slot 0's record is a static that survives
+    // -- for a pool slot the reset is written into memory about to be
+    // handed back, which costs a few stores and keeps one rule instead of
+    // two.
+    scheduled_process_record_reset(owner.pool_index);
+    scheduled_process_slot_remove(owner.pool_index);
+    scheduled_process_owner_drop(owner);
 }
 
-fn scheduled_process_stack_top(handle: ProcessHandle) -> usize {
-    if (slotmap_matches(&scheduled_process_pool, handle.pool_index,
-                        handle.generation)) {
-        return scheduled_process_records[handle.pool_index].saved_sp;
+// GitHub issue #392: a root of one's own, for a probe.
+//
+// A probe that needs a second address space used to name one as a bare
+// `1`, which worked while any index below the ceiling was a root whether
+// or not a process occupied it. A root is a live process's record now, so
+// a probe has to be a process -- the same thing this issue's fd-context
+// stage did to the probes that used to get contexts for free.
+//
+// Plain usizes in and out, and 0 for "none", because the callers are in
+// kernel/mm/address_space.tkb and kernel/mm/process_image.tkb, both parsed
+// BEFORE this file: a function resolves regardless of file order, a type
+// does not. 0 is unambiguous -- it is the bootstrap, which this never
+// hands out.
+//
+// The address space allocated for the slot is given straight back: these
+// probes are about creating one, and want a slot that has none.
+fn scheduled_process_probe_slot_acquire() -> usize !{unsafe} {
+    let mut slot: usize = 0;
+    match scheduled_process_alloc() {
+        ScheduledProcessAllocResult::Full => { return 0; }
+        ScheduledProcessAllocResult::Allocated(handle) => {
+            slot = handle.pool_index;
+        }
+    }
+    address_space_release_root(slot);
+    return slot;
+}
+
+fn scheduled_process_probe_slot_release(slot: usize) !{unsafe} {
+    scheduled_process_release_slot_resources(slot);
+    scheduled_process_record_reset(slot);
+    scheduled_process_slot_remove(slot);
+}
+
+fn scheduled_process_stack_top(handle: ProcessHandle) -> usize !{unsafe} {
+    if (scheduled_process_handle_matches(handle)) {
+        return scheduled_process_record_at(handle.pool_index).saved_sp;
     }
     return 0;
 }
@@ -1024,20 +1340,28 @@ fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool {
     }
 }
 
-// Stage-local hardware evidence. This does not schedule either owner: it
-// proves bounded allocation, typed Ready -> Running -> Ready/Exited
-// transitions, page-aligned distinct kernel stacks, and generation-safe slot
-// reuse before later stages attach real VM/fd state to these identities.
-// GitHub issue #246: loop-based, not one named local + one copy-pasted
-// match block per slot -- practical only up to a handful of slots (this
-// shape served KERNEL_PROCESS_MAX up through 3, issue #245), impractical
-// at the larger ceiling #246 moved to. ProcessHandle is a plain struct
-// (not an indexed/existential owner type), so an array of them is legal
-// storage, unlike a linear owner such as PageRunOwner or FreelistOwner.
+// GitHub issue #392: this probe used to prove the OPPOSITE of what it
+// proves now. It allocated every slot and then confirmed the next
+// allocation was Full -- an assertion that the ceiling was where the
+// constant said. There is no ceiling, so it allocates PAST the old one
+// instead: 24 concurrent processes where 16 was the number, each with its
+// own kernel stack run, and every record given back afterwards. That is
+// the shape issue #257 left behind when TCP_CONNECTION_MAX went.
+//
+// It also still proves what it always did: typed Ready -> Running ->
+// Ready/Exited transitions, run-aligned distinct kernel stacks, and that a
+// handle to a reaped process is refused.
+//
+// ProcessHandle is a plain struct (not an indexed/existential owner type),
+// so an array of them is legal storage, unlike a linear owner such as
+// PageRunOwner or FreelistOwner.
+const PROCESS_TABLE_PROBE_COUNT: usize = 24;
+
 fn scheduled_process_table_probe() -> bool !{unsafe} {
     scheduled_process_table_init();
-    let mut handles: [ProcessHandle; KERNEL_PROCESS_MAX];
-    for i: usize in 0..<KERNEL_PROCESS_MAX {
+    let records_before: usize = process_image_record_live_count();
+    let mut handles: [ProcessHandle; PROCESS_TABLE_PROBE_COUNT];
+    for i: usize in 0..<PROCESS_TABLE_PROBE_COUNT {
         match scheduled_process_alloc() {
             ScheduledProcessAllocResult::Full => { return false; }
             ScheduledProcessAllocResult::Allocated(handle) => {
@@ -1046,85 +1370,80 @@ fn scheduled_process_table_probe() -> bool !{unsafe} {
         }
     }
 
-    // Allocate to capacity, confirm the next allocation past that is Full.
-    let mut capacity_ok: bool = false;
-    match scheduled_process_alloc() {
-        ScheduledProcessAllocResult::Allocated(unexpected) => {
-            if (scheduled_process_probe_cycle(unexpected)) {}
-        }
-        ScheduledProcessAllocResult::Full => {
-            capacity_ok = true;
-        }
-    }
-    if (capacity_ok == false) { return false; }
-
     // The boot and secondary stacks are held to the same shape as the
     // ones allocated below, checked here because this is the probe that
     // owns "a kernel stack is where it says it is".
     if (kernel_linker_stacks_well_shaped() == false) { return false; }
 
-    // Every live slot's stack must be distinct, and must END exactly
-    // where its run ends. Both loops bound by the same literal
-    // (KERNEL_PROCESS_MAX), not one loop bound by the other's variable,
-    // so --forbid-trap can prove both `handles[i]`/`handles[j]` accesses
-    // in one pass (a variable inner bound like `0..<i` does not carry a
-    // provable range here).
+    // Every live process's stack must be distinct, and must END exactly
+    // where its run ends. Both loops bound by the same constant, not one
+    // loop bound by the other's variable, so --forbid-trap can prove both
+    // `handles[i]`/`handles[j]` accesses in one pass (a variable inner
+    // bound like `0..<i` does not carry a provable range here).
     //
     // GitHub issue #377: the run is KERNEL_STACK_RUN_BYTES-aligned and
     // the stack is its upper half, so the top is a multiple of the whole
     // run -- and that one equation is the same fact the single-bit
     // overflow test relies on. Asserting it here is asserting that test's
-    // premise on every slot the kernel ever hands out.
+    // premise on every stack the kernel ever hands out.
     //
     // Two earlier versions of this check were each true only of the
     // layout of their day: PAGE-alignment (issue #373 -- true only while
     // a page was entirely payload, so it required the first push to land
     // inside the allocator's metadata), then the payload boundary. Both
     // named an offset within one page. This one names the allocation.
-    for i: usize in 0..<KERNEL_PROCESS_MAX {
+    for i: usize in 0..<PROCESS_TABLE_PROBE_COUNT {
         let stack: usize = scheduled_process_stack_top(handles[i]);
         if (stack == 0 || stack % KERNEL_STACK_RUN_BYTES != 0 ||
             stack % 16 != 0) { return false; }
-        for j: usize in 0..<KERNEL_PROCESS_MAX {
+        for j: usize in 0..<PROCESS_TABLE_PROBE_COUNT {
             if (j != i && stack == scheduled_process_stack_top(handles[j])) {
                 return false;
             }
         }
     }
 
-    // Exercise cycle/reap/reuse on one slot before cycling the rest.
+    // Exercise cycle/reap/reuse on one process before cycling the rest.
+    // The reused allocation may or may not land on the same pool slot --
+    // that is the allocator's business -- but the reaped handle must be
+    // refused either way, and refused on the generation rather than on a
+    // range check, since there is no range left to fail.
     let mut first: ProcessHandle = handles[0];
     if (scheduled_process_probe_cycle(first) == false) { return false; }
+    if (scheduled_process_stack_top(first) != 0) { return false; }
     match scheduled_process_alloc() {
         ScheduledProcessAllocResult::Full => { return false; }
         ScheduledProcessAllocResult::Allocated(reused) => {
-            if (scheduled_process_same_slot(first, reused) == false ||
-                scheduled_process_same_generation(first, reused) ||
-                scheduled_process_stack_top(first) != 0) {
+            if (scheduled_process_same_slot(first, reused) &&
+                scheduled_process_same_generation(first, reused)) {
                 return false;
             }
+            if (scheduled_process_stack_top(reused) == 0) { return false; }
             if (scheduled_process_probe_cycle(reused) == false) {
                 return false;
             }
         }
     }
-    for i: usize in 1..<KERNEL_PROCESS_MAX {
+    for i: usize in 1..<PROCESS_TABLE_PROBE_COUNT {
         if (scheduled_process_probe_cycle(handles[i]) == false) {
             return false;
         }
     }
-    // GitHub issue #392: an image record dies with its process now, so
-    // allocating every slot and then cycling every one of them must leave
-    // the pool holding exactly ONE record -- root 0's. That is the single
-    // record release exempts, because root 0 is the permanent bootstrap
-    // root whose image state is established once and read on every later
-    // stack fault. Stated as the surviving count rather than as a delta:
-    // the answer is 1 whether or not this probe is what created it.
+    // Everything given back. Two counts, because two pools are involved
+    // and each has its own way of leaking.
     //
-    // This is the detector for the release path, added with it. Sixteen
-    // records allocated and fifteen not given back is what the process
-    // table's own size used to hide.
-    if (process_image_record_live_count() != 1) {
+    // The image records: back to what the pool held before. This probe
+    // does not touch the bootstrap (scheduled_process_alloc_bootstrap is a
+    // separate entry point), so root 0's record -- the one release exempts
+    // -- is neither created nor destroyed here.
+    //
+    // The process records: none survives. 24 allocated and 23 given back
+    // is what a per-slot array used to hide, because a slot that is never
+    // freed cannot leak.
+    if (process_image_record_live_count() != records_before) {
+        return false;
+    }
+    if (intrusive_pool_live_count(&scheduled_process_pool) != 0) {
         return false;
     }
     return true;
@@ -1251,7 +1570,7 @@ fn kernel_process_trace_fail_after_exec_requested() -> bool {
 }
 
 fn kernel_process_trace_current(event: usize, peer: ProcessHandle,
-                                aux: usize) {
+                                aux: usize) !{unsafe} {
     if (execution_current_live == false) { return; }
     let mut current: ProcessHandle = execution_current_handle;
     let state: usize = kernel_process_crash_state();
@@ -1259,11 +1578,11 @@ fn kernel_process_trace_current(event: usize, peer: ProcessHandle,
     kernel_process_trace_record(
         event, scheduled_process_pid_of_handle(current), current.generation,
         scheduled_process_pid_of_handle(peer), peer.generation, state, reason,
-        current.pool_index, scheduled_process_records[current.pool_index].saved_sp,
+        current.pool_index, scheduled_process_peek_saved_sp(current.pool_index),
         aux);
 }
 
-fn kernel_process_trace_address_space_activate(root: usize) {
+fn kernel_process_trace_address_space_activate(root: usize) !{unsafe} {
     if (execution_current_live == false) { return; }
     let mut current: ProcessHandle = execution_current_handle;
     kernel_process_trace_record(
@@ -1271,25 +1590,25 @@ fn kernel_process_trace_address_space_activate(root: usize) {
         scheduled_process_pid_of_handle(current),
         current.generation, 0, 0, kernel_process_crash_state(),
         kernel_process_crash_wait_reason(), root,
-        scheduled_process_records[current.pool_index].saved_sp, 0);
+        scheduled_process_peek_saved_sp(current.pool_index), 0);
 }
 
-fn kernel_process_trace_exec_prepare() {
+fn kernel_process_trace_exec_prepare() !{unsafe} {
     if (execution_current_live == false) { return; }
     let mut current: ProcessHandle = execution_current_handle;
     kernel_process_trace_record(
         ProcessTraceExecPrepare, scheduled_process_pid_of_handle(current),
         current.generation, 0, 0, kernel_process_crash_state(),
         kernel_process_crash_wait_reason(),
-        current.pool_index, scheduled_process_records[current.pool_index].saved_sp,
+        current.pool_index, scheduled_process_peek_saved_sp(current.pool_index),
         0);
 }
 
 fn kernel_process_trace_handle(event: usize, subject: ProcessHandle,
-                               peer: ProcessHandle, aux: usize) {
-    let state: ProcessSlotState = scheduled_process_record_state(
+                               peer: ProcessHandle, aux: usize) !{unsafe} {
+    let state: ProcessSlotState = scheduled_process_peek_state(
         subject.pool_index);
-    let reason: ProcessWaitReason = scheduled_process_record_wait_reason(
+    let reason: ProcessWaitReason = scheduled_process_peek_wait_reason(
         subject.pool_index);
     let state_u8: u8 = state as u8;
     let reason_u8: u8 = reason as u8;
@@ -1299,7 +1618,7 @@ fn kernel_process_trace_handle(event: usize, subject: ProcessHandle,
         event, scheduled_process_pid_of_handle(subject), subject.generation,
         scheduled_process_pid_of_handle(peer), peer.generation, state_code,
         reason_code, subject.pool_index,
-        scheduled_process_records[subject.pool_index].saved_sp,
+        scheduled_process_peek_saved_sp(subject.pool_index),
         aux);
 }
 
@@ -1388,15 +1707,10 @@ fn kernel_process_execution_reset() {
     process_test_evidence_reset();
     kernel_process_trace_enabled = kernel_process_trace_boot_enabled;
     kernel_crash_trace_next = 0;
-    for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        scheduled_process_records[slot].has_parent = false;
-        scheduled_process_records[slot].has_child = false;
-        scheduled_process_records[slot].exec_image_live = false;
-        scheduled_process_records[slot].last_child_pid = 0;
-        scheduled_process_records[slot].child_exit_status = 0;
-        scheduled_process_records[slot].child_waitable = false;
-    }
-    match scheduled_process_alloc() {
+    // No per-slot clearing loop: scheduled_process_table_clear above
+    // destroyed every pooled record and reset the bootstrap's static one,
+    // which is strictly more than this loop did (issue #392).
+    match scheduled_process_alloc_bootstrap() {
         ScheduledProcessAllocResult::Full => {}
         ScheduledProcessAllocResult::Allocated(root) => {
             execution_current_handle = root;
@@ -1406,7 +1720,7 @@ fn kernel_process_execution_reset() {
                     ProcessTraceResume,
                     scheduled_process_pid_of_handle(root), root.generation,
                     0, 0, 2, 0, root.pool_index,
-                    scheduled_process_records[root.pool_index].saved_sp, 0);
+                    scheduled_process_record_at(root.pool_index).saved_sp, 0);
             }
         }
     }
@@ -1433,11 +1747,20 @@ fn kernel_process_scheduler_disable() {
 // selection.
 fn kernel_process_schedulable_count() -> usize {
     let mut live: usize = 0;
-    for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        let state: ProcessSlotState = scheduled_process_record_state(slot);
-        if (state != ProcessSlotState::Free &&
-            state != ProcessSlotState::Exited) {
-            live = live + 1;
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                let state: ProcessSlotState =
+                    scheduled_process_record_state(slot);
+                if (state != ProcessSlotState::Free &&
+                    state != ProcessSlotState::Exited) {
+                    live = live + 1;
+                }
+                cursor = scheduled_process_next_slot(slot);
+            }
         }
     }
     return live;
@@ -1445,19 +1768,19 @@ fn kernel_process_schedulable_count() -> usize {
 
 fn kernel_process_switch_to_parent(current_sp: usize) -> usize {
     if (execution_current_live == false ||
-        scheduled_process_records[execution_current_handle.pool_index]
+        scheduled_process_record_at(execution_current_handle.pool_index)
             .has_parent ==
             false) {
         return current_sp;
     }
     let mut from: ProcessHandle = execution_current_handle;
     let mut to: ProcessHandle =
-        scheduled_process_records[from.pool_index].parent;
+        scheduled_process_record_at(from.pool_index).parent;
     if (scheduled_process_record_state(to.pool_index) !=
             ProcessSlotState::Ready) {
         return current_sp;
     }
-    scheduled_process_records[from.pool_index].saved_sp = current_sp;
+    scheduled_process_record_at(from.pool_index).saved_sp = current_sp;
     if (kernel_process_yield_handle(from) == false) {
         return current_sp;
     }
@@ -1469,24 +1792,24 @@ fn kernel_process_switch_to_parent(current_sp: usize) -> usize {
     kernel_process_trace_handle(ProcessTraceSchedule, to, from, 0);
     process_image_activate_root(to.pool_index);
     kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
-    return scheduled_process_records[to.pool_index].saved_sp;
+    return scheduled_process_record_at(to.pool_index).saved_sp;
 }
 
 fn kernel_process_switch_to_child(current_sp: usize) -> usize {
     if (execution_current_live == false ||
-        scheduled_process_records[execution_current_handle.pool_index]
+        scheduled_process_record_at(execution_current_handle.pool_index)
             .has_child ==
             false) {
         return current_sp;
     }
     let mut from: ProcessHandle = execution_current_handle;
     let mut to: ProcessHandle =
-        scheduled_process_records[from.pool_index].child;
+        scheduled_process_record_at(from.pool_index).child;
     if (scheduled_process_record_state(to.pool_index) !=
             ProcessSlotState::Ready) {
         return current_sp;
     }
-    scheduled_process_records[from.pool_index].saved_sp = current_sp;
+    scheduled_process_record_at(from.pool_index).saved_sp = current_sp;
     if (kernel_process_yield_handle(from) == false) {
         return current_sp;
     }
@@ -1498,7 +1821,7 @@ fn kernel_process_switch_to_child(current_sp: usize) -> usize {
     kernel_process_trace_handle(ProcessTraceSchedule, to, from, 0);
     process_image_activate_root(to.pool_index);
     kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
-    return scheduled_process_records[to.pool_index].saved_sp;
+    return scheduled_process_record_at(to.pool_index).saved_sp;
 }
 
 // GitHub issue #245: the old two-process toggle ("if I'm the Child, go up
@@ -1509,7 +1832,7 @@ fn kernel_process_switch_to_child(current_sp: usize) -> usize {
 // forked leaf) matches the old if-branch, switching up to its own parent.
 fn kernel_process_schedule(current_sp: usize) -> usize {
     if (execution_current_live &&
-        scheduled_process_records[execution_current_handle.pool_index]
+        scheduled_process_record_at(execution_current_handle.pool_index)
             .has_child) {
         return kernel_process_switch_to_child(current_sp);
     }
@@ -1521,15 +1844,15 @@ fn kernel_process_schedule(current_sp: usize) -> usize {
 // hasn't exited yet" (wait4 should block instead).
 fn kernel_process_current_has_live_child() -> bool {
     return execution_current_live &&
-           scheduled_process_records[execution_current_handle.pool_index]
+           scheduled_process_record_at(execution_current_handle.pool_index)
                .has_child;
 }
 
 fn kernel_process_current_has_relative() -> bool {
     if (execution_current_live == false) { return false; }
     let slot: usize = execution_current_handle.pool_index;
-    return scheduled_process_records[slot].has_child ||
-           scheduled_process_records[slot].has_parent;
+    return scheduled_process_record_at(slot).has_child ||
+           scheduled_process_record_at(slot).has_parent;
 }
 
 // GitHub issue #375: make a kernel stack overflow LOUD.
@@ -1622,12 +1945,21 @@ private fn kernel_stack_below_witness(bottom: usize)
 // against a report that costs a few frames. A handler on a stack of its
 // own is the proper answer and belongs with the entry-time check, not
 // here.
-private fn kernel_stack_guard_fail(reason: *u8, slot: usize, base: usize,
+// GitHub issue #392: which process, by pid, not by slot -- a slot is a
+// pool address now, and "the boot stack" used to be spelled as a slot one
+// past the end of an array that no longer exists. An explicit bool says
+// it instead, because a sentinel that has to be out of range needs a range.
+private fn kernel_stack_guard_fail(reason: *u8, slot: usize,
+                                   process_stack: bool, base: usize,
                                    sp: usize) !{unsafe} {
     kernel_boot_log("kernel stack: OVERFLOW -- ");
     kernel_boot_log(reason);
-    kernel_boot_log(" (issues #373/#377) slot=");
-    uart_put_udec(slot);
+    kernel_boot_log(" (issues #373/#377) pid=");
+    if (process_stack) {
+        uart_put_udec(scheduled_process_pid_of_slot(slot));
+    } else {
+        kernel_boot_log("none (boot stack)");
+    }
     kernel_boot_log(" bottom=");
     uart_put_udec(base);
     kernel_boot_log(" sp=");
@@ -1635,14 +1967,10 @@ private fn kernel_stack_guard_fail(reason: *u8, slot: usize, base: usize,
     kernel_boot_log(" size=");
     uart_put_udec(KERNEL_PROCESS_STACK_SIZE);
     // How far past the bottom, when it is already past: the number a
-    // guard page would have read off the faulting address. A slot of
-    // KERNEL_PROCESS_MAX means the boot stack, which has no slot -- it is
-    // out of the array's range by exactly one, deliberately, so that a
-    // real slot and "not a slot" cannot be confused.
+    // guard page would have read off the faulting address.
     let mut over: usize = kernel_boot_stack_overflow_bytes();
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        over = kernel_stack_overflow_bytes(checked);
+    if (process_stack) {
+        over = kernel_stack_overflow_bytes(slot);
     }
     if (over != 0) {
         kernel_boot_log(" past-end=");
@@ -1659,18 +1987,16 @@ fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
     // never see it.
     if (kernel_boot_stack_witness_disturbed()) {
         kernel_stack_guard_fail("boot stack wrote past its end" as *u8,
-                                KERNEL_PROCESS_MAX, boot_stack_bottom,
-                                current_sp);
+                                0, false, boot_stack_bottom, current_sp);
         return;
     }
     if (execution_current_live == false) { return; }
     let slot: usize = execution_current_handle.pool_index;
-    if (slot >= KERNEL_PROCESS_MAX) { return; }
-    let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
+    if (scheduled_process_slot_valid(slot) == false) { return; }
     // A slot whose run has not been allocated yet, or a path still on the
     // boot stack from entry.S, has nothing to check here. An unaligned
     // base is rejected by the same test (see kernel_stack_run_usable).
-    let bottom: usize = kernel_stack_bottom(checked);
+    let bottom: usize = kernel_stack_bottom(slot);
     if (bottom == 0) { return; }
     // Two distinct questions, asked in the order of severity, because
     // they mean different things and only one of them is recoverable in
@@ -1685,7 +2011,7 @@ fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
     }
     if (overflowed) {
         kernel_stack_guard_fail("stack wrote past its end, into the run below it" as *u8,
-                                checked, bottom, current_sp);
+                                slot, true, bottom, current_sp);
         return;
     }
     let stack: *KernelStackHalf = kernel_stack_span(bottom);
@@ -1698,7 +2024,7 @@ fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
     }
     if (disturbed) {
         kernel_stack_guard_fail("stack reached its own bottom" as *u8,
-                                checked, bottom, current_sp);
+                                slot, true, bottom, current_sp);
     }
 }
 
@@ -1806,11 +2132,27 @@ private fn kernel_stack_owner_name(sp: usize) -> *u8 {
     if (sp >= irq_stack_run_bottom && sp < irq_stack_top) {
         return "below the IRQ stack" as *u8;
     }
-    for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        let base: usize = scheduled_process_records[slot].stack_run;
-        if (base != 0 && sp >= base && sp < base + KERNEL_STACK_RUN_BYTES) {
-            return "below a process kernel stack" as *u8;
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                let base: usize =
+                    scheduled_process_record_at(slot).stack_run;
+                if (base != 0 && sp >= base &&
+                    sp < base + KERNEL_STACK_RUN_BYTES) {
+                    return "below a process kernel stack" as *u8;
+                }
+                cursor = scheduled_process_next_slot(slot);
+            }
         }
+    }
+    // A run parked by a reaped process is still this kernel's memory, and
+    // an SP inside one is still worth naming rather than calling unknown.
+    let spare: usize = scheduled_process_spare_stack_run;
+    if (spare != 0 && sp >= spare && sp < spare + KERNEL_STACK_RUN_BYTES) {
+        return "below a reaped process kernel stack" as *u8;
     }
     // Not a stack this file knows about. The page allocator may still
     // know what it is, and on this path that answer is worth more than
@@ -1945,7 +2287,7 @@ fn kernel_irq_stack_overflow_bytes() -> usize !{unsafe} {
 //
 // Returns 0 for a slot with no backing page. A slot that has never run
 // reports 0 as well, which is correct rather than a special case.
-fn kernel_stack_used_bytes(slot: {0..<KERNEL_PROCESS_MAX as usize})
+fn kernel_stack_used_bytes(slot: usize)
         -> usize !{unsafe} {
     let bottom: usize = kernel_stack_bottom(slot);
     if (bottom == 0) { return 0; }
@@ -1967,7 +2309,7 @@ fn kernel_stack_used_bytes(slot: {0..<KERNEL_PROCESS_MAX as usize})
 // overflow harmless AND invisible, which is how issue #373's corruption
 // stayed silent for as long as it did. Scanning DOWN from the top of
 // that region finds the deepest byte the stack reached below its bottom.
-fn kernel_stack_overflow_bytes(slot: {0..<KERNEL_PROCESS_MAX as usize})
+fn kernel_stack_overflow_bytes(slot: usize)
         -> usize !{unsafe} {
     let bottom: usize = kernel_stack_bottom(slot);
     if (bottom == 0) { return 0; }
@@ -1983,10 +2325,18 @@ fn kernel_stack_overflow_bytes(slot: {0..<KERNEL_PROCESS_MAX as usize})
 // The deepest any slot has been, which is the number that decides how big
 // a kernel stack has to be (issues #376/#377).
 fn kernel_stack_deepest_bytes() -> usize !{unsafe} {
-    let mut deepest: usize = 0;
-    for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        let used: usize = kernel_stack_used_bytes(slot);
-        if (used > deepest) { deepest = used; }
+    let mut deepest: usize = scheduled_process_stack_deepest_reaped;
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                let used: usize = kernel_stack_used_bytes(slot);
+                if (used > deepest) { deepest = used; }
+                cursor = scheduled_process_next_slot(slot);
+            }
+        }
     }
     return deepest;
 }
@@ -2035,11 +2385,21 @@ fn kernel_stack_watermark_report() !{unsafe} {
         uart_put_udec(irq_over);
         kernel_boot_log("OVER");
     }
-    kernel_boot_log(" per-slot=");
-    for slot: usize in 0..<KERNEL_PROCESS_MAX {
+    // Per LIVE process, by pid -- a reaped process's run is recycled now,
+    // so there is nothing left to read its poison out of. What those
+    // processes reached is in `deepest` above, taken at their reap.
+    kernel_boot_log(" reaped-deepest=");
+    uart_put_udec(scheduled_process_stack_deepest_reaped);
+    kernel_boot_log(" per-process=");
+    let mut report_cursor = scheduled_process_first_slot();
+    let mut reporting: bool = true;
+    while (reporting) {
+      match report_cursor {
+        ProcessSlotCursor::Done => { reporting = false; }
+        ProcessSlotCursor::At(slot) => {
         let used: usize = kernel_stack_used_bytes(slot);
         if (used != 0) {
-            uart_put_udec(slot);
+            uart_put_udec(scheduled_process_pid_of_slot(slot));
             kernel_boot_log(":");
             uart_put_udec(used);
             // Depth PAST the end, which only the region below the stack
@@ -2054,6 +2414,9 @@ fn kernel_stack_watermark_report() !{unsafe} {
             }
             kernel_boot_log(" ");
         }
+        report_cursor = scheduled_process_next_slot(slot);
+        }
+      }
     }
     kernel_boot_log("\n");
 }
@@ -2093,22 +2456,22 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
         return 0;
     }
 
-    if (scheduled_process_records[execution_current_handle.pool_index]
+    if (scheduled_process_record_at(execution_current_handle.pool_index)
             .has_child) {
         let mut parent: ProcessHandle = execution_current_handle;
         let mut child: ProcessHandle =
-            scheduled_process_records[parent.pool_index].child;
+            scheduled_process_record_at(parent.pool_index).child;
         if (scheduled_process_record_state(child.pool_index) !=
                 ProcessSlotState::Ready) {
             return 0;
         }
-        scheduled_process_records[parent.pool_index].saved_sp = current_sp;
+        scheduled_process_record_at(parent.pool_index).saved_sp = current_sp;
         match scheduled_process_running_take(parent) {
             ScheduledProcessRunningTakeResult::Missing => { return 0; }
             ScheduledProcessRunningTakeResult::Running(resources) => {
                 let (owner, running) = resources;
                 let blocked = scheduled_process_block(owner, running);
-                scheduled_process_records[owner.pool_index].wait_reason =
+                scheduled_process_record_at(owner.pool_index).wait_reason =
                     ProcessWaitReason::UartRx;
                 scheduled_process_release(owner, blocked);
                 kernel_process_trace_handle(ProcessTraceBlock, parent, child,
@@ -2124,27 +2487,27 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
         }
         process_image_activate_root(child.pool_index);
         kernel_process_trace_handle(ProcessTraceResume, child, parent, 0);
-        return scheduled_process_records[child.pool_index].saved_sp;
+        return scheduled_process_record_at(child.pool_index).saved_sp;
     }
 
-    if (scheduled_process_records[execution_current_handle.pool_index]
+    if (scheduled_process_record_at(execution_current_handle.pool_index)
             .has_parent == false) {
         return 0;
     }
     let mut child: ProcessHandle = execution_current_handle;
     let mut parent: ProcessHandle =
-        scheduled_process_records[child.pool_index].parent;
+        scheduled_process_record_at(child.pool_index).parent;
     if (scheduled_process_record_state(parent.pool_index) !=
             ProcessSlotState::Ready) {
         return 0;
     }
-    scheduled_process_records[child.pool_index].saved_sp = current_sp;
+    scheduled_process_record_at(child.pool_index).saved_sp = current_sp;
     match scheduled_process_running_take(child) {
         ScheduledProcessRunningTakeResult::Missing => { return 0; }
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
             let blocked = scheduled_process_block(owner, running);
-            scheduled_process_records[owner.pool_index].wait_reason =
+            scheduled_process_record_at(owner.pool_index).wait_reason =
                 ProcessWaitReason::UartRx;
             scheduled_process_release(owner, blocked);
             kernel_process_trace_handle(ProcessTraceBlock, child, parent,
@@ -2160,7 +2523,7 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
     }
     process_image_activate_root(parent.pool_index);
     kernel_process_trace_handle(ProcessTraceResume, parent, child, 0);
-    return scheduled_process_records[parent.pool_index].saved_sp;
+    return scheduled_process_record_at(parent.pool_index).saved_sp;
 }
 
 // GitHub issue #244: the mirror image of kernel_process_block_uart() --
@@ -2172,25 +2535,25 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
 // already switched back on its own.
 fn kernel_process_block_wait4(current_sp: usize) -> usize {
     if (execution_current_live == false ||
-        scheduled_process_records[execution_current_handle.pool_index]
+        scheduled_process_record_at(execution_current_handle.pool_index)
             .has_child ==
             false) {
         return 0;
     }
     let mut parent: ProcessHandle = execution_current_handle;
     let mut child: ProcessHandle =
-        scheduled_process_records[parent.pool_index].child;
+        scheduled_process_record_at(parent.pool_index).child;
     if (scheduled_process_record_state(child.pool_index) !=
             ProcessSlotState::Ready) {
         return 0;
     }
-    scheduled_process_records[parent.pool_index].saved_sp = current_sp;
+    scheduled_process_record_at(parent.pool_index).saved_sp = current_sp;
     match scheduled_process_running_take(parent) {
         ScheduledProcessRunningTakeResult::Missing => { return 0; }
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
             let blocked = scheduled_process_block(owner, running);
-            scheduled_process_records[owner.pool_index].wait_reason =
+            scheduled_process_record_at(owner.pool_index).wait_reason =
                 ProcessWaitReason::ChildExit;
             scheduled_process_release(owner, blocked);
             kernel_process_trace_handle(ProcessTraceBlock, parent, child,
@@ -2203,7 +2566,7 @@ fn kernel_process_block_wait4(current_sp: usize) -> usize {
     execution_current_handle = child;
     process_image_activate_root(child.pool_index);
     kernel_process_trace_handle(ProcessTraceResume, child, parent, 0);
-    return scheduled_process_records[child.pool_index].saved_sp;
+    return scheduled_process_record_at(child.pool_index).saved_sp;
 }
 
 // The UART IRQ transfers one byte directly into the suspended syscall frame.
@@ -2220,10 +2583,10 @@ fn kernel_process_uart_wake(value: usize)
     }
     let mut waiter: ProcessHandle = execution_current_handle;
     let mut found: bool = false;
-    if (scheduled_process_records[execution_current_handle.pool_index]
+    if (scheduled_process_record_at(execution_current_handle.pool_index)
             .has_child) {
-        let mut candidate: ProcessHandle = scheduled_process_records[
-            execution_current_handle.pool_index].child;
+        let mut candidate: ProcessHandle = scheduled_process_record_at(
+            execution_current_handle.pool_index).child;
         if (scheduled_process_record_state(candidate.pool_index) ==
                 ProcessSlotState::Blocked &&
             scheduled_process_record_wait_reason(candidate.pool_index) ==
@@ -2236,10 +2599,10 @@ fn kernel_process_uart_wake(value: usize)
     // Its child normally is not the UART waiter, so keep looking upward
     // instead of dropping the byte before checking the blocked ash parent.
     if (found == false &&
-        scheduled_process_records[execution_current_handle.pool_index]
+        scheduled_process_record_at(execution_current_handle.pool_index)
             .has_parent) {
-        let mut candidate: ProcessHandle = scheduled_process_records[
-            execution_current_handle.pool_index].parent;
+        let mut candidate: ProcessHandle = scheduled_process_record_at(
+            execution_current_handle.pool_index).parent;
         if (scheduled_process_record_state(candidate.pool_index) ==
                 ProcessSlotState::Blocked &&
             scheduled_process_record_wait_reason(candidate.pool_index) ==
@@ -2259,13 +2622,13 @@ fn kernel_process_uart_wake(value: usize)
         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
             let (owner, blocked) = resources;
             match kernel_syscall_uart_deliver(
-                    scheduled_process_records[owner.pool_index].saved_sp,
+                    scheduled_process_record_at(owner.pool_index).saved_sp,
                     owner.pool_index, value) {
                 KernelUartDeliveryResult::Consumed => {}
                 KernelUartDeliveryResult::RetryRead => { retry_read = true; }
             }
             let ready = scheduled_process_wake(owner, blocked);
-            scheduled_process_records[owner.pool_index].wait_reason =
+            scheduled_process_record_at(owner.pool_index).wait_reason =
                 ProcessWaitReason::None;
             scheduled_process_release(owner, ready);
             kernel_process_trace_handle(ProcessTraceWake, waiter,
@@ -2285,14 +2648,14 @@ fn kernel_process_uart_wake(value: usize)
 fn kernel_process_uart_record_parent_progress()
         -> ProcessUartProgressResult {
     if (execution_current_live == false ||
-        scheduled_process_records[execution_current_handle.pool_index]
+        scheduled_process_record_at(execution_current_handle.pool_index)
             .has_child ==
             false) {
         return ProcessUartProgressResult::Invalid;
     }
     let mut parent: ProcessHandle = execution_current_handle;
     let mut child: ProcessHandle =
-        scheduled_process_records[parent.pool_index].child;
+        scheduled_process_record_at(parent.pool_index).child;
     if (scheduled_process_record_state(parent.pool_index) !=
             ProcessSlotState::Running ||
         scheduled_process_record_state(child.pool_index) !=
@@ -2427,10 +2790,8 @@ fn kernel_process_scheduler_probe() -> bool {
         saw_resume && saw_activate;
     kernel_process_scheduler_disable();
     scheduled_process_table_clear();
-    for slot: usize in 0..<KERNEL_PROCESS_MAX {
-        scheduled_process_records[slot].has_parent = false;
-        scheduled_process_records[slot].has_child = false;
-    }
+    // scheduled_process_table_clear above destroyed every pooled record
+    // and reset the bootstrap's, so there is nothing left to clear here.
     execution_current_live = false;
     kernel_process_trace_disable();
     return ok;
@@ -2503,7 +2864,7 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
     // already-scoped-to-current-only replacement.
     if (flags != 0x11 || child_stack != 0 ||
         execution_current_live == false ||
-        scheduled_process_records[execution_current_handle.pool_index]
+        scheduled_process_record_at(execution_current_handle.pool_index)
             .has_child) {
         return ProcessCloneResult::Invalid;
     }
@@ -2513,10 +2874,10 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             return ProcessCloneResult::Invalid;
         }
         ScheduledProcessAllocResult::Allocated(child) => {
-            scheduled_process_records[parent.pool_index].child = child;
-            scheduled_process_records[parent.pool_index].has_child = true;
-            scheduled_process_records[child.pool_index].parent = parent;
-            scheduled_process_records[child.pool_index].has_parent = true;
+            scheduled_process_record_at(parent.pool_index).child = child;
+            scheduled_process_record_at(parent.pool_index).has_child = true;
+            scheduled_process_record_at(child.pool_index).parent = parent;
+            scheduled_process_record_at(child.pool_index).has_parent = true;
             // "current" becomes the CHILD right here, before this function
             // returns ChildReady -- the assembly clone continuation resumes
             // as the child directly (x0=0), so there is no separate
@@ -2538,7 +2899,7 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
                 child.generation,
                 scheduled_process_pid_of_handle(parent), parent.generation,
                 1, 0, child.pool_index,
-                scheduled_process_records[child.pool_index].saved_sp,
+                scheduled_process_record_at(child.pool_index).saved_sp,
                 flags);
             return ProcessCloneResult::ChildReady(
                 scheduled_process_pid_of_handle(child));
@@ -2563,14 +2924,20 @@ fn kernel_process_clone_child_stack_top() -> usize {
 // self-test.
 fn kernel_process_clone_rollback() {
     if (execution_current_live == false ||
-        scheduled_process_records[execution_current_handle.pool_index]
+        scheduled_process_record_at(execution_current_handle.pool_index)
             .has_parent ==
             false) {
         return;
     }
     let mut child: ProcessHandle = execution_current_handle;
     let mut parent: ProcessHandle =
-        scheduled_process_records[child.pool_index].parent;
+        scheduled_process_record_at(child.pool_index).parent;
+    // GitHub issue #392: BEFORE the reap. A reaped process's record is
+    // handed back to the pool now, so clearing its parent link afterwards
+    // wrote into the counted absent-record fallback -- harmless in effect,
+    // and exactly the kind of use-after-reap an array of never-freed slots
+    // cannot show you.
+    scheduled_process_record_at(child.pool_index).has_parent = false;
     match scheduled_process_ready_take(child) {
         ScheduledProcessReadyTakeResult::Missing => {}
         ScheduledProcessReadyTakeResult::Ready(resources) => {
@@ -2587,8 +2954,7 @@ fn kernel_process_clone_rollback() {
             }
         }
     }
-    scheduled_process_records[parent.pool_index].has_child = false;
-    scheduled_process_records[child.pool_index].has_parent = false;
+    scheduled_process_record_at(parent.pool_index).has_child = false;
     execution_current_handle = parent;
     process_image_activate_root(parent.pool_index);
     process_test_evidence_release_clone();
@@ -2601,26 +2967,26 @@ fn kernel_process_clone_rollback() {
 fn kernel_process_clone_context_install(parent_sp: usize, child_sp: usize)
         -> usize {
     if (execution_current_live == false || parent_sp == 0 || child_sp == 0 ||
-        scheduled_process_records[execution_current_handle.pool_index]
+        scheduled_process_record_at(execution_current_handle.pool_index)
             .has_parent ==
             false) {
         return 0;
     }
     let mut child: ProcessHandle = execution_current_handle;
     let mut parent: ProcessHandle =
-        scheduled_process_records[child.pool_index].parent;
+        scheduled_process_record_at(child.pool_index).parent;
     if (kernel_process_yield_handle(parent) == false ||
         kernel_process_start_handle(child) == false) {
         return 0;
     }
-    scheduled_process_records[parent.pool_index].saved_sp = parent_sp;
-    scheduled_process_records[child.pool_index].saved_sp = child_sp;
+    scheduled_process_record_at(parent.pool_index).saved_sp = parent_sp;
+    scheduled_process_record_at(child.pool_index).saved_sp = child_sp;
     return child_sp;
 }
 
 fn kernel_process_is_child() -> bool {
     return execution_current_live &&
-           scheduled_process_records[execution_current_handle.pool_index]
+           scheduled_process_record_at(execution_current_handle.pool_index)
                .has_parent;
 }
 
@@ -2629,12 +2995,12 @@ fn kernel_process_is_child() -> bool {
 // and must not inherit the fixture's bounded foreground-server lifecycle.
 fn kernel_process_parent_is_root() -> bool {
     if (execution_current_live == false ||
-        scheduled_process_records[execution_current_handle.pool_index]
+        scheduled_process_record_at(execution_current_handle.pool_index)
             .has_parent == false) {
         return false;
     }
     let mut parent: ProcessHandle =
-        scheduled_process_records[execution_current_handle.pool_index].parent;
+        scheduled_process_record_at(execution_current_handle.pool_index).parent;
     return parent.pool_index == 0;
 }
 
@@ -2660,16 +3026,16 @@ fn kernel_process_current_pid() -> usize {
 fn kernel_process_current_set_pending_block(
         reason: ProcessWaitReason, wait4_status_ptr: usize) {
     if (execution_current_live) {
-        scheduled_process_records[execution_current_handle.pool_index]
+        scheduled_process_record_at(execution_current_handle.pool_index)
             .wait_reason = reason;
-        scheduled_process_records[execution_current_handle.pool_index]
+        scheduled_process_record_at(execution_current_handle.pool_index)
             .wait4_status_ptr = wait4_status_ptr;
     }
 }
 
 fn kernel_process_current_pending_block_reason() -> ProcessWaitReason {
     if (execution_current_live) {
-        return scheduled_process_records[execution_current_handle.pool_index]
+        return scheduled_process_record_at(execution_current_handle.pool_index)
             .wait_reason;
     }
     return ProcessWaitReason::None;
@@ -2682,14 +3048,14 @@ fn kernel_process_current_pending_block_reason() -> ProcessWaitReason {
 fn kernel_process_crash_parent_pid() -> usize {
     if (execution_current_live == false) { return 0; }
     let slot: usize = execution_current_handle.pool_index;
-    if (scheduled_process_records[slot].has_parent == false) { return 0; }
+    if (scheduled_process_record_at(slot).has_parent == false) { return 0; }
     return scheduled_process_pid_of_handle(
-        scheduled_process_records[slot].parent);
+        scheduled_process_record_peek(slot).parent);
 }
 
-fn kernel_process_crash_state() -> usize {
+fn kernel_process_crash_state() -> usize !{unsafe} {
     if (execution_current_live == false) { return 0; }
-    let state: ProcessSlotState = scheduled_process_record_state(
+    let state: ProcessSlotState = scheduled_process_peek_state(
         execution_current_handle.pool_index);
     match state {
         ProcessSlotState::Free => { return 0; }
@@ -2700,9 +3066,9 @@ fn kernel_process_crash_state() -> usize {
     }
 }
 
-fn kernel_process_crash_wait_reason() -> usize {
+fn kernel_process_crash_wait_reason() -> usize !{unsafe} {
     if (execution_current_live == false) { return 0; }
-    let reason: ProcessWaitReason = scheduled_process_record_wait_reason(
+    let reason: ProcessWaitReason = scheduled_process_peek_wait_reason(
         execution_current_handle.pool_index);
     match reason {
         ProcessWaitReason::None => { return 0; }
@@ -2729,7 +3095,7 @@ fn kernel_process_crash_root_slot() -> usize {
 fn kernel_process_crash_image_kind() -> usize {
     if (execution_current_live == false) { return 0; }
     let slot: usize = execution_current_handle.pool_index;
-    if (scheduled_process_records[slot].exec_image_live) { return 1; }
+    if (scheduled_process_record_at(slot).exec_image_live) { return 1; }
     return 0;
 }
 
@@ -2754,13 +3120,13 @@ fn kernel_process_current_root() -> AddressSpaceRoot {
 // pids start at 1) if current has no live child.
 fn kernel_process_current_child_pid() -> usize {
     if (execution_current_live == false ||
-        scheduled_process_records[execution_current_handle.pool_index]
+        scheduled_process_record_at(execution_current_handle.pool_index)
             .has_child ==
             false) {
         return 0;
     }
     return scheduled_process_pid_of_handle(
-        scheduled_process_records[execution_current_handle.pool_index].child);
+        scheduled_process_record_at(execution_current_handle.pool_index).child);
 }
 
 fn kernel_process_child_exit(status: usize) -> usize {
@@ -2782,28 +3148,28 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // for genuinely concurrent children (a shell backgrounding a job with
     // `&`), where a child exit must not stop the survivors from running.
     if (execution_current_live == false ||
-        scheduled_process_records[execution_current_handle.pool_index]
+        scheduled_process_record_at(execution_current_handle.pool_index)
             .has_parent ==
             false) {
         return 0;
     }
     let mut child: ProcessHandle = execution_current_handle;
     let mut parent: ProcessHandle =
-        scheduled_process_records[child.pool_index].parent;
+        scheduled_process_record_at(child.pool_index).parent;
     kernel_process_trace_record(
         ProcessTraceExit, scheduled_process_pid_of_handle(child),
         child.generation,
         scheduled_process_pid_of_handle(parent), parent.generation, 2, 0,
         child.pool_index,
-        scheduled_process_records[child.pool_index].saved_sp, status);
+        scheduled_process_record_at(child.pool_index).saved_sp, status);
     // GitHub issue #248: per-slot (indexed by the WAITING PARENT's own
     // pool_index), not a bare global -- see these fields' own header
     // comment for why a global here breaks a multi-level concurrent
     // wait4() chain.
-    scheduled_process_records[parent.pool_index].last_child_pid =
+    scheduled_process_record_at(parent.pool_index).last_child_pid =
         scheduled_process_pid_of_handle(child);
-    scheduled_process_records[parent.pool_index].child_exit_status = status;
-    scheduled_process_records[parent.pool_index].child_waitable = true;
+    scheduled_process_record_at(parent.pool_index).child_exit_status = status;
+    scheduled_process_record_at(parent.pool_index).child_waitable = true;
     match scheduled_process_running_take(child) {
         ScheduledProcessRunningTakeResult::Missing => {}
         ScheduledProcessRunningTakeResult::Running(resources) => {
@@ -2814,11 +3180,14 @@ fn kernel_process_child_exit(status: usize) -> usize {
                 ScheduledProcessExitedTakeResult::Missing => {}
                 ScheduledProcessExitedTakeResult::Exited(done) => {
                     let (exited_owner, exited_state) = done;
-                    scheduled_process_reap(exited_owner, exited_state);
-                    scheduled_process_records[parent.pool_index]
-                        .has_child = false;
-                    scheduled_process_records[child.pool_index]
+                    // The child's own link is cleared before the reap
+                    // gives its record back; see the same note in
+                    // kernel_process_release_clone.
+                    scheduled_process_record_at(child.pool_index)
                         .has_parent = false;
+                    scheduled_process_reap(exited_owner, exited_state);
+                    scheduled_process_record_at(parent.pool_index)
+                        .has_child = false;
                 }
             }
         }
@@ -2845,11 +3214,11 @@ fn kernel_process_child_exit(status: usize) -> usize {
             ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                 let (owner, blocked) = resources;
                 let ready = scheduled_process_wake(owner, blocked);
-                scheduled_process_records[owner.pool_index].wait_reason =
+                scheduled_process_record_at(owner.pool_index).wait_reason =
                     ProcessWaitReason::None;
                 kernel_syscall_wait4_deliver(
-                    scheduled_process_records[owner.pool_index].saved_sp,
-                    scheduled_process_records[owner.pool_index].last_child_pid,
+                    scheduled_process_record_at(owner.pool_index).saved_sp,
+                    scheduled_process_record_at(owner.pool_index).last_child_pid,
                     owner.pool_index);
                 scheduled_process_release(owner, ready);
                 kernel_process_trace_handle(ProcessTraceWake, parent, child,
@@ -2861,7 +3230,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
         execution_current_handle = parent;
         process_image_activate_root(parent.pool_index);
         kernel_process_trace_handle(ProcessTraceResume, parent, child, 0);
-        return scheduled_process_records[parent.pool_index].saved_sp;
+        return scheduled_process_record_at(parent.pool_index).saved_sp;
     }
     return 0;
 }
@@ -2878,39 +3247,32 @@ fn kernel_process_child_exit(status: usize) -> usize {
 // explicit _for(slot) pair further below instead.
 fn kernel_process_child_waitable() -> bool {
     if (execution_current_live == false) { return false; }
-    return scheduled_process_records[execution_current_handle.pool_index]
+    return scheduled_process_record_at(execution_current_handle.pool_index)
         .child_waitable;
 }
 
 fn kernel_process_child_wait_status_peek() -> usize {
     if (execution_current_live == false) { return 0; }
-    return scheduled_process_records[execution_current_handle.pool_index]
+    return scheduled_process_record_at(execution_current_handle.pool_index)
         .child_exit_status;
 }
 
 fn kernel_process_child_wait_status() -> usize {
     if (execution_current_live == false) { return 0; }
     let slot: usize = execution_current_handle.pool_index;
-    scheduled_process_records[slot].child_waitable = false;
-    return scheduled_process_records[slot].child_exit_status;
+    scheduled_process_record_at(slot).child_waitable = false;
+    return scheduled_process_record_at(slot).child_exit_status;
 }
 
 // Explicit-slot pair for kernel_syscall_wait4_deliver's own use (see this
 // file's kernel_process_child_exit): the one caller that needs a SPECIFIC
 // parent slot rather than "whichever slot is current."
 fn kernel_process_child_wait_status_peek_for(slot: usize) -> usize {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        return scheduled_process_records[checked].child_exit_status;
-    }
-    return 0;
+    return scheduled_process_record_at(slot).child_exit_status;
 }
 
 fn kernel_process_child_wait_status_consume_for(slot: usize) {
-    if (slot < KERNEL_PROCESS_MAX) {
-        let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-        scheduled_process_records[checked].child_waitable = false;
-    }
+    scheduled_process_record_at(slot).child_waitable = false;
 }
 
 // Called from kernel_process_child_exec_prepare() right after that
@@ -2918,15 +3280,14 @@ fn kernel_process_child_wait_status_consume_for(slot: usize) {
 // names it directly, no switch has happened yet.
 fn kernel_process_child_exec_mark() {
     if (execution_current_live) {
-        let slot: {0..<KERNEL_PROCESS_MAX as usize} =
-            execution_current_handle.pool_index;
-        scheduled_process_records[slot].exec_image_live = true;
+        let slot: usize = execution_current_handle.pool_index;
+        scheduled_process_record_at(slot).exec_image_live = true;
         let mut current: ProcessHandle = execution_current_handle;
         kernel_process_trace_record(
             ProcessTraceExecCommit,
             scheduled_process_pid_of_handle(current), current.generation,
             0, 0, kernel_process_crash_state(), kernel_process_crash_wait_reason(),
-            current.pool_index, scheduled_process_records[current.pool_index].saved_sp,
+            current.pool_index, scheduled_process_record_at(current.pool_index).saved_sp,
             0);
     }
 }
@@ -2940,27 +3301,20 @@ fn kernel_process_child_exec_mark() {
 // (after that same call has switched execution_current_handle to the
 // parent). Taking an explicit pid removes the ambiguity instead of
 // guessing which one "current" means at the call site.
-fn kernel_process_exec_image_live_for_pid(pid: usize) -> bool {
+fn kernel_process_exec_image_live_for_pid(pid: usize) -> bool !{unsafe} {
     match scheduled_process_slot_for_pid(pid) {
         ProcessSlotForPidResult::Missing => { return false; }
         ProcessSlotForPidResult::Found(slot) => {
-            if (slot < KERNEL_PROCESS_MAX) {
-                let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-                return scheduled_process_records[checked].exec_image_live;
-            }
-            return false;
+            return scheduled_process_record_at(slot).exec_image_live;
         }
     }
 }
 
-fn kernel_process_exec_clear_for_pid(pid: usize) {
+fn kernel_process_exec_clear_for_pid(pid: usize) !{unsafe} {
     match scheduled_process_slot_for_pid(pid) {
         ProcessSlotForPidResult::Missing => {}
         ProcessSlotForPidResult::Found(slot) => {
-            if (slot < KERNEL_PROCESS_MAX) {
-                let checked: {0..<KERNEL_PROCESS_MAX as usize} = slot;
-                scheduled_process_records[checked].exec_image_live = false;
-            }
+            scheduled_process_record_at(slot).exec_image_live = false;
         }
     }
 }
@@ -2990,7 +3344,7 @@ fn kernel_process_child_exit_count() -> usize {
 
 fn kernel_process_last_child_pid() -> usize {
     if (execution_current_live == false) { return 0; }
-    return scheduled_process_records[execution_current_handle.pool_index]
+    return scheduled_process_record_at(execution_current_handle.pool_index)
         .last_child_pid;
 }
 
@@ -3006,13 +3360,13 @@ fn kernel_process_clone_evidence() -> bool {
     return execution_current_live &&
            process_test_evidence_clone_calls() >= 1 &&
            process_test_evidence_exit_42_seen() &&
-           scheduled_process_records[execution_current_handle.pool_index]
+           scheduled_process_record_at(execution_current_handle.pool_index)
                .has_child ==
                false &&
            scheduled_process_record_state(
                execution_current_handle.pool_index) ==
                ProcessSlotState::Running &&
-           scheduled_process_records[execution_current_handle.pool_index]
+           scheduled_process_record_at(execution_current_handle.pool_index)
                .saved_sp !=
                0;
 }

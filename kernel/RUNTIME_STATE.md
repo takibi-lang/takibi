@@ -36,16 +36,19 @@ core, one UART, one boot-time filesystem mount).
 
 ### Process/scheduler core (`kernel/kernel/process.tkb`)
 
-`scheduled_process_pool`/`scheduled_process_records`,
+`scheduled_process_pool` (`IntrusivePool(ProcessRecord)`, private) and the
+static `scheduled_process_boot_record` beside it,
 `execution_current_handle`/
 `execution_current_live`, `execution_scheduler_enabled`/
 `execution_reschedule_pending`.
 
 **Why global:** there is exactly one scheduler on this single-core kernel
 (see the file's own "NOT SYNCHRONIZED, single-core scheduler" limitation
-header). `scheduled_process_records` is already the per-slot owner
-(#264) -- every process's state, wait reason, parent/child links, and
-saved SP live in one `ProcessRecord` per slot, not scattered scalars. Issue
+header). `ProcessRecord` is already the per-process owner (#264) -- every
+process's state, wait reason, parent/child links, and saved SP live in one
+record, not scattered scalars. Since #392 that record is a pool allocation
+and a process slot is its ADDRESS; the bootstrap is the one static, because
+root 0 exists before the MMU is on. Issue
 #392 folded the kernel stack's page run in as a field and put the handles
 for the three pooled per-process records (fd context, image record,
 address-space backing) there too, so the parallel arrays those replaced

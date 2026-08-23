@@ -510,42 +510,52 @@ fn user_memory_boundary_probe_run(base: usize,
 // given, both checks below observe root 0's empty PTE instead of their
 // own root's real mapping and fail identically, regardless of the two
 // roots' genuinely different content.
-fn user_memory_root_isolation_probe() -> bool {
+fn user_memory_root_isolation_probe() -> bool !{unsafe} {
     let index: usize = match user_va_find_free_run(1) {
         UserVaRunResult::None => { return false; }
         UserVaRunResult::Found(found) => { found }
     };
-    let root_a: usize = 14;
-    let root_b: usize = 15;
-    if (address_space_is_live(root_a) || address_space_is_live(root_b)) {
+    // GitHub issue #392: two roots of this probe's own. They used to be
+    // the bare slots 14 and 15 -- the top of a table that no longer has a
+    // top. A root is a live process's record now, so the probe allocates
+    // two processes and uses theirs.
+    let root_a: usize = scheduled_process_probe_slot_acquire();
+    let root_b: usize = scheduled_process_probe_slot_acquire();
+    if (root_a == 0 || root_b == 0 ||
+        address_space_is_live(root_a) || address_space_is_live(root_b)) {
+        scheduled_process_probe_slot_release(root_b);
+        scheduled_process_probe_slot_release(root_a);
         return false;
     }
+    let mut roots_ok: bool = true;
     match address_space_ensure_root(root_a) {
         AddressSpaceEnsureResult::Ok => {}
-        AddressSpaceEnsureResult::SlotOutOfRange => { return false; }
-        AddressSpaceEnsureResult::OutOfMemory => { return false; }
-        AddressSpaceEnsureResult::AsidExhausted => { return false; }
+        AddressSpaceEnsureResult::SlotOutOfRange => { roots_ok = false; }
+        AddressSpaceEnsureResult::OutOfMemory => { roots_ok = false; }
+        AddressSpaceEnsureResult::AsidExhausted => { roots_ok = false; }
     }
-    match address_space_ensure_root(root_b) {
-        AddressSpaceEnsureResult::Ok => {}
-        AddressSpaceEnsureResult::SlotOutOfRange => {
-            address_space_release_root(root_a);
-            return false;
+    if (roots_ok) {
+        match address_space_ensure_root(root_b) {
+            AddressSpaceEnsureResult::Ok => {}
+            AddressSpaceEnsureResult::SlotOutOfRange => { roots_ok = false; }
+            AddressSpaceEnsureResult::OutOfMemory => { roots_ok = false; }
+            AddressSpaceEnsureResult::AsidExhausted => { roots_ok = false; }
         }
-        AddressSpaceEnsureResult::OutOfMemory => {
-            address_space_release_root(root_a);
-            return false;
-        }
-        AddressSpaceEnsureResult::AsidExhausted => {
-            address_space_release_root(root_a);
-            return false;
-        }
+    }
+    if (roots_ok == false) {
+        address_space_release_root(root_b);
+        address_space_release_root(root_a);
+        scheduled_process_probe_slot_release(root_b);
+        scheduled_process_probe_slot_release(root_a);
+        return false;
     }
     let va: usize = USER_TEXT_VA + index * PAGE_SIZE;
     match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => {
             address_space_release_root(root_b);
             address_space_release_root(root_a);
+            scheduled_process_probe_slot_release(root_b);
+            scheduled_process_probe_slot_release(root_a);
             return false;
         }
         PageAllocResult::Allocated(page_a) => {
@@ -554,6 +564,8 @@ fn user_memory_root_isolation_probe() -> bool {
                     page_free(page_a);
                     address_space_release_root(root_b);
                     address_space_release_root(root_a);
+                    scheduled_process_probe_slot_release(root_b);
+                    scheduled_process_probe_slot_release(root_a);
                     return false;
                 }
                 PageAllocResult::Allocated(page_b) => {
@@ -561,6 +573,8 @@ fn user_memory_root_isolation_probe() -> bool {
                         root_a, root_b, index, va, page_a, page_b);
                     address_space_release_root(root_b);
                     address_space_release_root(root_a);
+                    scheduled_process_probe_slot_release(root_b);
+                    scheduled_process_probe_slot_release(root_a);
                     return ok;
                 }
             }

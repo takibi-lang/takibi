@@ -526,9 +526,11 @@ fn kernel_test_common_probes() {
         // then went on saying it, which is the failure mode a view test
         // cannot catch by itself -- the expectation matched a line that
         // had become a lie.
-        kernel_boot_log("process table: slots=16 stacks=");
+        kernel_boot_log("process table: ");
+        uart_put_udec(PROCESS_TABLE_PROBE_COUNT);
+        kernel_boot_log(" concurrent processes past the old ceiling of 16, stacks=");
         uart_put_udec(KERNEL_PROCESS_STACK_SIZE);
-        kernel_boot_log(" (upper half of an aligned run) generation reuse safe\n");
+        kernel_boot_log(" (upper half of an aligned run), every record given back\n");
     } else {
         kernel_boot_log("process table: failed\n");
     }
@@ -563,7 +565,9 @@ fn kernel_test_common_probes() {
         kernel_boot_log("shared object pool: failed\n");
     }
     if (unified_object_ref_ceiling_probe()) {
-        kernel_boot_log("shared object refcount ceiling: exact boundary at capacity=256 ok\n");
+        kernel_boot_log("shared object refcount ceiling: exact boundary at capacity=");
+        uart_put_udec(SHARED_OBJECT_MAX_REFS);
+        kernel_boot_log(" ok\n");
     } else {
         kernel_boot_log("shared object refcount ceiling: failed\n");
     }
@@ -871,6 +875,15 @@ irq_uart_rx_unmask();
                     if (address_space_backing_missing_uses() != 0) {
                         kernel_boot_log("address space: backings MISSING uses=");
                         uart_put_udec(address_space_backing_missing_uses());
+                        kernel_boot_log("\n");
+                    }
+                    // The same for the process record itself, whose
+                    // fallback is what an access to a REAPED process's
+                    // slot lands in. An array of never-freed slots could
+                    // not have one, which is exactly why it is counted.
+                    if (scheduled_process_record_missing_uses() != 0) {
+                        kernel_boot_log("process table: records MISSING uses=");
+                        uart_put_udec(scheduled_process_record_missing_uses());
                         kernel_boot_log("\n");
                     }
                     if (page_allocator_double_free_count() == 0) {

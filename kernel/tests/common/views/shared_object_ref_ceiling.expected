@@ -1,1 +1,1 @@
-shared object refcount ceiling: exact boundary at capacity=256 ok
+shared object refcount ceiling: exact boundary at capacity=4096 ok

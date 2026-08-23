@@ -402,21 +402,15 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
     syscall_exec_pending = false;
     syscall_exec_argc = 0;
     syscall_test_lifecycle_persistent_shell_clear();
-    for process_slot: usize in 0..<KERNEL_PROCESS_MAX {
-        scheduled_process_set_uart_block_delivery(
-            process_slot, UartBlockDelivery::Scalar);
-    }
+    scheduled_process_reset_syscall_state_everywhere();
     for path_index: usize in 0..<256 { syscall_exec_path[path_index] = 0; }
     tcp_connection_pool_init();
     syscall_test_evidence_reset_socket_counters();
     syscall_inetd_mode = false;
-    // Configure is a whole-world reset and can run while processes
-    // already exist, so it still clears every slot rather than relying on
+    // Both of this file's per-process values are cleared above, in one
+    // walk over the live processes -- configure is a whole-world reset and
+    // can run while processes already exist, so it does not rely on
     // scheduled_process_alloc's own per-process reset.
-    for context: usize in 0..<KERNEL_PROCESS_MAX {
-        let mut fresh: CloneFileState = { false, false };
-        scheduled_process_set_clone_file_state(context, fresh);
-    }
 }
 
 // GitHub issue #245: parent/child slots used to be the literal 0/1 (the

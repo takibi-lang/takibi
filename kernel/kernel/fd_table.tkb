@@ -49,12 +49,18 @@ const SHARED_OBJECT_MAX: usize = 16;
 // object rather than new objects), so that is the real bound on
 // simultaneous holders -- see kernel/lib/refcount_slotmap.tkb's header
 // for why this is passed explicitly rather than left an unbounded usize.
-// GitHub issue #295 follow-up: a genuine `*` reference to
-// KERNEL_PROCESS_MAX * PROCESS_FD_MAX now that the compiler's const
-// grammar supports array_size-style arithmetic between previously
-// declared consts, replacing a duplicated `256` literal kept in sync by
-// hand (and comment) alone.
-const SHARED_OBJECT_MAX_REFS: usize = KERNEL_PROCESS_MAX * PROCESS_FD_MAX;
+// GitHub issue #392: 4096, and for the first time a number of its own.
+// It was KERNEL_PROCESS_MAX * PROCESS_FD_MAX -- how many descriptors could
+// exist at all, so no reference count could reach it. There is no process
+// ceiling any more, so the product is unbounded and this becomes an
+// INDEPENDENT ceiling: the 4097th descriptor naming one shared object is
+// refused with RefcountRetainResult::Overflow, which the fd install and
+// duplicate paths already report distinctly (LINUX_EMFILE) and
+// unified_object_ref_ceiling_probe already boundary-tests. 4096 is 16x
+// what the old product came to; removing the ceiling rather than raising
+// it needs the refcount itself to stop being a counter, which is a
+// different change.
+const SHARED_OBJECT_MAX_REFS: usize = 4096;
 
 enum UnifiedFdKind: u8 {
     Empty;
@@ -220,17 +226,6 @@ struct SharedObject {
 }
 private let mut object_records: [SharedObject; SHARED_OBJECT_MAX];
 
-// Public callers validate their process argument before narrowing it. The
-// fallback is unreachable at those call sites, but keeps the helper total.
-fn unified_fd_narrow_process(value: usize)
-        -> {0..<KERNEL_PROCESS_MAX as usize} {
-    if (value < KERNEL_PROCESS_MAX) {
-        let process: {0..<KERNEL_PROCESS_MAX as usize} = value;
-        return process;
-    }
-    return 0;
-}
-
 must_use variant UnifiedFdResult { Invalid; Ok; }
 // GitHub issue #295: a narrower result for the object-creating entry points
 // below (unified_file_open/unified_directory_open/unified_terminal_stdio_open/
@@ -242,8 +237,8 @@ must_use variant UnifiedFdResult { Invalid; Ok; }
 must_use variant UnifiedOpenResult { Invalid; Full; Ok; }
 // GitHub issue #295: unified_fd_install/unified_fd_duplicate's only source
 // of failure beyond a bad argument is refcount_pool_retain's own
-// RefcountRetainResult::Overflow -- SHARED_OBJECT_MAX_REFS (256, this
-// kernel's own KERNEL_PROCESS_MAX * PROCESS_FD_MAX) reached. That already
+// RefcountRetainResult::Overflow -- SHARED_OBJECT_MAX_REFS reached. That
+// already
 // had its own distinct variant one layer down; this file used to discard it
 // into the same UnifiedFdResult::Invalid as a genuinely bad fd/process
 // argument. Realistically reachable only via unified_fd_duplicate (dup()/
@@ -686,8 +681,8 @@ fn unified_fd_close_on_exec(process: usize, fd: usize) -> bool {
     return ctx.fd_close_on_exec[fd];
 }
 
-fn unified_fd_close_exec_descriptors(process: usize) {
-    if (process >= KERNEL_PROCESS_MAX) { return; }
+fn unified_fd_close_exec_descriptors(process: usize) !{unsafe} {
+    if (scheduled_process_slot_valid(process) == false) { return; }
     for fd: usize in 0..<PROCESS_FD_MAX {
         if (unified_fd_close_on_exec(process, fd)) {
             match unified_fd_close(process, fd) {
@@ -1114,10 +1109,8 @@ fn unified_object_pool_exhaustion_probe() -> bool {
 // object's own maximum simultaneous holder count, independent of
 // SHARED_OBJECT_MAX (the object pool's own capacity, exercised above) --
 // this drives refcount_pool_retain/_release directly on a single allocated
-// object rather than installing 256 real fd-table entries across every
-// process slot, which this kernel's KERNEL_PROCESS_MAX*PROCESS_FD_MAX
-// shape cannot even construct simultaneously (that product, 256, IS
-// SHARED_OBJECT_MAX_REFS -- see this constant's own definition comment).
+// object rather than installing SHARED_OBJECT_MAX_REFS real fd-table
+// entries across that many processes, which no fixture constructs.
 fn unified_object_ref_ceiling_probe() -> bool {
     unified_fd_table_init();
     match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
@@ -1275,34 +1268,49 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
     // Released first, so this is a fresh zeroed table rather than
     // whatever an earlier probe stage left in the slot.
     unified_fd_context_release(0);
-    unified_fd_context_release(1);
     if (unified_fd_context_ensure(0) == false) { return false; }
-    // ...and process 1's, which the clone stage below writes into.
-    if (unified_fd_context_ensure(1) == false) { return false; }
+    // ...and a second process's, which the clone stage below writes into.
+    // It used to be the bare slot `1`, which named a process only while
+    // every index below the ceiling did; a slot is a live process's record
+    // now, so the probe allocates one.
+    let child: usize = scheduled_process_probe_slot_acquire();
+    if (child == 0) { return false; }
+    unified_fd_context_release(child);
+    if (unified_fd_context_ensure(child) == false) {
+        scheduled_process_probe_slot_release(child);
+        return false;
+    }
     let probe_address: usize = fd_context_address(0);
-    if (probe_address == 0) { return false; }
+    if (probe_address == 0) { scheduled_process_probe_slot_release(child);
+ return false; }
     let ctx: *ProcessFdContext = fd_context_at(0);
     ctx.heap_break = 0x50000000;
     match unified_terminal_stdio_open(0) {
-        UnifiedOpenResult::Invalid => { return false; }
-        UnifiedOpenResult::Full => { return false; }
+        UnifiedOpenResult::Invalid => { scheduled_process_probe_slot_release(child);
+ return false; }
+        UnifiedOpenResult::Full => { scheduled_process_probe_slot_release(child);
+ return false; }
         UnifiedOpenResult::Ok => {}
     }
     if (unified_terminal_is_open(0, 0) == false ||
         unified_terminal_is_open(0, 1) == false ||
         unified_terminal_is_open(0, 2) == false) {
+        scheduled_process_probe_slot_release(child);
         return false;
     }
     match unified_fd_close(0, 0) {
-        UnifiedFdResult::Invalid => { return false; }
+        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
+ return false; }
         UnifiedFdResult::Ok => {}
     }
     match unified_fd_alloc(0, 0) {
-        UnifiedFdAllocResult::Full => { return false; }
+        UnifiedFdAllocResult::Full => { scheduled_process_probe_slot_release(child);
+ return false; }
         UnifiedFdAllocResult::Allocated(fd) => {
             if (fd != 0 || unified_fd_probe_install(
                     fd, unified_object_alloc_first(
                         UnifiedFdKind::OpenFile)) == false) {
+                scheduled_process_probe_slot_release(child);
                 return false;
             }
         }
@@ -1313,18 +1321,22 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
             4, unified_object_alloc_first(UnifiedFdKind::Listener)) == false ||
         unified_fd_probe_install(
             5, unified_object_alloc_first(UnifiedFdKind::Connection)) == false) {
+        scheduled_process_probe_slot_release(child);
         return false;
     }
-    match unified_fd_clone(0, 1) {
-        UnifiedFdResult::Invalid => { return false; }
+    match unified_fd_clone(0, child) {
+        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
+ return false; }
         UnifiedFdResult::Ok => {}
     }
-    match unified_process_heap_configure(1, 0x50001000) {
-        UnifiedFdResult::Invalid => { return false; }
+    match unified_process_heap_configure(child, 0x50001000) {
+        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
+ return false; }
         UnifiedFdResult::Ok => {}
     }
-    match unified_fd_set_offset(1, 3, 9) {
-        UnifiedFdResult::Invalid => { return false; }
+    match unified_fd_set_offset(child, 3, 9) {
+        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
+ return false; }
         UnifiedFdResult::Ok => {}
     }
     let mut shared: bool = false;
@@ -1334,25 +1346,30 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
             if (offset == 9) { shared = true; }
         }
     }
-    match unified_fd_close(1, 4) {
-        UnifiedFdResult::Invalid => { return false; }
+    match unified_fd_close(child, 4) {
+        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
+ return false; }
         UnifiedFdResult::Ok => {}
     }
-    match unified_fd_destroy(1) {
-        UnifiedFdResult::Invalid => { return false; }
+    match unified_fd_destroy(child) {
+        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
+ return false; }
         UnifiedFdResult::Ok => {}
     }
     match unified_fd_destroy(0) {
-        UnifiedFdResult::Invalid => { return false; }
+        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
+ return false; }
         UnifiedFdResult::Ok => {}
     }
     for object: usize in 0..<SHARED_OBJECT_MAX {
         if (object_records[object].kind != UnifiedFdKind::Empty ||
             refcount_pool_raw_count(&object_pool, object) != 0) {
+            scheduled_process_probe_slot_release(child);
             return false;
         }
     }
     if (refcount_pool_double_release_count(&object_pool) != 0) {
+        scheduled_process_probe_slot_release(child);
         return false;
     }
     let mut heap_independent: bool = false;
@@ -1362,6 +1379,7 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
             if (value == 0x50000000) { heap_independent = true; }
         }
     }
+    scheduled_process_probe_slot_release(child);
     return shared && heap_independent;
 }
 

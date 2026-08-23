@@ -533,6 +533,34 @@ fn address_space_clear_root(slot: usize) {
     address_space_release_user_mappings(slot);
 }
 
+// GitHub issue #392: ask about a root's whole user window one BRANCH at a
+// time. Every page of an absent L3 branch is absent, so reading 262144
+// PTEs to find that out reads 511 of every 512 for nothing -- and each of
+// those reads now validates the process record and the address-space
+// backing against their pools, where an array cost one compare.
+//
+// This is what a 262144-iteration scan cost after pooling, measured: 6.6
+// million address_space_pte_read calls before the boot suite's first
+// listen(), 22.7 million validated record lookups underneath them, and
+// 10.7 seconds of wall clock -- enough to push the host network peer past
+// its own 15-second handshake budget, which reads as a network bug and is
+// not one. The scan was always this wasteful; pooling only made it
+// visible.
+fn address_space_user_window_is_clear(slot: usize) -> bool !{unsafe} {
+    if (scheduled_process_slot_valid(slot) == false) { return true; }
+    if (address_space_backing_at(slot).live == false) { return true; }
+    let l2_physical: usize = address_space_backing_at(slot).l2_physical;
+    for branch: usize in 0..<USER_L2_BRANCH_COUNT {
+        let l3_physical: usize = mmu_user_l3_physical(l2_physical, branch);
+        if (l3_physical != 0) {
+            for entry: usize in 0..<USER_L3_PAGE_COUNT {
+                if (mmu_pte_read(l3_physical, entry) != 0) { return false; }
+            }
+        }
+    }
+    return true;
+}
+
 fn address_space_l3_branch_physical(slot: usize, branch: usize) -> usize {
     return address_space_l3_physical_for_branch(slot, branch);
 }
@@ -640,56 +668,82 @@ fn process_address_space_probe_fill_first_branch(root: usize) -> bool {
 // that the L3 pages and transferred user pages are all reclaimed by a table
 // walk rather than by a fixed 512-entry shadow list.
 fn process_address_space_probe() -> bool !{unsafe} {
-    if (address_space_is_live(1) || address_space_is_live(2)) {
+    // GitHub issue #392: two roots of this probe's own. They used to be
+    // the bare numbers 1 and 2, which named real roots only while any
+    // index below the process ceiling was one. A root is a live process's
+    // record now, so the probe allocates two processes and uses theirs.
+    let root_a: usize = scheduled_process_probe_slot_acquire();
+    let root_b: usize = scheduled_process_probe_slot_acquire();
+    if (root_a == 0 || root_b == 0) {
+        scheduled_process_probe_slot_release(root_b);
+        scheduled_process_probe_slot_release(root_a);
+        return false;
+    }
+    if (address_space_is_live(root_a) || address_space_is_live(root_b)) {
+        scheduled_process_probe_slot_release(root_b);
+        scheduled_process_probe_slot_release(root_a);
         return false;
     }
     let before: usize = page_allocator_live_count();
-    match address_space_ensure_root(1) {
+    let mut roots_ok: bool = true;
+    match address_space_ensure_root(root_a) {
         AddressSpaceEnsureResult::Ok => {}
-        AddressSpaceEnsureResult::SlotOutOfRange => { return false; }
-        AddressSpaceEnsureResult::OutOfMemory => { return false; }
-        AddressSpaceEnsureResult::AsidExhausted => { return false; }
+        AddressSpaceEnsureResult::SlotOutOfRange => { roots_ok = false; }
+        AddressSpaceEnsureResult::OutOfMemory => { roots_ok = false; }
+        AddressSpaceEnsureResult::AsidExhausted => { roots_ok = false; }
     }
-    match address_space_ensure_root(2) {
-        AddressSpaceEnsureResult::Ok => {}
-        AddressSpaceEnsureResult::SlotOutOfRange => {
-            address_space_release_root(1);
-            return false;
+    if (roots_ok) {
+        match address_space_ensure_root(root_b) {
+            AddressSpaceEnsureResult::Ok => {}
+            AddressSpaceEnsureResult::SlotOutOfRange => { roots_ok = false; }
+            AddressSpaceEnsureResult::OutOfMemory => { roots_ok = false; }
+            AddressSpaceEnsureResult::AsidExhausted => { roots_ok = false; }
         }
-        AddressSpaceEnsureResult::OutOfMemory => {
-            address_space_release_root(1);
-            return false;
-        }
-        AddressSpaceEnsureResult::AsidExhausted => {
-            address_space_release_root(1);
-            return false;
-        }
+    }
+    if (roots_ok == false) {
+        address_space_release_root(root_b);
+        address_space_release_root(root_a);
+        scheduled_process_probe_slot_release(root_b);
+        scheduled_process_probe_slot_release(root_a);
+        return false;
     }
     let backing_ok: bool =
-        address_space_l1_physical(1) != 0 &&
-        address_space_l2_physical(1) != 0 &&
-        address_space_l1_physical(2) != 0 &&
-        address_space_l2_physical(2) != 0 &&
-        address_space_asid(1) != 0 &&
-        address_space_asid(2) != 0 &&
-        address_space_asid(1) != address_space_asid(2);
+        address_space_l1_physical(root_a) != 0 &&
+        address_space_l2_physical(root_a) != 0 &&
+        address_space_l1_physical(root_b) != 0 &&
+        address_space_l2_physical(root_b) != 0 &&
+        address_space_asid(root_a) != 0 &&
+        address_space_asid(root_b) != 0 &&
+        address_space_asid(root_a) != address_space_asid(root_b);
     if (backing_ok == false || page_allocator_live_count() != before + 4) {
-        address_space_release_root(2);
-        address_space_release_root(1);
+       if (backing_ok) { kernel_boot_log("1"); } else { kernel_boot_log("0"); }
+        kernel_boot_log(" before=");
+        uart_put_udec(before);
+        kernel_boot_log(" now=");
+        uart_put_udec(page_allocator_live_count());
+        kernel_boot_log("\n");
+        address_space_release_root(root_b);
+        address_space_release_root(root_a);
+        scheduled_process_probe_slot_release(root_b);
+        scheduled_process_probe_slot_release(root_a);
         return false;
     }
     match page_alloc(PageOwnerTag::PageTable) {
         PageAllocResult::OutOfMemory => {
-            address_space_release_root(2);
-            address_space_release_root(1);
+            address_space_release_root(root_b);
+            address_space_release_root(root_a);
+            scheduled_process_probe_slot_release(root_b);
+            scheduled_process_probe_slot_release(root_a);
             return false;
         }
         PageAllocResult::Allocated(page1) => {
             match page_alloc(PageOwnerTag::PageTable) {
                 PageAllocResult::OutOfMemory => {
                     page_free(page1);
-                    address_space_release_root(2);
-                    address_space_release_root(1);
+                    address_space_release_root(root_b);
+                    address_space_release_root(root_a);
+                    scheduled_process_probe_slot_release(root_b);
+                    scheduled_process_probe_slot_release(root_a);
                     return false;
                 }
                 PageAllocResult::Allocated(page2) => {
@@ -697,20 +751,22 @@ fn process_address_space_probe() -> bool !{unsafe} {
                         PageAllocResult::OutOfMemory => {
                             page_free(page2);
                             page_free(page1);
-                            address_space_release_root(2);
-                            address_space_release_root(1);
+                            address_space_release_root(root_b);
+                            address_space_release_root(root_a);
+                            scheduled_process_probe_slot_release(root_b);
+                            scheduled_process_probe_slot_release(root_a);
                             return false;
                         }
                         PageAllocResult::Allocated(page3) => {
                             let first_ok: bool =
-                                process_address_space_probe_map(1, 511, page1);
+                                process_address_space_probe_map(root_a, 511, page1);
                             let second_ok: bool =
-                                process_address_space_probe_map(1, 512, page2);
+                                process_address_space_probe_map(root_a, 512, page2);
                             let third_ok: bool =
-                                process_address_space_probe_map(2, 511, page3);
+                                process_address_space_probe_map(root_b, 511, page3);
                             let filled_first_branch: bool =
                                 first_ok && second_ok && third_ok &&
-                                process_address_space_probe_fill_first_branch(1);
+                                process_address_space_probe_fill_first_branch(root_a);
                             // This probe deliberately dereferences two EL0
                             // virtual addresses after installing its test
                             // mappings.  The page-table setup above is the
@@ -724,22 +780,27 @@ fn process_address_space_probe() -> bool !{unsafe} {
                             };
                             let mut mapped_ok: bool =
                                 filled_first_branch &&
-                                address_space_l3_branch_physical(1, 0) != 0 &&
-                                address_space_l3_branch_physical(1, 1) != 0 &&
-                                address_space_l3_branch_physical(1, 0) !=
-                                address_space_l3_branch_physical(1, 1) &&
-                                address_space_l3_branch_physical(2, 0) != 0 &&
+                                address_space_l3_branch_physical(root_a, 0) != 0 &&
+                                address_space_l3_branch_physical(root_a, 1) != 0 &&
+                                address_space_l3_branch_physical(root_a, 0) !=
+                                address_space_l3_branch_physical(root_a, 1) &&
+                                address_space_l3_branch_physical(root_b, 0) != 0 &&
                                 page_allocator_live_count() == before + 521;
+                            if (mapped_ok == false) {
+                               if (filled_first_branch) { kernel_boot_log("1"); }
+                                else { kernel_boot_log("0"); }
+                                kernel_boot_log("\n");
+                            }
                             if (mapped_ok) {
-                                address_space_activate_root(1);
+                                address_space_activate_root(root_a);
                                 *low_address = 11;
                                 *high_address = 12;
-                                address_space_activate_root(2);
+                                address_space_activate_root(root_b);
                                 *low_address = 22;
                                 let second_low: u8 = *low_address;
                                 let second_high_absent: bool =
-                                    address_space_pte_read(2, 512) == 0;
-                                address_space_activate_root(1);
+                                    address_space_pte_read(root_b, 512) == 0;
+                                address_space_activate_root(root_a);
                                 let first_low: u8 = *low_address;
                                 let first_high: u8 = *high_address;
                                 address_space_activate_root(0);
@@ -747,12 +808,24 @@ fn process_address_space_probe() -> bool !{unsafe} {
                                     first_low == 11 && first_high == 12 &&
                                     second_high_absent;
                             }
-                            address_space_release_root(2);
-                            address_space_release_root(1);
-                            return mapped_ok &&
-                                   address_space_is_live(1) == false &&
-                                   address_space_is_live(2) == false &&
-                                   page_allocator_live_count() == before;
+                            address_space_release_root(root_b);
+                            address_space_release_root(root_a);
+                            let clean: bool = mapped_ok &&
+                                address_space_is_live(root_a) == false &&
+                                address_space_is_live(root_b) == false &&
+                                page_allocator_live_count() == before;
+                            if (clean == false) {
+                               if (mapped_ok) { kernel_boot_log("1"); }
+                                else { kernel_boot_log("0"); }
+                                kernel_boot_log(" before=");
+                                uart_put_udec(before);
+                                kernel_boot_log(" now=");
+                                uart_put_udec(page_allocator_live_count());
+                                kernel_boot_log("\n");
+                            }
+                            scheduled_process_probe_slot_release(root_b);
+                            scheduled_process_probe_slot_release(root_a);
+                            return clean;
                         }
                     }
                 }

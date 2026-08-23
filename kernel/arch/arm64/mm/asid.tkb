@@ -2,17 +2,15 @@
 // independent of a page-table storage slot. A heap-owned page table has no
 // slot from which to derive an ASID; this pool gives it a matching lifetime.
 //
-// ASID_MAX matches address_space.tkb's current bounded process-address-space
-// table. A real hardware ASID-width query is a later refinement, out of
-// scope here. This pool's own index space is 0..<ASID_MAX, and every ASID
+// A real hardware ASID-width query is a later refinement, out of scope
+// here; see ASID_MAX's own note for what the number is now and why. This pool's own index space is 0..<ASID_MAX, and every ASID
 // value handed to a caller is index + 1, so ASID 0 is never assigned.
 //
 // SlotMap(N), not bare FreelistCore(N): per kernel/lib/slotmap.tkb's own
 // stated default ("use SlotMap(N) for any fixed-capacity slot pool... at
 // the cost of one extra usize per slot"), and this pool is exactly the
-// small-N case that default is for (ASID_MAX = 16, matching
-// kernel/mm/address_space.tkb's own precedent of using SlotMap directly for
-// a small pool of this shape).
+// small-N case that default is for, and stays so at 255: one extra usize
+// per slot is 2 KiB of BSS for the whole pool.
 //
 // Issue #264 now consumes this pool from kernel/mm/address_space.tkb. The
 // latter keeps the transitional bounded slot -> backing-record table and
@@ -28,7 +26,23 @@
 use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
 
-const ASID_MAX: usize = 16;
+// GitHub issue #392: 255, which is what an 8-bit ASID field offers minus
+// the never-assigned 0 -- the floor this file already assumed ("this
+// assumes at least an 8-bit ASID field, which is universally true on
+// AArch64"). It used to be 16 because it matched the process table's
+// size, and a static_assert enforced that; the process table has no size
+// any more, so the number that is left is the hardware's. A real
+// ID_AA64MMFR0_EL1.ASIDBits query would raise it to 65535 on parts that
+// implement 16-bit ASIDs, and is still not implemented -- the point of
+// this change is that the number stops being a restatement of a guess,
+// not that it becomes the largest possible.
+//
+// This is the one remaining fixed ceiling on the process path: a 256th
+// concurrent live address space is refused with AsidAllocResult::Full,
+// which surfaces as AddressSpaceEnsureResult::AsidExhausted and a logged
+// exhaustion line. Recycling an ASID from a live address space (Linux's
+// rollover) is what a real fix looks like and is not implemented.
+const ASID_MAX: usize = 255;
 
 private let mut asid_pool: SlotMap(ASID_MAX);
 
