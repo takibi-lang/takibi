@@ -9,10 +9,13 @@ use "kernel/lib/refcount_slotmap.tkb";
 use "kernel/lib/freelist.tkb";
 
 const POOL_N: usize = 3;
-// Deliberately small so the overflow path is reachable without a long
-// retain loop.
+// GitHub issue #401: the limit is a retain ARGUMENT now, not a parameter
+// of the pool -- the maximum number of holders is a property of the
+// caller's world, and often not constant (kernel/kernel/fd_table.tkb
+// computes it from how many descriptor slots exist). Deliberately small
+// here so the overflow path is reachable without a long retain loop.
 const POOL_MAX_REFS: usize = 2;
-let mut pool: RefcountSlotMap(POOL_N, POOL_MAX_REFS);
+let mut pool: RefcountSlotMap(POOL_N);
 
 fn app_main() {
     refcount_pool_init(&pool);
@@ -57,12 +60,12 @@ fn app_main() {
     // refcount that CAN be checked: not the value itself, but that it
     // never exceeds the real, known maximum number of simultaneous
     // holders.
-    match refcount_pool_retain(&pool, a_index, a_generation) {
+    match refcount_pool_retain(&pool, a_index, a_generation, POOL_MAX_REFS) {
         RefcountRetainResult::Ok => {}
         RefcountRetainResult::Invalid => { uart_puts("retain 1 invalid\n"); return; }
         RefcountRetainResult::Overflow => { uart_puts("retain 1 overflow\n"); return; }
     }
-    match refcount_pool_retain(&pool, a_index, a_generation) {
+    match refcount_pool_retain(&pool, a_index, a_generation, POOL_MAX_REFS) {
         RefcountRetainResult::Ok => {}
         RefcountRetainResult::Invalid => { uart_puts("retain 2 invalid\n"); return; }
         RefcountRetainResult::Overflow => { uart_puts("retain 2 overflow\n"); return; }
@@ -71,7 +74,7 @@ fn app_main() {
     uart_print(refcount_pool_count(&pool, a_index, a_generation));
     uart_puts("\n");
     uart_puts("retain past MAX_REFS overflows: ");
-    match refcount_pool_retain(&pool, a_index, a_generation) {
+    match refcount_pool_retain(&pool, a_index, a_generation, POOL_MAX_REFS) {
         RefcountRetainResult::Overflow => { uart_puts("true\n"); }
         RefcountRetainResult::Ok => { uart_puts("false (wrongly allowed)\n"); }
         RefcountRetainResult::Invalid => { uart_puts("false (wrongly rejected)\n"); }
@@ -82,7 +85,7 @@ fn app_main() {
     uart_print(refcount_pool_count(&pool, a_index, a_generation + 1));
     uart_puts("\n");
     uart_puts("retain with wrong generation: ");
-    match refcount_pool_retain(&pool, a_index, a_generation + 1) {
+    match refcount_pool_retain(&pool, a_index, a_generation + 1, POOL_MAX_REFS) {
         RefcountRetainResult::Invalid => { uart_puts("invalid (expected)\n"); }
         RefcountRetainResult::Ok => { uart_puts("wrongly allowed\n"); }
         RefcountRetainResult::Overflow => { uart_puts("wrongly overflowed\n"); }
@@ -133,7 +136,7 @@ fn app_main() {
     // Abandon must refuse a slot that IS currently retained (refusing to
     // guess whether the caller meant to drop the retain it forgot about
     // or actually wanted a plain release).
-    match refcount_pool_retain(&pool, c_index, c_generation) {
+    match refcount_pool_retain(&pool, c_index, c_generation, POOL_MAX_REFS) {
         RefcountRetainResult::Ok => {}
         RefcountRetainResult::Invalid => { uart_puts("c retain invalid\n"); return; }
         RefcountRetainResult::Overflow => { uart_puts("c retain overflow\n"); return; }

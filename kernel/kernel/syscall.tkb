@@ -2149,9 +2149,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             return SyscallAction::Resume(LINUX_EBADF);
                         }
                         UnifiedFdInstallResult::RefOverflow => {
-                            kernel_boot_log_resource_exhausted(
-                                "shared object reference count" as *u8,
-                                SHARED_OBJECT_MAX_REFS);
+                            // Issue #401: fd_table has already named this
+                            // an invariant break -- more references than
+                            // descriptor slots -- so there is nothing to
+                            // report as exhaustion here. The errno stays
+                            // EMFILE: refusing the operation is what keeps
+                            // a broken invariant from becoming a broken
+                            // kernel.
                             return SyscallAction::Resume(LINUX_EMFILE);
                         }
                         UnifiedFdInstallResult::Ok => {

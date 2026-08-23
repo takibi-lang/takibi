@@ -25,7 +25,8 @@ use "kernel/lib/intrusive_pool.tkb";
 //   would refuse it, correctly but confusingly, and the fix is to give
 //   that path the same ensure call rather than to make lookups forgiving.
 // - Fixed capacities (PROCESS_FD_MAX=16, SHARED_OBJECT_MAX=16,
-//   SHARED_OBJECT_MAX_REFS=256): see `kernel/RESOURCE_LIMITS.md` for the
+//   and the computed shared-object reference bound): see
+//   `kernel/RESOURCE_LIMITS.md` for the
 //   authoritative exhaustion-result/boundary-test contract for each. The
 //   number of fd CONTEXTS is no longer among them (issue #392).
 //
@@ -48,30 +49,9 @@ const SHARED_OBJECT_MAX: usize = 16;
 // unified_fd_duplicate both create independent references to an existing
 // object rather than new objects), so that is the real bound on
 // simultaneous holders -- see kernel/lib/refcount_slotmap.tkb's header
-// for why this is passed explicitly rather than left an unbounded usize.
-// GitHub issue #392: 4096, and for the first time a number PICKED rather
-// than derived. It was KERNEL_PROCESS_MAX * PROCESS_FD_MAX -- an inventory
-// of every entry that could hold a reference at all, so no reference count
-// could reach it. There is no process ceiling any more, so that product is
-// unbounded and the derivation is what broke, not the check.
-//
-// The check itself costs nothing and should stay: MAX_REFS sizes no
-// storage (the refcount is one usize per slot either way), it is a single
-// `current >= MAX_REFS` in refcount_pool_retain, and what it catches is a
-// reference LEAK -- a retain with no matching release -- long before
-// memory notices. A saturating counter with no bound catches nothing.
-//
-// What can be recovered is the DERIVATION, and it does not need the
-// refcount to stop being a counter: every holder of a shared object is an
-// entry in some process's fd table, and those tables are pooled here, so
-// the exact bound is intrusive_pool_live_count(&fd_context_pool) *
-// PROCESS_FD_MAX -- a runtime value this file can compute, where MAX_REFS
-// is a const-generic parameter of the pool. Passing the bound per retain
-// instead would make the check exact and leave nobody picking a number.
-// Filed rather than done here: it is refcount_slotmap.tkb's signature,
-// which is a kernel/lib/ change with one other consideration (whether an
-// exact bound wants to be a hard refusal or a logged invariant break).
-const SHARED_OBJECT_MAX_REFS: usize = 4096;
+// for why this is passed explicitly rather than left an unbounded usize,
+// and unified_object_ref_bound below for where this kernel's number comes
+// from now that it is computed rather than declared.
 
 enum UnifiedFdKind: u8 {
     Empty;
@@ -188,13 +168,13 @@ fn unified_fd_context_release(process: usize) !{unsafe} {
     }
 }
 // Slot allocation is O(1) via kernel/lib/refcount_slotmap.tkb's
-// RefcountSlotMap(N, MAX_REFS) (issue #242, follow-up to issue #207)
+// RefcountSlotMap(N) (issue #242, follow-up to issue #207)
 // instead of a hand-rolled linear scan over object_records[].kind==Empty, and
 // object_generation[]/object_references[] are replaced by the pool's own
 // per-slot generation+refcount pair. object_records[].kind stays this
 // file's own application data (RefcountSlotMap only knows "occupied or
 // not", not what kind of object occupies a slot).
-private let mut object_pool: RefcountSlotMap(SHARED_OBJECT_MAX, SHARED_OBJECT_MAX_REFS);
+private let mut object_pool: RefcountSlotMap(SHARED_OBJECT_MAX);
 // GitHub issue #305: one record per shared-object slot, replacing nine
 // parallel arrays that had to be indexed in lockstep -- the same
 // consolidation ProcessFdContext above already did for per-process
@@ -248,8 +228,9 @@ must_use variant UnifiedFdResult { Invalid; Ok; }
 must_use variant UnifiedOpenResult { Invalid; Full; Ok; }
 // GitHub issue #295: unified_fd_install/unified_fd_duplicate's only source
 // of failure beyond a bad argument is refcount_pool_retain's own
-// RefcountRetainResult::Overflow -- SHARED_OBJECT_MAX_REFS reached. That
-// already
+// RefcountRetainResult::Overflow -- more references than descriptor slots
+// exist, which is an invariant break rather than a limit (issue #401).
+// That already
 // had its own distinct variant one layer down; this file used to discard it
 // into the same UnifiedFdResult::Invalid as a genuinely bad fd/process
 // argument. Realistically reachable only via unified_fd_duplicate (dup()/
@@ -834,6 +815,48 @@ fn unified_file_is_writable(handle: UnifiedObjectHandle) -> bool {
            object_records[handle.slot].writable;
 }
 
+// GitHub issue #401: how many holders one shared object can have, COMPUTED
+// rather than declared. Every reference is held by one descriptor slot --
+// unified_fd_install, _duplicate and _clone are the only retains here, and
+// each is paired with filling an fd-table entry -- so the number of
+// descriptor slots in existence is an exact upper bound, and it is this:
+// one ProcessFdContext per live process, PROCESS_FD_MAX entries each.
+//
+// It replaces SHARED_OBJECT_MAX_REFS, which was KERNEL_PROCESS_MAX *
+// PROCESS_FD_MAX until issue #392 removed the process ceiling and left the
+// product unbounded -- at which point the constant became a picked 4096
+// rather than an inventory. The check was never a capacity (it sizes no
+// storage; it is one comparison), so what was lost was the DERIVATION, and
+// this is it back.
+//
+// Measured before it was enforced: instrumented to count how often a
+// retain would exceed this bound, the whole boot suite -- fork, exec, dup,
+// clone, the interactive shell, the HTTPd -- reported zero. The same
+// instrumentation with the bound deliberately set to one slot per process
+// reported 71, which is what says the counter was reached at all.
+fn unified_object_ref_bound() -> usize !{unsafe} {
+    return intrusive_pool_live_count(&fd_context_pool) * PROCESS_FD_MAX;
+}
+
+// Exceeding a DERIVED bound is not a resource limit: it says a reference
+// was taken that no descriptor slot can be holding. That is an invariant
+// break, and it is named as one here rather than reported as ordinary
+// exhaustion -- the callers still refuse the operation and map it to
+// LINUX_EMFILE, because a bound this file computes for the first time
+// should not be able to halt the kernel. Promoting it to a fail-stop is a
+// one-line change once it has run long enough to be trusted.
+private let mut unified_object_ref_bound_breaks: usize = 0;
+
+fn unified_object_ref_bound_breaks_count() -> usize {
+    return unified_object_ref_bound_breaks;
+}
+
+private fn unified_object_ref_bound_break(
+        object: {0..<SHARED_OBJECT_MAX as usize}) {
+    unified_object_ref_bound_breaks = unified_object_ref_bound_breaks + 1;
+    kernel_boot_log("fd table: INVARIANT BREAK -- a shared object has more references than there are descriptor slots\n");
+}
+
 fn unified_fd_install(process: usize, fd: usize, object_value: usize,
                       generation: usize) -> UnifiedFdInstallResult {
     if (fd >= PROCESS_FD_MAX ||
@@ -847,9 +870,13 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
             object_records[object].kind == UnifiedFdKind::Empty) {
             return UnifiedFdInstallResult::Invalid;
         }
-        match refcount_pool_retain(&object_pool, object, generation) {
+        match refcount_pool_retain(&object_pool, object, generation,
+                                   unified_object_ref_bound()) {
             RefcountRetainResult::Invalid => { return UnifiedFdInstallResult::Invalid; }
-            RefcountRetainResult::Overflow => { return UnifiedFdInstallResult::RefOverflow; }
+            RefcountRetainResult::Overflow => {
+                unified_object_ref_bound_break(object);
+                return UnifiedFdInstallResult::RefOverflow;
+            }
             RefcountRetainResult::Ok => {}
         }
         ctx.fd_kind[fd] = object_records[object].kind;
@@ -957,8 +984,7 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
     // every non-Empty parent fd's object is live and kind-matched, so
     // RefcountRetainResult::Invalid below is provably unreachable -- the
     // one real failure mode this loop can hit is ::Overflow
-    // (SHARED_OBJECT_MAX_REFS exceeded, e.g. a heavily dup()'d fd shared
-    // across many fd-table slots). Before this fix, a failure at fd=k left
+    // (the computed reference bound exceeded). Before this fix, a failure at fd=k left
     // fds 0..k already retained (their refcounts incremented, never
     // released) and fd=k itself half-copied (child_fd_kind set but its
     // refcount never bumped) -- exactly the "partially linked descriptor
@@ -979,7 +1005,8 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
             if (value < SHARED_OBJECT_MAX) {
                 let object: {0..<SHARED_OBJECT_MAX as usize} = value;
                 match refcount_pool_retain(&object_pool, object,
-                                           parent_ctx.fd_generation[fd]) {
+                                           parent_ctx.fd_generation[fd],
+                                           unified_object_ref_bound()) {
                     RefcountRetainResult::Ok => {}
                     RefcountRetainResult::Invalid => {
                         child_ctx.fd_kind[fd] = UnifiedFdKind::Empty;
@@ -987,9 +1014,7 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
                         return UnifiedFdResult::Invalid;
                     }
                     RefcountRetainResult::Overflow => {
-                        kernel_boot_log_resource_exhausted(
-                            "shared object reference count" as *u8,
-                            SHARED_OBJECT_MAX_REFS);
+                        unified_object_ref_bound_break(object);
                         child_ctx.fd_kind[fd] = UnifiedFdKind::Empty;
                         unified_fd_clone_rollback(child_ctx, fd);
                         return UnifiedFdResult::Invalid;
@@ -1116,76 +1141,73 @@ fn unified_object_pool_exhaustion_probe() -> bool {
     return true;
 }
 
-// GitHub issue #295 boundary test: SHARED_OBJECT_MAX_REFS (256) is one
-// object's own maximum simultaneous holder count, independent of
-// SHARED_OBJECT_MAX (the object pool's own capacity, exercised above) --
-// this drives refcount_pool_retain/_release directly on a single allocated
-// object rather than installing SHARED_OBJECT_MAX_REFS real fd-table
-// entries across that many processes, which no fixture constructs.
-fn unified_object_ref_ceiling_probe() -> bool {
+// GitHub issue #295 boundary test, reworked by issue #401. It used to
+// retain a fixed SHARED_OBJECT_MAX_REFS times and check that one more was
+// refused -- a test that the constant equalled itself. The bound is
+// COMPUTED now (unified_object_ref_bound: one descriptor slot per
+// PROCESS_FD_MAX per live fd context), so the thing worth proving is that
+// it TRACKS: fill it exactly, be refused at one past it, then create one
+// more process and be allowed exactly PROCESS_FD_MAX more.
+//
+// It still drives refcount_pool_retain/_release directly rather than
+// installing real fd-table entries: the point is this pool's own boundary,
+// not the descriptor paths, which unified_fd_table_probe covers.
+fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
     unified_fd_table_init();
+    let bound: usize = unified_object_ref_bound();
+    if (bound == 0) { return false; }
     match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
         UnifiedObjectResult::Invalid => { return false; }
         UnifiedObjectResult::Full => { return false; }
         UnifiedObjectResult::Allocated(handle) => {
             // refcount_pool_alloc's own doc comment: a freshly allocated
-            // slot's refcount starts at 0, so SHARED_OBJECT_MAX_REFS
-            // successful retains below bring it to exactly the ceiling.
+            // slot's refcount starts at 0, so `bound` successful retains
+            // bring it to exactly the bound.
             let mut retained: usize = 0;
-            while (retained < SHARED_OBJECT_MAX_REFS) {
+            while (retained < bound) {
                 match refcount_pool_retain(&object_pool, handle.slot,
-                                           handle.generation) {
+                                           handle.generation, bound) {
                     RefcountRetainResult::Ok => {}
                     RefcountRetainResult::Invalid => { return false; }
                     RefcountRetainResult::Overflow => { return false; }
                 }
                 retained = retained + 1;
             }
-
-            let mut ceiling_ok: bool = false;
+            let mut ok: bool = false;
             match refcount_pool_retain(&object_pool, handle.slot,
-                                       handle.generation) {
-                RefcountRetainResult::Overflow => { ceiling_ok = true; }
+                                       handle.generation, bound) {
+                RefcountRetainResult::Overflow => { ok = true; }
                 RefcountRetainResult::Invalid => {}
-                RefcountRetainResult::Ok => {
-                    // Unexpected success past the ceiling: release it so
-                    // the cleanup loop below still brings the count back
-                    // to exactly zero before this probe reports failure.
-                    match refcount_pool_release(&object_pool, handle.slot,
-                                                handle.generation) {
-                        RefcountReleaseResult::Invalid => {}
-                        RefcountReleaseResult::StillHeld => {}
-                        RefcountReleaseResult::Freed => {}
-                    }
+                RefcountRetainResult::Ok => { retained = retained + 1; }
+            }
+            // ...and one more process means PROCESS_FD_MAX more descriptor
+            // slots, so the same retain that was refused above is allowed
+            // now. This is the half a fixed constant could not have.
+            let extra: usize = scheduled_process_probe_slot_acquire();
+            if (extra == 0) { ok = false; }
+            let grown: usize = unified_object_ref_bound();
+            if (grown != bound + PROCESS_FD_MAX) { ok = false; }
+            if (ok) {
+                match refcount_pool_retain(&object_pool, handle.slot,
+                                           handle.generation, grown) {
+                    RefcountRetainResult::Ok => { retained = retained + 1; }
+                    RefcountRetainResult::Invalid => { ok = false; }
+                    RefcountRetainResult::Overflow => { ok = false; }
                 }
             }
-            if (ceiling_ok == false) {
-                let mut cleanup: usize = 0;
-                while (cleanup < retained) {
-                    match refcount_pool_release(&object_pool, handle.slot,
-                                                handle.generation) {
-                        RefcountReleaseResult::Invalid => {}
-                        RefcountReleaseResult::StillHeld => {}
-                        RefcountReleaseResult::Freed => {}
-                    }
-                    cleanup = cleanup + 1;
-                }
-                unified_fd_table_init();
-                return false;
-            }
-
+            scheduled_process_probe_slot_release(extra);
             let mut released: usize = 0;
-            while (released < SHARED_OBJECT_MAX_REFS) {
+            while (released < retained) {
                 match refcount_pool_release(&object_pool, handle.slot,
                                             handle.generation) {
-                    RefcountReleaseResult::Invalid => { return false; }
+                    RefcountReleaseResult::Invalid => { ok = false; }
                     RefcountReleaseResult::StillHeld => {}
                     RefcountReleaseResult::Freed => {}
                 }
                 released = released + 1;
             }
             unified_fd_table_init();
-            return true;
+            return ok;
         }
     }
 }
@@ -1195,8 +1217,8 @@ fn unified_object_ref_ceiling_probe() -> bool {
 // above (SHARED_OBJECT_MAX, the global object pool) -- unified_fd_table_probe
 // exercises fd installation functionally but never fills a process's table
 // to its own capacity. Every fd here duplicates the SAME one shared object
-// (unified_fd_duplicate only bumps its refcount, well under
-// SHARED_OBJECT_MAX_REFS) so this isolates PROCESS_FD_MAX's own boundary
+// (unified_fd_duplicate only bumps its refcount, well under the computed
+// reference bound) so this isolates PROCESS_FD_MAX's own boundary
 // rather than conflating it with the object pool's.
 fn unified_fd_table_exhaustion_probe() -> bool !{unsafe} {
     unified_fd_table_init();

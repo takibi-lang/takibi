@@ -8,7 +8,7 @@
 // decrement independently) is the motivating, and so far only, caller.
 //
 // Same underlying engine as SlotMap(N): FreelistCore(N) finds a free slot
-// in O(1). RefcountSlotMap(N, MAX_REFS) replaces SlotMap's single
+// in O(1). RefcountSlotMap(N) replaces SlotMap's single
 // occupant_generation record with a (generation, refcount) pair per slot,
 // and replaces the linear insert/remove pair with four operations that
 // match how a refcounted resource is actually used: alloc (find a free
@@ -17,31 +17,35 @@
 // the caller's own first reference failed), retain (add a holder),
 // release (remove a holder, freeing the slot when the count reaches 0).
 //
-// Why a second const-generic parameter (MAX_REFS), not a bare `usize`
-// refcount: see issue #242's design discussion (2026-08-07 comment) for
-// the fuller reasoning. The short version -- a refcount is a genuinely
-// dynamic runtime value that cannot be lifted to a compile-time constant
+// Why retain takes a LIMIT, rather than the pool carrying a MAX_REFS
+// const-generic parameter: issue #242's reasoning was that a refcount is a
+// genuinely dynamic value that cannot be lifted to a compile-time constant
 // the way single ownership can, but the MAXIMUM number of simultaneous
-// holders is usually a real, known bound (for fd_table.tkb, at most
-// PROCESS_FD_ENTRY_MAX fd-table slots can each hold one reference to the
-// same shared object). Refusing an increment past that bound, rather than
-// wrapping a bare usize, is the concrete, available-today static-adjacent
-// discipline this library commits to; it does not attempt to verify the
-// count's actual value at compile time, which no known automatic checker
-// -- takibi's included -- does for arbitrary, dynamically-many concurrent
-// holders. See kernel/lib/freelist.tkb's "Current limitations" section
+// holders is usually a real, known bound -- so refusing an increment past
+// that bound, rather than wrapping a bare usize, is the static-adjacent
+// discipline available today.
+//
+// GitHub issue #401 keeps the discipline and drops the constant. The bound
+// is a property of the CALLER's world, not of this pool, and it is often
+// not constant: fd_table.tkb's holders are descriptor slots, so its bound
+// is "how many descriptor slots exist", which changes as processes come
+// and go. A parameter takes the exact number at the moment of the retain
+// where a const-generic could only take a number somebody picked to be
+// large enough. This file still does not verify the count's actual value
+// at compile time, which no known automatic checker -- takibi's included
+// -- does for arbitrary, dynamically-many concurrent holders. See kernel/lib/freelist.tkb's "Current limitations" section
 // for the underlying FreelistCore(N)/synchronization caveats, which apply
 // here unchanged (this file adds no locking of its own either).
 use "kernel/lib/freelist.tkb";
 
-generic struct RefcountSlotMap(N: usize, MAX_REFS: usize) {
+generic struct RefcountSlotMap(N: usize) {
     core: FreelistCore(N);
     generation: [usize; N];
     refcount: [usize; N];
     double_release_count: usize;
 }
 
-fn refcount_pool_init(pool: &mut RefcountSlotMap(N, MAX_REFS)) {
+fn refcount_pool_init(pool: &mut RefcountSlotMap(N)) {
     freelist_core_init(&pool.core);
     // GitHub issue #217: pool.generation[i]/pool.refcount[i] index the
     // struct-embedded array fields directly and are checked/proven by
@@ -63,7 +67,7 @@ must_use variant RefcountAllocResult {
 // holder, mirroring fd_table.tkb's own pre-existing alloc/install split
 // (an object can be allocated and then fail to install its first fd
 // reference, at which point it must be abandoned, not released).
-fn refcount_pool_alloc(pool: &mut RefcountSlotMap(N, MAX_REFS))
+fn refcount_pool_alloc(pool: &mut RefcountSlotMap(N))
         -> RefcountAllocResult {
     match freelist_core_insert(&pool.core) {
         FreelistPopResult::Empty => { return RefcountAllocResult::Full; }
@@ -95,7 +99,7 @@ fn refcount_pool_alloc(pool: &mut RefcountSlotMap(N, MAX_REFS))
 // the slot genuinely has zero holders -- calling this on a slot with any
 // live holder would silently orphan them, so it refuses rather than
 // guessing what was intended.
-fn refcount_pool_abandon(pool: &mut RefcountSlotMap(N, MAX_REFS),
+fn refcount_pool_abandon(pool: &mut RefcountSlotMap(N),
                          index: usize, generation_value: usize) -> bool {
     // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
     if (index < N) {
@@ -112,8 +116,14 @@ fn refcount_pool_abandon(pool: &mut RefcountSlotMap(N, MAX_REFS),
 
 must_use variant RefcountRetainResult { Invalid; Overflow; Ok; }
 
-fn refcount_pool_retain(pool: &mut RefcountSlotMap(N, MAX_REFS),
-                        index: usize, generation_value: usize)
+// `limit` is the caller's own count of how many holders can exist at this
+// moment -- see this file's header. Overflow means the caller asked for a
+// reference it has nowhere to put, which for a derived limit is an
+// invariant break rather than a resource limit; what to do about that is
+// the caller's to decide, so this reports it and changes nothing.
+fn refcount_pool_retain(pool: &mut RefcountSlotMap(N),
+                        index: usize, generation_value: usize,
+                        limit: usize)
         -> RefcountRetainResult {
     // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
     if (index < N) {
@@ -122,7 +132,7 @@ fn refcount_pool_retain(pool: &mut RefcountSlotMap(N, MAX_REFS),
             return RefcountRetainResult::Invalid;
         }
         let current: usize = pool.refcount[index];
-        if (current >= MAX_REFS) {
+        if (current >= limit) {
             return RefcountRetainResult::Overflow;
         }
         pool.refcount[index] = current + 1;
@@ -141,7 +151,7 @@ must_use variant RefcountReleaseResult { Invalid; StillHeld; Freed; }
 // the guard, silently did nothing), so this counts the event instead of
 // corrupting the free chain by pushing an already-free slot a second
 // time.
-fn refcount_pool_release(pool: &mut RefcountSlotMap(N, MAX_REFS),
+fn refcount_pool_release(pool: &mut RefcountSlotMap(N),
                          index: usize, generation_value: usize)
         -> RefcountReleaseResult {
     // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
@@ -168,7 +178,7 @@ fn refcount_pool_release(pool: &mut RefcountSlotMap(N, MAX_REFS),
     return RefcountReleaseResult::Invalid;
 }
 
-fn refcount_pool_matches(pool: &mut RefcountSlotMap(N, MAX_REFS),
+fn refcount_pool_matches(pool: &mut RefcountSlotMap(N),
                          index: usize, generation_value: usize) -> bool {
     if (generation_value == 0) { return false; }
     // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
@@ -180,7 +190,7 @@ fn refcount_pool_matches(pool: &mut RefcountSlotMap(N, MAX_REFS),
 
 // 0 for a mismatched/stale handle, exactly like the object_references()
 // accessor this replaces already did by checking generation first.
-fn refcount_pool_count(pool: &mut RefcountSlotMap(N, MAX_REFS),
+fn refcount_pool_count(pool: &mut RefcountSlotMap(N),
                        index: usize, generation_value: usize) -> usize {
     // GitHub issue #217: inlined rather than calling refcount_pool_matches
     // -- a proof from an earlier CALL's own condition does not carry
@@ -202,7 +212,7 @@ fn refcount_pool_count(pool: &mut RefcountSlotMap(N, MAX_REFS),
 // check) -- unlike refcount_pool_count, does not require the caller's own
 // generation, so it also reports a leaked (allocated, still counted, but
 // otherwise-unreachable) slot's nonzero count instead of masking it as 0.
-fn refcount_pool_raw_count(pool: &mut RefcountSlotMap(N, MAX_REFS),
+fn refcount_pool_raw_count(pool: &mut RefcountSlotMap(N),
                            index: usize) -> usize {
     // GitHub issue #217: wrapping form, see refcount_pool_alloc's own comment.
     if (index < N) {
@@ -211,7 +221,7 @@ fn refcount_pool_raw_count(pool: &mut RefcountSlotMap(N, MAX_REFS),
     return 0;
 }
 
-fn refcount_pool_double_release_count(pool: &mut RefcountSlotMap(N, MAX_REFS))
+fn refcount_pool_double_release_count(pool: &mut RefcountSlotMap(N))
         -> usize {
     return pool.double_release_count;
 }

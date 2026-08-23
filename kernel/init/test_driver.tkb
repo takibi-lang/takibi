@@ -565,9 +565,7 @@ fn kernel_test_common_probes() {
         kernel_boot_log("shared object pool: failed\n");
     }
     if (unified_object_ref_ceiling_probe()) {
-        kernel_boot_log("shared object refcount ceiling: exact boundary at capacity=");
-        uart_put_udec(SHARED_OBJECT_MAX_REFS);
-        kernel_boot_log(" ok\n");
+        kernel_boot_log("shared object refcount ceiling: bound tracks the descriptor slots that exist, refuses one past it ok\n");
     } else {
         kernel_boot_log("shared object refcount ceiling: failed\n");
     }
@@ -881,6 +879,19 @@ irq_uart_rx_unmask();
                     // fallback is what an access to a REAPED process's
                     // slot lands in. An array of never-freed slots could
                     // not have one, which is exactly why it is counted.
+                    // GitHub issue #401: a shared object with more
+                    // references than there are descriptor slots to hold
+                    // them is an invariant break, not exhaustion. Reported
+                    // POSITIVELY, so a boot where it happened is a view
+                    // that lost a line rather than one that gained an
+                    // unmatched one.
+                    if (unified_object_ref_bound_breaks_count() == 0) {
+                        kernel_boot_log("resources: shared-object refs within the descriptor slots that exist\n");
+                    } else {
+                        kernel_boot_log("resources: shared-object ref INVARIANT BREAKS=");
+                        uart_put_udec(unified_object_ref_bound_breaks_count());
+                        kernel_boot_log("\n");
+                    }
                     if (scheduled_process_record_missing_uses() != 0) {
                         kernel_boot_log("process table: records MISSING uses=");
                         uart_put_udec(scheduled_process_record_missing_uses());
