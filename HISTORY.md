@@ -15,6 +15,23 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-23: Stale Depfile and Negative-Control Evidence Guards (GitHub Issue #397)
+
+Added a `make langcheck` preflight that parses every generated kernel depfile
+and fails early with the depfile and missing prerequisite named. `make clean`
+now removes those depfiles, including the generated exception-offset depfile,
+so the diagnostic's recovery instruction actually resets the stale state.
+
+Recorded the complementary test rule in `AGENTS.md`: a build-level negative
+control must assert both a nonzero command status and the expected diagnostic;
+grepping output alone does not prove the compiler ran. A synthetic stale
+depfile negative control verified both halves against the new checker.
+
+An introspective `--list-static-asserts` compiler mode was considered and not
+added. The concrete failures are covered by the depfile preflight and the
+exit-status rule; a new compiler reporting surface has no present consumer and
+would be speculative infrastructure.
+
 ### 2026-08-23: Raw Source-Filename Access Guard (GitHub Issue #359)
 
 Added a `make langcheck` lint that rejects direct `Lexing.pos_fname` access in

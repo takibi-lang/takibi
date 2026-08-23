@@ -100,6 +100,7 @@ test: build
 ## canonical implementation; examples/Makefile's own `langcheck` target
 ## just forwards here via `$(MAKE) -C .. langcheck`.
 langcheck:
+	@python3 scripts/check_stale_depfiles.py
 	@python3 scripts/check_compiler_sync_rules.py --quiet
 	@python3 scripts/check_raw_pos_fname.py
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash -c ' \
@@ -824,7 +825,7 @@ allbuild:
 ## clean` for that.
 clean:
 	dune clean
-	find kernel/build -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.img' \) -delete 2>/dev/null || true
-	rm -f kernel/arch/arm64/kernel/exception_context_offsets.inc
+	find kernel/build -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.img' -o -name '*.d' \) -delete 2>/dev/null || true
+	rm -f kernel/arch/arm64/kernel/exception_context_offsets.inc kernel/arch/arm64/kernel/exception_context_offsets.inc.d
 	rm -rf $(LINUX_USER_BUILD_DIR)
 	find $(LINUX_USER_DIR) -type f \( -name '*.o' -o -name '*.exe' \) -delete 2>/dev/null || true

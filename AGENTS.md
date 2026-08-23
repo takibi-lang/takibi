@@ -111,6 +111,23 @@ in `examples/Makefile`'s history, and HISTORY.md, for that trajectory).
    MMIO, real interrupts, real cache/memory-ordering behavior, real
    concurrency/timing.
 
+### Build-Level Negative Controls Must Prove the Build Ran
+
+A negative control performed through `make` or another build command must
+assert both facts independently:
+
+1. the build command exited nonzero; and
+2. its output contains the specific expected diagnostic.
+
+Never treat absence or presence of a grepped message alone as the verdict. A
+stale depfile, missing prerequisite, unavailable tool, or unrelated recipe
+failure can prevent the compiler from running at all, making an output-only
+check falsely confirm or reject the condition under test. Prefer an in-process
+`expect_type_error` test when the property does not require the build system.
+When a build-level control is necessary, capture the exit status before
+inspecting output and fail the control if the command unexpectedly succeeds or
+if it fails for a different reason.
+
 **The litmus test for tier 2 (`linux_user/`) is positive, not residual:**
 
 > Would this exact test's pass/fail verdict be identical if run on real
