@@ -15,6 +15,238 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-21: Removing Ceilings -- Three Tables, Five Traps, and What the Numbers Were Saying
+
+The session that followed #377/#378 turned from "finish the stack work" into
+"remove the resource ceilings this kernel writes down", and closed
+#375/#379/#381/#383/#384 and #350/#367/#371/#394 along the way. This entry
+is the arc, because the recurring lessons are worth more than nine separate
+accounts.
+
+#### The audit came first, and shrank the problem
+
+`kernel/RESOURCE_LIMITS.md`'s inventory, checked against the tree rather
+than read:
+
+| Constant | Removable? |
+|---|---|
+| `KERNEL_PROCESS_MAX` = 16 | the one worth doing -- removes four others with it |
+| `SHARED_OBJECT_MAX` = 16 | blocked on the retain/release design |
+| `PROCESS_FD_MAX` = 16 | a different shape: a small-int namespace, not a pool |
+| `BOOT_PAGE_COUNT` | not a guess -- it IS the machine's RAM |
+| `USER_SPACE_PAGE_COUNT` | architectural VA window |
+| `PAGE_MAP_REF_MAX`, `SHARED_OBJECT_MAX_REFS`, `KERNEL_SOCKET_FD_MAX` | all DERIVED |
+| `ASID_MAX` | tied to the process table |
+
+**Three independently guessed ceilings, not a dozen.** Most of the file
+records numbers that follow from something else, which is the healthy
+outcome and is invisible until someone re-derives each one.
+
+#### #367: every premise in the issue was stale, and re-deriving them found
+#### a bug
+
+#367 asked whether three "fixed-capacity pools" should move to
+`intrusive_pool`. Checking each against the tree:
+
+- one of the three (`process_address_space_pool`,
+  `PROCESS_ADDRESS_SPACE_MAX` = 2) **did not exist**;
+- a second constant was 4 in the issue and 16 in the code;
+- the coupling argument the whole issue rested on had been deleted by
+  #377/#381 earlier the same day;
+- its cited arithmetic came from #350, by then done, which had changed it.
+
+The corrected table WAS the deliverable, and it let each pool be judged
+alone. It also turned up something no one was looking for: **five
+separately-written literals had to be equal -- `KERNEL_PROCESS_MAX`,
+`ADDRESS_SPACE_MAX`, `PROCESS_IMAGE_ROOT_MAX`, `PROCESS_CONTEXT_MAX`,
+`ASID_MAX` -- with three files carrying prose saying "must match" and
+nothing checking it.** Now `static_assert`s, verified by setting one to 8
+and watching the build name the constant and the reason.
+
+#### #350: the ceiling moved, and the header had nowhere left to live
+
+A chunk was one page, so a `T` larger than 3968 bytes could not be pooled
+at all. It is `2^order` pages now, order chosen per instantiation from
+`sizeof(IntrusiveSlot(T))` -- SLUB's `slub_min_objects`/`slub_max_order`,
+the same two numbers:
+
+```
+BigPayload (1960)   2 slots / 1 page   ->   8 slots / 4 pages
+Stride1024          3 slots / 1 page   ->  15 slots / 4 pages
+Stride2048          1 slot  / 1 page   ->  15 slots / 8 pages
+HugePayload (5000)  did not compile    ->   6 slots / 8 pages
+```
+
+The design question was not the allocator -- #380 had already provided
+aligned runs. It was that **#349 put the chunk header in the page's
+metadata region, and #377 then made a run entirely payload** so no pool
+could read a kernel stack's frames as a chunk header. A multi-page chunk
+therefore had nowhere to put a header.
+
+It went back into the chunk, at the far end, and what replaces #349's
+safety argument is stronger: `intrusive_pool_owns_chunk` asks the
+ALLOCATOR whether the page is tagged `PoolChunk` (#384) before
+dereferencing anything. That tag is allocator-owned per-page state,
+unforgeable by a consumer, and read without touching the address -- so a
+garbage address is rejected BEFORE the header is reached rather than
+yielding a harmless-but-wrong one after.
+
+Three tests turned out to have preconditions true only of one-page chunks,
+and were no longer testing what they claimed: a literal `4` objects to
+"fill two chunks", "a slot in the other chunk" taken by ordinal, and a
+stale-handle pair built from the last connection freed -- which assumed
+that slot's CHUNK still belonged to the pool, when the last chunk to empty
+is exactly the one handed back.
+
+#### #392: three per-process tables pooled, and five traps paid for
+
+`KERNEL_PROCESS_MAX` cannot go while per-process state is arrays keyed by
+slot. Three of the four are done: fd contexts, image records,
+address-space backings. **All three removed restatements, not real bounds**
+-- there can be no more of any of them than there are processes -- and
+saying so plainly matters, because the work looks like progress on the
+ceiling and is not.
+
+Two compiler facts decided the shape, both established with two-file probes
+rather than reasoned about:
+
+- **Functions resolve globally**, regardless of `use` or file order. The
+  apparent cycles are not real for accessors.
+- **A `const` in a refined bound must come from an EARLIER file.**
+  `address_space.tkb` is parsed before `process.tkb` and so cannot name
+  `KERNEL_PROCESS_MAX` at all -- it asks `scheduled_process_slot_valid()`
+  instead.
+
+That second fact is why the plan inverted from "merge the tables into one
+struct first" to "pool each where it stands": a merged record's bound would
+have to be nameable from four files, and it is not.
+
+The five traps, in the order they were paid for:
+
+1. **The payload is not the slot address.** A slot address is
+   `IntrusiveSlot(T)`'s, whose first word is the occupant generation, so
+   casting it to `*T` put every field 8 bytes early and read the
+   generation's low byte as `fd_kind[0]`. It type-checks perfectly. The
+   symptom was `unified_fd_install` refusing fd 0 on a table that had just
+   been zeroed.
+2. **Check whether the "init" function is per-process.**
+   `unified_fd_table_init` runs on every process configure, so
+   re-initialising a pool there forgets its pages while records still hold
+   addresses into them -- #257's hazard. It empties live entries by walking
+   the pool now, and the pool is initialised once behind an explicit flag.
+3. **The bootstrap process does not come from `scheduled_process_alloc`.**
+   It needs its per-process resources from
+   `kernel_syscall_process_configure`. Missing that produced
+   `can't fork: Resource temporarily unavailable`.
+4. **Releasing at reap is a LIFETIME change, not tidiness.** The arrays
+   kept a slot's entry for the life of the kernel and the next occupant
+   reused it as-is. Releasing the image record silently dropped
+   `shell stack: demand-grown` -- root 0's `stack_growth_active` is set
+   once at bootstrap and read on every later stack fault. **Found in one
+   boot because that evidence line exists**, which is an argument for boot
+   suites printing facts rather than only pass/fail.
+5. **The MMU-off window.** Pooling the address-space backings stopped RPi5
+   booting: the kernel loaded and produced **zero UART bytes**, twice, with
+   every QEMU lane green. `kernel_mmu_init` runs before `main()` with the
+   MMU off, and its own comment already said what that costs -- "an
+   unaligned 128-bit store on RPi5, which faults before the bootstrap root
+   exists". Pooling turned "write four fields" into "allocate a page, carve
+   a chunk, write a header, zero a payload, then write four fields". Root
+   0's backing is a static now.
+
+**QEMU permits those stores, so it cannot see trap 5 at all.** The only
+detector is real hardware, and the failure signature is silence. That is
+the argument for running hardware per stage rather than once at the end,
+and it is why an effect for the MMU-off window is worth building.
+
+Also recorded: allocating only at process creation was not enough. A root
+is not always a live scheduler slot -- probes name roots directly and the
+clone paths name a destination before it is anybody's process. Instrumenting
+the fallback said **1648 such accesses on one boot**, which a fallback
+record would have absorbed in silence.
+
+#### Diagnosis, because #373 had shown what its absence costs
+
+Two issues filed during #373 were built here.
+
+**#379, `kernel/MEMORY_MAP.md`.** Both platforms side by side, with a
+numbered procedure for turning an address into a region. Every row says
+whether it is CHECKED (ELF), CHECKED (const) or HAND, and
+`scripts/check_kernel_memory_map.py` makes the first two real -- it reads
+both linked kernels with `nm`, reads the named `const` out of the named
+`.tkb`, and **fails if a row inside a checked table is not marked
+CHECKED**, since a row claiming verification while nothing verifies it is
+worse than an honest HAND row.
+
+It failed the build **three times in the same session**: when the IRQ stack
+shifted every symbol, when the kernel image grew, and when deleting
+`ADDRESS_SPACE_MAX` left a CHECKED row naming something that no longer
+existed. Written on the day the map changed; a map written a week later
+would have described a kernel that no longer existed.
+
+**#384, the page owner tag.** `owner` is a required ARGUMENT of
+`page_alloc`, not a field to set afterwards -- `page_alloc` cannot see its
+caller, and a forgettable tag degrades to `Unowned` exactly at a new
+subsystem's first call site. It costs nothing: `PageMeta`'s `usize` forced
+8-byte alignment, so bytes 2..7 were padding already.
+
+The fail-stop renderer translates FAR and ELR through the faulting
+process's own page table before asking, because both are user VAs when the
+fault came from EL0 -- asking about the VA answers "not one of ours" for
+exactly the case worth reporting. **#373 would have read as one line.**
+
+#### The smaller ones, and what each taught
+
+- **#375** -- the guard fail-stops now that four pages make reaching the
+  bottom mean something. It could not use the crash path's
+  `interrupt_wait()`: two of three call sites are `!{interrupt}` handlers
+  and the effect checker refused it, correctly. The disassembly was checked
+  for `b .` rather than assuming an empty infinite loop survives codegen.
+- **#383** -- the scrub asymmetry it recorded as "no known instance" got
+  one, from #377: a run's pages have no metadata region while live, so the
+  bytes a consumer wrote at the page tail become exactly what `page_meta_at`
+  points at the moment `in_run` clears. For a kernel stack those bytes are
+  frames. Every path back to the free list scrubs now, and the probe writes
+  `0xC3` into every page tail and requires zero after the free -- verified
+  by removing the clear again and watching the view fail.
+- **#371** -- `intrusive_pool_remove` says WHICH refusal. The first draft
+  had two accessors and did not compile: **a `must_use` variant is affine,
+  so consuming it to ask "did it work" leaves nothing to ask "why not"
+  with.** Two accessors would force every reporting caller to pick one
+  question, which is the defect the issue existed to remove, one level
+  down. One accessor returns both.
+- **#381** -- `growable_pool` left `kernel/` when kernel stacks outgrew a
+  one-page chunk. Demoted rather than deleted: it is still the
+  static-footprint comparand behind #344's claim, and deleting it would
+  turn a measurement back into an assertion.
+
+#### #394: the trusted-base number was moving for the wrong reasons
+
+`scripts/measure_trusted_base.py` counted `as *` uniformly, so the total
+moved +35 across this work -- **and 28 of that was diagnostic messages**,
+since `"part of a kernel stack run" as *u8` is how this language spells a
+string constant's address.
+
+Split three ways, by cast TARGET where the language distinguishes one. The
+third category was the surprise: `as *io T`, the MMIO boundary, is **174 of
+491**, and has computed operands (`(base + offset) as *io i32`), so
+classifying by operand -- which is what the issue proposed -- would have
+left them mixed in with memory casts and the number to watch would still
+have been wrong.
+
+```
+                        baseline    after
+total                      456       491   (+35)
+  memory                   250       257    (+7)
+  device (`as *io T`)      174       174     (0)
+  string constants          32        60   (+28)
+```
+
+**+7 memory casts for +943 lines under `--forbid-trap`** is the figure that
+was hidden in both directions. The total is unchanged so every number
+already in this file stays comparable; none of the three is called "safe",
+because they are three different things to be trusted.
+
 ### 2026-08-21: Issue #378 -- Interrupts Got Their Own Stack, and the Measurement Refuted the Reason
 
 #378 asked for a dedicated IRQ stack on the argument that a kernel stack
