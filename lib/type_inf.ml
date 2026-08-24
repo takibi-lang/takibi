@@ -1393,12 +1393,12 @@ let check_io_ptr_literal_needs_unsafe loc (e : Ast.expr) (target : ty) =
    (non-affine/linear) pointer unless the boundary is explicitly unsafe.
    `*io T` is exempted here because its dedicated hard error above already
    handles it, and affine/linear opaque targets are likewise already gated. *)
-(* GitHub issue #327 Stage 1: every TypeError caught while attempting each
-   function body in infer_program's Pass 3, in encounter order. Reset at
-   the start of every infer_program call. Empty on a clean compilation --
-   Pass 3 raises MultiTypeError
-   directly (rather than leaving this for a caller to check) the moment it
-   finds this non-empty, so nothing outside this file needs to read it. *)
+(* Every recoverable TypeError, in encounter order: outer statements record
+   directly during infer_func, while an error outside that recovery boundary
+   is caught around infer_func in Pass 3. Reset at the start of every
+   infer_program call. Empty on a clean compilation; Pass 3 raises the final
+   single TypeError/MultiTypeError before later passes run, so nothing outside
+   this file needs to read it. *)
 let collected_type_errors : (Ast.loc * string) list ref = ref []
 
 let is_io_pointee = function
@@ -4938,6 +4938,38 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
   in
   List.iter go_stmt fdef.body
 
+(* Recover only at the function body's outer statement boundary. A failed
+   statement keeps the environment produced by every preceding successful
+   statement. A failed let additionally installs a best-effort binding so a
+   later use of that name does not become a second, purely cascading
+   "unknown variable" error: an explicit annotation is authoritative, while
+   an unannotated let gets a fresh inference variable that later constraints
+   may still determine. The unannotated placeholder is deliberately omitted
+   from raw_locals so check_undetermined_lets does not diagnose the recovery
+   artifact itself. Nested blocks remain one statement for now; recovering
+   within them needs branch/loop environment joins rather than this linear
+   rule. *)
+let infer_top_level_stmt_resilient senv eenv fenv ret_ty
+    ((tyenv, raw_locals) as state) (s : Ast.stmt) =
+  try infer_stmt senv eenv tyenv fenv ret_ty raw_locals false s
+  with Types.TypeError (loc, msg) ->
+    collected_type_errors := (loc, msg) :: !collected_type_errors;
+    match s.desc with
+    | Ast.Let (is_mut, name, ty_opt, _, _) ->
+        let placeholder = match ty_opt with
+          | Some ast_ty -> (try of_ast ast_ty with Types.TypeError _ -> fresh ())
+          | None -> fresh ()
+        in
+        locally_bound_names := StringSet.add name !locally_bound_names;
+        record_stmt_binding_type s 0 placeholder;
+        let tyenv = StringMap.add name (placeholder, is_mut) tyenv in
+        let raw_locals = match ty_opt with
+          | Some _ -> StringMap.add name placeholder raw_locals
+          | None -> raw_locals
+        in
+        (tyenv, raw_locals)
+    | _ -> state
+
 let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
   (* An unsafe grant is lexical and must never cross a function boundary.
      The scope-local Fun.protect calls enforce this; these assertions make
@@ -4980,7 +5012,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
       genv fdef.params param_tys
     in
     let (_, raw_locals) = fold_stmts_with_future_writes
-      (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs false s)
+      (infer_top_level_stmt_resilient senv eenv fenv ret_ty)
       (init_env, StringMap.empty) fdef.body
     in
     check_undetermined_lets fdef raw_locals;

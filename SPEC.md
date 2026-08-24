@@ -40,6 +40,16 @@ refinement intervals, effects, affine/linear ownership, static indices,
 file privacy, and authority-region checks add Takibi-specific static
 semantics on top.
 
+Type checking reports independent errors across function definitions and
+across the outer statement list of each function. If an outer `let` fails,
+the checker retains its explicit declared type, or an unconstrained temporary
+type when no annotation exists, solely so later statements can be checked
+without an additional unknown-name cascade. Recovery inside nested blocks,
+branches, loops, and subexpressions is not performed; each such construct is
+one recovery unit at its enclosing function-body boundary. One error is
+reported as the ordinary single type error, while two or more are emitted
+together.
+
 Every top-level definition -- `fn`, global `let`, `struct`, `opaque
 struct`, and `enum` -- shares this ONE flat namespace, deliberately.
 Unlike C (which has a separate TAG namespace for `struct`/`union`/`enum`,

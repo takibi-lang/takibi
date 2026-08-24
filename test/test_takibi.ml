@@ -2301,6 +2301,47 @@ let infer_tests = [
         fn issue327_broken_b() -> i32 { return issue327_unbound_b; }
         fn issue327_broken_c() -> i32 { return issue327_unbound_c; }");
 
+  Alcotest.test_case
+    "two broken top-level statements in one function both surface"
+    `Quick
+    (expect_multi_type_error ["issue330_unbound_one"; "issue330_unbound_two"]
+       "fn issue330_two_statements() {
+          issue330_unbound_one;
+          issue330_unbound_two;
+        }");
+
+  Alcotest.test_case
+    "a failed unannotated let supplies a placeholder without a cascade"
+    `Quick
+    (expect_type_error "issue330_missing_initializer"
+       "fn issue330_placeholder() -> usize {
+          let x = issue330_missing_initializer;
+          return x;
+        }");
+
+  Alcotest.test_case
+    "two independent unsafe-gated casts in one function both surface"
+    `Quick
+    (expect_multi_type_error
+       ["casting to '*io u32' asserts";
+        "casting to '*io u16' asserts"]
+       "fn issue330_two_io_casts(a: usize, b: usize) {
+          let p: *io u32 = a as *io u32;
+          let q: *io u16 = b as *io u16;
+        }");
+
+  Alcotest.test_case
+    "Stage 2 recovery is top-level and treats a nested block as one statement"
+    `Quick
+    (expect_multi_type_error ["issue330_nested_first"; "issue330_after_block"]
+       "fn issue330_nested_boundary() {
+          {
+            issue330_nested_first;
+            issue330_nested_deferred;
+          }
+          issue330_after_block;
+        }");
+
   (* Negative control: exactly one broken function among otherwise-correct
      ones still raises a plain Types.TypeError, not MultiTypeError -- every
      other expect_type_error test in this file already depends on this,
