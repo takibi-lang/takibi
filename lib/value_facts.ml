@@ -122,6 +122,8 @@ let join a b =
 
 let invalidate facts = unknown facts.base
 
+let prove_nonzero facts = { facts with nonzero = Proven_nonzero }
+
 let multiply_exact a b =
   if not (same_base a.base b.base) then
     invalid_arg "Value_facts.multiply_exact: base type mismatch";

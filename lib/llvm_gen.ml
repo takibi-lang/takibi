@@ -2714,8 +2714,13 @@ let divisor_proven_nonzero ty expr =
   expr_proven_nonzero ty expr
 
 let emit_divisor_check loc operation divisor_ty divisor_expr divisor =
-  if not (Hashtbl.mem Type_inf.divisor_proven_nonzero_at loc)
-     && not (divisor_proven_nonzero divisor_ty divisor_expr) then begin
+  let checker_proved = Hashtbl.mem Type_inf.divisor_proven_nonzero_at loc in
+  let legacy_proved = divisor_proven_nonzero divisor_ty divisor_expr in
+  if legacy_proved && not checker_proved then
+    raise (Error (Printf.sprintf
+      "value-facts parity: LLVM proved a %s divisor nonzero at %s:%d but type inference did not"
+      operation (Ast.source_file_of_loc loc) loc.Lexing.pos_lnum));
+  if not checker_proved then begin
     let what = Printf.sprintf
       "%s by zero check remains: divisor type %s does not prove a nonzero value"
       operation (ty_str divisor_ty) in

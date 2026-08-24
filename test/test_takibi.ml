@@ -2295,6 +2295,17 @@ let infer_tests = [
          fn one_after_cast(n: u8) -> u8 { return n / (257 as u8); }");
       Alcotest.(check int) "only the post-truncation one is proved" 1
         (Hashtbl.length Type_inf.divisor_proven_nonzero_at));
+
+  Alcotest.test_case "layout divisor nonzero facts do not duplicate target layout" `Quick
+    (fun () ->
+      ignore (infer
+        "struct LayoutFacts { value: usize; }\n\
+         fn layout_facts(n: usize) -> usize {
+           return (n / sizeof(LayoutFacts)) + (n % alignof(LayoutFacts)) +
+                  (n / sizeof([u8; 0]));
+         }");
+      Alcotest.(check int) "nonempty sizeof and alignof only" 2
+        (Hashtbl.length Type_inf.divisor_proven_nonzero_at));
   (* GitHub issue #358: the parser cannot know whether Name[args] denotes
      an indexed owner, view, or variant. Lock down the post-registration
      invariant directly: views/variants are canonical everywhere in the

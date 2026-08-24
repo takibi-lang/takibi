@@ -75,6 +75,8 @@ let active_nonzero_bindings = ref IntSet.empty
 let active_parameter_bindings = ref IntSet.empty
 let binding_fact_sources : (Local_bindings.id, Ast.expr * ty) Hashtbl.t =
   Hashtbl.create 64
+let intrinsic_nonzero_at : (Lexing.position, unit) Hashtbl.t =
+  Hashtbl.create 32
 
 let record_stmt_binding_type (stmt : Ast.stmt) slot ty =
   match !active_local_bindings with
@@ -355,6 +357,35 @@ let rec const_type_size (senv : senv) (ty : Ast.type_expr) : int option =
            ) (Some 0) fields
        | _ -> None)
   | _ -> None
+
+let rec type_size_proven_nonzero senv eenv ty =
+  match ty with
+  | Ast.TypeBool
+  | Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
+  | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
+  | Ast.TypeU16Be | Ast.TypeU32Be | Ast.TypeIsize | Ast.TypeUsize
+  | Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeRef _ | Ast.TypeRefMut _
+  | Ast.TypeFn _ | Ast.TypeSlice _ -> true
+  | Ast.TypeArray (elem, count) ->
+      count > 0 && type_size_proven_nonzero senv eenv elem
+  | Ast.TypeIo inner | Ast.TypeSingleton (inner, _)
+  | Ast.TypeRefined (_, _, inner) | Ast.TypeBorrow inner
+  | Ast.TypeBorrowMut inner | Ast.TypeSink inner ->
+      type_size_proven_nonzero senv eenv inner
+  | Ast.TypeTuple items ->
+      List.exists (type_size_proven_nonzero senv eenv) items
+  | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
+      if StringMap.mem name eenv || Hashtbl.mem variant_defs name then true
+      else
+        (match StringMap.find_opt name senv with
+         | Some (fields, _, _) ->
+             List.exists (fun (_, field_ty) ->
+               type_size_proven_nonzero senv eenv field_ty) fields
+         | None -> false)
+  | Ast.TypeVariant _ -> true
+  | Ast.TypeVoid | Ast.TypeView _ | Ast.TypeExists _ | Ast.TypeKind
+  | Ast.TypeGenericInst _ | Ast.TypeIntLit _ | Ast.TypeArraySym _
+  | Ast.TypeSliceSym _ -> false
 
 (* Cumulative byte offset of `field` within packed struct `sname`, i.e.
    const_type_size of every field strictly before it. Tail padding from
@@ -869,6 +900,8 @@ let rec value_facts_of_expr ty (expr : Ast.expr) =
            let lo = of_signed_int64 (Int64.of_int lo) in
            let hi = of_signed_int64 (Int64.of_int (hi - 1)) in
            Some (interval base lo hi)
+       | _ when Hashtbl.mem intrinsic_nonzero_at expr.loc ->
+           Some (prove_nonzero (unknown base))
        | _ -> match expr.desc with
        | IntLit value ->
            let mathematical = match base.signedness with
@@ -907,7 +940,10 @@ let rec value_facts_of_expr ty (expr : Ast.expr) =
                  | Some id ->
                      (match Hashtbl.find_opt binding_fact_sources id with
                       | Some (source, source_ty) ->
-                          value_facts_of_expr source_ty source
+                          Option.map (fun facts ->
+                            if IntSet.mem id !active_nonzero_bindings
+                            then prove_nonzero facts else facts)
+                            (value_facts_of_expr source_ty source)
                       | None ->
                           let facts = unknown base in
                           if IntSet.mem id !active_nonzero_bindings
@@ -2848,8 +2884,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          isn't computable here, e.g. non-packed or align(N) structs,
          pointers, usize/isize fields -- no behavior change for those. *)
       (match const_type_size senv ty with
-       | Some v -> TRefinedInt (v, v + 1, TUsize)
-       | None -> TUsize)
+       | Some v ->
+           if v > 0 then Hashtbl.replace intrinsic_nonzero_at e.loc ();
+           TRefinedInt (v, v + 1, TUsize)
+       | None ->
+           if type_size_proven_nonzero senv eenv ty then
+             Hashtbl.replace intrinsic_nonzero_at e.loc ();
+           TUsize)
 
   | ContainsStableOwner ty ->
       (* GitHub issue #369: 1 if T is (or reaches) stable owner storage,
@@ -2876,6 +2917,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                                   && not (Hashtbl.mem variant_defs name) ->
            raise (TypeError (e.loc, Printf.sprintf "unknown type '%s' in alignof" name))
        | _ -> ());
+      Hashtbl.replace intrinsic_nonzero_at e.loc ();
       (* Deliberately NOT refined to a singleton range, unlike SizeOf.
          Refining means committing to a value here, in OCaml, and this
          value has no target-independent formula worth committing to:
@@ -5232,6 +5274,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
     active_parameter_bindings := IntSet.of_list bindings.param_ids;
     Hashtbl.reset active_binding_types;
     Hashtbl.reset binding_fact_sources;
+    Hashtbl.reset intrinsic_nonzero_at;
     List.iter2 (fun id ty -> Hashtbl.replace active_binding_types id ty)
       bindings.param_ids param_tys;
     (* Start with globals visible, then shadow them with params (params are mutable) *)
@@ -5278,6 +5321,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset overflow_audit_table;
   Hashtbl.reset divisor_proven_nonzero_at;
   Hashtbl.reset binding_fact_sources;
+  Hashtbl.reset intrinsic_nonzero_at;
   active_nonzero_bindings := IntSet.empty;
   active_parameter_bindings := IntSet.empty;
   enclosing_future_writes := StringSet.empty;  (* fresh per compilation / per unit test *)
