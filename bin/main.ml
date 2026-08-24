@@ -52,6 +52,7 @@ let () =
   let emit_exception_frame_offsets = ref "" in
   let emit_struct_layout = ref "" in
   let emit_depfile = ref "" in
+  let emit_overflow_audit = ref "" in
   let i = ref 1 in
   while !i < Array.length Sys.argv do
     (match Sys.argv.(!i) with
@@ -78,6 +79,13 @@ let () =
            exit 1
          );
          emit_depfile := Sys.argv.(!i)
+     | "--emit-overflow-audit" ->
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --emit-overflow-audit requires a path\n";
+           exit 1
+         );
+         emit_overflow_audit := Sys.argv.(!i)
      | "-o" ->
          incr i;
          if !i >= Array.length Sys.argv then (
@@ -125,7 +133,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--explain-inference] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-depfile <path>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--explain-inference] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -205,6 +213,45 @@ let () =
 
     (* HM type inference -- catches type errors and produces resolved types *)
     let prog_types = Typechecker.infer_program prog in
+
+    if !emit_overflow_audit <> "" then begin
+      let op_name = function
+        | Ast.Add -> "add" | Ast.Sub -> "sub" | Ast.Mul -> "mul"
+        | Ast.Div -> "div" | Ast.Mod -> "mod" | Ast.Shl -> "shl"
+        | _ -> assert false
+      in
+      let describe expr ty =
+        match Types.repr ty with
+        | Types.TRefinedInt (lo, hi, base) ->
+            Types.to_string base, Printf.sprintf "range:%d..<%d" lo hi
+        | Types.TSingleton (base, n) ->
+            Types.to_string base,
+            Printf.sprintf "singleton:%s" (Types.static_to_string n)
+        | base ->
+            let fact = match Const_env.folded_value expr with
+              | Some n -> Printf.sprintf "constant:%d" n
+              | None -> "unknown"
+            in
+            Types.to_string base, fact
+      in
+      let sites = Type_inf.overflow_audit_sites () |> List.sort (fun a b ->
+        let la = a.Type_inf.overflow_loc and lb = b.Type_inf.overflow_loc in
+        compare (la.pos_fname, la.pos_lnum, la.pos_cnum, op_name a.overflow_op)
+                (lb.pos_fname, lb.pos_lnum, lb.pos_cnum, op_name b.overflow_op))
+      in
+      let out = open_out !emit_overflow_audit in
+      Printf.fprintf out
+        "file\tline\tcolumn\toperator\tlhs_type\tlhs_fact\trhs_type\trhs_fact\n";
+      List.iter (fun site ->
+        let loc = site.Type_inf.overflow_loc in
+        let lhs_ty, lhs_fact = describe site.overflow_lhs site.overflow_lhs_ty in
+        let rhs_ty, rhs_fact = describe site.overflow_rhs site.overflow_rhs_ty in
+        Printf.fprintf out "%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\n"
+          loc.pos_fname loc.pos_lnum (loc.pos_cnum - loc.pos_bol + 1)
+          (op_name site.overflow_op) lhs_ty lhs_fact rhs_ty rhs_fact
+      ) sites;
+      close_out out
+    end;
 
     if !forbid_unsafe then begin
       let unsafe_functions = Types.StringMap.bindings prog_types.functions

@@ -43,6 +43,27 @@ type tyenv = (ty * bool) StringMap.t
 let active_local_bindings : Local_bindings.resolution option ref = ref None
 let active_binding_types : (Local_bindings.id, ty) Hashtbl.t = Hashtbl.create 32
 
+(* Diagnostic-only inventory for the overflow survey.  The source-position
+   key deduplicates an expression if generic expansion or inference visits it
+   more than once.  Keeping [ty] values here is intentional: inference may
+   link a type variable after the expression was first visited, and the report
+   should print that final resolved type. *)
+type overflow_audit_site = {
+  overflow_loc : Lexing.position;
+  overflow_op : Ast.binop;
+  overflow_lhs : Ast.expr;
+  overflow_lhs_ty : ty;
+  overflow_rhs : Ast.expr;
+  overflow_rhs_ty : ty;
+}
+
+let overflow_audit_table :
+    ((string * int * int * Ast.binop), overflow_audit_site) Hashtbl.t =
+  Hashtbl.create 128
+
+let overflow_audit_sites () =
+  Hashtbl.to_seq_values overflow_audit_table |> List.of_seq
+
 let record_stmt_binding_type (stmt : Ast.stmt) slot ty =
   match !active_local_bindings with
   | None -> ()
@@ -1631,6 +1652,20 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            raise (TypeError (e.loc,
              "&/&mut does not support operators (arithmetic, bitwise, or \
               comparison); use its fields, or widen it to *T first"))
+       | _ -> ());
+      (match op, repr t1, repr t2 with
+       | (Add | Sub | Mul | Div | Mod | Shl),
+         (TPtr _ | TAlignedPtr _), _
+       | (Add | Sub | Mul | Div | Mod | Shl), _,
+         (TPtr _ | TAlignedPtr _) -> ()
+       | (Add | Sub | Mul | Div | Mod | Shl), _, _ ->
+           let loc = e.loc in
+           let col = loc.pos_cnum - loc.pos_bol + 1 in
+           Hashtbl.replace overflow_audit_table
+             (loc.pos_fname, loc.pos_lnum, col, op)
+             { overflow_loc = loc; overflow_op = op;
+               overflow_lhs = e1; overflow_lhs_ty = t1;
+               overflow_rhs = e2; overflow_rhs_ty = t2 }
        | _ -> ());
       (* GitHub issue #186: u16be (bare or refined-over-it) deliberately does
          not participate in ordinary arithmetic, shifts, or ORDERING
@@ -5047,6 +5082,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset type_checker_consumed_unsafe_at;
   Hashtbl.reset index_resolved_ty;  (* GitHub issue #311, fresh per compilation / per unit test *)
   Hashtbl.reset slice_cast_len;     (* GitHub issue #372, same lifetime *)
+  Hashtbl.reset overflow_audit_table;
   enclosing_future_writes := StringSet.empty;  (* fresh per compilation / per unit test *)
   resolved_call_targets := StringMap.empty;
   resolved_indirect_call_effects := StringMap.empty;

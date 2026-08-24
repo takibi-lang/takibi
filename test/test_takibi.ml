@@ -2197,6 +2197,27 @@ let async_tx_fixture =
    "
 
 let infer_tests = [
+  Alcotest.test_case "overflow audit records source integer operators only and resets" `Quick
+    (fun () ->
+      ignore (infer_files ["audit.tkb",
+        "fn audit(a: i32, p: *i32) -> i32 {\n\
+         \  let x: i32 = a + 1;\n\
+         \  let q: *i32 = p + 1;\n\
+         \  return x << 2;\n\
+         }\n"]);
+      let sites = Type_inf.overflow_audit_sites () in
+      Alcotest.(check int) "integer sites; pointer addition excluded" 2
+        (List.length sites);
+      let operators = List.map (fun site -> site.Type_inf.overflow_op) sites in
+      Alcotest.(check bool) "addition recorded" true (List.mem Ast.Add operators);
+      Alcotest.(check bool) "left shift recorded" true (List.mem Ast.Shl operators);
+      List.iter (fun site ->
+        Alcotest.(check string) "original source filename" "audit.tkb"
+          site.Type_inf.overflow_loc.Lexing.pos_fname
+      ) sites;
+      ignore (infer "fn empty() { return; }");
+      Alcotest.(check int) "fresh inference clears audit" 0
+        (List.length (Type_inf.overflow_audit_sites ())));
   (* GitHub issue #358: the parser cannot know whether Name[args] denotes
      an indexed owner, view, or variant. Lock down the post-registration
      invariant directly: views/variants are canonical everywhere in the
