@@ -2713,7 +2713,8 @@ let divisor_proven_nonzero ty expr =
   expr_proven_nonzero ty expr
 
 let emit_divisor_check loc operation divisor_ty divisor_expr divisor =
-  if not (divisor_proven_nonzero divisor_ty divisor_expr) then begin
+  if not (Hashtbl.mem Type_inf.divisor_proven_nonzero_at loc)
+     && not (divisor_proven_nonzero divisor_ty divisor_expr) then begin
     let what = Printf.sprintf
       "%s by zero check remains: divisor type %s does not prove a nonzero value"
       operation (ty_str divisor_ty) in

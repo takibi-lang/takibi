@@ -22,16 +22,21 @@ type vector_table_contract =
    historical Cortex-M contract.  The CLI always calls [configure] first. *)
 let dma_cache = ref (Cache_line 32)
 let vector_table = ref Unsupported
+let pointer_bits = ref 32
 
 let reset () =
   dma_cache := Cache_line 32;
-  vector_table := Unsupported
+  vector_table := Unsupported;
+  pointer_bits := 32
 
 let starts_with s prefix =
   let n = String.length prefix in
   String.length s >= n && String.sub s 0 n = prefix
 
 let configure triple =
+  pointer_bits :=
+    if starts_with triple "aarch64" || starts_with triple "x86_64"
+    then 64 else 32;
   dma_cache :=
     if starts_with triple "aarch64" then Cache_line 64
     else if starts_with triple "arm" || starts_with triple "thumb" then
@@ -46,6 +51,7 @@ let configure triple =
 
 let dma_cache_contract () = !dma_cache
 let vector_table_contract () = !vector_table
+let pointer_bit_width () = !pointer_bits
 
 let dma_cache_line () =
   match !dma_cache with

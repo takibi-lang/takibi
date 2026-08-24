@@ -2218,6 +2218,17 @@ let infer_tests = [
       ignore (infer "fn empty() { return; }");
       Alcotest.(check int) "fresh inference clears audit" 0
         (List.length (Type_inf.overflow_audit_sites ())));
+
+  Alcotest.test_case "division proof decisions begin in type inference value facts" `Quick
+    (fun () ->
+      ignore (infer
+        "fn quot(n: i32, d: {1..<4 as i32}) -> i32 { return n / d; }\n\
+         fn rem(n: i32) -> i32 { return n % 3; }");
+      Alcotest.(check int) "refined and literal divisors proved" 2
+        (Hashtbl.length Type_inf.divisor_proven_nonzero_at);
+      ignore (infer "fn unchecked(n: i32, d: i32) -> i32 { return n / d; }");
+      Alcotest.(check int) "unknown divisor is not proved and table resets" 0
+        (Hashtbl.length Type_inf.divisor_proven_nonzero_at));
   (* GitHub issue #358: the parser cannot know whether Name[args] denotes
      an indexed owner, view, or variant. Lock down the post-registration
      invariant directly: views/variants are canonical everywhere in the

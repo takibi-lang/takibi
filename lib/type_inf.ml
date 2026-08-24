@@ -64,6 +64,13 @@ let overflow_audit_table :
 let overflow_audit_sites () =
   Hashtbl.to_seq_values overflow_audit_table |> List.of_seq
 
+(* First Value_facts consumer: type checking records a positive nonzero
+   proof for each divisor expression it can settle.  Code generation reads
+   this decision before its legacy fallback, allowing migration one proof
+   source at a time without changing permissive or --forbid-trap behavior. *)
+let divisor_proven_nonzero_at : (Lexing.position, unit) Hashtbl.t =
+  Hashtbl.create 64
+
 let record_stmt_binding_type (stmt : Ast.stmt) slot ty =
   match !active_local_bindings with
   | None -> ()
@@ -823,6 +830,53 @@ let check_match_int_literal_range loc lit base =
    llvm_gen.ml's own intlit_opt mirrors this exactly, change together. *)
 let intlit_opt (e : Ast.expr) : int option =
   Const_env.folded_value e
+
+let value_facts_base_of_ty t =
+  let open Value_facts in
+  match repr (canon_ty t) with
+  | TI8 -> Some { signedness = Signed; bits = 8 }
+  | TI16 -> Some { signedness = Signed; bits = 16 }
+  | TI32 -> Some { signedness = Signed; bits = 32 }
+  | TI64 -> Some { signedness = Signed; bits = 64 }
+  | TIsize -> Some { signedness = Signed; bits = Target_info.pointer_bit_width () }
+  | TU8 -> Some { signedness = Unsigned; bits = 8 }
+  | TU16 | TU16Be -> Some { signedness = Unsigned; bits = 16 }
+  | TU32 | TU32Be -> Some { signedness = Unsigned; bits = 32 }
+  | TU64 -> Some { signedness = Unsigned; bits = 64 }
+  | TUsize -> Some { signedness = Unsigned; bits = Target_info.pointer_bit_width () }
+  | _ -> None
+
+let value_facts_of_expr ty (expr : Ast.expr) =
+  let open Value_facts in
+  let represented_ty = repr ty in
+  let base_ty = match represented_ty with
+    | TRefinedInt (_, _, base) -> base
+    | base -> base
+  in
+  match value_facts_base_of_ty base_ty with
+  | None -> None
+  | Some base ->
+      (match expr.desc with
+       | IntLit value ->
+           let mathematical = match base.signedness with
+             | Signed -> of_signed_int64 value
+             | Unsigned -> of_unsigned_int64 value
+           in
+           (try Some (exact base mathematical)
+            with Invalid_argument _ -> Some (unknown base))
+       | _ ->
+           match represented_ty with
+           | TRefinedInt (lo, hi, _) ->
+               let lo = of_signed_int64 (Int64.of_int lo) in
+               let hi = of_signed_int64 (Int64.of_int (hi - 1)) in
+               Some (interval base lo hi)
+           | _ -> Some (unknown base))
+
+let record_divisor_nonzero_proof ty (expr : Ast.expr) =
+  match value_facts_of_expr ty expr with
+  | Some { Value_facts.nonzero = Proven_nonzero; _ } ->
+      Hashtbl.replace divisor_proven_nonzero_at expr.loc ()
+  | _ -> ()
 
 (* Is this expression built up entirely from compile-time integer
    LITERALS or a real object's address (`IntLit`, `&x`, casts of a
@@ -1843,6 +1897,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | Some 0 ->
                 raise (TypeError (e2.loc, "division by zero"))
             | _ -> ());
+           record_divisor_nonzero_proof t2 e2;
            (match Const_env.folded_value e with
             | Some k -> TRefinedInt (k, k + 1, ct1)
             | None -> ct1)
@@ -1861,6 +1916,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | Some 0 ->
                 raise (TypeError (e2.loc, "remainder by zero"))
             | _ -> ());
+           record_divisor_nonzero_proof t2 e2;
            (match intlit_opt e2 with
             | Some m when m > 0 ->
                 (match repr t1 with
@@ -5083,6 +5139,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset index_resolved_ty;  (* GitHub issue #311, fresh per compilation / per unit test *)
   Hashtbl.reset slice_cast_len;     (* GitHub issue #372, same lifetime *)
   Hashtbl.reset overflow_audit_table;
+  Hashtbl.reset divisor_proven_nonzero_at;
   enclosing_future_writes := StringSet.empty;  (* fresh per compilation / per unit test *)
   resolved_call_targets := StringMap.empty;
   resolved_indirect_call_effects := StringMap.empty;
