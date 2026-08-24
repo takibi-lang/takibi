@@ -73,6 +73,8 @@ let divisor_proven_nonzero_at : (Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
 let array_index_proven_in_bounds_at : (Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
+let refined_cast_proven_in_bounds_at : (Lexing.position, unit) Hashtbl.t =
+  Hashtbl.create 64
 let active_nonzero_bindings = ref IntSet.empty
 let active_parameter_bindings = ref IntSet.empty
 let binding_fact_sources : (Local_bindings.id, Ast.expr * ty) Hashtbl.t =
@@ -991,6 +993,24 @@ let record_array_index_proof size ty (expr : Ast.expr) =
       let upper_ok = compare_integer facts.interval.hi upper < 0 in
       if lower_ok && upper_ok then
         Hashtbl.replace array_index_proven_in_bounds_at expr.loc ()
+  | None -> ()
+
+let record_refined_cast_proof lo hi source_ty target_base
+    (expr : Ast.expr) cast_loc =
+  let facts = match value_facts_of_expr source_ty expr with
+    | Some facts -> Some facts
+    (* Bare literals are initially polymorphic, so use the explicit cast
+       target's representation to interpret their mathematical value. *)
+    | None -> value_facts_of_expr target_base expr
+  in
+  match facts with
+  | Some facts ->
+      let open Value_facts in
+      let lower = of_signed_int64 (Int64.of_int lo) in
+      let upper = of_signed_int64 (Int64.of_int hi) in
+      if compare_integer facts.interval.lo lower >= 0
+         && compare_integer facts.interval.hi upper < 0 then
+        Hashtbl.replace refined_cast_proven_in_bounds_at cast_loc ()
   | None -> ()
 
 let collect_nonzero_cond (cond : Ast.expr) =
@@ -2173,6 +2193,18 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            raise (TypeError (e.loc, "cannot cast a tuple to anything"))
        | _ -> ());
       let tgt_ty = of_ast target_ty in
+      (match target_ty with
+       | Ast.TypeRefined (lo, hi, base) ->
+           record_refined_cast_proof lo hi src_ty (of_ast base) e e.loc
+       (* A bare integer cast has no checked range obligation. Codegen may
+          preserve a proven source interval in its result type, but that is
+          still the same unchecked base conversion rather than an explicit
+          refined cast. *)
+       | Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
+       | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
+       | Ast.TypeIsize | Ast.TypeUsize ->
+           Hashtbl.replace refined_cast_proven_in_bounds_at e.loc ()
+       | _ -> ());
       if type_has_explicit_function_effect senv (to_ast src_ty)
          || type_has_explicit_function_effect senv target_ty
       then
@@ -5338,6 +5370,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset overflow_audit_table;
   Hashtbl.reset divisor_proven_nonzero_at;
   Hashtbl.reset array_index_proven_in_bounds_at;
+  Hashtbl.reset refined_cast_proven_in_bounds_at;
   Hashtbl.reset binding_fact_sources;
   Hashtbl.reset intrinsic_nonzero_at;
   active_nonzero_bindings := IntSet.empty;

@@ -3506,7 +3506,14 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              | TypeU16  -> lo <= 0 && 0x10000 <= hi
              | _ -> false
            in
-           if not proven then emit_refined_cast_check e.loc src_ty v lo hi;
+           let checker_proven =
+             Hashtbl.mem Type_inf.refined_cast_proven_in_bounds_at src_e.loc in
+           if proven && not checker_proven then
+             raise (Error (Printf.sprintf
+               "value-facts parity: LLVM proved a refined cast in bounds at %s:%d but type inference did not"
+               (Ast.source_file_of_loc e.loc) e.loc.Lexing.pos_lnum));
+           if not checker_proven then
+             emit_refined_cast_check e.loc src_ty v lo hi;
            (target_ty, to_arith_width target_ty (coerce v target_ty))
        | TypeSlice (el, _) ->
            (* Slice creation cast. type_inf already proved the minimum-length

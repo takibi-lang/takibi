@@ -2323,6 +2323,24 @@ let infer_tests = [
          fn fact_index(n: usize) -> u8 { return fact_slots[n]; }");
       Alcotest.(check int) "proof table resets between compilations" 0
         (Hashtbl.length Type_inf.array_index_proven_in_bounds_at));
+
+  Alcotest.test_case "refined casts consume immutable exact value facts" `Quick
+    (fun () ->
+      ignore (infer
+        "fn fact_cast(n: i32) -> usize {
+           let exact: i32 = 3;
+           let a = exact as {0..<8 as usize};
+           let b = n as {0..<8 as usize};
+           return a + b;
+         }");
+      Alcotest.(check int) "only the exact immutable source is proved" 1
+        (Hashtbl.length Type_inf.refined_cast_proven_in_bounds_at);
+      ignore (infer
+        "fn fact_cast(n: i32) -> usize {
+           return n as {0..<8 as usize};
+         }");
+      Alcotest.(check int) "cast proof table resets between compilations" 0
+        (Hashtbl.length Type_inf.refined_cast_proven_in_bounds_at));
   (* GitHub issue #358: the parser cannot know whether Name[args] denotes
      an indexed owner, view, or variant. Lock down the post-registration
      invariant directly: views/variants are canonical everywhere in the
