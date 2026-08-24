@@ -167,8 +167,10 @@ counted fallbacks -- the process record's, the image record's and the
 address-space backing's -- are printed at the end of the boot suite and are
 0.
 
-Covered since 2026-08-24 (issue #414), and worth knowing how: the ROLLBACK
-path when one of those allocations fails inside `scheduled_process_alloc`.
+Covered since 2026-08-24 (issue #414) for ONE of its five failure points,
+and worth knowing how -- and why the other four are still open: the
+ROLLBACK path when one of those allocations fails inside
+`scheduled_process_alloc`.
 The arrays they replaced could not fail, so the whole chain is a failure
 mode the pooling introduced, and reaching it honestly needs the page
 allocator genuinely empty -- 800 MiB of it, which no probe does.
@@ -191,6 +193,18 @@ page check because a pool keeps its chunk page either way. And
 `page_mapping_ref_ceiling_probe` had been depending on that leak: it needs
 two live address spaces to have a below-the-ceiling case, and was reading
 35 where the real number was 1.
+
+**What is still not covered**: the other four acquisitions in the chain --
+the process record, the kernel stack run, the image record and the fd
+context. Not for want of a breakpoint: emptying the free-list head is a
+clean injection only for single-page `page_alloc`, which is what the
+address-space root uses. Every other one reaches `page_alloc_contiguous`,
+which finds pages by scanning `meta[].occupied` rather than through the
+free list -- so an emptied list sends it down its QUARANTINE path, which
+reports `OutOfMemory` as wanted but deliberately leaks up to `count` pages
+on the way, and the lane would then report a rollback bug that is really
+the injection's own damage. Issue #414 records the options for a poke that
+does not do that.
 
 The pooled-record baseline that catches this is taken BEFORE the probes
 (the page baseline is taken after them, for the parked-run reason its own
