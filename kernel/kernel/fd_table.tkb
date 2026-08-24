@@ -62,11 +62,11 @@ use "kernel/lib/intrusive_pool.tkb";
 //
 // So the two numbers below are initial values of a runtime-settable limit,
 // which is what Linux's own are: INR_OPEN_CUR = 1024 and INR_OPEN_MAX =
-// 4096 (include/uapi/linux/fs.h). They size no storage. This kernel has no
-// equivalent of Linux's fs.nr_open cap on top of them, because there is no
-// flat table whose size a descriptor number would have to bound -- a
-// descriptor costs one slot of one block, allocated when it is installed,
-// and the page allocator is what runs out.
+// 4096 (include/uapi/linux/fs.h). They size no storage. The cap a process
+// may raise itself to is unified_process_fd_limit_max(), this kernel's
+// equivalent of Linux's fs.nr_open -- derived from the memory that exists
+// rather than picked, and needed because a descriptor NUMBER is what sizes
+// the block chain.
 const PROCESS_FD_LIMIT_DEFAULT_SOFT: usize = 1024;
 const PROCESS_FD_LIMIT_DEFAULT_HARD: usize = 4096;
 
@@ -1121,13 +1121,30 @@ fn unified_process_fd_limit(process: usize) -> UnifiedFdLimitResult !{unsafe} {
 // Linux's rules, minus the one this kernel has no way to express: a soft
 // limit may not exceed the hard limit, and raising the HARD limit is
 // privileged -- which every process here is, this kernel having a single
-// always-root identity, so it is allowed rather than refused. There is no
-// fs.nr_open ceiling above it (see PROCESS_FD_LIMIT_DEFAULT_SOFT), so a
-// process may raise its own limit as far as it likes and will meet the
-// page allocator rather than a number somebody picked.
+// always-root identity, so it is allowed rather than refused. The ceiling
+// above it is unified_process_fd_limit_max(), this kernel's fs.nr_open --
+// derived from the memory that exists rather than picked, so a process may
+// raise its own limit as far as the machine could actually back.
+// The largest descriptor NUMBER this machine could ever back, which is
+// Linux's `fs.nr_open` -- derived here rather than picked, the way every
+// other bound this file has left is.
+//
+// It exists because a descriptor number is what sizes the block chain:
+// installing fd N walks and allocates N / FD_BLOCK_SLOTS blocks. Without a
+// cap, a process that raised its own RLIMIT_NOFILE to 2^40 and then
+// dup2()'d into it would allocate blocks until the page allocator was
+// empty -- terminating, and only after taking the machine's memory with
+// it. Linux stops that with a sysctl; the honest bound here is that a
+// block costs at most a page, so there cannot be more descriptors than
+// pages x FD_BLOCK_SLOTS.
+fn unified_process_fd_limit_max() -> usize {
+    return page_allocator_total_count() * FD_BLOCK_SLOTS;
+}
+
 fn unified_process_fd_limit_configure(process: usize, soft: usize, hard: usize)
         -> UnifiedFdResult !{unsafe} {
     if (soft > hard) { return UnifiedFdResult::Invalid; }
+    if (hard > unified_process_fd_limit_max()) { return UnifiedFdResult::Invalid; }
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedFdResult::Invalid; }
     let ctx: *ProcessFdContext = fd_context_at(process);

@@ -78,6 +78,9 @@ const LINUX_ENOMEM: usize = 0xFFFFFFFFFFFFFFF4;
 const LINUX_ESRCH: usize = 0xFFFFFFFFFFFFFFFD;
 // RLIMIT_NOFILE, and Linux's RLIM64_INFINITY.
 const LINUX_RLIMIT_NOFILE: usize = 7;
+// Linux's RLIM_NLIMITS (include/uapi/asm-generic/resource.h): the number of
+// resources that exist, and therefore the first invalid one.
+const LINUX_RLIM_NLIMITS: usize = 16;
 const LINUX_RLIM64_INFINITY: usize = 0xFFFFFFFFFFFFFFFF;
 
 // GitHub issue #393: AT_FDCWD, spelled the way userspace passes it -- the
@@ -3312,6 +3315,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (x0 != 0 && x0 != kernel_process_current_pid()) {
             return SyscallAction::Resume(LINUX_ESRCH);
         }
+        // A resource number Linux does not have is EINVAL there, and was
+        // silently "unlimited" here -- which answered a question about a
+        // resource that does not exist. RLIM_NLIMITS is 16.
+        if (x1 >= LINUX_RLIM_NLIMITS) {
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
         let mut soft: usize = LINUX_RLIM64_INFINITY;
         let mut hard: usize = LINUX_RLIM64_INFINITY;
         if (x1 == LINUX_RLIMIT_NOFILE) {
@@ -3358,11 +3367,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let new_soft: usize = syscall_rlimit_load(new_bytes[0..<8]);
         let new_hard: usize = syscall_rlimit_load(new_bytes[8..<16]);
         if (new_soft > new_hard) { return SyscallAction::Resume(LINUX_EINVAL); }
-        // Every OTHER resource is genuinely unlimited in this kernel --
-        // there is no storage sized by one and nothing that checks one --
-        // so a write to it is accepted and there is nothing to store.
-        // Refusing with EINVAL would report a resource that does not
-        // exist, which is a worse answer than the true one.
+        // Every other resource Linux HAS is genuinely unlimited in this
+        // kernel -- there is no storage sized by one and nothing that
+        // checks one -- so a write to it is accepted and there is nothing
+        // to store. That is the true answer; a resource number Linux does
+        // not have at all was refused above.
         if (x1 != LINUX_RLIMIT_NOFILE) { return SyscallAction::Resume(0); }
         match unified_process_fd_limit_configure(
                 kernel_syscall_process_slot(), new_soft, new_hard) {
