@@ -71,6 +71,8 @@ let overflow_audit_sites () =
    source at a time without changing permissive or --forbid-trap behavior. *)
 let divisor_proven_nonzero_at : (Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
+let array_index_proven_in_bounds_at : (Lexing.position, unit) Hashtbl.t =
+  Hashtbl.create 64
 let active_nonzero_bindings = ref IntSet.empty
 let active_parameter_bindings = ref IntSet.empty
 let binding_fact_sources : (Local_bindings.id, Ast.expr * ty) Hashtbl.t =
@@ -887,7 +889,9 @@ let value_facts_base_of_ty t =
 
 let rec value_facts_of_expr ty (expr : Ast.expr) =
   let open Value_facts in
-  let represented_ty = repr ty in
+  (* A singleton carries a static equality witness but preserves all runtime
+     integer facts from its base, including an explicit refined interval. *)
+  let represented_ty = repr (strip_singleton ty) in
   let base_ty = match represented_ty with
     | TRefinedInt (_, _, base) -> base
     | base -> base
@@ -977,6 +981,17 @@ let record_divisor_nonzero_proof ty (expr : Ast.expr) =
   | Some { Value_facts.nonzero = Proven_nonzero; _ } ->
       Hashtbl.replace divisor_proven_nonzero_at expr.loc ()
   | _ -> ()
+
+let record_array_index_proof size ty (expr : Ast.expr) =
+  match value_facts_of_expr ty expr with
+  | Some facts ->
+      let open Value_facts in
+      let lower_ok = compare_integer facts.interval.lo zero >= 0 in
+      let upper = of_signed_int64 (Int64.of_int size) in
+      let upper_ok = compare_integer facts.interval.hi upper < 0 in
+      if lower_ok && upper_ok then
+        Hashtbl.replace array_index_proven_in_bounds_at expr.loc ()
+  | None -> ()
 
 let collect_nonzero_cond (cond : Ast.expr) =
   let zero expr = Const_env.folded_value expr = Some 0 in
@@ -2566,6 +2581,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       (match repr vt with
        | TArray (elem, n) ->
            require_usize_index idx.loc it;
+           record_array_index_proof n it idx;
            (* Constant index: check bounds at compile time. A literal too
               large to narrow natively (see Ast.int_of_intlit) is certainly
               out of bounds for any real array, so it is reported the same
@@ -3571,6 +3587,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let elem_ty = match repr vt with
              | TArray (elem, n) ->
                  require_usize_index idx.loc it;
+                 record_array_index_proof n it idx;
                  (match idx.desc with
                   | IntLit k64 ->
                       (match Ast.int_of_intlit k64 with
@@ -5320,6 +5337,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset slice_cast_len;     (* GitHub issue #372, same lifetime *)
   Hashtbl.reset overflow_audit_table;
   Hashtbl.reset divisor_proven_nonzero_at;
+  Hashtbl.reset array_index_proven_in_bounds_at;
   Hashtbl.reset binding_fact_sources;
   Hashtbl.reset intrinsic_nonzero_at;
   active_nonzero_bindings := IntSet.empty;

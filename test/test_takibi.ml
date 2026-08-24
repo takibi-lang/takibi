@@ -2306,6 +2306,23 @@ let infer_tests = [
          }");
       Alcotest.(check int) "nonempty sizeof and alignof only" 2
         (Hashtbl.length Type_inf.divisor_proven_nonzero_at));
+
+  Alcotest.test_case "array bounds consume immutable exact value facts" `Quick
+    (fun () ->
+      ignore (infer
+        "let mut fact_slots: [u8; 4];
+         fn fact_index(n: usize) -> u8 {
+           let exact: usize = 2;
+           let a = fact_slots[exact];
+           return a + fact_slots[n];
+         }");
+      Alcotest.(check int) "only the exact immutable index is proved" 1
+        (Hashtbl.length Type_inf.array_index_proven_in_bounds_at);
+      ignore (infer
+        "let mut fact_slots: [u8; 4];
+         fn fact_index(n: usize) -> u8 { return fact_slots[n]; }");
+      Alcotest.(check int) "proof table resets between compilations" 0
+        (Hashtbl.length Type_inf.array_index_proven_in_bounds_at));
   (* GitHub issue #358: the parser cannot know whether Name[args] denotes
      an indexed owner, view, or variant. Lock down the post-registration
      invariant directly: views/variants are canonical everywhere in the
