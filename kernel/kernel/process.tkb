@@ -296,6 +296,12 @@ private let mut scheduled_process_record_missing_count: usize = 0;
 // first one back. The array this replaces never gave a run back at all --
 // it kept one per slot forever, which is a leak only because the number of
 // slots stopped being 16.
+//
+// So ONE run can be held with no live process owning it, including at the
+// end of the boot suite -- measured, it is. kernel/init/test_driver.tkb's
+// `resources: pages=0` still means what it says because that is a constant
+// eight pages on both sides of its comparison, not because nothing is
+// held; its own comment says so where the baseline is taken.
 private let mut scheduled_process_spare_stack_run: usize = 0;
 
 // The deepest a REAPED process's kernel stack ever got. The array this

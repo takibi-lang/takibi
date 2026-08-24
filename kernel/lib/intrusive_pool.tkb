@@ -559,14 +559,24 @@ private let mut intrusive_pool_next_tag: usize = 1;
 //   the opposite of what a tag should look like.
 //
 // splitmix64's finaliser: every input bit avalanches, so consecutive
-// counter values land far apart. `| 1` keeps it nonzero, because 0 means
-// "no pool" and a zeroed header must never match.
+// counter values land far apart. It is a BIJECTION on 64 bits, which is
+// what keeps the counter's uniqueness -- distinct pools keep distinct
+// tags, and the mixing buys unpredictability without buying collisions.
+//
+// 0 is the one value that must not be handed out ("no pool", so a zeroed
+// header never matches), and exactly one input maps to it. That input is
+// answered with 1, which is the only collision this introduces: between
+// two specific 64-bit preimages that a counter starting at 1 and stepping
+// by 1 does not reach in any imaginable run. `| 1` was the first draft and
+// is worse -- it folds every tag onto an odd value, halving the space for
+// every pool rather than for one.
 private fn intrusive_pool_mix_tag(value: usize) -> usize {
     let mut x: usize = value ^ 0x9E3779B97F4A7C15;
     x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9;
     x = (x ^ (x >> 27)) * 0x94D049BB133111EB;
     x = x ^ (x >> 31);
-    return x | 1;
+    if (x == 0) { return 1; }
+    return x;
 }
 
 fn intrusive_owner_new(T: type, pool: &mut IntrusivePool(T) @ pool_id,

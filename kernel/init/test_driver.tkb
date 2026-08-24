@@ -627,11 +627,21 @@ let mut kernel_test_init_script: bool;
 
 fn kernel_test_driver_run() {
     kernel_test_common_probes();
-    // Root 0 permanently owns its L1/L2 backing pages, while the process-stack
-    // and growable-pool probes deliberately retain their lazily allocated
-    // backing pages for reuse. Record that stable kernel baseline after those
-    // probes so the final pages=0 verdict means zero transient workload pages,
-    // without reinitializing the allocator and falsely freeing either class.
+    // Root 0 permanently owns its L1/L2 backing pages, and the probes above
+    // leave a kernel stack RUN parked for reuse -- measured: one is still
+    // held here, and one still is at the final check. Record that stable
+    // kernel baseline after those probes so the final pages=0 verdict means
+    // zero transient workload pages, without reinitializing the allocator
+    // and falsely freeing either class.
+    //
+    // GitHub issue #392 changed the mechanism this rests on and the
+    // conclusion survived, which is worth saying because the two look the
+    // same from here. A stack run used to be retained PER SLOT for the life
+    // of the kernel; runs are recycled now through a single parked spare
+    // (scheduled_process_park_stack_run), so what this baseline absorbs is
+    // at most ONE run rather than one per slot. Both are constant between
+    // here and the final check, which is why `pages=0` still means what it
+    // says -- but it does NOT mean nothing is held.
     let page_baseline: usize = page_allocator_live_count();
     kernel_test_platform_network();
     kernel_test_platform_storage();

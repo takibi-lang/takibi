@@ -854,7 +854,11 @@ fn unified_object_ref_bound_breaks_count() -> usize {
 private fn unified_object_ref_bound_break(
         object: {0..<SHARED_OBJECT_MAX as usize}) {
     unified_object_ref_bound_breaks = unified_object_ref_bound_breaks + 1;
-    kernel_boot_log("fd table: INVARIANT BREAK -- a shared object has more references than there are descriptor slots\n");
+    kernel_boot_log("fd table: INVARIANT BREAK -- shared object ");
+    uart_put_udec(object);
+    kernel_boot_log(" has more references than there are descriptor slots (");
+    uart_put_udec(unified_object_ref_bound());
+    kernel_boot_log(")\n");
 }
 
 fn unified_fd_install(process: usize, fd: usize, object_value: usize,
