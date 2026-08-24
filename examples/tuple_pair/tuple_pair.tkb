@@ -31,7 +31,7 @@ fn try_divide(a: i32, b: i32) -> (bool, i32) {
         if (a == builtin::i32_min()) {
             return (false, 0);
         }
-        return (true, 0 - a);
+        return (true, -a);
     }
     return (true, a / b);
 }
