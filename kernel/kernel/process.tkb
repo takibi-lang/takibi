@@ -305,7 +305,26 @@ private let mut scheduled_process_record_missing_count: usize = 0;
 // `resources: pages=0` still means what it says because that is a constant
 // eight pages on both sides of its comparison, not because nothing is
 // held; its own comment says so where the baseline is taken.
-private let mut scheduled_process_spare_stack_run: usize = 0;
+variant SpareStackRunValue {
+    Empty;
+    Held(exists run: usize. PageRunOwner[run]);
+}
+
+struct SpareStackRunCell {
+    private mutex: i32;
+    private value: SpareStackRunValue;
+}
+
+private let mut scheduled_process_spare: SpareStackRunCell;
+private linear view SpareStackRunGuard[lock: addr];
+
+private fn scheduled_process_spare_lock(lock: *i32 @ address)
+        -> SpareStackRunGuard[address] {
+    return view SpareStackRunGuard[address];
+}
+
+private fn scheduled_process_spare_unlock(
+        guard: sink SpareStackRunGuard[address], lock: *i32 @ address) {}
 
 // The deepest a REAPED process's kernel stack ever got. The array this
 // replaces kept every slot's run for the life of the kernel, so the
@@ -887,7 +906,7 @@ private fn scheduled_process_release_slot_resources(slot: usize) !{unsafe} {
 
 // Gives a slot back. The bootstrap's record is a static and is only
 // marked free; a pool record is removed, and its kernel stack run is
-// parked rather than freed (see scheduled_process_spare_stack_run).
+// parked rather than freed (see scheduled_process_spare).
 private fn scheduled_process_slot_remove(slot: usize) !{unsafe} {
     if (slot == 0) {
         scheduled_process_boot_live = false;
@@ -916,31 +935,130 @@ private fn scheduled_process_slot_remove(slot: usize) !{unsafe} {
     }
 }
 
-// Parking, not freeing: see scheduled_process_spare_stack_run's own note
+// Parking, not freeing: see scheduled_process_spare's own note
 // for the measurement that says why. Parking a second run gives the first
 // one back, which is safe because it belonged to a process reaped before
 // this one -- checked anyway, since the cost of being wrong is the
 // allocator handing out memory a live stack is standing on.
 private fn scheduled_process_park_stack_run(base: usize) !{unsafe} {
     if (base == 0) { return; }
-    let previous: usize = scheduled_process_spare_stack_run;
-    scheduled_process_spare_stack_run = base;
-    if (previous == 0 || previous == base) { return; }
-    let sp: usize = kernel_stack_read_sp_el1();
-    if (sp >= previous && sp < previous + KERNEL_STACK_RUN_BYTES) {
-        scheduled_process_spare_stack_run = previous;
-        return;
+    let guard = scheduled_process_spare_lock(
+        &scheduled_process_spare.mutex);
+    let previous: SpareStackRunValue = stable_replace(
+        guard, &scheduled_process_spare.mutex,
+        scheduled_process_spare.value, SpareStackRunValue::Empty);
+    match previous {
+        SpareStackRunValue::Empty => {
+            match page_run_reclaim_transferred_physical(
+                    base, KERNEL_STACK_RUN_PAGES) {
+                PageRunReclaimResult::Invalid => {}
+                PageRunReclaimResult::Reclaimed(incoming) => {
+                    let displaced: SpareStackRunValue = stable_replace(
+                        guard, &scheduled_process_spare.mutex,
+                        scheduled_process_spare.value,
+                        SpareStackRunValue::Held(incoming));
+                    match displaced {
+                        SpareStackRunValue::Empty => {}
+                        SpareStackRunValue::Held(impossible) => {
+                            page_run_free(impossible);
+                        }
+                    }
+                }
+            }
+        }
+        SpareStackRunValue::Held(old) => {
+            let old_base: usize = page_run_physical_address(old);
+            if (old_base == base) {
+                let displaced: SpareStackRunValue = stable_replace(
+                    guard, &scheduled_process_spare.mutex,
+                    scheduled_process_spare.value,
+                    SpareStackRunValue::Held(old));
+                match displaced {
+                    SpareStackRunValue::Empty => {}
+                    SpareStackRunValue::Held(impossible) => {
+                        page_run_free(impossible);
+                    }
+                }
+            } else {
+                let sp: usize = kernel_stack_read_sp_el1();
+                if (sp >= old_base &&
+                    sp < old_base + KERNEL_STACK_RUN_BYTES) {
+                    let displaced: SpareStackRunValue = stable_replace(
+                        guard, &scheduled_process_spare.mutex,
+                        scheduled_process_spare.value,
+                        SpareStackRunValue::Held(old));
+                    match displaced {
+                        SpareStackRunValue::Empty => {}
+                        SpareStackRunValue::Held(impossible) => {
+                            page_run_free(impossible);
+                        }
+                    }
+                    page_run_transferred_release_physical(
+                        base, KERNEL_STACK_RUN_PAGES);
+                } else {
+                    match page_run_reclaim_transferred_physical(
+                            base, KERNEL_STACK_RUN_PAGES) {
+                        PageRunReclaimResult::Invalid => {
+                            page_run_free(old);
+                        }
+                        PageRunReclaimResult::Reclaimed(incoming) => {
+                            let displaced: SpareStackRunValue = stable_replace(
+                                guard, &scheduled_process_spare.mutex,
+                                scheduled_process_spare.value,
+                                SpareStackRunValue::Held(incoming));
+                            match displaced {
+                                SpareStackRunValue::Empty => {}
+                                SpareStackRunValue::Held(impossible) => {
+                                    page_run_free(impossible);
+                                }
+                            }
+                            page_run_free(old);
+                        }
+                    }
+                }
+            }
+        }
     }
-    page_run_transferred_release_physical(previous, KERNEL_STACK_RUN_PAGES);
+    scheduled_process_spare_unlock(
+        guard, &scheduled_process_spare.mutex);
 }
 
 private fn scheduled_process_take_spare_stack_run() -> usize !{unsafe} {
-    let base: usize = scheduled_process_spare_stack_run;
-    if (base == 0) { return 0; }
-    let sp: usize = kernel_stack_read_sp_el1();
-    if (sp >= base && sp < base + KERNEL_STACK_RUN_BYTES) { return 0; }
-    scheduled_process_spare_stack_run = 0;
-    return base;
+    let guard = scheduled_process_spare_lock(
+        &scheduled_process_spare.mutex);
+    let previous: SpareStackRunValue = stable_replace(
+        guard, &scheduled_process_spare.mutex,
+        scheduled_process_spare.value, SpareStackRunValue::Empty);
+    match previous {
+        SpareStackRunValue::Empty => {
+            scheduled_process_spare_unlock(
+                guard, &scheduled_process_spare.mutex);
+            return 0;
+        }
+        SpareStackRunValue::Held(owner) => {
+            let base: usize = page_run_physical_address(owner);
+            let sp: usize = kernel_stack_read_sp_el1();
+            if (sp >= base && sp < base + KERNEL_STACK_RUN_BYTES) {
+                let displaced: SpareStackRunValue = stable_replace(
+                    guard, &scheduled_process_spare.mutex,
+                    scheduled_process_spare.value,
+                    SpareStackRunValue::Held(owner));
+                match displaced {
+                    SpareStackRunValue::Empty => {}
+                    SpareStackRunValue::Held(impossible) => {
+                        page_run_free(impossible);
+                    }
+                }
+                scheduled_process_spare_unlock(
+                    guard, &scheduled_process_spare.mutex);
+                return 0;
+            }
+            let index = page_run_owner_transfer_index(owner);
+            scheduled_process_spare_unlock(
+                guard, &scheduled_process_spare.mutex);
+            return usable_ram_start + index * PAGE_SIZE;
+        }
+    }
 }
 
 fn scheduled_process_table_clear() !{unsafe} {
@@ -2215,10 +2333,35 @@ private fn kernel_stack_owner_name(sp: usize) -> *u8 {
     }
     // A run parked by a reaped process is still this kernel's memory, and
     // an SP inside one is still worth naming rather than calling unknown.
-    let spare: usize = scheduled_process_spare_stack_run;
-    if (spare != 0 && sp >= spare && sp < spare + KERNEL_STACK_RUN_BYTES) {
-        return "below a reaped process kernel stack" as *u8;
+    let spare_guard = scheduled_process_spare_lock(
+        &scheduled_process_spare.mutex);
+    let spare_value: SpareStackRunValue = stable_replace(
+        spare_guard, &scheduled_process_spare.mutex,
+        scheduled_process_spare.value, SpareStackRunValue::Empty);
+    match spare_value {
+        SpareStackRunValue::Empty => {}
+        SpareStackRunValue::Held(spare_owner) => {
+            let spare: usize = page_run_physical_address(spare_owner);
+            let displaced: SpareStackRunValue = stable_replace(
+                spare_guard, &scheduled_process_spare.mutex,
+                scheduled_process_spare.value,
+                SpareStackRunValue::Held(spare_owner));
+            match displaced {
+                SpareStackRunValue::Empty => {}
+                SpareStackRunValue::Held(impossible) => {
+                    page_run_free(impossible);
+                }
+            }
+            scheduled_process_spare_unlock(
+                spare_guard, &scheduled_process_spare.mutex);
+            if (sp >= spare && sp < spare + KERNEL_STACK_RUN_BYTES) {
+                return "below a reaped process kernel stack" as *u8;
+            }
+            return page_owner_description(sp);
+        }
     }
+    scheduled_process_spare_unlock(
+        spare_guard, &scheduled_process_spare.mutex);
     // Not a stack this file knows about. The page allocator may still
     // know what it is, and on this path that answer is worth more than
     // "unknown" -- an SP that landed in a page table or a pool chunk is a

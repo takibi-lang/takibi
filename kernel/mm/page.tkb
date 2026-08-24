@@ -200,6 +200,15 @@ must_use variant PageRunAllocResult {
     Allocated(exists run: usize. PageRunOwner[run]);
 }
 
+// Reconstituting an owner after a deliberate transfer-to-address boundary is
+// unsafe: the caller, not the type system, proves that the address still names
+// one live run of this size and that no other owner exists.  Keep the address
+// validation fallible even at that trust boundary.
+must_use variant PageRunReclaimResult {
+    Invalid;
+    Reclaimed(exists run: usize. PageRunOwner[run]);
+}
+
 fn page_run_owner_new(first: {0..<BOOT_PAGE_COUNT as usize}, count: usize,
                       generation: usize @ run) -> PageRunOwner[run] {
     let mut owner: PageRunOwner[run] = { first, count, generation };
@@ -328,6 +337,24 @@ fn page_run_transferred_release_physical(physical: usize, count: usize)
     if (index >= BOOT_PAGE_COUNT) { return; }
     let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
     page_run_release_indices(checked, count);
+}
+
+fn page_run_reclaim_transferred_physical(physical: usize, count: usize)
+        -> PageRunReclaimResult !{unsafe} {
+    let base: usize = usable_ram_start;
+    let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
+    if (physical < base || physical >= base + pool_bytes ||
+        (physical - base) % PAGE_SIZE != 0) {
+        return PageRunReclaimResult::Invalid;
+    }
+    let index: usize = (physical - base) / PAGE_SIZE;
+    if (index >= BOOT_PAGE_COUNT || count == 0 ||
+        count > BOOT_PAGE_COUNT - index) {
+        return PageRunReclaimResult::Invalid;
+    }
+    let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+    return PageRunReclaimResult::Reclaimed(
+        page_run_owner_new(checked, count, 0));
 }
 
 private fn page_run_release_indices(first: usize, count: usize) !{unsafe} {

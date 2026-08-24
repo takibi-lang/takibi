@@ -7221,6 +7221,41 @@ let infer_tests = [
           stable_unlock7e(guard, &stable_slot7e.mutex);
         }");
 
+  Alcotest.test_case
+    "stable owner slot: displaced page run cannot be dropped on an early return"
+    `Quick
+    (expect_type_error "still pending at this return"
+       "linear view SpareRunGuard7el[lock: addr];
+        linear struct PageRunOwner7el[run: usize] {
+          id: usize @ run;
+        }
+        variant SpareRunValue7el {
+          Empty;
+          Held(exists run: usize. PageRunOwner7el[run]);
+        }
+        struct SpareRunCell7el {
+          private mutex: i32;
+          private value: SpareRunValue7el;
+        }
+        private let mut spare_run_cell7el: SpareRunCell7el;
+        fn spare_run_lock7el(m: *i32 @ lock) -> SpareRunGuard7el[lock] {
+          return view SpareRunGuard7el[lock];
+        }
+        fn spare_run_unlock7el(g: sink SpareRunGuard7el[lock],
+                               m: *i32 @ lock) {}
+        fn spare_run_drop7el(owner: sink PageRunOwner7el[run]) {}
+        fn spare_run_bad_park7el() {
+          let guard = spare_run_lock7el(&spare_run_cell7el.mutex);
+          let previous: SpareRunValue7el = stable_replace(
+            guard, &spare_run_cell7el.mutex, spare_run_cell7el.value,
+            SpareRunValue7el::Empty);
+          match previous {
+            SpareRunValue7el::Empty => {}
+            SpareRunValue7el::Held(displaced) => { return; }
+          }
+          spare_run_unlock7el(guard, &spare_run_cell7el.mutex);
+        }");
+
   Alcotest.test_case "stable_replace rejects a guard for another mutex" `Quick
     (expect_type_error "stable_replace mutex does not match guard identity"
        "linear view StableGuard7ea[lock: addr];
