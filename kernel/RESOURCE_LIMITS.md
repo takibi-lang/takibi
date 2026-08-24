@@ -27,7 +27,9 @@ the Constant column is one of three things: a per-process limit the process
 itself can change (`RLIMIT_NOFILE`), a bound DERIVED from something that
 exists (memory, descriptor slots, address spaces), or `BOOT_PAGE_COUNT` --
 which is not a ceiling on a pool but this kernel's inventory of the RAM it
-manages, and belongs to issue #250 rather than to this line of work.
+manages. Issue #422 owns making that number the RAM that is actually
+there; #250 (decode the true installed total on RPi5) and #252 (let a
+refinement bound be fixed once at boot) are what it rests on.
 
 | Resource | Constant | Value | Scope | Alloc / release | Exhaustion result |
 |---|---|---|---|---|---|

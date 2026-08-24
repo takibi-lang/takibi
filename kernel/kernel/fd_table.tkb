@@ -572,18 +572,13 @@ private fn unified_object_retain(handle: UnifiedObjectHandle, limit: usize)
 // unified_fd_table_probe asserts the count is 0 at the end of a run.
 private let mut object_double_release_count: usize = 0;
 
-// GitHub issue #414: the two pools this file owns, for the boot suite's
-// end-of-run baseline comparison. See scheduled_process_pool_live_count.
+// GitHub issue #414: for the boot suite's end-of-run baseline comparison.
+// See scheduled_process_pool_live_count. Only the fd CONTEXT pool has one:
+// the shared-object and descriptor-block pools are read through
+// intrusive_pool_live_count where they are needed, and neither is part of
+// the acquisition chain that baseline is about.
 fn unified_fd_context_live_count() -> usize !{unsafe} {
     return intrusive_pool_live_count(&fd_context_pool);
-}
-
-fn unified_object_live_count() -> usize !{unsafe} {
-    return intrusive_pool_live_count(&object_pool);
-}
-
-fn unified_fd_block_live_count() -> usize !{unsafe} {
-    return intrusive_pool_live_count(&fd_block_pool);
 }
 
 fn unified_object_double_release_count() -> usize {

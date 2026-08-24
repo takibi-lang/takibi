@@ -15,6 +15,69 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-24: The Rollback Chain Ran For The First Time, And Found Two Things (GitHub Issue #414)
+
+`scheduled_process_alloc` acquires five things and unwinds them in order on
+any failure. The arrays those replaced could not fail, so the whole chain
+was a failure mode the pooling introduced and nothing had ever executed --
+`RESOURCE_LIMITS.md` said so in a "Not covered" paragraph.
+`make kernelcheck-alloc-rollback-qemu` executes it: GDB empties the page
+allocator's free-list head for the duration of ONE acquisition and restores
+it at the exhaustion log call the failing arm makes before it rolls back,
+so one allocation fails and the rest of the boot runs against a healthy
+allocator.
+
+**Building the oracle mattered more than building the injection.**
+`resources: pages=0` cannot see a leaked pooled RECORD, because a pool keeps
+its chunk page whether or not the record inside it came back. So the boot
+suite now compares the pools a process acquisition touches against a
+baseline and reports positively.
+
+**That counter found a leak on its first run.** The address-space BACKING
+record was never released at all -- "Nothing releases", `address_space.tkb`
+said, inherited from the array it replaced in #392. One record per process
+ever created, unreachable the moment the `ProcessRecord` naming it was
+recycled: 17 outstanding in a single QEMU boot, invisible to every existing
+check.
+
+**And fixing the leak exposed a probe that had been living off it.**
+`page_mapping_ref_ceiling_probe` needs two live address spaces to have a
+below-the-ceiling case at all; it was reading 35 where the true number was
+1. It acquires what it needs now. This is the "unstated second reader"
+shape again, with a twist worth noting: the second reader was consuming a
+BUG, so fixing the bug is what broke it.
+
+**Two lessons about the lane itself, both found by deliberately deleting a
+rollback step and watching the lane still pass.**
+
+1. *A baseline has to precede the thing it measures.* The injection armed
+   at the first process creation of the boot, which happens before the
+   suite's baseline -- so the leak landed in the baseline and the
+   comparison could never see it. The pooled-record baseline moved ahead of
+   the probes for that reason (the page baseline cannot move: it has to
+   absorb the parked stack run the probes leave behind).
+2. *The victim has to be something the run survives.* Refusing ash's first
+   fork ends the init script, and a run that stops has no accounting to
+   check. The lane arms on the probe section, which logs
+   `process table: failed` and carries on.
+
+With the address-space release deleted the lane now fails with `root=2/1`,
+naming the pool that leaked; with it restored, it passes.
+
+**A postscript that cost a full `allcheck` run.** The new lane took ports
+18683-18686, which are `kernelcheck-qemu-debug`'s -- set not in any script
+but in the Makefile recipe as `env KERNEL_QEMU_SERIAL_PORT=18683 ...`. The
+comment the lane inherited listed only script defaults, so checking it was
+checking half the map. `scripts/qemu_port_guard.py` (#407) could not catch
+it either: it compares one lane's claims against what is bound right now,
+so two lanes overlapping on tcp here and udp there each pass it alone.
+`scripts/check_qemu_lane_ports.py` now cross-checks the claims themselves --
+each lane's own guard invocation, resolved through its variable defaults and
+the Makefile's overrides -- and fails the build on a duplicate. **A new lane
+should pick from 18678 or 18689+ and run `make langcheck`.**
+
+---
+
 ### 2026-08-24: The Last Three Hand-Picked Resource Ceilings Went (GitHub Issues #391, #393, #402)
 
 `kernel/RESOURCE_LIMITS.md` had three constants left that bounded a real
