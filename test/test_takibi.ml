@@ -2297,6 +2297,22 @@ let infer_tests = [
       Alcotest.(check int) "future write prevents continuation proof" 0
         (Hashtbl.length Type_inf.divisor_proven_nonzero_at));
 
+  Alcotest.test_case "branch facts retain bounded nonzero constant exclusions" `Quick
+    (fun () ->
+      ignore (infer
+        "fn excluded_minus_one(n: i32, d: i32) -> i32 {
+           if (d == -1) { return 0; }
+           return n / d;
+         }");
+      let division = List.find (fun site ->
+        site.Type_inf.overflow_op = Ast.Div)
+        (Type_inf.overflow_audit_sites ()) in
+      let minus_one = Value_facts.negative 1L in
+      Alcotest.(check bool) "fallthrough excludes minus one" true
+        (match division.Type_inf.overflow_rhs_facts with
+         | Some facts -> Value_facts.excludes facts minus_one
+         | None -> false));
+
   Alcotest.test_case "cast divisor facts reflect truncation before nonzero" `Quick
     (fun () ->
       ignore (infer

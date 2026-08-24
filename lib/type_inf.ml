@@ -2,6 +2,7 @@ open Types
 
 module StringSet = Set.Make (String)
 module IntSet = Set.Make (Int)
+module IntMap = Map.Make (Int)
 
 (* GitHub issue #310: used to scope guard_narrow_hints' own append to
    error messages that actually name the "unproven" failure shape,
@@ -79,7 +80,8 @@ let array_index_proven_in_bounds_at : (Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
 let refined_cast_proven_in_bounds_at : (Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
-let active_nonzero_bindings = ref IntSet.empty
+let active_binding_exclusions : Value_facts.integer list IntMap.t ref =
+  ref IntMap.empty
 let active_parameter_bindings = ref IntSet.empty
 let binding_fact_sources : (Local_bindings.id, Ast.expr * ty) Hashtbl.t =
   Hashtbl.create 64
@@ -192,7 +194,7 @@ let type_checker_consumed_unsafe_at : (Lexing.position, unit) Hashtbl.t =
    state. *)
 let fold_stmts_with_future_writes
     (f : 'a -> Ast.stmt -> 'a) (init : 'a) (stmts : Ast.stmt list) : 'a =
-  let saved_nonzero = !active_nonzero_bindings in
+  let saved_exclusions = !active_binding_exclusions in
   let rec go acc = function
     | [] -> acc
     | s :: rest ->
@@ -218,7 +220,7 @@ let fold_stmts_with_future_writes
         go acc' rest
   in
   Fun.protect
-    ~finally:(fun () -> active_nonzero_bindings := saved_nonzero)
+    ~finally:(fun () -> active_binding_exclusions := saved_exclusions)
     (fun () -> go init stmts)
 
 let view_kinds : (string, Ast.opaque_kind) Hashtbl.t = Hashtbl.create 8
@@ -952,14 +954,17 @@ let rec value_facts_of_expr ty (expr : Ast.expr) =
                      (match Hashtbl.find_opt binding_fact_sources id with
                       | Some (source, source_ty) ->
                           Option.map (fun facts ->
-                            if IntSet.mem id !active_nonzero_bindings
-                            then prove_nonzero facts else facts)
+                            match IntMap.find_opt id !active_binding_exclusions with
+                            | Some excluded ->
+                                List.fold_left add_exclusion facts excluded
+                            | None -> facts)
                             (value_facts_of_expr source_ty source)
                       | None ->
                           let facts = unknown base in
-                          if IntSet.mem id !active_nonzero_bindings
-                          then Some (prove_nonzero facts)
-                          else Some facts)
+                          (match IntMap.find_opt id !active_binding_exclusions with
+                           | Some excluded ->
+                               Some (List.fold_left add_exclusion facts excluded)
+                           | None -> Some facts))
                  | None ->
                      (match Const_env.folded_value expr with
                       | Some value ->
@@ -1018,57 +1023,84 @@ let record_refined_cast_proof lo hi source_ty target_base
         Hashtbl.replace refined_cast_proven_in_bounds_at cast_loc ()
   | None -> ()
 
-let collect_nonzero_cond (cond : Ast.expr) =
-  let zero expr = Const_env.folded_value expr = Some 0 in
+let collect_excluded_cond (cond : Ast.expr) =
+  let constant expr =
+    Option.map (fun value ->
+      Value_facts.of_signed_int64 (Int64.of_int value))
+      (Const_env.folded_value expr)
+  in
   let binding_id expr = match !active_local_bindings with
     | Some bindings -> Local_bindings.id_for_expr bindings expr
     | None -> None
   in
+  let singleton var name value = match binding_id var with
+    | Some id -> IntMap.singleton id (name, [value])
+    | None -> IntMap.empty
+  in
   let direct op (left : Ast.expr) (right : Ast.expr) =
     match left.desc, right.desc with
-    | Ast.Var name, _ when zero right
-        && (op = Ast.Ne || op = Ast.Gt || op = Ast.Lt) ->
-        (match binding_id left with
-         | Some id -> IntSet.singleton id, [(id, name)]
-         | None -> IntSet.empty, [])
-    | _, Ast.Var name when zero left
-        && (op = Ast.Ne || op = Ast.Gt || op = Ast.Lt) ->
-        (match binding_id right with
-         | Some id -> IntSet.singleton id, [(id, name)]
-         | None -> IntSet.empty, [])
-    | _ -> IntSet.empty, []
+    | Ast.Var name, _ ->
+        (match constant right with
+         | Some value when op = Ast.Ne -> singleton left name value
+         | Some value when (op = Ast.Gt || op = Ast.Lt)
+                           && Value_facts.equal_integer value Value_facts.zero ->
+             singleton left name value
+         | _ -> IntMap.empty)
+    | _, Ast.Var name ->
+        (match constant left with
+         | Some value when op = Ast.Ne -> singleton right name value
+         | Some value when (op = Ast.Gt || op = Ast.Lt)
+                           && Value_facts.equal_integer value Value_facts.zero ->
+             singleton right name value
+         | _ -> IntMap.empty)
+    | _ -> IntMap.empty
+  in
+  let union_values left right =
+    List.fold_left (fun values value ->
+      if List.exists (Value_facts.equal_integer value) values
+      then values else value :: values) left right
+  in
+  let union_maps left right = IntMap.union (fun _ (name, a) (_, b) ->
+    Some (name, union_values a b)) left right
+  in
+  let intersect_maps left right = IntMap.merge (fun _ a b ->
+    match a, b with
+    | Some (name, xs), Some (_, ys) ->
+        let shared = List.filter (fun x ->
+          List.exists (Value_facts.equal_integer x) ys) xs in
+        if shared = [] then None else Some (name, shared)
+    | _ -> None) left right
   in
   let rec go (expr : Ast.expr) = match expr.desc with
     | Ast.BinOp (Ast.And, a, b) ->
-        let sa, na = go a and sb, nb = go b in
-        IntSet.union sa sb, na @ nb
+        union_maps (go a) (go b)
     | Ast.BinOp (Ast.Or, a, b) ->
-        let sa, na = go a and sb, nb = go b in
-        let shared = IntSet.inter sa sb in
-        shared, List.filter (fun (id, _) -> IntSet.mem id shared) (na @ nb)
+        intersect_maps (go a) (go b)
     | Ast.BinOp ((Ast.Ne | Ast.Gt | Ast.Lt) as op, a, b) -> direct op a b
-    | _ -> IntSet.empty, []
+    | _ -> IntMap.empty
   in
   go cond
 
-let nonzero_additions tyenv cond killed =
-  let ids, names = collect_nonzero_cond cond in
-  IntSet.filter (fun id ->
-    match List.assoc_opt id names with
-    | Some name ->
-        not (List.mem name killed)
-        && (match StringMap.find_opt name tyenv with
-            | Some (_, false) -> true
-            | Some (_, true) -> IntSet.mem id !active_parameter_bindings
-            | None -> false)
-    | None -> false
-  ) ids
+let exclusion_additions tyenv cond killed =
+  collect_excluded_cond cond |> IntMap.filter (fun id (name, _) ->
+    not (List.mem name killed)
+    && (match StringMap.find_opt name tyenv with
+        | Some (_, false) -> true
+        | Some (_, true) -> IntSet.mem id !active_parameter_bindings
+        | None -> false))
 
-let with_nonzero_narrowing tyenv cond killed f =
-  let additions = nonzero_additions tyenv cond killed in
-  let saved = !active_nonzero_bindings in
-  active_nonzero_bindings := IntSet.union saved additions;
-  Fun.protect ~finally:(fun () -> active_nonzero_bindings := saved) f
+let merge_exclusions old added =
+  List.fold_left (fun values value ->
+    if List.exists (Value_facts.equal_integer value) values
+       || List.length values >= Value_facts.max_excluded_values
+    then values else value :: values) old added
+
+let with_exclusion_narrowing tyenv cond killed f =
+  let additions = exclusion_additions tyenv cond killed |> IntMap.map snd in
+  let saved = !active_binding_exclusions in
+  active_binding_exclusions := IntMap.union (fun _ old added ->
+    Some (merge_exclusions old added)) saved additions;
+  Fun.protect ~finally:(fun () -> active_binding_exclusions := saved) f
 
 (* Is this expression built up entirely from compile-time integer
    LITERALS or a real object's address (`IntLit`, `&x`, casts of a
@@ -4643,7 +4675,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          instead of this If's own position in ITS enclosing list. *)
       let future_writes_here = !enclosing_future_writes in
       let then_tyenv = narrow_from_cond senv tyenv cond then_s in
-      let (_, rl1) = with_nonzero_narrowing tyenv cond
+      let (_, rl1) = with_exclusion_narrowing tyenv cond
         (Ast.written_names then_s) (fun () ->
           fold_stmts_with_future_writes
             (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
@@ -4725,8 +4757,10 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         | Some neg ->
             let killed = Ast.written_names else_s
               @ StringSet.elements future_writes_here in
-            active_nonzero_bindings := IntSet.union !active_nonzero_bindings
-              (nonzero_additions tyenv neg killed)
+            let additions = exclusion_additions tyenv neg killed |> IntMap.map snd in
+            active_binding_exclusions := IntMap.union (fun _ old added ->
+              Some (merge_exclusions old added))
+              !active_binding_exclusions additions
         | None -> ());
       (continuation_tyenv, rl2)
   | While (cond, body) ->
@@ -4757,7 +4791,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          regression risk (proving more here without codegen eliding the
          matching check). *)
       let narrowed_tyenv = narrow_from_cond senv tyenv cond body in
-      let (_, raw_locals') = with_nonzero_narrowing tyenv cond
+      let (_, raw_locals') = with_exclusion_narrowing tyenv cond
         (Ast.written_names body) (fun () ->
           fold_stmts_with_future_writes
             (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
@@ -5323,7 +5357,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
        function's own parameter names -- see locally_bound_names' own
        comment. *)
     locally_bound_names := StringSet.empty;
-    active_nonzero_bindings := IntSet.empty;
+    active_binding_exclusions := IntMap.empty;
     List.iter (fun (name, _) ->
       locally_bound_names := StringSet.add name !locally_bound_names
     ) fdef.params;
@@ -5393,7 +5427,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset refined_cast_proven_in_bounds_at;
   Hashtbl.reset binding_fact_sources;
   Hashtbl.reset intrinsic_nonzero_at;
-  active_nonzero_bindings := IntSet.empty;
+  active_binding_exclusions := IntMap.empty;
   active_parameter_bindings := IntSet.empty;
   enclosing_future_writes := StringSet.empty;  (* fresh per compilation / per unit test *)
   resolved_call_targets := StringMap.empty;
