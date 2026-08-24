@@ -2415,7 +2415,12 @@ it is a linear struct rather than an erased view.
   **only** when `n`'s own lower bound is already known non-negative
   (otherwise stays unrefined -- LLVM's `srem` can return a negative
   remainder for a negative dividend, so this guard is a soundness
-  requirement, not just precision).
+  requirement, not just precision). Division and remainder reject a
+  literal or `const` zero divisor at compile time. An unknown runtime
+  divisor gets a zero trap guard; `--forbid-trap` therefore requires a
+  nonzero proof. A refined interval wholly above or below zero, a nonzero
+  constant, `sizeof(T)`/`alignof(T)`, and facts established by conditions
+  such as `if (d != 0)` or an early-return zero guard provide that proof.
 - **`min(a, b)` / `max(a, b)`** (see "Expressions" above) provide
   compile-time-provable clamping against a literal, independent of the
   other operand's own range.
@@ -2773,7 +2778,7 @@ justification for it.
 
 `takibi ... --forbid-trap` rejects compilation if **any** runtime trap
 check remains anywhere in the generated code (array bounds checks,
-checked refined casts, exhaustive-enum casts), listing every unproven
+division/remainder zero checks, checked refined casts, exhaustive-enum casts), listing every unproven
 site with its source location. Without the flag, the same code compiles
 fine and gets a runtime check (`llvm.trap` on violation) -- the intended
 permissive mode for early driver bring-up, where a trap firing is a

@@ -388,6 +388,7 @@ fn ext2_lookup_path(mount: Ext2Mount, name: []u8)
 fn ext2_inode_block_pointer(mount: Ext2Mount, inode: Ext2Inode,
                             index: usize) -> usize {
     let pointers: usize = ext2_pointer_count();
+    if (pointers == 0) { return 0; }
     if (index >= EXT2_MAX_DIRECT_BLOCKS + pointers + pointers * pointers) {
         return 0;
     }

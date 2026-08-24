@@ -1840,6 +1840,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Div ->
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
            unify_at e.loc ct1 ct2;
+           (match intlit_opt e2 with
+            | Some 0 ->
+                raise (TypeError (e2.loc, "division by zero"))
+            | _ -> ());
            (match Const_env.folded_value e with
             | Some k -> TRefinedInt (k, k + 1, ct1)
             | None -> ct1)
@@ -1854,6 +1858,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Mod ->
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
            unify_at e.loc ct1 ct2;
+           (match intlit_opt e2 with
+            | Some 0 ->
+                raise (TypeError (e2.loc, "remainder by zero"))
+            | _ -> ());
            (match intlit_opt e2 with
             | Some m when m > 0 ->
                 (match repr t1 with

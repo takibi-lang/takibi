@@ -23,10 +23,12 @@ fn task_finish() {
 
 fn scheduler_run() {
     while (sched.active > 0) {
+        let task_count: isize = sched.task_count;
+        if (task_count == 0) { return; }
         let t: *fn() -> void = sched.tasks;
         let f: fn() -> void = t[sched.cur];
         f();
-        sched.cur = (sched.cur + 1) % sched.task_count;
+        sched.cur = (sched.cur + 1) % task_count;
     }
 }
 

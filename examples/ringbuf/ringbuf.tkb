@@ -20,16 +20,20 @@ struct RingBuf {
 }
 
 fn rb_push(rb: *RingBuf, val: i32) {
+    let cap: isize = rb.cap;
+    if (cap == 0) { return; }
     let buf: *i32 = rb.buf;
     buf[rb.tail] = val;
-    rb.tail = (rb.tail + 1) % rb.cap;
+    rb.tail = (rb.tail + 1) % cap;
     rb.size = rb.size + 1;
 }
 
 fn rb_pop(rb: *RingBuf) -> i32 {
+    let cap: isize = rb.cap;
+    if (cap == 0) { return 0; }
     let buf: *i32 = rb.buf;
     let val: i32 = buf[rb.head];
-    rb.head = (rb.head + 1) % rb.cap;
+    rb.head = (rb.head + 1) % cap;
     rb.size = rb.size - 1;
     return val;
 }

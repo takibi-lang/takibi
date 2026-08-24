@@ -33,5 +33,7 @@ fn rtc_is_running() -> bool {
 }
 
 fn rtc_read_seconds() -> i32 {
-    return (read_cntpct() / read_cntfrq()) as i32;
+    let frequency: i64 = read_cntfrq();
+    if (frequency == 0) { return 0; }
+    return (read_cntpct() / frequency) as i32;
 }

@@ -32,26 +32,30 @@ struct MsgQueue {
 let mut mq: MsgQueue = {1, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, 0, 0, 4};
 
 fn mq_send(val: i32) {
+    let cap: isize = mq.cap;
+    if (cap == 0) { return; }
     let mut g = mutex_lock(&mq.mutex);
     while (mq.count >= mq.cap) {
         g = cond_wait(&mq.not_full, g, &mq.mutex);
     }
     let buf: *i32 = mq.buf;
     buf[mq.tail] = val;
-    mq.tail  = (mq.tail  + 1) % mq.cap;
+    mq.tail  = (mq.tail  + 1) % cap;
     mq.count = mq.count + 1;
     cond_signal(&mq.not_empty);
     mutex_unlock(g, &mq.mutex);
 }
 
 fn mq_recv() -> i32 {
+    let cap: isize = mq.cap;
+    if (cap == 0) { return 0; }
     let mut g = mutex_lock(&mq.mutex);
     while (mq.count == 0) {
         g = cond_wait(&mq.not_empty, g, &mq.mutex);
     }
     let buf: *i32 = mq.buf;
     let val: i32 = buf[mq.head];
-    mq.head  = (mq.head  + 1) % mq.cap;
+    mq.head  = (mq.head  + 1) % cap;
     mq.count = mq.count - 1;
     cond_signal(&mq.not_full);
     mutex_unlock(g, &mq.mutex);
@@ -64,9 +68,14 @@ fn irq_dispatch(frame_sp: usize) -> usize {
     let id: u32 = *gic_cpu_iar;
     if (id == 30) {
         scheduler_rearm_tick();
+        let task_count: isize = sched.task_count;
+        if (task_count == 0) {
+            *(gic_cpu_eoir) = id;
+            return frame_sp;
+        }
         let sp: *usize = sched.tcb_sp;
         sp[sched.current_task] = frame_sp;
-        sched.current_task = (sched.current_task + 1) % sched.task_count;
+        sched.current_task = (sched.current_task + 1) % task_count;
         *(gic_cpu_eoir) = id;
         let sp2: *usize = sched.tcb_sp;
         return sp2[sched.current_task];
@@ -81,9 +90,11 @@ fn irq_dispatch(frame_sp: usize) -> usize {
 fn rpi3_irq_dispatch(frame_sp: usize) -> usize {
     if (rpi3_timer_irq_pending()) {
         scheduler_rearm_tick();
+        let task_count: isize = sched.task_count;
+        if (task_count == 0) { return frame_sp; }
         let sp: *usize = sched.tcb_sp;
         sp[sched.current_task] = frame_sp;
-        sched.current_task = (sched.current_task + 1) % sched.task_count;
+        sched.current_task = (sched.current_task + 1) % task_count;
         let sp2: *usize = sched.tcb_sp;
         return sp2[sched.current_task];
     }
@@ -95,9 +106,11 @@ fn SysTick_Handler() {
 }
 
 fn pendsv_dispatch(frame_sp: usize) -> usize {
+    let task_count: isize = sched.task_count;
+    if (task_count == 0) { return frame_sp; }
     let sp: *usize = sched.tcb_sp;
     sp[sched.current_task] = frame_sp;
-    sched.current_task = (sched.current_task + 1) % sched.task_count;
+    sched.current_task = (sched.current_task + 1) % task_count;
     let sp2: *usize = sched.tcb_sp;
     return sp2[sched.current_task];
 }

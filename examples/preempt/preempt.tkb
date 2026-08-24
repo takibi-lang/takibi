@@ -59,6 +59,8 @@ let mut stack_b: [u8; 4096];
 // `make qemutest`).
 fn scheduler_tick(frame_sp: usize) -> usize {
     scheduler_rearm_tick();
+    let task_count: isize = sched.task_count;
+    if (task_count == 0) { return frame_sp; }
     sched.total_ticks = sched.total_ticks + 1;
     let tc: *i32 = sched.tick_counts;
     tc[sched.current_task] = tc[sched.current_task] + 1;
@@ -68,7 +70,7 @@ fn scheduler_tick(frame_sp: usize) -> usize {
         scheduler_disable();
         sched.done = 1;
     }
-    sched.current_task = (sched.current_task + 1) % sched.task_count;
+    sched.current_task = (sched.current_task + 1) % task_count;
     let sp2: *usize = sched.tcb_sp;
     return sp2[sched.current_task];
 }
@@ -109,9 +111,11 @@ fn SysTick_Handler() {
 }
 
 fn pendsv_dispatch(frame_sp: usize) -> usize {
+    let task_count: isize = sched.task_count;
+    if (task_count == 0) { return frame_sp; }
     let sp: *usize = sched.tcb_sp;
     sp[sched.current_task] = frame_sp;
-    sched.current_task = (sched.current_task + 1) % sched.task_count;
+    sched.current_task = (sched.current_task + 1) % task_count;
     let sp2: *usize = sched.tcb_sp;
     return sp2[sched.current_task];
 }

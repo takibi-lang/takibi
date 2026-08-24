@@ -9802,6 +9802,60 @@ let codegen_tests = [
 
   (* -- --forbid-trap accounting (Llvm_gen.trap_sites) -------------------- *)
 
+  Alcotest.test_case "division and remainder by constant zero are type errors" `Quick
+    (fun () ->
+      expect_type_error "division by zero"
+        "fn div_zero65(x: i32) -> i32 { return x / 0; }" ();
+      expect_type_error "remainder by zero"
+        "const ZERO65: i32 = 0;
+         fn rem_zero65(x: i32) -> i32 { return x % ZERO65; }" ());
+
+  Alcotest.test_case "runtime divisor emits one trap guard" `Quick
+    (expect_trap_sites 1
+       "fn checked_div65(x: i32, divisor: i32) -> i32 {
+          return x / divisor;
+        }");
+
+  Alcotest.test_case "runtime remainder divisor emits one trap guard" `Quick
+    (expect_trap_sites 1
+       "fn checked_rem65(x: usize, divisor: usize) -> usize {
+          return x % divisor;
+        }");
+
+  Alcotest.test_case "constant nonzero divisors need no trap guard" `Quick
+    (expect_trap_sites 0
+       "const DIVISOR65: i32 = 3;
+        fn constant_div65(x: i32) -> i32 {
+          return (x / DIVISOR65) + (x % DIVISOR65);
+        }");
+
+  Alcotest.test_case "sizeof and alignof divisors need no trap guard" `Quick
+    (expect_trap_sites 0
+       "struct Sized65 { value: i64; }
+        fn layout_div65(x: usize) -> usize {
+          return (x / sizeof(Sized65)) + (x % alignof(Sized65));
+        }");
+
+  Alcotest.test_case "positive refined and negative constant divisors prove nonzero" `Quick
+    (expect_trap_sites 0
+       "fn refined_div65(x: i32, positive: {1..<8 as i32}) -> i32 {
+          return (x / positive) + (x % (0 - 3));
+        }");
+
+  Alcotest.test_case "if narrowing can prove a positive divisor" `Quick
+    (expect_trap_sites 0
+       "fn narrowed_div65(x: i32, divisor: i32) -> i32 {
+          if (divisor > 0) { return x / divisor; }
+          return 0;
+        }");
+
+  Alcotest.test_case "early-return zero guard proves a divisor nonzero" `Quick
+    (expect_trap_sites 0
+       "fn guarded_div65(x: i32, divisor: i32) -> i32 {
+          if (divisor == 0) { return 0; }
+          return x / divisor;
+        }");
+
   Alcotest.test_case
     "unproven i32 array index is a compile error: array/slice indices must \
      be usize now (see require_usize_index), not just any integer type" `Quick

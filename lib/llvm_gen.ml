@@ -851,6 +851,7 @@ let local_mem locals name = Hashtbl.mem locals.visible name
    for --forbid-trap soundness reporting), not a full replacement of this
    mechanism. *)
 let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
+let nonzero_ctx : (string, unit) Hashtbl.t = Hashtbl.create 4
 
 (* GitHub issue #296 codegen sync: type_inf.ml's own enclosing_future_writes
    (see that ref's comment) has an exact mirror here, discovered missing
@@ -887,6 +888,7 @@ let enclosing_future_slice_rebinds : string list ref = ref []
    reconstruct explicitly. The `If` case is the only thing that ever
    pushes onto these; every other statement kind leaves both alone. *)
 let pending_fallthrough_narrowing_ctx : (string * Ast.type_expr option) list ref = ref []
+let pending_fallthrough_nonzero_ctx : (string * bool) list ref = ref []
 let pending_fallthrough_locals : (string * local_binding) list ref = ref []
 let pending_fallthrough_slice_endpoints : (string * string option) list ref = ref []
 
@@ -1159,6 +1161,43 @@ let restore_narrowing_mut saved =
     match old_opt with
     | None     -> Hashtbl.remove narrowing_ctx name
     | Some old -> Hashtbl.replace narrowing_ctx name old
+  ) saved
+
+(* A nonzero proof is deliberately separate from interval narrowing: signed
+   `x != 0` is the disjoint set (-inf,0) U (0,+inf), which one interval cannot
+   represent. Facts compose through && and survive || only when both arms
+   prove the same name. *)
+let collect_nonzero_cond (cond : Ast.expr) =
+  let module S = Set.Make(String) in
+  let zero e = Const_env.folded_value e = Some 0 in
+  let direct op left right = match left.desc, right.desc with
+    | Var name, _ when zero right && (op = Ne || op = Gt || op = Lt) ->
+        S.singleton name
+    | _, Var name when zero left && (op = Ne || op = Gt || op = Lt) ->
+        S.singleton name
+    | _ -> S.empty
+  in
+  let rec go e = match e.desc with
+    | BinOp (And, a, b) -> S.union (go a) (go b)
+    | BinOp (Or, a, b) -> S.inter (go a) (go b)
+    | BinOp ((Ne | Gt | Lt) as op, a, b) -> direct op a b
+    | _ -> S.empty
+  in
+  S.elements (go cond)
+
+let apply_nonzero_narrowing cond killed =
+  List.fold_left (fun saved name ->
+    if List.mem name killed then saved
+    else
+      let old = Hashtbl.mem nonzero_ctx name in
+      Hashtbl.replace nonzero_ctx name ();
+      (name, old) :: saved
+  ) [] (collect_nonzero_cond cond)
+
+let restore_nonzero_narrowing saved =
+  List.iter (fun (name, old) ->
+    if old then Hashtbl.replace nonzero_ctx name ()
+    else Hashtbl.remove nonzero_ctx name
   ) saved
 
 (* condition -> [(idx_var, slice_var)] for `v < s.len` / `s.len > v` shapes,
@@ -2573,6 +2612,58 @@ let emit_refined_cast_check loc src_ty v lo hi =
   let bad = build_or lt ge "rc_bad" builder in
   emit_trap_when bad ~bad_name:"rc_trap" ~ok_name:"rc_ok"
 
+(* Division and remainder are only defined when the divisor is nonzero.
+   A singleton constant or a refined interval wholly above/below zero proves
+   that statically; otherwise emit the same recorded runtime guard used by
+   other transitional safety checks. *)
+let rec expr_proven_nonzero ty expr =
+  match intlit_opt expr with
+  | Some n -> n <> 0
+  | None ->
+      match expr.desc with
+      | SizeOf _ | AlignOf _ -> true
+      | Cast (target, inner) ->
+          (match intlit_opt inner with
+           | None | Some 0 -> false
+           | Some n ->
+               (* A nonzero source constant is useful only when the cast
+                  cannot truncate it to zero. *)
+               (match canon_ty target with
+                | TypeU8 -> n >= 0 && n < 256
+                | TypeU16 | TypeU16Be -> n >= 0 && n < 65_536
+                | TypeU32 | TypeU32Be -> n >= 0 && n < 4_294_967_296
+                | TypeU64 | TypeUsize -> n >= 0
+                | TypeI8 -> n >= -128 && n < 128
+                | TypeI16 -> n >= -32_768 && n < 32_768
+                | TypeI32 -> n >= -2_147_483_648 && n < 2_147_483_648
+                | TypeI64 | TypeIsize -> true
+                | _ -> false))
+      | Var name when Hashtbl.mem nonzero_ctx name -> true
+      | BinOp (Mul, left, right) ->
+          expr_proven_nonzero TypeUsize left
+          && expr_proven_nonzero TypeUsize right
+      | _ ->
+          (match ty with
+           | TypeRefined (lo, hi, _) -> lo > 0 || hi <= 0
+           | _ -> false)
+
+let divisor_proven_nonzero ty expr =
+  let ty = match expr.desc with
+    | Var name -> Option.value (Hashtbl.find_opt narrowing_ctx name) ~default:ty
+    | _ -> ty
+  in
+  expr_proven_nonzero ty expr
+
+let emit_divisor_check loc operation divisor_ty divisor_expr divisor =
+  if not (divisor_proven_nonzero divisor_ty divisor_expr) then begin
+    record_trap loc (Printf.sprintf
+      "%s by zero check remains: divisor type %s does not prove a nonzero value"
+      operation (ty_str divisor_ty));
+    let zero = const_int (type_of divisor) 0 in
+    let bad = build_icmp Icmp.Eq divisor zero "divzero_cmp" builder in
+    emit_trap_when bad ~bad_name:"divzero_trap" ~ok_name:"divzero_ok"
+  end
+
 (* Bounds check against a slice's RUNTIME length (a usize-width value).
    The index arrives i32-widened (widen_load invariant); zext to the
    length's width first -- a negative i32 zext-widens to a huge unsigned
@@ -3086,6 +3177,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            in
            (ret_ty, build_mul v1 v2 "multmp" builder)
        | Div ->
+           emit_divisor_check e2.loc "division" ty2 e2 v2;
            let result = if is_unsigned ty1
                         then build_udiv v1 v2 "divtmp" builder
                         else build_sdiv v1 v2 "divtmp" builder
@@ -3147,6 +3239,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        (* Range propagation: n % m where m is a positive constant and n is guaranteed non-negative.
           Symmetric condition with type_inf.ml: relaxing only one side causes a mismatch. *)
        | Mod  ->
+           emit_divisor_check e2.loc "remainder" ty2 e2 v2;
            let result = if is_unsigned ty1
                         then build_urem v1 v2 "modtmp" builder
                         else build_srem v1 v2 "modtmp" builder
@@ -4888,6 +4981,9 @@ and peek_index_elem_ty locals (base : Ast.expr) : Ast.type_expr option =
 (* -- Function codegen ---------------------------------------------------- *)
 
 let gen_func ?prog_types fdef =
+  (* Both tables carry facts only within one function body. *)
+  Hashtbl.reset narrowing_ctx;
+  Hashtbl.reset nonzero_ctx;
   let key = function_key prog_types fdef in
   let res name ty_opt = resolve_local_ast prog_types key name ty_opt in
   let binding_resolution = match prog_types with
@@ -5256,7 +5352,11 @@ let gen_func ?prog_types fdef =
                     set_volatile true inst
                 | None -> ());
                local_bind locals name binding_id (Imm (ast_ty, coerced))
-             end)
+             end;
+             if expr_proven_nonzero ast_ty e then
+               Hashtbl.replace nonzero_ctx name ()
+             else
+               Hashtbl.remove nonzero_ctx name)
 
     | LetTuple (names, rhs) ->
         (* OWNERSHIP_KERNEL.md 5.9: destructure a tuple value into
@@ -5326,11 +5426,13 @@ let gen_func ?prog_types fdef =
         let killed_idx = slice_rebind_names then_stmts in
         let saved      = apply_narrowing     locals cond killed in
         let saved_mut  = apply_narrowing_mut locals cond killed in
+        let saved_nz   = apply_nonzero_narrowing cond killed in
         let saved_idx  = apply_slice_index_narrowing cond killed_idx in
         let saved_end  = apply_slice_endpoint_narrowing cond killed_idx in
         run_scoped_stmts then_stmts;
         restore_narrowing     locals saved;
         restore_narrowing_mut saved_mut;
+        restore_nonzero_narrowing saved_nz;
         restore_slice_index_narrowing saved_idx;
         restore_slice_endpoint_narrowing saved_end;
         if block_terminator (insertion_block builder) = None then begin
@@ -5377,11 +5479,14 @@ let gen_func ?prog_types fdef =
                 Ast.written_names else_stmts @ future_writes_here in
               let f_saved     = apply_narrowing     locals neg fallthrough_killed in
               let f_saved_mut = apply_narrowing_mut locals neg fallthrough_killed in
+              let f_saved_nz = apply_nonzero_narrowing neg fallthrough_killed in
               let f_saved_end = apply_slice_endpoint_narrowing neg
                   (slice_rebind_names else_stmts @ future_rebinds_here) in
               pending_fallthrough_locals := f_saved @ !pending_fallthrough_locals;
               pending_fallthrough_narrowing_ctx :=
                 f_saved_mut @ !pending_fallthrough_narrowing_ctx;
+              pending_fallthrough_nonzero_ctx :=
+                f_saved_nz @ !pending_fallthrough_nonzero_ctx;
               pending_fallthrough_slice_endpoints :=
                 f_saved_end @ !pending_fallthrough_slice_endpoints
         end
@@ -5423,11 +5528,13 @@ let gen_func ?prog_types fdef =
         let killed    = Ast.written_names body in
         let saved     = apply_narrowing     locals cond killed in
         let saved_mut = apply_narrowing_mut locals cond killed in
+        let saved_nz  = apply_nonzero_narrowing cond killed in
         Stack.push (after_bb, cond_bb) loop_stack;
         run_scoped_stmts body;
         ignore (Stack.pop loop_stack);
         restore_narrowing     locals saved;
         restore_narrowing_mut saved_mut;
+        restore_nonzero_narrowing saved_nz;
         if block_terminator (insertion_block builder) = None then
           ignore (build_br cond_bb builder);
 
@@ -5788,17 +5895,22 @@ let gen_func ?prog_types fdef =
      list that contains it. *)
   and run_scoped_stmts (stmts : Ast.stmt list) : unit =
     let saved = Hashtbl.copy locals.visible in
+    let saved_nonzero = Hashtbl.copy nonzero_ctx in
     Fun.protect
       ~finally:(fun () ->
         Hashtbl.reset locals.visible;
-        Hashtbl.iter (Hashtbl.add locals.visible) saved)
+        Hashtbl.iter (Hashtbl.add locals.visible) saved;
+        Hashtbl.reset nonzero_ctx;
+        Hashtbl.iter (Hashtbl.add nonzero_ctx) saved_nonzero)
       (fun () -> run_stmts_with_future_writes stmts)
 
   and run_stmts_with_future_writes (stmts : Ast.stmt list) : unit =
     let saved_pending_ctx = !pending_fallthrough_narrowing_ctx in
+    let saved_pending_nonzero = !pending_fallthrough_nonzero_ctx in
     let saved_pending_locals = !pending_fallthrough_locals in
     let saved_pending_endpoints = !pending_fallthrough_slice_endpoints in
     pending_fallthrough_narrowing_ctx := [];
+    pending_fallthrough_nonzero_ctx := [];
     pending_fallthrough_locals := [];
     pending_fallthrough_slice_endpoints := [];
     let rec go = function
@@ -5828,10 +5940,12 @@ let gen_func ?prog_types fdef =
       | None     -> Hashtbl.remove narrowing_ctx name
       | Some old -> Hashtbl.replace narrowing_ctx name old
     ) !pending_fallthrough_narrowing_ctx;
+    restore_nonzero_narrowing !pending_fallthrough_nonzero_ctx;
     List.iter (fun (name, old) -> local_replace locals name old)
       !pending_fallthrough_locals;
     restore_slice_endpoint_narrowing !pending_fallthrough_slice_endpoints;
     pending_fallthrough_narrowing_ctx := saved_pending_ctx;
+    pending_fallthrough_nonzero_ctx := saved_pending_nonzero;
     pending_fallthrough_locals := saved_pending_locals;
     pending_fallthrough_slice_endpoints := saved_pending_endpoints
   in

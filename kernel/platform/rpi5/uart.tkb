@@ -89,6 +89,7 @@ fn uart_put_udec(value: usize) {
     let mut leading: bool = true;
     for i in 0..<5 {
         let place: usize = place_values[i];
+        if (place == 0) { return; }
         let digit: usize = (value / place) % 10;
         if (digit != 0 || leading == false || place == 1) {
             uart_putc((digit as u8) + 48);

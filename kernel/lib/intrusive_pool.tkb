@@ -880,6 +880,7 @@ fn intrusive_pool_slots_per_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id
 fn intrusive_chunk_base_of(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                            slot_address: usize) -> usize {
     let span: usize = intrusive_pool_chunk_bytes(pool);
+    if (span == 0) { return slot_address; }
     return slot_address - (slot_address % span);
 }
 
