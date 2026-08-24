@@ -15386,8 +15386,54 @@ let core_tests = [
     let joined = Core_test_flow.join_branches left right in
     Alcotest.(check bool) "union component" true
       (Core_test_flow.may_be_consumed "pending" joined);
-    Alcotest.(check bool) "intersection component" true
-      (Core_test_flow.is_consumed_on_all_paths "pending" joined));
+      Alcotest.(check bool) "intersection component" true
+        (Core_test_flow.is_consumed_on_all_paths "pending" joined));
+
+  Alcotest.test_case "value facts represent full signed and unsigned 64-bit bounds" `Quick
+    (fun () ->
+      let signed = Value_facts.unknown
+        { signedness = Signed; bits = 64 } in
+      let unsigned = Value_facts.unknown
+        { signedness = Unsigned; bits = 64 } in
+      Alcotest.(check string) "i64 minimum" "-9223372036854775808"
+        (Value_facts.to_string signed.interval.lo);
+      Alcotest.(check string) "i64 maximum" "9223372036854775807"
+        (Value_facts.to_string signed.interval.hi);
+      Alcotest.(check string) "u64 minimum" "0"
+        (Value_facts.to_string unsigned.interval.lo);
+      Alcotest.(check string) "u64 maximum" "18446744073709551615"
+        (Value_facts.to_string unsigned.interval.hi));
+
+  Alcotest.test_case "value facts join retains only facts true on both paths" `Quick
+    (fun () ->
+      let base = Value_facts.{ signedness = Signed; bits = 32 } in
+      let one = Value_facts.exact base (Value_facts.of_signed_int64 1L) in
+      let two = Value_facts.exact base (Value_facts.of_signed_int64 2L) in
+      let joined = Value_facts.join one two in
+      Alcotest.(check string) "joined lower bound" "1"
+        (Value_facts.to_string joined.interval.lo);
+      Alcotest.(check string) "joined upper bound" "2"
+        (Value_facts.to_string joined.interval.hi);
+      Alcotest.(check bool) "different constants are dropped" true
+        (Option.is_none joined.exact);
+      Alcotest.(check bool) "nonzero survives both paths" true
+        (joined.nonzero = Value_facts.Proven_nonzero);
+      let zero = Value_facts.exact base Value_facts.zero in
+      let with_zero = Value_facts.join one zero in
+      Alcotest.(check bool) "nonzero drops when one path permits zero" true
+        (with_zero.nonzero = Value_facts.Unknown));
+
+  Alcotest.test_case "value facts invalidation restores the full base range" `Quick
+    (fun () ->
+      let base = Value_facts.{ signedness = Unsigned; bits = 8 } in
+      let seven = Value_facts.exact base (Value_facts.of_unsigned_int64 7L) in
+      let invalidated = Value_facts.invalidate seven in
+      Alcotest.(check string) "lower bound" "0"
+        (Value_facts.to_string invalidated.interval.lo);
+      Alcotest.(check string) "upper bound" "255"
+        (Value_facts.to_string invalidated.interval.hi);
+      Alcotest.(check bool) "exact dropped" true
+        (Option.is_none invalidated.exact));
 ]
 
 (* -- Entry point ----------------------------------------------------------- *)
