@@ -165,10 +165,38 @@ counted fallbacks -- the process record's, the image record's and the
 address-space backing's -- are printed at the end of the boot suite and are
 0.
 
-Not covered, and worth knowing: the ROLLBACK path when one of those three
-allocations fails inside `scheduled_process_alloc`. The array they replaced
-could not fail, so this is a failure mode the change introduced, and
-reaching it needs the page allocator genuinely empty -- 800 MiB of it.
+Covered since 2026-08-24 (issue #414), and worth knowing how: the ROLLBACK
+path when one of those allocations fails inside `scheduled_process_alloc`.
+The arrays they replaced could not fail, so the whole chain is a failure
+mode the pooling introduced, and reaching it honestly needs the page
+allocator genuinely empty -- 800 MiB of it, which no probe does.
+`make kernelcheck-alloc-rollback-qemu` empties the free list from the
+debugger side for the duration of ONE acquisition
+(`address_space_allocate_root`, past the process record and the kernel
+stack run) and puts it back at the exhaustion log call the failing arm
+makes before it rolls anything back, so the lane injects one failure rather
+than poisoning the run. The verdict is this kernel's own end-of-run
+accounting: `resources: pooled per-process records back to the baseline`
+(the record, the address-space backing, the image record and the fd
+context all came back), `resources: pages=0` (the stack run was parked and
+the root's tables freed), and `resources: no double free`.
+
+**Two things that lane found, both of which it exists to find.** The
+address-space BACKING record was never released at all -- "Nothing
+releases", `address_space.tkb` said, inherited from the array it replaced
+in #392 -- so one record leaked per process ever created, invisible to the
+page check because a pool keeps its chunk page either way. And
+`page_mapping_ref_ceiling_probe` had been depending on that leak: it needs
+two live address spaces to have a below-the-ceiling case, and was reading
+35 where the real number was 1.
+
+The pooled-record baseline that catches this is taken BEFORE the probes
+(the page baseline is taken after them, for the parked-run reason its own
+comment gives), because the probes are where this boot allocates and
+releases processes in bulk -- a baseline after them would put the most
+interesting acquisitions of the run outside the measured window. That is
+not a hypothetical: armed at the first process creation of the boot, the
+lane passed with a rollback step deliberately deleted.
 - `unified_object_ref_ceiling_probe` (the computed reference bound -- a
   real 256-iteration retain loop, not a shortcut)
 - `page_mapping_ref_ceiling_probe` (the computed mapping bound -- writes the

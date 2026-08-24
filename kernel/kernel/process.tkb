@@ -879,6 +879,9 @@ private fn scheduled_process_release_every_process() !{unsafe} {
 private fn scheduled_process_release_slot_resources(slot: usize) !{unsafe} {
     unified_fd_context_release(slot);
     address_space_release_root(slot);
+    // GitHub issue #414: the ROOT's pages and the RECORD that named them
+    // are two things, and only the first was being given back.
+    address_space_backing_release(slot);
     process_image_record_release(slot);
 }
 
@@ -1044,12 +1047,21 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
     match address_space_ensure_root(slot) {
         AddressSpaceEnsureResult::Ok => {}
         AddressSpaceEnsureResult::SlotOutOfRange => {
+            address_space_backing_release(slot);
             scheduled_process_slot_remove(slot);
             return ScheduledProcessAllocResult::Full;
         }
         AddressSpaceEnsureResult::OutOfMemory => {
             kernel_boot_log_resource_exhausted(
                 "physical page allocator" as *u8, BOOT_PAGE_COUNT);
+            // GitHub issue #414: a backing RECORD exists by now even
+            // though the root does not -- address_space_ensure_root asks
+            // for the record before it asks the page allocator for the
+            // tables. Releasing it here is the difference between a
+            // refused allocation that costs nothing and one that costs a
+            // pool slot per attempt. It must come before the process
+            // record goes, because the handle naming it lives there.
+            address_space_backing_release(slot);
             scheduled_process_slot_remove(slot);
             return ScheduledProcessAllocResult::Full;
         }
@@ -1065,6 +1077,7 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
         kernel_boot_log_resource_exhausted(
             "physical page allocator" as *u8, BOOT_PAGE_COUNT);
         address_space_release_root(slot);
+        address_space_backing_release(slot);
         scheduled_process_slot_remove(slot);
         return ScheduledProcessAllocResult::Full;
     }
@@ -1073,6 +1086,7 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
             "physical page allocator" as *u8, BOOT_PAGE_COUNT);
         process_image_record_release(slot);
         address_space_release_root(slot);
+        address_space_backing_release(slot);
         scheduled_process_slot_remove(slot);
         return ScheduledProcessAllocResult::Full;
     }
@@ -1086,6 +1100,7 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
         unified_fd_context_release(slot);
         process_image_record_release(slot);
         address_space_release_root(slot);
+        address_space_backing_release(slot);
         scheduled_process_slot_remove(slot);
         return ScheduledProcessAllocResult::Full;
     }
@@ -1249,6 +1264,9 @@ fn scheduled_process_reap(
     // reason. Root 0 is exempt inside the release itself.
     process_image_exec_teardown(owner.pool_index);
     process_image_record_release(owner.pool_index);
+    // GitHub issue #414: last, because process_image_exec_teardown above
+    // still resolves against this root.
+    address_space_backing_release(owner.pool_index);
     // Read the watermark before the run is recycled -- see
     // scheduled_process_stack_deepest_reaped.
     let used: usize = kernel_stack_used_bytes(owner.pool_index);
@@ -1749,6 +1767,15 @@ fn kernel_process_scheduler_disable() {
 // GitHub issue #209: how many slots could the scheduler still choose
 // between. Exited slots are excluded: they are awaiting reap, never
 // selection.
+// GitHub issue #414: how many process records the pool is holding. The
+// boot suite compares it against a baseline at the end of the bounded
+// run, which is what says a refused allocation gave its record back --
+// the page check one line below cannot say that on its own, because a
+// chunk keeps its page whether or not the record inside it was returned.
+fn scheduled_process_pool_live_count() -> usize !{unsafe} {
+    return intrusive_pool_live_count(&scheduled_process_pool);
+}
+
 fn kernel_process_schedulable_count() -> usize {
     let mut live: usize = 0;
     let mut cursor = scheduled_process_first_slot();

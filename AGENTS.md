@@ -448,6 +448,7 @@ make kernelcheck-rpi5   # build and run the RPi5 hardware integration suite (nee
 make kernelcheck-qemu   # build and run the QEMU/AArch64 integration suite (no hardware needed)
 make kernelcheck-shell-qemu # PTY smoke test for the interactive QEMU ash path (no hardware needed)
 make kernelcheck-qemu-debug  # run the same QEMU suite against the DWARF build (no hardware needed)
+make kernelcheck-alloc-rollback-qemu # GDB empties the page allocator for ONE acquisition inside scheduled_process_alloc, then checks the kernel's own end-of-run accounting says every pooled record and page came back (issue #414; no hardware needed)
 make kernelcheck        # build and test every maintained kernel target (needs real RPi5 hardware for the rpi5 half)
 make kernelsh-qemu      # boot QEMU and attach the current terminal to the ash UART
 make kernelsh-rpi5      # load RPi5 over SWD and attach the Debug Probe UART to the ash shell

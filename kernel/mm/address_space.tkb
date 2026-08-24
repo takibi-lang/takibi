@@ -107,6 +107,48 @@ private fn address_space_backing_pool_init() {
     intrusive_pool_init(&address_space_backing_pool);
 }
 
+// GitHub issue #414: gives a slot's backing record back to the pool.
+//
+// It used to keep it for the life of the kernel -- "Nothing releases",
+// this file said, inherited from the array this pool replaced in #392 --
+// and that stopped being tenable when process creation itself stopped
+// having a ceiling: one AddressSpaceBacking per process ever created,
+// unreachable the moment the ProcessRecord naming it is recycled.
+//
+// It was found by measurement, not by reading: the end-of-run pooled-record
+// baseline added for #414 reported 51 live backings against a baseline of
+// 34 on one QEMU boot. The page check could not see it, and that is the
+// point of having both -- `resources: pages=0` was true the whole time,
+// because address_space_release_root frees the L1/L2 pages either way and
+// a pool keeps its chunk page whether or not the record inside it came
+// back.
+//
+// Root 0 is exempt: its backing is a static, not a pool allocation, for
+// the MMU-off reason stated above.
+fn address_space_backing_release(slot: usize) !{unsafe} {
+    if (slot == 0) { return; }
+    let address: usize = scheduled_process_address_space_backing(slot);
+    if (address == 0) { return; }
+    // Read the generation BEFORE clearing the handle, the same ordering
+    // process_image_record_release states: an owner rebuilt afterwards
+    // would name the right slot with the wrong occupant, and the pool
+    // would correctly refuse it.
+    let generation: usize =
+        scheduled_process_address_space_backing_generation(slot);
+    scheduled_process_set_address_space_backing(slot, 0, 0);
+    let owner =
+        intrusive_owner_new(&address_space_backing_pool, address, generation);
+    let guard = intrusive_pool_lock(&address_space_backing_pool);
+    let (ok, reason) = intrusive_remove_outcome(
+        intrusive_pool_remove(&address_space_backing_pool, guard, owner));
+    intrusive_pool_unlock(&address_space_backing_pool, guard);
+    if (ok == false) {
+        kernel_boot_log("address spaces: releasing a backing record -- ");
+        kernel_boot_log(reason);
+        kernel_boot_log("\n");
+    }
+}
+
 // Acquired on demand rather than only at process creation: a slot here is
 // not always a live scheduler slot, exactly as issue #392's image-record
 // stage found (1648 such accesses on one boot there). Idempotent.
@@ -137,10 +179,10 @@ fn address_space_backing_ensure(slot: usize) -> bool !{unsafe} {
     }
 }
 
-// The backing for a slot, allocating one if it has none. Nothing releases,
-// for the reason process_image_record_ensure states: these arrays kept a
-// slot's entry for the life of the kernel, and changing that is a lifetime
-// change rather than a storage one.
+// The backing for a slot, allocating one if it has none.
+// address_space_backing_release below gives one back; see its own comment
+// for why "nothing releases" -- what this note said until GitHub issue
+// #414 -- stopped being tenable.
 // Root 0's backing is a plain static, NOT a pool slot.
 //
 // kernel_mmu_init creates root 0 with the MMU still OFF -- entry.S calls

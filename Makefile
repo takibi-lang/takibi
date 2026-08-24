@@ -39,7 +39,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kernelcheck-lifecycle-gap-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -741,6 +741,18 @@ kernelcheck-stack-overflow-qemu: kernelbuild-qemu
 kernelcheck-lifecycle-gap-qemu: kernelbuild-qemu-debug
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_qemutest_lifecycle_gap.sh
 
+## Issue #414: the rollback chain inside scheduled_process_alloc has never
+## run -- the arrays it replaced could not fail, so every "give back what
+## was already acquired" path is a failure mode the pooling introduced and
+## nothing exercised. GDB empties the page allocator's free list for the
+## duration of ONE acquisition (address_space_allocate_root, past the
+## record and the stack run) and puts it back at the exhaustion log call
+## the failing arm makes before it rolls anything back. The verdict is the
+## kernel's own end-of-run accounting: the refusal was reported, and every
+## pooled record and page came back. Uses the DWARF-enabled ELF.
+kernelcheck-alloc-rollback-qemu: kernelbuild-qemu-debug
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_alloc_rollback_qemutest.sh
+
 ## kernelsh-qemu: boot the standalone kernel, attach the current terminal to
 ## its TCP-backed UART console, and forward localhost:18080 to guest httpd.
 ## Exit miniterm with Ctrl-].
@@ -753,7 +765,7 @@ kernelsh-qemu: kernelbuild-qemu
 kernelsh-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_shell_rpi5.sh
 
-kernelcheck: kernelcheck-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kernelcheck-stack-overflow-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-rpi5
+kernelcheck: kernelcheck-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kernelcheck-stack-overflow-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelcheck-rpi5
 
 ## allcheck: run every check this Makefile knows about -- langcheck, test,
 ## linuxcheck, kernelcheck -- so a single command surfaces a failure

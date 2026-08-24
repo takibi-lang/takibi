@@ -632,6 +632,45 @@ let mut kernel_test_httpd_daemon: bool;
 let mut kernel_test_init_script: bool;
 
 fn kernel_test_driver_run() {
+    // GitHub issue #414: the same baseline idea, one layer up, and
+    // deliberately taken BEFORE the probes rather than after them like the
+    // page baseline below.
+    //
+    // Pages returning to their baseline does NOT prove a pooled record was
+    // given back -- a pool keeps its chunk page either way -- so the pools
+    // a process acquisition touches are measured here and compared at the
+    // end of the bounded run. A refused allocation that rolled back
+    // correctly leaves every one of them where it found it.
+    //
+    // The probes are where this boot allocates and releases processes in
+    // bulk (24 of them in scheduled_process_table_probe alone), so a
+    // baseline taken after them would put the most interesting
+    // acquisitions of the whole run outside the measured window -- which
+    // is exactly what kernelcheck-alloc-rollback-qemu injects a failure
+    // into. The page baseline cannot move here for the reason its own
+    // comment gives: the probes leave a parked stack run behind, and it
+    // has to be inside that baseline rather than counted as a leak.
+    // Root 0's own fd context and image record are created lazily by the
+    // first path that needs them, which is inside the probes below -- so a
+    // baseline taken before the probes would count them as leaked at the
+    // end. Ask for them here instead: both ensures are idempotent, the
+    // bootstrap legitimately holds both for the life of the kernel, and
+    // "the bootstrap has them from boot" is what every entry point in
+    // kernel/kernel/fd_table.tkb already assumes.
+    if (unified_fd_context_ensure(0) == false ||
+        process_image_record_ensure(0) == false) {
+        kernel_boot_log("resources: bootstrap records unavailable at baseline\n");
+    }
+    let process_pool_baseline: usize = scheduled_process_pool_live_count();
+    let address_space_baseline: usize = address_space_live_count();
+    let image_record_baseline: usize = process_image_record_live_count();
+    let fd_context_baseline: usize = unified_fd_context_live_count();
+    // Descriptor BLOCKS are deliberately not in this set. A block is
+    // allocated when a descriptor is installed, not when a process
+    // acquires its context, so it is not part of the acquisition chain
+    // this baseline is about -- and an open descriptor legitimately holds
+    // one at the end of the run (the bootstrap opens its stdio after this
+    // point), which would make an equality here mean nothing.
     kernel_test_common_probes();
     // Root 0 permanently owns its L1/L2 backing pages, and the probes above
     // leave a kernel stack RUN parked for reuse -- measured: one is still
@@ -934,6 +973,37 @@ irq_uart_rx_unmask();
                     // remain live; equality with the boot baseline proves
                     // that no transient page leaked before the persistent
                     // demo shell starts.
+                    // GitHub issue #414, printed before the page line
+                    // because it is the finer statement: a pooled record
+                    // that was not given back is invisible to the page
+                    // count. Reported POSITIVELY, the same way the two
+                    // invariant lines above are, so a run where it
+                    // happened loses a line rather than gaining an
+                    // unmatched one.
+                    if (scheduled_process_pool_live_count() == process_pool_baseline &&
+                        address_space_live_count() == address_space_baseline &&
+                        process_image_record_live_count() == image_record_baseline &&
+                        unified_fd_context_live_count() == fd_context_baseline) {
+                        kernel_boot_log("resources: pooled per-process records back to the baseline\n");
+                    } else {
+                        kernel_boot_log("resources: POOLED RECORDS LEAKED process=");
+                        uart_put_udec(scheduled_process_pool_live_count());
+                        kernel_boot_log("/");
+                        uart_put_udec(process_pool_baseline);
+                        kernel_boot_log(" root=");
+                        uart_put_udec(address_space_live_count());
+                        kernel_boot_log("/");
+                        uart_put_udec(address_space_baseline);
+                        kernel_boot_log(" image=");
+                        uart_put_udec(process_image_record_live_count());
+                        kernel_boot_log("/");
+                        uart_put_udec(image_record_baseline);
+                        kernel_boot_log(" fdctx=");
+                        uart_put_udec(unified_fd_context_live_count());
+                        kernel_boot_log("/");
+                        uart_put_udec(fd_context_baseline);
+                        kernel_boot_log("\n");
+                    }
                     if (page_allocator_live_count() == page_baseline) {
                         kernel_boot_log("resources: pages=0\n");
                         // GitHub issue #376: reported beside the other
