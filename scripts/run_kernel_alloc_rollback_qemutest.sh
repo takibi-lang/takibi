@@ -47,16 +47,22 @@ INTERACTIVE_HTTPD_READY="$ARTIFACT_DIR/interactive-httpd.ready"
 INTERACTIVE_HTTPD_DONE="$ARTIFACT_DIR/interactive-httpd.done"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
-# 18671-18676 are already claimed by scripts/run_kernel_qemutest.sh and
-# scripts/run_kernel_oops_qemutest.sh's own (including Makefile-overridden)
-# ports; both Makefiles build with -j by default (see AGENTS.md), so
-# `make kernelcheck` can run every kernelcheck-*-qemu lane concurrently --
-# these defaults must not collide with any of them.
-SERIAL_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_SERIAL_PORT:-18683}"
-GDB_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_GDB_PORT:-18684}"
+# Every kernelcheck-*-qemu lane can run CONCURRENTLY (`make kernelcheck`
+# builds with -j by default, see AGENTS.md), so these four numbers must not
+# collide with any other lane's. The claims are spread across two places --
+# a script's own defaults and the Makefile's `env KERNEL_..._PORT=` recipe
+# overrides -- and this file originally took 18683-18686 because only the
+# first place was checked: 18683-18685 are kernelcheck-qemu-debug's, set in
+# the Makefile, and the collision surfaced as that lane's host peer timing
+# out with no UART output, blaming a kernel that was never asked anything.
+# scripts/check_qemu_lane_ports.py now reads BOTH places and fails the build
+# on a duplicate protocol:port claim, so this comment is no longer the thing
+# keeping them apart.
+SERIAL_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_SERIAL_PORT:-18689}"
+GDB_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_GDB_PORT:-18690}"
 TIMEOUT_SECS="${KERNEL_QEMU_ALLOC_ROLLBACK_TIMEOUT:-90}"
-NETDEV_LOCAL_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_LOCAL_PORT:-18685}"
-NETDEV_REMOTE_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_REMOTE_PORT:-18686}"
+NETDEV_LOCAL_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_LOCAL_PORT:-18691}"
+NETDEV_REMOTE_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_REMOTE_PORT:-18692}"
 mkdir -p "$ARTIFACT_DIR"
 rm -f "$INTERACTIVE_HTTPD_READY" "$INTERACTIVE_HTTPD_DONE"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"

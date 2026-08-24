@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Refuse a build in which two QEMU lanes claim the same protocol:port.
+
+GitHub issue #414's lane took 18683-18686 because only one of the two places
+a lane's ports are written down was checked. `make kernelcheck` runs every
+kernelcheck-*-qemu lane concurrently, and kernelcheck-qemu-debug's ports are
+not in any script -- they are `env KERNEL_QEMU_SERIAL_PORT=18683 ...` in the
+Makefile recipe, overriding the shared runner's defaults. The collision
+surfaced as that lane's host-side network peer timing out with no UART
+output, i.e. as a failure that named the kernel for something the kernel was
+never asked about.
+
+scripts/qemu_port_guard.py (issue #407) already catches a busy port at
+RUNTIME, and could not catch this: it is told one lane's claims and compares
+them against what is bound right now, so two lanes whose claims overlap only
+partially -- tcp:18684 here, udp:18684 there -- pass it individually and
+still ruin each other's run. This checks the claims against each other,
+before anything runs.
+
+What it reads, per lane:
+
+  * the `qemu_port_guard.py` invocation in each scripts/run_kernel_*.sh,
+    which is where a lane declares its protocol:port pairs by construction;
+  * the `VAR="${ENV_NAME:-DEFAULT}"` line each of those variables comes from;
+  * every Makefile recipe that runs the script, for `ENV_NAME=NNNNN`
+    overrides -- one recipe line is one lane INSTANCE, so the same runner
+    invoked three times with three different port sets is three lanes.
+
+A lane that does not call the port guard has nothing to declare and is
+skipped, which is also the honest answer: scripts/run_kernel_oops_qemutest.sh
+writes its UART to a file and only opens a gdbstub, and it does call the
+guard for that one port.
+"""
+
+import pathlib
+import re
+import sys
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+SCRIPT_GLOB = "run_kernel_*.sh"
+
+GUARD_CALL = re.compile(
+    r"qemu_port_guard\.py\"?\s+(?P<args>(?:\\\s*\n|[^\n])*?)\s*(?:\|\|\s*exit|\n)",
+    re.MULTILINE,
+)
+GUARD_ARG = re.compile(r"\"(?P<proto>tcp|udp):\$(?P<var>[A-Z_]+)\"")
+VAR_DEFAULT = re.compile(
+    r"^(?P<var>[A-Z_]+)=\"\$\{(?P<env>[A-Z0-9_]+):-(?P<default>\d+)\}\"", re.MULTILINE
+)
+ENV_OVERRIDE = re.compile(r"(?P<env>[A-Z0-9_]+)=(?P<port>\d+)")
+
+
+def lane_claims(script: pathlib.Path):
+    """[(proto, env_name, default_port)] this script declares to the guard."""
+    text = script.read_text(encoding="utf-8")
+    defaults = {
+        m.group("var"): (m.group("env"), int(m.group("default")))
+        for m in VAR_DEFAULT.finditer(text)
+    }
+    claims = []
+    for call in GUARD_CALL.finditer(text):
+        for arg in GUARD_ARG.finditer(call.group("args")):
+            var = arg.group("var")
+            if var not in defaults:
+                print(
+                    f"ERROR\t{script.name}: {arg.group('proto')}:${var} is passed to "
+                    "the port guard but has no VAR=\"${ENV:-DEFAULT}\" line to read a "
+                    "default from"
+                )
+                return None
+            env, default = defaults[var]
+            claims.append((arg.group("proto"), env, default))
+    return claims
+
+
+def makefile_instances(script_name: str):
+    """[(label, {env: port})] -- one entry per Makefile recipe running it."""
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    instances = []
+    for line in makefile.splitlines():
+        if script_name not in line:
+            continue
+        stripped = line.strip()
+        if not stripped.startswith("@") and not stripped.startswith("bash"):
+            continue
+        overrides = {
+            m.group("env"): int(m.group("port")) for m in ENV_OVERRIDE.finditer(line)
+        }
+        instances.append((stripped, overrides))
+    return instances
+
+
+def main() -> int:
+    claimed = {}
+    failed = False
+    lanes = 0
+    for script in sorted((REPO_ROOT / "scripts").glob(SCRIPT_GLOB)):
+        claims = lane_claims(script)
+        if claims is None:
+            return 1
+        if not claims:
+            continue
+        instances = makefile_instances(script.name) or [(f"{script.name} (defaults)", {})]
+        for label, overrides in instances:
+            lanes += 1
+            for proto, env, default in claims:
+                port = overrides.get(env, default)
+                key = (proto, port)
+                where = f"{script.name} [{env}]"
+                if key in claimed and claimed[key][0] != label:
+                    print(
+                        f"ERROR\t{proto}:{port} is claimed twice:\n"
+                        f"  {claimed[key][1]}\n    in {claimed[key][0][:110]}\n"
+                        f"  {where}\n    in {label[:110]}"
+                    )
+                    failed = True
+                    continue
+                claimed[key] = (label, where)
+    if failed:
+        print(
+            "FAIL qemu-lane-ports: two lanes that `make kernelcheck` runs "
+            "concurrently claim the same port"
+        )
+        return 1
+    print(
+        f"PASS qemu-lane-ports: {lanes} lane instances, "
+        f"{len(claimed)} protocol:port claims, no duplicates"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
