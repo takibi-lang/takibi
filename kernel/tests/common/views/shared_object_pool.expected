@@ -1,1 +1,1 @@
-shared object pool: exhaustion at capacity=16, reuse-after-free ok
+shared object pool: 24 concurrent objects past the old ceiling of 16, each its own storage, stale address refused, everything given back ok

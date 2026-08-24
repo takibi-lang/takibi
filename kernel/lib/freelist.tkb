@@ -22,7 +22,7 @@
 // nothing.
 //
 // Not adopted by every linear-scan call site GitHub issue #207 lists:
-// kernel/kernel/fd_table.tkb's SHARED_OBJECT_MAX pool uses a plain
+// kernel/kernel/fd_table.tkb's shared object pool uses a plain
 // (non-linear) reference-counted UnifiedObjectHandle, not a linear owner --
 // a fundamentally different resource-lifetime model this library's affine
 // FreelistOwner does not fit -- and several of its scans search for a slot

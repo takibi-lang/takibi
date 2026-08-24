@@ -559,8 +559,8 @@ fn kernel_test_common_probes() {
     } else {
         kernel_boot_log("fd table: failed\n");
     }
-    if (unified_object_pool_exhaustion_probe()) {
-        kernel_boot_log("shared object pool: exhaustion at capacity=16, reuse-after-free ok\n");
+    if (unified_object_pool_probe()) {
+        kernel_boot_log("shared object pool: 24 concurrent objects past the old ceiling of 16, each its own storage, stale address refused, everything given back ok\n");
     } else {
         kernel_boot_log("shared object pool: failed\n");
     }

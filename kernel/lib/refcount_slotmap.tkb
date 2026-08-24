@@ -2,10 +2,23 @@
 // #207/kernel/lib/slotmap.tkb), for call sites where SlotMap's linear
 // FreelistOwner does not fit: a resource with more than one independent
 // holder, released when the last holder is done rather than by a single
-// consuming call. kernel/kernel/fd_table.tkb's SHARED_OBJECT_MAX pool
+// consuming call. kernel/kernel/fd_table.tkb's shared object pool
 // (UnifiedObjectHandle, a plain non-linear struct with a refcount that
 // unified_fd_install/unified_fd_close/unified_fd_clone increment and
-// decrement independently) is the motivating, and so far only, caller.
+// decrement independently) was the motivating, and only, kernel caller.
+//
+// GitHub issue #391 moved that caller: an open file description is a
+// kernel/lib/intrusive_pool.tkb allocation now, carrying its own `refs`
+// field the way Linux's struct file carries f_count, so the shared object
+// pool has no capacity constant left to be exhausted at. What this file
+// provides that IntrusivePool does not -- a container that knows about
+// several independent holders -- is exactly what issue #297 set out to
+// give a static story, so it stays maintained and exercised host-native
+// by linux_user/refcount_slotmap/ rather than being deleted with its
+// consumer. Anything adopting it should read #391's reasoning first:
+// with the count in the payload, what is left for the container to
+// provide is identity, and IntrusivePool provides that without a
+// ceiling.
 //
 // Same underlying engine as SlotMap(N): FreelistCore(N) finds a free slot
 // in O(1). RefcountSlotMap(N) replaces SlotMap's single

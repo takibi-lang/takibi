@@ -891,6 +891,19 @@ fn page_owner_description(address: usize) -> *u8 {
     return "occupied but UNTAGGED (invariant break)" as *u8;
 }
 
+// GitHub issue #391: the totals this allocator was built over, as
+// functions rather than as the constants themselves. A consumer in
+// another file (kernel/kernel/fd_table.tkb derives Linux's
+// files_stat.max_files from the memory that exists) can then ask without
+// depending on parse order, which a const in a refined bound would.
+fn page_allocator_total_count() -> usize {
+    return BOOT_PAGE_COUNT;
+}
+
+fn page_allocator_page_bytes() -> usize {
+    return PAGE_SIZE;
+}
+
 fn page_allocator_live_count() -> usize {
     let mut live: usize = 0;
     for i: usize in 0..<BOOT_PAGE_COUNT {  // GitHub issue #217: checked indexing

@@ -59,7 +59,10 @@ const LINUX_ECHILD: usize = 0xFFFFFFFFFFFFFFF6;
 // collapsed into LINUX_EBADF (which real Linux reserves for an actually bad
 // descriptor argument) at every fd-allocating syscall handler below.
 // EMFILE = this process's own PROCESS_FD_MAX descriptor table is full;
-// ENFILE = the global SHARED_OBJECT_MAX object pool is full.
+// ENFILE = the global shared object pool is full. GitHub issue #391 left
+// that mapping alone and changed only what "full" means: the pool has no
+// capacity constant, so what is reported is the derived system-wide bound
+// (Linux's files_stat.max_files) or the page allocator being empty.
 const LINUX_EMFILE: usize = 0xFFFFFFFFFFFFFFE8;
 const LINUX_ENFILE: usize = 0xFFFFFFFFFFFFFFE9;
 
@@ -386,7 +389,7 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
         UnifiedOpenResult::Invalid => {}
         UnifiedOpenResult::Full => {
             kernel_boot_log_resource_exhausted(
-                "shared object pool" as *u8, SHARED_OBJECT_MAX);
+                "shared object pool" as *u8, unified_object_max_files());
         }
         UnifiedOpenResult::Ok => {}
     }
@@ -754,7 +757,7 @@ fn kernel_syscall_inetd_accept(port: u16)
                                             UnifiedOpenResult::Full => {
                                                 kernel_boot_log_resource_exhausted(
                                                     "shared object pool" as *u8,
-                                                    SHARED_OBJECT_MAX);
+                                                    unified_object_max_files());
                                                 return KernelInetdAcceptResult::TimedOut;
                                             }
                                             UnifiedOpenResult::Ok => {}
@@ -1678,7 +1681,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 UnifiedOpenResult::Full => {
                                     kernel_boot_log_resource_exhausted(
                                         "shared object pool" as *u8,
-                                        SHARED_OBJECT_MAX);
+                                        unified_object_max_files());
                                     return SyscallAction::Resume(LINUX_ENFILE);
                                 }
                                 UnifiedOpenResult::Ok => {
@@ -1695,7 +1698,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             UnifiedOpenResult::Full => {
                                 kernel_boot_log_resource_exhausted(
                                     "shared object pool" as *u8,
-                                    SHARED_OBJECT_MAX);
+                                    unified_object_max_files());
                                 return SyscallAction::Resume(LINUX_ENFILE);
                             }
                             UnifiedOpenResult::Ok => { return SyscallAction::Resume(fd); }
@@ -2269,7 +2272,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 UnifiedOpenResult::Invalid => { return SyscallAction::Resume(LINUX_EAGAIN); }
                 UnifiedOpenResult::Full => {
                     kernel_boot_log_resource_exhausted(
-                        "shared object pool" as *u8, SHARED_OBJECT_MAX);
+                        "shared object pool" as *u8, unified_object_max_files());
                     return SyscallAction::Resume(LINUX_EAGAIN);
                 }
                 UnifiedOpenResult::Ok => { return SyscallAction::Resume(created_socket_fd); }
@@ -2449,7 +2452,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                     UnifiedOpenResult::Full => {
                                         kernel_boot_log_resource_exhausted(
                                             "shared object pool" as *u8,
-                                            SHARED_OBJECT_MAX);
+                                            unified_object_max_files());
                                         return SyscallAction::Resume(LINUX_EAGAIN);
                                     }
                                     UnifiedOpenResult::Ok => {}

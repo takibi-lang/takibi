@@ -1,17 +1,18 @@
-use "kernel/lib/refcount_slotmap.tkb";
 use "kernel/lib/intrusive_pool.tkb";
 
-// Current limitations (2026-08-21, issues #295/#392). Keep this list
+// Current limitations (2026-08-24, issues #295/#392/#391). Keep this list
 // current as call sites change; a limitation that goes stale here is
 // worse than none, since it invites relying on a guarantee that quietly
 // stopped holding.
 // - NOT SYNCHRONIZED. Reachable only from single-core boot/syscall-
 //   dispatch context today, same as every kernel/lib/-backed pool this
-//   file builds on (RefcountSlotMap, IntrusivePool).
-// - refcount_pool_retain()/_release() (kernel/lib/refcount_slotmap.tkb)
-//   are a bare counter increment/decrement, not linear-tracked: nothing
-//   in the type system proves a caller's retains and releases stay
-//   balanced. unified_fd_clone() leaked exactly this way on a mid-loop
+//   file builds on (IntrusivePool).
+// - unified_object_retain()/_release() are a bare counter increment/
+//   decrement on SharedObject.refs, not linear-tracked: nothing in the
+//   type system proves a caller's retains and releases stay balanced.
+//   Issue #391 moved that counter out of RefcountSlotMap and into the
+//   object; it did not make it any more checkable, and issue #297 is
+//   still the issue that would. unified_fd_clone() leaked exactly this way on a mid-loop
 //   failure (fixed via unified_fd_clone_rollback(), issue #295) --
 //   every NEW multi-retain call site must roll back its own already-
 //   retained references by hand on any failure path; the compiler will
@@ -24,11 +25,11 @@ use "kernel/lib/intrusive_pool.tkb";
 //   third path would silently have no fd table: every entry point here
 //   would refuse it, correctly but confusingly, and the fix is to give
 //   that path the same ensure call rather than to make lookups forgiving.
-// - Fixed capacities (PROCESS_FD_MAX=16, SHARED_OBJECT_MAX=16,
-//   and the computed shared-object reference bound): see
-//   `kernel/RESOURCE_LIMITS.md` for the
-//   authoritative exhaustion-result/boundary-test contract for each. The
-//   number of fd CONTEXTS is no longer among them (issue #392).
+// - Fixed capacities (PROCESS_FD_MAX=16, and the computed shared-object
+//   reference bound): see `kernel/RESOURCE_LIMITS.md` for the
+//   authoritative exhaustion-result/boundary-test contract for each.
+//   Neither the number of fd CONTEXTS (issue #392) nor the number of
+//   shared OBJECTS (issue #391) is among them any more.
 //
 // GitHub issues #246 and #264: process index == kernel/kernel/process.tkb's
 // ProcessHandle.pool_index. One ProcessFdContext keeps the descriptor and
@@ -39,11 +40,15 @@ use "kernel/lib/intrusive_pool.tkb";
 // per-process descriptor namespace rather than treating fd 3 as a special
 // file-only slot.
 const PROCESS_FD_MAX: usize = 16;
-// A daemon child keeps its inherited shell descriptors while opening its
-// listener, accepted streams, and /dev/null redirection. Keep the shared
-// object pool at the same fixed capacity as the per-process descriptor
-// namespace so the interactive path does not have a smaller hidden limit.
-const SHARED_OBJECT_MAX: usize = 16;
+// GitHub issue #391: there is no shared-object capacity constant any
+// more. SHARED_OBJECT_MAX was 16 open file descriptions system-wide --
+// the one ceiling in this file that was a genuine resource limit rather
+// than a restatement of the process table's, and a shell running a
+// pipeline over a few files was not far from it. What replaces it is the
+// shape Linux uses: an open file description is an individually allocated
+// object (`struct file`, out of the filp cache), and what bounds how many
+// can exist is derived from the memory the machine has rather than
+// picked -- see unified_object_max_files below.
 // Every descriptor slot could in principle
 // hold its own reference to the same shared object (unified_fd_clone/
 // unified_fd_duplicate both create independent references to an existing
@@ -167,14 +172,24 @@ fn unified_fd_context_release(process: usize) !{unsafe} {
         kernel_boot_log("\n");
     }
 }
-// Slot allocation is O(1) via kernel/lib/refcount_slotmap.tkb's
-// RefcountSlotMap(N) (issue #242, follow-up to issue #207)
-// instead of a hand-rolled linear scan over object_records[].kind==Empty, and
-// object_generation[]/object_references[] are replaced by the pool's own
-// per-slot generation+refcount pair. object_records[].kind stays this
-// file's own application data (RefcountSlotMap only knows "occupied or
-// not", not what kind of object occupies a slot).
-private let mut object_pool: RefcountSlotMap(SHARED_OBJECT_MAX);
+// GitHub issue #391: an open file description is a pool ALLOCATION and
+// its identity is that allocation's address, exactly as issue #257 made a
+// TCP connection one. It was a RefcountSlotMap(16) slot with the record
+// beside it in an [SharedObject; 16] array (issue #242/#305), which meant
+// a fixed sixteen of them however much memory the machine had.
+//
+// The blocker #391 recorded was the second dimension: RefcountSlotMap
+// exists because this resource has several independent holders and dies
+// with the last one, and IntrusivePool has one generic argument and
+// nothing to say about refcounts. The way out is the one Linux already
+// takes -- the count belongs to the object, not to the container, and
+// `struct file` carries its own `f_count`. So SharedObject carries `refs`
+// below, and what is left for the pool to provide is identity, which is
+// all IntrusivePool claims to provide.
+//
+// kernel/lib/refcount_slotmap.tkb stays maintained (linux_user/ runs it
+// host-native) as the substrate issue #297's retain/release verification
+// was going to extend; what moved is this consumer, not the primitive.
 // GitHub issue #305: one record per shared-object slot, replacing nine
 // parallel arrays that had to be indexed in lockstep -- the same
 // consolidation ProcessFdContext above already did for per-process
@@ -210,26 +225,180 @@ struct SharedObject {
     // time) and read only through that validation, so the defence-in-depth
     // the refinement provided was against kernel bugs, not against
     // anything userspace supplies -- userspace supplies the fd, and that
-    // path is separately bounds-checked (handle.slot: {0..<SHARED_OBJECT_MAX})
-    // and generation-validated before this field is ever reached.
+    // path is separately validated (unified_object_matches on the
+    // descriptor's own object address) before this field is ever reached.
     transport_slot: usize;
     transport_generation: usize;
+    // GitHub issue #391: the reference count lives in the object, the way
+    // Linux's `struct file.f_count` does, rather than in a parallel slot
+    // of a refcounting container. Retained by unified_fd_install /
+    // _duplicate / _clone, released by unified_fd_close, and the object is
+    // given back to the pool when it reaches 0 -- unified_object_retain /
+    // _release below are the only two places that touch it.
+    refs: usize;
 }
-private let mut object_records: [SharedObject; SHARED_OBJECT_MAX];
+private let mut object_pool: IntrusivePool(SharedObject);
+
+// Initialised exactly once, for the same reason fd_context_pool is: a
+// re-init forgets the pool's pages while live descriptors still name
+// addresses inside them (the hazard issue #257 hit). unified_fd_table_init
+// DRAINS this pool instead, which is what its "write Empty into every
+// record" loop meant back when the records were an array.
+private let mut object_pool_ready: bool = false;
+
+fn unified_object_pool_init() {
+    if (object_pool_ready) { return; }
+    object_pool_ready = true;
+    intrusive_pool_init(&object_pool);
+}
+
+// GitHub issue #391: how many open file descriptions may exist at once,
+// COMPUTED from the memory this kernel has rather than declared. Linux's
+// fs/file_table.c files_maxfiles_init() is
+//
+//     n = memory_pages * (PAGE_SIZE / 1024) / 10
+//
+// -- one open file description per 10 KiB of RAM -- and this is that
+// derivation over this kernel's own page count: 204800 * 4 / 10 = 81920,
+// against the 16 that used to be the whole supply. Linux additionally
+// floors the result at NR_FILE (8192) for very small machines; the
+// derived value here is an order of magnitude above that floor, so
+// reproducing it would only add a constant that can never be the answer.
+//
+// It is deliberately not a capacity: it sizes no storage (a slot is a
+// pool allocation, made when it is needed), and the limit that actually
+// binds first is the page allocator, which arrives through the same
+// UnifiedOpenResult::Full and the same LINUX_ENFILE.
+fn unified_object_max_files() -> usize {
+    return page_allocator_total_count() *
+           (page_allocator_page_bytes() / 1024) / 10;
+}
+
+private fn unified_object_matches(handle: UnifiedObjectHandle) -> bool !{unsafe} {
+    return intrusive_pool_matches(&object_pool, handle.slot,
+                                  handle.generation);
+}
+
+// The PAYLOAD of a slot the caller has already matched -- the same split,
+// and the same reason for it, as fd_context_address/fd_context_at above.
+// Every caller in this file tests unified_object_matches first; reading
+// the payload of an address that failed that test is exactly the
+// use-after-free the generation check exists to refuse.
+private fn unified_object_at(handle: UnifiedObjectHandle) -> *SharedObject !{unsafe} {
+    let owner = intrusive_owner_new(&object_pool, handle.slot,
+                                    handle.generation);
+    let payload: *SharedObject = intrusive_pool_ref(&object_pool, owner);
+    intrusive_owner_drop(owner);
+    return payload;
+}
+
+// Gives the allocation back. Replaces refcount_pool_abandon (an object
+// allocated but never installed) and the Freed arm of the old release
+// (its last holder went away): with the record no longer an array
+// element, both mean the same thing, and neither has an
+// `object_records[slot].kind = Empty` to write afterwards -- the record
+// stops existing instead.
+private fn unified_object_free(slot: usize, generation: usize) !{unsafe} {
+    let owner = intrusive_owner_new(&object_pool, slot, generation);
+    let guard = intrusive_pool_lock(&object_pool);
+    let (ok, reason) = intrusive_remove_outcome(
+        intrusive_pool_remove(&object_pool, guard, owner));
+    intrusive_pool_unlock(&object_pool, guard);
+    if (ok == false) {
+        kernel_boot_log("fd table: releasing a shared object -- ");
+        kernel_boot_log(reason);
+        kernel_boot_log("\n");
+    }
+}
+
+must_use variant UnifiedObjectRetainResult { Invalid; Overflow; Ok; }
+must_use variant UnifiedObjectReleaseResult { Invalid; StillHeld; Freed; }
+
+// RefcountSlotMap's retain/release, over the object's own field. The
+// limit parameter is unchanged in meaning and still passed per call
+// (issue #401): it is the caller's world's bound, not the container's.
+private fn unified_object_retain(handle: UnifiedObjectHandle, limit: usize)
+        -> UnifiedObjectRetainResult !{unsafe} {
+    if (unified_object_matches(handle) == false) {
+        return UnifiedObjectRetainResult::Invalid;
+    }
+    let object: *SharedObject = unified_object_at(handle);
+    if (object.refs >= limit) { return UnifiedObjectRetainResult::Overflow; }
+    object.refs = object.refs + 1;
+    return UnifiedObjectRetainResult::Ok;
+}
+
+// A release of a live object that nobody holds is the double release
+// RefcountSlotMap counted, and it is counted here for the same reason:
+// unified_fd_table_probe asserts the count is 0 at the end of a run.
+private let mut object_double_release_count: usize = 0;
+
+fn unified_object_double_release_count() -> usize {
+    return object_double_release_count;
+}
+
+private fn unified_object_release(handle: UnifiedObjectHandle)
+        -> UnifiedObjectReleaseResult !{unsafe} {
+    if (unified_object_matches(handle) == false) {
+        return UnifiedObjectReleaseResult::Invalid;
+    }
+    let object: *SharedObject = unified_object_at(handle);
+    // `held < 1` rather than `held == 1`/`!= 0`, and through a `let`
+    // rather than off the field: this file's range narrowing is what
+    // proves `held - 1` non-negative below, and it narrows the `<` form
+    // on a binding (kernel/arch/arm64/mm/asid.tkb records the same
+    // rewrite for the same reason).
+    let held: usize = object.refs;
+    if (held < 1) {
+        object_double_release_count = object_double_release_count + 1;
+        return UnifiedObjectReleaseResult::Invalid;
+    }
+    object.refs = held - 1;
+    if (held < 2) {
+        unified_object_free(handle.slot, handle.generation);
+        return UnifiedObjectReleaseResult::Freed;
+    }
+    return UnifiedObjectReleaseResult::StillHeld;
+}
+
+// Gives every live object back. Removing a slot can hand its whole chunk
+// to the page allocator, which invalidates a cursor into that chunk, so
+// this restarts the walk after each removal instead of carrying `next`
+// across it. Both loops are bounded by the live count, which is small.
+private fn unified_object_drain_one() -> bool !{unsafe} {
+    let mut at: usize = intrusive_pool_first_slot(&object_pool);
+    while (at != 0) {
+        match intrusive_pool_probe_slot(&object_pool, at) {
+            IntrusiveSlotProbe::NoPayload => {}
+            IntrusiveSlotProbe::Live(slot_view) => {
+                let generation: usize = intrusive_view_generation(slot_view);
+                intrusive_view_drop(slot_view);
+                unified_object_free(at, generation);
+                return true;
+            }
+        }
+        at = intrusive_pool_next_slot(&object_pool, at);
+    }
+    return false;
+}
+
+private fn unified_object_pool_drain() !{unsafe} {
+    while (unified_object_drain_one()) {}
+}
 
 must_use variant UnifiedFdResult { Invalid; Ok; }
 // GitHub issue #295: a narrower result for the object-creating entry points
 // below (unified_file_open/unified_directory_open/unified_terminal_stdio_open/
 // unified_listener_create/unified_connection_create) whose only source of
 // failure beyond a bad argument is UnifiedObjectResult::Full -- the shared
-// SHARED_OBJECT_MAX pool being exhausted. Kept distinct from UnifiedFdResult
+// object pool being exhausted. Kept distinct from UnifiedFdResult
 // (used by ~40 other call sites with no such distinction to make) so this
 // change stays scoped to the functions that can actually distinguish it.
 must_use variant UnifiedOpenResult { Invalid; Full; Ok; }
 // GitHub issue #295: unified_fd_install/unified_fd_duplicate's only source
-// of failure beyond a bad argument is refcount_pool_retain's own
-// RefcountRetainResult::Overflow -- more references than descriptor slots
-// exist, which is an invariant break rather than a limit (issue #401).
+// of failure beyond a bad argument is unified_object_retain's own
+// UnifiedObjectRetainResult::Overflow -- more references than descriptor
+// slots exist, which is an invariant break rather than a limit (#401).
 // That already
 // had its own distinct variant one layer down; this file used to discard it
 // into the same UnifiedFdResult::Invalid as a genuinely bad fd/process
@@ -238,8 +407,15 @@ must_use variant UnifiedOpenResult { Invalid; Full; Ok; }
 // freshly allocated object whose refcount starts at 0, so RefOverflow is
 // unreachable there, but is still handled explicitly rather than assumed.
 must_use variant UnifiedFdInstallResult { Invalid; RefOverflow; Ok; }
+// GitHub issue #391: `slot` is the pool ADDRESS of the object now, not an
+// index into an array, so there is no range for a refinement to state --
+// the same trade issue #257 made for TcpConnection, and for the same
+// reason. What checks it is unified_object_matches, which asks the pool
+// whether the address lands on a real slot AND whether the occupant is
+// still the one `generation` names. Being in range was never the
+// interesting question; a recycled slot is in range too.
 struct UnifiedObjectHandle {
-    private slot: {0..<SHARED_OBJECT_MAX as usize};
+    private slot: usize;
     private generation: usize;
 }
 must_use variant UnifiedObjectResult {
@@ -263,18 +439,13 @@ must_use variant UnifiedFdAllocResult {
 
 fn unified_fd_table_init() !{unsafe} {
     unified_fd_context_pool_init();
-    refcount_pool_init(&object_pool);
-    for object: usize in 0..<SHARED_OBJECT_MAX {
-        object_records[object].kind = UnifiedFdKind::Empty;
-        object_records[object].offset = 0;
-        object_records[object].inode = 0;
-        object_records[object].readable = false;
-        object_records[object].writable = false;
-        object_records[object].listener_state = UnifiedListenerState::Closed;
-        object_records[object].port = 0;
-        object_records[object].transport_slot = 0;
-        object_records[object].transport_generation = 0;
-    }
+    unified_object_pool_init();
+    // GitHub issue #391: giving every object back, rather than writing
+    // Empty into every element of an array that always existed. The pool
+    // itself is deliberately NOT re-initialised, for the same reason the
+    // context pool is not -- see unified_object_pool_init.
+    unified_object_pool_drain();
+    object_double_release_count = 0;
     // GitHub issue #392: the loop is over LIVE contexts rather than over
     // every process slot, because contexts only exist for processes that
     // have one. Emptying them is not optional: this function also resets
@@ -381,24 +552,24 @@ fn unified_file_open(process: usize, fd: usize, inode: usize,
         UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
         UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
-            object_records[handle.slot].inode = inode;
-            object_records[handle.slot].readable = readable;
-            object_records[handle.slot].writable = writable;
+            // Straight to the payload with no unified_object_matches
+            // first: this handle was minted by the allocation two lines
+            // up and nothing has run since that could invalidate it.
+            let object: *SharedObject = unified_object_at(handle);
+            object.inode = inode;
+            object.readable = readable;
+            object.writable = writable;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
-                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
-                    refcount_pool_abandon(&object_pool, handle.slot,
-                                         handle.generation);
+                    unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
                 // Unreachable: object_pool just allocated this slot fresh,
                 // so its refcount is 0 -- see UnifiedFdInstallResult's own
                 // header comment. Handled the same as Invalid for totality.
                 UnifiedFdInstallResult::RefOverflow => {
-                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
-                    refcount_pool_abandon(&object_pool, handle.slot,
-                                         handle.generation);
+                    unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdInstallResult::Ok => { return UnifiedOpenResult::Ok; }
@@ -413,21 +584,18 @@ fn unified_directory_open(process: usize, fd: usize, inode: usize)
         UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
         UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
-            object_records[handle.slot].inode = inode;
-            object_records[handle.slot].readable = true;
-            object_records[handle.slot].writable = false;
+            let object: *SharedObject = unified_object_at(handle);
+            object.inode = inode;
+            object.readable = true;
+            object.writable = false;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
-                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
-                    refcount_pool_abandon(&object_pool, handle.slot,
-                                         handle.generation);
+                    unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdInstallResult::RefOverflow => {
-                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
-                    refcount_pool_abandon(&object_pool, handle.slot,
-                                         handle.generation);
+                    unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdInstallResult::Ok => { return UnifiedOpenResult::Ok; }
@@ -448,15 +616,11 @@ fn unified_terminal_stdio_open(process: usize) -> UnifiedOpenResult {
             match unified_fd_install(process, 0, handle.slot,
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
-                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
-                    refcount_pool_abandon(&object_pool, handle.slot,
-                                         handle.generation);
+                    unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdInstallResult::RefOverflow => {
-                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
-                    refcount_pool_abandon(&object_pool, handle.slot,
-                                         handle.generation);
+                    unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdInstallResult::Ok => {}
@@ -512,33 +676,56 @@ fn unified_terminal_is_open(process: usize, fd: usize) -> bool {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return false; }
     let ctx: *ProcessFdContext = fd_context_at(process);
-    let object_value: usize = ctx.fd_object[fd];
+    // GitHub issue #391: the descriptor's (address, generation) pair is
+    // checked by the pool before the record behind it is read, where the
+    // array form could read first and check afterwards. Reading the
+    // payload of an address the pool does not recognise is not a stale
+    // answer, it is a wild pointer, so the order is now load-bearing.
+    let mut handle: UnifiedObjectHandle = {
+        ctx.fd_object[fd], ctx.fd_generation[fd]
+    };
     if (ctx.fd_kind[fd] == UnifiedFdKind::Terminal &&
-        object_value < SHARED_OBJECT_MAX) {
-        let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        return object_records[object].kind == UnifiedFdKind::Terminal &&
-               refcount_pool_matches(&object_pool, object,
-                                     ctx.fd_generation[fd]);
+        unified_object_matches(handle)) {
+        return unified_object_at(handle).kind == UnifiedFdKind::Terminal;
     }
     return false;
 }
 
-fn unified_object_alloc_first(kind: UnifiedFdKind) -> UnifiedObjectResult {
+// GitHub issue #391: Full has two causes now and they are both real
+// exhaustion, so both keep the variant the callers already map to
+// LINUX_ENFILE: the system-wide derived ceiling (Linux's
+// files_stat.max_files), and the page allocator having nothing left to
+// carve a slot out of. Neither is a hand-picked sixteen.
+//
+// insert_zeroed, not insert: a zeroed SharedObject is the empty record
+// this function used to write field by field -- UnifiedFdKind::Empty and
+// UnifiedListenerState::Closed are both declaration-order tag zero, and
+// every other field starts at 0/false. Only the two that differ from
+// zero for a fresh object are written below.
+fn unified_object_alloc_first(kind: UnifiedFdKind) -> UnifiedObjectResult !{unsafe} {
     if (kind == UnifiedFdKind::Empty) {
         return UnifiedObjectResult::Invalid;
     }
-    match refcount_pool_alloc(&object_pool) {
-        RefcountAllocResult::Full => { return UnifiedObjectResult::Full; }
-        RefcountAllocResult::Allocated(pair) => {
-            let (slot_value, generation) = pair;
-            if (slot_value < SHARED_OBJECT_MAX) {
-                let slot: {0..<SHARED_OBJECT_MAX as usize} = slot_value;
-                object_records[slot].kind = kind;
-                object_records[slot].offset = 0;
-                let mut handle: UnifiedObjectHandle = { slot, generation };
-                return UnifiedObjectResult::Allocated(handle);
-            }
+    unified_object_pool_init();
+    if (intrusive_pool_live_count(&object_pool) >= unified_object_max_files()) {
+        return UnifiedObjectResult::Full;
+    }
+    let guard = intrusive_pool_lock(&object_pool);
+    let inserted = intrusive_pool_insert_zeroed(&object_pool, guard);
+    intrusive_pool_unlock(&object_pool, guard);
+    match inserted {
+        IntrusivePoolInsertResult::OutOfMemory => {
             return UnifiedObjectResult::Full;
+        }
+        IntrusivePoolInsertResult::Allocated(owner) => {
+            let slot: usize = intrusive_owner_slot(owner);
+            let generation: usize = intrusive_owner_generation(owner);
+            let object: *SharedObject = intrusive_pool_ref(&object_pool, owner);
+            object.kind = kind;
+            object.refs = 0;
+            intrusive_owner_drop(owner);
+            let mut handle: UnifiedObjectHandle = { slot, generation };
+            return UnifiedObjectResult::Allocated(handle);
         }
     }
 }
@@ -564,16 +751,11 @@ fn unified_socket_lookup(process: usize, fd: usize,
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedSocketResult::Missing; }
     let ctx: *ProcessFdContext = fd_context_at(process);
-    let object_value: usize = ctx.fd_object[fd];
-    if (ctx.fd_kind[fd] == kind &&
-        object_value < SHARED_OBJECT_MAX) {
-        let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        if (object_records[object].kind == kind &&
-            refcount_pool_matches(&object_pool, object,
-                                  ctx.fd_generation[fd])) {
-            let mut handle: UnifiedObjectHandle = {
-                object, ctx.fd_generation[fd]
-            };
+    let mut handle: UnifiedObjectHandle = {
+        ctx.fd_object[fd], ctx.fd_generation[fd]
+    };
+    if (ctx.fd_kind[fd] == kind && unified_object_matches(handle)) {
+        if (unified_object_at(handle).kind == kind) {
             return UnifiedSocketResult::Found(handle);
         }
     }
@@ -585,20 +767,17 @@ fn unified_listener_create(process: usize, fd: usize) -> UnifiedOpenResult {
         UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
         UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
-            object_records[handle.slot].listener_state = UnifiedListenerState::Created;
-            object_records[handle.slot].port = 0;
+            let object: *SharedObject = unified_object_at(handle);
+            object.listener_state = UnifiedListenerState::Created;
+            object.port = 0;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
-                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
-                    refcount_pool_abandon(&object_pool, handle.slot,
-                                         handle.generation);
+                    unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdInstallResult::RefOverflow => {
-                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
-                    refcount_pool_abandon(&object_pool, handle.slot,
-                                         handle.generation);
+                    unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdInstallResult::Ok => { return UnifiedOpenResult::Ok; }
@@ -615,20 +794,17 @@ fn unified_connection_create(process: usize, fd: usize,
         UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
         UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
-            object_records[handle.slot].transport_slot = transport_slot;
-            object_records[handle.slot].transport_generation = transport_generation;
+            let object: *SharedObject = unified_object_at(handle);
+            object.transport_slot = transport_slot;
+            object.transport_generation = transport_generation;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
-                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
-                    refcount_pool_abandon(&object_pool, handle.slot,
-                                         handle.generation);
+                    unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdInstallResult::RefOverflow => {
-                    object_records[handle.slot].kind = UnifiedFdKind::Empty;
-                    refcount_pool_abandon(&object_pool, handle.slot,
-                                         handle.generation);
+                    unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
                 UnifiedFdInstallResult::Ok => { return UnifiedOpenResult::Ok; }
@@ -685,14 +861,17 @@ fn unified_fd_close_exec_descriptors(process: usize) !{unsafe} {
     }
 }
 
-fn unified_object_references(handle: UnifiedObjectHandle) -> usize {
-    return refcount_pool_count(&object_pool, handle.slot, handle.generation);
+fn unified_object_references(handle: UnifiedObjectHandle) -> usize !{unsafe} {
+    if (unified_object_matches(handle) == false) { return 0; }
+    return unified_object_at(handle).refs;
 }
 
 fn unified_listener_state(handle: UnifiedObjectHandle) -> UnifiedListenerState {
-    if (object_records[handle.slot].kind == UnifiedFdKind::Listener &&
-        refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        return object_records[handle.slot].listener_state;
+    if (unified_object_matches(handle)) {
+        let object: *SharedObject = unified_object_at(handle);
+        if (object.kind == UnifiedFdKind::Listener) {
+            return object.listener_state;
+        }
     }
     return UnifiedListenerState::Closed;
 }
@@ -700,44 +879,57 @@ fn unified_listener_state(handle: UnifiedObjectHandle) -> UnifiedListenerState {
 fn unified_listener_set_state(handle: UnifiedObjectHandle,
                               state: UnifiedListenerState)
         -> UnifiedFdResult {
-    if (object_records[handle.slot].kind == UnifiedFdKind::Listener &&
-        refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        object_records[handle.slot].listener_state = state;
-        return UnifiedFdResult::Ok;
+    if (unified_object_matches(handle)) {
+        let object: *SharedObject = unified_object_at(handle);
+        if (object.kind == UnifiedFdKind::Listener) {
+            object.listener_state = state;
+            return UnifiedFdResult::Ok;
+        }
     }
     return UnifiedFdResult::Invalid;
 }
 
 fn unified_listener_port(handle: UnifiedObjectHandle) -> u16 {
-    if (object_records[handle.slot].kind == UnifiedFdKind::Listener &&
-        refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        return object_records[handle.slot].port;
+    if (unified_object_matches(handle)) {
+        let object: *SharedObject = unified_object_at(handle);
+        if (object.kind == UnifiedFdKind::Listener) { return object.port; }
     }
     return 0;
 }
 
 fn unified_listener_set_port(handle: UnifiedObjectHandle, port: u16)
         -> UnifiedFdResult {
-    if (object_records[handle.slot].kind == UnifiedFdKind::Listener &&
-        refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        object_records[handle.slot].port = port;
-        return UnifiedFdResult::Ok;
+    if (unified_object_matches(handle)) {
+        let object: *SharedObject = unified_object_at(handle);
+        if (object.kind == UnifiedFdKind::Listener) {
+            object.port = port;
+            return UnifiedFdResult::Ok;
+        }
     }
     return UnifiedFdResult::Invalid;
 }
 
 fn unified_connection_slot(handle: UnifiedObjectHandle) -> usize {
-    if (object_records[handle.slot].kind == UnifiedFdKind::Connection &&
-        refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        return object_records[handle.slot].transport_slot;
+    if (unified_object_matches(handle)) {
+        let object: *SharedObject = unified_object_at(handle);
+        if (object.kind == UnifiedFdKind::Connection) {
+            return object.transport_slot;
+        }
     }
-    return SHARED_OBJECT_MAX;
+    // GitHub issue #391: 0, not SHARED_OBJECT_MAX. The old sentinel was
+    // "one past the last valid index", which stopped meaning anything
+    // when the value became a transport POOL ADDRESS. 0 is the address
+    // no slot has, and is what kernel/net/tcp.tkb's own lookups already
+    // treat as "no connection".
+    return 0;
 }
 
 fn unified_connection_generation(handle: UnifiedObjectHandle) -> usize {
-    if (object_records[handle.slot].kind == UnifiedFdKind::Connection &&
-        refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        return object_records[handle.slot].transport_generation;
+    if (unified_object_matches(handle)) {
+        let object: *SharedObject = unified_object_at(handle);
+        if (object.kind == UnifiedFdKind::Connection) {
+            return object.transport_generation;
+        }
     }
     return 0;
 }
@@ -747,16 +939,12 @@ fn unified_file_lookup(process: usize, fd: usize) -> UnifiedFileResult {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedFileResult::Missing; }
     let ctx: *ProcessFdContext = fd_context_at(process);
-    let object_value: usize = ctx.fd_object[fd];
+    let mut handle: UnifiedObjectHandle = {
+        ctx.fd_object[fd], ctx.fd_generation[fd]
+    };
     if (ctx.fd_kind[fd] == UnifiedFdKind::OpenFile &&
-        object_value < SHARED_OBJECT_MAX) {
-        let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        if (object_records[object].kind == UnifiedFdKind::OpenFile &&
-            refcount_pool_matches(&object_pool, object,
-                                  ctx.fd_generation[fd])) {
-            let mut handle: UnifiedObjectHandle = {
-                object, ctx.fd_generation[fd]
-            };
+        unified_object_matches(handle)) {
+        if (unified_object_at(handle).kind == UnifiedFdKind::OpenFile) {
             return UnifiedFileResult::Found(handle);
         }
     }
@@ -764,9 +952,9 @@ fn unified_file_lookup(process: usize, fd: usize) -> UnifiedFileResult {
 }
 
 fn unified_file_inode(handle: UnifiedObjectHandle) -> usize {
-    if (object_records[handle.slot].kind == UnifiedFdKind::OpenFile &&
-        refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        return object_records[handle.slot].inode;
+    if (unified_object_matches(handle)) {
+        let object: *SharedObject = unified_object_at(handle);
+        if (object.kind == UnifiedFdKind::OpenFile) { return object.inode; }
     }
     return 0;
 }
@@ -779,16 +967,12 @@ fn unified_directory_lookup(process: usize, fd: usize)
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedDirectoryResult::Missing; }
     let ctx: *ProcessFdContext = fd_context_at(process);
-    let object_value: usize = ctx.fd_object[fd];
+    let mut handle: UnifiedObjectHandle = {
+        ctx.fd_object[fd], ctx.fd_generation[fd]
+    };
     if (ctx.fd_kind[fd] == UnifiedFdKind::Directory &&
-        object_value < SHARED_OBJECT_MAX) {
-        let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        if (object_records[object].kind == UnifiedFdKind::Directory &&
-            refcount_pool_matches(&object_pool, object,
-                                  ctx.fd_generation[fd])) {
-            let mut handle: UnifiedObjectHandle = {
-                object, ctx.fd_generation[fd]
-            };
+        unified_object_matches(handle)) {
+        if (unified_object_at(handle).kind == UnifiedFdKind::Directory) {
             return UnifiedDirectoryResult::Found(handle);
         }
     }
@@ -796,23 +980,23 @@ fn unified_directory_lookup(process: usize, fd: usize)
 }
 
 fn unified_directory_inode(handle: UnifiedObjectHandle) -> usize {
-    if (object_records[handle.slot].kind == UnifiedFdKind::Directory &&
-        refcount_pool_matches(&object_pool, handle.slot, handle.generation)) {
-        return object_records[handle.slot].inode;
+    if (unified_object_matches(handle)) {
+        let object: *SharedObject = unified_object_at(handle);
+        if (object.kind == UnifiedFdKind::Directory) { return object.inode; }
     }
     return 0;
 }
 
 fn unified_file_is_readable(handle: UnifiedObjectHandle) -> bool {
-    return object_records[handle.slot].kind == UnifiedFdKind::OpenFile &&
-           refcount_pool_matches(&object_pool, handle.slot, handle.generation) &&
-           object_records[handle.slot].readable;
+    if (unified_object_matches(handle) == false) { return false; }
+    let object: *SharedObject = unified_object_at(handle);
+    return object.kind == UnifiedFdKind::OpenFile && object.readable;
 }
 
 fn unified_file_is_writable(handle: UnifiedObjectHandle) -> bool {
-    return object_records[handle.slot].kind == UnifiedFdKind::OpenFile &&
-           refcount_pool_matches(&object_pool, handle.slot, handle.generation) &&
-           object_records[handle.slot].writable;
+    if (unified_object_matches(handle) == false) { return false; }
+    let object: *SharedObject = unified_object_at(handle);
+    return object.kind == UnifiedFdKind::OpenFile && object.writable;
 }
 
 // GitHub issue #401: how many holders one shared object can have, COMPUTED
@@ -851,10 +1035,9 @@ fn unified_object_ref_bound_breaks_count() -> usize {
     return unified_object_ref_bound_breaks;
 }
 
-private fn unified_object_ref_bound_break(
-        object: {0..<SHARED_OBJECT_MAX as usize}) {
+private fn unified_object_ref_bound_break(object: usize) {
     unified_object_ref_bound_breaks = unified_object_ref_bound_breaks + 1;
-    kernel_boot_log("fd table: INVARIANT BREAK -- shared object ");
+    kernel_boot_log("fd table: INVARIANT BREAK -- shared object at ");
     uart_put_udec(object);
     kernel_boot_log(" has more references than there are descriptor slots (");
     uart_put_udec(unified_object_ref_bound());
@@ -862,34 +1045,40 @@ private fn unified_object_ref_bound_break(
 }
 
 fn unified_fd_install(process: usize, fd: usize, object_value: usize,
-                      generation: usize) -> UnifiedFdInstallResult {
-    if (fd >= PROCESS_FD_MAX ||
-        object_value >= SHARED_OBJECT_MAX) { return UnifiedFdInstallResult::Invalid; }
+                      generation: usize) -> UnifiedFdInstallResult !{unsafe} {
+    if (fd >= PROCESS_FD_MAX) { return UnifiedFdInstallResult::Invalid; }
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedFdInstallResult::Invalid; }
     let ctx: *ProcessFdContext = fd_context_at(process);
-    if (object_value < SHARED_OBJECT_MAX) {
-        let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        if (ctx.fd_kind[fd] != UnifiedFdKind::Empty ||
-            object_records[object].kind == UnifiedFdKind::Empty) {
+    // GitHub issue #391: what used to be a range test on the object index
+    // is the pool's own occupancy test on the object address. It answers
+    // the stronger question -- this address is a real slot of this pool
+    // AND still holds the occupant `generation` names -- and it is what
+    // makes the payload read below legitimate.
+    let mut handle: UnifiedObjectHandle = { object_value, generation };
+    if (unified_object_matches(handle) == false) {
+        return UnifiedFdInstallResult::Invalid;
+    }
+    let object: *SharedObject = unified_object_at(handle);
+    if (ctx.fd_kind[fd] != UnifiedFdKind::Empty ||
+        object.kind == UnifiedFdKind::Empty) {
+        return UnifiedFdInstallResult::Invalid;
+    }
+    match unified_object_retain(handle, unified_object_ref_bound()) {
+        UnifiedObjectRetainResult::Invalid => {
             return UnifiedFdInstallResult::Invalid;
         }
-        match refcount_pool_retain(&object_pool, object, generation,
-                                   unified_object_ref_bound()) {
-            RefcountRetainResult::Invalid => { return UnifiedFdInstallResult::Invalid; }
-            RefcountRetainResult::Overflow => {
-                unified_object_ref_bound_break(object);
-                return UnifiedFdInstallResult::RefOverflow;
-            }
-            RefcountRetainResult::Ok => {}
+        UnifiedObjectRetainResult::Overflow => {
+            unified_object_ref_bound_break(object_value);
+            return UnifiedFdInstallResult::RefOverflow;
         }
-        ctx.fd_kind[fd] = object_records[object].kind;
-        ctx.fd_object[fd] = object;
-        ctx.fd_generation[fd] = generation;
-        ctx.fd_close_on_exec[fd] = false;
-        return UnifiedFdInstallResult::Ok;
+        UnifiedObjectRetainResult::Ok => {}
     }
-    return UnifiedFdInstallResult::Invalid;
+    ctx.fd_kind[fd] = object.kind;
+    ctx.fd_object[fd] = object_value;
+    ctx.fd_generation[fd] = generation;
+    ctx.fd_close_on_exec[fd] = false;
+    return UnifiedFdInstallResult::Ok;
 }
 
 fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult {
@@ -897,17 +1086,18 @@ fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedFdResult::Invalid; }
     let ctx: *ProcessFdContext = fd_context_at(process);
-    let object_value: usize = ctx.fd_object[fd];
+    let mut handle: UnifiedObjectHandle = {
+        ctx.fd_object[fd], ctx.fd_generation[fd]
+    };
     if (ctx.fd_kind[fd] != UnifiedFdKind::Empty &&
-        object_value < SHARED_OBJECT_MAX) {
-        let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        let generation: usize = ctx.fd_generation[fd];
-        match refcount_pool_release(&object_pool, object, generation) {
-            RefcountReleaseResult::Invalid => { return UnifiedFdResult::Invalid; }
-            RefcountReleaseResult::StillHeld => {}
-            RefcountReleaseResult::Freed => {
-                object_records[object].kind = UnifiedFdKind::Empty;
-            }
+        unified_object_matches(handle)) {
+        match unified_object_release(handle) {
+            UnifiedObjectReleaseResult::Invalid => { return UnifiedFdResult::Invalid; }
+            UnifiedObjectReleaseResult::StillHeld => {}
+            // Nothing to write back on Freed: the record is gone rather
+            // than marked Empty, which is the whole difference between a
+            // pool allocation and an array element.
+            UnifiedObjectReleaseResult::Freed => {}
         }
         ctx.fd_kind[fd] = UnifiedFdKind::Empty;
         ctx.fd_object[fd] = 0;
@@ -935,16 +1125,14 @@ fn unified_fd_clone_rollback(
     // `!{unsafe}`/per-index unsafe wrapping needed.
     for undo: usize in 0..<limit {
         if (child_ctx.fd_kind[undo] != UnifiedFdKind::Empty) {
-            let undo_value: usize = child_ctx.fd_object[undo];
-            if (undo_value < SHARED_OBJECT_MAX) {
-                let undo_object: {0..<SHARED_OBJECT_MAX as usize} = undo_value;
-                match refcount_pool_release(&object_pool, undo_object,
-                        child_ctx.fd_generation[undo]) {
-                    RefcountReleaseResult::Invalid => {}
-                    RefcountReleaseResult::StillHeld => {}
-                    RefcountReleaseResult::Freed => {
-                        object_records[undo_object].kind = UnifiedFdKind::Empty;
-                    }
+            let mut undo_handle: UnifiedObjectHandle = {
+                child_ctx.fd_object[undo], child_ctx.fd_generation[undo]
+            };
+            if (unified_object_matches(undo_handle)) {
+                match unified_object_release(undo_handle) {
+                    UnifiedObjectReleaseResult::Invalid => {}
+                    UnifiedObjectReleaseResult::StillHeld => {}
+                    UnifiedObjectReleaseResult::Freed => {}
                 }
             }
             child_ctx.fd_kind[undo] = UnifiedFdKind::Empty;
@@ -965,15 +1153,14 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
             return UnifiedFdResult::Invalid;
         }
         if (parent_ctx.fd_kind[fd] != UnifiedFdKind::Empty) {
-            let object_value: usize = parent_ctx.fd_object[fd];
-            if (object_value < SHARED_OBJECT_MAX) {
-                let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-                if (object_records[object].kind != parent_ctx.fd_kind[fd] ||
-                    refcount_pool_count(&object_pool, object,
-                                        parent_ctx.fd_generation[fd]) == 0) {
-                    return UnifiedFdResult::Invalid;
-                }
-            } else {
+            let mut parent_handle: UnifiedObjectHandle = {
+                parent_ctx.fd_object[fd], parent_ctx.fd_generation[fd]
+            };
+            if (unified_object_matches(parent_handle) == false) {
+                return UnifiedFdResult::Invalid;
+            }
+            if (unified_object_at(parent_handle).kind != parent_ctx.fd_kind[fd] ||
+                unified_object_references(parent_handle) == 0) {
                 return UnifiedFdResult::Invalid;
             }
         }
@@ -1006,28 +1193,23 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
             parent_ctx.fd_close_on_exec[fd];
         if (parent_ctx.fd_kind[fd] != UnifiedFdKind::Empty) {
             let value: usize = parent_ctx.fd_object[fd];
-            if (value < SHARED_OBJECT_MAX) {
-                let object: {0..<SHARED_OBJECT_MAX as usize} = value;
-                match refcount_pool_retain(&object_pool, object,
-                                           parent_ctx.fd_generation[fd],
-                                           unified_object_ref_bound()) {
-                    RefcountRetainResult::Ok => {}
-                    RefcountRetainResult::Invalid => {
-                        child_ctx.fd_kind[fd] = UnifiedFdKind::Empty;
-                        unified_fd_clone_rollback(child_ctx, fd);
-                        return UnifiedFdResult::Invalid;
-                    }
-                    RefcountRetainResult::Overflow => {
-                        unified_object_ref_bound_break(object);
-                        child_ctx.fd_kind[fd] = UnifiedFdKind::Empty;
-                        unified_fd_clone_rollback(child_ctx, fd);
-                        return UnifiedFdResult::Invalid;
-                    }
+            let mut retain_handle: UnifiedObjectHandle = {
+                value, parent_ctx.fd_generation[fd]
+            };
+            match unified_object_retain(retain_handle,
+                                        unified_object_ref_bound()) {
+                UnifiedObjectRetainResult::Ok => {}
+                UnifiedObjectRetainResult::Invalid => {
+                    child_ctx.fd_kind[fd] = UnifiedFdKind::Empty;
+                    unified_fd_clone_rollback(child_ctx, fd);
+                    return UnifiedFdResult::Invalid;
                 }
-            } else {
-                child_ctx.fd_kind[fd] = UnifiedFdKind::Empty;
-                unified_fd_clone_rollback(child_ctx, fd);
-                return UnifiedFdResult::Invalid;
+                UnifiedObjectRetainResult::Overflow => {
+                    unified_object_ref_bound_break(value);
+                    child_ctx.fd_kind[fd] = UnifiedFdKind::Empty;
+                    unified_fd_clone_rollback(child_ctx, fd);
+                    return UnifiedFdResult::Invalid;
+                }
             }
         }
     }
@@ -1040,16 +1222,16 @@ fn unified_fd_set_offset(process: usize, fd: usize, offset: usize)
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedFdResult::Invalid; }
     let ctx: *ProcessFdContext = fd_context_at(process);
-    let object_value: usize = ctx.fd_object[fd];
+    let mut handle: UnifiedObjectHandle = {
+        ctx.fd_object[fd], ctx.fd_generation[fd]
+    };
     if ((ctx.fd_kind[fd] == UnifiedFdKind::OpenFile ||
          ctx.fd_kind[fd] == UnifiedFdKind::Directory) &&
-        object_value < SHARED_OBJECT_MAX) {
-        let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        if ((object_records[object].kind == UnifiedFdKind::OpenFile ||
-             object_records[object].kind == UnifiedFdKind::Directory) &&
-            refcount_pool_matches(&object_pool, object,
-                                  ctx.fd_generation[fd])) {
-            object_records[object].offset = offset;
+        unified_object_matches(handle)) {
+        let object: *SharedObject = unified_object_at(handle);
+        if (object.kind == UnifiedFdKind::OpenFile ||
+            object.kind == UnifiedFdKind::Directory) {
+            object.offset = offset;
             return UnifiedFdResult::Ok;
         }
     }
@@ -1061,16 +1243,16 @@ fn unified_fd_offset(process: usize, fd: usize) -> UnifiedOffsetResult {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedOffsetResult::Missing; }
     let ctx: *ProcessFdContext = fd_context_at(process);
-    let object_value: usize = ctx.fd_object[fd];
+    let mut handle: UnifiedObjectHandle = {
+        ctx.fd_object[fd], ctx.fd_generation[fd]
+    };
     if ((ctx.fd_kind[fd] == UnifiedFdKind::OpenFile ||
          ctx.fd_kind[fd] == UnifiedFdKind::Directory) &&
-        object_value < SHARED_OBJECT_MAX) {
-        let object: {0..<SHARED_OBJECT_MAX as usize} = object_value;
-        if ((object_records[object].kind == UnifiedFdKind::OpenFile ||
-             object_records[object].kind == UnifiedFdKind::Directory) &&
-            refcount_pool_matches(&object_pool, object,
-                                  ctx.fd_generation[fd])) {
-            return UnifiedOffsetResult::Found(object_records[object].offset);
+        unified_object_matches(handle)) {
+        let object: *SharedObject = unified_object_at(handle);
+        if (object.kind == UnifiedFdKind::OpenFile ||
+            object.kind == UnifiedFdKind::Directory) {
+            return UnifiedOffsetResult::Found(object.offset);
         }
     }
     return UnifiedOffsetResult::Missing;
@@ -1093,54 +1275,50 @@ fn unified_fd_destroy(process: usize) -> UnifiedFdResult {
     return UnifiedFdResult::Ok;
 }
 
-// GitHub issue #295 boundary test: exhausts the shared SHARED_OBJECT_MAX
-// object pool directly (bypassing per-process fd installation, which this
-// file's unified_fd_table_probe already covers functionally but never runs
-// to this pool's own boundary) and confirms UnifiedObjectResult::Full is
-// reported at exactly capacity, then that a freed slot is reused -- mirrors
-// kernel/arch/arm64/mm/asid.tkb's asid_pool_probe structure for its own
-// same-shape SlotMap-backed pool.
-fn unified_object_pool_exhaustion_probe() -> bool {
+// GitHub issue #391 replaces issue #295's exhaustion probe here, the same
+// way issue #257 replaced TCP's: there is no capacity of sixteen left to
+// be refused at, so what is worth proving is the OPPOSITE of what the old
+// probe proved -- the pool goes past the old ceiling, each object is its
+// own storage, a freed object's address is refused afterwards on the
+// generation rather than on a range, and the pool ends holding exactly
+// what it held before.
+//
+// It still drives the object pool directly, bypassing per-process fd
+// installation, for the reason the old one did: unified_fd_table_probe
+// covers the descriptor paths functionally, and this covers the pool.
+const OBJECT_POOL_PROBE_COUNT: usize = 24;
+
+fn unified_object_pool_probe() -> bool !{unsafe} {
     unified_fd_table_init();
-    let mut handles: [UnifiedObjectHandle; SHARED_OBJECT_MAX];
-    for i: usize in 0..<SHARED_OBJECT_MAX {
+    let before: usize = intrusive_pool_live_count(&object_pool);
+    let mut handles: [UnifiedObjectHandle; OBJECT_POOL_PROBE_COUNT];
+    for i: usize in 0..<OBJECT_POOL_PROBE_COUNT {
         match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
             UnifiedObjectResult::Invalid => { return false; }
             UnifiedObjectResult::Full => { return false; }
             UnifiedObjectResult::Allocated(handle) => { handles[i] = handle; }
         }
     }
-
-    let mut capacity_ok: bool = false;
-    match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
-        UnifiedObjectResult::Full => { capacity_ok = true; }
-        UnifiedObjectResult::Invalid => {}
-        UnifiedObjectResult::Allocated(extra) => {
-            refcount_pool_abandon(&object_pool, extra.slot, extra.generation);
+    for i: usize in 0..<OBJECT_POOL_PROBE_COUNT {
+        for j: usize in 0..<OBJECT_POOL_PROBE_COUNT {
+            if (i != j && handles[i].slot == handles[j].slot) { return false; }
         }
     }
-    if (capacity_ok == false) { return false; }
-
-    let freed_slot: {0..<SHARED_OBJECT_MAX as usize} = handles[0].slot;
-    let freed_generation: usize = handles[0].generation;
-    refcount_pool_abandon(&object_pool, freed_slot, freed_generation);
-    object_records[freed_slot].kind = UnifiedFdKind::Empty;
-    let mut reused_ok: bool = false;
-    match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
-        UnifiedObjectResult::Full => {}
-        UnifiedObjectResult::Invalid => {}
-        UnifiedObjectResult::Allocated(reused) => {
-            if (reused.slot == freed_slot) { reused_ok = true; }
-            handles[0] = reused;
-        }
+    if (intrusive_pool_live_count(&object_pool) !=
+            before + OBJECT_POOL_PROBE_COUNT) {
+        return false;
     }
-    if (reused_ok == false) { return false; }
 
-    for i: usize in 0..<SHARED_OBJECT_MAX {
-        refcount_pool_abandon(&object_pool, handles[i].slot,
-                              handles[i].generation);
-        object_records[handles[i].slot].kind = UnifiedFdKind::Empty;
+    let mut stale: UnifiedObjectHandle = {
+        handles[0].slot, handles[0].generation
+    };
+    unified_object_free(stale.slot, stale.generation);
+    if (unified_object_matches(stale)) { return false; }
+
+    for i: usize in 1..<OBJECT_POOL_PROBE_COUNT {
+        unified_object_free(handles[i].slot, handles[i].generation);
     }
+    if (intrusive_pool_live_count(&object_pool) != before) { return false; }
     unified_fd_table_init();
     return true;
 }
@@ -1153,9 +1331,9 @@ fn unified_object_pool_exhaustion_probe() -> bool {
 // it TRACKS: fill it exactly, be refused at one past it, then create one
 // more process and be allowed exactly PROCESS_FD_MAX more.
 //
-// It still drives refcount_pool_retain/_release directly rather than
-// installing real fd-table entries: the point is this pool's own boundary,
-// not the descriptor paths, which unified_fd_table_probe covers.
+// It still drives retain/release directly rather than installing real
+// fd-table entries: the point is this bound's own boundary, not the
+// descriptor paths, which unified_fd_table_probe covers.
 fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
     unified_fd_table_init();
     let bound: usize = unified_object_ref_bound();
@@ -1164,25 +1342,23 @@ fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
         UnifiedObjectResult::Invalid => { return false; }
         UnifiedObjectResult::Full => { return false; }
         UnifiedObjectResult::Allocated(handle) => {
-            // refcount_pool_alloc's own doc comment: a freshly allocated
-            // slot's refcount starts at 0, so `bound` successful retains
-            // bring it to exactly the bound.
+            // unified_object_alloc_first's own doc comment: a freshly
+            // allocated object's refs starts at 0, so `bound` successful
+            // retains bring it to exactly the bound.
             let mut retained: usize = 0;
             while (retained < bound) {
-                match refcount_pool_retain(&object_pool, handle.slot,
-                                           handle.generation, bound) {
-                    RefcountRetainResult::Ok => {}
-                    RefcountRetainResult::Invalid => { return false; }
-                    RefcountRetainResult::Overflow => { return false; }
+                match unified_object_retain(handle, bound) {
+                    UnifiedObjectRetainResult::Ok => {}
+                    UnifiedObjectRetainResult::Invalid => { return false; }
+                    UnifiedObjectRetainResult::Overflow => { return false; }
                 }
                 retained = retained + 1;
             }
             let mut ok: bool = false;
-            match refcount_pool_retain(&object_pool, handle.slot,
-                                       handle.generation, bound) {
-                RefcountRetainResult::Overflow => { ok = true; }
-                RefcountRetainResult::Invalid => {}
-                RefcountRetainResult::Ok => { retained = retained + 1; }
+            match unified_object_retain(handle, bound) {
+                UnifiedObjectRetainResult::Overflow => { ok = true; }
+                UnifiedObjectRetainResult::Invalid => {}
+                UnifiedObjectRetainResult::Ok => { retained = retained + 1; }
             }
             // ...and one more process means PROCESS_FD_MAX more descriptor
             // slots, so the same retain that was refused above is allowed
@@ -1192,21 +1368,19 @@ fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
             let grown: usize = unified_object_ref_bound();
             if (grown != bound + PROCESS_FD_MAX) { ok = false; }
             if (ok) {
-                match refcount_pool_retain(&object_pool, handle.slot,
-                                           handle.generation, grown) {
-                    RefcountRetainResult::Ok => { retained = retained + 1; }
-                    RefcountRetainResult::Invalid => { ok = false; }
-                    RefcountRetainResult::Overflow => { ok = false; }
+                match unified_object_retain(handle, grown) {
+                    UnifiedObjectRetainResult::Ok => { retained = retained + 1; }
+                    UnifiedObjectRetainResult::Invalid => { ok = false; }
+                    UnifiedObjectRetainResult::Overflow => { ok = false; }
                 }
             }
             scheduled_process_probe_slot_release(extra);
             let mut released: usize = 0;
             while (released < retained) {
-                match refcount_pool_release(&object_pool, handle.slot,
-                                            handle.generation) {
-                    RefcountReleaseResult::Invalid => { ok = false; }
-                    RefcountReleaseResult::StillHeld => {}
-                    RefcountReleaseResult::Freed => {}
+                match unified_object_release(handle) {
+                    UnifiedObjectReleaseResult::Invalid => { ok = false; }
+                    UnifiedObjectReleaseResult::StillHeld => {}
+                    UnifiedObjectReleaseResult::Freed => {}
                 }
                 released = released + 1;
             }
@@ -1218,7 +1392,7 @@ fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
 
 // GitHub issue #295 boundary test: exhausts one process's own PROCESS_FD_MAX
 // descriptor namespace, distinct from unified_object_pool_exhaustion_probe
-// above (SHARED_OBJECT_MAX, the global object pool) -- unified_fd_table_probe
+// above (the global object pool) -- unified_fd_table_probe
 // exercises fd installation functionally but never fills a process's table
 // to its own capacity. Every fd here duplicates the SAME one shared object
 // (unified_fd_duplicate only bumps its refcount, well under the computed
@@ -1398,14 +1572,14 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
  return false; }
         UnifiedFdResult::Ok => {}
     }
-    for object: usize in 0..<SHARED_OBJECT_MAX {
-        if (object_records[object].kind != UnifiedFdKind::Empty ||
-            refcount_pool_raw_count(&object_pool, object) != 0) {
-            scheduled_process_probe_slot_release(child);
-            return false;
-        }
+    // GitHub issue #391: "every record is Empty again" is "the pool holds
+    // nothing again" now -- an object that nobody references stops
+    // existing rather than being marked free in place.
+    if (intrusive_pool_live_count(&object_pool) != 0) {
+        scheduled_process_probe_slot_release(child);
+        return false;
     }
-    if (refcount_pool_double_release_count(&object_pool) != 0) {
+    if (unified_object_double_release_count() != 0) {
         scheduled_process_probe_slot_release(child);
         return false;
     }
