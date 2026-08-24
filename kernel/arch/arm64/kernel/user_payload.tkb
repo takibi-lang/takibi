@@ -67,6 +67,31 @@ fn initial_user_payload() {
     fail_if(svc5(64, 3, (mutable_content as *u8) as usize, mutable_content.len, 0, 0) != 7);
     fail_if(svc5(57, 3, 0, 0, 0, 0) != 0);
 
+    /* GitHub issue #393: RLIMIT_NOFILE is a per-process pair this process
+     * can read and change, so prlimit64(2) is exercised for real here --
+     * read it, lower the soft limit, read it back and see the new value,
+     * then put it back. A stack buffer, not a global: this is a flat RX
+     * blob and a writable global would fault (issue #228).
+     *
+     * The two u64s are read a byte at a time for the same reason the
+     * kernel side writes them that way: a *usize cast onto a u8 array
+     * assumes an alignment the array does not promise. */
+    let mut rlimit_buf: [u8; 16];
+    let rlimit_base: *u8 = rlimit_buf as *u8;
+    fail_if(svc5(261, 0, 7, 0, ptr_of(rlimit_base, 0), 0) != 0);
+    fail_if(payload_read_u64(rlimit_base, 0) != 1024);
+    fail_if(payload_read_u64(rlimit_base, 8) != 4096);
+    payload_write_u64(rlimit_base, 0, 64);
+    payload_write_u64(rlimit_base, 8, 4096);
+    fail_if(svc5(261, 0, 7, ptr_of(rlimit_base, 0), 0, 0) != 0);
+    payload_write_u64(rlimit_base, 0, 0);
+    payload_write_u64(rlimit_base, 8, 0);
+    fail_if(svc5(261, 0, 7, 0, ptr_of(rlimit_base, 0), 0) != 0);
+    fail_if(payload_read_u64(rlimit_base, 0) != 64);
+    payload_write_u64(rlimit_base, 0, 1024);
+    payload_write_u64(rlimit_base, 8, 4096);
+    fail_if(svc5(261, 0, 7, ptr_of(rlimit_base, 0), 0, 0) != 0);
+
     /* socket/bind/listen/close one IPv4 stream endpoint. */
     let mut socket_address: [u8; 16] = {
         0x02, 0x00, 0x1f, 0x90,
@@ -212,4 +237,20 @@ fn fail_if(bad: bool) {
 
 fn ptr_of(base: *u8, offset: usize) -> usize {
     return (base + (offset as isize)) as usize;
+}
+
+/* struct rlimit64's little-endian u64s, byte at a time. See the
+ * prlimit64 block above for why not a pointer cast. */
+fn payload_read_u64(base: *u8, offset: usize) -> usize {
+    let mut value: usize = 0;
+    for i: usize in 0..<8 {
+        value = value | ((base[(offset + i) as isize] as usize) << (i * 8));
+    }
+    return value;
+}
+
+fn payload_write_u64(base: *u8, offset: usize, value: usize) {
+    for i: usize in 0..<8 {
+        base[(offset + i) as isize] = ((value >> (i * 8)) & 0xFF) as u8;
+    }
 }

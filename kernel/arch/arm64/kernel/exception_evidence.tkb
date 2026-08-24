@@ -2,6 +2,11 @@ use "kernel/kernel/process.tkb";
 use "kernel/kernel/fd_table.tkb";
 use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
 
+// How many of a process's descriptors an oops report prints. GitHub issue
+// #393: this is the width of the REPORT, not of the table -- see
+// CrashSnapshot's own fd_kind comment.
+const CRASH_FD_SNAPSHOT_SLOTS: usize = 16;
+
 // Stable, fixed-size fail-stop payload.  `valid` is written last, and
 // `sequence` changes before every capture, so a debugger cannot mistake an
 // all-zero or partial record for a fresh crash.  All fields are machine words
@@ -39,8 +44,15 @@ struct CrashSnapshot {
     // and fd_object[i] (the shared-object slot it holds, meaningless when
     // fd_kind[i] is Empty), so a diagnostic snapshot can identify relevant
     // descriptor/socket ownership, not just process/scheduler/VM state.
-    fd_kind: [usize; PROCESS_FD_MAX];
-    fd_object: [usize; PROCESS_FD_MAX];
+    // GitHub issue #393: a REPORT WIDTH, not a table capacity. The
+    // descriptor table has no capacity any more -- it grows with the
+    // process -- but a crash report is captured in a fixed struct, must
+    // not allocate, and must not walk an unbounded chain in exception
+    // context. So the snapshot carries the first CRASH_FD_SNAPSHOT_SLOTS
+    // descriptors, which is what the whole table used to be, and says so
+    // rather than implying the rest do not exist.
+    fd_kind: [usize; CRASH_FD_SNAPSHOT_SLOTS];
+    fd_object: [usize; CRASH_FD_SNAPSHOT_SLOTS];
 }
 
 let mut crash_snapshot: CrashSnapshot;
@@ -111,7 +123,7 @@ fn crash_snapshot_render() !{unsafe} {
     kernel_boot_log(" image=");
     if (crash_snapshot.image_kind == 1) { kernel_boot_log("exec\n"); }
     else { kernel_boot_log("bootstrap\n"); }
-    for fd: usize in 0..<PROCESS_FD_MAX {
+    for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
         if (crash_snapshot.fd_kind[fd] != 0) {
             kernel_boot_log("oops: fd="); uart_put_udec(fd);
             kernel_boot_log(" kind="); uart_put_udec(crash_snapshot.fd_kind[fd]);
@@ -223,7 +235,7 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     crash_snapshot.root_l1 = address_space_l1_physical(crash_snapshot.root_slot);
     crash_snapshot.root_asid = address_space_asid(crash_snapshot.root_slot);
     crash_snapshot.image_kind = kernel_process_crash_image_kind();
-    for fd: usize in 0..<PROCESS_FD_MAX {
+    for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
         crash_snapshot.fd_kind[fd] =
             kernel_fd_table_crash_kind(crash_snapshot.root_slot, fd);
         crash_snapshot.fd_object[fd] =

@@ -1,1 +1,1 @@
-process fd table: exhaustion at capacity=16, reuse-after-free ok
+process fd table: 40 descriptors past the old ceiling of 16, refusal follows this process's own RLIMIT_NOFILE ok

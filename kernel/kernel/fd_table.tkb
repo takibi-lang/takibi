@@ -25,21 +25,58 @@ use "kernel/lib/intrusive_pool.tkb";
 //   third path would silently have no fd table: every entry point here
 //   would refuse it, correctly but confusingly, and the fix is to give
 //   that path the same ensure call rather than to make lookups forgiving.
-// - Fixed capacities (PROCESS_FD_MAX=16, and the computed shared-object
-//   reference bound): see `kernel/RESOURCE_LIMITS.md` for the
+// - NO fixed capacity is left in this file. The number of fd CONTEXTS
+//   (issue #392), of shared OBJECTS (issue #391) and of DESCRIPTORS per
+//   process (issue #393) are all gone; what remains is a per-process
+//   RLIMIT_NOFILE the process itself can change, a shared-object bound
+//   derived from memory, and a reference bound derived from the
+//   descriptor slots that exist. `kernel/RESOURCE_LIMITS.md` holds the
 //   authoritative exhaustion-result/boundary-test contract for each.
-//   Neither the number of fd CONTEXTS (issue #392) nor the number of
-//   shared OBJECTS (issue #391) is among them any more.
+// - A descriptor lookup is a walk of this process's block chain, so it is
+//   O(fd / FD_BLOCK_SLOTS) where it used to be an array index. Every
+//   call site that needs two fields of one entry looks the block up once
+//   and reads both; a NEW call site should do the same rather than call
+//   two accessors, because the cost of a pooled accessor lands at the
+//   caller that calls it twice, not in the accessor.
 //
 // GitHub issues #246 and #264: process index == kernel/kernel/process.tkb's
 // ProcessHandle.pool_index. One ProcessFdContext keeps the descriptor and
 // heap state for that process together, instead of coupling parallel globals
 // through a flat process * PROCESS_FD_MAX + fd index.
 
-// Ash reserves a script fd at 10 with F_DUPFD_CLOEXEC. Keep a small but real
-// per-process descriptor namespace rather than treating fd 3 as a special
-// file-only slot.
-const PROCESS_FD_MAX: usize = 16;
+// GitHub issue #393: a descriptor namespace is per-process everywhere
+// this kernel is trying to be compatible with, and it grows. PROCESS_FD_MAX
+// was one global compile-time 16 shared by every process, so no process
+// could be given a smaller limit than another and none could be given a
+// larger one -- a Linux-visible behaviour difference, not only an internal
+// ceiling.
+//
+// What replaces it is the pair Linux uses. The STORAGE is allocated as it
+// is needed: a descriptor lives in an FdBlock, blocks are chained off the
+// process's own context, and nothing sizes that chain in advance (Linux
+// grows a flat fdtable by reallocating and copying; a chain never copies
+// and never invalidates a block address, which matters here because those
+// addresses are what the pool's generation check validates). The LIMIT is
+// RLIMIT_NOFILE, a per-process pair of numbers that fork inherits, exec
+// preserves, and prlimit64(2) reads and writes.
+//
+// So the two numbers below are initial values of a runtime-settable limit,
+// which is what Linux's own are: INR_OPEN_CUR = 1024 and INR_OPEN_MAX =
+// 4096 (include/uapi/linux/fs.h). They size no storage. This kernel has no
+// equivalent of Linux's fs.nr_open cap on top of them, because there is no
+// flat table whose size a descriptor number would have to bound -- a
+// descriptor costs one slot of one block, allocated when it is installed,
+// and the page allocator is what runs out.
+const PROCESS_FD_LIMIT_DEFAULT_SOFT: usize = 1024;
+const PROCESS_FD_LIMIT_DEFAULT_HARD: usize = 4096;
+
+// How many descriptors one block holds. A geometry number, not a ceiling:
+// it trades walk depth against per-block waste, and a process may have as
+// many blocks as it can pay for. 16 keeps the block at 400 bytes -- Linux's
+// own embedded fd_array is NR_OPEN_DEFAULT = BITS_PER_LONG = 64 entries,
+// but its entry is one pointer where this one carries kind, object,
+// generation and the close-on-exec flag.
+const FD_BLOCK_SLOTS: usize = 16;
 // GitHub issue #391: there is no shared-object capacity constant any
 // more. SHARED_OBJECT_MAX was 16 open file descriptions system-wide --
 // the one ceiling in this file that was a genuine resource limit rather
@@ -67,17 +104,53 @@ enum UnifiedFdKind: u8 {
     Connection;
 }
 enum UnifiedListenerState: u8 { Closed; Created; Bound; Listening; }
+// GitHub issue #393: one descriptor. What used to be four parallel arrays
+// indexed in lockstep by fd is one record per descriptor, for the same
+// reason issue #305 gave for SharedObject -- the arrays could disagree and
+// a record cannot.
+struct FdEntry {
+    kind: UnifiedFdKind;
+    object: usize;
+    generation: usize;
+    close_on_exec: bool;
+}
+
+// A run of FD_BLOCK_SLOTS descriptors, plus the (address, generation) pair
+// naming the next run. Both halves of that pair are kept, because a bare
+// address is exactly the stale handle intrusive_pool_matches exists to
+// refuse.
+struct FdBlock {
+    slot: [FdEntry; FD_BLOCK_SLOTS];
+    next: usize;
+    next_generation: usize;
+}
+private let mut fd_block_pool: IntrusivePool(FdBlock);
+private let mut fd_block_pool_ready: bool = false;
+
+// How many descriptor slots exist across every process, maintained as
+// blocks are allocated and freed. This is what unified_object_ref_bound
+// used to compute as `live contexts x PROCESS_FD_MAX` -- the same
+// quantity, still exact, now that neither factor is a constant.
+private let mut fd_slot_total: usize = 0;
+
 // GitHub issue #264 third stage: descriptor state and the process heap break
 // share one record, so a process slot has one local FD context rather than
-// five globals that must be indexed in lockstep.
+// five globals that must be indexed in lockstep. Issue #393 moved the
+// descriptors themselves out into the block chain named here: a pooled
+// payload is one fixed size, so a variable-length table inside it is not
+// expressible, and the chain is what makes the table variable-length.
 struct ProcessFdContext {
-    fd_kind: [UnifiedFdKind; PROCESS_FD_MAX];
-    fd_object: [usize; PROCESS_FD_MAX];
-    fd_generation: [usize; PROCESS_FD_MAX];
-    fd_close_on_exec: [bool; PROCESS_FD_MAX];
+    block_head: usize;
+    block_head_generation: usize;
     heap_break: usize;
     heap_start: usize;
     heap_limit: usize;
+    // RLIMIT_NOFILE for this process. Zero in a freshly zeroed context,
+    // which is why unified_fd_context_ensure writes the defaults rather
+    // than relying on the zeroing -- a soft limit of 0 would refuse every
+    // descriptor, and "no limit set yet" is not a state Linux has.
+    fd_limit_soft: usize;
+    fd_limit_hard: usize;
 }
 // GitHub issue #392: pooled, not an array keyed by process slot.
 //
@@ -131,6 +204,160 @@ private fn fd_context_at(process: usize) -> *ProcessFdContext !{unsafe} {
     return payload;
 }
 
+// -- Descriptor blocks -------------------------------------------------
+// GitHub issue #393. The chain, and the three things a caller of it ever
+// needs: find the block holding fd, find it or make it, and give them all
+// back. Nothing here knows what a descriptor means.
+
+fn unified_fd_block_pool_init() {
+    if (fd_block_pool_ready) { return; }
+    fd_block_pool_ready = true;
+    intrusive_pool_init(&fd_block_pool);
+}
+
+private fn fd_block_matches(address: usize, generation: usize) -> bool !{unsafe} {
+    if (address == 0) { return false; }
+    return intrusive_pool_matches(&fd_block_pool, address, generation);
+}
+
+private fn fd_block_at(address: usize, generation: usize) -> *FdBlock !{unsafe} {
+    let owner = intrusive_owner_new(&fd_block_pool, address, generation);
+    let payload: *FdBlock = intrusive_pool_ref(&fd_block_pool, owner);
+    intrusive_owner_drop(owner);
+    return payload;
+}
+
+// `a % N` is always below N for a positive N, but the refinement wants
+// that said where it can be checked. The dead branch is the price of
+// saying it once here instead of at every indexing site.
+private fn fd_slot_index(fd: usize) -> {0..<FD_BLOCK_SLOTS as usize} {
+    let value: usize = fd % FD_BLOCK_SLOTS;
+    if (value < FD_BLOCK_SLOTS) { return value; }
+    return 0;
+}
+
+must_use variant FdBlockAllocResult {
+    OutOfMemory;
+    Allocated((usize, usize));
+}
+
+private fn fd_block_alloc() -> FdBlockAllocResult !{unsafe} {
+    unified_fd_block_pool_init();
+    let guard = intrusive_pool_lock(&fd_block_pool);
+    let inserted = intrusive_pool_insert_zeroed(&fd_block_pool, guard);
+    intrusive_pool_unlock(&fd_block_pool, guard);
+    match inserted {
+        IntrusivePoolInsertResult::OutOfMemory => {
+            return FdBlockAllocResult::OutOfMemory;
+        }
+        IntrusivePoolInsertResult::Allocated(owner) => {
+            let address: usize = intrusive_owner_slot(owner);
+            let generation: usize = intrusive_owner_generation(owner);
+            intrusive_owner_drop(owner);
+            // insert_zeroed IS the empty run: UnifiedFdKind::Empty is
+            // declaration-order tag zero and every other field of an
+            // unused FdEntry is 0/false.
+            fd_slot_total = fd_slot_total + FD_BLOCK_SLOTS;
+            return FdBlockAllocResult::Allocated((address, generation));
+        }
+    }
+}
+
+private fn fd_block_free(address: usize, generation: usize) !{unsafe} {
+    let owner = intrusive_owner_new(&fd_block_pool, address, generation);
+    let guard = intrusive_pool_lock(&fd_block_pool);
+    let (ok, reason) = intrusive_remove_outcome(
+        intrusive_pool_remove(&fd_block_pool, guard, owner));
+    intrusive_pool_unlock(&fd_block_pool, guard);
+    if (ok == false) {
+        kernel_boot_log("fd table: releasing a descriptor block -- ");
+        kernel_boot_log(reason);
+        kernel_boot_log("\n");
+        return;
+    }
+    fd_slot_total = fd_slot_total - FD_BLOCK_SLOTS;
+}
+
+// The block holding `fd` and the generation naming its occupant, or (0, 0)
+// when the chain does not reach that far. Both halves are returned from
+// the one walk, so a caller never has to make the same walk twice to ask
+// the second question (the shape issue #371 argued for).
+private fn fd_block_lookup(ctx: *ProcessFdContext, fd: usize)
+        -> (usize, usize) !{unsafe} {
+    let target: usize = fd / FD_BLOCK_SLOTS;
+    let mut address: usize = ctx.block_head;
+    let mut generation: usize = ctx.block_head_generation;
+    let mut index: usize = 0;
+    while (fd_block_matches(address, generation)) {
+        if (index == target) { return (address, generation); }
+        let block: *FdBlock = fd_block_at(address, generation);
+        address = block.next;
+        generation = block.next_generation;
+        index = index + 1;
+    }
+    return (0, 0);
+}
+
+// Same walk, allocating the blocks the chain is missing. (0, 0) means the
+// page allocator is empty -- the only way this fails, and the reason
+// UnifiedFdInstallResult has a NoMemory of its own.
+//
+// A pool insert can grow the pool by taking another page; it never moves
+// an existing chunk, so the `block` pointer held across the allocation
+// below stays valid. That is the property kernel/lib/intrusive_pool.tkb
+// is built on and the reason a chain is usable here at all.
+private fn fd_block_ensure(ctx: *ProcessFdContext, fd: usize)
+        -> (usize, usize) !{unsafe} {
+    let target: usize = fd / FD_BLOCK_SLOTS;
+    if (fd_block_matches(ctx.block_head, ctx.block_head_generation) == false) {
+        match fd_block_alloc() {
+            FdBlockAllocResult::OutOfMemory => { return (0, 0); }
+            FdBlockAllocResult::Allocated(pair) => {
+                let (head, head_generation) = pair;
+                ctx.block_head = head;
+                ctx.block_head_generation = head_generation;
+            }
+        }
+    }
+    let mut address: usize = ctx.block_head;
+    let mut generation: usize = ctx.block_head_generation;
+    let mut index: usize = 0;
+    while (index < target) {
+        let block: *FdBlock = fd_block_at(address, generation);
+        if (fd_block_matches(block.next, block.next_generation) == false) {
+            match fd_block_alloc() {
+                FdBlockAllocResult::OutOfMemory => { return (0, 0); }
+                FdBlockAllocResult::Allocated(pair) => {
+                    let (next, next_generation) = pair;
+                    block.next = next;
+                    block.next_generation = next_generation;
+                }
+            }
+        }
+        address = block.next;
+        generation = block.next_generation;
+        index = index + 1;
+    }
+    return (address, generation);
+}
+
+// Gives the whole chain back. The descriptors themselves are expected to
+// have been closed already (unified_fd_destroy); this is the storage.
+private fn fd_blocks_release(ctx: *ProcessFdContext) !{unsafe} {
+    let mut address: usize = ctx.block_head;
+    let mut generation: usize = ctx.block_head_generation;
+    ctx.block_head = 0;
+    ctx.block_head_generation = 0;
+    while (fd_block_matches(address, generation)) {
+        let block: *FdBlock = fd_block_at(address, generation);
+        let next: usize = block.next;
+        let next_generation: usize = block.next_generation;
+        fd_block_free(address, generation);
+        address = next;
+        generation = next_generation;
+    }
+}
+
 // Called from scheduled_process_alloc, which owns the rollback if this
 // fails. Idempotent: a slot that already has a live context keeps it.
 fn unified_fd_context_ensure(process: usize) -> bool !{unsafe} {
@@ -143,6 +370,15 @@ fn unified_fd_context_ensure(process: usize) -> bool !{unsafe} {
         IntrusivePoolInsertResult::Allocated(owner) => {
             let address: usize = intrusive_owner_slot(owner);
             let generation: usize = intrusive_owner_generation(owner);
+            let ctx: *ProcessFdContext =
+                intrusive_pool_ref(&fd_context_pool, owner);
+            // GitHub issue #393: a process starts with Linux's own
+            // RLIMIT_NOFILE rather than with the zeroing's 0/0. No block
+            // is allocated here: a process that never opens a descriptor
+            // never pays for one, which is the other half of the table
+            // being grown rather than sized.
+            ctx.fd_limit_soft = PROCESS_FD_LIMIT_DEFAULT_SOFT;
+            ctx.fd_limit_hard = PROCESS_FD_LIMIT_DEFAULT_HARD;
             intrusive_owner_drop(owner);
             scheduled_process_set_fd_context(process, address, generation);
             return true;
@@ -156,6 +392,9 @@ fn unified_fd_context_ensure(process: usize) -> bool !{unsafe} {
 fn unified_fd_context_release(process: usize) !{unsafe} {
     let address: usize = fd_context_address(process);
     if (address == 0) { return; }
+    // The descriptor blocks go first: they are a separate pool, and the
+    // context is the only thing that names them.
+    fd_blocks_release(fd_context_at(process));
     // Read the generation BEFORE clearing the record, or the handle
     // rebuilt below names the right slot with the wrong occupant and the
     // pool correctly refuses it.
@@ -406,7 +645,11 @@ must_use variant UnifiedOpenResult { Invalid; Full; Ok; }
 // dup2()/fcntl(F_DUPFD)) -- the five *_open/*_create callers below install a
 // freshly allocated object whose refcount starts at 0, so RefOverflow is
 // unreachable there, but is still handled explicitly rather than assumed.
-must_use variant UnifiedFdInstallResult { Invalid; RefOverflow; Ok; }
+// GitHub issue #393 adds NoMemory: installing a descriptor can now need a
+// descriptor block, and the page allocator being empty is neither a bad
+// argument nor a reference-count invariant break. The handlers map it to
+// LINUX_ENOMEM, which is what Linux's own expand_files() returns.
+must_use variant UnifiedFdInstallResult { Invalid; RefOverflow; NoMemory; Ok; }
 // GitHub issue #391: `slot` is the pool ADDRESS of the object now, not an
 // index into an array, so there is no range for a refinement to state --
 // the same trade issue #257 made for TcpConnection, and for the same
@@ -432,9 +675,43 @@ must_use variant UnifiedSocketResult {
     Missing;
     Found(UnifiedObjectHandle);
 }
+// GitHub issue #393: a plain usize. A descriptor number is bounded by
+// this process's own RLIMIT_NOFILE, which is a runtime value, so there is
+// no compile-time range for a refinement to state. Full means that limit
+// was reached -- which is Linux's EMFILE, and is what the syscall handlers
+// already map it to.
 must_use variant UnifiedFdAllocResult {
     Full;
-    Allocated({0..<PROCESS_FD_MAX as usize});
+    Allocated(usize);
+}
+
+// The lowest open descriptor at or above `from`, for callers that used to
+// write `for fd in 0..<PROCESS_FD_MAX`. Walking the blocks is what makes
+// that loop terminate without a constant: the chain ends where the
+// process's descriptors end.
+must_use variant UnifiedFdScanResult { Done; Found(usize); }
+
+fn unified_fd_next_open(process: usize, from: usize)
+        -> UnifiedFdScanResult !{unsafe} {
+    let ctx_address: usize = fd_context_address(process);
+    if (ctx_address == 0) { return UnifiedFdScanResult::Done; }
+    let ctx: *ProcessFdContext = fd_context_at(process);
+    let mut address: usize = ctx.block_head;
+    let mut generation: usize = ctx.block_head_generation;
+    let mut base: usize = 0;
+    while (fd_block_matches(address, generation)) {
+        let block: *FdBlock = fd_block_at(address, generation);
+        for index: usize in 0..<FD_BLOCK_SLOTS {
+            if (base + index >= from &&
+                block.slot[index].kind != UnifiedFdKind::Empty) {
+                return UnifiedFdScanResult::Found(base + index);
+            }
+        }
+        address = block.next;
+        generation = block.next_generation;
+        base = base + FD_BLOCK_SLOTS;
+    }
+    return UnifiedFdScanResult::Done;
 }
 
 fn unified_fd_table_init() !{unsafe} {
@@ -458,15 +735,17 @@ fn unified_fd_table_init() !{unsafe} {
             IntrusiveSlotProbe::Live(slot_view) => {
                 let live: *ProcessFdContext =
                     intrusive_pool_payload_of(&fd_context_pool, slot_view);
-                for fd: usize in 0..<PROCESS_FD_MAX {
-                    live.fd_kind[fd] = UnifiedFdKind::Empty;
-                    live.fd_object[fd] = 0;
-                    live.fd_generation[fd] = 0;
-                    live.fd_close_on_exec[fd] = false;
-                }
+                // GitHub issue #393: giving the descriptor blocks back is
+                // what "empty every entry" means once the entries are
+                // allocated rather than always there. The limits go back
+                // to the defaults with them, so a probe that lowered one
+                // does not leave it lowered for the next.
+                fd_blocks_release(live);
                 live.heap_break = 0;
                 live.heap_start = 0;
                 live.heap_limit = 0;
+                live.fd_limit_soft = PROCESS_FD_LIMIT_DEFAULT_SOFT;
+                live.fd_limit_hard = PROCESS_FD_LIMIT_DEFAULT_HARD;
             }
         }
         cursor = intrusive_pool_next_slot(&fd_context_pool, cursor);
@@ -565,6 +844,16 @@ fn unified_file_open(process: usize, fd: usize, inode: usize,
                     unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
+                // GitHub issue #393: the descriptor block could not be
+                // allocated. The object this function just created has no
+                // holder, so it goes back the same way a failed install
+                // sends it back, and the caller sees Full -- which is what
+                // Full has meant since issue #391: the page allocator is
+                // empty.
+                UnifiedFdInstallResult::NoMemory => {
+                    unified_object_free(handle.slot, handle.generation);
+                    return UnifiedOpenResult::Full;
+                }
                 // Unreachable: object_pool just allocated this slot fresh,
                 // so its refcount is 0 -- see UnifiedFdInstallResult's own
                 // header comment. Handled the same as Invalid for totality.
@@ -594,6 +883,16 @@ fn unified_directory_open(process: usize, fd: usize, inode: usize)
                     unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
+                // GitHub issue #393: the descriptor block could not be
+                // allocated. The object this function just created has no
+                // holder, so it goes back the same way a failed install
+                // sends it back, and the caller sees Full -- which is what
+                // Full has meant since issue #391: the page allocator is
+                // empty.
+                UnifiedFdInstallResult::NoMemory => {
+                    unified_object_free(handle.slot, handle.generation);
+                    return UnifiedOpenResult::Full;
+                }
                 UnifiedFdInstallResult::RefOverflow => {
                     unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
@@ -619,6 +918,16 @@ fn unified_terminal_stdio_open(process: usize) -> UnifiedOpenResult {
                     unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
+                // GitHub issue #393: the descriptor block could not be
+                // allocated. The object this function just created has no
+                // holder, so it goes back the same way a failed install
+                // sends it back, and the caller sees Full -- which is what
+                // Full has meant since issue #391: the page allocator is
+                // empty.
+                UnifiedFdInstallResult::NoMemory => {
+                    unified_object_free(handle.slot, handle.generation);
+                    return UnifiedOpenResult::Full;
+                }
                 UnifiedFdInstallResult::RefOverflow => {
                     unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
@@ -632,6 +941,13 @@ fn unified_terminal_stdio_open(process: usize) -> UnifiedOpenResult {
                         UnifiedFdResult::Ok => {}
                     }
                     return UnifiedOpenResult::Invalid;
+                }
+                UnifiedFdInstallResult::NoMemory => {
+                    match unified_fd_close(process, 0) {
+                        UnifiedFdResult::Invalid => {}
+                        UnifiedFdResult::Ok => {}
+                    }
+                    return UnifiedOpenResult::Full;
                 }
                 UnifiedFdInstallResult::RefOverflow => {
                     match unified_fd_close(process, 0) {
@@ -654,6 +970,17 @@ fn unified_terminal_stdio_open(process: usize) -> UnifiedOpenResult {
                     }
                     return UnifiedOpenResult::Invalid;
                 }
+                UnifiedFdInstallResult::NoMemory => {
+                    match unified_fd_close(process, 1) {
+                        UnifiedFdResult::Invalid => {}
+                        UnifiedFdResult::Ok => {}
+                    }
+                    match unified_fd_close(process, 0) {
+                        UnifiedFdResult::Invalid => {}
+                        UnifiedFdResult::Ok => {}
+                    }
+                    return UnifiedOpenResult::Full;
+                }
                 UnifiedFdInstallResult::RefOverflow => {
                     match unified_fd_close(process, 1) {
                         UnifiedFdResult::Invalid => {}
@@ -671,20 +998,23 @@ fn unified_terminal_stdio_open(process: usize) -> UnifiedOpenResult {
     }
 }
 
-fn unified_terminal_is_open(process: usize, fd: usize) -> bool {
-    if (fd >= PROCESS_FD_MAX) { return false; }
+fn unified_terminal_is_open(process: usize, fd: usize) -> bool !{unsafe} {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return false; }
     let ctx: *ProcessFdContext = fd_context_at(process);
+    let (block, block_generation) = fd_block_lookup(ctx, fd);
+    if (block == 0) { return false; }
+    let entries: *FdBlock = fd_block_at(block, block_generation);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     // GitHub issue #391: the descriptor's (address, generation) pair is
     // checked by the pool before the record behind it is read, where the
     // array form could read first and check afterwards. Reading the
     // payload of an address the pool does not recognise is not a stale
     // answer, it is a wild pointer, so the order is now load-bearing.
     let mut handle: UnifiedObjectHandle = {
-        ctx.fd_object[fd], ctx.fd_generation[fd]
+        entries.slot[index].object, entries.slot[index].generation
     };
-    if (ctx.fd_kind[fd] == UnifiedFdKind::Terminal &&
+    if (entries.slot[index].kind == UnifiedFdKind::Terminal &&
         unified_object_matches(handle)) {
         return unified_object_at(handle).kind == UnifiedFdKind::Terminal;
     }
@@ -730,31 +1060,90 @@ fn unified_object_alloc_first(kind: UnifiedFdKind) -> UnifiedObjectResult !{unsa
     }
 }
 
-fn unified_fd_alloc(process: usize, first: usize) -> UnifiedFdAllocResult {
+// The lowest free descriptor at or above `first`, which is the contract
+// Linux's own alloc_fd has. GitHub issue #393: the search ends at this
+// process's soft RLIMIT_NOFILE rather than at a global constant, and past
+// the end of the block chain every descriptor is free by construction --
+// the block that will hold it is allocated when it is installed, not
+// here, so a process pays for descriptors it opens rather than for
+// descriptors it might open.
+fn unified_fd_alloc(process: usize, first: usize) -> UnifiedFdAllocResult !{unsafe} {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedFdAllocResult::Full; }
     let ctx: *ProcessFdContext = fd_context_at(process);
-    for fd: usize in first..<PROCESS_FD_MAX {
-        if (fd < PROCESS_FD_MAX) {
-            if (ctx.fd_kind[fd] == UnifiedFdKind::Empty) {
-                let result: {0..<PROCESS_FD_MAX as usize} = fd;
-                return UnifiedFdAllocResult::Allocated(result);
+    let limit: usize = ctx.fd_limit_soft;
+    let mut address: usize = ctx.block_head;
+    let mut generation: usize = ctx.block_head_generation;
+    let mut base: usize = 0;
+    while (fd_block_matches(address, generation)) {
+        let block: *FdBlock = fd_block_at(address, generation);
+        for index: usize in 0..<FD_BLOCK_SLOTS {
+            let fd: usize = base + index;
+            if (fd >= limit) { return UnifiedFdAllocResult::Full; }
+            if (fd >= first && block.slot[index].kind == UnifiedFdKind::Empty) {
+                return UnifiedFdAllocResult::Allocated(fd);
             }
         }
+        address = block.next;
+        generation = block.next_generation;
+        base = base + FD_BLOCK_SLOTS;
     }
-    return UnifiedFdAllocResult::Full;
+    let mut fd: usize = base;
+    if (first > base) { fd = first; }
+    if (fd >= limit) { return UnifiedFdAllocResult::Full; }
+    return UnifiedFdAllocResult::Allocated(fd);
+}
+
+// -- RLIMIT_NOFILE ------------------------------------------------------
+// GitHub issue #393. A descriptor limit is a property of the process, so
+// these read and write one process's own pair. prlimit64(2) is the syscall
+// that reaches them; fork inherits them through unified_fd_clone and exec
+// preserves them, because the context outlives the exec.
+
+must_use variant UnifiedFdLimitResult { Missing; Found((usize, usize)); }
+
+fn unified_process_fd_limit(process: usize) -> UnifiedFdLimitResult !{unsafe} {
+    let ctx_address: usize = fd_context_address(process);
+    if (ctx_address == 0) { return UnifiedFdLimitResult::Missing; }
+    let ctx: *ProcessFdContext = fd_context_at(process);
+    return UnifiedFdLimitResult::Found((ctx.fd_limit_soft, ctx.fd_limit_hard));
+}
+
+// Linux's rules, minus the one this kernel has no way to express: a soft
+// limit may not exceed the hard limit, and raising the HARD limit is
+// privileged -- which every process here is, this kernel having a single
+// always-root identity, so it is allowed rather than refused. There is no
+// fs.nr_open ceiling above it (see PROCESS_FD_LIMIT_DEFAULT_SOFT), so a
+// process may raise its own limit as far as it likes and will meet the
+// page allocator rather than a number somebody picked.
+fn unified_process_fd_limit_configure(process: usize, soft: usize, hard: usize)
+        -> UnifiedFdResult !{unsafe} {
+    if (soft > hard) { return UnifiedFdResult::Invalid; }
+    let ctx_address: usize = fd_context_address(process);
+    if (ctx_address == 0) { return UnifiedFdResult::Invalid; }
+    let ctx: *ProcessFdContext = fd_context_at(process);
+    ctx.fd_limit_soft = soft;
+    ctx.fd_limit_hard = hard;
+    return UnifiedFdResult::Ok;
 }
 
 fn unified_socket_lookup(process: usize, fd: usize,
-                         kind: UnifiedFdKind) -> UnifiedSocketResult {
-    if (fd >= PROCESS_FD_MAX) { return UnifiedSocketResult::Missing; }
+                         kind: UnifiedFdKind) -> UnifiedSocketResult !{unsafe} {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedSocketResult::Missing; }
     let ctx: *ProcessFdContext = fd_context_at(process);
+    // GitHub issue #393: "is this fd in range" is "does this process's
+    // chain reach that far". A descriptor the process never opened has no
+    // block, which is the same answer the range test gave and needs no
+    // constant to give it.
+    let (block, block_generation) = fd_block_lookup(ctx, fd);
+    if (block == 0) { return UnifiedSocketResult::Missing; }
+    let entries: *FdBlock = fd_block_at(block, block_generation);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     let mut handle: UnifiedObjectHandle = {
-        ctx.fd_object[fd], ctx.fd_generation[fd]
+        entries.slot[index].object, entries.slot[index].generation
     };
-    if (ctx.fd_kind[fd] == kind && unified_object_matches(handle)) {
+    if (entries.slot[index].kind == kind && unified_object_matches(handle)) {
         if (unified_object_at(handle).kind == kind) {
             return UnifiedSocketResult::Found(handle);
         }
@@ -775,6 +1164,16 @@ fn unified_listener_create(process: usize, fd: usize) -> UnifiedOpenResult {
                 UnifiedFdInstallResult::Invalid => {
                     unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
+                }
+                // GitHub issue #393: the descriptor block could not be
+                // allocated. The object this function just created has no
+                // holder, so it goes back the same way a failed install
+                // sends it back, and the caller sees Full -- which is what
+                // Full has meant since issue #391: the page allocator is
+                // empty.
+                UnifiedFdInstallResult::NoMemory => {
+                    unified_object_free(handle.slot, handle.generation);
+                    return UnifiedOpenResult::Full;
                 }
                 UnifiedFdInstallResult::RefOverflow => {
                     unified_object_free(handle.slot, handle.generation);
@@ -803,6 +1202,16 @@ fn unified_connection_create(process: usize, fd: usize,
                     unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
                 }
+                // GitHub issue #393: the descriptor block could not be
+                // allocated. The object this function just created has no
+                // holder, so it goes back the same way a failed install
+                // sends it back, and the caller sees Full -- which is what
+                // Full has meant since issue #391: the page allocator is
+                // empty.
+                UnifiedFdInstallResult::NoMemory => {
+                    unified_object_free(handle.slot, handle.generation);
+                    return UnifiedOpenResult::Full;
+                }
                 UnifiedFdInstallResult::RefOverflow => {
                     unified_object_free(handle.slot, handle.generation);
                     return UnifiedOpenResult::Invalid;
@@ -814,48 +1223,71 @@ fn unified_connection_create(process: usize, fd: usize,
 }
 
 fn unified_fd_duplicate(process: usize, old_fd: usize, new_fd: usize)
-        -> UnifiedFdInstallResult {
-    if (old_fd >= PROCESS_FD_MAX ||
-        new_fd >= PROCESS_FD_MAX || old_fd == new_fd) { return UnifiedFdInstallResult::Invalid; }
+        -> UnifiedFdInstallResult !{unsafe} {
+    if (old_fd == new_fd) { return UnifiedFdInstallResult::Invalid; }
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedFdInstallResult::Invalid; }
     let ctx: *ProcessFdContext = fd_context_at(process);
-    if (ctx.fd_kind[old_fd] == UnifiedFdKind::Empty) {
+    let (block, block_generation) = fd_block_lookup(ctx, old_fd);
+    if (block == 0) { return UnifiedFdInstallResult::Invalid; }
+    let entries: *FdBlock = fd_block_at(block, block_generation);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(old_fd);
+    if (entries.slot[index].kind == UnifiedFdKind::Empty) {
         return UnifiedFdInstallResult::Invalid;
     }
     return unified_fd_install(process, new_fd,
-                              ctx.fd_object[old_fd],
-                              ctx.fd_generation[old_fd]);
+                              entries.slot[index].object,
+                              entries.slot[index].generation);
 }
 
 fn unified_fd_set_close_on_exec(process: usize, fd: usize, value: bool)
-        -> UnifiedFdResult {
-    if (fd >= PROCESS_FD_MAX) { return UnifiedFdResult::Invalid; }
+        -> UnifiedFdResult !{unsafe} {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedFdResult::Invalid; }
     let ctx: *ProcessFdContext = fd_context_at(process);
-    if (ctx.fd_kind[fd] != UnifiedFdKind::Empty) {
-        ctx.fd_close_on_exec[fd] = value;
+    let (block, block_generation) = fd_block_lookup(ctx, fd);
+    if (block == 0) { return UnifiedFdResult::Invalid; }
+    let entries: *FdBlock = fd_block_at(block, block_generation);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
+    if (entries.slot[index].kind != UnifiedFdKind::Empty) {
+        entries.slot[index].close_on_exec = value;
         return UnifiedFdResult::Ok;
     }
     return UnifiedFdResult::Invalid;
 }
 
-fn unified_fd_close_on_exec(process: usize, fd: usize) -> bool {
-    if (fd >= PROCESS_FD_MAX) { return false; }
+fn unified_fd_close_on_exec(process: usize, fd: usize) -> bool !{unsafe} {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return false; }
     let ctx: *ProcessFdContext = fd_context_at(process);
-    return ctx.fd_close_on_exec[fd];
+    let (block, block_generation) = fd_block_lookup(ctx, fd);
+    if (block == 0) { return false; }
+    let entries: *FdBlock = fd_block_at(block, block_generation);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
+    return entries.slot[index].close_on_exec;
 }
 
+// GitHub issue #393: over the descriptors this process actually has,
+// rather than over every number below a constant. Closing one cannot
+// create another, so restarting the scan from the fd after the one just
+// closed terminates.
 fn unified_fd_close_exec_descriptors(process: usize) !{unsafe} {
     if (scheduled_process_slot_valid(process) == false) { return; }
-    for fd: usize in 0..<PROCESS_FD_MAX {
-        if (unified_fd_close_on_exec(process, fd)) {
-            match unified_fd_close(process, fd) {
-                UnifiedFdResult::Invalid => {}
-                UnifiedFdResult::Ok => {}
+    let mut from: usize = 0;
+    let mut scanning: bool = true;
+    while (scanning) {
+        scanning = false;
+        match unified_fd_next_open(process, from) {
+            UnifiedFdScanResult::Done => {}
+            UnifiedFdScanResult::Found(fd) => {
+                if (unified_fd_close_on_exec(process, fd)) {
+                    match unified_fd_close(process, fd) {
+                        UnifiedFdResult::Invalid => {}
+                        UnifiedFdResult::Ok => {}
+                    }
+                }
+                from = fd + 1;
+                scanning = true;
             }
         }
     }
@@ -935,14 +1367,17 @@ fn unified_connection_generation(handle: UnifiedObjectHandle) -> usize {
 }
 
 fn unified_file_lookup(process: usize, fd: usize) -> UnifiedFileResult {
-    if (fd >= PROCESS_FD_MAX) { return UnifiedFileResult::Missing; }
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedFileResult::Missing; }
     let ctx: *ProcessFdContext = fd_context_at(process);
+    let (block, block_generation) = fd_block_lookup(ctx, fd);
+    if (block == 0) { return UnifiedFileResult::Missing; }
+    let entries: *FdBlock = fd_block_at(block, block_generation);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     let mut handle: UnifiedObjectHandle = {
-        ctx.fd_object[fd], ctx.fd_generation[fd]
+        entries.slot[index].object, entries.slot[index].generation
     };
-    if (ctx.fd_kind[fd] == UnifiedFdKind::OpenFile &&
+    if (entries.slot[index].kind == UnifiedFdKind::OpenFile &&
         unified_object_matches(handle)) {
         if (unified_object_at(handle).kind == UnifiedFdKind::OpenFile) {
             return UnifiedFileResult::Found(handle);
@@ -963,14 +1398,17 @@ must_use variant UnifiedDirectoryResult { Missing; Found(UnifiedObjectHandle); }
 
 fn unified_directory_lookup(process: usize, fd: usize)
         -> UnifiedDirectoryResult {
-    if (fd >= PROCESS_FD_MAX) { return UnifiedDirectoryResult::Missing; }
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedDirectoryResult::Missing; }
     let ctx: *ProcessFdContext = fd_context_at(process);
+    let (block, block_generation) = fd_block_lookup(ctx, fd);
+    if (block == 0) { return UnifiedDirectoryResult::Missing; }
+    let entries: *FdBlock = fd_block_at(block, block_generation);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     let mut handle: UnifiedObjectHandle = {
-        ctx.fd_object[fd], ctx.fd_generation[fd]
+        entries.slot[index].object, entries.slot[index].generation
     };
-    if (ctx.fd_kind[fd] == UnifiedFdKind::Directory &&
+    if (entries.slot[index].kind == UnifiedFdKind::Directory &&
         unified_object_matches(handle)) {
         if (unified_object_at(handle).kind == UnifiedFdKind::Directory) {
             return UnifiedDirectoryResult::Found(handle);
@@ -1003,8 +1441,16 @@ fn unified_file_is_writable(handle: UnifiedObjectHandle) -> bool {
 // rather than declared. Every reference is held by one descriptor slot --
 // unified_fd_install, _duplicate and _clone are the only retains here, and
 // each is paired with filling an fd-table entry -- so the number of
-// descriptor slots in existence is an exact upper bound, and it is this:
-// one ProcessFdContext per live process, PROCESS_FD_MAX entries each.
+// descriptor slots in existence is an exact upper bound, and it is
+// fd_slot_total: FD_BLOCK_SLOTS for every descriptor block that has been
+// allocated and not yet given back.
+//
+// GitHub issue #393 is why it is a counter rather than a product. It was
+// `live fd contexts x PROCESS_FD_MAX`, exact only because both factors
+// were constants over a table that always existed; a process's table
+// grows now, so the quantity is maintained where it changes -- in
+// fd_block_alloc and fd_block_free -- instead of being recomputed from
+// numbers that no longer exist.
 //
 // It replaces SHARED_OBJECT_MAX_REFS, which was KERNEL_PROCESS_MAX *
 // PROCESS_FD_MAX until issue #392 removed the process ceiling and left the
@@ -1018,8 +1464,8 @@ fn unified_file_is_writable(handle: UnifiedObjectHandle) -> bool {
 // clone, the interactive shell, the HTTPd -- reported zero. The same
 // instrumentation with the bound deliberately set to one slot per process
 // reported 71, which is what says the counter was reached at all.
-fn unified_object_ref_bound() -> usize !{unsafe} {
-    return intrusive_pool_live_count(&fd_context_pool) * PROCESS_FD_MAX;
+fn unified_object_ref_bound() -> usize {
+    return fd_slot_total;
 }
 
 // Exceeding a DERIVED bound is not a resource limit: it says a reference
@@ -1046,10 +1492,14 @@ private fn unified_object_ref_bound_break(object: usize) {
 
 fn unified_fd_install(process: usize, fd: usize, object_value: usize,
                       generation: usize) -> UnifiedFdInstallResult !{unsafe} {
-    if (fd >= PROCESS_FD_MAX) { return UnifiedFdInstallResult::Invalid; }
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedFdInstallResult::Invalid; }
     let ctx: *ProcessFdContext = fd_context_at(process);
+    // GitHub issue #393: a descriptor number above this process's own soft
+    // RLIMIT_NOFILE is refused as a bad argument, which is what Linux's
+    // dup2/dup3 do with one (EBADF). The openat path never reaches this,
+    // because unified_fd_alloc has already reported Full -> EMFILE.
+    if (fd >= ctx.fd_limit_soft) { return UnifiedFdInstallResult::Invalid; }
     // GitHub issue #391: what used to be a range test on the object index
     // is the pool's own occupancy test on the object address. It answers
     // the stronger question -- this address is a real slot of this pool
@@ -1060,7 +1510,15 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
         return UnifiedFdInstallResult::Invalid;
     }
     let object: *SharedObject = unified_object_at(handle);
-    if (ctx.fd_kind[fd] != UnifiedFdKind::Empty ||
+    // The block is made here rather than at allocation time, so this is
+    // where the page allocator can be empty -- reported as its own variant
+    // rather than folded into the bad-argument one, the discipline issue
+    // #295 established for every other pool in this file.
+    let (block, block_generation) = fd_block_ensure(ctx, fd);
+    if (block == 0) { return UnifiedFdInstallResult::NoMemory; }
+    let entries: *FdBlock = fd_block_at(block, block_generation);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
+    if (entries.slot[index].kind != UnifiedFdKind::Empty ||
         object.kind == UnifiedFdKind::Empty) {
         return UnifiedFdInstallResult::Invalid;
     }
@@ -1074,22 +1532,25 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
         }
         UnifiedObjectRetainResult::Ok => {}
     }
-    ctx.fd_kind[fd] = object.kind;
-    ctx.fd_object[fd] = object_value;
-    ctx.fd_generation[fd] = generation;
-    ctx.fd_close_on_exec[fd] = false;
+    entries.slot[index].kind = object.kind;
+    entries.slot[index].object = object_value;
+    entries.slot[index].generation = generation;
+    entries.slot[index].close_on_exec = false;
     return UnifiedFdInstallResult::Ok;
 }
 
-fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult {
-    if (fd >= PROCESS_FD_MAX) { return UnifiedFdResult::Invalid; }
+fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult !{unsafe} {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedFdResult::Invalid; }
     let ctx: *ProcessFdContext = fd_context_at(process);
+    let (block, block_generation) = fd_block_lookup(ctx, fd);
+    if (block == 0) { return UnifiedFdResult::Invalid; }
+    let entries: *FdBlock = fd_block_at(block, block_generation);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     let mut handle: UnifiedObjectHandle = {
-        ctx.fd_object[fd], ctx.fd_generation[fd]
+        entries.slot[index].object, entries.slot[index].generation
     };
-    if (ctx.fd_kind[fd] != UnifiedFdKind::Empty &&
+    if (entries.slot[index].kind != UnifiedFdKind::Empty &&
         unified_object_matches(handle)) {
         match unified_object_release(handle) {
             UnifiedObjectReleaseResult::Invalid => { return UnifiedFdResult::Invalid; }
@@ -1099,43 +1560,44 @@ fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult {
             // pool allocation and an array element.
             UnifiedObjectReleaseResult::Freed => {}
         }
-        ctx.fd_kind[fd] = UnifiedFdKind::Empty;
-        ctx.fd_object[fd] = 0;
-        ctx.fd_generation[fd] = 0;
-        ctx.fd_close_on_exec[fd] = false;
+        // The block itself is kept, the way Linux keeps a grown fdtable
+        // until the process exits: a closed descriptor is normally
+        // reopened, and a block whose address a descriptor of another
+        // process could be about to reuse is not worth the churn. The
+        // whole chain goes back in unified_fd_context_release.
+        entries.slot[index].kind = UnifiedFdKind::Empty;
+        entries.slot[index].object = 0;
+        entries.slot[index].generation = 0;
+        entries.slot[index].close_on_exec = false;
         return UnifiedFdResult::Ok;
     }
     return UnifiedFdResult::Invalid;
 }
 
-// GitHub issue #295: shared undo for unified_fd_clone's copy+retain loop --
-// releases every reference already retained among child fds 0..<limit and
-// resets those slots back to Empty.
-//
-// GitHub issue #392: takes the child's CONTEXT rather than re-deriving it
-// from an index. There is no index to re-derive from once the context is
-// pooled, and passing the thing itself is what the old comment's "matching
-// this file's existing idiom" was a workaround for.
-fn unified_fd_clone_rollback(
-        child_ctx: *ProcessFdContext,
-        limit: {0..<PROCESS_FD_MAX as usize}) !{unsafe} {
-    // GitHub issue #312 (2026-08-16): `undo < PROCESS_FD_MAX` is now
-    // proven directly -- the for-loop's own range-refinement reuses
-    // `limit`'s own already-proven {0..<PROCESS_FD_MAX} upper bound, no
-    // `!{unsafe}`/per-index unsafe wrapping needed.
-    for undo: usize in 0..<limit {
-        if (child_ctx.fd_kind[undo] != UnifiedFdKind::Empty) {
-            let mut undo_handle: UnifiedObjectHandle = {
-                child_ctx.fd_object[undo], child_ctx.fd_generation[undo]
-            };
-            if (unified_object_matches(undo_handle)) {
-                match unified_object_release(undo_handle) {
-                    UnifiedObjectReleaseResult::Invalid => {}
-                    UnifiedObjectReleaseResult::StillHeld => {}
-                    UnifiedObjectReleaseResult::Freed => {}
+// GitHub issue #295: shared undo for unified_fd_clone's copy+retain loop.
+// GitHub issue #393 turns it into a scan: it closes every descriptor the
+// child has below `limit`, which is what "release what was already
+// retained and reset those slots" means once the slots are allocated
+// rather than always there. unified_fd_close is the release and the reset
+// in one, and it is the same function the successful path would have used
+// later, so there is no second copy of that logic to get wrong.
+fn unified_fd_clone_rollback(child: usize, limit: usize) !{unsafe} {
+    let mut from: usize = 0;
+    let mut scanning: bool = true;
+    while (scanning) {
+        scanning = false;
+        match unified_fd_next_open(child, from) {
+            UnifiedFdScanResult::Done => {}
+            UnifiedFdScanResult::Found(fd) => {
+                if (fd < limit) {
+                    match unified_fd_close(child, fd) {
+                        UnifiedFdResult::Invalid => {}
+                        UnifiedFdResult::Ok => {}
+                    }
+                    from = fd + 1;
+                    scanning = true;
                 }
             }
-            child_ctx.fd_kind[undo] = UnifiedFdKind::Empty;
         }
     }
 }
@@ -1148,68 +1610,105 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
     let child_ctx_address: usize = fd_context_address(child);
     if (child_ctx_address == 0) { return UnifiedFdResult::Invalid; }
     let child_ctx: *ProcessFdContext = fd_context_at(child);
-    for fd: usize in 0..<PROCESS_FD_MAX {
-        if (child_ctx.fd_kind[fd] != UnifiedFdKind::Empty) {
-            return UnifiedFdResult::Invalid;
-        }
-        if (parent_ctx.fd_kind[fd] != UnifiedFdKind::Empty) {
-            let mut parent_handle: UnifiedObjectHandle = {
-                parent_ctx.fd_object[fd], parent_ctx.fd_generation[fd]
-            };
-            if (unified_object_matches(parent_handle) == false) {
-                return UnifiedFdResult::Invalid;
-            }
-            if (unified_object_at(parent_handle).kind != parent_ctx.fd_kind[fd] ||
-                unified_object_references(parent_handle) == 0) {
-                return UnifiedFdResult::Invalid;
+    // The child must be starting empty. That used to be checked fd by fd
+    // against a constant; asking for its lowest open descriptor is the
+    // same question over a table that no longer has a fixed width.
+    match unified_fd_next_open(child, 0) {
+        UnifiedFdScanResult::Found(taken) => { return UnifiedFdResult::Invalid; }
+        UnifiedFdScanResult::Done => {}
+    }
+    // GitHub issue #295's read-only validation pass, unchanged in purpose:
+    // it is what makes RefcountRetainResult::Invalid unreachable in the
+    // copy pass below, leaving the reference bound as the one real
+    // failure mode there.
+    let mut from: usize = 0;
+    let mut scanning: bool = true;
+    while (scanning) {
+        scanning = false;
+        match unified_fd_next_open(parent, from) {
+            UnifiedFdScanResult::Done => {}
+            UnifiedFdScanResult::Found(fd) => {
+                let (block, block_generation) = fd_block_lookup(parent_ctx, fd);
+                if (block == 0) { return UnifiedFdResult::Invalid; }
+                let entries: *FdBlock = fd_block_at(block, block_generation);
+                let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
+                let mut parent_handle: UnifiedObjectHandle = {
+                    entries.slot[index].object, entries.slot[index].generation
+                };
+                if (unified_object_matches(parent_handle) == false) {
+                    return UnifiedFdResult::Invalid;
+                }
+                if (unified_object_at(parent_handle).kind !=
+                        entries.slot[index].kind ||
+                    unified_object_references(parent_handle) == 0) {
+                    return UnifiedFdResult::Invalid;
+                }
+                from = fd + 1;
+                scanning = true;
             }
         }
     }
-    child_ctx.heap_break =
-        parent_ctx.heap_break;
-    child_ctx.heap_start =
-        parent_ctx.heap_start;
-    child_ctx.heap_limit =
-        parent_ctx.heap_limit;
-    // GitHub issue #295: the first (read-only) loop above already proves
-    // every non-Empty parent fd's object is live and kind-matched, so
-    // RefcountRetainResult::Invalid below is provably unreachable -- the
-    // one real failure mode this loop can hit is ::Overflow
-    // (the computed reference bound exceeded). Before this fix, a failure at fd=k left
-    // fds 0..k already retained (their refcounts incremented, never
-    // released) and fd=k itself half-copied (child_fd_kind set but its
-    // refcount never bumped) -- exactly the "partially linked descriptor
-    // state" issue #295's Required Behavior section prohibits on a failed
-    // clone. Each failure branch below now undoes fds 0..fd before
-    // returning, matching scheduled_process_alloc's own rollback discipline.
-    for fd: usize in 0..<PROCESS_FD_MAX {
-        child_ctx.fd_kind[fd] =
-            parent_ctx.fd_kind[fd];
-        child_ctx.fd_object[fd] =
-            parent_ctx.fd_object[fd];
-        child_ctx.fd_generation[fd] =
-            parent_ctx.fd_generation[fd];
-        child_ctx.fd_close_on_exec[fd] =
-            parent_ctx.fd_close_on_exec[fd];
-        if (parent_ctx.fd_kind[fd] != UnifiedFdKind::Empty) {
-            let value: usize = parent_ctx.fd_object[fd];
-            let mut retain_handle: UnifiedObjectHandle = {
-                value, parent_ctx.fd_generation[fd]
-            };
-            match unified_object_retain(retain_handle,
-                                        unified_object_ref_bound()) {
-                UnifiedObjectRetainResult::Ok => {}
-                UnifiedObjectRetainResult::Invalid => {
-                    child_ctx.fd_kind[fd] = UnifiedFdKind::Empty;
-                    unified_fd_clone_rollback(child_ctx, fd);
+    child_ctx.heap_break = parent_ctx.heap_break;
+    child_ctx.heap_start = parent_ctx.heap_start;
+    child_ctx.heap_limit = parent_ctx.heap_limit;
+    // GitHub issue #393: fork inherits RLIMIT_NOFILE, which is Linux's
+    // behaviour and the reason the limit is per-process rather than
+    // per-open-table -- a child that inherited descriptors but not the
+    // limit that admits them would be a different process than the one
+    // fork promises.
+    child_ctx.fd_limit_soft = parent_ctx.fd_limit_soft;
+    child_ctx.fd_limit_hard = parent_ctx.fd_limit_hard;
+    // The copy pass goes through unified_fd_install rather than writing
+    // the child's entries directly: it is the one place that retains, and
+    // routing through it is what keeps the retain and the descriptor it
+    // belongs to from ever being written separately -- the exact split
+    // issue #295's leak lived in.
+    from = 0;
+    scanning = true;
+    while (scanning) {
+        scanning = false;
+        match unified_fd_next_open(parent, from) {
+            UnifiedFdScanResult::Done => {}
+            UnifiedFdScanResult::Found(fd) => {
+                let (block, block_generation) = fd_block_lookup(parent_ctx, fd);
+                if (block == 0) {
+                    unified_fd_clone_rollback(child, fd);
                     return UnifiedFdResult::Invalid;
                 }
-                UnifiedObjectRetainResult::Overflow => {
-                    unified_object_ref_bound_break(value);
-                    child_ctx.fd_kind[fd] = UnifiedFdKind::Empty;
-                    unified_fd_clone_rollback(child_ctx, fd);
-                    return UnifiedFdResult::Invalid;
+                let entries: *FdBlock = fd_block_at(block, block_generation);
+                let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
+                let inherited: bool = entries.slot[index].close_on_exec;
+                match unified_fd_install(child, fd, entries.slot[index].object,
+                                         entries.slot[index].generation) {
+                    UnifiedFdInstallResult::Ok => {}
+                    UnifiedFdInstallResult::Invalid => {
+                        unified_fd_clone_rollback(child, fd);
+                        return UnifiedFdResult::Invalid;
+                    }
+                    // install already logged the bound break; this only
+                    // has to undo the descriptors that came before.
+                    UnifiedFdInstallResult::RefOverflow => {
+                        unified_fd_clone_rollback(child, fd);
+                        return UnifiedFdResult::Invalid;
+                    }
+                    UnifiedFdInstallResult::NoMemory => {
+                        unified_fd_clone_rollback(child, fd);
+                        return UnifiedFdResult::Invalid;
+                    }
                 }
+                // install clears close-on-exec because a fresh descriptor
+                // has it clear; fork copies it, so it is put back here.
+                if (inherited) {
+                    match unified_fd_set_close_on_exec(child, fd, true) {
+                        UnifiedFdResult::Invalid => {
+                            unified_fd_clone_rollback(child, fd + 1);
+                            return UnifiedFdResult::Invalid;
+                        }
+                        UnifiedFdResult::Ok => {}
+                    }
+                }
+                from = fd + 1;
+                scanning = true;
             }
         }
     }
@@ -1218,15 +1717,18 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
 
 fn unified_fd_set_offset(process: usize, fd: usize, offset: usize)
         -> UnifiedFdResult {
-    if (fd >= PROCESS_FD_MAX) { return UnifiedFdResult::Invalid; }
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedFdResult::Invalid; }
     let ctx: *ProcessFdContext = fd_context_at(process);
+    let (block, block_generation) = fd_block_lookup(ctx, fd);
+    if (block == 0) { return UnifiedFdResult::Invalid; }
+    let entries: *FdBlock = fd_block_at(block, block_generation);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     let mut handle: UnifiedObjectHandle = {
-        ctx.fd_object[fd], ctx.fd_generation[fd]
+        entries.slot[index].object, entries.slot[index].generation
     };
-    if ((ctx.fd_kind[fd] == UnifiedFdKind::OpenFile ||
-         ctx.fd_kind[fd] == UnifiedFdKind::Directory) &&
+    if ((entries.slot[index].kind == UnifiedFdKind::OpenFile ||
+         entries.slot[index].kind == UnifiedFdKind::Directory) &&
         unified_object_matches(handle)) {
         let object: *SharedObject = unified_object_at(handle);
         if (object.kind == UnifiedFdKind::OpenFile ||
@@ -1239,15 +1741,18 @@ fn unified_fd_set_offset(process: usize, fd: usize, offset: usize)
 }
 
 fn unified_fd_offset(process: usize, fd: usize) -> UnifiedOffsetResult {
-    if (fd >= PROCESS_FD_MAX) { return UnifiedOffsetResult::Missing; }
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedOffsetResult::Missing; }
     let ctx: *ProcessFdContext = fd_context_at(process);
+    let (block, block_generation) = fd_block_lookup(ctx, fd);
+    if (block == 0) { return UnifiedOffsetResult::Missing; }
+    let entries: *FdBlock = fd_block_at(block, block_generation);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     let mut handle: UnifiedObjectHandle = {
-        ctx.fd_object[fd], ctx.fd_generation[fd]
+        entries.slot[index].object, entries.slot[index].generation
     };
-    if ((ctx.fd_kind[fd] == UnifiedFdKind::OpenFile ||
-         ctx.fd_kind[fd] == UnifiedFdKind::Directory) &&
+    if ((entries.slot[index].kind == UnifiedFdKind::OpenFile ||
+         entries.slot[index].kind == UnifiedFdKind::Directory) &&
         unified_object_matches(handle)) {
         let object: *SharedObject = unified_object_at(handle);
         if (object.kind == UnifiedFdKind::OpenFile ||
@@ -1258,17 +1763,24 @@ fn unified_fd_offset(process: usize, fd: usize) -> UnifiedOffsetResult {
     return UnifiedOffsetResult::Missing;
 }
 
-fn unified_fd_destroy(process: usize) -> UnifiedFdResult {
+fn unified_fd_destroy(process: usize) -> UnifiedFdResult !{unsafe} {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return UnifiedFdResult::Invalid; }
-    let ctx: *ProcessFdContext = fd_context_at(process);
-    for fd: usize in 0..<PROCESS_FD_MAX {
-        if (ctx.fd_kind[fd] != UnifiedFdKind::Empty) {
-            match unified_fd_close(process, fd) {
-                UnifiedFdResult::Invalid => {
-                    return UnifiedFdResult::Invalid;
+    let mut from: usize = 0;
+    let mut scanning: bool = true;
+    while (scanning) {
+        scanning = false;
+        match unified_fd_next_open(process, from) {
+            UnifiedFdScanResult::Done => {}
+            UnifiedFdScanResult::Found(fd) => {
+                match unified_fd_close(process, fd) {
+                    UnifiedFdResult::Invalid => {
+                        return UnifiedFdResult::Invalid;
+                    }
+                    UnifiedFdResult::Ok => {}
                 }
-                UnifiedFdResult::Ok => {}
+                from = fd + 1;
+                scanning = true;
             }
         }
     }
@@ -1323,29 +1835,44 @@ fn unified_object_pool_probe() -> bool !{unsafe} {
     return true;
 }
 
-// GitHub issue #295 boundary test, reworked by issue #401. It used to
-// retain a fixed SHARED_OBJECT_MAX_REFS times and check that one more was
-// refused -- a test that the constant equalled itself. The bound is
-// COMPUTED now (unified_object_ref_bound: one descriptor slot per
-// PROCESS_FD_MAX per live fd context), so the thing worth proving is that
-// it TRACKS: fill it exactly, be refused at one past it, then create one
-// more process and be allowed exactly PROCESS_FD_MAX more.
+// GitHub issue #295 boundary test, reworked by issue #401 and again by
+// issue #393. It used to retain a fixed SHARED_OBJECT_MAX_REFS times and
+// check that one more was refused -- a test that the constant equalled
+// itself. The bound is COMPUTED (unified_object_ref_bound: the descriptor
+// slots that exist), so what is worth proving is that it TRACKS: fill it
+// exactly, be refused at one past it, then make one more BLOCK of
+// descriptor slots exist and be allowed exactly FD_BLOCK_SLOTS more.
 //
-// It still drives retain/release directly rather than installing real
-// fd-table entries: the point is this bound's own boundary, not the
+// What changed with #393 is where the slots come from. They used to exist
+// because a process existed (PROCESS_FD_MAX of them per context, whether
+// or not any were used); they exist now because a descriptor was
+// installed and needed a block. So the probe installs one.
+//
+// It still drives retain/release directly rather than through the
 // descriptor paths, which unified_fd_table_probe covers.
 fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
     unified_fd_table_init();
-    let bound: usize = unified_object_ref_bound();
-    if (bound == 0) { return false; }
+    unified_fd_context_release(0);
+    if (unified_fd_context_ensure(0) == false) { return false; }
+    if (unified_object_ref_bound() != 0) { return false; }
     match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
         UnifiedObjectResult::Invalid => { return false; }
         UnifiedObjectResult::Full => { return false; }
         UnifiedObjectResult::Allocated(handle) => {
-            // unified_object_alloc_first's own doc comment: a freshly
-            // allocated object's refs starts at 0, so `bound` successful
-            // retains bring it to exactly the bound.
-            let mut retained: usize = 0;
+            // Installing it is what makes the first block, and therefore
+            // the first descriptor slots, exist. Before this line the
+            // bound is 0, which is the check above.
+            match unified_fd_install(0, 0, handle.slot, handle.generation) {
+                UnifiedFdInstallResult::Ok => {}
+                UnifiedFdInstallResult::Invalid => { return false; }
+                UnifiedFdInstallResult::RefOverflow => { return false; }
+                UnifiedFdInstallResult::NoMemory => { return false; }
+            }
+            let bound: usize = unified_object_ref_bound();
+            if (bound != FD_BLOCK_SLOTS) { return false; }
+            let mut ok: bool = true;
+            // fd 0 already holds one of them.
+            let mut retained: usize = 1;
             while (retained < bound) {
                 match unified_object_retain(handle, bound) {
                     UnifiedObjectRetainResult::Ok => {}
@@ -1354,19 +1881,41 @@ fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
                 }
                 retained = retained + 1;
             }
-            let mut ok: bool = false;
             match unified_object_retain(handle, bound) {
-                UnifiedObjectRetainResult::Overflow => { ok = true; }
-                UnifiedObjectRetainResult::Invalid => {}
-                UnifiedObjectRetainResult::Ok => { retained = retained + 1; }
+                UnifiedObjectRetainResult::Overflow => {}
+                UnifiedObjectRetainResult::Invalid => { ok = false; }
+                UnifiedObjectRetainResult::Ok => {
+                    retained = retained + 1;
+                    ok = false;
+                }
             }
-            // ...and one more process means PROCESS_FD_MAX more descriptor
-            // slots, so the same retain that was refused above is allowed
-            // now. This is the half a fixed constant could not have.
+            // ...and one more process holding one descriptor of its own
+            // means one more block of descriptor slots, so the same retain
+            // that was refused above is allowed now. This is the half a
+            // fixed constant could not have.
             let extra: usize = scheduled_process_probe_slot_acquire();
             if (extra == 0) { ok = false; }
+            if (ok) {
+                unified_fd_context_release(extra);
+                if (unified_fd_context_ensure(extra) == false) { ok = false; }
+            }
+            if (ok) {
+                match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
+                    UnifiedObjectResult::Invalid => { ok = false; }
+                    UnifiedObjectResult::Full => { ok = false; }
+                    UnifiedObjectResult::Allocated(other) => {
+                        match unified_fd_install(extra, 0, other.slot,
+                                                 other.generation) {
+                            UnifiedFdInstallResult::Ok => {}
+                            UnifiedFdInstallResult::Invalid => { ok = false; }
+                            UnifiedFdInstallResult::RefOverflow => { ok = false; }
+                            UnifiedFdInstallResult::NoMemory => { ok = false; }
+                        }
+                    }
+                }
+            }
             let grown: usize = unified_object_ref_bound();
-            if (grown != bound + PROCESS_FD_MAX) { ok = false; }
+            if (grown != bound + FD_BLOCK_SLOTS) { ok = false; }
             if (ok) {
                 match unified_object_retain(handle, grown) {
                     UnifiedObjectRetainResult::Ok => { retained = retained + 1; }
@@ -1374,8 +1923,18 @@ fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
                     UnifiedObjectRetainResult::Overflow => { ok = false; }
                 }
             }
+            match unified_fd_destroy(extra) {
+                UnifiedFdResult::Invalid => {}
+                UnifiedFdResult::Ok => {}
+            }
             scheduled_process_probe_slot_release(extra);
-            let mut released: usize = 0;
+            // fd 0's own reference goes back through the descriptor path,
+            // the rest through the same call that took them.
+            match unified_fd_destroy(0) {
+                UnifiedFdResult::Invalid => { ok = false; }
+                UnifiedFdResult::Ok => {}
+            }
+            let mut released: usize = 1;
             while (released < retained) {
                 match unified_object_release(handle) {
                     UnifiedObjectReleaseResult::Invalid => { ok = false; }
@@ -1390,20 +1949,21 @@ fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
     }
 }
 
-// GitHub issue #295 boundary test: exhausts one process's own PROCESS_FD_MAX
-// descriptor namespace, distinct from unified_object_pool_exhaustion_probe
-// above (the global object pool) -- unified_fd_table_probe
-// exercises fd installation functionally but never fills a process's table
-// to its own capacity. Every fd here duplicates the SAME one shared object
-// (unified_fd_duplicate only bumps its refcount, well under the computed
-// reference bound) so this isolates PROCESS_FD_MAX's own boundary
-// rather than conflating it with the object pool's.
-fn unified_fd_table_exhaustion_probe() -> bool !{unsafe} {
+// GitHub issue #393 replaces issue #295's per-process exhaustion probe.
+// There is no PROCESS_FD_MAX to be refused at any more, so this proves the
+// two things that took its place: a process's descriptors go PAST the old
+// ceiling of 16, which needs the block chain to grow and was the part that
+// used to be impossible; and the refusal follows this process's own
+// RLIMIT_NOFILE rather than a constant -- lowered, the same table refuses
+// at the new number, and raised again it admits the same descriptor.
+//
+// Every descriptor here duplicates the SAME shared object, so this
+// isolates the descriptor namespace rather than conflating it with the
+// object pool's own boundary (unified_object_pool_probe covers that).
+const FD_TABLE_PROBE_COUNT: usize = 40;
+
+fn unified_fd_table_growth_probe() -> bool !{unsafe} {
     unified_fd_table_init();
-    // GitHub issue #392: a probe standing in for a process has to acquire
-    // what a process acquires. Before the context was pooled it got one
-    // for free, because every slot's context existed whether or not a
-    // process did.
     unified_fd_context_release(0);
     if (unified_fd_context_ensure(0) == false) { return false; }
     match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
@@ -1413,49 +1973,79 @@ fn unified_fd_table_exhaustion_probe() -> bool !{unsafe} {
             match unified_fd_install(0, 0, handle.slot, handle.generation) {
                 UnifiedFdInstallResult::Invalid => { return false; }
                 UnifiedFdInstallResult::RefOverflow => { return false; }
+                UnifiedFdInstallResult::NoMemory => { return false; }
                 UnifiedFdInstallResult::Ok => {}
             }
         }
     }
-    for fd: usize in 1..<PROCESS_FD_MAX {
+    for fd: usize in 1..<FD_TABLE_PROBE_COUNT {
         match unified_fd_duplicate(0, 0, fd) {
             UnifiedFdInstallResult::Invalid => { return false; }
             UnifiedFdInstallResult::RefOverflow => { return false; }
+            UnifiedFdInstallResult::NoMemory => { return false; }
             UnifiedFdInstallResult::Ok => {}
         }
     }
-
-    let mut capacity_ok: bool = false;
-    match unified_fd_alloc(0, 0) {
-        UnifiedFdAllocResult::Full => { capacity_ok = true; }
-        UnifiedFdAllocResult::Allocated(unexpected) => {
-            if (unexpected == 0) {}
+    // Past the old ceiling, and every one of them really is installed:
+    // the shared object counts exactly one holder per descriptor.
+    match unified_file_lookup(0, FD_TABLE_PROBE_COUNT - 1) {
+        UnifiedFileResult::Missing => { return false; }
+        UnifiedFileResult::Found(last) => {
+            if (unified_object_references(last) != FD_TABLE_PROBE_COUNT) {
+                return false;
+            }
         }
     }
-    if (capacity_ok == false) { return false; }
-
-    match unified_fd_close(0, 0) {
-        UnifiedFdResult::Invalid => { return false; }
+    // The next free descriptor is the one past the last installed, which
+    // is a descriptor no block holds yet -- the chain grows when it is
+    // installed, not when it is named.
+    let mut ok: bool = true;
+    match unified_fd_alloc(0, 0) {
+        UnifiedFdAllocResult::Full => { ok = false; }
+        UnifiedFdAllocResult::Allocated(next) => {
+            if (next != FD_TABLE_PROBE_COUNT) { ok = false; }
+        }
+    }
+    // Lower this process's own limit to exactly what it holds: the same
+    // table, the same descriptors, and now a refusal.
+    match unified_process_fd_limit_configure(0, FD_TABLE_PROBE_COUNT,
+                                             PROCESS_FD_LIMIT_DEFAULT_HARD) {
+        UnifiedFdResult::Invalid => { ok = false; }
         UnifiedFdResult::Ok => {}
     }
-    let mut reused_ok: bool = false;
     match unified_fd_alloc(0, 0) {
         UnifiedFdAllocResult::Full => {}
-        UnifiedFdAllocResult::Allocated(reused_fd) => {
-            if (reused_fd == 0) { reused_ok = true; }
+        UnifiedFdAllocResult::Allocated(unexpected) => { ok = false; }
+    }
+    // Raise it by one and the same descriptor is admitted again.
+    match unified_process_fd_limit_configure(0, FD_TABLE_PROBE_COUNT + 1,
+                                             PROCESS_FD_LIMIT_DEFAULT_HARD) {
+        UnifiedFdResult::Invalid => { ok = false; }
+        UnifiedFdResult::Ok => {}
+    }
+    match unified_fd_alloc(0, 0) {
+        UnifiedFdAllocResult::Full => { ok = false; }
+        UnifiedFdAllocResult::Allocated(again) => {
+            if (again != FD_TABLE_PROBE_COUNT) { ok = false; }
         }
     }
-    if (reused_ok == false) { return false; }
-
-    for fd: usize in 1..<PROCESS_FD_MAX {
-        match unified_fd_close(0, fd) {
-            UnifiedFdResult::Invalid => {}
-            UnifiedFdResult::Ok => {}
-        }
+    // A limit below a descriptor a process already holds is Linux's
+    // behaviour too: the open descriptor keeps working, and only the next
+    // allocation is refused.
+    if (unified_terminal_is_open(0, 0)) { ok = false; }
+    match unified_file_lookup(0, FD_TABLE_PROBE_COUNT - 1) {
+        UnifiedFileResult::Missing => { ok = false; }
+        UnifiedFileResult::Found(still) => {}
     }
+    match unified_fd_destroy(0) {
+        UnifiedFdResult::Invalid => { ok = false; }
+        UnifiedFdResult::Ok => {}
+    }
+    if (intrusive_pool_live_count(&object_pool) != 0) { ok = false; }
     unified_fd_table_init();
-    return true;
+    return ok;
 }
+
 
 fn unified_fd_probe_install(fd: usize, result: UnifiedObjectResult) -> bool {
     match result {
@@ -1465,6 +2055,7 @@ fn unified_fd_probe_install(fd: usize, result: UnifiedObjectResult) -> bool {
             match unified_fd_install(0, fd, handle.slot, handle.generation) {
                 UnifiedFdInstallResult::Invalid => { return false; }
                 UnifiedFdInstallResult::RefOverflow => { return false; }
+                UnifiedFdInstallResult::NoMemory => { return false; }
                 UnifiedFdInstallResult::Ok => { return true; }
             }
         }
@@ -1599,12 +2190,15 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
 // own kernel_process_crash_*() accessors: reads plain ProcessFdContext data
 // only, never object_pool's RefcountSlotMap internals -- a crash report
 // must not acquire a lock after a fatal exception.
-fn kernel_fd_table_crash_kind(process: usize, fd: usize) -> usize {
-    if (fd >= PROCESS_FD_MAX) { return 0; }
+fn kernel_fd_table_crash_kind(process: usize, fd: usize) -> usize !{unsafe} {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return 0; }
     let ctx: *ProcessFdContext = fd_context_at(process);
-    match ctx.fd_kind[fd] {
+    let (block, block_generation) = fd_block_lookup(ctx, fd);
+    if (block == 0) { return 0; }
+    let entries: *FdBlock = fd_block_at(block, block_generation);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
+    match entries.slot[index].kind {
         UnifiedFdKind::Empty => { return 0; }
         UnifiedFdKind::Terminal => { return 1; }
         UnifiedFdKind::OpenFile => { return 2; }
@@ -1614,10 +2208,13 @@ fn kernel_fd_table_crash_kind(process: usize, fd: usize) -> usize {
     }
 }
 
-fn kernel_fd_table_crash_object(process: usize, fd: usize) -> usize {
-    if (fd >= PROCESS_FD_MAX) { return 0; }
+fn kernel_fd_table_crash_object(process: usize, fd: usize) -> usize !{unsafe} {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return 0; }
     let ctx: *ProcessFdContext = fd_context_at(process);
-    return ctx.fd_object[fd];
+    let (block, block_generation) = fd_block_lookup(ctx, fd);
+    if (block == 0) { return 0; }
+    let entries: *FdBlock = fd_block_at(block, block_generation);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
+    return entries.slot[index].object;
 }

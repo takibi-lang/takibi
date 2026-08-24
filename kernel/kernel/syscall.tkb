@@ -35,6 +35,12 @@ const AARCH64_NR_READV: usize = 65;
 const AARCH64_NR_WRITEV: usize = 66;
 const AARCH64_NR_PPOLL: usize = 73;
 const AARCH64_NR_UNAME: usize = 160;
+// GitHub issue #393: the only rlimit syscall this architecture has.
+// asm-generic (and therefore arm64) has no getrlimit/setrlimit numbers at
+// all, and musl 1.2.6's getrlimit()/setrlimit() go through SYS_prlimit64
+// first, so implementing this one implements all of them -- and it is
+// what ash's `ulimit -n` reaches.
+const AARCH64_NR_PRLIMIT64: usize = 261;
 const AARCH64_NR_EXIT: usize = 93;
 const AARCH64_NR_EXIT_GROUP: usize = 94;
 const AARCH64_NR_CLONE: usize = 220;
@@ -58,14 +64,31 @@ const LINUX_ECHILD: usize = 0xFFFFFFFFFFFFFFF6;
 // GitHub issue #295: distinct errno for fixed-pool exhaustion, previously
 // collapsed into LINUX_EBADF (which real Linux reserves for an actually bad
 // descriptor argument) at every fd-allocating syscall handler below.
-// EMFILE = this process's own PROCESS_FD_MAX descriptor table is full;
+// EMFILE = this process's own RLIMIT_NOFILE was reached (issue #393);
 // ENFILE = the global shared object pool is full. GitHub issue #391 left
 // that mapping alone and changed only what "full" means: the pool has no
 // capacity constant, so what is reported is the derived system-wide bound
 // (Linux's files_stat.max_files) or the page allocator being empty.
 const LINUX_EMFILE: usize = 0xFFFFFFFFFFFFFFE8;
 const LINUX_ENFILE: usize = 0xFFFFFFFFFFFFFFE9;
+// GitHub issue #393: installing a descriptor can need a descriptor block,
+// and the page allocator being empty is neither a bad argument nor a
+// limit. Linux's own expand_files() returns ENOMEM for it.
+const LINUX_ENOMEM: usize = 0xFFFFFFFFFFFFFFF4;
+const LINUX_ESRCH: usize = 0xFFFFFFFFFFFFFFFD;
+// RLIMIT_NOFILE, and Linux's RLIM64_INFINITY.
+const LINUX_RLIMIT_NOFILE: usize = 7;
+const LINUX_RLIM64_INFINITY: usize = 0xFFFFFFFFFFFFFFFF;
 
+// GitHub issue #393: AT_FDCWD, spelled the way userspace passes it -- the
+// 32-bit -100 sign-extended into x0. It used to be caught by accident:
+// the dirfd paths below tested `x0 < PROCESS_FD_MAX` before treating x0 as
+// a directory descriptor, and AT_FDCWD failed that test along with every
+// other out-of-range value. With no such range left, "relative to the
+// current directory" has to be recognised for what it is, which is also
+// what Linux does -- any OTHER value really is a descriptor, and an
+// unopened one really is EBADF.
+const LINUX_AT_FDCWD: usize = 0xFFFFFFFFFFFFFF9C;
 const LINUX_F_DUPFD: usize = 0;
 const LINUX_F_SETFD: usize = 2;
 const LINUX_F_DUPFD_CLOEXEC: usize = 1030;
@@ -120,19 +143,22 @@ const IOV_MAX: usize = 1024;
 // rationale and same off-by-one-avoiding `>=` check.
 const POLL_MAX: usize = 1024;
 
-// GitHub issue #409: the socket paths name PROCESS_FD_MAX directly. There
-// was a PROCESS_FD_MAX here, a second name for the same capacity --
-// kernel_socket_fd_alloc/kernel_listener_fd_lookup and friends only ever
-// range-check against it and then delegate to unified_fd_alloc/
-// unified_socket_lookup, which are sized by fd_table.tkb's PROCESS_FD_MAX.
+// GitHub issue #409 removed the second name for the descriptor capacity
+// from this file; issue #393 removed the capacity. The socket paths here
+// range-checked fd values against it and then delegated to
+// unified_fd_alloc/unified_socket_lookup; there is no range to check any
+// more -- a descriptor is admitted by this process's own RLIMIT_NOFILE and
+// validated by whether its block chain holds it, both of which are
+// fd_table.tkb's to answer.
 //
-// The incident that makes the duplication worth remembering is recorded in
-// kernel/RESOURCE_LIMITS.md's PROCESS_FD_MAX row: it was a literal 8 while
-// the real table was 16, so socket()/accept() reported resource exhaustion
-// at fd>=8 while free slots existed -- a wrong refusal rather than a
-// compile error, hit by a shell whose first eight descriptors were busy.
-// Issue #295 made it a real reference so it could not drift numerically;
-// this removes the second name so there is nothing left to drift.
+// The incident that makes a duplicated capacity worth remembering is
+// recorded in kernel/RESOURCE_LIMITS.md: this file carried a literal 8
+// while the real table was 16, so socket()/accept() reported resource
+// exhaustion at fd>=8 while free slots existed -- a wrong refusal rather
+// than a compile error, hit by a shell whose first eight descriptors were
+// busy. Issue #295 made it a real reference so it could not drift
+// numerically, #409 removed the second name, and #393 removed the number
+// itself: what is left cannot disagree with anything.
 
 private let mut syscall_ext2_mount: Ext2Mount;
 private let mut syscall_ext2_ready: bool;
@@ -161,6 +187,28 @@ private let mut syscall_inetd_mode: bool;
 // with headroom over sizeof(Utsname) (390 bytes) since array declarations
 // can't use sizeof(...) directly (SPEC.md).
 private let mut syscall_uname_buffer: [u8; 512];
+// GitHub issue #393: scratch for prlimit64(2)'s two struct rlimit64
+// values, the same shape as the uname and sockaddr buffers above -- user
+// memory is never read or written in place.
+private let mut syscall_rlimit_buffer: [u8; 16];
+
+// struct rlimit64 is two little-endian u64s. Written a byte at a time
+// rather than through a pointer cast onto the buffer: the cast would be
+// unsafe (issue #316) and would assume an alignment a u8 array does not
+// promise, and this is called twice per prlimit64 call.
+private fn syscall_rlimit_store(field: borrow [u8; 8..], value: usize) {
+    for i: usize in 0..<8 {
+        field[i] = ((value >> (i * 8)) & 0xFF) as u8;
+    }
+}
+
+private fn syscall_rlimit_load(field: borrow [u8; 8..]) -> usize {
+    let mut value: usize = 0;
+    for i: usize in 0..<8 {
+        value = value | ((field[i] as usize) << (i * 8));
+    }
+    return value;
+}
 
 must_use variant KernelInetdAcceptResult { TimedOut; Accepted; }
 
@@ -232,13 +280,17 @@ must_use variant KernelConnectionLookupResult {
     Missing;
     Found(usize);
 }
+// GitHub issue #393: plain usize. A descriptor number is bounded by the
+// process's own RLIMIT_NOFILE, a runtime value, so there is no
+// compile-time range to state -- the same trade the connection lookup
+// above already made for a pool address.
 must_use variant KernelSocketFdAllocResult {
     Full;
-    Allocated({0..<PROCESS_FD_MAX as usize});
+    Allocated(usize);
 }
 must_use variant KernelListenerLookupResult {
     Missing;
-    Found({0..<PROCESS_FD_MAX as usize});
+    Found(usize);
 }
 
 // GitHub issue #245: fd-table process slot == process.tkb's own
@@ -320,11 +372,37 @@ fn kernel_syscall_file_set_offset(fd: usize, value: usize) -> bool {
     }
 }
 
-fn kernel_syscall_any_file_is_open() -> bool {
-    for fd: usize in 0..<PROCESS_FD_MAX {
-        if (kernel_syscall_file_is_open(fd)) { return true; }
+// GitHub issue #393: over the descriptors this process has, rather than
+// over every number below a constant.
+fn kernel_syscall_any_file_is_open() -> bool !{unsafe} {
+    let mut from: usize = 0;
+    let mut scanning: bool = true;
+    while (scanning) {
+        scanning = false;
+        match unified_fd_next_open(kernel_syscall_process_slot(), from) {
+            UnifiedFdScanResult::Done => {}
+            UnifiedFdScanResult::Found(fd) => {
+                if (kernel_syscall_file_is_open(fd)) { return true; }
+                from = fd + 1;
+                scanning = true;
+            }
+        }
     }
     return false;
+}
+
+// This process's own soft RLIMIT_NOFILE, for the exhaustion log lines that
+// used to print the constant. Reporting the limit that actually refused
+// the call is the point: two processes can now be refused at different
+// numbers.
+fn kernel_syscall_fd_limit_soft() -> usize !{unsafe} {
+    match unified_process_fd_limit(kernel_syscall_process_slot()) {
+        UnifiedFdLimitResult::Missing => { return 0; }
+        UnifiedFdLimitResult::Found(pair) => {
+            let (soft, hard) = pair;
+            return soft;
+        }
+    }
 }
 
 fn kernel_syscall_heap_break() -> usize {
@@ -466,28 +544,21 @@ fn kernel_connection_fd_lookup(fd: usize) -> KernelConnectionLookupResult {
     return KernelConnectionLookupResult::Missing;
 }
 
-fn kernel_socket_fd_alloc(first: usize) -> KernelSocketFdAllocResult {
+fn kernel_socket_fd_alloc(first: usize) -> KernelSocketFdAllocResult !{unsafe} {
     match unified_fd_alloc(kernel_syscall_process_slot(), first) {
         UnifiedFdAllocResult::Full => { return KernelSocketFdAllocResult::Full; }
         UnifiedFdAllocResult::Allocated(fd) => {
-            if (fd < PROCESS_FD_MAX) {
-                let socket_fd: {0..<PROCESS_FD_MAX as usize} = fd;
-                return KernelSocketFdAllocResult::Allocated(socket_fd);
-            }
-            return KernelSocketFdAllocResult::Full;
+            return KernelSocketFdAllocResult::Allocated(fd);
         }
     }
 }
 
-fn kernel_listener_fd_lookup(fd: usize) -> KernelListenerLookupResult {
-    if (fd >= 0 && fd < PROCESS_FD_MAX) {
-        let index: {0..<PROCESS_FD_MAX as usize} = fd;
-        match unified_socket_lookup(kernel_syscall_process_slot(), index,
-                                    UnifiedFdKind::Listener) {
-            UnifiedSocketResult::Missing => {}
-            UnifiedSocketResult::Found(handle) => {
-                return KernelListenerLookupResult::Found(index);
-            }
+fn kernel_listener_fd_lookup(fd: usize) -> KernelListenerLookupResult !{unsafe} {
+    match unified_socket_lookup(kernel_syscall_process_slot(), fd,
+                                UnifiedFdKind::Listener) {
+        UnifiedSocketResult::Missing => {}
+        UnifiedSocketResult::Found(handle) => {
+            return KernelListenerLookupResult::Found(fd);
         }
     }
     return KernelListenerLookupResult::Missing;
@@ -542,25 +613,21 @@ fn kernel_listener_set_port(fd: usize, port: u16) -> bool {
     }
 }
 
-fn kernel_connected_fd_duplicate(old_fd: usize, new_fd: usize) -> bool {
-    if (old_fd >= 0 && old_fd < PROCESS_FD_MAX &&
-        new_fd >= 0 && new_fd < PROCESS_FD_MAX) {
-        match unified_fd_duplicate(kernel_syscall_process_slot(), old_fd,
-                                   new_fd) {
-            UnifiedFdInstallResult::Invalid => { return false; }
-            UnifiedFdInstallResult::RefOverflow => { return false; }
-            UnifiedFdInstallResult::Ok => { return true; }
-        }
+fn kernel_connected_fd_duplicate(old_fd: usize, new_fd: usize) -> bool !{unsafe} {
+    match unified_fd_duplicate(kernel_syscall_process_slot(), old_fd,
+                               new_fd) {
+        UnifiedFdInstallResult::Invalid => { return false; }
+        UnifiedFdInstallResult::RefOverflow => { return false; }
+        UnifiedFdInstallResult::NoMemory => { return false; }
+        UnifiedFdInstallResult::Ok => { return true; }
     }
-    return false;
 }
 
 // Keep ordinary file/terminal descriptor duplication separate from connected
 // socket ownership. dup3 uses this path when replacing a standard descriptor
 // with another non-socket object.
 fn kernel_regular_fd_duplicate(old_fd: usize, new_fd: usize) -> bool {
-    if (old_fd >= PROCESS_FD_MAX || new_fd >= PROCESS_FD_MAX ||
-        (kernel_syscall_terminal_is_open(old_fd) == false &&
+    if ((kernel_syscall_terminal_is_open(old_fd) == false &&
          kernel_syscall_file_is_open(old_fd) == false &&
          kernel_syscall_directory_is_open(old_fd) == false)) {
         return false;
@@ -577,6 +644,7 @@ fn kernel_regular_fd_duplicate(old_fd: usize, new_fd: usize) -> bool {
     match unified_fd_duplicate(kernel_syscall_process_slot(), old_fd, new_fd) {
         UnifiedFdInstallResult::Invalid => { return false; }
         UnifiedFdInstallResult::RefOverflow => { return false; }
+        UnifiedFdInstallResult::NoMemory => { return false; }
         UnifiedFdInstallResult::Ok => { return true; }
     }
 }
@@ -663,12 +731,25 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
         if (state.file_state_live == false) {
             return KernelFdReapResult::Failed;
         }
-        for fd: usize in 0..<PROCESS_FD_MAX {
-            if (kernel_connected_fd_is_open(fd)) {
-                if (kernel_connected_descriptor_release(fd) == false) {
-                    return KernelFdReapResult::Failed;
+        // GitHub issue #393: over the child's own descriptors. Clearing
+        // one removes it from the scan, so the walk restarts after the fd
+        // just cleared rather than from 0.
+        let mut from: usize = 0;
+        let mut scanning: bool = true;
+        while (scanning) {
+            scanning = false;
+            match unified_fd_next_open(child_slot, from) {
+                UnifiedFdScanResult::Done => {}
+                UnifiedFdScanResult::Found(fd) => {
+                    if (kernel_connected_fd_is_open(fd)) {
+                        if (kernel_connected_descriptor_release(fd) == false) {
+                            return KernelFdReapResult::Failed;
+                        }
+                        kernel_connected_fd_clear(fd);
+                    }
+                    from = fd + 1;
+                    scanning = true;
                 }
-                kernel_connected_fd_clear(fd);
             }
         }
         match unified_fd_destroy(child_slot) {
@@ -769,6 +850,9 @@ fn kernel_syscall_inetd_accept(port: u16)
                                                 return KernelInetdAcceptResult::TimedOut;
                                             }
                                             UnifiedFdInstallResult::RefOverflow => {
+                                                return KernelInetdAcceptResult::TimedOut;
+                                            }
+                                            UnifiedFdInstallResult::NoMemory => {
                                                 return KernelInetdAcceptResult::TimedOut;
                                             }
                                             UnifiedFdInstallResult::Ok => {}
@@ -1646,7 +1730,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         };
         let path_view: []u8 = syscall_path_buffer as []u8;
         let mut lookup_inode: usize = 2;
-        if (path_view[0] != 0x2F && x0 < PROCESS_FD_MAX) {
+        if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
             if (kernel_syscall_directory_is_open(x0) == false) {
                 return SyscallAction::Resume(LINUX_EBADF);
             }
@@ -1665,7 +1749,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 match unified_fd_alloc(kernel_syscall_process_slot(), 0) {
                     UnifiedFdAllocResult::Full => {
                         kernel_boot_log_resource_exhausted(
-                            "process fd table" as *u8, PROCESS_FD_MAX);
+                            "process fd table" as *u8,
+                            kernel_syscall_fd_limit_soft());
                         return SyscallAction::Resume(LINUX_EMFILE);
                     }
                     UnifiedFdAllocResult::Allocated(fd) => {
@@ -1842,7 +1927,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         };
         let path_view: []u8 = syscall_path_buffer as []u8;
         let mut lookup_inode: usize = 2;
-        if (path_view[0] != 0x2F && x0 < PROCESS_FD_MAX) {
+        if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
             if (kernel_syscall_directory_is_open(x0) == false) {
                 return SyscallAction::Resume(LINUX_EBADF);
             }
@@ -1869,7 +1954,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         };
         let path_view: []u8 = syscall_path_buffer as []u8;
         let mut lookup_inode: usize = 2;
-        if (path_view[0] != 0x2F && x0 < PROCESS_FD_MAX) {
+        if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
             if (kernel_syscall_directory_is_open(x0) == false) {
                 return SyscallAction::Resume(LINUX_EBADF);
             }
@@ -2139,7 +2224,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             match unified_fd_alloc(kernel_syscall_process_slot(), x2) {
                 UnifiedFdAllocResult::Full => {
                     kernel_boot_log_resource_exhausted(
-                        "process fd table" as *u8, PROCESS_FD_MAX);
+                        "process fd table" as *u8,
+                        kernel_syscall_fd_limit_soft());
                     return SyscallAction::Resume(LINUX_EMFILE);
                 }
                 UnifiedFdAllocResult::Allocated(new_fd) => {
@@ -2157,6 +2243,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             // a broken invariant from becoming a broken
                             // kernel.
                             return SyscallAction::Resume(LINUX_EMFILE);
+                        }
+                        UnifiedFdInstallResult::NoMemory => {
+                            kernel_boot_log_resource_exhausted(
+                                "descriptor block (out of pages)" as *u8, 0);
+                            return SyscallAction::Resume(LINUX_ENOMEM);
                         }
                         UnifiedFdInstallResult::Ok => {
                             if (command == LINUX_F_DUPFD_CLOEXEC) {
@@ -2184,8 +2275,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // across background-job stdin redirection.
         let old_fd: usize = x0;
         let new_fd: usize = x1;
-        if (x2 != 0 || old_fd == new_fd ||
-            new_fd >= PROCESS_FD_MAX) {
+        if (x2 != 0 || old_fd == new_fd) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
         if (kernel_connected_fd_is_open(old_fd) == false) {
@@ -2263,7 +2353,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match kernel_socket_fd_alloc(4) {
           KernelSocketFdAllocResult::Full => {
             kernel_boot_log_resource_exhausted(
-                "process fd table" as *u8, PROCESS_FD_MAX);
+                "process fd table" as *u8, kernel_syscall_fd_limit_soft());
             return SyscallAction::Resume(LINUX_EAGAIN);
           }
           KernelSocketFdAllocResult::Allocated(created_socket_fd) => {
@@ -2283,7 +2373,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
 
     if (number == 200) {
         syscall_test_evidence_record_bind();
-        let bind_fd: {0..<PROCESS_FD_MAX as usize} =
+        let bind_fd: usize =
             match kernel_listener_fd_lookup(x0) {
                 KernelListenerLookupResult::Missing => {
                     return SyscallAction::Resume(LINUX_EINVAL);
@@ -2330,7 +2420,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
 
     if (number == 201) {
         syscall_test_evidence_record_listen();
-        let listen_fd: {0..<PROCESS_FD_MAX as usize} =
+        let listen_fd: usize =
             match kernel_listener_fd_lookup(x0) {
                 KernelListenerLookupResult::Missing => {
                     return SyscallAction::Resume(LINUX_EINVAL);
@@ -2369,7 +2459,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return kernel_syscall_exit_current_process(0);
         }
         syscall_test_evidence_record_accept();
-        let accept_listener_fd: {0..<PROCESS_FD_MAX as usize} =
+        let accept_listener_fd: usize =
             match kernel_listener_fd_lookup(x0) {
                 KernelListenerLookupResult::Missing => {
                     return SyscallAction::Resume(LINUX_EINVAL);
@@ -2389,11 +2479,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             kernel_process_request_reschedule();
             return SyscallAction::Resume(LINUX_EAGAIN);
         }
-        let connected_fd: {0..<PROCESS_FD_MAX as usize} =
+        let connected_fd: usize =
             match kernel_socket_fd_alloc(5) {
                 KernelSocketFdAllocResult::Full => {
                     kernel_boot_log_resource_exhausted(
-                        "process fd table" as *u8, PROCESS_FD_MAX);
+                        "process fd table" as *u8,
+                        kernel_syscall_fd_limit_soft());
                     return SyscallAction::Resume(LINUX_EAGAIN);
                 }
                 KernelSocketFdAllocResult::Allocated(found) => { found }
@@ -3211,6 +3302,75 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
     if (number == AARCH64_NR_PPOLL) {
         return syscall_ppoll_dispatch(x0, x1, x2, x3);
+    }
+    if (number == AARCH64_NR_PRLIMIT64) {
+        // pid 0 is "me". A real pid is accepted only when it is this
+        // process's own: reaching into another process's descriptor
+        // limits mid-syscall is a cross-process write this kernel has no
+        // safe path for, and ESRCH is what Linux reports for a pid it
+        // will not act on.
+        if (x0 != 0 && x0 != kernel_process_current_pid()) {
+            return SyscallAction::Resume(LINUX_ESRCH);
+        }
+        let mut soft: usize = LINUX_RLIM64_INFINITY;
+        let mut hard: usize = LINUX_RLIM64_INFINITY;
+        if (x1 == LINUX_RLIMIT_NOFILE) {
+            match unified_process_fd_limit(kernel_syscall_process_slot()) {
+                UnifiedFdLimitResult::Missing => {
+                    return SyscallAction::Resume(LINUX_EINVAL);
+                }
+                UnifiedFdLimitResult::Found(pair) => {
+                    let (live_soft, live_hard) = pair;
+                    soft = live_soft;
+                    hard = live_hard;
+                }
+            }
+        }
+        // The OLD value is reported before the new one is applied, which
+        // is prlimit64's own contract and the reason one call can do both.
+        if (x3 != 0) {
+            match user_range_check_write(kernel_process_current_root(), x3,
+                                         sizeof(usize) * 2) {
+                UserWriteRangeResult::Fault => {
+                    return SyscallAction::Resume(LINUX_EFAULT);
+                }
+                UserWriteRangeResult::Ok(range) => {
+                    let old_bytes = syscall_rlimit_buffer as []u8;
+                    syscall_rlimit_store(old_bytes[0..<8], soft);
+                    syscall_rlimit_store(old_bytes[8..<16], hard);
+                    let reported: []u8 = old_bytes[0..<16];
+                    let sent: bool = copy_to_user(range, reported);
+                }
+            }
+        }
+        if (x2 == 0) { return SyscallAction::Resume(0); }
+        match user_range_check_read(kernel_process_current_root(), x2,
+                                    sizeof(usize) * 2) {
+            UserReadRangeResult::Fault => {
+                return SyscallAction::Resume(LINUX_EFAULT);
+            }
+            UserReadRangeResult::Ok(range) => {
+                let copied: bool = copy_from_user_raw(
+                    range, syscall_rlimit_buffer as *u8, sizeof(usize) * 2);
+            }
+        }
+        let new_bytes = syscall_rlimit_buffer as []u8;
+        let new_soft: usize = syscall_rlimit_load(new_bytes[0..<8]);
+        let new_hard: usize = syscall_rlimit_load(new_bytes[8..<16]);
+        if (new_soft > new_hard) { return SyscallAction::Resume(LINUX_EINVAL); }
+        // Every OTHER resource is genuinely unlimited in this kernel --
+        // there is no storage sized by one and nothing that checks one --
+        // so a write to it is accepted and there is nothing to store.
+        // Refusing with EINVAL would report a resource that does not
+        // exist, which is a worse answer than the true one.
+        if (x1 != LINUX_RLIMIT_NOFILE) { return SyscallAction::Resume(0); }
+        match unified_process_fd_limit_configure(
+                kernel_syscall_process_slot(), new_soft, new_hard) {
+            UnifiedFdResult::Invalid => {
+                return SyscallAction::Resume(LINUX_EINVAL);
+            }
+            UnifiedFdResult::Ok => { return SyscallAction::Resume(0); }
+        }
     }
     if (number == AARCH64_NR_UNAME) {
         match user_range_check_write(kernel_process_current_root(), x0, sizeof(Utsname)) {
