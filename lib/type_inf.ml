@@ -884,6 +884,22 @@ let rec value_facts_of_expr ty (expr : Ast.expr) =
                  | Some facts -> Some facts
                  | None -> Some (unknown base))
             | _ -> Some (unknown base))
+       | Cast (_, inner) ->
+           let inner_facts = match inner.desc with
+             | IntLit value ->
+                 let mathematical = match base.signedness with
+                   | Signed -> of_signed_int64 value
+                   | Unsigned -> of_unsigned_int64 value
+                 in
+                 Some (exact base (cast_integer base mathematical))
+             | _ -> value_facts_of_expr ty inner
+           in
+           (match inner_facts with
+            | Some facts ->
+                (match cast_exact base facts with
+                 | Some casted -> Some casted
+                 | None -> Some (unknown base))
+            | None -> Some (unknown base))
        | Var _ ->
            (match !active_local_bindings with
             | Some bindings ->

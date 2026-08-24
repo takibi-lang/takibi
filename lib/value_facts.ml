@@ -146,3 +146,31 @@ let multiply_exact a b =
           let value = { sign = result_sign; magnitude } in
           Some (exact a.base value)
   | _ -> None
+
+let cast_integer base value =
+  validate_base base;
+  let raw = match value.sign with
+    | Zero -> 0L
+    | Positive -> value.magnitude
+    | Negative -> Int64.neg value.magnitude
+  in
+  let raw =
+    if base.bits = 64 then raw
+    else Int64.logand raw (Int64.pred (power_of_two base.bits))
+  in
+  match base.signedness with
+  | Unsigned -> of_unsigned_int64 raw
+  | Signed ->
+      let sign_bit = Int64.shift_left 1L (base.bits - 1) in
+      if Int64.logand raw sign_bit = 0L then positive raw
+      else
+        let magnitude =
+          if base.bits = 64 then Int64.neg raw
+          else Int64.sub (power_of_two base.bits) raw
+        in
+        negative magnitude
+
+let cast_exact base facts =
+  match facts.exact with
+  | Some value -> Some (exact base (cast_integer base value))
+  | None -> None

@@ -2287,6 +2287,14 @@ let infer_tests = [
          }");
       Alcotest.(check int) "future write prevents continuation proof" 0
         (Hashtbl.length Type_inf.divisor_proven_nonzero_at));
+
+  Alcotest.test_case "cast divisor facts reflect truncation before nonzero" `Quick
+    (fun () ->
+      ignore (infer
+        "fn zero_after_cast(n: u8) -> u8 { return n / (256 as u8); }\n\
+         fn one_after_cast(n: u8) -> u8 { return n / (257 as u8); }");
+      Alcotest.(check int) "only the post-truncation one is proved" 1
+        (Hashtbl.length Type_inf.divisor_proven_nonzero_at));
   (* GitHub issue #358: the parser cannot know whether Name[args] denotes
      an indexed owner, view, or variant. Lock down the post-registration
      invariant directly: views/variants are canonical everywhere in the
@@ -15524,6 +15532,26 @@ let core_tests = [
            Value_facts.to_string (Option.get facts.Value_facts.exact)) safe);
       Alcotest.(check bool) "256 is not accepted as mathematical proof" true
         (Option.is_none wrapped));
+
+  Alcotest.test_case "value facts casts apply fixed-width truncation before facts" `Quick
+    (fun () ->
+      let source = Value_facts.{
+        base = { signedness = Unsigned; bits = 16 };
+        interval = { lo = positive 256L; hi = positive 256L };
+        exact = Some (positive 256L);
+        nonzero = Proven_nonzero;
+      } in
+      let u8 = Value_facts.{ signedness = Unsigned; bits = 8 } in
+      let i8 = Value_facts.{ signedness = Signed; bits = 8 } in
+      let truncated = Option.get (Value_facts.cast_exact u8 source) in
+      let signed = Option.get (Value_facts.cast_exact i8
+        (Value_facts.exact source.base (Value_facts.positive 255L))) in
+      Alcotest.(check string) "256 as u8" "0"
+        (Value_facts.to_string (Option.get truncated.exact));
+      Alcotest.(check bool) "truncated zero is not nonzero" true
+        (truncated.nonzero = Value_facts.Unknown);
+      Alcotest.(check string) "255 as i8" "-1"
+        (Value_facts.to_string (Option.get signed.exact)));
 ]
 
 (* -- Entry point ----------------------------------------------------------- *)
