@@ -16,13 +16,12 @@ type sign = Negative | Zero | Positive
 type integer = { sign : sign; magnitude : int64 }
 
 type interval = { lo : integer; hi : integer }  (* inclusive *)
-type nonzero = Proven_nonzero | Unknown
 
 type t = {
   base : base;
   interval : interval;
   exact : integer option;
-  nonzero : nonzero;
+  excluded : integer list;
 }
 
 let compare_magnitude = Int64.unsigned_compare
@@ -80,14 +79,31 @@ let full_interval base =
       { lo = negative half; hi = positive (Int64.pred half) }
 
 let unknown base =
-  { base; interval = full_interval base; exact = None; nonzero = Unknown }
+  { base; interval = full_interval base; exact = None; excluded = [] }
+
+let interval_excludes interval value =
+  compare_integer value interval.lo < 0 || compare_integer value interval.hi > 0
+
+let excludes facts value =
+  interval_excludes facts.interval value
+  || List.exists (equal_integer value) facts.excluded
+
+let max_excluded_values = 2
+
+let add_exclusion facts value =
+  if excludes facts value then facts
+  else if List.length facts.excluded >= max_excluded_values then facts
+  else { facts with excluded = value :: facts.excluded }
 
 let exact base value =
   let full = full_interval base in
   if compare_integer value full.lo < 0 || compare_integer value full.hi > 0 then
     invalid_arg "Value_facts.exact: value is outside its base type";
-  { base; interval = { lo = value; hi = value }; exact = Some value;
-    nonzero = if equal_integer value zero then Unknown else Proven_nonzero }
+  let facts =
+    { base; interval = { lo = value; hi = value }; exact = Some value;
+      excluded = [] }
+  in
+  if equal_integer value zero then facts else add_exclusion facts zero
 
 let interval base lo hi =
   let full = full_interval base in
@@ -96,9 +112,8 @@ let interval base lo hi =
      || compare_integer hi full.hi > 0 then
     invalid_arg "Value_facts.interval: invalid or out-of-base interval";
   let exact = if equal_integer lo hi then Some lo else None in
-  let excludes_zero = compare_integer hi zero < 0 || compare_integer lo zero > 0 in
-  { base; interval = { lo; hi }; exact;
-    nonzero = if excludes_zero then Proven_nonzero else Unknown }
+  let facts = { base; interval = { lo; hi }; exact; excluded = [] } in
+  if interval_excludes facts.interval zero then add_exclusion facts zero else facts
 
 let same_base a b =
   a.signedness = b.signedness && a.bits = b.bits
@@ -114,15 +129,18 @@ let join a b =
     | Some x, Some y when equal_integer x y -> Some x
     | _ -> None
   in
-  let nonzero = match a.nonzero, b.nonzero with
-    | Proven_nonzero, Proven_nonzero -> Proven_nonzero
-    | _ -> Unknown
-  in
-  { base = a.base; interval = { lo; hi }; exact; nonzero }
+  let candidates = a.excluded @ b.excluded in
+  let excluded = List.fold_left (fun kept value ->
+    if List.exists (equal_integer value) kept
+       || not (excludes a value && excludes b value)
+       || List.length kept >= max_excluded_values then kept
+    else value :: kept
+  ) [] candidates in
+  { base = a.base; interval = { lo; hi }; exact; excluded }
 
 let invalidate facts = unknown facts.base
 
-let prove_nonzero facts = { facts with nonzero = Proven_nonzero }
+let prove_nonzero facts = add_exclusion facts zero
 
 let multiply_exact a b =
   if not (same_base a.base b.base) then

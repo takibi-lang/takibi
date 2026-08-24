@@ -958,7 +958,7 @@ let rec value_facts_of_expr ty (expr : Ast.expr) =
                       | None ->
                           let facts = unknown base in
                           if IntSet.mem id !active_nonzero_bindings
-                          then Some { facts with nonzero = Proven_nonzero }
+                          then Some (prove_nonzero facts)
                           else Some facts)
                  | None ->
                      (match Const_env.folded_value expr with
@@ -985,7 +985,7 @@ let rec value_facts_of_expr ty (expr : Ast.expr) =
 
 let record_divisor_nonzero_proof ty (expr : Ast.expr) =
   match value_facts_of_expr ty expr with
-  | Some { Value_facts.nonzero = Proven_nonzero; _ } ->
+  | Some facts when Value_facts.excludes facts Value_facts.zero ->
       Hashtbl.replace divisor_proven_nonzero_at expr.loc ()
   | _ -> ()
 

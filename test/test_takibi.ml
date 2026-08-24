@@ -15558,11 +15558,11 @@ let core_tests = [
       Alcotest.(check bool) "different constants are dropped" true
         (Option.is_none joined.exact);
       Alcotest.(check bool) "nonzero survives both paths" true
-        (joined.nonzero = Value_facts.Proven_nonzero);
+        (Value_facts.excludes joined Value_facts.zero);
       let zero = Value_facts.exact base Value_facts.zero in
       let with_zero = Value_facts.join one zero in
       Alcotest.(check bool) "nonzero drops when one path permits zero" true
-        (with_zero.nonzero = Value_facts.Unknown));
+        (not (Value_facts.excludes with_zero Value_facts.zero)));
 
   Alcotest.test_case "value facts invalidation restores the full base range" `Quick
     (fun () ->
@@ -15575,6 +15575,30 @@ let core_tests = [
         (Value_facts.to_string invalidated.interval.hi);
       Alcotest.(check bool) "exact dropped" true
         (Option.is_none invalidated.exact));
+
+  Alcotest.test_case "value facts retain bounded excluded values across joins" `Quick
+    (fun () ->
+      let base = Value_facts.{ signedness = Signed; bits = 32 } in
+      let minus_one = Value_facts.negative 1L in
+      let left = Value_facts.add_exclusion (Value_facts.unknown base) minus_one in
+      let right = Value_facts.add_exclusion (Value_facts.unknown base) minus_one in
+      let joined = Value_facts.join left right in
+      Alcotest.(check bool) "common minus one exclusion survives" true
+        (Value_facts.excludes joined minus_one);
+      let with_unknown = Value_facts.join left (Value_facts.unknown base) in
+      Alcotest.(check bool) "one-sided exclusion drops at join" true
+        (not (Value_facts.excludes with_unknown minus_one));
+      let full = Value_facts.unknown base
+        |> fun facts -> Value_facts.add_exclusion facts Value_facts.zero
+        |> fun facts -> Value_facts.add_exclusion facts minus_one
+        |> fun facts -> Value_facts.add_exclusion facts (Value_facts.positive 2L)
+      in
+      Alcotest.(check bool) "capacity keeps zero" true
+        (Value_facts.excludes full Value_facts.zero);
+      Alcotest.(check bool) "capacity keeps minus one" true
+        (Value_facts.excludes full minus_one);
+      Alcotest.(check bool) "capacity widens by dropping a third value" false
+        (Value_facts.excludes full (Value_facts.positive 2L)));
 
   Alcotest.test_case "value facts multiply exact values only without overflow" `Quick
     (fun () ->
@@ -15594,7 +15618,7 @@ let core_tests = [
         base = { signedness = Unsigned; bits = 16 };
         interval = { lo = positive 256L; hi = positive 256L };
         exact = Some (positive 256L);
-        nonzero = Proven_nonzero;
+        excluded = [zero];
       } in
       let u8 = Value_facts.{ signedness = Unsigned; bits = 8 } in
       let i8 = Value_facts.{ signedness = Signed; bits = 8 } in
@@ -15604,7 +15628,7 @@ let core_tests = [
       Alcotest.(check string) "256 as u8" "0"
         (Value_facts.to_string (Option.get truncated.exact));
       Alcotest.(check bool) "truncated zero is not nonzero" true
-        (truncated.nonzero = Value_facts.Unknown);
+        (not (Value_facts.excludes truncated Value_facts.zero));
       Alcotest.(check string) "255 as i8" "-1"
         (Value_facts.to_string (Option.get signed.exact)));
 ]
