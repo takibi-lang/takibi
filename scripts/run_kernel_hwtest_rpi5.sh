@@ -397,6 +397,10 @@ sed -e 's|^/ # ||' \
 # same name. Each filter projects the shared UART transcript onto one
 # contract, whose expected file is then compared exactly.
 # Adding a subsystem test does not require another reset/load cycle.
+# Same purge, same reason, as scripts/run_kernel_qemutest.sh's own loop: the
+# comparison stops at the first mismatch, so a leftover .actual from the
+# previous run reads like this run's output and is not.
+rm -f "$ARTIFACT_DIR"/*.actual
 view_count=0
 view_names="$(
     for filter in "$COMMON_VIEW_DIR"/*.filter "$VIEW_DIR"/*.filter; do

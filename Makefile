@@ -109,6 +109,7 @@ langcheck:
 	@python3 scripts/check_compiler_sync_rules.py --quiet
 	@python3 scripts/check_raw_pos_fname.py
 	@python3 scripts/check_qemu_lane_ports.py
+	@python3 scripts/check_pool_release_paths.py
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash -c ' \
 		echo "Checking for non-ASCII characters in source files..."; \
 		if LC_ALL=C grep -rnP "[^\x00-\x7F]" --exclude-dir=_build \

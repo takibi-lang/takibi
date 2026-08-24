@@ -23,6 +23,7 @@ extern fn busy_spin(count: usize);
 
 const EBADF_RC: usize = 0xFFFFFFFFFFFFFFF7;
 const EFAULT_RC: usize = 0xFFFFFFFFFFFFFFF2;
+const EINVAL_RC: usize = 0xFFFFFFFFFFFFFFEA;
 const LARGE_LEN: usize = 1461;
 const SCHEDULER_CHILD_BUSY: usize = 0x0BEBC200;
 const SCHEDULER_PARENT_BUSY: usize = 0x17D78400;
@@ -91,6 +92,27 @@ fn initial_user_payload() {
     payload_write_u64(rlimit_base, 0, 1024);
     payload_write_u64(rlimit_base, 8, 4096);
     fail_if(svc5(261, 0, 7, ptr_of(rlimit_base, 0), 0, 0) != 0);
+
+    /* The two refusals, which the happy path above cannot show. A resource
+     * number Linux does not have (RLIM_NLIMITS is 16) is EINVAL rather
+     * than a reported limit for a resource that does not exist... */
+    fail_if(svc5(261, 0, 999, 0, ptr_of(rlimit_base, 0), 0) != EINVAL_RC);
+
+    /* ...and RLIMIT_NOFILE cannot be raised past what the machine could
+     * back. A descriptor NUMBER sizes this kernel's fd block chain, so
+     * without that refusal a process could raise its own limit and then
+     * dup2() into it until the page allocator was empty. The bound is
+     * derived (pages x FD_BLOCK_SLOTS); 1 << 32 is above it on any
+     * configuration this kernel runs on, and the limits it already has are
+     * unchanged afterwards. */
+    payload_write_u64(rlimit_base, 0, 4294967296);
+    payload_write_u64(rlimit_base, 8, 4294967296);
+    fail_if(svc5(261, 0, 7, ptr_of(rlimit_base, 0), 0, 0) != EINVAL_RC);
+    payload_write_u64(rlimit_base, 0, 0);
+    payload_write_u64(rlimit_base, 8, 0);
+    fail_if(svc5(261, 0, 7, 0, ptr_of(rlimit_base, 0), 0) != 0);
+    fail_if(payload_read_u64(rlimit_base, 0) != 1024);
+    fail_if(payload_read_u64(rlimit_base, 8) != 4096);
 
     /* socket/bind/listen/close one IPv4 stream endpoint. */
     let mut socket_address: [u8; 16] = {

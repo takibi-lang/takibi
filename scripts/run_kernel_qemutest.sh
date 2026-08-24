@@ -171,6 +171,12 @@ sed -e 's|^/ # ||' \
 
 # One boot, several independent views -- see this file's header and
 # scripts/run_kernel_hwtest_rpi5.sh's own identical loop.
+# The view loop stops at the first mismatch, so every .actual after it keeps
+# LAST run's content -- which reads exactly like this run's output and is
+# not. That cost a debugging round trip: a fixed leak was re-diagnosed from
+# a stale file. Purge them so a missing .actual means "never compared",
+# which is the truth.
+rm -f "$ARTIFACT_DIR"/*.actual
 view_count=0
 view_names="$(
     for filter in "$COMMON_VIEW_DIR"/*.filter "$VIEW_DIR"/*.filter; do
