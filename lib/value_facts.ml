@@ -122,3 +122,27 @@ let join a b =
 
 let invalidate facts = unknown facts.base
 
+let multiply_exact a b =
+  if not (same_base a.base b.base) then
+    invalid_arg "Value_facts.multiply_exact: base type mismatch";
+  match a.exact, b.exact with
+  | Some x, Some y ->
+      if x.sign = Zero || y.sign = Zero then Some (exact a.base zero)
+      else
+        let result_sign = if x.sign = y.sign then Positive else Negative in
+        let full = full_interval a.base in
+        let limit = match result_sign with
+          | Positive -> full.hi.magnitude
+          | Negative -> full.lo.magnitude
+          | Zero -> assert false
+        in
+        let fits =
+          Int64.unsigned_compare x.magnitude
+            (Int64.unsigned_div limit y.magnitude) <= 0
+        in
+        if not fits then None
+        else
+          let magnitude = Int64.mul x.magnitude y.magnitude in
+          let value = { sign = result_sign; magnitude } in
+          Some (exact a.base value)
+  | _ -> None

@@ -73,6 +73,8 @@ let divisor_proven_nonzero_at : (Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
 let active_nonzero_bindings = ref IntSet.empty
 let active_parameter_bindings = ref IntSet.empty
+let binding_fact_sources : (Local_bindings.id, Ast.expr * ty) Hashtbl.t =
+  Hashtbl.create 64
 
 let record_stmt_binding_type (stmt : Ast.stmt) slot ty =
   match !active_local_bindings with
@@ -849,7 +851,7 @@ let value_facts_base_of_ty t =
   | TUsize -> Some { signedness = Unsigned; bits = Target_info.pointer_bit_width () }
   | _ -> None
 
-let value_facts_of_expr ty (expr : Ast.expr) =
+let rec value_facts_of_expr ty (expr : Ast.expr) =
   let open Value_facts in
   let represented_ty = repr ty in
   let base_ty = match represented_ty with
@@ -859,7 +861,12 @@ let value_facts_of_expr ty (expr : Ast.expr) =
   match value_facts_base_of_ty base_ty with
   | None -> None
   | Some base ->
-      (match expr.desc with
+      (match represented_ty with
+       | TRefinedInt (lo, hi, _) ->
+           let lo = of_signed_int64 (Int64.of_int lo) in
+           let hi = of_signed_int64 (Int64.of_int (hi - 1)) in
+           Some (interval base lo hi)
+       | _ -> match expr.desc with
        | IntLit value ->
            let mathematical = match base.signedness with
              | Signed -> of_signed_int64 value
@@ -867,31 +874,48 @@ let value_facts_of_expr ty (expr : Ast.expr) =
            in
            (try Some (exact base mathematical)
             with Invalid_argument _ -> Some (unknown base))
+       | BinOp (Mul, left, right) ->
+           (match value_facts_of_expr ty left, value_facts_of_expr ty right with
+            | Some lhs, Some rhs ->
+                (match multiply_exact lhs rhs with
+                 | Some facts -> Some facts
+                 | None -> Some (unknown base))
+            | _ -> Some (unknown base))
+       | Var _ ->
+           (match !active_local_bindings with
+            | Some bindings ->
+                (match Local_bindings.id_for_expr bindings expr with
+                 | Some id ->
+                     (match Hashtbl.find_opt binding_fact_sources id with
+                      | Some (source, source_ty) ->
+                          value_facts_of_expr source_ty source
+                      | None ->
+                          let facts = unknown base in
+                          if IntSet.mem id !active_nonzero_bindings
+                          then Some { facts with nonzero = Proven_nonzero }
+                          else Some facts)
+                 | None ->
+                     (match Const_env.folded_value expr with
+                      | Some value ->
+                          let mathematical = match base.signedness with
+                            | Signed -> of_signed_int64 (Int64.of_int value)
+                            | Unsigned -> of_unsigned_int64 (Int64.of_int value)
+                          in
+                          (try Some (exact base mathematical)
+                           with Invalid_argument _ -> Some (unknown base))
+                      | None -> Some (unknown base)))
+            | None -> Some (unknown base))
        | _ ->
-           (match represented_ty with
-            | TRefinedInt (lo, hi, _) ->
-                let lo = of_signed_int64 (Int64.of_int lo) in
-                let hi = of_signed_int64 (Int64.of_int (hi - 1)) in
-                Some (interval base lo hi)
-            | _ ->
-                match Const_env.folded_value expr with
-                | Some value ->
-                    let value = Int64.of_int value in
-                    let mathematical = match base.signedness with
-                      | Signed -> of_signed_int64 value
-                      | Unsigned -> of_unsigned_int64 value
-                    in
-                    (try Some (exact base mathematical)
-                     with Invalid_argument _ -> Some (unknown base))
-                | None ->
-                    let facts = unknown base in
-                    (match expr.desc, !active_local_bindings with
-                     | Var _, Some bindings ->
-                         (match Local_bindings.id_for_expr bindings expr with
-                          | Some id when IntSet.mem id !active_nonzero_bindings ->
-                              Some { facts with nonzero = Proven_nonzero }
-                          | _ -> Some facts)
-                     | _ -> Some facts)))
+           match Const_env.folded_value expr with
+           | Some value ->
+               let value = Int64.of_int value in
+               let mathematical = match base.signedness with
+                 | Signed -> of_signed_int64 value
+                 | Unsigned -> of_unsigned_int64 value
+               in
+               (try Some (exact base mathematical)
+                with Invalid_argument _ -> Some (unknown base))
+           | None -> Some (unknown base))
 
 let record_divisor_nonzero_proof ty (expr : Ast.expr) =
   match value_facts_of_expr ty expr with
@@ -4405,6 +4429,12 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
        | None -> ());
       locally_bound_names := StringSet.add name !locally_bound_names;  (* issue #214 *)
       record_stmt_binding_type s 0 bind_ty;
+      (match is_mut, expr_opt, !active_local_bindings with
+       | false, Some init, Some bindings ->
+           (match Local_bindings.ids_for_stmt bindings s with
+            | id :: _ -> Hashtbl.replace binding_fact_sources id (init, bind_ty)
+            | [] -> ())
+       | _ -> ());
       ( StringMap.add name (bind_ty, is_mut) tyenv,
         StringMap.add name bind_ty raw_locals )
   | LetTuple (names, rhs) ->
@@ -5171,6 +5201,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
     active_local_bindings := Some bindings;
     active_parameter_bindings := IntSet.of_list bindings.param_ids;
     Hashtbl.reset active_binding_types;
+    Hashtbl.reset binding_fact_sources;
     List.iter2 (fun id ty -> Hashtbl.replace active_binding_types id ty)
       bindings.param_ids param_tys;
     (* Start with globals visible, then shadow them with params (params are mutable) *)
@@ -5216,6 +5247,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset slice_cast_len;     (* GitHub issue #372, same lifetime *)
   Hashtbl.reset overflow_audit_table;
   Hashtbl.reset divisor_proven_nonzero_at;
+  Hashtbl.reset binding_fact_sources;
   active_nonzero_bindings := IntSet.empty;
   active_parameter_bindings := IntSet.empty;
   enclosing_future_writes := StringSet.empty;  (* fresh per compilation / per unit test *)

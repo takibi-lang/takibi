@@ -2259,6 +2259,16 @@ let infer_tests = [
          }");
       Alcotest.(check int) "mutable shadow is not mistaken for parameter" 0
         (Hashtbl.length Type_inf.divisor_proven_nonzero_at));
+
+  Alcotest.test_case "immutable literal binding facts propagate without a refined annotation" `Quick
+    (fun () ->
+      ignore (infer
+        "fn inferred_literal_divisor(n: usize) -> usize {
+           let count = 4;
+           return n % (count * 4096);
+         }");
+      Alcotest.(check int) "inferred usize keeps exact initializer fact" 1
+        (Hashtbl.length Type_inf.divisor_proven_nonzero_at));
   (* GitHub issue #358: the parser cannot know whether Name[args] denotes
      an indexed owner, view, or variant. Lock down the post-registration
      invariant directly: views/variants are canonical everywhere in the
@@ -15484,6 +15494,18 @@ let core_tests = [
         (Value_facts.to_string invalidated.interval.hi);
       Alcotest.(check bool) "exact dropped" true
         (Option.is_none invalidated.exact));
+
+  Alcotest.test_case "value facts multiply exact values only without overflow" `Quick
+    (fun () ->
+      let base = Value_facts.{ signedness = Unsigned; bits = 8 } in
+      let exact n = Value_facts.exact base (Value_facts.of_unsigned_int64 n) in
+      let safe = Value_facts.multiply_exact (exact 15L) (exact 17L) in
+      let wrapped = Value_facts.multiply_exact (exact 16L) (exact 16L) in
+      Alcotest.(check (option string)) "255 fits" (Some "255")
+        (Option.map (fun facts ->
+           Value_facts.to_string (Option.get facts.Value_facts.exact)) safe);
+      Alcotest.(check bool) "256 is not accepted as mathematical proof" true
+        (Option.is_none wrapped));
 ]
 
 (* -- Entry point ----------------------------------------------------------- *)
