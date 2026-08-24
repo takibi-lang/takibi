@@ -1,5 +1,7 @@
 10 / 2 = 5
 division by zero rejected
+division overflow rejected
+division by minus one: 10
 acquired: 42
 fulfilled
 6

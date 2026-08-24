@@ -66,6 +66,17 @@ fn test_tuple_pair() {
         uart_puts("division by zero rejected\r\n");
     }
 
+    let (overflow_ok, _overflow_q) =
+        try_divide(builtin::i32_min(), -1);
+    if (overflow_ok == false) {
+        uart_puts("division overflow rejected\r\n");
+    }
+
+    let (negate_ok, negate_q) = try_divide(-10, -1);
+    if (negate_ok && negate_q == 10) {
+        uart_puts("division by minus one: 10\r\n");
+    }
+
     let (n, proof) = acquire_with_proof();
     uart_puts("acquired: ");
     uart_print(n);

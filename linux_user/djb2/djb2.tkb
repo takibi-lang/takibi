@@ -1,4 +1,5 @@
-// Demo of the djb2 XOR hash function: hash = ((hash << 5) + hash) ^ c.
+// DJB2 XOR hash: multiplication by 33 is the modulo-2^32 equivalent of
+// ((hash << 5) + hash), with the intentional wrap explicit in the source.
 
 fn djb2(s: *u8) u32 {
     let mut hash: u32 = 5381;

@@ -10283,6 +10283,10 @@ let codegen_tests = [
       expect_type_error "expects two arguments"
         "fn bad_wrap65(a: u32) -> u32 {
            return builtin::wrapping_mul_u32(a);
+         }" ();
+      expect_type_error "cannot unify u16 with u32"
+        "fn bad_wrap_type65(a: u16, b: u16) -> u32 {
+           return builtin::wrapping_mul_u32(a, b);
          }" ());
 
   Alcotest.test_case "signed remainder by minus one is defined without a trap" `Quick
