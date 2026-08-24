@@ -220,8 +220,23 @@ let () =
         | Ast.Div -> "div" | Ast.Mod -> "mod" | Ast.Shl -> "shl"
         | _ -> assert false
       in
-      let describe expr ty =
-        match Types.repr ty with
+      let describe expr ty facts =
+        let rec runtime_base ty = match Types.repr ty with
+          | Types.TRefinedInt (_, _, base) | Types.TSingleton (base, _) ->
+              runtime_base base
+          | base -> base
+        in
+        match facts with
+        | Some facts ->
+            let open Value_facts in
+            let base = Types.to_string (runtime_base ty) in
+            let fact = match facts.exact with
+              | Some value -> Printf.sprintf "constant:%s" (to_string value)
+              | None -> Printf.sprintf "interval-inclusive:%s..%s"
+                  (to_string facts.interval.lo) (to_string facts.interval.hi)
+            in
+            base, fact
+        | None -> match Types.repr ty with
         | Types.TRefinedInt (lo, hi, base) ->
             Types.to_string base, Printf.sprintf "range:%d..<%d" lo hi
         | Types.TSingleton (base, n) ->
@@ -244,8 +259,10 @@ let () =
         "file\tline\tcolumn\toperator\tlhs_type\tlhs_fact\trhs_type\trhs_fact\n";
       List.iter (fun site ->
         let loc = site.Type_inf.overflow_loc in
-        let lhs_ty, lhs_fact = describe site.overflow_lhs site.overflow_lhs_ty in
-        let rhs_ty, rhs_fact = describe site.overflow_rhs site.overflow_rhs_ty in
+        let lhs_ty, lhs_fact = describe site.overflow_lhs site.overflow_lhs_ty
+          site.overflow_lhs_facts in
+        let rhs_ty, rhs_fact = describe site.overflow_rhs site.overflow_rhs_ty
+          site.overflow_rhs_facts in
         Printf.fprintf out "%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\n"
           loc.pos_fname loc.pos_lnum (loc.pos_cnum - loc.pos_bol + 1)
           (op_name site.overflow_op) lhs_ty lhs_fact rhs_ty rhs_fact

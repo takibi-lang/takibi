@@ -2211,6 +2211,15 @@ let infer_tests = [
       let operators = List.map (fun site -> site.Type_inf.overflow_op) sites in
       Alcotest.(check bool) "addition recorded" true (List.mem Ast.Add operators);
       Alcotest.(check bool) "left shift recorded" true (List.mem Ast.Shl operators);
+      let addition = List.find (fun site ->
+        site.Type_inf.overflow_op = Ast.Add) sites in
+      let rhs_exact = match addition.Type_inf.overflow_rhs_facts with
+        | Some { Value_facts.exact = Some value; _ } ->
+            Some (Value_facts.to_string value)
+        | _ -> None
+      in
+      Alcotest.(check (option string)) "audit snapshots ValueFacts" (Some "1")
+        rhs_exact;
       List.iter (fun site ->
         Alcotest.(check string) "original source filename" "audit.tkb"
           site.Type_inf.overflow_loc.Lexing.pos_fname

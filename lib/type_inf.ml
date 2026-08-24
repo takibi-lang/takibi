@@ -56,6 +56,8 @@ type overflow_audit_site = {
   overflow_lhs_ty : ty;
   overflow_rhs : Ast.expr;
   overflow_rhs_ty : ty;
+  mutable overflow_lhs_facts : Value_facts.t option;
+  mutable overflow_rhs_facts : Value_facts.t option;
 }
 
 let overflow_audit_table :
@@ -64,6 +66,8 @@ let overflow_audit_table :
 
 let overflow_audit_sites () =
   Hashtbl.to_seq_values overflow_audit_table |> List.of_seq
+
+let active_overflow_audit_sites : overflow_audit_site list ref = ref []
 
 (* First Value_facts consumer: type checking records a positive nonzero
    proof for each divisor expression it can settle.  Code generation reads
@@ -905,7 +909,8 @@ let rec value_facts_of_expr ty (expr : Ast.expr) =
        | TRefinedInt (lo, hi, _) ->
            let lo = of_signed_int64 (Int64.of_int lo) in
            let hi = of_signed_int64 (Int64.of_int (hi - 1)) in
-           Some (interval base lo hi)
+           (try Some (interval base lo hi)
+            with Invalid_argument _ -> Some (unknown base))
        | _ when Hashtbl.mem intrinsic_nonzero_at expr.loc ->
            Some (prove_nonzero (unknown base))
        | _ -> match expr.desc with
@@ -1902,11 +1907,16 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | (Add | Sub | Mul | Div | Mod | Shl), _, _ ->
            let loc = e.loc in
            let col = loc.pos_cnum - loc.pos_bol + 1 in
-           Hashtbl.replace overflow_audit_table
-             (loc.pos_fname, loc.pos_lnum, col, op)
+           let site =
              { overflow_loc = loc; overflow_op = op;
                overflow_lhs = e1; overflow_lhs_ty = t1;
-               overflow_rhs = e2; overflow_rhs_ty = t2 }
+               overflow_rhs = e2; overflow_rhs_ty = t2;
+               overflow_lhs_facts = None; overflow_rhs_facts = None }
+           in
+           Hashtbl.replace overflow_audit_table
+             (loc.pos_fname, loc.pos_lnum, col, op)
+             site;
+           active_overflow_audit_sites := site :: !active_overflow_audit_sites
        | _ -> ());
       (* GitHub issue #186: u16be (bare or refined-over-it) deliberately does
          not participate in ordinary arithmetic, shifts, or ORDERING
@@ -5324,6 +5334,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
     Hashtbl.reset active_binding_types;
     Hashtbl.reset binding_fact_sources;
     Hashtbl.reset intrinsic_nonzero_at;
+    active_overflow_audit_sites := [];
     List.iter2 (fun id ty -> Hashtbl.replace active_binding_types id ty)
       bindings.param_ids param_tys;
     (* Start with globals visible, then shadow them with params (params are mutable) *)
@@ -5336,6 +5347,12 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
       (init_env, StringMap.empty) fdef.body
     in
     check_undetermined_lets fdef raw_locals;
+    List.iter (fun site ->
+      site.overflow_lhs_facts <-
+        value_facts_of_expr site.overflow_lhs_ty site.overflow_lhs;
+      site.overflow_rhs_facts <-
+        value_facts_of_expr site.overflow_rhs_ty site.overflow_rhs
+    ) !active_overflow_audit_sites;
     List.iter2 (fun (name, _) ty ->
       if contains_stable_owner_value_ty ty then
         raise (TypeError (fdef.def_loc, Printf.sprintf

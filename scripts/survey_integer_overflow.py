@@ -42,6 +42,9 @@ def fact_interval(fact: str) -> tuple[int, int] | None:
     if fact.startswith("range:"):
         lo, hi = fact.removeprefix("range:").split("..<", 1)
         return int(lo), int(hi) - 1
+    if fact.startswith("interval-inclusive:"):
+        lo, hi = fact.removeprefix("interval-inclusive:").split("..", 1)
+        return int(lo), int(hi)
     if fact.startswith("singleton:"):
         try:
             value = int(fact.removeprefix("singleton:"))
