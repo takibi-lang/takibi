@@ -1387,6 +1387,49 @@ let parser_tests = [
        | exception Parser.Error -> ()
   );
 
+  Alcotest.test_case
+    "language-word inventory is unique, disjoint, and drives every lexer keyword"
+    `Quick
+    (fun () ->
+      let categories = [
+        ("hard keyword", Language_words.hard_keywords);
+        ("contextual keyword", Language_words.contextual_keywords);
+        ("compiler builtin", Language_words.compiler_builtins);
+        ("predeclared name", Language_words.predeclared_names);
+        ("checker intrinsic", Language_words.checker_intrinsics);
+      ] in
+      let all = List.concat_map (fun (category, words) ->
+        List.map (fun word -> (word, category)) words) categories in
+      let seen = Hashtbl.create (List.length all) in
+      List.iter (fun (word, category) ->
+        match Hashtbl.find_opt seen word with
+        | None -> Hashtbl.add seen word category
+        | Some previous ->
+            Alcotest.failf "%S is classified as both %s and %s"
+              word previous category
+      ) all;
+      List.iter (fun word ->
+        let lexbuf = Lexing.from_string word in
+        match Lexer.read lexbuf with
+        | Parser.IDENT _ ->
+            Alcotest.failf "hard keyword %S lexed as an ordinary identifier" word
+        | _ -> ()
+      ) Language_words.hard_keywords);
+
+  Alcotest.test_case "builtin namespace parses known calls and diagnoses unknown names" `Quick
+    (fun () ->
+      (match parse
+         "fn f(a: usize, b: usize) -> usize {
+            return builtin::min(a, b);
+          }" with
+       | [Ast.FuncDef { body = [{ desc = Ast.Return (Some e); _ }]; _ }] ->
+           (match e.desc with
+            | Ast.Call ("min", [_; _]) -> ()
+            | _ -> Alcotest.fail "expected namespaced min to become a builtin call")
+       | _ -> Alcotest.fail "unexpected namespaced-builtin AST");
+      expect_type_error "unknown compiler builtin 'missing'"
+        "fn f() { builtin::missing(); }" ());
+
   (* -- as cast ----------------------------------------------- *)
 
   Alcotest.test_case "as cast to u8" `Quick (fun () ->
@@ -10686,6 +10729,25 @@ let codegen_tests = [
          "fn slice_copy(a: i32) -> i32 { return a; }" ();
        expect_type_error "compiler builtin"
          "extern fn slice_eq(a: i32) -> i32;" ());
+
+  Alcotest.test_case
+    "builtin namespace is distinct from local, global, parameter, type, and function names"
+    `Quick
+    (fun () ->
+      List.iter (fun src -> expect_codegen_ok src ()) [
+        "fn choose(min: usize, max: usize) -> usize {
+           let stable_replace: usize = min;
+           return builtin::max(stable_replace, max);
+         }";
+        "let min: usize = 7;
+         fn choose(max: usize) -> usize { return builtin::max(min, max); }";
+        "struct min { value: usize; }
+         fn choose(a: usize, b: usize) -> usize { return builtin::min(a, b); }";
+        "fn builtin() -> usize { return 1; }
+         fn choose(a: usize, b: usize) -> usize {
+           return builtin() + builtin::min(a, b);
+         }";
+      ]);
 
   (* -- P3: refined-bound subslice proof, checked subslice, lit/ptr casts -- *)
 

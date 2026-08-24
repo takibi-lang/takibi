@@ -20,8 +20,16 @@ let parse_file filename =
     | prog -> prog
     | exception Parser.Error ->
         let pos = Lexing.lexeme_start_p lexbuf in
+        let lexeme = Lexing.lexeme lexbuf in
+        let message =
+          if Language_words.is_hard_keyword lexeme then
+            Printf.sprintf "Unexpected hard keyword '%s'" lexeme
+          else if Language_words.is_contextual_keyword lexeme then
+            Printf.sprintf "Unexpected contextual keyword '%s' in this position" lexeme
+          else "Syntax error"
+        in
         close_in chan;
-        report_error pos "Syntax error";
+        report_error pos message;
         exit 1
   in
   close_in chan;

@@ -10,43 +10,7 @@ let contains_substring haystack needle =
   let rec go i = i + nl <= hl && (String.sub haystack i nl = needle || go (i + 1)) in
   nl = 0 || go 0
 
-let compiler_builtins = StringSet.of_list [
-  "slice_copy"; "slice_eq"; "stable_replace"; "min"; "max";
-  "dma_publish"; "dma_consume"; "device_fence"; "signal_fence";
-  "interrupt_wait"; "interrupt_notify";
-  "dma_prepare_tx"; "dma_prepare_rx"; "dma_finish_rx";
-  "checked_add_usize"; "checked_mul_usize";
-  (* GitHub issue #226: a closed, enumerated set of system-register/barrier/
-     TLBI intrinsics, to lift kernel/arch/arm64/kernel/timer.S and most of
-     kernel/arch/arm64/mm/mmu.S into .tkb. Each name is exactly one AArch64
-     instruction with registers chosen by LLVM's own allocator (see
-     lib/llvm_gen.ml) -- never a user-supplied asm string or register
-     choice, unlike general inline assembly (an explicit non-goal of #226:
-     issue #209's second bug was a human picking the wrong register by
-     hand). Deliberately not one generic `msr(reg_enum, value)` primitive:
-     that would need a new base type, for no real benefit over enumerating
-     the ~15 registers this kernel actually touches as plain names, matching
-     the existing dma_publish/dma_consume/device_fence one-name-per-
-     operation precedent above. No barrier is bundled into any of these:
-     TTBR0_EL1 writes alone need different barrier sequences at different
-     call sites (a fresh MMU activation's full TLB flush vs. an ASID-tagged
-     root switch's lighter one), so which barrier follows which write stays
-     ordinary, reviewable .tkb policy built on top of these raw primitives,
-     not a compiler-hardcoded choice. *)
-  "mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1";
-  (* GitHub issue #227 item 3: the four read-only registers
-     el1_exception_evidence's fail-stop path needs to move it into ordinary
-     .tkb, added to this same closed set. *)
-  "mrs_esr_el1"; "mrs_far_el1"; "mrs_elr_el1"; "mrs_spsr_el1";
-  "msr_cntp_tval_el0"; "msr_cntp_ctl_el0"; "msr_sctlr_el1";
-  "msr_mair_el1"; "msr_tcr_el1"; "msr_ttbr0_el1";
-  "msr_daifclr_irq"; "msr_daifset_irq"; "mrs_daif";
-  "tlbi_vmalle1"; "tlbi_vaae1is"; "tlbi_vae1is"; "tlbi_aside1is";
-  "dsb_ish"; "dsb_ishst"; "isb";
-  "smc4"; "hvc4"; "svc5";
-]
-
-let is_compiler_builtin name = StringSet.mem name compiler_builtins
+let is_compiler_builtin = Language_words.is_compiler_builtin
 
 let rec count_var_occurrences name (e : Ast.expr) =
   let count_all xs = List.fold_left (fun n x ->

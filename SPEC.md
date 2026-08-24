@@ -51,6 +51,37 @@ differ (a valid overload, see "Function Pointers, extern fn, and
 Overloading" below) -- only an identical name+signature pair, or a
 function colliding with a non-function kind, is rejected.
 
+## Compiler-Owned Words and Names
+
+Source words have four distinct classifications. The compiler's complete,
+machine-checked inventory is `lib/language_words.ml`; lexer and name-resolution
+tests fail if its categories overlap or a hard keyword is tokenized as an
+ordinary identifier.
+
+- **Hard keywords** always introduce or delimit grammar and can never be used
+  as identifiers. This includes declaration/control-flow words, type spellings,
+  literals, modifiers, and grammar-level operators such as `sizeof`. A parser
+  failure on one is reported as an unexpected hard keyword rather than as an
+  unresolved identifier.
+- **Contextual keywords** are reserved only where their grammar production
+  expects them. There are no contextual keywords today. A modifier is not put
+  in this class merely because contextual treatment might be useful later; the
+  lexer and parser must actually implement that behavior first.
+- **Compiler builtins** use call syntax but have compiler-defined typing and
+  lowering. Existing bare calls remain supported. The explicit
+  `builtin::name(...)` spelling selects this namespace regardless of local,
+  parameter, global, type, or function names. An unknown name after
+  `builtin::` is a compile error identifying the builtin namespace. New
+  callable compiler facilities use this namespace unless they genuinely need
+  a new grammar boundary.
+- **Predeclared ordinary names** enter a normal source namespace with a value
+  supplied by the selected target. `DMA_CACHE_LINE` is currently the only one.
+  The checker-only static sort `addr` is classified separately because it is
+  neither a runtime name nor a callable builtin.
+
+This is not a general namespace or module system. In particular,
+`anything_else::name` retains its existing enum/variant-constructor meaning.
+
 ## Design Principle
 
 In embedded targets, an unhandled runtime trap (`brk`/Synchronous Abort on

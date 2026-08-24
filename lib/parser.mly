@@ -857,8 +857,22 @@ expr:
   | IDENT LPAREN args RPAREN { { desc = Call ($1, $3); loc = $symbolstartpos } }
   | IDENT COLONCOLON IDENT
     { { desc = EnumVariant ($1, $3); loc = $symbolstartpos } }
-  | IDENT COLONCOLON IDENT LPAREN payload = expr RPAREN
-    { { desc = VariantCtor ($1, $3, payload); loc = $symbolstartpos } }
+  | namespace = IDENT COLONCOLON name = IDENT LPAREN values = args RPAREN
+    { if namespace = Language_words.builtin_namespace then begin
+        if not (Language_words.is_compiler_builtin name) then
+          raise (Types.TypeError ($symbolstartpos,
+            Printf.sprintf "unknown compiler builtin '%s' in namespace '%s'"
+              name namespace));
+        { desc = Call (name, values); loc = $symbolstartpos }
+      end else
+        match values with
+        | [payload] ->
+            { desc = VariantCtor (namespace, name, payload); loc = $symbolstartpos }
+        | _ ->
+            raise (Types.TypeError ($symbolstartpos,
+              Printf.sprintf
+                "variant constructor '%s::%s' expects exactly one payload"
+                namespace name)) }
   | SIZEOF LPAREN t = type_expr RPAREN
     { { desc = SizeOf t; loc = $symbolstartpos } }
   (* Expression position only, deliberately -- see SPEC.md. An array-size

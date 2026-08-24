@@ -22,6 +22,34 @@ let int64_of_digits ~(base : int) (s : string) : Int64.t =
   String.fold_left
     (fun acc c -> Int64.add (Int64.mul acc base64) (Int64.of_int (digit_val c)))
     0L s
+
+(* Keep token construction local (so Language_words does not depend on the
+   generated Parser module), but make the accepted key set authoritative: the
+   identifier rule calls this only for Language_words.hard_keywords, and this
+   match must handle every member or the keyword-inventory test fails. *)
+let hard_keyword_token = function
+  | "fn" -> FN | "inline" -> INLINE | "noinline" -> NOINLINE
+  | "return" -> RETURN | "const" -> CONST | "let" -> LET | "mut" -> MUT
+  | "if" -> IF | "else" -> ELSE | "while" -> WHILE | "for" -> FOR
+  | "in" -> IN | "break" -> BREAK | "continue" -> CONTINUE | "as" -> AS
+  | "void" -> VOID_TYPE | "extern" -> EXTERN | "symbol" -> SYMBOL
+  | "vector_table" -> VECTOR_TABLE | "exception_entry" -> EXCEPTION_ENTRY
+  | "exception_restore" -> EXCEPTION_RESTORE | "embed_file" -> EMBED_FILE
+  | "struct" -> STRUCT | "opaque" -> OPAQUE | "affine" -> AFFINE
+  | "linear" -> LINEAR | "view" -> VIEW | "variant" -> VARIANT
+  | "must_use" -> MUST_USE | "exists" -> EXISTS | "borrow" -> BORROW
+  | "sink" -> SINK | "private" -> PRIVATE | "packed" -> PACKED | "be" -> BE
+  | "io" -> IO | "enum" -> ENUM | "match" -> MATCH | "align" -> ALIGN
+  | "sizeof" -> SIZEOF | "alignof" -> ALIGNOF
+  | "contains_stable_owner" -> CONTAINS_STABLE_OWNER | "use" -> USE
+  | "offsetof" -> OFFSETOF | "static_assert" -> STATIC_ASSERT | "type" -> TYPE
+  | "generic" -> GENERIC | "bool" -> BOOL_TYPE | "unsafe" -> UNSAFE
+  | "true" -> TRUE | "false" -> FALSE
+  | "i8" -> I8_TYPE | "i16" -> I16_TYPE | "i32" -> I32_TYPE | "i64" -> I64_TYPE
+  | "u8" -> U8_TYPE | "u16" -> U16_TYPE | "u32" -> U32_TYPE | "u64" -> U64_TYPE
+  | "u16be" -> U16BE_TYPE | "u32be" -> U32BE_TYPE
+  | "isize" -> ISIZE_TYPE | "usize" -> USIZE_TYPE
+  | word -> failwith ("hard keyword has no lexer token: " ^ word)
 }
 
 rule read = parse
@@ -29,54 +57,6 @@ rule read = parse
   | '\n'       { Lexing.new_line lexbuf; read lexbuf }
   | "//" [^ '\n']* { read lexbuf }   (* Line comment: newline is processed in the next iteration *)
   | "/*"           { read_block_comment lexbuf }
-
-  | "fn"      { FN }
-  | "inline"  { INLINE }
-  | "noinline" { NOINLINE }
-  | "return"  { RETURN }
-  | "const"   { CONST }
-  | "let"     { LET }
-  | "mut"     { MUT }
-  | "if"      { IF }
-  | "else"    { ELSE }
-  | "while"    { WHILE }
-  | "for"      { FOR }
-  | "in"       { IN }
-  | "break"    { BREAK }
-  | "continue" { CONTINUE }
-  | "as"      { AS }
-  | "void"    { VOID_TYPE }
-  | "extern"  { EXTERN }
-  | "symbol"  { SYMBOL }
-  | "vector_table" { VECTOR_TABLE }
-  | "exception_entry" { EXCEPTION_ENTRY }
-  | "exception_restore" { EXCEPTION_RESTORE }
-  | "embed_file" { EMBED_FILE }
-  | "struct"  { STRUCT }
-  | "opaque"  { OPAQUE }
-  | "affine"  { AFFINE }
-  | "linear"  { LINEAR }
-  | "view"    { VIEW }
-  | "variant" { VARIANT }
-  | "must_use" { MUST_USE }
-  | "exists"  { EXISTS }
-  | "borrow"  { BORROW }
-  | "sink"    { SINK }
-  | "private" { PRIVATE }
-  | "packed"  { PACKED }
-  | "be"      { BE }
-  | "io"      { IO }
-  | "enum"    { ENUM }
-  | "match"   { MATCH }
-  | "align"   { ALIGN }
-  | "sizeof"  { SIZEOF }
-  | "alignof" { ALIGNOF }
-  | "contains_stable_owner" { CONTAINS_STABLE_OWNER }
-  | "use"     { USE }
-  | "offsetof" { OFFSETOF }
-  | "static_assert" { STATIC_ASSERT }
-  | "type"    { TYPE }
-  | "generic" { GENERIC }
 
   | '{' { LBRACE }
   | '}' { RBRACE }
@@ -121,16 +101,6 @@ rule read = parse
   | '^'  { HAT }
   | '~'  { TILDE }
 
-  | "bool" { BOOL_TYPE }
-  | "unsafe" { UNSAFE }
-  | "true"  { TRUE }
-  | "false" { FALSE }
-  | "i8"   { I8_TYPE  } | "i16"  { I16_TYPE } | "i32"  { I32_TYPE } | "i64"  { I64_TYPE }
-  | "u8"   { U8_TYPE  } | "u16"  { U16_TYPE } | "u32"  { U32_TYPE } | "u64"  { U64_TYPE }
-  | "u16be" { U16BE_TYPE }  (* GitHub issue #186: wire-order (big-endian) u16; ocamllex longest-match already prefers this over "u16" *)
-  | "u32be" { U32BE_TYPE }
-  | "isize" { ISIZE_TYPE }
-  | "usize" { USIZE_TYPE }
   | ':' { COLON }
   | "..<" { DOTDOTLT }   (* Range separator for {lo..<hi}. Match before '.' *)
   | ".."  { DOTDOT }     (* Open-ended range for slice min length: [u8; 54..].
@@ -149,7 +119,8 @@ rule read = parse
 
   | '_' { UNDERSCORE }  (* wildcard for match. Longest-match: _foo -> IDENT, _ alone -> UNDERSCORE *)
   | ['a'-'z' 'A'-'Z' '_' ] ['a'-'z' 'A'-'Z' '0'-'9' '_' ]* as id
-    { IDENT id }
+    { if Language_words.is_hard_keyword id then hard_keyword_token id
+      else IDENT id }
 
   | '"' { read_string (Buffer.create 32) lexbuf }
 

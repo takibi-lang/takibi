@@ -17,7 +17,7 @@ let reset () =
   Option.iter (fun n -> Hashtbl.replace table "DMA_CACHE_LINE" n)
     (Target_info.dma_cache_line ())
 
-let is_builtin name = name = "DMA_CACHE_LINE"
+let is_builtin = Language_words.is_predeclared_name
 
 let define name n = Hashtbl.replace table name n
 
