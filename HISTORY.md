@@ -15,6 +15,109 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-24: The Last Three Hand-Picked Resource Ceilings Went (GitHub Issues #391, #393, #402)
+
+`kernel/RESOURCE_LIMITS.md` had three constants left that bounded a real
+runtime resource by a number somebody chose: `SHARED_OBJECT_MAX` = 16 open
+file descriptions system-wide, `PROCESS_FD_MAX` = 16 descriptors per
+process, and `ASID_MAX` = 255 concurrent address spaces. All three are
+gone. What replaced each is the shape Linux uses, because the ask was to
+get closer to a Linux-compatible kernel's resource model rather than merely
+to delete numbers.
+
+**#391 -- an open file description is an allocation.** The blocker the
+issue recorded was a second dimension: `RefcountSlotMap(N, MAX_REFS)`
+exists because this resource has several independent holders, and
+`IntrusivePool` takes one generic argument and has nothing to say about
+refcounts. The way out is the one Linux already takes -- the count belongs
+to the object (`struct file.f_count`), so `SharedObject` grew a `refs`
+field and what is left for the container to provide is identity. The
+system-wide bound is Linux's too: `fs/file_table.c`'s
+`files_maxfiles_init()`, one open file description per 10 KiB of RAM,
+computed from this kernel's own page count (81920) rather than picked.
+`kernel/lib/refcount_slotmap.tkb` stayed maintained and host-native-tested
+-- the primitive issue #297 would extend is not what moved; its consumer
+is.
+
+One check got stronger rather than merely different: with the record an
+array element, reading a stale index first and validating afterwards was
+harmless. With the record a pool ADDRESS it is a wild pointer, so every
+descriptor lookup now matches the (address, generation) pair before it
+dereferences.
+
+**#393 -- a descriptor limit belongs to the process.** Both halves,
+because Linux has both. The STORAGE grows: a descriptor lives in an
+`FdBlock` of 16 entries, blocks are chained off the process's own context
+and allocated when a descriptor is installed. A chain rather than Linux's
+realloc-and-copy flat fdtable, because a block address is what the pool's
+generation check validates and a realloc would invalidate every one of
+them. The LIMIT is `RLIMIT_NOFILE`: per-process, inherited by fork,
+preserved across exec, read and written by `prlimit64(2)` -- the only
+rlimit syscall arm64 has, and the one musl 1.2.6's `getrlimit`/`setrlimit`
+both go through (read in the pinned source, per this repo's own rule about
+preferring pinned source over a trace).
+
+That also answered a coupling the issue named: `SHARED_OBJECT_MAX_REFS`
+was `live contexts x PROCESS_FD_MAX`, exact only because both factors were
+constants over a table that always existed. It is a counter now,
+maintained where blocks are allocated and freed -- the same quantity, still
+exact, no longer derived from numbers that stopped existing.
+
+**The bug this stage found in itself is the one worth remembering.**
+Removing `x0 < PROCESS_FD_MAX` from the three dirfd paths broke `ls`:
+`AT_FDCWD` (-100, sign-extended) had been excluded by that range test *by
+accident*, and with the test gone it was treated as a directory descriptor
+and refused with `EBADF`. This is the "unstated second reader" shape this
+log already has an entry for -- an accidental property of a bound had a
+consumer nobody had declared. It is recognised explicitly now, which is
+also what Linux does. Debugging note: the failure was one line in the boot
+log (`ls: .: Bad file descriptor`) two stages before the run hung, and the
+hang was not the thing to debug.
+
+**#402 -- an ASID is recycled by rolling over.** Half 1 asks
+`ID_AA64MMFR0_EL1.ASIDBits` instead of assuming the 8-bit architectural
+floor (both targets report 16-bit, verified on real Cortex-A76 hardware,
+not inferred from a TRM) and sets `TCR_EL1.AS` to match -- the two have to
+agree or the software counts in 16 bits while the hardware compares 8, and
+two address spaces silently share a tag. Half 2 makes assignment a counter
+with a GENERATION: passing the last number advances the generation,
+invalidates every TLB entry and restarts at 1, and an address space whose
+stamp was left behind is given a fresh number at its next activation. So
+`asid_assign()` cannot fail, and `AsidAllocResult::Full` /
+`AddressSpaceEnsureResult::AsidExhausted` were DELETED rather than left
+unreachable.
+
+**The design constraint that half 2 turns on:** handing out a recycled
+number is safe only when nobody is running under the old one, and that
+holds at exactly one moment -- a switch. So a root is created with NO ASID
+and takes one at its first activation, the lifetime Linux gives an mm.
+Assigning at creation, which is what the code did before, would have
+rolled over underneath the running address space and aliased its TLB
+entries with the new one's: a silent memory-corruption bug, not a
+performance one. The rollover probe lives in `address_space.tkb` rather
+than `asid.tkb` for the same reason -- it rolls over from outside a switch,
+so it has to put the running root back on the CPU itself.
+
+Each boundary test flipped the way issue #257's did: they prove the pools
+go PAST the old ceilings (24 shared objects, 40 descriptors, a real ASID
+rollover) rather than reporting exhaustion at them. Two harness
+assumptions had to be re-stated as a result: the oops harness pinned
+`asid=1` for the bootstrap root, which is no longer its identity, and the
+address-space probe asserted a fresh root has a nonzero ASID, which is
+exactly what it no longer has.
+
+What is left in `kernel/RESOURCE_LIMITS.md` after this is a per-process
+limit the process can change, two bounds derived from what exists (memory,
+and descriptor slots), and `BOOT_PAGE_COUNT` -- which is not a ceiling on a
+pool but this kernel's inventory of the RAM it manages, and is issue #250's
+subject rather than this work's.
+
+Verified on QEMU (39 views, ash TCP integration, PTY smoke, plus the
+oops/stack-overflow/lifecycle-gap lanes) and on real RPi5 hardware (39
+views) after each stage.
+
+---
+
 ### 2026-08-24: The MMU-Off Boot Window Became a Checked Context (GitHub Issue #395)
 
 Added the `mmu_off` declaration role and compositional `requires_mmu` call

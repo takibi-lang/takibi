@@ -21,6 +21,14 @@ per issue #295's "single authoritative capacity definition" constraint.
 Every pool identified by the audit now has an explicit, distinguishable
 exhaustion result and a boundary test proving it. None remain unaudited.
 
+**No pool below has a hand-picked capacity any more** (2026-08-24, issues
+#391/#393/#402 finishing what #257/#392/#401/#406 started). What is left in
+the Constant column is one of three things: a per-process limit the process
+itself can change (`RLIMIT_NOFILE`), a bound DERIVED from something that
+exists (memory, descriptor slots, address spaces), or `BOOT_PAGE_COUNT` --
+which is not a ceiling on a pool but this kernel's inventory of the RAM it
+manages, and belongs to issue #250 rather than to this line of work.
+
 | Resource | Constant | Value | Scope | Alloc / release | Exhaustion result |
 |---|---|---|---|---|---|
 | Scheduled processes | **no constant -- removed** (`kernel/kernel/process.tkb`) | unbounded; the page allocator is the only limit | Global pool | `scheduled_process_alloc()` / `scheduled_process_reap()`; `IntrusivePool(ProcessRecord)`-backed, generation-checked | Was `KERNEL_PROCESS_MAX` = 16 -- the array size of the process table and, through four restatements of the same number, of every per-process table beside it. A process record is a pool allocation now and a process slot is that allocation's ADDRESS, so `ScheduledProcessAllocResult::Full` means the page allocator is empty, not that a sixteenth slot was taken. The bootstrap is the one exception and is a static record named by slot value `0`, because root 0 exists before the MMU is on; `scheduled_process_alloc_bootstrap()` is its own entry point so that nothing else can take it by accident. Boundary-tested by `scheduled_process_table_probe`, which now proves the opposite of what it proved: 24 concurrent processes past the old ceiling, each with its own kernel stack run, and every record given back afterwards. |
