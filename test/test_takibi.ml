@@ -9811,10 +9811,24 @@ let codegen_tests = [
          fn rem_zero65(x: i32) -> i32 { return x % ZERO65; }" ());
 
   Alcotest.test_case "runtime divisor emits one trap guard" `Quick
-    (expect_trap_sites 1
-       "fn checked_div65(x: i32, divisor: i32) -> i32 {
-          return x / divisor;
-        }");
+    (fun () ->
+      ignore (gen_codegen
+        "fn checked_div65(x: i32, divisor: i32) -> i32 {
+           return x / divisor;
+         }");
+      Alcotest.(check int) "recorded trap sites" 1
+        (List.length !Llvm_gen.trap_sites);
+      let fn = match Hashtbl.find_opt Llvm_gen.functions "checked_div65" with
+        | Some (_, fn) -> fn
+        | None -> Alcotest.fail "checked_div65 was not emitted"
+      in
+      let ir = Llvm.string_of_llvalue fn in
+      Alcotest.(check bool) "zero comparison" true
+        (contains_substring ir "icmp eq");
+      Alcotest.(check bool) "trap call" true
+        (contains_substring ir "llvm.trap");
+      Alcotest.(check bool) "division after guard" true
+        (contains_substring ir "sdiv"));
 
   Alcotest.test_case "runtime remainder divisor emits one trap guard" `Quick
     (expect_trap_sites 1
@@ -9836,6 +9850,36 @@ let codegen_tests = [
           return (x / sizeof(Sized65)) + (x % alignof(Sized65));
         }");
 
+  Alcotest.test_case "zero-sized sizeof remains a division trap" `Quick
+    (expect_trap_sites 1
+       "fn zero_size_div65(x: usize) -> usize {
+          return x / sizeof([u8; 0]);
+        }");
+
+  Alcotest.test_case "constant casts that truncate to zero remain traps" `Quick
+    (expect_trap_sites 1
+       "fn truncated_div65(x: u8) -> u8 {
+          return x / (256 as u8);
+        }");
+
+  Alcotest.test_case "32-bit usize constants truncated to zero remain traps" `Quick
+    (fun () ->
+      Fun.protect
+        ~finally:(fun () ->
+          ignore (Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()))
+        (fun () ->
+          ignore (Llvm_gen.setup_target ~triple:"thumbv7em-none-eabi"
+                    ~cpu:"cortex-m7" ());
+          ignore (gen_codegen
+            "fn wide_div65(x: usize) -> usize {
+               return x / 4294967296;
+             }
+             fn cast_wide_div65(x: usize) -> usize {
+               return x / (4294967296 as usize);
+             }");
+          Alcotest.(check int) "recorded trap sites" 2
+            (List.length !Llvm_gen.trap_sites)));
+
   Alcotest.test_case "positive refined and negative constant divisors prove nonzero" `Quick
     (expect_trap_sites 0
        "fn refined_div65(x: i32, positive: {1..<8 as i32}) -> i32 {
@@ -9854,6 +9898,14 @@ let codegen_tests = [
        "fn guarded_div65(x: i32, divisor: i32) -> i32 {
           if (divisor == 0) { return 0; }
           return x / divisor;
+        }");
+
+  Alcotest.test_case "mutable divisor facts remain conservative without alias analysis" `Quick
+    (expect_trap_sites 1
+       "fn mutable_div65(x: i32) -> i32 {
+          let mut divisor: i32 = 1;
+          if (divisor != 0) { return x / divisor; }
+          return 0;
         }");
 
   Alcotest.test_case

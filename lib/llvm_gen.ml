@@ -1185,9 +1185,22 @@ let collect_nonzero_cond (cond : Ast.expr) =
   in
   S.elements (go cond)
 
-let apply_nonzero_narrowing cond killed =
+let apply_nonzero_narrowing locals cond killed =
   List.fold_left (fun saved name ->
-    if List.mem name killed then saved
+    (* Only an immutable SSA binding is stable without alias analysis.
+       A Mut local may be changed through a raw/reference alias that
+       Ast.written_names cannot name, and a global may change across a
+       call or interrupt. *)
+    let stable = match Hashtbl.find_opt locals.visible name with
+      | Some id ->
+          (match Hashtbl.find_opt locals.values id with
+           | Some (Imm _) -> true
+           | Some (Mut _) -> List.mem id locals.resolution.param_ids
+           | None -> false)
+      | None -> false
+    in
+    if List.mem name killed || not stable
+    then saved
     else
       let old = Hashtbl.mem nonzero_ctx name in
       Hashtbl.replace nonzero_ctx name ();
@@ -2616,28 +2629,42 @@ let emit_refined_cast_check loc src_ty v lo hi =
    A singleton constant or a refined interval wholly above/below zero proves
    that statically; otherwise emit the same recorded runtime guard used by
    other transitional safety checks. *)
+let integer_constant_survives ty n =
+  let within lo hi = n >= lo && n < hi in
+  match canon_ty ty with
+  | TypeU8 -> within 0 256
+  | TypeU16 | TypeU16Be -> within 0 65_536
+  | TypeU32 | TypeU32Be -> within 0 4_294_967_296
+  | TypeU64 -> n >= 0
+  | TypeI8 -> within (-128) 128
+  | TypeI16 -> within (-32_768) 32_768
+  | TypeI32 -> within (-2_147_483_648) 2_147_483_648
+  | TypeI64 -> true
+  | TypeUsize ->
+      n >= 0 && (usize_bitwidth () = 64 || n < 4_294_967_296)
+  | TypeIsize ->
+      isize_bitwidth () = 64 || within (-2_147_483_648) 2_147_483_648
+  | _ -> false
+
 let rec expr_proven_nonzero ty expr =
   match intlit_opt expr with
-  | Some n -> n <> 0
+  | Some n -> n <> 0 && integer_constant_survives ty n
   | None ->
       match expr.desc with
-      | SizeOf _ | AlignOf _ -> true
+      | SizeOf sized_ty ->
+          let dl = match !target_data with
+            | Some dl -> dl
+            | None -> raise (Error "sizeof proof: target data layout not initialized")
+          in
+          Llvm_target.DataLayout.abi_size (ltype_of_ast sized_ty) dl <> 0L
+      | AlignOf _ -> true
       | Cast (target, inner) ->
           (match intlit_opt inner with
            | None | Some 0 -> false
            | Some n ->
                (* A nonzero source constant is useful only when the cast
                   cannot truncate it to zero. *)
-               (match canon_ty target with
-                | TypeU8 -> n >= 0 && n < 256
-                | TypeU16 | TypeU16Be -> n >= 0 && n < 65_536
-                | TypeU32 | TypeU32Be -> n >= 0 && n < 4_294_967_296
-                | TypeU64 | TypeUsize -> n >= 0
-                | TypeI8 -> n >= -128 && n < 128
-                | TypeI16 -> n >= -32_768 && n < 32_768
-                | TypeI32 -> n >= -2_147_483_648 && n < 2_147_483_648
-                | TypeI64 | TypeIsize -> true
-                | _ -> false))
+               integer_constant_survives target n)
       | Var name when Hashtbl.mem nonzero_ctx name -> true
       | BinOp (Mul, left, right) ->
           expr_proven_nonzero TypeUsize left
@@ -5426,7 +5453,7 @@ let gen_func ?prog_types fdef =
         let killed_idx = slice_rebind_names then_stmts in
         let saved      = apply_narrowing     locals cond killed in
         let saved_mut  = apply_narrowing_mut locals cond killed in
-        let saved_nz   = apply_nonzero_narrowing cond killed in
+        let saved_nz   = apply_nonzero_narrowing locals cond killed in
         let saved_idx  = apply_slice_index_narrowing cond killed_idx in
         let saved_end  = apply_slice_endpoint_narrowing cond killed_idx in
         run_scoped_stmts then_stmts;
@@ -5479,7 +5506,7 @@ let gen_func ?prog_types fdef =
                 Ast.written_names else_stmts @ future_writes_here in
               let f_saved     = apply_narrowing     locals neg fallthrough_killed in
               let f_saved_mut = apply_narrowing_mut locals neg fallthrough_killed in
-              let f_saved_nz = apply_nonzero_narrowing neg fallthrough_killed in
+              let f_saved_nz = apply_nonzero_narrowing locals neg fallthrough_killed in
               let f_saved_end = apply_slice_endpoint_narrowing neg
                   (slice_rebind_names else_stmts @ future_rebinds_here) in
               pending_fallthrough_locals := f_saved @ !pending_fallthrough_locals;
@@ -5528,7 +5555,7 @@ let gen_func ?prog_types fdef =
         let killed    = Ast.written_names body in
         let saved     = apply_narrowing     locals cond killed in
         let saved_mut = apply_narrowing_mut locals cond killed in
-        let saved_nz  = apply_nonzero_narrowing cond killed in
+        let saved_nz  = apply_nonzero_narrowing locals cond killed in
         Stack.push (after_bb, cond_bb) loop_stack;
         run_scoped_stmts body;
         ignore (Stack.pop loop_stack);

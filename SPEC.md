@@ -2419,8 +2419,11 @@ it is a linear struct rather than an erased view.
   literal or `const` zero divisor at compile time. An unknown runtime
   divisor gets a zero trap guard; `--forbid-trap` therefore requires a
   nonzero proof. A refined interval wholly above or below zero, a nonzero
-  constant, `sizeof(T)`/`alignof(T)`, and facts established by conditions
-  such as `if (d != 0)` or an early-return zero guard provide that proof.
+  representable constant, positive `sizeof(T)`/`alignof(T)`, and facts
+  established for an immutable local by conditions such as `if (d != 0)`
+  or an early-return zero guard provide that proof. Mutable locals and
+  globals require an immutable snapshot because aliasing can invalidate a
+  fact without a direct assignment to its source name.
 - **`min(a, b)` / `max(a, b)`** (see "Expressions" above) provide
   compile-time-provable clamping against a literal, independent of the
   other operand's own range.
@@ -2778,9 +2781,10 @@ justification for it.
 
 `takibi ... --forbid-trap` rejects compilation if **any** runtime trap
 check remains anywhere in the generated code (array bounds checks,
-division/remainder zero checks, checked refined casts, exhaustive-enum casts), listing every unproven
-site with its source location. Without the flag, the same code compiles
-fine and gets a runtime check (`llvm.trap` on violation) -- the intended
+division/remainder zero checks, checked refined casts, exhaustive-enum
+casts), listing every unproven site with its source location. Without the
+flag, the same code compiles fine and gets a runtime check (`llvm.trap` on
+violation) -- the intended
 permissive mode for early driver bring-up, where a trap firing is a
 *signal that type information is missing*, not a shameful bug.
 
