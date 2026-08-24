@@ -7675,6 +7675,38 @@ let infer_tests = [
        "fn safe_helper298() { interrupt_notify(); }
         fn safe_irq298() !{interrupt} { safe_helper298(); }");
 
+  Alcotest.test_case "MMU-off root rejects an operation requiring the MMU" `Quick
+    (expect_type_error "boot_root395 -> boot_helper395 -> mmu_leaf395"
+       "extern fn mmu_leaf395() !{allocates, requires_mmu};
+        fn boot_helper395() { mmu_leaf395(); }
+        fn boot_root395() !{mmu_off} { boot_helper395(); }");
+
+  Alcotest.test_case "MMU-off root rejects an MMU-requiring callback contract" `Quick
+    (expect_type_error "<indirect call !{requires_mmu}>"
+       "fn boot_callback395(callback: fn !{requires_mmu}() -> void) !{mmu_off} {
+          callback();
+        }");
+
+  Alcotest.test_case "MMU-off root rejects an effect-unknown callback" `Quick
+    (expect_type_error "MMU-off function 'boot_unknown395' reaches a call with unknown effects"
+       "fn boot_unknown395(callback: fn() -> void) !{mmu_off} {
+          callback();
+        }");
+
+  Alcotest.test_case "MMU-off root accepts bootstrap-safe allocation" `Quick
+    (expect_ok
+       "extern fn boot_page_alloc395() !{allocates};
+        fn boot_leaf395() { boot_page_alloc395(); }
+        fn boot_root_ok395() !{mmu_off} { boot_leaf395(); }");
+
+  Alcotest.test_case "MMU-off is not a function-pointer call effect" `Quick
+    (expect_type_error "not a function-pointer call effect"
+       "fn boot_bad_callback395(callback: fn !{mmu_off}() -> void) {}");
+
+  Alcotest.test_case "extern cannot claim an MMU-off root" `Quick
+    (expect_type_error "or an mmu_off root"
+       "extern fn boot_extern395() !{mmu_off};");
+
   (* -- Takibi Core Slice 6: indexed erased views ------------------------- *)
 
   Alcotest.test_case

@@ -247,7 +247,7 @@ private fn page_run_is_free(first: usize, count: usize) -> bool {
 // smaller change, and the caller today is process creation -- rare, and
 // already doing far more expensive work.
 fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
-        -> PageRunAllocResult !{allocates, unsafe} {
+        -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
     if (count == 0) { return PageRunAllocResult::OutOfMemory; }
     // The alignment that matters is the ADDRESS's, and page INDEX zero is
     // not at an aligned address: both linker scripts only promise

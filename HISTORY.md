@@ -15,6 +15,31 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-24: The MMU-Off Boot Window Became a Checked Context (GitHub Issue #395)
+
+Added the `mmu_off` declaration role and compositional `requires_mmu` call
+effect. An MMU-off root rejects direct, transitive, recursive, and
+effect-contracted indirect paths that require translation, and conservatively
+rejects effect-unknown callbacks. The primary and secondary boot roots now
+carry `!{mmu_off}`; the contiguous page-run allocator carries
+`!{requires_mmu}`, covering the intrusive-pool growth path responsible for the
+RPi5 pre-UART boot failure that motivated the issue.
+
+The first kernel build demonstrated why the constraint cannot simply forbid
+the existing `allocates` effect: bootstrap legitimately allocates its initial
+page-table pages from the reviewed static page allocator before enabling the
+MMU. It also exposed path-insensitive false reachability through the generic
+nonzero-slot backing accessor. Root 0 construction and lookup now use an
+explicit static-backing path, while pooled address-space backings remain the
+ordinary post-MMU path. This makes the distinction visible in source and
+provable from the call graph instead of relying on a runtime `slot == 0`
+branch the effect analysis cannot see.
+
+The specification and memory-map documentation record the boundary and its
+rationale. Focused tests cover transitive and callback rejection, unknown
+callbacks, role placement, and the permitted bootstrap-safe allocator case.
+`make test` and `make allbuild` passed.
+
 ### 2026-08-24: Operational Effects Close IRQ/Exception Escape Hatches (GitHub Issue #298)
 
 Extended the compositional effect vocabulary from `may_block` to the minimal

@@ -5546,12 +5546,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let seen = ref StringSet.empty in
     List.iter (fun eff ->
       if eff <> "may_block" && eff <> "allocates" && eff <> "locks"
-         && eff <> "logs" && eff <> "unsafe" && eff <> "interrupt"
-         && eff <> "exception" && eff <> "noreturn" then
+         && eff <> "logs" && eff <> "requires_mmu" && eff <> "unsafe" && eff <> "interrupt"
+         && eff <> "exception" && eff <> "mmu_off" && eff <> "noreturn" then
         raise (TypeError (loc, Printf.sprintf
-          "unknown effect '%s' on %s '%s'; supported effects are may_block, allocates, locks, logs, unsafe, interrupt, exception, and noreturn"
+          "unknown effect '%s' on %s '%s'; supported effects are may_block, allocates, locks, logs, requires_mmu, unsafe, interrupt, exception, mmu_off, and noreturn"
           eff kind name));
-      if (eff = "interrupt" || eff = "exception") && not allow_interrupt then
+      if (eff = "interrupt" || eff = "exception" || eff = "mmu_off")
+         && not allow_interrupt then
         raise (TypeError (loc,
           Printf.sprintf "'%s' is a function declaration role, not a function-pointer call effect" eff));
       if eff = "noreturn" && not allow_noreturn then
@@ -5572,7 +5573,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     ) ["may_block"; "allocates"; "locks"; "logs"];
     if StringSet.mem "interrupt" !seen && StringSet.mem "exception" !seen then
       raise (TypeError (loc, Printf.sprintf
-        "%s '%s' cannot be both interrupt and exception" kind name))
+        "%s '%s' cannot be both interrupt and exception" kind name));
+    if StringSet.mem "mmu_off" !seen &&
+       (StringSet.mem "interrupt" !seen || StringSet.mem "exception" !seen) then
+      raise (TypeError (loc, Printf.sprintf
+        "%s '%s' cannot combine mmu_off with interrupt or exception" kind name));
+    if StringSet.mem "mmu_off" !seen && StringSet.mem "requires_mmu" !seen then
+      raise (TypeError (loc, Printf.sprintf
+        "%s '%s' cannot be both mmu_off and requires_mmu" kind name))
   in
   let validate_static_application loc kind name formals args =
     if List.length args <> List.length formals then
@@ -6226,9 +6234,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Option.iter (fun effects ->
           validate_effects ~allow_interrupt:true ~allow_noreturn:true Lexing.dummy_pos
             "extern function" name effects;
-          if List.mem "interrupt" effects || List.mem "exception" effects then
+          if List.mem "interrupt" effects || List.mem "exception" effects
+             || List.mem "mmu_off" effects then
             raise (TypeError (Lexing.dummy_pos, Printf.sprintf
-              "extern function '%s' cannot be an interrupt or exception root because it has no body to check"
+              "extern function '%s' cannot be an interrupt or exception root, or an mmu_off root, because it has no body to check"
               name))
         ) effects;
         validation_static_scope := Some (Hashtbl.create 8);
@@ -6776,7 +6785,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let call_effects = Option.map (fun effects ->
           List.filter (fun eff ->
             eff = "may_block" || eff = "allocates" || eff = "locks"
-            || eff = "logs" || eff = "unsafe") effects)
+            || eff = "logs" || eff = "requires_mmu" || eff = "unsafe") effects)
           fdef.effects in
         StringMap.add fdef.name ((key, TFun (pts, rt, call_effects)) :: old) m
     | Ast.ExternFuncDef (name, params, ret_ty, effects_for_extern) ->
@@ -6796,7 +6805,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           | Some effects ->
               Some (List.filter (fun eff ->
                 eff = "may_block" || eff = "allocates" || eff = "locks"
-                || eff = "logs" || eff = "unsafe") effects)
+                || eff = "logs" || eff = "requires_mmu" || eff = "unsafe") effects)
         in
         StringMap.add name ((key, TFun (pts, rt, call_effects)) :: old) m
     | Ast.ConstDef _ -> m
@@ -8568,11 +8577,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     loop seed
   in
   let operational_effects = ["may_block"; "allocates"; "locks"; "logs"] in
+  let compositional_effects = operational_effects @ ["requires_mmu"] in
   let closed_effects = List.map (fun eff ->
     (eff, close_property (explicit_effect eff)
       (fun direct indirect _ _ ->
         StringSet.mem eff direct || StringSet.mem eff indirect))
-  ) operational_effects in
+  ) compositional_effects in
   let closed_effect eff = List.assoc eff closed_effects in
   let may_unsafe = close_property explicit_unsafe
     (fun _ indirect direct_unsafe _ ->
@@ -8701,6 +8711,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              "exception function '%s' may re-enter an exception root via %s"
              (display_effect_key key) (String.concat " -> " path)))
        | None -> ())
+    end else if List.mem "mmu_off" effects then begin
+      if StringSet.mem key (closed_effect "requires_mmu") then begin
+        let path = Option.value
+          (find_effect_path "requires_mmu" StringSet.empty key)
+          ~default:[display_effect_key key] in
+        raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+          "MMU-off function '%s' requires the MMU via %s"
+          (display_effect_key key) (String.concat " -> " path)))
+      end;
+      if StringSet.mem key may_reach_unknown then begin
+        let path = Option.value (find_unknown_path StringSet.empty key)
+          ~default:[display_effect_key key; "<indirect call>"] in
+        raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+          "MMU-off function '%s' reaches a call with unknown effects via %s"
+          (display_effect_key key) (String.concat " -> " path)))
+      end
     end else if effects_opt = Some [] then begin
       List.iter (fun eff ->
         if StringSet.mem key (closed_effect eff) then begin
@@ -8750,8 +8776,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let effects =
       (if List.mem "interrupt" declared then ["interrupt"] else [])
       @ (if List.mem "exception" declared then ["exception"] else [])
+      @ (if List.mem "mmu_off" declared then ["mmu_off"] else [])
       @ List.filter (fun eff -> StringSet.mem key (closed_effect eff))
-          operational_effects
+          compositional_effects
       @ (if StringSet.mem key may_unsafe then ["unsafe"] else [])
     in
     { info with effects }

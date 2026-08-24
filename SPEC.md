@@ -1407,6 +1407,15 @@ local interrupt-mask guard is not marked `locks`. `logs` covers UART and
 console emission, including recursion through a logging helper, without a
 second redundant "reentrant logging" effect.
 
+`requires_mmu` is another compositional call effect, used by operations such
+as intrusive-pool growth whose memory accesses are valid only after the MMU is
+enabled. `mmu_off` is a declaration root for the early boot window; it rejects
+transitive `requires_mmu` and effect-unknown indirect calls with a concrete
+path. It deliberately does not reject every `allocates` effect: bootstrap must
+allocate the initial page-table pages through the reviewed static page
+allocator. `mmu_off`, like `interrupt` and `exception`, is not legal in a
+function-pointer row; `requires_mmu` is.
+
 `unsafe` records unchecked memory reasoning. Every function that directly
 contains an `unsafe { ... }` expression must declare `!{unsafe}` -- a local,
 self-declaration-only requirement at the definition site, not a required
@@ -1490,9 +1499,10 @@ The row follows `fn` in a function-pointer type so it cannot be confused
 with the enclosing function declaration's postfix row. No row means
 **unknown**, not effect-free. `!{}` is a checked operational-effect-free
 contract; `!{may_block}` permits blocking, `!{allocates}` allocation,
-`!{locks}` lock acquisition, `!{logs}` logging, and `!{unsafe}` unchecked
-memory reasoning. `interrupt` and `exception` are declaration
-roles and are not legal in a function-pointer row.
+`!{locks}` lock acquisition, `!{logs}` logging, `!{requires_mmu}` an
+MMU-dependent operation, and `!{unsafe}` unchecked memory reasoning.
+`interrupt`, `exception`, and `mmu_off` are declaration roles and are not
+legal in a function-pointer row.
 
 A callback's actual effects must be a subset of the destination contract. An
 effect-free callback may therefore enter a slot permitting operational

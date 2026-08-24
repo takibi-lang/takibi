@@ -328,11 +328,69 @@ fn address_space_allocate_root(slot: usize)
     }
 }
 
+// Root 0 is constructed before the MMU is enabled. Keep its complete write
+// path separate from the pooled nonzero-slot path so the checker can prove
+// that bootstrap never reaches intrusive-pool growth.
+private fn address_space_allocate_boot_root()
+        -> AddressSpaceAllocateResult {
+    match page_alloc(PageOwnerTag::PageTable) {
+        PageAllocResult::OutOfMemory => {
+            return AddressSpaceAllocateResult::OutOfMemory;
+        }
+        PageAllocResult::Allocated(l1) => {
+            match page_alloc(PageOwnerTag::PageTable) {
+                PageAllocResult::OutOfMemory => {
+                    page_free(l1);
+                    return AddressSpaceAllocateResult::OutOfMemory;
+                }
+                PageAllocResult::Allocated(l2) => {
+                    match asid_alloc() {
+                        AsidAllocResult::Full => {
+                            page_free(l2);
+                            page_free(l1);
+                            return AddressSpaceAllocateResult::AsidExhausted;
+                        }
+                        AsidAllocResult::Allocated(asid) => {
+                            let l1_physical: usize = page_physical_address(l1);
+                            let l2_physical: usize = page_physical_address(l2);
+                            let numeric_asid: usize = asid_value(asid);
+                            mmu_init_root(l1_physical, l2_physical);
+                            address_space_backing_root0.l1_physical = l1_physical;
+                            address_space_backing_root0.l2_physical = l2_physical;
+                            address_space_backing_root0.asid = numeric_asid;
+                            address_space_backing_root0.live = true;
+                            page_owner_transfer_index(l1);
+                            page_owner_transfer_index(l2);
+                            asid_owner_transfer(asid);
+                            return AddressSpaceAllocateResult::Ok;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 must_use variant AddressSpaceEnsureResult {
     SlotOutOfRange;
     OutOfMemory;
     AsidExhausted;
     Ok;
+}
+
+private fn address_space_ensure_boot_root() -> AddressSpaceEnsureResult {
+    if (address_space_backing_root0.live) {
+        return AddressSpaceEnsureResult::Ok;
+    }
+    match address_space_allocate_boot_root() {
+        AddressSpaceAllocateResult::OutOfMemory => {
+            return AddressSpaceEnsureResult::OutOfMemory;
+        }
+        AddressSpaceAllocateResult::AsidExhausted => {
+            return AddressSpaceEnsureResult::AsidExhausted;
+        }
+        AddressSpaceAllocateResult::Ok => { return AddressSpaceEnsureResult::Ok; }
+    }
 }
 
 // Idempotent because root 0 is first made real before any ProcessHandle
@@ -665,23 +723,25 @@ fn address_space_release_root(slot: usize) {
 // Called from entry.S before main(). It owns the exact early-boot sequence:
 // initialise page/ASID allocation, create permanent root 0, then enable the
 // MMU from root 0's resolved physical L1 and ASID.
-fn kernel_mmu_init() {
+fn kernel_mmu_init() !{mmu_off} {
     page_allocator_init();
     asid_pool_init();
     // entry.S cleared .bss before entering this function. Rewriting this
     // aggregate while the MMU is off permits LLVM to use an unaligned
     // 128-bit store on RPi5, which faults before the bootstrap root exists.
-    match address_space_ensure_root(0) {
+    match address_space_ensure_boot_root() {
         AddressSpaceEnsureResult::SlotOutOfRange => {}
         AddressSpaceEnsureResult::OutOfMemory => {}
         AddressSpaceEnsureResult::AsidExhausted => {}
         AddressSpaceEnsureResult::Ok => {}
     }
-    kernel_mmu_activate(address_space_l1_physical(0), address_space_asid(0));
+    kernel_mmu_activate(address_space_backing_root0.l1_physical,
+                        address_space_backing_root0.asid);
 }
 
-fn kernel_mmu_init_secondary() {
-    kernel_mmu_activate(address_space_l1_physical(0), address_space_asid(0));
+fn kernel_mmu_init_secondary() !{mmu_off} {
+    kernel_mmu_activate(address_space_backing_root0.l1_physical,
+                        address_space_backing_root0.asid);
 }
 
 // Root-0 compatibility helpers used by boot-only probes and the syscall

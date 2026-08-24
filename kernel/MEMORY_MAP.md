@@ -58,6 +58,13 @@ enables the MMU without a post-enable jump, so the running PC's VA must
 already equal its PA at that instant. Index 1 must be the identity block
 there, and the user window moves to index 2.
 
+Both primary and secondary entry paths call an `!{mmu_off}` root before
+enabling translation. The compiler rejects any reachable operation marked
+`requires_mmu`, including intrusive-pool growth, and reports the call path.
+The initial page-table pages still come from the reviewed static page
+allocator; allocation alone is not the forbidden property because bootstrap
+must construct those tables before it can enable the MMU.
+
 ## Physical layout of the kernel image
 
 Ascending, in the order the linker script emits them. Sizes vary with the
@@ -68,8 +75,8 @@ build; the boundaries are what matter.
 | Symbol | RPi5 | QEMU `virt` | Defined by | State |
 |---|---|---|---|---|
 | `_start` | `0x00200000` | `0x40000000` | linker script `.` assignment | CHECKED (ELF) |
-| `__bss_start` | `0x00633000` | `0x40433000` | linker script `.bss` | CHECKED (ELF) |
-| `__bss_end` | `0x00b14030` | `0x4091b380` | linker script `.bss` | CHECKED (ELF) |
+| `__bss_start` | `0x00634000` | `0x40433000` | linker script `.bss` | CHECKED (ELF) |
+| `__bss_end` | `0x00b15030` | `0x4091b380` | linker script `.bss` | CHECKED (ELF) |
 | `boot_stack_run_bottom` | `0x00b18000` | `0x40920000` | linker script `.stack` | CHECKED (ELF) |
 | `boot_stack_bottom` | `0x00b1c000` | `0x40924000` | linker script `.stack` | CHECKED (ELF) |
 | `boot_stack_top` | `0x00b20000` | `0x40928000` | linker script `.stack` | CHECKED (ELF) |
