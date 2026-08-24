@@ -2,12 +2,13 @@
 <html>
 <head>
 <meta charset="ascii">
-<title>Takibi SD Card Demo</title>
+<title>Takibi Kernel Demo</title>
 </head>
 <body style="font-family:system-ui,sans-serif;max-width:42rem;margin:3rem auto;line-height:1.5;background:#f7f7f3;color:#20242a">
-<h1>Takibi on STM32</h1>
+<h1>Takibi Kernel</h1>
 <p><img src="/icon.png" alt="Takibi logo" width="96" height="96"></p>
-<p>This page is served by a tiny Takibi HTTP server. The bytes came from a real FAT12 SD card, read on the board and sent over Ethernet.</p>
+<p>This page is served by Alpine BusyBox httpd running as an AArch64 userspace process on the Takibi kernel.</p>
+<p>The same ext2 root filesystem is read through virtio-blk on QEMU and USB mass storage on Raspberry Pi 5, then sent through Takibi's TCP/IP stack.</p>
 <p><a href="/about.html">About this demo</a></p>
 </body>
 </html>
