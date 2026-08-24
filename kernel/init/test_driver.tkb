@@ -555,7 +555,11 @@ fn kernel_test_common_probes() {
         kernel_boot_log("syscall subset: failed\n");
     }
     if (unified_fd_table_probe()) {
-        kernel_boot_log("fd table: processes=2 fds=16 shared-offset refs clean\n");
+        // GitHub issue #393: "fds=16" said the table's CAPACITY, which no
+        // longer exists. What this probe proves is what it says now: two
+        // processes, one of each descriptor kind installed, an offset
+        // shared across a clone, and every reference given back.
+        kernel_boot_log("fd table: processes=2 kinds=terminal+file+listener+connection, offset shared across clone, refs clean\n");
     } else {
         kernel_boot_log("fd table: failed\n");
     }
