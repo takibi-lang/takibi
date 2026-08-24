@@ -9857,6 +9857,61 @@ let codegen_tests = [
 
   (* -- --forbid-trap accounting (Llvm_gen.trap_sites) -------------------- *)
 
+  Alcotest.test_case
+    "every runtime-trap lowering records one site and emits one llvm.trap call"
+    `Quick
+    (fun () ->
+      let cases = [
+        ("array bounds", "oob_cmp",
+         "let mut trap420_array: [u8; 4];
+          fn trap420(i: usize) -> u8 { return trap420_array[i]; }");
+        ("refined cast", "rc_bad",
+         "fn trap420(x: i32) -> {0..<4 as i32} {
+            return x as {0..<4 as i32};
+          }");
+        ("exhaustive enum cast", "switch i32",
+         "enum Trap420 { A; B; }
+          fn trap420(x: u32) -> Trap420 { return x as Trap420; }");
+        ("subslice bounds", "ss_bad",
+         "fn trap420(s: []u8, lo: usize, hi: usize) -> []u8 {
+            return s[lo..<hi];
+          }");
+        ("division by zero", "divzero_cmp",
+         "fn trap420(x: i32, divisor: i32) -> i32 {
+            return x / divisor;
+          }");
+      ] in
+      List.iter (fun (category, marker, src) ->
+        ignore (gen_codegen src);
+        Alcotest.(check int) (category ^ " recorded sites") 1
+          (List.length !Llvm_gen.trap_sites);
+        let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+        Alcotest.(check bool) (category ^ " lowering marker") true
+          (contains_substring ir marker);
+        Alcotest.(check int) (category ^ " emitted trap calls") 1
+          (Llvm_gen.count_occurrences ir "call void @llvm.trap(")
+      ) cases);
+
+  Alcotest.test_case
+    "trap-accounting invariant rejects emission-only and accounting-only wiring" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "fn mismatch420(x: i32, divisor: i32) -> i32 {
+           return x / divisor;
+         }");
+      let real_sites = !Llvm_gen.trap_sites in
+      let expect_mismatch direction =
+        match Llvm_gen.assert_trap_accounting_consistent () with
+        | () -> Alcotest.failf "expected a %s runtime trap/accounting mismatch" direction
+        | exception Llvm_gen.Error msg ->
+            Alcotest.(check bool) (direction ^ " mismatch diagnostic") true
+              (contains_substring msg "runtime trap/accounting mismatch")
+      in
+      Llvm_gen.trap_sites := [];
+      expect_mismatch "emission-only";
+      Llvm_gen.trap_sites := (Lexing.dummy_pos, "accounting only") :: real_sites;
+      expect_mismatch "accounting-only");
+
   Alcotest.test_case "division and remainder by constant zero are type errors" `Quick
     (fun () ->
       expect_type_error "division by zero"

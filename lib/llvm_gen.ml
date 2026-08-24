@@ -234,8 +234,9 @@ let enum_nonexhaustive: (string, bool) Hashtbl.t = Hashtbl.create 8
 let global_const_defs : (string, Ast.type_expr * Ast.expr) Hashtbl.t = Hashtbl.create 16
 
 (* -- Trap-site accounting (--forbid-trap) --------------------------------- *)
-(* Every runtime trap check emitted by codegen (array bounds check, checked
-   refined cast, exhaustive-enum cast) is recorded here with its source
+(* Every runtime trap check emitted by codegen (array/slice bounds, checked
+   refined cast, exhaustive-enum cast, subslice, division/remainder) is
+   recorded here with its source
    location. bin/main.ml reads this after gen_program: under --forbid-trap a
    non-empty list is a compile error listing every unproven site.
    Recording happens at IR-generation time, i.e. it reflects exactly what the
@@ -2578,19 +2579,49 @@ let function_key (pt : Types.program_types option) (fdef : Ast.func) =
       | _ -> fdef.name
 
 (* -- Runtime trap checks -------------------------------------------------- *)
-(* Branch to llvm.trap when [bad] is true, then continue at a fresh block.
-   Shared tail of every runtime check codegen emits. *)
-let emit_trap_when bad ~bad_name ~ok_name =
+(* The only helpers that emit llvm.trap also record the corresponding source
+   obligation.  gen_program additionally compares the final IR call count to
+   trap_sites, catching a future direct call or accounting-only edit. *)
+let emit_trap_call () =
+  let trap_ft = function_type (void_type context) [||] in
+  let trap_fn = declare_function "llvm.trap" trap_ft !the_module in
+  ignore (build_call trap_ft trap_fn [||] "" builder);
+  ignore (build_unreachable builder)
+
+let emit_recorded_trap_when loc what bad ~bad_name ~ok_name =
+  record_trap loc what;
   let cur_f  = block_parent (insertion_block builder) in
   let bad_bb = append_block context bad_name cur_f in
   let ok_bb  = append_block context ok_name  cur_f in
   ignore (build_cond_br bad bad_bb ok_bb builder);
   position_at_end bad_bb builder;
-  let trap_ft = function_type (void_type context) [||] in
-  let trap_fn = declare_function "llvm.trap" trap_ft !the_module in
-  ignore (build_call trap_ft trap_fn [||] "" builder);
-  ignore (build_unreachable builder);
+  emit_trap_call ();
   position_at_end ok_bb builder
+
+let emit_recorded_trap_block loc what ~bad_bb ~ok_bb =
+  record_trap loc what;
+  position_at_end bad_bb builder;
+  emit_trap_call ();
+  position_at_end ok_bb builder
+
+let count_occurrences source needle =
+  let slen = String.length source and nlen = String.length needle in
+  let rec loop offset count =
+    if offset + nlen > slen then count
+    else if String.sub source offset nlen = needle then
+      loop (offset + nlen) (count + 1)
+    else loop (offset + 1) count
+  in
+  if nlen = 0 then 0 else loop 0 0
+
+let assert_trap_accounting_consistent () =
+  let ir_calls = count_occurrences (string_of_llmodule !the_module)
+      "call void @llvm.trap(" in
+  let recorded = List.length !trap_sites in
+  if ir_calls <> recorded then
+    raise (Error (Printf.sprintf
+      "BUG: runtime trap/accounting mismatch: emitted %d llvm.trap calls but recorded %d trap sites"
+      ir_calls recorded))
 
 (* Bounds check for [T; N] arrays. Traps via llvm.trap when idx >= N (unsigned compare).
    The unsigned compare also catches negative indices (idx < 0) as too-large unsigned values.
@@ -2598,12 +2629,12 @@ let emit_trap_when bad ~bad_name ~ok_name =
    hardcoded i32): comparing a usize-width idx_v against a hardcoded i32
    constant would be an LLVM type mismatch on a 64-bit target. *)
 let emit_bounds_check loc idx_ty idx_v n =
-  record_trap loc (Printf.sprintf
+  let what = Printf.sprintf
     "array bounds check remains: index type %s cannot prove range {0..<%d}"
-    (ty_str idx_ty) n);
+    (ty_str idx_ty) n in
   let n_llv = const_int (type_of idx_v) n in
   let cmp   = build_icmp Icmp.Uge idx_v n_llv "oob_cmp" builder in
-  emit_trap_when cmp ~bad_name:"oob" ~ok_name:"idx_ok"
+  emit_recorded_trap_when loc what cmp ~bad_name:"oob" ~ok_name:"idx_ok"
 
 (* Checked refined cast: `expr as {lo..<hi}` where the source type cannot
    prove the target range. Mirrors `int as ExhaustiveEnum` (switch + trap):
@@ -2614,16 +2645,16 @@ let emit_bounds_check loc idx_ty idx_v n =
    i32-widened (widen_load invariant) or as a genuine i64 (i64/u64/usize);
    a u64 bit pattern >= 2^63 compares negative and correctly traps. *)
 let emit_refined_cast_check loc src_ty v lo hi =
-  record_trap loc (Printf.sprintf
+  let what = Printf.sprintf
     "checked cast remains: %s as {%d..<%d} needs a runtime range check"
-    (ty_str src_ty) lo hi);
+    (ty_str src_ty) lo hi in
   let v = if type_of v = i1_type context
           then build_zext v (i32_type context) "zext" builder else v in
   let cty = type_of v in
   let lt  = build_icmp Icmp.Slt v (const_int cty lo) "rc_lt" builder in
   let ge  = build_icmp Icmp.Sge v (const_int cty hi) "rc_ge" builder in
   let bad = build_or lt ge "rc_bad" builder in
-  emit_trap_when bad ~bad_name:"rc_trap" ~ok_name:"rc_ok"
+  emit_recorded_trap_when loc what bad ~bad_name:"rc_trap" ~ok_name:"rc_ok"
 
 (* Division and remainder are only defined when the divisor is nonzero.
    A singleton constant or a refined interval wholly above/below zero proves
@@ -2683,12 +2714,13 @@ let divisor_proven_nonzero ty expr =
 
 let emit_divisor_check loc operation divisor_ty divisor_expr divisor =
   if not (divisor_proven_nonzero divisor_ty divisor_expr) then begin
-    record_trap loc (Printf.sprintf
+    let what = Printf.sprintf
       "%s by zero check remains: divisor type %s does not prove a nonzero value"
-      operation (ty_str divisor_ty));
+      operation (ty_str divisor_ty) in
     let zero = const_int (type_of divisor) 0 in
     let bad = build_icmp Icmp.Eq divisor zero "divzero_cmp" builder in
-    emit_trap_when bad ~bad_name:"divzero_trap" ~ok_name:"divzero_ok"
+    emit_recorded_trap_when loc what bad
+      ~bad_name:"divzero_trap" ~ok_name:"divzero_ok"
   end
 
 (* Bounds check against a slice's RUNTIME length (a usize-width value).
@@ -2697,15 +2729,15 @@ let emit_divisor_check loc operation divisor_ty divisor_expr divisor =
    value, so the single unsigned compare catches both directions.
    min_len only feeds the trap-site message. *)
 let emit_bounds_check_dyn loc idx_ty idx_v min_len len_v =
-  record_trap loc (Printf.sprintf
+  let what = Printf.sprintf
     "slice bounds check remains: index type %s cannot prove range {0..<%d} \
      (the slice's compile-time minimum length)"
-    (ty_str idx_ty) min_len);
+    (ty_str idx_ty) min_len in
   let lw = type_of len_v in
   let idx_w = if type_of idx_v = lw then idx_v
               else build_zext idx_v lw "zext" builder in
   let cmp = build_icmp Icmp.Uge idx_w len_v "oob_cmp" builder in
-  emit_trap_when cmp ~bad_name:"oob" ~ok_name:"idx_ok"
+  emit_recorded_trap_when loc what cmp ~bad_name:"oob" ~ok_name:"idx_ok"
 
 (* -- Slice (fat value {ptr, len}) helpers --------------------------------- *)
 
@@ -3545,9 +3577,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              (TypeNamed ename, v_coerced)
            else begin
              (* exhaustive enum: trap on unknown value at runtime *)
-             record_trap e.loc (Printf.sprintf
+             let what = Printf.sprintf
                "enum check remains: %s as %s (exhaustive) needs a runtime variant check"
-               (ty_str src_ty) ename);
+               (ty_str src_ty) ename in
              let variants = Hashtbl.find enum_variants_tbl ename in
              let cur_f    = block_parent (insertion_block builder) in
              let ok_bb    = append_block context "enum_ok"  cur_f in
@@ -3557,12 +3589,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              List.iter (fun (_, value) ->
                add_case sw (const_int ll_ut value) ok_bb
              ) variants;
-             position_at_end bad_bb builder;
-             let trap_ft = function_type (void_type context) [||] in
-             let trap_fn = declare_function "llvm.trap" trap_ft !the_module in
-             ignore (build_call trap_ft trap_fn [||] "" builder);
-             ignore (build_unreachable builder);
-             position_at_end ok_bb builder;
+             emit_recorded_trap_block e.loc what ~bad_bb ~ok_bb;
              (TypeNamed ename, v_coerced)
            end
        | TypeRefined (lo, hi, _) ->
@@ -3971,13 +3998,14 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
             (* Runtime-checked subslice (gradual form): one check, one
                recorded trap site, and everything downstream of the
                resulting view is bounds-governed again. *)
-            record_trap e.loc (Printf.sprintf
+            let what = Printf.sprintf
               "subslice bounds check remains: bounds cannot prove range \
-               {0..<%d} (the slice's compile-time minimum length)" min_len);
+               {0..<%d} (the slice's compile-time minimum length)" min_len in
             let inv  = build_icmp Icmp.Ugt lo_v hi_v "ss_inv" builder in
             let over = build_icmp Icmp.Ugt hi_v (slice_len fat) "ss_over" builder in
             let bad  = build_or inv over "ss_bad" builder in
-            emit_trap_when bad ~bad_name:"ss_trap" ~ok_name:"ss_ok"
+            emit_recorded_trap_when e.loc what bad
+              ~bad_name:"ss_trap" ~ok_name:"ss_ok"
           end
         end;
         finish_sub elem_ty (slice_ptr fat) lo_v hi_v (guaranteed_min lo_r hi_r)
@@ -7123,6 +7151,7 @@ let gen_program ?prog_types prog =
   ) prog;
   if Buffer.length raw_asm_buf > 0 then
     set_module_inline_asm !the_module (Buffer.contents raw_asm_buf);
+  assert_trap_accounting_consistent ();
   (* Resolve any deferred/forward-referenced DI metadata. Must run after every
      gen_func call above, before the module is optimized or emitted to an object. *)
   (match !dibuilder_opt with
