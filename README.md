@@ -250,6 +250,7 @@ After `make build`, the compiler is available at
 takibi <file1.tkb> [file2.tkb ...] -o output.o
        [--target <triple>] [--cpu <cpu>] [--features <features>]
        [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe]
+       [--explain-inference]
        [--emit-exception-frame-offsets <StructName>]
        [--emit-struct-layout <StructName>] [--emit-depfile <path>]
        [--version]

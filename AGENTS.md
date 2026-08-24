@@ -604,7 +604,7 @@ lib/
   llvm_gen.ml     -- LLVM IR generation and object file output
   use_resolver.ml -- resolves `use "path/to/file.tkb";` into the flat file list (issue #55)
 bin/
-  main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-depfile <path>] [--version]`)
+  main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--explain-inference] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-depfile <path>] [--version]`)
                      Multiple .tkb files are concatenated (flat global namespace) before compilation.
                      -g emits full DWARF debug info. QEMU/GDB source-level regression coverage includes
                      examples/dwarf_debug and the maintained kernelcheck-qemu-debug lane; the PC-sampling

@@ -8129,6 +8129,40 @@ let infer_tests = [
        "fn identity(T: type, x: usize) -> usize { return x; }
         fn use_identity() -> usize { return identity(5); }");
 
+  Alcotest.test_case
+    "generic inference explanation is opt-in and traces singleton wrappers"
+    `Quick (fun () ->
+      let src =
+        "generic struct ExplainPool(T: type) { value: T; }
+         fn explain_take(T: type, U: type, V: type,
+                         p: *ExplainPool(T) @ pool, missing: U, bad: *V) {}
+         fn explain_use() {
+           let mut pool: ExplainPool(usize);
+           let bad: usize = 0;
+           explain_take(&pool, 5, bad);
+         }" in
+      let message explain =
+        match Monomorphize.run ~explain_inference:explain (parse src) with
+        | _ -> Alcotest.fail "expected generic inference to fail"
+        | exception Types.TypeError (_, msg) -> msg
+      in
+      let concise = message false in
+      Alcotest.(check bool) "default diagnostic stays concise" false
+        (contains_substring concise "generic inference trace:");
+      let explained = message true in
+      List.iter (fun fragment ->
+        Alcotest.(check bool) fragment true
+          (contains_substring explained fragment)
+      ) [ "generic inference trace:";
+          "argument 1: template";
+          "concrete";
+          "peeled template TypeSingleton";
+          "bound type parameter T to Ast.TypeUsize";
+          "argument 2:";
+          "concrete type unavailable";
+          "argument 3:";
+          "stopped at TypePtr versus TypeUsize" ]);
+
   Alcotest.test_case "Name(T) generic instantiation parses but is rejected \
                        (generics not implemented yet, issue #207)" `Quick
     (expect_type_error

@@ -46,6 +46,7 @@ let () =
   let debug_info = ref false in
   let forbid_trap = ref false in
   let forbid_unsafe = ref false in
+  let explain_inference = ref false in
   let profile_functions = ref false in
   let show_version = ref false in
   let emit_exception_frame_offsets = ref "" in
@@ -107,6 +108,8 @@ let () =
          forbid_trap := true
      | "--forbid-unsafe" ->
          forbid_unsafe := true
+     | "--explain-inference" ->
+         explain_inference := true
      | "--profile-functions" ->
          profile_functions := true
      | arg ->
@@ -122,7 +125,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-depfile <path>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--explain-inference] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-depfile <path>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -192,7 +195,7 @@ let () =
        only plain, already-monomorphic code, exactly like today. A no-op
        (returns prog unchanged) for any program with no generic struct
        templates at all. *)
-    let prog = Monomorphize.run prog in
+    let prog = Monomorphize.run ~explain_inference:!explain_inference prog in
 
     (* GitHub issue #358: the parser cannot disambiguate `Name[args]`
        between an indexed struct, view, and variant. Resolve that spelling

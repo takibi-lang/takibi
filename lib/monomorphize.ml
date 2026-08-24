@@ -601,27 +601,65 @@ let discover_value_generic_params
    *inferred* shape (not just a template's declared parameter shape); see
    test/test_takibi.ml's own issue #322 regression cases, one per wrapper
    constructor, for the checklist this gap left with no earlier coverage. *)
-let rec unify_arg (type_params : string list) (value_params : string list)
+let type_expr_constructor = function
+  | TypeNamed _ -> "TypeNamed" | TypePtr _ -> "TypePtr"
+  | TypeIo _ -> "TypeIo" | TypeBorrow _ -> "TypeBorrow"
+  | TypeBorrowMut _ -> "TypeBorrowMut" | TypeSink _ -> "TypeSink"
+  | TypeRef _ -> "TypeRef" | TypeRefMut _ -> "TypeRefMut"
+  | TypeArray _ -> "TypeArray" | TypeSlice _ -> "TypeSlice"
+  | TypeAlignedPtr _ -> "TypeAlignedPtr"
+  | TypeGenericInst _ -> "TypeGenericInst"
+  | TypeArraySym _ -> "TypeArraySym" | TypeSliceSym _ -> "TypeSliceSym"
+  | TypeIntLit _ -> "TypeIntLit" | TypeSingleton _ -> "TypeSingleton"
+  | TypeFn _ -> "TypeFn" | TypeTuple _ -> "TypeTuple"
+  | TypeExists _ -> "TypeExists" | TypeRefined _ -> "TypeRefined"
+  | TypeIndexed _ -> "TypeIndexed" | TypeBool -> "TypeBool"
+  | TypeI8 -> "TypeI8" | TypeI16 -> "TypeI16" | TypeI32 -> "TypeI32"
+  | TypeI64 -> "TypeI64" | TypeU8 -> "TypeU8" | TypeU16 -> "TypeU16"
+  | TypeU32 -> "TypeU32" | TypeU64 -> "TypeU64"
+  | TypeU16Be -> "TypeU16Be" | TypeU32Be -> "TypeU32Be"
+  | TypeIsize -> "TypeIsize" | TypeUsize -> "TypeUsize"
+  | TypeVoid -> "TypeVoid" | TypeView _ -> "TypeView"
+  | TypeVariant _ -> "TypeVariant" | TypeKind -> "TypeKind"
+
+let rec unify_arg ?(trace = fun _ -> ())
+                  (type_params : string list) (value_params : string list)
                   (bindings : (string, type_expr) Hashtbl.t)
                   (value_bindings : (string, int) Hashtbl.t)
                   (template_ty : type_expr) (concrete_ty : type_expr) : unit =
-  let u = unify_arg type_params value_params bindings value_bindings in
+  let u = unify_arg ~trace type_params value_params bindings value_bindings in
+  let mismatch template concrete =
+    trace (Printf.sprintf "stopped at %s versus %s (no matching structural arm)"
+      (type_expr_constructor template) (type_expr_constructor concrete))
+  in
   (* Peel concrete-side parameter-mode wrappers first. The remaining outer
      match is deliberately exhaustive on template_ty: adding an Ast.type_expr
      constructor must make dune build point here instead of silently falling
      through a two-type wildcard and contributing no generic binding. *)
-  let concrete_ty = Ast.strip_singleton concrete_ty in
+  let concrete_ty = match concrete_ty with
+    | TypeSingleton (inner, _) ->
+        trace "peeled concrete TypeSingleton"; Ast.strip_singleton inner
+    | t -> t
+  in
   match concrete_ty with
   | TypeBorrow b | TypeBorrowMut b | TypeSink b ->
       u template_ty b
   | _ ->
-    match Ast.strip_singleton template_ty with
+    let template_ty = match template_ty with
+      | TypeSingleton (inner, _) ->
+          trace "peeled template TypeSingleton"; Ast.strip_singleton inner
+      | t -> t
+    in
+    match template_ty with
   | TypeNamed n when List.mem n type_params ->
       (match Hashtbl.find_opt bindings n with
        | Some existing when existing <> concrete_ty ->
            raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
              "conflicting inference for generic type parameter '%s'" n))
-       | _ -> Hashtbl.replace bindings n concrete_ty)
+       | _ ->
+           Hashtbl.replace bindings n concrete_ty;
+           trace (Printf.sprintf "bound type parameter %s to %s" n
+             (Ast.show_type_expr concrete_ty)))
   | TypeNamed n when List.mem n value_params ->
       (match (try Some (value_arg_of_type_expr concrete_ty) with Types.TypeError _ -> None) with
        | None -> () (* not a resolvable value in this position; contributes nothing here *)
@@ -630,10 +668,17 @@ let rec unify_arg (type_params : string list) (value_params : string list)
             | Some existing when existing <> v ->
                 raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
                   "conflicting inference for generic value parameter '%s'" n))
-            | _ -> Hashtbl.replace value_bindings n v))
-  | TypeNamed _ -> ()
-  | TypePtr a -> (match concrete_ty with TypePtr b -> u a b | _ -> ())
-  | TypeIo a -> (match concrete_ty with TypeIo b -> u a b | _ -> ())
+            | _ ->
+                Hashtbl.replace value_bindings n v;
+                trace (Printf.sprintf "bound value parameter %s to %d" n v)))
+  | TypeNamed _ ->
+      if type_expr_constructor concrete_ty = "TypeNamed" then
+        trace "reached non-parameter TypeNamed leaf; contributed no generic binding"
+      else mismatch template_ty concrete_ty
+  | TypePtr a -> (match concrete_ty with TypePtr b -> u a b
+                  | _ -> mismatch template_ty concrete_ty)
+  | TypeIo a -> (match concrete_ty with TypeIo b -> u a b
+                 | _ -> mismatch template_ty concrete_ty)
   | TypeBorrow a | TypeBorrowMut a | TypeSink a -> u a concrete_ty
   (* GitHub issue #314/#319: derive_arg_type below always synthesizes a
      plain TypePtr for an AddrOf-shaped argument, regardless of the
@@ -650,11 +695,11 @@ let rec unify_arg (type_params : string list) (value_params : string list)
   | TypeRef a ->
       (match concrete_ty with
        | TypePtr b | TypeRef b | TypeRefMut b -> u a b
-       | _ -> ())
+       | _ -> mismatch template_ty concrete_ty)
   | TypeRefMut a ->
       (match concrete_ty with
        | TypePtr b | TypeRef b | TypeRefMut b -> u a b
-       | _ -> ())
+       | _ -> mismatch template_ty concrete_ty)
   (* GitHub issue #332: template=&T (shared ref expected), concrete=&mut T
      (exclusive ref argument) was the one missing combination -- passing an
      exclusive reference where a shared reference suffices is ordinary,
@@ -663,17 +708,20 @@ let rec unify_arg (type_params : string list) (value_params : string list)
      plausible T to mangle a name; real reference-mode checking happens
      later in type_inf.ml. *)
   | TypeArray (a, _) ->
-      (match concrete_ty with TypeArray (b, _) -> u a b | _ -> ())
+      (match concrete_ty with TypeArray (b, _) -> u a b
+       | _ -> mismatch template_ty concrete_ty)
   | TypeSlice (a, _) ->
-      (match concrete_ty with TypeSlice (b, _) -> u a b | _ -> ())
+      (match concrete_ty with TypeSlice (b, _) -> u a b
+       | _ -> mismatch template_ty concrete_ty)
   | TypeAlignedPtr (_, a) ->
-      (match concrete_ty with TypeAlignedPtr (_, b) -> u a b | _ -> ())
+      (match concrete_ty with TypeAlignedPtr (_, b) -> u a b
+       | _ -> mismatch template_ty concrete_ty)
   | TypeGenericInst (n1, args1) ->
       (match concrete_ty with
        | TypeGenericInst (n2, args2)
          when n1 = n2 && List.length args1 = List.length args2 ->
            List.iter2 u args1 args2
-       | _ -> ())
+       | _ -> mismatch template_ty concrete_ty)
   | TypeArraySym _ | TypeSliceSym _ | TypeIntLit _ | TypeSingleton _
   | TypeFn _ | TypeTuple _ | TypeExists _ | TypeRefined _
   | TypeIndexed _ | TypeBool
@@ -681,7 +729,11 @@ let rec unify_arg (type_params : string list) (value_params : string list)
   | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be
   | TypeIsize | TypeUsize | TypeVoid
   | TypeView _ | TypeVariant _ | TypeKind ->
-      () (* structural mismatch: contributes nothing, not an error here *)
+      if type_expr_constructor template_ty = type_expr_constructor concrete_ty then
+        trace (Printf.sprintf "reached %s leaf; contributed no generic binding"
+          (type_expr_constructor template_ty))
+      else mismatch template_ty concrete_ty
+      (* Structural mismatch: contributes nothing, not an error here. *)
 
 (* -- run ---------------------------------------------------------------------
 
@@ -705,7 +757,7 @@ let rec unify_arg (type_params : string list) (value_params : string list)
    6. Rewrite the remaining (non-template) program's own TypeGenericInst
       occurrences (call names were already fixed in step 3). *)
 
-let run (prog : toplevel list) : toplevel list =
+let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
   let struct_templates : (string, struct_template) Hashtbl.t = Hashtbl.create 8 in
   List.iter (function
     | GenericStructDef (name, tps, fields, packed, align, priv, _loc) ->
@@ -882,13 +934,37 @@ let run (prog : toplevel list) : toplevel list =
       | Some tpl ->
           let bindings = Hashtbl.create 4 in
           let value_bindings = Hashtbl.create 4 in
-          List.iter2 (fun (_, template_ty) arg ->
+          let traces = ref [] in
+          List.iteri (fun index ((_, template_ty), arg) ->
             match derive_arg_type local_types arg with
             | Some concrete_ty ->
-                unify_arg tpl.fn_type_params tpl.fn_value_generic_params
-                  bindings value_bindings template_ty concrete_ty
-            | None -> ()
-          ) tpl.fn_value_params args;
+                if explain_inference then begin
+                  let events = ref [] in
+                  let trace event = events := event :: !events in
+                  unify_arg ~trace tpl.fn_type_params tpl.fn_value_generic_params
+                    bindings value_bindings template_ty concrete_ty;
+                  traces := Printf.sprintf
+                    "argument %d: template %s, concrete %s%s"
+                    (index + 1) (Ast.show_type_expr template_ty)
+                    (Ast.show_type_expr concrete_ty)
+                    (match List.rev !events with
+                     | [] -> "\n  contributed no generic binding"
+                     | xs -> "\n  " ^ String.concat "\n  " xs) :: !traces
+                end else
+                  unify_arg tpl.fn_type_params tpl.fn_value_generic_params
+                    bindings value_bindings template_ty concrete_ty
+            | None ->
+                if explain_inference then
+                  traces := Printf.sprintf
+                    "argument %d: template %s, concrete type unavailable\n  argument shape is outside narrow inference"
+                    (index + 1) (Ast.show_type_expr template_ty) :: !traces
+          ) (List.combine tpl.fn_value_params args);
+          let explanation () =
+            if explain_inference then
+              "\ngeneric inference trace:\n" ^
+              String.concat "\n" (List.rev !traces)
+            else ""
+          in
           let concrete_type_args = List.map (fun tp ->
             match Hashtbl.find_opt bindings tp with
             | Some t -> GType t
@@ -897,7 +973,7 @@ let run (prog : toplevel list) : toplevel list =
                  argument whose declared type would determine it must be a \
                  plain local variable or global (or its address) with an \
                  explicit type already known at this point in the program \
-                 (GitHub issue #207)" tp name))
+                 (GitHub issue #207)%s" tp name (explanation ())))
           ) tpl.fn_type_params in
           let concrete_value_args = List.map (fun vp ->
             match Hashtbl.find_opt value_bindings vp with
@@ -907,7 +983,7 @@ let run (prog : toplevel list) : toplevel list =
                  -- every argument whose declared type would determine it \
                  must be a plain local variable or global (or its address) \
                  with an explicit type already known at this point in the \
-                 program" vp name))
+                 program%s" vp name (explanation ())))
           ) tpl.fn_value_generic_params in
           let concrete_args = concrete_type_args @ concrete_value_args in
           let mangled = mangle name concrete_args in

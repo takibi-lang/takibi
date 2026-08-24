@@ -17,7 +17,8 @@ describes behavior in prose instead.
 
 File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
 [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features
-<features>] [-g] [--forbid-trap] [--forbid-unsafe] [--version]`. Multiple `.tkb` files are
+<features>] [-g] [--forbid-trap] [--forbid-unsafe] [--explain-inference]
+[--version]`. Multiple `.tkb` files are
 concatenated (flat global namespace) before compilation -- there is no
 module/import system beyond `use` (see "Known Limitations" below).
 
@@ -25,6 +26,13 @@ module/import system beyond `use` (see "Known Limitations" below).
 current implementation prioritizes practical GDB value inspection, so it
 may preserve extra debug-only storage compared with an optimized build
 without `-g`.
+
+`--explain-inference` augments a failed generic function type-argument
+inference diagnostic with an argument-by-argument structural trace. It shows
+the declared template type, the locally derived concrete type, wrapper types
+peeled during matching, bindings contributed to generic parameters, and the
+pair of internal type constructors where matching stopped. Without the flag,
+the concise diagnostic is unchanged.
 
 The implementation still has a Hindley-Milner-style inference core for
 ordinary values, but the language is no longer a pure HM type system:
