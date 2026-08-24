@@ -14,9 +14,112 @@ from pathlib import Path
 
 
 HEADER = [
-    "surface", "file", "line", "column", "operator",
+    "surface", "classification", "proof_reason",
+    "file", "line", "column", "operator",
     "lhs_type", "lhs_fact", "rhs_type", "rhs_fact",
 ]
+
+TYPE_RANGES = {
+    "i8": (-(1 << 7), (1 << 7) - 1),
+    "i16": (-(1 << 15), (1 << 15) - 1),
+    "i32": (-(1 << 31), (1 << 31) - 1),
+    "i64": (-(1 << 63), (1 << 63) - 1),
+    "u8": (0, (1 << 8) - 1),
+    "u16": (0, (1 << 16) - 1),
+    "u32": (0, (1 << 32) - 1),
+    "u64": (0, (1 << 64) - 1),
+    # Use the narrowest maintained target for a source location compiled for
+    # more than one target.  A proof within 32 bits is valid on 64-bit too.
+    "isize": (-(1 << 31), (1 << 31) - 1),
+    "usize": (0, (1 << 32) - 1),
+}
+
+
+def fact_interval(fact: str) -> tuple[int, int] | None:
+    if fact.startswith("constant:"):
+        value = int(fact.removeprefix("constant:"))
+        return value, value
+    if fact.startswith("range:"):
+        lo, hi = fact.removeprefix("range:").split("..<", 1)
+        return int(lo), int(hi) - 1
+    if fact.startswith("singleton:"):
+        try:
+            value = int(fact.removeprefix("singleton:"))
+        except ValueError:
+            return None
+        return value, value
+    return None
+
+
+def classify(row: dict[str, str]) -> tuple[str, str]:
+    type_range = TYPE_RANGES.get(row["lhs_type"])
+    lhs = fact_interval(row["lhs_fact"])
+    rhs = fact_interval(row["rhs_fact"])
+    if type_range is None:
+        return "review", "unsupported-or-mismatched-base-type"
+
+    op = row["operator"]
+    if op in ("div", "mod"):
+        if type_range[0] == 0:
+            return "proven", "unsigned-division-has-no-signed-min-overflow"
+        if lhs is not None and not (lhs[0] <= type_range[0] <= lhs[1]):
+            return "proven", "dividend-range-excludes-signed-min"
+        if rhs is not None and not (rhs[0] <= -1 <= rhs[1]):
+            return "proven", "divisor-range-excludes-minus-one"
+        return "review", "cannot-exclude-signed-min-divided-by-minus-one"
+
+    if lhs is None or rhs is None:
+        missing = "both" if lhs is None and rhs is None else (
+            "lhs" if lhs is None else "rhs"
+        )
+        return "review", f"missing-{missing}-range"
+
+    if op == "add":
+        result = (lhs[0] + rhs[0], lhs[1] + rhs[1])
+    elif op == "sub":
+        result = (lhs[0] - rhs[1], lhs[1] - rhs[0])
+    elif op == "mul":
+        products = [a * b for a in lhs for b in rhs]
+        result = min(products), max(products)
+    elif op == "shl":
+        width = type_range[1].bit_length() + (1 if type_range[0] < 0 else 0)
+        if rhs[0] < 0 or rhs[1] >= width:
+            return "review", "shift-count-not-proven-within-width"
+        if lhs[0] < 0:
+            return "review", "negative-left-shift-not-proven-safe"
+        result = lhs[0] << rhs[0], lhs[1] << rhs[1]
+    else:
+        raise AssertionError(f"unexpected audited operator: {op}")
+
+    if type_range[0] <= result[0] and result[1] <= type_range[1]:
+        return "proven", "result-interval-fits-base-type"
+    return "review", "result-interval-may-exceed-base-type"
+
+
+def check_classifier() -> None:
+    def row(op: str, ty: str, lhs: str, rhs: str) -> dict[str, str]:
+        return {
+            "operator": op, "lhs_type": ty,
+            "lhs_fact": lhs, "rhs_fact": rhs,
+        }
+
+    controls = [
+        ("proven", row("add", "u8", "constant:254", "constant:1")),
+        ("review", row("add", "u8", "constant:255", "constant:1")),
+        ("proven", row("sub", "i8", "range:-10..<11", "range:-2..<3")),
+        ("proven", row("mul", "i8", "range:-4..<5", "constant:30")),
+        ("review", row("mul", "i8", "range:-5..<6", "constant:30")),
+        ("proven", row("div", "i32", "unknown", "constant:2")),
+        ("review", row("div", "i32", "unknown", "constant:-1")),
+        ("proven", row("shl", "u8", "constant:1", "constant:7")),
+        ("review", row("shl", "u8", "constant:2", "constant:7")),
+    ]
+    for expected, control in controls:
+        actual, reason = classify(control)
+        if actual != expected:
+            raise RuntimeError(
+                f"classifier control expected {expected}, got {actual}: {reason}"
+            )
 
 
 def surface(path: str) -> str:
@@ -69,8 +172,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build every repository target and write a deduplicated overflow audit TSV"
     )
-    parser.add_argument("output", type=Path)
+    parser.add_argument("output", type=Path, nargs="?")
+    parser.add_argument(
+        "--self-test", action="store_true",
+        help="run arithmetic classifier controls without building",
+    )
     args = parser.parse_args()
+    check_classifier()
+    if args.self_test:
+        print("PASS overflow survey classifier controls")
+        return 0
+    if args.output is None:
+        parser.error("output is required unless --self-test is used")
 
     baseline = subprocess.run(
         ["make", "allbuild"], text=True, stdout=subprocess.PIPE,
@@ -100,7 +213,16 @@ def main() -> int:
             with report.open(newline="") as handle:
                 for row in csv.DictReader(handle, delimiter="\t"):
                     key = (row["file"], row["line"], row["column"], row["operator"])
-                    rows[key] = row
+                    previous = rows.get(key)
+                    if previous is None:
+                        rows[key] = row
+                    else:
+                        # The same shared source can be compiled for several
+                        # targets.  Retain a fact only when every compilation
+                        # agrees, so the source-level verdict is conservative.
+                        for field in ("lhs_type", "lhs_fact", "rhs_type", "rhs_fact"):
+                            if previous[field] != row[field]:
+                                previous[field] = "unknown"
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     ordered = [rows[key] for key in sorted(rows)]
@@ -108,7 +230,13 @@ def main() -> int:
         writer = csv.DictWriter(handle, fieldnames=HEADER, delimiter="\t")
         writer.writeheader()
         for row in ordered:
-            writer.writerow({"surface": surface(row["file"]), **row})
+            classification, reason = classify(row)
+            writer.writerow({
+                "surface": surface(row["file"]),
+                "classification": classification,
+                "proof_reason": reason,
+                **row,
+            })
 
     counts = Counter((surface(row["file"]), row["operator"]) for row in ordered)
     facts = Counter(
@@ -116,6 +244,9 @@ def main() -> int:
          "both-facts" if row["lhs_fact"] != "unknown" and row["rhs_fact"] != "unknown"
          else "missing-fact")
         for row in ordered
+    )
+    classifications = Counter(
+        (surface(row["file"]), classify(row)[0]) for row in ordered
     )
     print(f"wrote {len(ordered)} unique source locations to {args.output}")
     overhead = ((audit_seconds / baseline_seconds) - 1.0) * 100.0
@@ -130,6 +261,8 @@ def main() -> int:
     for key, count in sorted(counts.items()):
         print(f"{key[0]}\t{key[1]}\t{count}")
     for key, count in sorted(facts.items()):
+        print(f"{key[0]}\t{key[1]}\t{count}")
+    for key, count in sorted(classifications.items()):
         print(f"{key[0]}\t{key[1]}\t{count}")
     return 0
 
