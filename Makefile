@@ -71,7 +71,7 @@ FORCE:
 $(TAKIBI): FORCE
 	dune build
 
-## test: run unit tests
+## test: run the ordered unit tests, then one reproducible shuffled pass
 # Depends on `build` (not just order-only) so "dune test" never runs
 # concurrently with "dune build": dune's build-directory lock file is not
 # safe against two concurrent dune invocations racing to create it
@@ -91,9 +91,14 @@ $(TAKIBI): FORCE
 # every failure's detail by grepping dune's own per-test `.output` log
 # files (`--force`'d fresh on every run so a stale log is never mistaken
 # for a current one) and still exits 0/1 like a bare `dune test` would, so
-# nothing downstream that depends on `test`'s exit code changes.
+# nothing downstream that depends on `test`'s exit code changes. The second
+# invocation uses issue #331's original reproducer seed: it interleaves all
+# Alcotest groups deterministically, prints the seed, and keeps each case's
+# original group/name in its shuffled display name. The ordered pass remains
+# first so its stable native Alcotest paths remain available for diagnosis.
 test: build
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env ALCOTEST_COMPACT=1 bash scripts/list_dune_test_failures.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env ALCOTEST_COMPACT=1 SHUFFLE_TESTS=877156326 bash scripts/list_dune_test_failures.sh
 
 ## langcheck: verify that all source files contain only ASCII characters.
 ## Repo-wide (kernel/, examples/, the compiler itself), so this is the one
