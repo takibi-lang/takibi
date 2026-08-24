@@ -67,6 +67,75 @@ exception rejection for each new effect, callback contracts, recursive logging
 paths, and accepted clean helpers. `make test`, `make allbuild`, and
 `make kernelcheck-qemu` passed.
 
+### 2026-08-24: Removing the Last Guessed Ceilings, and Three Values With Undeclared Readers
+
+`KERNEL_PROCESS_MAX` went (issue #392, six staged commits), and with it the
+last array keyed by a process slot. A `ProcessRecord` is an
+`IntrusivePool` allocation; a process slot is that allocation's ADDRESS,
+except the bootstrap, which keeps slot value `0` backed by a static record
+because `kernel_mmu_init` creates root 0 with the MMU off, before anything
+may allocate. Four smaller ceilings followed: the in-page metadata
+reservation (#390, 25 MB of page payload returned), the shared-object
+reference bound (#401) and the page-mapping reference bound (#406) --
+both now COMPUTED from the pools that own their holders rather than
+picked -- and `KERNEL_SOCKET_FD_MAX` (#409), a second name for
+`PROCESS_FD_MAX`.
+
+Three lessons are indexed in `AGENTS.md`'s debugging-techniques section;
+this is the story behind them.
+
+**A value's accidental properties had undeclared readers, three times.**
+Each was found by a test failing loudly, never by reading the code:
+
+- A process slot was also the pid, as `slot + 1`, at about twenty sites.
+  Pooling would have made pids into addresses -- visible to userspace
+  through `getpid()`, printed into every oops line, and matched literally
+  as `pid=1` by the oops lane. Fixed by minting pids before the pooling
+  landed.
+- A page's last 128 bytes were the allocator's owner metadata (#353) --
+  and were ALREADY the pool's own chunk header for a one-page chunk, since
+  #350 moved the header to the chunk's far end. The reservation was not
+  merely consumer-less, it was contradicted; only nobody reading the
+  allocator's interpretation kept it harmless.
+- `intrusive_pool`'s `pool_tag` was compared for equality and also used as
+  an array index and a bit position by `linux_user`'s lock-order checker.
+  Mixing the tag (#399) made all 385 acquires "untracked" and the checker
+  reported success on its own terms; the expected-output diff caught it.
+
+In all three the fix was to delete the second reader's assumption rather
+than restore the accidental property.
+
+**A ten-second boot regression read as a lost SYN-ACK.** #392's first
+working version booted the whole ext2/exec/shell suite and then failed the
+socket fixture: the host peer sent 30 SYNs and saw nothing. Three
+kernel-side hypotheses were refuted one probe each -- IRQs masked
+(`daif_i=0`), RX ring starved (eight free buffers), the new stack-run
+recycling (identical failure with it disabled). Instrumenting the PEER
+settled it in one run: every SYN-ACK had arrived, byte-correct, just after
+the peer gave up. Every 262144-iteration walk over a root's page window now
+validated two pooled records per page -- 6.6 million PTE reads and 22.7
+million validated lookups before the first `listen()`, 13.0s -> 23.7s,
+past the peer's own 15-second budget. The fix was the walk, not the
+validation: an absent L3 branch has no present PTEs, so all three scans ask
+one branch at a time (51923 reads, 9.0s -- faster than before the pooling).
+The scans were always that wasteful; pooling only made it visible.
+
+**Measured before enforced.** #401 and #406 each landed their computed
+bound first as a counter that ALLOWED the violation, then ran a
+deliberately-wrong bound to prove the counter could fire at all. #406's
+first run reported two violations, both the probe forging a count to test
+the constant it was about to lose -- which is why the recording lives at
+the real caller rather than inside the primitive a probe also drives.
+
+**Also from this arc.** A reaped process's kernel stack run cannot be freed
+where it is reaped: 18 of the 35 reaps in one QEMU boot run ON the stack
+they are reaping, so runs are parked and recycled through a one-deep spare.
+`resources: pages=0` still passes with one run held, because the spare is a
+constant eight pages on both sides of the comparison -- not because nothing
+is held. A QEMU lane now checks its own ports before starting (#407), after
+a stale runner's UDP socket produced `error: no UART output captured --
+kernel did not boot` for a kernel that had booted fine.
+
 ### 2026-08-23: Eager Declared-Type Resolution (GitHub Issue #358)
 
 Added one whole-AST pass after monomorphization that resolves the parser's

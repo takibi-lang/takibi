@@ -1171,6 +1171,45 @@ genuinely `tcp.tkb`, two were the host-side harness starting before the
 kernel or the PHY was ready. Check what the runner waits for -- often
 nothing -- before reading the stack.
 
+**A value's accidental properties have readers you never declared -- grep
+the SHAPE, not the name.** Three times in one week's work (issues #392,
+#390, #399), changing what a value IS broke a consumer nobody had written
+down:
+
+| value | its stated meaning | the reader nobody declared |
+|---|---|---|
+| a process slot | index into the process table | `pid = slot + 1`, at about twenty sites |
+| a page's last 128 bytes | the allocator's owner metadata | already the pool's own chunk header, for a one-page chunk |
+| `intrusive_pool`'s `pool_tag` | an identity, compared for equality | an array index AND a bit position, in a `linux_user` checker |
+
+Grepping the NAME finds none of them, because the dependency is
+arithmetic. Grep for the shape instead -- `+ 1`, `- 1`, the value used as
+`[index]`, `1 << value`, bare small literals where the value belongs --
+before changing what a value means. And expect the fix to be "delete the
+second reader's assumption", not "preserve the accidental property": all
+three went that way. In all three it was a test that failed loudly, not a
+careful reading, that found it.
+
+**Instrument the OTHER side.** Issue #392's last stage looked exactly like
+a lost SYN-ACK: the host peer sent 30 SYNs and saw nothing. Three
+kernel-side hypotheses were refuted one probe each (IRQs masked? RX ring
+starved? memory corrupted?) before the peer itself was made to print what
+it received -- and it had received every SYN-ACK, byte-correct, just after
+it had given up. The kernel was ten seconds late to `listen()`. When a
+test has two sides, the side you are not changing is where the cheap
+answer usually is.
+
+**Measure an invariant before enforcing it, and prove the counter can
+fire.** Issues #401 and #406 each replaced a picked constant with a
+computed bound. Both landed first as a counter that ALLOWED the violation,
+run over the whole boot suite; both then ran a deliberately-wrong bound to
+confirm the counter was reached at all. Without that second run, "zero
+violations" and "the code is unreachable" are the same observation. #406's
+first run reported two violations, and both turned out to be the probe
+forging a count to test the constant it was about to lose -- which is also
+why the recording belongs at the real caller, not inside the primitive a
+probe drives.
+
 **Grep the whole repo before calling code dead.** A whole-program build
 means callers live in other subtrees, and `examples/` and `linux_user/`
 have their own Makefiles. `make allbuild` finds what a regex survey does
