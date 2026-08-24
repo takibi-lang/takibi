@@ -3652,21 +3652,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                               | Some t -> t | None -> idx_ty_raw)
                   | _ -> idx_ty_raw))
       in
-      (* Array load [T; N]: skip bounds check when TypeRefined proves safety,
-         or (P4c-1, same as sub_of_slice below) when the access is wrapped
-         in unsafe -- an explicit "trust me" for an index the interval
-         machinery can't close, no trap site recorded. *)
+      (* Array load [T; N]: type inference records the ValueFacts bounds
+         decision for this exact index expression. An unsafe access remains
+         an explicit "trust me" when that proof is absent. *)
       let load_from_array elem_ty n arr_ptr =
-        let legacy_proven = match refinement_range idx_ty with
-          | Some (lo, hi) -> lo >= 0 && hi <= n
-          | _ -> false
-        in
         let checker_proven =
           Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc in
-        if legacy_proven && not checker_proven then
-          raise (Error (Printf.sprintf
-            "value-facts parity: LLVM proved an array index in bounds at %s:%d but type inference did not"
-            (Ast.source_file_of_loc idx.loc) idx.loc.Lexing.pos_lnum));
         let needs_check = not checker_proven in
         if needs_check && !unsafe_depth = 0 then emit_bounds_check e.loc idx_ty idx_v n
         else if needs_check then note_unsafe_use ();
@@ -4630,16 +4621,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let (_, rhs_v) = gen_expr ?expected_ty:elem_ty_hint locals rhs in
            let same_base_key = match base.desc with Ast.Var n -> Some n | _ -> None in
            let store_to_array elem_ty n arr_ptr =
-             let legacy_proven = match refinement_range idx_ty with
-               | Some (lo, hi) -> lo >= 0 && hi <= n
-               | _ -> false
-             in
              let checker_proven =
                Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc in
-             if legacy_proven && not checker_proven then
-               raise (Error (Printf.sprintf
-                 "value-facts parity: LLVM proved an array index in bounds at %s:%d but type inference did not"
-                 (Ast.source_file_of_loc idx.loc) idx.loc.Lexing.pos_lnum));
              let needs_check = not checker_proven in
              if needs_check && !unsafe_depth = 0 then
                emit_bounds_check idx.loc idx_ty idx_v n
@@ -4799,16 +4782,8 @@ and gen_index_place locals (base : Ast.expr) (idx : Ast.expr) loc
   let same_base_key = match base.desc with Ast.Var n -> Some n | _ -> None in
   match resolve_index_storage ~op:"Index" locals base with
   | IdxArray (elem_ty, n, array_place) ->
-      let legacy_proven = match refinement_range idx_ty with
-        | Some (lo, hi) -> lo >= 0 && hi <= n
-        | None -> false
-      in
       let checker_proven =
         Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc in
-      if legacy_proven && not checker_proven then
-        raise (Error (Printf.sprintf
-          "value-facts parity: LLVM proved an array index in bounds at %s:%d but type inference did not"
-          (Ast.source_file_of_loc idx.loc) idx.loc.Lexing.pos_lnum));
       let needs_check = not checker_proven in
       if needs_check && !unsafe_depth = 0 then
         emit_bounds_check loc idx_ty idx_v n
