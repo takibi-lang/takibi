@@ -28,7 +28,7 @@ fn try_divide(a: i32, b: i32) -> (bool, i32) {
         return (false, 0);
     }
     if (b == -1) {
-        if (a == (0 - 2147483648)) {
+        if (a == builtin::i32_min()) {
             return (false, 0);
         }
         return (true, 0 - a);

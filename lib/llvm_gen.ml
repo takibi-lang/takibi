@@ -4241,6 +4241,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       if is_volatile then set_volatile true store;
       (value_ty, old_value)
 
+  | Call (("i32_min" | "i32_max") as name, []) ->
+      let value = if name = "i32_min" then -2147483648L else 2147483647L in
+      (TypeRefined
+         (Int64.to_int value, Int64.to_int value + 1, TypeI32),
+       const_of_int64 (i32_type context) value true)
+
   | Call (("checked_add_usize" | "checked_mul_usize") as name,
           [left_e; right_e]) ->
       let (_, left) = gen_expr ~expected_ty:TypeUsize locals left_e in

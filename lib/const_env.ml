@@ -85,6 +85,8 @@ let checked_div a b =
 
 let rec folded_value (e : Ast.expr) =
   match e.Ast.desc with
+  | Ast.Call ("i32_min", []) -> Some (-2147483648)
+  | Ast.Call ("i32_max", []) -> Some 2147483647
   | Ast.IntLit n -> Ast.int_of_intlit n
   | Ast.Var name -> find name
   | Ast.BinOp (Ast.Add, a, b) ->

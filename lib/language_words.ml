@@ -25,6 +25,7 @@ let contextual_keywords = []
 
 let compiler_builtins = [
   "slice_copy"; "slice_eq"; "stable_replace"; "min"; "max";
+  "i32_min"; "i32_max";
   "dma_publish"; "dma_consume"; "device_fence"; "signal_fence";
   "interrupt_wait"; "interrupt_notify";
   "dma_prepare_tx"; "dma_prepare_rx"; "dma_finish_rx";

@@ -1427,6 +1427,12 @@ let parser_tests = [
             | Ast.Call ("min", [_; _]) -> ()
             | _ -> Alcotest.fail "expected namespaced min to become a builtin call")
        | _ -> Alcotest.fail "unexpected namespaced-builtin AST");
+      (match parse "fn f() -> i32 { return builtin::i32_min(); }" with
+       | [Ast.FuncDef { body = [{ desc = Ast.Return (Some e); _ }]; _ }] ->
+           (match e.desc with
+            | Ast.Call ("i32_min", []) -> ()
+            | _ -> Alcotest.fail "expected namespaced i32_min builtin call")
+       | _ -> Alcotest.fail "unexpected i32_min AST");
       expect_type_error "unknown compiler builtin 'missing'"
         "fn f() { builtin::missing(); }" ());
 
@@ -10249,6 +10255,19 @@ let codegen_tests = [
         fn constant_div65(x: i32) -> i32 {
           return (x / DIVISOR65) + (x % DIVISOR65);
         }");
+
+  Alcotest.test_case "namespaced i32 limit builtins lower as exact constants" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "fn min_limit65() -> i32 { return builtin::i32_min(); }
+         fn max_limit65() -> i32 { return builtin::i32_max(); }");
+      let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+      Alcotest.(check bool) "minimum constant" true
+        (contains_substring ir "ret i32 -2147483648");
+      Alcotest.(check bool) "maximum constant" true
+        (contains_substring ir "ret i32 2147483647");
+      expect_type_error "expects no arguments"
+        "fn bad_limit65() -> i32 { return builtin::i32_min(0); }" ());
 
   Alcotest.test_case "signed remainder by minus one is defined without a trap" `Quick
     (fun () ->

@@ -429,6 +429,12 @@ parameter value, or top-level declaration name.
   lower bound, similarly. When both arguments have a known bound, the
   tighter combined range is proven; an unconstrained operand falls back
   to a wide (but not unsound) sentinel range.
+- `builtin::i32_min()` / `builtin::i32_max()` -- exact `i32` limits. They
+  carry singleton value facts, so they can be used directly in comparisons
+  and overflow guards without repeating width-dependent decimal literals.
+  The explicit namespace is preferred at call sites for these constant-like
+  zero-argument builtins. Other primitive widths are added only when a
+  maintained source use requires them.
 - `checked_add_usize(a, b)` / `checked_mul_usize(a, b)` -- reserved
   compiler builtins for native-width unsigned arithmetic. Both operands
   must be `usize`, and the program must declare the standard result shape

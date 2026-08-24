@@ -3338,6 +3338,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc, Printf.sprintf
            "%s expects two arguments: %s(ptr, len)" fname fname)))
 
+  | Call (("i32_min" | "i32_max") as fname, args) ->
+      if args <> [] then
+        raise (TypeError (e.loc, Printf.sprintf
+          "%s expects no arguments: builtin::%s()" fname fname));
+      let value = if fname = "i32_min" then -2147483648 else 2147483647 in
+      TRefinedInt (value, value + 1, TI32)
+
   | Call (("checked_add_usize" | "checked_mul_usize") as fname, args) ->
       (match Hashtbl.find_opt variant_defs "CheckedUsize" with
        | Some cases ->
