@@ -10269,6 +10269,22 @@ let codegen_tests = [
       expect_type_error "expects no arguments"
         "fn bad_limit65() -> i32 { return builtin::i32_min(0); }" ());
 
+  Alcotest.test_case "explicit wrapping multiply lowers to fixed-width arithmetic" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "fn wrap_mul65(a: u32, b: u32) -> u32 {
+           return builtin::wrapping_mul_u32(a, b);
+         }");
+      Alcotest.(check int) "wrapping is not a trap obligation" 0
+        (List.length !Llvm_gen.trap_sites);
+      let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+      Alcotest.(check bool) "u32 multiply" true
+        (contains_substring ir "mul i32");
+      expect_type_error "expects two arguments"
+        "fn bad_wrap65(a: u32) -> u32 {
+           return builtin::wrapping_mul_u32(a);
+         }" ());
+
   Alcotest.test_case "signed remainder by minus one is defined without a trap" `Quick
     (fun () ->
       ignore (gen_codegen

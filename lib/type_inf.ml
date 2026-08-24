@@ -3345,6 +3345,17 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       let value = if fname = "i32_min" then -2147483648 else 2147483647 in
       TRefinedInt (value, value + 1, TI32)
 
+  | Call ("wrapping_mul_u32" as fname, args) ->
+      (match args with
+       | [left; right] ->
+           let lt = infer_expr senv eenv tyenv fenv left in
+           let rt = infer_expr senv eenv tyenv fenv right in
+           unify_at left.loc lt TU32;
+           unify_at right.loc rt TU32;
+           TU32
+       | _ -> raise (TypeError (e.loc, Printf.sprintf
+           "%s expects two arguments: builtin::%s(left, right)" fname fname)))
+
   | Call (("checked_add_usize" | "checked_mul_usize") as fname, args) ->
       (match Hashtbl.find_opt variant_defs "CheckedUsize" with
        | Some cases ->

@@ -4247,6 +4247,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          (Int64.to_int value, Int64.to_int value + 1, TypeI32),
        const_of_int64 (i32_type context) value true)
 
+  | Call ("wrapping_mul_u32", [left_e; right_e]) ->
+      let (_, left) = gen_expr ~expected_ty:TypeU32 locals left_e in
+      let (_, right) = gen_expr ~expected_ty:TypeU32 locals right_e in
+      (TypeU32, build_mul left right "wrapping.mul" builder)
+
   | Call (("checked_add_usize" | "checked_mul_usize") as name,
           [left_e; right_e]) ->
       let (_, left) = gen_expr ~expected_ty:TypeUsize locals left_e in

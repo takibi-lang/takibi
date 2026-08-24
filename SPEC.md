@@ -359,7 +359,11 @@ parameter value, or top-level declaration name.
   (see the `cond` rule under "Statements" above).
   Bitwise: `~` (unary NOT), `>>` (right shift -- arithmetic/sign-extending
   for signed types, logical/zero-extending for unsigned), `<<`, `&`, `|`,
-  `^`. Both operands of a bitwise op must be the same integer type.
+  `^`. Both operands of a bitwise op must be the same integer type. Left
+  shift is a fixed-width bit operation: result bits above the left operand's
+  width are discarded rather than treated as arithmetic overflow. A
+  compile-time-known shift amount greater than or equal to that width is a
+  compile error.
 - Unary minus (`-expr`) desugars to `BinOp(Sub, IntLit 0, expr)` in the
   parser; no separate AST node.
 - `expr as T` -- explicit cast: integer widths (including `isize`/
@@ -435,6 +439,10 @@ parameter value, or top-level declaration name.
   The explicit namespace is preferred at call sites for these constant-like
   zero-argument builtins. Other primitive widths are added only when a
   maintained source use requires them.
+- `builtin::wrapping_mul_u32(a, b)` -- explicit fixed-width multiplication
+  modulo 2^32 for algorithms whose specified result wraps. This initial
+  operation and width are the concrete form used by the maintained DJB2
+  implementation; this is deliberately not a maximal wrapping API.
 - `checked_add_usize(a, b)` / `checked_mul_usize(a, b)` -- reserved
   compiler builtins for native-width unsigned arithmetic. Both operands
   must be `usize`, and the program must declare the standard result shape

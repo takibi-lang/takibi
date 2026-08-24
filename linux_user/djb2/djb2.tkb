@@ -3,7 +3,7 @@
 fn djb2(s: *u8) u32 {
     let mut hash: u32 = 5381;
     while (*s != 0) {
-        hash = ((hash << 5) + hash) ^ (*s as u32);
+        hash = builtin::wrapping_mul_u32(hash, 33) ^ (*s as u32);
         s = s + 1;
     }
     return hash;
