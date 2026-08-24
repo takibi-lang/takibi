@@ -126,9 +126,14 @@ if ! grep -Eq "^oops: fail-stop seq=[1-9][0-9]* cpu=[0-9]+ slot=8 ec=0x000000000
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi
+# GitHub issue #402: `asid=` is matched as "some assigned number", not as
+# the literal 1 it used to be. A root's ASID is not its identity any more --
+# the allocator recycles numbers by rolling the generation over, so root 0
+# holds whatever number its last activation gave it. What still has to be
+# true is that a running root has one at all, which a nonzero value says.
 if [ "$MODE" != child_exec ] &&
         { ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=7 pid=1 gen=[1-9][0-9]* ' "$UART_LOG" ||
-          ! grep -Eq '^oops: process pid=1 parent=0 state=2 wait=0 wait4_status_ptr=0x0+ root=0 asid=1 .* image=bootstrap$' "$UART_LOG"; }; then
+          ! grep -Eq '^oops: process pid=1 parent=0 state=2 wait=0 wait4_status_ptr=0x0+ root=0 asid=[1-9][0-9]* .* image=bootstrap$' "$UART_LOG"; }; then
     echo "FAIL kernel/qemu oops: expected bootstrap process trace" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1

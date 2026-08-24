@@ -600,8 +600,14 @@ fn kernel_test_common_probes() {
     } else {
         kernel_boot_log("intrusive pool: failed\n");
     }
-    if (asid_pool_probe()) {
-        kernel_boot_log("asid pool: exhaustion, reuse-after-free, transfer round-trip, double-free counted ok\n");
+    if (address_space_asid_rollover_probe()) {
+        // The width is PRINTED, not asserted in the message: the view
+        // fixture is what says this hardware reports 16, so a part that
+        // reported 8 would fail the view rather than quietly log a claim
+        // the probe never checked.
+        kernel_boot_log("asid pool: ");
+        uart_put_udec(asid_width_bits());
+        kernel_boot_log("-bit width from the hardware, rollover past the last number advances the generation and reassigns, no process refused ok\n");
     } else {
         kernel_boot_log("asid pool: failed\n");
     }

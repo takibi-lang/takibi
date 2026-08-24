@@ -11930,6 +11930,7 @@ let codegen_tests = [
          expect_type_error "compiler builtin"
            (Printf.sprintf "fn %s() {}" name) ())
          ["mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1";
+          "mrs_id_aa64mmfr0_el1";
           "msr_daifclr_irq"; "msr_daifset_irq"; "tlbi_vmalle1";
           "dsb_ish"; "dsb_ishst"; "isb"];
        List.iter (fun name ->
@@ -11954,7 +11955,7 @@ let codegen_tests = [
             dsb_ish();
             isb();
             msr_daifset_irq();
-            return mrs_sctlr_el1();
+            return mrs_sctlr_el1() | mrs_id_aa64mmfr0_el1();
           }"
        in
        let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_issue226_regs" with
@@ -11964,6 +11965,9 @@ let codegen_tests = [
        let ir = Llvm.string_of_llvalue fn in
        Alcotest.(check bool) "msr ttbr0_el1" true
          (contains_substring ir "msr ttbr0_el1, $0");
+       (* GitHub issue #402 *)
+       Alcotest.(check bool) "mrs id_aa64mmfr0_el1" true
+         (contains_substring ir "mrs $0, id_aa64mmfr0_el1");
        Alcotest.(check bool) "tlbi vaae1is" true
          (contains_substring ir "tlbi vaae1is, $0");
        Alcotest.(check bool) "dsb ish" true (contains_substring ir "dsb ish");

@@ -1,181 +1,136 @@
 // GitHub issue #254 design conclusion (2026-08-09): ASID assignment must be
 // independent of a page-table storage slot. A heap-owned page table has no
-// slot from which to derive an ASID; this pool gives it a matching lifetime.
+// slot from which to derive an ASID; this allocator gives it a matching
+// lifetime.
 //
-// A real hardware ASID-width query is a later refinement, out of scope
-// here; see ASID_MAX's own note for what the number is now and why. This pool's own index space is 0..<ASID_MAX, and every ASID
-// value handed to a caller is index + 1, so ASID 0 is never assigned.
+// GitHub issue #402 removed the last fixed ceiling on process creation from
+// this file, in the two halves that issue named.
 //
-// SlotMap(N), not bare FreelistCore(N): per kernel/lib/slotmap.tkb's own
-// stated default ("use SlotMap(N) for any fixed-capacity slot pool... at
-// the cost of one extra usize per slot"), and this pool is exactly the
-// small-N case that default is for, and stays so at 255: one extra usize
-// per slot is 2 KiB of BSS for the whole pool.
+// **The width is asked for, not assumed.** ID_AA64MMFR0_EL1.ASIDBits says
+// whether the implementation has 8-bit or 16-bit ASIDs; both QEMU virt
+// (Cortex-A53) and RPi5 (Cortex-A76) report 16, which is 65535 assignable
+// numbers rather than the 255 the architectural floor guarantees.
+// TCR_EL1.AS is set to match in kernel/arch/arm64/mm/mmu.tkb's
+// kernel_mmu_activate, because the two have to agree or the hardware reads
+// a different number of bits than the software writes.
 //
-// Issue #264 now consumes this pool from kernel/mm/address_space.tkb. The
-// latter keeps the transitional bounded slot -> backing-record table and
-// passes only the resolved numeric ASID to mmu.tkb.
+// **A number is reclaimed by rolling over, not by being freed.** That is
+// what makes exhaustion stop being a refusal: assignment is a counter, and
+// when the counter passes the last number it advances a GENERATION,
+// invalidates every TLB entry, and starts again at 1. An address space
+// whose recorded generation is not the current one no longer owns its
+// number -- it is given a fresh one the next time it is activated
+// (kernel/mm/address_space.tkb's address_space_activate), which is the one
+// place a root reaches TTBR0_EL1. So asid_assign() cannot fail, and no
+// process is ever refused for want of an ASID.
+//
+// Why there is no free list any more, and no linear AsidOwner: a freed
+// ASID used to be returned to a SlotMap so it could be handed out again.
+// With a generation there is nothing to return -- an abandoned number is
+// reclaimed in bulk at the next rollover -- so the obligation a linear
+// owner existed to enforce does not exist. What replaced "give it back" is
+// "outlive the generation", and what checks it is the generation stamp
+// stored beside the number.
 //
 // Current limitations:
-// - NOT SYNCHRONIZED, same caveat as kernel/lib/freelist.tkb/slotmap.tkb --
-//   this pool is reachable only from single-core boot/syscall-dispatch
-//   context today, same as every other kernel/lib-backed pool in kernel/.
-// - Capacity is fixed at ASID_MAX; a real ASID-width query (ID_AA64MMFR0_
-//   EL1.ASIDBits) is not implemented, so this assumes at least an 8-bit
-//   ASID field, which is universally true on AArch64.
-use "kernel/lib/slotmap.tkb";
-use "kernel/lib/freelist.tkb";
+// - NOT SYNCHRONIZED, and the rollover assumes a single core is running
+//   user code. `tlbi vmalle1` invalidates the LOCAL TLB; a second core
+//   executing user code with an ASID that is about to be reassigned would
+//   keep stale entries. That is true of this kernel's scheduler generally
+//   (GitHub issue #222: the scheduler globals are not per-core), and this
+//   file's assumption is exactly as strong as that one, not stronger.
+// - A number is not reused until the next rollover even if the address
+//   space holding it dies immediately. Linux keeps a bitmap and reuses
+//   freed numbers within a generation; here 65535 process creations
+//   between two whole-TLB invalidations is cheap enough that the bitmap is
+//   not worth its own state. What this costs is measured by
+//   asid_rollover_count(), which the boot suite prints.
+// - Nothing here ever invalidates by ASID on its own behalf. A rollover
+//   invalidates everything; a page-table change invalidates through
+//   kernel/mm/address_space.tkb, which still knows the number it recorded.
 
-// GitHub issue #392: 255, which is what an 8-bit ASID field offers minus
-// the never-assigned 0 -- the floor this file already assumed ("this
-// assumes at least an 8-bit ASID field, which is universally true on
-// AArch64"). It used to be 16 because it matched the process table's
-// size, and a static_assert enforced that; the process table has no size
-// any more, so the number that is left is the hardware's. A real
-// ID_AA64MMFR0_EL1.ASIDBits query would raise it to 65535 on parts that
-// implement 16-bit ASIDs, and is still not implemented -- the point of
-// this change is that the number stops being a restatement of a guess,
-// not that it becomes the largest possible.
+// The architectural floor: every AArch64 implementation has at least an
+// 8-bit ASID field, so this is what the width query falls back to when it
+// reports anything this file does not recognise.
+const ASID_BITS_FLOOR: usize = 8;
+
+private let mut asid_bits: usize = ASID_BITS_FLOOR;
+// The highest assignable number. ASID 0 is never assigned -- it is the
+// value TTBR0_EL1 holds before any address space exists, and treating it
+// as "no ASID" is what lets address_space.tkb test `asid != 0`.
+private let mut asid_last: usize = 255;
+private let mut asid_generation: usize = 1;
+private let mut asid_next: usize = 1;
+private let mut asid_rollover_count: usize = 0;
+private let mut asid_assign_count: usize = 0;
+private let mut asid_ready: bool = false;
+
+// Called from kernel_mmu_init with the MMU OFF: an mrs and some
+// arithmetic, no allocation, nothing that touches a page that is not
+// mapped yet (see kernel/MEMORY_MAP.md's note on that window).
+fn asid_init() {
+    if (asid_ready) { return; }
+    asid_ready = true;
+    asid_bits = mmu_asid_bits();
+    // 1 << 16 is 65536 numbers, of which 65535 are assignable.
+    asid_last = (1 << asid_bits) - 1;
+    asid_generation = 1;
+    asid_next = 1;
+}
+
+fn asid_width_bits() -> usize {
+    return asid_bits;
+}
+
+fn asid_highest_value() -> usize {
+    return asid_last;
+}
+
+fn asid_current_generation() -> usize {
+    return asid_generation;
+}
+
+fn asid_rollover_count_value() -> usize {
+    return asid_rollover_count;
+}
+
+fn asid_assign_count_value() -> usize {
+    return asid_assign_count;
+}
+
+// Does this recorded stamp still name the generation the hardware's TLB is
+// tagged for? A stamp of 0 is "never assigned" and is never current.
+fn asid_generation_is_current(generation: usize) -> bool {
+    if (generation == 0) { return false; }
+    return generation == asid_generation;
+}
+
+// The whole cost of the scheme, in one place. Every number is about to be
+// handed out again, so every entry tagged with one has to go.
+private fn asid_rollover() {
+    asid_generation = asid_generation + 1;
+    asid_next = 1;
+    asid_rollover_count = asid_rollover_count + 1;
+    mmu_tlb_invalidate_all();
+}
+
+// (asid, generation). Cannot fail: the caller that used to have to handle
+// AsidAllocResult::Full has nothing left to handle, which is the point of
+// issue #402.
 //
-// This is the one remaining fixed ceiling on the process path: a 256th
-// concurrent live address space is refused with AsidAllocResult::Full,
-// which surfaces as AddressSpaceEnsureResult::AsidExhausted and a logged
-// exhaustion line. Recycling an ASID from a live address space (Linux's
-// rollover) is what a real fix looks like and is not implemented.
-const ASID_MAX: usize = 255;
-
-private let mut asid_pool: SlotMap(ASID_MAX);
-
-linear struct AsidOwner[asid: usize] {
-    private index: {0..<ASID_MAX as usize};
-    private generation: usize @ asid;
-}
-
-must_use variant AsidAllocResult {
-    Full;
-    Allocated(exists asid: usize. AsidOwner[asid]);
-}
-
-fn asid_owner_new(index: {0..<ASID_MAX as usize}, generation: usize @ asid)
-        -> AsidOwner[asid] {
-    let mut owner: AsidOwner[asid] = { index, generation };
-    return owner;
-}
-
-fn asid_pool_init() {
-    slotmap_init(&asid_pool);
-}
-
-fn asid_alloc() -> AsidAllocResult {
-    match slotmap_insert(&asid_pool) {
-        FreelistPopResult::Empty => { return AsidAllocResult::Full; }
-        FreelistPopResult::Popped(popped) => {
-            let (index, generation) = freelist_owner_into_parts(popped);
-            if (index < ASID_MAX) {
-                let checked: {0..<ASID_MAX as usize} = index;
-                return AsidAllocResult::Allocated(
-                    asid_owner_new(checked, generation));
-            }
-            return AsidAllocResult::Full;
-        }
-    }
-}
-
-// The real numeric ASID (1..ASID_MAX) to encode into TTBR0_EL1/TLBI --
-// mirrors kernel/mm/page.tkb's page_physical_address.
-fn asid_value(owner: borrow AsidOwner[asid]) -> usize {
-    return owner.index + 1;
-}
-
-fn asid_free(owner: sink AsidOwner[asid]) {
-    let index: usize = owner.index;
-    let generation: usize = owner.generation;
-    slotmap_remove(&asid_pool, freelist_owner_new(index, generation));
-}
-
-// Transfers responsibility for an allocated ASID into a coarser owner (a
-// future per-process struct) that will hold it as a plain usize long-term --
-// same idiom as kernel/mm/page.tkb's page_owner_transfer_index.
-fn asid_owner_transfer(owner: sink AsidOwner[asid]) -> usize {
-    return owner.index + 1;
-}
-
-// Paired release for asid_owner_transfer, same generation-agnostic
-// reasoning as kernel/mm/page.tkb's page_transferred_release: the
-// double-free check only reads whether the slot is presently marked
-// occupied, so a fabricated generation of 0 is exactly as sound here as
-// the real one would be.
-fn asid_transferred_release(asid: usize) {
-    // `asid < 1` (not `asid == 0`): equivalent for an unsigned asid, but
-    // `<`/`>` narrow this file's range-narrowing machinery the same way
-    // the already-supported `if (v >= 0 && v < N)` wrapping-if form does,
-    // where `==`/`!=` do not -- GitHub issue #296 extended fallthrough
-    // narrowing to this function's own `asid` parameter (previously
-    // excluded, being non-`let`), which surfaced that `asid - 1` below
-    // could not be proven non-negative from the `!=`-shaped guard's own
-    // negation even though it always is at runtime (the guard already
-    // rules out asid == 0). Rewritten rather than left unproven or
-    // marked unsafe, since an equivalent, already-provable condition
-    // shape was available.
-    if (asid < 1 || asid > ASID_MAX) { return; }
-    let index: usize = asid - 1;
-    slotmap_remove(&asid_pool, freelist_owner_new(index, 0));
-}
-
-fn asid_pool_double_free_count() -> usize {
-    return slotmap_double_remove_count(&asid_pool);
-}
-
-// Boot self-test: runs against the production pool without reinitializing it
-// (root 0's permanent bootstrap ASID is already live). It exhausts every
-// currently-free ASID, then confirms transfer/release/reuse and double-free
-// accounting without ever disturbing an address space that owns an ASID.
-fn asid_pool_probe() -> bool {
-    let mut owners: [usize; ASID_MAX];
-    let mut count: usize = 0;
-    for i: usize in 0..<ASID_MAX {
-        match asid_alloc() {
-            AsidAllocResult::Full => {}
-            AsidAllocResult::Allocated(owner) => {
-                let value: usize = asid_value(owner);
-                if (value == 0 || value > ASID_MAX) {
-                    asid_free(owner);
-                    return false;
-                }
-                owners[i] = asid_owner_transfer(owner);
-                count = count + 1;
-            }
-        }
-    }
-    match asid_alloc() {
-        AsidAllocResult::Full => {}
-        AsidAllocResult::Allocated(extra) => {
-            asid_free(extra);
-            return false;
-        }
-    }
-    if (count == 0) { return false; }
-    let freed_asid: usize = owners[0];
-    asid_transferred_release(freed_asid);
-    let mut reused_ok: bool = false;
-    match asid_alloc() {
-        AsidAllocResult::Full => {}
-        AsidAllocResult::Allocated(reused) => {
-            if (asid_value(reused) == freed_asid) { reused_ok = true; }
-            owners[0] = asid_owner_transfer(reused);
-        }
-    }
-    if (reused_ok == false) { return false; }
-    let before_double_free: usize = asid_pool_double_free_count();
-    asid_transferred_release(freed_asid);
-    asid_transferred_release(freed_asid);
-    if (asid_pool_double_free_count() != before_double_free + 1) {
-        return false;
-    }
-    for i: usize in 1..<ASID_MAX {
-        if (i < count) {
-            asid_transferred_release(owners[i]);
-        }
-    }
-    return true;
+// **Call this only when switching to the address space that will hold the
+// result.** A rollover hands the numbers of every live address space to
+// somebody else, which is safe exactly because none of them is executing:
+// the one that was is the one being switched away from, and the one that
+// will be is the one taking the number this returns. Assigning at
+// CREATION time instead would roll over underneath a running address
+// space and alias its TLB entries with the new one's -- which is why a
+// new root is created with no ASID at all and gets one at its first
+// activation, the same lifetime Linux gives an mm.
+fn asid_assign() -> (usize, usize) {
+    if (asid_next > asid_last) { asid_rollover(); }
+    let value: usize = asid_next;
+    asid_next = asid_next + 1;
+    asid_assign_count = asid_assign_count + 1;
+    return (value, asid_generation);
 }

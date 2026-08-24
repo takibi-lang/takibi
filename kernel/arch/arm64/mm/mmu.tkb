@@ -82,6 +82,29 @@ fn mmu_tlb_invalidate_asid(asid: usize) {
     isb();
 }
 
+// GitHub issue #402: every entry, whatever it is tagged with. This is what
+// an ASID rollover costs, and the reason a rollover is rare rather than
+// forbidden. `tlbi vmalle1` is the LOCAL TLB -- see asid.tkb's own
+// limitations note on the single-core assumption that rests on.
+fn mmu_tlb_invalidate_all() {
+    dsb_ishst();
+    tlbi_vmalle1();
+    dsb_ish();
+    isb();
+}
+
+// GitHub issue #402: ID_AA64MMFR0_EL1.ASIDBits, field [7:4]. 0b0000 says
+// the implementation has 8-bit ASIDs and 0b0010 says 16-bit; the field has
+// no other defined value, and anything else is read as the architectural
+// floor rather than believed. Both targets this kernel runs on report 16
+// (Cortex-A53 and Cortex-A76), which is why the number that replaced
+// ASID_MAX = 255 is 65535.
+fn mmu_asid_bits() -> usize {
+    let field: usize = (mrs_id_aa64mmfr0_el1() >> 4) & 0xF;
+    if (field == 2) { return 16; }
+    return 8;
+}
+
 // GitHub issue #237: the layout constants and device blocks are supplied by
 // the selected platform mmu_layout.tkb. This function is deliberately a
 // pure construction operation over its two fixed resolved backing pages.
@@ -123,7 +146,13 @@ fn kernel_mmu_activate(l1_physical: usize, asid: usize) {
 
     // 37-bit VA, 40-bit PA, 4KB granule, WB inner-shareable walks, TTBR1
     // disabled.
-    let tcr: usize = 0x351b | (1 << 23) | (2 << 32);
+    let mut tcr: usize = 0x351b | (1 << 23) | (2 << 32);
+    // GitHub issue #402: TCR_EL1.AS (bit 36) selects how many of
+    // TTBR0_EL1[63:48] the hardware reads as the ASID. It has to agree with
+    // what kernel/arch/arm64/mm/asid.tkb hands out, or the software counts
+    // in 16 bits while the hardware compares 8 and two address spaces
+    // silently share a tag.
+    if (mmu_asid_bits() == 16) { tcr = tcr | (1 << 36); }
     msr_tcr_el1(tcr);
 
     mmu_activate_root(l1_physical, asid);

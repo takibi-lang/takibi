@@ -18,7 +18,10 @@ use "kernel/mm/address_space.tkb";
 //   IntrusivePool allocation, so the page allocator is the only limit
 //   (issue #392). The bootstrap is the exception and is a static record
 //   named by slot value 0, because root 0 exists before the MMU is on.
-//   ASID_MAX (255) is the one fixed ceiling left on the creation path.
+//   Nothing on the creation path has a fixed ceiling any more: the ASID
+//   was the last one, and issue #402 replaced it with a generation that
+//   rolls over (kernel/arch/arm64/mm/asid.tkb) rather than a number that
+//   runs out.
 //   A kernel stack run is recycled through a one-deep spare rather than
 //   freed at reap, because a reap usually runs ON the stack it is
 //   reaping. See `kernel/RESOURCE_LIMITS.md` for the full
@@ -1047,11 +1050,6 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
         AddressSpaceEnsureResult::OutOfMemory => {
             kernel_boot_log_resource_exhausted(
                 "physical page allocator" as *u8, BOOT_PAGE_COUNT);
-            scheduled_process_slot_remove(slot);
-            return ScheduledProcessAllocResult::Full;
-        }
-        AddressSpaceEnsureResult::AsidExhausted => {
-            kernel_boot_log_resource_exhausted("ASID pool" as *u8, ASID_MAX);
             scheduled_process_slot_remove(slot);
             return ScheduledProcessAllocResult::Full;
         }

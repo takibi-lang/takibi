@@ -76,7 +76,7 @@ build; the boundaries are what matter.
 |---|---|---|---|---|
 | `_start` | `0x00200000` | `0x40000000` | linker script `.` assignment | CHECKED (ELF) |
 | `__bss_start` | `0x00636000` | `0x40435000` | linker script `.bss` | CHECKED (ELF) |
-| `__bss_end` | `0x00b17030` | `0x4091cfc0` | linker script `.bss` | CHECKED (ELF) |
+| `__bss_end` | `0x00b16030` | `0x4091bfe0` | linker script `.bss` | CHECKED (ELF) |
 | `boot_stack_run_bottom` | `0x00b18000` | `0x40920000` | linker script `.stack` | CHECKED (ELF) |
 | `boot_stack_bottom` | `0x00b1c000` | `0x40924000` | linker script `.stack` | CHECKED (ELF) |
 | `boot_stack_top` | `0x00b20000` | `0x40928000` | linker script `.stack` | CHECKED (ELF) |
@@ -137,7 +137,7 @@ State: **HAND**. The numbers behind it are CHECKED (const) below.
 | `BOOT_PAGE_COUNT` | 204800 | `kernel/mm/page.tkb` | CHECKED (const) |
 | `KERNEL_STACK_PAGES` | 4 | `kernel/kernel/process.tkb` | CHECKED (const) |
 | `KERNEL_STACK_SHIFT` | 14 | `kernel/kernel/process.tkb` | CHECKED (const) |
-| `ASID_MAX` | 255 | `kernel/arch/arm64/mm/asid.tkb` | CHECKED (const) |
+| `ASID_BITS_FLOOR` | 8 | `kernel/arch/arm64/mm/asid.tkb` | CHECKED (const) |
 | `USER_SPACE_PAGE_COUNT` | 262144 | `kernel/mm/address_space.tkb` | CHECKED (const) |
 | `USER_RANGE_WINDOW` | `0x40000000` | `kernel/mm/user_memory.tkb` | CHECKED (const) |
 | `PROCESS_HEAP_PAGES_DEFAULT` | 128 | `kernel/mm/process_image.tkb` | CHECKED (const) |

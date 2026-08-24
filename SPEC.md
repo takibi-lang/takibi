@@ -2245,7 +2245,8 @@ at codegen time rather than silently lowering to a racy `wfi`.
 `extern fn` needed, each lowering to the one instruction it names with
 the register chosen by LLVM's allocator rather than by the caller:
 `mrs_cntfrq_el0`, `mrs_cntpct_el0`, `mrs_sctlr_el1`, `mrs_esr_el1`,
-`mrs_far_el1`, `mrs_elr_el1`, `mrs_spsr_el1`, `mrs_daif`;
+`mrs_far_el1`, `mrs_elr_el1`, `mrs_spsr_el1`, `mrs_id_aa64mmfr0_el1`,
+`mrs_daif`;
 `msr_cntp_tval_el0`, `msr_cntp_ctl_el0`, `msr_sctlr_el1`, `msr_mair_el1`,
 `msr_tcr_el1`, `msr_ttbr0_el1`, `msr_daifclr_irq`, `msr_daifset_irq`;
 `tlbi_vmalle1`, `tlbi_vaae1is`, `tlbi_vae1is`, `tlbi_aside1is`;

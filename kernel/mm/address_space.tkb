@@ -35,7 +35,13 @@ struct AddressSpaceBacking {
     live: bool;
     l1_physical: usize;
     l2_physical: usize;
+    // GitHub issue #402: the ASID and the generation it was handed out in.
+    // Both, because a number alone cannot say whether it is still this
+    // root's -- an ASID rollover hands every number out again, and what
+    // separates "mine" from "somebody else's now" is the stamp. 0/0 is a
+    // root that has never been activated and therefore never needed one.
     asid: usize;
+    asid_generation: usize;
 }
 
 // GitHub issue #392: pooled, not an array keyed by process slot. Third of
@@ -79,10 +85,6 @@ fn address_space_probe_root_acquire() -> usize !{unsafe} {
             return 0;
         }
         AddressSpaceEnsureResult::OutOfMemory => {
-            scheduled_process_probe_slot_release(slot);
-            return 0;
-        }
-        AddressSpaceEnsureResult::AsidExhausted => {
             scheduled_process_probe_slot_release(slot);
             return 0;
         }
@@ -261,24 +263,28 @@ fn address_space_asid(slot: usize) -> usize {
     return 0;
 }
 
+// GitHub issue #402: no ASID is taken here. A root is created without one
+// and is given one at its first activation, which is the lifetime Linux
+// gives an mm -- and, more to the point, the only moment at which handing
+// out a number is safe once numbers are recycled by rollover. See
+// asid_assign's own comment for what assigning at creation time would
+// alias.
 fn address_space_record_backing(
         slot: usize,
-        l1: sink PageOwner[l1_page], l2: sink PageOwner[l2_page],
-        asid: sink AsidOwner[asid_owner]) {
+        l1: sink PageOwner[l1_page], l2: sink PageOwner[l2_page]) {
     let l1_physical: usize = page_physical_address(l1);
     let l2_physical: usize = page_physical_address(l2);
-    let numeric_asid: usize = asid_value(asid);
 
     // Build before dropping the fine-grained owners into this coarser
     // record. mmu_init_root has no allocation or fallible operation.
     mmu_init_root(l1_physical, l2_physical);
     address_space_backing_at(slot).l1_physical = l1_physical;
     address_space_backing_at(slot).l2_physical = l2_physical;
-    address_space_backing_at(slot).asid = numeric_asid;
+    address_space_backing_at(slot).asid = 0;
+    address_space_backing_at(slot).asid_generation = 0;
     address_space_backing_at(slot).live = true;
     page_owner_transfer_index(l1);
     page_owner_transfer_index(l2);
-    asid_owner_transfer(asid);
 }
 
 // GitHub issue #295: address_space_allocate_root/_ensure_root used to return
@@ -289,9 +295,13 @@ fn address_space_record_backing(
 // pool. A caller such as scheduled_process_alloc could not tell "the process
 // table is genuinely full" from "the kernel is out of physical memory" --
 // exactly the kind of misdiagnosis issue #295 was filed over.
+// GitHub issue #402 removed AsidExhausted: there is no such failure any
+// more. An ASID is not allocated here at all, and when one is taken (at
+// activation) it cannot fail -- the allocator rolls over instead of
+// refusing. A variant nothing can return is worse than no variant, because
+// every caller keeps an arm that says something untrue about this kernel.
 must_use variant AddressSpaceAllocateResult {
     OutOfMemory;
-    AsidExhausted;
     Ok;
 }
 
@@ -311,17 +321,8 @@ fn address_space_allocate_root(slot: usize)
                     return AddressSpaceAllocateResult::OutOfMemory;
                 }
                 PageAllocResult::Allocated(l2) => {
-                    match asid_alloc() {
-                        AsidAllocResult::Full => {
-                            page_free(l2);
-                            page_free(l1);
-                            return AddressSpaceAllocateResult::AsidExhausted;
-                        }
-                        AsidAllocResult::Allocated(asid) => {
-                            address_space_record_backing(slot, l1, l2, asid);
-                            return AddressSpaceAllocateResult::Ok;
-                        }
-                    }
+                    address_space_record_backing(slot, l1, l2);
+                    return AddressSpaceAllocateResult::Ok;
                 }
             }
         }
@@ -344,27 +345,22 @@ private fn address_space_allocate_boot_root()
                     return AddressSpaceAllocateResult::OutOfMemory;
                 }
                 PageAllocResult::Allocated(l2) => {
-                    match asid_alloc() {
-                        AsidAllocResult::Full => {
-                            page_free(l2);
-                            page_free(l1);
-                            return AddressSpaceAllocateResult::AsidExhausted;
-                        }
-                        AsidAllocResult::Allocated(asid) => {
-                            let l1_physical: usize = page_physical_address(l1);
-                            let l2_physical: usize = page_physical_address(l2);
-                            let numeric_asid: usize = asid_value(asid);
-                            mmu_init_root(l1_physical, l2_physical);
-                            address_space_backing_root0.l1_physical = l1_physical;
-                            address_space_backing_root0.l2_physical = l2_physical;
-                            address_space_backing_root0.asid = numeric_asid;
-                            address_space_backing_root0.live = true;
-                            page_owner_transfer_index(l1);
-                            page_owner_transfer_index(l2);
-                            asid_owner_transfer(asid);
-                            return AddressSpaceAllocateResult::Ok;
-                        }
-                    }
+                    let l1_physical: usize = page_physical_address(l1);
+                    let l2_physical: usize = page_physical_address(l2);
+                    // Root 0 is the one root that takes its ASID eagerly:
+                    // kernel_mmu_activate needs a number for the very
+                    // first TTBR0_EL1 write, and there is nothing running
+                    // yet for a rollover to alias -- the counter is at 1.
+                    let (numeric_asid, generation) = asid_assign();
+                    mmu_init_root(l1_physical, l2_physical);
+                    address_space_backing_root0.l1_physical = l1_physical;
+                    address_space_backing_root0.l2_physical = l2_physical;
+                    address_space_backing_root0.asid = numeric_asid;
+                    address_space_backing_root0.asid_generation = generation;
+                    address_space_backing_root0.live = true;
+                    page_owner_transfer_index(l1);
+                    page_owner_transfer_index(l2);
+                    return AddressSpaceAllocateResult::Ok;
                 }
             }
         }
@@ -374,7 +370,6 @@ private fn address_space_allocate_boot_root()
 must_use variant AddressSpaceEnsureResult {
     SlotOutOfRange;
     OutOfMemory;
-    AsidExhausted;
     Ok;
 }
 
@@ -385,9 +380,6 @@ private fn address_space_ensure_boot_root() -> AddressSpaceEnsureResult {
     match address_space_allocate_boot_root() {
         AddressSpaceAllocateResult::OutOfMemory => {
             return AddressSpaceEnsureResult::OutOfMemory;
-        }
-        AddressSpaceAllocateResult::AsidExhausted => {
-            return AddressSpaceEnsureResult::AsidExhausted;
         }
         AddressSpaceAllocateResult::Ok => { return AddressSpaceEnsureResult::Ok; }
     }
@@ -408,11 +400,21 @@ fn address_space_ensure_root(slot: usize) -> AddressSpaceEnsureResult {
         AddressSpaceAllocateResult::OutOfMemory => {
             return AddressSpaceEnsureResult::OutOfMemory;
         }
-        AddressSpaceAllocateResult::AsidExhausted => {
-            return AddressSpaceEnsureResult::AsidExhausted;
-        }
         AddressSpaceAllocateResult::Ok => { return AddressSpaceEnsureResult::Ok; }
     }
+}
+
+// GitHub issue #402: the one moment a root may take an ASID. It is the
+// moment it is about to run, and the moment the root that was running
+// stops -- which is what makes handing out a recycled number safe. A root
+// whose stamp is still the current generation keeps the number it has;
+// one that never had a number, or whose generation was left behind by a
+// rollover, is given a fresh one here.
+private fn address_space_refresh_asid(backing: *AddressSpaceBacking) {
+    if (asid_generation_is_current(backing.asid_generation)) { return; }
+    let (value, generation) = asid_assign();
+    backing.asid = value;
+    backing.asid_generation = generation;
 }
 
 fn address_space_activate_root(slot: usize) {
@@ -421,6 +423,7 @@ fn address_space_activate_root(slot: usize) {
         let backing: *AddressSpaceBacking =
             address_space_backing_existing_at(checked);
         if (backing.live) {
+            address_space_refresh_asid(backing);
             mmu_activate_root(backing.l1_physical, backing.asid);
             address_space_active_slot = checked;
             return;
@@ -431,8 +434,18 @@ fn address_space_activate_root(slot: usize) {
     let fallback: usize = 0;
     let fallback_backing: *AddressSpaceBacking =
         address_space_backing_existing_at(fallback);
+    address_space_refresh_asid(fallback_backing);
     mmu_activate_root(fallback_backing.l1_physical, fallback_backing.asid);
     address_space_active_slot = 0;
+}
+
+// Puts the root that is running back on the CPU with a current ASID. The
+// production paths never need it -- every switch goes through
+// address_space_activate_root above -- but a probe that deliberately rolls
+// the ASID generation over does: the running root's stamp is left behind
+// by that rollover, and its number is about to be handed to somebody else.
+fn address_space_reactivate_current_root() {
+    address_space_activate_root(address_space_active_slot);
 }
 
 must_use variant AddressSpacePteWriteResult {
@@ -717,7 +730,11 @@ fn address_space_release_root(slot: usize) {
     address_space_backing_at(checked).asid = 0;
     page_transferred_release_physical(l2_physical);
     page_transferred_release_physical(l1_physical);
-    asid_transferred_release(asid);
+    // GitHub issue #402: nothing gives an ASID back any more. The number
+    // this root held is simply abandoned; it becomes assignable again at
+    // the next rollover, which is also the moment every TLB entry tagged
+    // with it disappears. Invalidating it here is still worth doing and
+    // still happens, in address_space_release_user_mappings above.
 }
 
 // Called from entry.S before main(). It owns the exact early-boot sequence:
@@ -725,14 +742,13 @@ fn address_space_release_root(slot: usize) {
 // MMU from root 0's resolved physical L1 and ASID.
 fn kernel_mmu_init() !{mmu_off} {
     page_allocator_init();
-    asid_pool_init();
+    asid_init();
     // entry.S cleared .bss before entering this function. Rewriting this
     // aggregate while the MMU is off permits LLVM to use an unaligned
     // 128-bit store on RPi5, which faults before the bootstrap root exists.
     match address_space_ensure_boot_root() {
         AddressSpaceEnsureResult::SlotOutOfRange => {}
         AddressSpaceEnsureResult::OutOfMemory => {}
-        AddressSpaceEnsureResult::AsidExhausted => {}
         AddressSpaceEnsureResult::Ok => {}
     }
     kernel_mmu_activate(address_space_backing_root0.l1_physical,
@@ -824,14 +840,12 @@ fn process_address_space_probe() -> bool !{unsafe} {
         AddressSpaceEnsureResult::Ok => {}
         AddressSpaceEnsureResult::SlotOutOfRange => { roots_ok = false; }
         AddressSpaceEnsureResult::OutOfMemory => { roots_ok = false; }
-        AddressSpaceEnsureResult::AsidExhausted => { roots_ok = false; }
     }
     if (roots_ok) {
         match address_space_ensure_root(root_b) {
             AddressSpaceEnsureResult::Ok => {}
             AddressSpaceEnsureResult::SlotOutOfRange => { roots_ok = false; }
             AddressSpaceEnsureResult::OutOfMemory => { roots_ok = false; }
-            AddressSpaceEnsureResult::AsidExhausted => { roots_ok = false; }
         }
     }
     if (roots_ok == false) {
@@ -841,7 +855,19 @@ fn process_address_space_probe() -> bool !{unsafe} {
         scheduled_process_probe_slot_release(root_a);
         return false;
     }
+    // GitHub issue #402: a freshly created root has NO ASID -- it takes one
+    // at its first activation, which is the only moment handing out a
+    // recycled number is safe. So the assertion moved: no number before,
+    // distinct nonzero numbers after, and the root that was running gets
+    // its own back when the probe puts it back on the CPU.
+    let restore: usize = address_space_active_slot;
+    let unassigned_ok: bool =
+        address_space_asid(root_a) == 0 && address_space_asid(root_b) == 0;
+    address_space_activate_root(root_a);
+    address_space_activate_root(root_b);
+    address_space_activate_root(restore);
     let backing_ok: bool =
+        unassigned_ok &&
         address_space_l1_physical(root_a) != 0 &&
         address_space_l2_physical(root_a) != 0 &&
         address_space_l1_physical(root_b) != 0 &&
@@ -966,4 +992,65 @@ fn process_address_space_probe() -> bool !{unsafe} {
             }
         }
     }
+}
+
+// GitHub issue #402 boundary test. It proves the OPPOSITE of what
+// asid_pool_probe proved: there is no ASID exhaustion left to be refused
+// at. It drives the REAL allocator past its last number -- 65535 of them
+// on both targets, which is why this is a counter loop rather than a
+// fixture that would have to create that many address spaces -- and checks
+// that the generation advances exactly once, numbering restarts at 1,
+// every stamp from before the rollover goes stale, and no assignment ever
+// fails.
+//
+// It lives here rather than in kernel/arch/arm64/mm/asid.tkb because of
+// its last step, which is not tidiness: the rollover left the RUNNING
+// root's stamp behind, and its number is assignable to somebody else now.
+// Every production rollover happens inside a switch and therefore ends
+// with the incoming root taking a current number by construction; a probe
+// that rolls over from outside a switch has to put the running root back
+// on the CPU itself. Activation is this file's to do.
+fn address_space_asid_rollover_probe() -> bool {
+    let bits: usize = asid_width_bits();
+    if (bits != 8 && bits != 16) { return false; }
+    let last: usize = asid_highest_value();
+    if (last != (1 << bits) - 1) { return false; }
+    let generation_before: usize = asid_current_generation();
+    let rollovers_before: usize = asid_rollover_count_value();
+    if (asid_generation_is_current(generation_before) == false) { return false; }
+    if (asid_generation_is_current(0)) { return false; }
+
+    let mut previous: usize = 0;
+    let mut ok: bool = true;
+    let mut rolled: bool = false;
+    let mut steps: usize = 0;
+    // One full generation of assignments is enough to cross the edge from
+    // wherever boot left the counter, whatever that was.
+    while (steps <= last && rolled == false) {
+        let (value, generation) = asid_assign();
+        if (value == 0 || value > last) { ok = false; }
+        if (generation == generation_before) {
+            if (value <= previous) { ok = false; }
+        } else {
+            if (generation != generation_before + 1) { ok = false; }
+            if (value != 1) { ok = false; }
+            rolled = true;
+        }
+        previous = value;
+        steps = steps + 1;
+    }
+    if (rolled == false) { ok = false; }
+    if (asid_rollover_count_value() != rollovers_before + 1) { ok = false; }
+    // A stamp from before is exactly what makes a live address space ask
+    // for a new number instead of trusting the one it holds.
+    if (asid_generation_is_current(generation_before)) { ok = false; }
+
+    address_space_reactivate_current_root();
+    let active: usize = address_space_active_slot;
+    let running: *AddressSpaceBacking = address_space_backing_existing_at(active);
+    if (asid_generation_is_current(running.asid_generation) == false) {
+        ok = false;
+    }
+    if (running.asid == 0 || running.asid > last) { ok = false; }
+    return ok;
 }

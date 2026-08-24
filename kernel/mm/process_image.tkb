@@ -694,10 +694,6 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
             scheduled_process_probe_slot_release(child_root);
             return false;
         }
-        AddressSpaceEnsureResult::AsidExhausted => {
-            scheduled_process_probe_slot_release(child_root);
-            return false;
-        }
     }
     match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => {

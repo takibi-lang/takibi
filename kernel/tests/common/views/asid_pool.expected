@@ -1,1 +1,1 @@
-asid pool: exhaustion, reuse-after-free, transfer round-trip, double-free counted ok
+asid pool: 16-bit width from the hardware, rollover past the last number advances the generation and reassigns, no process refused ok

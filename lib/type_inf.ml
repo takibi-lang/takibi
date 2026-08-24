@@ -2842,7 +2842,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
 
   | Call (("mrs_cntfrq_el0" | "mrs_cntpct_el0" | "mrs_sctlr_el1"
           | "mrs_esr_el1" | "mrs_far_el1" | "mrs_elr_el1" | "mrs_spsr_el1"
-          | "mrs_daif") as fname, args) ->
+          | "mrs_id_aa64mmfr0_el1" | "mrs_daif") as fname, args) ->
       (* GitHub issue #226/#227: closed system-register read intrinsics. Zero
          arguments, like dma_publish/etc. above -- a runtime value must not
          be able to select which register gets read. *)

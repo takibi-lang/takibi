@@ -532,14 +532,12 @@ fn user_memory_root_isolation_probe() -> bool !{unsafe} {
         AddressSpaceEnsureResult::Ok => {}
         AddressSpaceEnsureResult::SlotOutOfRange => { roots_ok = false; }
         AddressSpaceEnsureResult::OutOfMemory => { roots_ok = false; }
-        AddressSpaceEnsureResult::AsidExhausted => { roots_ok = false; }
     }
     if (roots_ok) {
         match address_space_ensure_root(root_b) {
             AddressSpaceEnsureResult::Ok => {}
             AddressSpaceEnsureResult::SlotOutOfRange => { roots_ok = false; }
             AddressSpaceEnsureResult::OutOfMemory => { roots_ok = false; }
-            AddressSpaceEnsureResult::AsidExhausted => { roots_ok = false; }
         }
     }
     if (roots_ok == false) {
