@@ -98,6 +98,18 @@ let expect_trap_sites expected src () =
   Alcotest.(check int) "recorded trap sites"
     expected (List.length !Llvm_gen.trap_sites)
 
+(* Run one complete compilation with an explicit pointer-width target.  The
+   cleanup is part of this helper rather than each table row: target selection
+   is process-global, and a failing row must not poison a later (or shuffled)
+   test. *)
+let with_codegen_target triple f =
+  Fun.protect
+    ~finally:Llvm_gen.reset_target
+    (fun () ->
+      let cpu = if triple = "thumbv7em-none-eabi" then "cortex-m7" else "" in
+      ignore (Llvm_gen.setup_target ~triple ~cpu ());
+      f ())
+
 (* GitHub issue #315 follow-up: expect codegen to succeed AND to have
    recorded exactly [expected] "unnecessary unsafe" sites
    (Llvm_gen.unnecessary_unsafe_sites -- a statement/expr inside `unsafe`
@@ -9862,23 +9874,81 @@ let codegen_tests = [
           return x / (256 as u8);
         }");
 
-  Alcotest.test_case "32-bit usize constants truncated to zero remain traps" `Quick
+  Alcotest.test_case
+    "pointer-width boundary matrix keeps literals, casts, proofs, and IR target-aware"
+    `Quick
     (fun () ->
-      Fun.protect
-        ~finally:(fun () ->
-          ignore (Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()))
-        (fun () ->
-          ignore (Llvm_gen.setup_target ~triple:"thumbv7em-none-eabi"
-                    ~cpu:"cortex-m7" ());
-          ignore (gen_codegen
-            "fn wide_div65(x: usize) -> usize {
-               return x / 4294967296;
-             }
-             fn cast_wide_div65(x: usize) -> usize {
-               return x / (4294967296 as usize);
-             }");
-          Alcotest.(check int) "recorded trap sites" 2
-            (List.length !Llvm_gen.trap_sites)));
+      let source =
+        "fn unsigned_width419(x: usize) -> usize {
+           let below_min: usize = (0 - 1) as usize;
+           let min: usize = 0;
+           let one: usize = 1;
+           let max: usize = 4294967295;
+           return (x / 4294967296) + (x % (4294967296 as usize)) +
+             below_min + min + one + max;
+         }
+         fn signed_width419() -> isize {
+           let min: isize = 0 - 2147483648;
+           let below_min: isize = 0 - 2147483649;
+           let max: isize = 2147483647;
+           let above_max: isize = 2147483648;
+           return min + below_min + (-1 as isize) + (0 as isize) +
+             (1 as isize) + max + above_max;
+         }"
+      in
+      let cases = [
+        ("thumbv7em-none-eabi", 32, 2);
+        ("aarch64-none-elf", 64, 0);
+      ] in
+      List.iter (fun (triple, width, expected_traps) ->
+        with_codegen_target triple (fun () ->
+          ignore (gen_codegen source);
+          Alcotest.(check int)
+            (Printf.sprintf "%s residual trap count" triple)
+            expected_traps (List.length !Llvm_gen.trap_sites);
+          let module_ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+          Alcotest.(check bool)
+            (Printf.sprintf "%s emits pointer-sized i%d functions" triple width)
+            true
+            (contains_substring module_ir
+               (Printf.sprintf "define i%d @unsigned_width419" width));
+          Alcotest.(check bool)
+            (Printf.sprintf "%s emits signed pointer-sized i%d function" triple width)
+            true
+            (contains_substring module_ir
+               (Printf.sprintf "define i%d @signed_width419" width))
+        )
+      ) cases;
+
+      (* Refined pointer-sized bounds deliberately use the portable 32-bit
+         envelope.  Pin both edges and both one-step violations so a later
+         target-aware relaxation cannot accidentally become host-int-aware. *)
+      let refined_cases = [
+        ("{0..<4294967296 as usize}", true);
+        ("{0..<4294967297 as usize}", false);
+        ("{(0 - 2147483648)..<2147483647 as isize}", true);
+        ("{(0 - 2147483649)..<2147483647 as isize}", false);
+      ] in
+      List.iter (fun (ty, accepted) ->
+        List.iter (fun (triple, _, _) ->
+          with_codegen_target triple (fun () ->
+            let program = Printf.sprintf "fn refined419(x: %s) {}" ty in
+            try
+              ignore (infer program);
+              if not accepted then
+                Alcotest.failf "%s unexpectedly accepted %s" triple ty
+            with
+            | Types.TypeError (_, msg)
+              when not accepted && contains_substring msg "out of range" -> ()
+            | Types.MultiTypeError errors
+              when not accepted && List.exists (fun (_, msg) ->
+                contains_substring msg "out of range") errors -> ()
+            | exn ->
+                Alcotest.failf "%s produced the wrong result for %s: %s"
+                  triple ty (Printexc.to_string exn)
+          )
+        ) cases
+      ) refined_cases);
 
   Alcotest.test_case "positive refined and negative constant divisors prove nonzero" `Quick
     (expect_trap_sites 0
