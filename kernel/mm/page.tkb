@@ -247,7 +247,7 @@ private fn page_run_is_free(first: usize, count: usize) -> bool {
 // smaller change, and the caller today is process creation -- rare, and
 // already doing far more expensive work.
 fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
-        -> PageRunAllocResult !{unsafe} {
+        -> PageRunAllocResult !{allocates, unsafe} {
     if (count == 0) { return PageRunAllocResult::OutOfMemory; }
     // The alignment that matters is the ADDRESS's, and page INDEX zero is
     // not at an aligned address: both linker scripts only promise
@@ -497,7 +497,7 @@ fn page_run_probe() -> bool !{unsafe} {
 // can be forgotten degrades to Unowned exactly where a new subsystem is
 // least understood -- which is when the tag is worth the most. Making it a
 // parameter puts the question to the compiler instead.
-fn page_alloc(owner: PageOwnerTag) -> PageAllocResult {
+fn page_alloc(owner: PageOwnerTag) -> PageAllocResult !{allocates} {
     match freelist_core_insert(&boot_page_pool.core) {
         FreelistPopResult::Empty => { return PageAllocResult::OutOfMemory; }
         FreelistPopResult::Popped(slot) => {

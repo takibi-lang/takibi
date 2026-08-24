@@ -7505,13 +7505,13 @@ let infer_tests = [
         ["may_block"] use.effects);
 
   Alcotest.test_case "Slice 5: explicit non-blocking function contract is checked" `Quick
-    (expect_type_error "violates its explicit !{} non-blocking contract"
+    (expect_type_error "violates its explicit !{} effect-free contract"
        "extern fn effect_wait27() !{may_block};
         fn effect_helper27() { effect_wait27(); }
         fn effect_bad27() !{} { effect_helper27(); }");
 
   Alcotest.test_case "Slice 5: explicit non-blocking contract rejects unknown indirect effects" `Quick
-    (expect_type_error "cannot verify its explicit !{} non-blocking contract"
+    (expect_type_error "cannot verify its explicit !{} effect-free contract"
        "fn effect_bad28(callback: fn() -> void) !{} { callback(); }");
 
   Alcotest.test_case "Slice 5: interrupt is not a function-pointer call effect" `Quick
@@ -7596,6 +7596,84 @@ let infer_tests = [
        "fn effect_bad31(slot: *fn !{}() -> void) {
           let widened: *fn() -> void = slot;
         }");
+
+  Alcotest.test_case "operational effects are inferred through direct calls" `Quick
+    (fun () ->
+      let types = infer
+        "extern fn alloc_boundary298() !{allocates};
+         extern fn lock_boundary298() !{locks};
+         extern fn log_boundary298() !{logs};
+         fn all_effects298() {
+           alloc_boundary298(); lock_boundary298(); log_boundary298();
+         }" in
+      let info = Types.StringMap.find "all_effects298" types.functions in
+      Alcotest.(check (list string)) "inferred effects"
+        ["allocates"; "locks"; "logs"] info.effects);
+
+  Alcotest.test_case "interrupt rejects transitive allocation" `Quick
+    (expect_type_error "alloc_irq298 -> alloc_helper298 -> alloc_leaf298"
+       "extern fn alloc_leaf298() !{allocates};
+        fn alloc_helper298() { alloc_leaf298(); }
+        fn alloc_irq298() !{interrupt} { alloc_helper298(); }");
+
+  Alcotest.test_case "interrupt rejects transitive lock acquisition" `Quick
+    (expect_type_error "lock_irq298 -> lock_helper298 -> lock_leaf298"
+       "extern fn lock_leaf298() !{locks};
+        fn lock_helper298() { lock_leaf298(); }
+        fn lock_irq298() !{interrupt} { lock_helper298(); }");
+
+  Alcotest.test_case "interrupt rejects transitive logging" `Quick
+    (expect_type_error "log_irq298 -> log_helper298 -> log_leaf298"
+       "extern fn log_leaf298() !{logs};
+        fn log_helper298() { log_leaf298(); }
+        fn log_irq298() !{interrupt} { log_helper298(); }");
+
+  Alcotest.test_case "exception rejects transitive allocation" `Quick
+    (expect_type_error "alloc_exception298 -> alloc_helper_e298 -> alloc_leaf_e298"
+       "extern fn alloc_leaf_e298() !{allocates};
+        fn alloc_helper_e298() { alloc_leaf_e298(); }
+        fn alloc_exception298() !{exception} { alloc_helper_e298(); }");
+
+  Alcotest.test_case "exception rejects transitive lock acquisition" `Quick
+    (expect_type_error "lock_exception298 -> lock_helper_e298 -> lock_leaf_e298"
+       "extern fn lock_leaf_e298() !{locks};
+        fn lock_helper_e298() { lock_leaf_e298(); }
+        fn lock_exception298() !{exception} { lock_helper_e298(); }");
+
+  Alcotest.test_case "exception rejects transitive logging" `Quick
+    (expect_type_error "log_exception298 -> log_helper_e298 -> log_leaf_e298"
+       "extern fn log_leaf_e298() !{logs};
+        fn log_helper_e298() { log_leaf_e298(); }
+        fn log_exception298() !{exception} { log_helper_e298(); }");
+
+  Alcotest.test_case "interrupt rejects an effect-contracted logging callback" `Quick
+    (expect_type_error "<indirect call !{logs}>"
+       "fn callback_root298(callback: fn !{logs}() -> void) !{interrupt} {
+          callback();
+        }");
+
+  Alcotest.test_case "effect-free callback cannot hide allocation" `Quick
+    (expect_type_error "destination contract does not allow"
+       "fn allocating_callback298() !{allocates} {}
+        fn register_callback298(callback: fn !{}() -> void) {}
+        fn install_callback298() {
+          register_callback298(allocating_callback298);
+        }");
+
+  Alcotest.test_case "recursive logging helper yields a concrete path" `Quick
+    (expect_type_error
+       "logging_irq298 -> recursive_logger298 -> log_sink298"
+       "extern fn log_sink298() !{logs};
+        fn recursive_logger298(n: i32) {
+          if (n > 0) { recursive_logger298(n - 1); }
+          log_sink298();
+        }
+        fn logging_irq298() !{interrupt} { recursive_logger298(1); }");
+
+  Alcotest.test_case "operational-effect-free interrupt helper is accepted" `Quick
+    (expect_ok
+       "fn safe_helper298() { interrupt_notify(); }
+        fn safe_irq298() !{interrupt} { safe_helper298(); }");
 
   (* -- Takibi Core Slice 6: indexed erased views ------------------------- *)
 

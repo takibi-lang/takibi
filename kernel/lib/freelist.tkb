@@ -131,7 +131,8 @@ fn freelist_core_init(core: &mut FreelistCore(N)) {
     core.next_generation = 1;
 }
 
-fn freelist_core_insert(core: &mut FreelistCore(N)) -> FreelistPopResult {
+fn freelist_core_insert(core: &mut FreelistCore(N)) -> FreelistPopResult
+        !{allocates} {
     let head: usize = core.free_head;
     if (head >= 0 && head < N) {
         // GitHub issue #217: head is narrowed to {0..<N} on this branch,

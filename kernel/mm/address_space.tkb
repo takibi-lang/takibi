@@ -180,6 +180,34 @@ private fn address_space_backing_at(slot: usize)
     return backing;
 }
 
+// Lookup-only counterpart for IRQ-reachable context-switch paths. A missing
+// backing is an invariant failure there, not permission to grow the pool: all
+// allocation belongs to process/address-space construction before scheduling.
+private fn address_space_backing_existing_at(slot: usize)
+        -> *AddressSpaceBacking !{unsafe} {
+    if (slot == 0) { return &address_space_backing_root0; }
+    let address: usize = scheduled_process_address_space_backing(slot);
+    if (address == 0) {
+        address_space_backing_missing_count =
+            address_space_backing_missing_count + 1;
+        return &address_space_backing_missing;
+    }
+    let generation: usize =
+        scheduled_process_address_space_backing_generation(slot);
+    if (intrusive_pool_matches(
+            &address_space_backing_pool, address, generation) == false) {
+        address_space_backing_missing_count =
+            address_space_backing_missing_count + 1;
+        return &address_space_backing_missing;
+    }
+    let owner =
+        intrusive_owner_new(&address_space_backing_pool, address, generation);
+    let backing: *AddressSpaceBacking =
+        intrusive_pool_ref(&address_space_backing_pool, owner);
+    intrusive_owner_drop(owner);
+    return backing;
+}
+
 fn address_space_is_live(slot: usize) -> bool {
     if (scheduled_process_slot_valid(slot)) {
         let checked: usize = slot;
@@ -332,9 +360,10 @@ fn address_space_ensure_root(slot: usize) -> AddressSpaceEnsureResult {
 fn address_space_activate_root(slot: usize) {
     if (scheduled_process_slot_valid(slot)) {
         let checked: usize = slot;
-        if (address_space_backing_at(checked).live) {
-            mmu_activate_root(address_space_backing_at(checked).l1_physical,
-                              address_space_backing_at(checked).asid);
+        let backing: *AddressSpaceBacking =
+            address_space_backing_existing_at(checked);
+        if (backing.live) {
+            mmu_activate_root(backing.l1_physical, backing.asid);
             address_space_active_slot = checked;
             return;
         }
@@ -342,8 +371,9 @@ fn address_space_activate_root(slot: usize) {
     // Root 0 is permanently retained as the bootstrap/fallback root, so an
     // invalid or already-released slot never reaches TTBR0_EL1.
     let fallback: usize = 0;
-    mmu_activate_root(address_space_backing_at(fallback).l1_physical,
-                      address_space_backing_at(fallback).asid);
+    let fallback_backing: *AddressSpaceBacking =
+        address_space_backing_existing_at(fallback);
+    mmu_activate_root(fallback_backing.l1_physical, fallback_backing.asid);
     address_space_active_slot = 0;
 }
 

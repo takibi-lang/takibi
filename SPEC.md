@@ -98,8 +98,9 @@ parameter value, or top-level declaration name.
   length unknown at compile time"; `[T; N..]` means "at least N elements,
   guaranteed". See "Slices" below.
 - **`fn(T...) -> R`** is a function pointer with unknown call effects.
-  **`fn !{}(T...) -> R`** is explicitly non-blocking and
-  **`fn !{may_block}(T...) -> R`** may block. LLVM 19 has a single opaque
+  **`fn !{}(T...) -> R`** is explicitly operational-effect-free; rows such
+  as **`fn !{may_block}(T...) -> R`** state the permitted call effects. LLVM
+  19 has a single opaque
   pointer kind, so signatures and effect contracts are checker-only; every
   form is the same runtime `ptr`.
 - **`{lo..<hi as base}`** is a refined integer subtype: a value of type
@@ -1378,12 +1379,15 @@ This is intentionally not a general borrow checker: projections and
 temporaries cannot be mutably borrowed, borrows cannot escape a direct call,
 and indexed owners still cannot live in arbitrary storage.
 
-## Blocking, Unsafe, Interrupt, and Exception Effects
+## Operational, Unsafe, Interrupt, and Exception Effects
 
 Checker effects are written after the return type:
 
 ```takibi
 extern fn sem_wait(s: *i32) !{may_block};
+extern fn heap_allocate(bytes: usize) -> *u8 !{allocates};
+extern fn mutex_take(m: *i32) !{locks};
+extern fn console_write(s: *u8) !{logs};
 fn mutex_lock(m: *i32 @ lock) -> MutexGuard[lock] !{may_block} { ... }
 fn raw_bytes(p: *u8) -> []u8 !{unsafe} { return unsafe { p[0..<16] }; }
 fn IRQ_Handler() !{interrupt} { acknowledge_irq(); }
@@ -1391,11 +1395,17 @@ fn Sync_Handler() !{exception} { dispatch_sync_exception(); }
 fn poll_callback() !{} { acknowledge_irq(); }
 ```
 
-`may_block` is inferred transitively through resolved direct calls. An
-explicit annotation is therefore an API contract and a seed, not a required
-annotation on every caller. `interrupt` marks a root whose complete reachable
-direct-call graph must not contain `may_block`; `interrupt_wait()` is
-intrinsically blocking. Diagnostics include one offending call path.
+The operational call effects are `may_block`, `allocates`, `locks`, and
+`logs`. Each is inferred transitively through resolved direct calls and
+effect-contracted indirect calls. An explicit annotation is therefore an API
+contract and a seed, not a required annotation on every caller.
+`interrupt` and `exception` mark roots whose complete reachable call graphs
+must contain none of these effects; `interrupt_wait()` is intrinsically
+`may_block`. Diagnostics include one offending call path. `locks` denotes an
+acquisition that is forbidden in interrupt/exception context; an IRQ-safe
+local interrupt-mask guard is not marked `locks`. `logs` covers UART and
+console emission, including recursion through a logging helper, without a
+second redundant "reentrant logging" effect.
 
 `unsafe` records unchecked memory reasoning. Every function that directly
 contains an `unsafe { ... }` expression must declare `!{unsafe}` -- a local,
@@ -1424,11 +1434,11 @@ pretending arbitrary Takibi loops are proven not to return.
 `exception` marks a synchronous-exception handler root. Like `interrupt`, it
 is a declaration role rather than a callable function-pointer effect, and an
 extern function cannot claim it because there is no Takibi body to check.
-Its complete reachable call graph must be non-blocking and must not contain an
-effect-unknown indirect call. It also must not call, directly or transitively,
-itself or any other `exception` root. This gives handlers a statically checked
-non-reentrant contract; ordinary helper recursion remains legal when it does
-not lead back to an exception root.
+Its complete reachable call graph must be free of the operational effects and
+must not contain an effect-unknown indirect call. It also must not call,
+directly or transitively, itself or any other `exception` root. This gives
+handlers a statically checked non-reentrant contract; ordinary helper recursion
+remains legal when it does not lead back to an exception root.
 
 The RPi3 COW example makes handler installation explicit with a linear
 `ExceptionRegistration[core]` supplied once by the privileged boot-entry ABI.
@@ -1478,17 +1488,18 @@ fn USART1_IRQHandler() !{interrupt} {
 
 The row follows `fn` in a function-pointer type so it cannot be confused
 with the enclosing function declaration's postfix row. No row means
-**unknown**, not non-blocking. `!{}` is a checked non-blocking contract;
-`!{may_block}` permits blocking and `!{unsafe}` permits unchecked memory
-reasoning. `interrupt` and `exception` are declaration
+**unknown**, not effect-free. `!{}` is a checked operational-effect-free
+contract; `!{may_block}` permits blocking, `!{allocates}` allocation,
+`!{locks}` lock acquisition, `!{logs}` logging, and `!{unsafe}` unchecked
+memory reasoning. `interrupt` and `exception` are declaration
 roles and are not legal in a function-pointer row.
 
-A callback's actual effects must be a subset of the destination contract. A
-non-blocking callback may therefore enter a `may_block` slot, but the reverse
-is rejected. An unannotated Takibi function cannot enter a `fn !{}(...)`
-slot until its declaration states `!{}`; that assertion is checked against
-its complete body/call graph. An extern without `may_block` remains a trusted
-non-blocking contract.
+A callback's actual effects must be a subset of the destination contract. An
+effect-free callback may therefore enter a slot permitting operational
+effects, but the reverse is rejected. An unannotated Takibi function cannot
+enter a `fn !{}(...)` slot until its declaration states `!{}`; that assertion
+is checked against its complete body/call graph. An extern without an
+operational effect remains a trusted effect-free contract.
 
 Indirect calls use their function-pointer row during transitive effect
 analysis. An unannotated function pointer remains effect-unknown and is

@@ -15,6 +15,33 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-24: Operational Effects Close IRQ/Exception Escape Hatches (GitHub Issue #298)
+
+Extended the compositional effect vocabulary from `may_block` to the minimal
+operational set `may_block`, `allocates`, `locks`, and `logs`. All four seed
+transitive direct-call inference, participate in function-pointer contracts,
+and are forbidden below `interrupt`, `exception`, and explicit `!{}` roots.
+Diagnostics retain a concrete path through ordinary helpers, recursive call
+graphs, and effect-contracted indirect calls. `unsafe` remains deliberately
+different: locally declared and inferred for callback compatibility, but not
+an operational root prohibition.
+
+Annotating the real page/free-list allocation and UART transmission boundaries
+immediately exposed two previously review-only IRQ paths. Timer-driven context
+switching reached lazy address-space-backing growth; activation now performs a
+lookup-only access, leaving allocation to construction before scheduling. The
+IRQ stack guard also reached UART reporting on its failure branch; inspection
+is now shared, while the IRQ wrapper silently fail-stops and the ordinary
+syscall-side wrapper retains the detailed report. The current single-core
+DAIF.I pool guard remains legal by design: `locks` describes acquisitions that
+are forbidden in interrupt/exception context, not an IRQ-safe interrupt-mask
+guard.
+
+Focused compiler tests cover inference, direct/transitive interrupt and
+exception rejection for each new effect, callback contracts, recursive logging
+paths, and accepted clean helpers. `make test`, `make allbuild`, and
+`make kernelcheck-qemu` passed.
+
 ### 2026-08-23: Eager Declared-Type Resolution (GitHub Issue #358)
 
 Added one whole-AST pass after monomorphization that resolves the parser's

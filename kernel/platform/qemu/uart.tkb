@@ -17,7 +17,7 @@ use "kernel/platform/qemu/intc.tkb";
 
 let mut uart_rx_handler: fn !{unsafe}() -> void;
 
-fn uart_putc(c: u8) !{unsafe} {
+fn uart_putc(c: u8) !{logs, unsafe} {
     let fr: *io u32 = unsafe { 0x09000018 as *io u32 }; // PL011 FR
     while ((*fr & (1 << 5)) != 0) { } // wait while TXFF (TX FIFO full)
     let dr: *io u8 = unsafe { 0x09000000 as *io u8 }; // PL011 DR

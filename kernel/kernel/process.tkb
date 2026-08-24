@@ -1980,24 +1980,34 @@ private fn kernel_stack_guard_fail(reason: *u8, slot: usize,
     while (true) { }
 }
 
-fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
+must_use variant KernelStackGuardResult {
+    Intact;
+    Failed((*u8, usize, bool, usize));
+}
+
+private fn kernel_stack_guard_inspect(current_sp: usize)
+        -> KernelStackGuardResult !{unsafe} {
     // The boot stack first, and unconditionally: it is the stack every
     // path that is not a running process stands on, so the test below --
     // which needs a current process to have a stack to ask about -- can
     // never see it.
     if (kernel_boot_stack_witness_disturbed()) {
-        kernel_stack_guard_fail("boot stack wrote past its end" as *u8,
-                                0, false, boot_stack_bottom, current_sp);
-        return;
+        return KernelStackGuardResult::Failed(
+            ("boot stack wrote past its end" as *u8,
+             0, false, boot_stack_bottom));
     }
-    if (execution_current_live == false) { return; }
+    if (execution_current_live == false) {
+        return KernelStackGuardResult::Intact;
+    }
     let slot: usize = execution_current_handle.pool_index;
-    if (scheduled_process_slot_valid(slot) == false) { return; }
+    if (scheduled_process_slot_valid(slot) == false) {
+        return KernelStackGuardResult::Intact;
+    }
     // A slot whose run has not been allocated yet, or a path still on the
     // boot stack from entry.S, has nothing to check here. An unaligned
     // base is rejected by the same test (see kernel_stack_run_usable).
     let bottom: usize = kernel_stack_bottom(slot);
-    if (bottom == 0) { return; }
+    if (bottom == 0) { return KernelStackGuardResult::Intact; }
     // Two distinct questions, asked in the order of severity, because
     // they mean different things and only one of them is recoverable in
     // principle. The region below the stack is written by nothing that is
@@ -2010,9 +2020,9 @@ fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
         if (below.bytes[i] != KERNEL_STACK_POISON) { overflowed = true; }
     }
     if (overflowed) {
-        kernel_stack_guard_fail("stack wrote past its end, into the run below it" as *u8,
-                                slot, true, bottom, current_sp);
-        return;
+        return KernelStackGuardResult::Failed(
+            ("stack wrote past its end, into the run below it" as *u8,
+             slot, true, bottom));
     }
     let stack: *KernelStackHalf = kernel_stack_span(bottom);
     let mut disturbed: bool = false;
@@ -2023,8 +2033,32 @@ fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
         }
     }
     if (disturbed) {
-        kernel_stack_guard_fail("stack reached its own bottom" as *u8,
-                                slot, true, bottom, current_sp);
+        return KernelStackGuardResult::Failed(
+            ("stack reached its own bottom" as *u8, slot, true, bottom));
+    }
+    return KernelStackGuardResult::Intact;
+}
+
+fn kernel_stack_guard_check(current_sp: usize) !{unsafe} {
+    match kernel_stack_guard_inspect(current_sp) {
+        KernelStackGuardResult::Intact => {}
+        KernelStackGuardResult::Failed(details) => {
+            let (reason, slot, process_stack, base) = details;
+            kernel_stack_guard_fail(
+                reason, slot, process_stack, base, current_sp);
+        }
+    }
+}
+
+// IRQ entry must not invoke the UART while it may have interrupted another
+// writer. The shared inspection remains identical; its fail-stop is silent.
+fn kernel_stack_guard_check_interrupt(current_sp: usize) !{unsafe} {
+    match kernel_stack_guard_inspect(current_sp) {
+        KernelStackGuardResult::Intact => {}
+        KernelStackGuardResult::Failed(details) => {
+            let (reason, slot, process_stack, base) = details;
+            while (true) { }
+        }
     }
 }
 
