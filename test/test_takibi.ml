@@ -10106,33 +10106,33 @@ let codegen_tests = [
     `Quick
     (fun () ->
       let cases = [
-        ("array bounds", "oob_cmp",
+        ("array bounds", "oob_cmp", 1,
          "let mut trap420_array: [u8; 4];
           fn trap420(i: usize) -> u8 { return trap420_array[i]; }");
-        ("refined cast", "rc_bad",
+        ("refined cast", "rc_bad", 1,
          "fn trap420(x: i32) -> {0..<4 as i32} {
             return x as {0..<4 as i32};
           }");
-        ("exhaustive enum cast", "switch i32",
+        ("exhaustive enum cast", "switch i32", 1,
          "enum Trap420 { A; B; }
           fn trap420(x: u32) -> Trap420 { return x as Trap420; }");
-        ("subslice bounds", "ss_bad",
+        ("subslice bounds", "ss_bad", 1,
          "fn trap420(s: []u8, lo: usize, hi: usize) -> []u8 {
             return s[lo..<hi];
           }");
-        ("division by zero", "divzero_cmp",
+        ("signed division", "divoverflow_cmp", 2,
          "fn trap420(x: i32, divisor: i32) -> i32 {
             return x / divisor;
           }");
       ] in
-      List.iter (fun (category, marker, src) ->
+      List.iter (fun (category, marker, expected, src) ->
         ignore (gen_codegen src);
-        Alcotest.(check int) (category ^ " recorded sites") 1
+        Alcotest.(check int) (category ^ " recorded sites") expected
           (List.length !Llvm_gen.trap_sites);
         let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
         Alcotest.(check bool) (category ^ " lowering marker") true
           (contains_substring ir marker);
-        Alcotest.(check int) (category ^ " emitted trap calls") 1
+        Alcotest.(check int) (category ^ " emitted trap calls") expected
           (Llvm_gen.count_occurrences ir "call void @llvm.trap(")
       ) cases);
 
@@ -10215,13 +10215,13 @@ let codegen_tests = [
         "const ZERO65: i32 = 0;
          fn rem_zero65(x: i32) -> i32 { return x % ZERO65; }" ());
 
-  Alcotest.test_case "runtime divisor emits one trap guard" `Quick
+  Alcotest.test_case "runtime signed divisor emits zero and overflow guards" `Quick
     (fun () ->
       ignore (gen_codegen
         "fn checked_div65(x: i32, divisor: i32) -> i32 {
            return x / divisor;
          }");
-      Alcotest.(check int) "recorded trap sites" 1
+      Alcotest.(check int) "recorded trap sites" 2
         (List.length !Llvm_gen.trap_sites);
       let fn = match Hashtbl.find_opt Llvm_gen.functions "checked_div65" with
         | Some (_, fn) -> fn
@@ -10230,6 +10230,8 @@ let codegen_tests = [
       let ir = Llvm.string_of_llvalue fn in
       Alcotest.(check bool) "zero comparison" true
         (contains_substring ir "icmp eq");
+      Alcotest.(check bool) "MIN / -1 comparison pair" true
+        (contains_substring ir "divoverflow_cmp");
       Alcotest.(check bool) "trap call" true
         (contains_substring ir "llvm.trap");
       Alcotest.(check bool) "division after guard" true
@@ -10247,6 +10249,16 @@ let codegen_tests = [
         fn constant_div65(x: i32) -> i32 {
           return (x / DIVISOR65) + (x % DIVISOR65);
         }");
+
+  Alcotest.test_case "signed remainder by minus one is defined without a trap" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "fn defined_rem65(x: i32) -> i32 { return x % (0 - 1); }");
+      Alcotest.(check int) "no runtime obligation" 0
+        (List.length !Llvm_gen.trap_sites);
+      let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+      Alcotest.(check bool) "minus-one path returns zero" true
+        (contains_substring ir "remnegone"));
 
   Alcotest.test_case "nonzero factors do not prove a nonzero wrapped product" `Quick
     (expect_trap_sites 1
@@ -10366,14 +10378,29 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case "early-return zero guard proves a divisor nonzero" `Quick
-    (expect_trap_sites 0
+    (expect_trap_sites 1
        "fn guarded_div65(x: i32, divisor: i32) -> i32 {
           if (divisor == 0) { return 0; }
           return x / divisor;
         }");
 
+  Alcotest.test_case "early-return guards prove signed division fully safe" `Quick
+    (expect_trap_sites 0
+       "fn guarded_signed_div65(x: i32, divisor: i32) -> i32 {
+          if (divisor == 0) { return 0; }
+          if (divisor == -1) { return 0; }
+          return x / divisor;
+        }");
+
+  Alcotest.test_case "dividend interval can exclude signed minimum overflow" `Quick
+    (expect_trap_sites 0
+       "fn bounded_dividend65(x: {(0 - 2147483647)..<2147483647 as i32},
+                              divisor: {1..<8 as i32}) -> i32 {
+          return x / divisor;
+        }");
+
   Alcotest.test_case "mutable divisor facts remain conservative without alias analysis" `Quick
-    (expect_trap_sites 1
+    (expect_trap_sites 2
        "fn mutable_div65(x: i32) -> i32 {
           let mut divisor: i32 = 1;
           if (divisor != 0) { return x / divisor; }

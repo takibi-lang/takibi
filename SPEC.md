@@ -2467,11 +2467,19 @@ it is a linear struct rather than an erased view.
   remainder for a negative dividend, so this guard is a soundness
   requirement, not just precision). Division and remainder reject a
   literal or `const` zero divisor at compile time. An unknown runtime
-  divisor gets a zero trap guard; `--forbid-trap` therefore requires a
-  nonzero proof. A refined interval wholly above or below zero, a nonzero
-  representable constant, positive `sizeof(T)`/`alignof(T)`, and facts
+  divisor gets a zero trap guard. Signed division also guards the one
+  overflowing operand pair, the signed minimum divided by `-1`.
+  Signed remainder defines that pair's result as zero and lowers it without
+  invoking LLVM's undefined `srem` case. `--forbid-trap` therefore requires
+  both a nonzero-divisor proof and, for signed division, proof that either
+  the dividend excludes its minimum or the divisor excludes `-1`. A refined
+  interval wholly above or below zero, a nonzero representable constant,
+  positive `sizeof(T)`/`alignof(T)`, and facts
   established for an immutable local by conditions such as `if (d != 0)`
-  or an early-return zero guard provide that proof. Mutable locals and
+  or an early-return zero guard provide the nonzero proof. Comparisons and
+  early-return guards against bounded distinguished values also retain
+  exclusions such as `d != -1`; for example, `d > 0` proves both obligations.
+  Mutable locals and
   globals require an immutable snapshot because aliasing can invalidate a
   fact without a direct assignment to its source name.
 - **`min(a, b)` / `max(a, b)`** (see "Expressions" above) provide
@@ -2831,8 +2839,9 @@ justification for it.
 
 `takibi ... --forbid-trap` rejects compilation if **any** runtime trap
 check remains anywhere in the generated code (array bounds checks,
-division/remainder zero checks, checked refined casts, exhaustive-enum
-casts), listing every unproven site with its source location. Without the
+division/remainder zero checks, signed-division overflow checks, checked
+refined casts, exhaustive-enum casts), listing every unproven site with its
+source location. Without the
 flag, the same code compiles fine and gets a runtime check (`llvm.trap` on
 violation) -- the intended
 permissive mode for early driver bring-up, where a trap firing is a

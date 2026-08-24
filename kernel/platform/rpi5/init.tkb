@@ -256,7 +256,7 @@ fn kernel_test_platform_storage() {
                                     let provision_ticks: i64 =
                                         read_cntpct() - provision_start;
                                     let provision_frequency: i64 = read_cntfrq();
-                                    if (provision_frequency == 0) {
+                                    if (provision_frequency <= 0) {
                                         kernel_boot_log("usb provision metrics: invalid counter frequency\n");
                                         return;
                                     }

@@ -76,6 +76,8 @@ let active_overflow_audit_sites : overflow_audit_site list ref = ref []
    source at a time without changing permissive or --forbid-trap behavior. *)
 let divisor_proven_nonzero_at : (Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
+let signed_division_overflow_proven_safe_at :
+    (Lexing.position, unit) Hashtbl.t = Hashtbl.create 32
 let array_index_proven_in_bounds_at : (Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
 let refined_cast_proven_in_bounds_at : (Lexing.position, unit) Hashtbl.t =
@@ -994,6 +996,18 @@ let record_divisor_nonzero_proof ty (expr : Ast.expr) =
       Hashtbl.replace divisor_proven_nonzero_at expr.loc ()
   | _ -> ()
 
+let record_signed_division_overflow_proof loc lhs_facts rhs_facts =
+  match lhs_facts with
+  | Some lhs when lhs.Value_facts.base.signedness = Value_facts.Signed ->
+      let signed_min = (Value_facts.full_interval lhs.base).lo in
+      let minus_one = Value_facts.negative 1L in
+      if Value_facts.excludes lhs signed_min
+         || (match rhs_facts with
+             | Some rhs -> Value_facts.excludes rhs minus_one
+             | None -> false) then
+        Hashtbl.replace signed_division_overflow_proven_safe_at loc ()
+  | _ -> ()
+
 let record_array_index_proof size ty (expr : Ast.expr) =
   match value_facts_of_expr ty expr with
   | Some facts ->
@@ -1037,22 +1051,31 @@ let collect_excluded_cond (cond : Ast.expr) =
     | Some id -> IntMap.singleton id (name, [value])
     | None -> IntMap.empty
   in
+  let distinguished = [Value_facts.zero; Value_facts.negative 1L] in
+  let ordered_exclusions ~variable_on_left op bound =
+    List.filter (fun candidate ->
+      let comparison = Value_facts.compare_integer candidate bound in
+      match variable_on_left, op with
+      | true, Ast.Gt | false, Ast.Lt -> comparison <= 0
+      | true, Ast.Lt | false, Ast.Gt -> comparison >= 0
+      | _ -> false) distinguished
+  in
+  let facts_for var name ~variable_on_left op constant_expr =
+    match constant constant_expr with
+    | Some value when op = Ast.Ne -> singleton var name value
+    | Some value when op = Ast.Gt || op = Ast.Lt ->
+        (match binding_id var with
+         | Some id ->
+             let excluded = ordered_exclusions ~variable_on_left op value in
+             if excluded = [] then IntMap.empty
+             else IntMap.singleton id (name, excluded)
+         | None -> IntMap.empty)
+    | _ -> IntMap.empty
+  in
   let direct op (left : Ast.expr) (right : Ast.expr) =
     match left.desc, right.desc with
-    | Ast.Var name, _ ->
-        (match constant right with
-         | Some value when op = Ast.Ne -> singleton left name value
-         | Some value when (op = Ast.Gt || op = Ast.Lt)
-                           && Value_facts.equal_integer value Value_facts.zero ->
-             singleton left name value
-         | _ -> IntMap.empty)
-    | _, Ast.Var name ->
-        (match constant left with
-         | Some value when op = Ast.Ne -> singleton right name value
-         | Some value when (op = Ast.Gt || op = Ast.Lt)
-                           && Value_facts.equal_integer value Value_facts.zero ->
-             singleton right name value
-         | _ -> IntMap.empty)
+    | Ast.Var name, _ -> facts_for left name ~variable_on_left:true op right
+    | _, Ast.Var name -> facts_for right name ~variable_on_left:false op left
     | _ -> IntMap.empty
   in
   let union_values left right =
@@ -1949,6 +1972,16 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            Hashtbl.replace overflow_audit_table
              (loc.pos_fname, loc.pos_lnum, col, op)
              site;
+           (match op with
+            | Div ->
+                (match Const_env.folded_value e with
+                 | Some _ ->
+                     Hashtbl.replace signed_division_overflow_proven_safe_at
+                       e2.loc ()
+                 | None ->
+                     record_signed_division_overflow_proof e2.loc
+                       site.overflow_lhs_facts site.overflow_rhs_facts)
+            | _ -> ());
            active_overflow_audit_sites := site :: !active_overflow_audit_sites
        | _ -> ());
       (* GitHub issue #186: u16be (bare or refined-over-it) deliberately does
@@ -5388,7 +5421,12 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
           value_facts_of_expr site.overflow_lhs_ty site.overflow_lhs;
       if site.overflow_rhs_facts = None then
         site.overflow_rhs_facts <-
-          value_facts_of_expr site.overflow_rhs_ty site.overflow_rhs
+          value_facts_of_expr site.overflow_rhs_ty site.overflow_rhs;
+      (match site.overflow_op with
+       | Div ->
+           record_signed_division_overflow_proof site.overflow_rhs.loc
+             site.overflow_lhs_facts site.overflow_rhs_facts
+       | _ -> ())
     ) !active_overflow_audit_sites;
     List.iter2 (fun (name, _) ty ->
       if contains_stable_owner_value_ty ty then
@@ -5423,6 +5461,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset slice_cast_len;     (* GitHub issue #372, same lifetime *)
   Hashtbl.reset overflow_audit_table;
   Hashtbl.reset divisor_proven_nonzero_at;
+  Hashtbl.reset signed_division_overflow_proven_safe_at;
   Hashtbl.reset array_index_proven_in_bounds_at;
   Hashtbl.reset refined_cast_proven_in_bounds_at;
   Hashtbl.reset binding_fact_sources;

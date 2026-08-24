@@ -2618,6 +2618,50 @@ let emit_divisor_check loc operation divisor_ty divisor =
       ~bad_name:"divzero_trap" ~ok_name:"divzero_ok"
   end
 
+(* LLVM signed division/remainder is also undefined for MIN / -1.  Keep this
+   separate from the zero-divisor obligation: either operand fact can prove
+   this pair impossible, and --forbid-trap should identify the missing proof
+   precisely. *)
+let emit_signed_division_overflow_check loc operation lhs_ty lhs rhs =
+  if not (Hashtbl.mem Type_inf.signed_division_overflow_proven_safe_at loc)
+  then begin
+    let bits = integer_bitwidth (type_of lhs) in
+    let min_value = Int64.shift_left 1L (bits - 1) in
+    let min_ll = const_of_int64 (type_of lhs) min_value true in
+    let minus_one = const_of_int64 (type_of rhs) (-1L) true in
+    let lhs_min = build_icmp Icmp.Eq lhs min_ll "divmin_cmp" builder in
+    let rhs_minus_one =
+      build_icmp Icmp.Eq rhs minus_one "divnegone_cmp" builder in
+    let bad = build_and lhs_min rhs_minus_one "divoverflow_cmp" builder in
+    let what = Printf.sprintf
+      "signed %s overflow check remains: operand type %s cannot prove MIN / -1 impossible"
+      operation (ty_str lhs_ty) in
+    emit_recorded_trap_when loc what bad
+      ~bad_name:"divoverflow_trap" ~ok_name:"divoverflow_ok"
+  end
+
+(* LLVM marks signed MIN % -1 as undefined even though the mathematical
+   remainder is representable and uniquely zero.  Define that case directly
+   instead of manufacturing a runtime error in the source language. *)
+let build_defined_signed_remainder lhs rhs =
+  let cur_f = block_parent (insertion_block builder) in
+  let minus_one = const_of_int64 (type_of rhs) (-1L) true in
+  let is_minus_one = build_icmp Icmp.Eq rhs minus_one "remnegone_cmp" builder in
+  let zero_bb = append_block context "remnegone" cur_f in
+  let srem_bb = append_block context "srem" cur_f in
+  let done_bb = append_block context "srem_done" cur_f in
+  ignore (build_cond_br is_minus_one zero_bb srem_bb builder);
+  position_at_end zero_bb builder;
+  let zero = const_int (type_of lhs) 0 in
+  ignore (build_br done_bb builder);
+  let zero_end = insertion_block builder in
+  position_at_end srem_bb builder;
+  let remainder = build_srem lhs rhs "modtmp" builder in
+  ignore (build_br done_bb builder);
+  let srem_end = insertion_block builder in
+  position_at_end done_bb builder;
+  build_phi [(zero, zero_end); (remainder, srem_end)] "modtmp" builder
+
 (* Bounds check against a slice's RUNTIME length (a usize-width value).
    The index arrives i32-widened (widen_load invariant); zext to the
    length's width first -- a negative i32 zext-widens to a huge unsigned
@@ -3132,6 +3176,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (ret_ty, build_mul v1 v2 "multmp" builder)
        | Div ->
            emit_divisor_check e2.loc "division" ty2 v2;
+           if not (is_unsigned ty1) then
+             emit_signed_division_overflow_check e2.loc "division" ty1 v1 v2;
            let result = if is_unsigned ty1
                         then build_udiv v1 v2 "divtmp" builder
                         else build_sdiv v1 v2 "divtmp" builder
@@ -3196,7 +3242,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            emit_divisor_check e2.loc "remainder" ty2 v2;
            let result = if is_unsigned ty1
                         then build_urem v1 v2 "modtmp" builder
-                        else build_srem v1 v2 "modtmp" builder
+                        else build_defined_signed_remainder v1 v2
            in
            let ret_ty = match intlit_opt e2 with
              | Some m when m > 0 ->
