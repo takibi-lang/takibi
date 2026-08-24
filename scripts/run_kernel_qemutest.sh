@@ -49,9 +49,10 @@ INTERACTIVE_HTTPD_DONE="$ARTIFACT_DIR/interactive-httpd.done"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 SERIAL_PORT="${KERNEL_QEMU_SERIAL_PORT:-18673}"
-# Safety net only: the run normally ends after the bounded suite and its
-# same-boot interactive HTTPd checks complete. This bound matters only if
-# the guest wedges before either phase reaches its marker.
+# The UART driver and network peer below each enforce this bound. QEMU itself
+# is deliberately started directly so QEMU_PID names the process that owns
+# the lane's sockets; cleanup must wait for that process before a following
+# invocation can safely reuse the fixed ports.
 TIMEOUT_SECS="${KERNEL_QEMU_TIMEOUT:-90}"
 # Keep the maintained kernel lane away from the historical examples' QEMU
 # datagram ports. A stale or concurrent legacy runner on 17771/17772 can
@@ -88,7 +89,7 @@ echo "[$RUN_LABEL] booting $(basename "$ELF") under QEMU"
 # below can talk to it while it runs.  Do not let the guest start until the
 # capture client owns the UART: with wait=off, a fast boot can emit early
 # self-test evidence before run_kernel_uart_driver.py connects.
-timeout "$TIMEOUT_SECS" qemu-system-aarch64 \
+qemu-system-aarch64 \
     -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
     -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=on" \
     -global virtio-mmio.force-legacy=on \
