@@ -182,6 +182,7 @@ let type_checker_consumed_unsafe_at : (Lexing.position, unit) Hashtbl.t =
    state. *)
 let fold_stmts_with_future_writes
     (f : 'a -> Ast.stmt -> 'a) (init : 'a) (stmts : Ast.stmt list) : 'a =
+  let saved_nonzero = !active_nonzero_bindings in
   let rec go acc = function
     | [] -> acc
     | s :: rest ->
@@ -206,7 +207,9 @@ let fold_stmts_with_future_writes
         in
         go acc' rest
   in
-  go init stmts
+  Fun.protect
+    ~finally:(fun () -> active_nonzero_bindings := saved_nonzero)
+    (fun () -> go init stmts)
 
 let view_kinds : (string, Ast.opaque_kind) Hashtbl.t = Hashtbl.create 8
 let view_params : (string, Ast.static_param list) Hashtbl.t = Hashtbl.create 8
@@ -956,9 +959,9 @@ let collect_nonzero_cond (cond : Ast.expr) =
   in
   go cond
 
-let with_nonzero_narrowing tyenv cond killed f =
+let nonzero_additions tyenv cond killed =
   let ids, names = collect_nonzero_cond cond in
-  let additions = IntSet.filter (fun id ->
+  IntSet.filter (fun id ->
     match List.assoc_opt id names with
     | Some name ->
         not (List.mem name killed)
@@ -967,7 +970,10 @@ let with_nonzero_narrowing tyenv cond killed f =
             | Some (_, true) -> IntSet.mem id !active_parameter_bindings
             | None -> false)
     | None -> false
-  ) ids in
+  ) ids
+
+let with_nonzero_narrowing tyenv cond killed f =
+  let additions = nonzero_additions tyenv cond killed in
   let saved = !active_nonzero_bindings in
   active_nonzero_bindings := IntSet.union saved additions;
   Fun.protect ~finally:(fun () -> active_nonzero_bindings := saved) f
@@ -4596,6 +4602,14 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
           | None -> tyenv
         end else tyenv
       in
+      (if stmt_list_always_returns then_s then
+        match negate_cond cond with
+        | Some neg ->
+            let killed = Ast.written_names else_s
+              @ StringSet.elements future_writes_here in
+            active_nonzero_bindings := IntSet.union !active_nonzero_bindings
+              (nonzero_additions tyenv neg killed)
+        | None -> ());
       (continuation_tyenv, rl2)
   | While (cond, body) ->
       let ct = infer_expr senv eenv tyenv fenv cond in

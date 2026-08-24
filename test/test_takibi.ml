@@ -2269,6 +2269,24 @@ let infer_tests = [
          }");
       Alcotest.(check int) "inferred usize keeps exact initializer fact" 1
         (Hashtbl.length Type_inf.divisor_proven_nonzero_at));
+
+  Alcotest.test_case "early-return continuation carries nonzero facts to siblings" `Quick
+    (fun () ->
+      ignore (infer
+        "fn guarded_divisor(n: i32, d: i32) -> i32 {
+           if (d == 0) { return 0; }
+           return n / d;
+         }");
+      Alcotest.(check int) "negated guard proves later divisor" 1
+        (Hashtbl.length Type_inf.divisor_proven_nonzero_at);
+      ignore (infer
+        "fn written_after_guard(n: i32, d: i32) -> i32 {
+           if (d == 0) { return 0; }
+           d = 0;
+           return n / d;
+         }");
+      Alcotest.(check int) "future write prevents continuation proof" 0
+        (Hashtbl.length Type_inf.divisor_proven_nonzero_at));
   (* GitHub issue #358: the parser cannot know whether Name[args] denotes
      an indexed owner, view, or variant. Lock down the post-registration
      invariant directly: views/variants are canonical everywhere in the
