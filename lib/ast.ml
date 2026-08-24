@@ -21,6 +21,16 @@ let source_file_of_loc (loc : loc) : string =
   | None -> loc.Lexing.pos_fname
   | Some i -> String.sub loc.Lexing.pos_fname 0 i
 
+let monomorphization_of_loc (loc : loc) : string option =
+  let full = loc.Lexing.pos_fname in
+  match String.index_opt full '#' with
+  | None -> None
+  | Some i ->
+      Some (String.sub full (i + 1) (String.length full - i - 1))
+
+let source_loc (loc : loc) : loc =
+  { loc with Lexing.pos_fname = source_file_of_loc loc }
+
 type 'a located = {
   desc: 'a;
   loc: loc [@printer pp_loc];

@@ -12,6 +12,8 @@ ALLOWED = {
     ("lib/ast.ml", "match String.index_opt loc.Lexing.pos_fname '#' with"),
     ("lib/ast.ml", "| None -> loc.Lexing.pos_fname"),
     ("lib/ast.ml", "| Some i -> String.sub loc.Lexing.pos_fname 0 i"),
+    ("lib/ast.ml", "let full = loc.Lexing.pos_fname in"),
+    ("lib/ast.ml", "{ loc with Lexing.pos_fname = source_file_of_loc loc }"),
     ("lib/monomorphize.ml",
      "{ loc with Lexing.pos_fname = loc.Lexing.pos_fname ^ \"#\" ^ mangled }"),
     ("lib/types.ml",

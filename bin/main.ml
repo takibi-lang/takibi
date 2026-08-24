@@ -339,7 +339,12 @@ let () =
        report-all-failures philosophy. *)
     if !forbid_trap && !Llvm_gen.trap_sites <> [] then begin
       let sites = List.rev !Llvm_gen.trap_sites in
-      List.iter (fun (loc, what) -> report_error loc what) sites;
+      let groups = Trap_diagnostics.group sites in
+      List.iter (fun group ->
+        report_error group.Trap_diagnostics.loc group.message;
+        Option.iter (fun note -> Printf.eprintf "Note: %s\n" note)
+          (Trap_diagnostics.instantiation_note group)
+      ) groups;
       Printf.eprintf
         "Error: --forbid-trap: %d runtime trap site(s) remain (listed above)\n"
         (List.length sites);

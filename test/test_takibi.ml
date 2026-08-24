@@ -9912,6 +9912,57 @@ let codegen_tests = [
       Llvm_gen.trap_sites := (Lexing.dummy_pos, "accounting only") :: real_sites;
       expect_mismatch "accounting-only");
 
+  Alcotest.test_case
+    "generic trap diagnostics group identical instances but preserve differing messages"
+    `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "fn same421(T: type, value: T, divisor: usize) -> usize {
+           return 10 % divisor;
+         }
+         fn use_same421(divisor: usize) -> usize {
+           let a: u8 = 1; let b: u16 = 2; let c: u32 = 3; let d: u64 = 4;
+           return same421(a, divisor) + same421(b, divisor) +
+                  same421(c, divisor) + same421(d, divisor);
+         }");
+      Alcotest.(check int) "underlying trap count remains per instantiation" 4
+        (List.length !Llvm_gen.trap_sites);
+      let groups = Trap_diagnostics.group (List.rev !Llvm_gen.trap_sites) in
+      Alcotest.(check int) "one identical diagnostic group" 1 (List.length groups);
+      let group = List.hd groups in
+      Alcotest.(check int) "group retains underlying count" 4 group.count;
+      Alcotest.(check (list string)) "stable instantiation order"
+        ["same421$u16"; "same421$u32"; "same421$u64"; "same421$u8"]
+        group.instances;
+      Alcotest.(check (option string)) "bounded representative rendering"
+        (Some
+          "grouped 4 trap site(s) across 4 generic instantiation(s): \
+           same421$u16, same421$u32, same421$u64, ... (+1 more)")
+        (Trap_diagnostics.instantiation_note group);
+
+      ignore (gen_codegen
+        "fn different421(T: type, value: T, divisor: T) -> T {
+           return value % divisor;
+         }
+         fn use_different421(a: u8, b: u16) -> usize {
+           return (different421(a, a) as usize) +
+                  (different421(b, b) as usize);
+         }");
+      let groups = Trap_diagnostics.group (List.rev !Llvm_gen.trap_sites) in
+      Alcotest.(check int) "substituted-type messages stay separate" 2
+        (List.length groups);
+
+      ignore (gen_codegen
+        "fn nongeneric421(x: i32, divisor: i32) -> i32 {
+           return x / divisor;
+         }");
+      let group = List.hd
+        (Trap_diagnostics.group (List.rev !Llvm_gen.trap_sites)) in
+      Alcotest.(check (list string)) "non-generic has no instance note" []
+        group.instances;
+      Alcotest.(check (option string)) "non-generic rendering is unchanged" None
+        (Trap_diagnostics.instantiation_note group));
+
   Alcotest.test_case "division and remainder by constant zero are type errors" `Quick
     (fun () ->
       expect_type_error "division by zero"
