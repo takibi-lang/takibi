@@ -2232,6 +2232,33 @@ let infer_tests = [
       ignore (infer "fn unchecked(n: i32, d: i32) -> i32 { return n / d; }");
       Alcotest.(check int) "unknown divisor is not proved and table resets" 0
         (Hashtbl.length Type_inf.divisor_proven_nonzero_at));
+
+  Alcotest.test_case "branch nonzero facts reach divisor proof decisions conservatively" `Quick
+    (fun () ->
+      ignore (infer
+        "fn branch_div(n: i32, d: i32) -> i32 {
+           if (d != 0) { return n / d; }
+           return 0;
+         }");
+      Alcotest.(check int) "stable parameter proved inside branch" 1
+        (Hashtbl.length Type_inf.divisor_proven_nonzero_at);
+      ignore (infer
+        "fn killed_branch_div(n: i32, d: i32) -> i32 {
+           if (d != 0) { d = 0; return n / d; }
+           return 0;
+         }");
+      Alcotest.(check int) "body write invalidates branch proof" 0
+        (Hashtbl.length Type_inf.divisor_proven_nonzero_at);
+      ignore (infer
+        "fn shadowed_branch_div(n: i32, d: i32) -> i32 {
+           {
+             let mut d: i32 = 1;
+             if (d != 0) { return n / d; }
+           }
+           return 0;
+         }");
+      Alcotest.(check int) "mutable shadow is not mistaken for parameter" 0
+        (Hashtbl.length Type_inf.divisor_proven_nonzero_at));
   (* GitHub issue #358: the parser cannot know whether Name[args] denotes
      an indexed owner, view, or variant. Lock down the post-registration
      invariant directly: views/variants are canonical everywhere in the
