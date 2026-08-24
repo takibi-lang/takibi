@@ -1911,7 +1911,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              { overflow_loc = loc; overflow_op = op;
                overflow_lhs = e1; overflow_lhs_ty = t1;
                overflow_rhs = e2; overflow_rhs_ty = t2;
-               overflow_lhs_facts = None; overflow_rhs_facts = None }
+               overflow_lhs_facts = value_facts_of_expr t1 e1;
+               overflow_rhs_facts = value_facts_of_expr t2 e2 }
            in
            Hashtbl.replace overflow_audit_table
              (loc.pos_fname, loc.pos_lnum, col, op)
@@ -5348,10 +5349,12 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
     in
     check_undetermined_lets fdef raw_locals;
     List.iter (fun site ->
-      site.overflow_lhs_facts <-
-        value_facts_of_expr site.overflow_lhs_ty site.overflow_lhs;
-      site.overflow_rhs_facts <-
-        value_facts_of_expr site.overflow_rhs_ty site.overflow_rhs
+      if site.overflow_lhs_facts = None then
+        site.overflow_lhs_facts <-
+          value_facts_of_expr site.overflow_lhs_ty site.overflow_lhs;
+      if site.overflow_rhs_facts = None then
+        site.overflow_rhs_facts <-
+          value_facts_of_expr site.overflow_rhs_ty site.overflow_rhs
     ) !active_overflow_audit_sites;
     List.iter2 (fun (name, _) ty ->
       if contains_stable_owner_value_ty ty then
