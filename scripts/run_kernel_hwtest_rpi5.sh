@@ -233,12 +233,14 @@ fi
 echo "[kernel/rpi5] curling BusyBox httpd index.html on port 8080"
 httpd_ok=0
 for _attempt in $(seq 1 20); do
-    if curl --silent --show-error --fail \
+    if httpd_type="$(curl --silent --show-error --fail \
             --interface "$ETH_TEST_IFACE" --noproxy '*' \
             --connect-timeout 5 --max-time 10 \
+            --write-out '%{content_type}' \
             --output "$HTTPD_BODY" \
-            "http://${ETH_TEST_SUBNET}.2:8080/" 2>"$HTTPD_LOG"; then
-        if cmp -s "$REPO_ROOT/kernel/tests/ext2/index.html" "$HTTPD_BODY"; then
+            "http://${ETH_TEST_SUBNET}.2:8080/" 2>"$HTTPD_LOG")"; then
+        if cmp -s "$REPO_ROOT/kernel/tests/ext2/index.html" "$HTTPD_BODY" &&
+                [ "$httpd_type" = "text/html" ]; then
             httpd_ok=1
             break
         fi
@@ -259,12 +261,14 @@ echo "[kernel/rpi5] BusyBox httpd curl passed"
 echo "[kernel/rpi5] curling BusyBox httpd index.html a second time (same boot)"
 second_httpd_ok=0
 for _attempt in $(seq 1 20); do
-    if curl --silent --show-error --fail \
+    if second_httpd_type="$(curl --silent --show-error --fail \
             --interface "$ETH_TEST_IFACE" --noproxy '*' \
             --connect-timeout 5 --max-time 10 \
+            --write-out '%{content_type}' \
             --output "$SECOND_HTTPD_BODY" \
-            "http://${ETH_TEST_SUBNET}.2:8080/" 2>"$SECOND_HTTPD_LOG"; then
-        if cmp -s "$REPO_ROOT/kernel/tests/ext2/index.html" "$SECOND_HTTPD_BODY"; then
+            "http://${ETH_TEST_SUBNET}.2:8080/" 2>"$SECOND_HTTPD_LOG")"; then
+        if cmp -s "$REPO_ROOT/kernel/tests/ext2/index.html" "$SECOND_HTTPD_BODY" &&
+                [ "$second_httpd_type" = "text/html" ]; then
             second_httpd_ok=1
             break
         fi
@@ -339,29 +343,40 @@ if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
     exit 1
 fi
 
-for request_number in 1 2; do
-    interactive_body="$ARTIFACT_DIR/interactive-httpd-body-$request_number.actual"
-    interactive_log="$ARTIFACT_DIR/interactive-httpd-curl-$request_number.log"
-    echo "[kernel/rpi5] curling interactive background HTTPd ($request_number/2)"
+interactive_assets=(
+    "root|/|index.html|text/html"
+    "index|/index.html|index.html|text/html"
+    "about|/about.html|about.html|text/html"
+    "icon|/icon.png|icon.png|image/png"
+)
+for asset_spec in "${interactive_assets[@]}"; do
+    IFS='|' read -r asset_name asset_path asset_file asset_type <<<"$asset_spec"
+    interactive_body="$ARTIFACT_DIR/interactive-httpd-$asset_name.actual"
+    interactive_log="$ARTIFACT_DIR/interactive-httpd-$asset_name.log"
+    echo "[kernel/rpi5] curling interactive background HTTPd $asset_path"
     interactive_httpd_ok=0
     for _attempt in $(seq 1 20); do
-        if curl --silent --show-error --fail \
+        if interactive_type="$(curl --silent --show-error --fail \
                 --interface "$ETH_TEST_IFACE" --noproxy '*' \
                 --connect-timeout 5 --max-time 10 \
+                --write-out '%{content_type}' \
                 --output "$interactive_body" \
-                "http://${ETH_TEST_SUBNET}.2:8080/" 2>"$interactive_log"; then
-            if cmp -s "$REPO_ROOT/kernel/tests/ext2/index.html" \
-                    "$interactive_body"; then
+                "http://${ETH_TEST_SUBNET}.2:8080${asset_path}" \
+                2>"$interactive_log")"; then
+            if cmp -s "$REPO_ROOT/kernel/tests/ext2/$asset_file" \
+                    "$interactive_body" &&
+                    [ "$interactive_type" = "$asset_type" ]; then
                 interactive_httpd_ok=1
                 break
             fi
-            echo 'unexpected response body' >"$interactive_log"
+            echo "unexpected response body or content type: $interactive_type" \
+                >"$interactive_log"
             break
         fi
         sleep 0.25
     done
     if [ "$interactive_httpd_ok" -ne 1 ]; then
-        echo "FAIL kernel/rpi5: interactive HTTPd curl $request_number failed (see $interactive_log)" >&2
+        echo "FAIL kernel/rpi5: interactive HTTPd curl $asset_path failed (see $interactive_log)" >&2
         exit 1
     fi
 done

@@ -77,14 +77,14 @@ HANDSHAKE_CLIENT_ISN = 500
 DATA_ECHO_PAYLOAD = b"Hello, TCP echo!"
 RECONNECT_CLIENT_PORT = 43211
 RECONNECT_CLIENT_ISN = 900
-HTTP_CLIENT_PORTS = (43300, 43301)
-HTTP_CLIENT_ISNS = (1200, 2200)
-HTTP_REQUEST_PARTS = (
-    b"GET / HTTP/1.0\r\n",
-    b"Host: 192.168.20.2\r\nConnection: close\r\n\r\n",
-)
-HTTP_EXPECTED_BODY = (
-    b"<!doctype html>\n<html><body>takibi RPi5 BusyBox httpd</body></html>\n"
+HTTP_CLIENT_PORTS = (43300, 43301, 43302, 43303)
+HTTP_CLIENT_ISNS = (1200, 2200, 3200, 4200)
+REPO_ROOT = Path(__file__).resolve().parents[1]
+HTTP_ASSETS = (
+    ("/", REPO_ROOT / "kernel/tests/ext2/index.html", "text/html"),
+    ("/index.html", REPO_ROOT / "kernel/tests/ext2/index.html", "text/html"),
+    ("/about.html", REPO_ROOT / "kernel/tests/ext2/about.html", "text/html"),
+    ("/icon.png", REPO_ROOT / "kernel/tests/ext2/icon.png", "image/png"),
 )
 INIT_SERVER_PORT = 8080
 INIT_CLIENT_PORTS = (43210, 43211)
@@ -465,7 +465,9 @@ def init_script_fixture(sock: socket.socket) -> bool:
     return ok
 
 
-def http_request(sock: socket.socket, client_port: int, client_isn: int) -> bool:
+def http_request(sock: socket.socket, client_port: int, client_isn: int,
+                 path: str, expected_body: bytes,
+                 expected_content_type: str) -> bool:
     # The bounded boot fixture deliberately drops the first SYN-ACK; the
     # interactive daemon does not. The same retry loop correctly covers both
     # lifecycles without making the interactive test inherit fixture state.
@@ -490,7 +492,11 @@ def http_request(sock: socket.socket, client_port: int, client_isn: int) -> bool
                                 server_port=HTTP_SERVER_PORT),
                 (QEMU_HOST, QEMU_PORT))
 
-    for part in HTTP_REQUEST_PARTS:
+    request_parts = (
+        f"GET {path} HTTP/1.0\r\n".encode("ascii"),
+        b"Host: 192.168.20.2\r\nConnection: close\r\n\r\n",
+    )
+    for part in request_parts:
         frame = build_tcp_frame(client_port, client_seq, server_next,
                                 FLAG_ACK | FLAG_PSH, data=part,
                                 server_port=HTTP_SERVER_PORT)
@@ -551,12 +557,24 @@ def http_request(sock: socket.socket, client_port: int, client_isn: int) -> bool
     if not response_end:
         print("  HTTP response did not close")
         return False
-    separator = bytes(body).find(b"\r\n\r\n")
-    actual_body = bytes(body[separator + 4:]) if separator >= 0 else b""
-    ok = actual_body == HTTP_EXPECTED_BODY
-    print("  HTTP GET / body:                  %s" % ("PASS" if ok else "FAIL"))
+    response = bytes(body)
+    separator = response.find(b"\r\n\r\n")
+    header = response[:separator].decode("iso-8859-1") if separator >= 0 else ""
+    actual_body = response[separator + 4:] if separator >= 0 else b""
+    content_type = ""
+    for line in header.split("\r\n"):
+        if line.lower().startswith("content-type:"):
+            content_type = line.split(":", 1)[1].strip().lower()
+            break
+    ok = (actual_body == expected_body and
+          content_type == expected_content_type)
+    print("  HTTP GET %-11s body+type:       %s" %
+          (path, "PASS" if ok else "FAIL"))
     if not ok:
-        print("  unexpected HTTP body:", actual_body)
+        print("  expected content type:", expected_content_type)
+        print("  actual content type:  ", content_type)
+        print("  expected body bytes:  ", len(expected_body))
+        print("  actual body bytes:    ", len(actual_body))
     return ok
 
 
@@ -630,9 +648,10 @@ def main() -> int:
                 del frame
             except socket.timeout:
                 break
+        root_body = HTTP_ASSETS[0][1].read_bytes()
         http_ok = init_ok and all(
-            http_request(sock, port, isn)
-            for port, isn in zip(HTTP_CLIENT_PORTS, HTTP_CLIENT_ISNS)
+            http_request(sock, port, isn, "/", root_body, "text/html")
+            for port, isn in zip(HTTP_CLIENT_PORTS[:2], HTTP_CLIENT_ISNS[:2])
         )
 
     normal_ok = ok_reconnect and http_ok
@@ -649,8 +668,9 @@ def main() -> int:
         print("  ARP while HTTPd is listening:       %s" %
               ("PASS" if arp_ok else "FAIL"))
         interactive_ok = arp_ok and all(
-            http_request(sock, port, isn)
-            for port, isn in zip(HTTP_CLIENT_PORTS, HTTP_CLIENT_ISNS))
+            http_request(sock, port, isn, path, source.read_bytes(), mime)
+            for (path, source, mime), port, isn in
+            zip(HTTP_ASSETS, HTTP_CLIENT_PORTS, HTTP_CLIENT_ISNS))
         sock.close()
         return 0 if interactive_ok else 1
 

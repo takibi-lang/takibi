@@ -94,7 +94,10 @@ stack; it gets private pages only when it writes. It aliases the accepted
 socket onto fd 0/fd 1, reads `index.html` from USB ext2, writes the response,
 and exits. The same parent accepts two sequential host `curl` requests before
 the bounded integration teardown reclaims every child mapping, fd, and socket
-reference. The host compares both complete 68-byte bodies with the fixture.
+reference. The document root also carries the SD-card demo's `about.html` and
+23,658-byte `icon.png`; interactive integration fetches `/`, all three named
+assets, checks their complete bodies, and verifies `text/html`/`image/png`
+content types.
 TCP fixtures also split a request across segments, inject bounded drops, and exercise short
 `read` plus a 1460+1 partial `write` sequence. The focused EL0 socket fixture
 also keeps connection A open while accepting connection B: a two-entry typed
@@ -168,7 +171,8 @@ For QEMU, start the shell and open the forwarded loopback URL in a browser:
 make kernelsh-qemu
 ```
 
-Open `http://127.0.0.1:18080/` in Firefox. QEMU user-mode networking forwards
+Open `http://127.0.0.1:18080/` in Firefox. Its links exercise
+`/about.html` and `/icon.png`. QEMU user-mode networking forwards
 that host port to the kernel's fixed `192.168.20.2:8080`; set
 `KERNEL_QEMU_SHELL_HTTP_PORT` to choose another host port. When the browser is
 outside the development container, forward that container port first. The
@@ -460,7 +464,7 @@ cover:
   sequence against a host-side Python peer (`scripts/kernel_net_test.py`)
   over a private `-netdev dgram` transport.
 - the BusyBox HTTPd accept/serve loop, split requests, retransmission
-  recovery, repeated requests, and exact `index.html` responses;
+  recovery, repeated requests, and exact HTML/PNG bodies and content types;
 - the interactive HTTPd child's own fork/child-selected/exec-prepare/
   exec-commit/listener-ready lifecycle checkpoints, in order (see
   "Interactive HTTPd lifecycle checkpoints" above);

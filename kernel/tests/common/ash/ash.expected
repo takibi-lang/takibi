@@ -1,7 +1,9 @@
+about.html
 bin
 dev
 etc
 hello.txt
+icon.png
 index.html
 large.txt
 latest
@@ -12,10 +14,12 @@ mutable.txt
 read_indirect.txt
 .
 ..
+about.html
 bin
 dev
 etc
 hello.txt
+icon.png
 index.html
 large.txt
 latest
