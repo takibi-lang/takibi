@@ -865,12 +865,22 @@ let value_facts_of_expr ty (expr : Ast.expr) =
            (try Some (exact base mathematical)
             with Invalid_argument _ -> Some (unknown base))
        | _ ->
-           match represented_ty with
-           | TRefinedInt (lo, hi, _) ->
-               let lo = of_signed_int64 (Int64.of_int lo) in
-               let hi = of_signed_int64 (Int64.of_int (hi - 1)) in
-               Some (interval base lo hi)
-           | _ -> Some (unknown base))
+           (match represented_ty with
+            | TRefinedInt (lo, hi, _) ->
+                let lo = of_signed_int64 (Int64.of_int lo) in
+                let hi = of_signed_int64 (Int64.of_int (hi - 1)) in
+                Some (interval base lo hi)
+            | _ ->
+                match Const_env.folded_value expr with
+                | Some value ->
+                    let value = Int64.of_int value in
+                    let mathematical = match base.signedness with
+                      | Signed -> of_signed_int64 value
+                      | Unsigned -> of_unsigned_int64 value
+                    in
+                    (try Some (exact base mathematical)
+                     with Invalid_argument _ -> Some (unknown base))
+                | None -> Some (unknown base)))
 
 let record_divisor_nonzero_proof ty (expr : Ast.expr) =
   match value_facts_of_expr ty expr with

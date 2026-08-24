@@ -2222,9 +2222,12 @@ let infer_tests = [
   Alcotest.test_case "division proof decisions begin in type inference value facts" `Quick
     (fun () ->
       ignore (infer
-        "fn quot(n: i32, d: {1..<4 as i32}) -> i32 { return n / d; }\n\
-         fn rem(n: i32) -> i32 { return n % 3; }");
-      Alcotest.(check int) "refined and literal divisors proved" 2
+        "const THREE_VF: i32 = 3;\n\
+         fn quot(n: i32, d: {1..<4 as i32}) -> i32 { return n / d; }\n\
+         fn rem(n: i32) -> i32 { return n % 3; }\n\
+         fn by_const(n: i32) -> i32 { return n / THREE_VF; }\n\
+         fn by_size(n: usize) -> usize { return n / sizeof([u8; 4]); }");
+      Alcotest.(check int) "refined, literal, const, and sizeof divisors proved" 4
         (Hashtbl.length Type_inf.divisor_proven_nonzero_at);
       ignore (infer "fn unchecked(n: i32, d: i32) -> i32 { return n / d; }");
       Alcotest.(check int) "unknown divisor is not proved and table resets" 0
@@ -10109,6 +10112,15 @@ let codegen_tests = [
        "const DIVISOR65: i32 = 3;
         fn constant_div65(x: i32) -> i32 {
           return (x / DIVISOR65) + (x % DIVISOR65);
+        }");
+
+  Alcotest.test_case "nonzero factors do not prove a nonzero wrapped product" `Quick
+    (expect_trap_sites 1
+       "fn wrapped_product_divisor65(x: u8, a: u8, b: u8) -> u8 {
+          if (a != 0 && b != 0) {
+            return x / (a * b);
+          }
+          return 0;
         }");
 
   Alcotest.test_case "sizeof and alignof divisors need no trap guard" `Quick

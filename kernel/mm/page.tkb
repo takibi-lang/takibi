@@ -375,7 +375,7 @@ fn page_allocator_init() {
 fn page_run_probe() -> bool !{unsafe} {
     let pages_before: usize = page_allocator_live_count();
     let doubles_before: usize = page_allocator_double_free_count();
-    let count: usize = 4;
+    let count: {4..<5 as usize} = 4;
 
     let run: exists r: usize. PageRunOwner[r] =
             match page_alloc_contiguous(count, PageOwnerTag::KernelStack) {

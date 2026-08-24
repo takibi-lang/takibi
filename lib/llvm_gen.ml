@@ -2677,7 +2677,7 @@ let integer_constant_survives ty n =
       isize_bitwidth () = 64 || within (-2_147_483_648) 2_147_483_648
   | _ -> false
 
-let rec expr_proven_nonzero ty expr =
+let expr_proven_nonzero ty expr =
   match intlit_opt expr with
   | Some n -> n <> 0 && integer_constant_survives ty n
   | None ->
@@ -2697,9 +2697,10 @@ let rec expr_proven_nonzero ty expr =
                   cannot truncate it to zero. *)
                integer_constant_survives target n)
       | Var name when Hashtbl.mem nonzero_ctx name -> true
-      | BinOp (Mul, left, right) ->
-          expr_proven_nonzero TypeUsize left
-          && expr_proven_nonzero TypeUsize right
+      (* Do not infer nonzero for a runtime multiplication merely because
+         both operands are nonzero. Fixed-width overflow can wrap their
+         product to zero (for example u8 16 * 16). Compile-time products
+         have already been handled by intlit_opt above. *)
       | _ ->
           (match ty with
            | TypeRefined (lo, hi, _) -> lo > 0 || hi <= 0
