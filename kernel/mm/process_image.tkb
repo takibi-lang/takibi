@@ -868,6 +868,16 @@ must_use variant ProcessImagePairProbeResult {
 // duplicated or dropped.
 fn process_image_pages_discard(pages: sink ProcessImagePages[image]) {}
 
+// Whether this root still owns an image a previous execve installed. The
+// only caller that can answer anything with it is the exec path itself: a
+// process that execs twice has to release the first image before the second
+// one is mapped over the same window, and by the time install runs the old
+// image's page-table entries have already been overwritten.
+fn process_image_exec_image_installed(root: usize) -> bool !{unsafe} {
+    if (scheduled_process_slot_valid(root) == false) { return false; }
+    return process_image_record_at(root).exec_image_installed;
+}
+
 fn process_image_exec_install(
         pages: sink ProcessImagePages[image]) -> bool {
     let root: usize =

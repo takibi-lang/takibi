@@ -283,12 +283,6 @@ fn kernel_process_child_exec_prepare() -> usize {
             }
         }
     }
-    match process_image_clone_vm_reap() {
-        ProcessCloneVmReapResult::Missing => {
-            return 0;
-        }
-        ProcessCloneVmReapResult::Reaped => {}
-    }
     // GitHub issue #245: this used to always be root 1, the only root the
     // old two-process model's single forked child could ever occupy. A
     // child running deeper than one level under its own parent (e.g.
@@ -296,6 +290,23 @@ fn kernel_process_child_exec_prepare() -> usize {
     // needs its own current root here instead.
     let child_root: usize =
         address_space_root_slot(kernel_process_current_root());
+    // Which VM this exec replaces depends on how the process got the one it
+    // has. A forked child is still running on the clone of its parent's, so
+    // that clone is what gets reaped. A process execing for the SECOND time
+    // (an `exec` in a shell script) has no clone left to reap and owns an
+    // installed image instead -- released here, before the replacement is
+    // mapped over the same window, because afterwards the old image's page
+    // table entries are gone and its physical pages are unreachable.
+    if (process_image_exec_image_installed(child_root)) {
+        process_image_exec_teardown(child_root);
+    } else {
+        match process_image_clone_vm_reap() {
+            ProcessCloneVmReapResult::Missing => {
+                return 0;
+            }
+            ProcessCloneVmReapResult::Reaped => {}
+        }
+    }
     if (ext2_mount_ready) {
         match kernel_exec_resolve_dynamic_ext2(saved_ext2_mount) {
             DynamicExecResolveResult::NotRequested => {}

@@ -67,5 +67,6 @@ shebang: /etc/script-shebang.sh
 shebang: args one two
 interpreter-argument /etc/script-interpreter-argument.sh three
 /hello.txt: line 1: hello: not found
+re-exec-ok
 repl-ok
 busybox interactive shell exit: 0
