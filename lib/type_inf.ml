@@ -34,7 +34,8 @@ let rec count_var_occurrences name (e : Ast.expr) =
       + count_var_occurrences name lo + count_var_occurrences name hi
   | Ast.Assign (lhs, rhs) ->
       count_var_occurrences name lhs + count_var_occurrences name rhs
-  | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.ViewLit _
+  | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.ByteSliceLit _
+  | Ast.ViewLit _
   | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.AlignOf _ | Ast.ContainsStableOwner _
   | Ast.OffsetOf _
   | Ast.EmbedFile _ -> 0
@@ -1140,7 +1141,7 @@ let rec is_literal_derived (e : Ast.expr) : bool =
   match e.desc with
   | IntLit _ -> true
   | AddrOf _ -> true
-  | StringLit _ -> true
+  | StringLit _ | ByteSliceLit _ -> true
       (* GitHub issue #318: a string literal's address is compiler-known,
          immutable, and unforgeable -- same reasoning already used for
          IntLit above. Currently unreachable from this function's own
@@ -1888,6 +1889,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
   | BoolLit _   -> TBool
   | StringLit _ -> TPtr TU8
+  | ByteSliceLit bytes -> TSlice (TU8, String.length bytes)
   | ViewLit (name, args) ->
       if not (Hashtbl.mem view_kinds name) then
         raise (TypeError (e.loc, Printf.sprintf "unknown erased view '%s'" name));
@@ -4460,6 +4462,8 @@ let rewrite_letmatch_arm_bodies (name : string) (arms : Ast.match_arm list)
     | Ast.ArmVariant (v, c, b, stmts) -> Ast.ArmVariant (v, c, b, rewrite_body stmts)
     | Ast.ArmWild stmts -> Ast.ArmWild (rewrite_body stmts)
     | Ast.ArmIntLit (ns, stmts) -> Ast.ArmIntLit (ns, rewrite_body stmts)
+    | Ast.ArmByteSliceLit (bytes, stmts) ->
+        Ast.ArmByteSliceLit (bytes, rewrite_body stmts)
   ) arms
 
 (* -- Statement inference --------------------------------------------------- *)
@@ -5051,6 +5055,10 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                  raise (TypeError (s.loc, Printf.sprintf
                    "match arm literal '%s' cannot be used against enum discriminant '%s'"
                    (String.concat " | " (List.map string_of_int lits)) ename))
+             | Ast.ArmByteSliceLit _ ->
+                 raise (TypeError (s.loc, Printf.sprintf
+                   "byte-slice literal match arm cannot be used against enum discriminant '%s'"
+                   ename))
            ) raw_locals arms in
            if is_ne then begin
              if not !has_wild then
@@ -5151,6 +5159,10 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                  raise (TypeError (s.loc, Printf.sprintf
                    "match arm literal '%s' cannot be used against variant discriminant '%s'"
                    (String.concat " | " (List.map string_of_int lits)) vtype))
+             | Ast.ArmByteSliceLit _ ->
+                 raise (TypeError (s.loc, Printf.sprintf
+                   "byte-slice literal match arm cannot be used against variant discriminant '%s'"
+                   vtype))
            ) raw_locals arms in
            if not !has_wild then
              List.iter (fun (cname, _) ->
@@ -5193,14 +5205,50 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                  raise (TypeError (s.loc, Printf.sprintf
                    "match arm '%s::...' cannot be used against a primitive integer discriminant"
                    aname))
+             | Ast.ArmByteSliceLit _ ->
+                 raise (TypeError (s.loc,
+                   "byte-slice literal match arm cannot be used against a primitive integer discriminant"))
            ) raw_locals arms in
            if not !has_wild then
              raise (TypeError (s.loc,
                "match on a primitive integer type requires a '_' wildcard arm \
                 (an integer's value space cannot be exhaustively listed)"));
            (tyenv, raw_locals')
+       | TSlice (TU8, minimum) ->
+           let has_wild = ref false in
+           let seen = Hashtbl.create 4 in
+           let raw_locals' = List.fold_left (fun rl arm ->
+             match arm with
+             | Ast.ArmByteSliceLit (bytes, body) ->
+                 if String.length bytes < minimum then
+                   raise (TypeError (s.loc, Printf.sprintf
+                     "byte-slice pattern bs%S has length %d but the discriminant has proven minimum length %d"
+                     bytes (String.length bytes) minimum));
+                 if Hashtbl.mem seen bytes then
+                   raise (TypeError (s.loc, Printf.sprintf
+                     "duplicate byte-slice match arm bs%S" bytes));
+                 Hashtbl.add seen bytes ();
+                 infer_arm_body tyenv rl body
+             | Ast.ArmWild body ->
+                 if !has_wild then
+                   raise (TypeError (s.loc,
+                     "duplicate '_' wildcard match arm"));
+                 has_wild := true;
+                 infer_arm_body tyenv rl body
+             | Ast.ArmVariant (aname, _, _, _) ->
+                 raise (TypeError (s.loc, Printf.sprintf
+                   "match arm '%s::...' cannot be used against a byte-slice discriminant"
+                   aname))
+             | Ast.ArmIntLit _ ->
+                 raise (TypeError (s.loc,
+                   "integer literal match arm cannot be used against a byte-slice discriminant"))
+           ) raw_locals arms in
+           if not !has_wild then
+             raise (TypeError (s.loc,
+               "match on a byte-slice type requires a '_' wildcard arm"));
+           (tyenv, raw_locals')
        | t -> raise (TypeError (disc.loc, Printf.sprintf
-           "match requires an enum, variant, or primitive integer type, got '%s'" (to_string t))))
+           "match requires an enum, variant, primitive integer, or []u8 type, got '%s'" (to_string t))))
   | LetMatch (is_mut, name, ty_opt, disc, arms) ->
       (* GitHub issue #183 follow-up ("Layer 1", plus a later non-mut
          extension and #184's `Yield`-tail sugar): `let [mut] name [: ty] =
@@ -5298,7 +5346,7 @@ let check_const_shadowing (fdef : Ast.func) =
                 if Const_env.find name <> None then reject s.loc name) binding;
               List.iter go_stmt b
           | Ast.ArmWild b            -> List.iter go_stmt b
-          | Ast.ArmIntLit (_, b)     -> List.iter go_stmt b
+          | Ast.ArmIntLit (_, b) | Ast.ArmByteSliceLit (_, b) -> List.iter go_stmt b
         ) arms
     | _ -> ()
   in
@@ -5329,7 +5377,7 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
   let rec go_arms arms = List.iter (function
     | Ast.ArmVariant (_, _, _, b) -> List.iter go_stmt b
     | Ast.ArmWild b            -> List.iter go_stmt b
-    | Ast.ArmIntLit (_, b)     -> List.iter go_stmt b
+    | Ast.ArmIntLit (_, b) | Ast.ArmByteSliceLit (_, b) -> List.iter go_stmt b
   ) arms
   and go_stmt (s : Ast.stmt) = match s.desc with
     | Ast.Let (_, name, None, _, _) -> check s.loc name
@@ -6566,7 +6614,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           | Some formals ->
               validate_static_application e.loc "view" name formals args)
      | Ast.Assign (lhs, rhs) -> validate_expr_types lhs; validate_expr_types rhs
-     | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.Var _
+     | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.ByteSliceLit _ | Ast.Var _
      | Ast.EnumVariant _ | Ast.EmbedFile _ -> ())
   and validate_stmt_types (s : Ast.stmt) =
     (match s.desc with
@@ -6596,7 +6644,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      | Ast.Match (e, arms) ->
          validate_expr_types e;
          List.iter (function
-           | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) ->
+           | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b)
+           | Ast.ArmByteSliceLit (_, b) ->
                List.iter validate_stmt_types b) arms
      | Ast.LetMatch (_, _, ty, disc, arms) ->
          Option.iter (fun t ->
@@ -6607,7 +6656,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          Option.iter (validate_let_type s.loc) ty;
          validate_expr_types disc;
          List.iter (function
-           | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) ->
+           | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b)
+           | Ast.ArmByteSliceLit (_, b) ->
                List.iter validate_stmt_types b) arms
      | Ast.StaticAssert _
      | Ast.Break | Ast.Continue -> ())
@@ -8325,7 +8375,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           require_region_live_base e.loc taints moved base;
           check_expr taints (check_expr taints moved false lo) false hi
       | Ast.SizeOf _ | Ast.AlignOf _ | Ast.ContainsStableOwner _ | Ast.OffsetOf _ | Ast.IntLit _
-      | Ast.BoolLit _ | Ast.StringLit _ | Ast.EmbedFile _ -> moved
+      | Ast.BoolLit _ | Ast.StringLit _ | Ast.ByteSliceLit _ | Ast.EmbedFile _ -> moved
       | Ast.EnumVariant (vtype, _) ->
           if (Hashtbl.find_opt variant_kinds vtype = Some Ast.KindLinear
               || Hashtbl.mem must_use_variants vtype)
@@ -8410,7 +8460,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.If (_, yes, no) -> always_terminates yes && always_terminates no
       | Ast.Match (_, arms) -> List.for_all (fun arm ->
           let body = match arm with
-            | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) -> b in
+            | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b)
+            | Ast.ArmByteSliceLit (_, b) -> b in
           always_terminates body) arms
       | Ast.Block body | Ast.UnsafeBlock body -> always_terminates body
       | _ -> false
@@ -8702,7 +8753,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   in
                   (binding, payload_ty, b)
               | Ast.ArmWild b -> (None, None, b)
-              | Ast.ArmIntLit (_, b) -> (None, None, b)
+              | Ast.ArmIntLit (_, b) | Ast.ArmByteSliceLit (_, b) -> (None, None, b)
             in
             let previous_binding_ty = match binding with
               | Some (name, _) -> StringMap.find_opt name !var_types
@@ -8948,7 +8999,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Index (_, index) -> visit_expr index
       | Ast.SliceOf (_, lo, hi) -> visit_expr lo; visit_expr hi
       | Ast.Assign (lhs, rhs) -> visit_expr lhs; visit_expr rhs
-      | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.Var _
+      | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.ByteSliceLit _ | Ast.Var _
       | Ast.ViewLit _ | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.AlignOf _
       | Ast.ContainsStableOwner _
       | Ast.OffsetOf _ | Ast.EmbedFile _ -> ()
@@ -8973,13 +9024,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           visit_expr subject;
           List.iter (function
             | Ast.ArmVariant (_, _, _, stmts) | Ast.ArmWild stmts
-            | Ast.ArmIntLit (_, stmts) ->
+            | Ast.ArmIntLit (_, stmts) | Ast.ArmByteSliceLit (_, stmts) ->
                 List.iter visit_stmt stmts) arms
       | Ast.LetMatch (_, _, _, subject, arms) ->
           visit_expr subject;
           List.iter (function
             | Ast.ArmVariant (_, _, _, stmts) | Ast.ArmWild stmts
-            | Ast.ArmIntLit (_, stmts) ->
+            | Ast.ArmIntLit (_, stmts) | Ast.ArmByteSliceLit (_, stmts) ->
                 List.iter visit_stmt stmts) arms
       | Ast.StaticAssert _
       | Ast.Break | Ast.Continue -> ()

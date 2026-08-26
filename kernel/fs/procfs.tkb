@@ -44,24 +44,28 @@ private fn procfs_parse_pid(component: []u8) -> ProcfsPidResult {
 }
 
 fn procfs_lookup(path: []u8) -> ProcfsLookupResult !{unsafe} {
+    match path {
+        bs"proc" => {
+            let mut root: ProcfsNode = {
+                ProcfsNodeKind::Root, 0, PROCFS_ROOT_INODE
+            };
+            return ProcfsLookupResult::Found(root);
+        }
+        _ => {}
+    }
     let process_path: []u8 = match byte_slice_split_first(path, 0x2F) {
         ByteSliceSplitResult::Absent => {
-            if (slice_eq(path, "proc" as []u8)) {
-                let mut root: ProcfsNode = {
-                    ProcfsNodeKind::Root, 0, PROCFS_ROOT_INODE
-                };
-                return ProcfsLookupResult::Found(root);
-            }
             return ProcfsLookupResult::Missing;
         }
         ByteSliceSplitResult::Found(split) => {
-            if (slice_eq(split.before, "proc" as []u8) == false) {
-                return ProcfsLookupResult::Missing;
+            match split.before {
+                bs"proc" => {}
+                _ => { return ProcfsLookupResult::Missing; }
             }
             split.after
         }
     };
-    let mut leaf: []u8 = "" as []u8;
+    let mut leaf: []u8 = bs"";
     let pid_component: []u8 = match byte_slice_split_first(process_path,
                                                             0x2F) {
         ByteSliceSplitResult::Absent => { process_path }
@@ -86,17 +90,20 @@ fn procfs_lookup(path: []u8) -> ProcfsLookupResult !{unsafe} {
         };
         return ProcfsLookupResult::Found(directory);
     }
-    if (slice_eq(leaf, "stat" as []u8)) {
-        let mut stat: ProcfsNode = {
-            ProcfsNodeKind::Stat, pid, procfs_inode(pid, 1)
-        };
-        return ProcfsLookupResult::Found(stat);
-    }
-    if (slice_eq(leaf, "cmdline" as []u8)) {
-        let mut cmdline: ProcfsNode = {
-            ProcfsNodeKind::Cmdline, pid, procfs_inode(pid, 2)
-        };
-        return ProcfsLookupResult::Found(cmdline);
+    match leaf {
+        bs"stat" => {
+            let mut stat: ProcfsNode = {
+                ProcfsNodeKind::Stat, pid, procfs_inode(pid, 1)
+            };
+            return ProcfsLookupResult::Found(stat);
+        }
+        bs"cmdline" => {
+            let mut cmdline: ProcfsNode = {
+                ProcfsNodeKind::Cmdline, pid, procfs_inode(pid, 2)
+            };
+            return ProcfsLookupResult::Found(cmdline);
+        }
+        _ => {}
     }
     return ProcfsLookupResult::Missing;
 }
@@ -185,7 +192,7 @@ private fn procfs_put_comm(output: borrow [u8; 1024..], offset_in: usize,
         at = at + 1;
         copied = copied + 1;
     }
-    if (copied == 0) { offset = procfs_put_text(output, offset, "kernel" as []u8); }
+    if (copied == 0) { offset = procfs_put_text(output, offset, bs"kernel"); }
     return offset;
 }
 
@@ -206,22 +213,22 @@ fn procfs_render_file(inode: usize, output: borrow [u8; 1024..])
     }
     let mut offset: usize = 0;
     offset = procfs_put_usize(output, offset, snapshot.pid);
-    offset = procfs_put_text(output, offset, " (" as []u8);
+    offset = procfs_put_text(output, offset, bs" (");
     offset = procfs_put_comm(output, offset, snapshot);
-    offset = procfs_put_text(output, offset, ") " as []u8);
+    offset = procfs_put_text(output, offset, bs") ");
     offset = procfs_put_byte(output, offset, snapshot.state);
     offset = procfs_put_byte(output, offset, 0x20);
     offset = procfs_put_usize(output, offset, snapshot.ppid);
     // Fields 5 through 13: pgrp, session, tty_nr, tpgid, flags and faults.
     offset = procfs_put_text(output, offset,
-        " 0 0 0 0 0 0 0 0 0" as []u8);
+        bs" 0 0 0 0 0 0 0 0 0");
     // Fields 14 through 24: utime, stime, child times, priority, nice,
     // thread count, itrealvalue, starttime, vsize and rss. Fields 25 through
     // 39 are consumed (though mostly discarded) by Alpine's enabled
     // FEATURE_TOP_SMP_PROCESS parser. Zero is an honest value until the
     // scheduler and VM expose accounted counters.
     offset = procfs_put_text(output, offset,
-        " 0 0 0 0 0 0 1 0 " as []u8);
+        bs" 0 0 0 0 0 0 1 0 ");
     offset = procfs_put_usize(output, offset, snapshot.start_time_ticks);
     offset = procfs_put_byte(output, offset, 0x20);
     offset = procfs_put_usize(output, offset,
@@ -229,7 +236,7 @@ fn procfs_render_file(inode: usize, output: borrow [u8; 1024..])
     offset = procfs_put_byte(output, offset, 0x20);
     offset = procfs_put_usize(output, offset, snapshot.resident_pages);
     offset = procfs_put_text(output, offset,
-        " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n" as []u8);
+        bs" 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
     return offset;
 }
 

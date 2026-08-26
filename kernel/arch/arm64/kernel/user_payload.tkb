@@ -62,7 +62,7 @@ fn initial_user_payload() {
 
     /* openat/write/close /mutable.txt through the Linux file ABI. */
     let mutable_path: *u8 = "/mutable.txt" as *u8;
-    let mutable_content: []u8 = "el0-ok\n" as []u8;
+    let mutable_content: []u8 = bs"el0-ok\n";
     let fd3: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
     fail_if(fd3 != 3);
     fail_if(svc5(64, 3, (mutable_content as *u8) as usize, mutable_content.len, 0, 0) != 7);
@@ -133,8 +133,8 @@ fn initial_user_payload() {
     let fd6: usize = svc5(242, 4, 0, 0, 0, 0);
     fail_if(fd6 != 6);
 
-    let connection_b_response: []u8 = "conn-B\n!" as []u8;
-    let socket_response: []u8 = "HTTP/1.0 200 OK\r\n\r\n" as []u8;
+    let connection_b_response: []u8 = bs"conn-B\n!";
+    let socket_response: []u8 = bs"HTTP/1.0 200 OK\r\n\r\n";
     // GitHub issue #228 (found on real hardware), reconfirmed under the
     // real static-PIE ELF (issue #241): this buffer MUST be a local
     // (stack) variable, not a global. scripts/check_user_payload_no_rw_globals.py
@@ -186,7 +186,7 @@ fn initial_user_payload() {
         /* The first byte must take the scheduler-aware Blocked -> Ready
          * path. Later bytes may already be in the bounded RX ring when
          * selected. */
-        let uart_fixture: []u8 = "irqtest\n" as []u8;
+        let uart_fixture: []u8 = bs"irqtest\n";
         for want_byte in uart_fixture {
             let c: usize = svc5(451, 0, 0, 0, 0, 0);
             fail_if(c != (want_byte as usize));

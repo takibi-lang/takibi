@@ -118,11 +118,13 @@ rule read = parse
   | '\'' ([^ '\'' '\\' '\n'] as c) '\'' { INT (Int64.of_int (Char.code c)) }
 
   | '_' { UNDERSCORE }  (* wildcard for match. Longest-match: _foo -> IDENT, _ alone -> UNDERSCORE *)
+  | "bs\"" { read_string (fun s -> BS_STRING s) (Buffer.create 32) lexbuf }
+
   | ['a'-'z' 'A'-'Z' '_' ] ['a'-'z' 'A'-'Z' '0'-'9' '_' ]* as id
     { if Language_words.is_hard_keyword id then hard_keyword_token id
       else IDENT id }
 
-  | '"' { read_string (Buffer.create 32) lexbuf }
+  | '"' { read_string (fun s -> STRING s) (Buffer.create 32) lexbuf }
 
   | eof { EOF }
 
@@ -132,13 +134,13 @@ and read_block_comment = parse
   | _      { read_block_comment lexbuf }
   | eof    { failwith "unterminated block comment" }
 
-and read_string buf = parse
-  | '"'        { STRING (Buffer.contents buf) }
-  | '\\' 'n'  { Buffer.add_char buf '\n'; read_string buf lexbuf }
-  | '\\' 'r'  { Buffer.add_char buf '\r'; read_string buf lexbuf }
-  | '\\' 't'  { Buffer.add_char buf '\t'; read_string buf lexbuf }
-  | '\\' '0'  { Buffer.add_char buf '\000'; read_string buf lexbuf }
-  | '\\' '\\' { Buffer.add_char buf '\\'; read_string buf lexbuf }
-  | '\\' '"'  { Buffer.add_char buf '"';  read_string buf lexbuf }
-  | _ as c    { Buffer.add_char buf c;    read_string buf lexbuf }
+and read_string token buf = parse
+  | '"'        { token (Buffer.contents buf) }
+  | '\\' 'n'  { Buffer.add_char buf '\n'; read_string token buf lexbuf }
+  | '\\' 'r'  { Buffer.add_char buf '\r'; read_string token buf lexbuf }
+  | '\\' 't'  { Buffer.add_char buf '\t'; read_string token buf lexbuf }
+  | '\\' '0'  { Buffer.add_char buf '\000'; read_string token buf lexbuf }
+  | '\\' '\\' { Buffer.add_char buf '\\'; read_string token buf lexbuf }
+  | '\\' '"'  { Buffer.add_char buf '"';  read_string token buf lexbuf }
+  | _ as c    { Buffer.add_char buf c;    read_string token buf lexbuf }
   | eof       { failwith "unterminated string literal" }

@@ -3559,32 +3559,32 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                       offsetof(Utsname, sysname)..<
                                       offsetof(Utsname, sysname) +
                                           UTSNAME_FIELD_SIZE],
-                                  "Linux" as []u8);
+                                  bs"Linux");
                 uname_write_field(uname_bytes[
                                       offsetof(Utsname, nodename)..<
                                       offsetof(Utsname, nodename) +
                                           UTSNAME_FIELD_SIZE],
-                                  "takibi" as []u8);
+                                  bs"takibi");
                 uname_write_field(uname_bytes[
                                       offsetof(Utsname, release)..<
                                       offsetof(Utsname, release) +
                                           UTSNAME_FIELD_SIZE],
-                                  "6.1.0-takibi" as []u8);
+                                  bs"6.1.0-takibi");
                 uname_write_field(uname_bytes[
                                       offsetof(Utsname, version)..<
                                       offsetof(Utsname, version) +
                                           UTSNAME_FIELD_SIZE],
-                                  "#1" as []u8);
+                                  bs"#1");
                 uname_write_field(uname_bytes[
                                       offsetof(Utsname, machine)..<
                                       offsetof(Utsname, machine) +
                                           UTSNAME_FIELD_SIZE],
-                                  "aarch64" as []u8);
+                                  bs"aarch64");
                 uname_write_field(uname_bytes[
                                       offsetof(Utsname, domainname)..<
                                       offsetof(Utsname, domainname) +
                                           UTSNAME_FIELD_SIZE],
-                                  "(none)" as []u8);
+                                  bs"(none)");
                 let source: []u8 = uname_bytes[0..<sizeof(Utsname)];
                 let ok: bool = copy_to_user(range, source);
                 return SyscallAction::Resume(0);

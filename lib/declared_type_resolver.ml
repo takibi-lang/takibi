@@ -94,7 +94,7 @@ let rec resolve_expr names expr =
   let ex = resolve_expr names in
   let ty = resolve_type names in
   let desc = match expr.desc with
-    | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _
+    | IntLit _ | BoolLit _ | StringLit _ | ByteSliceLit _ | Var _ | EnumVariant _
     | EmbedFile _ | ViewLit _ as desc -> desc
     | Call (name, args) -> Call (name, List.map ex args)
     | VariantCtor (variant, case, payload) ->
@@ -156,6 +156,8 @@ and resolve_arm names = function
   | ArmWild body -> ArmWild (List.map (resolve_stmt names) body)
   | ArmIntLit (values, body) ->
       ArmIntLit (values, List.map (resolve_stmt names) body)
+  | ArmByteSliceLit (bytes, body) ->
+      ArmByteSliceLit (bytes, List.map (resolve_stmt names) body)
 
 let resolve_static_params names params =
   List.map (fun (name, sort) -> (name, resolve_type names sort)) params
@@ -258,7 +260,7 @@ let validate prog =
   in
   let rec check_expr expr =
     match expr.desc with
-    | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _
+    | IntLit _ | BoolLit _ | StringLit _ | ByteSliceLit _ | Var _ | EnumVariant _
     | EmbedFile _ | ViewLit _ -> ()
     | Call (_, args) | StructLit args | TupleLit args -> List.iter check_expr args
     | VariantCtor (_, _, payload) | Bnot payload | Deref payload
@@ -294,7 +296,8 @@ let validate prog =
     | LetMatch (_, _, declared, value, arms) ->
         Option.iter check_type declared; check_expr value; List.iter check_arm arms
   and check_arm = function
-    | ArmVariant (_, _, _, body) | ArmWild body | ArmIntLit (_, body) ->
+    | ArmVariant (_, _, _, body) | ArmWild body | ArmIntLit (_, body)
+    | ArmByteSliceLit (_, body) ->
         List.iter check_stmt body
   in
   let check_static_params params =

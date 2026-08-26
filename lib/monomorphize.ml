@@ -201,7 +201,8 @@ let relocate_loc (mangled : string) (loc : loc) : loc =
 let rec relocate_expr (mangled : string) (e : expr) : expr =
   let ex = relocate_expr mangled in
   let desc = match e.desc with
-    | IntLit _ | BoolLit _ | StringLit _ | Var _ | EnumVariant _ | EmbedFile _ as d -> d
+    | IntLit _ | BoolLit _ | StringLit _ | ByteSliceLit _ | Var _
+    | EnumVariant _ | EmbedFile _ as d -> d
     | ViewLit (name, args) -> ViewLit (name, args)
     | Call (name, args) -> Call (name, List.map ex args)
     | VariantCtor (vname, cname, payload) -> VariantCtor (vname, cname, ex payload)
@@ -257,6 +258,7 @@ and relocate_arm (mangled : string) (a : match_arm) : match_arm =
   | ArmVariant (v, c, b, ss) -> ArmVariant (v, c, b, sts ss)
   | ArmWild ss -> ArmWild (sts ss)
   | ArmIntLit (ns, ss) -> ArmIntLit (ns, sts ss)
+  | ArmByteSliceLit (bytes, ss) -> ArmByteSliceLit (bytes, sts ss)
 
 (* -- plain (stateless) expr/stmt/func/toplevel walkers ---------------------
 
@@ -271,7 +273,7 @@ let rec walk_expr ~subst ~vsubst ~resolve_inst (e : expr) : expr =
   let ty t = transform ~subst ~vsubst ~resolve_inst t in
   let ex e = walk_expr ~subst ~vsubst ~resolve_inst e in
   let desc = match e.desc with
-    | IntLit _ | BoolLit _ | StringLit _ | EnumVariant _ | EmbedFile _ as d -> d
+    | IntLit _ | BoolLit _ | StringLit _ | ByteSliceLit _ | EnumVariant _ | EmbedFile _ as d -> d
     | Var name ->
         (* Freelist redesign follow-up: a generic function's own body may
            reference a bound VALUE parameter as an ordinary runtime
@@ -346,6 +348,7 @@ and walk_arm ~subst ~vsubst ~resolve_inst (a : match_arm) : match_arm =
   | ArmVariant (v, c, b, ss) -> ArmVariant (v, c, b, sts ss)
   | ArmWild ss -> ArmWild (sts ss)
   | ArmIntLit (ns, ss) -> ArmIntLit (ns, sts ss)
+  | ArmByteSliceLit (bytes, ss) -> ArmByteSliceLit (bytes, sts ss)
 
 let walk_func ~subst ~vsubst ~resolve_inst (f : func) : func =
   let ty t = transform ~subst ~vsubst ~resolve_inst t in
@@ -1000,7 +1003,8 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
       let ty t = transform ~subst ~vsubst ~resolve_inst:collect_resolve t in
       let ex e = walk_expr_calls ~subst ~vsubst local_types e in
       let desc = match e.desc with
-        | IntLit _ | BoolLit _ | StringLit _ | EnumVariant _ | EmbedFile _ as d -> d
+        | IntLit _ | BoolLit _ | StringLit _ | ByteSliceLit _
+        | EnumVariant _ | EmbedFile _ as d -> d
         | Var name ->
             (* Same value-generic-parameter substitution as the stateless
                walk_expr (see its own comment) -- needed here too since a
@@ -1091,6 +1095,7 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
       | ArmVariant (v, c, b, ss) -> ArmVariant (v, c, b, sts ss)
       | ArmWild ss -> ArmWild (sts ss)
       | ArmIntLit (ns, ss) -> ArmIntLit (ns, sts ss)
+      | ArmByteSliceLit (bytes, ss) -> ArmByteSliceLit (bytes, sts ss)
     in
     let walk_func_calls (f : func) : func =
       let ty t = transform ~subst:no_subst ~vsubst:no_vsubst ~resolve_inst:collect_resolve t in

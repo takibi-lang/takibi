@@ -1,5 +1,7 @@
 use "kernel/lib/byte_slice.tkb";
 
+let mut subject_calls: usize = 0;
+
 fn print_bool(value: bool) {
     if (value) { uart_puts("yes"); } else { uart_puts("no"); }
 }
@@ -33,39 +35,69 @@ fn print_retained_split(value: []u8, delimiter: u8) {
     }
 }
 
+fn classify(value: []u8) -> i32 {
+    match value {
+        bs"" => { return 0; }
+        bs"stat" => { return 1; }
+        bs"A\0B" => { return 2; }
+        _ => { return 3; }
+    }
+}
+
+fn one_subject() -> []u8 {
+    subject_calls = subject_calls + 1;
+    return bs"cmdline";
+}
+
 fn app_main() {
     uart_puts("equal=");
-    print_bool(slice_eq("proc" as []u8, "proc" as []u8));
+    print_bool(slice_eq(bs"proc", bs"proc"));
     uart_puts(" unequal=");
-    print_bool(slice_eq("proc" as []u8, "stat" as []u8));
+    print_bool(slice_eq(bs"proc", bs"stat"));
     uart_puts(" empty=");
-    print_bool(slice_eq("" as []u8, "" as []u8));
+    print_bool(slice_eq(bs"", bs""));
 
     uart_puts(" prefix=");
-    print_bool(byte_slice_starts_with("proc/7/stat" as []u8,
-                                      "proc/" as []u8));
+    print_bool(byte_slice_starts_with(bs"proc/7/stat",
+                                      bs"proc/"));
     uart_puts(" whole=");
-    print_bool(byte_slice_starts_with("proc" as []u8,
-                                      "proc" as []u8));
+    print_bool(byte_slice_starts_with(bs"proc",
+                                      bs"proc"));
     uart_puts(" long=");
-    print_bool(byte_slice_starts_with("proc" as []u8,
-                                      "proc/" as []u8));
+    print_bool(byte_slice_starts_with(bs"proc",
+                                      bs"proc/"));
     uart_puts(" empty-prefix=");
-    print_bool(byte_slice_starts_with("proc" as []u8, "" as []u8));
+    print_bool(byte_slice_starts_with(bs"proc", bs""));
 
     uart_puts(" split-middle=");
-    print_retained_split("proc/7" as []u8, 0x2F);
+    print_retained_split(bs"proc/7", 0x2F);
     uart_puts(" split-zero=");
-    print_retained_split("/proc" as []u8, 0x2F);
+    print_retained_split(bs"/proc", 0x2F);
     uart_puts(" split-last=");
-    print_retained_split("proc/" as []u8, 0x2F);
+    print_retained_split(bs"proc/", 0x2F);
     uart_puts(" split-absent=");
-    print_retained_split("proc" as []u8, 0x2F);
+    print_retained_split(bs"proc", 0x2F);
 
     let mut embedded: [u8; 3] = { 0x41, 0, 0x42 };
     uart_puts(" embedded-nul=");
     print_bool(slice_eq(embedded as []u8, embedded as []u8));
     uart_puts(" nul-split=");
     print_split(embedded as []u8, 0);
+    uart_puts(" match=");
+    uart_print(classify(bs"stat"));
+    uart_puts(":");
+    uart_print(classify(bs"status"));
+    uart_puts(":");
+    uart_print(classify(bs""));
+    uart_puts(":");
+    uart_print(classify(bs"A\0B"));
+    uart_puts(" once=");
+    match one_subject() {
+        bs"stat" => { uart_puts("stat"); }
+        bs"cmdline" => { uart_puts("cmdline"); }
+        _ => { uart_puts("other"); }
+    }
+    uart_puts(":");
+    uart_print(subject_calls);
     uart_puts("\n");
 }

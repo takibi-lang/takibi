@@ -47,7 +47,8 @@ let resolve_func (fdef : Ast.func) : resolution =
     | Ast.SliceOf (base, lo, hi) ->
         expr env base; expr env lo; expr env hi
     | Ast.StructLit fields | Ast.TupleLit fields -> List.iter (expr env) fields
-    | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.ViewLit _
+    | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.ByteSliceLit _
+    | Ast.ViewLit _
     | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.ContainsStableOwner _
     | Ast.AlignOf _ | Ast.OffsetOf _ | Ast.EmbedFile _ -> ()
   in
@@ -65,7 +66,8 @@ let resolve_func (fdef : Ast.func) : resolution =
                 bind env name id
           in
           scoped arm_env body
-      | Ast.ArmWild body | Ast.ArmIntLit (_, body) -> scoped env body
+      | Ast.ArmWild body | Ast.ArmIntLit (_, body)
+      | Ast.ArmByteSliceLit (_, body) -> scoped env body
     ) arms
   and stmt env (s : Ast.stmt) =
     match s.desc with

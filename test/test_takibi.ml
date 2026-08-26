@@ -1922,6 +1922,20 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "bs expression and pattern have dedicated AST nodes" `Quick (fun () ->
+    match parse
+      "fn f(value: []u8) {
+         let literal = bs\"stat\";
+         match value { bs\"stat\" => {} _ => {} }
+       }" with
+    | [Ast.FuncDef { body = [
+         { desc = Ast.Let (_, _, _, Some { desc = Ast.ByteSliceLit "stat"; _ }, _); _ };
+         { desc = Ast.Match (_,
+             [Ast.ArmByteSliceLit ("stat", []); Ast.ArmWild []]); _ }
+       ]; _ }] -> ()
+    | _ -> Alcotest.fail "expected dedicated byte-slice literal nodes"
+  );
+
   (* -- extern fn --------------------------------------------------- *)
 
   Alcotest.test_case "extern fn without return type parses" `Quick (fun () ->
@@ -5401,6 +5415,45 @@ let infer_tests = [
     (expect_type_error "cannot be used against variant discriminant"
       "variant Foo { Bar; }
        fn f() { match (Foo::Bar) { 0 => { let x = 0; } _ => { let y = 1; } } }");
+
+  (* -- bounded byte-slice literals and exact patterns ---------------- *)
+
+  Alcotest.test_case "bs expression carries its decoded minimum length" `Quick
+    (expect_ok
+      "fn f() { let value: [u8; 4..] = bs\"stat\"; let byte = value[3]; }");
+
+  Alcotest.test_case "byte-slice match with wildcard type-checks" `Quick
+    (expect_ok
+      "fn f(value: []u8) { match value {
+         bs\"stat\" => { let x: i32 = 1; }
+         bs\"cmdline\" => { let y: i32 = 2; }
+         _ => { let z: i32 = 3; } } }");
+
+  Alcotest.test_case "byte-slice match requires wildcard" `Quick
+    (expect_type_error "match on a byte-slice type requires a '_' wildcard arm"
+      "fn f(value: []u8) { match value { bs\"stat\" => {} } }");
+
+  Alcotest.test_case "duplicate byte-slice match arm is rejected" `Quick
+    (expect_type_error "duplicate byte-slice match arm"
+      "fn f(value: []u8) { match value {
+         bs\"stat\" => {} bs\"stat\" => {} _ => {} } }");
+
+  Alcotest.test_case "byte-slice arm shorter than proven minimum is rejected" `Quick
+    (expect_type_error "has length 4 but the discriminant has proven minimum length 5"
+      "fn f(value: [u8; 5..]) { match value {
+         bs\"stat\" => {} _ => {} } }");
+
+  Alcotest.test_case "byte-slice pattern rejects raw pointer discriminant" `Quick
+    (expect_type_error "match requires an enum, variant, primitive integer, or []u8 type"
+      "fn f(value: *u8) { match value { bs\"stat\" => {} _ => {} } }");
+
+  Alcotest.test_case "byte-slice match codegen produces valid IR" `Quick
+    (expect_codegen_ok
+      "fn f(value: []u8) -> i32 { match value {
+         bs\"\" => { return 0; }
+         bs\"A\\0B\" => { return 1; }
+         bs\"stat\" => { return 2; }
+         _ => { return 3; } } }");
 
   Alcotest.test_case "int match codegen produces valid IR" `Quick
     (expect_codegen_ok

@@ -172,14 +172,14 @@ fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: []u8)
 fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount)
         -> DynamicExecResolveResult !{unsafe} {
     match kernel_exec_resolve_ext2_name_at(
-            mount, "bin/busybox-extras" as []u8,
+            mount, bs"bin/busybox-extras",
             dynamic_primary_metadata as []u8) {
         ExecResolveResult::NotFound => {
             return DynamicExecResolveResult::Invalid;
         }
         ExecResolveResult::Resolved(primary) => {
             match kernel_exec_resolve_ext2_name_at(
-                    mount, "lib/ld-musl-aarch64.so.1" as []u8,
+                    mount, bs"lib/ld-musl-aarch64.so.1",
                     dynamic_interpreter_metadata as []u8) {
                 ExecResolveResult::NotFound => {
                     return DynamicExecResolveResult::Invalid;
@@ -198,7 +198,7 @@ fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount)
 fn kernel_exec_resolve_dynamic_ext2(mount: Ext2Mount)
         -> DynamicExecResolveResult !{unsafe} {
     if (kernel_syscall_exec_path_matches(
-            "/bin/httpd" as []u8) == false) {
+            bs"/bin/httpd") == false) {
         return DynamicExecResolveResult::NotRequested;
     }
     return kernel_exec_resolve_dynamic_ext2_images(mount);
@@ -482,7 +482,7 @@ fn httpd_image_mapping_check(httpd: Ext2ExecImage,
         -> HttpdImageMapCheckResult {
     match process_image_map_ext2(
             httpd.plan, saved_ext2_mount, httpd.inode, httpd.file_length,
-            "check\0" as []u8, 1) {
+            bs"check\0", 1) {
         ProcessImageMapResult::InvalidImage => {
             return HttpdImageMapCheckResult::Invalid;
         }
@@ -500,7 +500,7 @@ fn httpd_image_mapping_check(httpd: Ext2ExecImage,
     }
     match process_image_map_ext2(
             musl.plan, saved_ext2_mount, musl.inode, musl.file_length,
-            "check\0" as []u8, 1) {
+            bs"check\0", 1) {
         ProcessImageMapResult::InvalidImage => {
             return HttpdImageMapCheckResult::Invalid;
         }
@@ -704,7 +704,7 @@ saved_rootfs_inode = 0;
 saved_rootfs_length = 0;
 if (ext2_mount_ready) {
     match kernel_exec_resolve_ext2_name_at(
-            saved_ext2_mount, "bin/busybox.static" as []u8,
+            saved_ext2_mount, bs"bin/busybox.static",
             rootfs_metadata as []u8) {
         ExecResolveResult::NotFound => {
             kernel_boot_log("rootfs image: /bin/busybox.static not found\n");
@@ -795,7 +795,7 @@ irq_uart_rx_unmask();
                             saved_ext2_mount,
                             images.interpreter.inode,
                             images.interpreter.file_length,
-                            0x40000, "check\0" as []u8, 1, 0) {
+                            0x40000, bs"check\0", 1, 0) {
                         ProcessImagePairProbeResult::Invalid => {
                             kernel_boot_log("httpd map: combined invalid\n");
                         }
@@ -848,7 +848,7 @@ irq_uart_rx_unmask();
                 rootfs_plan_ready, saved_rootfs_plan,
                 saved_rootfs_inode, saved_rootfs_length,
                 saved_rootfs_plan,
-                "bin/busybox.static\0sh\0/etc/init.sh\0" as []u8,
+                bs"bin/busybox.static\0sh\0/etc/init.sh\0",
                 3) {
             ProcessImageMapResult::InvalidImage => {
                 kernel_boot_log("script map: invalid image\n");

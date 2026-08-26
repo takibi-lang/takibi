@@ -256,6 +256,7 @@ and expr_desc =
        value fits. *)
   | BoolLit of bool
   | StringLit of string     (* "..."  -- null-terminated *char constant *)
+  | ByteSliceLit of string  (* bs"..." -- bounded []u8 constant view *)
   | Var of ident
   | ViewLit of ident * static_arg list
     (* `view Name[args]` -- explicitly mint an erased permission value. It
@@ -524,6 +525,8 @@ and match_arm =
          {lo..<hi as base} refinement of one; a `_` wildcard arm is always
          mandatory (an integer's value space is never exhaustively
          listable the way a closed variant/enum's cases are). *)
+  | ArmByteSliceLit of string * stmt list
+      (* bs"..." => { stmts } -- exact byte-slice content pattern. *)
 [@@deriving show]
 
 type func = {
@@ -802,7 +805,7 @@ let written_names (stmts : stmt list) : string list =
          | FieldGet (b, _) -> go_expr b
          | _ -> go_expr lhs);
         go_expr rhs
-    | IntLit _ | BoolLit _ | StringLit _ | Var _ | ViewLit _
+    | IntLit _ | BoolLit _ | StringLit _ | ByteSliceLit _ | Var _ | ViewLit _
     | EnumVariant _ | SizeOf _ | AlignOf _ | ContainsStableOwner _
     | OffsetOf _ | EmbedFile _ ->
         ()
@@ -829,7 +832,7 @@ let written_names (stmts : stmt list) : string list =
               Option.iter (fun (name, _) -> add name) binding;
               List.iter go_stmt b
           | ArmWild b -> List.iter go_stmt b
-          | ArmIntLit (_, b) -> List.iter go_stmt b
+          | ArmIntLit (_, b) | ArmByteSliceLit (_, b) -> List.iter go_stmt b
         ) arms
     | LetMatch (_, n, _, d, arms) ->
         add n; go_expr d;
@@ -838,7 +841,7 @@ let written_names (stmts : stmt list) : string list =
               Option.iter (fun (name, _) -> add name) binding;
               List.iter go_stmt b
           | ArmWild b -> List.iter go_stmt b
-          | ArmIntLit (_, b) -> List.iter go_stmt b
+          | ArmIntLit (_, b) | ArmByteSliceLit (_, b) -> List.iter go_stmt b
         ) arms
   in
   List.iter go_stmt stmts;

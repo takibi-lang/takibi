@@ -44,7 +44,7 @@ must_use variant UsbExt2ResizeCheckResult { Invalid; Verified; }
 must_use variant UsbExt2CreateCheckResult { Invalid; Verified; }
 fn usb_ext2_equal_size_write_check(mount: Ext2Mount)
         -> UsbExt2WriteCheckResult {
-    match ext2_lookup_root(mount, "mutable.txt" as []u8) {
+    match ext2_lookup_root(mount, bs"mutable.txt") {
         Ext2LookupResult::Invalid => {
             return UsbExt2WriteCheckResult::Invalid;
         }
@@ -53,7 +53,7 @@ fn usb_ext2_equal_size_write_check(mount: Ext2Mount)
         }
         Ext2LookupResult::Found(inode_number) => {
             match ext2_write_small_file(
-                    mount, inode_number, "usb-ok\n" as []u8) {
+                    mount, inode_number, bs"usb-ok\n") {
                 Ext2WriteResult::Invalid => {
                     return UsbExt2WriteCheckResult::Invalid;
                 }
@@ -67,7 +67,7 @@ fn usb_ext2_equal_size_write_check(mount: Ext2Mount)
                         Ext2ReadResult::Read(length) => {
                             if (length == 7 &&
                                 slice_eq(ext2_read_fixture[0..<7],
-                                         "usb-ok\n" as []u8)) {
+                                         bs"usb-ok\n")) {
                                 return UsbExt2WriteCheckResult::Verified;
                             }
                         }
@@ -80,7 +80,7 @@ fn usb_ext2_equal_size_write_check(mount: Ext2Mount)
 }
 
 fn usb_ext2_resize_check(mount: Ext2Mount) -> UsbExt2ResizeCheckResult {
-    match ext2_lookup_root(mount, "mutable.txt" as []u8) {
+    match ext2_lookup_root(mount, bs"mutable.txt") {
         Ext2LookupResult::Invalid => {
             return UsbExt2ResizeCheckResult::Invalid;
         }
@@ -89,7 +89,7 @@ fn usb_ext2_resize_check(mount: Ext2Mount) -> UsbExt2ResizeCheckResult {
         }
         Ext2LookupResult::Found(inode_number) => {
             match ext2_resize_small_file(
-                    mount, inode_number, "tiny\n" as []u8) {
+                    mount, inode_number, bs"tiny\n") {
                 Ext2ResizeResult::Invalid => {
                     return UsbExt2ResizeCheckResult::Invalid;
                 }
@@ -103,13 +103,13 @@ fn usb_ext2_resize_check(mount: Ext2Mount) -> UsbExt2ResizeCheckResult {
                 Ext2ReadResult::Read(short_length) => {
                     if (short_length != 5 ||
                         slice_eq(ext2_read_fixture[0..<5],
-                                 "tiny\n" as []u8) == false) {
+                                 bs"tiny\n") == false) {
                         return UsbExt2ResizeCheckResult::Invalid;
                     }
                 }
             }
             match ext2_resize_small_file(
-                    mount, inode_number, "extended ext2\n" as []u8) {
+                    mount, inode_number, bs"extended ext2\n") {
                 Ext2ResizeResult::Invalid => {
                     return UsbExt2ResizeCheckResult::Invalid;
                 }
@@ -123,7 +123,7 @@ fn usb_ext2_resize_check(mount: Ext2Mount) -> UsbExt2ResizeCheckResult {
                 Ext2ReadResult::Read(long_length) => {
                     if (long_length == 14 &&
                         slice_eq(ext2_read_fixture[0..<14],
-                                 "extended ext2\n" as []u8)) {
+                                 bs"extended ext2\n")) {
                         return UsbExt2ResizeCheckResult::Verified;
                     }
                 }
@@ -135,13 +135,13 @@ fn usb_ext2_resize_check(mount: Ext2Mount) -> UsbExt2ResizeCheckResult {
 
 fn usb_ext2_create_check(mount: Ext2Mount) -> UsbExt2CreateCheckResult {
     match ext2_create_root_file(
-            mount, "created.txt" as []u8, "created on ext2\n" as []u8) {
+            mount, bs"created.txt", bs"created on ext2\n") {
         Ext2CreateResult::Invalid => {
             return UsbExt2CreateCheckResult::Invalid;
         }
         Ext2CreateResult::Created(linked) => {
             let mut content_ok: bool = false;
-            match ext2_lookup_root(mount, "created.txt" as []u8) {
+            match ext2_lookup_root(mount, bs"created.txt") {
                 Ext2LookupResult::Invalid => { }
                 Ext2LookupResult::NotFound => { }
                 Ext2LookupResult::Found(inode_number) => {
@@ -152,7 +152,7 @@ fn usb_ext2_create_check(mount: Ext2Mount) -> UsbExt2CreateCheckResult {
                         Ext2ReadResult::Read(length) => {
                             if (length == 16 &&
                                 slice_eq(ext2_read_fixture[0..<16],
-                                         "created on ext2\n" as []u8)) {
+                                         bs"created on ext2\n")) {
                                 content_ok = true;
                             }
                         }
@@ -160,14 +160,14 @@ fn usb_ext2_create_check(mount: Ext2Mount) -> UsbExt2CreateCheckResult {
                 }
             }
             match ext2_unlink_root_file(
-                    mount, linked, "created.txt" as []u8) {
+                    mount, linked, bs"created.txt") {
                 Ext2UnlinkResult::Invalid => {
                     return UsbExt2CreateCheckResult::Invalid;
                 }
                 Ext2UnlinkResult::Unlinked => {
                     if (content_ok) {
                         match ext2_lookup_root(
-                                mount, "created.txt" as []u8) {
+                                mount, bs"created.txt") {
                             Ext2LookupResult::Invalid => { }
                             Ext2LookupResult::Found(existing) => { }
                             Ext2LookupResult::NotFound => {
@@ -331,7 +331,7 @@ fn kernel_test_platform_storage() {
                                             }
                                             match ext2_lookup_root(
                                                     usb_mount,
-                                                    "hello.txt" as []u8) {
+                                                    bs"hello.txt") {
                                                 Ext2LookupResult::Invalid => {
                                                     kernel_boot_log("usb ext2: lookup failed\n");
                                                 }
@@ -348,7 +348,7 @@ fn kernel_test_platform_storage() {
                                                         Ext2ReadResult::Read(usb_length) => {
                                                             if (usb_length == 16 &&
                                                                 slice_eq(ext2_read_fixture[0..<16],
-                                                                         "hello from ext2\n" as []u8)) {
+                                                                         bs"hello from ext2\n")) {
                                                                 kernel_boot_log("usb ext2: mounted /hello.txt ok\n");
                                                             }
                                                         }
@@ -391,7 +391,7 @@ fn kernel_test_platform_storage() {
                     if (ext2_fixture_geometry_is_expected(mount)) {
                         kernel_boot_log("ext2 mount: block=1024 inodes=1024 blocks=4096\n");
                     }
-                    match ext2_lookup_root(mount, "hello.txt" as []u8) {
+                    match ext2_lookup_root(mount, bs"hello.txt") {
                         Ext2LookupResult::Invalid => {
                             kernel_boot_log("ext2 lookup: invalid\n");
                         }
@@ -408,14 +408,14 @@ fn kernel_test_platform_storage() {
                                 Ext2ReadResult::Read(length) => {
                                     if (length == 16 &&
                                         slice_eq(ext2_read_fixture[0..<16],
-                                                 "hello from ext2\n" as []u8)) {
+                                                 bs"hello from ext2\n")) {
                                         kernel_boot_log("ext2 read: /hello.txt ok\n");
                                     }
                                 }
                             }
                         }
                     }
-                    match ext2_lookup_root(mount, "mutable.txt" as []u8) {
+                    match ext2_lookup_root(mount, bs"mutable.txt") {
                         Ext2LookupResult::Invalid => {
                             kernel_boot_log("ext2 write: invalid lookup\n");
                         }
@@ -424,7 +424,7 @@ fn kernel_test_platform_storage() {
                         }
                         Ext2LookupResult::Found(mutable_inode) => {
                             match ext2_write_small_file(
-                                    mount, mutable_inode, "after!\n" as []u8) {
+                                    mount, mutable_inode, bs"after!\n") {
                                 Ext2WriteResult::Invalid => {
                                     kernel_boot_log("ext2 write: invalid\n");
                                 }
@@ -438,7 +438,7 @@ fn kernel_test_platform_storage() {
                                         Ext2ReadResult::Read(written_length) => {
                                             if (written_length == 7 &&
                                                 slice_eq(ext2_read_fixture[0..<7],
-                                                         "after!\n" as []u8)) {
+                                                         bs"after!\n")) {
                                                 kernel_boot_log("ext2 write: /mutable.txt ok\n");
                                             }
                                         }
@@ -447,7 +447,7 @@ fn kernel_test_platform_storage() {
                             }
                         }
                     }
-                    match ext2_lookup_root(mount, "latest" as []u8) {
+                    match ext2_lookup_root(mount, bs"latest") {
                         Ext2LookupResult::Invalid => {
                             kernel_boot_log("ext2 symlink: invalid lookup\n");
                         }
@@ -464,7 +464,7 @@ fn kernel_test_platform_storage() {
                                 Ext2SymlinkResult::Read(target_length) => {
                                     if (target_length == 9 &&
                                         slice_eq(ext2_symlink_fixture[0..<9],
-                                                 "hello.txt" as []u8)) {
+                                                 bs"hello.txt")) {
                                         match ext2_lookup_root(
                                                 mount,
                                                 ext2_symlink_fixture[0..<9]) {
@@ -478,7 +478,7 @@ fn kernel_test_platform_storage() {
                                                     Ext2ReadResult::Read(linked_length) => {
                                                         if (linked_length == 16 &&
                                                             slice_eq(ext2_read_fixture[0..<16],
-                                                                     "hello from ext2\n" as []u8)) {
+                                                                     bs"hello from ext2\n")) {
                                                             kernel_boot_log("ext2 symlink: /latest -> hello.txt ok\n");
                                                         }
                                                     }
@@ -500,7 +500,7 @@ fn kernel_test_platform_storage() {
                     // catches an off-by-one in the per-block chunk/copy
                     // arithmetic that checking only the first byte would
                     // miss.
-                    match ext2_lookup_root(mount, "large.txt" as []u8) {
+                    match ext2_lookup_root(mount, bs"large.txt") {
                         Ext2LookupResult::Invalid => {
                             kernel_boot_log("ext2 multi-block: invalid lookup\n");
                         }

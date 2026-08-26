@@ -99,7 +99,8 @@ let arm_body_ok stmts =
 let validate_arm_bodies pos arms =
   List.iter (fun arm ->
     let stmts = match arm with
-      | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) -> b
+      | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b)
+      | Ast.ArmByteSliceLit (_, b) -> b
     in
     if not (arm_body_ok stmts) then
       raise (Types.TypeError (pos,
@@ -183,6 +184,7 @@ let promote_be_field_type = function
 %token <Int64.t> INT
 %token <string> IDENT
 %token <string> STRING
+%token <string> BS_STRING
 %token FN INLINE NOINLINE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE IO ENUM MATCH ALIGN SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
 %token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
@@ -757,6 +759,8 @@ match_arm:
        here never contends with `expr`'s own PIPE-as-bitwise-or rule
        below. *)
     { ArmIntLit (ns, body) }
+  | bytes = BS_STRING DARROW LBRACE body = arm_body RBRACE
+    { ArmByteSliceLit (bytes, body) }
 
 match_int_lits:
   | n = match_int_lit { [n] }
@@ -851,6 +855,7 @@ expr:
   | TRUE   { { desc = BoolLit true;   loc = $symbolstartpos } }
   | FALSE  { { desc = BoolLit false;  loc = $symbolstartpos } }
   | STRING { { desc = StringLit $1;   loc = $symbolstartpos } }
+  | BS_STRING { { desc = ByteSliceLit $1; loc = $symbolstartpos } }
   | VIEW name = IDENT args = view_static_args
     { { desc = ViewLit (name, args); loc = $symbolstartpos } }
   | IDENT { { desc = Var $1; loc = $symbolstartpos } }

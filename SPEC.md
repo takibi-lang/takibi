@@ -180,6 +180,10 @@ parameter value, or top-level declaration name.
 - String literals: `"..."`, with `\n` `\r` `\t` `\0` `\\` `\"` escapes. Can be
   cast directly to a slice (`"..." as []u8`): the compile-time byte
   length (NUL excluded) becomes the minimum.
+- Byte-slice literals: `bs"..."`, with the same escapes. Their type is
+  `[u8; N..]`, where `N` is the decoded byte count; no implicit trailing
+  NUL is part of the slice. Unlike `"..."`, they are bounded fat values,
+  not raw `*u8` pointers.
 - Comments: `// line comment`, `/* block comment */`.
 
 ## Statements
@@ -1796,12 +1800,37 @@ arm, not once per literal.
 - Mixing a literal arm and an `enum`/`variant` case arm in the same
   `match` is a compile error: the discriminant's type picks one arm
   grammar, not both.
-- **No pattern beyond a `|`-separated set of literals is supported yet**
-  -- no ranges (`0..<10 => { ... }`), and no string/byte-slice patterns
-  (this project has no first-class string type -- though `[]u8`, via
-  `"literal" as []u8`, gets most of the way there for the compile-time-
-  known-length case; see "Slices" below -- what a string *pattern*
-  should even mean is an open question, not yet designed).
+- Integer patterns do not support ranges (`0..<10 => { ... }`).
+
+## Match on Byte Slices
+
+`match` accepts an `[]u8` (including a `[u8; N..]` refinement) with exact
+`bs"..."` content patterns:
+
+```
+match component {
+    bs"stat" => { return 1; }
+    bs"cmdline" => { return 2; }
+    _ => { return 0; }
+}
+```
+
+Each literal arm first compares the runtime length, then compares bytes only
+within that proven length. It performs no allocation, raw-pointer indexing,
+NUL scan, or bounds trap. Embedded `\0` is an ordinary byte and participates
+in equality. The discriminant expression is evaluated once even with several
+literal arms.
+
+A `_` wildcard arm is mandatory because byte slices have an open value space.
+Duplicate byte sequences are a compile error, including two differently
+escaped literals which decode to the same bytes. Integer and enum/variant arms
+cannot be mixed with byte-slice arms. A literal shorter than the scrutinee's
+proven minimum length is a compile error because that arm cannot match.
+Prefix, suffix, delimiter, capture, rest,
+glob, regular-expression, and raw-`*u8` content patterns are not supported.
+A raw pointer carries neither a readable bound nor a NUL-termination proof and
+must cross an explicit bounded slice construction/copy boundary before its
+contents can be matched.
 
 ## Slices
 
@@ -1811,6 +1840,9 @@ type's own `N` is a compile-time-proven *lower bound* on that runtime
 length, not the exact length.
 
 **Creation**:
+- `bs"literal"` -- a bounded byte-slice literal with compile-time minimum
+  length equal to its decoded byte count. This is the concise/default form
+  for new bounded literal uses and is also valid as an exact `match` pattern.
 - `arr as []T` / `arr as [T; N..]` -- from an array-typed **place**; the
   array's static size becomes the slice's minimum. A place is a variable,
   or (GitHub issue #372) a struct field of array type, reached through a
@@ -1832,8 +1864,8 @@ length, not the exact length.
   buffer pointer into a slice at a driver boundary, after which every
   further access through the slice is bounds-governed normally. Rejected
   on `*io T` (slice access is non-volatile).
-- `"literal" as []u8` -- compile-time byte length (NUL excluded) becomes
-  the minimum.
+- `"literal" as []u8` -- the older explicit conversion remains valid;
+  compile-time byte length (NUL excluded) becomes the minimum.
 - `s as *T` -- explicit bridge back to the raw-pointer world (the `ptr`
   half only). Casting a slice to anything else is a compile error.
   **When `T` is `u8`, or is exactly the slice's own element type, this

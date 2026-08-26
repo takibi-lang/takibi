@@ -1240,7 +1240,7 @@ let slice_rebind_names (stmts : Ast.stmt list) : string list =
          | FieldGet (b, _) -> go_expr b
          | _ -> go_expr lhs);
         go_expr rhs
-    | IntLit _ | BoolLit _ | StringLit _ | Var _ | ViewLit _
+    | IntLit _ | BoolLit _ | StringLit _ | ByteSliceLit _ | Var _ | ViewLit _
     | EnumVariant _ | SizeOf _ | AlignOf _ | ContainsStableOwner _
     | OffsetOf _ | EmbedFile _ ->
         ()
@@ -1267,7 +1267,7 @@ let slice_rebind_names (stmts : Ast.stmt list) : string list =
               Option.iter (fun (name, _) -> add name) binding;
               List.iter go_stmt b
           | ArmWild b -> List.iter go_stmt b
-          | ArmIntLit (_, b) -> List.iter go_stmt b
+          | ArmIntLit (_, b) | ArmByteSliceLit (_, b) -> List.iter go_stmt b
         ) arms
     | LetMatch (_, n, _, d, arms) ->
         add n; go_expr d;
@@ -1276,7 +1276,7 @@ let slice_rebind_names (stmts : Ast.stmt list) : string list =
               Option.iter (fun (name, _) -> add name) binding;
               List.iter go_stmt b
           | ArmWild b -> List.iter go_stmt b
-          | ArmIntLit (_, b) -> List.iter go_stmt b
+          | ArmIntLit (_, b) | ArmByteSliceLit (_, b) -> List.iter go_stmt b
         ) arms
   in
   List.iter go_stmt stmts;
@@ -2299,7 +2299,7 @@ let rec collect_lets stmts =
           match arm with
           | ArmVariant (_, _, _, body) -> collect_lets body
           | ArmWild body            -> collect_lets body
-          | ArmIntLit (_, body)     -> collect_lets body
+          | ArmIntLit (_, body) | ArmByteSliceLit (_, body) -> collect_lets body
         ) arms
     | LetMatch (_, name, ty_opt, _, arms) ->
         (* Always alloca-based internally regardless of the surface
@@ -2320,7 +2320,7 @@ let rec collect_lets stmts =
           match arm with
           | ArmVariant (_, _, _, body) -> collect_lets body
           | ArmWild body            -> collect_lets body
-          | ArmIntLit (_, body)     -> collect_lets body
+          | ArmIntLit (_, body) | ArmByteSliceLit (_, body) -> collect_lets body
         ) arms
     | _                           -> []
   ) stmts
@@ -2362,7 +2362,8 @@ let rec collect_mutable_pattern_binders resolution stmts =
               in
               here @ collect_mutable_pattern_binders resolution body
           | ArmWild body -> collect_mutable_pattern_binders resolution body
-          | ArmIntLit (_, body) -> collect_mutable_pattern_binders resolution body
+          | ArmIntLit (_, body) | ArmByteSliceLit (_, body) ->
+              collect_mutable_pattern_binders resolution body
         ) arms |> List.concat
     | Let _ | LetTuple _ | Return _ | Expr _ | Yield _ | Break | Continue
     | StaticAssert _ -> []
@@ -2393,7 +2394,7 @@ let rec collect_immutable_lets stmts =
           match arm with
           | ArmVariant (_, _, _, body) -> collect_immutable_lets body
           | ArmWild body            -> collect_immutable_lets body
-          | ArmIntLit (_, body)     -> collect_immutable_lets body
+          | ArmIntLit (_, body) | ArmByteSliceLit (_, body) -> collect_immutable_lets body
         ) arms
     | _                           -> []
   ) stmts
@@ -2425,6 +2426,8 @@ let rewrite_letmatch_arm_bodies (name : string) (arms : Ast.match_arm list)
     | Ast.ArmVariant (v, c, b, stmts) -> Ast.ArmVariant (v, c, b, rewrite_body stmts)
     | Ast.ArmWild stmts -> Ast.ArmWild (rewrite_body stmts)
     | Ast.ArmIntLit (ns, stmts) -> Ast.ArmIntLit (ns, rewrite_body stmts)
+    | Ast.ArmByteSliceLit (bytes, stmts) ->
+        Ast.ArmByteSliceLit (bytes, rewrite_body stmts)
   ) arms
 
 (* -- resolve helpers: map AST annotation -> Ast.type_expr using HM results -- *)
@@ -2688,6 +2691,36 @@ let make_slice ptr len =
   let v1 = build_insertvalue v0 ptr 0 "s0" builder in
   build_insertvalue v1 len 1 "s" builder
 
+let gen_slice_eq_values elem_ty av bv =
+  let usz = usize_lltype () in
+  let i1t = i1_type context in
+  let aptr = slice_ptr av and alen = slice_len av in
+  let bptr = slice_ptr bv and blen = slice_len bv in
+  let cur_f = block_parent (insertion_block builder) in
+  let entry_bb = insertion_block builder in
+  let cond_bb = append_block context "se_cond" cur_f in
+  let body_bb = append_block context "se_body" cur_f in
+  let done_bb = append_block context "se_done" cur_f in
+  let len_eq = build_icmp Icmp.Eq alen blen "se_len_eq" builder in
+  ignore (build_cond_br len_eq cond_bb done_bb builder);
+  position_at_end cond_bb builder;
+  let i_phi = build_phi [ (const_int usz 0, entry_bb) ] "se_i" builder in
+  let at_end = build_icmp Icmp.Eq i_phi alen "se_at_end" builder in
+  ignore (build_cond_br at_end done_bb body_bb builder);
+  position_at_end body_bb builder;
+  let ap = build_gep (ltype_of_ast elem_ty) aptr [| i_phi |] "se_ap" builder in
+  let la = build_load (ltype_of_ast elem_ty) ap "se_la" builder in
+  let bp = build_gep (ltype_of_ast elem_ty) bptr [| i_phi |] "se_bp" builder in
+  let lb = build_load (ltype_of_ast elem_ty) bp "se_lb" builder in
+  let eqv = build_icmp Icmp.Eq la lb "se_eqv" builder in
+  let i_next = build_add i_phi (const_int usz 1) "se_next" builder in
+  add_incoming (i_next, insertion_block builder) i_phi;
+  ignore (build_cond_br eqv cond_bb done_bb builder);
+  position_at_end done_bb builder;
+  build_phi [ (const_int i1t 0, entry_bb);
+              (const_int i1t 1, cond_bb);
+              (const_int i1t 0, body_bb) ] "se_res" builder
+
 (* Effective compile-time minimum length of the slice named [id]:
    the binding's own minimum, upgraded by any active if-condition narrowing
    (narrowing_ctx, Mut bindings only -- Imm bindings are replaced in the
@@ -2843,6 +2876,29 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let zero   = const_int (i32_type context) 0 in
       let ptr    = build_in_bounds_gep arr_ty g [|zero; zero|] "strptr" builder in
       (TypePtr TypeU8, ptr)
+
+  | ByteSliceLit s ->
+      (* Dedicated bounded byte-slice literal. Keep this as its own AST
+         case rather than a Cast(StringLit, []u8) desugaring: patterns and
+         future surface spelling depend on byte-sequence semantics, not on
+         the general cast machinery. Storage still carries a private trailing
+         NUL for linker convenience; the slice length excludes it. *)
+      incr str_counter;
+      let name = Printf.sprintf ".bs%d" !str_counter in
+      let len = String.length s in
+      let arr_ty = array_type (i8_type context) (len + 1) in
+      let bytes = Array.init (len + 1) (fun i ->
+        if i < len then const_int (i8_type context) (Char.code s.[i])
+        else const_int (i8_type context) 0)
+      in
+      let g = define_global name (const_array (i8_type context) bytes)
+          !the_module in
+      set_global_constant true g;
+      set_linkage Linkage.Private g;
+      let zero = const_int (i32_type context) 0 in
+      let ptr = build_in_bounds_gep arr_ty g [|zero; zero|] "bsptr" builder in
+      (TypeSlice (TypeU8, len),
+       make_slice ptr (const_int (usize_lltype ()) len))
 
   | Var name ->
       let local = match local_find_expr_opt locals e with
@@ -4398,36 +4454,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | TypeSlice (el, _) -> el
         | _ -> raise (Error "BUG: slice_eq on non-slice (type_inf should reject)")
       in
-      let usz  = usize_lltype () in
-      let i1t  = i1_type context in
-      let aptr = slice_ptr av and alen = slice_len av in
-      let bptr = slice_ptr bv and blen = slice_len bv in
-      let cur_f    = block_parent (insertion_block builder) in
-      let entry_bb = insertion_block builder in
-      let cond_bb  = append_block context "se_cond" cur_f in
-      let body_bb  = append_block context "se_body" cur_f in
-      let done_bb  = append_block context "se_done" cur_f in
-      let len_eq = build_icmp Icmp.Eq alen blen "se_len_eq" builder in
-      ignore (build_cond_br len_eq cond_bb done_bb builder);
-      position_at_end cond_bb builder;
-      let i_phi  = build_phi [ (const_int usz 0, entry_bb) ] "se_i" builder in
-      let at_end = build_icmp Icmp.Eq i_phi alen "se_at_end" builder in
-      ignore (build_cond_br at_end done_bb body_bb builder);
-      position_at_end body_bb builder;
-      let ap = build_gep (ltype_of_ast elem_ty) aptr [| i_phi |] "se_ap" builder in
-      let la = build_load (ltype_of_ast elem_ty) ap "se_la" builder in
-      let bp = build_gep (ltype_of_ast elem_ty) bptr [| i_phi |] "se_bp" builder in
-      let lb = build_load (ltype_of_ast elem_ty) bp "se_lb" builder in
-      let eqv = build_icmp Icmp.Eq la lb "se_eqv" builder in
-      let i_next = build_add i_phi (const_int usz 1) "se_next" builder in
-      add_incoming (i_next, insertion_block builder) i_phi;
-      ignore (build_cond_br eqv cond_bb done_bb builder);
-      position_at_end done_bb builder;
-      let res = build_phi [ (const_int i1t 0, entry_bb);   (* length mismatch  *)
-                            (const_int i1t 1, cond_bb);    (* reached the end  *)
-                            (const_int i1t 0, body_bb) ]   (* element mismatch *)
-                  "se_res" builder in
-      (TypeBool, res)
+      (TypeBool, gen_slice_eq_values elem_ty av bv)
 
   | Call (("min" | "max") as fname, [a_e; b_e]) ->
       (* Builtin (P4c-2): sync rule with type_inf.ml's Call case -- the
@@ -5687,6 +5714,51 @@ let gen_func ?prog_types fdef =
 
     | Match (disc, arms) ->
         let (disc_ty, disc_v) = gen_expr locals disc in
+        if List.exists (function ArmByteSliceLit _ -> true | _ -> false) arms
+        then begin
+          let elem_ty = match disc_ty with
+            | TypeSlice (TypeU8, _) -> TypeU8
+            | _ -> raise (Error
+                "BUG: byte-slice match on non-[]u8 discriminant")
+          in
+          let literal_arms = List.filter_map (function
+            | ArmByteSliceLit (bytes, body) -> Some (bytes, body)
+            | _ -> None
+          ) arms in
+          let wildcard_body = List.find_map (function
+            | ArmWild body -> Some body
+            | _ -> None
+          ) arms in
+          let merge_bb = append_block context "match_merge" f in
+          let merge_reachable = ref false in
+          let finish_body body =
+            run_scoped_stmts body;
+            if block_terminator (insertion_block builder) = None then begin
+              merge_reachable := true;
+              ignore (build_br merge_bb builder)
+            end
+          in
+          List.iteri (fun index (bytes, body) ->
+            let arm_bb = append_block context
+                (Printf.sprintf "match_bs_%d" index) f in
+            let next_bb = append_block context
+                (Printf.sprintf "match_bs_next_%d" index) f in
+            let literal = { Ast.desc = Ast.ByteSliceLit bytes;
+                            loc = disc.loc } in
+            let (_, literal_v) = gen_expr locals literal in
+            let equal = gen_slice_eq_values elem_ty disc_v literal_v in
+            ignore (build_cond_br equal arm_bb next_bb builder);
+            position_at_end arm_bb builder;
+            finish_body body;
+            position_at_end next_bb builder
+          ) literal_arms;
+          (match wildcard_body with
+           | Some body -> finish_body body
+           | None -> raise (Error
+               "BUG: byte-slice match reached codegen without wildcard"));
+          position_at_end merge_bb builder;
+          if not !merge_reachable then ignore (build_unreachable builder)
+        end else begin
         let arm_variant_name = List.find_map (function
           | ArmVariant (name, _, _, _) when Hashtbl.mem variant_defs name ->
               Some name
@@ -5723,6 +5795,8 @@ let gen_func ?prog_types fdef =
                  cosmetic label. *)
               (arm, append_block context
                 (Printf.sprintf "match_lit_%d" (List.hd lits)) f)
+          | ArmByteSliceLit _ -> raise (Error
+              "BUG: byte-slice arm escaped byte-slice match codegen")
         ) arms in
         (* Default target: wildcard arm if present, otherwise dead (unreachable) *)
         let default_bb = match List.find_opt (fun (a, _) ->
@@ -5740,6 +5814,7 @@ let gen_func ?prog_types fdef =
           match a with
           | ArmVariant _ -> n + 1
           | ArmIntLit (lits, _) -> n + List.length lits
+          | ArmByteSliceLit _ -> n
           | ArmWild _ -> n) 0 arm_bbs in
         let sw = build_switch switch_v default_bb n_variants builder in
         List.iter (fun (arm, bb) ->
@@ -5768,6 +5843,8 @@ let gen_func ?prog_types fdef =
                  exactly once for this block below, not once per literal. *)
               List.iter (fun lit -> add_case sw (const_int switch_ll_ty lit) bb) lits
           | ArmWild _ -> ()
+          | ArmByteSliceLit _ -> raise (Error
+              "BUG: byte-slice arm escaped byte-slice match codegen")
         ) arm_bbs;
         List.iteri (fun arm_index (arm, bb) ->
           position_at_end bb builder;
@@ -5815,7 +5892,9 @@ let gen_func ?prog_types fdef =
                 | None, Some _ -> raise (Error
                     "BUG: numeric enum match arm has a payload binder"))
            | ArmWild body            -> run_scoped_stmts body
-           | ArmIntLit (_, body)     -> run_scoped_stmts body);
+           | ArmIntLit (_, body)     -> run_scoped_stmts body
+           | ArmByteSliceLit _ -> raise (Error
+               "BUG: byte-slice arm escaped byte-slice match codegen"));
           if block_terminator (insertion_block builder) = None then begin
             merge_reachable := true;
             ignore (build_br merge_bb builder)
@@ -5830,6 +5909,7 @@ let gen_func ?prog_types fdef =
            it open made gen_func's generic scalar fallback try to return an
            integer zero from aggregate-returning functions. *)
         if not !merge_reachable then ignore (build_unreachable builder)
+        end
     | LetMatch (_, name, ty_opt, disc, arms) ->
         (* GitHub issue #183 follow-up, extended by #184's `Yield`-tail
            sugar: `name`'s alloca already exists -- collect_lets (called
@@ -6139,7 +6219,8 @@ let rec check_static_asserts_stmts (stmts : Ast.stmt list) : unit =
   List.iter (fun (s : Ast.stmt) ->
     let arms_of arms =
       List.iter (function
-        | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b) ->
+        | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b)
+        | Ast.ArmByteSliceLit (_, b) ->
             check_static_asserts_stmts b) arms
     in
     match s.desc with
