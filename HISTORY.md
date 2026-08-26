@@ -15,6 +15,91 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-26: Shebang Scripts Through execve (#287), and the Second exec That Fail-Stopped the Kernel
+
+`execve` picked an image from the caller's `argv[0]` and fell back to the
+static BusyBox ELF for anything it could not resolve. A text file with a `#!`
+line therefore got neither its interpreter nor a refusal: ash received a
+BusyBox that then failed on an applet name it had never heard of. The
+motivation was concrete -- `kernel/README.md` told a human to type
+`httpd -f -p 8080 -h / &` at the interactive ash prompt, and
+`scripts/run_kernel_uart_driver.py` typed its own byte-literal copy of the
+same string, so the port and document root existed twice with nothing keeping
+them in agreement.
+
+**Where the decision had to be made.** The image is not mapped until the
+syscall's action tail (`kernel_syscall_child_exec_return` ->
+`kernel_process_child_exec_prepare`), and that tail has already committed to
+replacing the process; its only failure mode is `kernel_syscall_fail_stop`,
+which reports nothing to userspace. So the format decision was placed in the
+`AARCH64_NR_EXECVE` branch itself, where an errno can still be returned. It
+reads the first 128 bytes of the target once (`syscall_script_line`, bounded
+for the same reason Linux bounds `BINPRM_BUF_SIZE`) and answers one of four
+things: `Executable` (ELF magic), `Script` (a `#!` directive it parsed),
+`NotExecutable` (a regular file that is neither -> `ENOEXEC`), or `Unknown`
+(not a readable regular file -- a directory, a device node, or absent -- where
+deciding a format needs a file there is none of, so the existing
+image-selection path is left alone).
+
+`#!` builds the replacement argv the way Linux's script binfmt does:
+interpreter as `argv[0]`, its single optional argument next, then the pathname
+`execve` was called with in place of the caller's own `argv[0]`. The stored
+exec path is rewritten to the interpreter, because that is what names the
+image that will actually be loaded -- which is also what keeps
+`/bin/httpd`'s dynamic BusyBox-Extras/musl pair selectable from a script.
+
+**A `--forbid-trap` shape worth remembering.** The first draft subsliced the
+staging buffer with the parsed range (`line[interpreter_from..<interpreter_to]`)
+and could not be compiled: the checker proves bounds against a slice's
+compile-time minimum, and there is no relation to prove between two ends that
+were each computed by a separate scan. The version that compiles walks the
+staging array's own static size and treats the range as a filter over that
+walk, so every index is bounded by the array and no relational proof is needed
+at all. Three trap sites became zero without a single runtime check.
+
+**ENOEXEC turned out to be observable.** BusyBox ash answers it with its own
+shell-script fallback, so `/hello.txt` from the prompt produces
+`/hello.txt: line 1: hello: not found` -- ash reading a text file as a script
+because the kernel declined to guess. That transcript is now pinned in
+`kernel/tests/common/ash/ash.expected`, which the QEMU and RPi5 lanes share.
+
+**The second exec.** Wiring the demo to `/etc/httpd-serve.sh` immediately
+fail-stopped, and the reduction had nothing to do with scripts:
+`/bin/sh -c 'exec /bin/echo hi'` fail-stopped the kernel on the pre-shebang
+build too. A process that `execve`s a second time reached two checks that both
+assume it is still running on a clone of its parent's VM -- the clone was
+already reaped by the first exec, and `process_image_exec_install` refuses to
+install over an already-installed image, so the second image was unmapped and
+prepare returned failure. The fix asks the question the code had been
+assuming the answer to: which VM this exec replaces depends on how the process
+got the one it has. A forked child reaps its clone; a process that already
+owns an installed image tears that image down instead, and it has to happen
+before the replacement is mapped, since both occupy the same user window and
+afterwards the old one's page table entries are gone and its pages are
+unreachable. The oops record's own `image=exec` line was the entire diagnosis.
+
+**Process shape matters more than style here.** The intermediate version of
+`httpd-serve.sh` avoided `exec` (running httpd in the foreground and following
+it with `exit $?` so ash would fork rather than tail-call). It worked, and the
+daemon served pages -- but with that extra shell parked in `wait4` for the life
+of the demo, the ash prompt stopped answering UART input once the listener came
+up. `exec` is what keeps the daemon a direct child of the ash that started it,
+which is the shape the interactive scenario already depended on.
+
+Coverage ended up on the boot path rather than beside it: `init.sh`'s final
+line is `exec /etc/httpd-demo.sh` now instead of `exec /bin/sh
+/etc/httpd-demo.sh`, so PID 1's own parent-exec handoff resolves a `#!` line on
+every boot of both lanes, with byte-identical argv and no new expected output
+to maintain. Two ext2 fixtures pin the two argv shapes
+(`/etc/script-shebang.sh` for `$0`/`$*`, and a one-line
+`/etc/script-interpreter-argument.sh` whose interpreter is `/bin/echo`, so the
+interpreter-argument form prints its own argv), and the ash fixture carries the
+`ENOEXEC` fallback and the re-exec case. Verified on QEMU (39 views, ash lane,
+oops, lifecycle-gap, alloc-rollback) and on real RPi5 hardware (39 views, one
+boot).
+
+---
+
 ### 2026-08-26: The Directory Map Was An Index That Had Stopped Being One
 
 `AGENTS.md` had grown to 1,334 lines / 101,798 characters, two thirds of the
