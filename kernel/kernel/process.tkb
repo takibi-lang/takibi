@@ -2160,20 +2160,13 @@ fn kernel_process_schedulable_count() -> usize {
     return live;
 }
 
-fn kernel_process_switch_to_parent(current_sp: usize) -> usize {
-    if (execution_current_live == false ||
-        scheduled_process_record_at(execution_current_handle.pool_index)
-            .has_parent ==
-            false) {
-        return current_sp;
-    }
-    let mut from: ProcessHandle = execution_current_handle;
-    let mut to: ProcessHandle =
-        scheduled_process_record_at(from.pool_index).parent;
-    if (scheduled_process_record_state(to.pool_index) !=
-            ProcessSlotState::Ready) {
-        return current_sp;
-    }
+// The switch itself, once a target has been chosen: park the outgoing
+// frame, hand the CPU over, and answer with the incoming process's own
+// saved frame. Both of this file's schedulers and both of its blockers end
+// here, so "how a switch is performed" has one implementation and only the
+// choice of target varies.
+private fn kernel_process_switch_to(from: ProcessHandle, to: ProcessHandle,
+                                    current_sp: usize) -> usize {
     scheduled_process_record_at(from.pool_index).saved_sp = current_sp;
     if (kernel_process_yield_handle(from) == false) {
         return current_sp;
@@ -2189,48 +2182,85 @@ fn kernel_process_switch_to_parent(current_sp: usize) -> usize {
     return scheduled_process_record_at(to.pool_index).saved_sp;
 }
 
-fn kernel_process_switch_to_child(current_sp: usize) -> usize {
-    if (execution_current_live == false ||
-        scheduled_process_record_at(execution_current_handle.pool_index)
-            .has_child ==
-            false) {
-        return current_sp;
+// A ProcessRecord holds one child, so the live process tree is a chain:
+// root -> child -> child -> ... Walking up from anywhere reaches the root,
+// which is what makes the rotation below definable without a run queue.
+private fn kernel_process_chain_root(from: ProcessHandle) -> ProcessHandle {
+    let mut root: ProcessHandle = from;
+    let mut remaining: usize = scheduled_process_pool_live_count() + 1;
+    let mut climbing: bool = true;
+    while (climbing && remaining != 0) {
+        remaining = remaining - 1;
+        if (scheduled_process_record_at(root.pool_index).has_parent == false) {
+            climbing = false;
+        } else {
+            let mut parent: ProcessHandle =
+                scheduled_process_record_at(root.pool_index).parent;
+            if (scheduled_process_handle_matches(parent) == false) {
+                climbing = false;
+            } else {
+                root = parent;
+            }
+        }
     }
-    let mut from: ProcessHandle = execution_current_handle;
-    let mut to: ProcessHandle =
-        scheduled_process_record_at(from.pool_index).child;
-    if (scheduled_process_record_state(to.pool_index) !=
-            ProcessSlotState::Ready) {
-        return current_sp;
-    }
-    scheduled_process_record_at(from.pool_index).saved_sp = current_sp;
-    if (kernel_process_yield_handle(from) == false) {
-        return current_sp;
-    }
-    if (kernel_process_start_handle(to) == false) {
-        if (kernel_process_start_handle(from)) {}
-        return current_sp;
-    }
-    execution_current_handle = to;
-    kernel_process_trace_handle(ProcessTraceSchedule, to, from, 0);
-    process_image_activate_root(to.pool_index);
-    kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
-    return scheduled_process_record_at(to.pool_index).saved_sp;
+    return root;
 }
 
-// GitHub issue #245: the old two-process toggle ("if I'm the Child, go up
-// to the Parent; else go down to the Child") generalizes exactly:
-// whichever slot has a live child of its own is playing the "parent"
-// role relative to it, so switching down to that child matches the old
-// else-branch; a slot with no live child (never forked, or is itself the
-// forked leaf) matches the old if-branch, switching up to its own parent.
+must_use variant ProcessNextReadyResult { Missing; Next(ProcessHandle); }
+
+// The next runnable process, in one fixed cyclic order over that chain: a
+// process's successor is its child, or the root again when it has none.
+//
+// The policy this replaces was "switch to my child if I have one, otherwise
+// to my parent", and its failure was that it could not step OVER a process
+// that was not itself runnable. An interactive shell whose child is a script
+// shell parked in wait4 for a daemon two levels further down was never
+// selected again: the bottom two processes handed the CPU back and forth,
+// which is a valid answer to "who is my relative" and a wrong answer to
+// "who should run next". The prompt went silent while the daemon kept
+// serving. Rotating instead makes every runnable process reachable from
+// every other, at the cost of visiting processes the old policy skipped --
+// including a busy-looping PID 1, which was genuinely runnable all along.
+private fn kernel_process_next_ready(from: ProcessHandle)
+        -> ProcessNextReadyResult {
+    let mut root: ProcessHandle = kernel_process_chain_root(from);
+    let mut cursor: ProcessHandle = from;
+    let mut remaining: usize = scheduled_process_pool_live_count() + 1;
+    while (remaining != 0) {
+        remaining = remaining - 1;
+        let mut advanced: bool = false;
+        if (scheduled_process_record_at(cursor.pool_index).has_child) {
+            let mut child: ProcessHandle =
+                scheduled_process_record_at(cursor.pool_index).child;
+            if (scheduled_process_handle_matches(child)) {
+                cursor = child;
+                advanced = true;
+            }
+        }
+        if (advanced == false) { cursor = root; }
+        if (scheduled_process_same_slot(cursor, from) == false &&
+            scheduled_process_record_state(cursor.pool_index) ==
+                ProcessSlotState::Ready) {
+            return ProcessNextReadyResult::Next(cursor);
+        }
+    }
+    return ProcessNextReadyResult::Missing;
+}
+
+// GitHub issue #245 generalized this from a fixed two-process Parent/Child
+// toggle to "whichever slot has a live child is playing the parent role".
+// That still only ever looked at ONE relative; the rotation above looks at
+// every live process, which is what a chain deeper than that one relative
+// requires.
 fn kernel_process_schedule(current_sp: usize) -> usize {
-    if (execution_current_live &&
-        scheduled_process_record_at(execution_current_handle.pool_index)
-            .has_child) {
-        return kernel_process_switch_to_child(current_sp);
+    if (execution_current_live == false) { return current_sp; }
+    match kernel_process_next_ready(execution_current_handle) {
+        ProcessNextReadyResult::Missing => { return current_sp; }
+        ProcessNextReadyResult::Next(to) => {
+            return kernel_process_switch_to(
+                execution_current_handle, to, current_sp);
+        }
     }
-    return kernel_process_switch_to_parent(current_sp);
 }
 
 // GitHub issue #244: distinguishes "no child at all" (wait4 should fail
@@ -2897,137 +2927,88 @@ fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {
     return next_sp;
 }
 
+// Block the running process and hand the CPU to the next runnable one.
+//
 // Called with IRQ delivery masked after the UART ring's final empty check.
 // Publishing Blocked before returning the next runnable frame closes the
-// otherwise-lost wakeup window between checking the ring and sleeping.  The
-// current process may itself have a live child (interactive ash with a
-// background job), in which case the child must run while the shell waits;
-// the old implementation always switched to the current process's parent,
-// starving this nested child before its exec could reach listen().
-fn kernel_process_block_uart(current_sp: usize) -> usize {
+// otherwise-lost wakeup window between checking the ring and sleeping.
+//
+// The successor is chosen BEFORE the block, because the rotation only
+// returns Ready processes and the caller is about to stop being one.
+//
+// Both blockers used to name their successor structurally -- UART blocking
+// switched to the current process's child (or, failing that, its parent) and
+// wait4 switched to the child it was waiting on -- and refused to block at
+// all when that one relative was not Ready. Refusing is a fail-stop at the
+// caller, so "the process I would have handed the CPU to is itself blocked"
+// had to be impossible for the kernel to stay up. It is not impossible: a
+// shell reading the terminal while its own child waits on a daemon is an
+// ordinary shape, and it is exactly the shape a script that starts a
+// background daemon produces.
+private fn kernel_process_block_current(current_sp: usize,
+                                        reason: ProcessWaitReason,
+                                        trace_aux: usize) -> usize {
     if (execution_current_live == false) {
         return 0;
     }
+    let mut from: ProcessHandle = execution_current_handle;
+    let mut to: ProcessHandle = match kernel_process_next_ready(from) {
+        ProcessNextReadyResult::Missing => { return 0; }
+        ProcessNextReadyResult::Next(next) => { next }
+    };
+    scheduled_process_record_at(from.pool_index).saved_sp = current_sp;
+    match scheduled_process_running_take(from) {
+        ScheduledProcessRunningTakeResult::Missing => { return 0; }
+        ScheduledProcessRunningTakeResult::Running(resources) => {
+            let (owner, running) = resources;
+            let blocked = scheduled_process_block(owner, running);
+            scheduled_process_record_at(owner.pool_index).wait_reason = reason;
+            scheduled_process_release(owner, blocked);
+            kernel_process_trace_handle(ProcessTraceBlock, from, to,
+                                        trace_aux);
+        }
+    }
+    if (kernel_process_start_handle(to) == false) {
+        return 0;
+    }
+    execution_current_handle = to;
+    process_image_activate_root(to.pool_index);
+    kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
+    return scheduled_process_record_at(to.pool_index).saved_sp;
+}
 
-    if (scheduled_process_record_at(execution_current_handle.pool_index)
-            .has_child) {
-        let mut parent: ProcessHandle = execution_current_handle;
-        let mut child: ProcessHandle =
-            scheduled_process_record_at(parent.pool_index).child;
-        if (scheduled_process_record_state(child.pool_index) !=
-                ProcessSlotState::Ready) {
-            return 0;
-        }
-        scheduled_process_record_at(parent.pool_index).saved_sp = current_sp;
-        match scheduled_process_running_take(parent) {
-            ScheduledProcessRunningTakeResult::Missing => { return 0; }
-            ScheduledProcessRunningTakeResult::Running(resources) => {
-                let (owner, running) = resources;
-                let blocked = scheduled_process_block(owner, running);
-                scheduled_process_record_at(owner.pool_index).wait_reason =
-                    ProcessWaitReason::UartRx;
-                scheduled_process_release(owner, blocked);
-                kernel_process_trace_handle(ProcessTraceBlock, parent, child,
-                                            1);
-            }
-        }
-        if (kernel_process_start_handle(child) == false) {
-            return 0;
-        }
-        execution_current_handle = child;
+fn kernel_process_block_uart(current_sp: usize) -> usize {
+    let next_sp: usize = kernel_process_block_current(
+        current_sp, ProcessWaitReason::UartRx, 1);
+    if (next_sp != 0) {
         if (process_test_evidence_record_uart_block()) {
             kernel_boot_log("uart rx: scheduler child blocked\n");
         }
-        process_image_activate_root(child.pool_index);
-        kernel_process_trace_handle(ProcessTraceResume, child, parent, 0);
-        return scheduled_process_record_at(child.pool_index).saved_sp;
     }
-
-    if (scheduled_process_record_at(execution_current_handle.pool_index)
-            .has_parent == false) {
-        return 0;
-    }
-    let mut child: ProcessHandle = execution_current_handle;
-    let mut parent: ProcessHandle =
-        scheduled_process_record_at(child.pool_index).parent;
-    if (scheduled_process_record_state(parent.pool_index) !=
-            ProcessSlotState::Ready) {
-        return 0;
-    }
-    scheduled_process_record_at(child.pool_index).saved_sp = current_sp;
-    match scheduled_process_running_take(child) {
-        ScheduledProcessRunningTakeResult::Missing => { return 0; }
-        ScheduledProcessRunningTakeResult::Running(resources) => {
-            let (owner, running) = resources;
-            let blocked = scheduled_process_block(owner, running);
-            scheduled_process_record_at(owner.pool_index).wait_reason =
-                ProcessWaitReason::UartRx;
-            scheduled_process_release(owner, blocked);
-            kernel_process_trace_handle(ProcessTraceBlock, child, parent,
-                                        1);
-        }
-    }
-    if (kernel_process_start_handle(parent) == false) {
-        return 0;
-    }
-    execution_current_handle = parent;
-    if (process_test_evidence_record_uart_block()) {
-        kernel_boot_log("uart rx: scheduler child blocked\n");
-    }
-    process_image_activate_root(parent.pool_index);
-    kernel_process_trace_handle(ProcessTraceResume, parent, child, 0);
-    return scheduled_process_record_at(parent.pool_index).saved_sp;
+    return next_sp;
 }
 
 // GitHub issue #244: the mirror image of kernel_process_block_uart() --
-// blocks current (the parent calling wait4()) and switches to current's
-// own live child instead, so the child can keep running toward its own
-// exit. Only valid when that child is Ready (yielded, not itself blocked
-// or already exited): a scheduler preemption is the only way the parent
-// reaches wait4() before the child's own kernel_process_child_exit() has
-// already switched back on its own.
+// blocks current (the parent calling wait4()) so its own child can keep
+// running toward its exit.
 fn kernel_process_block_wait4(current_sp: usize) -> usize {
     if (execution_current_live == false ||
         scheduled_process_record_at(execution_current_handle.pool_index)
-            .has_child ==
-            false) {
+            .has_child == false) {
         return 0;
     }
-    let mut parent: ProcessHandle = execution_current_handle;
-    let mut child: ProcessHandle =
-        scheduled_process_record_at(parent.pool_index).child;
-    if (scheduled_process_record_state(child.pool_index) !=
-            ProcessSlotState::Ready) {
-        return 0;
-    }
-    scheduled_process_record_at(parent.pool_index).saved_sp = current_sp;
-    match scheduled_process_running_take(parent) {
-        ScheduledProcessRunningTakeResult::Missing => { return 0; }
-        ScheduledProcessRunningTakeResult::Running(resources) => {
-            let (owner, running) = resources;
-            let blocked = scheduled_process_block(owner, running);
-            scheduled_process_record_at(owner.pool_index).wait_reason =
-                ProcessWaitReason::ChildExit;
-            scheduled_process_release(owner, blocked);
-            kernel_process_trace_handle(ProcessTraceBlock, parent, child,
-                                        2);
-        }
-    }
-    if (kernel_process_start_handle(child) == false) {
-        return 0;
-    }
-    execution_current_handle = child;
-    process_image_activate_root(child.pool_index);
-    kernel_process_trace_handle(ProcessTraceResume, child, parent, 0);
-    return scheduled_process_record_at(child.pool_index).saved_sp;
+    return kernel_process_block_current(
+        current_sp, ProcessWaitReason::ChildExit, 2);
 }
 
 // The UART IRQ transfers one byte directly into the suspended syscall frame.
 // true means the byte was consumed by a waiter and must not enter the ring.
-// The waiter can be either the current process's blocked child (the original
-// root-shell shape) or the current process's blocked parent (nested ash with
-// a background child).
+// The waiter is either the current process's blocked child (the original
+// root-shell shape) or a blocked ancestor -- the terminal is one device, so
+// the process reading it is normally an ancestor of whatever the scheduler
+// happens to be running when its byte arrives.
 must_use variant ProcessUartWakeResult { Missing; Consumed; RetryRead; }
+
 
 fn kernel_process_uart_wake(value: usize)
         -> ProcessUartWakeResult !{interrupt} {
@@ -3051,17 +3032,39 @@ fn kernel_process_uart_wake(value: usize)
     // A middle process can have both relatives (ash -> listener -> worker).
     // Its child normally is not the UART waiter, so keep looking upward
     // instead of dropping the byte before checking the blocked ash parent.
-    if (found == false &&
-        scheduled_process_record_at(execution_current_handle.pool_index)
-            .has_parent) {
-        let mut candidate: ProcessHandle = scheduled_process_record_at(
-            execution_current_handle.pool_index).parent;
-        if (scheduled_process_record_state(candidate.pool_index) ==
-                ProcessSlotState::Blocked &&
-            scheduled_process_record_wait_reason(candidate.pool_index) ==
-                ProcessWaitReason::UartRx) {
-            waiter = candidate;
-            found = true;
+    //
+    // Upward means all the way up, not one hop. A shell script that starts a
+    // daemon puts two processes between that daemon and the ash blocked on
+    // this byte (ash -> script shell -> daemon), and stopping at the first
+    // parent dropped every keystroke from there on -- the prompt went silent
+    // while the daemon itself kept serving. The walk is bounded by the number
+    // of live processes, so a parent chain that is not in fact a chain runs
+    // out rather than spinning inside an interrupt.
+    let mut remaining_hops: usize = scheduled_process_pool_live_count() + 1;
+    let mut ancestor: ProcessHandle = execution_current_handle;
+    let mut climbing: bool = true;
+    while (climbing && found == false && remaining_hops != 0) {
+        remaining_hops = remaining_hops - 1;
+        if (scheduled_process_record_at(ancestor.pool_index).has_parent ==
+                false) {
+            climbing = false;
+        } else {
+            let mut candidate: ProcessHandle =
+                scheduled_process_record_at(ancestor.pool_index).parent;
+            // A parent link that no longer names the process it was recorded
+            // for is the end of the chain, not something to read state from.
+            if (scheduled_process_handle_matches(candidate) == false) {
+                climbing = false;
+            } else {
+                if (scheduled_process_record_state(candidate.pool_index) ==
+                        ProcessSlotState::Blocked &&
+                    scheduled_process_record_wait_reason(
+                        candidate.pool_index) == ProcessWaitReason::UartRx) {
+                    waiter = candidate;
+                    found = true;
+                }
+                ancestor = candidate;
+            }
         }
     }
     if (found == false) {
