@@ -403,7 +403,11 @@ contains a local sequence, CPU, process and peer identities, state, wait
 reason, root, saved SP, and event-specific auxiliary value. Writers never
 print; a record publishes its sequence last, so a fail-stop copy skips an
 IRQ-interrupted in-progress record and presents committed entries oldest to
-newest. Ordinary boots leave tracing disabled. The current scheduler runs only
+newest. `kernel_process_trace_report()` snapshots and prints that same tail on
+demand without crashing; it is callable from a fixture or as
+`call (void) kernel_process_trace_report()` in GDB. The live report and the
+oops report use one row formatter, so their field order cannot drift. Ordinary
+boots leave tracing and the report disabled. The current scheduler runs only
 on core 0; when real SMP scheduling is introduced, this ABI is intended to
 become one independently written ring per CPU rather than a false shared
 global order.

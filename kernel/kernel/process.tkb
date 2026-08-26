@@ -1804,6 +1804,73 @@ fn kernel_process_crash_trace_copy(output: *usize) -> usize {
     return copied;
 }
 
+private fn kernel_process_trace_put_hex(value: usize) {
+    kernel_boot_log("0x");
+    let mut shift: usize = 60;
+    while (true) {
+        let digit: usize = (value >> shift) & 0xF;
+        if (digit < 10) { uart_putc((digit as u8) + 48); }
+        else { uart_putc((digit as u8) + 87); }
+        if (shift == 0) { return; }
+        shift = shift - 4;
+    }
+}
+
+// One formatter for both a live on-demand report and the trace frozen into a
+// crash snapshot. `prefix` identifies the surrounding report while every row
+// keeps the same field order and representation.
+fn kernel_process_trace_render(
+        trace: borrow [usize; KERNEL_CRASH_TRACE_WORDS..],
+        count: usize, prefix: *u8) {
+    kernel_boot_log(prefix);
+    kernel_boot_log(" count=");
+    uart_put_udec(count);
+    kernel_boot_log("\n");
+    for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
+        if (item < count) {
+            let base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+            kernel_boot_log(prefix);
+            kernel_boot_log(" seq=");
+            uart_put_udec(trace[base]);
+            kernel_boot_log(" cpu=");
+            uart_put_udec(trace[base + 1]);
+            kernel_boot_log(" event=");
+            uart_put_udec(trace[base + 2]);
+            kernel_boot_log(" pid=");
+            uart_put_udec(trace[base + 3]);
+            kernel_boot_log(" gen=");
+            uart_put_udec(trace[base + 4]);
+            kernel_boot_log(" peer=");
+            uart_put_udec(trace[base + 5]);
+            kernel_boot_log(" peer-gen=");
+            uart_put_udec(trace[base + 6]);
+            kernel_boot_log(" state=");
+            uart_put_udec(trace[base + 7]);
+            kernel_boot_log(" wait=");
+            uart_put_udec(trace[base + 8]);
+            kernel_boot_log(" root=");
+            uart_put_udec(trace[base + 9]);
+            kernel_boot_log(" sp=");
+            kernel_process_trace_put_hex(
+                trace[base + 10]);
+            kernel_boot_log(" aux=");
+            kernel_process_trace_put_hex(
+                trace[base + 11]);
+            kernel_boot_log("\n");
+        }
+    }
+}
+
+// Callable from a fixture, a deliberate debug stop, or GDB. Snapshot first:
+// printing is deliberately outside scheduler/IRQ writers, and the caller sees
+// one oldest-to-newest tail rather than following a ring that keeps moving.
+fn kernel_process_trace_report() {
+    let mut trace: [usize; KERNEL_CRASH_TRACE_WORDS];
+    let count: usize = kernel_process_crash_trace_copy(trace as *usize);
+    kernel_process_trace_render(
+        trace as []usize, count, "process trace:" as *u8);
+}
+
 must_use variant ProcessUartProgressResult { Invalid; Recorded; }
 
 fn kernel_process_start_handle(handle: ProcessHandle) -> bool {

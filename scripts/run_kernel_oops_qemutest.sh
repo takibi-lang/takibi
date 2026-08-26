@@ -92,6 +92,7 @@ for _ in $(seq 1 50); do
             -ex "disable 1"
             -ex "break run_initial_user"
             -ex "continue"
+            -ex "call (void) kernel_process_trace_report()"
             -ex "set {int}\$x0 = $fault_instruction"
             -ex "break el1_exception_evidence_from_frame"
             -ex "continue"
@@ -135,6 +136,13 @@ if [ "$MODE" != child_exec ] &&
         { ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=7 pid=1 gen=[1-9][0-9]* ' "$UART_LOG" ||
           ! grep -Eq '^oops: process pid=1 parent=0 state=2 wait=0 wait4_status_ptr=0x0+ root=0 asid=[1-9][0-9]* .* image=bootstrap$' "$UART_LOG"; }; then
     echo "FAIL kernel/qemu oops: expected bootstrap process trace" >&2
+    sed 's/^/  /' "$UART_LOG" >&2 || true
+    exit 1
+fi
+if [ "$MODE" != child_exec ] &&
+        { ! grep -Eq '^process trace: count=([1-9]|1[0-6])$' "$UART_LOG" ||
+          ! grep -Eq '^process trace: seq=[1-9][0-9]* cpu=0 event=7 pid=1 gen=[1-9][0-9]* ' "$UART_LOG"; }; then
+    echo "FAIL kernel/qemu oops: on-demand process trace report was not callable before the crash" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi

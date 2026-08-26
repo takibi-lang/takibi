@@ -76,7 +76,10 @@ per-process record they are not scoped to.
 oops-snapshot infrastructure -- deliberately allocation-free,
 single-writer, and readable from a fail-stop path that cannot assume a
 working scheduler. A ring buffer's write cursor is definitionally one
-global counter, not a per-process field.
+global counter, not a per-process field. The same committed chronology can
+also be snapshotted and printed without a crash by
+`kernel_process_trace_report()`; that entry point and the oops path share one
+row formatter, and neither prints from a scheduler or interrupt writer.
 
 ### VM / address-space (`kernel/mm/`, `kernel/arch/arm64/mm/`)
 

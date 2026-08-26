@@ -140,39 +140,9 @@ fn crash_snapshot_render() !{unsafe} {
     } else {
         kernel_boot_log("oops: saved-frame=unavailable\n");
     }
-    kernel_boot_log("oops: trace count=");
-    uart_put_udec(crash_snapshot.trace_count);
-    kernel_boot_log("\n");
-    for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
-        if (item < crash_snapshot.trace_count) {
-            let base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
-            kernel_boot_log("oops: trace seq=");
-            uart_put_udec(crash_snapshot.trace[base]);
-            kernel_boot_log(" cpu=");
-            uart_put_udec(crash_snapshot.trace[base + 1]);
-            kernel_boot_log(" event=");
-            uart_put_udec(crash_snapshot.trace[base + 2]);
-            kernel_boot_log(" pid=");
-            uart_put_udec(crash_snapshot.trace[base + 3]);
-            kernel_boot_log(" gen=");
-            uart_put_udec(crash_snapshot.trace[base + 4]);
-            kernel_boot_log(" peer=");
-            uart_put_udec(crash_snapshot.trace[base + 5]);
-            kernel_boot_log(" peer-gen=");
-            uart_put_udec(crash_snapshot.trace[base + 6]);
-            kernel_boot_log(" state=");
-            uart_put_udec(crash_snapshot.trace[base + 7]);
-            kernel_boot_log(" wait=");
-            uart_put_udec(crash_snapshot.trace[base + 8]);
-            kernel_boot_log(" root=");
-            uart_put_udec(crash_snapshot.trace[base + 9]);
-            kernel_boot_log(" sp=");
-            crash_snapshot_put_hex(crash_snapshot.trace[base + 10]);
-            kernel_boot_log(" aux=");
-            crash_snapshot_put_hex(crash_snapshot.trace[base + 11]);
-            kernel_boot_log("\n");
-        }
-    }
+    kernel_process_trace_render(
+        crash_snapshot.trace as []usize, crash_snapshot.trace_count,
+        "oops: trace" as *u8);
 }
 
 // One "oops: <what> page ..." line. Reports the identity-mapped address
