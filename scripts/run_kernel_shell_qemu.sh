@@ -9,6 +9,7 @@ ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
 ARTIFACT_DIR="${KERNEL_QEMU_SHELL_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-shell-qemu}"
 SHELL_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
+QMP_SOCKET="$ARTIFACT_DIR/qmp.sock"
 
 # The top-level Makefile normally enables -Oline, which captures a recipe's
 # stdout/stderr until its command exits. This is an intentionally long-lived
@@ -39,6 +40,7 @@ fi
 # kernelcheck run.
 mkdir -p "$ARTIFACT_DIR"
 cp "$EXT2_IMAGE" "$SHELL_EXT2_IMAGE"
+rm -f "$QMP_SOCKET"
 
 QEMU_SERIAL_PORT="${KERNEL_QEMU_SHELL_SERIAL_PORT:-17773}"
 HTTP_PORT="${KERNEL_QEMU_SHELL_HTTP_PORT:-18080}"
@@ -51,7 +53,9 @@ QEMU_LAUNCH_NS="$(date +%s%N)"
 QEMU_COMMAND=(
     qemu-system-aarch64 \
     -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
-    -serial "tcp:127.0.0.1:$QEMU_SERIAL_PORT,server=on,wait=off" \
+    -qmp "unix:$QMP_SOCKET,server=on,wait=off" \
+    -chardev "socket,id=debug_uart,host=127.0.0.1,port=$QEMU_SERIAL_PORT,server=on,wait=off" \
+    -serial chardev:debug_uart \
     -global virtio-mmio.force-legacy=on \
     -drive "file=$SHELL_EXT2_IMAGE,if=none,format=raw,id=vd0" \
     -device virtio-blk-device,drive=vd0 \
@@ -62,6 +66,7 @@ QEMU_COMMAND=(
 
 export KERNEL_SHELL_PLATFORM=qemu
 export KERNEL_SHELL_LAUNCH_NS="$QEMU_LAUNCH_NS"
+export KERNEL_SHELL_QMP_SOCKET="$QMP_SOCKET"
 if [ "${KERNEL_QEMU_SHELL_MEASURE_ONLY:-0}" = 1 ]; then
     export KERNEL_SHELL_MEASURE_ONLY=1
 fi

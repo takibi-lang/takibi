@@ -201,6 +201,14 @@ UART TX automatically, eliminating both the second toggle and the risk of
 continuing while BREAK remains asserted. The startup banner and kernel README
 state the sequence; Ctrl-C remains ordinary terminal input.
 
+`kernelsh-qemu` keeps the TCP UART/miniterm path chosen to survive GNU Make's
+detached stdin and to match the RPi5 console behavior. It adds a separate,
+private Unix-domain QMP socket only for control: Ctrl-T then `b` sends
+`chardev-send-break` for the explicitly named PL011 chardev, while all UART
+bytes continue over the original TCP socket. The existing PTY smoke test now
+enters DDB with that exact key sequence, runs `oops` and `continue`, and proves
+that the resumed ash still executes a command.
+
 ---
 
 ### 2026-08-26: Shebang Scripts Through execve (#287), and the Second exec That Fail-Stopped the Kernel

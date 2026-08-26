@@ -51,6 +51,8 @@ def main():
         os.execvp("make", ["make", "-j1", "kernelsh-qemu"])
 
     transcript = bytearray()
+    break_sent = False
+    ddb_prompt_count = 0
     command_sent = False
     deadline = time.monotonic() + START_TIMEOUT_SECONDS
 
@@ -65,7 +67,17 @@ def main():
                 if data:
                     transcript.extend(data)
                     normalized = bytes(transcript).replace(b"\r", b"")
-                    if not command_sent and READY_MARKER in normalized and b"/ # " in normalized:
+                    if not break_sent and READY_MARKER in normalized and b"/ # " in normalized:
+                        os.write(terminal, b"\x14b")  # Ctrl-T, then lowercase b
+                        break_sent = True
+                    prompts = normalized.count(b"ddb> ")
+                    while ddb_prompt_count < prompts:
+                        if ddb_prompt_count == 0:
+                            os.write(terminal, b"oops\n")
+                        elif ddb_prompt_count == 1:
+                            os.write(terminal, b"continue\n")
+                        ddb_prompt_count += 1
+                    if (not command_sent and b"ddb: continuing\n" in normalized):
                         os.write(terminal, b"x=; echo " + COMMAND_RESULT + b"\n")
                         command_sent = True
                     if command_sent and b"\n" + COMMAND_RESULT + b"\n" in normalized:

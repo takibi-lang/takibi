@@ -164,15 +164,17 @@ be opened from the host browser. Both use pyserial's
 python3-serial`. Press Ctrl-] to leave either console.
 Exiting this way also restores the host terminal settings.
 
-To stop a live RPi5 kernel in DDB, press Ctrl-T and then the ordinary lowercase
-`b` key in `make kernelsh-rpi5`. The host console sends one 250 ms serial BREAK;
-neither key is forwarded to ash, and no second key sequence is needed to
-release it. The kernel prints `ddb>` and accepts `oops`, `regs`, `trace`,
-`help`, and `continue`. Use `continue` to return through the saved exception
-frame. Ctrl-C remains an ordinary terminal byte and is not reserved by the
-debugger. The console prints this key reminder when it starts. Miniterm's
-generic Ctrl-T, Ctrl-B indefinite BREAK toggle is intentionally not the Takibi
-DDB binding.
+To stop a live kernel in DDB from either `make kernelsh-qemu` or
+`make kernelsh-rpi5`, press Ctrl-T and then the ordinary lowercase `b` key.
+Neither key is forwarded to ash. On RPi5 the host sends one automatically
+released 250 ms physical serial BREAK; on QEMU the console asks the PL011
+chardev to deliver the equivalent BREAK through a private QMP control socket.
+The existing TCP UART/miniterm data path is unchanged. The kernel prints
+`ddb>` and accepts `oops`, `regs`, `trace`, `help`, and `continue`. Use
+`continue` to return through the saved exception frame. Ctrl-C remains an
+ordinary terminal byte and is not reserved by the debugger. The console
+prints this key reminder when it starts. Miniterm's generic Ctrl-T, Ctrl-B
+indefinite BREAK toggle is intentionally not the Takibi DDB binding.
 
 The QEMU shell also reports the elapsed time from QEMU launch to the kernel's
 explicit `interactive shell: uart blocked` readiness marker. This is the

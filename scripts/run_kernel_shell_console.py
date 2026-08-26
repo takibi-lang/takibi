@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Run miniterm while reporting the kernel ash readiness marker."""
 
+import json
 import os
 import signal
+import socket
 import sys
 import time
 
@@ -35,6 +37,33 @@ LABEL = f"[kernel/{PLATFORM}]"
 # slow to bind" apart from "QEMU crashed on startup" from the log alone.
 OPEN_RETRY_TIMEOUT_SECONDS = 10
 OPEN_RETRY_INTERVAL_SECONDS = 0.2
+
+
+def qmp_execute(socket_path: str, command: str, arguments: dict) -> None:
+    """Execute one QMP command over the shell runner's private Unix socket."""
+    deadline = time.monotonic() + OPEN_RETRY_TIMEOUT_SECONDS
+    while True:
+        try:
+            qmp = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            qmp.connect(socket_path)
+            break
+        except OSError:
+            qmp.close()
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(OPEN_RETRY_INTERVAL_SECONDS)
+    with qmp, qmp.makefile("rwb", buffering=0) as stream:
+        greeting = json.loads(stream.readline())
+        if "QMP" not in greeting:
+            raise RuntimeError("QMP greeting did not appear")
+        stream.write(b'{"execute":"qmp_capabilities"}\n')
+        if "return" not in json.loads(stream.readline()):
+            raise RuntimeError("QMP capability negotiation failed")
+        request = {"execute": command, "arguments": arguments}
+        stream.write(json.dumps(request, separators=(",", ":")).encode() + b"\n")
+        response = json.loads(stream.readline())
+        if "return" not in response:
+            raise RuntimeError(f"QMP command failed: {response}")
 
 
 def backend_alive(pid: int) -> bool:
@@ -130,13 +159,20 @@ class TimingMiniterm(miniterm.Miniterm):
         self.reported = False
 
     def handle_menu_key(self, key):
-        # A debugger stop needs one unambiguous pulse, not miniterm's generic
-        # indefinite BREAK toggle (Ctrl-T Ctrl-B), whose release timing is an
-        # easy operator error. Debug Probe firmware implements CDC SEND_BREAK
-        # durations and drives its UART TX low for the requested interval.
+        # A debugger stop needs one unambiguous action, not miniterm's generic
+        # indefinite BREAK toggle. QEMU receives a chardev event over its
+        # private QMP socket; Debug Probe receives a timed CDC BREAK.
         if key in ("b", "B"):
-            print("--- sending 250 ms BREAK for Takibi DDB ---", file=sys.stderr)
-            self.serial.send_break(0.25)
+            qmp_socket = os.environ.get("KERNEL_SHELL_QMP_SOCKET")
+            try:
+                if qmp_socket:
+                    qmp_execute(qmp_socket, "chardev-send-break", {"id": "debug_uart"})
+                    print("--- sent QEMU PL011 BREAK for Takibi DDB ---", file=sys.stderr)
+                else:
+                    print("--- sending 250 ms BREAK for Takibi DDB ---", file=sys.stderr)
+                    self.serial.send_break(0.25)
+            except (OSError, RuntimeError, json.JSONDecodeError) as error:
+                print(f"--- could not send Takibi DDB BREAK: {error} ---", file=sys.stderr)
             return
         super().handle_menu_key(key)
 
