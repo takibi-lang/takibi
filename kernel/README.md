@@ -404,7 +404,11 @@ exception path. It checks an injected EL0 BRK, an injected EL0 data abort, and
 a fail-stop immediately after a real child exec commit. GDB only arms the
 fault or the default-false test switch, then detaches; the kernel itself saves
 the Lower-EL exception frame, emits the UART oops report, retains
-CrashSnapshot, and parks the CPU. The test also sources the compiler-generated
+CrashSnapshot, and enters a read-only UART crash console with interrupts
+masked. Its initial commands are `oops`, `trace`, `ps`, and `proc PID`;
+unknown commands cannot mutate memory, registers, processes, or resume a
+terminal failure. The focused regression drives all four commands over the
+real QEMU UART connection. The test also sources the compiler-generated
 _build/kernel-crash-snapshot-layout.gdb and then
 scripts/kernel_crash_snapshot.gdb's read-only takibi-oops command to inspect
 that retained record. The helper reads the snapshot's generated layout only;

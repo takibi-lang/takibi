@@ -111,6 +111,14 @@ fn uart_isr_getc() -> u8 !{unsafe} {
     return *dr;
 }
 
+// Terminal fail-stop diagnostics run with IRQ delivery masked, so they must
+// consume the same PL011 FIFO by polling rather than through uart_rx_handler.
+// This deliberately has no timeout: the kernel is already terminally stopped.
+fn uart_debug_getc() -> u8 !{unsafe} {
+    while (uart_rx_ready() == false) { }
+    return uart_isr_getc();
+}
+
 fn uart_rx_ready() -> bool !{unsafe} {
     let fr: *io u32 = unsafe { 0x1F00030018 as *io u32 };
     return (*fr & (1 << 4)) == 0; // RXFE clear = data available

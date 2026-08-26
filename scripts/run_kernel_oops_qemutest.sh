@@ -9,7 +9,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
 ARTIFACT_DIR="${KERNEL_QEMU_OOPS_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-oops-qemu}"
-GDB_PORT="${KERNEL_QEMU_OOPS_GDB_PORT:-18674}"
+GDB_PORT="${KERNEL_QEMU_OOPS_GDB_PORT:-18697}"
+SERIAL_PORT="${KERNEL_QEMU_OOPS_SERIAL_PORT:-18698}"
 MODE="${KERNEL_QEMU_OOPS_MODE:-brk}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 SNAPSHOT_LAYOUT="$REPO_ROOT/_build/kernel-crash-snapshot-layout.gdb"
@@ -20,7 +21,7 @@ mkdir -p "$ARTIFACT_DIR"
 # somebody already owns this lane's ports, and say that rather than
 # reporting a kernel that was never asked anything.
 python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu oops" \
-    "tcp:$GDB_PORT" || exit 1
+    "tcp:$GDB_PORT" "tcp:$SERIAL_PORT" || exit 1
 if ! command -v gdb-multiarch >/dev/null 2>&1; then
     echo "error: gdb-multiarch is required for kernelcheck-oops-qemu" >&2
     exit 1
@@ -51,14 +52,24 @@ case "$MODE" in
 esac
 
 qemu-system-aarch64 -machine virt -cpu cortex-a53 -smp 2 -m 1024 \
-    -display none -monitor none -serial "file:$UART_LOG" \
+    -display none -monitor none \
+    -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=on" \
     -S -gdb "tcp::$GDB_PORT" -kernel "$ELF" >"$ARTIFACT_DIR/qemu.log" 2>&1 &
 qemu_pid=$!
+console_driver_pid=""
 cleanup() {
+    if [ -n "$console_driver_pid" ]; then
+        kill "$console_driver_pid" 2>/dev/null || true
+        wait "$console_driver_pid" 2>/dev/null || true
+    fi
     kill "$qemu_pid" 2>/dev/null || true
     wait "$qemu_pid" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM HUP
+
+python3 "$REPO_ROOT/scripts/run_kernel_crash_console.py" \
+    --port "$SERIAL_PORT" --log "$UART_LOG" &
+console_driver_pid=$!
 
 # Fault injection is the sole GDB role before the oops. It enables the
 # debugger-owned boot-test trace switch before process setup, then stops at
@@ -114,16 +125,33 @@ if [ "$armed" != true ]; then
 fi
 
 for _ in $(seq 1 50); do
-    if grep -q '^oops: saved sp_el0=' "$UART_LOG"; then
+    if grep -q '^ddb: read-only crash console' "$UART_LOG"; then
         break
     fi
     sleep 0.1
 done
 
+if ! wait "$console_driver_pid"; then
+    console_driver_pid=""
+    echo "FAIL kernel/qemu oops: read-only UART crash console did not respond" >&2
+    sed 's/^/  /' "$UART_LOG" >&2 || true
+    exit 1
+fi
+console_driver_pid=""
+
 if ! grep -Eq "^oops: fail-stop seq=[1-9][0-9]* cpu=[0-9]+ slot=8 ec=0x00000000000000$expected_ec " "$UART_LOG" ||
         ! grep -q '^oops: saved sp_el0=' "$UART_LOG" ||
         ! grep -Eq '^oops: trace count=([1-9]|1[0-6])$' "$UART_LOG"; then
     echo "FAIL kernel/qemu oops: expected fail-stop UART report" >&2
+    sed 's/^/  /' "$UART_LOG" >&2 || true
+    exit 1
+fi
+if ! grep -q '^ddb: read-only crash console$' "$UART_LOG" ||
+        ! grep -q '^trace count=' "$UART_LOG" ||
+        ! grep -q '^ps: pid ppid state pages command$' "$UART_LOG" ||
+        ! grep -Eq '^ps: 1 0 [RSZ] [0-9]+ ' "$UART_LOG" ||
+        ! grep -Eq '^proc: pid=1 ppid=0 state=[RSZ] wait=[0-9]+ saved_sp=0x[0-9a-f]+ pages=[0-9]+ command=' "$UART_LOG"; then
+    echo "FAIL kernel/qemu oops: crash-console commands did not render" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi
@@ -192,8 +220,9 @@ if [ -n "$expected_detail" ] && ! grep -Eq "$expected_detail" "$UART_LOG"; then
     exit 1
 fi
 
-# The CPU is parked in WFE, so the kernel-aware GDB command can inspect the
-# fixed CrashSnapshot. It reads the kernel's one stored object, not a
+# The CPU is confined to the read-only UART console, so the kernel-aware GDB
+# command can still halt it and inspect the fixed CrashSnapshot. It reads the
+# kernel's one stored object, not a
 # duplicate ExceptionFrame or crash-record ABI in the test harness.
 gdb-multiarch -q -batch "$ELF" \
     -ex "target remote :$GDB_PORT" \

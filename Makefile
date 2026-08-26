@@ -731,11 +731,12 @@ kernelcheck-qemu-debug: kernelbuild-qemu-debug
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ASH_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_ASH_LABEL=qemu-debug KERNEL_QEMU_ASH_ARTIFACT_DIR="$(CURDIR)/_build/kernel-hwtest-qemu-debug-ash" KERNEL_QEMU_ASH_SERIAL_PORT=18686 KERNEL_QEMU_ASH_NETDEV_LOCAL_PORT=18687 KERNEL_QEMU_ASH_NETDEV_REMOTE_PORT=18688 bash scripts/run_kernel_ash_qemutest.sh
 
 ## Focused terminal-path check.  This is deliberately separate from the
-## ordinary QEMU suite because its expected result is a parked fail-stop.
+## ordinary QEMU suite because its expected result is a terminal fail-stop
+## serving the read-only UART crash console.
 kernelcheck-oops-qemu: kernelbuild-qemu $(KERNEL_CRASH_SNAPSHOT_LAYOUT)
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_oops_qemutest.sh
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=data_abort_write KERNEL_QEMU_OOPS_GDB_PORT=18675 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-data-abort" bash scripts/run_kernel_oops_qemutest.sh
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec KERNEL_QEMU_OOPS_GDB_PORT=18676 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-child-exec" bash scripts/run_kernel_oops_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=data_abort_write KERNEL_QEMU_OOPS_GDB_PORT=18693 KERNEL_QEMU_OOPS_SERIAL_PORT=18694 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-data-abort" bash scripts/run_kernel_oops_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec KERNEL_QEMU_OOPS_GDB_PORT=18695 KERNEL_QEMU_OOPS_SERIAL_PORT=18696 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-child-exec" bash scripts/run_kernel_oops_qemutest.sh
 
 ## Issue #377 regression: the exception-entry stack guard.  Deliberately
 ## separate from the ordinary QEMU suite for the same reason as

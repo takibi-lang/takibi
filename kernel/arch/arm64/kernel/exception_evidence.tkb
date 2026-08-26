@@ -58,6 +58,8 @@ struct CrashSnapshot {
 let mut crash_snapshot: CrashSnapshot;
 let mut crash_snapshot_capturing: bool;
 
+const CRASH_CONSOLE_LINE_BYTES: usize = 32;
+
 fn crash_snapshot_put_hex(value: usize) {
     kernel_boot_log("0x");
     let mut shift: usize = 60;
@@ -145,6 +147,121 @@ fn crash_snapshot_render() !{unsafe} {
         "oops: trace" as *u8);
 }
 
+private fn crash_console_command_is(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
+                                    length: usize, text: []u8) -> bool {
+    if (length != text.len) { return false; }
+    let mut index: usize = 0;
+    while (index < length && index < CRASH_CONSOLE_LINE_BYTES) {
+        if (index >= 0 && index < CRASH_CONSOLE_LINE_BYTES &&
+                index < text.len) {
+            if (line[index] != text[index]) { return false; }
+        } else { return false; }
+        index = index + 1;
+    }
+    return true;
+}
+
+must_use variant CrashConsolePidResult { Invalid; Parsed(usize); }
+
+private fn crash_console_parse_proc(
+        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
+        -> CrashConsolePidResult {
+    if (length < 6 || line[0] != 0x70 || line[1] != 0x72 ||
+            line[2] != 0x6F || line[3] != 0x63 || line[4] != 0x20) {
+        return CrashConsolePidResult::Invalid;
+    }
+    let mut pid: usize = 0;
+    let mut index: usize = 5;
+    while (index < length && index < CRASH_CONSOLE_LINE_BYTES) {
+        if (index >= 0 && index < CRASH_CONSOLE_LINE_BYTES) {
+            let byte: u8 = line[index];
+            if (byte < 0x30 || byte > 0x39) {
+                return CrashConsolePidResult::Invalid;
+            }
+            let digit: usize = (byte - 0x30) as usize;
+            if (pid > (0xFFFFFFFFFFFFFFFF - digit) / 10) {
+                return CrashConsolePidResult::Invalid;
+            }
+            pid = pid * 10 + digit;
+        }
+        index = index + 1;
+    }
+    if (pid == 0) { return CrashConsolePidResult::Invalid; }
+    return CrashConsolePidResult::Parsed(pid);
+}
+
+private fn crash_console_dispatch(
+        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
+        !{unsafe} {
+    if (crash_console_command_is(line, length, bs"oops")) {
+        crash_snapshot_render();
+        return;
+    }
+    if (crash_console_command_is(line, length, bs"trace")) {
+        kernel_process_trace_render(
+            crash_snapshot.trace as []usize, crash_snapshot.trace_count,
+            "trace" as *u8);
+        return;
+    }
+    if (crash_console_command_is(line, length, bs"ps")) {
+        kernel_process_monitor_ps();
+        return;
+    }
+    match crash_console_parse_proc(line, length) {
+        CrashConsolePidResult::Parsed(pid) => {
+            kernel_process_monitor_proc(pid);
+            return;
+        }
+        CrashConsolePidResult::Invalid => {}
+    }
+    if (crash_console_command_is(line, length, bs"help")) {
+        kernel_boot_log("commands: oops trace ps proc PID\n");
+        return;
+    }
+    kernel_boot_log("ddb: unknown command; try help\n");
+}
+
+private fn crash_console_append(
+        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize,
+        byte: u8) -> usize {
+    if (length < 32) {
+        line[length] = byte;
+        return length + 1;
+    }
+    return length;
+}
+
+private fn crash_console_run() !{unsafe} {
+    // The ordinary UART RX handler belongs to the suspended kernel and may
+    // wake a process. Keep it out of a terminal exception monitor and poll
+    // the device directly instead.
+    disable_irq();
+    kernel_boot_log("ddb: read-only crash console\n");
+    let mut line: [u8; CRASH_CONSOLE_LINE_BYTES];
+    let mut length: usize = 0;
+    while (true) {
+        kernel_boot_log("ddb> ");
+        let mut reading: bool = true;
+        while (reading) {
+            let byte: u8 = uart_debug_getc();
+            if (byte == 0x0A || byte == 0x0D) {
+                kernel_boot_log("\n");
+                reading = false;
+            } else {
+                if (byte == 0x08 || byte == 0x7F) {
+                    // Editing is deliberately absent from the first crash
+                    // console; ignore erase rather than complicating its
+                    // bounded input state.
+                } else {
+                    length = crash_console_append(line as []u8, length, byte);
+                }
+            }
+        }
+        crash_console_dispatch(line as []u8, length);
+        length = 0;
+    }
+}
+
 // One "oops: <what> page ..." line. Reports the identity-mapped address
 // directly when it is one of the allocator's pages, and otherwise tries
 // the faulting process's address space, saying which reading it used --
@@ -223,7 +340,7 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     // observes it.  This is cache maintenance only, never a DMA submission.
     dma_prepare_tx(&crash_snapshot as *usize, sizeof(CrashSnapshot));
     crash_snapshot_render();
-    while (true) { interrupt_wait(); }
+    crash_console_run();
 }
 
 // Vector-table targets have no universally valid saved ExceptionFrame.

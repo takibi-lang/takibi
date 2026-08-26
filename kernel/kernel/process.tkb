@@ -644,6 +644,80 @@ fn scheduled_process_diagnostic_next_pid(after: usize) -> usize !{unsafe} {
     return next;
 }
 
+private fn kernel_process_monitor_put_command(snapshot: ProcessDiagnosticSnapshot) {
+    let mut index: usize = 0;
+    while (index < snapshot.command_line_length && index < 512) {
+        if (index >= 0 && index < 512) {
+            let byte: u8 = snapshot.command_line[index];
+            if (byte == 0) { return; }
+            if (byte >= 0x20 && byte <= 0x7E) { uart_putc(byte); }
+            else { uart_putc(0x3F); }
+        }
+        index = index + 1;
+    }
+}
+
+// Read-only monitor views deliberately consume the same value snapshot as
+// procfs. They never retain a ProcessRecord pointer while the kernel is
+// stopped, and the UART frontend does not become a second process model.
+fn kernel_process_monitor_ps() !{unsafe} {
+    kernel_boot_log("ps: pid ppid state pages command\n");
+    let mut after: usize = 0;
+    let mut walking: bool = true;
+    while (walking) {
+        let pid: usize = scheduled_process_diagnostic_next_pid(after);
+        if (pid == 0) { walking = false; }
+        else {
+            match scheduled_process_diagnostic_snapshot(pid) {
+                ProcessDiagnosticResult::Missing => {}
+                ProcessDiagnosticResult::Found(snapshot) => {
+                    kernel_boot_log("ps: "); uart_put_udec(snapshot.pid);
+                    kernel_boot_log(" "); uart_put_udec(snapshot.ppid);
+                    kernel_boot_log(" "); uart_putc(snapshot.state);
+                    kernel_boot_log(" "); uart_put_udec(snapshot.resident_pages);
+                    kernel_boot_log(" ");
+                    kernel_process_monitor_put_command(snapshot);
+                    kernel_boot_log("\n");
+                }
+            }
+            after = pid;
+        }
+    }
+}
+
+fn kernel_process_monitor_proc(pid: usize) !{unsafe} {
+    let slot: usize = match scheduled_process_slot_for_pid(pid) {
+        ProcessSlotForPidResult::Missing => {
+            kernel_boot_log("proc: no such pid\n");
+            return;
+        }
+        ProcessSlotForPidResult::Found(found) => { found }
+    };
+    let snapshot: ProcessDiagnosticSnapshot =
+        match scheduled_process_diagnostic_snapshot(pid) {
+            ProcessDiagnosticResult::Missing => {
+                kernel_boot_log("proc: no such pid\n");
+                return;
+            }
+            ProcessDiagnosticResult::Found(found) => { found }
+        };
+    kernel_boot_log("proc: pid="); uart_put_udec(snapshot.pid);
+    kernel_boot_log(" ppid="); uart_put_udec(snapshot.ppid);
+    kernel_boot_log(" state="); uart_putc(snapshot.state);
+    kernel_boot_log(" wait=");
+    match scheduled_process_peek_wait_reason(slot) {
+        ProcessWaitReason::None => { uart_put_udec(0); }
+        ProcessWaitReason::UartRx => { uart_put_udec(1); }
+        ProcessWaitReason::ChildExit => { uart_put_udec(2); }
+    }
+    kernel_boot_log(" saved_sp=");
+    kernel_process_trace_put_hex(scheduled_process_peek_saved_sp(slot));
+    kernel_boot_log(" pages="); uart_put_udec(snapshot.resident_pages);
+    kernel_boot_log(" command=");
+    kernel_process_monitor_put_command(snapshot);
+    kernel_boot_log("\n");
+}
+
 fn scheduled_process_set_command_line(slot: usize, value: []u8,
                                       requested: usize) !{unsafe} {
     let record: *ProcessRecord = scheduled_process_record_at(slot);

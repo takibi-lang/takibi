@@ -100,6 +100,37 @@ boot).
 
 ---
 
+### 2026-08-26: A Fail-Stop Became Inspectable Through UART Alone
+
+Issue #290 originally put an optional UART monitor after kernel-aware GDB
+helpers. The order changed once the prerequisite evidence existed in the
+kernel itself: the bounded scheduler trace and `CrashSnapshot` already carried
+the process, exception-frame, address-space, and descriptor facts that the
+interactive HTTPd failure had needed, while QEMU and RPi5 already had external
+low-level debugging through QEMU's gdbstub and OpenOCD. An in-kernel GDB remote
+stub was split out and explicitly deferred; no concrete missing capability
+justified bringing its protocol, stepping, breakpoint, mutation, and SMP-stop
+surface into this milestone.
+
+The terminal exception path now enters a deliberately read-only UART crash
+console after publishing and printing `CrashSnapshot`. It masks IRQ delivery
+and polls the platform PL011 directly, so the suspended kernel's ordinary UART
+handler cannot consume a command or wake a blocked userspace reader. The first
+four commands are the concrete investigation set: `oops` re-renders the
+retained snapshot, `trace` renders its frozen lifecycle tail, `ps` lists the
+live process diagnostic views, and `proc PID` shows one process's parent,
+state, wait reason, saved kernel SP, resident pages, and bounded command line.
+The latter two reuse the same value-copy diagnostic API as procfs rather than
+exposing `ProcessRecord` ownership to a new frontend. There is no continue,
+memory/register write, expression evaluator, or breakpoint command: a fatal
+exception remains terminal.
+
+`kernelcheck-oops-qemu` now connects to QEMU's real bidirectional UART socket
+in each of its BRK, data-abort, and post-exec fail-stop modes, submits all four
+commands, and checks their replies before independently reading the retained
+snapshot through GDB. Both QEMU and RPi5 builds retain `--forbid-trap`; the
+ console's 32-byte input line is written only through a bounds-proven helper.
+
 ### 2026-08-26: The Directory Map Was An Index That Had Stopped Being One
 
 `AGENTS.md` had grown to 1,334 lines / 101,798 characters, two thirds of the
