@@ -254,7 +254,7 @@ fn platform_irq_init() {
 
 fn irq_uart_rx_unmask() !{unsafe} {
     let uart0_imsc: *io u32 = unsafe { 0x1F00030038 as *io u32 };
-    *uart0_imsc = (1 << 4) | (1 << 6); // RXIM | RTIM
+    *uart0_imsc = (1 << 4) | (1 << 6) | (1 << 9); // RXIM | RTIM | BEIM
 }
 
 fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
@@ -262,9 +262,10 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     let gicc_iar: *io u32 = unsafe { 0x107FFFA00C as *io u32 };
     let gicc_eoir: *io u32 = unsafe { 0x107FFFA010 as *io u32 };
     let id: u32 = *gicc_iar;
+    let mut debug_break: bool = false;
 
     if (id == RPI5_UART0_GIC_INTID) {
-        uart_irq_handler();
+        debug_break = uart_irq_handler();
 
         // RP1's level-triggered MSI-X wrapper needs an IACK after the
         // device source has been serviced, matching rp1_chained_handle_irq.
@@ -292,6 +293,7 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     }
 
     *gicc_eoir = id;
+    if (debug_break) { kernel_ddb_enter(frame_sp); }
     return frame_sp;
 }
 

@@ -78,7 +78,36 @@ With all three, the demo script needs no `exec`, and moving it to `/bin` makes
 it `httpd-serve.sh &` at the prompt: no directory, no interpreter, no exec.
 Verified on QEMU (39 views, ash lane, oops, lifecycle-gap, alloc-rollback) and
 on real RPi5 hardware (39 views, one boot).
+---
 
+### 2026-08-26: UART BREAK Entered an Interrupt-Safe, Resumable DDB
+
+The first crash console deliberately covered only terminal failures. The next
+concrete requirement was earlier intervention: stop a live kernel with the
+debug cable, inspect the state that already exists, and resume it. Deferring
+that work to ordinary context was rejected because the scheduler, process
+state, or return path may be exactly what is broken. Acknowledging the UART
+and GIC before entering the debugger is necessary controller hygiene, but it
+does not make the saved IRQ frame an ordinary execution context.
+
+The resumable DDB root therefore remains `!{interrupt, unsafe}`. Its entire
+reachable call graph uses only fixed storage, bounded trace copying, direct
+PL011 polling, and reads of the compiler-defined `ExceptionFrame`; allocation,
+locks, sleeping, scheduling, filesystem/network work, and ordinary logging
+remain rejected by the existing operational-effect checker. No handwritten
+register-copy assembly or parallel offset table was added. `continue` simply
+returns to the compiler-generated IRQ restore path. The deliberately small
+command set is `oops`, `regs`, `trace`, and `continue`; the terminal crash
+console retains its broader process views and remains non-resumable.
+
+The UART receive callback now accepts the byte already consumed by its IRQ
+handler. That gives the driver one authoritative 32-bit DR read with which to
+distinguish DR.BE from a normal byte, avoiding both a lost character and a
+second FIFO read. This distinction mattered in integration: QEMU 8.2's PL011
+models a chardev BREAK as an RX FIFO word carrying DR.BE, while physical PL011
+also exposes the enabled BE interrupt status. The QEMU lane uses QMP's
+`chardev-send-break`, drives every DDB command through the same UART socket,
+and proves that `continue` resumes the interrupted boot.
 ---
 
 ### 2026-08-26: Shebang Scripts Through execve (#287), and the Second exec That Fail-Stopped the Kernel

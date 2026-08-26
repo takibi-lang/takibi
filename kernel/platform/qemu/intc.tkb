@@ -54,7 +54,7 @@ fn platform_irq_init() {
 
 fn irq_uart_rx_unmask() !{unsafe} {
     let uart0_imsc: *io u32 = unsafe { 0x09000038 as *io u32 };
-    *uart0_imsc = (1 << 4) | (1 << 6); // RXIM | RTIM
+    *uart0_imsc = (1 << 4) | (1 << 6) | (1 << 9); // RXIM | RTIM | BEIM
 }
 
 fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
@@ -62,9 +62,10 @@ fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     let gicc_iar: *io u32 = unsafe { 0x0801000C as *io u32 };
     let gicc_eoir: *io u32 = unsafe { 0x08010010 as *io u32 };
     let id: u32 = *gicc_iar;
+    let mut debug_break: bool = false;
 
     if (id == QEMU_UART_GIC_INTID) {
-        uart_irq_handler();
+        debug_break = uart_irq_handler();
     } else if (id == (virtio_net_gic_intid as u32) && virtio_net_gic_intid >= 0) {
         // GitHub issue #237 M4: virtio_net_gic_intid (kernel/drivers/net/
         // virtio_net.tkb) is discovered at runtime, not a compile-time
@@ -84,6 +85,7 @@ fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     }
 
     *gicc_eoir = id;
+    if (debug_break) { kernel_ddb_enter(frame_sp); }
     return frame_sp;
 }
 

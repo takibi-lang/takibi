@@ -39,7 +39,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -738,6 +738,11 @@ kernelcheck-oops-qemu: kernelbuild-qemu $(KERNEL_CRASH_SNAPSHOT_LAYOUT)
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=data_abort_write KERNEL_QEMU_OOPS_GDB_PORT=18693 KERNEL_QEMU_OOPS_SERIAL_PORT=18694 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-data-abort" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec KERNEL_QEMU_OOPS_GDB_PORT=18695 KERNEL_QEMU_OOPS_SERIAL_PORT=18696 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-child-exec" bash scripts/run_kernel_oops_qemutest.sh
 
+## A real PL011 BREAK enters the resumable, interrupt-safe DDB subset. The
+## check inspects registers/trace and proves `continue` resumes ordinary boot.
+kernelcheck-ddb-qemu: kernelbuild-qemu
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_ddb_qemutest.sh
+
 ## Issue #377 regression: the exception-entry stack guard.  Deliberately
 ## separate from the ordinary QEMU suite for the same reason as
 ## kernelcheck-oops-qemu -- its expected result is a parked fail-stop.  GDB
@@ -780,7 +785,7 @@ kernelsh-qemu: kernelbuild-qemu
 kernelsh-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_shell_rpi5.sh
 
-kernelcheck: kernelcheck-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kernelcheck-stack-overflow-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelcheck-rpi5
+kernelcheck: kernelcheck-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-stack-overflow-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelcheck-rpi5
 
 ## allcheck: run every check this Makefile knows about -- langcheck, test,
 ## linuxcheck, kernelcheck -- so a single command surfaces a failure
@@ -812,7 +817,7 @@ kernelcheck: kernelcheck-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kerne
 allcheck:
 	@status=0; $(MAKE) langcheck test linuxcheck kernelcheck || status=$$?; \
 	if [ $$status -eq 0 ]; then \
-		echo "PASS allcheck: langcheck + compiler unit + linux_user + QEMU + QEMU debug + QEMU oops + QEMU stack overflow + RPi5 integration"; \
+		echo "PASS allcheck: langcheck + compiler unit + linux_user + QEMU + QEMU debug + QEMU oops + QEMU DDB + QEMU stack overflow + RPi5 integration"; \
 	else \
 		echo "FAIL allcheck: one or more checks failed (see the lane output above)" >&2; \
 		exit $$status; \
@@ -823,7 +828,7 @@ allcheck:
 # produces a final, unmistakable allcheck failure receipt after Make has
 # waited for the other scheduled jobs.
 ifneq (,$(filter allcheck,$(MAKECMDGOALS)))
-$(info [allcheck] includes: langcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, and RPi5 integration)
+$(info [allcheck] includes: langcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, QEMU DDB, and RPi5 integration)
 endif
 
 ## allbuild: a fast, no-execution/no-hardware smoke gate across all three

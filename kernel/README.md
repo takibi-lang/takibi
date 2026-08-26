@@ -144,6 +144,7 @@ make kernelcheck-shell-qemu  # PTY smoke test for the interactive QEMU ash path
 make kernelbuild-qemu-debug  # build kernel/build/qemu/kernel-debug.elf with DWARF info
 make kernelcheck-qemu-debug  # run the complete QEMU integration test against the DWARF build
 make kernelcheck-oops-qemu  # verify parked QEMU oops records and the retained lifecycle trace
+make kernelcheck-ddb-qemu  # enter DDB through a real UART BREAK, inspect, and resume
 make kernelcheck-lifecycle-gap-qemu  # verify the interactive-HTTPd checkpoint diagnosis names a real gap
 make kernelbuild       # build every maintained kernel target
 make kernelcheck       # build and test every maintained kernel target
@@ -415,6 +416,29 @@ _build/kernel-crash-snapshot-layout.gdb and then
 scripts/kernel_crash_snapshot.gdb's read-only takibi-oops command to inspect
 that retained record. The helper reads the snapshot's generated layout only;
 it does not reproduce the exception-frame ABI.
+
+### Resumable UART DDB
+
+A serial BREAK enters a separate, resumable DDB path from UART IRQ context.
+The interrupt controller and UART source are acknowledged first, but DDB
+deliberately remains typed `!{interrupt, unsafe}`: it does not pretend that
+acknowledgement turns an interrupt frame into ordinary kernel context. Every
+reachable operation is fixed-size and polling-only, with no allocator, lock,
+scheduler, sleep, filesystem, network, or ordinary logging dependency. Its
+commands are `oops`, `regs`, `trace`, and `continue` (`help` lists them).
+
+`regs` reads the compiler-defined `ExceptionFrame` directly. DDB does not
+copy registers with handwritten assembly and does not duplicate frame
+offsets; the compiler-generated exception entry and return path remain the
+only owner of register save/restore. `trace` takes a bounded copy of the
+committed lifecycle ring. `continue` returns through the existing IRQ restore
+path. The terminal crash console above intentionally has no `continue`.
+
+`kernelcheck-ddb-qemu` asks QEMU to deliver a real chardev BREAK to the PL011,
+drives all inspection commands over its UART socket, and verifies that boot
+continues afterward. The RPi5 implementation uses the same PL011 DR.BE/BEIM
+path and is build-checked; physical BREAK/resume remains a hardware-operated
+check rather than something the QEMU lane can establish.
 
 When enabled for a boot test, the process layer records a fixed 16-entry,
 allocation-free lifecycle ring: fork, exec prepare/commit, schedule, block,

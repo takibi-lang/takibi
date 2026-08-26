@@ -60,6 +60,208 @@ let mut crash_snapshot_capturing: bool;
 
 const CRASH_CONSOLE_LINE_BYTES: usize = 32;
 
+// Resumable DDB state is intentionally smaller than CrashSnapshot. It is
+// captured and rendered entirely from an IRQ root, so every field is fixed
+// size and every reachable operation must pass the interrupt operational-
+// effect checker (no allocation, locks, ordinary logs, or interrupt_wait).
+struct DdbSnapshot {
+    sequence: usize;
+    cpu: usize;
+    frame_sp: usize;
+    trace_count: usize;
+    trace: [usize; KERNEL_CRASH_TRACE_WORDS];
+}
+
+private let mut ddb_snapshot: DdbSnapshot;
+
+private fn ddb_puts(text: *u8) !{unsafe} {
+    while (*text != 0) {
+        uart_debug_putc(*text);
+        text = text + 1;
+    }
+}
+
+private fn ddb_put_hex(value: usize) !{unsafe} {
+    ddb_puts("0x");
+    let mut shift: usize = 60;
+    while (true) {
+        let digit: usize = (value >> shift) & 0xF;
+        if (digit < 10) { uart_debug_putc((digit as u8) + 48); }
+        else { uart_debug_putc((digit as u8) + 87); }
+        if (shift == 0) { return; }
+        shift = shift - 4;
+    }
+}
+
+private fn ddb_put_udec(value_in: usize) !{unsafe} {
+    let mut digits: [u8; 20];
+    let mut count: usize = 0;
+    let mut value: usize = value_in;
+    if (value == 0) { uart_debug_putc(0x30); return; }
+    for index: usize in 0..<20 {
+        if (value != 0) {
+            digits[index] = 0x30 + ((value % 10) as u8);
+            count = count + 1;
+            value = value / 10;
+        }
+    }
+    while (count != 0) {
+        count = count - 1;
+        if (count >= 0 && count < 20) { uart_debug_putc(digits[count]); }
+    }
+}
+
+private fn ddb_command_is(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
+                          length: usize, text: []u8) -> bool {
+    if (length != text.len) { return false; }
+    let mut index: usize = 0;
+    while (index < length && index < CRASH_CONSOLE_LINE_BYTES) {
+        if (index >= 0 && index < CRASH_CONSOLE_LINE_BYTES &&
+                index < text.len) {
+            if (line[index] != text[index]) { return false; }
+        } else { return false; }
+        index = index + 1;
+    }
+    return true;
+}
+
+private fn ddb_append(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
+                      length: usize, byte: u8) -> usize {
+    if (length < 32) {
+        line[length] = byte;
+        return length + 1;
+    }
+    return length;
+}
+
+private fn ddb_render_regs() !{unsafe} {
+    let frame: *ExceptionFrame = unsafe {
+        ddb_snapshot.frame_sp as *ExceptionFrame
+    };
+    ddb_puts("ddb: x0="); ddb_put_hex(frame.x0);
+    ddb_puts(" x1="); ddb_put_hex(frame.x1);
+    ddb_puts(" x2="); ddb_put_hex(frame.x2);
+    ddb_puts(" x3="); ddb_put_hex(frame.x3);
+    ddb_puts("\nddb: x4="); ddb_put_hex(frame.x4);
+    ddb_puts(" x5="); ddb_put_hex(frame.x5);
+    ddb_puts(" x6="); ddb_put_hex(frame.x6);
+    ddb_puts(" x7="); ddb_put_hex(frame.x7);
+    ddb_puts("\nddb: x8="); ddb_put_hex(frame.x8);
+    ddb_puts(" x9="); ddb_put_hex(frame.x9);
+    ddb_puts(" x10="); ddb_put_hex(frame.x10);
+    ddb_puts(" x11="); ddb_put_hex(frame.x11);
+    ddb_puts("\nddb: x12="); ddb_put_hex(frame.x12);
+    ddb_puts(" x13="); ddb_put_hex(frame.x13);
+    ddb_puts(" x14="); ddb_put_hex(frame.x14);
+    ddb_puts(" x15="); ddb_put_hex(frame.x15);
+    ddb_puts("\nddb: x16="); ddb_put_hex(frame.x16);
+    ddb_puts(" x17="); ddb_put_hex(frame.x17);
+    ddb_puts(" x18="); ddb_put_hex(frame.x18);
+    ddb_puts(" x19="); ddb_put_hex(frame.x19);
+    ddb_puts("\nddb: x20="); ddb_put_hex(frame.x20);
+    ddb_puts(" x21="); ddb_put_hex(frame.x21);
+    ddb_puts(" x22="); ddb_put_hex(frame.x22);
+    ddb_puts(" x23="); ddb_put_hex(frame.x23);
+    ddb_puts("\nddb: x24="); ddb_put_hex(frame.x24);
+    ddb_puts(" x25="); ddb_put_hex(frame.x25);
+    ddb_puts(" x26="); ddb_put_hex(frame.x26);
+    ddb_puts(" x27="); ddb_put_hex(frame.x27);
+    ddb_puts("\nddb: x28="); ddb_put_hex(frame.x28);
+    ddb_puts(" x29="); ddb_put_hex(frame.x29);
+    ddb_puts(" x30="); ddb_put_hex(frame.x30);
+    ddb_puts("\n");
+    ddb_puts("ddb: sp_el0="); ddb_put_hex(frame.sp_el0);
+    ddb_puts(" elr="); ddb_put_hex(frame.elr_el1);
+    ddb_puts(" spsr="); ddb_put_hex(frame.spsr_el1);
+    ddb_puts(" tpidr_el0="); ddb_put_hex(frame.tpidr_el0);
+    ddb_puts("\n");
+}
+
+private fn ddb_render_trace() !{unsafe} {
+    ddb_puts("ddb: trace count="); ddb_put_udec(ddb_snapshot.trace_count);
+    ddb_puts("\n");
+    for item: usize in 0..<16 {
+        if (item < ddb_snapshot.trace_count) {
+            let base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+            ddb_puts("ddb: trace seq="); ddb_put_udec(ddb_snapshot.trace[base]);
+            ddb_puts(" cpu="); ddb_put_udec(ddb_snapshot.trace[base + 1]);
+            ddb_puts(" event="); ddb_put_udec(ddb_snapshot.trace[base + 2]);
+            ddb_puts(" pid="); ddb_put_udec(ddb_snapshot.trace[base + 3]);
+            ddb_puts(" gen="); ddb_put_udec(ddb_snapshot.trace[base + 4]);
+            ddb_puts(" peer="); ddb_put_udec(ddb_snapshot.trace[base + 5]);
+            ddb_puts(" state="); ddb_put_udec(ddb_snapshot.trace[base + 7]);
+            ddb_puts(" wait="); ddb_put_udec(ddb_snapshot.trace[base + 8]);
+            ddb_puts(" root="); ddb_put_udec(ddb_snapshot.trace[base + 9]);
+            ddb_puts(" sp="); ddb_put_hex(ddb_snapshot.trace[base + 10]);
+            ddb_puts(" aux="); ddb_put_hex(ddb_snapshot.trace[base + 11]);
+            ddb_puts("\n");
+        }
+    }
+}
+
+private fn ddb_render_oops() !{unsafe} {
+    let frame: *ExceptionFrame = unsafe {
+        ddb_snapshot.frame_sp as *ExceptionFrame
+    };
+    ddb_puts("ddb: break seq="); ddb_put_udec(ddb_snapshot.sequence);
+    ddb_puts(" cpu="); ddb_put_udec(ddb_snapshot.cpu & 0xFF);
+    ddb_puts(" elr="); ddb_put_hex(frame.elr_el1);
+    ddb_puts(" sp_el0="); ddb_put_hex(frame.sp_el0);
+    ddb_puts("\n");
+}
+
+// The one resumable DDB root. It receives an already-saved IRQ frame after
+// the UART source and interrupt controller were acknowledged, but remains an
+// interrupt function: no semantic exception is made for debugger code.
+fn kernel_ddb_enter(frame_sp: usize) !{interrupt, unsafe} {
+    ddb_snapshot.sequence = ddb_snapshot.sequence + 1;
+    ddb_snapshot.cpu = crash_snapshot_read_mpidr_el1();
+    ddb_snapshot.frame_sp = frame_sp;
+    ddb_snapshot.trace_count = kernel_process_crash_trace_copy(
+        ddb_snapshot.trace as *usize);
+    ddb_puts("\nddb: interrupt-safe UART debugger\n");
+    ddb_render_oops();
+    let mut line: [u8; CRASH_CONSOLE_LINE_BYTES];
+    let mut length: usize = 0;
+    let mut stopped: bool = true;
+    while (stopped) {
+        ddb_puts("ddb> ");
+        let mut reading: bool = true;
+        while (reading) {
+            let byte: u8 = uart_debug_getc();
+            if (byte == 0x0A || byte == 0x0D) {
+                ddb_puts("\n");
+                reading = false;
+            } else {
+                if (byte != 0x08 && byte != 0x7F) {
+                    length = ddb_append(line as []u8, length, byte);
+                }
+            }
+        }
+        if (ddb_command_is(line as []u8, length, bs"continue")) {
+            ddb_puts("ddb: continuing\n");
+            stopped = false;
+        } else {
+            if (ddb_command_is(line as []u8, length, bs"oops")) {
+                ddb_render_oops();
+            } else {
+                if (ddb_command_is(line as []u8, length, bs"regs")) {
+                    ddb_render_regs();
+                } else {
+                    if (ddb_command_is(line as []u8, length, bs"trace")) {
+                        ddb_render_trace();
+                    } else {
+                        if (ddb_command_is(line as []u8, length, bs"help")) {
+                            ddb_puts("commands: oops regs trace continue\n");
+                        } else { ddb_puts("ddb: unknown command; try help\n"); }
+                    }
+                }
+            }
+        }
+        length = 0;
+    }
+}
+
 fn crash_snapshot_put_hex(value: usize) {
     kernel_boot_log("0x");
     let mut shift: usize = 60;

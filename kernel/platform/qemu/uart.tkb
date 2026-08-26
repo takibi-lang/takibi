@@ -15,7 +15,7 @@
 
 use "kernel/platform/qemu/intc.tkb";
 
-let mut uart_rx_handler: fn !{unsafe}() -> void;
+let mut uart_rx_handler: fn !{unsafe}(u8) -> void;
 
 fn uart_putc(c: u8) !{logs, unsafe} {
     let fr: *io u32 = unsafe { 0x09000018 as *io u32 }; // PL011 FR
@@ -55,9 +55,7 @@ fn uart_put_udec(value: usize) {
     }
 }
 
-fn uart_rx_discard() !{unsafe} {
-    let dr: *io u8 = unsafe { 0x09000000 as *io u8 };
-    let discarded: u8 = *dr;
+fn uart_rx_discard(discarded: u8) !{unsafe} {
 }
 
 fn uart_isr_getc() -> u8 !{unsafe} {
@@ -73,12 +71,23 @@ fn uart_debug_getc() -> u8 !{unsafe} {
     return uart_isr_getc();
 }
 
+// DDB's emergency TX path is deliberately distinct from uart_putc: it does
+// not carry the ordinary `logs` effect and touches no driver-owned state.
+// The interrupt checker therefore sees the real MMIO-only operation rather
+// than granting the debugger a general logging escape hatch.
+fn uart_debug_putc(c: u8) !{unsafe} {
+    let fr: *io u32 = unsafe { 0x09000018 as *io u32 };
+    while ((*fr & (1 << 5)) != 0) { }
+    let dr: *io u8 = unsafe { 0x09000000 as *io u8 };
+    *dr = c;
+}
+
 fn uart_rx_ready() -> bool !{unsafe} {
     let fr: *io u32 = unsafe { 0x09000018 as *io u32 };
     return (*fr & (1 << 4)) == 0; // RXFE clear = data available
 }
 
-fn uart_set_rx_handler(handler: fn !{}() -> void) !{} {
+fn uart_set_rx_handler(handler: fn !{}(u8) -> void) !{} {
     uart_rx_handler = handler;
 }
 
@@ -89,12 +98,25 @@ fn uart_tx_isr() {
 // GICC_IAR identifies the UART SPI. No RP1-style per-vector IACK write
 // here -- QEMU's GICv2 needs only the ordinary GICC_EOIR this file's
 // caller already issues.
-fn uart_irq_handler() !{interrupt, unsafe} {
-    if (uart_rx_ready()) {
-        uart_rx_handler();
-    }
+fn uart_irq_handler() -> bool !{interrupt, unsafe} {
+    let uart_mis: *io u32 = unsafe { 0x09000040 as *io u32 };
     let uart_icr: *io u32 = unsafe { 0x09000044 as *io u32 };
+    if (uart_rx_ready()) {
+        let dr: *io u32 = unsafe { 0x09000000 as *io u32 };
+        let received: u32 = *dr;
+        // QEMU represents CHR_EVENT_BREAK as a FIFO word carrying DR.BE.
+        // Real PL011 also exposes BE through MIS when BEIM is enabled.
+        if ((received & (1 << 10)) != 0 || (*uart_mis & (1 << 9)) != 0) {
+            *uart_icr = 1 << 9; // BEIC
+            return true;
+        }
+        uart_rx_handler(received as u8);
+    } else if ((*uart_mis & (1 << 9)) != 0) {
+        *uart_icr = 1 << 9; // BEIC
+        return true;
+    }
     *uart_icr = 1 << 6; // RTIC (receive-timeout, latched separately from FIFO level)
+    return false;
 }
 
 fn uart_init() !{unsafe} {

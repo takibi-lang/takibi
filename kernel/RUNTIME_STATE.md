@@ -81,6 +81,16 @@ also be snapshotted and printed without a crash by
 `kernel_process_trace_report()`; that entry point and the oops path share one
 row formatter, and neither prints from a scheduler or interrupt writer.
 
+`exception_evidence.tkb`'s `crash_snapshot`/`crash_snapshot_capturing` and
+`ddb_snapshot`.
+
+**Why global:** the terminal crash record must survive the failing context,
+while resumable DDB must retain one bounded trace copy and the current
+compiler-defined IRQ-frame pointer while its polled command loop is active.
+Neither record owns scheduler or process resources. IRQ masking prevents a
+nested entry on the servicing CPU; the current scheduler and UART IRQ route
+remain confined to core 0.
+
 ### VM / address-space (`kernel/mm/`, `kernel/arch/arm64/mm/`)
 
 `mm/process_image.tkb`'s `process_image_pool`/`_ready` and its counted
