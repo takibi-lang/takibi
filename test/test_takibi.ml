@@ -143,6 +143,15 @@ let contains_substring haystack needle =
   let rec scan i = i + n <= m && (String.sub haystack i n = needle || scan (i + 1)) in
   scan 0
 
+let substring_position haystack needle =
+  let n = String.length needle and m = String.length haystack in
+  let rec scan i =
+    if i + n > m then None
+    else if String.sub haystack i n = needle then Some i
+    else scan (i + 1)
+  in
+  if n = 0 then Some 0 else scan 0
+
 let read_all ic =
   let buf = Buffer.create 1024 in
   (try while true do Buffer.add_channel buf ic 1024 done with End_of_file -> ());
@@ -8678,6 +8687,43 @@ let with_embed_fixture contents f =
   Fun.protect ~finally:(fun () -> Sys.remove path) (fun () -> f path)
 
 let codegen_tests = [
+  Alcotest.test_case
+    "byte-slice match guards loads and evaluates its subject once" `Quick
+    (fun () ->
+      let src =
+        "let mut cg_bs_calls: usize = 0;
+         fn cg_bs_subject() -> []u8 {
+           cg_bs_calls = cg_bs_calls + 1;
+           return bs\"stat\";
+         }
+         fn cg_bs_match() -> i32 {
+           match cg_bs_subject() {
+             bs\"stat\" => { return 1; }
+             bs\"stay\" => { return 2; }
+             _ => { return 3; }
+           }
+         }"
+      in
+      (match gen_codegen src with
+       | _ -> ()
+       | exception Llvm_gen.Error msg ->
+           Alcotest.failf "unexpected codegen Error: %s" msg);
+      match Hashtbl.find_opt Llvm_gen.functions "cg_bs_match" with
+      | None -> Alcotest.fail "cg_bs_match was not emitted"
+      | Some (_, fn) ->
+          let ir = Llvm.string_of_llvalue fn in
+          Alcotest.(check int) "subject call count" 1
+            (count_substring ir "@cg_bs_subject(");
+          Alcotest.(check bool) "no runtime trap" false
+            (contains_substring ir "llvm.trap");
+          match substring_position ir "se_len_eq = icmp eq",
+                substring_position ir "se_la = load i8" with
+          | Some guard_pos, Some load_pos ->
+              Alcotest.(check bool) "length guard precedes byte load" true
+                (guard_pos < load_pos)
+          | _ -> Alcotest.failf
+              "expected byte-slice length guard and byte load in IR:\n%s" ir);
+
   Alcotest.test_case
     "mutable local restores its declaration-specific alloca after a disjoint immutable local" `Quick
     (expect_codegen_ok
