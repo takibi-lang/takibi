@@ -88,8 +88,11 @@ executables here: a script's first line names its interpreter and `execve`
 resolves it, so `/bin` also holds `httpd-serve.sh` (the browser demo as one
 command) and `script-interpreter-argument.sh` (a fixture pinning `#!` argv
 construction), both reachable by bare name through ash's `PATH` search.
-`/etc` keeps the boot policy that is never typed: `/etc/init.sh`,
-`/etc/httpd-demo.sh`, and `/etc/script-shebang.sh`.
+`/etc` keeps what is never typed as a bare command: the boot policy
+(`/etc/init.sh`, `/etc/httpd-demo.sh`), `/etc/script-shebang.sh`, and the two
+fixtures that pin what `execve` refuses (`/etc/not-a-program`,
+`/etc/bad-interpreter.sh`). `/bin/busybox` exists as a hard link because that
+is the name BusyBox re-executes itself through.
 
 The current HTTPd milestone runs the unmodified pinned BusyBox Extras binary
 through its `/bin/httpd` hard link as a persistent foreground daemon:

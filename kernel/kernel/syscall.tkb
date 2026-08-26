@@ -30,12 +30,14 @@ use "kernel/kernel/syscall_test_lifecycle.tkb";
 //   match its pool's documented contract exactly (`LINUX_EMFILE` for
 //   per-process fd exhaustion, `LINUX_ENFILE` for the global shared-
 //   object pool, etc.).
-// - execve's `#!` dispatch is one level deep and one argument wide: the
-//   interpreter a script names must itself be an executable image, not
-//   another script, and only the first whitespace-separated word after
-//   the interpreter is passed on, exactly as Linux does. The directive
-//   must also fit, newline included, in the bounded first-line staging
-//   window; a longer first line is refused rather than truncated.
+// - execve's `#!` dispatch is ONE LEVEL DEEP: the interpreter a script
+//   names must itself be an executable image. Linux allows five nested
+//   script levels and reports ELOOP on the sixth; this kernel would
+//   instead fall back to the static BusyBox image for a nested one.
+//   Everything else about the directive matches measured Linux behavior:
+//   one argument wide, a 256-byte window (`BINPRM_BUF_SIZE`), '\n' or NUL
+//   ends it, CR does not, and a first line that fills the window without
+//   ending is refused rather than truncated.
 //
 const AARCH64_NR_WRITE: usize = 64;
 const AARCH64_NR_READV: usize = 65;
@@ -89,6 +91,10 @@ const LINUX_ESRCH: usize = 0xFFFFFFFFFFFFFFFD;
 // declined; guessing an executable format on its behalf is what this errno
 // exists to avoid.
 const LINUX_ENOEXEC: usize = 0xFFFFFFFFFFFFFFF8;
+// A regular file whose bytes cannot be read. Linux answers execve(2) with
+// this when the header read itself fails, rather than with a verdict about a
+// format it never saw.
+const LINUX_EIO: usize = 0xFFFFFFFFFFFFFFFB;
 // RLIMIT_NOFILE, and Linux's RLIM64_INFINITY.
 const LINUX_RLIMIT_NOFILE: usize = 7;
 // Linux's RLIM_NLIMITS (include/uapi/asm-generic/resource.h): the number of
@@ -241,11 +247,16 @@ private let mut syscall_exec_argv: [u8; 512];
 private let mut syscall_exec_path: [u8; 256];
 // The first line of an execve(2) target, read before any image is chosen.
 // Bounded on purpose: this is the whole window in which a `#!` interpreter
-// directive is allowed to live, and Linux applies the same kind of limit
-// (BINPRM_BUF_SIZE) for the same reason -- the kernel must decide the
-// executable format from a fixed-size read, not from a file-length-dependent
-// scan.
-const SYSCALL_SCRIPT_LINE_MAX: usize = 128;
+// directive is allowed to live, and the kernel must decide the executable
+// format from a fixed-size read rather than a file-length-dependent scan.
+//
+// 256 is Linux's own BINPRM_BUF_SIZE, and matching it exactly is what makes
+// the boundary behave the same: an interpreter name that does not fit is
+// ENOEXEC on both, and one that does fit is resolved on both. The window is
+// zero-filled before the read for the same reason Linux zero-pads its
+// buffer -- a file with no trailing newline then ends at a NUL, which the
+// scan below treats as the end of the directive.
+const SYSCALL_SCRIPT_LINE_MAX: usize = 256;
 private let mut syscall_script_line: [u8; SYSCALL_SCRIPT_LINE_MAX];
 
 must_use variant SyscallPathResult { Fault; Invalid; Name([]u8); }
@@ -299,15 +310,61 @@ struct SyscallScriptPrefix {
     length: usize;
 }
 
+// Each case below was measured against Linux rather than assumed, because
+// the errno is the whole interface a shell has to this decision:
+//   absent path                        ENOENT
+//   directory, or any non-regular file EACCES
+//   regular file with no execute bit   EACCES   (before any header is read)
+//   regular file, not ELF and not `#!` ENOEXEC
+//   `#!` naming a missing interpreter  ENOENT   (the interpreter's error)
 must_use variant SyscallExecFormatResult {
-    // The target is not a readable regular file in this filesystem. The
-    // caller keeps whatever image-selection path it already had; deciding a
-    // format needs a file to read, and there is none.
-    Unknown;
+    // No filesystem yet. The caller keeps whatever image-selection path it
+    // already had; deciding a format needs a file to read, and at this point
+    // in the boot there is nowhere to read one from.
+    NotMounted;
+    Absent;
+    NotPermitted;
+    Unreadable;
     Executable;
     NotExecutable;
     Invalid;
     Script(SyscallScriptPrefix);
+}
+
+must_use variant SyscallExecTargetResult {
+    Absent;
+    NotPermitted;
+    Inode(usize);
+}
+
+// Does this pathname name something this kernel may execute at all? Asked
+// before any byte of the file is read, in the order Linux asks it: a
+// directory or a device node is refused for being the wrong kind of object,
+// and a regular file with no execute bit is refused for being unexecutable,
+// neither of which is a statement about its contents.
+private fn syscall_exec_target(name: []u8) -> SyscallExecTargetResult
+        !{unsafe} {
+    match ext2_lookup_path(syscall_ext2_mount, name) {
+        Ext2LookupResult::Invalid => { return SyscallExecTargetResult::Absent; }
+        Ext2LookupResult::NotFound => {
+            return SyscallExecTargetResult::Absent;
+        }
+        Ext2LookupResult::Found(inode) => {
+            let mode: usize = ext2_inode_mode(syscall_ext2_mount, inode);
+            if ((mode & 0xF000) != 0x8000) {
+                return SyscallExecTargetResult::NotPermitted;
+            }
+            // 0o111. Linux refuses a regular file with no execute bit before
+            // it reads a single header byte, and CAP_DAC_OVERRIDE does not
+            // bypass exec permission -- so a uid-0 process sees this same
+            // refusal, which is what makes it the right answer for a kernel
+            // that has no uid model of its own yet.
+            if ((mode & 0x49) == 0) {
+                return SyscallExecTargetResult::NotPermitted;
+            }
+            return SyscallExecTargetResult::Inode(inode);
+        }
+    }
 }
 
 must_use variant SyscallArgvAppendResult { Full; Appended(usize); }
@@ -373,16 +430,21 @@ private fn syscall_exec_argv_append_line(offset: usize, from: usize,
 private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
         -> SyscallExecFormatResult {
     let line: []u8 = syscall_script_line as []u8;
-    let mut scan_limit: usize = line_length;
-    if (scan_limit > SYSCALL_SCRIPT_LINE_MAX) {
-        scan_limit = SYSCALL_SCRIPT_LINE_MAX;
-    }
     let mut end: usize = 0;
     let mut line_terminated: bool = false;
+    // The whole window is scanned, not only the bytes the file supplied: it
+    // was zero-filled first, so a file with no trailing newline ends at a
+    // padding NUL. Linux ends the directive at '\n' OR NUL for exactly that
+    // reason, and `#!/bin/sh` with no newline is a working script there.
+    //
+    // CR is deliberately NOT a terminator. A CRLF script carries an
+    // interpreter named "/bin/sh\r", which does not exist -- Linux reports
+    // ENOENT for it, and being more forgiving here would mean a script that
+    // runs on this kernel and fails on Linux.
     for position: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
-        if (position < scan_limit && line_terminated == false) {
+        if (line_terminated == false) {
             let current: u8 = line[position];
-            if (current == 0x0A || current == 0x0D || current == 0) {
+            if (current == 0x0A || current == 0) {
                 end = position;
                 line_terminated = true;
             }
@@ -440,15 +502,17 @@ private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
     if (interpreter_to > SYSCALL_SCRIPT_LINE_MAX) {
         return SyscallExecFormatResult::NotExecutable;
     }
-    // Relative interpreter names would have to be resolved against a working
-    // directory this kernel does not track, so they are refused rather than
-    // silently resolved against the root.
+    // A relative interpreter name would have to be resolved against a working
+    // directory this kernel does not track. Linux resolves it against the
+    // caller's cwd and reports ENOENT when that fails, which is the same
+    // answer this reaches by a shorter route -- and the same answer a shell
+    // has to act on either way.
     let mut interpreter_absolute: bool = false;
     if (interpreter_from < line.len) {
         interpreter_absolute = line[interpreter_from] == 0x2F;
     }
     if (interpreter_absolute == false) {
-        return SyscallExecFormatResult::NotExecutable;
+        return SyscallExecFormatResult::Absent;
     }
     let mut offset: usize = 0;
     let mut argc: usize = 0;
@@ -501,6 +565,29 @@ private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
             path_cursor = path_cursor + 1;
         }
     }
+    // Linux resolves the interpreter itself and reports ITS error, so a
+    // script naming a missing interpreter is ENOENT and one naming a
+    // directory is EACCES -- neither is a complaint about the script. The
+    // stored path is the interpreter now, so the same question asked of the
+    // original target above is asked of it here.
+    let interpreter_path: []u8 = syscall_exec_path as []u8;
+    let interpreter_length: usize = path_cursor;
+    if (interpreter_length > interpreter_path.len) {
+        return SyscallExecFormatResult::Invalid;
+    }
+    let interpreter_full = interpreter_path[0..<interpreter_length];
+    if (interpreter_full.len < 2) {
+        return SyscallExecFormatResult::Absent;
+    }
+    match syscall_exec_target(interpreter_full[1..<interpreter_full.len]) {
+        SyscallExecTargetResult::Absent => {
+            return SyscallExecFormatResult::Absent;
+        }
+        SyscallExecTargetResult::NotPermitted => {
+            return SyscallExecFormatResult::NotPermitted;
+        }
+        SyscallExecTargetResult::Inode(interpreter_inode) => {}
+    }
     let mut prefix: SyscallScriptPrefix = { argc, offset };
     return SyscallExecFormatResult::Script(prefix);
 }
@@ -513,25 +600,28 @@ private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
 private fn syscall_exec_format(name: []u8, path_length: usize)
         -> SyscallExecFormatResult !{unsafe} {
     if (syscall_ext2_ready == false) {
-        return SyscallExecFormatResult::Unknown;
+        return SyscallExecFormatResult::NotMounted;
     }
-    match ext2_lookup_path(syscall_ext2_mount, name) {
-        Ext2LookupResult::Invalid => {
-            return SyscallExecFormatResult::Unknown;
+    match syscall_exec_target(name) {
+        SyscallExecTargetResult::Absent => {
+            return SyscallExecFormatResult::Absent;
         }
-        Ext2LookupResult::NotFound => {
-            return SyscallExecFormatResult::Unknown;
+        SyscallExecTargetResult::NotPermitted => {
+            return SyscallExecFormatResult::NotPermitted;
         }
-        Ext2LookupResult::Found(inode) => {
+        SyscallExecTargetResult::Inode(inode) => {
             for index: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
                 syscall_script_line[index] = 0;
             }
             let line: []u8 = syscall_script_line as []u8;
             match ext2_read_file_chunk(syscall_ext2_mount, inode, 0, line) {
                 Ext2ReadResult::Invalid => {
-                    // Not a regular file (a directory or a device node), or
-                    // unreadable. Neither is this function's decision to make.
-                    return SyscallExecFormatResult::Unknown;
+                    // The kind and the permission were already settled above,
+                    // so what is left is a read that failed on a file this
+                    // kernel was allowed to execute. Linux reports the read's
+                    // own error rather than a verdict about a format it never
+                    // saw.
+                    return SyscallExecFormatResult::Unreadable;
                 }
                 Ext2ReadResult::Read(length) => {
                     if (length < 4) {
@@ -3174,8 +3264,17 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let mut script_offset: usize = 0;
         if (exec_path_absolute) {
             match syscall_exec_format(exec_lookup_name, path_length) {
-                SyscallExecFormatResult::Unknown => {}
+                SyscallExecFormatResult::NotMounted => {}
                 SyscallExecFormatResult::Executable => {}
+                SyscallExecFormatResult::Absent => {
+                    return SyscallAction::Resume(LINUX_ENOENT);
+                }
+                SyscallExecFormatResult::NotPermitted => {
+                    return SyscallAction::Resume(LINUX_EACCES);
+                }
+                SyscallExecFormatResult::Unreadable => {
+                    return SyscallAction::Resume(LINUX_EIO);
+                }
                 SyscallExecFormatResult::NotExecutable => {
                     return SyscallAction::Resume(LINUX_ENOEXEC);
                 }

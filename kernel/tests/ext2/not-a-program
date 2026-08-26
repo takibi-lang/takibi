@@ -1,0 +1,5 @@
+# Executable, and neither an ELF header nor a #! line -- the one case
+# execve(2) answers with ENOEXEC. BusyBox ash answers THAT by reading this
+# file as a shell script itself, so the line below is what reaches the
+# transcript, and both halves of the exchange are pinned by it.
+ENOEXEC-fallback-reached

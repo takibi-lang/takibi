@@ -28,6 +28,7 @@ lost+found
 many
 mutable.txt
 read_indirect.txt
+busybox
 busybox-extras
 busybox.static
 cat
@@ -69,7 +70,10 @@ shebang: /etc/script-shebang.sh
 shebang: args one two
 shebang: status 7
 interpreter-argument /bin/script-interpreter-argument.sh three
-/hello.txt: line 1: hello: not found
+/bin/sh: /hello.txt: Permission denied
+/bin/sh: /etc: Permission denied
+/etc/not-a-program: line 5: ENOEXEC-fallback-reached: not found
+/bin/sh: /etc/bad-interpreter.sh: not found
 re-exec-ok
 repl-ok
 busybox interactive shell exit: 0

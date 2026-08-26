@@ -8,6 +8,9 @@ ps
 echo "shebang: status $?"
 script-interpreter-argument.sh three
 /hello.txt
+/etc
+/etc/not-a-program
+/etc/bad-interpreter.sh
 /bin/sh -c 'exec /bin/echo re-exec-ok'
 echo repl-ok
 exit
