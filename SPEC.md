@@ -2954,11 +2954,10 @@ investigations behind any of these, see `HISTORY.md`.
 - **`match` on a primitive integer type supports only literal and
   `|`-separated OR-pattern literal patterns** (see "Match on Primitive
   Types," GitHub issue #151/#156) -- no range patterns (`0..<10 =>
-  {...}`) and no string/byte-slice patterns (this project has no
-  first-class string type, and what a string *pattern* should even mean
-  -- exact equality? prefix? a runtime length check? -- is unresolved).
-  Deferred until a concrete case needs one rather than designed
-  speculatively now.
+  {...}`), and byte-slice patterns cannot be mixed into an integer
+  match. Exact `bs"..."` patterns are supported only when the
+  discriminant is `[]u8`; see "Match on Byte Slices" above. Range
+  patterns remain deferred until a concrete case needs them.
 - **Indexing another Index expression's result directly is not
   supported** -- `a[i][j]` or `a[i].field` (as opposed to `a[i]` alone,
   or `s.field[i]` -- see just below) is a clear compile error ("not yet
