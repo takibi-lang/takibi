@@ -27,8 +27,10 @@ and the development container verifies the response with real `curl`.
 - Ordinary kernel services do not use EL2 HVC as an internal service layer.
 - Page, mapping, process, file, socket, frame, and DMA lifetimes retain
   explicit affine or linear ownership.
-- A fixed 16-slot scheduler table (`ProcessRecord`) gives each live process a
-  dedicated address-space root, ASID, and unified descriptor table. Kernel
+- A pooled scheduler table (`ProcessRecord`) gives each live process a
+  dedicated address-space root, ASID, and unified descriptor table. There is
+  no process-count constant: a record is a pool allocation, so the page
+  allocator is the only limit (`RESOURCE_LIMITS.md` carries the full table). Kernel
   stacks are 16 KiB, allocated on a slot's first use as the upper half of a
   32 KiB-aligned page run whose lower half contains an overflow instead of
   letting it reach a neighbour; page-table pages are directly owned by each
@@ -577,9 +579,9 @@ run, not a specification.
   is derived from the 1-KiB block geometry rather than a file-size literal.
   Writes and truncates remain limited to one direct block. Directories and
   symlinks remain one block, and there are no additional block groups.
-- **Processes.** A fixed 16-slot `ProcessRecord` scheduler table, with lazily
-  backed kernel stacks and directly owned address-space page tables, all on
-  core 0.
+- **Processes.** A pooled `ProcessRecord` scheduler table with no
+  process-count ceiling, with lazily backed kernel stacks and directly owned
+  address-space page tables, all on core 0.
   Core 1 proves autonomous EL1 entry and shared-MMU visibility, then parks.
   `execve` resolves `argv[0]` as an ext2 path, validates a bounded ELF
   metadata window, and streams each PT_LOAD page from the file. Static

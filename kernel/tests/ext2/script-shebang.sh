@@ -5,3 +5,6 @@
 # what the caller typed after it.
 echo "shebang: $0"
 echo "shebang: args $*"
+# A status the interpreter would never produce on its own, so the caller
+# reading $? is reading THIS script's exit and not /bin/sh's.
+exit 7
