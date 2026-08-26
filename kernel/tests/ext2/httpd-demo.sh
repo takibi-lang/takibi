@@ -1,3 +1,4 @@
+#!/bin/sh
 # Keep a parent ash runnable while its interactive child blocks on UART. A
 # foreground child would make this shell block in wait4 at the same time,
 # leaving the current scheduler with no runnable process. Background ash

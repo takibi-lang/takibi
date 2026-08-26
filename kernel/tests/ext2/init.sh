@@ -97,4 +97,7 @@ echo "init: complete"
 # see httpd-demo.sh) rather than a command that exits, so control does not
 # return to the kernel driver in the normal case -- see kernel/init/
 # test_driver.tkb's handling of this exec for what still runs beforehand.
-exec /bin/sh /etc/httpd-demo.sh
+# The interpreter is not named here: it comes from that file's own `#!`
+# line, so PID 1's replacement goes through the same script dispatch every
+# other script in this rootfs does.
+exec /etc/httpd-demo.sh
