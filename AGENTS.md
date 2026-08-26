@@ -193,6 +193,59 @@ comment naming an issue for a design rationale that has already been settled is
 acceptable where it genuinely explains why the code looks the way it does; a
 comment naming an issue as future work is not.
 
+### Record How a Defect Was Found
+
+**Every GitHub issue carries a `Found-by:` field, and every commit that closes
+an issue carries a `Found-by:` trailer.** It names how the problem was
+discovered, using one of these values, optionally followed by free text:
+
+| Value | Meaning |
+| --- | --- |
+| `type-error` | the Takibi compiler's type checker rejected it |
+| `compiler-lint` | a compiler lint or a `scripts/check_*.py` build check flagged it |
+| `runtime-check` | a compiler-emitted runtime check or kernel assertion fired |
+| `test` | a dune, QEMU-lane, or hardware test failed |
+| `qemu` | found while debugging under QEMU (gdb, boot logs) |
+| `hardware` | found on a real board (bring-up, bisect, SWD) |
+| `review` | found by reading code, by an audit, or reported by the maintainer |
+| `design` | not a defect at all: a design, research, or refactoring task |
+
+```
+Found-by: hardware -- RPi5 SWD register read after a two-hour boot-log bisect
+```
+
+The free text is the right place for what the discovery cost, which is the part
+nothing else in this repository ever records.
+
+The rule exists because this one fact has a different decay rate from
+everything around it. A defect's symptom, its fix, and the check that now
+rejects it can all be re-derived later from the issue tracker, from `git log`,
+and from `test/test_takibi.ml` -- which already carries roughly 500 negative
+tests, many of them naming the issue they came from. Whether the type checker
+caught it or whether it took three hours on a board cannot be re-derived from
+any of those, and it is the fact that says what the language is actually worth.
+Measured on 2026-08-26: of the last 400 commits, 144 named an issue, and
+subjects such as "three cheap ones from this session's own audit" are the
+visible edge of defects that were found, fixed, and never written down as
+anything a later reader could classify.
+
+Note the interaction with "Issue Numbers Do Not Belong in Tracked Files" above.
+`Found-by:` is deliberately *not* a new tracked document keyed by issue number;
+that shape is what the ppoll incident of 2026-08-05 warns against. It lives in
+GitHub issues and in commit messages, and its durable home in this repository is
+`HISTORY.md`, which is already the sanctioned exception: past tense, never
+updated to track current state.
+
+`scripts/hooks/found-by-policy.sh` enforces this, and is wired into
+`.claude/hooks/found-by-required.sh`, `.codex/hooks/found-by-required.sh`, and
+`.githooks/commit-msg` (activate that one per clone with
+`git config core.hooksPath .githooks`).
+
+**One case is convention only.** A defect found and fixed inside a single
+session, with no issue ever filed, is exactly the case most worth recording and
+the one no trigger can detect -- the commit that fixes it looks like any other
+commit. Add the `Found-by:` trailer to it anyway.
+
 ## Git Workflow: Agents Commit, Humans Push
 
 Coding agents working in this repo (Claude Code, Codex, etc.) should stage and

@@ -8,6 +8,11 @@
             "type": "command",
             "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/gh-issue-ascii-only.sh\"",
             "statusMessage": "Checking GitHub issue text"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/found-by-required.sh\"",
+            "statusMessage": "Checking Found-by provenance"
           }
         ]
       }

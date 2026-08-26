@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Repository commit-msg hook. Unlike the Claude Code and Codex hooks, this one
+# runs for every committer -- the human maintainer, and any agent whose tooling
+# this repository does not wire a PreToolUse hook into.
+#
+# Activate once per clone:
+#
+#   git config core.hooksPath .githooks
+#
+# It fails open: any exit status other than the policy's own 10 lets the commit
+# through, so a broken check never blocks work.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+policy="$repo_root/scripts/hooks/found-by-policy.sh"
+[ -x "$policy" ] || [ -f "$policy" ] || exit 0
+
+set +e
+reason="$(bash "$policy" --commit-message-file "$1")"
+status=$?
+set -e
+
+if [ "$status" -eq 10 ]; then
+  printf '\n%s\n\n' "$reason" >&2
+  exit 1
+fi
+
+exit 0

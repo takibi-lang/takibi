@@ -15,6 +15,51 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-26: The One Fact About A Defect That Cannot Be Re-Derived Later
+
+The question was whether to start a curated corpus of past defects now --
+one file per issue, saying what the bug was and that the compiler now rejects
+it -- or to reconstruct it from the issue tracker at the time it is needed.
+Four candidate flagship entries were checked first, and none of them held:
+issues #267 (GIC INTID/SPI mixups), #396 (slot address vs payload address),
+and #297 (retain/release balance) are all still open research or design
+issues, and #373's kernel stack overflow was answered by a compiler-emitted
+*runtime* SP test, with the static version (#58) still open. Not one of the
+four is a compile error today. A corpus written to that headline would have
+been wrong on its first day.
+
+Three measurements decided the rest. `test/test_takibi.ml` already holds 500
+`expect_type_error`/`expect_codegen_error` cases naming 79 distinct issues, so
+the corpus largely exists. Of the 355 cases with no issue reference nearby, a
+sample turned out to be ordinary language-surface tests -- "break/continue
+outside of a loop", "division and remainder by constant zero" -- not lost
+incident records, which weakens the case for writing anything down now. And of
+the last 400 commits, 144 named an issue; among the rest sat subjects like
+"three cheap ones from this session's own audit", defects that were found,
+fixed, and never recorded as anything a later reader could classify.
+
+That split the record by decay rate. What a defect was, and whether the
+compiler rejects it today, are both re-derivable later from the issue tracker,
+`git log`, and the test suite -- and a document asserting the second one would
+rot exactly the way `kernel/README.md`'s ppoll description did on 2026-08-05.
+How the defect was *found* is not re-derivable from anything, and it is the
+fact that says what the language is worth. So no new document was created.
+`Found-by:` became a field on issues and a trailer on issue-closing commits,
+with an eight-value vocabulary, and `HISTORY.md` -- already the sanctioned
+exception to "issue numbers do not belong in tracked files" -- stayed its
+durable home.
+
+Enforcement follows the shape `gh-issue-ascii-only.sh` established: one
+agent-neutral policy body in `scripts/hooks/found-by-policy.sh`, called by thin
+adapters in `.claude/hooks/`, `.codex/hooks/`, and `.githooks/commit-msg`
+(activated per clone with `git config core.hooksPath .githooks`). The reason
+text the hook prints carries the vocabulary, because a rule stated in one line
+of a 1,300-line AGENTS.md is read once and a denial message is read every time.
+CI was deliberately left out until an outside committer exists. One gap is
+convention only and is documented as such: a defect found and fixed within a
+single session, with no issue filed, is the case most worth recording and the
+one no trigger can detect, since its commit looks like every other commit.
+
 ### 2026-08-24: The Rollback Chain Ran For The First Time, And Found Two Things (GitHub Issue #414)
 
 `scheduled_process_alloc` acquires five things and unwinds them in order on
