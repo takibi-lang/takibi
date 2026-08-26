@@ -15,6 +15,72 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-26: The Scheduler Could Not Step Over The Process Next To It
+
+Dropping the `exec` from `httpd-serve.sh` -- so that the script waits on the
+daemon the way a shell script ordinarily does -- made the interactive ash
+prompt go permanently silent while the daemon kept serving pages. Three
+separate places turned out to walk the process tree by naming a single
+relative, and all three broke on the same shape.
+
+**Getting the evidence cost more than the fix.** The effect system refuses to
+let an `!{interrupt}` function log (`interrupt function
+'kernel_process_uart_wake' may log via ... uart_putc`), which is correct and
+also means the obvious probe is unavailable. Nothing else was running either:
+every process was parked, so there was no syscall path left to print from. The
+working shape was to record the process chain into globals from the interrupt
+and print it from `kernel_syscall_dispatch`, plus a temporary patch to the UART
+driver so the host would keep curling the daemon and thereby keep producing
+syscalls to print from. One line settled it:
+
+```
+DBG uart drops=5 cur-pid=26 [pid=26 st=2 w=0 ch=0] [pid=25 st=3 w=2 ch=26]
+    [pid=24 st=1 w=0 ch=25] [pid=1 st=1 w=0 ch=24]
+```
+
+pid 24 is the ash, and `st=1` is Ready, not Blocked. That ruled out UART
+delivery as the whole story -- the shell was runnable and simply never being
+run.
+
+**The scheduler.** `kernel_process_schedule` was "switch to my child if I have
+one, otherwise to my parent" (issue #245 generalized it from a fixed
+Parent/Child toggle, but it still only ever looked at one relative). With
+1 -> 24 -> 25 -> 26 -> 27 in the chain, the bottom two processes handed the CPU
+back and forth forever. That is a valid answer to "who is my relative" and a
+wrong answer to "who runs next".
+
+A `ProcessRecord` holds one child, so the live process tree IS a chain -- which
+means a cyclic order over every live process is definable without building a
+run queue at all: a process's successor is its child, or the chain's root when
+it has none. Rotating over that cycle and skipping whoever is not Ready makes
+every runnable process reachable from every other. It also gives PID 1 its
+turns back; its `while :; do :; done` had been starved by the old policy
+whenever anything deeper was running, which nobody had noticed because nothing
+depended on it.
+
+**Both blockers refused to block.** `kernel_process_block_uart` and
+`kernel_process_block_wait4` also named their successor structurally, and
+returned 0 when that one relative was not Ready. The caller fail-stops on 0, so
+"the process I would have handed the CPU to is itself blocked" had to be
+impossible for the kernel to stay up -- and it is an ordinary shape, not an
+impossible one. They ask the same rotation now, before blocking, since the
+rotation only returns Ready processes and the caller is about to stop being
+one.
+
+**And the UART wake.** `kernel_process_uart_wake` checked the current
+process's child and then its parent; its own comment said "keep looking
+upward", and it stopped after one hop. Two processes below the waiting ash was
+one hop too many, so the byte went to the ring buffer, where a process blocked
+on UART cannot reach it. Reverting just this half, with the scheduler already
+fixed, still hangs the demo -- both halves are load-bearing.
+
+With all three, the demo script needs no `exec`, and moving it to `/bin` makes
+it `httpd-serve.sh &` at the prompt: no directory, no interpreter, no exec.
+Verified on QEMU (39 views, ash lane, oops, lifecycle-gap, alloc-rollback) and
+on real RPi5 hardware (39 views, one boot).
+
+---
+
 ### 2026-08-26: Shebang Scripts Through execve (#287), and the Second exec That Fail-Stopped the Kernel
 
 `execve` picked an image from the caller's `argv[0]` and fell back to the
