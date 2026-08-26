@@ -15,6 +15,58 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-26: The Directory Map Was An Index That Had Stopped Being One
+
+`AGENTS.md` had grown to 1,334 lines / 101,798 characters, two thirds of the
+150,000-character budget that forced `HISTORY.md` out of `CLAUDE.md` on
+2026-07-08. The question was whether to shorten it, and the answer turned on
+what was measured rather than on the line count: `## Directory Layout`, 282
+lines and 21% of the file, kept one line per file and had silently stopped
+being true. It omitted eight `lib/*.ml` files -- `monomorphize.ml`,
+`value_facts.ml`, `declared_type_resolver.ml`, `trap_diagnostics.ml`,
+`generic_scope.ml`, `local_bindings.ml`, `language_words.ml`,
+`takibi_core.ml` -- nine of the ten `scripts/check_*.py` build checks, `docs/`,
+and the entire `kernel/` tree, which is the primary development target. Its
+copy of `bin/main.ml`'s flag list was missing `--emit-overflow-audit`. Someone
+reading it as an index would have concluded that `monomorphize.ml` did not
+exist, which is worse than having no index at all -- the same failure the
+`kernel/README.md` ppoll entry produced on 2026-08-05.
+
+The replacement is 110 lines at directory granularity: what each directory is,
+the boundary rule `ls` cannot show (that `linux_user/` may not `use` anything
+under `examples/`; that the four `common_*` HALs mirror each other's signatures
+exactly, which is what lets one example file build on every target), and a
+pointer to whichever `AGENTS.md`, `SPEC.md`, or file header is authoritative.
+What an individual file does now lives only in that file's leading comment,
+where it cannot drift away from the code. Where a file exists solely to break a
+cross-target name collision -- `gic_regs.tkb`, `stm32_stub.tkb`,
+`uart_irq_stub.tkb`, `eth_sdmmc_regs.tkb` -- its own header already carried the
+full reason, so the map now points there instead of paraphrasing it.
+
+`scripts/check_agents_paths.py` (wired into `make langcheck`) keeps it honest
+asymmetrically, and the asymmetry is the design: **everything `AGENTS.md` names
+must exist**, because naming a path that is gone is what misleads a reader,
+while requiring every file to be documented is exactly what grew the section to
+282 lines in the first place. One exception is enforced in the other direction:
+every `scripts/check_*.py` must be named, since that list's whole value is
+being complete. Writing the check immediately found a real stale reference
+outside the section being edited -- `examples/linux_hello`, removed long ago.
+
+Two things moved rather than being deleted. `bin/main.ml`'s usage string is now
+the authoritative flag list, since `AGENTS.md`'s copy had already fallen behind
+it. And the `--version` investigation that had accumulated in the map belongs
+here: `--version` prints `dune-project`'s `(version ...)` field through
+`dune-build-info` (`Build_info.V1.version ()`), so bumping the package version
+is the only edit needed; this populates under plain `dune build` with no `dune
+install`, despite `dune-build-info`'s own `.mli` saying the value is `None`
+until "artifact substitution" happens -- that turned out to already occur on
+every build in dune 3.22 for this project's setup. `bin/main.ml` still falls
+back to a literal "unknown (not installed via dune)" string if a future
+dune/setup combination brings the documented `None` case back.
+
+Historical paths are deliberately outside this check's scope. `AGENTS.md`
+describes the present; a path that used to exist belongs in this file.
+
 ### 2026-08-26: The One Fact About A Defect That Cannot Be Re-Derived Later
 
 The question was whether to start a curated corpus of past defects now --

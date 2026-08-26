@@ -68,8 +68,8 @@ moved) into `linux_user/` is exactly such an explicit ask; see the extraction
 note below.
 
 **Copy, don't blindly move, when extracting an example into `linux_user/`.**
-Some examples exist *only* for QEMU/host coverage (e.g. the now-removed
-`examples/linux_hello`) and can be moved outright once ported. Many others
+Some examples exist *only* for QEMU/host coverage (`linux_user/linux_hello` is
+one that was moved outright, not copied) and can be moved once ported. Many others
 (anything in `examples/Makefile`'s `EXAMPLES` list) are also independently
 cross-compiled for STM32 (`stm32build`) and exercised on real RPi3/RPi5
 hardware (`hwcheck-rpi3`/`hwcheck-rpi5`, see `scripts/run_hwtest_rpi5.sh`).
@@ -642,285 +642,115 @@ command* in a recipe, never by adding a *new recursive `$(MAKE)` call* around it
 
 ## Directory Layout
 
-```
-lib/
-  ast.ml          -- AST definitions (includes TypePtr, TypeArray, TypeFn, Deref, AddrOf, AssignDeref, Cast)
-  target_info.ml  -- target-derived source/type contracts, including DMA cache-line alignment
-  const_env.ml    -- parser-time table of explicit primitive-integer `const` declarations,
-                     compiler target constants, and named array sizes/refined bounds
-  lexer.mll       -- ocamllex (includes hex literals, & token, as keyword, ^ token, -> token, void keyword)
-  parser.mly      -- Menhir (includes pointer types, array types, function pointer types, prefix * / & / unary -, as cast)
-  types.ml        -- internal type (ty) + HM-style inference output types + StringMap
-  type_inf.ml     -- HM-style inference core plus refinement, effect, ownership,
-                     static-index, privacy, and authority-region checks
-  type_layout.ml  -- struct/enum layout table (fields, packed, align) backing sizeof/offsetof (issue #40)
-  typechecker.ml  -- external wrapper (called from main.ml)
-  llvm_gen.ml     -- LLVM IR generation and object file output
-  use_resolver.ml -- resolves `use "path/to/file.tkb";` into the flat file list (issue #55)
-bin/
-  main.ml         -- CLI (`takibi <file1.tkb> [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--explain-inference] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-depfile <path>] [--version]`)
-                     Multiple .tkb files are concatenated (flat global namespace) before compilation.
-                     -g emits full DWARF debug info. QEMU/GDB source-level regression coverage includes
-                     examples/dwarf_debug and the maintained kernelcheck-qemu-debug lane; the PC-sampling
-                     profiler is a separate use of the same gdbstub plumbing.
-                     --version prints the version from dune-project's `(version ...)` field via
-                     the `dune-build-info` library (`Build_info.V1.version ()`) and exits 0 --
-                     bump `dune-project`'s package version to change what this prints, nothing in
-                     `bin/main.ml` itself needs editing. Confirmed this populates even under plain
-                     `dune build` (no `dune install` needed), despite `dune-build-info`'s own .mli
-                     comment saying the value is `None` until "artifact substitution" happens --
-                     that turned out to already occur on every build in dune 3.22, at least for
-                     this project's setup. Falls back to a literal "unknown (not installed via
-                     dune)" string if a future dune/setup combination brings back the documented
-                     None case.
-examples/
-  common/         -- platform-agnostic .tkb logic with no MMIO/assembly dependency at
-                     all, reused byte-for-byte by both targets. Everything
-                     target-specific (startup assembly, linker scripts, UART/GIC/timer/
-                     network drivers) now lives in common_qemu/ or common_stm32/
-                     instead -- see each's own entry below for why this split exists.
-    runtime.tkb   -- high-level main wrapper around platform_init/app_main/platform_shutdown
-    print.tkb     -- uart_print/uart_println overloaded core (bool + every signed/
-                     unsigned width); common_qemu/print.tkb and common_stm32/print.tkb
-                     each add only the isize/usize overloads at their own native width
-    sync.tkb      -- extern fn sem_wait/sem_post, mutex_lock/unlock, cond_wait/signal
-    netutil.tkb   -- bytes_eq/bytes_copy/read_u16be/write_u16be/read_u32be/write_u32be,
-                     shared by every protocol example on both targets
-    inet_checksum.tkb -- RFC 1071 Internet checksum (checksum_add/checksum_fold),
-                     pure compute, no MMIO
-    http_server_common.tkb -- shared ARP/IPv4/TCP state machine for the HTTP
-                     examples; response generation is supplied by callbacks in
-                     the including example
-    http_sdcard_server.tkb -- shared SD-card-backed HTTP response generator,
-                     including path-to-8.3 mapping, content type selection, and
-                     multi-segment file streaming over the common TCP core
-    fat12.tkb     -- FAT12 filesystem core (issue #61/#98): fat_format/fat_open/fat_read/
-                     fat_write/fat_close over mem_block_read/mem_block_write, which callers
-                     (fatfs.tkb's in-memory `disk`, fatfs_sdcard.tkb's/http_server_sdcard.tkb's
-                     real SDMMC1 adapter) supply. FatFile is now a linear indexed runtime owner
-                     with per-open cursor/size/mode state; HISTORY.md's issue #97 entry records
-                     the older affine-opaque singleton stage it replaced.
-    rtos.tkb      -- Simple RTOS (issue #66) task-facing API: cpu_id() (examples/percpu),
-                     address-indexed KLock/KGuard/klock/kunlock, the copy-rendezvous
-                     Chan helpers, and rtos_task_add/rtos_start/task_self
-                     scheduling glue generalized from the fixed-task examples. Chan internals
-                     are private and initialized through constructors; ownership-bearing
-                     rendezvous in rtos_demo uses a concrete stable owner slot and
-                     stable_replace rather than a generic zero-copy channel. Scheduler
-                     bookkeeping (SchedState) is private with refined field types, so
-                     every task-table access is a proven array access (2026-07-17 RTOS
-                     audit, see HISTORY.md). Used by both
-                     QEMU RTOS examples and STM32 RAM RTOS examples such as
-                     rtos_fatfs_sdcard/http_server_sdcard_rtos -- see HISTORY.md's RTOS entries.
-                     task_yield() intentionally remains unimplemented until a real caller
-                     needs voluntary switching.
-  common_qemu/    -- QEMU/AArch64-only HAL: startup assembly, linker script, and every
-                     MMIO-backed driver (UART, GIC, timer, virtio-net). Split out from
-                     common/ once enough of common/ turned out to be genuinely
-                     platform-agnostic (see common/'s own entry above) that a single
-                     flat directory no longer made the QEMU-only/shared boundary clear.
-    startup.S     -- _start -> main, BSS zero-clear, AArch64 semihosting exit (shared by all examples)
-    link.ld       -- linker script (load address 0x40000000) (shared by all examples)
-    timer_asm.S   -- ARM Generic Timer stubs: read_cntfrq, set_cntp_tval, enable_cntp, disable_cntp, task_exit_stub
-    sem_asm.S     -- atomic semaphore: sem_wait (ldaxr/stxr), sem_post (ldxr/stlxr)
-    uart.tkb      -- uart_putc, uart_puts, uart_isr_getc (RX-interrupt byte read, no polling)
-    uart_irq_stub.tkb -- no-op uart_set_rx_handler(): QEMU's GIC dispatch is registered
-                     directly by echo/irq, so the uniform STM32 UART callback
-                     -registration hook (see common_stm32/uart.tkb) has nothing to do here
-    print.tkb     -- isize/usize uart_print/uart_println overloads at this target's
-                     native 64-bit width (see common/print.tkb above)
-    gic_regs.tkb  -- GicRegs struct + the `gic` global only, split out of gic.tkb
-                     (GitHub issue #79 follow-up) so a shared file needing just the
-                     type (irq.tkb/echo.tkb's dead-on-STM32 irq_dispatch) can `use`
-                     it without also pulling in gic.tkb's functions -- see that
-                     file's header comment for the cross-file duplicate-definition
-                     bug this split fixes
-    gic.tkb       -- `use`s gic_regs.tkb; gic_init, gic_enable_timer_ppi,
-                     gic_enable_uart_spi, irq_uart_rx_setup/_unmask (uniform names
-                     shared with common_stm32/nvic.tkb, see examples/common_stm32/AGENTS.md)
-    timer.tkb     -- extern fn timer stubs, setup_task_stack, timer_init (depends on gic.tkb),
-                     scheduler_init/_disable/_rearm_tick (uniform names shared with
-                     common_stm32/scheduler.tkb, see examples/common_stm32/AGENTS.md)
-    rtc.tkb       -- PL031 RTC register access (see examples/common_qemu/AGENTS.md)
-    virtio_mmio.tkb -- net_init/net_rx_wait/net_rx_acquire/net_rx_len/net_rx_frame/
-                     net_transmit/net_tx_complete/net_rx_release/net_read_mac
-                     (uniform API shared with common_stm32/eth.tkb, see examples/common_stm32/AGENTS.md)
-    netconfig.tkb -- OUR_IP (QEMU-side static IP for arp_reply/icmp_echo/tcp_echo),
-                     HTTP_SERVER_IP (http_server's own IP, see examples/common_stm32/AGENTS.md's "Network config" entry)
-    stm32_stub.tkb -- no-op stand-ins for STM32-only symbols a shared example's dead
-                     QEMU-side code still references (see examples/common_stm32/AGENTS.md)
-    semihosting_asm.S -- ARM semihosting file-I/O stubs (semihosting_open/write/close/read),
-                     used by examples/fatfs to dump its in-memory disk image to a host file
-                     for mtools to verify
-  common_stm32/   -- STM32F746G-DISCOVERY (Cortex-M7) HAL, mirroring common_qemu's
-                     function names/signatures so every example .tkb file is a single
-                     file shared by both targets -- see examples/common_stm32/AGENTS.md
-                     for the full bring-up/scheduler/Ethernet design
-    startup.S     -- Reset_Handler, vector table, PendSV_Handler, weak
-                     SysTick/ETH/pendsv_dispatch stubs; calls only `main`. Flash-execution
-                     only -- used solely by examples/http_server/kernel_stm32.elf's rule now
-                     (see examples/common_stm32/AGENTS.md's "STM32 Hardware Test Harness: RAM Execution" entry for why every
-                     other STM32 example runs from RAM instead, and why this file's AXI
-                     SRAM1 MPU window is genuinely cacheable, not the non-cacheable window
-                     an earlier version of this file configured)
-    link_eth.ld   -- MEMORY {FLASH RAM} linker script (RAM = AXI SRAM, Ethernet DMA can
-                     reach it; DTCM cannot). Used only by http_server's Flash build now --
-                     see startup.S's entry just above
-    startup_ram.S -- RAM-execution Reset_Handler/vector table (no Flash boot dependency;
-                     VTOR self-relocation). Used by every STM32 example except
-                     http_server's Flash build -- see "STM32 Hardware Test Harness: RAM
-                     Execution" below
-    link_ram.ld   -- MEMORY {RAM} linker script, AXI SRAM1 (0x20010000, 240K), no Flash
-                     region at all -- pairs with startup_ram.S
-    uart.tkb      -- uart_init, platform_init/platform_shutdown, ring-buffered
-                     TX drained via DMA2 Stream7/Channel4 + completion interrupt
-                     (uart_putc/uart_puts -- issue #101), USART1 RX ISR and
-                     RX callback registration (PA9/PB7, AF7), uart_isr_getc
-    rtc.tkb       -- rtc_init, rtc_is_running, rtc_read_seconds (real RTC peripheral, LSI)
-    nvic.tkb      -- enable_usart1_irq, irq_uart_rx_setup/_unmask
-    scheduler.tkb -- setup_task_stack, task_exit_stub, systick_init/_disable, pendsv_trigger,
-                     scheduler_init/_disable/_rearm_tick (see examples/common_stm32/AGENTS.md)
-    sem_asm.S     -- atomic semaphore: sem_wait/sem_post (ldrex/strex/dmb)
-    eth.tkb       -- net_init/net_rx_acquire/net_rx_frame/net_transmit/net_rx_release/net_read_mac
-                     (real Ethernet MAC/PHY/DMA driver, see examples/common_stm32/AGENTS.md)
-    eth_sdmmc_regs.tkb -- RCC_AHB1ENR/RCC_APB2ENR/GPIOC_MODER/GPIOC_OSPEEDR, split out of
-                     eth.tkb and sdmmc.tkb (issue #97 follow-up) once http_server_sdcard.tkb
-                     became the first program to need both HALs and exposed the duplicate --
-                     see HISTORY.md
-    netconfig.tkb -- OUR_MAC/OUR_IP (STM32 board's fixed network identity),
-                     HTTP_SERVER_IP (same value as OUR_IP here, see examples/common_stm32/AGENTS.md's "Network config" entry)
-    sdmmc.tkb     -- disk_initialize/disk_status/disk_read/disk_write (real SDMMC1 microSD
-                     driver, DMA+interrupt both directions, issue #62)
-    semihosting_stub.S -- no-op stand-ins for examples/fatfs's semihosting extern fns on
-                     this target (no ARM semihosting on real hardware)
-  common_rpi3/    -- Raspberry Pi 3B (BCM2837) bare-metal HAL, JTAG-injection-only
-                     bring-up (issue #140), 63 top-level examples ported (all
-                     except fatfs: rtc/timer, real interrupts, the preemptive
-                     scheduler group, and net_echo through kvs_server over a
-                     from-scratch USB host stack) -- see its AGENTS.md.
-    startup.S     -- core-0-only gate, exception vector table + rpi3_irq_entry,
-                     HCR_EL2.IMO routing, inherited-interrupt quiescing, stack/BSS
-                     zeroing, calls mmu_init() then main(), halts on return
-    intc.tkb      -- BCM2837 2-level interrupt controller driver (QA7 ARM-local +
-                     legacy VC armctrl): irq_uart_rx_setup/unmask, rpi3_irq_dispatch
-    rtc.tkb / timer_asm.S -- rtc_* HAL on the ARM Generic Timer's free-running
-                     counter (this board has no real RTC peripheral) -- seconds-
-                     since-boot, not wall-clock; see AGENTS.md's "RTC" entry
-    mmu.S         -- minimal EL2 identity-map MMU setup (2-level, 4KB granule):
-                     fixes LLVM-synthesized unaligned-store faults that occur
-                     whenever the stage 1 MMU is off (Device memory semantics).
-                     Both D-/I-cache are ON (re-enabled for ldaxr/stlxr
-                     correctness, see AGENTS.md's "MMU and caches" entry) --
-                     JTAG's load_image and this board's own DWC2 controller both
-                     bypass the CPU cache, so anything DMA'd needs explicit
-                     maintenance instead (dma_prepare_tx/dma_prepare_rx/
-                     dma_finish_rx, real AArch64 lowering since issue #146;
-                     startup.S's own dcache_invalidate_all handles the
-                     whole-cache case at boot)
-    link.ld       -- load address 0x200000 (deliberately distinct from jtag_stub.ld's)
-    uart.tkb      -- UART0 (PL011) driver, GPIO14/15 ALT0 pinmux + pull disable
-    print.tkb     -- isize/usize uart_print/uart_println overloads (AArch64
-                     64-bit, byte-for-byte copy of common_qemu/print.tkb)
-    jtag_stub.S / jtag_stub.ld -- standalone spin-loop image flashed as the SD
-                     card's kernel8.img, giving JTAG a clean non-Linux catch point
-    mailbox.tkb   -- VideoCore mailbox property interface (issue #144): must
-                     power on the USB power domain before any DWC2 register does
-                     anything; also the bus-address-translation reference point
-                     (0xC0000000 alias) DWC2's own DMA reuses
-    usb_dwc2.tkb  -- DesignWare Hi-Speed USB2 OTG host controller driver: core/
-                     host-port bring-up, control/bulk host-channel transfers,
-                     descriptor parsing, per-endpoint DATA0/DATA1 toggle tracking
-    usb_hub.tkb   -- minimal USB 2.0 chapter-11 hub-class driver (port power/
-                     reset/status only) to reach the LAN9514's internal ports
-    lan9514.tkb   -- SMSC LAN9514 vendor register protocol (no memory-mapped
-                     registers -- everything is a USB vendor control transfer),
-                     MAC assignment (no EEPROM on this board), PHY link bring-up
-    eth.tkb       -- net_init/net_rx_*/net_transmit HAL matching common_stm32/
-                     eth.tkb's and common_qemu/virtio_mmio.tkb's API exactly, so
-                     net_echo.tkb and siblings run unmodified against it; a single
-                     synchronous RX/TX buffer pair, not a real DMA descriptor ring
-                     (USB bulk transfers here are request/response, not async)
-    netconfig.tkb -- OUR_MAC (locally-administered)/OUR_IP (192.168.20.2, this
-                     board's own dedicated point-to-point NIC subnet)
-  common_rpi5/    -- Raspberry Pi 5 (BCM2712) bare-metal HAL: RP1 PCIe/UART/
-                     xHCI USB Mass Storage, GIC/timer interrupts, two-core SMP,
-                     MMU/EL0/EL1/HVC, and FAT12. Every non-Ethernet RPi3
-                     example port is real-hardware proven; see its AGENTS.md.
-                     SWD uses the official Debug Probe (CMSIS-DAP), not RPi3's
-                     FTDI/JTAG 6-pin header.
-  <name>/         -- each directory: see the leading comment in <name>.tkb for a description.
-                     Every example is now a single file compiled for both targets -- no
-                     `<name>_stm32.tkb` exists anywhere in this repo (see the STM32 section
-                     below for how the hardest cases, irq/preempt/semaphore/condvar/watchdog/
-                     msgqueue, got there too).
-linux_user/       -- see "Maintenance Scope: kernel/ and linux_user/" and "Where Should a
-                     New Test Go?" above for what belongs here. Deliberately self-contained:
-                     nothing here `use`s anything under examples/. Built/run via the root
-                     Makefile's `linuxbuild`/`linuxcheck`, not examples/Makefile.
-  common/         -- platform-agnostic .tkb logic (own copies, not shared with examples/
-                     common/, so this tree has no dependency on the frozen one): print.tkb/
-                     runtime.tkb (uart_print/uart_println core + app_main wrapper, mirrors
-                     examples/common/'s own), checked_usize.tkb, elf64_validate.tkb (ELF64/
-                     AArch64 load-plan structural validation -- parses bytes, doesn't execute
-                     them, so it's portable despite validating an AArch64 target)
-  common_linux/   -- x86_64-pc-linux-gnu-only HAL: startup.S (_start -> main, raw exit
-                     syscall), syscall.S (linux_write/linux_exit, no libc), uart.tkb
-                     (uart_putc/uart_puts over the write(2) syscall), print.tkb (`use`s
-                     common/print.tkb + common/runtime.tkb)
-  <name>/         -- each directory: see the leading comment in <name>.tkb. Any test copied
-                     in from examples/ (rather than moved) keeps its examples/ original too
-                     if that original is independently exercised on real STM32/RPi3/RPi5
-                     hardware -- see the "Copy, don't blindly move" note above.
-scripts/
-  run_qemutest.sh -- integration test script: host-side checks plus QEMU tests
-                     (FIFO sync and timing verification included)
-  run_hwtest_ram.sh -- STM32 hardware integration test script (make hwcheck-stm32): RAM execution
-                     over the debug port, no Flash write -- see "STM32 Hardware Test
-                     Harness: RAM Execution" below. Supersedes the deleted run_hwtest.sh.
-  run_hwtest_net_ram.sh -- STM32 real-Ethernet hardware tests (make hwcheck-stm32-net): same RAM
-                     execution as run_hwtest_ram.sh, over a genuinely cacheable AXI SRAM1
-                     DMA region -- see examples/common_stm32/AGENTS.md's "STM32 Hardware Test Harness: RAM Execution" entry.
-                     Supersedes the deleted run_hwtest_net.sh.
-  provision_http_server_sdcard.sh -- writes a real mtools-built FAT12 image onto
-                     http_server_sdcard's SD card via OpenOCD + the real SDMMC1 driver, no
-                     human involved; shared by make hwcheck-stm32-net,
-                     make stm32-http-server-sdcard, and
-                     make stm32-http-server-sdcard-rtos
-                     (issue #97, see HISTORY.md)
-  run_hwtest_rpi3.sh -- RPi3 hardware integration test script (make hwcheck-rpi3): JTAG
-                     injection, UART capture/diff -- see examples/common_rpi3/AGENTS.md.
-  run_hwtest_rpi3_net.sh -- RPi3 real-Ethernet hardware tests (make hwcheck-rpi3-net), over
-                     the USB host stack examples/common_rpi3/AGENTS.md's "USB host stack"
-                     section covers -- same eth_*_test.py raw-socket scripts STM32 already
-                     uses, parameterized by ETH_TEST_SUBNET/ETH_TEST_MAC for this board's
-                     own point-to-point NIC/address.
-  rpi5_jtag_load.sh -- RPi5 Stage A: injects an ELF over SWD via the official
-                     Debug Probe (CMSIS-DAP) and examples/common_rpi5/bcm2712.cfg
-                     (vendored, upstream OpenOCD ships no bcm2712.cfg).
-  stm32_uart_dev.sh -- resolves the STM32 ST-Link VCP by its stable USB
-                     `/dev-host/serial/by-id` identity, avoiding ttyACM swaps.
-  run_hwtest_rpi5.sh -- make hwcheck-rpi5's real-board runner: injects every
-                     non-Ethernet RPi3 example port and byte-compares complete
-                     RP1-UART output; also drives GPIO14/15 input, starts the
-                     second core where needed, and runs destructive USB/FAT12
-                     fixtures against the dedicated sacrificial drive.
-  run_hwtest_rpi5_net.sh -- RPi5 RP1-GEM Ethernet runner for L2, TCP/HTTP/KVS,
-                     USB-backed HTTP/RTOS, and two-boot KVS persistence.
-  rpi5_provision_http_server_sdcard.sh -- builds a FAT12 seed image and writes
-                     it to the RPi5 USB drive through SWD installer firmware.
-  rpi5_jtag_reset.sh -- RPi5 reboot via a PSCI SYSTEM_RESET SMC call injected
-                     over SWD (no nSRST line on this connector, confirmed --
-                     requires --resident-image-unchanged; see
-                     examples/common_rpi5/AGENTS.md item 3).
-  rpi5_uart_dev.sh -- resolves the Debug Probe's ttyACM device by its
-                     /dev/serial/by-id label (`*Raspberry_Pi_Debug_Probe*`), not
-                     by number -- the STM32 board's ST-Link VCP and the Debug
-                     Probe's UART both enumerate as ttyACM* on this host, and
-                     which number is which is not stable across replug. Same
-                     fix as rpi_uart_dev.sh's own RPi3-vs-JTAG-probe disambiguation.
-test/
-  test_takibi.ml  -- Alcotest unit tests for parser / type_inf
-```
+**This map is deliberately kept at directory granularity.** It used to carry a
+line per file, and that list had silently gone stale: on 2026-08-26 it was
+missing eight `lib/*.ml` files (including `monomorphize.ml` and
+`value_facts.ml`), nine of the ten `scripts/check_*.py` files, `docs/`, and the
+entire `kernel/` tree -- the primary development target. A reader using it as
+an index would have concluded those did not exist, which is worse than having
+no index. What an individual file does belongs in that file's own leading
+comment, where it cannot drift away from the code it describes.
+
+So: when you add a directory, add it here. When you add a file, write its
+leading comment. `scripts/check_agents_paths.py` (run by `make langcheck`)
+fails the build if this file names a path that no longer exists.
+
+### The compiler
+
+- `lib/` -- the compiler library: lexing/parsing, HM-style inference, and on
+  top of it the refinement, effect, ownership, static-index, privacy, and
+  authority-region checks, struct/enum layout, monomorphization, and LLVM IR
+  generation. Two properties of this directory are load-bearing and invisible
+  from a file listing. First, `type_inf.ml` and `llvm_gen.ml` independently
+  re-derive several things (sizeof/offsetof, literal materialization, struct
+  field indexing), so a change to one is usually a change to both --
+  `scripts/check_compiler_sync_rules.py` encodes the pairs that must move
+  together. Second, struct layout has three implementations
+  (`type_layout.ml`, `llvm_gen.ml`'s own size computation, and LLVM's
+  DataLayout); `Type_layout.check_against_codegen` fails the build when they
+  diverge.
+- `bin/main.ml` -- the `takibi` CLI. Its own usage string is the authoritative
+  flag list; do not mirror it here. The flags that carry a project rule rather
+  than a mechanism are `--forbid-trap` (see "Development Process: Write `.tkb`
+  Code Under `--forbid-trap` From the Start"), `--forbid-unsafe`, `-g`, and
+  `--emit-depfile` (see "Build Commands").
+- `test/` -- Alcotest unit tests for the compiler, in a single
+  `test_takibi.ml`. Roughly 500 of its cases are `expect_type_error` /
+  `expect_codegen_error` negatives; see "Where Should a New Test Go?" for what
+  belongs here versus in a runnable example. Use
+  `scripts/list_dune_test_failures.sh`, not bare `dune test`, when more than
+  one case fails.
+
+### The targets
+
+- `kernel/` -- the standalone kernel, and the primary development target. Its
+  subdirectories follow Linux's names (`kernel/arch/`, `kernel/drivers/`,
+  `kernel/fs/`, `kernel/init/`, `kernel/kernel/`, `kernel/lib/`, `kernel/mm/`,
+  `kernel/net/`, `kernel/platform/`, `kernel/printk/`, `kernel/tests/`). It has
+  its own documentation set, which is authoritative over anything said here:
+  `kernel/README.md`, `SYSCALLS.md`, `MEMORY_MAP.md` (build-checked by
+  `scripts/check_kernel_memory_map.py`), `RESOURCE_LIMITS.md`, and
+  `RUNTIME_STATE.md`. See "Maintenance Scope: `kernel/` and `linux_user/`".
+- `examples/` -- one directory per example, each a single `.tkb` file compiled
+  unmodified for every target; read that file's leading comment for what it
+  demonstrates. The four `common_*` HAL directories mirror each other's
+  function names and signatures exactly, which is what lets a single example
+  file build everywhere, and each has its own `AGENTS.md` carrying that
+  target's bring-up detail:
+  - `examples/common/` -- platform-agnostic logic with no MMIO or assembly dependency.
+  - `examples/common_qemu/` -- QEMU/AArch64 virt (`examples/common_qemu/AGENTS.md`).
+  - `examples/common_stm32/` -- STM32F746G-DISCOVERY, Cortex-M7
+    (`examples/common_stm32/AGENTS.md`).
+  - `examples/common_rpi3/` -- Raspberry Pi 3B, BCM2837, JTAG-only bring-up, including a
+    from-scratch USB host stack (`examples/common_rpi3/AGENTS.md`).
+  - `examples/common_rpi5/` -- Raspberry Pi 5, BCM2712, RP1 PCIe/UART/xHCI, SMP, EL0/EL1
+    (`examples/common_rpi5/AGENTS.md`).
+
+  Where a file inside these exists only to resolve a cross-target name
+  collision or a shared-file dependency (`gic_regs.tkb`, `stm32_stub.tkb`,
+  `uart_irq_stub.tkb`, `eth_sdmmc_regs.tkb`, `semihosting_stub.S`), the reason
+  is in that file's own header comment.
+- `linux_user/` -- x86_64 Linux userspace, built and run through the root
+  Makefile's `linuxbuild`/`linuxcheck`, not `examples/Makefile`. Deliberately
+  self-contained: nothing here `use`s anything under `examples/`, and it keeps
+  its own copies of the shared `examples/common/` sources under
+  `linux_user/common/` rather than sharing them. See
+  "Maintenance Scope" and "Where Should a New Test Go?", including the
+  "copy, don't blindly move" rule for tests that also run on real hardware.
+
+### Everything else
+
+- `scripts/` -- build checks, test harnesses, and hardware runners, by naming
+  convention: `check_*.py` are build-time checks (list below), `run_hwtest_*.sh`
+  drive a real board for the matching `make hwcheck-*` target, `*_uart_dev.sh`
+  resolve a probe's serial device by its stable `by-id` identity rather than by
+  ttyACM number, `*_test.py` are host-side network/protocol test drivers,
+  `check_suite_output.py` splits one batched UART stream into per-case fixture
+  comparisons, and
+  `profile_*` are the PC-sampling profiler's pieces. Which script a `make`
+  target runs is in the Makefile, which is the thing that cannot go stale.
+- `docs/` -- durable technical knowledge that outlives the session that
+  produced it; see `docs/README.md` for what qualifies.
+- `img/` -- project icons.
+
+### Build checks
+
+Each of these fails the build rather than warning. They are listed here because
+being a complete list is the whole point of this one;
+`scripts/check_agents_paths.py` enforces that completeness.
+
+| Check | What it refuses to let through |
+| --- | --- |
+| `check_agents_paths.py` | a path named in `AGENTS.md` that no longer exists, or a `scripts/check_*.py` this file never names |
+| `check_compiler_sync_rules.py` | a `sync rule` comment in `type_inf.ml` or `llvm_gen.ml` with no counterpart reference in its peer |
+| `check_kernel_asm_invariants.py` | hand-written kernel assembly, disassembled from the built ELF, that breaks an EL0 entry/exit invariant (issues #229/#231) |
+| `check_kernel_lib_limitations_header.py` | a `kernel/lib`, `kernel/kernel`, or `kernel/net` file with no "Current limitations" header |
+| `check_kernel_memory_map.py` | a build whose layout disagrees with `kernel/MEMORY_MAP.md` (`--update` rewrites the rows instead) |
+| `check_pool_release_paths.py` | a kernel pool with no path that gives a record back |
+| `check_qemu_lane_ports.py` | two QEMU lanes claiming the same protocol and port |
+| `check_raw_pos_fname.py` | a raw `Lexing.pos_fname` read outside the identity-preserving helpers |
+| `check_stale_depfiles.py` | a generated kernel depfile naming a prerequisite that has been deleted |
+| `check_user_payload_no_rw_globals.py` | a writable global in the flat EL0 payload, whose blob is mapped RX-only |
 
 ## Important Design Notes
 
