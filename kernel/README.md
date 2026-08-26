@@ -113,6 +113,7 @@ kernel/arch/arm64/       EL2 entry, EL0 transition, exceptions, MMU, timer
 kernel/drivers/block/    block-device interfaces and memory adapter
 kernel/drivers/net/      RP1 Cadence GEM driver
 kernel/fs/ext2/          ext2 implementation
+kernel/fs/procfs.tkb     bounded read-only BusyBox ps compatibility view
 kernel/init/             top-level kernel initialization and integration flow
 kernel/kernel/           process and Linux syscall policy
 kernel/mm/               pages, address spaces, mappings, and ELF images

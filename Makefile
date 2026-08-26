@@ -461,13 +461,14 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'link /bin/busybox.static /bin/od' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox.static /bin/echo' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox.static /bin/ls' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/ps' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox-extras /bin/httpd' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'mkdir /many' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'expand /many' $@.tmp >/dev/null 2>&1
 	for index in $$(seq -w 0 19); do \
 		debugfs -w -R "link /bin/busybox.static /many/entry-$$index" $@.tmp >/dev/null 2>&1; \
 	done
-	debugfs -w -R 'set_inode_field /bin/busybox.static links_count 27' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/busybox.static links_count 28' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/busybox-extras links_count 2' $@.tmp >/dev/null 2>&1
 	e2fsck -fn $@.tmp >/dev/null
 	mv $@.tmp $@

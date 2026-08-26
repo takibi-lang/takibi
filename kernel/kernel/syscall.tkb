@@ -3,6 +3,7 @@ use "kernel/mm/address_space.tkb";
 use "kernel/mm/user_memory.tkb";
 use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
 use "kernel/fs/ext2/ext2.tkb";
+use "kernel/fs/procfs.tkb";
 use "kernel/net/socket_capability.tkb";
 use "kernel/net/tcp.tkb";
 use "kernel/kernel/fd_table.tkb";
@@ -372,6 +373,32 @@ fn kernel_syscall_file_set_offset(fd: usize, value: usize) -> bool {
     match unified_fd_set_offset(kernel_syscall_process_slot(), fd, value) {
         UnifiedFdResult::Invalid => { return false; }
         UnifiedFdResult::Ok => { return true; }
+    }
+}
+
+fn kernel_syscall_procfs_open(node: ProcfsNode, fd: usize)
+        -> SyscallAction {
+    if (procfs_node_is_directory(node)) {
+        match unified_directory_open(kernel_syscall_process_slot(), fd,
+                                     node.inode) {
+            UnifiedOpenResult::Invalid => {
+                return SyscallAction::Resume(LINUX_EBADF);
+            }
+            UnifiedOpenResult::Full => {
+                return SyscallAction::Resume(LINUX_ENFILE);
+            }
+            UnifiedOpenResult::Ok => { return SyscallAction::Resume(fd); }
+        }
+    }
+    match unified_file_open(kernel_syscall_process_slot(), fd, node.inode,
+                            true, false) {
+        UnifiedOpenResult::Invalid => {
+            return SyscallAction::Resume(LINUX_EBADF);
+        }
+        UnifiedOpenResult::Full => {
+            return SyscallAction::Resume(LINUX_ENFILE);
+        }
+        UnifiedOpenResult::Ok => { return SyscallAction::Resume(fd); }
     }
 }
 
@@ -1731,6 +1758,23 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
             SyscallPathResult::Name(path) => { path }
         };
+        match procfs_lookup(path_name) {
+            ProcfsLookupResult::Missing => {}
+            ProcfsLookupResult::Found(node) => {
+                let access_mode: usize = x2 & 3;
+                if (access_mode != 0) {
+                    return SyscallAction::Resume(LINUX_EACCES);
+                }
+                let fd: usize = match unified_fd_alloc(
+                        kernel_syscall_process_slot(), 0) {
+                    UnifiedFdAllocResult::Full => {
+                        return SyscallAction::Resume(LINUX_EMFILE);
+                    }
+                    UnifiedFdAllocResult::Allocated(allocated) => { allocated }
+                };
+                return kernel_syscall_procfs_open(node, fd);
+            }
+        }
         let path_view: []u8 = syscall_path_buffer as []u8;
         let mut lookup_inode: usize = 2;
         if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
@@ -1815,6 +1859,54 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 let mut directory_offset: usize =
                     kernel_syscall_file_offset(x0);
                 let mut written: usize = 0;
+                if (inode_number == PROCFS_ROOT_INODE) {
+                    let mut name_storage: [u8; 20];
+                    let name_view: []u8 = name_storage as []u8;
+                    let mut scanning: bool = true;
+                    while (scanning) {
+                        let pid: usize = procfs_next_pid(directory_offset);
+                        if (pid == 0) {
+                            scanning = false;
+                        } else {
+                            let name_length: usize =
+                                procfs_pid_name(pid, name_view);
+                            let mut record_length: usize =
+                                19 + name_length + 1;
+                            record_length = (record_length + 7) &
+                                            0xFFFFFFFFFFFFFFF8;
+                            if (record_length > x2 - written) {
+                                if (written == 0) {
+                                    return SyscallAction::Resume(LINUX_EINVAL);
+                                }
+                                scanning = false;
+                            } else {
+                                user_write_u64(range, written,
+                                    procfs_inode(pid, 0) as u64);
+                                user_write_u64(range, written + 8,
+                                               pid as u64);
+                                user_write_u16(range, written + 16,
+                                               record_length);
+                                user_write_byte(range, written + 18, 4);
+                                for index: usize in 0..<20 {
+                                    if (index < name_length) {
+                                        user_write_byte(
+                                            range, written + 19 + index,
+                                            name_storage[index]);
+                                    }
+                                }
+                                user_write_byte(
+                                    range, written + 19 + name_length, 0);
+                                written = written + record_length;
+                                directory_offset = pid;
+                            }
+                        }
+                    }
+                    if (kernel_syscall_file_set_offset(
+                            x0, directory_offset) == false) {
+                        return SyscallAction::Resume(LINUX_EBADF);
+                    }
+                    return SyscallAction::Resume(written);
+                }
                 while (written < x2) {
                     match ext2_read_directory_chunk(
                             syscall_ext2_mount, inode_number,
@@ -1955,6 +2047,29 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
             SyscallPathResult::Name(path) => { path }
         };
+        match procfs_lookup(path_name) {
+            ProcfsLookupResult::Missing => {}
+            ProcfsLookupResult::Found(node) => {
+                match user_range_check_write(
+                        kernel_process_current_root(), x2, 128) {
+                    UserWriteRangeResult::Fault => {
+                        return SyscallAction::Resume(LINUX_EFAULT);
+                    }
+                    UserWriteRangeResult::Ok(range) => {
+                        user_zero_fill(range);
+                        user_write_u64(range, 8, node.inode as u64);
+                        if (procfs_node_is_directory(node)) {
+                            user_write_u32(range, 16, 0x416D as u32);
+                            user_write_u32(range, 20, 2);
+                        } else {
+                            user_write_u32(range, 16, 0x8124 as u32);
+                            user_write_u32(range, 20, 1);
+                        }
+                        return SyscallAction::Resume(0);
+                    }
+                }
+            }
+        }
         let path_view: []u8 = syscall_path_buffer as []u8;
         let mut lookup_inode: usize = 2;
         if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
@@ -2141,6 +2256,34 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (kernel_syscall_file_is_open(fd) == false ||
             kernel_syscall_file_readable(fd) == false) {
             return SyscallAction::Resume(LINUX_EBADF);
+        }
+        let opened_inode: usize = kernel_syscall_file_inode(fd);
+        if (procfs_inode_is_ours(opened_inode)) {
+            let staging_buffer: []u8 =
+                syscall_file_buffer as []u8;
+            let total: usize = procfs_render_file(opened_inode,
+                                                  staging_buffer);
+            let offset: usize = kernel_syscall_file_offset(fd);
+            if (offset >= total || requested == 0) {
+                return SyscallAction::Resume(0);
+            }
+            let mut amount: usize = total - offset;
+            if (amount > requested) { amount = requested; }
+            match user_range_check_write(kernel_process_current_root(),
+                                         address, amount) {
+                UserWriteRangeResult::Fault => {
+                    return SyscallAction::Resume(LINUX_EFAULT);
+                }
+                UserWriteRangeResult::Ok(range) => {
+                    let source: *u8 = (syscall_file_buffer as *u8) +
+                        (offset as isize);
+                    copy_to_user_raw(range, source, amount);
+                }
+            }
+            if (kernel_syscall_file_set_offset(fd, offset + amount) == false) {
+                return SyscallAction::Resume(LINUX_EBADF);
+            }
+            return SyscallAction::Resume(amount);
         }
         // Do not turn the requested length into a kernel allocation. Each
         // iteration obtains one ext2 block and copies it into the next
@@ -2823,6 +2966,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // registry currently contains one static BusyBox ELF.
         if (exec_path_absolute == false) { return SyscallAction::Resume(LINUX_ENOENT); }
         syscall_exec_argc = argc;
+        let diagnostic_argv: []u8 = syscall_exec_argv as []u8;
+        scheduled_process_set_command_line(
+            kernel_syscall_process_slot(),
+            diagnostic_argv, output_offset);
         syscall_exec_pending = true;
         if (kernel_process_is_child()) { return SyscallAction::ChildExec; }
         return SyscallAction::Exec;
@@ -3035,6 +3182,25 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 let wrote_seconds: bool =
                     user_write_u64(range, 0, 1700000000 as u64);
                 let wrote_nanoseconds: bool = user_write_u64(range, 8, 0);
+            }
+        }
+        return SyscallAction::Resume(0);
+    }
+    if (number == 179) {
+        // Linux aarch64 struct sysinfo. BusyBox ps consumes uptime; keep the
+        // rest zero until a concrete consumer needs accounted values.
+        match user_range_check_write(kernel_process_current_root(), x0, 112) {
+            UserWriteRangeResult::Fault => {
+                return SyscallAction::Resume(LINUX_EFAULT);
+            }
+            UserWriteRangeResult::Ok(range) => {
+                user_zero_fill(range);
+                let frequency: i64 = read_cntfrq();
+                let mut uptime: usize = 0;
+                if (frequency > 0) {
+                    uptime = (read_cntpct() / frequency) as usize;
+                }
+                user_write_u64(range, 0, uptime as u64);
             }
         }
         return SyscallAction::Resume(0);

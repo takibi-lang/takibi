@@ -167,6 +167,12 @@ struct ProcessRecord {
     // change and the Unix one: `pid - 1` was a valid way to find a
     // process only while a pid named a table row.
     pid: usize;
+    start_time_ticks: usize;
+    // Bounded kernel-owned diagnostic copy. procfs must never retain or
+    // revisit userspace argv pointers while a process can exit or replace
+    // its address space underneath the read.
+    command_line: [u8; 512];
+    command_line_length: usize;
     saved_sp: usize;
     state: ProcessSlotState;
     wait_reason: ProcessWaitReason;
@@ -388,6 +394,21 @@ variant ProcessSlotCursor {
     At(usize);
 }
 
+struct ProcessDiagnosticSnapshot {
+    pid: usize;
+    ppid: usize;
+    state: u8;
+    resident_pages: usize;
+    start_time_ticks: usize;
+    command_line: [u8; 512];
+    command_line_length: usize;
+}
+
+must_use variant ProcessDiagnosticResult {
+    Missing;
+    Found(ProcessDiagnosticSnapshot);
+}
+
 private fn scheduled_process_live_pool_slot_from(cursor: usize)
         -> ProcessSlotCursor !{unsafe} {
     let mut probe: usize = cursor;
@@ -569,6 +590,79 @@ fn scheduled_process_slot_for_pid(pid: usize) -> ProcessSlotForPidResult
         }
     }
     return ProcessSlotForPidResult::Missing;
+}
+
+// Allocation-free, kernel-owned procfs input. The caller receives a value
+// copy, never a ProcessRecord pointer or a userspace argv pointer.
+fn scheduled_process_diagnostic_snapshot(pid: usize)
+        -> ProcessDiagnosticResult !{unsafe} {
+    let slot: usize = match scheduled_process_slot_for_pid(pid) {
+        ProcessSlotForPidResult::Missing => {
+            return ProcessDiagnosticResult::Missing;
+        }
+        ProcessSlotForPidResult::Found(found) => { found }
+    };
+    let record: *ProcessRecord = scheduled_process_record_at(slot);
+    let mut snapshot: ProcessDiagnosticSnapshot;
+    snapshot.pid = record.pid;
+    snapshot.ppid = 0;
+    if (record.has_parent) {
+        snapshot.ppid = scheduled_process_pid_of_handle(record.parent);
+    }
+    match record.state {
+        ProcessSlotState::Free => { snapshot.state = 0x3F; }
+        ProcessSlotState::Ready => { snapshot.state = 0x52; }
+        ProcessSlotState::Running => { snapshot.state = 0x52; }
+        ProcessSlotState::Blocked => { snapshot.state = 0x53; }
+        ProcessSlotState::Exited => { snapshot.state = 0x5A; }
+    }
+    snapshot.resident_pages = process_image_active_page_count(slot);
+    snapshot.start_time_ticks = record.start_time_ticks;
+    snapshot.command_line_length = record.command_line_length;
+    for index: usize in 0..<512 {
+        snapshot.command_line[index] = record.command_line[index];
+    }
+    return ProcessDiagnosticResult::Found(snapshot);
+}
+
+// PID-ordered enumeration gives procfs deterministic directory output even
+// though the process pool is address-ordered internally.
+fn scheduled_process_diagnostic_next_pid(after: usize) -> usize !{unsafe} {
+    let mut next: usize = 0;
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                let pid: usize = scheduled_process_record_at(slot).pid;
+                if (pid > after && (next == 0 || pid < next)) { next = pid; }
+                cursor = scheduled_process_next_slot(slot);
+            }
+        }
+    }
+    return next;
+}
+
+fn scheduled_process_set_command_line(slot: usize, value: []u8,
+                                      requested: usize) !{unsafe} {
+    let record: *ProcessRecord = scheduled_process_record_at(slot);
+    let mut length: usize = requested;
+    if (length > value.len) { length = value.len; }
+    if (length > 512) { length = 512; }
+    let destination: []u8 = record.command_line as []u8;
+    let copied: usize = slice_copy(destination, value);
+    record.command_line_length = length;
+}
+
+private fn scheduled_process_copy_command_line(parent: usize, child: usize)
+        !{unsafe} {
+    let source: *ProcessRecord = scheduled_process_record_at(parent);
+    let destination: *ProcessRecord = scheduled_process_record_at(child);
+    destination.command_line_length = source.command_line_length;
+    for index: usize in 0..<512 {
+        destination.command_line[index] = source.command_line[index];
+    }
 }
 
 // GitHub issue #392: where kernel/kernel/fd_table.tkb keeps this
@@ -852,6 +946,8 @@ fn scheduled_process_table_init() !{unsafe} {
 private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
     let record: *ProcessRecord = scheduled_process_record_at(slot);
     record.pid = 0;
+    record.start_time_ticks = 0;
+    record.command_line_length = 0;
     record.saved_sp = 0;
     record.state = ProcessSlotState::Free;
     record.wait_reason = ProcessWaitReason::None;
@@ -1227,6 +1323,14 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
     // GitHub issue #392: the one place a pid is minted. Past every branch
     // that can still refuse the slot.
     scheduled_process_record_at(slot).pid = scheduled_process_next_pid;
+    let counter_frequency: usize = read_cntfrq() as usize;
+    let tick_divisor: usize = counter_frequency / 100;
+    if (tick_divisor != 0) {
+        scheduled_process_record_at(slot).start_time_ticks =
+            (read_cntpct() as usize) / tick_divisor;
+    } else {
+        scheduled_process_record_at(slot).start_time_ticks = 0;
+    }
     scheduled_process_next_pid = scheduled_process_next_pid + 1;
     scheduled_process_record_reset_syscall_state(slot);
     // GitHub issues #375/#376: a reused run would otherwise inherit the
@@ -3149,6 +3253,8 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             return ProcessCloneResult::Invalid;
         }
         ScheduledProcessAllocResult::Allocated(child) => {
+            scheduled_process_copy_command_line(parent.pool_index,
+                                                child.pool_index);
             scheduled_process_record_at(parent.pool_index).child = child;
             scheduled_process_record_at(parent.pool_index).has_child = true;
             scheduled_process_record_at(child.pool_index).parent = parent;

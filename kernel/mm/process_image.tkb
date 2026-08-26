@@ -1910,6 +1910,11 @@ fn process_image_stack_grew_pages(count: usize) -> bool {
            process_image_record_at(root).active_page_count > count;
 }
 
+fn process_image_active_page_count(root: usize) -> usize !{unsafe} {
+    if (scheduled_process_slot_valid(root) == false) { return 0; }
+    return process_image_record_at(root).active_page_count;
+}
+
 fn process_image_stack_grew(pages: borrow ProcessImagePages[image]) -> bool {
     return process_image_stack_grew_pages(pages.count);
 }

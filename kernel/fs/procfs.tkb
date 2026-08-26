@@ -1,0 +1,275 @@
+use "kernel/kernel/process.tkb";
+
+// Read-only Linux-shaped process diagnostics for the pinned BusyBox ps
+// applet. This is intentionally not a general virtual-filesystem registry.
+// A node is reconstructed from its path and PID; no procfs object retains a
+// ProcessRecord pointer across syscalls.
+
+enum ProcfsNodeKind: u8 { Root; ProcessDirectory; Stat; Cmdline; }
+
+struct ProcfsNode {
+    kind: ProcfsNodeKind;
+    pid: usize;
+    inode: usize;
+}
+
+must_use variant ProcfsLookupResult { Missing; Found(ProcfsNode); }
+
+const PROCFS_ROOT_INODE: usize = 0xF0000000;
+const PROCFS_PID_INODE_BASE: usize = 0xF1000000;
+
+fn procfs_inode(pid: usize, suffix: usize) -> usize {
+    if (pid > (0xFFFFFFFFFFFFFFFF - PROCFS_PID_INODE_BASE - suffix) / 4) {
+        return 0;
+    }
+    return PROCFS_PID_INODE_BASE + pid * 4 + suffix;
+}
+
+fn procfs_lookup(path: []u8) -> ProcfsLookupResult !{unsafe} {
+    let mut position: usize = 0;
+    let mut pid: usize = 0;
+    let mut digits: usize = 0;
+    let mut suffix: usize = 0;
+    let mut suffix_length: usize = 0;
+    let mut valid: bool = true;
+    for byte in path {
+        if (position == 0 && byte != 0x70) { valid = false; }
+        if (position == 1 && byte != 0x72) { valid = false; }
+        if (position == 2 && byte != 0x6F) { valid = false; }
+        if (position == 3 && byte != 0x63) { valid = false; }
+        if (position == 4 && byte != 0x2F) { valid = false; }
+        if (position >= 5 && suffix == 0) {
+            if (byte >= 0x30 && byte <= 0x39) {
+                let digit: usize = (byte - 0x30) as usize;
+                if (pid > (0xFFFFFFFFFFFFFFFF - digit) / 10) {
+                    valid = false;
+                } else {
+                    pid = pid * 10 + digit;
+                    digits = digits + 1;
+                }
+            } else if (byte == 0x2F && digits != 0) {
+                suffix = 1;
+            } else {
+                valid = false;
+            }
+        } else if (position >= 5 && suffix != 0) {
+            suffix_length = suffix_length + 1;
+            if (suffix_length == 1) {
+                if (byte == 0x73) { suffix = 2; }
+                else if (byte == 0x63) { suffix = 3; }
+                else { valid = false; }
+            } else if (suffix == 2) {
+                if ((suffix_length == 2 && byte != 0x74) ||
+                    (suffix_length == 3 && byte != 0x61) ||
+                    (suffix_length == 4 && byte != 0x74) ||
+                    suffix_length > 4) { valid = false; }
+            } else if (suffix == 3) {
+                if ((suffix_length == 2 && byte != 0x6D) ||
+                    (suffix_length == 3 && byte != 0x64) ||
+                    (suffix_length == 4 && byte != 0x6C) ||
+                    (suffix_length == 5 && byte != 0x69) ||
+                    (suffix_length == 6 && byte != 0x6E) ||
+                    (suffix_length == 7 && byte != 0x65) ||
+                    suffix_length > 7) { valid = false; }
+            }
+        }
+        position = position + 1;
+    }
+    if (valid == false || position < 4) {
+        return ProcfsLookupResult::Missing;
+    }
+    if (position == 4) {
+        let mut root: ProcfsNode = {
+            ProcfsNodeKind::Root, 0, PROCFS_ROOT_INODE
+        };
+        return ProcfsLookupResult::Found(root);
+    }
+    if (position < 6 || digits == 0) {
+        return ProcfsLookupResult::Missing;
+    }
+    match scheduled_process_slot_for_pid(pid) {
+        ProcessSlotForPidResult::Missing => {
+            return ProcfsLookupResult::Missing;
+        }
+        ProcessSlotForPidResult::Found(slot) => {}
+    }
+    if (suffix == 0 || (suffix == 1 && suffix_length == 0)) {
+        let mut directory: ProcfsNode = {
+            ProcfsNodeKind::ProcessDirectory, pid, procfs_inode(pid, 0)
+        };
+        return ProcfsLookupResult::Found(directory);
+    }
+    if (suffix == 2 && suffix_length == 4) {
+        let mut stat: ProcfsNode = {
+            ProcfsNodeKind::Stat, pid, procfs_inode(pid, 1)
+        };
+        return ProcfsLookupResult::Found(stat);
+    }
+    if (suffix == 3 && suffix_length == 7) {
+        let mut cmdline: ProcfsNode = {
+            ProcfsNodeKind::Cmdline, pid, procfs_inode(pid, 2)
+        };
+        return ProcfsLookupResult::Found(cmdline);
+    }
+    return ProcfsLookupResult::Missing;
+}
+
+fn procfs_inode_is_ours(inode: usize) -> bool {
+    return inode == PROCFS_ROOT_INODE || inode >= PROCFS_PID_INODE_BASE;
+}
+
+fn procfs_inode_kind(inode: usize) -> ProcfsNodeKind {
+    if (inode == PROCFS_ROOT_INODE) { return ProcfsNodeKind::Root; }
+    let suffix: usize = (inode - PROCFS_PID_INODE_BASE) % 4;
+    if (suffix == 0) { return ProcfsNodeKind::ProcessDirectory; }
+    if (suffix == 1) { return ProcfsNodeKind::Stat; }
+    return ProcfsNodeKind::Cmdline;
+}
+
+fn procfs_inode_pid(inode: usize) -> usize {
+    if (inode < PROCFS_PID_INODE_BASE) { return 0; }
+    return (inode - PROCFS_PID_INODE_BASE) / 4;
+}
+
+fn procfs_node_is_directory(node: ProcfsNode) -> bool {
+    return node.kind == ProcfsNodeKind::Root ||
+           node.kind == ProcfsNodeKind::ProcessDirectory;
+}
+
+private fn procfs_put_byte(output: borrow [u8; 1024..], offset: usize,
+                           byte: u8) -> usize {
+    if (offset < 1024) {
+        output[offset] = byte;
+        return offset + 1;
+    }
+    return offset;
+}
+
+private fn procfs_put_text(output: borrow [u8; 1024..], offset_in: usize,
+                           text: []u8) -> usize {
+    let mut offset: usize = offset_in;
+    for byte in text { offset = procfs_put_byte(output, offset, byte); }
+    return offset;
+}
+
+private fn procfs_put_usize(output: borrow [u8; 1024..], offset_in: usize,
+                            value_in: usize) -> usize {
+    let mut digits: [u8; 20];
+    let mut count: usize = 0;
+    let mut value: usize = value_in;
+    if (value == 0) { return procfs_put_byte(output, offset_in, 0x30); }
+    for index: usize in 0..<20 {
+        if (value != 0) {
+            digits[index] = 0x30 + ((value % 10) as u8);
+            count = count + 1;
+            value = value / 10;
+        }
+    }
+    let mut offset: usize = offset_in;
+    while (count != 0) {
+        count = count - 1;
+        if (count >= 0 && count < 20) {
+            offset = procfs_put_byte(output, offset, digits[count]);
+        }
+    }
+    return offset;
+}
+
+private fn procfs_put_comm(output: borrow [u8; 1024..], offset_in: usize,
+                           snapshot: ProcessDiagnosticSnapshot) -> usize {
+    let mut start: usize = 0;
+    let mut index: usize = 0;
+    while (index < snapshot.command_line_length && index < 512) {
+        if (index >= 0 && index < 512) {
+            let byte: u8 = snapshot.command_line[index];
+            if (byte == 0) { break; }
+            if (byte == 0x2F) { start = index + 1; }
+        }
+        index = index + 1;
+    }
+    let mut offset: usize = offset_in;
+    let mut at: usize = start;
+    let mut copied: usize = 0;
+    while (at < index && copied < 15 && at < 512) {
+        if (at >= 0 && at < 512) {
+            offset = procfs_put_byte(output, offset,
+                                     snapshot.command_line[at]);
+        }
+        at = at + 1;
+        copied = copied + 1;
+    }
+    if (copied == 0) { offset = procfs_put_text(output, offset, "kernel" as []u8); }
+    return offset;
+}
+
+fn procfs_render_file(inode: usize, output: borrow [u8; 1024..])
+        -> usize !{unsafe} {
+    let pid: usize = procfs_inode_pid(inode);
+    let snapshot: ProcessDiagnosticSnapshot =
+        match scheduled_process_diagnostic_snapshot(pid) {
+            ProcessDiagnosticResult::Missing => { return 0; }
+            ProcessDiagnosticResult::Found(found) => { found }
+        };
+    if (procfs_inode_kind(inode) == ProcfsNodeKind::Cmdline) {
+        let mut length: usize = snapshot.command_line_length;
+        if (length > 512) { length = 512; }
+        let source: []u8 = snapshot.command_line as []u8;
+        let copied: usize = slice_copy(output, source);
+        return length;
+    }
+    let mut offset: usize = 0;
+    offset = procfs_put_usize(output, offset, snapshot.pid);
+    offset = procfs_put_text(output, offset, " (" as []u8);
+    offset = procfs_put_comm(output, offset, snapshot);
+    offset = procfs_put_text(output, offset, ") " as []u8);
+    offset = procfs_put_byte(output, offset, snapshot.state);
+    offset = procfs_put_byte(output, offset, 0x20);
+    offset = procfs_put_usize(output, offset, snapshot.ppid);
+    // Fields 5 through 13: pgrp, session, tty_nr, tpgid, flags and faults.
+    offset = procfs_put_text(output, offset,
+        " 0 0 0 0 0 0 0 0 0" as []u8);
+    // Fields 14 through 24: utime, stime, child times, priority, nice,
+    // thread count, itrealvalue, starttime, vsize and rss. Fields 25 through
+    // 39 are consumed (though mostly discarded) by Alpine's enabled
+    // FEATURE_TOP_SMP_PROCESS parser. Zero is an honest value until the
+    // scheduler and VM expose accounted counters.
+    offset = procfs_put_text(output, offset,
+        " 0 0 0 0 0 0 1 0 " as []u8);
+    offset = procfs_put_usize(output, offset, snapshot.start_time_ticks);
+    offset = procfs_put_byte(output, offset, 0x20);
+    offset = procfs_put_usize(output, offset,
+                              snapshot.resident_pages * 4096);
+    offset = procfs_put_byte(output, offset, 0x20);
+    offset = procfs_put_usize(output, offset, snapshot.resident_pages);
+    offset = procfs_put_text(output, offset,
+        " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n" as []u8);
+    return offset;
+}
+
+fn procfs_next_pid(after: usize) -> usize !{unsafe} {
+    return scheduled_process_diagnostic_next_pid(after);
+}
+
+fn procfs_pid_name(pid: usize, output: borrow [u8; 20..]) -> usize {
+    let mut reverse: [u8; 20];
+    let mut count: usize = 0;
+    let mut value: usize = pid;
+    if (value == 0) { output[0] = 0x30; return 1; }
+    for index: usize in 0..<20 {
+        if (value != 0) {
+            reverse[index] = 0x30 + ((value % 10) as u8);
+            count = count + 1;
+            value = value / 10;
+        }
+    }
+    let length: usize = count;
+    let mut at: usize = 0;
+    while (count != 0 && at < 20) {
+        count = count - 1;
+        if (at >= 0 && at < 20 && count >= 0 && count < 20) {
+            output[at] = reverse[count];
+        }
+        at = at + 1;
+    }
+    return length;
+}

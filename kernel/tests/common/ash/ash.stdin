@@ -3,5 +3,6 @@ x=; /bin/ls
 /bin/ls -a
 /bin/ls /bin
 /bin/ls /many
+ps
 echo repl-ok
 exit

@@ -50,8 +50,9 @@ without making `ps` fail, but doing so loses command-line diagnostics.
 
 BusyBox reads at most 1023 bytes and locates the last `)` before parsing the
 remaining whitespace-separated fields. The record must preserve Linux field
-positions through field 24 even when a selected output column needs only a
-subset:
+positions through field 39 even when a selected output column needs only a
+subset. Alpine enables `CONFIG_FEATURE_TOP_SMP_PROCESS`, so BusyBox scans the
+additional fields even when `ps` does not display its CPU column:
 
 | Field | Linux name | BusyBox use |
 | ---: | --- | --- |
@@ -71,6 +72,8 @@ subset:
 | 22 | starttime | `etime` |
 | 23 | vsize | `vsz`, converted from bytes to KiB |
 | 24 | rss | `rss`, converted from pages to KiB |
+| 25-38 | rsslim through exit_signal | Parsed and discarded |
+| 39 | processor | Last CPU value retained by the shared procps scanner |
 
 At least 11 selected conversions in BusyBox's parser must succeed; a malformed
 or shortened record causes that process to be skipped. Keeping Linux's field

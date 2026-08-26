@@ -17,16 +17,16 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 | 17 | getcwd | Implemented | this kernel has exactly one real directory (`/`); always returns it. Returns the real byte count written (matching the raw syscall's own contract, distinct from the POSIX library wrapper's buffer-pointer return) -- previously returned the buffer address instead, never caught because no scenario called it before the `sh -c` scenario did |
 | 24 | dup3 | Implemented | accepted-fd -> stdin/stdout aliasing only, matching the traced daemon child's own shape |
 | 49 | chdir | Implemented | accepts `/` and `.`, keeping the one real cwd at the ext2 root; other paths return `ENOENT` |
-| 56 | openat | Implemented | generic NUL-terminated absolute pathname lookup, plus relative lookup from an ext2 directory FD; opening a directory returns a directory FD |
+| 56 | openat | Implemented | generic NUL-terminated absolute pathname lookup, plus relative lookup from an ext2 directory FD; opening a directory returns a directory FD. The read-only `/proc`, `/proc/<pid>`, `/proc/<pid>/stat`, and `/proc/<pid>/cmdline` nodes are virtual and bypass ext2 lookup |
 | 57 | close | Implemented | |
-| 61 | getdents64 | Implemented | enumerates ext2 directory records from the direct-block directory limit into Linux `linux_dirent64` records, with 8-byte alignment, shared FD offsets across `dup`/`fork`, deleted-entry skipping, EOF as zero, and `EINVAL` for a buffer too small for the first record |
-| 63 | read | Implemented | connected-socket, ext2-file, and UART-fallback paths, all through the typed user-memory boundary (`kernel/mm/user_memory.tkb`); an empty UART RX path blocks and wakes on received input, as exercised by the foreground interactive ash REPL |
+| 61 | getdents64 | Implemented | enumerates ext2 directory records from the direct-block directory limit and PID-ordered virtual `/proc` entries into Linux `linux_dirent64` records, with 8-byte alignment, shared FD offsets across `dup`/`fork`, EOF as zero, and `EINVAL` for a buffer too small for the first record |
+| 63 | read | Implemented | connected-socket, ext2-file, bounded procfs-file, and UART-fallback paths, all through the typed user-memory boundary (`kernel/mm/user_memory.tkb`); an empty UART RX path blocks and wakes on received input, as exercised by the foreground interactive ash REPL |
 | 64 | write | Implemented | same three paths as `read`, plus the inetd-response path |
 | 65 | readv | Partial | fd 3 (ext2 file) only, via a standalone segment helper not shared with `read`(64)'s TCP/inetd branches. Each iovec entry validated and copied individually through the user-memory boundary (`struct packed Iovec`, `IOV_MAX`-bounded, `checked_mul_usize`/`checked_add_usize`-guarded array-length and running-total arithmetic). Connected-TCP and inetd-mode fds are not supported |
 | 66 | writev | Partial | fd 1/2 (UART) only -- same scoping and same fd-kind gap as `readv` above |
 | 71 | sendfile | Implemented | fd 3 (ext2 file) -> fd 1/2 (UART) only, offset must be 0 |
 | 73 | ppoll | Partial | real pollfd array validation (`struct packed Pollfd`, `POLL_MAX`-bounded) and real per-fd readiness (UART RX pending, connected-TCP buffered data). Really blocks and wakes on UART RX for exactly one shape: `nfds == 1`, fd 0, `POLLIN` requested, nothing ready, NULL timeout and NULL sigmask -- the shape BusyBox ash's `read` builtin uses. Every other shape returns current readiness immediately, so a non-NULL timeout is never armed and no multi-fd wait exists |
-| 79 | newfstatat | Implemented | generic ext2 pathname lookup, including relative lookup from a directory FD, plus fixed asm-generic AArch64 `stat` fields for regular files, directories, and symlinks |
+| 79 | newfstatat | Implemented | generic ext2 pathname lookup, including relative lookup from a directory FD, plus fixed asm-generic AArch64 `stat` fields for ext2 and virtual procfs files/directories. Proc process-directory ownership is root/root, matching the kernel's current always-root identity model |
 | 93/94 | exit/exit_group | Implemented | real child-vs-parent teardown via the process/fd/VM-clone machinery |
 | 96 | set_tid_address | Implemented | returns the real current pid (single-threaded-per-process model) |
 | 103 | setitimer | Partial | previous timer is honestly zeroed; no real itimer is armed (this kernel's bounded single-request integration scope never needs `SIGALRM` to actually fire) |
@@ -38,6 +38,7 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 | 173 | getppid | Implemented | always returns 0; a real parent link exists (`scheduled_process_parent`) but nothing traced needs a real ppid, so it is not wired up |
 | 174-177 | getuid/geteuid/getgid/getegid | Implemented | return 0 (always-root model) |
 | 178 | gettid | Implemented | returns the real current pid |
+| 179 | sysinfo | Partial | writes a zero-filled Linux aarch64 `struct sysinfo` with real generic-counter uptime; other accounting fields remain zero because the pinned BusyBox `ps` consumer uses only uptime |
 | 198 | socket | Implemented | `AF_INET`/`AF_INET6`, `SOCK_STREAM` only |
 | 200 | bind | Implemented | IPv4/IPv6 sockaddr validated through the user-memory boundary |
 | 201 | listen | Implemented | |
