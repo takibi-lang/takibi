@@ -15,6 +15,78 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-26: The Errno Was A Guess Until It Was Measured
+
+`execve` fell back to the static BusyBox image for any pathname it could not
+find in ext2. That was reported as a leftover rough edge; the first question
+was how much of the tree depended on it, and the answer came from a probe
+rather than from reading call sites. Logging every `execve` pathname whose
+lookup missed, across one whole boot -- init.sh, every applet, `user_payload`,
+HTTPd, the parent-exec handoff, the persistent shell, the interactive demo --
+produced exactly one line:
+
+```
+DBG execve UNKNOWN path=/bin/busybox
+```
+
+and zero relative-path execves. BusyBox re-executes itself through
+`/bin/busybox`, and this rootfs only ever had `busybox.static` and
+`busybox-extras`. So the fallback was carrying one missing hard link, and had
+been doing it invisibly: the ENOEXEC shell-script fallback pinned in the ash
+fixture a few commits earlier worked *because of it*. Adding the link is the
+honest fix, and it makes the fallback unnecessary rather than merely unused.
+
+**Then the errnos.** The maintainer's standing preference is that differences
+from Linux get resolved as they are found, so each refusal was measured on a
+real Linux with a `fork` + `execve` probe per case rather than reasoned about:
+
+| case | Linux |
+| --- | --- |
+| absent path | `ENOENT` |
+| directory | `EACCES` |
+| character device | `EACCES` |
+| regular, x-bit, not ELF/script | `ENOEXEC` |
+| regular, NO x-bit, not ELF/script | `EACCES` |
+| empty file / 2-byte file, x-bit | `ENOEXEC` |
+| `#!` naming a missing interpreter | `ENOENT` |
+| `#!` with a relative interpreter | `ENOENT` |
+| `#!` whose interpreter is a directory | `EACCES` |
+
+Two of these would have been guessed wrong. A directory is `EACCES`, not
+`ENOEXEC` -- the format is never looked at, so the answer is about the kind of
+object, not its contents. And a regular file with no execute bit is `EACCES`
+before a single header byte is read; `CAP_DAC_OVERRIDE` does not bypass exec
+permission, which is what makes that the right answer for a kernel whose
+processes are all effectively uid 0.
+
+**Three parsing details came out of the same probes.** A shebang line with no
+trailing newline is a *working* script on Linux, because `bprm_buf` is
+zero-padded and the scan ends at `'\n'` or NUL -- this kernel scanned only the
+bytes the file supplied and refused it. A CRLF script is `ENOENT` on Linux,
+because the interpreter is literally named `/bin/sh\r`; this kernel was
+treating CR as a terminator and was therefore more forgiving than the platform
+it is imitating, which is the wrong direction to differ in. And the window is
+256 bytes now rather than 128, matching `BINPRM_BUF_SIZE`, so the boundary
+between "resolved" and "too long to be a directive" falls in the same place.
+
+**What is left is one difference, recorded rather than fixed.** Linux allows
+five nested script levels and reports `ELOOP` on the sixth; this kernel
+supports one. The nested argv shape was measured too --
+`/bin/echo LEAFARG a0.sh ONEARG a1.sh a2.sh USERARG` for a three-deep chain --
+because the awkward part of implementing it is that the levels have to be
+collected before anything is emitted, which the current forward append cannot
+do. It is now a filed issue carrying those numbers, and the limitations header
+names the limit instead of leaving it to be rediscovered.
+
+The ash fixture pins all four answers as BusyBox ash renders them
+(`Permission denied` for a mode-0644 file and for a directory, the script
+fallback for an executable non-program, `not found` for a script whose
+interpreter is missing), so what the tree records is the exchange a user sees
+rather than an internal code. Verified on QEMU (39 views, ash lane, oops,
+lifecycle-gap, alloc-rollback) and real RPi5 hardware (39 views, one boot).
+
+---
+
 ### 2026-08-26: The Scheduler Could Not Step Over The Process Next To It
 
 Dropping the `exec` from `httpd-serve.sh` -- so that the script waits on the
