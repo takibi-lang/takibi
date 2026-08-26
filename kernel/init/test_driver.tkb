@@ -232,6 +232,16 @@ fn kernel_process_child_exec_map_result(
             kernel_syscall_process_configure_current(heap_start, heap_limit);
             process_image_activate_root(child_root);
             kernel_process_child_exec_mark();
+            // An exec commits here too, not only on the dynamic image path
+            // below. The checkpoint is scoped to the one tracked child pid,
+            // so what it means is unchanged -- but the tracked child's own
+            // execve reaches a static image whenever the command it was
+            // given is a `#!` script, and the interpreter, not the daemon,
+            // is what this process becomes.
+            if (kernel_syscall_persistent_shell_active()) {
+                kernel_syscall_persistent_shell_checkpoint_exec_commit(
+                    kernel_process_current_pid());
+            }
             kernel_syscall_exec_clear();
             return 1;
         }

@@ -81,12 +81,17 @@ The rootfs keeps executable files under `/bin`: Alpine's original
 `busybox.static` and `busybox-extras` names identify the two real binaries;
 `sh`, `cat`, `echo`, `ls`, `od`, and `uname` are hard links to the static
 binary, while `httpd` is a hard link to BusyBox Extras. The independent
-Takibi test program is `/bin/user_payload`. Boot policy scripts remain under
-`/etc` (`/etc/init.sh` and `/etc/httpd-demo.sh`).
+Takibi test program is `/bin/user_payload`. Shell scripts live under `/etc`:
+the boot policy (`/etc/init.sh`, `/etc/httpd-demo.sh`), the browser demo's
+one-command wrapper (`/etc/httpd-serve.sh`), and two fixtures that pin
+`#!` argv construction (`/etc/script-shebang.sh`,
+`/etc/script-interpreter-argument.sh`). Each is started by pathname: a
+script's first line names its interpreter, and `execve` resolves it.
 
 The current HTTPd milestone runs the unmodified pinned BusyBox Extras binary
 through its `/bin/httpd` hard link as a persistent foreground daemon:
-`httpd -f -p 8080 -h /`.
+`httpd -f -p 8080 -h /`, reached by running `/etc/httpd-serve.sh`, which
+carries that command line so no prompt has to.
 HTTPd creates its own IPv6 wildcard listener, accepts each connection, and
 uses the observed `clone(SIGCHLD)` fork shape. Each child receives a private
 copy-on-write view of the parent's initial 331-page VM plus a distinct kernel
@@ -159,12 +164,20 @@ the QEMU process or UART socket exists.
 
 ### Publish a page from interactive ash
 
-Both shell targets provide the same BusyBox HTTPd command. Wait for the
+Both shell targets provide the same BusyBox HTTPd command, as a script in
+the rootfs rather than as something to retype. Wait for the
 `interactive shell: uart blocked` marker and its `/ #` prompt, then run:
 
 ```sh
-httpd -f -p 8080 -h / &
+/etc/httpd-serve.sh &
 ```
+
+The script's `#!/bin/sh` line is what makes that work: `execve` reads it,
+runs the interpreter it names, and hands it this pathname. The trailing `&`
+is still needed -- `httpd -f` stays in the foreground for the life of the
+daemon, and the script `exec`s it so the daemon ends up a direct child of
+the ash that started it. Its command line (port 8080, document root `/`)
+lives in `kernel/tests/ext2/httpd-serve.sh`.
 
 For QEMU, start the shell and open the forwarded loopback URL in a browser:
 
