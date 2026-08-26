@@ -129,6 +129,17 @@ class TimingMiniterm(miniterm.Miniterm):
         self.pending = b""
         self.reported = False
 
+    def handle_menu_key(self, key):
+        # A debugger stop needs one unambiguous pulse, not miniterm's generic
+        # indefinite BREAK toggle (Ctrl-T Ctrl-B), whose release timing is an
+        # easy operator error. Debug Probe firmware implements CDC SEND_BREAK
+        # durations and drives its UART TX low for the requested interval.
+        if key in ("b", "B"):
+            print("--- sending 250 ms BREAK for Takibi DDB ---", file=sys.stderr)
+            self.serial.send_break(0.25)
+            return
+        super().handle_menu_key(key)
+
     def reader(self):
         try:
             while self.alive and self._reader_alive:
@@ -212,6 +223,12 @@ def main() -> int:
     terminal.set_rx_encoding("UTF-8")
     terminal.set_tx_encoding("UTF-8")
     terminal.exit_character = chr(0x1D)
+    print(
+        f"{LABEL} controls: Ctrl-] exits; Ctrl-T then b sends a 250 ms "
+        "serial BREAK for DDB",
+        file=sys.stderr,
+        flush=True,
+    )
 
     def stop_terminal(_signum, _frame):
         terminal.stop()

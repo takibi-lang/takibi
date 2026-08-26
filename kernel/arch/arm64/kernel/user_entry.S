@@ -288,6 +288,20 @@ kernel_syscall_fail_stop:
     mov     x0, #8
     b       el1_exception_evidence_from_frame
 
+    /* Takibi-owned deliberate debugger stop. The generated Current-EL sync
+     * entry saves/restores ExceptionFrame; this helper only emits BRK. */
+    .global kernel_ddb_breakpoint
+kernel_ddb_breakpoint:
+    brk     #0x544b
+    ret
+
+    /* Non-resumable tail for every other generated Current-EL sync frame. */
+    .global kernel_current_sync_fail_stop
+kernel_current_sync_fail_stop:
+    mov     x1, x0
+    mov     x0, #0
+    b       el1_exception_evidence_from_frame
+
     .global crash_snapshot_read_sp_el0
 crash_snapshot_read_sp_el0:
     mrs     x0, sp_el0

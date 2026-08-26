@@ -81,6 +81,17 @@ exception_entry el1_current_irq_entry {
     dispatch_stack: irq_stack_top;
 }
 
+// Current-EL synchronous exceptions normally remain fatal. The dispatcher
+// recognizes only Takibi's reserved deliberate BRK immediate as resumable.
+exception_entry el1_current_sync_entry {
+    frame: ExceptionFrame;
+    dispatch: kernel_ddb_sync_dispatch;
+    stack_guard_shift: KERNEL_STACK_SHIFT;
+    stack_guard_stack: overflow_stack_top;
+    stack_guard_handler: kernel_stack_overflow_fail_stop;
+    dispatch_stack: irq_stack_top;
+}
+
 // Lower-EL AArch64 IRQ entry: the same frame, no fixture hook.
 exception_entry el0_irq_entry {
     frame: ExceptionFrame;

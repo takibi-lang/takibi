@@ -20,6 +20,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--serial-port", type=int, required=True)
     parser.add_argument("--qmp-port", type=int, required=True)
+    parser.add_argument("--break-source", choices=("uart", "software"), default="uart")
     parser.add_argument("--log", required=True)
     parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
@@ -28,7 +29,7 @@ def main() -> int:
     serial = connect(args.serial_port, deadline)
     serial.settimeout(0.25)
     received = bytearray()
-    break_sent = False
+    break_sent = args.break_source == "software"
     prompt_count = 0
     commands = [b"oops\n", b"regs\n", b"trace\n", b"continue\n"]
 
@@ -45,6 +46,9 @@ def main() -> int:
             log.flush()
 
             if not break_sent and b"distro stack: argc=3 argv auxv ready\n" in received:
+                if args.break_source == "software":
+                    break_sent = True
+                    continue
                 with connect(args.qmp_port, deadline) as qmp:
                     qmp_file = qmp.makefile("rwb", buffering=0)
                     greeting = json.loads(qmp_file.readline())

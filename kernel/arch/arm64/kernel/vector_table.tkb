@@ -27,7 +27,7 @@ vector_table {
     1 => el1_exception_evidence;
     2 => el1_exception_evidence;
     3 => el1_exception_evidence;
-    4 => el1_exception_evidence;
+    4 => el1_current_sync_entry;
     5 => el1_current_irq_entry;
     6 => el1_exception_evidence;
     7 => el1_exception_evidence;

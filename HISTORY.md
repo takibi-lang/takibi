@@ -180,6 +180,27 @@ models a chardev BREAK as an RX FIFO word carrying DR.BE, while physical PL011
 also exposes the enabled BE interrupt status. The QEMU lane uses QMP's
 `chardev-send-break`, drives every DDB command through the same UART socket,
 and proves that `continue` resumes the interrupted boot.
+
+A second entry path now reserves AArch64 `brk #0x544b` for a deliberate
+Takibi debugger stop. Current-EL synchronous slots use another
+compiler-generated `ExceptionFrame`; the dispatcher accepts only that exact
+EC/immediate pair, runs the same interrupt-safe DDB, advances its saved ELR by
+four, and returns through generated restore code. Every other synchronous
+exception branches to an explicit `noreturn` fatal tail. The effect checker
+rejected the first version because its interrupt dispatcher could reach the
+blocking crash path; the dedicated terminal boundary fixed the model without
+granting DDB a general effect escape. QEMU tests both real UART BREAK and the
+software BRK before claiming resumability.
+
+The first interactive-console instruction reused miniterm's indefinite BREAK
+toggle (Ctrl-T, Ctrl-B), but real-hardware use showed that it did not provide
+a dependable DDB entry gesture. The Takibi console now binds Ctrl-T followed
+by lowercase `b` to one 250 ms `send_break` operation. Raspberry Pi Debug
+Probe firmware implements the USB CDC timed-BREAK request and releases its
+UART TX automatically, eliminating both the second toggle and the risk of
+continuing while BREAK remains asserted. The startup banner and kernel README
+state the sequence; Ctrl-C remains ordinary terminal input.
+
 ---
 
 ### 2026-08-26: Shebang Scripts Through execve (#287), and the Second exec That Fail-Stopped the Kernel

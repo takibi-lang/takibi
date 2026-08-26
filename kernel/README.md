@@ -164,6 +164,16 @@ be opened from the host browser. Both use pyserial's
 python3-serial`. Press Ctrl-] to leave either console.
 Exiting this way also restores the host terminal settings.
 
+To stop a live RPi5 kernel in DDB, press Ctrl-T and then the ordinary lowercase
+`b` key in `make kernelsh-rpi5`. The host console sends one 250 ms serial BREAK;
+neither key is forwarded to ash, and no second key sequence is needed to
+release it. The kernel prints `ddb>` and accepts `oops`, `regs`, `trace`,
+`help`, and `continue`. Use `continue` to return through the saved exception
+frame. Ctrl-C remains an ordinary terminal byte and is not reserved by the
+debugger. The console prints this key reminder when it starts. Miniterm's
+generic Ctrl-T, Ctrl-B indefinite BREAK toggle is intentionally not the Takibi
+DDB binding.
+
 The QEMU shell also reports the elapsed time from QEMU launch to the kernel's
 explicit `interactive shell: uart blocked` readiness marker. This is the
 point at which ash is waiting for input, rather than merely the point at which
@@ -439,7 +449,11 @@ path. The terminal crash console above intentionally has no `continue`.
 
 `kernelcheck-ddb-qemu` asks QEMU to deliver a real chardev BREAK to the PL011,
 drives all inspection commands over its UART socket, and verifies that boot
-continues afterward. The RPi5 implementation uses the same PL011 DR.BE/BEIM
+continues afterward. A second lane executes Takibi's reserved deliberate
+`brk #0x544b`, enters through a compiler-generated Current-EL synchronous
+`ExceptionFrame`, advances ELR past that instruction, and proves the same
+resume behavior. Other Current-EL synchronous exceptions remain fatal. The
+RPi5 implementation uses the same PL011 DR.BE/BEIM
 path and is build-checked; physical BREAK/resume remains a hardware-operated
 check rather than something the QEMU lane can establish.
 

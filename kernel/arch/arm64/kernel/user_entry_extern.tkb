@@ -11,6 +11,8 @@ extern fn el0_context_resume(frame_sp: usize) !{noreturn};
 // architectural state against the saved context instead of reporting only
 // one half of a context-restore failure.
 extern fn kernel_syscall_fail_stop(frame_sp: usize) !{noreturn};
+extern fn kernel_ddb_breakpoint();
+extern fn kernel_current_sync_fail_stop(frame_sp: usize) !{noreturn};
 
 // The fail-stop snapshot deliberately keeps these architectural reads in the
 // kernel's existing AArch64 assembly boundary.  They are not general language

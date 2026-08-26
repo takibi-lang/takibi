@@ -73,6 +73,11 @@ struct DdbSnapshot {
 }
 
 private let mut ddb_snapshot: DdbSnapshot;
+let mut kernel_ddb_breakpoint_test_enabled: bool;
+
+fn kernel_ddb_breakpoint_test_checkpoint() {
+    if (kernel_ddb_breakpoint_test_enabled) { kernel_ddb_breakpoint(); }
+}
 
 private fn ddb_puts(text: *u8) !{unsafe} {
     while (*text != 0) {
@@ -260,6 +265,19 @@ fn kernel_ddb_enter(frame_sp: usize) !{interrupt, unsafe} {
         }
         length = 0;
     }
+}
+
+// EC=0x3c is AArch64 BRK. Only Takibi's reserved immediate is resumable;
+// every other Current-EL synchronous exception retains fail-stop semantics.
+fn kernel_ddb_sync_dispatch(frame_sp: usize) -> usize !{interrupt, unsafe} {
+    let esr: usize = mrs_esr_el1();
+    if (((esr >> 26) & 0x3F) == 0x3C && (esr & 0xFFFF) == 0x544B) {
+        kernel_ddb_enter(frame_sp);
+        let frame: *ExceptionFrame = unsafe { frame_sp as *ExceptionFrame };
+        frame.elr_el1 = frame.elr_el1 + 4;
+        return frame_sp;
+    }
+    kernel_current_sync_fail_stop(frame_sp);
 }
 
 fn crash_snapshot_put_hex(value: usize) {

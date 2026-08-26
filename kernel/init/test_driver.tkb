@@ -890,6 +890,7 @@ irq_uart_rx_unmask();
                         USER_TEXT_VA +
                         USER_SPACE_PAGE_COUNT * PAGE_SIZE - 512) {
                     kernel_boot_log("distro stack: argc=3 argv auxv ready\n");
+                    kernel_ddb_breakpoint_test_checkpoint();
                 }
                 let (script_heap_start, script_heap_limit) =
                     process_image_heap_range(script_pages);
