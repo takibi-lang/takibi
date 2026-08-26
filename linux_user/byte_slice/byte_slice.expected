@@ -1,0 +1,1 @@
+equal=yes unequal=no empty=yes prefix=yes whole=yes long=no empty-prefix=yes split-middle=4:1 split-zero=0:4 split-last=4:0 split-absent=absent embedded-nul=yes nul-split=1:1

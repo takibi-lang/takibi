@@ -1,0 +1,76 @@
+// Allocation-free byte-slice matching and delimiter handling.
+//
+// This deliberately stays below a String abstraction: kernel pathname and
+// protocol parsers already operate on bounded []u8 views, may contain NUL,
+// and need byte-exact semantics. slice_eq remains the exact-equality
+// primitive; this file supplies the two missing compositions that callers
+// otherwise hand-code.
+//
+// Current limitations (2026-08-26). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none.
+// - Matching is byte-exact. There is no Unicode, case folding, pathname
+//   normalization, NUL termination, or locale-dependent behavior.
+// - byte_slice_split_first accepts a retaining slice because its returned
+//   views escape through a variant. The ownership checker therefore rejects
+//   stack-derived input; use byte_slice_find_first when only an offset is
+//   needed from a borrowed/stack slice.
+
+struct ByteSliceSplit {
+    before: []u8;
+    after: []u8;
+}
+
+must_use variant ByteSliceSplitResult {
+    Absent;
+    Found(ByteSliceSplit);
+}
+
+must_use variant ByteSliceFindResult {
+    Absent;
+    Found(usize);
+}
+
+fn byte_slice_starts_with(value: borrow []u8, prefix: borrow []u8) -> bool {
+    if (prefix.len > value.len) { return false; }
+    let mut position: usize = 0;
+    for byte in prefix {
+        if (position < value.len) {
+            if (value[position] != byte) { return false; }
+        } else {
+            return false;
+        }
+        position = position + 1;
+    }
+    return true;
+}
+
+fn byte_slice_find_first(value: borrow []u8, delimiter: u8)
+        -> ByteSliceFindResult {
+    for position: usize in 0..<value.len {
+        if (value[position] == delimiter) {
+            return ByteSliceFindResult::Found(position);
+        }
+    }
+    return ByteSliceFindResult::Absent;
+}
+
+fn byte_slice_split_first(value: []u8, delimiter: u8)
+        -> ByteSliceSplitResult {
+    match byte_slice_find_first(value, delimiter) {
+        ByteSliceFindResult::Absent => {
+            return ByteSliceSplitResult::Absent;
+        }
+        ByteSliceFindResult::Found(position) => {
+            if (position < value.len) {
+                let after_start: usize = position + 1;
+                if (after_start <= value.len) {
+                    let mut split: ByteSliceSplit = {
+                        value[0..<position], value[after_start..<value.len]
+                    };
+                    return ByteSliceSplitResult::Found(split);
+                }
+            }
+        }
+    }
+    return ByteSliceSplitResult::Absent;
+}

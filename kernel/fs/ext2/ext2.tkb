@@ -1,4 +1,5 @@
 use "kernel/drivers/block/memory.tkb";
+use "kernel/lib/byte_slice.tkb";
 
 const EXT2_SUPERBLOCK_BLOCK: usize = 1;
 const EXT2_MAGIC: u16 = 0xEF53;
@@ -331,10 +332,10 @@ fn ext2_lookup_path_from(mount: Ext2Mount, start_inode: usize, name: []u8)
         }
         let name_tail = name[component_start..<name.len];
         let mut component_length: usize = name_tail.len;
-        for position: usize in 0..<name_tail.len {
-            if (name_tail[position] == 0x2F) {
+        match byte_slice_find_first(name_tail, 0x2F) {
+            ByteSliceFindResult::Absent => {}
+            ByteSliceFindResult::Found(position) => {
                 component_length = position;
-                break;
             }
         }
         if (component_length == 0) {
