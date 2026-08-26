@@ -438,9 +438,9 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $@.tmp:/icon.png
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $@.tmp:/etc/init.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/httpd-demo.sh $@.tmp:/etc/httpd-demo.sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/httpd-serve.sh $@.tmp:/etc/httpd-serve.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/httpd-serve.sh $@.tmp:/bin/httpd-serve.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $@.tmp:/etc/script-shebang.sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $@.tmp:/etc/script-interpreter-argument.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $@.tmp:/bin/script-interpreter-argument.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $@.tmp:/large.txt
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSYBOX_STATIC) $@.tmp:/bin/busybox.static
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSYBOX_EXTRAS) $@.tmp:/bin/busybox-extras
@@ -458,9 +458,9 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'set_inode_field /lib/ld-musl-aarch64.so.1 mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/init.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/httpd-demo.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /etc/httpd-serve.sh mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/httpd-serve.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/script-shebang.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /etc/script-interpreter-argument.sh mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/script-interpreter-argument.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/user_payload mode 0100755' $@.tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 debugfs -w -R 'symlink /latest hello.txt' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox.static /bin/sh' $@.tmp >/dev/null 2>&1

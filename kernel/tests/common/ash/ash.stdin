@@ -5,7 +5,7 @@ x=; /bin/ls
 /bin/ls /many
 ps
 /etc/script-shebang.sh one two
-/etc/script-interpreter-argument.sh three
+script-interpreter-argument.sh three
 /hello.txt
 /bin/sh -c 'exec /bin/echo re-exec-ok'
 echo repl-ok

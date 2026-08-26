@@ -81,17 +81,18 @@ The rootfs keeps executable files under `/bin`: Alpine's original
 `busybox.static` and `busybox-extras` names identify the two real binaries;
 `sh`, `cat`, `echo`, `ls`, `od`, and `uname` are hard links to the static
 binary, while `httpd` is a hard link to BusyBox Extras. The independent
-Takibi test program is `/bin/user_payload`. Shell scripts live under `/etc`:
-the boot policy (`/etc/init.sh`, `/etc/httpd-demo.sh`), the browser demo's
-one-command wrapper (`/etc/httpd-serve.sh`), and two fixtures that pin
-`#!` argv construction (`/etc/script-shebang.sh`,
-`/etc/script-interpreter-argument.sh`). Each is started by pathname: a
-script's first line names its interpreter, and `execve` resolves it.
+Takibi test program is `/bin/user_payload`. Shell scripts are ordinary
+executables here: a script's first line names its interpreter and `execve`
+resolves it, so `/bin` also holds `httpd-serve.sh` (the browser demo as one
+command) and `script-interpreter-argument.sh` (a fixture pinning `#!` argv
+construction), both reachable by bare name through ash's `PATH` search.
+`/etc` keeps the boot policy that is never typed: `/etc/init.sh`,
+`/etc/httpd-demo.sh`, and `/etc/script-shebang.sh`.
 
 The current HTTPd milestone runs the unmodified pinned BusyBox Extras binary
 through its `/bin/httpd` hard link as a persistent foreground daemon:
-`httpd -f -p 8080 -h /`, reached by running `/etc/httpd-serve.sh`, which
-carries that command line so no prompt has to.
+`httpd -f -p 8080 -h /`, reached by running `httpd-serve.sh`, which carries
+that command line so no prompt has to.
 HTTPd creates its own IPv6 wildcard listener, accepts each connection, and
 uses the observed `clone(SIGCHLD)` fork shape. Each child receives a private
 copy-on-write view of the parent's initial 331-page VM plus a distinct kernel
@@ -169,15 +170,14 @@ the rootfs rather than as something to retype. Wait for the
 `interactive shell: uart blocked` marker and its `/ #` prompt, then run:
 
 ```sh
-/etc/httpd-serve.sh &
+httpd-serve.sh &
 ```
 
-The script's `#!/bin/sh` line is what makes that work: `execve` reads it,
-runs the interpreter it names, and hands it this pathname. The trailing `&`
-is still needed -- `httpd -f` stays in the foreground for the life of the
-daemon, and the script `exec`s it so the daemon ends up a direct child of
-the ash that started it. Its command line (port 8080, document root `/`)
-lives in `kernel/tests/ext2/httpd-serve.sh`.
+No pathname and no interpreter: the script lives in `/bin`, so ash's `PATH`
+search finds it, and its `#!/bin/sh` line is what `execve` resolves to decide
+what runs it. The trailing `&` is still needed -- `httpd -f` stays in the
+foreground for the life of the daemon. Its command line (port 8080, document
+root `/`) lives in `kernel/tests/ext2/httpd-serve.sh`.
 
 For QEMU, start the shell and open the forwarded loopback URL in a browser:
 
@@ -590,7 +590,13 @@ run, not a specification.
   `WAIT_ANY`), delivering the real reaped pid and exit status, tracked
   per-slot so any live process (not just the tree root) can wait for its
   own child; a process may have at most one live child at a time, so
-  concurrent multi-child wait/reap remains out of scope. UART `read(2)`
+  concurrent multi-child wait/reap remains out of scope. That one-child rule
+  makes the live process tree a chain, and scheduling is a round-robin over
+  it: a process's successor is its child, or the chain's root when it has
+  none, and the rotation skips whoever is not runnable. A process therefore
+  keeps its turn even when the process next to it is blocked -- which is what
+  a shell script that starts a background daemon needs, since it parks a
+  `wait4` between the interactive shell and the daemon. UART `read(2)`
   blocks and wakes on received input, sufficient for the foreground
   interactive BusyBox ash REPL; there is no controlling-TTY job control.
 - **Signals.** Signal state is recorded honestly, but no signal is ever

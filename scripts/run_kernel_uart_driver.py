@@ -165,7 +165,7 @@ def main() -> int:
                            "httpd-shell-ready" for line in text.splitlines()):
                         write_uart_line(
                             connection,
-                            b"/etc/httpd-serve.sh &")
+                            b"httpd-serve.sh &")
                         print("[kernel/uart] sent interactive HTTPd command",
                               flush=True)
                         httpd_sent = True
