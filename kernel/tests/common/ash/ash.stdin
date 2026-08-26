@@ -4,5 +4,8 @@ x=; /bin/ls
 /bin/ls /bin
 /bin/ls /many
 ps
+/etc/script-shebang.sh one two
+/etc/script-interpreter-argument.sh three
+/hello.txt
 echo repl-ok
 exit

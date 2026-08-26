@@ -10,7 +10,7 @@ use "kernel/kernel/fd_table.tkb";
 use "kernel/kernel/syscall_test_evidence.tkb";
 use "kernel/kernel/syscall_test_lifecycle.tkb";
 
-// Current limitations (2026-08-13, issue #295). Keep this list current as
+// Current limitations (2026-08-26). Keep this list current as
 // call sites change; a limitation that goes stale here is worse than
 // none. This file is the Linux syscall dispatch/policy layer, so its own
 // scope is inherently broad -- `kernel/README.md`'s "Current limits"
@@ -30,6 +30,12 @@ use "kernel/kernel/syscall_test_lifecycle.tkb";
 //   match its pool's documented contract exactly (`LINUX_EMFILE` for
 //   per-process fd exhaustion, `LINUX_ENFILE` for the global shared-
 //   object pool, etc.).
+// - execve's `#!` dispatch is one level deep and one argument wide: the
+//   interpreter a script names must itself be an executable image, not
+//   another script, and only the first whitespace-separated word after
+//   the interpreter is passed on, exactly as Linux does. The directive
+//   must also fit, newline included, in the bounded first-line staging
+//   window; a longer first line is refused rather than truncated.
 //
 const AARCH64_NR_WRITE: usize = 64;
 const AARCH64_NR_READV: usize = 65;
@@ -77,6 +83,12 @@ const LINUX_ENFILE: usize = 0xFFFFFFFFFFFFFFE9;
 // limit. Linux's own expand_files() returns ENOMEM for it.
 const LINUX_ENOMEM: usize = 0xFFFFFFFFFFFFFFF4;
 const LINUX_ESRCH: usize = 0xFFFFFFFFFFFFFFFD;
+// execve(2) reached a regular file that carries neither an ELF header nor a
+// usable `#!` interpreter line. Real Linux reports this so a shell can decide
+// what to do with a file it asked the kernel to execute and the kernel
+// declined; guessing an executable format on its behalf is what this errno
+// exists to avoid.
+const LINUX_ENOEXEC: usize = 0xFFFFFFFFFFFFFFF8;
 // RLIMIT_NOFILE, and Linux's RLIM64_INFINITY.
 const LINUX_RLIMIT_NOFILE: usize = 7;
 // Linux's RLIM_NLIMITS (include/uapi/asm-generic/resource.h): the number of
@@ -227,6 +239,14 @@ private let mut syscall_exec_pending: bool;
 private let mut syscall_exec_argc: usize;
 private let mut syscall_exec_argv: [u8; 512];
 private let mut syscall_exec_path: [u8; 256];
+// The first line of an execve(2) target, read before any image is chosen.
+// Bounded on purpose: this is the whole window in which a `#!` interpreter
+// directive is allowed to live, and Linux applies the same kind of limit
+// (BINPRM_BUF_SIZE) for the same reason -- the kernel must decide the
+// executable format from a fixed-size read, not from a file-length-dependent
+// scan.
+const SYSCALL_SCRIPT_LINE_MAX: usize = 128;
+private let mut syscall_script_line: [u8; SYSCALL_SCRIPT_LINE_MAX];
 
 must_use variant SyscallPathResult { Fault; Invalid; Name([]u8); }
 
@@ -268,6 +288,267 @@ fn kernel_syscall_exec_path_matches(name: []u8) -> bool !{unsafe} {
         index = index + 1;
     }
     return true;
+}
+
+// A `#!` script is executed by naming an interpreter, so the image execve(2)
+// finally loads is not the file the caller named. Both facts are staged here
+// before any image is chosen: `argc`/`length` describe the replacement argv
+// prefix already written into syscall_exec_argv.
+struct SyscallScriptPrefix {
+    argc: usize;
+    length: usize;
+}
+
+must_use variant SyscallExecFormatResult {
+    // The target is not a readable regular file in this filesystem. The
+    // caller keeps whatever image-selection path it already had; deciding a
+    // format needs a file to read, and there is none.
+    Unknown;
+    Executable;
+    NotExecutable;
+    Invalid;
+    Script(SyscallScriptPrefix);
+}
+
+must_use variant SyscallArgvAppendResult { Full; Appended(usize); }
+
+// Append one NUL-terminated entry to the pending execve argv buffer and
+// return the offset the next entry starts at.
+private fn syscall_exec_argv_append(offset: usize, source: []u8)
+        -> SyscallArgvAppendResult {
+    let argv_view: []u8 = syscall_exec_argv as []u8;
+    if (offset > argv_view.len) { return SyscallArgvAppendResult::Full; }
+    let tail = argv_view[offset..<argv_view.len];
+    let length: usize = source.len;
+    if (length > tail.len) { return SyscallArgvAppendResult::Full; }
+    let destination = tail[0..<length];
+    if (slice_copy(destination, source) != length) {
+        return SyscallArgvAppendResult::Full;
+    }
+    if (length < tail.len) {
+        tail[length] = 0;
+    } else {
+        return SyscallArgvAppendResult::Full;
+    }
+    return SyscallArgvAppendResult::Appended(offset + length + 1);
+}
+
+// The same append, for a byte range of the staged `#!` line. It walks the
+// staging array's own static size rather than subslicing it, so the range the
+// directive parser produced needs no relational proof between its two ends:
+// every index is bounded by the array, and the range is a filter over that
+// walk instead of a slice construction.
+private fn syscall_exec_argv_append_line(offset: usize, from: usize,
+                                         to: usize)
+        -> SyscallArgvAppendResult {
+    let argv_view: []u8 = syscall_exec_argv as []u8;
+    let mut cursor: usize = offset;
+    for position: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
+        if (position >= from && position < to) {
+            let value: u8 = syscall_script_line[position];
+            if (cursor < argv_view.len) {
+                argv_view[cursor] = value;
+            } else {
+                return SyscallArgvAppendResult::Full;
+            }
+            cursor = cursor + 1;
+        }
+    }
+    if (cursor < argv_view.len) {
+        argv_view[cursor] = 0;
+    } else {
+        return SyscallArgvAppendResult::Full;
+    }
+    return SyscallArgvAppendResult::Appended(cursor + 1);
+}
+
+// Parse the `#!` directive already staged in syscall_script_line and build
+// the replacement argv: the interpreter becomes argv[0], its single optional
+// argument follows, and the pathname execve(2) was called with takes the
+// place of the caller's own argv[0]. That is the argv shape Linux's script
+// binfmt produces, and the reason the pathname is used rather than argv[0] is
+// that the interpreter has to be able to open the script it was given.
+// syscall_exec_path is rewritten to the interpreter for the same reason the
+// argv is: it names the image that will actually be loaded.
+private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
+        -> SyscallExecFormatResult {
+    let line: []u8 = syscall_script_line as []u8;
+    let mut scan_limit: usize = line_length;
+    if (scan_limit > SYSCALL_SCRIPT_LINE_MAX) {
+        scan_limit = SYSCALL_SCRIPT_LINE_MAX;
+    }
+    let mut end: usize = 0;
+    let mut line_terminated: bool = false;
+    for position: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
+        if (position < scan_limit && line_terminated == false) {
+            let current: u8 = line[position];
+            if (current == 0x0A || current == 0x0D || current == 0) {
+                end = position;
+                line_terminated = true;
+            }
+        }
+    }
+    // A first line that fills the whole staging window without ending is a
+    // truncated directive. The interpreter name it appears to carry may be
+    // cut in half, and running the wrong program is worse than refusing.
+    if (line_terminated == false) {
+        return SyscallExecFormatResult::NotExecutable;
+    }
+    let mut interpreter_start: usize = end;
+    for position: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
+        if (position >= 2 && position < end && interpreter_start == end) {
+            let current: u8 = line[position];
+            if (current != 0x20 && current != 0x09) {
+                interpreter_start = position;
+            }
+        }
+    }
+    let mut interpreter_end: usize = end;
+    for position: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
+        if (position >= interpreter_start && position < end &&
+            interpreter_end == end) {
+            let current: u8 = line[position];
+            if (current == 0x20 || current == 0x09) {
+                interpreter_end = position;
+            }
+        }
+    }
+    let mut argument_start: usize = end;
+    for position: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
+        if (position >= interpreter_end && position < end &&
+            argument_start == end) {
+            let current: u8 = line[position];
+            if (current != 0x20 && current != 0x09) {
+                argument_start = position;
+            }
+        }
+    }
+    let mut argument_end: usize = argument_start;
+    for position: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
+        if (position >= argument_start && position < end) {
+            let current: u8 = line[position];
+            if (current != 0x20 && current != 0x09) {
+                argument_end = position + 1;
+            }
+        }
+    }
+    let interpreter_from: usize = interpreter_start;
+    let interpreter_to: usize = interpreter_end;
+    if (interpreter_from >= interpreter_to) {
+        return SyscallExecFormatResult::NotExecutable;
+    }
+    if (interpreter_to > SYSCALL_SCRIPT_LINE_MAX) {
+        return SyscallExecFormatResult::NotExecutable;
+    }
+    // Relative interpreter names would have to be resolved against a working
+    // directory this kernel does not track, so they are refused rather than
+    // silently resolved against the root.
+    let mut interpreter_absolute: bool = false;
+    if (interpreter_from < line.len) {
+        interpreter_absolute = line[interpreter_from] == 0x2F;
+    }
+    if (interpreter_absolute == false) {
+        return SyscallExecFormatResult::NotExecutable;
+    }
+    let mut offset: usize = 0;
+    let mut argc: usize = 0;
+    match syscall_exec_argv_append_line(offset, interpreter_from,
+                                        interpreter_to) {
+        SyscallArgvAppendResult::Full => {
+            return SyscallExecFormatResult::Invalid;
+        }
+        SyscallArgvAppendResult::Appended(next) => { offset = next; }
+    }
+    argc = argc + 1;
+    let argument_from: usize = argument_start;
+    let argument_to: usize = argument_end;
+    if (argument_from < argument_to) {
+        match syscall_exec_argv_append_line(offset, argument_from,
+                                            argument_to) {
+            SyscallArgvAppendResult::Full => {
+                return SyscallExecFormatResult::Invalid;
+            }
+            SyscallArgvAppendResult::Appended(next) => { offset = next; }
+        }
+        argc = argc + 1;
+    }
+    let stored_path: []u8 = syscall_exec_path as []u8;
+    if (path_length > stored_path.len) {
+        return SyscallExecFormatResult::Invalid;
+    }
+    let script_path = stored_path[0..<path_length];
+    match syscall_exec_argv_append(offset, script_path) {
+        SyscallArgvAppendResult::Full => {
+            return SyscallExecFormatResult::Invalid;
+        }
+        SyscallArgvAppendResult::Appended(next) => { offset = next; }
+    }
+    argc = argc + 1;
+    // The pathname execve(2) was called with is in the replacement argv now,
+    // so the stored path can become what it has to name from here on: the
+    // image that will actually be loaded.
+    for path_index: usize in 0..<256 { syscall_exec_path[path_index] = 0; }
+    let mut path_cursor: usize = 0;
+    for position: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
+        if (position >= interpreter_from && position < interpreter_to) {
+            let value: u8 = syscall_script_line[position];
+            if (path_cursor < 256) {
+                let bounded: {0..<256 as usize} = path_cursor;
+                syscall_exec_path[bounded] = value;
+            } else {
+                return SyscallExecFormatResult::Invalid;
+            }
+            path_cursor = path_cursor + 1;
+        }
+    }
+    let mut prefix: SyscallScriptPrefix = { argc, offset };
+    return SyscallExecFormatResult::Script(prefix);
+}
+
+// Decide an execve(2) target's executable format from one bounded read of the
+// file itself, rather than from the caller's argv. This runs at syscall time
+// on purpose: the image is not mapped until the syscall's action tail, which
+// has no way left to report an error to userspace, so every refusal a shell
+// can act on has to be decided here.
+private fn syscall_exec_format(name: []u8, path_length: usize)
+        -> SyscallExecFormatResult !{unsafe} {
+    if (syscall_ext2_ready == false) {
+        return SyscallExecFormatResult::Unknown;
+    }
+    match ext2_lookup_path(syscall_ext2_mount, name) {
+        Ext2LookupResult::Invalid => {
+            return SyscallExecFormatResult::Unknown;
+        }
+        Ext2LookupResult::NotFound => {
+            return SyscallExecFormatResult::Unknown;
+        }
+        Ext2LookupResult::Found(inode) => {
+            for index: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
+                syscall_script_line[index] = 0;
+            }
+            let line: []u8 = syscall_script_line as []u8;
+            match ext2_read_file_chunk(syscall_ext2_mount, inode, 0, line) {
+                Ext2ReadResult::Invalid => {
+                    // Not a regular file (a directory or a device node), or
+                    // unreadable. Neither is this function's decision to make.
+                    return SyscallExecFormatResult::Unknown;
+                }
+                Ext2ReadResult::Read(length) => {
+                    if (length < 4) {
+                        return SyscallExecFormatResult::NotExecutable;
+                    }
+                    if (line[0] == 0x7F && line[1] == 0x45 &&
+                        line[2] == 0x4C && line[3] == 0x46) {
+                        return SyscallExecFormatResult::Executable;
+                    }
+                    if (line[0] != 0x23 || line[1] != 0x21) {
+                        return SyscallExecFormatResult::NotExecutable;
+                    }
+                    return syscall_exec_script_prefix(length, path_length);
+                }
+            }
+        }
+    }
 }
 
 must_use variant KernelFdReapResult { Failed; Reaped; }
@@ -2885,8 +3166,30 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (saved_path != path_length) {
             return SyscallAction::Resume(LINUX_EFAULT);
         }
-        let mut output_offset: usize = 0;
-        let mut argc: usize = 0;
+        // The executable format is decided from the file, before the
+        // caller's argv is copied: a `#!` target replaces argv[0] with its
+        // own interpreter, so the copy below has to know whether the
+        // caller's argv[0] still belongs in the result.
+        let mut script_argc: usize = 0;
+        let mut script_offset: usize = 0;
+        if (exec_path_absolute) {
+            match syscall_exec_format(exec_lookup_name, path_length) {
+                SyscallExecFormatResult::Unknown => {}
+                SyscallExecFormatResult::Executable => {}
+                SyscallExecFormatResult::NotExecutable => {
+                    return SyscallAction::Resume(LINUX_ENOEXEC);
+                }
+                SyscallExecFormatResult::Invalid => {
+                    return SyscallAction::Resume(LINUX_EINVAL);
+                }
+                SyscallExecFormatResult::Script(prefix) => {
+                    script_argc = prefix.argc;
+                    script_offset = prefix.length;
+                }
+            }
+        }
+        let mut output_offset: usize = script_offset;
+        let mut argc: usize = script_argc;
         let mut vector_terminated: bool = false;
         for index: usize in 0..<8 {
             let entry_offset: usize = index * 8;
@@ -2917,6 +3220,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         if (path_view[0] == 0x2F) {
                             string_length = string_length + 1;
                         }
+                        // Linux's script binfmt drops the caller's own
+                        // argv[0] and puts the script pathname in its place,
+                        // already appended above. Keeping both would shift
+                        // every argument the interpreter sees by one.
+                        let caller_argv0_replaced: bool =
+                            index == 0 && script_argc != 0;
+                        if (caller_argv0_replaced == false) {
                         match checked_add_usize(output_offset,
                                                 string_length + 1) {
                             CheckedUsize::Overflow => {
@@ -2952,6 +3262,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 output_offset = end;
                                 argc = argc + 1;
                             }
+                        }
                         }
                     }
                 }
