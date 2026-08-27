@@ -15,7 +15,7 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
-## 2026-08-27: per-CPU diagnostic events reached DDB
+## 2026-08-27: per-CPU diagnostic events reached DDB (#440)
 
 The first kernel integration of the ftrace-inspired, Takibi-specific
 diagnostic ring keeps eight fixed records for each of four target CPUs. A

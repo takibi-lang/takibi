@@ -640,6 +640,49 @@ locked. Lesson for output-interleaving fixes generally: locking output and prese
 `make` dependency graph are two different problems: fix the first by wrapping the *underlying
 command* in a recipe, never by adding a *new recursive `$(MAKE)` call* around it.
 
+## Kernel Debugging: Use UART DDB First
+
+The maintained kernel has a resumable, interrupt-safe UART debugger intended
+for both humans and coding agents. When a QEMU or RPi5 failure leaves UART
+alive, use DDB before adding temporary prints to scheduler, exception, or IRQ
+paths. Start `make kernelsh-qemu` or `make kernelsh-rpi5`, then press Ctrl-T
+followed by lowercase `b`. The host sends one finite serial BREAK; this is not
+miniterm's indefinite Ctrl-T/Ctrl-B BREAK toggle. `make kernelcheck-ddb-qemu`
+automates both real UART BREAK and software `brk` entry. The normal
+`make kernelcheck-rpi5` suite verifies physical Debug Probe BREAK, inspection,
+and resume after its ordinary workload.
+
+The useful first-pass commands are:
+
+- `regs`, `intr`, `sched`, and `current` -- saved CPU, interrupt-entry, and
+  scheduler state;
+- `ps` and `proc PID` -- the bounded process snapshot (`not captured` is not a
+  claim that a PID does not exist when the snapshot says it was truncated);
+- `vm` and `fds` -- the captured current process's address-space and bounded
+  descriptor view;
+- `trace` -- the older typed process-lifecycle tail;
+- `events` -- the ftrace-inspired Takibi per-CPU diagnostic rings. Read each
+  CPU independently; there is deliberately no claimed total order between
+  CPUs. Treat `damaged` and `overwritten` as evidence loss, not as valid
+  records. Fixed event ids are 16-bit and build-checked for collisions;
+- `xk ADDRESS [COUNT]`, `xp PHYSICAL [COUNT]`, and
+  `xu PID ADDRESS [COUNT]` -- fault-contained reads of managed ordinary RAM.
+  They reject MMIO and non-RAM storage rather than performing a potentially
+  state-changing "read";
+- `oops` for the retained crash view and `continue` to resume through the
+  compiler-defined saved exception frame.
+
+DDB remains allocation-free, bounded, polling-only, and inside the interrupt
+effect rules. Do not call ordinary logging, allocation, locks, sleeping,
+filesystem, network, or scheduler operations from its call graph, and do not
+add an effect exemption for debugger code. Memory/register mutation, general
+expressions, and an in-kernel GDB remote protocol are intentionally absent
+until a concrete debugging case justifies their separate safety costs.
+Backtracing is also deferred: a plausible but incorrect AArch64 unwind is
+worse evidence for an automated debugger than raw PC/LR plus structured
+snapshots. `kernel/README.md` is the authoritative command and implementation
+reference.
+
 ## Directory Layout
 
 **This map is deliberately kept at directory granularity.** It used to carry a

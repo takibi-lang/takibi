@@ -170,7 +170,9 @@ Neither key is forwarded to ash. On RPi5 the host sends one automatically
 released 250 ms physical serial BREAK; on QEMU the console asks the PL011
 chardev to deliver the equivalent BREAK through a private QMP control socket.
 The existing TCP UART/miniterm data path is unchanged. The kernel prints
-`ddb>` and accepts `oops`, `regs`, `trace`, `help`, and `continue`. Use
+`ddb>` and accepts `oops`, `regs`, `intr`, `sched`, `current`, `vm`, `fds`,
+`ps`, `proc PID`, `trace`, `events`, `xk`, `xp`, `xu`, `help`, and
+`continue`. Use
 `continue` to return through the saved exception frame. Ctrl-C remains an
 ordinary terminal byte and is not reserved by the debugger. The console
 prints this key reminder when it starts. Miniterm's generic Ctrl-T, Ctrl-B
