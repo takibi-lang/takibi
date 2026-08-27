@@ -4,8 +4,6 @@
 // - Four CPU rings are statically reserved, matching the largest maintained
 //   target. CPUs outside that range do not record.
 // - Eight records per CPU retain only a short diagnostic tail.
-// - Event ids are statically assigned; the build-time collision registry is
-//   added when a second subsystem claims a range.
 // - Tracing is disabled by default and currently enabled only by debugger
 //   test configuration. There is no production control surface yet.
 // - Readers preserve per-CPU order only. They do not invent a global order
@@ -20,6 +18,10 @@ const DIAGNOSTIC_TRACE_STORAGE_WORDS: usize = 256;
 // 0x0100..0x01ff is the platform/interrupt range. The first concrete event
 // records a UART BREAK before control enters DDB.
 const DiagnosticEventUartBreak: usize = 0x0101;
+// 0x0200..0x02ff is the process/scheduler range. UART wake outcome codes are
+// 0=no current process, 1=no blocked waiter, 2=waiter ownership vanished,
+// 3=byte consumed, 4=read must retry. Payload is byte/current pid/waiter pid.
+const DiagnosticEventProcessUartWake: usize = 0x0201;
 
 struct DiagnosticTraceCopyResult {
     count: usize;

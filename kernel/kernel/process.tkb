@@ -3114,8 +3114,10 @@ must_use variant ProcessUartWakeResult { Missing; Consumed; RetryRead; }
 
 
 fn kernel_process_uart_wake(value: usize)
-        -> ProcessUartWakeResult !{interrupt} {
+        -> ProcessUartWakeResult !{interrupt, unsafe} {
     if (execution_current_live == false) {
+        diagnostic_trace_record(
+            DiagnosticEventProcessUartWake, value, 0, 0, 0);
         return ProcessUartWakeResult::Missing;
     }
     let mut waiter: ProcessHandle = execution_current_handle;
@@ -3171,11 +3173,18 @@ fn kernel_process_uart_wake(value: usize)
         }
     }
     if (found == false) {
+        diagnostic_trace_record(
+            DiagnosticEventProcessUartWake, value,
+            scheduled_process_pid_of_handle(execution_current_handle), 0, 1);
         return ProcessUartWakeResult::Missing;
     }
     let mut retry_read: bool = false;
     match scheduled_process_blocked_take(waiter) {
         ScheduledProcessBlockedTakeResult::Missing => {
+            diagnostic_trace_record(
+                DiagnosticEventProcessUartWake, value,
+                scheduled_process_pid_of_handle(execution_current_handle),
+                scheduled_process_pid_of_handle(waiter), 2);
             return ProcessUartWakeResult::Missing;
         }
         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
@@ -3195,7 +3204,17 @@ fn kernel_process_uart_wake(value: usize)
         }
     }
     process_test_evidence_record_uart_wake();
-    if (retry_read) { return ProcessUartWakeResult::RetryRead; }
+    if (retry_read) {
+        diagnostic_trace_record(
+            DiagnosticEventProcessUartWake, value,
+            scheduled_process_pid_of_handle(execution_current_handle),
+            scheduled_process_pid_of_handle(waiter), 4);
+        return ProcessUartWakeResult::RetryRead;
+    }
+    diagnostic_trace_record(
+        DiagnosticEventProcessUartWake, value,
+        scheduled_process_pid_of_handle(execution_current_handle),
+        scheduled_process_pid_of_handle(waiter), 3);
     return ProcessUartWakeResult::Consumed;
 }
 
@@ -3239,7 +3258,7 @@ fn kernel_process_uart_block_evidence() -> bool {
 // the final counters: child Blocked/UartRx while parent is runnable, followed
 // by that same child Ready after wake.  Suppress the one human-facing UART
 // progress line locally; this is a structural probe, not a boot milestone.
-fn kernel_process_trace_block_wake_probe() -> bool {
+fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
     kernel_process_execution_reset();
     kernel_process_trace_enable();
     process_test_evidence_set_uart_block_logged(true);

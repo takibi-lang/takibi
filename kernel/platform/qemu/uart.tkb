@@ -87,7 +87,7 @@ fn uart_rx_ready() -> bool !{unsafe} {
     return (*fr & (1 << 4)) == 0; // RXFE clear = data available
 }
 
-fn uart_set_rx_handler(handler: fn !{}(u8) -> void) !{} {
+fn uart_set_rx_handler(handler: fn !{unsafe}(u8) -> void) !{} {
     uart_rx_handler = handler;
 }
 

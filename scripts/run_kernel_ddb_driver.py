@@ -67,6 +67,11 @@ def main() -> int:
                 if args.break_source == "software":
                     break_sent = True
                     continue
+                # Put one ordinary byte ahead of BREAK in the PL011 FIFO.
+                # Its IRQ exercises the process UART-wake producer; BREAK's
+                # following IRQ exercises the platform producer. FIFO order
+                # gives one deterministic per-CPU interleaving with no sleep.
+                serial.sendall(b"\n")
                 with connect(args.qmp_port, deadline) as qmp:
                     qmp_file = qmp.makefile("rwb", buffering=0)
                     greeting = json.loads(qmp_file.readline())

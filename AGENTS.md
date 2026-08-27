@@ -745,6 +745,7 @@ being a complete list is the whole point of this one;
 | `check_compiler_sync_rules.py` | a `sync rule` comment in `type_inf.ml` or `llvm_gen.ml` with no counterpart reference in its peer |
 | `check_kernel_asm_invariants.py` | hand-written kernel assembly, disassembled from the built ELF, that breaks an EL0 entry/exit invariant (issues #229/#231) |
 | `check_kernel_lib_limitations_header.py` | a `kernel/lib`, `kernel/kernel`, or `kernel/net` file with no "Current limitations" header |
+| `check_diagnostic_event_ids.py` | duplicate or non-16-bit fixed diagnostic event ids |
 | `check_kernel_memory_map.py` | a build whose layout disagrees with `kernel/MEMORY_MAP.md` (`--update` rewrites the rows instead) |
 | `check_kernel_log_expectations.py` | a host-side test driver waiting for a boot-log line the kernel no longer emits |
 | `check_pool_release_paths.py` | a kernel pool with no path that gives a record back |

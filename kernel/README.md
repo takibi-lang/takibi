@@ -494,7 +494,10 @@ address semantics. Physical MMIO and addresses outside managed RAM are denied.
 reports valid, damaged/in-progress, and overwritten counts separately and
 does not imply a total order between CPUs. Recording is disabled by default;
 the current first producer records UART BREAK entry when explicitly enabled
-by the debugger integration test.
+by the debugger integration test. Process UART wake decisions use a second
+event range and retain the input byte, current PID, selected waiter PID, and
+outcome. This distinguishes no-current/no-waiter/ownership-loss from consumed
+and retry-read outcomes without printing from the interrupt path.
 
 `kernelcheck-ddb-qemu` asks QEMU to deliver a real chardev BREAK to the PL011,
 drives all inspection commands over its UART socket, and verifies that boot

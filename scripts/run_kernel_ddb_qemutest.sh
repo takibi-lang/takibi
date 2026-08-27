@@ -111,8 +111,9 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
 fi
 
 if [ "$BREAK_SOURCE" = uart ] &&
-        ! grep -q '^ddb: event seq=1 cpu=0 id=0x0000000000000101 a=0x' "$UART_LOG"; then
-    echo "FAIL kernel/qemu ddb: UART BREAK event missing from diagnostic ring" >&2
+        { ! grep -q '^ddb: event seq=1 cpu=0 id=0x0000000000000201 a=0x000000000000000a b=0x0000000000000001 c=0x0000000000000000 d=0x0000000000000001$' "$UART_LOG" ||
+          ! grep -q '^ddb: event seq=2 cpu=0 id=0x0000000000000101 a=0x' "$UART_LOG"; }; then
+    echo "FAIL kernel/qemu ddb: interleaved UART wake/BREAK events missing" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi

@@ -28,6 +28,15 @@ boots retain only the static storage cost and skip recording after one branch.
 The existing typed process trace remains separate until this smaller mechanism
 has proved useful.
 
+A second event range then made the earlier UART-wake diagnosis reproducible
+without temporary globals or interrupt-time printing. Each wake attempt keeps
+the byte, current PID, selected waiter PID, and a closed numeric outcome for
+no current process, no waiter, lost waiter ownership, consumed, or retry-read.
+The QEMU DDB lane places an ordinary newline ahead of BREAK in the PL011 FIFO;
+`events` therefore shows the process decision followed by the platform BREAK
+record in one CPU-local order. A source check rejects duplicate, zero, or
+non-16-bit fixed event ids before either kernel build.
+
 ---
 
 ### 2026-08-27: BusyBox init As PID 1 (#270), And Four Tests That Had Stopped Meaning What They Said

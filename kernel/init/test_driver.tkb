@@ -1125,7 +1125,7 @@ irq_uart_rx_unmask();
 }
 
 // Shared UART RX bridge used by syscall wait paths on both platforms.
-fn kernel_uart_rx_isr(c: u8) !{} {
+fn kernel_uart_rx_isr(c: u8) !{unsafe} {
     match kernel_process_uart_wake(c as usize) {
         ProcessUartWakeResult::Missing => {}
         ProcessUartWakeResult::Consumed => {
