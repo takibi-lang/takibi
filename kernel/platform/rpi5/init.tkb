@@ -10,10 +10,26 @@ must_use variant SecondaryBootResult {
     NotStarted(usize);
 }
 
+// GitHub issue #445: which core is asking, as a callable function.
+//
+// BCM2712 numbers its cores in MPIDR_EL1.Aff1 (bits [9:8]), not Aff0 --
+// which is why kernel/platform/rpi5/init.tkb's own psci_cpu_on target
+// affinity for core 1 is 0x100 rather than 0x1, and why
+// kernel/arch/arm64/boot/entry.S reads `ubfx x1, x1, #8, #2` where the
+// QEMU port reads Aff0. Two bits, matching that ubfx width and this part's
+// four cores.
+//
+// The field choice is the whole reason this is per-platform; see
+// kernel/platform/qemu/init.tkb's copy.
+fn cpu_id() -> usize {
+    return (mrs_mpidr_el1() >> 8) & 3;
+}
+
 // Reached only by core 1 after PSCI has installed the secondary entry point,
 // that entry has selected its private stack, and the shared EL1 page table is
 // active. The context value prevents a coincidental stale write from passing.
-fn kernel_secondary_main(context: usize, core_id: usize) {
+fn kernel_secondary_main(context: usize) {
+    let core_id: usize = cpu_id();
     if (context == 0x191 && core_id == 1) {
         kernel_secondary_boot_state = 0x100 + core_id;
         signal_fence();

@@ -23,9 +23,18 @@
     .type _start, %function
 _start:
     msr     DAIFSet, #0xf
+    /* GitHub issue #445: Aff0, not Aff1. This guard is what keeps main()
+     * from running on a core that is not the primary, and it was still
+     * carrying entry.S's Aff1 line -- the very line kernel_secondary_entry
+     * below documents as wrong for this machine, because QEMU `virt`
+     * numbers its cores in Aff0 and leaves Aff1 zero on every one of them.
+     * So the guard read 0 for every core and parked none of them.
+     *
+     * Harmless today only because `-kernel` enters here on CPU 0 alone and
+     * every other core waits in firmware for PSCI. It stops being harmless
+     * the moment anything enters this symbol on a second core. */
     mrs     x0, mpidr_el1
-    lsr     x0, x0, #8
-    and     x0, x0, #3
+    and     x0, x0, #0xff
     cbnz    x0, .Lpark
 
     adrp    x0, __bss_start
@@ -75,19 +84,12 @@ kernel_secondary_entry:
     bl      el1_fpsimd_enable
     bl      kernel_mmu_init_secondary
     mov     x0, x19
-    /* GitHub issue #237: QEMU `virt`'s per-CPU MPIDR_EL1 numbering puts the
-     * core index in Aff0 (bits[7:0]) -- confirmed by dumping this
-     * machine's own generated DTB (cpu@0 reg=0, cpu@1 reg=1) -- unlike
-     * entry.S's RPi5 copy, which reads Aff1 (bits[9:8]) because BCM2712
-     * numbers cores there instead (matching kernel/platform/rpi5/init.tkb's own
-     * psci_cpu_on(0x100, ...) target_affinity, Aff1=1). A first real boot
-     * attempt under this port silently failed smp_bringup with this exact
-     * line still copied from entry.S unchanged: PSCI reported CPU_ON
-     * SUCCESS, but kernel_secondary_main's own core_id==1 guard never
-     * matched, because Aff1 is 0 for every QEMU `virt` core.
-     */
-    mrs     x1, mpidr_el1
-    and     x1, x1, #0xff
+    /* GitHub issue #445: the core index used to be extracted here, and
+     * getting the field wrong was a real bug -- see cpu_id()'s comment in
+     * kernel/platform/qemu/init.tkb, which now owns that knowledge for
+     * both this file and its RPi5 counterpart. Nothing about which
+     * affinity field this machine numbers cores in is stated in assembly
+     * any more. */
     bl      kernel_secondary_main
 .Lsecondary_park:
     wfe

@@ -54,8 +54,10 @@ kernel_secondary_entry:
     bl      el1_fpsimd_enable
     bl      kernel_mmu_init_secondary
     mov     x0, x19
-    mrs     x1, mpidr_el1
-    ubfx    x1, x1, #8, #2
+    /* GitHub issue #445: the core index is cpu_id() in
+     * kernel/platform/rpi5/init.tkb now, not an ubfx here. The width and
+     * position of the field differ per platform and this file had one of
+     * the two copies. */
     bl      kernel_secondary_main
 .Lsecondary_park:
     wfe

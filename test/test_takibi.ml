@@ -12316,6 +12316,7 @@ let codegen_tests = [
             let f: usize = mrs_cntfrq_el0();
             let p: usize = mrs_cntpct_el0();
             let s: usize = mrs_sctlr_el1();
+            let m: usize = mrs_mpidr_el1();
             msr_daifclr_irq();
             msr_daifset_irq();
             tlbi_vmalle1();
@@ -12519,7 +12520,7 @@ let codegen_tests = [
        List.iter (fun name ->
          expect_type_error "compiler builtin"
            (Printf.sprintf "fn %s() {}" name) ())
-         ["mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1";
+         ["mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1"; "mrs_mpidr_el1";
           "mrs_id_aa64mmfr0_el1";
           "msr_daifclr_irq"; "msr_daifset_irq"; "tlbi_vmalle1";
           "dsb_ish"; "dsb_ishst"; "isb"];

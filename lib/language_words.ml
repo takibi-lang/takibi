@@ -33,7 +33,7 @@ let compiler_builtins = [
   "checked_add_usize"; "checked_mul_usize";
   "mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1";
   "mrs_esr_el1"; "mrs_far_el1"; "mrs_elr_el1"; "mrs_spsr_el1";
-  "mrs_id_aa64mmfr0_el1";
+  "mrs_id_aa64mmfr0_el1"; "mrs_mpidr_el1";
   "msr_cntp_tval_el0"; "msr_cntp_ctl_el0"; "msr_sctlr_el1";
   "msr_mair_el1"; "msr_tcr_el1"; "msr_ttbr0_el1";
   "msr_daifclr_irq"; "msr_daifset_irq"; "mrs_daif";

@@ -22,8 +22,25 @@ fn qemu_psci_cpu_on(target_affinity: usize, entry: usize, context: usize)
     return hvc4(0xc4000003, target_affinity, entry, context);
 }
 
+// GitHub issue #445: which core is asking, as a callable function.
+//
+// QEMU `virt` numbers its cores in MPIDR_EL1.Aff0 (bits [7:0]) -- confirmed
+// by dumping this machine's own generated DTB (cpu@0 reg=0, cpu@1 reg=1),
+// and confirmed the hard way during the issue #237 port, where
+// kernel/arch/arm64/boot/entry_qemu.S carried entry.S's Aff1 line unchanged
+// and smp_bringup silently failed with PSCI reporting SUCCESS.
+//
+// This differs from kernel/platform/rpi5/init.tkb's copy by exactly that
+// field choice, which is why it is per-platform rather than in
+// kernel/arch/arm64/boot/cpu.tkb beside the other MPIDR-free CPU
+// operations.
+fn cpu_id() -> usize {
+    return mrs_mpidr_el1() & 0xff;
+}
+
 // QEMU uses Aff0 target numbering and HVC for PSCI, unlike RPi5's Aff1/SMC path.
-fn kernel_secondary_main(context: usize, core_id: usize) {
+fn kernel_secondary_main(context: usize) {
+    let core_id: usize = cpu_id();
     if (context == 0x191 && core_id == 1) {
         kernel_secondary_boot_state = 0x100 + core_id;
         signal_fence();

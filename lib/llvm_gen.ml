@@ -4178,7 +4178,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
   | Call (("mrs_cntfrq_el0" | "mrs_cntpct_el0" | "mrs_sctlr_el1"
           | "mrs_esr_el1" | "mrs_far_el1" | "mrs_elr_el1" | "mrs_spsr_el1"
-          | "mrs_id_aa64mmfr0_el1" | "mrs_daif") as name, []) ->
+          | "mrs_id_aa64mmfr0_el1" | "mrs_mpidr_el1"
+          | "mrs_daif") as name, []) ->
       (* GitHub issue #226/#227: one `mrs` each, register chosen by LLVM's
          own allocator via the "=r" output constraint -- never named by the
          .tkb caller. *)
@@ -4196,6 +4197,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            this implementation has, rather than the 8-bit floor every
            AArch64 part is guaranteed to have. *)
         | "mrs_id_aa64mmfr0_el1" -> "id_aa64mmfr0_el1"
+        (* GitHub issue #445: which core is asking. Both boot paths already
+           compute this in assembly and throw it away -- entry_qemu.S reads
+           Aff0 and entry.S reads Aff1, because QEMU `virt` and BCM2712
+           number their cores in different affinity fields. WHICH field is
+           per-platform and belongs in kernel/platform/*/init.tkb's
+           cpu_id(); this intrinsic is only the register read. *)
+        | "mrs_mpidr_el1"  -> "mpidr_el1"
         (* GitHub issue #351: reading the interrupt mask is what lets a
            lock RESTORE it rather than unconditionally enabling -- the
            local_irq_save half that msr_daifset_irq alone cannot express. *)
