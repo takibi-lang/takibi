@@ -15,6 +15,100 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+### 2026-08-27: BusyBox init As PID 1 (#270), And Four Tests That Had Stopped Meaning What They Said
+
+The issue's open design point asked for a trace of the pinned BusyBox init
+applet's minimum requirements before expanding anything. The trace produced a
+much smaller answer than the issue's own earlier analysis expected: **one**
+kernel change.
+
+**The one change.** Booting `busybox init` as PID 1 with a one-line
+`/etc/inittab` got as far as `can't fork`. `musl`'s `vfork()` is not the
+`vfork` syscall -- it is `clone(CLONE_VM|CLONE_VFORK|SIGCHLD)`, measured as
+`flags=16657` (0x4111) coming out of the binary, and the clone handler
+accepted only `0x11`. `run()` in `init/init.c` uses `vfork()` for every
+non-ASKFIRST action, so the first `sysinit` fork failed. Worth noting:
+`SYSCALLS.md` had claimed the `CLONE_VM|CLONE_VFORK` shape was supported. It
+was not; the documentation had been ahead of the code, which is the failure
+mode this repository's own issue-number rule warns about, in a different file.
+
+**Why nothing else was needed.** Every other call BusyBox init makes that this
+kernel lacks -- `reboot`, `setsid`, `ioctl(TCGETS)`, `rt_sigtimedwait`,
+`nanosleep`, `faccessat`, `kill` -- is one whose return init ignores or reads
+as "feature absent", and unrecognized syscalls return `-ENOSYS` here rather
+than fail-stopping. The consequence of missing `rt_sigtimedwait` is that init
+busy-spins in its main loop rather than blocking, which is exactly what the
+`while :; do :; done` in the wrapper it replaces was already doing. They are
+filed as separate issues rather than carried by this one.
+
+**The real work was evidence placement, and it kept finding stale tests.** The
+bounded fixture used to end at an event the kernel could see directly: init.sh
+calling `execve` on itself. Under init that event does not exist, so the
+boundary became PID 1 reaping its first child -- with `::sysinit:/etc/init.sh`
+the same boundary, needing no knowledge of what the child was. One detail cost
+a cycle: a blocking `wait4` is delivered from the **exiting child's** context,
+so at the moment PID 1 is credited with the reap the child's pages are not back
+yet, and those counts are precisely what the report measures. Latch at the
+reap, report at PID 1's next syscall.
+
+Then, in order of discovery:
+
+1. **Nine views fixed by deleting half a condition.** The bounded HTTPd fixture
+   armed only when its launcher was PID 1's own child -- true only while
+   init.sh *was* PID 1. Under init the bounded HTTPd is a grandchild, so the
+   fixture never armed and init.sh never got past it. The distinction the test
+   needs is the phase, not the depth. 17 failing views became 7.
+
+2. **A probe that scribbled on root 0.** `process_image_clone_growth_probe()`
+   fabricates a synthetic image in root 0 and tears it down again, including
+   root 0's stack-top PTE and its demand-stack metadata. That was harmless
+   while root 0 was PID 1's about-to-be-replaced init.sh image. Once root 0 is
+   init's live image, the probe unmapped init's own stack page and disabled its
+   growth, and init took a translation fault on its next push. Diagnosing it
+   took three rounds of instrumentation and two wrong hypotheses -- the probe
+   that settled it logged every clear of root 0's stack-top PTE, which named
+   the caller immediately. It runs before PID 1's image exists now.
+
+3. **`socket()` was asserted to happen exactly once per boot.** BusyBox init
+   logs through syslog, so every `message(L_LOG)` opens a datagram socket,
+   fails to reach `/dev/log`, and closes it. Measured as `s=3` where the
+   fixture expected 1. The count is a floor now; `bind`/`listen`/`accept` stay
+   exact, because a socket that never connects never reaches them.
+
+4. **A one-shot latch spent by the wrong phase.** The "shell blocked on the
+   UART" marker prints once per boot. The bounded phase's own interactive ash
+   already spent it, so the persistent shell's block never announced itself and
+   the harness waited forever. `kernel_syscall_process_configure()` used to
+   re-arm it as a side effect of the parent-exec handoff; re-arming now belongs
+   to the persistent phase starting.
+
+5. **A test that had been passing on luck.** The oops lane's `child_exec` mode
+   required the faulting address to resolve through the faulting root. That
+   fail-stop is SVC-class and has no faulting address at all, so `FAR` holds
+   whatever the last real data abort left there. Whether that stale VA happens
+   to be mapped is a fact about the process tree, not about the report. It
+   resolved under the old topology and does not under init, having proved
+   nothing either time.
+
+**Two things the type system found on its own.** The page baseline had to
+include PID 1's image, because that image is permanent now rather than a
+transient the fixture leaks -- and independently, the ownership checker refused
+the change until the image's linear owner was given up explicitly, since
+nothing unmaps it any more. "Nothing consumes this" and "this is permanent" are
+the same fact, and the compiler asked about it before any test did.
+
+Also: `ps` says `init` for PID 1 rather than `[kernel]`, since the bootstrap's
+image is mapped by the kernel rather than by `execve` and nothing had recorded
+a command line for it.
+
+Verified on QEMU (38 views -- the parent-exec handoff view is deleted with the
+path it measured -- plus the ash lane, oops, lifecycle-gap, alloc-rollback, and
+`allbuild`) and on real RPi5 hardware (38 views, one boot). Hardware found one
+thing QEMU could not: the RPi5 lane keeps its own copy of the distro-image
+view.
+
+---
+
 ### 2026-08-26: The Errno Was A Guess Until It Was Measured
 
 `execve` fell back to the static BusyBox image for any pathname it could not
