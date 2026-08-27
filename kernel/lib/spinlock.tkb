@@ -9,6 +9,14 @@
 // Current limitations (2026-08-27). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
+// - NOT A PUBLIC API. GitHub issue #449 settled that this kernel has one
+//   lock flavour and it masks interrupts, because that is what makes a
+//   lock safe to take from an interrupt handler without per-call-site
+//   analysis. These three functions are the inside of that lock, not an
+//   alternative to it: kernel/lib/pool_lock.tkb is the only caller and
+//   should stay that way. Do not add a bare non-masking spin_lock beside
+//   it -- Linux has both flavours and mixing them is a recurring bug
+//   class, and no measurement here says the masking costs anything.
 // - THE LOCK IS AN ADDRESS, and nothing checks that the address is a lock.
 //   `usize` is what a slot address, a payload address and a lock word all
 //   look like (GitHub issue #396). A typed `SpinLock` wrapper is the

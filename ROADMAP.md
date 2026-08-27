@@ -166,9 +166,12 @@ consumed". The tie is lexical and type-level, so it does not care whether
 the racing context is another core or another task -- it works under goal 1
 as well as goal 2.
 
-**Goal 3 is the one at risk, and the risk is an ordering risk.** The
-`locks`-forbidden-on-`interrupt` rule means every handler written between now
-and #449 is built around having no lock and no guard available. Three
+**Goal 3 is the one at risk.** The `locks`-forbidden-on-`interrupt` rule
+looks like it settles the question and does not: it fires on the
+annotation, and no function in this kernel declares `!{locks}`, so an
+interrupt handler taking a pool lock compiles today. Meanwhile the
+scheduler already runs in interrupt context and mutates the process table,
+so "handlers do not lock" was never true of the one handler that matters. Three
 mechanisms are on file -- relaxing that rule (#449), a lock-free classified
 ring (#440), and atomic commit publication (#299) -- and the design space is
 covered. What is not settled is which one handlers are supposed to use, and

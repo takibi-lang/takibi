@@ -17,17 +17,32 @@
 //      it is `if (lower_el)` in each platform's irq dispatch. So a syscall
 //      handler runs to completion. This is Linux's CONFIG_PREEMPT_NONE.
 //
-//   3. INTERRUPT HANDLERS TOUCH NO SHARED STATE. virtio_net_irq_handler
-//      sets two flags and calls interrupt_notify(); the real work happens
-//      later in syscall-dispatch context. The effect system enforces the
-//      shape of this: `locks` is rejected outright on an `!{interrupt}`
-//      function, so a handler cannot take a lock even if it wanted to
-//      (GitHub issue #449 revisits that rule).
+//   3. INTERRUPT HANDLERS ENTER NO LOCKED SUBSYSTEM. Device handlers
+//      publish and return: virtio_net_irq_handler sets two flags and calls
+//      interrupt_notify(), and the real work happens later in
+//      syscall-dispatch context. None of them reaches a pool, the fd
+//      table, or the network stack.
 //
-// Leg 3 is enforced by the compiler. Legs 1 and 2 are numbers, declared
-// here, asserted at every site whose correctness argument names them.
-// Raising either one fails the build at each such site -- which turns
-// issue #447 into a worklist instead of a silent change of meaning.
+//      The SCHEDULER is the exception, and it is not a small one:
+//      kernel_process_timer_schedule is `!{interrupt}` and walks the
+//      process chain and writes saved_sp, and kernel_process_uart_wake
+//      writes into a blocked process's saved frame. So this leg is "no
+//      handler enters a subsystem that will have a lock", not "no handler
+//      touches shared state" -- the scheduler's state is shared, and is
+//      unsynchronized for the same reason as everything else here rather
+//      than for a different one.
+//
+//      NOTHING CHECKS THIS. It is tempting to say the effect system does,
+//      since `locks` is rejected on an `!{interrupt}` function -- but that
+//      rejection fires only on the ANNOTATION, and no function in this
+//      kernel declares `!{locks}`. An interrupt handler calling
+//      pool_lock_acquire today compiles. GitHub issue #449 owns both the
+//      rule and the annotations that would give it teeth.
+//
+// Legs 1 and 2 are numbers, declared here, asserted at every site whose
+// correctness argument names them. Raising either one fails the build at
+// each such site -- which turns issue #447 into a worklist instead of a
+// silent change of meaning. Leg 3 has no number and no check; see below.
 //
 // Current limitations (2026-08-27). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
@@ -42,9 +57,12 @@
 // - THESE ARE NOT A DESIGN. They describe what is true, so that changing
 //   it is loud. Deciding what each subsystem should do once a number
 //   moves is issues #451/#452/#449, not this file.
-// - LEG 3 HAS NO NUMBER. It is enforced by the effect system rather than
-//   asserted here, so a change to that rule will not fail these
-//   assertions. #449 owns it and says so.
+// - LEG 3 HAS NO NUMBER AND, TODAY, NO CHECK. The `locks` effect exists
+//   and its interrupt exclusion works when a function declares it; zero
+//   functions do, so the rule currently forbids an annotation nobody
+//   writes. Until #449 annotates the lock primitives, leg 3 is a property
+//   of what the handlers happen to call, which is exactly the kind of
+//   accident this file exists to stop relying on silently.
 
 // How many cores execute kernel code. Not how many cores exist, and not
 // how many the platform brings up -- core 1 boots today and this is still
