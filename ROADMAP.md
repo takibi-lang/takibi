@@ -129,10 +129,15 @@ trace producer, one local-only whole-TLB flush.
 
 ### Phase 0: the foundation, language and observation
 
-- **#17** -- the closed set of atomic operations, rescoped 2026-08-27 from a
-  one-line stub. Acquire load, release store, compare-and-swap, fetch-add;
-  `ldar`/`stlr` with the exclusives-versus-LSE choice measured on both targets
-  rather than assumed.
+- **#17 -- DONE 2026-08-27.** `atomic_load_acquire`, `atomic_store_release`,
+  `atomic_swap_acquire`, `atomic_fetch_add_relaxed`, all behind `unsafe`. The
+  exclusives-versus-LSE question answered itself: the read-modify-write pair
+  goes through LLVM's `atomicrmw`, so `--cpu` picks, and measured on objdump
+  cortex-a53 gets a retry loop while cortex-a76 gets `swpa`/`ldadd`. x86-64
+  works too, so the lock can be exercised from `linux_user/` in seconds
+  instead of a QEMU boot. **#450** holds compare-and-swap, which LLVM's OCaml
+  bindings cannot express (`build_atomicrmw` exists, `build_cmpxchg` does
+  not) and which a test-and-set spinlock does not need.
 - **#445** -- the spinlock built on them, plus `cpu_id()`. `pool_lock`'s
   signature does not change: its header already anticipated this exact
   substitution.
@@ -435,9 +440,15 @@ that the previous snapshot's milestone letters can be found.
 
 ## Issue and board hygiene for this snapshot
 
-- Promote **#17** to the only immediate foundational issue. Nothing else in M0
-  can start, and it sat as a one-line stub for two months precisely because
-  nothing was blocked on it until now.
+- **#17 is closed**, so the immediate foundational issue is now **#445**, the
+  spinlock. #17 sat as a one-line stub for two months precisely because
+  nothing was blocked on it; it took one session once something was.
+- Decide once, rather than per issue, what triggers investing in a locally
+  built and patched LLVM. **#123**, **#300**/**#425**, and **#450** are all
+  waiting on the OCaml bindings, and building LLVM is the expensive part.
+  #450 proposes the trigger: two or more of them blocking work that is
+  actually scheduled at the same time, rather than a count of open issues,
+  since a gap nobody is blocked on costs nothing to leave.
 - Keep the M0 phases in separate issues with their own closing bars rather than
   collecting them into an SMP umbrella. The previous snapshot's "treat SMP as
   one coherent milestone" was right about the ordering and wrong about the
