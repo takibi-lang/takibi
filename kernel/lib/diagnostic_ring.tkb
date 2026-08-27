@@ -1,0 +1,135 @@
+// Fixed-record per-CPU diagnostic ring for DDB and fail-stop evidence.
+//
+// Current limitations:
+// - Four CPU rings are statically reserved, matching the largest maintained
+//   target. CPUs outside that range do not record.
+// - Eight records per CPU retain only a short diagnostic tail.
+// - Event ids are statically assigned; the build-time collision registry is
+//   added when a second subsystem claims a range.
+// - Tracing is disabled by default and currently enabled only by debugger
+//   test configuration. There is no production control surface yet.
+// - Readers preserve per-CPU order only. They do not invent a global order
+//   between CPUs and do not yet carry timestamps for causal correlation.
+
+const DIAGNOSTIC_TRACE_CPUS: usize = 4;
+const DIAGNOSTIC_TRACE_EVENTS: usize = 8;
+const DIAGNOSTIC_TRACE_WORDS_PER_EVENT: usize = 8;
+const DIAGNOSTIC_TRACE_CPU_WORDS: usize = 64;
+const DIAGNOSTIC_TRACE_STORAGE_WORDS: usize = 256;
+
+// 0x0100..0x01ff is the platform/interrupt range. The first concrete event
+// records a UART BREAK before control enters DDB.
+const DiagnosticEventUartBreak: usize = 0x0101;
+
+struct DiagnosticTraceCopyResult {
+    count: usize;
+    damaged: usize;
+    overwritten: usize;
+}
+
+private let mut diagnostic_trace_next: [usize; DIAGNOSTIC_TRACE_CPUS];
+private let mut diagnostic_trace_records:
+    [usize; DIAGNOSTIC_TRACE_STORAGE_WORDS];
+let mut diagnostic_trace_test_enabled: bool;
+
+private fn diagnostic_trace_next_address(cpu: usize) -> usize {
+    let next: *usize = diagnostic_trace_next;
+    return (next + (cpu as isize)) as usize;
+}
+
+private fn diagnostic_trace_record_address(word: usize) -> usize {
+    let records: *usize = diagnostic_trace_records;
+    return (records + (word as isize)) as usize;
+}
+
+fn diagnostic_trace_record(event: usize, a: usize, b: usize,
+                           c: usize, d: usize) !{interrupt, unsafe} {
+    if (diagnostic_trace_test_enabled == false) { return; }
+    let cpu: usize = cpu_id();
+    if (cpu >= DIAGNOSTIC_TRACE_CPUS) { return; }
+    let sequence: usize = unsafe {
+        atomic_fetch_add_relaxed(diagnostic_trace_next_address(cpu), 1)
+    } + 1;
+    let slot: usize = (sequence - 1) % DIAGNOSTIC_TRACE_EVENTS;
+    let base: usize =
+        (cpu * DIAGNOSTIC_TRACE_EVENTS + slot) *
+        DIAGNOSTIC_TRACE_WORDS_PER_EVENT;
+    if (base <= DIAGNOSTIC_TRACE_STORAGE_WORDS -
+            DIAGNOSTIC_TRACE_WORDS_PER_EVENT) {
+        unsafe {
+            atomic_store_release(diagnostic_trace_record_address(base), 0);
+        }
+        diagnostic_trace_records[base + 1] = cpu;
+        diagnostic_trace_records[base + 2] = event;
+        diagnostic_trace_records[base + 3] = a;
+        diagnostic_trace_records[base + 4] = b;
+        diagnostic_trace_records[base + 5] = c;
+        diagnostic_trace_records[base + 6] = d;
+        diagnostic_trace_records[base + 7] = 0;
+        unsafe {
+            atomic_store_release(diagnostic_trace_record_address(base),
+                                 sequence);
+        }
+    }
+}
+
+fn diagnostic_trace_record_uart_break(data: usize) !{interrupt, unsafe} {
+    diagnostic_trace_record(DiagnosticEventUartBreak, data, 0, 0, 0);
+}
+
+// Copy one CPU oldest-to-newest. A commit is checked before and after copying
+// so a wrap during the copy becomes `damaged`, never plausible stale data.
+fn diagnostic_trace_copy_cpu(cpu: usize,
+        output: borrow [usize; DIAGNOSTIC_TRACE_CPU_WORDS..])
+        -> DiagnosticTraceCopyResult !{interrupt, unsafe} {
+    let mut count: usize = 0;
+    let mut damaged: usize = 0;
+    let mut overwritten: usize = 0;
+    for word: usize in 0..<DIAGNOSTIC_TRACE_CPU_WORDS {
+        output[word] = 0;
+    }
+    if (cpu < DIAGNOSTIC_TRACE_CPUS) {
+        let latest: usize = unsafe {
+            atomic_load_acquire(diagnostic_trace_next_address(cpu))
+        };
+        let mut first: usize = 1;
+        if (latest > DIAGNOSTIC_TRACE_EVENTS) {
+            overwritten = latest - DIAGNOSTIC_TRACE_EVENTS;
+            first = overwritten + 1;
+        }
+        for item: usize in 0..<DIAGNOSTIC_TRACE_EVENTS {
+            let sequence: usize = first + item;
+            if (sequence <= latest) {
+                let slot: usize = (sequence - 1) % DIAGNOSTIC_TRACE_EVENTS;
+                let source: usize =
+                    (cpu * DIAGNOSTIC_TRACE_EVENTS + slot) *
+                    DIAGNOSTIC_TRACE_WORDS_PER_EVENT;
+                let before: usize = unsafe {
+                    atomic_load_acquire(diagnostic_trace_record_address(source))
+                };
+                if (before == sequence) {
+                    let target: usize =
+                        count * DIAGNOSTIC_TRACE_WORDS_PER_EVENT;
+                    for word: usize in 0..<DIAGNOSTIC_TRACE_WORDS_PER_EVENT {
+                        let target_word: usize = target + word;
+                        let source_word: usize = source + word;
+                        if (target_word < DIAGNOSTIC_TRACE_CPU_WORDS &&
+                                source_word < DIAGNOSTIC_TRACE_STORAGE_WORDS) {
+                            output[target_word] =
+                                diagnostic_trace_records[source_word];
+                        }
+                    }
+                    let after: usize = unsafe {
+                        atomic_load_acquire(
+                            diagnostic_trace_record_address(source))
+                    };
+                    if (after == sequence) { count = count + 1; }
+                    else { damaged = damaged + 1; }
+                } else { damaged = damaged + 1; }
+            }
+        }
+    }
+    let mut result: DiagnosticTraceCopyResult =
+        {count, damaged, overwritten};
+    return result;
+}

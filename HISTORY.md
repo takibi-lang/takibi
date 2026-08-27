@@ -15,6 +15,21 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-08-27: per-CPU diagnostic events reached DDB
+
+The first kernel integration of the ftrace-inspired, Takibi-specific
+diagnostic ring keeps eight fixed records for each of four target CPUs. A
+writer atomically reserves a CPU-local sequence, invalidates the destination,
+fills its fixed payload, and publishes with a release store. DDB's `events`
+reader uses acquire loads around each copy and reports in-progress/overwritten
+records rather than presenting them as evidence. The first producer is the
+UART BREAK path, deliberately enabled only by the integration fixture; normal
+boots retain only the static storage cost and skip recording after one branch.
+The existing typed process trace remains separate until this smaller mechanism
+has proved useful.
+
+---
+
 ### 2026-08-27: BusyBox init As PID 1 (#270), And Four Tests That Had Stopped Meaning What They Said
 
 The issue's open design point asked for a trace of the pinned BusyBox init

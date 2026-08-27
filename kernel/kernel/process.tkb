@@ -1,4 +1,5 @@
 use "kernel/mm/page.tkb";
+use "kernel/lib/diagnostic_ring.tkb";
 use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
 use "kernel/kernel/process_test_evidence.tkb";

@@ -441,7 +441,7 @@ acknowledgement turns an interrupt frame into ordinary kernel context. Every
 reachable operation is fixed-size and polling-only, with no allocator, lock,
 scheduler, sleep, filesystem, network, or ordinary logging dependency. Its
 commands are `oops`, `regs`, `intr`, `sched`, `current`, `vm`, `fds`, `ps`, `proc PID`,
-`trace`, `xk ADDRESS [COUNT]`, `xp PHYSICAL [COUNT]`,
+`trace`, `events`, `xk ADDRESS [COUNT]`, `xp PHYSICAL [COUNT]`,
 `xu PID ADDRESS [COUNT]`, and `continue`
 (`help` lists them).
 
@@ -489,6 +489,12 @@ reported as not captured, not nonexistent.
 managed ordinary RAM before the guarded load; the present identity mapping is
 only the mechanism used to access that physical byte, not part of the command's
 address semantics. Physical MMIO and addresses outside managed RAM are denied.
+
+`events` renders each CPU's independent fixed-record diagnostic tail. It
+reports valid, damaged/in-progress, and overwritten counts separately and
+does not imply a total order between CPUs. Recording is disabled by default;
+the current first producer records UART BREAK entry when explicitly enabled
+by the debugger integration test.
 
 `kernelcheck-ddb-qemu` asks QEMU to deliver a real chardev BREAK to the PL011,
 drives all inspection commands over its UART socket, and verifies that boot

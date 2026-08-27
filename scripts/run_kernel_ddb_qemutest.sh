@@ -55,6 +55,7 @@ GDB_COMMANDS=(
     -ex "break kernel_ddb_breakpoint_test_checkpoint"
     -ex "continue"
     -ex "set *(char *)&kernel_ddb_memory_fault_test_enabled = 1"
+    -ex "set *(char *)&diagnostic_trace_test_enabled = 1"
     -ex "disable 1"
 )
 if [ "$BREAK_SOURCE" = software ]; then
@@ -87,6 +88,7 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -Eq '^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+$' "$UART_LOG" ||
         ! grep -Eq '^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+$' "$UART_LOG" ||
         ! grep -q '^ddb: trace count=' "$UART_LOG" ||
+        ! grep -q '^ddb: events cpu=0 count=' "$UART_LOG" ||
         ! grep -Eq "^ddb: xk address=0x0*$KERNEL_READ_ADDRESS count=2$" "$UART_LOG" ||
         [ "$(grep -c '^ddb: xk byte address=0x.* value=0x' "$UART_LOG")" -lt 2 ] ||
         ! grep -q '^ddb: xk denied (not ordinary kernel RAM) address=0x0000001000000000 count=1$' "$UART_LOG" ||
@@ -104,6 +106,13 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -q '^ddb: continuing$' "$UART_LOG" ||
         ! grep -q '^init: ash bootstrap$' "$UART_LOG"; then
     echo "FAIL kernel/qemu ddb: BREAK inspection did not resume boot" >&2
+    sed 's/^/  /' "$UART_LOG" >&2 || true
+    exit 1
+fi
+
+if [ "$BREAK_SOURCE" = uart ] &&
+        ! grep -q '^ddb: event seq=1 cpu=0 id=0x0000000000000101 a=0x' "$UART_LOG"; then
+    echo "FAIL kernel/qemu ddb: UART BREAK event missing from diagnostic ring" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi

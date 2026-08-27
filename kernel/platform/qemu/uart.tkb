@@ -107,11 +107,13 @@ fn uart_irq_handler() -> bool !{interrupt, unsafe} {
         // QEMU represents CHR_EVENT_BREAK as a FIFO word carrying DR.BE.
         // Real PL011 also exposes BE through MIS when BEIM is enabled.
         if ((received & (1 << 10)) != 0 || (*uart_mis & (1 << 9)) != 0) {
+            diagnostic_trace_record_uart_break(received as usize);
             *uart_icr = 1 << 9; // BEIC
             return true;
         }
         uart_rx_handler(received as u8);
     } else if ((*uart_mis & (1 << 9)) != 0) {
+        diagnostic_trace_record_uart_break(1 << 10);
         *uart_icr = 1 << 9; // BEIC
         return true;
     }
