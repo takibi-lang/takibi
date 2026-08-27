@@ -209,8 +209,18 @@ symbol read, reject a non-RAM address, deliberately bypass that classifier
 under a test-only flag to take a real translation fault, return to the prompt,
 and continue boot.
 
-This is the first slice only. Process-user and physical-RAM address spaces
-remain to be added before the read-only memory issue is complete.
+The second slice adds `xu PID ADDRESS [COUNT]`. Each captured process now also
+freezes the L2 address from the existing lookup-only address-space diagnostic
+view. The command walks L2/L3 descriptors with the same guarded loads, checks
+that every table and resolved page belongs to ordinary RAM, and translates
+each byte independently. That last choice makes a cross-page read observable
+and avoids trusting that two adjacent virtual pages are physically adjacent.
+It never activates the selected root and never changes a TLB. Both DDB entry
+lanes cover an ordinary read, a mapped-page boundary crossing, an uncaptured
+PID, and an unmapped VA before continuing.
+
+Physical-RAM addressing remains to be added before the read-only memory issue
+is complete.
 
 ---
 

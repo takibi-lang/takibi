@@ -90,6 +90,7 @@ struct DdbSnapshot {
     process_count: usize;
     process_truncated: usize;
     processes: [ProcessDdbRecord; DDB_PROCESS_RECORDS];
+    process_l2: [usize; DDB_PROCESS_RECORDS];
     trace_count: usize;
     trace: [usize; KERNEL_CRASH_TRACE_WORDS];
 }
@@ -171,6 +172,12 @@ must_use variant DdbMemoryCommand {
     Kernel((usize, usize));
 }
 
+must_use variant DdbUserMemoryCommand {
+    NotUserMemory;
+    Invalid;
+    User((usize, usize, usize));
+}
+
 private fn ddb_hex_digit(byte: u8) -> usize {
     if (byte >= 0x30 && byte <= 0x39) { return (byte - 0x30) as usize; }
     if (byte >= 0x61 && byte <= 0x66) {
@@ -232,7 +239,68 @@ private fn ddb_parse_memory(
     return DdbMemoryCommand::Kernel((address, count));
 }
 
+// `xu PID HEX_ADDRESS [COUNT]`. PID/count are decimal; the address is hex.
+private fn ddb_parse_user_memory(
+        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
+        -> DdbUserMemoryCommand {
+    if (length < 6 || line[0] != 0x78 || line[1] != 0x75 ||
+            line[2] != 0x20) {
+        return DdbUserMemoryCommand::NotUserMemory;
+    }
+    let mut field: usize = 0;
+    let mut pid: usize = 0;
+    let mut pid_digits: usize = 0;
+    let mut address: usize = 0;
+    let mut address_digits: usize = 0;
+    let mut count: usize = 16;
+    let mut count_digits: usize = 0;
+    for index: usize in 3..<32 {
+        if (index < length) {
+            let byte: u8 = line[index];
+            if (byte == 0x20) {
+                if (field == 0 && pid_digits != 0) { field = 1; }
+                else if (field == 1 && address_digits != 0) { field = 2; }
+                else { return DdbUserMemoryCommand::Invalid; }
+            } else if (field == 0) {
+                if (byte < 0x30 || byte > 0x39) {
+                    return DdbUserMemoryCommand::Invalid;
+                }
+                let digit: usize = (byte - 0x30) as usize;
+                if (pid > (0xFFFFFFFFFFFFFFFF - digit) / 10) {
+                    return DdbUserMemoryCommand::Invalid;
+                }
+                pid = pid * 10 + digit;
+                pid_digits = pid_digits + 1;
+            } else if (field == 1) {
+                let digit: usize = ddb_hex_digit(byte);
+                if (digit >= 16 ||
+                        address > (0xFFFFFFFFFFFFFFFF - digit) / 16) {
+                    return DdbUserMemoryCommand::Invalid;
+                }
+                address = address * 16 + digit;
+                address_digits = address_digits + 1;
+            } else {
+                if (count_digits == 0) { count = 0; }
+                if (byte < 0x30 || byte > 0x39 || count > 6) {
+                    return DdbUserMemoryCommand::Invalid;
+                }
+                count = count * 10 + ((byte - 0x30) as usize);
+                count_digits = count_digits + 1;
+            }
+        }
+    }
+    if (pid == 0 || address_digits == 0 ||
+            (field == 2 && count_digits == 0) ||
+            count == 0 || count > 64 ||
+            address > 0xFFFFFFFFFFFFFFFF - count) {
+        return DdbUserMemoryCommand::Invalid;
+    }
+    return DdbUserMemoryCommand::User((pid, address, count));
+}
+
 must_use variant DdbByteReadResult { Fault; Read(usize); }
+must_use variant DdbWordReadResult { Fault; Read(usize); }
+must_use variant DdbUserTranslateResult { Unmapped; Fault; Mapped(usize); }
 
 private fn ddb_read_kernel_byte(address: usize)
         -> DdbByteReadResult !{unsafe} {
@@ -245,6 +313,63 @@ private fn ddb_read_kernel_byte(address: usize)
         return DdbByteReadResult::Fault;
     }
     return DdbByteReadResult::Read(value);
+}
+
+private fn ddb_read_kernel_word(address: usize)
+        -> DdbWordReadResult !{unsafe} {
+    if (address > 0xFFFFFFFFFFFFFFFF - 8) {
+        return DdbWordReadResult::Fault;
+    }
+    let mut value: usize = 0;
+    for byte: usize in 0..<8 {
+        match ddb_read_kernel_byte(address + byte) {
+            DdbByteReadResult::Fault => { return DdbWordReadResult::Fault; }
+            DdbByteReadResult::Read(part) => {
+                value = value | ((part & 0xFF) << (byte * 8));
+            }
+        }
+    }
+    return DdbWordReadResult::Read(value);
+}
+
+private fn ddb_translate_user(l2: usize, virtual: usize)
+        -> DdbUserTranslateResult !{unsafe} {
+    if (virtual < USER_TEXT_VA) { return DdbUserTranslateResult::Unmapped; }
+    let offset: usize = virtual - USER_TEXT_VA;
+    let index: usize = offset / PAGE_SIZE;
+    if (index >= USER_SPACE_PAGE_COUNT) {
+        return DdbUserTranslateResult::Unmapped;
+    }
+    if (page_ddb_kernel_address_readable(l2, PAGE_SIZE) == false) {
+        return DdbUserTranslateResult::Fault;
+    }
+    let branch: usize = index / USER_L3_PAGE_COUNT;
+    match ddb_read_kernel_word(l2 + branch * 8) {
+        DdbWordReadResult::Fault => { return DdbUserTranslateResult::Fault; }
+        DdbWordReadResult::Read(l2_entry) => {
+            if ((l2_entry & 3) != 3) {
+                return DdbUserTranslateResult::Unmapped;
+            }
+            let l3: usize = l2_entry & 0x0000FFFFFFFFF000;
+            if (page_ddb_kernel_address_readable(l3, PAGE_SIZE) == false) {
+                return DdbUserTranslateResult::Fault;
+            }
+            let entry: usize = index % USER_L3_PAGE_COUNT;
+            match ddb_read_kernel_word(l3 + entry * 8) {
+                DdbWordReadResult::Fault => {
+                    return DdbUserTranslateResult::Fault;
+                }
+                DdbWordReadResult::Read(pte) => {
+                    if ((pte & 3) != 3) {
+                        return DdbUserTranslateResult::Unmapped;
+                    }
+                    let page: usize = pte & USER_PAGE_PHYS_MASK;
+                    return DdbUserTranslateResult::Mapped(
+                        page + (virtual % PAGE_SIZE));
+                }
+            }
+        }
+    }
 }
 
 private fn ddb_render_kernel_memory(address: usize, count: usize) !{unsafe} {
@@ -280,6 +405,73 @@ private fn ddb_command_kernel_memory(address: usize, count: usize) !{unsafe} {
         return;
     }
     ddb_render_kernel_memory(address, count);
+}
+
+private fn ddb_render_user_memory(pid: usize, address: usize, count: usize)
+        !{unsafe} {
+    let mut root: usize = 0;
+    let mut l2: usize = 0;
+    let mut found: bool = false;
+    for index: usize in 0..<DDB_PROCESS_RECORDS {
+        if (index < ddb_snapshot.process_count &&
+                ddb_snapshot.processes[index].pid == pid) {
+            root = ddb_snapshot.processes[index].root_slot;
+            l2 = ddb_snapshot.process_l2[index];
+            found = true;
+        }
+    }
+    if (found == false) {
+        ddb_puts("ddb: xu pid not captured");
+        if (ddb_snapshot.process_truncated != 0) {
+            ddb_puts(" (snapshot truncated)");
+        }
+        ddb_puts("\n");
+        return;
+    }
+    ddb_puts("ddb: xu pid="); ddb_put_udec(pid);
+    ddb_puts(" root="); ddb_put_udec(root);
+    ddb_puts(" address="); ddb_put_hex(address);
+    ddb_puts(" count="); ddb_put_udec(count);
+    ddb_puts("\n");
+    let mut offset: usize = 0;
+    while (offset < count && offset < 64) {
+        let virtual: usize = address + offset;
+        let mut physical: usize = 0;
+        match ddb_translate_user(l2, virtual) {
+            DdbUserTranslateResult::Unmapped => {
+                ddb_puts("ddb: xu unmapped address="); ddb_put_hex(virtual);
+                ddb_puts("\n");
+                return;
+            }
+            DdbUserTranslateResult::Fault => {
+                ddb_puts("ddb: xu page-table fault address=");
+                ddb_put_hex(virtual);
+                ddb_puts("\n");
+                return;
+            }
+            DdbUserTranslateResult::Mapped(mapped) => { physical = mapped; }
+        }
+        if (page_ddb_kernel_address_readable(physical, 1) == false) {
+            ddb_puts("ddb: xu invalid physical="); ddb_put_hex(physical);
+            ddb_puts("\n");
+            return;
+        }
+        match ddb_read_kernel_byte(physical) {
+            DdbByteReadResult::Fault => {
+                ddb_puts("ddb: xu fault address="); ddb_put_hex(virtual);
+                ddb_puts(" physical="); ddb_put_hex(physical);
+                ddb_puts("\n");
+                return;
+            }
+            DdbByteReadResult::Read(value) => {
+                ddb_puts("ddb: xu byte address="); ddb_put_hex(virtual);
+                ddb_puts(" physical="); ddb_put_hex(physical);
+                ddb_puts(" value="); ddb_put_hex(value & 0xFF);
+                ddb_puts("\n");
+            }
+        }
+        offset = offset + 1;
+    }
 }
 
 private fn ddb_render_regs() !{unsafe} {
@@ -515,6 +707,17 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
     ddb_snapshot.process_count = process_copy.count;
     ddb_snapshot.process_truncated = 0;
     if (process_copy.truncated) { ddb_snapshot.process_truncated = 1; }
+    for index: usize in 0..<DDB_PROCESS_RECORDS {
+        ddb_snapshot.process_l2[index] = 0;
+        if (index < ddb_snapshot.process_count) {
+            let mut process_vm: AddressSpaceDiagnosticSnapshot =
+                address_space_diagnostic_snapshot(
+                    ddb_snapshot.processes[index].root_slot);
+            if (process_vm.live) {
+                ddb_snapshot.process_l2[index] = process_vm.l2_physical;
+            }
+        }
+    }
     ddb_snapshot.trace_count = kernel_process_crash_trace_copy(
         ddb_snapshot.trace as *usize);
     ddb_puts("\nddb: interrupt-safe UART debugger\n");
@@ -565,7 +768,16 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
                     ddb_puts("ddb: usage: xk HEX_ADDRESS [COUNT_1_TO_64]\n");
                 }
                 DdbMemoryCommand::NotMemory => {
-                  match crash_console_parse_proc(line as []u8, length) {
+                  match ddb_parse_user_memory(line as []u8, length) {
+                    DdbUserMemoryCommand::User(details) => {
+                        let (pid, address, count) = details;
+                        ddb_render_user_memory(pid, address, count);
+                    }
+                    DdbUserMemoryCommand::Invalid => {
+                        ddb_puts("ddb: usage: xu PID HEX_ADDRESS [COUNT_1_TO_64]\n");
+                    }
+                    DdbUserMemoryCommand::NotUserMemory => {
+                     match crash_console_parse_proc(line as []u8, length) {
                     CrashConsolePidResult::Parsed(pid) => { ddb_render_proc(pid); }
                     CrashConsolePidResult::Invalid => {
                     if (ddb_command_is(line as []u8, length, bs"trace")) {
@@ -576,8 +788,10 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
                         // exercise a real translation fault and prompt return.
                         ddb_render_kernel_memory(0x1000000000, 1);
                     } else if (ddb_command_is(line as []u8, length, bs"help")) {
-                        ddb_puts("commands: oops regs intr sched current vm fds ps proc PID trace xk ADDRESS [COUNT] continue\n");
+                        ddb_puts("commands: oops regs intr sched current vm fds ps proc PID trace xk ADDRESS [COUNT] xu PID ADDRESS [COUNT] continue\n");
                     } else { ddb_puts("ddb: unknown command; try help\n"); }
+                    }
+                     }
                     }
                   }
                 }

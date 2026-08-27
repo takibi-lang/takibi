@@ -308,6 +308,7 @@ fn address_space_asid(slot: usize) -> usize {
 struct AddressSpaceDiagnosticSnapshot {
     live: bool;
     l1_physical: usize;
+    l2_physical: usize;
     asid: usize;
 }
 
@@ -317,10 +318,11 @@ struct AddressSpaceDiagnosticSnapshot {
 fn address_space_diagnostic_snapshot(slot: usize)
         -> AddressSpaceDiagnosticSnapshot !{unsafe} {
     let backing: *AddressSpaceBacking = address_space_backing_existing_at(slot);
-    let mut snapshot: AddressSpaceDiagnosticSnapshot = { false, 0, 0 };
+    let mut snapshot: AddressSpaceDiagnosticSnapshot = { false, 0, 0, 0 };
     if (backing.live) {
         snapshot.live = true;
         snapshot.l1_physical = backing.l1_physical;
+        snapshot.l2_physical = backing.l2_physical;
         snapshot.asid = backing.asid;
     }
     return snapshot;

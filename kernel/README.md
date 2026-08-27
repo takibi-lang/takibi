@@ -441,7 +441,8 @@ acknowledgement turns an interrupt frame into ordinary kernel context. Every
 reachable operation is fixed-size and polling-only, with no allocator, lock,
 scheduler, sleep, filesystem, network, or ordinary logging dependency. Its
 commands are `oops`, `regs`, `intr`, `sched`, `current`, `vm`, `fds`, `ps`, `proc PID`,
-`trace`, `xk ADDRESS [COUNT]`, and `continue` (`help` lists them).
+`trace`, `xk ADDRESS [COUNT]`, `xu PID ADDRESS [COUNT]`, and `continue`
+(`help` lists them).
 
 `regs` reads the compiler-defined `ExceptionFrame` directly. DDB does not
 copy registers with handwritten assembly and does not duplicate frame
@@ -473,6 +474,15 @@ matches the one address DDB published immediately before the load; every other
 synchronous exception retains the normal fail-stop path. Current-EL sync
 dispatch stays on the interrupted stack so a nested guarded fault cannot
 overwrite the suspended DDB call frames on the IRQ stack.
+
+`xu` reads the same bounded byte count from a captured process's user virtual
+address space. DDB freezes each captured root's lookup-only L2 address at
+entry, walks L2/L3 descriptors without activating the root or changing a TLB,
+and re-translates every byte so crossing a page boundary is explicit. Page
+table addresses and resolved data pages must themselves lie in ordinary RAM;
+bad descriptors stop with `page-table fault` rather than becoming an MMIO or
+unmapped dereference. A PID absent from a truncated process snapshot is
+reported as not captured, not nonexistent.
 
 `kernelcheck-ddb-qemu` asks QEMU to deliver a real chardev BREAK to the PL011,
 drives all inspection commands over its UART socket, and verifies that boot
