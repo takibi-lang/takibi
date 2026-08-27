@@ -45,7 +45,12 @@ def main() -> int:
             log.write(chunk)
             log.flush()
 
-            if not break_sent and b"distro stack: argc=3 argv auxv ready\n" in received:
+            # Matched as a prefix on purpose. This trigger means "the
+            # initial image's stack is ready", and the argument count that
+            # follows on the same line is not part of that question -- it
+            # changed when PID 1 became BusyBox init, and pinning it here
+            # silently stopped the BREAK from ever being sent.
+            if not break_sent and b"distro stack: " in received:
                 if args.break_source == "software":
                     break_sent = True
                     continue
