@@ -13,6 +13,11 @@ GDB_PORT="${KERNEL_QEMU_DDB_GDB_PORT:-18703}"
 BREAK_SOURCE="${KERNEL_QEMU_DDB_BREAK_SOURCE:-uart}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
+KERNEL_READ_ADDRESS="$(llvm-nm-19 "$ELF" | awk '$3 == "kernel_ddb_breakpoint_test_enabled" { print $1; exit }')"
+if [ -z "$KERNEL_READ_ADDRESS" ]; then
+    echo "kernel DDB read-test symbol not found" >&2
+    exit 1
+fi
 
 mkdir -p "$ARTIFACT_DIR"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
@@ -41,16 +46,20 @@ trap cleanup EXIT INT TERM HUP
 python3 "$REPO_ROOT/scripts/run_kernel_ddb_driver.py" \
     --serial-port "$SERIAL_PORT" --qmp-port "$QMP_PORT" \
     --break-source "$BREAK_SOURCE" \
+    --kernel-address "$KERNEL_READ_ADDRESS" \
     --log "$UART_LOG" &
 driver_pid=$!
 
-GDB_COMMANDS=(-ex "target remote 127.0.0.1:$GDB_PORT")
+GDB_COMMANDS=(
+    -ex "target remote 127.0.0.1:$GDB_PORT"
+    -ex "break kernel_ddb_breakpoint_test_checkpoint"
+    -ex "continue"
+    -ex "set *(char *)&kernel_ddb_memory_fault_test_enabled = 1"
+    -ex "disable 1"
+)
 if [ "$BREAK_SOURCE" = software ]; then
     GDB_COMMANDS+=(
-        -ex "break kernel_ddb_breakpoint_test_checkpoint"
-        -ex "continue"
         -ex "set *(char *)&kernel_ddb_breakpoint_test_enabled = 1"
-        -ex "disable 1"
     )
 fi
 gdb-multiarch -q -batch "$ELF" "${GDB_COMMANDS[@]}" \
@@ -78,6 +87,10 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -Eq '^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+$' "$UART_LOG" ||
         ! grep -Eq '^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+$' "$UART_LOG" ||
         ! grep -q '^ddb: trace count=' "$UART_LOG" ||
+        ! grep -Eq "^ddb: xk address=0x0*$KERNEL_READ_ADDRESS count=2$" "$UART_LOG" ||
+        [ "$(grep -c '^ddb: xk byte address=0x.* value=0x' "$UART_LOG")" -lt 2 ] ||
+        ! grep -q '^ddb: xk denied (not ordinary kernel RAM) address=0x0000001000000000 count=1$' "$UART_LOG" ||
+        ! grep -q '^ddb: xk fault address=0x0000001000000000$' "$UART_LOG" ||
         ! grep -q '^ddb: continuing$' "$UART_LOG" ||
         ! grep -q '^init: ash bootstrap$' "$UART_LOG"; then
     echo "FAIL kernel/qemu ddb: BREAK inspection did not resume boot" >&2

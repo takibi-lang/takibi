@@ -89,7 +89,6 @@ exception_entry el1_current_sync_entry {
     stack_guard_shift: KERNEL_STACK_SHIFT;
     stack_guard_stack: overflow_stack_top;
     stack_guard_handler: kernel_stack_overflow_fail_stop;
-    dispatch_stack: irq_stack_top;
 }
 
 // Lower-EL AArch64 IRQ entry: the same frame, no fixture hook.

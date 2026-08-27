@@ -58,6 +58,20 @@ const PAGE_SIZE: usize = 4096;
 const BOOT_PAGE_COUNT: usize = 204800;
 
 extern symbol usable_ram_start;
+extern symbol kernel_image_start;
+
+// DDB's kernel-virtual reader is intentionally limited to the identity-
+// mapped ordinary-memory span owned by this image and its page allocator.
+// Device blocks may also be mapped in TTBR0, but reading them can acknowledge
+// or clear hardware state and is not an inspection-only operation.
+fn page_ddb_kernel_address_readable(address: usize, count: usize) -> bool {
+    if (count == 0 || address < kernel_image_start ||
+            address > 0xFFFFFFFFFFFFFFFF - count) {
+        return false;
+    }
+    let end: usize = usable_ram_start + PAGE_SIZE * BOOT_PAGE_COUNT;
+    return address < end && count <= end - address;
+}
 
 // GitHub issue #353: per-page storage whose MEANING belongs to whoever
 // currently holds the page -- `struct page`'s shape -- reserved at the

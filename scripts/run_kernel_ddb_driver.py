@@ -21,6 +21,7 @@ def main() -> int:
     parser.add_argument("--serial-port", type=int, required=True)
     parser.add_argument("--qmp-port", type=int, required=True)
     parser.add_argument("--break-source", choices=("uart", "software"), default="uart")
+    parser.add_argument("--kernel-address", required=True)
     parser.add_argument("--log", required=True)
     parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
@@ -35,7 +36,9 @@ def main() -> int:
         b"oops\n", b"regs\n", b"intr\n", b"sched\n",
         b"current\n", b"vm\n", b"fds\n",
         b"ps\n", b"proc 1\n",
-        b"trace\n", b"continue\n",
+        b"trace\n",
+        f"xk {args.kernel_address} 2\n".encode("ascii"),
+        b"xk 1000000000 1\n", b"xkfault\n", b"continue\n",
     ]
 
     with serial, open(args.log, "wb") as log:

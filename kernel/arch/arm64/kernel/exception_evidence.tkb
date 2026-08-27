@@ -96,6 +96,10 @@ struct DdbSnapshot {
 
 private let mut ddb_snapshot: DdbSnapshot;
 let mut kernel_ddb_breakpoint_test_enabled: bool;
+let mut kernel_ddb_memory_fault_test_enabled: bool;
+let mut kernel_ddb_memory_access_active: bool;
+let mut kernel_ddb_memory_access_faulted: bool;
+let mut kernel_ddb_memory_access_address: usize;
 
 fn kernel_ddb_breakpoint_test_checkpoint() {
     if (kernel_ddb_breakpoint_test_enabled) { kernel_ddb_breakpoint(); }
@@ -159,6 +163,123 @@ private fn ddb_append(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
         return length + 1;
     }
     return length;
+}
+
+must_use variant DdbMemoryCommand {
+    NotMemory;
+    Invalid;
+    Kernel((usize, usize));
+}
+
+private fn ddb_hex_digit(byte: u8) -> usize {
+    if (byte >= 0x30 && byte <= 0x39) { return (byte - 0x30) as usize; }
+    if (byte >= 0x61 && byte <= 0x66) {
+        return ((byte - 0x61) as usize) + 10;
+    }
+    if (byte >= 0x41 && byte <= 0x46) {
+        return ((byte - 0x41) as usize) + 10;
+    }
+    return 16;
+}
+
+// `xk ADDRESS [COUNT]`, with a deliberately small report bound. ADDRESS is
+// hexadecimal (an optional 0x prefix); COUNT is decimal and defaults to 16.
+private fn ddb_parse_memory(
+        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
+        -> DdbMemoryCommand {
+    if (length < 4 || line[0] != 0x78 || line[1] != 0x6B ||
+            line[2] != 0x20) {
+        return DdbMemoryCommand::NotMemory;
+    }
+    let prefixed: bool = length >= 5 && line[3] == 0x30 && line[4] == 0x78;
+    let mut address: usize = 0;
+    let mut address_digits: usize = 0;
+    let mut parsing_count: bool = false;
+    let mut count: usize = 16;
+    let mut count_digits: usize = 0;
+    for index: usize in 3..<32 {
+        if (index < length) {
+            let byte: u8 = line[index];
+            if (prefixed && (index == 3 || index == 4)) {
+                // The prefix was validated above; neither byte is a digit.
+            } else if (parsing_count) {
+                if (count_digits == 0) { count = 0; }
+                if (byte < 0x30 || byte > 0x39 || count > 6) {
+                    return DdbMemoryCommand::Invalid;
+                }
+                count = count * 10 + ((byte - 0x30) as usize);
+                count_digits = count_digits + 1;
+            } else if (byte == 0x20) {
+                if (address_digits == 0) { return DdbMemoryCommand::Invalid; }
+                parsing_count = true;
+            } else {
+                let digit: usize = ddb_hex_digit(byte);
+                if (digit >= 16 ||
+                        address > (0xFFFFFFFFFFFFFFFF - digit) / 16) {
+                    return DdbMemoryCommand::Invalid;
+                }
+                address = address * 16 + digit;
+                address_digits = address_digits + 1;
+            }
+        }
+    }
+    if (address_digits == 0 || (parsing_count && count_digits == 0)) {
+        return DdbMemoryCommand::Invalid;
+    }
+    if (count == 0 || count > 64 || address > 0xFFFFFFFFFFFFFFFF - count) {
+        return DdbMemoryCommand::Invalid;
+    }
+    return DdbMemoryCommand::Kernel((address, count));
+}
+
+must_use variant DdbByteReadResult { Fault; Read(usize); }
+
+private fn ddb_read_kernel_byte(address: usize)
+        -> DdbByteReadResult !{unsafe} {
+    kernel_ddb_memory_access_address = address;
+    kernel_ddb_memory_access_faulted = false;
+    kernel_ddb_memory_access_active = true;
+    let value: usize = kernel_ddb_guarded_read_u8(address);
+    kernel_ddb_memory_access_active = false;
+    if (kernel_ddb_memory_access_faulted) {
+        return DdbByteReadResult::Fault;
+    }
+    return DdbByteReadResult::Read(value);
+}
+
+private fn ddb_render_kernel_memory(address: usize, count: usize) !{unsafe} {
+    ddb_puts("ddb: xk address="); ddb_put_hex(address);
+    ddb_puts(" count="); ddb_put_udec(count);
+    ddb_puts("\n");
+    let mut offset: usize = 0;
+    while (offset < count && offset < 64) {
+        match ddb_read_kernel_byte(address + offset) {
+            DdbByteReadResult::Fault => {
+                ddb_puts("ddb: xk fault address=");
+                ddb_put_hex(address + offset);
+                ddb_puts("\n");
+                return;
+            }
+            DdbByteReadResult::Read(value) => {
+                ddb_puts("ddb: xk byte address=");
+                ddb_put_hex(address + offset);
+                ddb_puts(" value="); ddb_put_hex(value & 0xFF);
+                ddb_puts("\n");
+            }
+        }
+        offset = offset + 1;
+    }
+}
+
+private fn ddb_command_kernel_memory(address: usize, count: usize) !{unsafe} {
+    if (page_ddb_kernel_address_readable(address, count) == false) {
+        ddb_puts("ddb: xk denied (not ordinary kernel RAM) address=");
+        ddb_put_hex(address);
+        ddb_puts(" count="); ddb_put_udec(count);
+        ddb_puts("\n");
+        return;
+    }
+    ddb_render_kernel_memory(address, count);
 }
 
 private fn ddb_render_regs() !{unsafe} {
@@ -435,14 +556,30 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
         } else if (ddb_command_is(line as []u8, length, bs"ps")) {
             ddb_render_ps();
         } else {
-            match crash_console_parse_proc(line as []u8, length) {
-                CrashConsolePidResult::Parsed(pid) => { ddb_render_proc(pid); }
-                CrashConsolePidResult::Invalid => {
+            match ddb_parse_memory(line as []u8, length) {
+                DdbMemoryCommand::Kernel(details) => {
+                    let (address, count) = details;
+                    ddb_command_kernel_memory(address, count);
+                }
+                DdbMemoryCommand::Invalid => {
+                    ddb_puts("ddb: usage: xk HEX_ADDRESS [COUNT_1_TO_64]\n");
+                }
+                DdbMemoryCommand::NotMemory => {
+                  match crash_console_parse_proc(line as []u8, length) {
+                    CrashConsolePidResult::Parsed(pid) => { ddb_render_proc(pid); }
+                    CrashConsolePidResult::Invalid => {
                     if (ddb_command_is(line as []u8, length, bs"trace")) {
                         ddb_render_trace();
+                    } else if (kernel_ddb_memory_fault_test_enabled &&
+                            ddb_command_is(line as []u8, length, bs"xkfault")) {
+                        // Test-only bypass of the ordinary-RAM classifier:
+                        // exercise a real translation fault and prompt return.
+                        ddb_render_kernel_memory(0x1000000000, 1);
                     } else if (ddb_command_is(line as []u8, length, bs"help")) {
-                        ddb_puts("commands: oops regs intr sched current vm fds ps proc PID trace continue\n");
+                        ddb_puts("commands: oops regs intr sched current vm fds ps proc PID trace xk ADDRESS [COUNT] continue\n");
                     } else { ddb_puts("ddb: unknown command; try help\n"); }
+                    }
+                  }
                 }
             }
         }
@@ -454,6 +591,17 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
 // every other Current-EL synchronous exception retains fail-stop semantics.
 fn kernel_ddb_sync_dispatch(frame_sp: usize) -> usize !{interrupt, unsafe} {
     let esr: usize = mrs_esr_el1();
+    if (kernel_ddb_memory_access_active &&
+            ((esr >> 26) & 0x3F) == 0x25 &&
+            mrs_far_el1() == kernel_ddb_memory_access_address) {
+        kernel_ddb_memory_access_active = false;
+        kernel_ddb_memory_access_faulted = true;
+        let fault_frame: *ExceptionFrame = unsafe {
+            frame_sp as *ExceptionFrame
+        };
+        fault_frame.elr_el1 = kernel_ddb_memory_fault_return;
+        return frame_sp;
+    }
     if (((esr >> 26) & 0x3F) == 0x3C && (esr & 0xFFFF) == 0x544B) {
         kernel_ddb_enter(frame_sp, 2, 0x544B);
         let frame: *ExceptionFrame = unsafe { frame_sp as *ExceptionFrame };

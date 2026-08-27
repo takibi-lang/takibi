@@ -9,6 +9,7 @@ ENTRY(_start)
 
 SECTIONS {
     . = 0x40000000;
+    kernel_image_start = .;
 
     .text : {
         KEEP(*(.text.boot))

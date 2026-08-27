@@ -181,6 +181,39 @@ lifecycle-gap, alloc-rollback) and real RPi5 hardware (39 views, one boot).
 
 ---
 
+### 2026-08-27: A Bad DDB Read Returned To The Prompt (#443)
+
+The first arbitrary-memory command is `xk ADDRESS [COUNT]`, a bounded 1-to-64
+byte kernel-virtual dump. It accepts hexadecimal addresses, labels every byte
+with its address, and restricts normal requests to the identity-mapped
+ordinary-RAM span from the kernel image through the page allocator. That last
+boundary matters: device blocks are kernel-mapped too, but an MMIO read can
+acknowledge or clear state and is therefore not read-only merely because the
+instruction is a load.
+
+Range checking is not enough for a debugger whose page tables may be the thing
+that broke. One assembly leaf contains the only faultable `ldrb`; immediately
+before calling it DDB publishes an active bit and the exact expected FAR. A
+Current-EL data abort is recoverable only when all three agree: DDB access is
+active, EC is Current-EL data abort, and FAR equals that address. The handler
+redirects the saved ELR to a zero-result return leaf and marks the read failed.
+Every other synchronous exception still takes the existing fail-stop path.
+
+The subtle part was the stack, not the load. Synchronous exception dispatch
+previously moved to `irq_stack_top`. A data abort while DDB was already using
+that stack would place a nested frame below the live calls and then reset SP to
+the top, overwriting the debugger it meant to recover. Current-EL synchronous
+dispatch now stays on the interrupted stack; IRQ dispatch remains on its
+dedicated stack. Both real UART BREAK and software BRK tests perform a valid
+symbol read, reject a non-RAM address, deliberately bypass that classifier
+under a test-only flag to take a real translation fault, return to the prompt,
+and continue boot.
+
+This is the first slice only. Process-user and physical-RAM address spaces
+remain to be added before the read-only memory issue is complete.
+
+---
+
 ### 2026-08-27: DDB Captured The Interrupt And Scheduler Decision State (#442)
 
 Registers alone did not say why DDB was entered or whether the interrupted

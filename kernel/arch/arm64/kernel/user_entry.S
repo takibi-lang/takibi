@@ -295,6 +295,21 @@ kernel_ddb_breakpoint:
     brk     #0x544b
     ret
 
+    /* One faultable instruction for DDB memory inspection. The caller
+     * publishes the exact expected FAR before entering. On a matching
+     * Current-EL data abort, kernel_ddb_sync_dispatch replaces ELR with
+     * kernel_ddb_memory_fault_return; exception restore then resumes at
+     * the zero-result return below with the original x30 intact. */
+    .global kernel_ddb_guarded_read_u8
+kernel_ddb_guarded_read_u8:
+    ldrb    w0, [x0]
+    ret
+
+    .global kernel_ddb_memory_fault_return
+kernel_ddb_memory_fault_return:
+    mov     x0, #0
+    ret
+
     /* Non-resumable tail for every other generated Current-EL sync frame. */
     .global kernel_current_sync_fail_stop
 kernel_current_sync_fail_stop:
