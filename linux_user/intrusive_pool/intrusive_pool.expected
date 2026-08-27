@@ -7,7 +7,7 @@ the chosen order differs between a small and a large T (usize pages, BigPayload 
 a payload larger than a page pools, in a chunk of several pages (slot bytes, chunk pages, slots, placed): 5008 8 6 6
 slots starting beyond the chunk's first page validate and name the same chunk (beyond first page, base+valid, values): 5 true true
 reclaiming a multi-page chunk gives back every page of it (chunks released, provider delta): 1 0
-static bytes of bookkeeping for a 336-object pool -- growable: 5440, intrusive: 88
+static bytes of bookkeeping for a 336-object pool -- growable: 5440, intrusive: 96
 intrusive pool size is the same for a 1960-byte payload: true
 pages consumed before the first insert: 0
 two live slots hold distinct values: true

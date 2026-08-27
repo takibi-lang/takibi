@@ -89,13 +89,16 @@ fn pool_lock_check_reset() {
 }
 
 // The pool calls this from intrusive_pool_lock. `tag` is the pool's own
-// pool_tag, which is unique per pool and assigned at init.
+// pool_tag, which is unique per pool and assigned at init. `lock` is the
+// address of that pool's lock word (issue #445), which this backend does
+// not need and takes anyway -- the whole value of a stand-in is that its
+// signature is the real one, so a change over there fails here.
 // Returns the state a matching release must restore. linux_user has no
 // interrupt mask to save, so this is always 0 -- the value exists so the
 // SHAPE matches the kernel backend, where it is the DAIF.I bit read
 // before masking. A stand-in whose signature differs from the real thing
 // is a stand-in that stops catching signature drift.
-fn pool_lock_acquire(tag: usize) -> usize {
+fn pool_lock_acquire(tag: usize, lock: usize) -> usize {
     let slot_value: usize = pool_lock_slot_of(tag);
     if (tag == 0 || slot_value >= POOL_LOCK_MAX_TAGS) {
         pool_lock_untracked = pool_lock_untracked + 1;
@@ -139,7 +142,7 @@ fn pool_lock_acquire(tag: usize) -> usize {
 // a linear guard is released where its holder chooses, and releasing in a
 // different order than acquired is legal even though acquiring in a
 // different order is what this file is looking for.
-fn pool_lock_release(tag: usize, flags: usize) {
+fn pool_lock_release(tag: usize, lock: usize, flags: usize) {
     let slot_value: usize = pool_lock_slot_of(tag);
     if (tag == 0 || slot_value >= POOL_LOCK_MAX_TAGS) { return; }
     let mut found: bool = false;

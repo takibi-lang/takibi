@@ -485,6 +485,12 @@ generic struct IntrusiveSlot(T: type) {
 // more than one required.
 generic struct IntrusivePool(T: type) {
     pool_tag: usize;
+    // GitHub issue #445: the word the spinlock swaps. Per POOL, which is
+    // the cheapest axis there is -- six pools in this kernel, so 48 bytes
+    // in total, against a per-object or per-chunk field that would scale
+    // with what the pool holds. pool_tag cannot double as it: a tag is a
+    // mixed counter identifying the pool (issue #399), not a location.
+    lock_word: usize;
     chunk_head: usize;
     partial_head: usize;
     empty_chunk_count: usize;
@@ -685,16 +691,22 @@ private linear struct IntrusivePoolGuard[pool_id: addr] {
 // Acquires this pool. The body delegates to pool_lock_acquire, which the
 // FILE LIST supplies (issue #364): linux_user gives it a checking
 // implementation that catches re-entrancy and inconsistent lock order
-// (issue #365), and a kernel build gives it disable_irq() on one core or
-// a real acquire for SMP. This file does not know or care which, which
-// is what lets the checking be thorough where it is free and absent
+// (issue #365), and a kernel build gives it a real spinlock inside the
+// interrupt mask (issue #445). This file does not know or care which,
+// which is what lets the checking be thorough where it is free and absent
 // where it would cost.
+//
+// It passes both the tag and the address of this pool's own lock word.
+// The tag is identity, for the checking backend; the address is the thing
+// the kernel backend swaps. They are different questions and a tag cannot
+// answer the second one.
 //
 // Deliberately NOT `!{may_block}`: see above.
 fn intrusive_pool_lock(T: type, pool: &mut IntrusivePool(T) @ pool_id)
         -> IntrusivePoolGuard[pool_id] {
     let mut guard: IntrusivePoolGuard[pool_id] =
-        { pool_lock_acquire(pool.pool_tag) };
+        { pool_lock_acquire(pool.pool_tag,
+                            (&(*pool).lock_word) as usize) };
     return guard;
 }
 
@@ -703,7 +715,8 @@ fn intrusive_pool_lock(T: type, pool: &mut IntrusivePool(T) @ pool_id)
 // that review comments are worst at catching.
 fn intrusive_pool_unlock(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                          guard: sink IntrusivePoolGuard[pool_id]) {
-    pool_lock_release(pool.pool_tag, guard.flags);
+    pool_lock_release(pool.pool_tag, (&(*pool).lock_word) as usize,
+                      guard.flags);
 }
 
 fn intrusive_pool_init(T: type, pool: &mut IntrusivePool(T) @ pool_id) {
@@ -727,6 +740,10 @@ fn intrusive_pool_init_retaining(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                                  retained_chunks: usize) {
     pool.pool_tag = intrusive_pool_mix_tag(intrusive_pool_next_tag);
     intrusive_pool_next_tag = intrusive_pool_next_tag + 1;
+    // Free. Re-initialising a pool that some core is inside would be a bug
+    // this cannot detect, and is not a thing any caller does: init runs
+    // once, before the pool is reachable.
+    pool.lock_word = 0;
     pool.chunk_head = 0;
     pool.partial_head = 0;
     pool.empty_chunk_count = 0;

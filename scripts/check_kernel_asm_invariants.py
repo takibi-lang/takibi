@@ -226,6 +226,54 @@ def check_eret_daif_mask(insns):
     return failures
 
 
+
+# GitHub issue #445: the pool lock has to be an ATOMIC, and reading the
+# source is not evidence that it is one. Replacing the exchange in
+# spin_trylock with a plain store leaves a lock that takes and releases
+# correctly, passes a take/release smoke test, and excludes nothing --
+# that exact substitution was made deliberately while writing
+# linux_user/spinlock, and only the "a second attempt must fail" line
+# caught it. This check catches the same substitution in the shipped
+# kernel, where there is no second thread to notice.
+#
+# Two accepted forms rather than one instruction, because WHICH one is the
+# backend's choice from --cpu and both are correct: ARMv8.0 (cortex-a53,
+# QEMU virt) has no LSE and gets an ldaxr/stxr retry loop, while ARMv8.2
+# (cortex-a76, RPi5) gets the single-instruction swpa. Pinning either one
+# specifically would fail on the other target for no reason.
+ATOMIC_EXCHANGE_RE = re.compile(r"^(swpa?l?|ldaxr|cas(a|l|al)?)\b")
+
+
+def check_spinlock_is_atomic(insns):
+    failures = []
+    seen = {}
+    for _, text, fn in insns:
+        if fn in ("spin_trylock", "spin_unlock"):
+            seen.setdefault(fn, []).append(text)
+
+    body = seen.get("spin_trylock")
+    if body is None:
+        # Not an error on a build that does not link the lock at all; a
+        # build that does and has lost the function is caught below by
+        # spin_unlock, and a build with neither has no pool lock to guard.
+        pass
+    elif not any(ATOMIC_EXCHANGE_RE.match(t) for t in body):
+        failures.append(
+            "spin_trylock contains no atomic exchange (looked for swpa/ldaxr/"
+            "cas): a lock that is a plain load and store excludes nothing, "
+            "and passes every single-threaded test"
+        )
+
+    body = seen.get("spin_unlock")
+    if body is not None and not any(t.startswith("stlr") for t in body):
+        failures.append(
+            "spin_unlock contains no stlr: releasing with a plain store lets "
+            "the next holder observe this core's writes out of order, which "
+            "is the ordering the lock exists to provide"
+        )
+    return failures
+
+
 def main():
     if len(sys.argv) != 3:
         print(
@@ -238,14 +286,16 @@ def main():
     expected_uxn_and_pxn_count = int(sys.argv[2])
     insns = parse_instructions(objdump_lines(elf_path))
     failures = (
-        check_uxn(insns, expected_uxn_and_pxn_count) + check_eret_daif_mask(insns)
+        check_uxn(insns, expected_uxn_and_pxn_count)
+        + check_eret_daif_mask(insns)
+        + check_spinlock_is_atomic(insns)
     )
     if failures:
         for f in failures:
             print("FAIL kernel/asm-invariants: %s" % f, file=sys.stderr)
         return 1
-    print("PASS kernel/asm-invariants: UXN identity-block bits and "
-          "eret DAIF.I masking both verified statically")
+    print("PASS kernel/asm-invariants: UXN identity-block bits, eret DAIF.I "
+          "masking, and the spinlock's atomicity all verified statically")
     return 0
 
 

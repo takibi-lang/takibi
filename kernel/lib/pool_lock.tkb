@@ -1,26 +1,34 @@
 // GitHub issue #351: the kernel's lock backend for kernel/lib/'s pool
 // primitives.
 //
-// Current limitations (2026-08-20). Keep this list current as call sites
+// Current limitations (2026-08-27). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
-// - SINGLE CORE ONLY. Masking interrupts excludes the only other
-//   execution context there is on one core, and nothing here excludes a
-//   second CPU. An SMP port has to add a real acquire; the signature
-//   does not change when it does, because `flags` is already the thing a
-//   spin_lock_irqsave-shaped API hands back.
 // - The mask is DAIF.I only. FIQ, SError and debug exceptions are not
-//   masked, matching enable_irq/disable_irq's own scope.
+//   masked, matching enable_irq/disable_irq's own scope. A handler at one
+//   of those levels that takes a pool lock deadlocks against interrupted
+//   code holding it, and nothing here can tell.
+// - The spin is unbounded and unfair. A core that never gets the word is
+//   indistinguishable from a core waiting on one that is making progress,
+//   so a lost release hangs rather than reporting. See
+//   kernel/lib/spinlock.tkb for what the wait does and does not do.
 // - Nothing here detects a deadlock. Taking a second pool's lock while
 //   holding one is legal and correct as far as this file is concerned;
 //   whether the ORDER is consistent across call sites is checked by
 //   linux_user/intrusive_pool/pool_lock_check.tkb, in the suite that can
 //   afford to look.
 //
-// This is `local_irq_save`, and the reason it can be is that the caller
-// keeps `flags` -- the pool's guard is a linear struct carrying it, which
-// is the frame slot Linux's own `unsigned long flags` occupies. That is
-// what makes the pair correct where a bare disable/enable is not:
+// This is `spin_lock_irqsave`, and it became one in issue #445 without
+// its shape changing -- which is what the previous version of this header
+// predicted, because `flags` was already the thing such an API hands back.
+// The order is the part that matters: MASK, then take; give back, then
+// RESTORE. Taking the lock first would leave a window where this core
+// holds it and an interrupt can arrive, and a handler that then wants the
+// same lock waits for a holder that cannot run until the handler returns.
+//
+// The caller keeping `flags` is what makes the pair correct where a bare
+// disable/enable is not -- the pool's guard is a linear struct carrying
+// it, the frame slot Linux's own `unsigned long flags` occupies:
 //
 //   in an interrupt handler, DAIF.I is already set on entry, so the
 //   acquire records "was masked" and the matching release leaves it
@@ -36,6 +44,7 @@
 // the handler's value and leave interrupts masked for good. Per-guard
 // state has no such window and needs no depth counter.
 use "kernel/arch/arm64/boot/cpu.tkb";
+use "kernel/lib/spinlock.tkb";
 
 // Bit 7 of DAIF is the I (IRQ) mask.
 const DAIF_IRQ_BIT: usize = 7;
@@ -46,16 +55,20 @@ const DAIF_IRQ_BIT: usize = 7;
 // `tag` identifies the pool for the checking backend linux_user
 // substitutes here; this one has no use for it, and says so rather than
 // dropping it from the signature -- a stand-in whose shape differs from
-// the real thing stops catching drift.
-fn pool_lock_acquire(tag: usize) -> usize {
+// the real thing stops catching drift. `lock` is the address of that
+// pool's own lock word, which is the half a tag cannot supply.
+fn pool_lock_acquire(tag: usize, lock: usize) -> usize !{unsafe} {
     let flags: usize = (mrs_daif() >> DAIF_IRQ_BIT) & 1;
     disable_irq();
+    spin_lock(lock);
     return flags;
 }
 
-// Restores what the matching acquire found. Enables ONLY if this acquire
-// is the one that masked -- never unconditionally, which is the whole
-// difference between this and a bare enable_irq().
-fn pool_lock_release(tag: usize, flags: usize) {
+// Gives the lock back, then restores what the matching acquire found.
+// Enables ONLY if this acquire is the one that masked -- never
+// unconditionally, which is the whole difference between this and a bare
+// enable_irq().
+fn pool_lock_release(tag: usize, lock: usize, flags: usize) !{unsafe} {
+    spin_unlock(lock);
     if (flags == 0) { enable_irq(); }
 }

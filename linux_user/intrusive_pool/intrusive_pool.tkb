@@ -310,6 +310,12 @@ fn app_main() {
     // 336 usizes each -- before a single object exists. IntrusivePool(T)
     // has no such array, and its size does not move when the payload type
     // changes either.
+    //
+    // 88 -> 96 in issue #445: the pool now carries the word its spinlock
+    // swaps. Per POOL, which is the axis this comparison is about -- the
+    // number is 5440 on the other side because that one scales with the
+    // OBJECT COUNT, and 96 does not scale with anything. Six pools in the
+    // kernel means 48 bytes bought a lock that excludes a second core.
     uart_puts("static bytes of bookkeeping for a 336-object pool -- growable: ");
     uart_print(sizeof(GrowablePool(usize, 168, 2, 336)));
     uart_puts(", intrusive: ");
