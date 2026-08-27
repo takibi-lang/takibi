@@ -3248,6 +3248,70 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects one argument: %s(v)" fname fname)))
 
+  | Call (("atomic_load_acquire" | "atomic_store_release"
+          | "atomic_swap_acquire" | "atomic_fetch_add_relaxed") as fname,
+          args) ->
+      (* GitHub issue #17: the closed atomic set. Same "closed set of
+         instructions" shape as the mrs/msr/tlbi intrinsics above, with the
+         MEMORY ORDERING baked into the name rather than passed as an
+         argument -- for the reason those intrinsics do not take a register
+         selector. An ordering chosen by a runtime value cannot be read off
+         the call site, and the whole value of naming it is that a reviewer
+         and the emitted instruction agree.
+
+         The address is a plain `usize` rather than a typed pointer because
+         these are the raw instructions, not the safe surface. What a caller
+         is supposed to use is `kernel/lib/`'s spinlock, or a fixed-layout
+         record with atomic commit publication (GitHub issue #299); this
+         intrinsic is the thing those two are built out of, which is why it
+         is gated below.
+
+         Deliberately NOT here: compare-and-swap. LLVM's OCaml bindings
+         expose `build_atomicrmw` but no `build_cmpxchg` (LLVM 19), so a CAS
+         would have to be a hand-written ldaxr/stlxr loop in inline asm,
+         which would also give up the LSE-versus-exclusives choice the
+         backend makes for everything here. Nothing needs it yet: a
+         test-and-set spinlock is `atomic_swap_acquire` plus
+         `atomic_store_release`. Add it when a caller cannot be written
+         without it, and see GitHub issue #123 for the standing position on
+         missing binding APIs. *)
+      let check_addr addr =
+        let at = infer_expr senv eenv tyenv fenv addr in
+        unify_at addr.loc at TUsize
+      in
+      let check_value v =
+        let vt = infer_expr senv eenv tyenv fenv v in
+        unify_at v.loc vt TUsize
+      in
+      (* The gate. Raw atomics are reachable only from inside `unsafe { }`:
+         an atomic's correctness lives entirely in an ordering argument the
+         compiler cannot see, which is exactly what `unsafe` is for. *)
+      if !unsafe_depth = 0 then
+        raise (TypeError (e.loc, Printf.sprintf
+          ("'%s' is a raw atomic operation whose correctness rests on a "
+           ^^ "memory-ordering argument the compiler cannot check (GitHub "
+           ^^ "issue #17); write `unsafe { ... }` around it, or use the "
+           ^^ "lock or the publication record built on top of it")
+          fname))
+      else
+        note_type_checker_unsafe_use ();
+      (match fname, args with
+       | "atomic_load_acquire", [addr] -> check_addr addr; TUsize
+       | "atomic_load_acquire", _ ->
+           raise (TypeError (e.loc,
+             "atomic_load_acquire expects one argument: "
+             ^ "atomic_load_acquire(addr)"))
+       | "atomic_store_release", [addr; v] ->
+           check_addr addr; check_value v; TVoid
+       | "atomic_store_release", _ ->
+           raise (TypeError (e.loc,
+             "atomic_store_release expects two arguments: "
+             ^ "atomic_store_release(addr, value)"))
+       | _, [addr; v] -> check_addr addr; check_value v; TUsize
+       | _, _ ->
+           raise (TypeError (e.loc, Printf.sprintf
+             "%s expects two arguments: %s(addr, value)" fname fname)))
+
   | Call (("smc4" | "hvc4") as fname, args) ->
       (* GitHub issue #226: the raw `smc #0` trap, exposed as a plain
          4-in/1-out hardware primitive (the real SMCCC x0-x3 in / x0 out

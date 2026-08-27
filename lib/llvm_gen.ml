@@ -4206,6 +4206,66 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       ignore (build_call fty inline [| v |] "" builder);
       (TypeVoid, const_null (i1_type context))
 
+  | Call (("atomic_load_acquire" | "atomic_store_release"
+          | "atomic_swap_acquire" | "atomic_fetch_add_relaxed") as name,
+          args) ->
+      (* GitHub issue #17. Two lowerings, and which one a given operation
+         gets is decided by what LLVM's OCaml bindings actually expose
+         rather than by preference.
+
+         The read-modify-write pair goes through `build_atomicrmw`, so the
+         BACKEND picks the instruction: cortex-a53 (QEMU `virt`, ARMv8.0)
+         has no LSE and gets an ldxr/stxr retry loop, while cortex-a76
+         (RPi5, ARMv8.2) gets the single-instruction `swpa`/`ldadd`. Both
+         `--cpu` values are already passed by the Makefile, which is why
+         this is a fact to verify on emitted assembly rather than a choice
+         to make here.
+
+         The pure load and store are inline asm, because the bindings
+         expose no way to put an ordering on `build_load`/`build_store` --
+         there is no `set_ordering` and no `build_fence` (LLVM 19; see
+         GitHub issue #123 for the standing position on missing binding
+         APIs). `ldar`/`stlr` are ARMv8.0 baseline with no LSE variant, so
+         naming them directly gives up nothing, unlike the RMW pair where
+         naming the instruction would cost the a76 its better one. *)
+      let triple = target_triple !the_module in
+      if not (starts_with triple "aarch64") then
+        raise (Error (Printf.sprintf
+          "atomic operations are not implemented for target '%s'" triple));
+      let ity = usize_lltype () in
+      (match name, args with
+       | "atomic_load_acquire", [addr_e] ->
+           let (_, a) = gen_expr ~expected_ty:TypeUsize locals addr_e in
+           let fty = function_type ity [| ity |] in
+           let inline =
+             const_inline_asm fty "ldar $0, [$1]" "=r,r,~{memory}" true false in
+           let v = build_call fty inline [| a |] "atomic.load" builder in
+           (TypeUsize, v)
+       | "atomic_store_release", [addr_e; val_e] ->
+           let (_, a) = gen_expr ~expected_ty:TypeUsize locals addr_e in
+           let (_, v) = gen_expr ~expected_ty:TypeUsize locals val_e in
+           let fty = function_type (void_type context) [| ity; ity |] in
+           let inline =
+             const_inline_asm fty "stlr $1, [$0]" "r,r,~{memory}" true false in
+           ignore (build_call fty inline [| a; v |] "" builder);
+           (TypeVoid, const_null (i1_type context))
+       | _, [addr_e; val_e] ->
+           let (_, a) = gen_expr ~expected_ty:TypeUsize locals addr_e in
+           let p = build_inttoptr a (pointer_type context) "atomic.addr"
+             builder in
+           let (_, v) = gen_expr ~expected_ty:TypeUsize locals val_e in
+           let (op, ord) = match name with
+             | "atomic_swap_acquire" ->
+                 (AtomicRMWBinOp.Xchg, AtomicOrdering.Acquire)
+             | _ -> (AtomicRMWBinOp.Add, AtomicOrdering.Monotonic)
+           in
+           (* singlethread = false. The whole point is the other core. *)
+           let r = build_atomicrmw op p v ord false "atomic.rmw" builder in
+           (TypeUsize, r)
+       | _, _ ->
+           (* type_inf.ml has already rejected every other arity. *)
+           assert false)
+
   | Call ("smc4", [a0_e; a1_e; a2_e; a3_e]) ->
       (* GitHub issue #226: the real SMCCC ABI (x0-x3 in, x0 out) is fixed
          hardware/firmware convention, not something a .tkb caller chooses

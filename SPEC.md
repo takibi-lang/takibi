@@ -2315,7 +2315,12 @@ the register chosen by LLVM's allocator rather than by the caller:
 `msr_tcr_el1`, `msr_ttbr0_el1`, `msr_daifclr_irq`, `msr_daifset_irq`;
 `tlbi_vmalle1`, `tlbi_vaae1is`, `tlbi_vae1is`, `tlbi_aside1is`;
 `dsb_ish`, `dsb_ishst`, `isb`; and the call gates `smc4`, `hvc4`,
-`svc5`. A non-AArch64 target rejects them during type checking.
+`svc5`. These are AArch64-only, but nothing rejects them during type
+checking -- the type checker does not know the target triple. On another
+target they reach the assembler and fail there with a raw mnemonic error
+(`invalid instruction mnemonic 'tlbi'`), which names the instruction
+rather than the rule. The atomics below are the one group that reports
+this properly, because their lowering had to branch on the triple anyway.
 
 `mrs_daif` is what makes an interrupt-masking lock able to RESTORE the
 mask rather than unconditionally enable it: `msr_daifset_irq` /
@@ -2325,6 +2330,63 @@ two such locks nest. Reading the mask first is the `local_irq_save` half
 of the pair -- see `kernel/lib/pool_lock.tkb`, and note that the saved
 value has to live in the caller's frame, which is why the guard holding
 it is a linear struct rather than an erased view.
+
+### Atomic Operations (GitHub issue #17)
+
+Four intrinsics, all AArch64-only, all usable only inside `unsafe { ... }`:
+
+```
+atomic_load_acquire(addr: usize) -> usize
+atomic_store_release(addr: usize, value: usize)
+atomic_swap_acquire(addr: usize, value: usize) -> usize
+atomic_fetch_add_relaxed(addr: usize, value: usize) -> usize
+```
+
+**The memory ordering is part of the name, not an argument.** This is the
+same rule that keeps a register selector out of `mrs_*`/`msr_*`: an
+ordering chosen by a runtime value cannot be read off the call site, and
+the entire value of writing the ordering down is that a reviewer and the
+emitted instruction agree about it.
+
+**They require `unsafe`**, which no other intrinsic in the group above
+does. An atomic's correctness is not a property of the operation; it is a
+property of the ordering argument relating it to every other access, and
+no check in this compiler can see that argument. Ordinary code is meant to
+use the lock built out of these, or a fixed-layout record with atomic
+commit publication -- not these directly. Reaching for one is exactly the
+moment `unsafe` exists to mark.
+
+The address is a plain `usize`, not a typed pointer, for the same reason:
+this is the raw instruction, below the level where a type would mean
+anything.
+
+**Which instruction each one becomes is a backend decision, not a spelling
+here.** The read-modify-write pair lowers to LLVM's `atomicrmw`, so the
+selected `--cpu` picks the encoding. Measured on real objdump output:
+
+| | `--cpu cortex-a53` (ARMv8.0, QEMU `virt`) | `--cpu cortex-a76` (ARMv8.2, RPi5) |
+|---|---|---|
+| `atomic_load_acquire` | `ldar` | `ldar` |
+| `atomic_store_release` | `stlr` | `stlr` |
+| `atomic_swap_acquire` | `ldaxr`/`stxr` retry loop | `swpa` |
+| `atomic_fetch_add_relaxed` | `ldxr`/`add`/`stxr` retry loop | `ldadd` |
+
+The load and store are inline asm rather than LLVM atomics because the
+OCaml bindings expose no ordering on `build_load`/`build_store` (there is
+no `set_ordering` and no `build_fence` in LLVM 19's bindings; see GitHub
+issue #123). Nothing is lost by naming them: `ldar`/`stlr` are ARMv8.0
+baseline and have no LSE variant to miss. The RMW pair deliberately does
+NOT name its instruction, because naming it would cost the a76 the single
+instruction it has.
+
+**Compare-and-swap is deliberately absent.** The same bindings expose
+`build_atomicrmw` but no `build_cmpxchg`, so a CAS would have to be a
+hand-written `ldaxr`/`stlxr` loop -- which would also give up the
+LSE-versus-exclusives choice above. A test-and-set spinlock does not need
+it: it is `atomic_swap_acquire` to take and `atomic_store_release` to
+give back. Add CAS when a caller exists that cannot be written without it.
+
+A non-AArch64 target rejects all four at code generation, by name.
 
 ## Function Pointers, extern fn, and Overloading
 

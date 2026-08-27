@@ -12375,6 +12375,126 @@ let codegen_tests = [
        expect_type_error "cannot unify"
          "fn bad_hvc4_type(a: i32) { let r: usize = hvc4(a, a, a, a); }" ());
 
+  (* GitHub issue #17: the closed atomic set. Same coverage shape as the
+     #226 intrinsics above -- arity, argument type, cannot-be-redefined --
+     plus the one rule those do not have: an atomic is reachable only from
+     inside `unsafe { }`, because its correctness is a memory-ordering
+     argument no check in this compiler can see. What callers are meant to
+     use instead is the lock built on these, or issue #299's publication
+     record; this tier proves the gate, and the emitted instruction is
+     verified against real objdump output on both --cpu values. *)
+  Alcotest.test_case
+    "issue #17: atomics type-check inside unsafe and carry their ordering \
+     in the name"
+    `Quick
+    (fun () ->
+       expect_ok
+         "fn issue17_atomics(addr: usize, v: usize) -> usize !{unsafe} {
+            unsafe { atomic_store_release(addr, v); }
+            let seen: usize = unsafe { atomic_load_acquire(addr) };
+            let old: usize = unsafe { atomic_swap_acquire(addr, v) };
+            return seen + old + unsafe { atomic_fetch_add_relaxed(addr, v) };
+          }" ());
+
+  Alcotest.test_case
+    "issue #17: a raw atomic outside unsafe is rejected"
+    `Quick
+    (fun () ->
+       List.iter (fun call ->
+         expect_type_error "raw atomic operation"
+           (Printf.sprintf
+              "fn bad_unguarded(addr: usize, v: usize) -> usize { return %s; }"
+              call) ())
+         ["atomic_load_acquire(addr)";
+          "atomic_swap_acquire(addr, v)";
+          "atomic_fetch_add_relaxed(addr, v)"];
+       expect_type_error "raw atomic operation"
+         "fn bad_unguarded_store(addr: usize, v: usize) {
+            atomic_store_release(addr, v);
+          }" ());
+
+  Alcotest.test_case
+    "issue #17: atomics check their arity and their usize address"
+    `Quick
+    (fun () ->
+       expect_type_error "expects one argument"
+         "fn bad_load(a: usize) -> usize !{unsafe} {
+            return unsafe { atomic_load_acquire(a, a) };
+          }" ();
+       expect_type_error "expects two arguments"
+         "fn bad_store(a: usize) !{unsafe} {
+            unsafe { atomic_store_release(a); }
+          }" ();
+       expect_type_error "expects two arguments"
+         "fn bad_swap(a: usize) -> usize !{unsafe} {
+            return unsafe { atomic_swap_acquire(a) };
+          }" ();
+       expect_type_error "cannot unify"
+         "fn bad_addr_type(a: i32) -> usize !{unsafe} {
+            return unsafe { atomic_load_acquire(a) };
+          }" ();
+       expect_type_error "cannot unify"
+         "fn bad_value_type(a: usize, v: i32) !{unsafe} {
+            unsafe { atomic_store_release(a, v); }
+          }" ());
+
+  (* The IR-shape half. What this compiler is responsible for is emitting an
+     `atomicrmw` with the right operation and ordering at all; WHICH
+     instruction that becomes (ldxr/stxr retry loop on ARMv8.0, swpa/ldadd
+     on ARMv8.2+LSE) is LLVM's instruction selection reading --cpu, so
+     asserting it here would be testing the backend rather than this
+     change. SPEC.md records the measured a53/a76 output instead. *)
+  Alcotest.test_case
+    "issue #17: the RMW pair lowers to atomicrmw, the load/store to ldar/stlr"
+    `Quick
+    (fun () ->
+       with_codegen_target "aarch64-none-elf" (fun () ->
+         expect_codegen_ok
+           "fn issue17_codegen(addr: usize, v: usize) -> usize !{unsafe} {
+              unsafe { atomic_store_release(addr, v); }
+              let seen: usize = unsafe { atomic_load_acquire(addr) };
+              let old: usize = unsafe { atomic_swap_acquire(addr, v) };
+              return seen + old
+                     + unsafe { atomic_fetch_add_relaxed(addr, v) };
+            }" ();
+         let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+         Alcotest.(check bool) "swap is an acquire atomicrmw xchg"
+           true (contains_substring ir "atomicrmw xchg");
+         Alcotest.(check bool) "swap carries acquire ordering"
+           true (contains_substring ir "acquire");
+         Alcotest.(check bool) "fetch_add is a relaxed atomicrmw add"
+           true (contains_substring ir "atomicrmw add");
+         Alcotest.(check bool) "fetch_add carries monotonic ordering"
+           true (contains_substring ir "monotonic");
+         Alcotest.(check bool) "load is ldar"
+           true (contains_substring ir "ldar $0, [$1]");
+         Alcotest.(check bool) "store is stlr"
+           true (contains_substring ir "stlr $1, [$0]");
+         (* singlethread would make every one of these useless for the
+            other core, which is the entire point. *)
+         Alcotest.(check bool) "no syncscope(\"singlethread\")"
+           false (contains_substring ir "syncscope(\"singlethread\")")));
+
+  Alcotest.test_case
+    "issue #17: a non-AArch64 target rejects atomics by name"
+    `Quick
+    (fun () ->
+       with_codegen_target "x86_64-pc-linux-gnu" (fun () ->
+         expect_codegen_error "atomic operations are not implemented"
+           "fn issue17_wrong_target(addr: usize) -> usize !{unsafe} {
+              return unsafe { atomic_load_acquire(addr) };
+            }" ()));
+
+  Alcotest.test_case
+    "issue #17: atomic builtin names cannot be redefined"
+    `Quick
+    (fun () ->
+       List.iter (fun name ->
+         expect_type_error "compiler builtin"
+           (Printf.sprintf "fn %s() {}" name) ())
+         ["atomic_load_acquire"; "atomic_store_release";
+          "atomic_swap_acquire"; "atomic_fetch_add_relaxed"]);
+
   Alcotest.test_case
     "issue #226: system-register/barrier/TLBI builtin names cannot be redefined"
     `Quick
