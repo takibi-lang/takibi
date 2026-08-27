@@ -68,6 +68,16 @@ struct DdbSnapshot {
     sequence: usize;
     cpu: usize;
     frame_sp: usize;
+    process_pid: usize;
+    parent_pid: usize;
+    process_state: usize;
+    wait_reason: usize;
+    root_slot: usize;
+    root_live: usize;
+    root_l1: usize;
+    root_asid: usize;
+    fd_kind: [usize; CRASH_FD_SNAPSHOT_SLOTS];
+    fd_object: [usize; CRASH_FD_SNAPSHOT_SLOTS];
     trace_count: usize;
     trace: [usize; KERNEL_CRASH_TRACE_WORDS];
 }
@@ -215,6 +225,37 @@ private fn ddb_render_oops() !{unsafe} {
     ddb_puts("\n");
 }
 
+private fn ddb_render_current() !{unsafe} {
+    ddb_puts("ddb: current pid="); ddb_put_udec(ddb_snapshot.process_pid);
+    ddb_puts(" parent="); ddb_put_udec(ddb_snapshot.parent_pid);
+    ddb_puts(" state="); ddb_put_udec(ddb_snapshot.process_state);
+    ddb_puts(" wait="); ddb_put_udec(ddb_snapshot.wait_reason);
+    ddb_puts("\n");
+}
+
+private fn ddb_render_vm() !{unsafe} {
+    ddb_puts("ddb: vm pid="); ddb_put_udec(ddb_snapshot.process_pid);
+    ddb_puts(" root="); ddb_put_udec(ddb_snapshot.root_slot);
+    ddb_puts(" live="); ddb_put_udec(ddb_snapshot.root_live);
+    ddb_puts(" asid="); ddb_put_udec(ddb_snapshot.root_asid);
+    ddb_puts(" l1="); ddb_put_hex(ddb_snapshot.root_l1);
+    ddb_puts("\n");
+}
+
+private fn ddb_render_fds() !{unsafe} {
+    ddb_puts("ddb: fds pid="); ddb_put_udec(ddb_snapshot.process_pid);
+    ddb_puts(" slots="); ddb_put_udec(CRASH_FD_SNAPSHOT_SLOTS);
+    ddb_puts("\n");
+    for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
+        if (ddb_snapshot.fd_kind[fd] != 0) {
+            ddb_puts("ddb: fd="); ddb_put_udec(fd);
+            ddb_puts(" kind="); ddb_put_udec(ddb_snapshot.fd_kind[fd]);
+            ddb_puts(" object="); ddb_put_udec(ddb_snapshot.fd_object[fd]);
+            ddb_puts("\n");
+        }
+    }
+}
+
 // The one resumable DDB root. It receives an already-saved IRQ frame after
 // the UART source and interrupt controller were acknowledged, but remains an
 // interrupt function: no semantic exception is made for debugger code.
@@ -222,6 +263,23 @@ fn kernel_ddb_enter(frame_sp: usize) !{interrupt, unsafe} {
     ddb_snapshot.sequence = ddb_snapshot.sequence + 1;
     ddb_snapshot.cpu = crash_snapshot_read_mpidr_el1();
     ddb_snapshot.frame_sp = frame_sp;
+    ddb_snapshot.process_pid = kernel_process_current_pid();
+    ddb_snapshot.parent_pid = kernel_process_crash_parent_pid();
+    ddb_snapshot.process_state = kernel_process_crash_state();
+    ddb_snapshot.wait_reason = kernel_process_crash_wait_reason();
+    ddb_snapshot.root_slot = kernel_process_crash_root_slot();
+    let mut vm: AddressSpaceDiagnosticSnapshot =
+        address_space_diagnostic_snapshot(ddb_snapshot.root_slot);
+    ddb_snapshot.root_live = 0;
+    if (vm.live) { ddb_snapshot.root_live = 1; }
+    ddb_snapshot.root_l1 = vm.l1_physical;
+    ddb_snapshot.root_asid = vm.asid;
+    for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
+        ddb_snapshot.fd_kind[fd] =
+            kernel_fd_table_crash_kind(ddb_snapshot.root_slot, fd);
+        ddb_snapshot.fd_object[fd] =
+            kernel_fd_table_crash_object(ddb_snapshot.root_slot, fd);
+    }
     ddb_snapshot.trace_count = kernel_process_crash_trace_copy(
         ddb_snapshot.trace as *usize);
     ddb_puts("\nddb: interrupt-safe UART debugger\n");
@@ -246,23 +304,21 @@ fn kernel_ddb_enter(frame_sp: usize) !{interrupt, unsafe} {
         if (ddb_command_is(line as []u8, length, bs"continue")) {
             ddb_puts("ddb: continuing\n");
             stopped = false;
-        } else {
-            if (ddb_command_is(line as []u8, length, bs"oops")) {
-                ddb_render_oops();
-            } else {
-                if (ddb_command_is(line as []u8, length, bs"regs")) {
-                    ddb_render_regs();
-                } else {
-                    if (ddb_command_is(line as []u8, length, bs"trace")) {
-                        ddb_render_trace();
-                    } else {
-                        if (ddb_command_is(line as []u8, length, bs"help")) {
-                            ddb_puts("commands: oops regs trace continue\n");
-                        } else { ddb_puts("ddb: unknown command; try help\n"); }
-                    }
-                }
-            }
-        }
+        } else if (ddb_command_is(line as []u8, length, bs"oops")) {
+            ddb_render_oops();
+        } else if (ddb_command_is(line as []u8, length, bs"regs")) {
+            ddb_render_regs();
+        } else if (ddb_command_is(line as []u8, length, bs"current")) {
+            ddb_render_current();
+        } else if (ddb_command_is(line as []u8, length, bs"vm")) {
+            ddb_render_vm();
+        } else if (ddb_command_is(line as []u8, length, bs"fds")) {
+            ddb_render_fds();
+        } else if (ddb_command_is(line as []u8, length, bs"trace")) {
+            ddb_render_trace();
+        } else if (ddb_command_is(line as []u8, length, bs"help")) {
+            ddb_puts("commands: oops regs current vm fds trace continue\n");
+        } else { ddb_puts("ddb: unknown command; try help\n"); }
         length = 0;
     }
 }

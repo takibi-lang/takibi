@@ -305,6 +305,27 @@ fn address_space_asid(slot: usize) -> usize {
     return 0;
 }
 
+struct AddressSpaceDiagnosticSnapshot {
+    live: bool;
+    l1_physical: usize;
+    asid: usize;
+}
+
+// IRQ/DDB diagnostics must never turn a missing backing into an allocation.
+// Observe only the lookup-only path used by interrupt context switches and
+// return a value copy that owns no pool reference.
+fn address_space_diagnostic_snapshot(slot: usize)
+        -> AddressSpaceDiagnosticSnapshot !{unsafe} {
+    let backing: *AddressSpaceBacking = address_space_backing_existing_at(slot);
+    let mut snapshot: AddressSpaceDiagnosticSnapshot = { false, 0, 0 };
+    if (backing.live) {
+        snapshot.live = true;
+        snapshot.l1_physical = backing.l1_physical;
+        snapshot.asid = backing.asid;
+    }
+    return snapshot;
+}
+
 // GitHub issue #402: no ASID is taken here. A root is created without one
 // and is given one at its first activation, which is the lifetime Linux
 // gives an mm -- and, more to the point, the only moment at which handing

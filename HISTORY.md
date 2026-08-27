@@ -181,6 +181,32 @@ lifecycle-gap, alloc-rollback) and real RPi5 hardware (39 views, one boot).
 
 ---
 
+### 2026-08-27: DDB Froze Current Process, VM, and FD State Without Allocating
+
+The resumable debugger could show registers and the scheduler trace but not
+answer the immediate kernel questions attached to the stopped context. It now
+captures fixed-size `current`, `vm`, and `fds` views at entry: PID/parent/state/
+wait reason, root/live/ASID/L1, and the first 16 descriptor kind/object pairs.
+Commands render only that frozen copy, so the debugger does not retain a
+process or pool owner while stopped and repeated commands cannot observe a
+different moment.
+
+The operational-effect checker rejected the first VM implementation because
+the ordinary `address_space_asid` accessor can ensure a missing pooled backing,
+which reaches page allocation. A new address-space diagnostic snapshot uses
+the already-existing lookup-only IRQ path and returns zeros for a missing
+backing instead. No debugger exemption was added. Both UART BREAK and software
+BRK integration lanes exercise every new command before continuing.
+
+An all-process `ps` command was intentionally not copied into resumable DDB.
+The process pool has no fixed capacity now, so walking it from interrupt
+context would contradict the debugger's bounded-progress contract. That view
+waits for a genuinely bounded diagnostic index (and, once secondary CPUs run
+normal kernel work, a stop-the-world rendezvous) rather than treating current
+single-core scheduling as proof that an unbounded walk is safe.
+
+---
+
 ### 2026-08-26: The Scheduler Could Not Step Over The Process Next To It
 
 Dropping the `exec` from `httpd-serve.sh` -- so that the script waits on the

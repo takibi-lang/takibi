@@ -31,7 +31,10 @@ def main() -> int:
     received = bytearray()
     break_sent = args.break_source == "software"
     prompt_count = 0
-    commands = [b"oops\n", b"regs\n", b"trace\n", b"continue\n"]
+    commands = [
+        b"oops\n", b"regs\n", b"current\n", b"vm\n", b"fds\n",
+        b"trace\n", b"continue\n",
+    ]
 
     with serial, open(args.log, "wb") as log:
         while time.monotonic() < deadline:
