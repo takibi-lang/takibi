@@ -4268,13 +4268,22 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
          The pure load and store are inline asm, because the bindings
          expose no way to put an ordering on `build_load`/`build_store` --
-         there is no `set_ordering` and no `build_fence` (LLVM 19; see
-         GitHub issue #123 for the standing position on missing binding
-         APIs). `ldar`/`stlr` are ARMv8.0 baseline with no LSE variant, so
-         naming them directly gives up nothing, unlike the RMW pair where
-         naming the instruction would cost the a76 its better one. *)
+         there is no `set_ordering` and no `build_fence` in LLVM 19's OCaml
+         bindings. `ldar`/`stlr` are ARMv8.0 baseline with no LSE variant,
+         so naming them directly gives up nothing, unlike the RMW pair
+         where naming the instruction would cost the a76 its better one.
+         That is also the only part that has to know the target: x86-64 is
+         TSO, so its load and store carry the ordering already and the
+         inline asm exists there purely for the memory clobber.
+
+         x86-64 is supported so that a lock built on these can be exercised
+         from `linux_user/` at the Linux-native tier, where a test costs
+         seconds rather than a QEMU boot. It is not a target this kernel
+         runs on. *)
       let triple = target_triple !the_module in
-      if not (starts_with triple "aarch64") then
+      let is_aarch64 = starts_with triple "aarch64" in
+      let is_x86_64 = starts_with triple "x86_64" in
+      if not (is_aarch64 || is_x86_64) then
         raise (Error (Printf.sprintf
           "atomic operations are not implemented for target '%s'" triple));
       let ity = usize_lltype () in
@@ -4282,16 +4291,23 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | "atomic_load_acquire", [addr_e] ->
            let (_, a) = gen_expr ~expected_ty:TypeUsize locals addr_e in
            let fty = function_type ity [| ity |] in
-           let inline =
-             const_inline_asm fty "ldar $0, [$1]" "=r,r,~{memory}" true false in
+           (* x86-64 is TSO: an ordinary load already has acquire semantics
+              in hardware, so what an acquire needs from the compiler is
+              only that nothing be moved across it -- which is what the
+              memory clobber says. AArch64 is not TSO and needs the
+              instruction to carry the ordering itself. *)
+           let asm = if is_aarch64 then "ldar $0, [$1]" else "movq ($1), $0" in
+           let inline = const_inline_asm fty asm "=r,r,~{memory}" true false in
            let v = build_call fty inline [| a |] "atomic.load" builder in
            (TypeUsize, v)
        | "atomic_store_release", [addr_e; val_e] ->
            let (_, a) = gen_expr ~expected_ty:TypeUsize locals addr_e in
            let (_, v) = gen_expr ~expected_ty:TypeUsize locals val_e in
            let fty = function_type (void_type context) [| ity; ity |] in
-           let inline =
-             const_inline_asm fty "stlr $1, [$0]" "r,r,~{memory}" true false in
+           (* Same reasoning as the load, mirrored: on x86-64 an ordinary
+              store is already a release. *)
+           let asm = if is_aarch64 then "stlr $1, [$0]" else "movq $1, ($0)" in
+           let inline = const_inline_asm fty asm "r,r,~{memory}" true false in
            ignore (build_call fty inline [| a; v |] "" builder);
            (TypeVoid, const_null (i1_type context))
        | _, [addr_e; val_e] ->

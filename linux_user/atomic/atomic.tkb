@@ -1,0 +1,39 @@
+// GitHub issue #17: the closed atomic set, exercised where a test costs
+// seconds instead of a QEMU boot.
+//
+// Single-threaded on purpose. One thread cannot prove an ordering, and this
+// does not try to: what it proves is that each intrinsic executes, returns
+// the value the instruction is defined to return, and leaves the memory the
+// instruction is defined to leave -- which is exactly what a wrong inline-asm
+// operand constraint would break, silently and identically on both targets.
+// The ordering claim belongs to the lock built on these, and to two cores.
+//
+// Expected output (linux_user/atomic/atomic.expected):
+//   0x00001234   load after store_release
+//   0x00001234   swap_acquire returns the PREVIOUS value
+//   0x00005678   ... and leaves the new one
+//   0x00005678   fetch_add_relaxed returns the PREVIOUS value
+//   0x00005689   ... and leaves previous + 0x11
+
+let mut atomic_cell: usize = 0;
+
+fn atomic_roundtrip() -> i32 !{unsafe} {
+    let addr: usize = (&atomic_cell) as usize;
+
+    unsafe { atomic_store_release(addr, 0x1234); }
+    uart_println_hex(unsafe { atomic_load_acquire(addr) } as i32);
+
+    let previous: usize = unsafe { atomic_swap_acquire(addr, 0x5678) };
+    uart_println_hex(previous as i32);
+    uart_println_hex(unsafe { atomic_load_acquire(addr) } as i32);
+
+    let before_add: usize = unsafe { atomic_fetch_add_relaxed(addr, 0x11) };
+    uart_println_hex(before_add as i32);
+    uart_println_hex(unsafe { atomic_load_acquire(addr) } as i32);
+
+    return 0;
+}
+
+fn app_main() {
+    atomic_roundtrip();
+}

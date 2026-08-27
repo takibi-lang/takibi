@@ -12475,11 +12475,28 @@ let codegen_tests = [
          Alcotest.(check bool) "no syncscope(\"singlethread\")"
            false (contains_substring ir "syncscope(\"singlethread\")")));
 
+  (* x86-64 is supported so a lock built on these can be exercised from
+     linux_user/ (see linux_user/atomic). STM32's Cortex-M is not, and is
+     the honest stand-in for "a target nobody has done the ordering
+     analysis for" -- the error names the target rather than letting the
+     assembler reject a mnemonic, which is what the #226 intrinsics still
+     do on the same target. *)
   Alcotest.test_case
-    "issue #17: a non-AArch64 target rejects atomics by name"
+    "issue #17: atomics work on x86-64 too, and an unsupported target says so"
     `Quick
     (fun () ->
        with_codegen_target "x86_64-pc-linux-gnu" (fun () ->
+         expect_codegen_ok
+           "fn issue17_x86(addr: usize, v: usize) -> usize !{unsafe} {
+              unsafe { atomic_store_release(addr, v); }
+              return unsafe { atomic_swap_acquire(addr, v) };
+            }" ();
+         let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+         Alcotest.(check bool) "x86-64 keeps the same atomicrmw"
+           true (contains_substring ir "atomicrmw xchg");
+         Alcotest.(check bool) "x86-64 store is a plain TSO store"
+           true (contains_substring ir "movq $1, ($0)"));
+       with_codegen_target "thumbv7em-none-eabi" (fun () ->
          expect_codegen_error "atomic operations are not implemented"
            "fn issue17_wrong_target(addr: usize) -> usize !{unsafe} {
               return unsafe { atomic_load_acquire(addr) };

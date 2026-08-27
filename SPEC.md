@@ -2320,7 +2320,8 @@ checking -- the type checker does not know the target triple. On another
 target they reach the assembler and fail there with a raw mnemonic error
 (`invalid instruction mnemonic 'tlbi'`), which names the instruction
 rather than the rule. The atomics below are the one group that reports
-this properly, because their lowering had to branch on the triple anyway.
+this properly, because their lowering had to branch on the triple anyway
+-- and they support x86-64 rather than merely rejecting it.
 
 `mrs_daif` is what makes an interrupt-masking lock able to RESTORE the
 mask rather than unconditionally enable it: `msr_daifset_irq` /
@@ -2333,7 +2334,7 @@ it is a linear struct rather than an erased view.
 
 ### Atomic Operations (GitHub issue #17)
 
-Four intrinsics, all AArch64-only, all usable only inside `unsafe { ... }`:
+Four intrinsics, usable only inside `unsafe { ... }`:
 
 ```
 atomic_load_acquire(addr: usize) -> usize
@@ -2372,21 +2373,31 @@ selected `--cpu` picks the encoding. Measured on real objdump output:
 | `atomic_fetch_add_relaxed` | `ldxr`/`add`/`stxr` retry loop | `ldadd` |
 
 The load and store are inline asm rather than LLVM atomics because the
-OCaml bindings expose no ordering on `build_load`/`build_store` (there is
-no `set_ordering` and no `build_fence` in LLVM 19's bindings; see GitHub
-issue #123). Nothing is lost by naming them: `ldar`/`stlr` are ARMv8.0
-baseline and have no LSE variant to miss. The RMW pair deliberately does
-NOT name its instruction, because naming it would cost the a76 the single
-instruction it has.
+OCaml bindings expose no ordering on `build_load`/`build_store` -- there is
+no `set_ordering` and no `build_fence` in LLVM 19's bindings. Nothing is
+lost by naming them: `ldar`/`stlr` are ARMv8.0 baseline and have no LSE
+variant to miss. The RMW pair deliberately does NOT name its instruction,
+because naming it would cost the a76 the single instruction it has.
+
+**x86-64 is supported as well**, so that a lock built on these can be
+exercised from `linux_user/` at the Linux-native tier, where a test costs
+seconds rather than a QEMU boot (`linux_user/atomic` is the first one).
+x86-64 is TSO: an ordinary load is already an acquire and an ordinary
+store already a release, so there the inline asm exists only to carry the
+memory clobber that stops the compiler reordering across it. The
+read-modify-write pair needs no target branch at all and becomes `xchgq`
+and `lock xaddq`. It is not a target this kernel runs on.
 
 **Compare-and-swap is deliberately absent.** The same bindings expose
 `build_atomicrmw` but no `build_cmpxchg`, so a CAS would have to be a
 hand-written `ldaxr`/`stlxr` loop -- which would also give up the
 LSE-versus-exclusives choice above. A test-and-set spinlock does not need
 it: it is `atomic_swap_acquire` to take and `atomic_store_release` to
-give back. Add CAS when a caller exists that cannot be written without it.
+give back. GitHub issue #450 holds CAS, including the measurement of what
+a hand-written `ldaxr`/`stlxr` loop would cost on the a76.
 
-A non-AArch64 target rejects all four at code generation, by name.
+Any other target rejects all four at code generation, by name -- unlike
+the intrinsics above, which reach the assembler and fail on the mnemonic.
 
 ## Function Pointers, extern fn, and Overloading
 

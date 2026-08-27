@@ -3272,9 +3272,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          which would also give up the LSE-versus-exclusives choice the
          backend makes for everything here. Nothing needs it yet: a
          test-and-set spinlock is `atomic_swap_acquire` plus
-         `atomic_store_release`. Add it when a caller cannot be written
-         without it, and see GitHub issue #123 for the standing position on
-         missing binding APIs. *)
+         `atomic_store_release`. GitHub issue #450 holds it, with the
+         measurement of what a hand-written loop would cost. *)
       let check_addr addr =
         let at = infer_expr senv eenv tyenv fenv addr in
         unify_at addr.loc at TUsize
