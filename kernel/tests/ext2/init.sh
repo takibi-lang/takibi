@@ -1,3 +1,4 @@
+#!/bin/sh
 # This is the temporary first userspace process. It makes boot policy
 # ordinary ext2 data instead of kernel-side argv scenarios.
 PATH=/bin:/usr/bin
@@ -91,13 +92,6 @@ done
 
 echo "init: complete"
 
-# This is deliberately the final action: parent execve replaces PID 1, so
-# there is no shell left to continue this script afterward. The replacement
-# is the persistent terminal demo (backgrounds an interactive ash and parks,
-# see httpd-demo.sh) rather than a command that exits, so control does not
-# return to the kernel driver in the normal case -- see kernel/init/
-# test_driver.tkb's handling of this exec for what still runs beforehand.
-# The interpreter is not named here: it comes from that file's own `#!`
-# line, so PID 1's replacement goes through the same script dispatch every
-# other script in this rootfs does.
-exec /etc/httpd-demo.sh
+# The persistent interactive shell is a BusyBox init respawn entry now
+# (/etc/inittab), not something this script hands off to. init keeps it
+# running and stays PID 1 itself.

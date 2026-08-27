@@ -70,6 +70,20 @@ let mut rootfs_plan_ready: bool;
 let mut saved_rootfs_inode: usize;
 let mut saved_rootfs_length: usize;
 
+// GitHub issue #270: the boot-resource baselines were locals of
+// kernel_test_driver_run() while the end-of-fixture report ran inside it.
+// PID 1 is BusyBox init now and never returns there, so the report runs
+// from a hook instead and the baselines have to outlive the function that
+// takes them.
+private let mut process_pool_baseline: usize;
+private let mut address_space_baseline: usize;
+private let mut image_record_baseline: usize;
+private let mut fd_context_baseline: usize;
+private let mut page_baseline: usize;
+private let mut init_boot_fixture_reported: bool;
+private let mut init_boot_fixture_pending: bool;
+private let mut clone_growth_probe_ok: bool;
+
 must_use variant ExecArgv0NameResult { Invalid; Name([]u8); }
 
 // GitHub issue #249: argv[0] is the same path ash passes to execve() for
@@ -248,6 +262,149 @@ fn kernel_process_child_exec_map_result(
     }
 }
 
+// GitHub issue #270: the bounded boot fixture used to end at an event the
+// kernel could see directly -- init.sh calling execve on itself to hand PID
+// 1 to the demo wrapper. Under BusyBox init that event does not exist: PID 1
+// is init, it never execs and never exits, so nothing after
+// run_initial_user() runs at all.
+//
+// The structural equivalent is PID 1 REAPING its first child. With
+// `::sysinit:/etc/init.sh` in /etc/inittab that is exactly the bounded suite
+// completing, and it needs no knowledge of what the child was -- which is
+// what keeps boot policy in the inittab rather than back in here. Reaping
+// rather than exiting is the point that matters: it is when the child's
+// pages and pooled records are actually back, which is what the leak checks
+// below measure.
+// Latching and reporting are deliberately two steps. A blocking wait4() is
+// delivered from the EXITING CHILD's context (see
+// kernel_syscall_wait4_deliver), so at the moment PID 1 is credited with the
+// reap the child's own pages and records are not back yet -- and those
+// counts are exactly what the report measures. Latch there, report at PID
+// 1's next syscall, by which time the child is fully gone and init is
+// running again.
+fn kernel_init_boot_fixture_reaped(reaper_pid: usize) {
+    if (init_boot_fixture_reported) { return; }
+    if (reaper_pid != 1) { return; }
+    init_boot_fixture_pending = true;
+}
+
+fn kernel_init_boot_fixture_poll() !{unsafe} {
+    if (init_boot_fixture_pending == false) { return; }
+    if (kernel_process_current_pid() != 1) { return; }
+    init_boot_fixture_pending = false;
+    init_boot_fixture_reported = true;
+    kernel_init_script_pre_exec_evidence();
+    kernel_init_script_success_evidence(false);
+    // GitHub issue #207: every page released across this
+    // whole boot must have been live at the time. Checked
+    // here, now that init.sh's own image is fully torn
+    // down and before the persistent demo's image is
+    // mapped, rather than after init.sh returns (it no
+    // longer does).
+    // GitHub issue #392: the image-record fallback exists
+    // so sixty-odd accesses need no error path they could
+    // not act on; printing its use count is what keeps it
+    // from being a silent one. Zero on a healthy kernel,
+    // and a line that should never appear.
+    if (process_image_record_missing_uses() != 0) {
+        kernel_boot_log("process image: records MISSING uses=");
+        uart_put_udec(process_image_record_missing_uses());
+        kernel_boot_log("\n");
+    }
+    if (address_space_backing_missing_uses() != 0) {
+        kernel_boot_log("address space: backings MISSING uses=");
+        uart_put_udec(address_space_backing_missing_uses());
+        kernel_boot_log("\n");
+    }
+    // The same for the process record itself, whose
+    // fallback is what an access to a REAPED process's
+    // slot lands in. An array of never-freed slots could
+    // not have one, which is exactly why it is counted.
+    // GitHub issue #401: a shared object with more
+    // references than there are descriptor slots to hold
+    // them is an invariant break, not exhaustion. Reported
+    // POSITIVELY, so a boot where it happened is a view
+    // that lost a line rather than one that gained an
+    // unmatched one.
+    // GitHub issue #406: a physical page mapped into more
+    // address spaces than exist is an invariant break, not
+    // exhaustion. Positive report, same reasoning as the
+    // shared-object line below.
+    if (page_mapping_ref_bound_breaks_count() == 0) {
+        kernel_boot_log("resources: page mappings within the address spaces that exist\n");
+    } else {
+        kernel_boot_log("resources: page mapping INVARIANT BREAKS=");
+        uart_put_udec(page_mapping_ref_bound_breaks_count());
+        kernel_boot_log("\n");
+    }
+    if (unified_object_ref_bound_breaks_count() == 0) {
+        kernel_boot_log("resources: shared-object refs within the descriptor slots that exist\n");
+    } else {
+        kernel_boot_log("resources: shared-object ref INVARIANT BREAKS=");
+        uart_put_udec(unified_object_ref_bound_breaks_count());
+        kernel_boot_log("\n");
+    }
+    if (scheduled_process_record_missing_uses() != 0) {
+        kernel_boot_log("process table: records MISSING uses=");
+        uart_put_udec(scheduled_process_record_missing_uses());
+        kernel_boot_log("\n");
+    }
+    if (page_allocator_double_free_count() == 0) {
+        kernel_boot_log("resources: no double free\n");
+    } else {
+        kernel_boot_log("resources: DOUBLE FREE\n");
+    }
+    // All bounded-suite user images and fixtures have been
+    // torn down at this point. The permanent root-0 pages
+    // remain live; equality with the boot baseline proves
+    // that no transient page leaked before the persistent
+    // demo shell starts.
+    // GitHub issue #414, printed before the page line
+    // because it is the finer statement: a pooled record
+    // that was not given back is invisible to the page
+    // count. Reported POSITIVELY, the same way the two
+    // invariant lines above are, so a run where it
+    // happened loses a line rather than gaining an
+    // unmatched one.
+    if (scheduled_process_pool_live_count() == process_pool_baseline &&
+        address_space_live_count() == address_space_baseline &&
+        process_image_record_live_count() == image_record_baseline &&
+        unified_fd_context_live_count() == fd_context_baseline) {
+        kernel_boot_log("resources: pooled per-process records back to the baseline\n");
+    } else {
+        kernel_boot_log("resources: POOLED RECORDS LEAKED process=");
+        uart_put_udec(scheduled_process_pool_live_count());
+        kernel_boot_log("/");
+        uart_put_udec(process_pool_baseline);
+        kernel_boot_log(" root=");
+        uart_put_udec(address_space_live_count());
+        kernel_boot_log("/");
+        uart_put_udec(address_space_baseline);
+        kernel_boot_log(" image=");
+        uart_put_udec(process_image_record_live_count());
+        kernel_boot_log("/");
+        uart_put_udec(image_record_baseline);
+        kernel_boot_log(" fdctx=");
+        uart_put_udec(unified_fd_context_live_count());
+        kernel_boot_log("/");
+        uart_put_udec(fd_context_baseline);
+        kernel_boot_log("\n");
+    }
+    if (page_allocator_live_count() == page_baseline) {
+        kernel_boot_log("resources: pages=0\n");
+        // GitHub issue #376: reported beside the other
+        // end-of-run resource facts, and for the same
+        // reason -- this is the point every scenario has
+        // already run, so the deepest path has been taken
+        // by whichever fixture takes it.
+        kernel_stack_watermark_report();
+    } else {
+        kernel_boot_log("resources: pages leaked\n");
+    }
+    kernel_syscall_persistent_shell_start();
+    kernel_process_trace_enable();
+}
+
 fn kernel_initial_process_map(rootfs_ready: bool,
                               rootfs_plan: DistroElfLoadPlan,
                               rootfs_inode: usize,
@@ -353,8 +510,15 @@ fn kernel_process_child_exec_prepare() -> usize {
                         // and must retain a normal daemon lifetime; applying
                         // the fixture state there made its accept loop stop
                         // after the fixture's two requests.
-                        if (kernel_process_parent_is_root() &&
-                            kernel_syscall_persistent_shell_active() ==
+                        // GitHub issue #270: this used to also require the
+                        // launcher to be PID 1's own child, which was true
+                        // only while init.sh WAS PID 1. Under BusyBox init
+                        // the bounded HTTPd is a grandchild, and the
+                        // distinction the test actually needs is the phase,
+                        // not the depth: before the boot fixture reports,
+                        // an HTTPd is the bounded one; after, it is the
+                        // interactive shell's daemon.
+                        if (kernel_syscall_persistent_shell_active() ==
                                 false) {
                             kernel_init_socket_evidence =
                                 kernel_syscall_socket_evidence();
@@ -465,7 +629,7 @@ fn kernel_init_script_success_evidence(include_file_evidence: bool) {
     if (kernel_process_clone_evidence()) {
         kernel_boot_log("vm fork: private pages=132 reclaimed\n");
     }
-    if (process_image_clone_growth_probe()) {
+    if (clone_growth_probe_ok) {
         kernel_boot_log("vm fork: child stack growth ok\n");
     }
     if (kernel_tcp_injected_syn_ack_recovered()) {
@@ -625,6 +789,15 @@ fn kernel_test_common_probes() {
     } else {
         kernel_boot_log("intrusive pool: failed\n");
     }
+    // GitHub issue #270: this probe fabricates a synthetic image in ROOT 0
+    // and tears it down again, including root 0's stack-top PTE and its
+    // demand-stack metadata. That was harmless while root 0 was PID 1's
+    // about-to-be-replaced init.sh image. PID 1 is BusyBox init now and
+    // root 0 is its LIVE image, so the probe has to run here, before that
+    // image exists, rather than from the end-of-fixture evidence -- where
+    // it silently unmapped init's own stack page and disabled its growth,
+    // and init then took a translation fault on its next push.
+    clone_growth_probe_ok = process_image_clone_growth_probe();
     if (address_space_asid_rollover_probe()) {
         // The width is PRINTED, not asserted in the message: the view
         // fixture is what says this hardware reports 16, so a part that
@@ -686,10 +859,10 @@ fn kernel_test_driver_run() {
         process_image_record_ensure(0) == false) {
         kernel_boot_log("resources: bootstrap records unavailable at baseline\n");
     }
-    let process_pool_baseline: usize = scheduled_process_pool_live_count();
-    let address_space_baseline: usize = address_space_live_count();
-    let image_record_baseline: usize = process_image_record_live_count();
-    let fd_context_baseline: usize = unified_fd_context_live_count();
+    process_pool_baseline = scheduled_process_pool_live_count();
+    address_space_baseline = address_space_live_count();
+    image_record_baseline = process_image_record_live_count();
+    fd_context_baseline = unified_fd_context_live_count();
     // Descriptor BLOCKS are deliberately not in this set. A block is
     // allocated when a descriptor is installed, not when a process
     // acquires its context, so it is not part of the acquisition chain
@@ -712,7 +885,7 @@ fn kernel_test_driver_run() {
     // at most ONE run rather than one per slot. Both are constant between
     // here and the final check, which is why `pages=0` still means what it
     // says -- but it does NOT mean nothing is held.
-    let page_baseline: usize = page_allocator_live_count();
+    page_baseline = page_allocator_live_count();
     kernel_test_platform_network();
     kernel_test_platform_storage();
     if (virtio_blk_index_wrap_probe()) {
@@ -869,8 +1042,8 @@ irq_uart_rx_unmask();
                 rootfs_plan_ready, saved_rootfs_plan,
                 saved_rootfs_inode, saved_rootfs_length,
                 saved_rootfs_plan,
-                bs"bin/busybox.static\0sh\0/etc/init.sh\0",
-                3) {
+                bs"bin/busybox.static\0init\0",
+                2) {
             ProcessImageMapResult::InvalidImage => {
                 kernel_boot_log("script map: invalid image\n");
             }
@@ -889,9 +1062,22 @@ irq_uart_rx_unmask();
                     process_image_stack_pointer(script_pages) ==
                         USER_TEXT_VA +
                         USER_SPACE_PAGE_COUNT * PAGE_SIZE - 512) {
-                    kernel_boot_log("distro stack: argc=3 argv auxv ready\n");
+                    kernel_boot_log("distro stack: argc=2 argv auxv ready\n");
                     kernel_ddb_breakpoint_test_checkpoint();
                 }
+                // GitHub issue #270: taken here rather than before the
+                // probes, because PID 1's image is BusyBox init now and
+                // stays mapped for the life of the kernel. It belongs in
+                // the baseline for the same reason root 0's own permanent
+                // pages do -- it is not a transient the fixture leaks.
+                page_baseline = page_allocator_live_count();
+                // GitHub issue #270: PID 1 is a real program now, so `ps`
+                // should say which one. The bootstrap's image is mapped by
+                // the kernel rather than by execve, so nothing else records
+                // a command line for it, and procfs fell back to naming it
+                // as a kernel thread.
+                scheduled_process_set_command_line(
+                    0, bs"init\0" as []u8, 5);
                 let (script_heap_start, script_heap_limit) =
                     process_image_heap_range(script_pages);
                 kernel_syscall_process_configure(
@@ -899,195 +1085,20 @@ irq_uart_rx_unmask();
                 let script_status: usize = run_initial_user(
                     process_image_entry(script_pages),
                     process_image_stack_pointer(script_pages));
-                if (script_status == 0) {
-                    kernel_init_script_success_evidence(true);
-                    process_image_unmap(script_pages);
-                    if (process_image_window_is_clear()) {
-                        kernel_boot_log("distro unmap: clean\n");
-                        kernel_boot_log("init unmap: clean\n");
-                    }
-                } else if (script_status == 7 &&
-                           kernel_syscall_exec_pending()) {
-                    // The final `exec` in init.sh replaces PID 1. This EL1
-                    // continuation is the parent-exec handoff, distinct from
-                    // the child-frame path used by ordinary applets. Today
-                    // this exec target is kernel/tests/ext2/httpd-demo.sh,
-                    // the persistent terminal demo -- it backgrounds an
-                    // interactive ash and parks, so it does not return in
-                    // the normal case. Issue #289: since init.sh's own run
-                    // therefore no longer returns to kernel_test_driver_run()
-                    // afterward either, all of the evidence that used to be
-                    // reported there (bounded-suite pass/fail evidence,
-                    // double-free, page-leak) is reported right here
-                    // instead, decoupled from whatever this exec's target
-                    // does later -- it only describes init.sh's own
-                    // already-complete run, so waiting for the replacement
-                    // to also finish was never a real dependency, just an
-                    // artifact of reusing its exit as a return point.
-                    kernel_init_script_pre_exec_evidence();
-                    kernel_init_script_success_evidence(false);
-                    unified_fd_close_exec_descriptors(0);
-                    let exec_argc: usize = kernel_syscall_exec_argc();
-                    let exec_argv = kernel_syscall_exec_argv();
-                    kernel_syscall_exec_clear();
-                    process_image_unmap(script_pages);
-                    if (process_image_window_is_clear()) {
-                        kernel_boot_log("distro unmap: clean\n");
-                        kernel_boot_log("init unmap: clean\n");
-                    }
-                    // GitHub issue #207: every page released across this
-                    // whole boot must have been live at the time. Checked
-                    // here, now that init.sh's own image is fully torn
-                    // down and before the persistent demo's image is
-                    // mapped, rather than after init.sh returns (it no
-                    // longer does).
-                    // GitHub issue #392: the image-record fallback exists
-                    // so sixty-odd accesses need no error path they could
-                    // not act on; printing its use count is what keeps it
-                    // from being a silent one. Zero on a healthy kernel,
-                    // and a line that should never appear.
-                    if (process_image_record_missing_uses() != 0) {
-                        kernel_boot_log("process image: records MISSING uses=");
-                        uart_put_udec(process_image_record_missing_uses());
-                        kernel_boot_log("\n");
-                    }
-                    if (address_space_backing_missing_uses() != 0) {
-                        kernel_boot_log("address space: backings MISSING uses=");
-                        uart_put_udec(address_space_backing_missing_uses());
-                        kernel_boot_log("\n");
-                    }
-                    // The same for the process record itself, whose
-                    // fallback is what an access to a REAPED process's
-                    // slot lands in. An array of never-freed slots could
-                    // not have one, which is exactly why it is counted.
-                    // GitHub issue #401: a shared object with more
-                    // references than there are descriptor slots to hold
-                    // them is an invariant break, not exhaustion. Reported
-                    // POSITIVELY, so a boot where it happened is a view
-                    // that lost a line rather than one that gained an
-                    // unmatched one.
-                    // GitHub issue #406: a physical page mapped into more
-                    // address spaces than exist is an invariant break, not
-                    // exhaustion. Positive report, same reasoning as the
-                    // shared-object line below.
-                    if (page_mapping_ref_bound_breaks_count() == 0) {
-                        kernel_boot_log("resources: page mappings within the address spaces that exist\n");
-                    } else {
-                        kernel_boot_log("resources: page mapping INVARIANT BREAKS=");
-                        uart_put_udec(page_mapping_ref_bound_breaks_count());
-                        kernel_boot_log("\n");
-                    }
-                    if (unified_object_ref_bound_breaks_count() == 0) {
-                        kernel_boot_log("resources: shared-object refs within the descriptor slots that exist\n");
-                    } else {
-                        kernel_boot_log("resources: shared-object ref INVARIANT BREAKS=");
-                        uart_put_udec(unified_object_ref_bound_breaks_count());
-                        kernel_boot_log("\n");
-                    }
-                    if (scheduled_process_record_missing_uses() != 0) {
-                        kernel_boot_log("process table: records MISSING uses=");
-                        uart_put_udec(scheduled_process_record_missing_uses());
-                        kernel_boot_log("\n");
-                    }
-                    if (page_allocator_double_free_count() == 0) {
-                        kernel_boot_log("resources: no double free\n");
-                    } else {
-                        kernel_boot_log("resources: DOUBLE FREE\n");
-                    }
-                    // All bounded-suite user images and fixtures have been
-                    // torn down at this point. The permanent root-0 pages
-                    // remain live; equality with the boot baseline proves
-                    // that no transient page leaked before the persistent
-                    // demo shell starts.
-                    // GitHub issue #414, printed before the page line
-                    // because it is the finer statement: a pooled record
-                    // that was not given back is invisible to the page
-                    // count. Reported POSITIVELY, the same way the two
-                    // invariant lines above are, so a run where it
-                    // happened loses a line rather than gaining an
-                    // unmatched one.
-                    if (scheduled_process_pool_live_count() == process_pool_baseline &&
-                        address_space_live_count() == address_space_baseline &&
-                        process_image_record_live_count() == image_record_baseline &&
-                        unified_fd_context_live_count() == fd_context_baseline) {
-                        kernel_boot_log("resources: pooled per-process records back to the baseline\n");
-                    } else {
-                        kernel_boot_log("resources: POOLED RECORDS LEAKED process=");
-                        uart_put_udec(scheduled_process_pool_live_count());
-                        kernel_boot_log("/");
-                        uart_put_udec(process_pool_baseline);
-                        kernel_boot_log(" root=");
-                        uart_put_udec(address_space_live_count());
-                        kernel_boot_log("/");
-                        uart_put_udec(address_space_baseline);
-                        kernel_boot_log(" image=");
-                        uart_put_udec(process_image_record_live_count());
-                        kernel_boot_log("/");
-                        uart_put_udec(image_record_baseline);
-                        kernel_boot_log(" fdctx=");
-                        uart_put_udec(unified_fd_context_live_count());
-                        kernel_boot_log("/");
-                        uart_put_udec(fd_context_baseline);
-                        kernel_boot_log("\n");
-                    }
-                    if (page_allocator_live_count() == page_baseline) {
-                        kernel_boot_log("resources: pages=0\n");
-                        // GitHub issue #376: reported beside the other
-                        // end-of-run resource facts, and for the same
-                        // reason -- this is the point every scenario has
-                        // already run, so the deepest path has been taken
-                        // by whichever fixture takes it.
-                        kernel_stack_watermark_report();
-                    } else {
-                        kernel_boot_log("resources: pages leaked\n");
-                    }
-                    match process_image_map_ext2(
-                            saved_rootfs_plan, saved_ext2_mount,
-                            saved_rootfs_inode, saved_rootfs_length,
-                            exec_argv, exec_argc) {
-                        ProcessImageMapResult::InvalidImage => {
-                            kernel_boot_log("execve map: replacement invalid\n");
-                        }
-                        ProcessImageMapResult::OutOfMemory => {
-                            kernel_boot_log("execve map: replacement out of memory\n");
-                        }
-                        ProcessImageMapResult::Mapped(replaced_pages) => {
-                            if (process_image_gap_is_unmapped()) {
-                                kernel_boot_log(
-                                    "execve: parent-exec handoff mapped\n");
-                            }
-                            let (replacement_heap_start,
-                                 replacement_heap_limit) =
-                                process_image_heap_range(replaced_pages);
-                            kernel_syscall_process_configure(
-                                replacement_heap_start,
-                                replacement_heap_limit);
-                            kernel_syscall_persistent_shell_start();
-                            kernel_process_trace_enable();
-                            let replacement_status: usize =
-                                run_initial_user(
-                                    process_image_entry(replaced_pages),
-                                    process_image_stack_pointer(
-                                        replaced_pages));
-                            // The persistent demo shell parks forever (see
-                            // kernel/tests/ext2/httpd-demo.sh); reaching
-                            // this point in normal operation would mean it
-                            // unexpectedly exited.
-                            kernel_boot_log(
-                                "execve: persistent shell exited unexpectedly status=");
-                            uart_put_udec(replacement_status);
-                            kernel_boot_log("\n");
-                            process_image_unmap(replaced_pages);
-                        }
-                    }
-                } else {
-                    kernel_boot_log("init script failed\n");
-                    process_image_unmap(script_pages);
-                    if (process_image_window_is_clear()) {
-                        kernel_boot_log("distro unmap: clean\n");
-                        kernel_boot_log("init unmap: clean\n");
-                    }
-                }
+                // GitHub issue #270: PID 1 is BusyBox init and does not
+                // exit, so reaching here at all is the failure. The
+                // bounded fixture's own evidence is reported from
+                // kernel_init_boot_fixture_reaped() instead, at the point
+                // init reaps its sysinit child.
+                kernel_boot_log("init: PID 1 exited unexpectedly status=");
+                uart_put_udec(script_status);
+                kernel_boot_log("\n");
+                // The ownership checker is right to ask: nothing unmaps this
+                // image any more. PID 1's image is permanent now, the same
+                // way root 0's own page tables are, so the linear owner is
+                // given up here rather than pretending a teardown exists.
+                process_image_pages_discard(script_pages);
+
             }
         }
     }

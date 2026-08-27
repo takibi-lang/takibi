@@ -1,0 +1,2 @@
+::sysinit:/etc/init.sh
+::respawn:/bin/sh -i

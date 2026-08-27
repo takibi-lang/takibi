@@ -88,10 +88,10 @@ executables here: a script's first line names its interpreter and `execve`
 resolves it, so `/bin` also holds `httpd-serve.sh` (the browser demo as one
 command) and `script-interpreter-argument.sh` (a fixture pinning `#!` argv
 construction), both reachable by bare name through ash's `PATH` search.
-`/etc` keeps what is never typed as a bare command: the boot policy
-(`/etc/init.sh`, `/etc/httpd-demo.sh`), `/etc/script-shebang.sh`, and the two
-fixtures that pin what `execve` refuses (`/etc/not-a-program`,
-`/etc/bad-interpreter.sh`). `/bin/busybox` exists as a hard link because that
+`/etc` keeps what is never typed as a bare command: BusyBox init's
+`/etc/inittab` and the boot scenario it runs (`/etc/init.sh`),
+`/etc/script-shebang.sh`, and the two fixtures that pin what `execve`
+refuses (`/etc/not-a-program`, `/etc/bad-interpreter.sh`). `/bin/busybox` exists as a hard link because that
 is the name BusyBox re-executes itself through.
 
 The current HTTPd milestone runs the unmodified pinned BusyBox Extras binary
@@ -477,11 +477,12 @@ global order.
 
 ### Interactive HTTPd lifecycle checkpoints
 
-The bounded self-test suite's own top-level ash execs, via a real `exec`
-self-replace (see `kernel/tests/ext2/init.sh`'s final line), directly into
-the persistent terminal demo shell -- a single top-level launch, not a
-second kernel-side one. That shell forks its own interactive ash, which in
-turn forks and execs the background HTTPd the host harness drives. Because
+PID 1 is the pinned BusyBox `init` applet. It reads `/etc/inittab`, runs the
+bounded self-test suite as its `sysinit` action (`/etc/init.sh`), waits for
+it, and then keeps an interactive ash alive as a `respawn` entry. That ash
+forks and execs the background HTTPd the host harness drives. init stays PID
+1 for the life of the kernel: there is no `exec` self-replace and no wrapper
+shell between it and the interactive ash. Because
 that chain of boundaries used to collapse into one generic "interactive
 HTTPd did not become ready" timeout, the kernel now prints a
 `persistent shell: <name> pid=<n>` checkpoint at each of fork, child
@@ -535,7 +536,8 @@ cover:
 - the interactive HTTPd child's own fork/child-selected/exec-prepare/
   exec-commit/listener-ready lifecycle checkpoints, in order (see
   "Interactive HTTPd lifecycle checkpoints" above);
-- the ext2-resident `init.sh` scenario, including connected socket I/O,
+- the ext2-resident `init.sh` scenario, run as BusyBox init's `sysinit`
+  action, including connected socket I/O,
   overlapping connections, partial writes, UART input, and process/VM
   lifecycle checks;
 - resource-limit boundary probes (issue #295): each fixed-capacity pool

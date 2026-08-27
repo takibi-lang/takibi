@@ -132,6 +132,13 @@ fn kernel_syscall_connected_fixture_start() {
 
 fn kernel_syscall_persistent_shell_start() {
     syscall_persistent_shell = true;
+    // The "shell blocked on the UART" marker is a one-shot latch, and the
+    // bounded phase's own interactive ash already spent it. Re-arming it
+    // here is what makes the persistent shell's block announce itself --
+    // kernel_syscall_process_configure() used to do this as a side effect
+    // of the parent-exec handoff, which no longer happens under an init
+    // that stays PID 1.
+    syscall_test_evidence_reset_read_uart_waits();
 }
 
 fn kernel_syscall_persistent_shell_active() -> bool {

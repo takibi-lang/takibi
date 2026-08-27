@@ -196,11 +196,21 @@ fi
 # point rather than an inconvenience: a fault injected at the first user
 # instruction names a user text page in ELR, while a kernel-side fail-stop
 # after an exec commit names one in FAR and has a kernel ELR.
+# GitHub issue #270: child_exec mode used to require FAR to resolve too.
+# That fail-stop is SVC-class -- it has no faulting address at all, so FAR
+# is whatever the last real data abort left in the register, and whether
+# that stale VA happens to be mapped in the exec'ing child's root is a fact
+# about the process tree rather than about the report. It resolved while
+# init.sh was PID 1 and does not under BusyBox init, having proved nothing
+# either time. The default mode injects a real fault and still asserts the
+# translation, which is where that coverage belongs; both owner lines are
+# still required in every mode by the loop below.
 case "$MODE" in
-    child_exec) resolved=far ;;
+    child_exec) resolved= ;;
     *)          resolved=elr ;;
 esac
-if ! grep -Eq "^oops: $resolved page \(via root [0-9]+ -> 0x[0-9a-f]+\) is mapped into a process address space\$" \
+if [ -n "$resolved" ] &&
+        ! grep -Eq "^oops: $resolved page \(via root [0-9]+ -> 0x[0-9a-f]+\) is mapped into a process address space\$" \
         "$UART_LOG"; then
     echo "FAIL kernel/qemu oops: expected the $resolved page's owner, resolved through the faulting root" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true

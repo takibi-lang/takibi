@@ -1288,7 +1288,14 @@ fn kernel_syscall_file_evidence()
 // only while the capacity was 2. What it was actually checking is that no
 // connection is left open, which is now one question rather than a list.
 fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
-    return syscall_test_evidence_socket_calls() == 1 &&
+    // GitHub issue #270: socket() is no longer exactly-once for the whole
+    // boot. BusyBox init logs through syslog, so every message(L_LOG) it
+    // emits opens a datagram socket, fails to reach /dev/log, and closes
+    // it again. That says nothing about this fixture, which is why the
+    // count is a floor now. bind/listen/accept stay exact: a syslog socket
+    // that never connects never reaches any of them, so the shape being
+    // asserted here is unchanged in strength.
+    return syscall_test_evidence_socket_calls() >= 1 &&
            syscall_test_evidence_bind_calls() == 1 &&
            syscall_test_evidence_listen_calls() == 1 &&
            syscall_test_evidence_accept_calls() == 2 &&
@@ -1744,6 +1751,10 @@ fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize,
         }
     }
     kernel_process_child_wait_status_consume_for(parent_slot);
+    // GitHub issue #270: the blocking path credits the reap to the parent
+    // being woken, not to whoever is current here (the exiting child).
+    kernel_init_boot_fixture_reaped(
+        scheduled_process_pid_of_slot(parent_slot));
     el0_context_set_x0(frame_sp, reaped_pid);
 }
 
@@ -1924,6 +1935,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         -> SyscallAction !{unsafe} {
     let exception_class: usize = (esr >> 26) & 0x3F;
     if (exception_class != 0x15) { return SyscallAction::Unreachable; }
+    kernel_init_boot_fixture_poll();
     kernel_syscall_persistent_shell_checkpoint_selected();
     if (number == AARCH64_NR_TAKIBI_UART_RX_WAIT) {
         disable_irq();
@@ -3387,15 +3399,23 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
 
     if (number == AARCH64_NR_CLONE || number == AARCH64_NR_VFORK ||
         number == AARCH64_NR_FORK || number == AARCH64_NR_CLONE3) {
-        if (number == AARCH64_NR_CLONE && (x0 != 0x11 || x1 != 0)) {
+        // musl's vfork() is not the vfork syscall: it is
+        // clone(CLONE_VM|CLONE_VFORK|SIGCHLD, 0), measured at 0x4111 coming
+        // out of the pinned BusyBox init. Both shapes become the same
+        // copy-on-write fork here, which differs from Linux in two ways
+        // worth naming: the child gets its own copy of the address space
+        // rather than sharing the parent's, and the parent is not suspended
+        // until the child execs. Both differences are in the safe
+        // direction for a vfork caller -- a caller may not rely on writes
+        // reaching the parent, and every one of them execs or _exits
+        // immediately -- but a program that reads a value the child wrote
+        // would see the pre-fork value here and the child's value on Linux.
+        if (number == AARCH64_NR_CLONE &&
+            ((x0 != 0x11 && x0 != 0x4111) || x1 != 0)) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
-        let mut clone_flags: usize = x0;
-        let mut clone_stack: usize = x1;
-        if (number != AARCH64_NR_CLONE) {
-            clone_flags = 0x11;
-            clone_stack = 0;
-        }
+        let mut clone_flags: usize = 0x11;
+        let mut clone_stack: usize = 0;
         let parent_slot: usize = kernel_syscall_process_slot();
         // GitHub issue #245: kernel_process_clone_begin() now runs first
         // (it used to run last), since the address-space root and
@@ -3409,7 +3429,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
             ProcessCloneResult::ChildReady(child_pid) => {
                 // Guard against PID 1's own fork of the interactive ash
-                // (kernel/tests/ext2/httpd-demo.sh backgrounding it): that
+                // (BusyBox init starting the /etc/inittab respawn ash):
+                // that
                 // happens automatically at boot, before the host ever
                 // submits a command, and is not the boundary this
                 // checkpoint means. The checkpoint is specifically the
@@ -3529,12 +3550,18 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     }
                     let consumed_status: usize =
                         kernel_process_child_wait_status();
+                    kernel_init_boot_fixture_reaped(
+                        kernel_process_current_pid());
                     return SyscallAction::Resume(
                         kernel_process_last_child_pid());
                 }
             }
         }
         let ignored_status: usize = kernel_process_child_wait_status();
+        // GitHub issue #270: PID 1 reaping its first child is where the
+        // bounded boot fixture ends now. The hook is a no-op for every
+        // other reaper and after the first one.
+        kernel_init_boot_fixture_reaped(kernel_process_current_pid());
         return SyscallAction::Resume(kernel_process_last_child_pid());
     }
     if (number == 17) {
