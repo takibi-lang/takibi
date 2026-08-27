@@ -127,6 +127,61 @@ capacity left** (#391/#393/#402 finished what #257/#392/#401/#406 started), so
 scheduler, one live child per process, one parked spare kernel-stack run, one
 trace producer, one local-only whole-TLB flush.
 
+### Where this is going, and what must not be foreclosed
+
+Four goals the maintainer stated on 2026-08-27. None of them has to be
+reached by the end of M0 -- what matters is that the sequence below does not
+paint the design into a corner.
+
+1. **A preemptible kernel.** Today it is not: a timer interrupt taken at EL1
+   only sets a flag, and the switch happens at syscall return
+   (`kernel/platform/qemu/intc.tkb`'s `if (lower_el)`). That is
+   `CONFIG_PREEMPT_NONE`, deliberately.
+2. **Multicore.** This milestone.
+3. **A way for an interrupt handler to hand information to the main
+   context.** Today the only channel is a bare global flag, because the
+   effect system forbids `!{locks}` on an `!{interrupt}` function outright.
+4. **Locks that control access to the resource they protect**, rather than
+   sitting beside it by convention.
+
+**Three of the four are not foreclosed, and one is at risk.**
+
+Goal 1 is *helped* by the sequence: the interrupt mask #451 gives each guard
+is also the preemption-disable primitive, since preemption arrives through
+the timer interrupt. #453 turns enabling preemption into a compile-error
+worklist rather than a silent change.
+
+Goal 4 is verified to work, including the case that looked hardest -- a
+pooled object with its protected fields grouped behind one accessor:
+
+```takibi
+fn e_data(g: borrow EGuard[id], e: *Entry) -> *Protected @ id {
+    return &e.data;
+}
+```
+
+Using the returned pointer after releasing the guard is rejected: "pointer
+'d' is derived from linear value 'guard' and cannot be used after 'guard' is
+consumed". The tie is lexical and type-level, so it does not care whether
+the racing context is another core or another task -- it works under goal 1
+as well as goal 2.
+
+**Goal 3 is the one at risk, and the risk is an ordering risk.** The
+`locks`-forbidden-on-`interrupt` rule means every handler written between now
+and #449 is built around having no lock and no guard available. Three
+mechanisms are on file -- relaxing that rule (#449), a lock-free classified
+ring (#440), and atomic commit publication (#299) -- and the design space is
+covered. What is not settled is which one handlers are supposed to use, and
+that question should be answered in #449 **before** more handlers are
+written, not after.
+
+**Which decisions are one-way.** Reversible: the `Mutex` type, view-to-linear-struct,
+the spinlock's internals, non-preemptible-to-preemptible. Costly to revisit:
+the public/private split and grouping of a struct's fields, because every
+call site moves twice instead of once -- which is why #452 should group the
+protected fields when it makes them private, not in a later pass. And the
+interrupt/locks rule, because handlers get built around whatever it says.
+
 ### Phase 0: the foundation, language and observation
 
 - **#17 -- DONE 2026-08-27.** `atomic_load_acquire`, `atomic_store_release`,
