@@ -91,6 +91,9 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         [ "$(grep -c '^ddb: xk byte address=0x.* value=0x' "$UART_LOG")" -lt 2 ] ||
         ! grep -q '^ddb: xk denied (not ordinary kernel RAM) address=0x0000001000000000 count=1$' "$UART_LOG" ||
         ! grep -q '^ddb: xk fault address=0x0000001000000000$' "$UART_LOG" ||
+        ! grep -Eq "^ddb: xp physical=0x0*$KERNEL_READ_ADDRESS count=2$" "$UART_LOG" ||
+        [ "$(grep -c '^ddb: xp byte physical=0x.* value=0x' "$UART_LOG")" -lt 2 ] ||
+        ! grep -q '^ddb: xp denied (not ordinary physical RAM) address=0x0000001000000000 count=1$' "$UART_LOG" ||
         ! grep -q '^ddb: xu pid=1 root=0 address=0x0000000080000000 count=2$' "$UART_LOG" ||
         [ "$(grep -c '^ddb: xu byte address=0x000000008000000[01] physical=0x[0-9a-f]* value=0x[0-9a-f]*$' "$UART_LOG")" -lt 2 ] ||
         ! grep -q '^ddb: xu pid=1 root=0 address=0x0000000080000fff count=2$' "$UART_LOG" ||

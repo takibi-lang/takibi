@@ -170,6 +170,7 @@ must_use variant DdbMemoryCommand {
     NotMemory;
     Invalid;
     Kernel((usize, usize));
+    Physical((usize, usize));
 }
 
 must_use variant DdbUserMemoryCommand {
@@ -189,12 +190,14 @@ private fn ddb_hex_digit(byte: u8) -> usize {
     return 16;
 }
 
-// `xk ADDRESS [COUNT]`, with a deliberately small report bound. ADDRESS is
+// `xk ADDRESS [COUNT]` or `xp ADDRESS [COUNT]`, with a deliberately small
+// report bound. ADDRESS is
 // hexadecimal (an optional 0x prefix); COUNT is decimal and defaults to 16.
 private fn ddb_parse_memory(
         line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
         -> DdbMemoryCommand {
-    if (length < 4 || line[0] != 0x78 || line[1] != 0x6B ||
+    if (length < 4 || line[0] != 0x78 ||
+            (line[1] != 0x6B && line[1] != 0x70) ||
             line[2] != 0x20) {
         return DdbMemoryCommand::NotMemory;
     }
@@ -235,6 +238,9 @@ private fn ddb_parse_memory(
     }
     if (count == 0 || count > 64 || address > 0xFFFFFFFFFFFFFFFF - count) {
         return DdbMemoryCommand::Invalid;
+    }
+    if (line[1] == 0x70) {
+        return DdbMemoryCommand::Physical((address, count));
     }
     return DdbMemoryCommand::Kernel((address, count));
 }
@@ -405,6 +411,36 @@ private fn ddb_command_kernel_memory(address: usize, count: usize) !{unsafe} {
         return;
     }
     ddb_render_kernel_memory(address, count);
+}
+
+private fn ddb_command_physical_memory(address: usize, count: usize) !{unsafe} {
+    if (page_ddb_physical_address_readable(address, count) == false) {
+        ddb_puts("ddb: xp denied (not ordinary physical RAM) address=");
+        ddb_put_hex(address);
+        ddb_puts(" count="); ddb_put_udec(count);
+        ddb_puts("\n");
+        return;
+    }
+    ddb_puts("ddb: xp physical="); ddb_put_hex(address);
+    ddb_puts(" count="); ddb_put_udec(count);
+    ddb_puts("\n");
+    let mut offset: usize = 0;
+    while (offset < count && offset < 64) {
+        let physical: usize = address + offset;
+        match ddb_read_kernel_byte(physical) {
+            DdbByteReadResult::Fault => {
+                ddb_puts("ddb: xp fault physical="); ddb_put_hex(physical);
+                ddb_puts("\n");
+                return;
+            }
+            DdbByteReadResult::Read(value) => {
+                ddb_puts("ddb: xp byte physical="); ddb_put_hex(physical);
+                ddb_puts(" value="); ddb_put_hex(value & 0xFF);
+                ddb_puts("\n");
+            }
+        }
+        offset = offset + 1;
+    }
 }
 
 private fn ddb_render_user_memory(pid: usize, address: usize, count: usize)
@@ -764,8 +800,12 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
                     let (address, count) = details;
                     ddb_command_kernel_memory(address, count);
                 }
+                DdbMemoryCommand::Physical(details) => {
+                    let (address, count) = details;
+                    ddb_command_physical_memory(address, count);
+                }
                 DdbMemoryCommand::Invalid => {
-                    ddb_puts("ddb: usage: xk HEX_ADDRESS [COUNT_1_TO_64]\n");
+                    ddb_puts("ddb: usage: xk|xp HEX_ADDRESS [COUNT_1_TO_64]\n");
                 }
                 DdbMemoryCommand::NotMemory => {
                   match ddb_parse_user_memory(line as []u8, length) {
@@ -788,7 +828,7 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
                         // exercise a real translation fault and prompt return.
                         ddb_render_kernel_memory(0x1000000000, 1);
                     } else if (ddb_command_is(line as []u8, length, bs"help")) {
-                        ddb_puts("commands: oops regs intr sched current vm fds ps proc PID trace xk ADDRESS [COUNT] xu PID ADDRESS [COUNT] continue\n");
+                        ddb_puts("commands: oops regs intr sched current vm fds ps proc PID trace xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] continue\n");
                     } else { ddb_puts("ddb: unknown command; try help\n"); }
                     }
                      }

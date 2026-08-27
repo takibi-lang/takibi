@@ -73,6 +73,14 @@ fn page_ddb_kernel_address_readable(address: usize, count: usize) -> bool {
     return address < end && count <= end - address;
 }
 
+// Physical inspection has the same ordinary-RAM boundary. The current kernel
+// maps this span identically, but keeping the physical predicate separate
+// prevents the debugger interface from treating that mapping choice as the
+// meaning of an `xp` address.
+fn page_ddb_physical_address_readable(address: usize, count: usize) -> bool {
+    return page_ddb_kernel_address_readable(address, count);
+}
+
 // GitHub issue #353: per-page storage whose MEANING belongs to whoever
 // currently holds the page -- `struct page`'s shape -- reserved at the
 // END OF THE PAGE ITSELF.

@@ -219,8 +219,13 @@ It never activates the selected root and never changes a TLB. Both DDB entry
 lanes cover an ordinary read, a mapped-page boundary crossing, an uncaptured
 PID, and an unmapped VA before continuing.
 
-Physical-RAM addressing remains to be added before the read-only memory issue
-is complete.
+The final slice adds `xp PHYSICAL [COUNT]`. It classifies the input against the
+managed physical-RAM span independently of `xk`, then uses the kernel's current
+identity map only as the guarded access mechanism. This keeps the command's
+physical-address meaning intact if the virtual layout changes later, and keeps
+MMIO outside a supposedly read-only debugger operation. QEMU covers a valid
+symbol address and a rejected non-RAM physical address through both entry
+lanes. The read-only memory-inspection milestone is now complete.
 
 ---
 

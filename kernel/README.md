@@ -441,7 +441,8 @@ acknowledgement turns an interrupt frame into ordinary kernel context. Every
 reachable operation is fixed-size and polling-only, with no allocator, lock,
 scheduler, sleep, filesystem, network, or ordinary logging dependency. Its
 commands are `oops`, `regs`, `intr`, `sched`, `current`, `vm`, `fds`, `ps`, `proc PID`,
-`trace`, `xk ADDRESS [COUNT]`, `xu PID ADDRESS [COUNT]`, and `continue`
+`trace`, `xk ADDRESS [COUNT]`, `xp PHYSICAL [COUNT]`,
+`xu PID ADDRESS [COUNT]`, and `continue`
 (`help` lists them).
 
 `regs` reads the compiler-defined `ExceptionFrame` directly. DDB does not
@@ -483,6 +484,11 @@ table addresses and resolved data pages must themselves lie in ordinary RAM;
 bad descriptors stop with `page-table fault` rather than becoming an MMIO or
 unmapped dereference. A PID absent from a truncated process snapshot is
 reported as not captured, not nonexistent.
+
+`xp` reads a physical address directly. It is independently classified as
+managed ordinary RAM before the guarded load; the present identity mapping is
+only the mechanism used to access that physical byte, not part of the command's
+address semantics. Physical MMIO and addresses outside managed RAM are denied.
 
 `kernelcheck-ddb-qemu` asks QEMU to deliver a real chardev BREAK to the PL011,
 drives all inspection commands over its UART socket, and verifies that boot
