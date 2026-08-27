@@ -13322,18 +13322,24 @@ let codegen_tests = [
           return unsafe { arr[proven] };
         }");
 
-  (* Kept last in this group deliberately: Llvm_gen.enable_debug_info flips a
-     process-global ref with no way back off (same one-way-switch pattern
-     Llvm_gen.setup_target's target_data already uses), so every codegen test
-     registered after this one would also get DISubprogram/DILocation
-     metadata attached. That's harmless (extra metadata, not a behavior
-     change), but keeping this test last avoids it being a surprise to
-     earlier, unrelated test cases. *)
+  (* Debug info is turned back OFF when this test finishes, and that matters
+     more than it looks. It used to be a one-way switch mitigated by keeping
+     this test last in the group -- but SHUFFLE_TESTS reorders the group, so
+     "last" was not a property this test had. Under some seeds it ran early
+     and every later codegen test inherited -g, which is not the harmless
+     extra metadata the old comment here claimed: debug_info_enabled also
+     turns on volatile debug-preservation stores and debug-only allocas for
+     immutable lets, so it changes emitted code. Two unrelated tests failed
+     that way, each reported as invalid IR in a function that had nothing
+     wrong with it, and the verifier report named a variable from a program
+     that had already finished. Fun.protect, not registration order, is what
+     keeps that from coming back. *)
   Alcotest.test_case
     "DWARF debug info (-g): attaching a DISubprogram plus a per-statement \
      DILocation still produces IR that LLVM's verifier accepts, across \
      nested If/While bodies (regression coverage for the -g flag)" `Quick
     (fun () ->
+       Fun.protect ~finally:Llvm_gen.disable_debug_info (fun () ->
        Llvm_gen.enable_debug_info "test.tkb";
        expect_codegen_ok
          "enum DwarfState: u8 {
@@ -13373,7 +13379,7 @@ let codegen_tests = [
        Alcotest.(check bool) "struct member state is present"
          true (contains_substring ir "!DIDerivedType(tag: DW_TAG_member, name: \"state\"");
        Alcotest.(check bool) "slice fat-value members are present"
-         true (contains_substring ir "!DIDerivedType(tag: DW_TAG_member, name: \"len\""));
+         true (contains_substring ir "!DIDerivedType(tag: DW_TAG_member, name: \"len\"")));
 
   Alcotest.test_case
     "struct_layout reports LLVM target offsets and tail padding for arbitrary structs" `Quick

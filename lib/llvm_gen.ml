@@ -732,6 +732,26 @@ let debug_primary_file : string option ref = ref None
    one. *)
 let di_files : (string, Llvm.llmetadata) Hashtbl.t = Hashtbl.create 8
 
+(* One DIType cache per named aggregate/enum. Structs also keep a permanent
+   forward declaration so self-referential pointer fields can terminate
+   without requiring LLVM's temporary-node RAUW API, which the OCaml binding
+   does not expose.
+
+   Declared here rather than next to their only users, a thousand lines
+   down, because setup_debug_info_for_module below has to CLEAR them: every
+   value in them was minted by a DIBuilder, and that DIBuilder does not
+   survive the module being recreated. A cache that does survive it hands
+   the next module metadata belonging to the previous one's
+   DICompileUnit, which LLVM's verifier rejects -- as invalid IR for some
+   unrelated function, with nothing in the message pointing at debug info
+   or at the program that ran before. *)
+let di_struct_placeholders : (string, Llvm.llmetadata) Hashtbl.t =
+  Hashtbl.create 8
+let di_struct_types : (string, Llvm.llmetadata) Hashtbl.t = Hashtbl.create 8
+let di_struct_in_progress : (string, unit) Hashtbl.t = Hashtbl.create 8
+let di_enum_types : (string, Llvm.llmetadata) Hashtbl.t = Hashtbl.create 8
+let di_slice_types : (string, Llvm.llmetadata) Hashtbl.t = Hashtbl.create 8
+
 let di_file_for (dib : Llvm_debuginfo.lldibuilder) (filename : string) : Llvm.llmetadata =
   match Hashtbl.find_opt di_files filename with
   | Some f -> f
@@ -764,7 +784,14 @@ let setup_debug_info_for_module () =
     | Some f -> f
     | None -> raise (Error "BUG: setup_debug_info_for_module called before enable_debug_info")
   in
+  (* Every cached llmetadata below belongs to the DIBuilder about to be
+     replaced. Reset all of them, not just di_files. *)
   Hashtbl.reset di_files;
+  Hashtbl.reset di_struct_placeholders;
+  Hashtbl.reset di_struct_types;
+  Hashtbl.reset di_struct_in_progress;
+  Hashtbl.reset di_enum_types;
+  Hashtbl.reset di_slice_types;
   let dib = Llvm_debuginfo.dibuilder !the_module in
   dibuilder_opt := Some dib;
   let file = di_file_for dib primary_file in
@@ -799,6 +826,34 @@ let enable_debug_info (primary_file : string) =
   debug_info_enabled := true;
   debug_primary_file := Some primary_file;
   setup_debug_info_for_module ()
+
+(* The way back off, which enable_debug_info used to not have.
+
+   A compiler process passed -g once and never needs to un-pass it, so a
+   one-way switch was true to how the CLI uses this. The test process is
+   not a compiler process: it compiles a thousand independent programs, and
+   with SHUFFLE_TESTS it compiles them in a different order every run. The
+   -g test could once be "kept last" by registration order, but shuffling
+   is exactly the thing that ignores registration order, so every codegen
+   test after it in some shuffle inherited debug info it never asked for --
+   and then LLVM's verifier rejected an unrelated function, naming a
+   DILocalVariable belonging to a program that had finished running. That
+   failure is reproducible only by seed, points at the wrong test, and says
+   nothing about -g.
+
+   So the switch goes both ways now, and `reset_target`'s neighbours in the
+   test harness call this for the same reason they call that. *)
+let disable_debug_info () =
+  debug_info_enabled := false;
+  debug_primary_file := None;
+  dibuilder_opt := None;
+  di_compile_unit := None;
+  Hashtbl.reset di_files;
+  Hashtbl.reset di_struct_placeholders;
+  Hashtbl.reset di_struct_types;
+  Hashtbl.reset di_struct_in_progress;
+  Hashtbl.reset di_enum_types;
+  Hashtbl.reset di_slice_types
 
 (* Locals are either immutable SSA values or mutable alloca pointers *)
 type local_binding =
@@ -1700,16 +1755,6 @@ let dw_ate_boolean        = 0x02
 let dw_ate_signed         = 0x05
 let dw_ate_unsigned       = 0x07
 let dw_tag_structure_type = 0x13
-
-(* One DIType cache per named aggregate/enum. Structs also keep a permanent
-   forward declaration so self-referential pointer fields can terminate
-   without requiring LLVM's temporary-node RAUW API, which the OCaml binding
-   does not expose. *)
-let di_struct_placeholders : (string, llmetadata) Hashtbl.t = Hashtbl.create 8
-let di_struct_types : (string, llmetadata) Hashtbl.t = Hashtbl.create 8
-let di_struct_in_progress : (string, unit) Hashtbl.t = Hashtbl.create 8
-let di_enum_types : (string, llmetadata) Hashtbl.t = Hashtbl.create 8
-let di_slice_types : (string, llmetadata) Hashtbl.t = Hashtbl.create 8
 
 let di_size_align_bits (ty : lltype) : int * int =
   match !target_data with
@@ -6095,10 +6140,23 @@ let gen_func ?prog_types fdef =
      already doesn't catch Error specially, same as every other internal
      Error in this file) and the test suite report a normal, attributable
      failure. *)
-  if not (Llvm_analysis.verify_function f) then
+  if not (Llvm_analysis.verify_function f) then begin
+    (* verify_function answers yes/no and nothing else, which leaves the
+       reader to spot the defect in a dumped function by eye. verify_module
+       returns the verifier's own report, so ask it too and print WHY. It
+       covers the whole module rather than this function, which is a
+       feature here: the reason is often a reference to something declared
+       elsewhere in it. *)
+    let why = match Llvm_analysis.verify_module !the_module with
+      | Some reason -> reason
+      | None ->
+          "(the module as a whole verifies; only this function does not)"
+    in
     raise (Error (Printf.sprintf
-      "internal compiler error: invalid LLVM IR generated for function '%s'\n%s"
-      fdef.name (string_of_llvalue f)));
+      "internal compiler error: invalid LLVM IR generated for function \
+       '%s'\n%s\n-- verifier report --\n%s"
+      fdef.name (string_of_llvalue f) why))
+  end;
   f
 
 (* -- Top-level codegen --------------------------------------------------- *)
