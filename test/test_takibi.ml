@@ -12916,6 +12916,45 @@ let codegen_tests = [
           return 0;
         }");
 
+  (* GitHub issue #453: every failing assertion, not the first one. The
+     value of asserting a whole-kernel invariant is that changing it hands
+     back a worklist -- raising KERNEL_ACTIVE_CORES names all nine sites in
+     one build. Stopping at the first would make that nine edit-rebuild
+     cycles, with the ninth found only after the first eight are fixed. *)
+  Alcotest.test_case
+    "issue #453: every failing static_assert is reported, not just the first"
+    `Quick
+    (fun () ->
+       expect_codegen_error "3 static assertion(s) failed"
+         "fn first() -> usize {
+            static_assert(1 == 2, \"first breaks\");
+            return 0;
+          }
+          fn second() -> usize {
+            static_assert(3 == 4, \"second breaks\");
+            return 0;
+          }
+          fn third() -> usize {
+            static_assert(5 == 6, \"third breaks\");
+            return 0;
+          }" ();
+       (* and each one is named, so the worklist is usable *)
+       List.iter (fun fragment ->
+         expect_codegen_error fragment
+           "fn first() -> usize {
+              static_assert(1 == 2, \"first breaks\");
+              return 0;
+            }
+            fn second() -> usize {
+              static_assert(3 == 4, \"second breaks\");
+              return 0;
+            }
+            fn third() -> usize {
+              static_assert(5 == 6, \"third breaks\");
+              return 0;
+            }" ())
+         ["first breaks"; "second breaks"; "third breaks"]);
+
   Alcotest.test_case
     "issue #344: a true static_assert emits no code and compiles"
     `Quick

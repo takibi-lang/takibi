@@ -1,0 +1,59 @@
+// GitHub issue #453: the three properties this kernel's unsynchronized
+// state is safe BECAUSE OF, named so that removing one is a compile error
+// rather than a race.
+//
+// Most of `kernel/` shares mutable state with no lock. That is not an
+// oversight and not a convention anyone has to remember -- it is correct,
+// today, because there is exactly one kernel execution context. Three
+// separate facts make that true, and two of them are scheduled to be
+// removed on purpose:
+//
+//   1. ONE CORE runs kernel code. Core 1 reaches EL1, proves it can see
+//      the shared page table, and parks (GitHub issue #447 changes this).
+//
+//   2. KERNEL MODE DOES NOT PREEMPT. A timer interrupt taken at EL1 --
+//      inside a syscall -- only sets a flag; the switch happens on the way
+//      out, in kernel_process_syscall_return_schedule. The line that does
+//      it is `if (lower_el)` in each platform's irq dispatch. So a syscall
+//      handler runs to completion. This is Linux's CONFIG_PREEMPT_NONE.
+//
+//   3. INTERRUPT HANDLERS TOUCH NO SHARED STATE. virtio_net_irq_handler
+//      sets two flags and calls interrupt_notify(); the real work happens
+//      later in syscall-dispatch context. The effect system enforces the
+//      shape of this: `locks` is rejected outright on an `!{interrupt}`
+//      function, so a handler cannot take a lock even if it wanted to
+//      (GitHub issue #449 revisits that rule).
+//
+// Leg 3 is enforced by the compiler. Legs 1 and 2 are numbers, declared
+// here, asserted at every site whose correctness argument names them.
+// Raising either one fails the build at each such site -- which turns
+// issue #447 into a worklist instead of a silent change of meaning.
+//
+// Current limitations (2026-08-27). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none, since it
+// invites relying on a guarantee that quietly stopped holding.
+// - THE ASSERTION SET IS A CLAIM, NOT A PROOF. Nothing checks that every
+//   site depending on these numbers actually asserts them. The audit
+//   behind the current set is recorded in issue #453; a new piece of
+//   unsynchronized shared state added without an assertion is exactly as
+//   invisible as it was before this file existed. What this buys is that
+//   the sites already known are known to the COMPILER instead of to a
+//   comment.
+// - THESE ARE NOT A DESIGN. They describe what is true, so that changing
+//   it is loud. Deciding what each subsystem should do once a number
+//   moves is issues #451/#452/#449, not this file.
+// - LEG 3 HAS NO NUMBER. It is enforced by the effect system rather than
+//   asserted here, so a change to that rule will not fail these
+//   assertions. #449 owns it and says so.
+
+// How many cores execute kernel code. Not how many cores exist, and not
+// how many the platform brings up -- core 1 boots today and this is still
+// 1, because it parks without touching kernel state.
+const KERNEL_ACTIVE_CORES: usize = 1;
+
+// Whether a syscall handler can lose the CPU before it returns. 0 today:
+// see leg 2 above. A separate number from the core count because the two
+// are independently removable and each breaks a different set of sites --
+// preemption alone would make two PROCESSES interleave inside the kernel
+// on one core, which most of the state below is equally unready for.
+const KERNEL_PREEMPTIBLE: usize = 0;

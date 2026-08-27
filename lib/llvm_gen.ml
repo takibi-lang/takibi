@@ -6357,6 +6357,15 @@ let rec eval_static_int (e : Ast.expr) : Int64.t =
    is settled here is whether it is a compile-time CONSTANT (it must be --
    an assertion that could only be decided at runtime is itself the error)
    and whether it holds. *)
+(* GitHub issue #453: failures are COLLECTED, not raised at the first one.
+   The point of an assertion on a whole-kernel invariant is that changing
+   the invariant produces a worklist -- every site that has to be reviewed,
+   in one build. Raising at the first turns a nine-site review into nine
+   edit-rebuild cycles, and the ninth is found only after the first eight
+   are fixed. Type errors in this compiler already batch this way
+   (MultiTypeError); this is the same courtesy one pass later. *)
+let static_assert_failures : string list ref = ref []
+
 let rec check_static_asserts_stmts (stmts : Ast.stmt list) : unit =
   List.iter (fun (s : Ast.stmt) ->
     let arms_of arms =
@@ -6378,9 +6387,10 @@ let rec check_static_asserts_stmts (stmts : Ast.stmt list) : unit =
                  (%s)" where msg))
         in
         if value = 0L then
-          raise (Error (match message with
-            | Some m -> Printf.sprintf "%s: static assertion failed: %s" where m
-            | None   -> Printf.sprintf "%s: static assertion failed" where))
+          static_assert_failures := !static_assert_failures @
+            [(match message with
+              | Some m -> Printf.sprintf "%s: static assertion failed: %s" where m
+              | None   -> Printf.sprintf "%s: static assertion failed" where)]
     | Ast.Block b | Ast.UnsafeBlock b -> check_static_asserts_stmts b
     | Ast.If (_, t, e) ->
         check_static_asserts_stmts t; check_static_asserts_stmts e
@@ -7258,10 +7268,17 @@ let gen_program ?prog_types prog =
      function body is emitted. `prog` at this point holds one FuncDef per
      INSTANTIATION, so a generic function's assertion is checked once per
      concrete type it is used at, and not at all if it is never used. *)
+  static_assert_failures := [];
   List.iter (function
     | FuncDef fdef -> check_static_asserts_stmts fdef.body
     | _ -> ()
   ) prog;
+  (match !static_assert_failures with
+   | [] -> ()
+   | failures ->
+       let n = List.length failures in
+       raise (Error (Printf.sprintf "%s\n%d static assertion(s) failed"
+         (String.concat "\n" failures) n)));
   (* Pass 2: generate function bodies *)
   List.iter (function
     | FuncDef fdef    -> ignore (gen_func ?prog_types fdef)

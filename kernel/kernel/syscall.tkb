@@ -9,6 +9,7 @@ use "kernel/net/tcp.tkb";
 use "kernel/kernel/fd_table.tkb";
 use "kernel/kernel/syscall_test_evidence.tkb";
 use "kernel/kernel/syscall_test_lifecycle.tkb";
+use "kernel/lib/execution_model.tkb";
 
 // Current limitations (2026-08-26). Keep this list current as
 // call sites change; a limitation that goes stale here is worse than
@@ -4109,4 +4110,20 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
             return ok;
         }
     }
+}
+
+// GitHub issue #453. This file's own header says it: "every syscall
+// handler here assumes it runs to completion on core 0 with no concurrent
+// dispatch from another core." Both halves of that are numbers now.
+//
+// The core count is the obvious one. The preemption number is the one
+// that is easy to lose: a timer interrupt DOES arrive inside a syscall
+// today -- interrupts are unmasked on EL0 entry -- and what keeps two
+// processes from interleaving inside a handler is that the switch is
+// deferred to kernel_process_syscall_return_schedule. Enable kernel
+// preemption and every handler in this file becomes re-entrant with
+// respect to a second process, on one core, with no other change.
+fn syscall_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1 && KERNEL_PREEMPTIBLE == 0,
+                  "every syscall handler here assumes it runs to completion with no second dispatch; enabling either number makes them re-entrant");
 }

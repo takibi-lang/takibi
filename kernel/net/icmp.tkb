@@ -3,6 +3,7 @@
 // rp1_gem.tkb directly.
 use "kernel/net/checksum.tkb";
 use "kernel/net/wire.tkb";
+use "kernel/lib/execution_model.tkb";
 
 // Current limitations (2026-08-13, issue #295): NOT SYNCHRONIZED,
 // single-core only. Only Echo Request/Reply is handled; no fragmentation
@@ -161,4 +162,11 @@ fn kernel_icmp_reply_once(ready_in: sink NetRxCanAcquire)
         }
     }
     return KernelIcmpResult::TimedOut(ready);
+}
+
+// GitHub issue #453. Echo replies are built in shared frame storage with
+// no serialisation, the same shape as kernel/net/arp.tkb.
+fn icmp_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "replies are built in shared frame storage with nothing serialising two requests");
 }

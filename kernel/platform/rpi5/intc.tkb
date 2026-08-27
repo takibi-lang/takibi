@@ -283,6 +283,14 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         *rp1_msix_cfg6_set = 1 << 2; // MSIX_CFG_IACK
     } else if (id == RPI5_TIMER_GIC_INTID) {
         timer_irq_handler();
+        // GitHub issue #453: this branch is why most of kernel/ can share
+        // mutable state with no lock. Interrupted EL0 -> switch now.
+        // Interrupted EL1 -- inside a syscall -- fall through and only
+        // REQUEST a reschedule, so the switch happens on the way out of
+        // the syscall and a handler always runs to completion. That is
+        // KERNEL_PREEMPTIBLE == 0 in kernel/lib/execution_model.tkb, and
+        // nine files assert it. Changing this line means changing that
+        // constant, which will tell you which nine.
         if (lower_el) {
             kernel_stack_guard_check_interrupt(frame_sp);  // issue #375
             let next_sp: usize = kernel_process_timer_schedule(frame_sp);

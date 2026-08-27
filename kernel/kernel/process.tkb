@@ -8,6 +8,7 @@ use "kernel/kernel/process_test_evidence.tkb";
 // choke points for kernel/mm/address_space.tkb's backing-page and ASID
 // records; mmu.tkb itself sees only resolved physical addresses and ASIDs.
 use "kernel/mm/address_space.tkb";
+use "kernel/lib/execution_model.tkb";
 
 // Current limitations (2026-08-13, issue #295). Keep this list current as
 // call sites change; a limitation that goes stale here is worse than
@@ -3949,4 +3950,14 @@ fn kernel_process_clone_evidence() -> bool {
            scheduled_process_record_at(execution_current_handle.pool_index)
                .saved_sp !=
                0;
+}
+
+// GitHub issue #453. execution_current_handle, execution_scheduler_enabled
+// and execution_reschedule_pending are one scheduler's state, and
+// scheduled_process_spare_lock returns an erased view that emits no
+// instruction -- a compile-time proof that no second holder exists, which
+// stops being a proof when a second core can reap (#451).
+fn process_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "one scheduler's globals, and a spare-run guard that emits no instruction");
 }

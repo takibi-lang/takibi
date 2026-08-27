@@ -646,11 +646,16 @@ fn intrusive_owner_drop(owner: sink IntrusiveOwner[pool_id, allocation]) {}
 // is today. Porting has to fill it in, and the honest bar is that
 // nothing else in this file needs to change when it does.
 //
+// GitHub issue #445 filled it in, and the bar held: pool_lock_acquire is
+// a real spin_lock_irqsave now -- mask, then take an atomic exchange on
+// this pool's own lock word -- and nothing in this file changed except
+// passing that word's address beside the tag.
+//
 // USABLE FROM AN INTERRUPT HANDLER, DELIBERATELY
 //
-// The kernel's exclusion primitive on one core is DAIF.I masking
-// (kernel/arch/arm64/boot/cpu.tkb's disable_irq/enable_irq), which is
-// what intrusive_pool_lock should become there. That flavour of lock is
+// The kernel's exclusion primitive was DAIF.I masking alone while there
+// was one core, which is what intrusive_pool_lock became there; issue
+// #445 added the acquire under it without changing this shape. That flavour of lock is
 // safe to take from BOTH thread and interrupt context -- Linux's
 // spin_lock_irqsave -- so this pool composes with `!{interrupt}` rather
 // than being excluded from it.

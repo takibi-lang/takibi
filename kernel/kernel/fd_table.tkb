@@ -1,4 +1,5 @@
 use "kernel/lib/intrusive_pool.tkb";
+use "kernel/lib/execution_model.tkb";
 
 // Current limitations (2026-08-24, issues #295/#392/#391). Keep this list
 // current as call sites change; a limitation that goes stale here is
@@ -2243,4 +2244,13 @@ fn kernel_fd_table_crash_object(process: usize, fd: usize) -> usize !{unsafe} {
     let entries: *FdBlock = fd_block_at(block, block_generation);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     return entries.slot[index].object;
+}
+
+// GitHub issue #453. unified_object_retain/_release are a bare counter
+// increment and decrement, as this file's header already says. Two cores
+// racing on that loses a reference and frees a live object; there is no
+// atomic and no lock on that path.
+fn fd_table_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "unified_object_retain/_release are a bare counter; a lost decrement frees a live object");
 }

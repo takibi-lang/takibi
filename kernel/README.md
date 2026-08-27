@@ -673,6 +673,19 @@ common/platform view `.expected` files are the actual contracts; the
 list below is orientation for a reader deciding whether a workload will
 run, not a specification.
 
+- **Execution model: one core, and a kernel that does not preempt.** Most
+  of `kernel/` shares mutable state with no lock. That is correct today
+  because there is exactly one kernel execution context, which rests on
+  three separate facts: only core 0 runs kernel code (core 1 reaches EL1,
+  proves it can see the shared page table, and parks); a timer interrupt
+  taken inside a syscall only *requests* a reschedule, so the switch
+  happens on the way out and a handler always runs to completion
+  (Linux's `CONFIG_PREEMPT_NONE`); and interrupt handlers touch no shared
+  state, which the effect system enforces by rejecting `locks` on an
+  `!{interrupt}` function. The first two are constants in
+  `kernel/lib/execution_model.tkb` and nine files assert them, so changing
+  either one fails the build at every site that depends on it rather than
+  becoming a race. See GitHub issue #453.
 - **Filesystem.** One ext2 block group, nested path lookup, root-directory
   mutation, allocation bitmaps, and fast symlinks. Regular-file reads cover
   twelve direct blocks plus single- and double-indirect blocks; the maximum

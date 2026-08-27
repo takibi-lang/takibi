@@ -66,6 +66,8 @@
 //   zero-initialized .bss is NOT equivalent to an initialized empty pool,
 //   unlike the linear-scan allocators this replaced.
 
+use "kernel/lib/execution_model.tkb";
+
 must_use variant FreelistPopResult {
     Empty;
     Popped(exists allocation: usize. FreelistOwner[allocation]);
@@ -250,4 +252,15 @@ fn freelist_ref(T: type, target: &mut Freelist(T, N),
     let data = target.data;
     let index: isize = freelist_owner_index(owner) as isize;
     return (data as *T) + index;
+}
+
+// GitHub issue #453. The header above already states this file's whole
+// safety argument -- every instance "reachable ONLY from syscall-dispatch
+// context on core 0" -- and names the failure it guards against: a
+// library that works because every caller so far happened to be
+// single-context, adopted by one that isn't. That paragraph is now a
+// number the compiler checks.
+fn freelist_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "the free chain has no lock, and a concurrent push corrupts it silently");
 }

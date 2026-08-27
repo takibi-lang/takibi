@@ -52,6 +52,8 @@
 // The architectural floor: every AArch64 implementation has at least an
 // 8-bit ASID field, so this is what the width query falls back to when it
 // reports anything this file does not recognise.
+use "kernel/lib/execution_model.tkb";
+
 const ASID_BITS_FLOOR: usize = 8;
 
 private let mut asid_bits: usize = ASID_BITS_FLOOR;
@@ -133,4 +135,14 @@ fn asid_assign() -> (usize, usize) {
     asid_next = asid_next + 1;
     asid_assign_count = asid_assign_count + 1;
     return (value, asid_generation);
+}
+
+// GitHub issue #453. The rollover invalidates the LOCAL TLB (`tlbi
+// vmalle1`), so a second core executing user code with an ASID about to be
+// reassigned keeps stale entries -- this file's header states exactly
+// that. GitHub issue #446 makes the invalidation a broadcast; until it
+// lands, this is the assertion that notices.
+fn asid_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "the rollover invalidates the LOCAL TLB, so another core keeps stale entries -- see issue #446");
 }

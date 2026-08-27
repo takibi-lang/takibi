@@ -16,6 +16,8 @@
 // multi-NIC support, and every network-facing syscall path serializes
 // through this single store.
 //
+use "kernel/lib/execution_model.tkb";
+
 variant NetworkCapabilityValue {
     Empty;
     Ready(NetRxCanAcquire);
@@ -109,4 +111,13 @@ fn network_capability_put(ready: sink NetRxCanAcquire)
             return NetworkCapabilityPutResult::Conflict;
         }
     }
+}
+
+// GitHub issue #453. This file's header already says the initialisation
+// flag that mints the first NetRxCanAcquire is trusted "because this whole
+// kernel is NOT SYNCHRONIZED / single-core" -- two cores reaching
+// net_init() would mint two permissions for one descriptor set.
+fn socket_capability_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "the init flag that mints the first NetRxCanAcquire would mint two");
 }

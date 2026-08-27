@@ -80,6 +80,7 @@ use "kernel/net/icmp.tkb";
 use "kernel/mm/page.tkb";
 use "kernel/lib/pool_lock.tkb";
 use "kernel/lib/intrusive_pool.tkb";
+use "kernel/lib/execution_model.tkb";
 
 let mut our_mac: [u8; 6];
 
@@ -2604,4 +2605,21 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
         ready = pending_tcp_service_once(conn, ready, retry_ticks);
     }
     return KernelTcpCloseResult::Closed(ready);
+}
+
+// GitHub issue #453, and this file is the worst case behind it.
+//
+// RetxEntry has eleven fields and its guard covers one of them. The other
+// ten -- including a 1514-byte frame handed to the NIC -- are ordinary
+// public storage written by tcp_retransmit_scan with no guard held.
+// TcpConnection is the same shape with 4 private fields and 20 public.
+// That is safe today only because there is no second kernel context to
+// interleave with, which is exactly what both numbers below say.
+//
+// GitHub issue #452 is the fix: group the protected fields and reach them
+// only through a guard-derived accessor. Until then, this assertion is
+// what makes removing either leg fail here rather than in production.
+fn tcp_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1 && KERNEL_PREEMPTIBLE == 0,
+                  "RetxEntry's guard covers one field of eleven, including the 1514-byte frame the NIC reads -- see issue #452");
 }
