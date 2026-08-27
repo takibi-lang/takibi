@@ -178,6 +178,7 @@ sed -e 's|^/ # ||' \
 # which is the truth.
 rm -f "$ARTIFACT_DIR"/*.actual
 view_count=0
+failed_views=""
 view_names="$(
     for filter in "$COMMON_VIEW_DIR"/*.filter "$VIEW_DIR"/*.filter; do
         [ -e "$filter" ] || continue
@@ -203,14 +204,26 @@ while IFS= read -r name; do
     fi
     LC_ALL=C grep -E -f "$filter" "$UART_LOG.normalized" >"$actual" || true
     if ! cmp -s "$expected" "$actual"; then
+        # Report and keep going. Stopping at the first mismatch made the
+        # output say "one view failed" when seventeen had, because every
+        # view after it was never compared -- which is also why the .actual
+        # purge above exists. Comparing all of them costs one grep each
+        # against an already-captured log, and a change that moves several
+        # views at once is exactly when the whole list is what you need.
         echo "FAIL $RUN_LABEL view: $name" >&2
         diff -u "$expected" "$actual" >&2 || true
-        echo "artifacts: $ARTIFACT_DIR" >&2
-        exit 1
+        failed_views="$failed_views $name"
+        continue
     fi
     echo "PASS $RUN_LABEL view: $name"
     view_count=$((view_count + 1))
 done <<<"$view_names"
+
+if [ -n "$failed_views" ]; then
+    echo "FAIL $RUN_LABEL views:$failed_views" >&2
+    echo "artifacts: $ARTIFACT_DIR" >&2
+    exit 1
+fi
 
 if [ "$view_count" -eq 0 ]; then
     echo "error: no kernel integration views found under $COMMON_VIEW_DIR or $VIEW_DIR" >&2
