@@ -311,6 +311,18 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
         uart_put_udec(process_image_record_missing_uses());
         kernel_boot_log("\n");
     }
+    // The fourth fallback of this kind, and the only one that had a counter
+    // and no reader. process_image_root_index() answers 0 for a target root
+    // that is not a valid slot, which was harmless while root 0 was an image
+    // about to be replaced -- and is not now that root 0 is BusyBox init's
+    // live image, because every teardown that resolves through it unmaps
+    // PID 1. Issue #270 hit exactly that from a probe, and nothing in the
+    // boot would have said so.
+    if (process_image_root_fallback_uses() != 0) {
+        kernel_boot_log("process image: target root FELL BACK TO 0 uses=");
+        uart_put_udec(process_image_root_fallback_uses());
+        kernel_boot_log("\n");
+    }
     if (address_space_backing_missing_uses() != 0) {
         kernel_boot_log("address space: backings MISSING uses=");
         uart_put_udec(address_space_backing_missing_uses());
