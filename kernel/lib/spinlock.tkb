@@ -1,0 +1,80 @@
+// GitHub issue #445: the first thing in this kernel that actually excludes
+// a second core.
+//
+// A test-and-set lock. Taking it is one acquire swap; giving it back is one
+// release store. That pair is enough to build a lock because a swap is
+// atomic: exactly one of two cores swapping into the same word can observe
+// the free value, and the other observes what the winner wrote.
+//
+// Current limitations (2026-08-27). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none, since it
+// invites relying on a guarantee that quietly stopped holding.
+// - THE LOCK IS AN ADDRESS, and nothing checks that the address is a lock.
+//   `usize` is what a slot address, a payload address and a lock word all
+//   look like (GitHub issue #396). A typed `SpinLock` wrapper is the
+//   obvious fix and is deliberately not here yet: it would need a cast to
+//   reach the raw layer anyway, and there is exactly one caller today.
+//   Add it with the second one.
+// - NO OWNER, NO DEPTH, NO DEADLOCK DETECTION. Taking the same lock twice
+//   on one core hangs, and this file cannot tell that from waiting for
+//   another core. What checks lock ORDER is
+//   `linux_user/intrusive_pool/pool_lock_check.tkb`, in the tier that can
+//   afford to look; what would catch re-entrancy at runtime is an owner
+//   field this has no caller for.
+// - NOTHING HERE MASKS INTERRUPTS. On one core an interrupt handler that
+//   takes a lock the interrupted code already holds deadlocks, and the
+//   caller is what prevents that -- see `kernel/lib/pool_lock.tkb`, which
+//   is this file's only caller and does the masking around it. Do not use
+//   these three functions directly from code that can be interrupted.
+// - THE WAIT IS A BUSY SPIN. No WFE, no backoff, no queue, so a contended
+//   lock burns the waiting core. That is the right first shape at two
+//   cores and the wrong one at many; issue #9 is where fairness and
+//   affinity get decided, and there is no measurement to design against
+//   until cores actually contend.
+
+// Two values, not a bool: the word is what the atomic operates on, and an
+// atomic works in usize.
+const SPIN_LOCK_FREE: usize = 0;
+const SPIN_LOCK_HELD: usize = 1;
+
+// One attempt. True means this caller now holds it.
+//
+// Public rather than an internal step of spin_lock, and the reason is that
+// it is the only way to test the exclusion single-threaded: take it, watch
+// a second attempt fail, give it back, watch a third succeed. With one
+// thread there is no other way to observe that the lock excludes anything,
+// and "it compiles" is not evidence a lock works.
+fn spin_trylock(lock: usize) -> bool !{unsafe} {
+    let previous: usize = unsafe { atomic_swap_acquire(lock, SPIN_LOCK_HELD) };
+    return previous == SPIN_LOCK_FREE;
+}
+
+// Blocks until taken.
+//
+// Test-and-TEST-and-set: the retry spins on a plain acquire LOAD and only
+// swaps again once the word looks free. The obvious loop -- swapping over
+// and over -- is correct but writes the cache line on every attempt, so
+// each waiting core steals the line from the holder and from every other
+// waiter. Reading instead lets the line stay shared until it actually
+// changes. On one core this is indistinguishable; it is written this way
+// because two cores are the point.
+fn spin_lock(lock: usize) !{unsafe} {
+    while (spin_trylock(lock) == false) {
+        while (unsafe { atomic_load_acquire(lock) } != SPIN_LOCK_FREE) {
+        }
+    }
+}
+
+// Gives it back. A release store, so everything this core did while holding
+// the lock is visible to whichever core takes it next -- that ordering, not
+// the write itself, is the entire reason this is not `*lock = 0`.
+fn spin_unlock(lock: usize) !{unsafe} {
+    unsafe { atomic_store_release(lock, SPIN_LOCK_FREE); }
+}
+
+// Whether the word is currently held, for a probe or a diagnostic. Never a
+// basis for deciding to enter a critical section: the answer can be stale
+// before the caller acts on it, which is what spin_trylock is for.
+fn spin_lock_is_held(lock: usize) -> bool !{unsafe} {
+    return unsafe { atomic_load_acquire(lock) } != SPIN_LOCK_FREE;
+}

@@ -178,7 +178,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair \
                              field_lease match_int_lit \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
@@ -202,6 +202,11 @@ $(LINUX_USER_DIR)/page_pool/page_pool_exe.o: $(LINUX_USER_DIR)/page_pool/page_po
 $(LINUX_USER_DIR)/inet_checksum/inet_checksum_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 $(LINUX_USER_DIR)/byte_slice/byte_slice_exe.o: kernel/lib/byte_slice.tkb
+# GitHub issue #445: the kernel's own spinlock, compiled and run natively.
+# The same source the kernel links, not a copy -- see the freelist/slotmap
+# note below for why that distinction is the point.
+$(LINUX_USER_DIR)/spinlock/spinlock_exe.o: kernel/lib/spinlock.tkb
+$(LINUX_USER_DIR)/spinlock/spinlock_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/spinlock.tkb
 
 # GitHub issue #217 (2026-08-15) closed the array-field-decay gap this
 # comment used to describe for the four targets below: FreelistCore(N)'s

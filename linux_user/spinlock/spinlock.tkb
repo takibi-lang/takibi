@@ -1,0 +1,62 @@
+// GitHub issue #445: kernel/lib/spinlock.tkb, exercised where a test costs
+// seconds instead of a QEMU boot.
+//
+// One thread, on purpose. A single thread cannot demonstrate that two cores
+// take turns, and this does not claim to -- that evidence needs core 1
+// running (issue #447) and belongs to the two-core lane.
+//
+// What ONE thread can demonstrate is the thing a lock is for: that while it
+// is held, a second attempt to take it fails. spin_trylock is public
+// precisely so this is observable without a second thread. A lock that
+// always succeeded would pass a take/release smoke test and fail this one
+// on its second line.
+//
+// Expected output (linux_user/spinlock/spinlock.expected):
+//   0x00000000   is_held on a fresh lock
+//   0x00000001   trylock succeeds
+//   0x00000001   ... and the lock now reads held
+//   0x00000000   trylock AGAIN fails -- the exclusion, and the whole point
+//   0x00000001   ... and the first holder still holds it
+//   0x00000000   after unlock, free again
+//   0x00000001   trylock succeeds a second time, so unlock really released
+//   0x00000001   blocking spin_lock takes an uncontended lock
+//   0x00000000   and unlock releases it
+
+let mut demo_lock: usize = 0;
+
+fn report(flag: bool) {
+    if (flag) { uart_println_hex(1); } else { uart_println_hex(0); }
+}
+
+fn spinlock_roundtrip() -> i32 !{unsafe} {
+    let lock: usize = (&demo_lock) as usize;
+
+    report(spin_lock_is_held(lock));
+
+    report(spin_trylock(lock));
+    report(spin_lock_is_held(lock));
+
+    // Held. A second attempt must fail, and must not corrupt the first
+    // holder's claim.
+    report(spin_trylock(lock));
+    report(spin_lock_is_held(lock));
+
+    spin_unlock(lock);
+    report(spin_lock_is_held(lock));
+
+    report(spin_trylock(lock));
+    spin_unlock(lock);
+
+    // The blocking form, on a lock nothing holds: it must return rather
+    // than spin, and it must leave the lock held.
+    spin_lock(lock);
+    report(spin_lock_is_held(lock));
+    spin_unlock(lock);
+    report(spin_lock_is_held(lock));
+
+    return 0;
+}
+
+fn app_main() {
+    spinlock_roundtrip();
+}
