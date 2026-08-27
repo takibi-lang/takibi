@@ -64,6 +64,9 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -Eq '^ddb: current pid=[0-9]+ parent=[0-9]+ state=[0-9]+ wait=[0-9]+$' "$UART_LOG" ||
         ! grep -Eq '^ddb: vm pid=[0-9]+ root=[0-9]+ live=[01] asid=[0-9]+ l1=0x[0-9a-f]+$' "$UART_LOG" ||
         ! grep -Eq '^ddb: fds pid=[0-9]+ slots=[0-9]+$' "$UART_LOG" ||
+        ! grep -Eq '^ddb: ps count=[1-9][0-9]* truncated=[01]$' "$UART_LOG" ||
+        ! grep -Eq '^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+$' "$UART_LOG" ||
+        ! grep -Eq '^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+$' "$UART_LOG" ||
         ! grep -q '^ddb: trace count=' "$UART_LOG" ||
         ! grep -q '^ddb: continuing$' "$UART_LOG" ||
         ! grep -q '^init: ash bootstrap$' "$UART_LOG"; then

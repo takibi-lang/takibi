@@ -78,6 +78,9 @@ struct DdbSnapshot {
     root_asid: usize;
     fd_kind: [usize; CRASH_FD_SNAPSHOT_SLOTS];
     fd_object: [usize; CRASH_FD_SNAPSHOT_SLOTS];
+    process_count: usize;
+    process_truncated: usize;
+    processes: [ProcessDdbRecord; DDB_PROCESS_RECORDS];
     trace_count: usize;
     trace: [usize; KERNEL_CRASH_TRACE_WORDS];
 }
@@ -256,6 +259,42 @@ private fn ddb_render_fds() !{unsafe} {
     }
 }
 
+private fn ddb_render_process(record: ProcessDdbRecord) !{unsafe} {
+    ddb_puts(" pid="); ddb_put_udec(record.pid);
+    ddb_puts(" ppid="); ddb_put_udec(record.ppid);
+    ddb_puts(" state="); ddb_put_udec(record.state);
+    ddb_puts(" wait="); ddb_put_udec(record.wait_reason);
+    ddb_puts(" root="); ddb_put_udec(record.root_slot);
+    ddb_puts(" sp="); ddb_put_hex(record.saved_sp);
+    ddb_puts("\n");
+}
+
+private fn ddb_render_ps() !{unsafe} {
+    ddb_puts("ddb: ps count="); ddb_put_udec(ddb_snapshot.process_count);
+    ddb_puts(" truncated="); ddb_put_udec(ddb_snapshot.process_truncated);
+    ddb_puts("\n");
+    for index: usize in 0..<DDB_PROCESS_RECORDS {
+        if (index < ddb_snapshot.process_count) {
+            ddb_puts("ddb: ps");
+            ddb_render_process(ddb_snapshot.processes[index]);
+        }
+    }
+}
+
+private fn ddb_render_proc(pid: usize) !{unsafe} {
+    for index: usize in 0..<DDB_PROCESS_RECORDS {
+        if (index < ddb_snapshot.process_count &&
+                ddb_snapshot.processes[index].pid == pid) {
+            ddb_puts("ddb: proc");
+            ddb_render_process(ddb_snapshot.processes[index]);
+            return;
+        }
+    }
+    ddb_puts("ddb: proc pid not captured");
+    if (ddb_snapshot.process_truncated != 0) { ddb_puts(" (snapshot truncated)"); }
+    ddb_puts("\n");
+}
+
 // The one resumable DDB root. It receives an already-saved IRQ frame after
 // the UART source and interrupt controller were acknowledged, but remains an
 // interrupt function: no semantic exception is made for debugger code.
@@ -280,6 +319,11 @@ fn kernel_ddb_enter(frame_sp: usize) !{interrupt, unsafe} {
         ddb_snapshot.fd_object[fd] =
             kernel_fd_table_crash_object(ddb_snapshot.root_slot, fd);
     }
+    let mut process_copy: ProcessDdbCopyResult =
+        kernel_process_ddb_copy(ddb_snapshot.processes as []ProcessDdbRecord);
+    ddb_snapshot.process_count = process_copy.count;
+    ddb_snapshot.process_truncated = 0;
+    if (process_copy.truncated) { ddb_snapshot.process_truncated = 1; }
     ddb_snapshot.trace_count = kernel_process_crash_trace_copy(
         ddb_snapshot.trace as *usize);
     ddb_puts("\nddb: interrupt-safe UART debugger\n");
@@ -314,11 +358,20 @@ fn kernel_ddb_enter(frame_sp: usize) !{interrupt, unsafe} {
             ddb_render_vm();
         } else if (ddb_command_is(line as []u8, length, bs"fds")) {
             ddb_render_fds();
-        } else if (ddb_command_is(line as []u8, length, bs"trace")) {
-            ddb_render_trace();
-        } else if (ddb_command_is(line as []u8, length, bs"help")) {
-            ddb_puts("commands: oops regs current vm fds trace continue\n");
-        } else { ddb_puts("ddb: unknown command; try help\n"); }
+        } else if (ddb_command_is(line as []u8, length, bs"ps")) {
+            ddb_render_ps();
+        } else {
+            match crash_console_parse_proc(line as []u8, length) {
+                CrashConsolePidResult::Parsed(pid) => { ddb_render_proc(pid); }
+                CrashConsolePidResult::Invalid => {
+                    if (ddb_command_is(line as []u8, length, bs"trace")) {
+                        ddb_render_trace();
+                    } else if (ddb_command_is(line as []u8, length, bs"help")) {
+                        ddb_puts("commands: oops regs current vm fds ps proc PID trace continue\n");
+                    } else { ddb_puts("ddb: unknown command; try help\n"); }
+                }
+            }
+        }
         length = 0;
     }
 }

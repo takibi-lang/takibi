@@ -198,12 +198,16 @@ the already-existing lookup-only IRQ path and returns zeros for a missing
 backing instead. No debugger exemption was added. Both UART BREAK and software
 BRK integration lanes exercise every new command before continuing.
 
-An all-process `ps` command was intentionally not copied into resumable DDB.
-The process pool has no fixed capacity now, so walking it from interrupt
-context would contradict the debugger's bounded-progress contract. That view
-waits for a genuinely bounded diagnostic index (and, once secondary CPUs run
-normal kernel work, a stop-the-world rendezvous) rather than treating current
-single-core scheduling as proof that an unbounded walk is safe.
+The process pool has no fixed capacity, but its cursor primitives advance one
+physical slot in O(1); the unbounded part was only the caller's loop. DDB now
+uses that property for `ps` and `proc PID`: entry probes at most 64 slots and
+copies at most 32 live summaries. It prints `truncated=1` when either budget is
+exhausted, and an uncaptured PID is reported as uncaptured rather than
+nonexistent. This gives a useful process view without inventing a new fixed
+kernel process ceiling. Once secondary CPUs run normal kernel work, the same
+snapshot will additionally need a stop-the-world rendezvous; building that
+while the only secondary is still parked with IRQs disabled would be unused
+future infrastructure.
 
 ---
 

@@ -440,8 +440,8 @@ deliberately remains typed `!{interrupt, unsafe}`: it does not pretend that
 acknowledgement turns an interrupt frame into ordinary kernel context. Every
 reachable operation is fixed-size and polling-only, with no allocator, lock,
 scheduler, sleep, filesystem, network, or ordinary logging dependency. Its
-commands are `oops`, `regs`, `current`, `vm`, `fds`, `trace`, and `continue`
-(`help` lists them).
+commands are `oops`, `regs`, `current`, `vm`, `fds`, `ps`, `proc PID`,
+`trace`, and `continue` (`help` lists them).
 
 `regs` reads the compiler-defined `ExceptionFrame` directly. DDB does not
 copy registers with handwritten assembly and does not duplicate frame
@@ -451,10 +451,12 @@ committed lifecycle ring. `continue` returns through the existing IRQ restore
 path. `current`, `vm`, and `fds` read only the fixed snapshot captured at DDB
 entry: process identity/state/wait reason, a lookup-only address-space view,
 and the first 16 descriptor slots. The VM lookup cannot allocate a missing
-backing. DDB deliberately has no unbounded `ps` walk: the process pool is
-dynamic, so that command requires a future bounded diagnostic index rather
-than traversing arbitrary live state in interrupt context. The terminal crash
-console above intentionally has no `continue`.
+backing. `ps` and `proc PID` use a separate bounded entry snapshot: at most 64
+physical pool slots are probed and at most 32 live process summaries retained.
+The header prints `truncated=1` when either budget prevents a complete view;
+`proc PID` then says that an absent PID was not captured rather than claiming
+it does not exist. The terminal crash console above intentionally has no
+`continue`.
 
 `kernelcheck-ddb-qemu` asks QEMU to deliver a real chardev BREAK to the PL011,
 drives all inspection commands over its UART socket, and verifies that boot

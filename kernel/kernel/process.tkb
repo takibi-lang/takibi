@@ -404,6 +404,85 @@ struct ProcessDiagnosticSnapshot {
     command_line_length: usize;
 }
 
+const DDB_PROCESS_RECORDS: usize = 32;
+const DDB_PROCESS_PROBE_BUDGET: usize = 64;
+
+struct ProcessDdbRecord {
+    pid: usize;
+    ppid: usize;
+    state: usize;
+    wait_reason: usize;
+    saved_sp: usize;
+    root_slot: usize;
+}
+
+struct ProcessDdbCopyResult {
+    count: usize;
+    truncated: bool;
+}
+
+private fn scheduled_process_ddb_copy_one(
+        output: borrow [ProcessDdbRecord; DDB_PROCESS_RECORDS..],
+        index: usize, slot: usize,
+        record: *ProcessRecord) {
+    if (index >= 32) { return; }
+    output[index].pid = record.pid;
+    output[index].ppid = 0;
+    if (record.has_parent) {
+        output[index].ppid = scheduled_process_pid_of_handle(record.parent);
+    }
+    match record.state {
+        ProcessSlotState::Free => { output[index].state = 0; }
+        ProcessSlotState::Ready => { output[index].state = 1; }
+        ProcessSlotState::Running => { output[index].state = 2; }
+        ProcessSlotState::Blocked => { output[index].state = 3; }
+        ProcessSlotState::Exited => { output[index].state = 4; }
+    }
+    match record.wait_reason {
+        ProcessWaitReason::None => { output[index].wait_reason = 0; }
+        ProcessWaitReason::UartRx => { output[index].wait_reason = 1; }
+        ProcessWaitReason::ChildExit => { output[index].wait_reason = 2; }
+    }
+    output[index].saved_sp = record.saved_sp;
+    output[index].root_slot = slot;
+}
+
+// Fixed work for interrupt-safe DDB entry: at most 64 physical pool slots
+// are probed and at most 32 live records copied. A truncated result is an
+// explicit diagnostic fact, never silently presented as the whole table.
+fn kernel_process_ddb_copy(
+        output: borrow [ProcessDdbRecord; DDB_PROCESS_RECORDS..])
+        -> ProcessDdbCopyResult !{unsafe} {
+    let mut count: usize = 0;
+    if (scheduled_process_boot_live) {
+        scheduled_process_ddb_copy_one(
+            output, 0, 0, &scheduled_process_boot_record);
+        count = count + 1;
+    }
+    let mut slot: usize = 0;
+    if (scheduled_process_pool_ready) {
+        slot = intrusive_pool_first_slot(&scheduled_process_pool);
+    }
+    let mut probes: usize = 0;
+    while (slot != 0 && probes < DDB_PROCESS_PROBE_BUDGET &&
+            count < DDB_PROCESS_RECORDS) {
+        let next: usize = intrusive_pool_next_slot(&scheduled_process_pool, slot);
+        match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
+            IntrusiveSlotProbe::NoPayload => {}
+            IntrusiveSlotProbe::Live(slot_view) => {
+                let record: *ProcessRecord = intrusive_pool_payload_of(
+                    &scheduled_process_pool, slot_view);
+                scheduled_process_ddb_copy_one(output, count, slot, record);
+                count = count + 1;
+            }
+        }
+        probes = probes + 1;
+        slot = next;
+    }
+    let mut result: ProcessDdbCopyResult = { count, slot != 0 };
+    return result;
+}
+
 must_use variant ProcessDiagnosticResult {
     Missing;
     Found(ProcessDiagnosticSnapshot);

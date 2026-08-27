@@ -85,7 +85,7 @@ row formatter, and neither prints from a scheduler or interrupt writer.
 `ddb_snapshot`.
 
 **Why global:** the terminal crash record must survive the failing context,
-while resumable DDB must retain one bounded trace/FD/VM/current-process copy
+while resumable DDB must retain one bounded trace/FD/VM/process-table copy
 and the current compiler-defined IRQ-frame pointer while its polled command
 loop is active.
 Neither record owns scheduler or process resources. IRQ masking prevents a
