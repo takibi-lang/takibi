@@ -11,6 +11,9 @@ script-interpreter-argument.sh three
 /etc
 /etc/not-a-program
 /etc/bad-interpreter.sh
+/etc/crlf.sh
+/etc/no-newline.sh
+/etc/long-shebang.sh
 /bin/sh -c 'exec /bin/echo re-exec-ok'
 echo repl-ok
 exit

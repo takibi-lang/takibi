@@ -75,6 +75,9 @@ interpreter-argument /bin/script-interpreter-argument.sh three
 /bin/sh: /etc: Permission denied
 /etc/not-a-program: line 5: ENOEXEC-fallback-reached: not found
 /bin/sh: /etc/bad-interpreter.sh: not found
+/bin/sh: /etc/crlf.sh: not found
+no-trailing-newline /etc/no-newline.sh
+LONG-SHEBANG-FELL-BACK
 re-exec-ok
 repl-ok
 busybox interactive shell exit: 0
