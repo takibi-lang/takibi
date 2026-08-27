@@ -181,6 +181,32 @@ lifecycle-gap, alloc-rollback) and real RPi5 hardware (39 views, one boot).
 
 ---
 
+### 2026-08-27: DDB Captured The Interrupt And Scheduler Decision State (#442)
+
+Registers alone did not say why DDB was entered or whether the interrupted
+context had IRQs masked, and the process list did not expose the two gates
+that decide whether a timer request can become a process switch. The new
+`intr` snapshot records IRQ versus deliberate BRK entry, the acknowledged
+INTID or BRK immediate, live DAIF, the interrupted frame's saved DAIF, and
+ESR/FAR only when they are meaningful for synchronous entry. IRQ entry says
+those last registers are unavailable rather than printing stale exception
+state as evidence.
+
+`sched` freezes the scheduler-enabled and reschedule-pending bits at entry and
+counts Ready, Running, Blocked, and Exited records in the same bounded process
+copy `ps` already owns. Its truncation bit is printed beside the counts, so a
+partial debugger view cannot masquerade as a complete run queue. The two new
+process accessors are scalar and lookup-only; neither makes a scheduling
+decision or acquires an owner from the dynamic pool.
+
+Both QEMU entry lanes pin their actual source -- INTID 33 for PL011 BREAK and
+BRK immediate 0x544b -- execute both commands, and continue boot. The RPi5
+forbid-trap build and all fatal-oops lanes remain green. Per-CPU scheduler
+state and a coherent system-wide view still wait for secondary CPUs to do
+ordinary work, when a stop-the-world rendezvous becomes a real requirement.
+
+---
+
 ### 2026-08-27: DDB Froze Current Process, VM, and FD State Without Allocating
 
 The resumable debugger could show registers and the scheduler trace but not

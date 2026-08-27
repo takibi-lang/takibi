@@ -440,7 +440,7 @@ deliberately remains typed `!{interrupt, unsafe}`: it does not pretend that
 acknowledgement turns an interrupt frame into ordinary kernel context. Every
 reachable operation is fixed-size and polling-only, with no allocator, lock,
 scheduler, sleep, filesystem, network, or ordinary logging dependency. Its
-commands are `oops`, `regs`, `current`, `vm`, `fds`, `ps`, `proc PID`,
+commands are `oops`, `regs`, `intr`, `sched`, `current`, `vm`, `fds`, `ps`, `proc PID`,
 `trace`, and `continue` (`help` lists them).
 
 `regs` reads the compiler-defined `ExceptionFrame` directly. DDB does not
@@ -448,7 +448,12 @@ copy registers with handwritten assembly and does not duplicate frame
 offsets; the compiler-generated exception entry and return path remain the
 only owner of register save/restore. `trace` takes a bounded copy of the
 committed lifecycle ring. `continue` returns through the existing IRQ restore
-path. `current`, `vm`, and `fds` read only the fixed snapshot captured at DDB
+path. `intr` identifies IRQ versus deliberate BRK entry and reports both the
+live and interrupted DAIF masks; ESR/FAR are shown only for synchronous entry,
+because those registers do not describe an IRQ. `sched` reports the frozen
+scheduler enable/pending bits and process-state counts from the same bounded
+snapshot as `ps`, including its truncation flag. `current`, `vm`, and `fds`
+read only the fixed snapshot captured at DDB
 entry: process identity/state/wait reason, a lookup-only address-space view,
 and the first 16 descriptor slots. The VM lookup cannot allocate a missing
 backing. `ps` and `proc PID` use a separate bounded entry snapshot: at most 64

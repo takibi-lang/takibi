@@ -32,7 +32,8 @@ def main() -> int:
     break_sent = args.break_source == "software"
     prompt_count = 0
     commands = [
-        b"oops\n", b"regs\n", b"current\n", b"vm\n", b"fds\n",
+        b"oops\n", b"regs\n", b"intr\n", b"sched\n",
+        b"current\n", b"vm\n", b"fds\n",
         b"ps\n", b"proc 1\n",
         b"trace\n", b"continue\n",
     ]

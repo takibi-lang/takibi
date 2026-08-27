@@ -2206,6 +2206,18 @@ fn kernel_process_scheduler_disable() {
     execution_reschedule_pending = false;
 }
 
+// Lookup-only debugger view of the scheduler control bits. DDB must not
+// acquire an owner or make a scheduling decision merely to describe them.
+fn kernel_process_ddb_scheduler_enabled() -> usize {
+    if (execution_scheduler_enabled) { return 1; }
+    return 0;
+}
+
+fn kernel_process_ddb_reschedule_pending() -> usize {
+    if (execution_reschedule_pending) { return 1; }
+    return 0;
+}
+
 // GitHub issue #209: how many slots could the scheduler still choose
 // between. Exited slots are excluded: they are awaiting reap, never
 // selection.

@@ -85,7 +85,7 @@ fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     }
 
     *gicc_eoir = id;
-    if (debug_break) { kernel_ddb_enter(frame_sp); }
+    if (debug_break) { kernel_ddb_enter(frame_sp, 1, id as usize); }
     return frame_sp;
 }
 
