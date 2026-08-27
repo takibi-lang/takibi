@@ -1,0 +1,156 @@
+// Host-native proof of the fixed-record per-CPU diagnostic-ring algorithm.
+// Its verdict is independent of timing and real concurrency: the test drives
+// explicit begin/commit operations to model an interrupt nested inside a
+// writer, wraparound, and an entry left in progress. Kernel integration will
+// separately prove the real CPU-local and interrupt behavior.
+//
+// A sequence is reserved before a slot is touched. Zero invalidates the old
+// commit, payload is filled next, and the new sequence publishes last. A
+// reader accepts a slot only when its commit equals the sequence expected at
+// that chronological position. This is inspired by ftrace/printk's explicit
+// record lifecycle, but it is not their userspace or ring-page ABI.
+
+const DIAGNOSTIC_CPUS: usize = 2;
+const DIAGNOSTIC_EVENTS: usize = 4;
+const DIAGNOSTIC_WORDS: usize = 8;
+const DIAGNOSTIC_STORAGE_WORDS: usize = 64;
+
+struct DiagnosticRing {
+    next: [usize; DIAGNOSTIC_CPUS];
+    records: [usize; DIAGNOSTIC_STORAGE_WORDS];
+}
+
+struct DiagnosticReservation {
+    cpu: usize;
+    sequence: usize;
+    base: usize;
+}
+
+let mut diagnostic_test_ring: DiagnosticRing;
+
+// Atomic intrinsics take integer addresses. Array-element address syntax is
+// intentionally unavailable, so these two helpers are the narrow raw-pointer
+// boundary required regardless of bounds checking; callers validate the
+// refined CPU or record base before entering it.
+private fn diagnostic_next_address(ring: *DiagnosticRing,
+                                   cpu: {0..<2 as usize}) -> usize {
+    let next: *usize = ring.next;
+    return (next + (cpu as isize)) as usize;
+}
+
+private fn diagnostic_record_address(ring: *DiagnosticRing,
+                                     word: usize) -> usize {
+    let records: *usize = ring.records;
+    return (records + (word as isize)) as usize;
+}
+
+fn diagnostic_begin(ring: *DiagnosticRing, cpu: {0..<2 as usize})
+        -> DiagnosticReservation !{unsafe} {
+    let sequence: usize = unsafe {
+        atomic_fetch_add_relaxed(diagnostic_next_address(ring, cpu), 1)
+    } + 1;
+    let slot: usize = (sequence - 1) % DIAGNOSTIC_EVENTS;
+    let base: usize =
+        (cpu * DIAGNOSTIC_EVENTS + slot) * DIAGNOSTIC_WORDS;
+    if (base < DIAGNOSTIC_STORAGE_WORDS) {
+        unsafe {
+            atomic_store_release(diagnostic_record_address(ring, base), 0);
+        }
+    }
+    let mut reservation: DiagnosticReservation = {cpu, sequence, base};
+    return reservation;
+}
+
+fn diagnostic_commit(ring: *DiagnosticRing, reservation: DiagnosticReservation,
+                     event: usize, a: usize, b: usize, c: usize, d: usize)
+        !{unsafe} {
+    let base: usize = reservation.base;
+    if (base <= DIAGNOSTIC_STORAGE_WORDS - DIAGNOSTIC_WORDS) {
+        ring.records[base + 1] = reservation.cpu;
+        ring.records[base + 2] = event;
+        ring.records[base + 3] = a;
+        ring.records[base + 4] = b;
+        ring.records[base + 5] = c;
+        ring.records[base + 6] = d;
+        ring.records[base + 7] = 0;
+        unsafe {
+            atomic_store_release(diagnostic_record_address(ring, base),
+                                 reservation.sequence);
+        }
+    }
+}
+
+fn diagnostic_record(ring: *DiagnosticRing, cpu: {0..<2 as usize},
+                     event: usize, value: usize) !{unsafe} {
+    let mut reservation: DiagnosticReservation = diagnostic_begin(ring, cpu);
+    diagnostic_commit(ring, reservation, event, value, 0, 0, 0);
+}
+
+fn diagnostic_valid_count(ring: *DiagnosticRing,
+                          cpu: {0..<2 as usize}) -> usize !{unsafe} {
+    let latest: usize = unsafe {
+        atomic_load_acquire(diagnostic_next_address(ring, cpu))
+    };
+    let mut first: usize = 1;
+    if (latest > DIAGNOSTIC_EVENTS) {
+        first = latest - DIAGNOSTIC_EVENTS + 1;
+    }
+    let mut valid: usize = 0;
+    for item: usize in 0..<DIAGNOSTIC_EVENTS {
+        let sequence: usize = first + item;
+        if (sequence <= latest) {
+            let slot: usize = (sequence - 1) % DIAGNOSTIC_EVENTS;
+            let base: usize =
+                (cpu * DIAGNOSTIC_EVENTS + slot) * DIAGNOSTIC_WORDS;
+            if (base < DIAGNOSTIC_STORAGE_WORDS) {
+                let before: usize = unsafe {
+                    atomic_load_acquire(diagnostic_record_address(ring, base))
+                };
+                // A real reader copies the payload here, then validates the
+                // commit again so wraparound during the copy is detectable.
+                let after: usize = unsafe {
+                    atomic_load_acquire(diagnostic_record_address(ring, base))
+                };
+                if (before == sequence && after == sequence) {
+                    valid = valid + 1;
+                }
+            }
+        }
+    }
+    return valid;
+}
+
+fn app_main() !{unsafe} {
+    // Model ordinary code interrupted between reservation and commit. The
+    // nested record commits first, but both retain their own sequence/slot.
+    let mut outer: DiagnosticReservation = diagnostic_begin(&diagnostic_test_ring, 0);
+    diagnostic_record(&diagnostic_test_ring, 0, 0x101, 22);
+    diagnostic_commit(&diagnostic_test_ring, outer, 0x100, 11, 0, 0, 0);
+    uart_puts("nested-valid: ");
+    uart_println(diagnostic_valid_count(&diagnostic_test_ring, 0));
+
+    // CPU 1 owns independent sequence and storage state.
+    diagnostic_record(&diagnostic_test_ring, 1, 0x200, 33);
+    uart_puts("cpu1-valid: ");
+    uart_println(diagnostic_valid_count(&diagnostic_test_ring, 1));
+
+    // Wrap CPU 0 past its four-record retention window.
+    diagnostic_record(&diagnostic_test_ring, 0, 0x102, 44);
+    diagnostic_record(&diagnostic_test_ring, 0, 0x103, 55);
+    diagnostic_record(&diagnostic_test_ring, 0, 0x104, 66);
+    diagnostic_record(&diagnostic_test_ring, 0, 0x105, 77);
+    uart_puts("wrapped-valid: ");
+    uart_println(diagnostic_valid_count(&diagnostic_test_ring, 0));
+    uart_puts("overwritten: ");
+    uart_println(unsafe {
+        atomic_load_acquire(diagnostic_next_address(&diagnostic_test_ring, 0))
+    } - DIAGNOSTIC_EVENTS);
+
+    // An uncommitted newest reservation is visible as damaged/missing, never
+    // as the record previously occupying that slot.
+    let mut unfinished: DiagnosticReservation = diagnostic_begin(&diagnostic_test_ring, 0);
+    uart_puts("in-progress-valid: ");
+    uart_println(diagnostic_valid_count(&diagnostic_test_ring, 0));
+    uart_puts("in-progress-seq: ");
+    uart_println(unfinished.sequence);
+}
