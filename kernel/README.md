@@ -632,7 +632,10 @@ run, not a specification.
   metadata window, and streams each PT_LOAD page from the file. Static
   BusyBox applets such as `/bin/echo` are hard links to its ELF, so their
   argv[0]-driven multi-call dispatch works without a separate registry; an
-  unresolved path falls back to that same static image. `wait4` blocks
+  `argv[0]` naming no ext2 file falls back to that same static image, which
+  is what makes a bare applet name work after ash's own `PATH` search. The
+  pathname is a separate question and is answered before that fallback is
+  reached: an absent one is `ENOENT`, not a fallback. `wait4` blocks
   the caller until its live child exits (by specific pid or `-1`/
   `WAIT_ANY`), delivering the real reaped pid and exit status, tracked
   per-slot so any live process (not just the tree root) can wait for its
