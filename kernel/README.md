@@ -506,8 +506,11 @@ continues afterward. A second lane executes Takibi's reserved deliberate
 `ExceptionFrame`, advances ELR past that instruction, and proves the same
 resume behavior. Other Current-EL synchronous exceptions remain fatal. The
 RPi5 implementation uses the same PL011 DR.BE/BEIM
-path and is build-checked; physical BREAK/resume remains a hardware-operated
-check rather than something the QEMU lane can establish.
+path. The normal RPi5 integration enables the test-only ring byte over SWD
+after its ordinary workload, sends an ordinary byte followed by timed CDC
+BREAK, runs `events`, and continues in the same boot. This verifies the
+process-wake and platform-BREAK records, undamaged per-CPU reading, and resume
+on the physical board.
 
 When enabled for a boot test, the process layer records a fixed 16-entry,
 allocation-free lifecycle ring: fork, exec prepare/commit, schedule, block,

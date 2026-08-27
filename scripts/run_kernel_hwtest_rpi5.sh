@@ -392,6 +392,18 @@ echo "[kernel/rpi5] interactive background HTTPd passed"
 
 cleanup
 trap - EXIT INT TERM HUP
+
+# The ordinary integration has completed and released the UART. Enable the
+# debugger-only ring on this already-loaded kernel, then prove real Debug
+# Probe CDC BREAK entry, two-subsystem inspection, and resume in the same boot.
+DDB_LOG="$ARTIFACT_DIR/ddb-uart.log"
+: >"$DDB_LOG"
+RPI5_SWD_SPEED="${RPI5_SWD_SPEED:-}" \
+    "$REPO_ROOT/scripts/rpi5_set_kernel_byte.sh" "$ELF" \
+    diagnostic_trace_test_enabled 1 >"$ARTIFACT_DIR/ddb-openocd.log" 2>&1
+python3 "$REPO_ROOT/scripts/run_kernel_ddb_rpi5_driver.py" \
+    --port "$SERIAL_DEV" --log "$DDB_LOG"
+
 # The real UART echoes a shell command immediately after the prompt, so a
 # command's short output can arrive as `/ # repl-ok` rather than as a separate
 # line. Views describe semantic output, not the interactive prompt; normalize

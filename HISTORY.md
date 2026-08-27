@@ -37,6 +37,14 @@ The QEMU DDB lane places an ordinary newline ahead of BREAK in the PL011 FIFO;
 record in one CPU-local order. A source check rejects duplicate, zero, or
 non-16-bit fixed event ids before either kernel build.
 
+RPi5 coverage runs after the ordinary hardware workload in the same boot.
+Once the main UART driver has released the Debug Probe, SWD changes only the
+test-enable byte in the loaded image. The CDC UART then sends newline followed
+by a timed BREAK, reads `events`, and continues. The captured board record was
+a retry-read wake from PID 32 to waiter PID 30 followed by the platform BREAK;
+all four CPU readers reported no damaged or overwritten entries. This makes
+the real-hardware path part of `kernelcheck-rpi5`, not a manual claim.
+
 ---
 
 ### 2026-08-27: BusyBox init As PID 1 (#270), And Four Tests That Had Stopped Meaning What They Said
