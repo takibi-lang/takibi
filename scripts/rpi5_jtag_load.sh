@@ -119,6 +119,7 @@ if ! openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" \
     -c 'init' \
     -c 'halt' \
     -c 'reg pc' \
+    -c 'mdw 0x00100000 1' \
     -c 'resume' \
     -c 'shutdown' > "$CHECK_LOG" 2>&1
 then
@@ -131,10 +132,18 @@ fi
 halted_pc=$(awk '/^pc \(/{print $3}' "$CHECK_LOG" | head -1)
 current_mode=$(grep -oE 'current mode: EL[0-9][A-Za-z]' "$CHECK_LOG" | head -1 | awk '{print $3}')
 mmu_state=$(grep -oE 'MMU: (enabled|disabled)' "$CHECK_LOG" | head -1 | awk '{print $2}')
+dtb_magic=$(awk '/^0x00100000: /{print $2}' "$CHECK_LOG" | head -1)
 
-if [ -z "$current_mode" ] || [ -z "$mmu_state" ]; then
+if [ -z "$current_mode" ] || [ -z "$mmu_state" ] || [ -z "$dtb_magic" ]; then
     echo "error: could not parse current exception level / MMU state from openocd output -- log follows" >&2
     cat "$CHECK_LOG" >&2
+    rm -f "$CHECK_LOG"
+    exit 1
+fi
+if [ "$dtb_magic" != "edfe0dd0" ]; then
+    echo "error: SD spin stub did not capture a valid firmware DTB at 0x00100000" >&2
+    echo "       (read 0x${dtb_magic}; rebuild and install examples/common_rpi5/jtag_stub.img," >&2
+    echo "       then power-cycle the board before injecting Takibi)" >&2
     rm -f "$CHECK_LOG"
     exit 1
 fi
@@ -186,6 +195,10 @@ LOAD_COMMANDS=(
     -c "load_image $ELF 0 elf"
     -c 'targets bcm2712.cpu0'
     -c "reg sp $stack_top"
+    -c 'reg x0 0x00100000'
+    -c 'reg x1 0'
+    -c 'reg x2 0'
+    -c 'reg x3 0'
     -c "reg pc $entry_pc"
     -c 'resume'
 )

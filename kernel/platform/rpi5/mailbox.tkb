@@ -91,7 +91,7 @@ let mut mem_msg: [u32; 8] align(4096);
 
 must_use variant PlatformMemoryResult {
     Failed;
-    Detected((u32, u32));
+    Detected((usize, usize));
 }
 
 // platform_memory_detect: the generic name this file's own platform_init()/
@@ -110,7 +110,21 @@ must_use variant PlatformMemoryResult {
 // #247 step 1) -- kernel/mm/page.tkb's allocator still uses its own fixed
 // BOOT_PAGE_COUNT reservation regardless of what this reports; resizing
 // the allocator to match is deliberately deferred to a follow-up issue.
-fn platform_memory_detect() -> PlatformMemoryResult {
+fn platform_memory_detect() -> PlatformMemoryResult !{unsafe} {
+    let dtb: usize = boot_dtb_address_read();
+    let detected: FdtMemoryResult = fdt_detect_memory(dtb);
+    match detected {
+        FdtMemoryResult::Found(memory) => {
+            return PlatformMemoryResult::Detected(memory);
+        }
+        FdtMemoryResult::Invalid => { }
+        FdtMemoryResult::NotFound => { }
+    }
+
+    // Keep the mailbox as a compatibility fallback for a board still
+    // running the old non-capturing SD stub. The SWD loader refuses that
+    // configuration, but a directly booted diagnostic image remains able
+    // to report the legacy sub-1-GiB ARM-visible window.
     mem_msg[0] = 8 * 4;
     mem_msg[1] = 0;
     mem_msg[2] = 0x00010005;
@@ -122,5 +136,6 @@ fn platform_memory_detect() -> PlatformMemoryResult {
     if (mbox_call(mem_msg, 8 * 4, MBOX_CH_PROP) == false) {
         return PlatformMemoryResult::Failed;
     }
-    return PlatformMemoryResult::Detected((mem_msg[5], mem_msg[6]));
+    return PlatformMemoryResult::Detected(
+        (mem_msg[5] as usize, mem_msg[6] as usize));
 }

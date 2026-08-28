@@ -55,8 +55,9 @@ The current RPi5 kernel includes:
 - typed page allocation, AArch64 stage-1 page tables, process images, and
   deterministic teardown, backed by real physical RAM addressed directly
   (`kernel/mm/page.tkb`) and sized against the board's own real detected
-  RAM (`kernel/platform/rpi5/mailbox.tkb`, a VideoCore firmware query,
-  boot-logged but not yet the allocator's own live bound);
+  RAM (the firmware-resolved DTB captured by the resident SWD stub, with
+  the VideoCore mailbox retained as a compatibility fallback, boot-logged
+  but not yet the allocator's own live bound);
 - ELF64 validation, static PIE loading, interpreter-aware PIE plus musl
   loading, initial Linux stack and auxv construction, `brk`, and bounded
   anonymous `mmap` behavior;
@@ -306,8 +307,11 @@ GPIO path for simultaneous injection and logs.
 
 ### One-time SD-card preparation
 
-The board boots a small spin stub from `kernel_2712.img`; test kernels are then
-injected into RAM over SWD. Build and install the stub:
+The board boots a small DTB-capturing spin stub from `kernel_2712.img`; test
+kernels are then injected into RAM over SWD. The stub preserves firmware's
+resolved Device Tree below the injected kernel, and the SWD loader verifies
+its FDT magic before changing RAM or restoring its address in `x0`. Build and
+install the stub:
 
 ```bash
 make examples/common_rpi5/jtag_stub.img
@@ -649,8 +653,9 @@ are deliberate, not gaps to silently close:
   and the kernel mounts it through `kernel/drivers/block/virtio_blk.tkb`.
   There is no RP1, PCIe, or xHCI/USB Mass Storage under QEMU, so the real USB
   provisioning and hardware-specific storage checks remain RPi5-only.
-- **RAM discovery uses different boot providers.** RPi5's
-  `platform_memory_detect()` queries the real VideoCore mailbox. QEMU's
+- **RAM discovery uses different boot providers.** RPi5 firmware passes its
+  resolved FDT to the resident SD stub, which preserves it across SWD
+  injection; the VideoCore mailbox remains a compatibility fallback. QEMU's
   direct-kernel loader generates an FDT from the selected machine and `-m`
   value, passes its physical address in `x0`, and
   `kernel/platform/qemu/memory.tkb` reads the `/memory` node through the

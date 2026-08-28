@@ -8,6 +8,7 @@
     .global _start
     .type _start, %function
 _start:
+    mov     x19, x0
     mrs     x0, mpidr_el1
     lsr     x0, x0, #8
     and     x0, x0, #3
@@ -23,6 +24,9 @@ _start:
     str     xzr, [x0], #8
     b       .Lbss_loop
 .Lbss_done:
+    adrp    x0, boot_dtb_address
+    add     x0, x0, :lo12:boot_dtb_address
+    str     x19, [x0]
     adrp    x0, boot_stack_top
     add     x0, x0, :lo12:boot_stack_top
     adr     x1, .Lel1_entry
@@ -36,6 +40,21 @@ _start:
 .Lpark:
     wfe
     b       .Lpark
+
+    .global boot_dtb_address_read
+    .type boot_dtb_address_read, %function
+boot_dtb_address_read:
+    adrp    x0, boot_dtb_address
+    add     x0, x0, :lo12:boot_dtb_address
+    ldr     x0, [x0]
+    ret
+
+    .section .bss.boot, "aw", %nobits
+    .align 3
+boot_dtb_address:
+    .skip 8
+
+    .section .text.boot, "ax"
 
 /* PSCI enters a successfully started secondary in Non-secure EL2 with x0
  * carrying the caller-supplied context. Unlike the JTAG loader, this path is
