@@ -37,10 +37,11 @@ core, one UART, one boot-time filesystem mount).
 ### Process/scheduler core (`kernel/kernel/process.tkb`)
 
 `scheduled_process_pool` (`IntrusivePool(ProcessRecord)`, private) and the
-static `scheduled_process_boot_record` beside it,
-`execution_current_handle`/
-`execution_current_live`, `execution_scheduler_enabled`/
-`execution_reschedule_pending`.
+static `scheduled_process_boot_record` beside it, and
+`execution_state: [ExecutionState; KERNEL_ACTIVE_CORES]` -- the four
+former `execution_*` scalars (`current_handle`, `current_live`,
+`scheduler_enabled`, `reschedule_pending`), grouped and made an array by
+issue #222.
 
 **Why global:** there is exactly one scheduler on this single-core kernel
 (see the file's own "NOT SYNCHRONIZED, single-core scheduler" limitation
@@ -59,12 +60,22 @@ way `tcp_connection_store` went: it was the parking lot, somewhere for a
 linear `ScheduledProcessOwner` to live between syscalls, and with the
 SlotMap already recording who is live an owner is minted from a handle's
 (slot, generation) pair on demand and discharged when the operation ends.
-`execution_current_handle`/`_live` name which slot is "current"; that is
-inherently a single, global fact on one core. `execution_scheduler_enabled`/
-`_reschedule_pending` gate real scheduling decisions
-(`kernel_process_schedule`/`kernel_process_syscall_return_schedule`), so
-they stay with the scheduler they control rather than moving into a
-per-process record they are not scoped to.
+`ExecutionState.current_handle`/`.current_live` name which slot is
+"current", and `.scheduler_enabled`/`.reschedule_pending` gate real
+scheduling decisions (`kernel_process_schedule`/
+`kernel_process_syscall_return_schedule`), so all four stay with the
+scheduler they control rather than moving into a per-process record they
+are not scoped to.
+
+Issue #222 changed WHERE they live without changing that: they were four
+sibling scalars, which assumed not that there is one core but that there
+is one SET of them with nowhere to put a second. They are now
+`ExecutionState`, held in an array sized by `KERNEL_ACTIVE_CORES`
+(`kernel/lib/execution_model.tkb`), reached through one private
+`execution_here()`. That function returns slot 0 and carries the
+`static_assert` that fails when the constant is raised, so the 176
+references that used to name a scalar each are now one function to teach
+`cpu_id()` -- see issue #453 for the worklist that assertion joins.
 
 ### Diagnostic/trace infrastructure (`kernel/kernel/process.tkb`)
 
