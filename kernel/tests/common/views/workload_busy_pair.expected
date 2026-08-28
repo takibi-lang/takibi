@@ -1,1 +1,3 @@
 workload: busy pair two pids under init, 8 rounds each side by side, neither starved beyond 4
+workload: busy pair init restarted a only, b kept its pid and its counter
+workload: busy pair done

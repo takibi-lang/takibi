@@ -402,6 +402,7 @@ KERNEL_BUSY_LOOP_TKB     := $(KERNEL_DIR)/arch/arm64/kernel/busy_loop.tkb
 KERNEL_BUSY_LOOP_O       := $(KERNEL_BUILD_DIR)/busy_loop.o
 KERNEL_BUSY_LOOP_A_ELF   := $(KERNEL_BUILD_DIR)/busy_a.elf
 KERNEL_BUSY_LOOP_B_ELF   := $(KERNEL_BUILD_DIR)/busy_b.elf
+KERNEL_BUSY_LOOP_SPIN_ELF := $(KERNEL_BUILD_DIR)/busy_spin.elf
 KERNEL_RPI5_MAIN_O      := $(KERNEL_BUILD_DIR)/main.o
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_FD_TABLE_TKB)
@@ -434,7 +435,7 @@ $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 	tar -xOzf $< lib/ld-musl-aarch64.so.1 > $@
 	chmod +x $@
 
-$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd-serve.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) | $(KERNEL_USER_BUILD_DIR)
+$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd-serve.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_SPIN_ELF) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
 	truncate -s 2621440 $@.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 2560
@@ -471,6 +472,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_RPI5_USER_PAYLOAD_ELF) $@.tmp:/bin/user_payload
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_A_ELF) $@.tmp:/bin/busy-a
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_B_ELF) $@.tmp:/bin/busy-b
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_SPIN_ELF) $@.tmp:/bin/spin
 	debugfs -w -R 'set_inode_field /bin/busybox.static mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/busybox-extras mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /lib/ld-musl-aarch64.so.1 mode 0100755' $@.tmp >/dev/null 2>&1
@@ -486,6 +488,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'set_inode_field /bin/user_payload mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/busy-a mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/busy-b mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/spin mode 0100755' $@.tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 debugfs -w -R 'symlink /latest hello.txt' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox.static /bin/busybox' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox.static /bin/sh' $@.tmp >/dev/null 2>&1
@@ -551,6 +554,10 @@ $(KERNEL_BUSY_LOOP_A_ELF): $(KERNEL_BUSY_LOOP_O)
 
 $(KERNEL_BUSY_LOOP_B_ELF): $(KERNEL_BUSY_LOOP_O)
 	$(LLD) -pie --no-dynamic-linker -e busy_loop_b $< -o $@
+	python3 scripts/check_user_payload_no_rw_globals.py $@
+
+$(KERNEL_BUSY_LOOP_SPIN_ELF): $(KERNEL_BUSY_LOOP_O)
+	$(LLD) -pie --no-dynamic-linker -e busy_loop_spin $< -o $@
 	python3 scripts/check_user_payload_no_rw_globals.py $@
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MAILBOX_TKB) \

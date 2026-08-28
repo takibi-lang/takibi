@@ -15,5 +15,16 @@ script-interpreter-argument.sh three
 /etc/no-newline.sh
 /etc/long-shebang.sh
 /bin/sh -c 'exec /bin/echo re-exec-ok'
+# Two background jobs at once, and ash's own account of them. /bin/spin is
+# one round of the busy loop and then exit: silent, because output that
+# interleaved with the prompt would arrive in an order nothing here can
+# pin, and long enough that both are still Running when `jobs` asks. That
+# listing is the evidence -- two jobs, neither finished -- and it carries no
+# pid, so it is the same text on every boot. Two output-less commands leave
+# two bare prompts, which is why the line after them carries them.
+/bin/spin &
+/bin/spin &
+jobs
+echo two-jobs-ok
 echo repl-ok
 exit

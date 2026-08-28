@@ -24,6 +24,7 @@
 
 const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
 const WORKLOAD_EXIT_SYSCALL: usize = 93;
+const WORKLOAD_ANSWER_EXIT: usize = 2;
 const BUSY_LOOP_TAG_A: usize = 1;
 const BUSY_LOOP_TAG_B: usize = 2;
 
@@ -41,14 +42,34 @@ fn busy_loop_a() { busy_loop_run(BUSY_LOOP_TAG_A); }
 
 fn busy_loop_b() { busy_loop_run(BUSY_LOOP_TAG_B); }
 
+/* /bin/spin: one round of the same work, then exit. It reports nothing and
+ * prints nothing.
+ *
+ * This exists so an interactive shell can background two jobs that are
+ * demonstrably alive at the same time. `/bin/true &` twice was tried first
+ * and is a race: it holds under QEMU and loses on RPi5, where the first job
+ * has exited before the shell forks the second, and a fixture that depends
+ * on which board it runs on is worse than none. One round outlasts a fork
+ * and an exec by a wide margin on either target. Silent because its output
+ * would interleave with the prompt in an order nothing can pin. */
+fn busy_loop_spin() {
+    let mut state: usize = 0x9E3779B97F4A7C15;
+    for step: usize in 0..<BUSY_LOOP_ROUND_STEPS {
+        state = state ^ (state << 13);
+        state = state ^ (state >> 7);
+        state = state ^ (state << 17);
+    }
+    svc5(WORKLOAD_EXIT_SYSCALL, state & 1, 0, 0, 0, 0);
+}
+
 fn busy_loop_run(tag: usize) {
     let mut state: usize = 0x9E3779B97F4A7C15 ^ tag;
     let mut done: usize = 0;
-    /* Runs until the kernel says the measurement is complete, then keeps
-     * running with nothing left to report. A CPU-bound workload that
-     * stopped being CPU-bound would stop being the thing a second core is
-     * measured against; what is bounded here is the REPORTING, which is
-     * what keeps the boot's UART capture finite. */
+    /* Runs until the kernel says there is nothing left to report, then
+     * keeps running anyway. A CPU-bound workload that stopped being
+     * CPU-bound would stop being the thing a second core is measured
+     * against; what is bounded here is the REPORTING, which is what keeps
+     * the boot's UART capture finite. */
     while (true) {
         for step: usize in 0..<BUSY_LOOP_ROUND_STEPS {
             state = state ^ (state << 13);
@@ -56,7 +77,16 @@ fn busy_loop_run(tag: usize) {
             state = state ^ (state << 17);
         }
         if (done == 0) {
-            done = svc5(WORKLOAD_PROGRESS_SYSCALL, tag, state, 0, 0, 0);
+            let answer: usize = svc5(
+                WORKLOAD_PROGRESS_SYSCALL, tag, state, 0, 0, 0);
+            /* 2 is the kernel asking this entry to die, so that init has to
+             * bring it back and the fixture can check that it brought back
+             * only this one. Nothing else here decides to exit: a workload
+             * that stopped on its own would prove nothing about init. */
+            if (answer == WORKLOAD_ANSWER_EXIT) {
+                svc5(WORKLOAD_EXIT_SYSCALL, 0, 0, 0, 0, 0);
+            }
+            done = answer;
         }
     }
 }

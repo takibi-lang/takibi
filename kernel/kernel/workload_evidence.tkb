@@ -24,11 +24,13 @@
 // - TWO TAGS, NOT N. The pair is the shape the inittab starts, and the
 //   two-versus-four decision for cores is the same one made here: every
 //   class of unfairness appears at two.
-// - ONE GENERATION IS MEASURED. The verdict latches the first time both
-//   tags have run their rounds side by side. A later generation of either
-//   process (init respawning one that died) is counted -- see
-//   restarts below -- but does not re-open the measurement, so the
-//   reported line stays a single line in a shared UART capture.
+// - ONE GENERATION IS MEASURED. The fairness verdict latches the first
+//   time both tags have run their rounds side by side, and a later
+//   generation does not re-open it. What DOES follow it is one restart:
+//   this file asks tag A to exit, once, and then checks that init brought
+//   only A back -- B keeping both its pid and a counter that never went
+//   backwards is the other half of that claim. After that everything is
+//   latched and the pair reports nothing more.
 // - SINGLE-WRITER, like the rest of this kernel's evidence state. Every
 //   entry point below runs in syscall-dispatch context on the one core
 //   that runs kernel code; there is no locking here and none is correct
@@ -102,6 +104,15 @@ struct WorkloadBusyPair {
     start_ticks: usize;
     end_ticks: usize;
     reported: bool;
+    // The restart demonstration, which runs once after the fairness
+    // verdict. `restart_requested` is this file having told tag A to exit;
+    // the three `*_before` fields are what was true of the pair at that
+    // moment, and what B is checked against when A's replacement speaks.
+    restart_requested: bool;
+    restart_a_pid_before: usize;
+    restart_b_pid_before: usize;
+    restart_b_rounds_before: usize;
+    restart_reported: bool;
     // A report this file refused: an unknown tag, or a caller that is not
     // a child of init. Zero on a healthy boot, and printed only when it
     // is not.
@@ -130,6 +141,11 @@ fn workload_busy_pair_reset() {
     workload_busy_pair.start_ticks = 0;
     workload_busy_pair.end_ticks = 0;
     workload_busy_pair.reported = false;
+    workload_busy_pair.restart_requested = false;
+    workload_busy_pair.restart_a_pid_before = 0;
+    workload_busy_pair.restart_b_pid_before = 0;
+    workload_busy_pair.restart_b_rounds_before = 0;
+    workload_busy_pair.restart_reported = false;
     workload_busy_pair.refused = 0;
 }
 
@@ -173,11 +189,18 @@ private fn workload_busy_absolute_difference(left: usize, right: usize)
 
 // One process's report that it finished another round of work.
 //
-// Returns 0 while the measurement is still open and 1 once the verdict has
-// been taken, so the caller can stop reporting without this file having to
-// know how it paces itself.
+// The answer is an instruction to the caller, so that what the fixture is
+// doing lives here rather than being duplicated in the two programs:
+//
+//   0  keep working and keep reporting
+//   1  keep working, stop reporting -- everything this file wanted is done
+//   2  exit now, so init is made to respawn you
+//
+// A CPU-bound process that stopped being CPU-bound would stop being the
+// thing a second core is measured against, which is why 1 is "stop
+// reporting" and not "stop".
 fn workload_busy_record_progress(tag: usize) -> usize !{unsafe} {
-    if (workload_busy_pair.reported) { return 1; }
+    if (workload_busy_pair.restart_reported) { return 1; }
     // Started by init, from /etc/inittab. A report from anywhere else is
     // not this workload, and counting it would let an unrelated process
     // satisfy the fairness assertion on the real one's behalf.
@@ -230,6 +253,9 @@ fn workload_busy_record_progress(tag: usize) -> usize !{unsafe} {
         workload_busy_pair.last_tick = 0;
         return 0;
     }
+    if (workload_busy_pair.reported) {
+        return workload_busy_restart_step(tag);
+    }
     let a_progress: usize =
         workload_busy_pair.a_rounds - workload_busy_pair.a_base;
     let b_progress: usize =
@@ -245,6 +271,72 @@ fn workload_busy_record_progress(tag: usize) -> usize !{unsafe} {
     workload_busy_pair.end_ticks = read_cntpct() as usize;
     workload_busy_pair.reported = true;
     workload_busy_pair_report();
+    // Not 1: the pair keeps reporting, because the restart demonstration
+    // below is driven entirely by which of them speaks next.
+    return 0;
+}
+
+// The second half of the fixture: init brings back the entry that died, and
+// only that entry.
+//
+// Making one of the pair die is this file's job rather than a `kill` from
+// outside, for a plain reason -- no signal is ever delivered in this kernel,
+// so there is nothing to kill it WITH. What matters for the claim is that
+// the process ended and that init noticed, and an exit gives both. When
+// `kill` exists this should become one, since a killed process and a process
+// that chose to exit are different events for init to notice.
+//
+// A is chosen arbitrarily. B is the control: its pid must be the one it
+// already had (init did not restart it too) and its counter must have moved
+// while A was away (it kept running rather than waiting on its sibling).
+private fn workload_busy_restart_step(tag: usize) -> usize !{unsafe} {
+    if (workload_busy_pair.restart_requested == false) {
+        if (tag != WORKLOAD_BUSY_TAG_A) { return 0; }
+        workload_busy_pair.restart_requested = true;
+        workload_busy_pair.restart_a_pid_before = workload_busy_pair.a_pid;
+        workload_busy_pair.restart_b_pid_before = workload_busy_pair.b_pid;
+        workload_busy_pair.restart_b_rounds_before =
+            workload_busy_pair.b_rounds;
+        return 2;
+    }
+    // A's replacement has spoken once the restart counter moved -- that is
+    // a report under tag A from a pid that is not the one told to exit.
+    if (workload_busy_pair.a_restarts == 0) { return 0; }
+    // Then wait for B to finish another round before judging. Asking at A's
+    // replacement instead made "B kept going" a race against how fast the
+    // board respawns: on RPi5 the fork and exec beat B's next round and the
+    // check failed on a boot where nothing was wrong. Waiting for B's own
+    // next report asks the same question with no clock in it.
+    if (tag != WORKLOAD_BUSY_TAG_B) { return 0; }
+    workload_busy_pair.restart_reported = true;
+    if (workload_busy_pair.a_restarts == 1 &&
+        workload_busy_pair.b_restarts == 0 &&
+        workload_busy_pair.b_pid == workload_busy_pair.restart_b_pid_before &&
+        workload_busy_pair.b_rounds >
+            workload_busy_pair.restart_b_rounds_before) {
+        kernel_boot_log(
+            "workload: busy pair init restarted a only, b kept its pid and its counter\n");
+    } else {
+        kernel_boot_log("workload: busy pair RESTART a=");
+        uart_put_udec(workload_busy_pair.a_restarts);
+        kernel_boot_log(" b=");
+        uart_put_udec(workload_busy_pair.b_restarts);
+        kernel_boot_log(" b_pid_moved=");
+        if (workload_busy_pair.b_pid !=
+                workload_busy_pair.restart_b_pid_before) {
+            kernel_boot_log("yes");
+        } else {
+            kernel_boot_log("no");
+        }
+        kernel_boot_log(" b_rounds=");
+        uart_put_udec(workload_busy_pair.b_rounds -
+                      workload_busy_pair.restart_b_rounds_before);
+        kernel_boot_log("\n");
+    }
+    // The last line the workload ever prints, whichever way the check went.
+    // The host runner waits for it before starting anything that competes
+    // for the machine, so it has to appear on a failing boot too.
+    kernel_boot_log("workload: busy pair done\n");
     return 1;
 }
 

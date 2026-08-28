@@ -90,6 +90,32 @@ That is this kernel's idle loop, and the `SyscallAction` case it goes through
 is called `WaitInterrupt` rather than `WaitUart` now, because a `wait4` uses
 it too.
 
+The two userspace criteria this issue inherited from #437 then found two
+more, both in the same place: what happens when a process that nobody is
+waiting for exits. (The criterion itself is the ash session backgrounding
+two `/bin/spin` jobs and asking `jobs`, which answers with both still
+Running. A kernel-side "one process now has two live children" marker was
+tried first and abandoned: it fired under QEMU and not on RPi5, and a
+fixture whose verdict depends on which board runs it is worse than none.
+Ash's own job table answers the same question without a clock in it.) `/bin/true &` twice from the interactive prompt, and the
+second job's exit fail-stopped the kernel -- `kernel_process_child_exit`
+hands the CPU to the parent, which is the right answer for every child this
+kernel had until a shell could background one, and the parent here was
+blocked on the next keystroke. It asks the scheduler when the parent cannot
+take it. That exposed the last one: with the ash blocked and nothing else
+alive yet, there was no third answer either, so an exit that would leave
+nothing runnable now waits for an interrupt and asks again, from before it
+has torn anything down.
+
+Making one of the pair die is an exit rather than a `kill`, and that is a
+determination rather than a convenience: no signal is ever delivered here,
+so there is nothing to kill it with. The same reading of the pinned BusyBox
+source settled the other half -- `init`'s `respawn` works without SIGCHLD
+because `rt_sigtimedwait` returns `-ENOSYS` and its `waitpid(-1, WNOHANG)`
+reap loop still runs, while ash's `wait` builtin does NOT, because it polls
+with `WNOHANG` and then calls `sigsuspend`. A script in this rootfs must not
+use `wait`.
+
 Two more are filed rather than fixed, both surfaced by the same fixture.
 `accept` and the TCP receive path wait for a frame in a bounded in-kernel
 loop, so a daemon idling in `accept` with nothing connecting freezes every

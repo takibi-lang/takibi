@@ -80,7 +80,9 @@ The current RPi5 kernel includes:
   device: `/etc/inittab` starts `/bin/busy-a` and `/bin/busy-b` as two
   `respawn` entries, each looping on arithmetic and reporting a finished
   round to the kernel, which measures how far ahead of the other either one
-  ever got and reports both processes' CPU time;
+  ever got and reports both processes' CPU time, then asks one of them to
+  exit and checks that `init` brought back only that one while the other
+  kept its pid and its counter;
 - one-boot integration views that independently compare boot, VM, process,
   syscall, filesystem, USB, Ethernet, BusyBox, HTTPd, and workload-fairness
   evidence.
@@ -92,7 +94,14 @@ binary, while `httpd` is a hard link to BusyBox Extras. The independent
 Takibi test programs are `/bin/user_payload` (the EL0 syscall-ABI fixture)
 and the pair `/bin/busy-a`/`/bin/busy-b`, which are the same object linked
 twice with different ELF entry points so each knows which `respawn` entry it
-is without parsing `argv`. Shell scripts are ordinary
+is without parsing `argv`. `/bin/spin` is a third link of the same object: one
+round of that work and then exit. The ash session backgrounds two of them
+and then asks `jobs`, which answers with both still Running -- that listing
+is how the session shows it holds more than one job at once, and it carries
+no pid, so it is the same text on every boot. `spin` prints nothing because
+output interleaving with the prompt would arrive in an order no fixture
+could pin.
+Shell scripts are ordinary
 executables here: a script's first line names its interpreter and `execve`
 resolves it, so `/bin` also holds `httpd-serve.sh` (the browser demo as one
 command) and `script-interpreter-argument.sh` (a fixture pinning `#!` argv
@@ -776,9 +785,19 @@ run, not a specification.
   process waiting for UART input yields whenever anything else is runnable,
   and the arriving byte is delivered to the waiter wherever it sits in the
   process tree, including a sibling's; only when nothing else can run does
-  the kernel wait for the byte in place.
+  the kernel wait for the byte in place. An exiting process hands the CPU
+  to its parent when the parent is waiting for it, and to whoever the
+  scheduler picks otherwise -- which is what a background job needs, since
+  its parent is off at its own prompt. An exit that would leave nothing at
+  all runnable waits for an interrupt and asks again instead of proceeding.
 - **Signals.** Signal state is recorded honestly, but no signal is ever
-  delivered, so an installed handler is never invoked.
+  delivered, so an installed handler is never invoked. Two consequences are
+  worth naming because they decide what a shell script can do here.
+  BusyBox `init`'s `respawn` works anyway: `rt_sigtimedwait` returns
+  `-ENOSYS`, so its main loop falls through to a `waitpid(-1, WNOHANG)`
+  reap and restarts the entry that died. Ash's `wait` builtin does not:
+  it polls with `WNOHANG` and then calls `sigsuspend` to wait for
+  `SIGCHLD`, so `wait` never returns. A script here must not use it.
 - **Memory.** `mmap` is anonymous-only through a heap-break cursor rather
   than a real independent mapping. `mprotect` performs exactly one
   permission transition (`RW+XN` <-> `R+XN` on data, heap, and stack) and

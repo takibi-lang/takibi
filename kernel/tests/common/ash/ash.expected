@@ -43,6 +43,7 @@ od
 ps
 script-interpreter-argument.sh
 sh
+spin
 uname
 user_payload
 entry-00
@@ -82,5 +83,8 @@ interpreter-argument /bin/script-interpreter-argument.sh three
 no-trailing-newline /etc/no-newline.sh
 LONG-SHEBANG-FELL-BACK
 re-exec-ok
+/ # / # [2]+  Running                    
+[1]-  Running                    
+two-jobs-ok
 repl-ok
 busybox interactive shell exit: 0

@@ -112,7 +112,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
     --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
-    --workload-marker 'workload: busy pair ' \
+    --workload-marker 'workload: busy pair done' \
     --validate-ash &
 uart_driver_pid=$!
 cleanup() {

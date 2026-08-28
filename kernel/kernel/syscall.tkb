@@ -1676,6 +1676,13 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
 // SyscallAction::Exit directly is valid only for the root EL0 process.
 fn kernel_syscall_exit_current_process(status: usize) -> SyscallAction {
     if (kernel_process_is_child()) {
+        // GitHub issue #448: nothing is torn down yet, so waiting for an
+        // interrupt and running this syscall again is free of side
+        // effects -- and it is the only thing to do when the exit has
+        // nowhere to hand the CPU. See kernel_process_exit_would_strand.
+        if (kernel_process_exit_would_strand()) {
+            return SyscallAction::WaitInterrupt;
+        }
         match kernel_syscall_clone_files_reap() {
             KernelFdReapResult::Failed => { return SyscallAction::Unreachable; }
             KernelFdReapResult::Reaped => { }

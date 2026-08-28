@@ -1,1 +1,1 @@
-^workload: busy pair (two pids|ONE pid|STARVED|REFUSED)
+^workload: busy pair (two pids|ONE pid|STARVED|REFUSED|init restarted|RESTART|done)
