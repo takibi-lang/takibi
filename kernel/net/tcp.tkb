@@ -82,6 +82,7 @@ use "kernel/lib/pool_lock.tkb";
 use "kernel/lib/intrusive_pool.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/mutex.tkb";
+use "kernel/lib/task_mutex.tkb";
 
 let mut our_mac: [u8; 6];
 
@@ -211,6 +212,19 @@ struct TcpConnection {
     // zero nor fresh, and the language's empty state for such a field is
     // an inherited zero tag (issue #369). That is checked, not remembered
     // -- plain insert does not compile for this T.
+    // GitHub issue #462: the connection-wide lock, held for as long as a
+    // TcpConnectionOwner exists. A TaskMutex and not a Mutex because a
+    // connection is held across a user copy and across a frame transmit,
+    // and masking interrupts for that would make the whole kernel's
+    // interrupt latency the length of a send.
+    //
+    // SEPARATE from frames_mutex below, which guards the three frame links
+    // and is taken by tcp_connection_frames_acquire/_release. free() calls
+    // the latter while holding this one, and free() is itself called from
+    // inside a take/put window -- one mutex for both would be the same
+    // lock taken twice on that path. Order: this one, then frames_mutex,
+    // never the reverse.
+    private lock: TaskMutex;
     private frames_mutex: Mutex;
     private tx: FrameLink;
     private rx: FrameLink;
@@ -778,6 +792,10 @@ fn tcp_connection_free_first_live() -> bool !{unsafe} {
             IntrusiveSlotProbe::Live(slot_view) => {
                 let generation: usize = intrusive_view_generation(slot_view);
                 intrusive_view_drop(slot_view);
+                // GitHub issue #462: this mints an owner only to hand it
+                // to free, and an owner means a held lock, so it acquires
+                // like any other mint.
+                task_mutex_acquire(&tcp_connection_payload(cursor).lock);
                 tcp_connection_free(
                     tcp_connection_owner_new(cursor, generation));
                 return true;
@@ -888,6 +906,10 @@ fn tcp_connection_alloc() -> TcpConnectionAllocResult !{unsafe} {
             // it. That round trip is the documented one, and the reason
             // intrusive_pool_remove validates what it is given.
             intrusive_owner_drop(pool_owner);
+            // GitHub issue #462: acquired here rather than earlier so the
+            // frames_acquire failure path above, which mints no owner,
+            // has none to release. insert_zeroed left the word free.
+            task_mutex_acquire(&conn.lock);
             return TcpConnectionAllocResult::Allocated(
                 tcp_connection_owner_new(address, generation));
         }
@@ -913,8 +935,14 @@ fn tcp_connection_matches(owner: borrow TcpConnectionOwner[connection],
 // impossible duplicate. With no parking lot there is nothing to store and
 // nothing to conflict with: an owner that has done its work is simply
 // discharged, and the connection stays exactly where it is.
-fn tcp_connection_put(owner: sink TcpConnectionOwner[connection]) {
+fn tcp_connection_put(owner: sink TcpConnectionOwner[connection])
+        !{unsafe} {
+    // GitHub issue #462: the release. Linear, so every path out of every
+    // syscall that took a connection reaches exactly one of these -- which
+    // is what twelve hand-written call sites used to get right by review.
+    let address: usize = owner.slot;
     tcp_connection_owner_drop(owner);
+    task_mutex_release(&tcp_connection_payload(address).lock);
 }
 
 // What used to pull an owner out of a stable slot and revalidate the pair
@@ -924,12 +952,38 @@ fn tcp_connection_put(owner: sink TcpConnectionOwner[connection]) {
 fn tcp_connection_take(slot_value: usize, generation: usize)
         -> TcpConnectionTakeResult !{unsafe} {
     if (intrusive_pool_matches(&tcp_connection_pool, slot_value, generation)) {
+        // GitHub issue #462: the owner IS the exclusion now. This is the
+        // acquire, and the reason it can live here -- rather than needing
+        // a lock outside the payload -- is that the caller has no
+        // *TcpConnection yet: the pool hands us one, we lock it, and only
+        // then does a token for it exist.
+        //
+        // matches() above and payload() below each take the pool lock and
+        // RELEASE it before returning, so the acquire below is not nested
+        // inside it. That direction matters: free() holds this lock while
+        // taking the pool's, and the two orders together would deadlock.
+        task_mutex_acquire(&tcp_connection_payload(slot_value).lock);
         return TcpConnectionTakeResult::Ready(
             tcp_connection_owner_new(slot_value, generation));
     }
     return TcpConnectionTakeResult::Missing;
 }
 
+// Consumes the owner and the connection with it.
+//
+// GitHub issue #462: this is the one consume that does NOT release the
+// lock, and the asymmetry is deliberate rather than an oversight. The slot
+// goes back to the pool here; releasing a lock on an object that has
+// ceased to exist would be describing a state nobody can observe, and the
+// address would already be eligible for reuse. What makes the next holder
+// safe is intrusive_pool_insert_zeroed, which clears the whole payload --
+// lock word included -- so every allocation starts free.
+//
+// The invariant is still closed: every owner corresponds to one held lock,
+// and an owner reaching here takes both out of existence together.
+//
+// Note it holds this lock while taking the POOL lock below. That is the
+// permitted direction; tcp_connection_take is careful not to be the other.
 fn tcp_connection_free(owner: sink TcpConnectionOwner[connection]) !{unsafe} {
     let address: usize = owner.slot;
     let generation: usize = owner.generation;
