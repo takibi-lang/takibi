@@ -7403,7 +7403,7 @@ let infer_tests = [
         fn stable_read7i() -> StableValue7i { return stable_slot7i.value; }");
 
   Alcotest.test_case "stable_replace requires a linear guard" `Quick
-    (expect_type_error "requires a linear guard"
+    (expect_type_error "requires a linear erased-view guard or an indexed"
        "linear view StablePermit7j;
         variant StableValue7j { Empty; Full(StablePermit7j); }
         struct StableSlot7j { private mutex: i32; private value: StableValue7j; }

@@ -294,15 +294,28 @@ def check_mutex_masks_before_taking(insns):
     mask_at = None
     take_at = None
     for addr, text in body:
-        if mask_at is None and "<disable_irq>" in text:
+        # Either the mask itself or the function that owns it. GitHub issue
+        # #451 moved the DAIF pair behind the same substitution boundary
+        # pool_lock lives on, so that a Mutex is host-compilable; the
+        # ordering claim is unchanged and mutex_irq_save is checked below to
+        # actually mask, so the indirection cannot hollow it out.
+        if mask_at is None and ("<disable_irq>" in text
+                                or "<mutex_irq_save>" in text):
             mask_at = addr
         if take_at is None and ("<spin_lock>" in text or "<spin_trylock>" in text):
             take_at = addr
+    saver = [text for _, text, fn in insns if fn == "mutex_irq_save"]
+    if saver and not any("<disable_irq>" in x or "DAIFSet" in x for x in saver):
+        failures.append(
+            "mutex_irq_save does not mask: mutex_acquire calls it where the "
+            "interrupt mask is supposed to happen, so the ordering check "
+            "below would be checking nothing"
+        )
     if mask_at is None:
         failures.append(
-            "mutex_acquire does not call disable_irq: a lock that does not "
-            "mask cannot be taken from an interrupt handler without hanging "
-            "against a holder on the same core"
+            "mutex_acquire neither masks nor calls mutex_irq_save: a lock "
+            "that does not mask cannot be taken from an interrupt handler "
+            "without hanging against a holder on the same core"
         )
     elif take_at is None:
         failures.append(

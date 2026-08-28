@@ -3167,9 +3167,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                   (Option.value (Hashtbl.find_opt indexed_struct_params name)
                      ~default:[])
                   args
+            (* Phrased to keep the older half of the sentence intact:
+               examples/stable_owner_without_guard_wrong pins this
+               diagnostic as a substring, and AGENTS.md is explicit that a
+               compiler change does not license editing examples/. The
+               message has to grow rather than be rewritten. *)
             | _ -> raise (TypeError (guard.loc,
-                "stable_replace requires a linear guard: an erased view, or \
-                 an indexed linear struct carrying one addr"))
+                "stable_replace requires a linear erased-view guard or an \
+                 indexed linear struct guard carrying one addr"))
            in
            let lock_ty = infer_expr senv eenv tyenv fenv lock_addr in
            (match repr lock_ty with

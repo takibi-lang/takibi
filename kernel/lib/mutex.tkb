@@ -48,14 +48,17 @@
 //   mandatory is the caller holding it in a linear struct -- see
 //   IntrusivePoolGuard, and the guards issue #451 converts.
 use "kernel/lib/spinlock.tkb";
-use "kernel/arch/arm64/boot/cpu.tkb";
 
 // One field, at offset 0, which is what makes `m as usize` the address of
 // the word the atomic operates on. `--emit-struct-layout Mutex` says so.
 struct Mutex { private word: usize; }
 
-// Bit 7 of DAIF is the I (IRQ) mask.
-const MUTEX_DAIF_IRQ_BIT: usize = 7;
+// mutex_irq_save/mutex_irq_restore are supplied by the FILE LIST, the same
+// way pool_lock_acquire is (GitHub issue #364). The kernel gives them
+// DAIF; linux_user, which has no interrupt mask to save, gives them
+// nothing to do. Keeping the mask outside this file is what lets the
+// Mutex itself be compiled and exercised host-natively -- and it is the
+// same boundary, not a second one.
 
 // Free. Call once, before the Mutex is reachable by anything else.
 fn mutex_init(m: *Mutex @ id) {
@@ -78,8 +81,7 @@ fn mutex_init(m: *Mutex @ id) {
 // -- a hang, not a delay. That ordering is the entire reason an interrupt
 // handler may take one of these at all (GitHub issue #449).
 fn mutex_acquire(m: *Mutex @ id) -> usize !{unsafe} {
-    let flags: usize = (mrs_daif() >> MUTEX_DAIF_IRQ_BIT) & 1;
-    disable_irq();
+    let flags: usize = mutex_irq_save();
     spin_lock(m as usize);
     return flags;
 }
@@ -90,7 +92,7 @@ fn mutex_acquire(m: *Mutex @ id) -> usize !{unsafe} {
 // entry, so the release leaves it set) and correct when two are nested.
 fn mutex_release(m: *Mutex @ id, flags: usize) !{unsafe} {
     spin_unlock(m as usize);
-    if (flags == 0) { enable_irq(); }
+    mutex_irq_restore(flags);
 }
 
 // One attempt, without masking. For a caller that has something else to do

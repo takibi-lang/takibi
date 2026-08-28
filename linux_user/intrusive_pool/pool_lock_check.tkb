@@ -174,3 +174,13 @@ fn pool_lock_held_depth_now() -> usize { return pool_lock_held_depth; }
 // the two counts above are answering about less than the whole program.
 fn pool_lock_untracked_count() -> usize { return pool_lock_untracked; }
 fn pool_lock_unbalanced_count() -> usize { return pool_lock_unbalanced; }
+
+// GitHub issue #451: the other half of the substitution. kernel/lib/
+// mutex.tkb asks the file list for its interrupt mask; this tier has none,
+// so these do nothing -- and say so with the real signatures, because a
+// stand-in whose shape differs from the real thing stops catching drift.
+fn mutex_irq_save() -> usize {
+    return 0;
+}
+
+fn mutex_irq_restore(flags: usize) {}

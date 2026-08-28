@@ -49,6 +49,27 @@ use "kernel/lib/mutex.tkb";
 // Bit 7 of DAIF is the I (IRQ) mask.
 const DAIF_IRQ_BIT: usize = 7;
 
+// GitHub issue #451: the interrupt-mask half of every Mutex in this
+// kernel, kept here rather than in kernel/lib/mutex.tkb so that the Mutex
+// itself stays host-compilable -- linux_user substitutes this file and
+// gives these two nothing to do, which is the same boundary
+// pool_lock_acquire already lives on (issue #364), not a second one.
+//
+// Returns 1 if IRQs were already masked, 0 if they were enabled. The
+// caller keeps it, in a linear guard, because restoring the value FOUND is
+// what makes the pair correct inside an interrupt handler and correct when
+// two nest -- see this file's header.
+fn mutex_irq_save() -> usize {
+    let flags: usize = (mrs_daif() >> DAIF_IRQ_BIT) & 1;
+    disable_irq();
+    return flags;
+}
+
+// Enables ONLY if the matching save is the one that masked.
+fn mutex_irq_restore(flags: usize) {
+    if (flags == 0) { enable_irq(); }
+}
+
 // Returns the state a matching pool_lock_release must restore: 1 if IRQs
 // were already masked when this was called, 0 if they were enabled.
 //
