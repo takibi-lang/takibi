@@ -9,9 +9,9 @@ const KERNEL_BLOCK_BATCH: usize = 64;
 // plus an `extern symbol start`/`end` pair. `let mut` matches this image
 // actually being written through by block_write below. KERNEL_EXT2_IMAGE_LEN
 // is kernel/build/user/ext2.img's real size -- fixed by its own build
-// recipe's `truncate -s 3145728`, so it is a real build-system constant;
+// recipe's `truncate -s 2621440`, so it is a real build-system constant;
 // embed_file's own compile-time check still verifies it regardless.
-const KERNEL_EXT2_IMAGE_LEN: usize = 3145728;
+const KERNEL_EXT2_IMAGE_LEN: usize = 2621440;
 let mut kernel_ext2_image: [u8; KERNEL_EXT2_IMAGE_LEN] =
     embed_file("kernel/build/user/ext2.img");
 
@@ -55,7 +55,7 @@ fn usb_mass_storage_block_device() -> KernelBlockDeviceResult {
 
         DiskIoResult::Ok => { }
     }
-    // Deliberately expose only the fixture's 3 MiB extent. This bounds every
+    // Deliberately expose only the fixture's 2.5 MiB extent. This bounds every
     // destructive write far below the real medium's capacity until
     // partition/device ownership policy exists.
     let mut device: KernelBlockDevice = { 1, KERNEL_EXT2_IMAGE_LEN };

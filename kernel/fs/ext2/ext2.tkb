@@ -177,7 +177,7 @@ fn ext2_mount(device: KernelBlockDevice) -> Ext2MountResult {
 }
 
 fn ext2_fixture_geometry_is_expected(mount: Ext2Mount) -> bool {
-    return mount.inode_count == 1024 && mount.filesystem_blocks == 3072 &&
+    return mount.inode_count == 1024 && mount.filesystem_blocks == 2560 &&
            mount.inodes_per_group == 1024 && mount.inode_size == 128;
 }
 
