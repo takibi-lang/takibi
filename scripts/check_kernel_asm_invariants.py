@@ -274,6 +274,50 @@ def check_spinlock_is_atomic(insns):
     return failures
 
 
+
+# GitHub issue #451/#449: mutex_acquire must MASK BEFORE IT TAKES.
+#
+# That order is the entire reason an interrupt handler may take one of
+# these locks. Taking first leaves a window where this core holds the lock
+# and an interrupt can arrive; a handler wanting the same lock then waits
+# for a holder that cannot run until the handler returns, which is a hang
+# rather than a delay. The source says so in a comment, and a comment is
+# not what the CPU executes -- swapping two adjacent statements would
+# compile, pass every single-core test, and hang the first time a handler
+# contended.
+def check_mutex_masks_before_taking(insns):
+    failures = []
+    body = [(addr, text) for addr, text, fn in insns if fn == "mutex_acquire"]
+    if not body:
+        # A build that does not link the lock has nothing to check.
+        return failures
+    mask_at = None
+    take_at = None
+    for addr, text in body:
+        if mask_at is None and "<disable_irq>" in text:
+            mask_at = addr
+        if take_at is None and ("<spin_lock>" in text or "<spin_trylock>" in text):
+            take_at = addr
+    if mask_at is None:
+        failures.append(
+            "mutex_acquire does not call disable_irq: a lock that does not "
+            "mask cannot be taken from an interrupt handler without hanging "
+            "against a holder on the same core"
+        )
+    elif take_at is None:
+        failures.append(
+            "mutex_acquire calls disable_irq but never spin_lock: it masks "
+            "interrupts and takes nothing"
+        )
+    elif mask_at > take_at:
+        failures.append(
+            "mutex_acquire takes the lock at 0x%x before masking at 0x%x: "
+            "an interrupt arriving in that window, in a handler wanting the "
+            "same lock, waits for a holder that cannot run" % (take_at, mask_at)
+        )
+    return failures
+
+
 def main():
     if len(sys.argv) != 3:
         print(
@@ -289,13 +333,15 @@ def main():
         check_uxn(insns, expected_uxn_and_pxn_count)
         + check_eret_daif_mask(insns)
         + check_spinlock_is_atomic(insns)
+        + check_mutex_masks_before_taking(insns)
     )
     if failures:
         for f in failures:
             print("FAIL kernel/asm-invariants: %s" % f, file=sys.stderr)
         return 1
     print("PASS kernel/asm-invariants: UXN identity-block bits, eret DAIF.I "
-          "masking, and the spinlock's atomicity all verified statically")
+          "masking, the spinlock's atomicity, and mutex_acquire masking "
+          "before it takes, all verified statically")
     return 0
 
 
