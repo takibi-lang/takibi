@@ -24,6 +24,31 @@
 // and pays none of this. That split is why the checking can be this
 // thorough: it costs nothing where it would matter.
 //
+// WHAT THIS FILE DOES NOT SEE, AND THE ONE ORDER THAT MATTERS TODAY
+//
+// GitHub issue #462 introduced a lock this checker is blind to: a
+// TcpConnection's own TaskMutex, held for as long as a
+// TcpConnectionOwner exists. It is not a pool lock, so it carries no tag
+// and never reaches the tracking below -- and it is acquired in
+// kernel/net/tcp.tkb, which linux_user does not compile.
+//
+// The order it participates in is one-directional:
+//
+//   tcp_connection_free() holds the CONNECTION lock and then takes the
+//   POOL lock, to remove the slot. Permitted.
+//
+//   tcp_connection_take() must never be the reverse. It calls
+//   intrusive_pool_matches() and tcp_connection_payload() first, and both
+//   take the pool lock and RELEASE it before returning, so the connection
+//   acquire that follows is sequential rather than nested.
+//
+// That second half is true by how those two functions are written, not by
+// anything that would notice if it changed. What would break it: giving
+// either one a signature that returns while still holding the pool lock
+// -- a guard-returning shape, the way intrusive_pool_lock itself does.
+// That is a visible change to a signature rather than a silent one to a
+// body, which is the only reason this is a comment and not a check.
+//
 // Reported through counters and observers rather than a trap, matching
 // how this pool already reports double frees, foreign handles and
 // corrupted chains -- and keeping the suite free of trap sites under
