@@ -7469,6 +7469,68 @@ let infer_tests = [
             stable_unlock7y(guard, &stable_slot7y.mutex);
           }" ());
 
+  (* GitHub issue #452: the guard-derived accessor pattern, in the shape
+     kernel/net/tcp.tkb's RetxEntry actually uses -- a POOLED object whose
+     protected fields are grouped behind one accessor, rather than
+     examples/rtos_demo's singleton reached as a global. The tie comes from
+     the guard parameter, which is why the container can be a plain pointer
+     obtained from a pool. *)
+  Alcotest.test_case
+    "issue #452: a guard-derived accessor reaches grouped protected fields"
+    `Quick
+    (fun () ->
+       expect_ok
+         "struct GuardedState452 { count: usize; }
+          struct Entry452 {
+            private mutex: i32;
+            private state: GuardedState452;
+            identity: usize;
+          }
+          linear struct EntryGuard452[lock: addr] { private flags: usize; }
+          fn entry_lock452(m: *i32 @ id) -> EntryGuard452[id] {
+            let mut g: EntryGuard452[id] = { 0 };
+            return g;
+          }
+          fn entry_unlock452(g: sink EntryGuard452[id], m: *i32 @ id) {}
+          fn entry_state452(g: borrow EntryGuard452[id], e: *Entry452)
+              -> *GuardedState452 @ id {
+            return &e.state;
+          }
+          fn bump452(e: *Entry452) -> usize {
+            let guard = entry_lock452(&e.mutex);
+            let s = entry_state452(guard, e);
+            s.count = s.count + 1;
+            let seen: usize = s.count;
+            entry_unlock452(guard, &e.mutex);
+            return seen;
+          }" ());
+
+  Alcotest.test_case
+    "issue #452: the accessor's pointer dies with the guard"
+    `Quick
+    (expect_type_error "cannot be used after"
+       "struct GuardedState452b { count: usize; }
+        struct Entry452b {
+          private mutex: i32;
+          private state: GuardedState452b;
+        }
+        linear struct EntryGuard452b[lock: addr] { private flags: usize; }
+        fn entry_lock452b(m: *i32 @ id) -> EntryGuard452b[id] {
+          let mut g: EntryGuard452b[id] = { 0 };
+          return g;
+        }
+        fn entry_unlock452b(g: sink EntryGuard452b[id], m: *i32 @ id) {}
+        fn entry_state452b(g: borrow EntryGuard452b[id], e: *Entry452b)
+            -> *GuardedState452b @ id {
+          return &e.state;
+        }
+        fn use_after452b(e: *Entry452b) -> usize {
+          let guard = entry_lock452b(&e.mutex);
+          let s = entry_state452b(guard, e);
+          entry_unlock452b(guard, &e.mutex);
+          return s.count;
+        }");
+
   Alcotest.test_case "stable_replace result cannot be discarded" `Quick
     (expect_type_error "linear result of 'stable_replace' must be moved"
        "linear view StableGuard7k[lock: addr];
