@@ -43,10 +43,14 @@ use "kernel/lib/mutex.tkb";
 //   answers "which slot last held this pid", which is what the exec-reap
 //   path needs and is all it promises. That lookup is a linear scan of
 //   the table; the slot -> pid direction is a field read.
-// - A process may have at most one live child at a time; wait4()
-//   concurrent multi-child wait/reap is out of scope (kernel/README.md's
-//   "Current limits" section is authoritative for this and other
-//   syscall-visible process-model constraints).
+// - A process may have as many children as the page allocator allows
+//   (issue #437). An exited child stays as a ZOMBIE holding its own
+//   exit_status until wait4 collects it, so a record outlives the process
+//   it described; wait4(pid) selects among siblings, and wait4(-1) takes
+//   the newest zombie rather than the earliest -- Linux promises "some
+//   terminated child" and not an order. What is NOT here: a parent that
+//   never waits keeps its zombies until it exits (its own exit drains
+//   them), which is Linux's behaviour and is a real way to hold slots.
 //
 enum ProcessState: u8 { Ready; Running; Blocked; Exited; }
 enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
@@ -391,6 +395,18 @@ private let mut scheduled_process_stack_deepest_reaped: usize = 0;
 // literally. Nothing recycles a pid inside one run: that is what makes it
 // independent of the slot it happens to occupy.
 private let mut scheduled_process_next_pid: usize = 1;
+
+// GitHub issue #448: how many reaps found nothing to unlink, i.e. were
+// handed a parent with no first_child. Only the teardown sweep can
+// produce one, and only for a record whose has_parent is false. It is
+// a counter and not a fail-stop because that record is observed but
+// unexplained: the number tells us whether it is one straggler at
+// teardown or something that happens while the system runs.
+private let mut kernel_process_reap_unlinked_count: usize = 0;
+
+fn kernel_process_reap_unlinked_count_value() -> usize { 
+    return kernel_process_reap_unlinked_count;
+}
 
 // -- The record a slot names ------------------------------------------
 
@@ -2360,9 +2376,14 @@ private fn kernel_process_switch_to(from: ProcessHandle, to: ProcessHandle,
     return scheduled_process_record_at(to.pool_index).saved_sp;
 }
 
-// A ProcessRecord holds one child, so the live process tree is a chain:
-// root -> child -> child -> ... Walking up from anywhere reaches the root,
-// which is what makes the rotation below definable without a run queue.
+// Walking up parent links from anywhere reaches the root, which is what
+// makes the rotation below definable without a run queue.
+//
+// This used to say the live tree is a CHAIN, because a ProcessRecord held
+// one child. It holds a first child and a sibling list now (issue #437),
+// so the tree branches and the rotation is a pre-order walk of it -- see
+// kernel_process_next_successor. The root is still the root; only the
+// shape below it changed.
 private fn kernel_process_chain_root(from: ProcessHandle) -> ProcessHandle {
     let mut root: ProcessHandle = from;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
@@ -4162,6 +4183,22 @@ private fn kernel_process_reap_zombie(parent: usize, child: ProcessHandle)
         scheduled_process_record_at(child.pool_index).next_sibling;
     let has_following: bool =
         scheduled_process_record_at(child.pool_index).has_next_sibling;
+    // first_child is only ever ASSIGNED when a child is linked, so on a
+    // record that never had one it holds whatever the pool slot's memory
+    // held -- has_first_child is the only thing that says it is readable.
+    // Three of the four callers reach here by walking this very list, so
+    // they cannot get here without one. The fourth is the teardown sweep,
+    // which finds Exited records by scanning ALL slots and asks
+    // kernel_process_owner_slot_of for a parent -- and that returns the
+    // slot ITSELF for a record whose has_parent is false. Such a record
+    // exists (issue #448 records that it is not yet explained), and it
+    // has no children, so without this guard the walk below would read
+    // record_at() at an index no one chose. Nothing to unlink is a
+    // perfectly good outcome: the reap below is what actually matters.
+    if (scheduled_process_record_at(parent).has_first_child == false) {
+        kernel_process_reap_unlinked_count =
+            kernel_process_reap_unlinked_count + 1;
+    } else {
     let mut head: ProcessHandle =
         scheduled_process_record_at(parent).first_child;
     if (scheduled_process_same_slot(head, child)) {
@@ -4186,6 +4223,7 @@ private fn kernel_process_reap_zombie(parent: usize, child: ProcessHandle)
                 } else { prev = next; }
             }
         }
+    }
     }
     match scheduled_process_exited_take(child) {
         ScheduledProcessExitedTakeResult::Missing => {}

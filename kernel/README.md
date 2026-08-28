@@ -740,11 +740,19 @@ run, not a specification.
   the caller until its live child exits (by specific pid or `-1`/
   `WAIT_ANY`), delivering the real reaped pid and exit status, tracked
   per-slot so any live process (not just the tree root) can wait for its
-  own child; a process may have at most one live child at a time, so
-  concurrent multi-child wait/reap remains out of scope. That one-child rule
-  makes the live process tree a chain, and scheduling is a round-robin over
-  it: a process's successor is its child, or the chain's root when it has
-  none, and the rotation skips whoever is not runnable. A process therefore
+  own child. A process may have as many children as the page allocator
+  allows (issue #437), each keeping its own exit status: an exited child
+  stays as a zombie until `wait4` collects it, and `wait4(pid)` selects
+  among siblings. `wait4(-1)` takes the newest zombie rather than the
+  earliest, matching Linux's "some terminated child" rather than promising
+  an order. The two process-GROUP selectors Linux also accepts here,
+  `pid == 0` and `pid < -1`, are `EINVAL` rather than wrong answers,
+  because there are no process groups yet to select over. A parent that never waits keeps its zombies until its own exit
+  drains them, which is also Linux's behaviour.
+  Scheduling is a round-robin over the process TREE: a process's successor
+  is its first child, else its next sibling, else the nearest ancestor's
+  next sibling, else the root, and the rotation skips whoever is not
+  runnable. A process therefore
   keeps its turn even when the process next to it is blocked -- which is what
   a shell script that starts a background daemon needs, since it parks a
   `wait4` between the interactive shell and the daemon. UART `read(2)`
