@@ -57,6 +57,42 @@ fn spinlock_roundtrip() -> i32 !{unsafe} {
     return 0;
 }
 
+// GitHub issue #462: the same exclusion through TaskMutex's public API
+// rather than the raw spinlock underneath it. A fixture that exercises the
+// layer below the one callers use proves the wrong thing -- this is the
+// API kernel/net/tcp.tkb will hold across a syscall.
+//
+// TaskMutex and not Mutex because Mutex's acquire asks the file list for
+// an interrupt mask, and this tier has none to give; the pool tests supply
+// that stand-in, and this one does not need it.
+//
+// Expected output continues:
+//   0x00000000   a fresh TaskMutex is free
+//   0x00000001   task_mutex_trylock takes it
+//   0x00000000   ... and a second attempt fails
+//   0x00000000   after release, free again
+//   0x00000001   the blocking acquire takes an uncontended one
+
+let mut demo_task_lock: TaskMutex;
+
+fn task_mutex_roundtrip() -> i32 !{unsafe} {
+    task_mutex_init(&demo_task_lock);
+    report(task_mutex_is_held(&demo_task_lock));
+
+    report(task_mutex_trylock(&demo_task_lock));
+    report(task_mutex_trylock(&demo_task_lock));
+
+    task_mutex_release(&demo_task_lock);
+    report(task_mutex_is_held(&demo_task_lock));
+
+    task_mutex_acquire(&demo_task_lock);
+    report(task_mutex_is_held(&demo_task_lock));
+    task_mutex_release(&demo_task_lock);
+
+    return 0;
+}
+
 fn app_main() {
     spinlock_roundtrip();
+    task_mutex_roundtrip();
 }

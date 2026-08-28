@@ -205,8 +205,8 @@ $(LINUX_USER_DIR)/byte_slice/byte_slice_exe.o: kernel/lib/byte_slice.tkb
 # GitHub issue #445: the kernel's own spinlock, compiled and run natively.
 # The same source the kernel links, not a copy -- see the freelist/slotmap
 # note below for why that distinction is the point.
-$(LINUX_USER_DIR)/spinlock/spinlock_exe.o: kernel/lib/spinlock.tkb
-$(LINUX_USER_DIR)/spinlock/spinlock_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/spinlock.tkb
+$(LINUX_USER_DIR)/spinlock/spinlock_exe.o: kernel/lib/spinlock.tkb kernel/lib/task_mutex.tkb
+$(LINUX_USER_DIR)/spinlock/spinlock_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/spinlock.tkb kernel/lib/task_mutex.tkb
 
 # GitHub issue #217 (2026-08-15) closed the array-field-decay gap this
 # comment used to describe for the four targets below: FreelistCore(N)'s

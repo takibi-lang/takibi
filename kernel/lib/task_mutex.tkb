@@ -1,0 +1,73 @@
+// GitHub issue #462: the second lock class, and the first lock in this
+// kernel that does not mask interrupts.
+//
+// kernel/lib/mutex.tkb masks DAIF.I on every acquire, which is what makes
+// a Mutex safe to take from an interrupt handler -- a handler can never
+// interrupt a holder on the same core. It is also what makes it wrong for
+// a lock held across real work: masking is all-or-nothing, so the whole
+// kernel's interrupt latency becomes the longest critical section anyone
+// writes.
+//
+// A TcpConnection is held across a user copy AND a frame transmit
+// (kernel_tcp_send_received takes the TX permission). Masking there is the
+// same defect issue #452 had to restructure the retransmit path to avoid,
+// and here it cannot be restructured away, because the transmit is what
+// the syscall is for.
+//
+// So this class trades the property it does not need for the one it does:
+// **no interrupt handler may take a TaskMutex**, and in exchange holding
+// one costs no interrupt latency at all. GitHub issue #449 decided that
+// whether a handler may take a lock is a property OF THE LOCK, declared
+// where the lock is; a separate type is that declaration, and reaching for
+// the wrong acquire is not expressible rather than merely wrong.
+//
+// Current limitations (2026-08-28). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none, since it
+// invites relying on a guarantee that quietly stopped holding.
+// - THE INTERRUPT RULE IS BY TYPE AND BY NAME, NOT BY CHECK. Nothing
+//   rejects an `!{interrupt}` function that takes one of these, and the
+//   consequence if one ever did is a hang: the handler spins for a holder
+//   that cannot run until the handler returns. GitHub issue #449 owns the
+//   `locks` annotation that would make it a compile error. Until then this
+//   header is the rule, which is why it is stated first.
+// - NO OWNER, NO RECURSION COUNT, NO DEADLOCK DETECTION -- same as Mutex.
+//   Taking the same one twice on one core hangs.
+// - NO LEVEL, and unlike Mutex this one will never need one. A level
+//   exists to mask fewer interrupts; this masks none.
+// - THE RELEASE IS THE CALLER'S OBLIGATION, and nothing here makes it
+//   mandatory. What makes it mandatory at the one call site that exists is
+//   that the caller holds a LINEAR token minted only by the acquire --
+//   see TcpConnectionOwner, which is the whole reason this class has no
+//   guard type of its own.
+use "kernel/lib/spinlock.tkb";
+
+// One field, at offset 0, for the same reason Mutex has one: `m as usize`
+// is the address the atomic operates on only because the word is first.
+struct TaskMutex { private word: usize; }
+
+// Free. Call once, before it is reachable by anything else.
+fn task_mutex_init(m: *TaskMutex @ id) {
+    static_assert(offsetof(TaskMutex, word) == 0,
+                  "TaskMutex.word must be first: `m as usize` is the atomic's address");
+    m.word = 0;
+}
+
+// Takes it. No mask, so nothing to hand back -- which is why the caller's
+// token needs no flags field and why this pair is not shaped like Mutex's.
+fn task_mutex_acquire(m: *TaskMutex @ id) !{unsafe} {
+    spin_lock(m as usize);
+}
+
+fn task_mutex_release(m: *TaskMutex @ id) !{unsafe} {
+    spin_unlock(m as usize);
+}
+
+// One attempt. For a caller with something else to do rather than wait,
+// and the only way to observe the exclusion with one thread.
+fn task_mutex_trylock(m: *TaskMutex @ id) -> bool !{unsafe} {
+    return spin_trylock(m as usize);
+}
+
+fn task_mutex_is_held(m: *TaskMutex @ id) -> bool !{unsafe} {
+    return spin_lock_is_held(m as usize);
+}
