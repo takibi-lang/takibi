@@ -23,6 +23,7 @@
     .type _start, %function
 _start:
     msr     DAIFSet, #0xf
+    mov     x19, x0
     /* GitHub issue #445: Aff0, not Aff1. This guard is what keeps main()
      * from running on a core that is not the primary, and it was still
      * carrying entry.S's Aff1 line -- the very line kernel_secondary_entry
@@ -47,6 +48,9 @@ _start:
     str     xzr, [x0], #8
     b       .Lbss_loop
 .Lbss_done:
+    adrp    x0, boot_dtb_address
+    add     x0, x0, :lo12:boot_dtb_address
+    str     x19, [x0]
     adrp    x0, boot_stack_top
     add     x0, x0, :lo12:boot_stack_top
     mov     sp, x0
@@ -63,6 +67,21 @@ _start:
 .Lpark:
     wfe
     b       .Lpark
+
+    .global boot_dtb_address_read
+    .type boot_dtb_address_read, %function
+boot_dtb_address_read:
+    adrp    x0, boot_dtb_address
+    add     x0, x0, :lo12:boot_dtb_address
+    ldr     x0, [x0]
+    ret
+
+    .section .bss.boot, "aw", %nobits
+    .align 3
+boot_dtb_address:
+    .skip 8
+
+    .section .text.boot, "ax"
 
 /* PSCI enters a successfully started secondary already in Non-secure EL1
  * on QEMU `virt` (same reasoning as _start above -- there is no EL2 drop

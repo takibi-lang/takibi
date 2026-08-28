@@ -1,1 +1,2 @@
 extern symbol kernel_secondary_entry;
+extern fn boot_dtb_address_read() -> usize;

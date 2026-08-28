@@ -649,10 +649,12 @@ are deliberate, not gaps to silently close:
   and the kernel mounts it through `kernel/drivers/block/virtio_blk.tkb`.
   There is no RP1, PCIe, or xHCI/USB Mass Storage under QEMU, so the real USB
   provisioning and hardware-specific storage checks remain RPi5-only.
-- **RAM size is an assumed constant, not detected.** RPi5's
-  `platform_memory_detect()` queries the real VideoCore mailbox; QEMU has
-  no such firmware service, so `kernel/platform/qemu/memory.tkb` reports a
-  fixed value matching the harness's own `-m` choice. Neither platform's
+- **RAM discovery uses different boot providers.** RPi5's
+  `platform_memory_detect()` queries the real VideoCore mailbox. QEMU's
+  direct-kernel loader generates an FDT from the selected machine and `-m`
+  value, passes its physical address in `x0`, and
+  `kernel/platform/qemu/memory.tkb` reads the `/memory` node through the
+  bounded common reader in `kernel/boot/fdt.tkb`. Neither platform's
   page allocator actually consumes this value today (see "Current limits"
   below) -- it is diagnostic boot-log output on both.
 - **The MMU device/RAM layout is inverted from RPi5's.** RPi5's real RAM

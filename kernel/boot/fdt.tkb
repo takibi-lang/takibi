@@ -1,0 +1,232 @@
+// Minimal, bounded Flattened Device Tree reader for early kernel boot.
+//
+// The input is an untrusted physical boot boundary: firmware, QEMU, or a
+// debugger-assisted loader supplies its address.  Every offset and length is
+// checked against the blob's totalsize before a byte is read.  Raw pointers
+// are deliberate here because no Takibi array owns firmware-provided memory.
+
+const FDT_MAGIC: usize = 0xd00dfeed;
+const FDT_HEADER_SIZE: usize = 40;
+const FDT_MAX_SIZE: usize = 1024 * 1024;
+
+const FDT_BEGIN_NODE: usize = 1;
+const FDT_END_NODE: usize = 2;
+const FDT_PROP: usize = 3;
+const FDT_NOP: usize = 4;
+const FDT_END: usize = 9;
+
+must_use variant FdtMemoryResult {
+    Invalid;
+    NotFound;
+    Found((usize, usize));
+}
+
+// Internal result used across the one unsafe boundary below. The public
+// result remains must_use; this duplicate shape avoids hiding a must-use
+// call syntactically inside an unsafe expression.
+variant FdtScanResult {
+    Invalid;
+    NotFound;
+    Found((usize, usize));
+}
+
+private fn fdt_range_valid(total: usize, offset: usize, length: usize)
+        -> bool {
+    return offset <= total && length <= total - offset;
+}
+
+private fn fdt_read_u8(base: usize, total: usize, offset: usize) -> usize
+        !{unsafe} {
+    if (fdt_range_valid(total, offset, 1) == false ||
+        base > 0xFFFFFFFFFFFFFFFF - offset) { return 0; }
+    let p: *u8 = unsafe { (base + offset) as *u8 };
+    return *p as usize;
+}
+
+private fn fdt_read_be32(base: usize, total: usize, offset: usize) -> usize
+        !{unsafe} {
+    if (fdt_range_valid(total, offset, 4) == false) { return 0; }
+    return (fdt_read_u8(base, total, offset) << 24) |
+           (fdt_read_u8(base, total, offset + 1) << 16) |
+           (fdt_read_u8(base, total, offset + 2) << 8) |
+           fdt_read_u8(base, total, offset + 3);
+}
+
+private fn fdt_align4(value: usize) -> usize {
+    if (value > 0xFFFFFFFFFFFFFFFC) { return 0; }
+    return (value + 3) & 0xFFFFFFFFFFFFFFFC;
+}
+
+private fn fdt_string_is(base: usize, total: usize, offset: usize,
+                         expected: []u8) -> bool !{unsafe} {
+    if (offset > total || expected.len >= total - offset) { return false; }
+    for i: usize in 0..<expected.len {
+        if (fdt_read_u8(base, total, offset + i) != expected[i] as usize) {
+            return false;
+        }
+    }
+    return fdt_read_u8(base, total, offset + expected.len) == 0;
+}
+
+private fn fdt_node_is_memory(base: usize, total: usize, offset: usize)
+        -> bool !{unsafe} {
+    let name: [u8; 6..] = bs"memory";
+    if (fdt_range_valid(total, offset, 7) == false) { return false; }
+    for i: usize in 0..<6 {
+        if (fdt_read_u8(base, total, offset + i) != name[i] as usize) {
+            return false;
+        }
+    }
+    let suffix: usize = fdt_read_u8(base, total, offset + 6);
+    return suffix == 0 || suffix == '@' as usize;
+}
+
+private fn fdt_cells_value(base: usize, total: usize, offset: usize,
+                           cells: usize) -> usize !{unsafe} {
+    if (cells == 1) { return fdt_read_be32(base, total, offset); }
+    if (cells == 2) {
+        let high: usize = fdt_read_be32(base, total, offset);
+        let low: usize = fdt_read_be32(base, total, offset + 4);
+        return (high << 32) | low;
+    }
+    return 0;
+}
+
+private fn fdt_scan_memory(base: usize) -> FdtScanResult !{unsafe} {
+    // A zero physical address is valid: QEMU virt places its generated FDT
+    // there.  Validate content, never use the address as an absence sentinel.
+    let header_total: usize = FDT_HEADER_SIZE;
+    if (fdt_read_be32(base, header_total, 0) != FDT_MAGIC) {
+        return FdtScanResult::Invalid;
+    }
+    let total: usize = fdt_read_be32(base, header_total, 4);
+    if (total < FDT_HEADER_SIZE || total > FDT_MAX_SIZE) {
+        return FdtScanResult::Invalid;
+    }
+
+    let struct_offset: usize = fdt_read_be32(base, total, 8);
+    let strings_offset: usize = fdt_read_be32(base, total, 12);
+    let strings_size: usize = fdt_read_be32(base, total, 32);
+    let struct_size: usize = fdt_read_be32(base, total, 36);
+    let version: usize = fdt_read_be32(base, total, 20);
+    let last_compatible_version: usize = fdt_read_be32(base, total, 24);
+    if (fdt_range_valid(total, struct_offset, struct_size) == false ||
+        fdt_range_valid(total, strings_offset, strings_size) == false ||
+        (struct_offset & 3) != 0 || version < 17 ||
+        last_compatible_version > 17) {
+        return FdtScanResult::Invalid;
+    }
+
+    let struct_end: usize = struct_offset + struct_size;
+    let strings_end: usize = strings_offset + strings_size;
+    let mut cursor: usize = struct_offset;
+    let mut depth: usize = 0;
+    let mut address_cells: usize = 2;
+    let mut size_cells: usize = 1;
+    let mut memory_depth: usize = 0;
+    let mut memory_type: bool = false;
+    let mut candidate_valid: bool = false;
+    let mut candidate_base: usize = 0;
+    let mut candidate_size: usize = 0;
+
+    while (cursor < struct_end) {
+        if (fdt_range_valid(struct_end, cursor, 4) == false) {
+            return FdtScanResult::Invalid;
+        }
+        let token: usize = fdt_read_be32(base, total, cursor);
+        cursor = cursor + 4;
+        if (token == FDT_BEGIN_NODE) {
+            let name_offset: usize = cursor;
+            let mut name_end: usize = cursor;
+            while (name_end < struct_end &&
+                   fdt_read_u8(base, total, name_end) != 0) {
+                name_end = name_end + 1;
+            }
+            if (name_end >= struct_end) { return FdtScanResult::Invalid; }
+            depth = depth + 1;
+            if (depth == 2 && fdt_node_is_memory(base, total, name_offset)) {
+                memory_depth = depth;
+                memory_type = false;
+                candidate_valid = false;
+            }
+            cursor = fdt_align4(name_end + 1);
+            if (cursor == 0 || cursor > struct_end) {
+                return FdtScanResult::Invalid;
+            }
+        } else if (token == FDT_END_NODE) {
+            if (depth == 0) { return FdtScanResult::Invalid; }
+            if (memory_depth == depth) {
+                if (memory_type && candidate_valid) {
+                    return FdtScanResult::Found(
+                        (candidate_base, candidate_size));
+                }
+                memory_depth = 0;
+            }
+            depth = depth - 1;
+        } else if (token == FDT_PROP) {
+            if (fdt_range_valid(struct_end, cursor, 8) == false) {
+                return FdtScanResult::Invalid;
+            }
+            let length: usize = fdt_read_be32(base, total, cursor);
+            let name_relative: usize = fdt_read_be32(base, total, cursor + 4);
+            cursor = cursor + 8;
+            if (name_relative >= strings_size ||
+                fdt_range_valid(struct_end, cursor, length) == false) {
+                return FdtScanResult::Invalid;
+            }
+            let prop_name: usize = strings_offset + name_relative;
+            if (prop_name >= strings_end) { return FdtScanResult::Invalid; }
+            if (depth == 1 && length == 4 &&
+                fdt_string_is(base, strings_end, prop_name,
+                              bs"#address-cells")) {
+                address_cells = fdt_read_be32(base, total, cursor);
+            } else if (depth == 1 && length == 4 &&
+                       fdt_string_is(base, strings_end, prop_name,
+                                     bs"#size-cells")) {
+                size_cells = fdt_read_be32(base, total, cursor);
+            } else if (memory_depth == depth &&
+                       fdt_string_is(base, strings_end, prop_name,
+                                     bs"device_type")) {
+                memory_type = length >= 7 &&
+                    fdt_string_is(base, cursor + length, cursor, bs"memory");
+            } else if (memory_depth == depth &&
+                       fdt_string_is(base, strings_end, prop_name, bs"reg")) {
+                if ((address_cells == 1 || address_cells == 2) &&
+                    (size_cells == 1 || size_cells == 2)) {
+                    let tuple_bytes: usize = (address_cells + size_cells) * 4;
+                    if (length >= tuple_bytes) {
+                        candidate_base = fdt_cells_value(
+                            base, total, cursor, address_cells);
+                        candidate_size = fdt_cells_value(
+                            base, total, cursor + address_cells * 4,
+                            size_cells);
+                        candidate_valid = candidate_size != 0;
+                    }
+                }
+            }
+            let next: usize = fdt_align4(cursor + length);
+            if (next == 0 || next > struct_end) {
+                return FdtScanResult::Invalid;
+            }
+            cursor = next;
+        } else if (token == FDT_NOP) {
+        } else if (token == FDT_END) {
+            if (depth != 0) { return FdtScanResult::Invalid; }
+            return FdtScanResult::NotFound;
+        } else {
+            return FdtScanResult::Invalid;
+        }
+    }
+    return FdtScanResult::Invalid;
+}
+
+fn fdt_detect_memory(base: usize) -> FdtMemoryResult !{unsafe} {
+    let scanned: FdtScanResult = fdt_scan_memory(base);
+    match scanned {
+        FdtScanResult::Invalid => { return FdtMemoryResult::Invalid; }
+        FdtScanResult::NotFound => { return FdtMemoryResult::NotFound; }
+        FdtScanResult::Found(memory) => {
+            return FdtMemoryResult::Found(memory);
+        }
+    }
+}

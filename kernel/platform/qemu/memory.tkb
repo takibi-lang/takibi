@@ -3,20 +3,29 @@
 // comment already anticipated a future QEMU port would fill in "without
 // main.tkb changing at all" (kernel/platform/qemu/init.tkb calls this name
 // unmodified). There is no VideoCore-mailbox equivalent under QEMU and no
-// usable DTB pointer captured by kernel/arch/arm64/boot/entry.S at boot
-// (see that file -- `_start` never reads x0), so this returns a fixed
-// value matching this platform's own Makefile/QEMU-invocation `-m` choice
-// (kernel/README.md's QEMU section documents the exact figure) rather than
-// detecting anything live. Diagnostic only, exactly as it is on RPi5 --
+// VideoCore-mailbox equivalent under QEMU. QEMU's built-in direct-kernel
+// loader supplies its generated FDT in x0; entry_qemu.S preserves that
+// physical address before reusing the argument registers. Diagnostic only,
+// exactly as it is on RPi5 --
 // kernel/mm/page.tkb's allocator still uses its own fixed BOOT_PAGE_COUNT
 // regardless of this value on both platforms.
 must_use variant PlatformMemoryResult {
     Failed;
-    Detected((u32, u32));
+    Detected((usize, usize));
 }
 
-fn platform_memory_detect() -> PlatformMemoryResult {
-    // QEMU `virt` RAM base (examples/common_qemu/AGENTS.md) and this
-    // platform's own -m 1024 harness invocation -- see kernel/README.md.
-    return PlatformMemoryResult::Detected((0x40000000, 1024 * 1024 * 1024));
+fn platform_memory_detect() -> PlatformMemoryResult !{unsafe} {
+    let dtb: usize = boot_dtb_address_read();
+    let detected: FdtMemoryResult = fdt_detect_memory(dtb);
+    match detected {
+        FdtMemoryResult::Invalid => {
+            return PlatformMemoryResult::Failed;
+        }
+        FdtMemoryResult::NotFound => {
+            return PlatformMemoryResult::Failed;
+        }
+        FdtMemoryResult::Found(memory) => {
+            return PlatformMemoryResult::Detected(memory);
+        }
+    }
 }
