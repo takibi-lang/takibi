@@ -4,6 +4,7 @@ use "kernel/kernel/process.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/fs/elf64.tkb";
 use "kernel/fs/ext2/ext2.tkb";
+use "kernel/lib/mutex.tkb";
 
 
 // User-page ownership is recorded only in the page tables. Address-space
@@ -324,7 +325,7 @@ variant ProcessCloneVmValue {
     Ready(ProcessCloneVmOwner);
 }
 struct ProcessCloneVmStore {
-    private mutex: i32;
+    private mutex: Mutex;
     private value: ProcessCloneVmValue;
 }
 private let mut process_clone_vm_store: ProcessCloneVmStore;
@@ -416,13 +417,13 @@ fn process_stack_load_word(stack: borrow [u8; PROCESS_STACK_LAYOUT_BYTES..],
            ((stack[offset + 7] as u64) << 56);
 }
 
-fn process_clone_vm_lock(lock: *i32 @ address)
+fn process_clone_vm_lock(lock: *Mutex @ address)
         -> ProcessCloneVmGuard[address] {
     return view ProcessCloneVmGuard[address];
 }
 
 fn process_clone_vm_unlock(guard: sink ProcessCloneVmGuard[address],
-                           lock: *i32 @ address) {}
+                           lock: *Mutex @ address) {}
 
 fn process_clone_vm_owner_drop(owner: sink ProcessCloneVmOwner) {}
 

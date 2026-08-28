@@ -81,6 +81,7 @@ use "kernel/mm/page.tkb";
 use "kernel/lib/pool_lock.tkb";
 use "kernel/lib/intrusive_pool.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/lib/mutex.tkb";
 
 let mut our_mac: [u8; 6];
 
@@ -210,7 +211,7 @@ struct TcpConnection {
     // zero nor fresh, and the language's empty state for such a field is
     // an inherited zero tag (issue #369). That is checked, not remembered
     // -- plain insert does not compile for this T.
-    private frames_mutex: i32;
+    private frames_mutex: Mutex;
     private tx: FrameLink;
     private rx: FrameLink;
     private inetd: FrameLink;
@@ -321,7 +322,7 @@ variant RetxLink {
 // and step 5 left no index to encode), and `next`, which is what removes
 // the ceiling.
 struct RetxEntry {
-    private mutex: i32;
+    private mutex: Mutex;
     private next: RetxLink;
     connection: usize;
     kind: PendingTcpKind;
@@ -339,7 +340,7 @@ struct RetxEntry {
 // same way tcp_connection_store wraps its own: a struct carrying the
 // mutex its stable_replace needs.
 struct RetxChain {
-    private mutex: i32;
+    private mutex: Mutex;
     private head: RetxLink;
 }
 
@@ -431,11 +432,11 @@ private let mut tcp_frame_pool_ready: bool = false;
 // address 0 maps to. Every arrival is logged.
 private let mut tcp_frame_absent_fallback: [u8; 1514];
 
-fn tcp_frame_lock(m: *i32 @ address) -> FrameGuard[address] {
+fn tcp_frame_lock(m: *Mutex @ address) -> FrameGuard[address] {
     return view FrameGuard[address];
 }
 
-fn tcp_frame_unlock(guard: sink FrameGuard[address], m: *i32 @ address) {}
+fn tcp_frame_unlock(guard: sink FrameGuard[address], m: *Mutex @ address) {}
 
 // Give a parked frame back. #370's cost in full: the handle came out of a
 // stable slot, so its brand is existential, and intrusive_pool_remove
@@ -1081,11 +1082,11 @@ fn kernel_tcp_restore_stream_policy() {
     tcp_ack_each_stream_segment = false;
 }
 
-fn retx_lock(m: *i32 @ address) -> RetxGuard[address] {
+fn retx_lock(m: *Mutex @ address) -> RetxGuard[address] {
     return view RetxGuard[address];
 }
 
-fn retx_unlock(guard: sink RetxGuard[address], m: *i32 @ address) {}
+fn retx_unlock(guard: sink RetxGuard[address], m: *Mutex @ address) {}
 
 // Detach the whole queue. Every walk below is "take the chain, decide
 // entry by entry, put back what survives", rather than unlinking a node

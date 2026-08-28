@@ -17,6 +17,7 @@
 // through this single store.
 //
 use "kernel/lib/execution_model.tkb";
+use "kernel/lib/mutex.tkb";
 
 variant NetworkCapabilityValue {
     Empty;
@@ -24,7 +25,7 @@ variant NetworkCapabilityValue {
 }
 
 struct NetworkCapabilityStore {
-    private mutex: i32;
+    private mutex: Mutex;
     private value: NetworkCapabilityValue;
 }
 
@@ -43,13 +44,13 @@ must_use variant NetworkCapabilityTakeResult {
 
 must_use variant NetworkCapabilityPutResult { Stored; Conflict; }
 
-fn network_capability_lock(lock: *i32 @ address)
+fn network_capability_lock(lock: *Mutex @ address)
         -> NetworkCapabilityGuard[address] {
     return view NetworkCapabilityGuard[address];
 }
 
 fn network_capability_unlock(guard: sink NetworkCapabilityGuard[address],
-                             lock: *i32 @ address) {}
+                             lock: *Mutex @ address) {}
 
 fn network_capability_install(ready: sink NetRxCanAcquire)
         -> NetworkCapabilityInstallResult {

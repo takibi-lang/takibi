@@ -1,0 +1,105 @@
+// GitHub issue #451: the kernel's lock, as a type rather than as six
+// anonymous integers.
+//
+// Six containers carried `private mutex: i32` and a guard that emitted no
+// instruction. The integer was never checked to be a lock, was never the
+// width an atomic operates on, and said nothing about what it protected.
+// This is the one definition all of them share.
+//
+// WHY A STRUCT AND NOT A `usize`
+//
+// Three things, none of which a bare integer can do:
+//
+//   1. The width is structural. An atomic exchange in this language is
+//      usize-wide; a 4-byte field would have had the exchange write over
+//      whatever sat beside it. `Mutex` is usize-sized by construction, so
+//      that class of bug cannot be reintroduced by a field declaration.
+//   2. `*Mutex` is a type a reader can check. GitHub issue #396 is that a
+//      slot address, a payload address and a lock word are all `usize`;
+//      this is one of them saying which it is.
+//   3. It has somewhere to grow. GitHub issue #449 settled that masking
+//      DAIF.I is a giant lock as far as interrupt latency is concerned --
+//      right today with one core and no nested interrupts, wrong once
+//      interrupts have priorities. The fix is a per-lock LEVEL raising
+//      ICC_PMR_EL1 instead, which is what NetBSD's IPL is. Adding
+//      `private level: usize` here is a one-place change; adding it to a
+//      bare `usize` lock word would have been a change at every call site.
+//
+// Current limitations (2026-08-28). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none, since it
+// invites relying on a guarantee that quietly stopped holding.
+// - ONE CLASS, AND EVERY LOCK IS IN IT. GitHub issue #449 decided that
+//   whether a handler may take a lock is a property OF THE LOCK, and that
+//   the distinction needs somewhere to live before there are two classes.
+//   There is one today: every Mutex masks interrupts, so every Mutex is
+//   interrupt-takeable. Nothing here records or checks a class, because
+//   there is nothing yet to distinguish.
+// - NO LEVEL. See point 3 above. Acquiring masks every interrupt, not the
+//   ones that could contend, so interrupt latency is bounded by the
+//   LONGEST critical section in the kernel rather than by the ones a given
+//   handler could actually collide with.
+// - NO OWNER, NO RECURSION COUNT. Taking the same Mutex twice on one core
+//   hangs and this cannot tell that from waiting for another core. Lock
+//   ORDER across call sites is checked by
+//   linux_user/intrusive_pool/pool_lock_check.tkb, in the tier that can
+//   afford to look.
+// - THE GUARD IS THE CALLER'S. mutex_acquire hands back the interrupt
+//   state and nothing here makes returning it mandatory. What makes it
+//   mandatory is the caller holding it in a linear struct -- see
+//   IntrusivePoolGuard, and the guards issue #451 converts.
+use "kernel/lib/spinlock.tkb";
+use "kernel/arch/arm64/boot/cpu.tkb";
+
+// One field, at offset 0, which is what makes `m as usize` the address of
+// the word the atomic operates on. `--emit-struct-layout Mutex` says so.
+struct Mutex { private word: usize; }
+
+// Bit 7 of DAIF is the I (IRQ) mask.
+const MUTEX_DAIF_IRQ_BIT: usize = 7;
+
+// Free. Call once, before the Mutex is reachable by anything else.
+fn mutex_init(m: *Mutex @ id) {
+    // Every function below reaches the word through `m as usize`, which is
+    // the word's address only because the word is the first field. That is
+    // an accidental-looking property with a real reader, so it is checked
+    // rather than assumed (GitHub issue #396's shape, and the sort of thing
+    // a later field added at the top would silently break).
+    static_assert(offsetof(Mutex, word) == 0,
+                  "Mutex.word must be first: `m as usize` is the atomic's address");
+    m.word = 0;
+}
+
+// Takes it, and returns the interrupt state a matching release must
+// restore: 1 if IRQs were already masked, 0 if they were enabled.
+//
+// MASK, THEN TAKE. The other order leaves a window where this core holds
+// the lock and an interrupt can arrive, and a handler wanting the same
+// lock then waits for a holder that cannot run until the handler returns
+// -- a hang, not a delay. That ordering is the entire reason an interrupt
+// handler may take one of these at all (GitHub issue #449).
+fn mutex_acquire(m: *Mutex @ id) -> usize !{unsafe} {
+    let flags: usize = (mrs_daif() >> MUTEX_DAIF_IRQ_BIT) & 1;
+    disable_irq();
+    spin_lock(m as usize);
+    return flags;
+}
+
+// Gives it back, then restores what the matching acquire found. Enables
+// ONLY if this acquire is the one that masked, which is what makes the
+// pair correct inside an interrupt handler (DAIF.I is already set on
+// entry, so the release leaves it set) and correct when two are nested.
+fn mutex_release(m: *Mutex @ id, flags: usize) !{unsafe} {
+    spin_unlock(m as usize);
+    if (flags == 0) { enable_irq(); }
+}
+
+// One attempt, without masking. For a caller that has something else to do
+// rather than wait -- and for proving the exclusion single-threaded, which
+// is the only way to observe it without a second core.
+fn mutex_trylock(m: *Mutex @ id) -> bool !{unsafe} {
+    return spin_trylock(m as usize);
+}
+
+fn mutex_is_held(m: *Mutex @ id) -> bool !{unsafe} {
+    return spin_lock_is_held(m as usize);
+}

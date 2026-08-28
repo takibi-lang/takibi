@@ -9,6 +9,7 @@ use "kernel/kernel/process_test_evidence.tkb";
 // records; mmu.tkb itself sees only resolved physical addresses and ASIDs.
 use "kernel/mm/address_space.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/lib/mutex.tkb";
 
 // Current limitations (2026-08-13, issue #295). Keep this list current as
 // call sites change; a limitation that goes stale here is worse than
@@ -330,20 +331,20 @@ variant SpareStackRunValue {
 }
 
 struct SpareStackRunCell {
-    private mutex: i32;
+    private mutex: Mutex;
     private value: SpareStackRunValue;
 }
 
 private let mut scheduled_process_spare: SpareStackRunCell;
 private linear view SpareStackRunGuard[lock: addr];
 
-private fn scheduled_process_spare_lock(lock: *i32 @ address)
+private fn scheduled_process_spare_lock(lock: *Mutex @ address)
         -> SpareStackRunGuard[address] {
     return view SpareStackRunGuard[address];
 }
 
 private fn scheduled_process_spare_unlock(
-        guard: sink SpareStackRunGuard[address], lock: *i32 @ address) {}
+        guard: sink SpareStackRunGuard[address], lock: *Mutex @ address) {}
 
 // The deepest a REAPED process's kernel stack ever got. The array this
 // replaces kept every slot's run for the life of the kernel, so the

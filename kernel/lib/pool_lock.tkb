@@ -44,7 +44,7 @@
 // the handler's value and leave interrupts masked for good. Per-guard
 // state has no such window and needs no depth counter.
 use "kernel/arch/arm64/boot/cpu.tkb";
-use "kernel/lib/spinlock.tkb";
+use "kernel/lib/mutex.tkb";
 
 // Bit 7 of DAIF is the I (IRQ) mask.
 const DAIF_IRQ_BIT: usize = 7;
@@ -57,18 +57,14 @@ const DAIF_IRQ_BIT: usize = 7;
 // dropping it from the signature -- a stand-in whose shape differs from
 // the real thing stops catching drift. `lock` is the address of that
 // pool's own lock word, which is the half a tag cannot supply.
-fn pool_lock_acquire(tag: usize, lock: usize) -> usize !{unsafe} {
-    let flags: usize = (mrs_daif() >> DAIF_IRQ_BIT) & 1;
-    disable_irq();
-    spin_lock(lock);
-    return flags;
+fn pool_lock_acquire(tag: usize, lock: *Mutex @ id) -> usize !{unsafe} {
+    return mutex_acquire(lock);
 }
 
 // Gives the lock back, then restores what the matching acquire found.
 // Enables ONLY if this acquire is the one that masked -- never
 // unconditionally, which is the whole difference between this and a bare
 // enable_irq().
-fn pool_lock_release(tag: usize, lock: usize, flags: usize) !{unsafe} {
-    spin_unlock(lock);
-    if (flags == 0) { enable_irq(); }
+fn pool_lock_release(tag: usize, lock: *Mutex @ id, flags: usize) !{unsafe} {
+    mutex_release(lock, flags);
 }
