@@ -2370,6 +2370,21 @@ private fn kernel_process_switch_to(from: ProcessHandle, to: ProcessHandle,
         return current_sp;
     }
     execution_here().current_handle = to;
+    // GitHub issue #448: the incoming process starts a WHOLE quantum here,
+    // rather than inheriting whatever is left of the outgoing one's.
+    //
+    // Without this the timer is periodic and a switch that does NOT
+    // originate from it -- the deferred kind, taken at syscall return
+    // because the tick landed at EL1 -- hands the incoming process only
+    // the remainder of the current period. That is not noise: it is
+    // systematic, because which process follows a syscall-heavy one in the
+    // rotation is a property of the tree, not of luck. Measured with two
+    // identical CPU-bound processes under a busy-looping PID 1, one got
+    // 21.5M counter ticks and the other 9.4M -- 2.3x -- from an equal
+    // number of selections (21 versus 18). Re-arming here made the same
+    // measurement 21562176 versus 21563097.
+    timer_tick_rearm();
+    workload_busy_note_selected(scheduled_process_pid_of_handle(to));
     kernel_process_trace_handle(ProcessTraceSchedule, to, from, 0);
     process_image_activate_root(to.pool_index);
     kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
@@ -2518,6 +2533,23 @@ fn kernel_process_current_has_live_child() -> bool {
     return execution_here().current_live &&
            kernel_process_has_live_child_of(
                execution_here().current_handle.pool_index);
+}
+
+// Is there another process the scheduler could pick right now?
+//
+// GitHub issue #448: this is what a syscall about to wait for a device has
+// to ask before it waits INSIDE the kernel. The UART read path used to ask
+// "do I have a live child" instead, and answered "no" for an interactive
+// shell sitting at its prompt -- true, and the wrong question, because the
+// shell's SIBLINGS were runnable and got nothing while the kernel span at
+// EL1 waiting for a keystroke. Kernel mode does not preempt, so that spin
+// is the whole machine.
+fn kernel_process_other_ready() -> bool {
+    if (execution_here().current_live == false) { return false; }
+    match kernel_process_next_ready(execution_here().current_handle) {
+        ProcessNextReadyResult::Missing => { return false; }
+        ProcessNextReadyResult::Next(next) => { return true; }
+    }
 }
 
 fn kernel_process_current_has_relative() -> bool {
@@ -3340,6 +3372,38 @@ fn kernel_process_uart_wake(value: usize)
                     found = true;
                 }
                 ancestor = candidate;
+            }
+        }
+    }
+    // GitHub issue #448: last, the rest of the tree.
+    //
+    // The two searches above cover a waiter that is below current or above
+    // it. A waiter that is neither -- current's SIBLING, or anything under
+    // one -- was simply not looked for, because until an inittab started
+    // more than one thing there was nothing else for a process to be. The
+    // interactive shell is exactly that now: a `respawn` entry beside two
+    // busy loops, so every keystroke arrives while a sibling is running.
+    //
+    // Same pre-order walk the scheduler rotates through, so "reachable by
+    // the walk" means the same thing in both places. Kept as a FALLBACK
+    // rather than a replacement: with two waiters the child-then-ancestor
+    // order above is the behaviour every existing fixture was recorded
+    // against, and this only decides cases that used to drop the byte.
+    if (found == false) {
+        let mut root: ProcessHandle =
+            kernel_process_chain_root(execution_here().current_handle);
+        let mut cursor: ProcessHandle = root;
+        let mut steps: usize = scheduled_process_pool_live_count() + 1;
+        while (steps != 0 && found == false) {
+            steps = steps - 1;
+            if (scheduled_process_record_state(cursor.pool_index) ==
+                    ProcessSlotState::Blocked &&
+                scheduled_process_record_wait_reason(cursor.pool_index) ==
+                    ProcessWaitReason::UartRx) {
+                waiter = cursor;
+                found = true;
+            } else {
+                cursor = kernel_process_next_successor(cursor, root);
             }
         }
     }

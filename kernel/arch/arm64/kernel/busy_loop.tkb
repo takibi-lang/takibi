@@ -1,0 +1,62 @@
+/* The two CPU-bound EL0 programs /etc/inittab starts as `respawn` entries,
+ * built from this one source and linked twice with different ELF entry
+ * points (-e busy_loop_a, -e busy_loop_b; see the Makefile's
+ * KERNEL_BUSY_LOOP_A_ELF/_B_ELF rules) so that /bin/busy-a and /bin/busy-b
+ * are two independent images with no argv parsing between them and the tag
+ * they report under.
+ *
+ * Why a busy loop and not a realistic service: everything else this kernel
+ * runs is I/O-bound and spends its time blocked, so a second core would sit
+ * idle behind it and the fixture would pass without saying anything about
+ * concurrency. Two loops that only compute make the scheduler the only
+ * variable, and the fairness between them is directly measurable.
+ *
+ * The work is a xorshift chain rather than an empty countdown for two
+ * reasons: it cannot be folded away (each step depends on the last, and the
+ * result leaves the process through the syscall below), and it uses only
+ * shifts and xors, so no step can overflow.
+ *
+ * Like kernel/arch/arm64/kernel/user_payload.tkb, this links into a real
+ * static-PIE ELF with no writable globals -- scripts/
+ * check_user_payload_no_rw_globals.py enforces that, and every value here
+ * lives in a local for that reason.
+ */
+
+const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
+const WORKLOAD_EXIT_SYSCALL: usize = 93;
+const BUSY_LOOP_TAG_A: usize = 1;
+const BUSY_LOOP_TAG_B: usize = 2;
+
+/* One round of work. Sized so a round spans several scheduler timer slices
+ * (the tick is cntfrq/64, about a millisecond on both maintained targets),
+ * which is what keeps the two processes within about one round of each
+ * other under a rotating scheduler -- a round much shorter than a slice
+ * would let whichever process holds the CPU finish many of them at once and
+ * make the skew a property of the slice length rather than of fairness. */
+const BUSY_LOOP_ROUND_STEPS: usize = 16000000;
+
+/* xorshift64 seeded per tag, so the two processes do the same amount of
+ * work along different value sequences. */
+fn busy_loop_a() { busy_loop_run(BUSY_LOOP_TAG_A); }
+
+fn busy_loop_b() { busy_loop_run(BUSY_LOOP_TAG_B); }
+
+fn busy_loop_run(tag: usize) {
+    let mut state: usize = 0x9E3779B97F4A7C15 ^ tag;
+    let mut done: usize = 0;
+    /* Runs until the kernel says the measurement is complete, then keeps
+     * running with nothing left to report. A CPU-bound workload that
+     * stopped being CPU-bound would stop being the thing a second core is
+     * measured against; what is bounded here is the REPORTING, which is
+     * what keeps the boot's UART capture finite. */
+    while (true) {
+        for step: usize in 0..<BUSY_LOOP_ROUND_STEPS {
+            state = state ^ (state << 13);
+            state = state ^ (state >> 7);
+            state = state ^ (state << 17);
+        }
+        if (done == 0) {
+            done = svc5(WORKLOAD_PROGRESS_SYSCALL, tag, state, 0, 0, 0);
+        }
+    }
+}

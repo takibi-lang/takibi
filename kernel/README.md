@@ -76,14 +76,23 @@ The current RPi5 kernel includes:
 - an ext2 root filesystem containing reproducibly pinned Alpine BusyBox,
   BusyBox Extras, and the matching musl interpreter without committing those
   GPL binaries;
+- a CPU-bound workload that occupies the scheduler rather than waiting on a
+  device: `/etc/inittab` starts `/bin/busy-a` and `/bin/busy-b` as two
+  `respawn` entries, each looping on arithmetic and reporting a finished
+  round to the kernel, which measures how far ahead of the other either one
+  ever got and reports both processes' CPU time;
 - one-boot integration views that independently compare boot, VM, process,
-  syscall, filesystem, USB, Ethernet, BusyBox, and HTTPd evidence.
+  syscall, filesystem, USB, Ethernet, BusyBox, HTTPd, and workload-fairness
+  evidence.
 
 The rootfs keeps executable files under `/bin`: Alpine's original
 `busybox.static` and `busybox-extras` names identify the two real binaries;
 `sh`, `cat`, `echo`, `ls`, `od`, and `uname` are hard links to the static
 binary, while `httpd` is a hard link to BusyBox Extras. The independent
-Takibi test program is `/bin/user_payload`. Shell scripts are ordinary
+Takibi test programs are `/bin/user_payload` (the EL0 syscall-ABI fixture)
+and the pair `/bin/busy-a`/`/bin/busy-b`, which are the same object linked
+twice with different ELF entry points so each knows which `respawn` entry it
+is without parsing `argv`. Shell scripts are ordinary
 executables here: a script's first line names its interpreter and `execve`
 resolves it, so `/bin` also holds `httpd-serve.sh` (the browser demo as one
 command) and `script-interpreter-argument.sh` (a fixture pinning `#!` argv
@@ -755,9 +764,19 @@ run, not a specification.
   runnable. A process therefore
   keeps its turn even when the process next to it is blocked -- which is what
   a shell script that starts a background daemon needs, since it parks a
-  `wait4` between the interactive shell and the daemon. UART `read(2)`
+  `wait4` between the interactive shell and the daemon. Each switch re-arms
+  the scheduler tick, so the incoming process starts a whole quantum rather
+  than inheriting the remainder of the outgoing one's -- without that, a
+  switch taken at syscall return (because the tick landed inside a syscall)
+  systematically shortchanged whichever process follows a syscall-heavy one
+  in the rotation, measured at 2.3x between two identical CPU-bound
+  processes. UART `read(2)`
   blocks and wakes on received input, sufficient for the foreground
-  interactive BusyBox ash REPL; there is no controlling-TTY job control.
+  interactive BusyBox ash REPL; there is no controlling-TTY job control. A
+  process waiting for UART input yields whenever anything else is runnable,
+  and the arriving byte is delivered to the waiter wherever it sits in the
+  process tree, including a sibling's; only when nothing else can run does
+  the kernel wait for the byte in place.
 - **Signals.** Signal state is recorded honestly, but no signal is ever
   delivered, so an installed handler is never invoked.
 - **Memory.** `mmap` is anonymous-only through a heap-break cursor rather
@@ -771,6 +790,13 @@ run, not a specification.
 - **`ppoll`.** Blocks and wakes on UART RX for the single-descriptor stdin
   shape BusyBox ash's `read` builtin uses. Any other shape reports current
   readiness immediately, and a non-NULL timeout is never armed.
+- **Waiting for the network happens inside the kernel.** `accept` and the
+  TCP receive path wait for a frame in a bounded in-kernel loop rather than
+  blocking the calling process. Since kernel mode does not preempt, every
+  other process stops for the duration -- so a daemon idling in `accept`
+  with nothing connecting freezes the machine until its timeout expires.
+  This is why the QEMU and RPi5 runners take the busy-pair fairness
+  measurement before starting the interactive HTTPd demo.
 - Unrecognized Linux calls return `-ENOSYS`.
 
 Filesystem, TCP, process, and VM features continue to be added only when an

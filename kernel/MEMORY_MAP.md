@@ -75,21 +75,21 @@ build; the boundaries are what matter.
 | Symbol | RPi5 | QEMU `virt` | Defined by | State |
 |---|---|---|---|---|
 | `_start` | `0x00200000` | `0x40000000` | linker script `.` assignment | CHECKED (ELF) |
-| `__bss_start` | `0x0054f000` | `0x4034e000` | linker script `.bss` | CHECKED (ELF) |
-| `__bss_end` | `0x00a30030` | `0x40836ce0` | linker script `.bss` | CHECKED (ELF) |
-| `boot_stack_run_bottom` | `0x00a38000` | `0x40838000` | linker script `.stack` | CHECKED (ELF) |
-| `boot_stack_bottom` | `0x00a3c000` | `0x4083c000` | linker script `.stack` | CHECKED (ELF) |
-| `boot_stack_top` | `0x00a40000` | `0x40840000` | linker script `.stack` | CHECKED (ELF) |
-| `secondary_stack_run_bottom` | `0x00a40000` | `0x40840000` | linker script `.stack` | CHECKED (ELF) |
-| `secondary_stack_bottom` | `0x00a44000` | `0x40844000` | linker script `.stack` | CHECKED (ELF) |
-| `secondary_stack_top` | `0x00a48000` | `0x40848000` | linker script `.stack` | CHECKED (ELF) |
-| `overflow_stack_run_bottom` | `0x00a48000` | `0x40848000` | linker script `.stack` | CHECKED (ELF) |
-| `overflow_stack_bottom` | `0x00a4c000` | `0x4084c000` | linker script `.stack` | CHECKED (ELF) |
-| `overflow_stack_top` | `0x00a50000` | `0x40850000` | linker script `.stack` | CHECKED (ELF) |
-| `irq_stack_run_bottom` | `0x00a50000` | `0x40850000` | linker script `.stack` | CHECKED (ELF) |
-| `irq_stack_bottom` | `0x00a54000` | `0x40854000` | linker script `.stack` | CHECKED (ELF) |
-| `irq_stack_top` | `0x00a58000` | `0x40858000` | linker script `.stack` | CHECKED (ELF) |
-| `usable_ram_start` | `0x00a58000` | `0x40858000` | linker script, `ALIGN(4096)` | CHECKED (ELF) |
+| `__bss_start` | `0x004d0000` | `0x402cf000` | linker script `.bss` | CHECKED (ELF) |
+| `__bss_end` | `0x009cd030` | `0x407d2ec0` | linker script `.bss` | CHECKED (ELF) |
+| `boot_stack_run_bottom` | `0x009d0000` | `0x407d8000` | linker script `.stack` | CHECKED (ELF) |
+| `boot_stack_bottom` | `0x009d4000` | `0x407dc000` | linker script `.stack` | CHECKED (ELF) |
+| `boot_stack_top` | `0x009d8000` | `0x407e0000` | linker script `.stack` | CHECKED (ELF) |
+| `secondary_stack_run_bottom` | `0x009d8000` | `0x407e0000` | linker script `.stack` | CHECKED (ELF) |
+| `secondary_stack_bottom` | `0x009dc000` | `0x407e4000` | linker script `.stack` | CHECKED (ELF) |
+| `secondary_stack_top` | `0x009e0000` | `0x407e8000` | linker script `.stack` | CHECKED (ELF) |
+| `overflow_stack_run_bottom` | `0x009e0000` | `0x407e8000` | linker script `.stack` | CHECKED (ELF) |
+| `overflow_stack_bottom` | `0x009e4000` | `0x407ec000` | linker script `.stack` | CHECKED (ELF) |
+| `overflow_stack_top` | `0x009e8000` | `0x407f0000` | linker script `.stack` | CHECKED (ELF) |
+| `irq_stack_run_bottom` | `0x009e8000` | `0x407f0000` | linker script `.stack` | CHECKED (ELF) |
+| `irq_stack_bottom` | `0x009ec000` | `0x407f4000` | linker script `.stack` | CHECKED (ELF) |
+| `irq_stack_top` | `0x009f0000` | `0x407f8000` | linker script `.stack` | CHECKED (ELF) |
+| `usable_ram_start` | `0x009f0000` | `0x407f8000` | linker script, `ALIGN(4096)` | CHECKED (ELF) |
 
 `stack_top` is an alias of `boot_stack_top`, kept because `entry.S` names
 it. `irq_stack_top` and `usable_ram_start` are the same address: `.stack`

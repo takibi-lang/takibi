@@ -15,6 +15,81 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-08-28: a workload that occupies the scheduler, and the three N=1 assumptions it found (#448)
+
+Until now every fixture in this kernel was I/O-bound: it blocked on UART, on
+a socket, or on a child, so it spent its time not running and could say
+nothing about who the scheduler picks when two things both want the CPU.
+`#448` asked for the missing piece -- a pair of CPU-bound processes started
+from `/etc/inittab` as `respawn` entries, with a fairness assertion, passing
+on ONE core, so that anything that breaks after a second core is enabled is
+provably a concurrency defect rather than a workload defect.
+
+The workload itself is small: `kernel/arch/arm64/kernel/busy_loop.tkb` is one
+source compiled once and linked twice with different ELF entry points
+(`-e busy_loop_a`, `-e busy_loop_b`) so `/bin/busy-a` and `/bin/busy-b` are
+separate static-PIE images that need no `argv` parsing to know which entry
+they are. Each loops on xorshift64 -- chosen because it cannot be folded away
+and no step can overflow -- and reports a finished round through a new
+Takibi-internal syscall (453). `kernel/kernel/workload_evidence.tkb` counts
+rounds per tag, measures the SKEW (how far ahead of the other either one ever
+got, over the interval where both were alive), and prints one fixed verdict
+line a view matches exactly plus one measurement line carrying the numbers
+that are machine-dependent. Skew rather than round counts, because a round
+count is a property of the machine and no fixture could pin it.
+
+Getting that to pass took three separate discoveries, each an N=1 assumption
+that was true while a process could have one child and nothing else existed
+beside it.
+
+**1. One clone in flight.** Two `respawn` entries would not even start: the
+second `fork()` returned `-EAGAIN` and BusyBox init reported "can't fork" --
+and never retries an entry whose fork failed, so that entry was gone for the
+life of the boot. The cause was a global singleton in
+`kernel/mm/process_image.tkb`: a mutex-guarded store holding one linear
+`ProcessCloneVmOwner`, plus `clone_source_root`/`clone_dest_root`/
+`clone_page_count` beside it. `init` forks its entries back to back and this
+kernel does not suspend a `vfork` parent, so the second fork arrived while the
+first child had not yet `execve`d. The state moved into the destination's own
+`ProcessImageRecord`, exactly as #392 moved the parked exec image there, and
+`process_image_clone_vm_reap` now names the root it is reaping.
+
+**2. The scheduler tick was not re-armed on a context switch.** With the pair
+finally running, they were not running equally: 21.5M counter ticks of CPU
+against 9.4M -- 2.3x -- from a nearly equal number of selections (21 against
+18). The tick is periodic, so a switch that does NOT originate from it (the
+deferred kind, taken at syscall return because the tick landed at EL1) handed
+the incoming process only the remainder of the current period. That is
+systematic rather than noise, because which process follows a syscall-heavy
+one in the rotation is a property of the tree. `kernel_process_switch_to`
+re-arms the tick; the same measurement then read 21562176 against 21563097.
+The bug had been there all along and no fixture could see it, because no two
+processes had ever wanted the CPU at the same time.
+
+**3. A UART waiter with no child waited inside the kernel.** With the pair
+running and the interactive ash also present, the machine stopped entirely
+whenever no keystroke was in flight -- 120 PC samples over the gdbstub landed
+100% in kernel scheduler/pool code and none in EL0. The read path asked "do I
+have a live child?" before blocking, and answered "no" for a shell sitting at
+its prompt, falling through to an EL1 `wfe`/retry loop. Kernel mode does not
+preempt, so that loop is the whole machine. It asks
+`kernel_process_other_ready()` now, and `kernel_process_uart_wake` gained a
+whole-tree fallback so the arriving byte reaches a waiter that is a SIBLING of
+whatever is running -- which is what an inittab with three entries makes
+normal. The in-kernel wait remains for the case the old question was really
+about: nobody else to run.
+
+A fourth is filed rather than fixed: `accept` and the TCP receive path wait
+for a frame in a bounded in-kernel loop, so a daemon idling in `accept` with
+nothing connecting freezes every other process until its 30-second timeout
+expires. The QEMU and RPi5 runners therefore take the fairness measurement
+before starting the interactive HTTPd demo, and `run_kernel_uart_driver.py`
+gained a `--workload-marker` for that ordering.
+
+Found-by: test -- a two-entry `/etc/inittab` refused to start its second
+entry; the two scheduler defects behind it were found only once the first was
+fixed and two CPU-bound processes could finally run side by side.
+
 ## 2026-08-27: per-CPU diagnostic events reached DDB (#440)
 
 The first kernel integration of the ftrace-inspired, Takibi-specific

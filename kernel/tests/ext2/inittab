@@ -1,2 +1,4 @@
 ::sysinit:/etc/init.sh
+::respawn:/bin/busy-a
+::respawn:/bin/busy-b
 ::respawn:/bin/sh -i

@@ -9,6 +9,7 @@ use "kernel/net/tcp.tkb";
 use "kernel/kernel/fd_table.tkb";
 use "kernel/kernel/syscall_test_evidence.tkb";
 use "kernel/kernel/syscall_test_lifecycle.tkb";
+use "kernel/kernel/workload_evidence.tkb";
 use "kernel/lib/execution_model.tkb";
 
 // Current limitations (2026-08-26). Keep this list current as
@@ -64,6 +65,7 @@ const AARCH64_NR_WAIT4: usize = 260;
 const AARCH64_NR_FCNTL: usize = 25;
 const AARCH64_NR_TAKIBI_UART_RX_WAIT: usize = 451;
 const AARCH64_NR_TAKIBI_PARENT_PROGRESS: usize = 452;
+const AARCH64_NR_TAKIBI_WORKLOAD_PROGRESS: usize = 453;
 const LINUX_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
 const LINUX_EFAULT: usize = 0xFFFFFFFFFFFFFFF2;
 const LINUX_ENOSYS: usize = 0xFFFFFFFFFFFFFFDA;
@@ -1590,7 +1592,18 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
                             "\ninteractive shell: uart blocked\n");
                     }
                 }
-                if (kernel_process_current_has_live_child()) {
+                // GitHub issue #448: block whenever ANYTHING else could
+                // run, not only when this process has a child. The old
+                // question was the right one while a process could have
+                // one child and nothing else existed beside it; with an
+                // /etc/inittab that starts three entries, an interactive
+                // shell waiting at its prompt has no child and two
+                // runnable siblings, and answering "no" here left the
+                // kernel spinning at EL1 for the whole wait -- which, in a
+                // kernel that does not preempt kernel mode, stops every
+                // other process too. WaitUart below stays for the case
+                // that question was really about: nobody else to run.
+                if (kernel_process_other_ready()) {
                     let process_slot: usize = kernel_syscall_process_slot();
                     if (scheduled_process_slot_valid(process_slot)) {
                         scheduled_process_set_uart_block_delivery(
@@ -1669,7 +1682,13 @@ fn kernel_syscall_exit_current_process(status: usize) -> SyscallAction {
         }
         if (kernel_process_exec_image_live_for_pid(
                 kernel_process_current_pid()) == false) {
-            match process_image_clone_vm_reap() {
+            // GitHub issue #448: the clone being given back is the one made
+            // INTO this exiting process's own root, which it now has to
+            // name -- there is no longer a single clone in flight for the
+            // kernel to have meant implicitly.
+            let exiting_root: usize =
+                address_space_root_slot(kernel_process_current_root());
+            match process_image_clone_vm_reap(exiting_root) {
                 ProcessCloneVmReapResult::Missing => {
                     return SyscallAction::Unreachable;
                 }
@@ -2002,6 +2021,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         kernel_process_current_set_pending_block(
             ProcessWaitReason::UartRx, 0);
         return SyscallAction::Block;
+    }
+
+    // The busy pair /etc/inittab starts reports a finished round here.
+    // x0 names which of the two entries is speaking; the caller's identity
+    // and the fairness arithmetic are kernel/kernel/workload_evidence.tkb's,
+    // and the non-zero answer is that file telling the caller the
+    // measurement is over.
+    if (number == AARCH64_NR_TAKIBI_WORKLOAD_PROGRESS) {
+        return SyscallAction::Resume(workload_busy_record_progress(x0));
     }
 
     if (number == AARCH64_NR_TAKIBI_PARENT_PROGRESS) {
@@ -3518,7 +3546,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         match kernel_syscall_clone_files_begin(
                                 parent_slot, child_slot) {
                             UnifiedFdResult::Invalid => {
-                                match process_image_clone_vm_reap() {
+                                match process_image_clone_vm_reap(child_slot) {
                                     ProcessCloneVmReapResult::Missing => {}
                                     ProcessCloneVmReapResult::Reaped => {}
                                 }

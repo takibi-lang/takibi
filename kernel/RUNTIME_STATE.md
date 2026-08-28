@@ -111,11 +111,9 @@ per-root `ProcessImageRecord` array of #258/#264 is now pooled, keyed by a
 handle in `ProcessRecord`; `process_image_exec_stores`, the per-root
 parking lot for a linear exec image, is gone the same way
 `tcp_connection_store` went -- the root's own record holds what the reap
-path asks of an installed image), `process_clone_vm_store`,
-the ext2-image-loading staging fields
-(`process_image_ext2_*`/`process_image_pair_ext2_*`), the in-flight-clone
-scalars (`clone_page_count`/`clone_last_reaped_count`/`clone_source_root`/
-`clone_dest_root`); `mm/address_space.tkb`'s
+path asks of an installed image), the ext2-image-loading staging fields
+(`process_image_ext2_*`/`process_image_pair_ext2_*`), and
+`clone_last_reaped_count`; `mm/address_space.tkb`'s
 `address_space_backing_pool`/`_ready`, its counted fallback pair
 `address_space_backing_missing`/`_count`, the static
 `address_space_backing_root0`, and `address_space_active_slot`;
@@ -126,10 +124,15 @@ scalars (`clone_page_count`/`clone_last_reaped_count`/`clone_source_root`/
 `ProcessImageRecord`'s own header comment states the "one managed
 thing, one struct" rule this file already follows (a future
 per-address-space field belongs in the struct, not a new parallel
-array). The clone-in-flight scalars are singleton by design (this
-kernel supports exactly one clone operation in flight at a time,
-matching `process_clone_vm_store`'s own single-in-flight-clone
-protocol -- see that struct's header). The physical pools
+array). What used to sit here and no longer does is the
+clone-in-flight group -- a mutex-guarded `process_clone_vm_store`
+holding one linear owner, plus a source root, a destination root and a
+page count. They were singleton by design, and the design was wrong:
+one clone in flight is a ceiling, not a fact, and a second `fork()`
+taken before the first child had `execve`d was refused with `-EAGAIN`.
+They live in the destination's own `ProcessImageRecord` now, following
+that struct's own rule. `clone_last_reaped_count` stayed, because it
+reports on the last reap rather than on a process. The physical pools
 (`boot_page_pool`, `asid_pool`) are genuinely global machine resources,
 already SlotMap-backed with explicit exhaustion results (see
 `RESOURCE_LIMITS.md`).
@@ -237,11 +240,16 @@ what a global provides.
 `init/test_driver.tkb` (the original precedent this whole pass followed),
 `kernel/kernel/process_test_evidence.tkb` (#303),
 `kernel/kernel/syscall_test_evidence.tkb` (#304),
-`kernel/kernel/syscall_test_lifecycle.tkb` (#307).
+`kernel/kernel/syscall_test_lifecycle.tkb` (#307),
+`kernel/kernel/workload_evidence.tkb` (the CPU-bound pair `/etc/inittab`
+starts, and the fairness and CPU-time numbers taken about it -- the one
+piece of this group the scheduler itself calls into, once per context
+switch, and the one that returns to its caller before reading a counter
+whenever the pair does not exist).
 
 **Why global:** test fixtures are inherently singleton within one boot
 (there is one QEMU/RPi5 integration run at a time). The point of these
-four files is that test-only state is now physically separated from
+five files is that test-only state is now physically separated from
 production state at the file level, satisfying #294's "test-only
 lifecycle state is clearly separated from ordinary kernel state"
 acceptance criterion -- not that it stopped being global.

@@ -54,16 +54,13 @@ fn process_image_pair_ext2_source_clear() {
     process_image_pair_ext2_inode = 0;
     process_image_pair_ext2_length = 0;
 }
-private let mut clone_page_count: usize;
+// GitHub issue #448: how many pages the LAST reap gave back, which is a
+// report about an event rather than about a process, so it stays here.
+// What used to sit beside it -- the source root, the destination root, and
+// the running page count of "the clone in flight" -- moved into the
+// destination's own ProcessImageRecord, because there is no longer one
+// clone in flight. See ProcessCloneVm* below for what that ceiling cost.
 private let mut clone_last_reaped_count: usize;
-// GitHub issue #245: the clone in flight (if any) copies from whichever
-// root was active when process_image_clone_vm_begin() was called into an
-// explicitly chosen destination root -- both stashed here since
-// process_image_clone_vm_reap() (and the rollback/growth-release helpers
-// it calls) take no parameters of their own, matching process_clone_vm_
-// store's own single-in-flight-clone design.
-private let mut clone_source_root: usize;
-private let mut clone_dest_root: usize;
 // GitHub issues #258 and #264: one persistent record per address-space
 // root, replacing the prior ProcessLayout table plus the separate flattened
 // growth-page array. Its scalar fields are ProcessLayout's former fields,
@@ -97,6 +94,38 @@ struct ProcessImageRecord {
     // parking lot is gone rather than pooled.
     exec_image_installed: bool;
     exec_image_page_count: usize;
+    // GitHub issue #448: the fork that produced this root, while it is
+    // still outstanding -- the pages copied into it are the parent's,
+    // shared copy-on-write, and stay owed back until this process execs
+    // (replacing them) or exits (releasing them).
+    //
+    // This was a global singleton: one `linear view` parked in a
+    // mutex-guarded store, plus a source root, a destination root and a
+    // page count beside it. That is an N=1 ceiling, and a second fork
+    // taken before the first child had exec'd got -EAGAIN. BusyBox init
+    // forks its `respawn` entries back to back, so a `/etc/inittab` with
+    // more than one of them failed at the second entry with "can't fork"
+    // -- and init never retries an entry whose fork failed, so that entry
+    // was simply gone for the life of the boot.
+    //
+    // Per-record for the same reason exec_image_installed above is: the
+    // thing owed back belongs to one process, so it is described by that
+    // process's own record rather than by a global that can only ever
+    // describe one of them.
+    //
+    // What that costs, stated plainly: the singleton could be a LINEAR
+    // owner, and linearity is what made "reaped exactly once" a compile
+    // error to get wrong. A flag is not that. The trade is not a
+    // preference -- an erased `linear view` cannot be tied to a runtime
+    // address, so there is no way to mint one proof per record and have
+    // the checker know which record it belongs to; the same wall the
+    // slot-overlay investigation hit. exec_image_installed above made the
+    // same trade for the same reason, and the detector that replaces the
+    // proof is also the same: the end-of-boot accounting fails if a page
+    // or a pooled record does not come back.
+    clone_vm_outstanding: bool;
+    clone_vm_source_root: usize;
+    clone_vm_page_count: usize;
 }
 
 // GitHub issue #392: pooled, not an array keyed by process slot. See
@@ -319,29 +348,6 @@ fn process_image_install_page(page: sink PageOwner[page_id],
     }
 }
 
-private linear view ProcessCloneVmOwner;
-variant ProcessCloneVmValue {
-    Empty;
-    Ready(ProcessCloneVmOwner);
-}
-struct ProcessCloneVmStore {
-    private mutex: Mutex;
-    private value: ProcessCloneVmValue;
-}
-private let mut process_clone_vm_store: ProcessCloneVmStore;
-// GitHub issue #451: a linear STRUCT, not an erased view any more.
-// A view emits nothing, so it could not carry the interrupt state a
-// release must restore -- and it did not need to while the lock itself
-// emitted nothing either. Now that mutex_acquire really masks and really
-// takes, `flags` is the frame slot Linux's own `unsigned long flags`
-// occupies, and holding it per-guard is what makes the pair correct
-// inside an interrupt handler (DAIF.I already set on entry, so release
-// leaves it set) and correct when two nest. Identity is unchanged:
-// `[lock: addr]` still makes another container's guard a compile error.
-private linear struct ProcessCloneVmGuard[lock: addr] {
-    private flags: usize;
-}
-
 must_use variant ProcessCloneVmResult { OutOfMemory; Copied; }
 must_use variant ProcessCloneVmReapResult { Missing; Reaped; }
 
@@ -428,61 +434,10 @@ fn process_stack_load_word(stack: borrow [u8; PROCESS_STACK_LAYOUT_BYTES..],
            ((stack[offset + 7] as u64) << 56);
 }
 
-fn process_clone_vm_lock(lock: *Mutex @ address)
-        -> ProcessCloneVmGuard[address] {
-    let mut guard: ProcessCloneVmGuard[address] = { mutex_acquire(lock) };
-    return guard;
-}
-
-fn process_clone_vm_unlock(guard: sink ProcessCloneVmGuard[address],
-        lock: *Mutex @ address) {
-    mutex_release(lock, guard.flags);
-}
-
-fn process_clone_vm_owner_drop(owner: sink ProcessCloneVmOwner) {}
-
-fn process_clone_vm_install(owner: sink ProcessCloneVmOwner) -> bool {
-    let guard = process_clone_vm_lock(&process_clone_vm_store.mutex);
-    let previous: ProcessCloneVmValue = stable_replace(
-        guard, &process_clone_vm_store.mutex,
-        process_clone_vm_store.value, ProcessCloneVmValue::Ready(owner));
-    match previous {
-        ProcessCloneVmValue::Empty => {
-            process_clone_vm_unlock(
-                guard, &process_clone_vm_store.mutex);
-            return true;
-        }
-        ProcessCloneVmValue::Ready(stale) => {
-            let displaced: ProcessCloneVmValue = stable_replace(
-                guard, &process_clone_vm_store.mutex,
-                process_clone_vm_store.value,
-                ProcessCloneVmValue::Ready(stale));
-            process_clone_vm_unlock(
-                guard, &process_clone_vm_store.mutex);
-            match displaced {
-                ProcessCloneVmValue::Empty => { return false; }
-                ProcessCloneVmValue::Ready(incoming) => {
-                    // This branch is unreachable in the single-child model;
-                    // consume the incoming proof after rolling its pages back.
-                    process_clone_vm_owner_drop(incoming);
-                    return false;
-                }
-            }
-        }
-    }
-}
-
-fn process_clone_vm_take() -> ProcessCloneVmValue {
-    let guard = process_clone_vm_lock(&process_clone_vm_store.mutex);
-    let previous: ProcessCloneVmValue = stable_replace(
-        guard, &process_clone_vm_store.mutex,
-        process_clone_vm_store.value, ProcessCloneVmValue::Empty);
-    process_clone_vm_unlock(guard, &process_clone_vm_store.mutex);
-    return previous;
-}
-
-fn process_clone_vm_rollback() {
-    let dest: usize = clone_dest_root;
+// Give back everything a clone into `dest` had taken, and leave that
+// root describing no clone. Safe to call on a root whose clone never got
+// far enough to be recorded: the fields it clears are already clear.
+fn process_clone_vm_rollback(dest: usize) {
     address_space_release_user_mappings(dest);
     if (scheduled_process_slot_valid(dest)) {
         let root: usize =
@@ -490,8 +445,9 @@ fn process_clone_vm_rollback() {
         process_image_record_at(root).active_page_count = 0;
         process_image_record_at(root).stack_growth_active = false;
         process_image_record_at(root).stack_lowest_l3 = process_stack_top_page();
+        process_image_record_at(root).clone_vm_outstanding = false;
+        process_image_record_at(root).clone_vm_page_count = 0;
     }
-    clone_page_count = 0;
 }
 
 // GitHub issue #245: dest_root is the caller's choice, not a fixed "root
@@ -515,9 +471,16 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
     let dest: usize =
         process_image_narrow_root(dest_root);
     let source: usize = process_image_target_root;
-    clone_source_root = source;
-    clone_dest_root = dest_root;
-    clone_page_count = 0;
+    // GitHub issue #448: a clone already owed back on this root would be
+    // leaked by overwriting its bookkeeping. It cannot happen (a root
+    // belongs to one process, and that process cannot fork into itself),
+    // and refusing says so rather than assuming it.
+    if (process_image_record_at(dest).clone_vm_outstanding) {
+        return ProcessCloneVmResult::OutOfMemory;
+    }
+    process_image_record_at(dest).clone_vm_source_root = source;
+    process_image_record_at(dest).clone_vm_page_count = 0;
+    let mut clone_page_count: usize = 0;
     address_space_clear_root(dest_root);
     // Reset the destination root's demand-stack metadata before rebuilding
     // it below, the same way process_image_map_current() resets its own
@@ -559,7 +522,7 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
                                                address_space_live_count()) {
                 PageMappingRetainResult::Retained => {}
                 PageMappingRetainResult::NotMapped => {
-                    process_clone_vm_rollback();
+                    process_clone_vm_rollback(dest_root);
                     return ProcessCloneVmResult::OutOfMemory;
                 }
                 PageMappingRetainResult::RefCeilingReached => {
@@ -570,7 +533,7 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
                     // still rolled back: refusing is what keeps a broken
                     // invariant from becoming a broken address space.
                     page_mapping_ref_bound_break();
-                    process_clone_vm_rollback();
+                    process_clone_vm_rollback(dest_root);
                     return ProcessCloneVmResult::OutOfMemory;
                 }
             }
@@ -581,12 +544,12 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
             match address_space_pte_write(dest_root, l3_index, child_pte) {
                 AddressSpacePteWriteResult::Invalid => {
                     page_mapping_release_physical(parent_physical);
-                    process_clone_vm_rollback();
+                    process_clone_vm_rollback(dest_root);
                     return ProcessCloneVmResult::OutOfMemory;
                 }
                 AddressSpacePteWriteResult::OutOfMemory => {
                     page_mapping_release_physical(parent_physical);
-                    process_clone_vm_rollback();
+                    process_clone_vm_rollback(dest_root);
                     return ProcessCloneVmResult::OutOfMemory;
                 }
                 AddressSpacePteWriteResult::Written => {
@@ -597,11 +560,11 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
                                 source, l3_index,
                                 address_space_pte_cow_value(parent_pte)) {
                             AddressSpacePteWriteResult::Invalid => {
-                                process_clone_vm_rollback();
+                                process_clone_vm_rollback(dest_root);
                                 return ProcessCloneVmResult::OutOfMemory;
                             }
                             AddressSpacePteWriteResult::OutOfMemory => {
-                                process_clone_vm_rollback();
+                                process_clone_vm_rollback(dest_root);
                                 return ProcessCloneVmResult::OutOfMemory;
                             }
                             AddressSpacePteWriteResult::Written => {
@@ -634,10 +597,8 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
     process_image_record_at(dest).active_page_count = clone_page_count;
     process_image_record_at(dest).stack_growth_active = true;
     process_image_record_at(dest).stack_lowest_l3 = clone_stack_lowest_l3;
-    if (process_clone_vm_install(view ProcessCloneVmOwner) == false) {
-        process_clone_vm_rollback();
-        return ProcessCloneVmResult::OutOfMemory;
-    }
+    process_image_record_at(dest).clone_vm_page_count = clone_page_count;
+    process_image_record_at(dest).clone_vm_outstanding = true;
     return ProcessCloneVmResult::Copied;
 }
 
@@ -655,21 +616,29 @@ fn process_image_activate_root(root: usize) {
     kernel_process_trace_address_space_activate(root);
 }
 
-fn process_image_clone_vm_reap() -> ProcessCloneVmReapResult {
-    match process_clone_vm_take() {
-        ProcessCloneVmValue::Empty => {
-            return ProcessCloneVmReapResult::Missing;
-        }
-        ProcessCloneVmValue::Ready(owner) => {
-            let count: usize = clone_page_count;
-            let source: usize = clone_source_root;
-            process_clone_vm_rollback();
-            process_image_activate_root(source);
-            process_clone_vm_owner_drop(owner);
-            clone_last_reaped_count = count;
-            return ProcessCloneVmReapResult::Reaped;
-        }
+// Give the parent's copy-on-write pages back and put the parent's root
+// into TTBR0 again. `dest_root` is the root the clone was made INTO -- the
+// caller's own, at every one of the three call sites, since a clone is
+// reaped by the process that received it (when it execs, when it exits, or
+// when the rest of the clone failed under it).
+//
+// GitHub issue #448: this used to take no argument and read the one clone
+// the kernel could have in flight out of a global. Naming the root is what
+// lets two of them be outstanding at once.
+fn process_image_clone_vm_reap(dest_root: usize) -> ProcessCloneVmReapResult {
+    if (scheduled_process_slot_valid(dest_root) == false) {
+        return ProcessCloneVmReapResult::Missing;
     }
+    let dest: usize = process_image_narrow_root(dest_root);
+    if (process_image_record_at(dest).clone_vm_outstanding == false) {
+        return ProcessCloneVmReapResult::Missing;
+    }
+    let count: usize = process_image_record_at(dest).clone_vm_page_count;
+    let source: usize = process_image_record_at(dest).clone_vm_source_root;
+    process_clone_vm_rollback(dest_root);
+    process_image_activate_root(source);
+    clone_last_reaped_count = count;
+    return ProcessCloneVmReapResult::Reaped;
 }
 
 fn process_image_clone_vm_reaped_pages() -> usize {
@@ -803,7 +772,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         process_image_activate_root(0);
     }
 
-    match process_image_clone_vm_reap() {
+    match process_image_clone_vm_reap(child_root) {
         ProcessCloneVmReapResult::Missing => {}
         ProcessCloneVmReapResult::Reaped => {}
     }

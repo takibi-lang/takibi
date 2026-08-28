@@ -1,0 +1,277 @@
+// The CPU-bound pair /etc/inittab starts, and the fairness question asked
+// about it.
+//
+// This exists because nothing else in this kernel can keep a core busy.
+// Every other fixture here is I/O-bound: it blocks on UART, on a socket,
+// or on a child, so it spends its time not running and says nothing about
+// who the scheduler picks when two things both want the CPU. A pair of
+// busy loops makes the scheduler the only variable, which is what a
+// second core has to be measured against -- and it has to pass on ONE
+// core first, so that anything that breaks after the second core is
+// enabled is a concurrency defect rather than a workload defect.
+//
+// The measurement is deliberately not "how many rounds did each finish".
+// That number is a property of the machine and of whatever else the boot
+// is doing, so no fixture could pin it. What IS pinnable is the SKEW: how
+// far ahead of the other either process ever got, counted only over the
+// interval where both were alive. On one core with a rotating scheduler
+// that is bounded by how many rounds fit in a timer slice; a scheduler
+// that stopped covering one of them would drive it to the round count
+// itself.
+//
+// Current limitations (2026-08-28). Keep this list current; a stale one
+// invites relying on a guarantee that quietly stopped holding.
+// - TWO TAGS, NOT N. The pair is the shape the inittab starts, and the
+//   two-versus-four decision for cores is the same one made here: every
+//   class of unfairness appears at two.
+// - ONE GENERATION IS MEASURED. The verdict latches the first time both
+//   tags have run their rounds side by side. A later generation of either
+//   process (init respawning one that died) is counted -- see
+//   restarts below -- but does not re-open the measurement, so the
+//   reported line stays a single line in a shared UART capture.
+// - SINGLE-WRITER, like the rest of this kernel's evidence state. Every
+//   entry point below runs in syscall-dispatch context on the one core
+//   that runs kernel code; there is no locking here and none is correct
+//   once that stops being true.
+// - THE PROGRESS COUNT IS THE CALLER'S CLAIM. A process that reported
+//   without doing the work between reports would be believed. What the
+//   syscall checks is identity (which process is speaking) and ordering,
+//   not effort; the effort is in kernel/arch/arm64/kernel/busy_loop.tkb
+//   and is the fixture's own business.
+
+use "kernel/arch/arm64/kernel/timer.tkb";
+
+// The two inittab entries, told apart by the tag they pass rather than by
+// their pid -- a respawned entry gets a new pid and is still the same
+// workload.
+const WORKLOAD_BUSY_TAG_A: usize = 1;
+const WORKLOAD_BUSY_TAG_B: usize = 2;
+
+// How many rounds each must run WHILE THE OTHER IS ALSO RUNNING before the
+// verdict is taken. Enough that a scheduler that alternates unevenly has
+// somewhere to show it, few enough that the boot's remaining fixtures are
+// not waiting on it.
+const WORKLOAD_BUSY_ROUNDS: usize = 8;
+
+// The fairness bound. One round is a busy chunk several timer slices long
+// (see busy_loop.tkb), so a rotating scheduler keeps the two within about
+// one round of each other; a starved process would run away to
+// WORKLOAD_BUSY_ROUNDS. This bound is wide enough not to be flaky and far
+// enough below that to catch the thing it exists to catch.
+const WORKLOAD_BUSY_SKEW_BOUND: usize = 2;
+
+struct WorkloadBusyPair {
+    // The pid currently reporting under each tag, and how many times that
+    // pid has changed -- which is init having respawned that entry.
+    a_pid: usize;
+    b_pid: usize;
+    a_restarts: usize;
+    b_restarts: usize;
+    a_rounds: usize;
+    b_rounds: usize;
+    // Each tag's round count at the moment the second one first reported.
+    // Skew is measured from there: whichever entry init forked first is
+    // ahead by however long the second took to start, and that is startup
+    // ordering, not starvation.
+    a_base: usize;
+    b_base: usize;
+    both_running: bool;
+    max_skew: usize;
+    a_slices: usize;
+    b_slices: usize;
+    a_ticks: usize;
+    b_ticks: usize;
+    last_pid: usize;
+    last_tick: usize;
+    start_ticks: usize;
+    end_ticks: usize;
+    reported: bool;
+    // A report this file refused: an unknown tag, or a caller that is not
+    // a child of init. Zero on a healthy boot, and printed only when it
+    // is not.
+    refused: usize;
+}
+
+private let mut workload_busy_pair: WorkloadBusyPair;
+
+fn workload_busy_pair_reset() {
+    workload_busy_pair.a_pid = 0;
+    workload_busy_pair.b_pid = 0;
+    workload_busy_pair.a_restarts = 0;
+    workload_busy_pair.b_restarts = 0;
+    workload_busy_pair.a_rounds = 0;
+    workload_busy_pair.b_rounds = 0;
+    workload_busy_pair.a_base = 0;
+    workload_busy_pair.b_base = 0;
+    workload_busy_pair.both_running = false;
+    workload_busy_pair.max_skew = 0;
+    workload_busy_pair.a_slices = 0;
+    workload_busy_pair.b_slices = 0;
+    workload_busy_pair.a_ticks = 0;
+    workload_busy_pair.b_ticks = 0;
+    workload_busy_pair.last_pid = 0;
+    workload_busy_pair.last_tick = 0;
+    workload_busy_pair.start_ticks = 0;
+    workload_busy_pair.end_ticks = 0;
+    workload_busy_pair.reported = false;
+    workload_busy_pair.refused = 0;
+}
+
+// Every time the scheduler picks one of the pair, counted where the pick
+// happens. This is the fairness question asked of the SCHEDULER rather
+// than of the workload: two processes doing identical work should be
+// selected about equally often, and a round count that says otherwise
+// cannot say whether the cause was the pick or the work.
+fn workload_busy_note_selected(pid: usize) {
+    // Free until the pair exists: every boot before this workload starts,
+    // and every switch after the verdict, leaves here without reading the
+    // counter. The scheduler calls this on every context switch.
+    if (workload_busy_pair.a_pid == 0 && workload_busy_pair.b_pid == 0) {
+        return;
+    }
+    let now: usize = read_cntpct() as usize;
+    if (workload_busy_pair.last_tick != 0) {
+        let spent: usize = now - workload_busy_pair.last_tick;
+        if (workload_busy_pair.a_pid != 0 &&
+            workload_busy_pair.last_pid == workload_busy_pair.a_pid) {
+            workload_busy_pair.a_ticks = workload_busy_pair.a_ticks + spent;
+        } else if (workload_busy_pair.b_pid != 0 &&
+                   workload_busy_pair.last_pid == workload_busy_pair.b_pid) {
+            workload_busy_pair.b_ticks = workload_busy_pair.b_ticks + spent;
+        }
+    }
+    workload_busy_pair.last_pid = pid;
+    workload_busy_pair.last_tick = now;
+    if (workload_busy_pair.a_pid != 0 && pid == workload_busy_pair.a_pid) {
+        workload_busy_pair.a_slices = workload_busy_pair.a_slices + 1;
+    } else if (workload_busy_pair.b_pid != 0 && pid == workload_busy_pair.b_pid) {
+        workload_busy_pair.b_slices = workload_busy_pair.b_slices + 1;
+    }
+}
+
+private fn workload_busy_absolute_difference(left: usize, right: usize)
+        -> usize {
+    if (left > right) { return left - right; }
+    return right - left;
+}
+
+// One process's report that it finished another round of work.
+//
+// Returns 0 while the measurement is still open and 1 once the verdict has
+// been taken, so the caller can stop reporting without this file having to
+// know how it paces itself.
+fn workload_busy_record_progress(tag: usize) -> usize !{unsafe} {
+    if (workload_busy_pair.reported) { return 1; }
+    // Started by init, from /etc/inittab. A report from anywhere else is
+    // not this workload, and counting it would let an unrelated process
+    // satisfy the fairness assertion on the real one's behalf.
+    if (kernel_process_parent_is_root() == false) {
+        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        return 0;
+    }
+    let pid: usize = kernel_process_current_pid();
+    if (tag == WORKLOAD_BUSY_TAG_A) {
+        if (workload_busy_pair.a_pid == 0) {
+            workload_busy_pair.a_pid = pid;
+        } else if (workload_busy_pair.a_pid != pid) {
+            workload_busy_pair.a_pid = pid;
+            workload_busy_pair.a_restarts = workload_busy_pair.a_restarts + 1;
+        }
+        workload_busy_pair.a_rounds = workload_busy_pair.a_rounds + 1;
+    } else if (tag == WORKLOAD_BUSY_TAG_B) {
+        if (workload_busy_pair.b_pid == 0) {
+            workload_busy_pair.b_pid = pid;
+        } else if (workload_busy_pair.b_pid != pid) {
+            workload_busy_pair.b_pid = pid;
+            workload_busy_pair.b_restarts = workload_busy_pair.b_restarts + 1;
+        }
+        workload_busy_pair.b_rounds = workload_busy_pair.b_rounds + 1;
+    } else {
+        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        return 0;
+    }
+    if (workload_busy_pair.both_running == false) {
+        if (workload_busy_pair.a_pid == 0 || workload_busy_pair.b_pid == 0) {
+            return 0;
+        }
+        // Both have now spoken, so both exist and both are runnable. This
+        // is the start of the measured interval.
+        workload_busy_pair.both_running = true;
+        workload_busy_pair.a_base = workload_busy_pair.a_rounds;
+        workload_busy_pair.b_base = workload_busy_pair.b_rounds;
+        workload_busy_pair.start_ticks = read_cntpct() as usize;
+        return 0;
+    }
+    let a_progress: usize =
+        workload_busy_pair.a_rounds - workload_busy_pair.a_base;
+    let b_progress: usize =
+        workload_busy_pair.b_rounds - workload_busy_pair.b_base;
+    let skew: usize =
+        workload_busy_absolute_difference(a_progress, b_progress);
+    if (skew > workload_busy_pair.max_skew) {
+        workload_busy_pair.max_skew = skew;
+    }
+    if (a_progress < WORKLOAD_BUSY_ROUNDS || b_progress < WORKLOAD_BUSY_ROUNDS) {
+        return 0;
+    }
+    workload_busy_pair.end_ticks = read_cntpct() as usize;
+    workload_busy_pair.reported = true;
+    workload_busy_pair_report();
+    return 1;
+}
+
+// The verdict, and the numbers behind it.
+//
+// Two lines on purpose. The first is fixed text a view can match exactly:
+// it says what held, and it is absent when it did not. The second carries
+// the measurements, which are machine- and load-dependent and therefore
+// belong in the capture for a person (and for the one-core versus
+// two-core comparison) rather than in a fixture's expected output.
+private fn workload_busy_pair_report() !{unsafe} {
+    if (workload_busy_pair.a_pid != workload_busy_pair.b_pid &&
+        workload_busy_pair.max_skew <= WORKLOAD_BUSY_SKEW_BOUND) {
+        kernel_boot_log("workload: busy pair two pids under init, ");
+        uart_put_udec(WORKLOAD_BUSY_ROUNDS);
+        kernel_boot_log(" rounds each side by side, neither starved beyond ");
+        uart_put_udec(WORKLOAD_BUSY_SKEW_BOUND);
+        kernel_boot_log("\n");
+    } else if (workload_busy_pair.a_pid == workload_busy_pair.b_pid) {
+        kernel_boot_log("workload: busy pair ONE pid reported both tags\n");
+    } else {
+        kernel_boot_log("workload: busy pair STARVED skew=");
+        uart_put_udec(workload_busy_pair.max_skew);
+        kernel_boot_log(" beyond ");
+        uart_put_udec(WORKLOAD_BUSY_SKEW_BOUND);
+        kernel_boot_log("\n");
+    }
+    // The throughput half. `elapsed` is what the pair took wall-clock;
+    // `cpu` is what each was actually given, which is the number a second
+    // core has to change. Both in counter ticks, with the frequency beside
+    // them so a reader needs nothing else to turn them into seconds.
+    kernel_boot_log("workload: busy pair measured skew=");
+    uart_put_udec(workload_busy_pair.max_skew);
+    kernel_boot_log(" rounds=");
+    uart_put_udec(WORKLOAD_BUSY_ROUNDS * 2);
+    kernel_boot_log(" elapsed=");
+    uart_put_udec(workload_busy_pair.end_ticks -
+                  workload_busy_pair.start_ticks);
+    kernel_boot_log(" cpu_a=");
+    uart_put_udec(workload_busy_pair.a_ticks);
+    kernel_boot_log(" cpu_b=");
+    uart_put_udec(workload_busy_pair.b_ticks);
+    kernel_boot_log(" slices=");
+    uart_put_udec(workload_busy_pair.a_slices);
+    kernel_boot_log("/");
+    uart_put_udec(workload_busy_pair.b_slices);
+    kernel_boot_log(" tickfreq=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log(" restarts=");
+    uart_put_udec(workload_busy_pair.a_restarts +
+                  workload_busy_pair.b_restarts);
+    kernel_boot_log("\n");
+    if (workload_busy_pair.refused != 0) {
+        kernel_boot_log("workload: busy pair REFUSED reports=");
+        uart_put_udec(workload_busy_pair.refused);
+        kernel_boot_log("\n");
+    }
+}
