@@ -742,10 +742,11 @@ kernelcheck-rpi5: kernelbuild-rpi5
 ## behavior for focused runs.  The timing-sensitive DDB checks deliberately
 ## remain sequential within kernelcheck-ddb-qemu: fanning every QEMU boot out
 ## at once made the UART wake/BREAK interleaving check fail under host load.
-kernelcheck-qemu: kernelcheck-qemu-main kernelcheck-qemu-ash kernelcheck-shell-qemu
+kernelcheck-qemu: kernelcheck-qemu-main kernelcheck-qemu-ash
 
 kernelcheck-qemu-main: kernelbuild-qemu
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" python3 scripts/run_kernel_shell_qemu_smoketest.py
 
 kernelcheck-qemu-ash: kernelbuild-qemu
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_ash_qemutest.sh
