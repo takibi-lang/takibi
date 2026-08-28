@@ -3246,16 +3246,42 @@ fn kernel_process_uart_wake(value: usize)
     }
     let mut waiter: ProcessHandle = execution_here().current_handle;
     let mut found: bool = false;
+    // GitHub issue #437: EVERY child, not just the first.
+    //
+    // This read first_child alone, which was every child there could be.
+    // With a fan-out the terminal waiter can be any of them, and dropping
+    // the byte because it was not the newest is the same silent-prompt
+    // failure the ancestor walk below was added to fix.
+    //
+    // A walk of the sibling list rather than of the process table: this is
+    // `!{interrupt}`, and the table cursor goes through the pool, whose
+    // accessors take the pool lock. Reading records is free.
     if (scheduled_process_record_at(execution_here().current_handle.pool_index)
             .has_first_child) {
         let mut candidate: ProcessHandle = scheduled_process_record_at(
             execution_here().current_handle.pool_index).first_child;
-        if (scheduled_process_record_state(candidate.pool_index) ==
-                ProcessSlotState::Blocked &&
-            scheduled_process_record_wait_reason(candidate.pool_index) ==
-                ProcessWaitReason::UartRx) {
-            waiter = candidate;
-            found = true;
+        let mut scanning: usize = scheduled_process_pool_live_count() + 1;
+        while (scanning != 0 && found == false) {
+            scanning = scanning - 1;
+            if (scheduled_process_handle_matches(candidate) == false) {
+                scanning = 0;
+            } else {
+                if (scheduled_process_record_state(candidate.pool_index) ==
+                        ProcessSlotState::Blocked &&
+                    scheduled_process_record_wait_reason(candidate.pool_index) ==
+                        ProcessWaitReason::UartRx) {
+                    waiter = candidate;
+                    found = true;
+                } else {
+                    if (scheduled_process_record_at(candidate.pool_index)
+                            .has_next_sibling == false) {
+                        scanning = 0;
+                    } else {
+                        candidate = scheduled_process_record_at(
+                            candidate.pool_index).next_sibling;
+                    }
+                }
+            }
         }
     }
     // A middle process can have both relatives (ash -> listener -> worker).
@@ -3437,6 +3463,83 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
     return setup_ok && saw_block && saw_wake;
 }
 
+// GitHub issue #437: three live children at once, each collected by pid.
+//
+// The fan-out limit is gone, and nothing in this kernel forks twice yet --
+// so without this the lifting is untested and the enumeration, the sibling
+// list and wait4's pid selection are all claims. It exercises the four
+// things that had to move together: a second and third clone_begin that
+// used to be -EINVAL, a scheduler rotation that must reach every one of
+// them, wait4(pid) selecting the MIDDLE child rather than the newest, and
+// each child keeping its own status where the parent used to keep one.
+//
+// Bookkeeping-only, like scheduled_process_table_probe beside it: the
+// children never run user code, they are driven Ready->Running->Exited
+// directly, so this needs no images and no address spaces.
+fn kernel_process_fanout_probe() -> bool !{unsafe} {
+    kernel_process_execution_reset();
+    let parent_pid: usize = kernel_process_current_pid();
+    let mut pids: [usize; 3] = { 0, 0, 0 };
+    let mut parent_handle: ProcessHandle = execution_here().current_handle;
+    // Three forks from the SAME parent. clone_begin switches current to
+    // the child, so step back before the next one -- that is what makes
+    // them siblings rather than a chain, and it is the sequence the old
+    // ceiling made impossible to write.
+    for i: usize in 0..<3 {
+        match kernel_process_clone_begin(0x11, 0) {
+            ProcessCloneResult::Invalid => { return false; }
+            ProcessCloneResult::ChildReady(child_pid) => { pids[i] = child_pid; }
+        }
+        execution_here().current_handle = parent_handle;
+        if (kernel_process_current_pid() != parent_pid) { return false; }
+    }
+    if (pids[0] == pids[1] || pids[1] == pids[2] || pids[0] == pids[2]) {
+        return false;
+    }
+    // Every child reachable from the parent, which the old chain walk
+    // could not do past the first.
+    let mut seen: usize = 0;
+    for i: usize in 0..<3 {
+        if (kernel_process_current_has_child_pid(pids[i])) { seen = seen + 1; }
+    }
+    if (seen != 3) { return false; }
+    // Drive all three Ready->Running->Exited, the bookkeeping-only cycle
+    // scheduled_process_probe_cycle uses, and stamp each with its own
+    // status so the collection below can tell them apart.
+    let mut cursor: ProcessHandle =
+        scheduled_process_record_at(parent_handle.pool_index).first_child;
+    for i: usize in 0..<3 {
+        let mut following: ProcessHandle =
+            scheduled_process_record_at(cursor.pool_index).next_sibling;
+        let has_following: bool =
+            scheduled_process_record_at(cursor.pool_index).has_next_sibling;
+        // Head insertion means the list runs newest-first, so the pid
+        // stamped here is pids[2 - i].
+        scheduled_process_record_at(cursor.pool_index).exit_status = 42 - i;
+        match scheduled_process_ready_take(cursor) {
+            ScheduledProcessReadyTakeResult::Missing => { return false; }
+            ScheduledProcessReadyTakeResult::Ready(resources) => {
+                let (owner, ready) = resources;
+                let running = scheduled_process_start(owner, ready);
+                let exited = scheduled_process_exit(owner, running);
+                scheduled_process_release(owner, exited);
+            }
+        }
+        if (has_following == false && i != 2) { return false; }
+        cursor = following;
+    }
+    if (kernel_process_child_waitable_pid(pids[1]) == false) { return false; }
+    if (kernel_process_child_wait_status_pid(pids[1]) != 41) { return false; }
+    if (kernel_process_last_child_pid() != pids[1]) { return false; }
+    // The other two are untouched and still carry their own statuses --
+    // the property a single parent-side field could not have.
+    if (kernel_process_child_waitable_pid(pids[1])) { return false; }
+    if (kernel_process_child_wait_status_pid(pids[0]) != 40) { return false; }
+    if (kernel_process_child_wait_status_pid(pids[2]) != 42) { return false; }
+    if (kernel_process_child_waitable()) { return false; }
+    return true;
+}
+
 fn kernel_process_scheduler_probe() -> bool {
     kernel_process_execution_reset();
     kernel_process_trace_enable();
@@ -3564,22 +3667,16 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
     // -EINVAL while running as ash's forked+exec'd child). The per-slot
     // ProcessRecord.has_first_child[current] check below is the correct,
     // already-scoped-to-current-only replacement.
-    // GitHub issue #437: a LIVE child, not any child.
+    // GitHub issue #437: no child-count refusal at all any more.
     //
-    // This read `has_first_child`, and that was the same question while a
-    // child's record was handed back the instant it exited. With zombies
-    // it is not: an exited-but-unreaped child still occupies the link, so
-    // testing the link alone would refuse the second fork of every
-    // sequential fork/exit/fork caller -- which is most of them, and is
-    // how this first went wrong (httpd's "foreground children=2" stopped
-    // at one).
-    //
-    // Still one live child at a time. Lifting THAT is the next step and is
-    // deliberately not this one.
+    // This refused a second child, then briefly a second LIVE child while
+    // zombies arrived. Both were the same ceiling: a parent could not have
+    // two things running, which is what `/etc/inittab` with two `respawn`
+    // entries asks for and what any multicore workload needs. The page
+    // allocator is the only limit now, the same answer #392 gave the
+    // process table itself.
     if (flags != 0x11 || child_stack != 0 ||
-        execution_here().current_live == false ||
-        kernel_process_has_live_child_of(
-            execution_here().current_handle.pool_index)) {
+        execution_here().current_live == false) {
         return ProcessCloneResult::Invalid;
     }
     let mut parent: ProcessHandle = execution_here().current_handle;
@@ -3590,6 +3687,15 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
         ScheduledProcessAllocResult::Allocated(child) => {
             scheduled_process_copy_command_line(parent.pool_index,
                                                 child.pool_index);
+            // GitHub issue #437: push at the HEAD of the sibling list.
+            // O(1), and with one child it leaves first_child naming that
+            // child and no sibling -- the shape every existing view was
+            // recorded against, which is why the enumeration change and
+            // this one could be verified separately.
+            scheduled_process_record_at(child.pool_index).next_sibling =
+                scheduled_process_record_at(parent.pool_index).first_child;
+            scheduled_process_record_at(child.pool_index).has_next_sibling =
+                scheduled_process_record_at(parent.pool_index).has_first_child;
             scheduled_process_record_at(parent.pool_index).first_child = child;
             scheduled_process_record_at(parent.pool_index).has_first_child = true;
             scheduled_process_record_at(child.pool_index).parent = parent;
@@ -4120,6 +4226,97 @@ private fn kernel_process_has_live_child_of(slot: usize) -> bool {
         cursor = scheduled_process_record_at(cursor.pool_index).next_sibling;
     }
     return false;
+}
+
+// GitHub issue #437: does this slot have a child with this pid, live or
+// zombie? wait4(pid) used to be checked against first_child's pid alone,
+// which was the only child there could be. It is a search now.
+fn kernel_process_current_has_child_pid(pid: usize) -> bool {
+    if (execution_here().current_live == false || pid == 0) { return false; }
+    let slot: usize = execution_here().current_handle.pool_index;
+    if (scheduled_process_record_at(slot).has_first_child == false) {
+        return false;
+    }
+    let mut cursor: ProcessHandle =
+        scheduled_process_record_at(slot).first_child;
+    let mut remaining: usize = scheduled_process_pool_live_count() + 1;
+    while (remaining != 0) {
+        remaining = remaining - 1;
+        if (scheduled_process_handle_matches(cursor) == false) { return false; }
+        if (scheduled_process_pid_of_handle(cursor) == pid) { return true; }
+        if (scheduled_process_record_at(cursor.pool_index).has_next_sibling
+                == false) {
+            return false;
+        }
+        cursor = scheduled_process_record_at(cursor.pool_index).next_sibling;
+    }
+    return false;
+}
+
+// The zombie carrying this pid, if this slot has one. wait4(pid) reaps
+// through here so that a specific child can be collected while its
+// siblings keep running.
+private fn kernel_process_zombie_of_pid(slot: usize, pid: usize)
+        -> ProcessNextReadyResult {
+    if (scheduled_process_record_at(slot).has_first_child == false) {
+        return ProcessNextReadyResult::Missing;
+    }
+    let mut cursor: ProcessHandle =
+        scheduled_process_record_at(slot).first_child;
+    let mut remaining: usize = scheduled_process_pool_live_count() + 1;
+    while (remaining != 0) {
+        remaining = remaining - 1;
+        if (scheduled_process_handle_matches(cursor) == false) {
+            return ProcessNextReadyResult::Missing;
+        }
+        if (scheduled_process_pid_of_handle(cursor) == pid &&
+            scheduled_process_record_state(cursor.pool_index) ==
+                ProcessSlotState::Exited) {
+            return ProcessNextReadyResult::Next(cursor);
+        }
+        if (scheduled_process_record_at(cursor.pool_index).has_next_sibling
+                == false) {
+            return ProcessNextReadyResult::Missing;
+        }
+        cursor = scheduled_process_record_at(cursor.pool_index).next_sibling;
+    }
+    return ProcessNextReadyResult::Missing;
+}
+
+// The status of THAT child, without collecting it. The peek/reap pair has
+// to name the same child once a parent can have several.
+fn kernel_process_child_wait_status_peek_pid(pid: usize) -> usize {
+    if (execution_here().current_live == false) { return 0; }
+    match kernel_process_zombie_of_pid(
+            execution_here().current_handle.pool_index, pid) {
+        ProcessNextReadyResult::Missing => { return 0; }
+        ProcessNextReadyResult::Next(zombie) => {
+            return scheduled_process_record_at(zombie.pool_index).exit_status;
+        }
+    }
+}
+
+// wait4(pid): is THAT child collectable, rather than any of them?
+fn kernel_process_child_waitable_pid(pid: usize) -> bool {
+    if (execution_here().current_live == false) { return false; }
+    match kernel_process_zombie_of_pid(
+            execution_here().current_handle.pool_index, pid) {
+        ProcessNextReadyResult::Missing => { return false; }
+        ProcessNextReadyResult::Next(zombie) => { return true; }
+    }
+}
+
+// wait4(pid)'s reap. Returns the status; the reaped pid is readable
+// afterwards through kernel_process_last_child_pid, same as wait4(-1).
+fn kernel_process_child_wait_status_pid(pid: usize) -> usize !{unsafe} {
+    if (execution_here().current_live == false) { return 0; }
+    let slot: usize = execution_here().current_handle.pool_index;
+    match kernel_process_zombie_of_pid(slot, pid) {
+        ProcessNextReadyResult::Missing => { return 0; }
+        ProcessNextReadyResult::Next(zombie) => {
+            return kernel_process_reap_zombie(slot, zombie);
+        }
+    }
 }
 
 fn kernel_process_child_waitable() -> bool {

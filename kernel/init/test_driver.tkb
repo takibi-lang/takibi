@@ -799,6 +799,14 @@ fn kernel_test_common_probes() {
     } else {
         kernel_boot_log("scheduler: failed\n");
     }
+    // GitHub issue #437: the fan-out ceiling is gone, and nothing else in
+    // this boot forks twice from one parent -- so without this the lifting
+    // is a claim. Reports POSITIVELY, like its neighbours.
+    if (kernel_process_fanout_probe()) {
+        kernel_boot_log("process fanout: 3 siblings, wait4 by pid collects the middle one, each status its own\n");
+    } else {
+        kernel_boot_log("process fanout: failed\n");
+    }
     if (kernel_process_crash_trace_ring_probe()) {
         kernel_boot_log("crash trace: ring wrap oldest-to-newest ok\n");
     } else {

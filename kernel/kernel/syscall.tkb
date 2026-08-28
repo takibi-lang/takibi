@@ -3495,10 +3495,16 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // literal (this used to be the literal 2, the only pid the old
         // two-process model could ever produce) is wrong for any process
         // other than the original root.
-        let mut expected_pid: usize = kernel_process_current_child_pid();
-        if (expected_pid == 0) {
-            expected_pid = kernel_process_last_child_pid();
-        }
+        // GitHub issue #437: a SEARCH, not a comparison. This asked
+        // first_child's pid and fell back to the last reaped one, which
+        // was exact while a parent could have one child. With several,
+        // wait4(pid) for any of them but the newest would have been
+        // -EINVAL.
+        let selecting: bool = requested_pid != 0xFFFFFFFFFFFFFFFF;
+        let known_child: bool =
+            kernel_process_current_has_child_pid(requested_pid) ||
+            (requested_pid != 0 &&
+             requested_pid == kernel_process_last_child_pid());
         // GitHub issue #248: no longer rejects a child-status caller here
         // (kernel_process_is_child() used to gate this to the tree root
         // only) -- kernel_process_current_child_pid()/_last_child_pid()
@@ -3506,12 +3512,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // kernel/kernel/process.tkb's own child-exit/wait bookkeeping is
         // now per-slot too, so any live process may legitimately wait4()
         // for its own live child, not just the root.
-        if ((requested_pid != 0xFFFFFFFFFFFFFFFF &&
-             requested_pid != expected_pid) ||
+        if ((selecting && known_child == false) ||
             (wait_options != 0 && wait_options != LINUX_WNOHANG)) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
-        if (kernel_process_child_waitable() == false) {
+        let mut collectable: bool = kernel_process_child_waitable();
+        if (selecting) {
+            collectable = kernel_process_child_waitable_pid(requested_pid);
+        }
+        if (collectable == false) {
             if (wait_options == LINUX_WNOHANG) {
                 return SyscallAction::Resume(0);
             }
@@ -3544,13 +3553,29 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             match user_range_check_write(kernel_process_current_root(), x1, 4) {
                 UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserWriteRangeResult::Ok(range) => {
-                    let status: usize = kernel_process_child_wait_status_peek();
+                    // GitHub issue #437: peek then reap, and both have to
+                    // name the SAME child once a parent can have several.
+                    // The peek is only used to write the status buffer, so
+                    // the selecting reap below is what settles which one is
+                    // collected.
+                    let mut status: usize =
+                        kernel_process_child_wait_status_peek();
+                    if (selecting) {
+                        status =
+                            kernel_process_child_wait_status_peek_pid(
+                                requested_pid);
+                    }
                     if (user_write_u32(range, 0,
                             ((status & 0xFF) << 8) as u32) == false) {
                         return SyscallAction::Resume(LINUX_EFAULT);
                     }
-                    let consumed_status: usize =
-                        kernel_process_child_wait_status();
+                    let mut consumed_status: usize = 0;
+                    if (selecting) {
+                        consumed_status =
+                            kernel_process_child_wait_status_pid(requested_pid);
+                    } else {
+                        consumed_status = kernel_process_child_wait_status();
+                    }
                     kernel_init_boot_fixture_reaped(
                         kernel_process_current_pid());
                     return SyscallAction::Resume(
@@ -3558,7 +3583,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
             }
         }
-        let ignored_status: usize = kernel_process_child_wait_status();
+        let mut ignored_status: usize = 0;
+        if (selecting) {
+            ignored_status =
+                kernel_process_child_wait_status_pid(requested_pid);
+        } else {
+            ignored_status = kernel_process_child_wait_status();
+        }
         // GitHub issue #270: PID 1 reaping its first child is where the
         // bounded boot fixture ends now. The hook is a no-op for every
         // other reaper and after the first one.

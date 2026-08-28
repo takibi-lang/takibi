@@ -1,5 +1,6 @@
 ^process table:
 ^fd table:
 ^scheduler:
+^process fanout:
 ^crash trace:
 ^resources:
