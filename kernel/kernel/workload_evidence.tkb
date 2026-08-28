@@ -58,7 +58,23 @@ const WORKLOAD_BUSY_ROUNDS: usize = 8;
 // one round of each other; a starved process would run away to
 // WORKLOAD_BUSY_ROUNDS. This bound is wide enough not to be flaky and far
 // enough below that to catch the thing it exists to catch.
-const WORKLOAD_BUSY_SKEW_BOUND: usize = 2;
+//
+// Measured: 1 on QEMU, 2 on RPi5. RPi5 is the wider of the two, and its
+// generic timer is why -- it reads CNTFRQ_EL0 as 0, so `timer_tick_rearm`
+// programs a zero countdown and there is no real quantum to share out.
+// The bound is set above the worse of the two rather than at it: a fixture
+// that passes at exactly its own limit is one boot away from being a
+// flake, and the case this exists to catch (one process not being selected
+// at all) reaches WORKLOAD_BUSY_ROUNDS, not 5.
+//
+// Note which half of the report is the assertion. ROUND COUNTS are, and
+// they are counted by this file from syscalls, so they mean the same thing
+// on both targets. The tick numbers below are diagnostic only, and on
+// RPi5 they are not currently trustworthy: `cpu_a + cpu_b` comes out
+// larger than the `elapsed` they were measured inside, which cannot happen
+// with a monotonic counter and does not happen under QEMU. Do not build an
+// assertion on them until that board's counter is understood.
+const WORKLOAD_BUSY_SKEW_BOUND: usize = 4;
 
 struct WorkloadBusyPair {
     // The pid currently reporting under each tag, and how many times that
@@ -200,6 +216,18 @@ fn workload_busy_record_progress(tag: usize) -> usize !{unsafe} {
         workload_busy_pair.a_base = workload_busy_pair.a_rounds;
         workload_busy_pair.b_base = workload_busy_pair.b_rounds;
         workload_busy_pair.start_ticks = read_cntpct() as usize;
+        // The CPU accounting starts here too, so `cpu_a`/`cpu_b` and
+        // `elapsed` cover the same interval and their sum is a fraction of
+        // it rather than a number that can exceed it -- which is what the
+        // first hardware run reported, and it made the two unreadable
+        // together. `last_tick` has to go with them: leaving it set would
+        // credit the next switch with the whole stretch before this point,
+        // which is exactly how the first attempt at this reset still
+        // reported a sum larger than the interval.
+        workload_busy_pair.a_ticks = 0;
+        workload_busy_pair.b_ticks = 0;
+        workload_busy_pair.last_pid = 0;
+        workload_busy_pair.last_tick = 0;
         return 0;
     }
     let a_progress: usize =

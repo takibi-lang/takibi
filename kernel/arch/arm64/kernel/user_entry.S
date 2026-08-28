@@ -120,7 +120,7 @@ el0_sync_entry:
     cmp     x6, #5
     b.eq    .Lsyscall_block
     cmp     x6, #6
-    b.eq    .Lsyscall_wait_uart
+    b.eq    .Lsyscall_wait_interrupt
     cmp     x6, #7
     b.eq    .Lsyscall_exec
     cmp     x6, #8
@@ -170,9 +170,21 @@ el0_sync_entry:
     mov     x0, sp
     b       kernel_syscall_block_return
 
-.Lsyscall_wait_uart:
-    /* interrupt_notify() emits SEV, so WFE retains an event that arrives
-     * between the ppoll readiness check and entering the wait. */
+.Lsyscall_wait_interrupt:
+    /* Wait for an interrupt, then run this same syscall again --
+     * .Lsyscall_dispatch reloads esr and every argument from the saved
+     * frame, so a retry re-asks the question rather than resuming a
+     * half-finished answer.
+     *
+     * interrupt_notify() emits SEV, so WFE retains an event that arrives
+     * between the readiness check and entering the wait.
+     *
+     * GitHub issue #448: this is also what the kernel does when EVERY
+     * process is blocked. It used to be reached only by a UART waiter with
+     * nobody else to run, and was named for that; a wait4 that finds no
+     * runnable successor now lands here too instead of fail-stopping,
+     * which is why the name no longer says UART. It is this kernel's idle
+     * loop, standing on whichever process asked last. */
     wfe
     b       .Lsyscall_dispatch
 

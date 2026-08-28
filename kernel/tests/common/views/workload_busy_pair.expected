@@ -1,1 +1,1 @@
-workload: busy pair two pids under init, 8 rounds each side by side, neither starved beyond 2
+workload: busy pair two pids under init, 8 rounds each side by side, neither starved beyond 4

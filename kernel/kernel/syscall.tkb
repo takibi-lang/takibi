@@ -1566,7 +1566,7 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
                 if (syscall_test_evidence_record_ppoll_uart_wait()) {
                     kernel_boot_log("shell ppoll: uart blocked\n");
                 }
-                return SyscallAction::WaitUart;
+                return SyscallAction::WaitInterrupt;
             }
             return SyscallAction::Resume(ready_count);
         }
@@ -1601,7 +1601,7 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
                 // runnable siblings, and answering "no" here left the
                 // kernel spinning at EL1 for the whole wait -- which, in a
                 // kernel that does not preempt kernel mode, stops every
-                // other process too. WaitUart below stays for the case
+                // other process too. WaitInterrupt below stays for the case
                 // that question was really about: nobody else to run.
                 if (kernel_process_other_ready()) {
                     let process_slot: usize = kernel_syscall_process_slot();
@@ -1613,7 +1613,7 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
                         return SyscallAction::Block;
                     }
                 }
-                return SyscallAction::WaitUart;
+                return SyscallAction::WaitInterrupt;
             }
             let value: u8 = kernel_uart_rx_getc();
             enable_irq();
@@ -1651,7 +1651,7 @@ must_use variant SyscallAction {
     CloneChild(usize);      // 3: clone succeeded; value = child pid
     CloneParent(usize);      // 4: child exited; value = parent's saved SP
     Block;                    // 5: block this frame on the scheduler
-    WaitUart;                  // 6: retry after an uncontended UART wfe
+    WaitInterrupt;             // 6: wfe, then run this syscall again
     Exec;                       // 7: parent-only execve pending
     ChildExec;                   // 8: child execve pending
 }
@@ -1664,7 +1664,7 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
         SyscallAction::CloneChild(value) => { return (3, value); }
         SyscallAction::CloneParent(value) => { return (4, value); }
         SyscallAction::Block => { return (5, 0); }
-        SyscallAction::WaitUart => { return (6, 0); }
+        SyscallAction::WaitInterrupt => { return (6, 0); }
         SyscallAction::Exec => { return (7, 7); }
         SyscallAction::ChildExec => { return (8, 8); }
     }
@@ -3625,6 +3625,20 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 // ProcessRecord (kernel/kernel/process.tkb) instead of a
                 // module global, or a woken wait4() would resume with a
                 // stale x0/no status written.
+                // GitHub issue #448: blocking with no runnable successor
+                // used to fail-stop, and until this kernel had more than
+                // one thing wanting the CPU it could not happen -- the
+                // process this one is waiting for was always either
+                // running or spinning inside the kernel. Now that a UART
+                // waiter really yields, "every process is blocked" is a
+                // state a healthy boot reaches: the shell waits for a
+                // keystroke and its parent waits for the shell. Wait for
+                // an interrupt and ask again instead. The retry is free of
+                // side effects -- this handler has written nothing at this
+                // point -- and the timer alone guarantees it runs again.
+                if (kernel_process_other_ready() == false) {
+                    return SyscallAction::WaitInterrupt;
+                }
                 kernel_process_current_set_pending_block(
                     ProcessWaitReason::ChildExit, x1);
                 return SyscallAction::Block;

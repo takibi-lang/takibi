@@ -87,9 +87,18 @@ fn process_test_evidence_exit_42_seen() -> bool {
 // the last process_test_evidence_set_uart_block_logged(false) -- callers
 // use that to gate a one-time boot log line without duplicating the
 // increment-then-check-then-set sequence at each call site.
-fn process_test_evidence_record_uart_block() -> bool {
+//
+// GitHub issue #448: counting and CLAIMING THE MARKER are two different
+// questions now. Every UART block is counted, because
+// kernel_process_uart_block_evidence() checks wakes against blocks and a
+// block that went uncounted would make a woken process look like a wake
+// with no block. But only the payload fixture's own block may claim the
+// one-time line: an ash `read(2)` reaches this function too since
+// #448 made a UART waiter really yield, and on RPi5 it got here first and
+// printed the payload's marker into the middle of the ash transcript.
+fn process_test_evidence_record_uart_block(claim_marker: bool) -> bool {
     process_test_evidence.uart_blocks = process_test_evidence.uart_blocks + 1;
-    if (process_test_evidence.uart_block_logged == false) {
+    if (claim_marker && process_test_evidence.uart_block_logged == false) {
         process_test_evidence.uart_block_logged = true;
         return true;
     }

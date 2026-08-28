@@ -3258,10 +3258,31 @@ private fn kernel_process_block_current(current_sp: usize,
 }
 
 fn kernel_process_block_uart(current_sp: usize) -> usize {
+    // GitHub issue #448: the one-shot marker belongs to the fixture that
+    // means it, and that is now a distinguishable thing rather than
+    // "whoever blocked first".
+    //
+    // This line reports the kernel's own UART-wait primitive being used by
+    // the EL0 payload's child while its parent keeps computing -- the
+    // Scalar delivery kind, syscall 451. An ash `read(2)` is the Read
+    // kind, and until this release an ash never reached this function at
+    // all: it span inside the kernel instead, so "the first block of the
+    // boot" and "the payload fixture's block" were the same event by
+    // accident. They are not any more -- on RPi5 the interactive shell got
+    // here first and printed the payload's marker into the middle of the
+    // ash transcript -- so the fixture says which block it means.
+    let mut fixture_block: bool = true;
+    if (execution_here().current_live) {
+        if (scheduled_process_uart_block_delivery(
+                execution_here().current_handle.pool_index) ==
+            UartBlockDelivery::Read) {
+            fixture_block = false;
+        }
+    }
     let next_sp: usize = kernel_process_block_current(
         current_sp, ProcessWaitReason::UartRx, 1);
     if (next_sp != 0) {
-        if (process_test_evidence_record_uart_block()) {
+        if (process_test_evidence_record_uart_block(fixture_block)) {
             kernel_boot_log("uart rx: scheduler child blocked\n");
         }
     }

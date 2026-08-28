@@ -790,6 +790,18 @@ run, not a specification.
 - **`ppoll`.** Blocks and wakes on UART RX for the single-descriptor stdin
   shape BusyBox ash's `read` builtin uses. Any other shape reports current
   readiness immediately, and a non-NULL timeout is never armed.
+- **RPi5 reads `CNTFRQ_EL0` as 0.** `timer_tick_rearm` derives the
+  scheduler tick from it (`read_cntfrq() >> 6`), so on that board the
+  countdown is programmed to zero and there is no real time slice: the
+  timer re-fires as fast as it can. Every other `read_cntfrq()`-derived
+  deadline in the kernel is zero there too, which makes each of them expire
+  on its first test. `CNTPCT_EL0` there is not trustworthy either: the
+  busy-pair report's per-process CPU totals sum to several times the
+  interval they were measured inside, which cannot happen with a monotonic
+  counter and does not happen under QEMU. The kernel works and every
+  fixture passes -- the fairness assertion counts syscall-reported rounds,
+  not ticks -- but no timeout on that board means what its source says it
+  means, and no tick-derived number from it should be believed.
 - **Waiting for the network happens inside the kernel.** `accept` and the
   TCP receive path wait for a frame in a bounded in-kernel loop rather than
   blocking the calling process. Since kernel mode does not preempt, every

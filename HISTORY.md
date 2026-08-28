@@ -79,12 +79,28 @@ whatever is running -- which is what an inittab with three entries makes
 normal. The in-kernel wait remains for the case the old question was really
 about: nobody else to run.
 
-A fourth is filed rather than fixed: `accept` and the TCP receive path wait
-for a frame in a bounded in-kernel loop, so a daemon idling in `accept` with
-nothing connecting freezes every other process until its 30-second timeout
-expires. The QEMU and RPi5 runners therefore take the fairness measurement
-before starting the interactive HTTPd demo, and `run_kernel_uart_driver.py`
-gained a `--workload-marker` for that ordering.
+Hardware then found a fourth, which the QEMU lane could not: once a UART
+waiter really yields, "every process is blocked" becomes a state a healthy
+boot reaches -- the shell waits for a keystroke and its parent waits for the
+shell -- and `kernel_syscall_block_return` fail-stopped on it, because
+blocking with no runnable successor had until now been unreachable. It waits
+for an interrupt and re-runs the syscall instead; `.Lsyscall_dispatch`
+reloads every argument from the saved frame, so a retry re-asks the question.
+That is this kernel's idle loop, and the `SyscallAction` case it goes through
+is called `WaitInterrupt` rather than `WaitUart` now, because a `wait4` uses
+it too.
+
+Two more are filed rather than fixed, both surfaced by the same fixture.
+`accept` and the TCP receive path wait for a frame in a bounded in-kernel
+loop, so a daemon idling in `accept` with nothing connecting freezes every
+other process until its timeout expires; the runners therefore take the
+fairness measurement before starting the interactive HTTPd demo, and
+`run_kernel_uart_driver.py` gained a `--workload-marker` for that ordering.
+And the report prints the counter frequency it measured against, which is
+62500000 under QEMU and **0** on RPi5 -- so that board has no scheduler
+quantum (`read_cntfrq() >> 6` is the tick) and every network deadline
+derived from `read_cntfrq()` is zero there, expiring on its first test.
+Nothing had ever reported a timer-derived number from that board before.
 
 Found-by: test -- a two-entry `/etc/inittab` refused to start its second
 entry; the two scheduler defects behind it were found only once the first was
