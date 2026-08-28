@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Validate the raw BusyBox dmesg transcript without normalizing its time."""
 
+import argparse
 import re
-import sys
 from pathlib import Path
 
 
@@ -14,9 +14,11 @@ def fail(message: str) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        fail("expected one UART log path")
-    data = Path(sys.argv[1]).read_bytes().replace(b"\r", b"")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("uart_log", type=Path)
+    parser.add_argument("--platform", choices=("qemu", "rpi5"), default="qemu")
+    args = parser.parse_args()
+    data = args.uart_log.read_bytes().replace(b"\r", b"")
     records: list[tuple[int, bytes]] = []
     for line in data.splitlines():
         match = LINE.match(line)
@@ -31,8 +33,16 @@ def main() -> None:
     by_text = {text: timestamp for timestamp, text in records}
     first = b"takibi kernel: EL1"
     assembled_prefix = b"memory: base_bytes="
-    listener = b"virtio net: link ready mac=02:00:20:00:00:02"
-    resumed = b"virtio net: tcp handshake echo close reconnect ok"
+    if args.platform == "qemu":
+        listener = b"virtio net: link ready mac=02:00:20:00:00:02"
+        resumed = b"virtio net: tcp handshake echo close reconnect ok"
+        minimum_delay = 3_500_000
+        maximum_delay = 5_500_000
+    else:
+        listener = b"rp1 gem: link ready mac=02:00:20:00:00:02"
+        resumed = b"rp1 gem: tcp handshake echo close reconnect ok"
+        minimum_delay = 5_000_000
+        maximum_delay = 9_000_000
     if first not in by_text:
         fail("first kernel marker is absent")
     assembled = [item for item in records if item[1].startswith(assembled_prefix)]
@@ -41,9 +51,15 @@ def main() -> None:
     if listener not in by_text or resumed not in by_text:
         fail("bounded network retransmission markers are absent")
     elapsed = by_text[resumed] - by_text[listener]
-    if elapsed < 3_500_000 or elapsed > 5_500_000:
-        fail(f"network interval is {elapsed} us, expected 3.5-5.5 s")
-    print(f"PASS kernel/dmesg: monotonic records, assembled lines, delay={elapsed} us")
+    if elapsed < minimum_delay or elapsed > maximum_delay:
+        fail(
+            f"{args.platform} network interval is {elapsed} us, expected "
+            f"{minimum_delay / 1_000_000:.1f}-{maximum_delay / 1_000_000:.1f} s"
+        )
+    print(
+        f"PASS kernel/{args.platform} dmesg: monotonic records, "
+        f"assembled lines, delay={elapsed} us"
+    )
 
 
 if __name__ == "__main__":

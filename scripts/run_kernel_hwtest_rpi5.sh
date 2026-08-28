@@ -413,6 +413,9 @@ if [ "$uart_driver_status" -ne 0 ]; then
 fi
 echo "[kernel/rpi5] interactive background HTTPd passed"
 
+python3 "$REPO_ROOT/scripts/validate_kernel_dmesg_timestamps.py" \
+    --platform rpi5 "$UART_LOG"
+
 cleanup
 trap - EXIT INT TERM HUP
 
