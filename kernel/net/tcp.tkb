@@ -544,7 +544,7 @@ fn tcp_frame_take() -> (FrameLink, usize) !{unsafe} {
 // result is exactly the right thing to report when it fails -- a connection
 // with no frame to transmit from is not one this stack can serve.
 fn tcp_connection_frames_acquire(conn: *TcpConnection) -> bool !{unsafe} {
-    conn.frames_mutex = 0;
+    mutex_init(&conn.frames_mutex);
     let (tx, tx_address) = tcp_frame_take();
     if (tx_address == 0) {
         tcp_frame_release_link(tx);
@@ -718,7 +718,7 @@ fn tcp_connection_pool_init() !{unsafe} {
         tcp_frame_pool_ready = true;
     }
     if (tcp_retx_pool_ready == false) {
-        tcp_retx_chain.mutex = 0;
+        mutex_init(&tcp_retx_chain.mutex);
         // Retain NOTHING. #346's one-empty-chunk reserve is the right
         // default for a pool in steady churn, and the wrong one here: this
         // kernel checks "no page is held at rest" as an invariant (the
@@ -1325,7 +1325,12 @@ fn pending_tcp_record(conn: *TcpConnection,
         IntrusivePoolInsertResult::Allocated(owner) => {
             let entry_address: usize = intrusive_owner_slot(owner);
             let entry: *RetxEntry = intrusive_pool_ref(&tcp_retx_pool, owner);
-            entry.mutex = 0;
+            // GitHub issue #460: this was `entry.mutex = 0` and it
+            // compiled after the field became a Mutex -- assigning an
+            // integer to a struct emits a FOUR-BYTE store, so it zeroed
+            // half the lock word. Harmless only because insert_zeroed had
+            // already zeroed all of it.
+            mutex_init(&entry.mutex);
             entry.connection = conn.self_address;
             entry.kind = kind;
             entry.frame_length = frame_length;
