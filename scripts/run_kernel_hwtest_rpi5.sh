@@ -10,6 +10,7 @@ COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
 ARTIFACT_DIR="${RPI5_KERNEL_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-rpi5}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
+UART_TIMING_LOG="$ARTIFACT_DIR/uart-timing.log"
 RESET_LOG="$ARTIFACT_DIR/reset.log"
 LOADER_LOG="$ARTIFACT_DIR/loader.log"
 ARP_LOG="$ARTIFACT_DIR/arp.log"
@@ -20,6 +21,7 @@ HTTPD_BODY="$ARTIFACT_DIR/httpd-body.actual"
 SECOND_HTTPD_LOG="$ARTIFACT_DIR/httpd-curl-second.log"
 SECOND_HTTPD_BODY="$ARTIFACT_DIR/httpd-body-second.actual"
 INTERACTIVE_ARP_LOG="$ARTIFACT_DIR/interactive-httpd-arp.log"
+INTERACTIVE_HTTPD_LISTENER="$ARTIFACT_DIR/interactive-httpd.listener"
 INTERACTIVE_HTTPD_READY="$ARTIFACT_DIR/interactive-httpd.ready"
 INTERACTIVE_HTTPD_DONE="$ARTIFACT_DIR/interactive-httpd.done"
 SOCKET_ACCEPT_LOG="$ARTIFACT_DIR/socket-accept.log"
@@ -29,7 +31,8 @@ ETH_TEST_MAC="${ETH_TEST_MAC:-02:00:20:00:00:02}"
 ETH_TEST_HOST_IP="${ETH_TEST_HOST_IP:-192.168.20.1}"
 
 mkdir -p "$ARTIFACT_DIR"
-rm -f "$INTERACTIVE_HTTPD_READY" "$INTERACTIVE_HTTPD_DONE"
+rm -f "$INTERACTIVE_HTTPD_LISTENER" "$INTERACTIVE_HTTPD_READY" \
+    "$INTERACTIVE_HTTPD_DONE"
 exec 9>"$ARTIFACT_DIR/runner.lock"
 if ! flock -n 9; then
     echo "FAIL kernel/rpi5: another hardware runner already owns $ARTIFACT_DIR" >&2
@@ -103,9 +106,10 @@ timeout 1 cat "$SERIAL_DEV" >/dev/null 2>&1 || true
 # SWD load time grows with embedded initramfs images. Keep the common pyserial
 # driver alive through the entire load; it owns both capture and ash input.
 python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
-    --port "$SERIAL_DEV" --log "$UART_LOG" --timeout 180 \
+    --port "$SERIAL_DEV" --log "$UART_LOG" --timing-log "$UART_TIMING_LOG" --timeout 180 \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --stop-marker 'resources: pages=0' \
+    --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
     --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
     --validate-ash &
@@ -315,12 +319,15 @@ else
 fi
 
 # The bounded userspace suite is now complete and has recorded pages=0. The
-# same boot installs one final interactive ash; the UART driver backgrounds a
-# normal-lifetime HTTPd there and proves the shell still runs a builtin.
-interactive_ready=0
+# same boot installs one final interactive ash. Start the network checks as
+# soon as its HTTPd child publishes the listener; waiting first for the shell
+# to resume deadlocks against accept4()'s 30-second deadline, because the
+# child owns the single RX capability until the first request arrives. The
+# separate ready file below still proves the parent shell resumed afterwards.
+interactive_listener=0
 for _wait in $(seq 1 600); do
-    if [ -f "$INTERACTIVE_HTTPD_READY" ]; then
-        interactive_ready=1
+    if [ -f "$INTERACTIVE_HTTPD_LISTENER" ]; then
+        interactive_listener=1
         break
     fi
     if ! kill -0 "$uart_driver_pid" 2>/dev/null; then
@@ -328,8 +335,8 @@ for _wait in $(seq 1 600); do
     fi
     sleep 0.1
 done
-if [ "$interactive_ready" -ne 1 ]; then
-    echo "FAIL kernel/rpi5: interactive background HTTPd did not become ready" >&2
+if [ "$interactive_listener" -ne 1 ]; then
+    echo "FAIL kernel/rpi5: interactive background HTTPd did not publish its listener" >&2
     exit 1
 fi
 
@@ -380,6 +387,22 @@ for asset_spec in "${interactive_assets[@]}"; do
         exit 1
     fi
 done
+
+interactive_ready=0
+for _wait in $(seq 1 600); do
+    if [ -f "$INTERACTIVE_HTTPD_READY" ]; then
+        interactive_ready=1
+        break
+    fi
+    if ! kill -0 "$uart_driver_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+if [ "$interactive_ready" -ne 1 ]; then
+    echo "FAIL kernel/rpi5: interactive shell did not resume after HTTPd started" >&2
+    exit 1
+fi
 touch "$INTERACTIVE_HTTPD_DONE"
 uart_driver_status=0
 wait "$uart_driver_pid" || uart_driver_status=$?

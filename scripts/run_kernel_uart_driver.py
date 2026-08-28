@@ -73,6 +73,8 @@ def main() -> int:
     parser.add_argument("--port", required=True,
                         help="pyserial URL or UART device path")
     parser.add_argument("--log", required=True)
+    parser.add_argument("--timing-log",
+                        help="optional line-oriented UART receipt timeline")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--stop-marker", default="resources: pages=0")
@@ -83,6 +85,7 @@ def main() -> int:
     parser.add_argument("--payload", default="irqtest")
     parser.add_argument("--ash-only", action="store_true")
     parser.add_argument("--validate-ash", action="store_true")
+    parser.add_argument("--interactive-httpd-listener-file")
     parser.add_argument("--interactive-httpd-ready-file")
     parser.add_argument("--interactive-httpd-done-file")
     args = parser.parse_args()
@@ -90,12 +93,18 @@ def main() -> int:
     interactive_httpd = args.interactive_httpd_ready_file is not None
     if interactive_httpd != (args.interactive_httpd_done_file is not None):
         raise RuntimeError("interactive HTTPd ready/done files must be paired")
+    if args.interactive_httpd_listener_file and not interactive_httpd:
+        raise RuntimeError("interactive HTTPd listener file requires ready/done files")
     httpd_ready_file = (Path(args.interactive_httpd_ready_file)
                         if interactive_httpd else None)
+    httpd_listener_file = (Path(args.interactive_httpd_listener_file)
+                           if args.interactive_httpd_listener_file else None)
     httpd_done_file = (Path(args.interactive_httpd_done_file)
                        if interactive_httpd else None)
     if httpd_ready_file is not None:
         httpd_ready_file.unlink(missing_ok=True)
+    if httpd_listener_file is not None:
+        httpd_listener_file.unlink(missing_ok=True)
 
     commands = [line.rstrip("\n") for line in open(args.stdin, encoding="ascii")
                 if line.strip() and not line.startswith("#")]
@@ -129,6 +138,10 @@ def main() -> int:
     httpd_probe_sent = False
     httpd_ready = False
     httpd_done_seen_at = None
+    capture_started = time.monotonic()
+    timing_pending = bytearray()
+    timing_capture = (open(args.timing_log, "w", encoding="ascii")
+                      if args.timing_log else None)
     try:
         with open(args.log, "wb") as capture:
             while time.monotonic() < deadline:
@@ -137,6 +150,16 @@ def main() -> int:
                     output.extend(chunk)
                     capture.write(chunk)
                     capture.flush()
+                    if timing_capture is not None:
+                        timing_pending.extend(chunk)
+                        while b"\n" in timing_pending:
+                            line, _, remainder = timing_pending.partition(b"\n")
+                            timing_pending = bytearray(remainder)
+                            elapsed = time.monotonic() - capture_started
+                            text_line = line.decode(
+                                "ascii", errors="replace").replace("\r", "")
+                            timing_capture.write(f"{elapsed:9.3f}\t{text_line}\n")
+                            timing_capture.flush()
 
                 prompt_count = output.count(b"/ # ")
                 if (shell_step == 0 and
@@ -172,6 +195,8 @@ def main() -> int:
                 if (httpd_sent and not httpd_probe_sent and
                         b"persistent server: listener ready port=8080\n"
                         in output):
+                    if httpd_listener_file is not None:
+                        httpd_listener_file.touch()
                     write_uart_line(connection, b"echo httpd-background-ok")
                     httpd_probe_sent = True
                 if httpd_probe_sent and not httpd_ready:
@@ -197,6 +222,13 @@ def main() -> int:
                     break
     finally:
         connection.close()
+        if timing_capture is not None:
+            if timing_pending:
+                elapsed = time.monotonic() - capture_started
+                text_line = timing_pending.decode(
+                    "ascii", errors="replace").replace("\r", "")
+                timing_capture.write(f"{elapsed:9.3f}\t{text_line}\n")
+            timing_capture.close()
 
     text = output.decode("utf-8", errors="replace").replace("\r", "")
     if args.validate_ash:
