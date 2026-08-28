@@ -491,6 +491,11 @@ reported as not captured, not nonexistent.
 managed ordinary RAM before the guarded load; the present identity mapping is
 only the mechanism used to access that physical byte, not part of the command's
 address semantics. Physical MMIO and addresses outside managed RAM are denied.
+Malformed commands, address-range overflow, and byte counts outside 1 through
+64 are rejected without attempting a load. The QEMU DDB lane exercises those
+parser boundaries as well as a real guarded translation fault, then issues
+further commands and `continue`; an accidental address must not consume the
+debugging session that exposed the failure.
 
 `events` renders each CPU's independent fixed-record diagnostic tail. It
 reports valid, damaged/in-progress, and overwritten counts separately and

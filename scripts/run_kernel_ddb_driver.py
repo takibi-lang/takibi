@@ -38,10 +38,12 @@ def main() -> int:
         b"ps\n", b"proc 1\n",
         b"trace\n", b"events\n",
         f"xk {args.kernel_address} 2\n".encode("ascii"),
+        b"xk ffffffffffffffff 2\n", b"xk 0 0\n",
         b"xk 1000000000 1\n", b"xkfault\n",
         f"xp {args.kernel_address} 2\n".encode("ascii"),
         b"xp 1000000000 1\n",
         b"xu 1 80000000 2\n", b"xu 1 80000fff 2\n",
+        b"xu 1 ffffffffffffffff 2\n", b"xu 1 80000000 65\n",
         b"xu 999999 80000000 1\n", b"xu 1 70000000 1\n",
         b"continue\n",
     ]
