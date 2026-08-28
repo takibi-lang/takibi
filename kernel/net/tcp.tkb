@@ -324,6 +324,16 @@ variant RetxLink {
 struct RetxEntry {
     private mutex: Mutex;
     private next: RetxLink;
+    // GitHub issue #452: reachable only through retx_retry_state(), which
+    // needs the guard. These are the two fields the scan writes while
+    // other contexts can read the entry.
+    private retry: RetxRetryState;
+    // Written once at creation, before the entry is linked into the chain,
+    // and read-only afterwards. Deliberately still public: the lock does
+    // not protect them because nothing mutates them once published, and
+    // the chain link's own acquire/release is what orders the creation
+    // against a reader that walks to them. If any of these ever gains a
+    // second writer it belongs in RetxRetryState above, not here.
     connection: usize;
     kind: PendingTcpKind;
     frame_length: usize;
@@ -331,8 +341,6 @@ struct RetxEntry {
     remote_ip: [u8; 4];
     remote_port: u16;
     local_port: u16;
-    sent_at: i64;
-    retries: usize;
     frame: [u8; 1514];
 }
 
@@ -342,6 +350,21 @@ struct RetxEntry {
 struct RetxChain {
     private mutex: Mutex;
     private head: RetxLink;
+}
+
+// GitHub issue #452: the fields the retransmit scan MUTATES after an entry
+// is published, grouped so one accessor covers the whole protected set
+// rather than one designated field.
+//
+// Grouped rather than five `private` markers on flat fields, deliberately:
+// stable_replace gates exactly one field, so a flat struct would need one
+// special case per field and the NEXT field added would silently get
+// neither. And making a field private and moving it into a nested struct
+// are both call-site-wide edits, so doing them in one pass touches each
+// site once.
+struct RetxRetryState {
+    sent_at: i64;
+    retries: usize;
 }
 
 // GitHub issue #451: a linear STRUCT, not an erased view any more.
@@ -1118,6 +1141,23 @@ fn retx_unlock(guard: sink RetxGuard[address],
     mutex_release(m, guard.flags);
 }
 
+// GitHub issue #452: the only way to reach an entry's retry state.
+//
+// The returned pointer is tied to the guard's authority, so using it after
+// retx_unlock is a compile error ("pointer is derived from linear value
+// 'guard' and cannot be used after 'guard' is consumed") -- which is the
+// half a `private` marker alone does not give. What it does NOT prove is
+// that this function returns data the lock actually protects; that stays
+// a module obligation, and SPEC.md says so under "Guard-derived pointers".
+//
+// The container is a plain *RetxEntry rather than one carrying `@ address`
+// -- the tie comes from the guard, and a field address through an
+// identity-annotated pointer is rejected today anyway.
+fn retx_retry_state(guard: borrow RetxGuard[address], e: *RetxEntry)
+        -> *RetxRetryState @ address {
+    return &e.retry;
+}
+
 // Detach the whole queue. Every walk below is "take the chain, decide
 // entry by entry, put back what survives", rather than unlinking a node
 // where it stands: unlinking needs the PREVIOUS entry's link held open
@@ -1339,8 +1379,16 @@ fn pending_tcp_record(conn: *TcpConnection,
                        conn.remote_ip as []u8);
             entry.remote_port = conn.remote_port;
             entry.local_port = conn.local_port;
-            entry.sent_at = read_cntpct();
-            entry.retries = 0;
+            // GitHub issue #452: the retry state needs the guard even
+            // here, where nothing else can see this entry yet -- the
+            // accessor being the only way in is the property, and an
+            // exception for "I know it is private right now" is how that
+            // property stops holding later.
+            let init_guard = retx_lock(&entry.mutex);
+            let init_retry = retx_retry_state(init_guard, entry);
+            init_retry.sent_at = read_cntpct();
+            init_retry.retries = 0;
+            retx_unlock(init_guard, &entry.mutex);
             slice_copy(entry.frame as []u8,
                        tcp_connection_tx_slice(conn));
 
@@ -1661,27 +1709,47 @@ fn pending_tcp_service_once(conn: *TcpConnection,
                         intrusive_pool_ref(&tcp_retx_pool, branded);
                     let following: RetxLink = retx_entry_take_next(entry);
                     let mut expired: bool = false;
-                    if (entry.connection == conn.self_address &&
-                        now - entry.sent_at >= retry_ticks) {
-                        if (entry.retries < TCP_RETRY_LIMIT) {
-                            let length: usize = entry.frame_length;
-                            let frame_bytes = entry.frame as []u8;
-                            ready = net_transmit_ready(
-                                ready, frame_bytes[0..<1514], length as i32);
-                            entry.sent_at = now;
-                            entry.retries = entry.retries + 1;
-                            if (slot == conn.injected_data_entry) {
-                                tcp_injected_data_retransmitted = true;
+                    // GitHub issue #452: decide and mutate under the guard,
+                    // TRANSMIT OUTSIDE IT. mutex_acquire masks interrupts,
+                    // and holding that across net_transmit_ready would mask
+                    // them for as long as handing a 1514-byte frame to the
+                    // NIC takes. The retry state is two words; the transmit
+                    // is not, and it needs none of it.
+                    //
+                    // `sent_at` is set before the transmit rather than
+                    // after, and the stored VALUE is unchanged: `now` is
+                    // read once before this loop, so both orders wrote the
+                    // same number.
+                    let mut retransmit: bool = false;
+                    let mut length: usize = 0;
+                    if (entry.connection == conn.self_address) {
+                        let scan_guard = retx_lock(&entry.mutex);
+                        let retry = retx_retry_state(scan_guard, entry);
+                        if (now - retry.sent_at >= retry_ticks) {
+                            if (retry.retries < TCP_RETRY_LIMIT) {
+                                retry.sent_at = now;
+                                retry.retries = retry.retries + 1;
+                                retransmit = true;
+                                length = entry.frame_length;
+                            } else {
+                                // Give up silently on this one segment --
+                                // the same per-segment exhaustion behavior
+                                // this file always had, scoped to this
+                                // entry rather than the whole queue.
+                                expired = true;
                             }
-                            if (slot == conn.injected_fin_entry) {
-                                tcp_injected_fin_retransmitted = true;
-                            }
-                        } else {
-                            // Give up silently on this one segment -- same
-                            // per-segment exhaustion behavior this file
-                            // always had, just scoped to this entry
-                            // instead of the whole queue.
-                            expired = true;
+                        }
+                        retx_unlock(scan_guard, &entry.mutex);
+                    }
+                    if (retransmit) {
+                        let frame_bytes = entry.frame as []u8;
+                        ready = net_transmit_ready(
+                            ready, frame_bytes[0..<1514], length as i32);
+                        if (slot == conn.injected_data_entry) {
+                            tcp_injected_data_retransmitted = true;
+                        }
+                        if (slot == conn.injected_fin_entry) {
+                            tcp_injected_fin_retransmitted = true;
                         }
                     }
                     if (expired) {
