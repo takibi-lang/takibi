@@ -194,8 +194,22 @@ struct ProcessRecord {
     wait4_status_ptr: usize;
     parent: ProcessHandle;
     has_parent: bool;
-    child: ProcessHandle;
-    has_child: bool;
+    // GitHub issue #437: FIRST child, and the sibling link beside it.
+    //
+    // This was `child`, one slot, and the name was accurate: a process
+    // could have one. That is the ceiling on any workload that wants two
+    // things running, and `/etc/inittab` with two `respawn` entries is the
+    // shape that makes it visible.
+    //
+    // First-child/next-sibling rather than a second pool: a tree costs one
+    // link field per process, and the scheduler's walk over it reduces to
+    // exactly today's "child, else up to the root" when no process has a
+    // sibling -- which is why this change can be made without moving any
+    // existing behaviour.
+    first_child: ProcessHandle;
+    has_first_child: bool;
+    next_sibling: ProcessHandle;
+    has_next_sibling: bool;
     last_child_pid: usize;
     child_exit_status: usize;
     child_waitable: bool;
@@ -1130,7 +1144,8 @@ private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
     record.wait_reason = ProcessWaitReason::None;
     record.wait4_status_ptr = 0;
     record.has_parent = false;
-    record.has_child = false;
+    record.has_first_child = false;
+    record.has_next_sibling = false;
     record.last_child_pid = 0;
     record.child_exit_status = 0;
     record.child_waitable = false;
@@ -2379,6 +2394,60 @@ must_use variant ProcessNextReadyResult { Missing; Next(ProcessHandle); }
 // serving. Rotating instead makes every runnable process reachable from
 // every other, at the cost of visiting processes the old policy skipped --
 // including a busy-looping PID 1, which was genuinely runnable all along.
+// GitHub issue #437: a depth-first walk of the process TREE, where this
+// used to be a walk of a process CHAIN.
+//
+// The old rotation was "successor is your child, or the chain root when
+// you have none". That enumerates every live process exactly once only
+// because the live tree IS a chain -- give any process two children and
+// the walk stops covering the second one and everything under it, so
+// lifting the fan-out limit without replacing this would produce a kernel
+// that forks and then starves.
+//
+// The successor here is the ordinary pre-order one: first child, else next
+// sibling, else the nearest ancestor's next sibling, else back to the
+// root. With no siblings anywhere that reduces to "child, else root" --
+// the old walk exactly, which is why this change moves no behaviour and
+// the existing views are its oracle.
+//
+// A pool walk was the alternative and would have dropped the tree
+// dependency entirely. It also reorders scheduling by slot address rather
+// than by descent, which every view that pins a switch sequence would
+// have noticed. Keeping parent/child locality is worth more than dropping
+// a dependency the tree walk handles correctly anyway.
+private fn kernel_process_next_successor(from: ProcessHandle,
+                                         root: ProcessHandle)
+        -> ProcessHandle {
+    if (scheduled_process_record_at(from.pool_index).has_first_child) {
+        let mut child: ProcessHandle =
+            scheduled_process_record_at(from.pool_index).first_child;
+        if (scheduled_process_handle_matches(child)) { return child; }
+    }
+    // No child: the next sibling, and failing that the nearest ancestor
+    // that has one. Bounded by the live count -- an ancestor chain cannot
+    // be longer than the number of live processes, and a cycle would
+    // otherwise spin here rather than in the caller.
+    let mut cursor: ProcessHandle = from;
+    let mut climbing: usize = scheduled_process_pool_live_count() + 1;
+    while (climbing != 0) {
+        climbing = climbing - 1;
+        if (scheduled_process_record_at(cursor.pool_index).has_next_sibling) {
+            let mut sibling: ProcessHandle =
+                scheduled_process_record_at(cursor.pool_index).next_sibling;
+            if (scheduled_process_handle_matches(sibling)) { return sibling; }
+        }
+        if (scheduled_process_record_at(cursor.pool_index).has_parent == false) {
+            return root;
+        }
+        let mut parent: ProcessHandle =
+            scheduled_process_record_at(cursor.pool_index).parent;
+        if (scheduled_process_handle_matches(parent) == false) { return root; }
+        if (scheduled_process_same_slot(parent, root)) { return root; }
+        cursor = parent;
+    }
+    return root;
+}
+
 private fn kernel_process_next_ready(from: ProcessHandle)
         -> ProcessNextReadyResult {
     let mut root: ProcessHandle = kernel_process_chain_root(from);
@@ -2386,16 +2455,7 @@ private fn kernel_process_next_ready(from: ProcessHandle)
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
     while (remaining != 0) {
         remaining = remaining - 1;
-        let mut advanced: bool = false;
-        if (scheduled_process_record_at(cursor.pool_index).has_child) {
-            let mut child: ProcessHandle =
-                scheduled_process_record_at(cursor.pool_index).child;
-            if (scheduled_process_handle_matches(child)) {
-                cursor = child;
-                advanced = true;
-            }
-        }
-        if (advanced == false) { cursor = root; }
+        cursor = kernel_process_next_successor(cursor, root);
         if (scheduled_process_same_slot(cursor, from) == false &&
             scheduled_process_record_state(cursor.pool_index) ==
                 ProcessSlotState::Ready) {
@@ -2427,13 +2487,13 @@ fn kernel_process_schedule(current_sp: usize) -> usize {
 fn kernel_process_current_has_live_child() -> bool {
     return execution_here().current_live &&
            scheduled_process_record_at(execution_here().current_handle.pool_index)
-               .has_child;
+               .has_first_child;
 }
 
 fn kernel_process_current_has_relative() -> bool {
     if (execution_here().current_live == false) { return false; }
     let slot: usize = execution_here().current_handle.pool_index;
-    return scheduled_process_record_at(slot).has_child ||
+    return scheduled_process_record_at(slot).has_first_child ||
            scheduled_process_record_at(slot).has_parent;
 }
 
@@ -3152,7 +3212,7 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
 fn kernel_process_block_wait4(current_sp: usize) -> usize {
     if (execution_here().current_live == false ||
         scheduled_process_record_at(execution_here().current_handle.pool_index)
-            .has_child == false) {
+            .has_first_child == false) {
         return 0;
     }
     return kernel_process_block_current(
@@ -3178,9 +3238,9 @@ fn kernel_process_uart_wake(value: usize)
     let mut waiter: ProcessHandle = execution_here().current_handle;
     let mut found: bool = false;
     if (scheduled_process_record_at(execution_here().current_handle.pool_index)
-            .has_child) {
+            .has_first_child) {
         let mut candidate: ProcessHandle = scheduled_process_record_at(
-            execution_here().current_handle.pool_index).child;
+            execution_here().current_handle.pool_index).first_child;
         if (scheduled_process_record_state(candidate.pool_index) ==
                 ProcessSlotState::Blocked &&
             scheduled_process_record_wait_reason(candidate.pool_index) ==
@@ -3282,13 +3342,13 @@ fn kernel_process_uart_record_parent_progress()
         -> ProcessUartProgressResult {
     if (execution_here().current_live == false ||
         scheduled_process_record_at(execution_here().current_handle.pool_index)
-            .has_child ==
+            .has_first_child ==
             false) {
         return ProcessUartProgressResult::Invalid;
     }
     let mut parent: ProcessHandle = execution_here().current_handle;
     let mut child: ProcessHandle =
-        scheduled_process_record_at(parent.pool_index).child;
+        scheduled_process_record_at(parent.pool_index).first_child;
     if (scheduled_process_record_state(parent.pool_index) !=
             ProcessSlotState::Running ||
         scheduled_process_record_state(child.pool_index) !=
@@ -3493,12 +3553,12 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
     // wrongly rejected a real, unrelated clone deeper in the tree (found
     // on real RPi5 hardware: user_payload's own fork always failed with
     // -EINVAL while running as ash's forked+exec'd child). The per-slot
-    // ProcessRecord.has_child[current] check below is the correct,
+    // ProcessRecord.has_first_child[current] check below is the correct,
     // already-scoped-to-current-only replacement.
     if (flags != 0x11 || child_stack != 0 ||
         execution_here().current_live == false ||
         scheduled_process_record_at(execution_here().current_handle.pool_index)
-            .has_child) {
+            .has_first_child) {
         return ProcessCloneResult::Invalid;
     }
     let mut parent: ProcessHandle = execution_here().current_handle;
@@ -3509,8 +3569,8 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
         ScheduledProcessAllocResult::Allocated(child) => {
             scheduled_process_copy_command_line(parent.pool_index,
                                                 child.pool_index);
-            scheduled_process_record_at(parent.pool_index).child = child;
-            scheduled_process_record_at(parent.pool_index).has_child = true;
+            scheduled_process_record_at(parent.pool_index).first_child = child;
+            scheduled_process_record_at(parent.pool_index).has_first_child = true;
             scheduled_process_record_at(child.pool_index).parent = parent;
             scheduled_process_record_at(child.pool_index).has_parent = true;
             // "current" becomes the CHILD right here, before this function
@@ -3589,7 +3649,7 @@ fn kernel_process_clone_rollback() {
             }
         }
     }
-    scheduled_process_record_at(parent.pool_index).has_child = false;
+    scheduled_process_record_at(parent.pool_index).has_first_child = false;
     execution_here().current_handle = parent;
     process_image_activate_root(parent.pool_index);
     process_test_evidence_release_clone();
@@ -3756,12 +3816,12 @@ fn kernel_process_current_root() -> AddressSpaceRoot {
 fn kernel_process_current_child_pid() -> usize {
     if (execution_here().current_live == false ||
         scheduled_process_record_at(execution_here().current_handle.pool_index)
-            .has_child ==
+            .has_first_child ==
             false) {
         return 0;
     }
     return scheduled_process_pid_of_handle(
-        scheduled_process_record_at(execution_here().current_handle.pool_index).child);
+        scheduled_process_record_at(execution_here().current_handle.pool_index).first_child);
 }
 
 fn kernel_process_child_exit(status: usize) -> usize {
@@ -3822,7 +3882,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
                         .has_parent = false;
                     scheduled_process_reap(exited_owner, exited_state);
                     scheduled_process_record_at(parent.pool_index)
-                        .has_child = false;
+                        .has_first_child = false;
                 }
             }
         }
@@ -3996,7 +4056,7 @@ fn kernel_process_clone_evidence() -> bool {
            process_test_evidence_clone_calls() >= 1 &&
            process_test_evidence_exit_42_seen() &&
            scheduled_process_record_at(execution_here().current_handle.pool_index)
-               .has_child ==
+               .has_first_child ==
                false &&
            scheduled_process_record_state(
                execution_here().current_handle.pool_index) ==
