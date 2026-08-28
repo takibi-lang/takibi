@@ -6150,7 +6150,36 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       if StringSet.mem forbidden !seen && StringSet.mem "exception" !seen then
         raise (TypeError (loc, Printf.sprintf
           "%s '%s' cannot be both exception and %s" kind name forbidden))
-    ) ["may_block"; "allocates"; "locks"; "logs"];
+    (* GitHub issue #449: `locks` is NOT here, and used to be. Two
+       deliberate decisions in this tree contradicted each other, and
+       annotating the lock primitives is what made that visible.
+
+       Issue #298 added `locks` to this list, with tests, for the
+       diagnostic-trace writer: a recorder must stay safe if an IRQ
+       interrupts ordinary kernel code. Issue #351 had already decided the
+       opposite for the pool, and pinned it -- linux_user/intrusive_pool
+       carries an `!{interrupt}` probe that takes a pool guard, with the
+       comment "the pool is usable from an interrupt handler, and this is
+       here so that stops being a claim in a comment ... marking the lock
+       `!{may_block}` is the alternative this design deliberately did not
+       take."
+
+       Both could stand only because the effect was vacuous: no function
+       declared `locks`, so #298's rule never fired on #351's probe.
+       Annotating the primitives made them collide, and #351 is right. A
+       lock whose acquire MASKS composes with an interrupt handler -- the
+       handler cannot interrupt a holder on the same core -- which is a
+       property of the lock rather than of the call site, and is how Linux
+       allows spin_lock_irqsave there.
+
+       Nothing #298 actually required is lost. A trace writer must not
+       allocate and must not log: `allocates` and `logs` are still here. A
+       lock that genuinely must not be taken in a handler is one whose
+       acquire does not mask, and kernel/lib/task_mutex.tkb declares
+       `may_block` -- also still here -- so it is rejected with a call
+       path. What is removed is the over-generalisation from "the trace
+       writer must not lock" to "no handler may lock". *)
+    ) ["may_block"; "allocates"; "logs"];
     if StringSet.mem "interrupt" !seen && StringSet.mem "exception" !seen then
       raise (TypeError (loc, Printf.sprintf
         "%s '%s' cannot be both interrupt and exception" kind name));
@@ -9160,6 +9189,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     loop seed
   in
   let operational_effects = ["may_block"; "allocates"; "locks"; "logs"] in
+  (* GitHub issue #449: `locks` still PROPAGATES with the rest -- "does
+     this call path take a lock" is the question the effect exists to
+     answer, and an `!{}` effect-free contract still forbids all four. What
+     it is no longer is forbidden inside an interrupt or exception root;
+     validate_effects' own note has why, and why nothing #298 required is
+     lost by it. *)
+  let interrupt_forbidden_effects = ["may_block"; "allocates"; "logs"] in
   let compositional_effects = operational_effects @ ["requires_mmu"] in
   let closed_effects = List.map (fun eff ->
     (eff, close_property (explicit_effect eff)
@@ -9269,7 +9305,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           "%s function '%s' %s via %s" role
           (display_effect_key key) description (String.concat " -> " path)))
       end
-    ) operational_effects in
+    ) interrupt_forbidden_effects in
     if List.mem "interrupt" effects then begin
       check_forbidden "interrupt";
       if StringSet.mem key may_reach_unknown then begin

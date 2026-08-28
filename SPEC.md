@@ -1467,12 +1467,26 @@ The operational call effects are `may_block`, `allocates`, `locks`, and
 effect-contracted indirect calls. An explicit annotation is therefore an API
 contract and a seed, not a required annotation on every caller.
 `interrupt` and `exception` mark roots whose complete reachable call graphs
-must contain none of these effects; `interrupt_wait()` is intrinsically
-`may_block`. Diagnostics include one offending call path. `locks` denotes an
-acquisition that is forbidden in interrupt/exception context; an IRQ-safe
-local interrupt-mask guard is not marked `locks`. `logs` covers UART and
-console emission, including recursion through a logging helper, without a
-second redundant "reentrant logging" effect.
+must contain `may_block`, `allocates` or `logs`; `interrupt_wait()` is
+intrinsically `may_block`. Diagnostics include one offending call path.
+
+**`locks` is the exception, and deliberately so** (GitHub issue #449). It
+propagates like the others -- "does this call path take a lock" is the
+question it exists to answer, and an `!{}` effect-free contract still
+forbids it -- but it is NOT forbidden inside an interrupt or exception
+root. A lock whose acquire masks interrupts composes with a handler: the
+handler cannot interrupt a holder on the same core. That is a property of
+the lock, not of the call site, and it is why
+`linux_user/intrusive_pool` carries an `!{interrupt}` probe that takes a
+pool guard. A lock whose acquire does NOT mask is a different matter and
+says so with `may_block`, which is forbidden there --
+`kernel/lib/task_mutex.tkb` is the one, and an interrupt handler reaching
+it is rejected with the call path.
+
+`logs` covers UART and console emission, including recursion through a
+logging helper, without a second redundant "reentrant logging" effect. It
+stays forbidden in a handler for a reason worth stating: at 115200 baud a
+forty-character line is 3.5 ms, and the scheduler tick is 15.6 ms.
 
 `requires_mmu` is another compositional call effect, used by operations such
 as intrusive-pool growth whose memory accesses are valid only after the MMU is

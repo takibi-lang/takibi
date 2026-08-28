@@ -123,7 +123,7 @@ fn pool_lock_check_reset() {
 // SHAPE matches the kernel backend, where it is the DAIF.I bit read
 // before masking. A stand-in whose signature differs from the real thing
 // is a stand-in that stops catching signature drift.
-fn pool_lock_acquire(tag: usize, lock: *Mutex @ id) -> usize {
+fn pool_lock_acquire(tag: usize, lock: *Mutex @ id) -> usize !{locks} {
     let slot_value: usize = pool_lock_slot_of(tag);
     if (tag == 0 || slot_value >= POOL_LOCK_MAX_TAGS) {
         pool_lock_untracked = pool_lock_untracked + 1;
@@ -167,7 +167,7 @@ fn pool_lock_acquire(tag: usize, lock: *Mutex @ id) -> usize {
 // a linear guard is released where its holder chooses, and releasing in a
 // different order than acquired is legal even though acquiring in a
 // different order is what this file is looking for.
-fn pool_lock_release(tag: usize, lock: *Mutex @ id, flags: usize) {
+fn pool_lock_release(tag: usize, lock: *Mutex @ id, flags: usize) !{locks} {
     let slot_value: usize = pool_lock_slot_of(tag);
     if (tag == 0 || slot_value >= POOL_LOCK_MAX_TAGS) { return; }
     let mut found: bool = false;

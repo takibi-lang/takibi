@@ -8102,8 +8102,17 @@ let infer_tests = [
         fn alloc_helper298() { alloc_leaf298(); }
         fn alloc_irq298() !{interrupt} { alloc_helper298(); }");
 
-  Alcotest.test_case "interrupt rejects transitive lock acquisition" `Quick
-    (expect_type_error "lock_irq298 -> lock_helper298 -> lock_leaf298"
+  (* GitHub issue #449: was "interrupt rejects transitive lock
+     acquisition" (issue #298). It does not any more, and the reason is
+     that linux_user/intrusive_pool's own `!{interrupt}` probe -- added by
+     #351 to stop "this pool is usable from a handler" being a claim in a
+     comment -- is the counterexample. A MASKING acquire composes with a
+     handler. What #298 needed is kept by `allocates` and `logs`, and a
+     non-masking lock is rejected through `may_block`; see the tests above
+     and validate_effects' note. This one now pins that a lock is
+     ACCEPTED. *)
+  Alcotest.test_case "interrupt accepts transitive lock acquisition" `Quick
+    (expect_ok
        "extern fn lock_leaf298() !{locks};
         fn lock_helper298() { lock_leaf298(); }
         fn lock_irq298() !{interrupt} { lock_helper298(); }");
@@ -8120,8 +8129,8 @@ let infer_tests = [
         fn alloc_helper_e298() { alloc_leaf_e298(); }
         fn alloc_exception298() !{exception} { alloc_helper_e298(); }");
 
-  Alcotest.test_case "exception rejects transitive lock acquisition" `Quick
-    (expect_type_error "lock_exception298 -> lock_helper_e298 -> lock_leaf_e298"
+  Alcotest.test_case "exception accepts transitive lock acquisition" `Quick
+    (expect_ok
        "extern fn lock_leaf_e298() !{locks};
         fn lock_helper_e298() { lock_leaf_e298(); }
         fn lock_exception298() !{exception} { lock_helper_e298(); }");
@@ -12425,6 +12434,56 @@ let codegen_tests = [
      kernel/arch/arm64/mm/mmu.S into .tkb. Same coverage shape as the DMA/
      device barrier builtins above: arity, cannot-be-redefined, and
      IR-shape checks. *)
+  (* GitHub issue #449: what an `!{interrupt}` function may and may not
+     reach. The rule that used to be here -- no `locks` in a handler -- was
+     wrong for this kernel and had no test either; these are the rules that
+     replaced it. *)
+  Alcotest.test_case
+    "issue #449: the interrupt rules, including the one deliberately kept"
+    `Quick
+    (fun () ->
+       (* A masking acquire composes with a handler: it cannot interrupt a
+          holder on the same core. #298 forbade this and #351 had already
+          pinned the opposite with an `!{interrupt}` probe over a pool
+          guard; both stood only while the effect was vacuous. Annotating
+          the primitives collided them, and #351 wins. *)
+       expect_ok
+         "fn issue449_masking_acquire(a: usize) -> usize !{locks} {
+            return a;
+          }
+          fn issue449_handler() !{interrupt} {
+            issue449_masking_acquire(1);
+          }" ();
+       (* A lock whose acquire does not mask blocks forever there, and says
+          so with may_block rather than with a second effect -- so it stays
+          rejected under whatever happens to `locks` later. *)
+       expect_type_error "may block via"
+         "fn issue449_task_acquire(a: usize) -> usize !{may_block} {
+            return a;
+          }
+          fn issue449_handler_blocks() !{interrupt} {
+            issue449_task_acquire(1);
+          }" ();
+       (* Transitively, and the diagnostic names the path. *)
+       expect_type_error "issue449_deep_handler -> issue449_middle -> issue449_deep_acquire"
+         "fn issue449_deep_acquire(a: usize) -> usize !{may_block} {
+            return a;
+          }
+          fn issue449_middle(a: usize) -> usize {
+            return issue449_deep_acquire(a);
+          }
+          fn issue449_deep_handler() !{interrupt} {
+            issue449_middle(1);
+          }" ();
+       (* locks and may_block on ONE function is legal and is what
+          task_mutex_acquire is: it takes a lock, and from a handler that
+          take never returns. A rule excluding the pair would reject the
+          real thing. *)
+       expect_ok
+         "fn issue449_both(a: usize) -> usize !{locks, may_block} {
+            return a;
+          }" ());
+
   Alcotest.test_case
     "issue #226: zero-argument register/barrier intrinsics take no arguments"
     `Quick

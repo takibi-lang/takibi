@@ -24,12 +24,14 @@
 // Current limitations (2026-08-28). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
-// - THE INTERRUPT RULE IS BY TYPE AND BY NAME, NOT BY CHECK. Nothing
-//   rejects an `!{interrupt}` function that takes one of these, and the
-//   consequence if one ever did is a hang: the handler spins for a holder
-//   that cannot run until the handler returns. GitHub issue #449 owns the
-//   `locks` annotation that would make it a compile error. Until then this
-//   header is the rule, which is why it is stated first.
+// - THE INTERRUPT RULE IS CHECKED, but only for the BLOCKING acquire.
+//   task_mutex_acquire is `!{may_block}`, so an `!{interrupt}` function
+//   that reaches it -- through any depth of calls -- is a compile error
+//   naming the path. task_mutex_trylock is not, because it does not spin
+//   and a handler using it correctly is a real pattern. What that leaves
+//   uncovered: a handler that trylocks in a loop, which is the blocking
+//   acquire written out longhand and which nothing here can tell from a
+//   handler that gives up.
 // - NO OWNER, NO RECURSION COUNT, NO DEADLOCK DETECTION -- same as Mutex.
 //   Taking the same one twice on one core hangs.
 // - NO LEVEL, and unlike Mutex this one will never need one. A level
@@ -54,17 +56,28 @@ fn task_mutex_init(m: *TaskMutex @ id) {
 
 // Takes it. No mask, so nothing to hand back -- which is why the caller's
 // token needs no flags field and why this pair is not shaped like Mutex's.
-fn task_mutex_acquire(m: *TaskMutex @ id) !{unsafe} {
+//
+// `may_block` is not decoration and not an approximation. From an
+// interrupt handler this genuinely blocks forever: the handler spins for a
+// holder that cannot run until the handler returns. The effect system
+// already rejects `may_block` on an `!{interrupt}` function and reports
+// the call path, so the rule this file's header states is now checked
+// rather than asserted -- which is what GitHub issue #449 owed it.
+//
+// kernel/lib/intrusive_pool.tkb had already worked out that this is what
+// the annotation would do, and declined it there because a pool lock IS
+// safe from a handler. This is the case it declined it FOR.
+fn task_mutex_acquire(m: *TaskMutex @ id) !{locks, may_block, unsafe} {
     spin_lock(m as usize);
 }
 
-fn task_mutex_release(m: *TaskMutex @ id) !{unsafe} {
+fn task_mutex_release(m: *TaskMutex @ id) !{locks, unsafe} {
     spin_unlock(m as usize);
 }
 
 // One attempt. For a caller with something else to do rather than wait,
 // and the only way to observe the exclusion with one thread.
-fn task_mutex_trylock(m: *TaskMutex @ id) -> bool !{unsafe} {
+fn task_mutex_trylock(m: *TaskMutex @ id) -> bool !{locks, unsafe} {
     return spin_trylock(m as usize);
 }
 
