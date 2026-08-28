@@ -9,14 +9,22 @@
 // Current limitations (2026-08-27). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
-// - NOT A PUBLIC API. GitHub issue #449 settled that this kernel has one
-//   lock flavour and it masks interrupts, because that is what makes a
-//   lock safe to take from an interrupt handler without per-call-site
-//   analysis. These three functions are the inside of that lock, not an
-//   alternative to it: kernel/lib/pool_lock.tkb is the only caller and
-//   should stay that way. Do not add a bare non-masking spin_lock beside
-//   it -- Linux has both flavours and mixing them is a recurring bug
-//   class, and no measurement here says the masking costs anything.
+// - NOT A PUBLIC API. kernel/lib/pool_lock.tkb is the only caller and
+//   should stay that way: these three functions are the inside of a lock,
+//   not an alternative to one. What makes taking a lock from an interrupt
+//   handler safe is that its acquire masks first, and that is pool_lock's
+//   job, not this file's.
+// - ONE FLAVOUR NOW, AND A LEVEL LATER. Masking DAIF.I is all-or-nothing,
+//   so while any lock is held every interrupt is blocked however narrow
+//   the data under it is -- a giant lock as far as interrupt latency is
+//   concerned. That is the right trade today (one core, no nested
+//   interrupts, no measurement saying the masking costs anything) and the
+//   wrong one once interrupts have priorities. The extension is a per-lock
+//   LEVEL raising ICC_PMR_EL1 instead of setting DAIF.I, which is what
+//   NetBSD's IPL is; GitHub issue #449 records the decision and why
+//   issue #451's nominal Mutex type is what keeps it a one-place change.
+//   Do not add a second flavour before there is a second interrupt
+//   priority to serve.
 // - THE LOCK IS AN ADDRESS, and nothing checks that the address is a lock.
 //   `usize` is what a slot address, a payload address and a lock word all
 //   look like (GitHub issue #396). A typed `SpinLock` wrapper is the
