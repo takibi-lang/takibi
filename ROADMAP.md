@@ -237,10 +237,27 @@ run, not during.
 
 ### Phase 2: make a multicore workload expressible, still on one core
 
-**#437** then **#448**. A process may have exactly one live child today, so an
-`/etc/inittab` with two `respawn` entries cannot start, and the round-robin
-scheduler's enumeration depends on the live process tree being a chain. Both
-move together or the kernel forks and then starves.
+**#437 -- DONE 2026-08-28, closed.** A process may have as many children as
+the page allocator allows. Three commits, each verifiable before the next
+because none could be exercised by what the next one enabled: `1dd33db` made
+the scheduler walk the process TREE rather than a chain (a pre-order
+successor that reduces to the old walk exactly while nothing has a sibling);
+`1567fb5` made an exited child wait to be collected, holding its own status,
+so the parent's single `child_exit_status`/`child_waitable` were deleted
+rather than pluralised -- pluralising meant a per-parent queue with a
+capacity, in a kernel that has removed every hand-picked one; `7a2f6b3`
+lifted the count refusal and made `wait4` validate and collect by pid.
+
+The typestate paid for itself: `scheduled_process_reap` consumes a linear
+`ScheduledProcessState[Exited]` whose only source is a take on a record that
+IS Exited, so moving that take from exit to the wait path turned the zombie
+window into a state the checker sees. RPi5 caught the one bug QEMU could not
+-- `process_image_target_root` left at 0 on wait4's fast path, aiming the COW
+handler at PID 1's live image.
+
+**#448 is next**, and #437's userspace criteria moved into it: both `respawn`
+entries alive, killing one restarting only that one, and ash backgrounding
+more than one job.
 
 The workload is a pair of CPU-bound busy loops with a fairness assertion, and
 it must pass **on one core** before the second core is enabled -- so that
