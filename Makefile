@@ -431,8 +431,8 @@ $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 
 $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd-serve.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
-	truncate -s 4194304 $@.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 4096
+	truncate -s 3145728 $@.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 3072
 	debugfs -w -R 'mkdir /etc' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'mkdir /bin' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'mkdir /lib' $@.tmp >/dev/null 2>&1

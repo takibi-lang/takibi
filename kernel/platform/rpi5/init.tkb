@@ -263,12 +263,12 @@ fn kernel_test_platform_storage() {
                         KernelBlockDeviceResult::Ready(usb_device) => {
                             disk_reset_write10_command_count();
                             let provision_start: i64 = read_cntpct();
-                            match block_copy(source_device, usb_device, 4096) {
+                            match block_copy(source_device, usb_device, 3072) {
                                 BlockCopyResult::Invalid => {
                                     kernel_boot_log("usb ext2: provision failed\n");
                                 }
                                 BlockCopyResult::Copied => {
-                                                    kernel_boot_log("usb ext2: provisioned blocks=4096\n");
+                                    kernel_boot_log("usb ext2: provisioned blocks=3072\n");
                                     let provision_ticks: i64 =
                                         read_cntpct() - provision_start;
                                     let provision_frequency: i64 = read_cntfrq();
@@ -285,7 +285,7 @@ fn kernel_test_platform_storage() {
                                          provision_frequency) as usize);
                                     kernel_boot_log("\n");
                                     match block_compare_usb(source_device,
-                                                             usb_device, 4096) {
+                                                             usb_device, 3072) {
                                         BlockCompareResult::Invalid => {
                                             kernel_boot_log("usb ext2: provision verify failed\n");
                                             return;
@@ -405,7 +405,7 @@ fn kernel_test_platform_storage() {
                     // EBADF for /etc/init.sh.
                     kernel_syscall_ext2_configure(mount);
                     if (ext2_fixture_geometry_is_expected(mount)) {
-                        kernel_boot_log("ext2 mount: block=1024 inodes=1024 blocks=4096\n");
+                        kernel_boot_log("ext2 mount: block=1024 inodes=1024 blocks=3072\n");
                     }
                     match ext2_lookup_root(mount, bs"hello.txt") {
                         Ext2LookupResult::Invalid => {
