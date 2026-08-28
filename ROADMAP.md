@@ -203,7 +203,21 @@ interrupt/locks rule, because handlers get built around whatever it says.
   since before there was a lock, has zero uses, and currently forbids the one
   case a spinlock exists for (an interrupt handler taking one).
 - **#299** -- fixed-layout records with atomic commit publication, the second
-  of the two safe surfaces over #17.
+  of the two safe surfaces over #17. **Do it late within Phase 0, and
+  finish it before Phase 3.** The reasoning is Codex's, from working on the
+  diagnostic ring: #299 is not a tracing feature, it is the publication
+  protocol that lets DDB read a ring another CPU is writing. The current
+  hand-written ring is correct for one CPU plus its own interrupts and says
+  nothing about cross-CPU visibility, so deferring #299 until multicore
+  actually runs is too late -- but building it now, against an imagined
+  API, is worse than building it against #222's real per-CPU state once
+  that lands. So: #445/#449 settle the lock and its effect discipline,
+  #222 fixes the actual shape of per-CPU state, #299 is written as a
+  consumer of that shape, the diagnostic ring moves onto it, and only then
+  does Phase 3 let two CPUs run at once. Where the ring lives and who owns
+  it follows #222; the fixed record layout and write-last publication are
+  #299's and must exist before multicore starts; a cross-CPU total order
+  and a general lock-free API are neither.
 - **#440** -- the classified, near-lock-free deferred log ring.
 
 **Decision recorded 2026-08-27: raw atomics are reachable only through
