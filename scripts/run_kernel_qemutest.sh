@@ -43,7 +43,9 @@ COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
 ARTIFACT_DIR="${KERNEL_QEMU_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-qemu}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
+UART_TIMING_LOG="$ARTIFACT_DIR/uart-timing.log"
 PEER_LOG="$ARTIFACT_DIR/net-peer.log"
+INTERACTIVE_HTTPD_LISTENER="$ARTIFACT_DIR/interactive-httpd.listener"
 INTERACTIVE_HTTPD_READY="$ARTIFACT_DIR/interactive-httpd.ready"
 INTERACTIVE_HTTPD_DONE="$ARTIFACT_DIR/interactive-httpd.done"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
@@ -60,7 +62,8 @@ TIMEOUT_SECS="${KERNEL_QEMU_TIMEOUT:-90}"
 NETDEV_LOCAL_PORT="${KERNEL_QEMU_NETDEV_LOCAL_PORT:-18671}"
 NETDEV_REMOTE_PORT="${KERNEL_QEMU_NETDEV_REMOTE_PORT:-18672}"
 mkdir -p "$ARTIFACT_DIR"
-rm -f "$INTERACTIVE_HTTPD_READY" "$INTERACTIVE_HTTPD_DONE"
+rm -f "$INTERACTIVE_HTTPD_LISTENER" "$INTERACTIVE_HTTPD_READY" \
+    "$INTERACTIVE_HTTPD_DONE"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 exec 9>"$ARTIFACT_DIR/runner.lock"
 if ! flock -n 9; then
@@ -111,8 +114,10 @@ trap 'stop_qemu; exit 130' INT TERM HUP
 
 python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --port "socket://127.0.0.1:$SERIAL_PORT" --log "$UART_LOG" \
+    --timing-log "$UART_TIMING_LOG" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --timeout "$TIMEOUT_SECS" --stop-marker 'resources: pages=0' \
+    --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
     --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
     --validate-ash &
@@ -129,7 +134,7 @@ echo "[$RUN_LABEL] driving host-side network peer (ARP/ICMP/TCP)"
 peer_status=0
 timeout "$TIMEOUT_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" \
-    --interactive-ready-file "$INTERACTIVE_HTTPD_READY" \
+    --interactive-ready-file "$INTERACTIVE_HTTPD_LISTENER" \
     >"$PEER_LOG" 2>&1 || peer_status=$?
 sed 's/^/  /' "$PEER_LOG"
 if [ "$peer_status" -ne 0 ]; then
