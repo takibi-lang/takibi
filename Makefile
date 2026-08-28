@@ -858,7 +858,7 @@ kernelcheck: kernelcheck-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kerne
 allcheck:
 	@status=0; $(MAKE) langcheck test linuxcheck kernelcheck || status=$$?; \
 	if [ $$status -eq 0 ]; then \
-		echo "PASS allcheck: langcheck + compiler unit + linux_user + QEMU + QEMU debug + QEMU oops + QEMU DDB + QEMU stack overflow + RPi5 integration"; \
+		echo "PASS allcheck: langcheck + compiler unit + linux_user + QEMU + QEMU debug + QEMU oops + QEMU DDB + QEMU stack overflow + QEMU lifecycle gap + QEMU allocation rollback + RPi5 integration"; \
 	else \
 		echo "FAIL allcheck: one or more checks failed (see the lane output above)" >&2; \
 		exit $$status; \
@@ -869,7 +869,7 @@ allcheck:
 # produces a final, unmistakable allcheck failure receipt after Make has
 # waited for the other scheduled jobs.
 ifneq (,$(filter allcheck,$(MAKECMDGOALS)))
-$(info [allcheck] includes: langcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, QEMU DDB, and RPi5 integration)
+$(info [allcheck] includes: langcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, QEMU DDB, QEMU stack overflow, QEMU lifecycle gap, QEMU allocation rollback, and RPi5 integration)
 endif
 
 ## allbuild: a fast, no-execution/no-hardware smoke gate across all three
