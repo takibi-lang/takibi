@@ -210,9 +210,15 @@ struct ProcessRecord {
     has_first_child: bool;
     next_sibling: ProcessHandle;
     has_next_sibling: bool;
+    // GitHub issue #437: the pid this process most recently REAPED, which
+    // is genuinely about the reaper and stays here. What left is
+    // child_exit_status/child_waitable: they described "the" child, and
+    // there is no longer one.
     last_child_pid: usize;
-    child_exit_status: usize;
-    child_waitable: bool;
+    // The status this process exited with, on the process that exited.
+    // It lives here because the record now survives the exit -- see
+    // kernel_process_child_exit. Meaningful only while state is Exited.
+    exit_status: usize;
     exec_image_live: bool;
     // GitHub issue #392: kernel/kernel/syscall.tkb's own per-process
     // state, which had nowhere to live but an array keyed by this
@@ -1147,8 +1153,7 @@ private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
     record.has_first_child = false;
     record.has_next_sibling = false;
     record.last_child_pid = 0;
-    record.child_exit_status = 0;
-    record.child_waitable = false;
+    record.exit_status = 0;
     record.exec_image_live = false;
     scheduled_process_record_reset_syscall_state(slot);
 }
@@ -2485,9 +2490,13 @@ fn kernel_process_schedule(current_sp: usize) -> usize {
 // with -ECHILD immediately, same as always) from "a child exists but
 // hasn't exited yet" (wait4 should block instead).
 fn kernel_process_current_has_live_child() -> bool {
+    // GitHub issue #437: LIVE, which a zombie is not. This decides
+    // -ECHILD versus blocking in wait4, and counting an exited-but-
+    // unreaped child as live would block a parent that has one waiting to
+    // be collected.
     return execution_here().current_live &&
-           scheduled_process_record_at(execution_here().current_handle.pool_index)
-               .has_first_child;
+           kernel_process_has_live_child_of(
+               execution_here().current_handle.pool_index);
 }
 
 fn kernel_process_current_has_relative() -> bool {
@@ -3555,10 +3564,22 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
     // -EINVAL while running as ash's forked+exec'd child). The per-slot
     // ProcessRecord.has_first_child[current] check below is the correct,
     // already-scoped-to-current-only replacement.
+    // GitHub issue #437: a LIVE child, not any child.
+    //
+    // This read `has_first_child`, and that was the same question while a
+    // child's record was handed back the instant it exited. With zombies
+    // it is not: an exited-but-unreaped child still occupies the link, so
+    // testing the link alone would refuse the second fork of every
+    // sequential fork/exit/fork caller -- which is most of them, and is
+    // how this first went wrong (httpd's "foreground children=2" stopped
+    // at one).
+    //
+    // Still one live child at a time. Lifting THAT is the next step and is
+    // deliberately not this one.
     if (flags != 0x11 || child_stack != 0 ||
         execution_here().current_live == false ||
-        scheduled_process_record_at(execution_here().current_handle.pool_index)
-            .has_first_child) {
+        kernel_process_has_live_child_of(
+            execution_here().current_handle.pool_index)) {
         return ProcessCloneResult::Invalid;
     }
     let mut parent: ProcessHandle = execution_here().current_handle;
@@ -3861,30 +3882,60 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // pool_index), not a bare global -- see these fields' own header
     // comment for why a global here breaks a multi-level concurrent
     // wait4() chain.
+    // GitHub issue #437: the child becomes a ZOMBIE here rather than being
+    // reaped here.
+    //
+    // The status used to be copied onto the PARENT because the child's
+    // record was given back in this very function, leaving nowhere else
+    // for it to live. That is also why the parent could only remember one:
+    // a second exiting child would overwrite the first. Making those
+    // fields plural would have meant a per-parent queue with a capacity,
+    // in a kernel that has spent #391/#393/#402/#392 removing every
+    // hand-picked one.
+    //
+    // So the record survives instead, holding its own status, and wait4
+    // reaps it. The type system already had the shape for this: reap()
+    // consumes a linear ScheduledProcessState[Exited], and the only way to
+    // obtain one is scheduled_process_exited_take() on a record whose
+    // state IS Exited. Moving the take from here to the wait path turns
+    // the zombie window from an instant into a state the checker can see
+    // -- reaping something still Running has no token to pass, and reaping
+    // twice cannot re-mint one.
+    // GitHub issue #437: reap this process's OWN zombies before it becomes
+    // one. Nobody can wait for them any more -- their only waiter is the
+    // process exiting on this line -- so leaving them costs a pool record
+    // and a page run each, for good. The end-of-boot accounting is what
+    // says so: without this, "pooled per-process records back to the
+    // baseline" becomes "POOLED RECORDS LEAKED process=2/0".
+    //
+    // Linux re-parents to init instead, which is the better answer once
+    // there is something to re-parent that is still RUNNING. A zombie has
+    // nothing left to run and only a status nobody asked for.
+    let mut draining: usize = scheduled_process_pool_live_count() + 1;
+    while (draining != 0) {
+        draining = draining - 1;
+        match kernel_process_first_zombie_of(child.pool_index) {
+            ProcessNextReadyResult::Missing => { draining = 0; }
+            ProcessNextReadyResult::Next(grandchild) => {
+                let orphan_status: usize =
+                    kernel_process_reap_zombie(child.pool_index, grandchild);
+            }
+        }
+    }
+    scheduled_process_record_at(child.pool_index).exit_status = status;
+    // Set here as well as in the reap, and both are needed. The blocked-
+    // parent path below hands this value to kernel_syscall_wait4_deliver
+    // as the pid to resume with, and it reads it BEFORE the reap that
+    // would otherwise set it -- a parent resuming with 0 is a wait() that
+    // never finishes, which is exactly how this first went wrong.
     scheduled_process_record_at(parent.pool_index).last_child_pid =
         scheduled_process_pid_of_handle(child);
-    scheduled_process_record_at(parent.pool_index).child_exit_status = status;
-    scheduled_process_record_at(parent.pool_index).child_waitable = true;
     match scheduled_process_running_take(child) {
         ScheduledProcessRunningTakeResult::Missing => {}
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
             let exited = scheduled_process_exit(owner, running);
             scheduled_process_release(owner, exited);
-            match scheduled_process_exited_take(child) {
-                ScheduledProcessExitedTakeResult::Missing => {}
-                ScheduledProcessExitedTakeResult::Exited(done) => {
-                    let (exited_owner, exited_state) = done;
-                    // The child's own link is cleared before the reap
-                    // gives its record back; see the same note in
-                    // kernel_process_release_clone.
-                    scheduled_process_record_at(child.pool_index)
-                        .has_parent = false;
-                    scheduled_process_reap(exited_owner, exited_state);
-                    scheduled_process_record_at(parent.pool_index)
-                        .has_first_child = false;
-                }
-            }
         }
     }
     // GitHub issue #244: the parent may be genuinely Blocked here (wait4
@@ -3940,34 +3991,180 @@ fn kernel_process_child_exit(status: usize) -> usize {
 // wake-a-blocked-parent step above, where execution_here().current_handle is
 // still the exiting CHILD, not yet switched to the parent) uses the
 // explicit _for(slot) pair further below instead.
+// GitHub issue #437: which of this slot's children, if any, has exited
+// and not yet been reaped. Walks the sibling list, so a parent with
+// several children finds whichever one is waitable rather than the one a
+// single field happened to remember.
+private fn kernel_process_first_zombie_of(slot: usize)
+        -> ProcessNextReadyResult {
+    if (scheduled_process_record_at(slot).has_first_child == false) {
+        return ProcessNextReadyResult::Missing;
+    }
+    let mut cursor: ProcessHandle =
+        scheduled_process_record_at(slot).first_child;
+    let mut remaining: usize = scheduled_process_pool_live_count() + 1;
+    while (remaining != 0) {
+        remaining = remaining - 1;
+        if (scheduled_process_handle_matches(cursor) == false) {
+            return ProcessNextReadyResult::Missing;
+        }
+        if (scheduled_process_record_state(cursor.pool_index) ==
+                ProcessSlotState::Exited) {
+            return ProcessNextReadyResult::Next(cursor);
+        }
+        if (scheduled_process_record_at(cursor.pool_index).has_next_sibling
+                == false) {
+            return ProcessNextReadyResult::Missing;
+        }
+        cursor = scheduled_process_record_at(cursor.pool_index).next_sibling;
+    }
+    return ProcessNextReadyResult::Missing;
+}
+
+// Unlinks a reaped child from its parent's list and gives its record back.
+//
+// This is where the reap lives now. The linear pair comes from
+// scheduled_process_exited_take, which only produces one for a record
+// whose state is Exited -- so this cannot reap a running process for want
+// of a token, and cannot reap the same one twice because the take will not
+// mint a second pair.
+private fn kernel_process_reap_zombie(parent: usize, child: ProcessHandle)
+        -> usize !{unsafe} {
+    // GitHub issue #437: scheduled_process_reap ends in
+    // process_image_exec_teardown, which leaves process_image_target_root
+    // at 0. While the reap ran inside kernel_process_child_exit that was
+    // repaired before anyone returned to EL0, because that function's tail
+    // re-activates the parent. It runs in the REAPER's syscall context
+    // now, and on the fast path (the child already a zombie when wait4 is
+    // called) nothing after it re-activates -- so the reaper resumed at
+    // EL0 with the COW handler aimed at root 0, PID 1's live image, and
+    // its next write to a COW page fail-stopped. Root 0 being a VALID slot
+    // is what made this invisible to the fallback counter. QEMU never saw
+    // it because its parents always block before the child exits; RPi5's
+    // children finish first, deterministically.
+    //
+    // So: capture the root the reaper is running on, reap, restore. The
+    // same repair kernel_syscall_wait4_deliver already does for the same
+    // reason, one call earlier in the same path.
+    let resume_root: usize = process_image_root_index();
+    let status: usize =
+        scheduled_process_record_at(child.pool_index).exit_status;
+    let pid: usize = scheduled_process_pid_of_handle(child);
+    // Unlink first: the record is about to be handed back, and its
+    // next_sibling has to be read while it is still ours to read.
+    let mut following: ProcessHandle =
+        scheduled_process_record_at(child.pool_index).next_sibling;
+    let has_following: bool =
+        scheduled_process_record_at(child.pool_index).has_next_sibling;
+    let mut head: ProcessHandle =
+        scheduled_process_record_at(parent).first_child;
+    if (scheduled_process_same_slot(head, child)) {
+        scheduled_process_record_at(parent).first_child = following;
+        scheduled_process_record_at(parent).has_first_child = has_following;
+    } else {
+        let mut prev: ProcessHandle = head;
+        let mut remaining: usize = scheduled_process_pool_live_count() + 1;
+        while (remaining != 0) {
+            remaining = remaining - 1;
+            if (scheduled_process_record_at(prev.pool_index).has_next_sibling
+                    == false) { remaining = 0; }
+            else {
+                let mut next: ProcessHandle =
+                    scheduled_process_record_at(prev.pool_index).next_sibling;
+                if (scheduled_process_same_slot(next, child)) {
+                    scheduled_process_record_at(prev.pool_index).next_sibling =
+                        following;
+                    scheduled_process_record_at(prev.pool_index)
+                        .has_next_sibling = has_following;
+                    remaining = 0;
+                } else { prev = next; }
+            }
+        }
+    }
+    match scheduled_process_exited_take(child) {
+        ScheduledProcessExitedTakeResult::Missing => {}
+        ScheduledProcessExitedTakeResult::Exited(done) => {
+            let (exited_owner, exited_state) = done;
+            scheduled_process_record_at(child.pool_index).has_parent = false;
+            scheduled_process_record_at(child.pool_index).has_next_sibling =
+                false;
+            scheduled_process_reap(exited_owner, exited_state);
+        }
+    }
+    scheduled_process_record_at(parent).last_child_pid = pid;
+    process_image_activate_root(resume_root);
+    return status;
+}
+
+// Does this slot have a child that has not exited? The zombie walk's
+// complement, and what "may I fork" asks now that a link can name a
+// record whose process is already gone.
+private fn kernel_process_has_live_child_of(slot: usize) -> bool {
+    if (scheduled_process_record_at(slot).has_first_child == false) {
+        return false;
+    }
+    let mut cursor: ProcessHandle =
+        scheduled_process_record_at(slot).first_child;
+    let mut remaining: usize = scheduled_process_pool_live_count() + 1;
+    while (remaining != 0) {
+        remaining = remaining - 1;
+        if (scheduled_process_handle_matches(cursor) == false) { return false; }
+        if (scheduled_process_record_state(cursor.pool_index) !=
+                ProcessSlotState::Exited) {
+            return true;
+        }
+        if (scheduled_process_record_at(cursor.pool_index).has_next_sibling
+                == false) {
+            return false;
+        }
+        cursor = scheduled_process_record_at(cursor.pool_index).next_sibling;
+    }
+    return false;
+}
+
 fn kernel_process_child_waitable() -> bool {
     if (execution_here().current_live == false) { return false; }
-    return scheduled_process_record_at(execution_here().current_handle.pool_index)
-        .child_waitable;
+    match kernel_process_first_zombie_of(
+            execution_here().current_handle.pool_index) {
+        ProcessNextReadyResult::Missing => { return false; }
+        ProcessNextReadyResult::Next(zombie) => { return true; }
+    }
 }
 
 fn kernel_process_child_wait_status_peek() -> usize {
     if (execution_here().current_live == false) { return 0; }
-    return scheduled_process_record_at(execution_here().current_handle.pool_index)
-        .child_exit_status;
+    return kernel_process_child_wait_status_peek_for(
+        execution_here().current_handle.pool_index);
 }
 
-fn kernel_process_child_wait_status() -> usize {
+fn kernel_process_child_wait_status() -> usize !{unsafe} {
     if (execution_here().current_live == false) { return 0; }
-    let slot: usize = execution_here().current_handle.pool_index;
-    scheduled_process_record_at(slot).child_waitable = false;
-    return scheduled_process_record_at(slot).child_exit_status;
+    return kernel_process_child_wait_status_consume_for(
+        execution_here().current_handle.pool_index);
 }
 
 // Explicit-slot pair for kernel_syscall_wait4_deliver's own use (see this
 // file's kernel_process_child_exit): the one caller that needs a SPECIFIC
 // parent slot rather than "whichever slot is current."
 fn kernel_process_child_wait_status_peek_for(slot: usize) -> usize {
-    return scheduled_process_record_at(slot).child_exit_status;
+    match kernel_process_first_zombie_of(slot) {
+        ProcessNextReadyResult::Missing => { return 0; }
+        ProcessNextReadyResult::Next(zombie) => {
+            return scheduled_process_record_at(zombie.pool_index).exit_status;
+        }
+    }
 }
 
-fn kernel_process_child_wait_status_consume_for(slot: usize) {
-    scheduled_process_record_at(slot).child_waitable = false;
+// Consumes: this is the reap. Returns the status it reaped, so the
+// current-slot wrapper above needs no second lookup.
+fn kernel_process_child_wait_status_consume_for(slot: usize) -> usize
+        !{unsafe} {
+    match kernel_process_first_zombie_of(slot) {
+        ProcessNextReadyResult::Missing => { return 0; }
+        ProcessNextReadyResult::Next(zombie) => {
+            return kernel_process_reap_zombie(slot, zombie);
+        }
+    }
 }
 
 // Called from kernel_process_child_exec_prepare() right after that
@@ -4075,3 +4272,85 @@ fn process_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
                   "one scheduler's globals, and a spare-run guard that emits no instruction");
 }
+
+
+// GitHub issue #437: collect every child of the current process that has
+// exited and not been reaped.
+//
+// This is what a real init does in its wait loop, one child at a time and
+// forever. A caller uses it when it wants the same effect at one moment --
+// the bounded boot fixture before its resource accounting, where a record
+// still waiting to be collected would otherwise read as a leak.
+//
+// Bounded by the live count: each reap removes one child from the list, so
+// the walk cannot outlast the processes that exist.
+fn kernel_process_reap_own_zombies() !{unsafe} {
+    if (execution_here().current_live == false) { return; }
+    let mut sweeping: usize = scheduled_process_pool_live_count() + 1;
+    while (sweeping != 0) {
+        sweeping = sweeping - 1;
+        let mut found: bool = false;
+        let mut cursor = scheduled_process_first_slot();
+        let mut walking: bool = true;
+        while (walking) {
+            match cursor {
+                ProcessSlotCursor::Done => { walking = false; }
+                ProcessSlotCursor::At(slot) => {
+                    if (found == false &&
+                        scheduled_process_record_state(slot) ==
+                            ProcessSlotState::Exited) {
+                        found = true;
+                        let owner_slot: usize =
+                            kernel_process_owner_slot_of(slot);
+                        let mut victim: ProcessHandle =
+                            scheduled_process_handle_of_slot(slot);
+                        let collected: usize =
+                            kernel_process_reap_zombie(owner_slot, victim);
+                    }
+                    cursor = scheduled_process_next_slot(slot);
+                }
+            }
+        }
+        if (found == false) { sweeping = 0; }
+    }
+}
+
+// Whose child list, if any, holds this slot.
+//
+// Normally its parent. A record can reach Exited with no parent link --
+// measured, one does in the bounded boot suite -- and where that comes
+// from is a separate question (see issue #437); a teardown sweep must
+// collect it either way rather than leave a record nobody can name.
+// Answering "itself" makes the unlink in kernel_process_reap_zombie a
+// no-op, which is what a record outside every list needs.
+private fn kernel_process_owner_slot_of(slot: usize) -> usize {
+    if (scheduled_process_record_at(slot).has_parent) {
+        let mut parent: ProcessHandle =
+            scheduled_process_record_at(slot).parent;
+        if (scheduled_process_handle_matches(parent)) {
+            return parent.pool_index;
+        }
+    }
+    return slot;
+}
+
+// The handle a slot currently answers to.
+private fn scheduled_process_handle_of_slot(slot: usize) -> ProcessHandle {
+    if (slot == 0) {
+        let mut boot: ProcessHandle = { 0, scheduled_process_boot_generation };
+        return boot;
+    }
+    match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
+        IntrusiveSlotProbe::NoPayload => {
+            let mut absent: ProcessHandle = { slot, 0 };
+            return absent;
+        }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            let generation: usize = intrusive_view_generation(slot_view);
+            intrusive_view_drop(slot_view);
+            let mut live: ProcessHandle = { slot, generation };
+            return live;
+        }
+    }
+}
+

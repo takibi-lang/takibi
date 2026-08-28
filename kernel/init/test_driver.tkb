@@ -378,6 +378,19 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     // invariant lines above are, so a run where it
     // happened loses a line rather than gaining an
     // unmatched one.
+    // GitHub issue #437: collect this process's zombies before asking
+    // whether anything leaked.
+    //
+    // A record awaiting collection is not a leaked record, and the line
+    // above already says the bounded suite's fixtures are torn down at
+    // this point -- this is the rest of that teardown. What makes it
+    // necessary is that exit stopped reaping: a child whose parent was not
+    // blocked in wait4 stays until its parent asks, and here the parent is
+    // pid 1, which asks continuously in a real boot and once here.
+    //
+    // Measured before it was written: the only two live records at this
+    // point were pid 1 (Running) and one pid in Exited.
+    kernel_process_reap_own_zombies();
     if (scheduled_process_pool_live_count() == process_pool_baseline &&
         address_space_live_count() == address_space_baseline &&
         process_image_record_live_count() == image_record_baseline &&
