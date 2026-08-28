@@ -31,6 +31,7 @@ def main() -> int:
     serial.settimeout(0.25)
     received = bytearray()
     break_sent = args.break_source == "software"
+    wake_byte_sent = args.break_source == "software"
     prompt_count = 0
     commands = [
         b"oops\n", b"regs\n", b"intr\n", b"sched\n",
@@ -60,26 +61,18 @@ def main() -> int:
             log.write(chunk)
             log.flush()
 
-            # Matched as a prefix on purpose. This trigger means "the
-            # initial image's stack is ready", and the argument count that
-            # follows on the same line is not part of that question -- it
-            # changed when PID 1 became BusyBox init, and pinning it here
-            # silently stopped the BREAK from ever being sent.
-            if not break_sent and b"distro stack: " in received:
-                if args.break_source == "software":
-                    break_sent = True
-                    continue
-                # Put one ordinary byte ahead of BREAK. Its IRQ exercises the
-                # process UART-wake producer; BREAK's following IRQ exercises
-                # the platform producer. QEMU's chardev BREAK is an out-of-band
-                # event, not another FIFO byte, so submitting both back-to-back
-                # does not guarantee the guest has serviced the byte first --
-                # a harmless extra boot-log line was enough to expose that
-                # race. Give the guest a bounded scheduling window here, then
-                # still prove the actual wake-before-BREAK order from the
-                # kernel's per-CPU event records below.
+            # Drive the two producers in an evidence-backed order rather than
+            # guessing how much host sleep lets the guest run. The marker says
+            # the interactive shell has published its UART wait. Submit the
+            # ordinary byte first and QEMU's out-of-band BREAK second; the
+            # event-ring assertions below prove that the guest actually
+            # recorded wake before BREAK.
+            if (not wake_byte_sent and
+                    b"interactive shell: uart blocked\n" in received):
                 serial.sendall(b"\n")
-                time.sleep(0.25)
+                wake_byte_sent = True
+
+            if wake_byte_sent and not break_sent:
                 with connect(args.qmp_port, deadline) as qmp:
                     qmp_file = qmp.makefile("rwb", buffering=0)
                     greeting = json.loads(qmp_file.readline())
