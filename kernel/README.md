@@ -661,6 +661,34 @@ Stable operator-visible kernel status uses `kernel_boot_log`. Temporary debug
 UART messages are not accepted as expected-file evidence and are removed after
 bring-up. Host-side progress output is separate from kernel UART output.
 
+## Kernel text log and multicore publication boundary
+
+`kernel_boot_log()` writes its unchanged text to UART and retains the same
+logical line in a fixed 256-record ring. Each record carries the architectural
+monotonic-counter time of its first byte; BusyBox `dmesg` retrieves a bounded
+snapshot through Linux `syslog(2)`. The printed form is
+`[ssssss.uuuuuu] text`. A record retains at most 160 text bytes, and both a
+long-line truncation and overwritten oldest records are reported explicitly.
+The ring and its 64-KiB formatting snapshot are static storage: logging does
+not allocate.
+
+The retained text ring deliberately has one writer: core 0 ordinary
+main/syscall context. A `kernel_boot_log()` call from another core remains
+live-UART-only and is not retained. Interrupt-context diagnostics continue to
+use the fixed-width diagnostic event ring; crash and DDB output continue to
+use their direct polled UART path. This is a correctness boundary, not a claim
+that the current arrays are accidentally safe under concurrent writes.
+
+A future multicore text writer must reserve a monotonically increasing record
+sequence atomically, write timestamp/CPU/text into the reserved slot, then
+publish that sequence with release ordering. Readers must acquire the
+publication word, reject overwritten or half-published sequences, and order
+records by sequence rather than by arrival at UART. CPU id belongs in record
+metadata even if the default display initially omits it. A single global
+spinlock around UART plus the ring is not the intended extension: a stalled
+polled console must not become the serialization mechanism for retaining
+diagnostics from another core.
+
 ## Current limits
 
 The passing HTTPd test is a concrete Linux compatibility milestone, not a

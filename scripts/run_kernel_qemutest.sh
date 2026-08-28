@@ -166,8 +166,11 @@ fi
 # the kernel, which logs each of the last three only on a match against
 # the pid the fork checkpoint recorded.
 sed -e 's|^/ # ||' \
+    -e 's|^\[[0-9][0-9]*\.[0-9][0-9]*\] |[<time>] |' \
     -e 's|^\(persistent shell: [a-z ]*\)pid=[0-9][0-9]*$|\1pid=<child>|' \
     <"$UART_LOG" | tr -d '\r' >"$UART_LOG.normalized"
+
+python3 "$REPO_ROOT/scripts/validate_kernel_dmesg_timestamps.py" "$UART_LOG"
 
 # One boot, several independent views -- see this file's header and
 # scripts/run_kernel_hwtest_rpi5.sh's own identical loop.

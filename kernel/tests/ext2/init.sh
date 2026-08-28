@@ -86,6 +86,16 @@ fi
 # image is selected by the command name, while the shell remains PID 1.
 /bin/httpd -f -p 8080 -h /
 
+# Read the retained, kernel-timestamped text ring through Linux syslog(2),
+# exactly as the packaged BusyBox dmesg applet does on Linux.
+/bin/dmesg
+if [ "$?" -eq 0 ]; then
+    echo "busybox dmesg exit: 0"
+else
+    echo "busybox dmesg failed"
+    exit 1
+fi
+
 for phase in fd uart telnet; do
     echo "init: phase $phase"
 done

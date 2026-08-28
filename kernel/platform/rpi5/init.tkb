@@ -556,7 +556,15 @@ fn main() {
     // poisoned outright (issue #378).
     kernel_irq_stack_arm();
     platform_init();
+    kernel_log_init();
+    let log_bounds_ok: bool = kernel_log_bounds_probe();
+    kernel_log_init();
     kernel_boot_log("takibi kernel: EL1\n");
+    if (log_bounds_ok) {
+        kernel_boot_log("kernel log: overwrite+line truncation reported\n");
+    } else {
+        kernel_boot_log("kernel log: bounds probe failed\n");
+    }
 
     // GitHub issue #247 step 1: query the platform for the real
     // ARM-visible physical RAM base/size, instead of trusting

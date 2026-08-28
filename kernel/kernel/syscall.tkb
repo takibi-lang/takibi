@@ -44,6 +44,7 @@ const AARCH64_NR_WRITE: usize = 64;
 const AARCH64_NR_READV: usize = 65;
 const AARCH64_NR_WRITEV: usize = 66;
 const AARCH64_NR_PPOLL: usize = 73;
+const AARCH64_NR_SYSLOG: usize = 116;
 const AARCH64_NR_UNAME: usize = 160;
 // GitHub issue #393: the only rlimit syscall this architecture has.
 // asm-generic (and therefore arm64) has no getrlimit/setrlimit numbers at
@@ -102,6 +103,8 @@ const LINUX_RLIMIT_NOFILE: usize = 7;
 // resources that exist, and therefore the first invalid one.
 const LINUX_RLIM_NLIMITS: usize = 16;
 const LINUX_RLIM64_INFINITY: usize = 0xFFFFFFFFFFFFFFFF;
+const LINUX_SYSLOG_ACTION_READ_ALL: usize = 3;
+const LINUX_SYSLOG_ACTION_SIZE_BUFFER: usize = 10;
 
 // GitHub issue #393: AT_FDCWD, spelled the way userspace passes it -- the
 // 32-bit -100 sign-extended into x0. It used to be caught by accident:
@@ -1757,6 +1760,57 @@ fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize,
     kernel_init_boot_fixture_reaped(
         scheduled_process_pid_of_slot(parent_slot));
     el0_context_set_x0(frame_sp, reaped_pid);
+}
+
+// Linux syslog(2), consumed by BusyBox dmesg through musl's klogctl(). The
+// current concrete applet uses action 10 to size its allocation and action 3
+// to read a non-destructive snapshot. Console-level control and destructive
+// reads remain EINVAL until a real caller needs them.
+private fn syscall_syslog(action: usize, address: usize, requested: usize)
+        -> SyscallAction !{unsafe} {
+    if (action == LINUX_SYSLOG_ACTION_SIZE_BUFFER) {
+        return SyscallAction::Resume(kernel_log_snapshot_capacity());
+    }
+    if (action != LINUX_SYSLOG_ACTION_READ_ALL || requested == 0) {
+        return SyscallAction::Resume(LINUX_EINVAL);
+    }
+    let available: usize = kernel_log_snapshot_build();
+    let mut amount: usize = requested;
+    if (amount > available) { amount = available; }
+    if (amount == 0) { return SyscallAction::Resume(0); }
+    let mut copied: usize = 0;
+    while (copied < amount) {
+        let mut chunk: usize = amount - copied;
+        if (chunk > KERNEL_BLOCK_SIZE) { chunk = KERNEL_BLOCK_SIZE; }
+        let staging_buffer = syscall_file_buffer as []u8;
+        if (chunk > staging_buffer.len) {
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
+        let staging = staging_buffer[0..<chunk];
+        let staged: usize = kernel_log_snapshot_copy(copied, staging);
+        if (staged != chunk) { return SyscallAction::Resume(LINUX_EINVAL); }
+        let target: usize = match checked_add_usize(address, copied) {
+            CheckedUsize::Overflow => {
+                return SyscallAction::Resume(LINUX_EFAULT);
+            }
+            CheckedUsize::Value(value) => { value }
+        };
+        match user_range_check_write(
+                kernel_process_current_root(), target, chunk) {
+            UserWriteRangeResult::Fault => {
+                return SyscallAction::Resume(LINUX_EFAULT);
+            }
+            UserWriteRangeResult::Ok(range) => {
+                let sent: bool = copy_to_user_raw(
+                    range, syscall_file_buffer as *u8, chunk);
+                if (sent == false) {
+                    return SyscallAction::Resume(LINUX_EFAULT);
+                }
+            }
+        }
+        copied = copied + chunk;
+    }
+    return SyscallAction::Resume(copied);
 }
 
 must_use variant KernelUartDeliveryResult { Consumed; RetryRead; }
@@ -3643,6 +3697,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
         }
         return SyscallAction::Resume(0);
+    }
+    if (number == AARCH64_NR_SYSLOG) {
+        return syscall_syslog(x0, x1, x2);
     }
     if (number == 113) {
         match user_range_check_write(kernel_process_current_root(), x1, 16) {

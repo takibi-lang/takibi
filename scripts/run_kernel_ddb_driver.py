@@ -69,11 +69,17 @@ def main() -> int:
                 if args.break_source == "software":
                     break_sent = True
                     continue
-                # Put one ordinary byte ahead of BREAK in the PL011 FIFO.
-                # Its IRQ exercises the process UART-wake producer; BREAK's
-                # following IRQ exercises the platform producer. FIFO order
-                # gives one deterministic per-CPU interleaving with no sleep.
+                # Put one ordinary byte ahead of BREAK. Its IRQ exercises the
+                # process UART-wake producer; BREAK's following IRQ exercises
+                # the platform producer. QEMU's chardev BREAK is an out-of-band
+                # event, not another FIFO byte, so submitting both back-to-back
+                # does not guarantee the guest has serviced the byte first --
+                # a harmless extra boot-log line was enough to expose that
+                # race. Give the guest a bounded scheduling window here, then
+                # still prove the actual wake-before-BREAK order from the
+                # kernel's per-CPU event records below.
                 serial.sendall(b"\n")
+                time.sleep(0.25)
                 with connect(args.qmp_port, deadline) as qmp:
                     qmp_file = qmp.makefile("rwb", buffering=0)
                     greeting = json.loads(qmp_file.readline())

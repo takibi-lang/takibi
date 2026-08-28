@@ -1,0 +1,2 @@
+^\[<time>\] (takibi kernel: EL1|kernel log: overwrite\+line truncation reported|virtio net: link ready mac=02:00:20:00:00:02|virtio net: tcp handshake echo close reconnect ok)$
+^busybox dmesg exit: 0$

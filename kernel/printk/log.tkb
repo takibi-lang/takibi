@@ -1,37 +1,257 @@
-// Stable operator-visible boot and status messages. Userspace test output uses
-// the Linux write syscall; temporary kernel UART diagnostics do not belong in
-// this interface.
+// Operator-visible kernel text log. Ordinary kernel_boot_log() output is
+// still written synchronously to UART, while logical lines are retained with
+// the monotonic time at which their first byte was emitted. Userspace writes
+// and the direct crash/DDB UART paths do not enter this ring.
+//
+// Current limitation: the ordinary writer is core-0 main/syscall context only.
+// Interrupt-safe classified events remain kernel/diagnostic/event.tkb's job.
+const KERNEL_LOG_RECORD_COUNT: usize = 256;
+const KERNEL_LOG_TEXT_MAX: usize = 160;
+const KERNEL_LOG_TEXT_BYTES: usize = 40960;
+const KERNEL_LOG_SNAPSHOT_CAPACITY: usize = 65536;
+
+private let mut kernel_log_text: [u8; KERNEL_LOG_TEXT_BYTES];
+private let mut kernel_log_ticks: [i64; KERNEL_LOG_RECORD_COUNT];
+private let mut kernel_log_lengths: [usize; KERNEL_LOG_RECORD_COUNT];
+private let mut kernel_log_line_truncated: [bool; KERNEL_LOG_RECORD_COUNT];
+private let mut kernel_log_oldest: usize;
+private let mut kernel_log_count: usize;
+private let mut kernel_log_overwritten: usize;
+private let mut kernel_log_capture_enabled: bool;
+private let mut kernel_log_active: bool;
+private let mut kernel_log_active_slot: usize;
+private let mut kernel_log_boot_tick: i64;
+private let mut kernel_log_frequency: i64;
+private let mut kernel_log_snapshot: [u8; KERNEL_LOG_SNAPSHOT_CAPACITY];
+private let mut kernel_log_snapshot_length: usize;
+
+fn kernel_log_init() {
+    kernel_log_oldest = 0;
+    kernel_log_count = 0;
+    kernel_log_overwritten = 0;
+    kernel_log_capture_enabled = false;
+    kernel_log_active = false;
+    kernel_log_active_slot = 0;
+    kernel_log_boot_tick = read_cntpct();
+    kernel_log_frequency = read_cntfrq();
+    kernel_log_snapshot_length = 0;
+}
+
+private fn kernel_log_start_line() {
+    let mut slot: usize = 0;
+    if (kernel_log_count < KERNEL_LOG_RECORD_COUNT) {
+        slot = (kernel_log_oldest + kernel_log_count) % KERNEL_LOG_RECORD_COUNT;
+        kernel_log_count = kernel_log_count + 1;
+    } else {
+        slot = kernel_log_oldest;
+        kernel_log_oldest = (kernel_log_oldest + 1) % KERNEL_LOG_RECORD_COUNT;
+        kernel_log_overwritten = kernel_log_overwritten + 1;
+    }
+    if (slot < KERNEL_LOG_RECORD_COUNT) {
+        kernel_log_ticks[slot] = read_cntpct() - kernel_log_boot_tick;
+        kernel_log_lengths[slot] = 0;
+        kernel_log_line_truncated[slot] = false;
+        kernel_log_active_slot = slot;
+        kernel_log_active = true;
+    }
+}
+
+// Keeping the active flag set across a fragment without '\n' captures
+// uart_put_udec/uart_put_hex output between fragments in the same line.
+fn kernel_log_begin_fragment() {
+    // The current record arrays have one writer. Secondary-core text remains
+    // live-UART-only until records gain atomic sequence reservation and
+    // release publication; admitting it here would create silent corruption.
+    if (cpu_id() != 0) { return; }
+    kernel_log_capture_enabled = true;
+}
+
+fn kernel_log_capture_uart_byte(value: u8) {
+    if (kernel_log_capture_enabled == false) { return; }
+    if (kernel_log_active == false) {
+        if (value == 10) {
+            kernel_log_capture_enabled = false;
+            return;
+        }
+        kernel_log_start_line();
+    }
+    if (kernel_log_active == false) { return; }
+    let slot: usize = kernel_log_active_slot;
+    if (slot >= KERNEL_LOG_RECORD_COUNT) {
+        kernel_log_active = false;
+        return;
+    }
+    let length: usize = kernel_log_lengths[slot];
+    if (length < KERNEL_LOG_TEXT_MAX) {
+        let offset: usize = slot * KERNEL_LOG_TEXT_MAX + length;
+        if (offset < KERNEL_LOG_TEXT_BYTES) {
+            kernel_log_text[offset] = value;
+            kernel_log_lengths[slot] = length + 1;
+        }
+    } else {
+        kernel_log_line_truncated[slot] = true;
+    }
+    if (value == 10) {
+        kernel_log_active = false;
+        kernel_log_capture_enabled = false;
+    }
+}
+
+private fn kernel_log_snapshot_push(value: u8) {
+    let length: usize = kernel_log_snapshot_length;
+    if (length < 65536) {
+        let safe_length:
+            {0..<65536 as usize} = length;
+        kernel_log_snapshot[safe_length] = value;
+        kernel_log_snapshot_length = length + 1;
+    }
+}
+
+private fn kernel_log_snapshot_text(text: *u8) {
+    while (*text != 0) {
+        kernel_log_snapshot_push(*text);
+        text = text + 1;
+    }
+}
+
+private fn kernel_log_snapshot_decimal6(value: usize) {
+    let mut place_values: [usize; 6] =
+        { 100000, 10000, 1000, 100, 10, 1 };
+    for position: usize in 0..<6 {
+        let divisor: usize = place_values[position];
+        if (divisor != 0) {
+            let digit: usize = (value / divisor) % 10;
+            kernel_log_snapshot_push((digit + 48) as u8);
+        }
+    }
+}
+
+private fn kernel_log_snapshot_timestamp(ticks: i64) {
+    let mut seconds: usize = 0;
+    let mut micros: usize = 0;
+    if (ticks >= 0 && kernel_log_frequency > 0) {
+        let tick_count: usize = ticks as usize;
+        let frequency: usize = kernel_log_frequency as usize;
+        if (frequency == 0) { return; }
+        seconds = tick_count / frequency;
+        let remainder: usize = tick_count % frequency;
+        match checked_mul_usize(remainder, 1000000) {
+            CheckedUsize::Overflow => { micros = 0; }
+            CheckedUsize::Value(scaled) => { micros = scaled / frequency; }
+        }
+    }
+    kernel_log_snapshot_push(91);
+    kernel_log_snapshot_decimal6(seconds % 1000000);
+    kernel_log_snapshot_push(46);
+    kernel_log_snapshot_decimal6(micros);
+    kernel_log_snapshot_push(93);
+    kernel_log_snapshot_push(32);
+}
+
+// A partial final line is included. Long lines and ring overwrite are both
+// reported explicitly instead of being presented as complete history.
+fn kernel_log_snapshot_build() -> usize {
+    kernel_log_snapshot_length = 0;
+    if (kernel_log_overwritten != 0) {
+        kernel_log_snapshot_text("<4>kernel log: overwritten records=" as *u8);
+        kernel_log_snapshot_decimal6(kernel_log_overwritten % 1000000);
+        kernel_log_snapshot_push(10);
+    }
+    let mut index: usize = 0;
+    while (index < kernel_log_count) {
+        let slot: usize = (kernel_log_oldest + index) % KERNEL_LOG_RECORD_COUNT;
+        if (slot < KERNEL_LOG_RECORD_COUNT) {
+            kernel_log_snapshot_timestamp(kernel_log_ticks[slot]);
+            let length: usize = kernel_log_lengths[slot];
+            let mut byte_index: usize = 0;
+            while (byte_index < length && byte_index < KERNEL_LOG_TEXT_MAX) {
+                let offset: usize = slot * KERNEL_LOG_TEXT_MAX + byte_index;
+                if (offset < KERNEL_LOG_TEXT_BYTES) {
+                    kernel_log_snapshot_push(kernel_log_text[offset]);
+                }
+                byte_index = byte_index + 1;
+            }
+            if (kernel_log_line_truncated[slot]) {
+                kernel_log_snapshot_text("... [line truncated]\n" as *u8);
+            }
+        }
+        index = index + 1;
+    }
+    return kernel_log_snapshot_length;
+}
+
+fn kernel_log_snapshot_capacity() -> usize {
+    return KERNEL_LOG_SNAPSHOT_CAPACITY;
+}
+
+fn kernel_log_snapshot_copy(offset: usize, destination: []u8) -> usize {
+    if (offset >= kernel_log_snapshot_length) { return 0; }
+    let mut amount: usize = destination.len;
+    if (amount > kernel_log_snapshot_length - offset) {
+        amount = kernel_log_snapshot_length - offset;
+    }
+    let mut index: usize = 0;
+    while (index < amount) {
+        let source_index: usize = match checked_add_usize(offset, index) {
+            CheckedUsize::Overflow => { return index; }
+            CheckedUsize::Value(value) => { value }
+        };
+        if (source_index < KERNEL_LOG_SNAPSHOT_CAPACITY &&
+            index < destination.len) {
+            let safe_source:
+                {0..<KERNEL_LOG_SNAPSHOT_CAPACITY as usize} = source_index;
+            destination[index] = kernel_log_snapshot[safe_source];
+        }
+        index = index + 1;
+    }
+    return amount;
+}
+
+// Destructive boot-time probe, followed immediately by kernel_log_init(). It
+// exercises both bounded-loss signals without emitting 257 UART lines.
+fn kernel_log_bounds_probe() -> bool {
+    for record: usize in 0..<257 {
+        kernel_log_begin_fragment();
+        kernel_log_capture_uart_byte(120);
+        kernel_log_capture_uart_byte(10);
+    }
+    if (kernel_log_overwritten != 1 ||
+        kernel_log_count != KERNEL_LOG_RECORD_COUNT) {
+        return false;
+    }
+    let snapshot_length: usize = kernel_log_snapshot_build();
+    if (snapshot_length < 3 || kernel_log_snapshot[0] != 60 ||
+        kernel_log_snapshot[1] != 52 || kernel_log_snapshot[2] != 62) {
+        return false;
+    }
+    kernel_log_begin_fragment();
+    for byte_index: usize in 0..<161 {
+        kernel_log_capture_uart_byte(121);
+    }
+    let slot: usize = kernel_log_active_slot;
+    if (slot >= 256) { return false; }
+    let safe_slot: {0..<256 as usize} = slot;
+    if (kernel_log_line_truncated[safe_slot] == false) {
+        return false;
+    }
+    return true;
+}
+
 fn kernel_boot_log(message: *u8) {
+    kernel_log_begin_fragment();
     uart_puts(message);
 }
 
-// A dispatched syscall whose computed SyscallAction encodes to action 0
-// matches no branch in kernel/arch/arm64/kernel/user_entry.S's fixed
-// dispatch table and falls through to a silent kernel_syscall_fail_stop --
-// found the hard way in the #241/#244/#245 three-level process tree work,
-// where the only way to find the root cause was reading user_entry.S by
-// hand and cross-referencing a hardware UART transcript that never once
-// mentioned the failing syscall. This line is the fix: printed right
-// before that fail-stop, so the next occurrence names its own syscall
-// number instead of requiring another cold read of the dispatch table.
 fn kernel_boot_log_syscall_unreachable(number: usize) {
-    uart_puts("syscall dispatch: unreachable action, syscall=" as *u8);
+    kernel_boot_log("syscall dispatch: unreachable action, syscall=" as *u8);
     uart_put_udec(number);
-    uart_puts("\n" as *u8);
+    kernel_boot_log("\n" as *u8);
 }
 
-// GitHub issue #295: a fixed-capacity pool returning "full" at its call site
-// otherwise looks identical to any other rejection (bad argument, timeout,
-// EBADF) once it crosses the syscall boundary -- the interactive BusyBox
-// HTTPd milestone's shared-object/descriptor exhaustion was visible only as
-// an opaque shell/child startup failure until this file was hand-traced.
-// Every pool-exhaustion branch this issue addresses logs through here so the
-// resource name and its configured capacity always reach the operator, same
-// as kernel_boot_log_syscall_unreachable does for an unreachable dispatch.
 fn kernel_boot_log_resource_exhausted(resource: *u8, capacity: usize) {
-    uart_puts("resource exhausted: " as *u8);
+    kernel_boot_log("resource exhausted: " as *u8);
     uart_puts(resource);
-    uart_puts(" capacity=" as *u8);
+    kernel_boot_log(" capacity=" as *u8);
     uart_put_udec(capacity);
-    uart_puts("\n" as *u8);
+    kernel_boot_log("\n" as *u8);
 }

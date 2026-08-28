@@ -66,6 +66,7 @@ use "kernel/platform/rpi5/intc.tkb";
 let mut uart_rx_handler: fn !{unsafe}(u8) -> void;
 
 fn uart_putc(c: u8) !{logs, unsafe} {
+    kernel_log_capture_uart_byte(c);
     let fr: *io u32 = unsafe { 0x1F00030018 as *io u32 }; // UART0_FR (RP1 rp1_uart0, base 0x1F00030000 + 0x018)
     while ((*fr & (1 << 5)) != 0) { } // wait while TXFF (TX FIFO full)
     let dr: *io u8 = unsafe { 0x1F00030000 as *io u8 }; // UART0_DR
