@@ -110,6 +110,7 @@ langcheck:
 	@python3 scripts/check_compiler_sync_rules.py --quiet
 	@python3 scripts/check_raw_pos_fname.py
 	@python3 scripts/check_qemu_lane_ports.py
+	@python3 scripts/check_kernel_interactive_httpd_protocol.py
 	@python3 scripts/check_pool_release_paths.py
 	@python3 scripts/check_kernel_log_expectations.py
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash -c ' \
@@ -852,7 +853,12 @@ kernelsh-qemu: kernelbuild-qemu
 kernelsh-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_shell_rpi5.sh
 
-kernelcheck: kernelcheck-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-stack-overflow-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelcheck-rpi5
+KERNELCHECK_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
+	kernelcheck-oops-qemu kernelcheck-ddb-qemu \
+	kernelcheck-stack-overflow-qemu kernelcheck-lifecycle-gap-qemu \
+	kernelcheck-alloc-rollback-qemu kernelcheck-rpi5
+
+kernelcheck: $(KERNELCHECK_LANES)
 
 ## allcheck: run every check this Makefile knows about -- langcheck, test,
 ## linuxcheck, kernelcheck -- so a single command surfaces a failure
@@ -884,7 +890,7 @@ kernelcheck: kernelcheck-qemu kernelcheck-qemu-debug kernelcheck-oops-qemu kerne
 allcheck:
 	@status=0; $(MAKE) langcheck test linuxcheck kernelcheck || status=$$?; \
 	if [ $$status -eq 0 ]; then \
-		echo "PASS allcheck: langcheck + compiler unit + linux_user + QEMU + QEMU debug + QEMU oops + QEMU DDB + QEMU stack overflow + QEMU lifecycle gap + QEMU allocation rollback + RPi5 integration"; \
+		echo "PASS allcheck: langcheck test linuxcheck $(KERNELCHECK_LANES)"; \
 	else \
 		echo "FAIL allcheck: one or more checks failed (see the lane output above)" >&2; \
 		exit $$status; \
