@@ -75,9 +75,30 @@ def main() -> int:
             if wake_byte_sent and not break_sent:
                 with connect(args.qmp_port, deadline) as qmp:
                     qmp_file = qmp.makefile("rwb", buffering=0)
-                    greeting = json.loads(qmp_file.readline())
+                    # Say what arrived instead of naming only what did
+                    # not. A bare "greeting did not appear" is true of a
+                    # timeout, of a QEMU that already exited, and of a
+                    # capability line read out of order -- three different
+                    # repairs. Under `make allcheck` the QEMU subchecks run
+                    # concurrently, so a slow start looks exactly like a
+                    # broken one from here.
+                    greeting_line = qmp_file.readline()
+                    if not greeting_line:
+                        raise SystemExit(
+                            "QMP sent nothing before the deadline: the port "
+                            "accepted a connection but QEMU produced no "
+                            "greeting, so it is still starting or has already "
+                            "exited")
+                    try:
+                        greeting = json.loads(greeting_line)
+                    except json.JSONDecodeError as exc:
+                        raise SystemExit(
+                            "QMP greeting was not JSON (%s): %r"
+                            % (exc, greeting_line[:200]))
                     if "QMP" not in greeting:
-                        raise SystemExit("QMP greeting did not appear")
+                        raise SystemExit(
+                            "QMP greeting did not appear; the first line was "
+                            "%r" % (greeting_line[:200],))
                     qmp_file.write(b'{"execute":"qmp_capabilities"}\n')
                     if "return" not in json.loads(qmp_file.readline()):
                         raise SystemExit("QMP capability negotiation failed")

@@ -53,9 +53,24 @@ def qmp_execute(socket_path: str, command: str, arguments: dict) -> None:
                 raise
             time.sleep(OPEN_RETRY_INTERVAL_SECONDS)
     with qmp, qmp.makefile("rwb", buffering=0) as stream:
-        greeting = json.loads(stream.readline())
+        # Same reasoning as scripts/run_kernel_ddb_driver.py: report the
+        # line that arrived, because a timeout and a QEMU that already
+        # exited are indistinguishable from the absence of a greeting.
+        greeting_line = stream.readline()
+        if not greeting_line:
+            raise RuntimeError(
+                "QMP sent nothing before the deadline: the socket connected "
+                "but QEMU produced no greeting, so it is still starting or "
+                "has already exited")
+        try:
+            greeting = json.loads(greeting_line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "QMP greeting was not JSON (%s): %r" % (exc, greeting_line[:200]))
         if "QMP" not in greeting:
-            raise RuntimeError("QMP greeting did not appear")
+            raise RuntimeError(
+                "QMP greeting did not appear; the first line was %r"
+                % (greeting_line[:200],))
         stream.write(b'{"execute":"qmp_capabilities"}\n')
         if "return" not in json.loads(stream.readline()):
             raise RuntimeError("QMP capability negotiation failed")

@@ -3527,6 +3527,12 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
     // Drive all three Ready->Running->Exited, the bookkeeping-only cycle
     // scheduled_process_probe_cycle uses, and stamp each with its own
     // status so the collection below can tell them apart.
+    // seen == 3 above already means the link exists, but say so where the
+    // read is: first_child is only readable when has_first_child says it
+    // is, and a probe that assumes an invariant it does not state is how
+    // the unguarded read in kernel_process_reap_zombie survived.
+    if (scheduled_process_record_at(parent_handle.pool_index)
+            .has_first_child == false) { return false; }
     let mut cursor: ProcessHandle =
         scheduled_process_record_at(parent_handle.pool_index).first_child;
     for i: usize in 0..<3 {
