@@ -753,7 +753,10 @@ kernelcheck-qemu-ash: kernelbuild-qemu
 
 ## Exercise make -> /dev/tty -> miniterm -> ash in a pseudo-terminal.  This
 ## complements the UART protocol tests above by covering the interactive entry
-## point and its host-side terminal file descriptors.
+## point and its host-side terminal file descriptors.  Its runner omits the
+## NIC: the full boot immediately before it already covers virtio-net and HTTP,
+## while user-mode networking otherwise makes this terminal-only check spend
+## about 15 seconds in the kernel's network retry fixture.
 kernelcheck-shell-qemu: kernelbuild-qemu
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" python3 scripts/run_kernel_shell_qemu_smoketest.py
 

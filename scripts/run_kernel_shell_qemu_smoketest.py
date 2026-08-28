@@ -18,7 +18,20 @@ EXIT_TIMEOUT_SECONDS = 15
 
 def terminate(pid):
     try:
-        os.kill(pid, signal.SIGTERM)
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            exited_pid, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if exited_pid:
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
     try:
@@ -46,8 +59,9 @@ def main():
         os.environ["KERNEL_QEMU_SHELL_ARTIFACT_DIR"] = os.path.join(
             REPO_ROOT, "_build", "kernelcheck-shell-qemu"
         )
-        os.environ["KERNEL_QEMU_SHELL_SERIAL_PORT"] = "17777"
-        os.environ["KERNEL_QEMU_SHELL_HTTP_PORT"] = "18081"
+        os.environ["KERNEL_QEMU_SHELL_SERIAL_PORT"] = "18707"
+        os.environ["KERNEL_QEMU_SHELL_HTTP_PORT"] = "18708"
+        os.environ["KERNEL_QEMU_SHELL_SKIP_NETWORK"] = "1"
         os.execvp("make", ["make", "-j1", "kernelsh-qemu"])
 
     transcript = bytearray()

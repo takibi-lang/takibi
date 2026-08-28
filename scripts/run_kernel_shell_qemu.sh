@@ -44,8 +44,23 @@ rm -f "$QMP_SOCKET"
 
 QEMU_SERIAL_PORT="${KERNEL_QEMU_SHELL_SERIAL_PORT:-17773}"
 HTTP_PORT="${KERNEL_QEMU_SHELL_HTTP_PORT:-18080}"
+SKIP_NETWORK="${KERNEL_QEMU_SHELL_SKIP_NETWORK:-0}"
+# The human-facing default retains HTTP forwarding. The automated PTY smoke
+# sets this flag because its contract is the terminal/miniterm/DDB path; the
+# ordinary integration boot already exercises virtio-net and HTTP in the same
+# aggregate target.
+guard_ports=("tcp:$QEMU_SERIAL_PORT")
+if [ "$SKIP_NETWORK" != 1 ]; then
+    guard_ports+=("tcp:$HTTP_PORT")
+fi
+python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu shell" \
+    "${guard_ports[@]}" || exit 1
 echo "[kernel/qemu] interactive UART session (Ctrl-] exits miniterm)"
-echo "[kernel/qemu] httpd forwarding: http://127.0.0.1:$HTTP_PORT/ -> 192.168.20.2:8080"
+if [ "$SKIP_NETWORK" = 1 ]; then
+    echo "[kernel/qemu] network device omitted for terminal-path smoke"
+else
+    echo "[kernel/qemu] httpd forwarding: http://127.0.0.1:$HTTP_PORT/ -> 192.168.20.2:8080"
+fi
 QEMU_LAUNCH_NS="$(date +%s%N)"
 # Keep the user-network subnet aligned with the kernel's fixed test address.
 # hostfwd terminates only on loopback, so the demo is local to the developer
@@ -59,10 +74,14 @@ QEMU_COMMAND=(
     -global virtio-mmio.force-legacy=on \
     -drive "file=$SHELL_EXT2_IMAGE,if=none,format=raw,id=vd0" \
     -device virtio-blk-device,drive=vd0 \
-    -netdev "user,id=net0,net=192.168.20.0/24,dhcpstart=192.168.20.15,host=192.168.20.1,hostfwd=tcp:127.0.0.1:$HTTP_PORT-192.168.20.2:8080" \
-    -device virtio-net-device,netdev=net0,mac=02:00:20:00:00:02,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off \
     -kernel "$ELF"
 )
+if [ "$SKIP_NETWORK" != 1 ]; then
+    QEMU_COMMAND+=(
+        -netdev "user,id=net0,net=192.168.20.0/24,dhcpstart=192.168.20.15,host=192.168.20.1,hostfwd=tcp:127.0.0.1:$HTTP_PORT-192.168.20.2:8080"
+        -device "virtio-net-device,netdev=net0,mac=02:00:20:00:00:02,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off"
+    )
+fi
 
 export KERNEL_SHELL_PLATFORM=qemu
 export KERNEL_SHELL_LAUNCH_NS="$QEMU_LAUNCH_NS"
