@@ -732,17 +732,16 @@ RPI5_SWD_SPEED ?= 30000
 kernelcheck-rpi5: kernelbuild-rpi5
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_hwtest_rpi5.sh
 
-## The ordinary and debug suites each contain one long full-system boot plus
-## independent ash/terminal checks on their own ports.  Keep those invocations
-## as separate Make targets so `allcheck` can schedule them together instead
-## of making the short checks wait behind the long boot.  They remain in this
-## one dependency graph, so $(TAKIBI) is still built exactly once; do not
-## replace these prerequisites with separate recursive Make invocations (see
-## the allcheck comment below).  The aggregate names retain their old public
-## behavior for focused runs.  The timing-sensitive DDB checks deliberately
-## remain sequential within kernelcheck-ddb-qemu: fanning every QEMU boot out
-## at once made the UART wake/BREAK interleaving check fail under host load.
-kernelcheck-qemu: kernelcheck-qemu-main kernelcheck-qemu-ash
+## Each long full-system boot already validates the complete ash transcript.
+## Keep the ash-only targets below for focused debugging, but do not run their
+## duplicate boots from the aggregate checks.  The ordinary PTY smoke covers
+## a distinct host terminal path and remains behind the long boot: even after
+## removing both duplicate ash boots, running it in the full QEMU fan-out can
+## leave its QMP interaction stalled under host load.  Everything remains in
+## one dependency graph, so $(TAKIBI) is still built exactly once (see the
+## allcheck comment below).  The timing-sensitive DDB checks deliberately
+## remain sequential within kernelcheck-ddb-qemu.
+kernelcheck-qemu: kernelcheck-qemu-main
 
 kernelcheck-qemu-main: kernelbuild-qemu
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_qemutest.sh
@@ -757,7 +756,7 @@ kernelcheck-qemu-ash: kernelbuild-qemu
 kernelcheck-shell-qemu: kernelbuild-qemu
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" python3 scripts/run_kernel_shell_qemu_smoketest.py
 
-kernelcheck-qemu-debug: kernelcheck-qemu-debug-main kernelcheck-qemu-debug-ash
+kernelcheck-qemu-debug: kernelcheck-qemu-debug-main
 
 kernelcheck-qemu-debug-main: kernelbuild-qemu-debug
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_LABEL=qemu-debug KERNEL_QEMU_HWTEST_ARTIFACT_DIR="$(CURDIR)/_build/kernel-hwtest-qemu-debug" KERNEL_QEMU_SERIAL_PORT=18683 KERNEL_QEMU_NETDEV_LOCAL_PORT=18684 KERNEL_QEMU_NETDEV_REMOTE_PORT=18685 bash scripts/run_kernel_qemutest.sh
