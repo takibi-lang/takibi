@@ -344,7 +344,18 @@ struct RetxChain {
     private head: RetxLink;
 }
 
-private linear view RetxGuard[lock: addr];
+// GitHub issue #451: a linear STRUCT, not an erased view any more.
+// A view emits nothing, so it could not carry the interrupt state a
+// release must restore -- and it did not need to while the lock itself
+// emitted nothing either. Now that mutex_acquire really masks and really
+// takes, `flags` is the frame slot Linux's own `unsigned long flags`
+// occupies, and holding it per-guard is what makes the pair correct
+// inside an interrupt handler (DAIF.I already set on entry, so release
+// leaves it set) and correct when two nest. Identity is unchanged:
+// `[lock: addr]` still makes another container's guard a compile error.
+private linear struct RetxGuard[lock: addr] {
+    private flags: usize;
+}
 private let mut tcp_retx_chain: RetxChain;
 private let mut tcp_retx_pool: IntrusivePool(RetxEntry);
 // See tcp_connection_pool_init: that function is a reset called many
@@ -420,7 +431,18 @@ variant FrameLink {
     Some(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
 }
 
-private linear view FrameGuard[lock: addr];
+// GitHub issue #451: a linear STRUCT, not an erased view any more.
+// A view emits nothing, so it could not carry the interrupt state a
+// release must restore -- and it did not need to while the lock itself
+// emitted nothing either. Now that mutex_acquire really masks and really
+// takes, `flags` is the frame slot Linux's own `unsigned long flags`
+// occupies, and holding it per-guard is what makes the pair correct
+// inside an interrupt handler (DAIF.I already set on entry, so release
+// leaves it set) and correct when two nest. Identity is unchanged:
+// `[lock: addr]` still makes another container's guard a compile error.
+private linear struct FrameGuard[lock: addr] {
+    private flags: usize;
+}
 private let mut tcp_frame_pool: IntrusivePool(NetFrame);
 private let mut tcp_frame_pool_ready: bool = false;
 
@@ -433,10 +455,14 @@ private let mut tcp_frame_pool_ready: bool = false;
 private let mut tcp_frame_absent_fallback: [u8; 1514];
 
 fn tcp_frame_lock(m: *Mutex @ address) -> FrameGuard[address] {
-    return view FrameGuard[address];
+    let mut guard: FrameGuard[address] = { mutex_acquire(m) };
+    return guard;
 }
 
-fn tcp_frame_unlock(guard: sink FrameGuard[address], m: *Mutex @ address) {}
+fn tcp_frame_unlock(guard: sink FrameGuard[address],
+                    m: *Mutex @ address) {
+    mutex_release(m, guard.flags);
+}
 
 // Give a parked frame back. #370's cost in full: the handle came out of a
 // stable slot, so its brand is existential, and intrusive_pool_remove
@@ -1083,10 +1109,14 @@ fn kernel_tcp_restore_stream_policy() {
 }
 
 fn retx_lock(m: *Mutex @ address) -> RetxGuard[address] {
-    return view RetxGuard[address];
+    let mut guard: RetxGuard[address] = { mutex_acquire(m) };
+    return guard;
 }
 
-fn retx_unlock(guard: sink RetxGuard[address], m: *Mutex @ address) {}
+fn retx_unlock(guard: sink RetxGuard[address],
+                    m: *Mutex @ address) {
+    mutex_release(m, guard.flags);
+}
 
 // Detach the whole queue. Every walk below is "take the chain, decide
 // entry by entry, put back what survives", rather than unlinking a node

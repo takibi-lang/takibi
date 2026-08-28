@@ -30,7 +30,18 @@ struct NetworkCapabilityStore {
 }
 
 private let mut network_capability_store: NetworkCapabilityStore;
-private linear view NetworkCapabilityGuard[lock: addr];
+// GitHub issue #451: a linear STRUCT, not an erased view any more.
+// A view emits nothing, so it could not carry the interrupt state a
+// release must restore -- and it did not need to while the lock itself
+// emitted nothing either. Now that mutex_acquire really masks and really
+// takes, `flags` is the frame slot Linux's own `unsigned long flags`
+// occupies, and holding it per-guard is what makes the pair correct
+// inside an interrupt handler (DAIF.I already set on entry, so release
+// leaves it set) and correct when two nest. Identity is unchanged:
+// `[lock: addr]` still makes another container's guard a compile error.
+private linear struct NetworkCapabilityGuard[lock: addr] {
+    private flags: usize;
+}
 
 must_use variant NetworkCapabilityInstallResult {
     Installed;
@@ -46,11 +57,14 @@ must_use variant NetworkCapabilityPutResult { Stored; Conflict; }
 
 fn network_capability_lock(lock: *Mutex @ address)
         -> NetworkCapabilityGuard[address] {
-    return view NetworkCapabilityGuard[address];
+    let mut guard: NetworkCapabilityGuard[address] = { mutex_acquire(lock) };
+    return guard;
 }
 
 fn network_capability_unlock(guard: sink NetworkCapabilityGuard[address],
-                             lock: *Mutex @ address) {}
+        lock: *Mutex @ address) {
+    mutex_release(lock, guard.flags);
+}
 
 fn network_capability_install(ready: sink NetRxCanAcquire)
         -> NetworkCapabilityInstallResult {

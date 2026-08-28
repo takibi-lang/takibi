@@ -7402,8 +7402,8 @@ let infer_tests = [
         private let mut stable_slot7i: StableSlot7i;
         fn stable_read7i() -> StableValue7i { return stable_slot7i.value; }");
 
-  Alcotest.test_case "stable_replace requires a linear view guard" `Quick
-    (expect_type_error "requires a linear erased-view guard"
+  Alcotest.test_case "stable_replace requires a linear guard" `Quick
+    (expect_type_error "requires a linear guard"
        "linear view StablePermit7j;
         variant StableValue7j { Empty; Full(StablePermit7j); }
         struct StableSlot7j { private mutex: i32; private value: StableValue7j; }
@@ -7412,6 +7412,62 @@ let infer_tests = [
           return stable_replace(x, &stable_slot7j.mutex,
             stable_slot7j.value, StableValue7j::Empty);
         }");
+
+  (* GitHub issue #451: a guard may be a linear STRUCT, not only an erased
+     view. A view has no runtime payload, so it cannot carry the interrupt
+     mask a real lock must restore -- which is what these guards became
+     once the lock stopped emitting nothing. What stable_replace wants from
+     a guard is its identity, and that is erased either way. *)
+  Alcotest.test_case
+    "issue #451: an indexed linear STRUCT is a stable_replace guard too"
+    `Quick
+    (fun () ->
+       expect_ok
+         "linear struct StableGuard7z[lock: addr] { private flags: usize; }
+          linear view StablePermit7z;
+          variant StableValue7z { Empty; Full(StablePermit7z); }
+          struct StableSlot7z { private mutex: i32; private value: StableValue7z; }
+          private let mut stable_slot7z: StableSlot7z;
+          private let mut stable_other7z: StableSlot7z;
+          fn stable_lock7z(m: *i32 @ lock) -> StableGuard7z[lock] {
+            let mut g: StableGuard7z[lock] = { 0 };
+            return g;
+          }
+          fn stable_unlock7z(g: sink StableGuard7z[lock], m: *i32 @ lock) {}
+          fn stable_take7z(p: sink StablePermit7z) {}
+          fn stable_use7z() {
+            let guard = stable_lock7z(&stable_slot7z.mutex);
+            match stable_replace(guard, &stable_slot7z.mutex,
+                                 stable_slot7z.value, StableValue7z::Empty) {
+              StableValue7z::Empty => {}
+              StableValue7z::Full(p) => { stable_take7z(p); }
+            }
+            stable_unlock7z(guard, &stable_slot7z.mutex);
+          }" ();
+       (* the identity guarantee must survive the new shape: a guard minted
+          from one container may not be used with another *)
+       expect_type_error "static value mismatch"
+         "linear struct StableGuard7y[lock: addr] { private flags: usize; }
+          linear view StablePermit7y;
+          variant StableValue7y { Empty; Full(StablePermit7y); }
+          struct StableSlot7y { private mutex: i32; private value: StableValue7y; }
+          private let mut stable_slot7y: StableSlot7y;
+          private let mut stable_other7y: StableSlot7y;
+          fn stable_lock7y(m: *i32 @ lock) -> StableGuard7y[lock] {
+            let mut g: StableGuard7y[lock] = { 0 };
+            return g;
+          }
+          fn stable_unlock7y(g: sink StableGuard7y[lock], m: *i32 @ lock) {}
+          fn stable_take7y(p: sink StablePermit7y) {}
+          fn stable_use7y() {
+            let guard = stable_lock7y(&stable_slot7y.mutex);
+            match stable_replace(guard, &stable_other7y.mutex,
+                                 stable_other7y.value, StableValue7y::Empty) {
+              StableValue7y::Empty => {}
+              StableValue7y::Full(p) => { stable_take7y(p); }
+            }
+            stable_unlock7y(guard, &stable_slot7y.mutex);
+          }" ());
 
   Alcotest.test_case "stable_replace result cannot be discarded" `Quick
     (expect_type_error "linear result of 'stable_replace' must be moved"

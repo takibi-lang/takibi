@@ -3133,23 +3133,43 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            (match guard.desc with
             | Var _ -> ()
             | _ -> raise (TypeError (guard.loc,
-                "stable_replace guard must be a bare linear view binding")));
+                "stable_replace guard must be a bare linear guard binding")));
            let gt = infer_expr senv eenv tyenv fenv guard in
+           (* The single `addr` index the guard carries, whichever shape it
+              is. GitHub issue #451: a guard was an erased `linear view`
+              until a real lock needed one to carry the interrupt mask it
+              must restore, which a view cannot do -- it has no runtime
+              payload. So a linear STRUCT with the same static parameters
+              is equally a guard here, and the check is the same question
+              asked of `indexed_struct_params` instead of `view_params`.
+              What stable_replace needs from a guard is its identity, and
+              that is erased in both. *)
+           let single_addr_arg formals args =
+             let addr_args = List.fold_left2 (fun found (_, sort) arg ->
+               match sort with
+               | Ast.TypeNamed "addr" -> arg :: found
+               | _ -> found) [] formals args in
+             match addr_args with
+             | [lock] -> lock
+             | _ -> raise (TypeError (guard.loc,
+                 "stable_replace guard must carry exactly one addr index"))
+           in
            let guard_lock = match repr gt with
             | TView (name, args)
               when Hashtbl.find_opt view_kinds name = Some Ast.KindLinear ->
-                let formals = Option.value
-                  (Hashtbl.find_opt view_params name) ~default:[] in
-                let addr_args = List.fold_left2 (fun found (_, sort) arg ->
-                  match sort with
-                  | Ast.TypeNamed "addr" -> arg :: found
-                  | _ -> found) [] formals args in
-                (match addr_args with
-                 | [lock] -> lock
-                 | _ -> raise (TypeError (guard.loc,
-                     "stable_replace guard must carry exactly one addr index")))
+                single_addr_arg
+                  (Option.value (Hashtbl.find_opt view_params name) ~default:[])
+                  args
+            | TIndexedStruct (name, args)
+              when Hashtbl.find_opt indexed_struct_kinds name
+                   = Some Ast.KindLinear ->
+                single_addr_arg
+                  (Option.value (Hashtbl.find_opt indexed_struct_params name)
+                     ~default:[])
+                  args
             | _ -> raise (TypeError (guard.loc,
-                "stable_replace requires a linear erased-view guard"))
+                "stable_replace requires a linear guard: an erased view, or \
+                 an indexed linear struct carrying one addr"))
            in
            let lock_ty = infer_expr senv eenv tyenv fenv lock_addr in
            (match repr lock_ty with

@@ -329,7 +329,18 @@ struct ProcessCloneVmStore {
     private value: ProcessCloneVmValue;
 }
 private let mut process_clone_vm_store: ProcessCloneVmStore;
-private linear view ProcessCloneVmGuard[lock: addr];
+// GitHub issue #451: a linear STRUCT, not an erased view any more.
+// A view emits nothing, so it could not carry the interrupt state a
+// release must restore -- and it did not need to while the lock itself
+// emitted nothing either. Now that mutex_acquire really masks and really
+// takes, `flags` is the frame slot Linux's own `unsigned long flags`
+// occupies, and holding it per-guard is what makes the pair correct
+// inside an interrupt handler (DAIF.I already set on entry, so release
+// leaves it set) and correct when two nest. Identity is unchanged:
+// `[lock: addr]` still makes another container's guard a compile error.
+private linear struct ProcessCloneVmGuard[lock: addr] {
+    private flags: usize;
+}
 
 must_use variant ProcessCloneVmResult { OutOfMemory; Copied; }
 must_use variant ProcessCloneVmReapResult { Missing; Reaped; }
@@ -419,11 +430,14 @@ fn process_stack_load_word(stack: borrow [u8; PROCESS_STACK_LAYOUT_BYTES..],
 
 fn process_clone_vm_lock(lock: *Mutex @ address)
         -> ProcessCloneVmGuard[address] {
-    return view ProcessCloneVmGuard[address];
+    let mut guard: ProcessCloneVmGuard[address] = { mutex_acquire(lock) };
+    return guard;
 }
 
 fn process_clone_vm_unlock(guard: sink ProcessCloneVmGuard[address],
-                           lock: *Mutex @ address) {}
+        lock: *Mutex @ address) {
+    mutex_release(lock, guard.flags);
+}
 
 fn process_clone_vm_owner_drop(owner: sink ProcessCloneVmOwner) {}
 

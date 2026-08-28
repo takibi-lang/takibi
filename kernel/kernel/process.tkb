@@ -17,17 +17,13 @@ use "kernel/lib/mutex.tkb";
 // - NOT SYNCHRONIZED, single-core scheduler: only core 0 ever runs the
 //   scheduler/dispatches syscalls. Core 1 proves autonomous EL1 entry and
 //   shared-MMU visibility via PSCI CPU_ON, then parks permanently.
-// - scheduled_process_spare_lock EMITS NOTHING, and that is still true
-//   after issue #445 gave the pool locks a real acquire. It returns an
-//   erased `linear view`, which is a compile-time proof that no second
-//   holder exists in the program -- a stronger statement than a spinlock
-//   makes, and a strictly weaker one at runtime, which is the half that
-//   matters once a second core reaps. Five more guards in this kernel
-//   have the same shape (kernel/mm/process_image.tkb,
-//   kernel/net/socket_capability.tkb, kernel/net/tcp.tkb x3); issue #451
-//   holds converting all six together, because they share the obstacle:
-//   their `mutex` field is an i32 and this language's atomics are usize,
-//   so a 64-bit exchange on one would write over the field beside it.
+// - scheduled_process_spare_lock takes a real lock as of issue #451. It
+//   returns a linear STRUCT carrying the interrupt state its release
+//   restores, where it used to return an erased `linear view` that emitted
+//   nothing -- a compile-time proof that no second holder exists in the
+//   program, which is a stronger statement than a spinlock makes and a
+//   strictly weaker one at runtime. Both hold now. The four other guards
+//   in this kernel moved in the same change.
 // - No fixed process-table capacity: a ProcessRecord is an
 //   IntrusivePool allocation, so the page allocator is the only limit
 //   (issue #392). The bootstrap is the exception and is a static record
@@ -336,15 +332,29 @@ struct SpareStackRunCell {
 }
 
 private let mut scheduled_process_spare: SpareStackRunCell;
-private linear view SpareStackRunGuard[lock: addr];
+// GitHub issue #451: a linear STRUCT, not an erased view any more.
+// A view emits nothing, so it could not carry the interrupt state a
+// release must restore -- and it did not need to while the lock itself
+// emitted nothing either. Now that mutex_acquire really masks and really
+// takes, `flags` is the frame slot Linux's own `unsigned long flags`
+// occupies, and holding it per-guard is what makes the pair correct
+// inside an interrupt handler (DAIF.I already set on entry, so release
+// leaves it set) and correct when two nest. Identity is unchanged:
+// `[lock: addr]` still makes another container's guard a compile error.
+private linear struct SpareStackRunGuard[lock: addr] {
+    private flags: usize;
+}
 
 private fn scheduled_process_spare_lock(lock: *Mutex @ address)
         -> SpareStackRunGuard[address] {
-    return view SpareStackRunGuard[address];
+    let mut guard: SpareStackRunGuard[address] = { mutex_acquire(lock) };
+    return guard;
 }
 
 private fn scheduled_process_spare_unlock(
-        guard: sink SpareStackRunGuard[address], lock: *Mutex @ address) {}
+        guard: sink SpareStackRunGuard[address], lock: *Mutex @ address) {
+    mutex_release(lock, guard.flags);
+}
 
 // The deepest a REAPED process's kernel stack ever got. The array this
 // replaces kept every slot's run for the life of the kernel, so the
