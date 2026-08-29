@@ -149,7 +149,7 @@ State: **HAND**. The numbers behind it are CHECKED (const) below.
 | Constant | Value | Defined in | State |
 |---|---|---|---|
 | `PAGE_SIZE` | 4096 | `kernel/mm/page.tkb` | CHECKED (const) |
-| `BOOT_PAGE_COUNT` | 204800 | `kernel/mm/page.tkb` | CHECKED (const) |
+| `BOOTSTRAP_PAGE_COUNT` | 2048 | `kernel/mm/page.tkb` | CHECKED (const); pre-DTB page tables only, not runtime capacity |
 | `KERNEL_STACK_PAGES` | 4 | `kernel/kernel/process.tkb` | CHECKED (const) |
 | `KERNEL_STACK_SHIFT` | 14 | `kernel/kernel/process.tkb` | CHECKED (const) |
 | `ASID_BITS_FLOOR` | 8 | `kernel/arch/arm64/mm/asid.tkb` | CHECKED (const) |
@@ -166,14 +166,14 @@ because these are the numbers people actually quote:
 |---|---|---|
 | `KERNEL_PROCESS_STACK_SIZE` | 16384 | `KERNEL_STACK_PAGES * PAGE_SIZE` |
 | `KERNEL_STACK_RUN_BYTES` | 32768 | twice the above |
-| Page pool extent | 800 MiB | `BOOT_PAGE_COUNT * PAGE_SIZE` |
-| Page pool end (RPi5) | `0x32b38000` | `usable_ram_start + 800 MiB` |
-| Page pool end (QEMU) | `0x72940000` | `usable_ram_start + 800 MiB` |
+| Runtime page pool | DTB-derived | normalized page-aligned extents at or above `usable_ram_start` |
+| Runtime metadata | DTB-derived | `sizeof(PageMeta)` per managed page plus one `PageExtent` per normalized extent, reserved from discovered RAM |
 
 ## A page is 4096 bytes of payload
 
 All of it. The allocator keeps its per-page state -- occupancy, owner tag,
-mapping refcount -- in a side array (`PageMeta`), not inside the page.
+mapping refcount, free-list link, and physical address -- in runtime-sized
+side storage (`PageMeta`), not inside the page.
 
 It was not always so, and the history is the useful part. Issue #353 moved
 the allocator's owner metadata INTO the last `PAGE_META_BYTES` (128) of
@@ -190,7 +190,7 @@ for a one-page chunk the pool's header and the allocator's "reserved"
 region were the same 128 bytes. Issue #390 deleted the reservation, and
 with it `PAGE_META_BYTES`, `PAGE_USABLE_BYTES`, `page_meta_at`,
 `page_meta_clear` and `PageMeta.in_run`. Every page got its last 128 bytes
-back: 25 MB across `BOOT_PAGE_COUNT`.
+back across the runtime-discovered page inventory.
 
 **What still holds**: a pool asks `page_owner_tag_at` -- the side array --
 whether a page is tagged `PoolChunk` before it dereferences anything, and a

@@ -4,9 +4,9 @@
 #
 # The poke is the page allocator's free-list head, which is what issue #414
 # proposed. kernel/lib/freelist.tkb's freelist_core_insert treats any head
-# outside [0, N) as an empty list, so writing BOOT_PAGE_COUNT (204800) makes
-# every page_alloc report OutOfMemory without touching a single page's
-# metadata -- nothing to undo afterwards but the head itself.
+# outside [0, runtime_page_count) as an empty list, so writing the discovered
+# count makes every page_alloc report OutOfMemory without touching a single
+# page's metadata -- nothing to undo afterwards but the head itself.
 #
 # Which acquisition fails is chosen by WHERE this arms, not by the poke:
 # address_space_allocate_root is past the process record and the kernel
@@ -55,12 +55,12 @@ delete
 printf "alloc-rollback: armed after the pooled-record baseline\n"
 break address_space_allocate_root
 continue
-set $saved_free_head = boot_page_pool.core.free_head
-set boot_page_pool.core.free_head = 204800
+set $saved_free_head = boot_page_pool.runtime_free_head
+set boot_page_pool.runtime_free_head = boot_page_pool.runtime_page_count
 delete
 printf "alloc-rollback: injected at address_space_allocate_root, saved_free_head=%lu\n", $saved_free_head
 break kernel_boot_log_resource_exhausted
 continue
-set boot_page_pool.core.free_head = $saved_free_head
+set boot_page_pool.runtime_free_head = $saved_free_head
 delete
-printf "alloc-rollback: restored free_head=%lu\n", boot_page_pool.core.free_head
+printf "alloc-rollback: restored free_head=%lu\n", boot_page_pool.runtime_free_head

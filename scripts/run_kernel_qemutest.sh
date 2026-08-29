@@ -11,13 +11,9 @@
 # opened by the same pyserial driver used for the RPi5 UART, so capture and
 # ash input share one transport implementation.
 #
-# -m 1024: kernel/mm/page.tkb's BOOT_PAGE_COUNT reserves ~800 MiB of real
-# physical page content starting right after the kernel image. QEMU
-# `virt`'s default RAM (much smaller than that without an explicit -m)
-# would leave part of that pool unbacked -- harmless for today's self-test
-# bundle (it never allocates anywhere near that much), but a real latent
-# bug for any future workload that does. Matches kernel/README.md's
-# documented QEMU invocation.
+# -m 1024 exercises the maintained full-memory configuration. The allocator
+# sizes itself from QEMU's generated DTB; the separate 128 MiB lane proves a
+# smaller machine does not inherit this runner's capacity.
 #
 # -netdev dgram + -device virtio-net-device (GitHub issue #237 M4): one
 # UDP datagram == one raw Ethernet frame, the same private point-to-point

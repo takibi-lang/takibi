@@ -1431,7 +1431,8 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult !{unsafe} {
     match inserted {
         IntrusivePoolInsertResult::OutOfMemory => {
             kernel_boot_log_resource_exhausted(
-                "physical page allocator" as *u8, BOOT_PAGE_COUNT);
+                "physical page allocator" as *u8,
+                page_allocator_total_count());
             return ScheduledProcessAllocResult::Full;
         }
         IntrusivePoolInsertResult::Allocated(pool_owner) => {
@@ -1484,7 +1485,7 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
             PageRunAllocResult::OutOfMemory => {
                 kernel_boot_log_resource_exhausted(
                     "physical page allocator" as *u8,
-                    BOOT_PAGE_COUNT);
+                    page_allocator_total_count());
                 scheduled_process_slot_remove(slot);
                 return ScheduledProcessAllocResult::Full;
             }
@@ -1519,7 +1520,8 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
         }
         AddressSpaceEnsureResult::OutOfMemory => {
             kernel_boot_log_resource_exhausted(
-                "physical page allocator" as *u8, BOOT_PAGE_COUNT);
+                "physical page allocator" as *u8,
+                page_allocator_total_count());
             // GitHub issue #414: a backing RECORD exists by now even
             // though the root does not -- address_space_ensure_root asks
             // for the record before it asks the page allocator for the
@@ -1541,7 +1543,8 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
     // range".
     if (process_image_record_ensure(slot) == false) {
         kernel_boot_log_resource_exhausted(
-            "physical page allocator" as *u8, BOOT_PAGE_COUNT);
+            "physical page allocator" as *u8,
+            page_allocator_total_count());
         address_space_release_root(slot);
         address_space_backing_release(slot);
         scheduled_process_slot_remove(slot);
@@ -1549,7 +1552,8 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
     }
     if (unified_fd_context_ensure(slot) == false) {
         kernel_boot_log_resource_exhausted(
-            "physical page allocator" as *u8, BOOT_PAGE_COUNT);
+            "physical page allocator" as *u8,
+            page_allocator_total_count());
         process_image_record_release(slot);
         address_space_release_root(slot);
         address_space_backing_release(slot);
@@ -4843,4 +4847,3 @@ private fn scheduled_process_handle_of_slot(slot: usize) -> ProcessHandle {
         }
     }
 }
-

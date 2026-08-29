@@ -13,15 +13,16 @@ from pathlib import Path
 
 MULTIBANK_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=1024 "
-    b"regions=1 reservations=0 allocator_pages=204800")
+    b"regions=1 reservations=0 allocator_pages=261264")
 # The page count is what is left after every statically laid-out kernel
 # region, so it moves whenever the image or the linker script does -- which
 # is the point of asserting it exactly rather than as a range. It went
-# 30728 -> 30712 for GitHub issue #477, exactly the 16 pages (64 KiB) that
-# the second core's own IRQ and overflow stacks cost.
+# 31904 -> 31888 for GitHub issue #477, exactly the 16 pages (64 KiB) that
+# the second core's own IRQ and overflow stacks cost after the allocator was
+# changed to size its runtime inventory from the boot DTB.
 LOW_MEMORY_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=128 "
-    b"regions=1 reservations=0 allocator_pages=30712")
+    b"regions=1 reservations=0 allocator_pages=31888")
 INVALID_EXPECTED = b"memory: invalid boot DTB; halting"
 
 
@@ -104,7 +105,7 @@ def main() -> int:
         print("FAIL kernel/qemu FDT allocator sizing: expected memory line absent",
               file=sys.stderr)
         return 1
-    print("PASS kernel/qemu FDT allocator sizing: 128 MiB DTB supplies 30712 pages")
+    print("PASS kernel/qemu FDT allocator sizing: 128 MiB DTB supplies 31888 pages")
 
     with tempfile.TemporaryDirectory(prefix="takibi-fdt-") as directory:
         dtb = Path(directory) / "virt.dtb"
@@ -128,6 +129,7 @@ def main() -> int:
             print("FAIL kernel/qemu FDT negative control: unexpected QEMU DTB shape",
                   file=sys.stderr)
             return 1
+
         dtb.write_bytes(blob.replace(b"memory\0", b"xemory\0"))
         invalid_command = [
             "qemu-system-aarch64",

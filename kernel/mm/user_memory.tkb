@@ -1,16 +1,6 @@
 use "kernel/mm/page.tkb";
 use "kernel/mm/address_space.tkb";
 
-// Result type for the compiler-lowered native-width checked_add_usize/
-// checked_mul_usize builtins (see SPEC.md). Declared once here since
-// issue #196's iovec/pollfd array-length arithmetic (iovcnt*sizeof(Iovec)
-// and the accumulated byte total across segments) is the first user of
-// these builtins in kernel/.
-must_use variant CheckedUsize {
-    Value(usize);
-    Overflow;
-}
-
 // One L1 slot of user VA: address_space.tkb lazily allocates an L3 table for
 // each populated L2 branch. The literal stays here because top-level const
 // initializers cannot multiply another file's identifier.

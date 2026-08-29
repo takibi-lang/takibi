@@ -153,12 +153,10 @@
 //   every slot in it is freed. This is issue #26's own suggested default
 //   for this class of primitive ("real kernels often start with 'never
 //   shrink'"), not an oversight.
-// - Capacity is bounded by MAX_CHUNKS * SLOTS_PER_CHUNK == N, itself still
-//   bounded by page.tkb's own fixed BOOT_PAGE_COUNT (204800 pages / 800
-//   MiB as of issue #251, backed by real physical RAM directly rather
-//   than a kernel-owned shadow array -- see that file's own header) --
-//   this primitive removes the "one fixed N per resource pool" ceiling,
-//   not page.tkb's own outer ceiling.
+// - Capacity is bounded by MAX_CHUNKS * SLOTS_PER_CHUNK == N. The physical
+//   page allocator is instead sized from the usable RAM described by the
+//   boot DTB, so this pool's configured chunk bound may be reached before
+//   or after global physical-memory exhaustion.
 // - N == SLOTS_PER_CHUNK * MAX_CHUNKS is a precondition the caller must
 //   maintain by hand; nothing here checks it.
 // - A freshly acquired chunk's page is zeroed once, at grow time
@@ -203,8 +201,8 @@ must_use variant GrowablePoolInsertResult {
 // GitHub issue #295: growable_pool_grow_one_chunk's two failure causes are
 // unrelated in scope -- ChunkLimitReached is this one pool's own configured
 // MAX_CHUNKS ceiling, while OutOfMemory is kernel/mm/page.tkb's single
-// GLOBAL physical page allocator (BOOT_PAGE_COUNT) having nothing left for
-// ANY subsystem. Callers that only ever saw a bare `bool` (growable_pool_
+// GLOBAL physical page allocator having nothing left for ANY subsystem.
+// Callers that only ever saw a bare `bool` (growable_pool_
 // ensure, before this issue) could not tell "this pool's own bound" from
 // "the whole kernel is out of memory," which is exactly the kind of
 // resource-exhaustion ambiguity issue #295 was filed to remove.
@@ -479,7 +477,7 @@ fn growable_pool_ref_at(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX
 // cross-chunk data correctness (no aliasing between two different pages'
 // slots), generation-safe reuse after a genuine free, real double-free
 // detection, and this pool's own MAX_CHUNKS ceiling producing OutOfMemory
-// independent of page.tkb's much larger BOOT_PAGE_COUNT ceiling, for the
+// independent of the DTB-sized global page allocator's capacity, for the
 // self-directed-allocation mode (issue #26); then the same lazy-growth,
 // idempotence, cross-chunk, zero-on-grow, and ceiling properties again for
 // the externally-indexed mode (issue #246, growable_pool_ensure/_ref_at).
@@ -566,8 +564,8 @@ fn growable_pool_probe() -> bool {
     }
     growable_pool_remove(&pool, a0);
 
-    // This pool's own MAX_CHUNKS ceiling, independent of page.tkb's much
-    // larger BOOT_PAGE_COUNT ceiling.
+    // This pool's own MAX_CHUNKS ceiling, independent of the much larger
+    // DTB-sized global page allocator.
     let mut small_pool: GrowablePool(usize, 1, 1, 1);
     growable_pool_init(&small_pool);
     let c0: exists sc: usize. FreelistOwner[sc] = match growable_pool_insert(&small_pool) {

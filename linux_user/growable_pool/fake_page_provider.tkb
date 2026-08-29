@@ -25,10 +25,10 @@ const PAGE_COUNT: usize = 64;
 // than in a side array indexed by page number.
 //
 // The side array was the first design and it does not survive contact
-// with a real kernel. kernel/mm/page.tkb manages 204800 pages, so a
-// 128-byte side entry per page is 25 MB of BSS reserved whether or not
-// anything is ever pooled. In-page costs 128 bytes per page that is
-// ACTUALLY a chunk, and the kernel's pooled types (ProcessRecord x16,
+// with a real kernel. kernel/mm/page.tkb manages every usable page in the
+// boot DTB, so a fixed 128-byte side entry per possible page either wastes
+// BSS or imposes another RAM ceiling. In-page costs 128 bytes per page that
+// is ACTUALLY a chunk, and the kernel's pooled types (ProcessRecord x16,
 // TcpConnectionStore x2, ...) come to a handful of pages. Break-even is
 // around 115200 chunk pages -- 450 MB of pooled memory -- so the side
 // array is right only in a world where nearly every page is a chunk,
@@ -63,9 +63,9 @@ private let mut fake_pages: [u8; PAGE_SIZE * PAGE_COUNT] align(65536);   // 16 p
 // express "give me page 6", and therefore no way to find `n` free pages
 // that happen to be adjacent -- so an allocator built on one cannot
 // serve a contiguous request at all. That is not a limitation of this
-// stand-in: `kernel/mm/page.tkb` is `FreelistCore(BOOT_PAGE_COUNT)` and
-// has exactly the same hole, which is why every DMA buffer in the kernel
-// is a static BSS array today.
+// stand-in: the current kernel allocator also maintains an O(1) free list
+// and searches its runtime page inventory for contiguous requests. Every
+// DMA buffer in the kernel remains a static BSS array today.
 //
 // It is also why real kernels use a buddy allocator here rather than a
 // list: bolting "claim this specific index" onto a singly-linked free
@@ -399,4 +399,3 @@ private fn fake_page_run_release(start: usize, count: usize) !{unsafe} {
         }
     }
 }
-

@@ -6,7 +6,7 @@
 # acquired before it. The arrays these replaced could not fail, so the whole
 # chain is a failure mode the pooling introduced and nothing exercised.
 #
-# Reaching it honestly needs the page allocator genuinely empty (800 MiB),
+# Reaching it honestly needs the discovered page allocator genuinely empty,
 # which no probe does. This lane makes it empty for the duration of ONE
 # acquisition, from the debugger side, the way
 # scripts/run_kernel_qemutest_lifecycle_gap.sh and
@@ -16,7 +16,7 @@
 #
 # The verdict is the kernel's own end-of-run accounting, not the injection:
 #
-#   - `resource exhausted: physical page allocator capacity=204800` proves
+#   - the physical-page exhaustion line proves
 #     the injected failure was actually reached and reported.
 #   - `resources: pooled per-process records back to the baseline` proves
 #     the rollback gave back the process record, the address-space backing,
@@ -184,7 +184,7 @@ trap - EXIT INT TERM HUP
 
 sed 's/^/  /' "$UART_DRIVER_LOG"
 
-if ! grep -q '^resource exhausted: physical page allocator capacity=204800' "$UART_LOG"; then
+if ! grep -q '^resource exhausted: physical page allocator capacity=[0-9][0-9]*' "$UART_LOG"; then
     echo "FAIL kernel/qemu alloc-rollback: the kernel never reported the injected exhaustion" >&2
     echo "artifacts: $ARTIFACT_DIR" >&2
     exit 1

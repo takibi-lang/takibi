@@ -514,11 +514,10 @@ fn unified_object_pool_init() {
 //     n = memory_pages * (PAGE_SIZE / 1024) / 10
 //
 // -- one open file description per 10 KiB of RAM -- and this is that
-// derivation over this kernel's own page count: 204800 * 4 / 10 = 81920,
-// against the 16 that used to be the whole supply. Linux additionally
-// floors the result at NR_FILE (8192) for very small machines; the
-// derived value here is an order of magnitude above that floor, so
-// reproducing it would only add a constant that can never be the answer.
+// derivation over this kernel's DTB-sized page count, against the 16 that
+// used to be the whole supply. Linux additionally floors the result at
+// NR_FILE (8192); maintained machines remain above that floor, so
+// reproducing it would only add a constant that cannot be the answer here.
 //
 // It is deliberately not a capacity: it sizes no storage (a slot is a
 // pool allocation, made when it is needed), and the limit that actually

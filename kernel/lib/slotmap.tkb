@@ -20,8 +20,8 @@
 // primitive with a superset of capabilities beats deciding per call site
 // whether the plain FreelistCore(N) is "enough," at the cost of one extra
 // usize per slot. Reach for FreelistCore(N) directly only when that per-
-// slot cost genuinely matters (large N, e.g. page.tkb's BOOT_PAGE_COUNT
-// class of pool) and no call site will ever need generation re-validation.
+// slot cost genuinely matters (large N; page.tkb's former fixed page pool
+// was in this class) and no call site will ever need generation re-validation.
 //
 // Current limitations (2026-08-07): same as kernel/lib/freelist.tkb's own
 // "Current limitations" section -- SlotMap(N) has no synchronization of
