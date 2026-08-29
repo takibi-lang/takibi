@@ -150,6 +150,9 @@ fn kernel_secondary_main(context: usize) {
             if (freelist_contention_is_armed()) {
                 freelist_contention_secondary_run();
             }
+            if (page_contention_is_armed()) {
+                page_contention_secondary_run();
+            }
             wfi();
         }
     }

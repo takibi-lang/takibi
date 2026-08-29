@@ -49,6 +49,8 @@
 // detect a double release. Keeping that state as a bool preserves the
 // diagnostic invariant while removing 7 bytes/page of avoidable metadata.
 use "kernel/lib/freelist.tkb";
+use "kernel/lib/pool_lock.tkb";
+use "kernel/lib/execution_model.tkb";
 
 const PAGE_SIZE: usize = 4096;
 must_use variant CheckedUsize {
@@ -215,6 +217,27 @@ struct PageExtent {
 // -- exactly SlotMap(N)'s own shape, applied non-generically here since this
 // file's only ever going to have one pool.
 struct BootPagePool align(16) {
+    // GitHub issue #479. Everything below this line is shared mutable
+    // state reached from every page fault and every process creation, and
+    // until this field existed it had no lock and no assertion -- it was
+    // not even one of the ten sites raising KERNEL_ACTIVE_CORES reports,
+    // which is what made it worth finding.
+    //
+    // A Mutex, masking interrupts, rather than a TaskMutex. Not because
+    // the mask is needed here -- the effect checker proves the allocator
+    // is unreachable from interrupt context, transitively and by name
+    // ("interrupt function 'platform_el0_irq_dispatch' may allocate via
+    // ... -> page_alloc") -- but because of the NESTING.
+    // intrusive_pool_grow_one_chunk calls page_alloc_contiguous while
+    // holding the pool's own Mutex, so interrupts are already masked when
+    // this lock is taken from there. Taking a may_block TaskMutex under a
+    // mask is the shape that hangs; Mutex's acquire records "already
+    // masked" and its release restores what it found.
+    //
+    // The lock order is therefore POOL then PAGE, and it is one-way:
+    // page.tkb's only outward call is from a test probe
+    // (page_mapping_ref_ceiling_probe), so nothing takes page-then-pool.
+    private lock: Mutex;
     core: FreelistCore(BOOTSTRAP_PAGE_COUNT);
     meta: [PageMeta; BOOTSTRAP_PAGE_COUNT];
     runtime_meta_base: usize;
@@ -460,7 +483,19 @@ private fn page_run_is_free(first: usize, count: usize) -> bool {
 // non-goals rule out a general buddy unless it turns out to be the
 // smaller change, and the caller today is process creation -- rare, and
 // already doing far more expensive work.
+// GitHub issue #479: one acquire for the whole run search and claim. A run
+// is only contiguous if nothing takes a page out of the middle of it
+// between the scan and the claim.
 fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
+        -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
+    let flags: usize = page_lock();
+    let result: PageRunAllocResult =
+        page_alloc_contiguous_locked(count, owner);
+    page_unlock(flags);
+    return result;
+}
+
+private fn page_alloc_contiguous_locked(count: usize, owner: PageOwnerTag)
         -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
     if (count < 1) { return PageRunAllocResult::OutOfMemory; }
     if (owner == PageOwnerTag::Unowned ||
@@ -548,6 +583,12 @@ fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
 }
 
 fn page_run_free(owner: sink PageRunOwner[run]) !{unsafe} {
+    let flags: usize = page_lock();
+    page_run_free_locked(owner);
+    page_unlock(flags);
+}
+
+private fn page_run_free_locked(owner: sink PageRunOwner[run]) !{unsafe} {
     page_run_release_indices(owner.first, owner.count);
 }
 
@@ -611,7 +652,35 @@ private fn page_run_release_indices(first: usize, count: usize) !{unsafe} {
     }
 }
 
+// GitHub issue #479. The allocator's lock is a Mutex and Mutex is not
+// recursive, so the entry points below split into two layers: a public one
+// that takes the lock and a private `_locked` one that does the work. Two
+// of them are called both directly and from another entry point
+// (page_transferred_release from page_mapping_release_physical and from
+// page_transferred_release_physical), and locking those without the split
+// would deadlock on the second acquire.
+//
+// This assertion names the OTHER number, not the core count, and that is
+// the point of having two. The lock excludes a second core. What it does
+// not survive is a holder losing the CPU: a preempted holder whose
+// successor allocates would spin on a lock its own core holds, on one core
+// or on eight. KERNEL_PREEMPTIBLE == 0 is why that cannot happen, and this
+// is the site that says so.
+fn page_allocator_execution_model_assumption() {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "a preempted holder of the page-allocator lock deadlocks its own core's next allocation");
+}
+
+private fn page_lock() -> usize !{unsafe} {
+    return pool_lock_acquire(0, &boot_page_pool.lock);
+}
+
+private fn page_unlock(flags: usize) !{unsafe} {
+    pool_lock_release(0, &boot_page_pool.lock, flags);
+}
+
 fn page_allocator_init() {
+    mutex_init(&boot_page_pool.lock);
     freelist_core_init(&boot_page_pool.core);
     for i: usize in 0..<BOOTSTRAP_PAGE_COUNT {
         boot_page_pool.meta[i].occupied = false;
@@ -950,11 +1019,24 @@ fn page_run_probe() -> bool !{unsafe} {
 // can be forgotten degrades to Unowned exactly where a new subsystem is
 // least understood -- which is when the tag is worth the most. Making it a
 // parameter puts the question to the compiler instead.
+// GitHub issue #479: ONE acquire covers the pop AND the three meta writes
+// that follow it. That sequence is the reason the lock is here rather than
+// inside freelist_core_insert -- a lock around the pop alone would hand two
+// cores different indices and then let them interleave the metadata for
+// them, which the free-list probe cannot see and a page-owner audit would.
 fn page_alloc(owner: PageOwnerTag) -> PageAllocResult !{allocates} {
     if (owner == PageOwnerTag::Unowned ||
         owner == PageOwnerTag::Unavailable) {
         return PageAllocResult::OutOfMemory;
     }
+    let flags: usize = page_lock();
+    let result: PageAllocResult = page_alloc_locked(owner);
+    page_unlock(flags);
+    return result;
+}
+
+private fn page_alloc_locked(owner: PageOwnerTag) -> PageAllocResult
+        !{allocates} {
     if (boot_page_pool.runtime_applied == false) {
         match freelist_core_insert(&boot_page_pool.core) {
             FreelistPopResult::Empty => {
@@ -999,17 +1081,20 @@ fn page_alloc(owner: PageOwnerTag) -> PageAllocResult !{allocates} {
 // ancestor): a free list is not idempotent, so this counts the event at
 // its source instead of silently corrupting the chain a second time.
 fn page_free(owner: sink PageOwner[page]) !{unsafe} {
+    let flags: usize = page_lock();
     let index: usize = owner.index;
-    if (index >= page_capacity()) { return; }
+    if (index >= page_capacity()) { page_unlock(flags); return; }
     let meta: *PageMeta = page_meta_at_index(index);
     if ((*meta).occupied == false) {
         boot_page_pool.double_remove_count = boot_page_pool.double_remove_count + 1;
+        page_unlock(flags);
         return;
     }
     (*meta).occupied = false;
     (*meta).owner = PageOwnerTag::Unowned;
     (*meta).map_refcount = 0;
     page_freelist_push(index, owner.generation);
+    page_unlock(flags);
 }
 
 fn page_physical_address(owner: borrow PageOwner[page]) -> usize {
@@ -1065,6 +1150,12 @@ fn page_owner_transfer_index(owner: sink PageOwner[page])
 // retain by physical address after validating that this is still a mapped
 // page from this allocator.
 fn page_mapping_install(owner: sink PageOwner[page]) !{unsafe} {
+    let flags: usize = page_lock();
+    page_mapping_install_locked(owner);
+    page_unlock(flags);
+}
+
+private fn page_mapping_install_locked(owner: sink PageOwner[page]) !{unsafe} {
     let index: usize = owner.index;
     let meta: *PageMeta = page_meta_at_index(index);
     (*meta).map_refcount = 1;
@@ -1116,6 +1207,15 @@ fn page_mapping_ref_bound_break() {
 // are is not this file's business, the same shape issue #401 gave
 // refcount_pool_retain.
 fn page_mapping_retain_physical(physical: usize, limit: usize)
+        -> PageMappingRetainResult !{unsafe} {
+    let flags: usize = page_lock();
+    let result: PageMappingRetainResult =
+        page_mapping_retain_physical_locked(physical, limit);
+    page_unlock(flags);
+    return result;
+}
+
+private fn page_mapping_retain_physical_locked(physical: usize, limit: usize)
         -> PageMappingRetainResult !{unsafe} {
     if (physical % PAGE_SIZE != 0) {
         return PageMappingRetainResult::NotMapped;
@@ -1255,27 +1355,36 @@ fn page_mapping_release_physical(physical: usize) !{unsafe} {
     if (physical % PAGE_SIZE != 0) {
         return;
     }
+    // GitHub issue #479: ONE acquire covers the refcount decrement AND the
+    // release it may trigger. Locking them separately would let another
+    // core see map_refcount reach 0 and free the page underneath this one.
+    let flags: usize = page_lock();
     match page_index_for_physical(physical) {
-        PageIndexResult::NotManaged => { return; }
+        PageIndexResult::NotManaged => { page_unlock(flags); return; }
         PageIndexResult::Found(index) => {
             let meta: *PageMeta = page_meta_at_index(index);
             let current: usize = (*meta).map_refcount;
             if ((*meta).occupied == false || current == 0) {
                 boot_page_pool.double_remove_count =
                     boot_page_pool.double_remove_count + 1;
+                page_unlock(flags);
                 return;
             }
             let next: usize = current - 1;
             (*meta).map_refcount = next;
-            if (next == 0) { page_transferred_release(index); }
+            if (next == 0) { page_transferred_release_locked(index); }
         }
     }
+    page_unlock(flags);
 }
 
 // Generation-agnostic: the double-free check below only reads the occupancy
 // bit. The coarser owner that called page_owner_transfer_index only kept the
 // index, so a fabricated generation is still used for the free-list link.
-fn page_transferred_release(index: usize) !{unsafe} {
+// GitHub issue #479: the shared body. Callers that already hold the lock
+// use this; page_transferred_release below is the entry point that takes
+// it. Two other entry points call THIS, which is why the split exists.
+private fn page_transferred_release_locked(index: usize) !{unsafe} {
     if (index >= page_capacity()) { return; }
     let meta: *PageMeta = page_meta_at_index(index);
     if ((*meta).occupied == false) {
@@ -1288,14 +1397,24 @@ fn page_transferred_release(index: usize) !{unsafe} {
     page_freelist_push(index, 0);
 }
 
+fn page_transferred_release(index: usize) !{unsafe} {
+    let flags: usize = page_lock();
+    page_transferred_release_locked(index);
+    page_unlock(flags);
+}
+
 fn page_transferred_release_physical(physical: usize) !{unsafe} {
     if (physical % PAGE_SIZE != 0) {
         return;
     }
+    let flags: usize = page_lock();
     match page_index_for_physical(physical) {
         PageIndexResult::NotManaged => {}
-        PageIndexResult::Found(index) => { page_transferred_release(index); }
+        PageIndexResult::Found(index) => {
+            page_transferred_release_locked(index);
+        }
     }
+    page_unlock(flags);
 }
 
 // Who holds the page an arbitrary address falls in, or Unowned if the

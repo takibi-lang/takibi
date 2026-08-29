@@ -284,14 +284,19 @@ fn freelist_ref(T: type, target: &mut Freelist(T, N),
 // freelist_core_insert reads free_head and then writes next_free[head]
 // back into it; two cores reading the same head pop the same index.
 //
-// THE FIX IS NOT IN THIS FILE, which is what measuring it settled. The
-// live kernel instance is kernel/mm/page.tkb's boot_page_pool.core, and
-// page_alloc pops from it and THEN writes three fields of
-// boot_page_pool.meta[index]. A lock inside the pop would not cover that
-// sequence. The lock belongs to the caller, as IntrusivePool's already
-// does -- and page.tkb has neither a lock nor an assertion today, which
-// is its own finding recorded in #479.
+// THE FIX IS NOT IN THIS FILE, which is what measuring it settled, and it
+// has landed where it belonged. The live kernel instance is
+// kernel/mm/page.tkb's boot_page_pool.core, and page_alloc pops from it and
+// THEN writes three fields of boot_page_pool.meta[index]; a lock inside the
+// pop could not cover that sequence. page.tkb holds a Mutex across the
+// whole of it now.
+//
+// So this file stays unlocked BY DESIGN and the assertion below stays too,
+// with a different job: it is now aimed at the NEXT caller. An instance
+// adopted without a caller's lock gets the measured behaviour above, and
+// the probe demonstrates both halves every boot -- unlocked hands one index
+// to two cores, locked does not.
 fn freelist_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "the free chain has no lock, and a concurrent push corrupts it silently");
+                  "this primitive is unlocked by design: a new instance needs its CALLER to hold a lock, as kernel/mm/page.tkb does");
 }

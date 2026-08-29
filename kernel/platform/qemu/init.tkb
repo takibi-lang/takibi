@@ -2,6 +2,7 @@ use "kernel/init/test_driver.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/kernel/pool_contention_evidence.tkb";
 use "kernel/kernel/freelist_contention_evidence.tkb";
+use "kernel/kernel/page_contention_evidence.tkb";
 
 must_use variant SecondaryBootResult {
     Started;
@@ -464,10 +465,18 @@ fn main() !{unsafe} {
             // The line is in the boot every time on purpose -- an open
             // race that only shows up when someone remembers to look is
             // the state this was written to leave behind.
-            if (freelist_contention_probe()) {
-                kernel_boot_log("freelist contention: two cores cycling one free chain, no index handed out twice ok\n");
+            // GitHub issue #479: the page allocator's own lock. Added
+            // after removing that lock changed nothing any lane could
+            // see -- an audit is not evidence.
+            if (page_contention_probe()) {
+                kernel_boot_log("page contention: two cores allocating and freeing, every page back, none freed twice ok\n");
             } else {
-                kernel_boot_log("freelist contention: same index handed to both cores -- open, see GitHub issue #479\n");
+                kernel_boot_log("page contention: failed\n");
+            }
+            if (freelist_contention_probe()) {
+                kernel_boot_log("freelist contention: unlocked hands one index to both cores, a caller's lock stops it ok\n");
+            } else {
+                kernel_boot_log("freelist contention: failed\n");
             }
             if (pool_contention_probe()) {
                 kernel_boot_log("pool contention: two cores cycling one pool, every allocation given back, no handle refused ok\n");

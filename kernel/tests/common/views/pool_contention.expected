@@ -1,4 +1,7 @@
-freelist contention stage: complete
-freelist contention: same index handed to both cores -- open, see GitHub issue #479
+page contention stage: complete
+page contention: two cores allocating and freeing, every page back, none freed twice ok
+freelist contention stage: unlocked
+freelist contention stage: locked
+freelist contention: unlocked hands one index to both cores, a caller's lock stops it ok
 pool contention stage: complete
 pool contention: two cores cycling one pool, every allocation given back, no handle refused ok

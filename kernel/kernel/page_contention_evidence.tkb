@@ -1,0 +1,190 @@
+// GitHub issue #479: the page allocator's own lock, exercised.
+//
+// This exists because of a negative result. After the lock landed, removing
+// it again changed nothing the suite could see -- every lane still passed.
+// The audit behind it is sound (the lock order is pool-then-page, and the
+// effect checker proves the allocator is unreachable from interrupt
+// context, transitively and by name), but an audit is not evidence, and a
+// lock nothing exercises is indistinguishable from a lock that does not
+// work. That is the state the free-list probe next door was written to
+// avoid, and it would have been dishonest to leave this one in it.
+//
+// The detector is the allocator's OWN bookkeeping rather than anything this
+// file invents. Both cores allocate and free the same number of pages; a
+// lost race shows up as pages that never came back (live_count above the
+// baseline) or as a page freed twice (double_free_count). Two cores handed
+// the same index both free it, and the second free is what the counter
+// sees.
+//
+// Current limitations:
+// - USES THE REAL ALLOCATOR, unlike the pool and free-list probes, which
+//   own private instances. There is no private page allocator to own, and
+//   a copy of it would be testing a copy. Balanced by construction: every
+//   allocation here is freed here, and the verdict checks the count
+//   returned to exactly where it started.
+// - MEASURES EXCLUSION, NOT ORDERING, like the others.
+// - Says nothing about page_alloc_contiguous, whose critical section is
+//   longer and whose failure (a run that is not contiguous) this detector
+//   cannot see. That wants its own probe and does not have one.
+
+use "kernel/mm/page.tkb";
+use "kernel/lib/execution_model.tkb";
+
+const PAGE_CONTENTION_ROUNDS: usize = 2048;
+const PAGE_CONTENTION_OUTSIDE_WORK: usize = 64;
+
+private let mut page_probe_armed: usize;
+private let mut page_probe_primary: usize;
+private let mut page_probe_secondary: usize;
+private let mut page_probe_failed: usize;
+private let mut page_probe_active: usize;
+private let mut page_probe_overlap: usize;
+
+private fn page_probe_armed_address() -> usize {
+    return (&page_probe_armed) as usize;
+}
+
+private fn page_probe_primary_address() -> usize {
+    return (&page_probe_primary) as usize;
+}
+
+private fn page_probe_secondary_address() -> usize {
+    return (&page_probe_secondary) as usize;
+}
+
+private fn page_probe_failed_address() -> usize {
+    return (&page_probe_failed) as usize;
+}
+
+private fn page_probe_active_address() -> usize {
+    return (&page_probe_active) as usize;
+}
+
+private fn page_probe_overlap_address() -> usize {
+    return (&page_probe_overlap) as usize;
+}
+
+// Take one page and give it straight back. Both cores run this.
+private fn page_probe_cycle() -> bool !{allocates, unsafe} {
+    match page_alloc(PageOwnerTag::UserPage) {
+        PageAllocResult::OutOfMemory => {
+            unsafe {
+                atomic_fetch_add_relaxed(page_probe_failed_address(), 1);
+            }
+            return false;
+        }
+        PageAllocResult::Allocated(owner) => {
+            page_free(owner);
+            for spin: usize in 0..<PAGE_CONTENTION_OUTSIDE_WORK { }
+            return true;
+        }
+    }
+}
+
+fn page_contention_is_armed() -> bool !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(page_probe_armed_address())
+    } == 1;
+}
+
+fn page_contention_secondary_run() !{allocates, unsafe} {
+    unsafe { atomic_store_release(page_probe_active_address(), 1); }
+    while (unsafe {
+               atomic_load_acquire(page_probe_secondary_address())
+           } < PAGE_CONTENTION_ROUNDS &&
+           unsafe { atomic_load_acquire(page_probe_armed_address()) } == 1) {
+        if (page_probe_cycle()) {
+            unsafe {
+                atomic_fetch_add_relaxed(page_probe_secondary_address(), 1);
+            }
+        }
+    }
+    unsafe { atomic_store_release(page_probe_active_address(), 0); }
+}
+
+private fn page_contention_report(stage: *u8, baseline: usize,
+                                  doubles_before: usize) !{unsafe} {
+    kernel_boot_log("page contention stage: ");
+    kernel_boot_log(stage);
+    kernel_boot_log("\n");
+    kernel_boot_log("page contention counts: primary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(page_probe_primary_address())
+    });
+    kernel_boot_log(" secondary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(page_probe_secondary_address())
+    });
+    kernel_boot_log(" leaked=");
+    uart_put_udec(page_allocator_live_count() - baseline);
+    kernel_boot_log(" doublefree=");
+    uart_put_udec(page_allocator_double_free_count() - doubles_before);
+    kernel_boot_log(" overlap=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(page_probe_overlap_address())
+    });
+    kernel_boot_log("\n");
+}
+
+fn page_contention_probe() -> bool !{allocates, unsafe} {
+    let baseline: usize = page_allocator_live_count();
+    let doubles_before: usize = page_allocator_double_free_count();
+    unsafe { atomic_store_release(page_probe_armed_address(), 1); }
+
+    let entry_window: i64 = read_cntfrq() >> 2;
+    let entry_start: i64 = read_cntpct();
+    let mut entered: bool = false;
+    while (entered == false && read_cntpct() - entry_start < entry_window) {
+        if (unsafe {
+                atomic_load_acquire(page_probe_active_address())
+            } == 1) {
+            entered = true;
+        }
+    }
+    if (entered == false) {
+        unsafe { atomic_store_release(page_probe_armed_address(), 0); }
+        page_contention_report("secondary-never-entered" as *u8, baseline,
+                               doubles_before);
+        return false;
+    }
+
+    for round: usize in 0..<PAGE_CONTENTION_ROUNDS {
+        if (page_probe_cycle()) {
+            unsafe {
+                atomic_fetch_add_relaxed(page_probe_primary_address(), 1);
+            }
+        }
+    }
+
+    unsafe {
+        atomic_store_release(page_probe_overlap_address(),
+            atomic_load_acquire(page_probe_secondary_address()));
+    }
+
+    let finish_window: i64 = read_cntfrq() * 2;
+    let finish_start: i64 = read_cntpct();
+    let mut finished: bool = false;
+    while (finished == false && read_cntpct() - finish_start < finish_window) {
+        if (unsafe {
+                atomic_load_acquire(page_probe_secondary_address())
+            } >= PAGE_CONTENTION_ROUNDS) {
+            finished = true;
+        }
+    }
+    unsafe { atomic_store_release(page_probe_armed_address(), 0); }
+    if (finished == false) {
+        page_contention_report("secondary-never-finished" as *u8, baseline,
+                               doubles_before);
+        return false;
+    }
+
+    page_contention_report("complete" as *u8, baseline, doubles_before);
+    let overlap: usize = unsafe {
+        atomic_load_acquire(page_probe_overlap_address())
+    };
+    // Every page back where it started, nothing freed twice, and both cores
+    // were inside the allocator at once.
+    return page_allocator_live_count() == baseline &&
+           page_allocator_double_free_count() == doubles_before &&
+           overlap > 0;
+}
