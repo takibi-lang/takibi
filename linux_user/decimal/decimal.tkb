@@ -1,0 +1,43 @@
+// GitHub issue #470: kernel/printk/decimal.tkb, checked where a test costs
+// milliseconds.
+//
+// This exists because the thing it checks was wrong on one platform for as
+// long as there was no such test. `uart_put_udec` was a copy per platform;
+// QEMU's carried ten place values and RPi5's carried five, so on the board
+// every number of six digits or more printed as its low five. 54000000 came
+// out as `0` and 843750 as `43750`, and a truncated number reads exactly
+// like a real one -- so the boot logs said the ARM generic timer's frequency
+// register was returning zero, and then that it was returning a different
+// value on every read, and neither was true. Two instrumented hardware boots
+// and an investigation went into a timer that was working correctly.
+//
+// The values below are the ones that lied, plus the boundaries where the
+// old five-place table changed behaviour, plus the ends of the range.
+//
+// Expected output (linux_user/decimal/decimal.expected): each value, once
+// per line, printed by the kernel's own formatter.
+
+fn show(value: usize) {
+    uart_put_udec(value);
+    uart_puts("\r\n");
+}
+
+fn app_main() {
+    show(0);
+    show(9);
+    show(10);
+    // The last value the five-place table could print, and the first it
+    // could not.
+    show(99999);
+    show(100000);
+    // What the board actually printed as `0`, and as `43750`.
+    show(54000000);
+    show(843750);
+    show(1000000);
+    // A tick count and a byte count of the sizes this kernel really logs.
+    show(25532962);
+    show(1073741824);
+    // Both ends of the range the type can hold.
+    show(9999999999);
+    show(18446744073709551615);
+}

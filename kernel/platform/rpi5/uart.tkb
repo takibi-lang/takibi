@@ -85,19 +85,6 @@ fn uart_puts(s: *u8) {
 // numbering, so hex would need a mental translation step every time.
 // Five digits (max 99999) comfortably covers every value this kernel ever
 // prints -- Takibi-internal syscall numbers top out at 452.
-fn uart_put_udec(value: usize) {
-    let mut place_values: [usize; 5] = { 10000, 1000, 100, 10, 1 };
-    let mut leading: bool = true;
-    for i in 0..<5 {
-        let place: usize = place_values[i];
-        if (place == 0) { return; }
-        let digit: usize = (value / place) % 10;
-        if (digit != 0 || leading == false || place == 1) {
-            uart_putc((digit as u8) + 48);
-            leading = false;
-        }
-    }
-}
 
 fn uart_rx_discard(discarded: u8) !{unsafe} {
 }

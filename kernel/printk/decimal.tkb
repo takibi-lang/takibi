@@ -1,0 +1,41 @@
+// Unsigned decimal on the console.
+//
+// Its own file, and not part of kernel/printk/log.tkb's ring, because
+// turning a number into characters needs nothing but uart_putc -- which is
+// what lets linux_user/decimal compile this exact code host-native and
+// check what it prints. The bug below was invisible for as long as it did
+// not have a test that could run anywhere.
+//
+// GitHub issue #470: this used to be a copy per platform, and the copies had
+// drifted. QEMU's carried ten place values; RPi5's carried five, so every
+// number of six digits or more printed as its low five -- 54000000 came out
+// as `0`, and 843750 as `43750`. Nothing said so; a diagnostic that lies by
+// truncation reads exactly like a diagnostic. That cost this issue two
+// instrumented hardware boots and an investigation into a generic timer
+// that turned out to be working correctly the whole time.
+//
+// Twenty places, so every usize prints. `uart_putc` stays per-platform
+// because it is the device; how a number becomes characters is not.
+private let mut kernel_decimal_places: [usize; 20] = {
+    10000000000000000000, 1000000000000000000, 100000000000000000,
+    10000000000000000, 1000000000000000, 100000000000000,
+    10000000000000, 1000000000000, 100000000000, 10000000000,
+    1000000000, 100000000, 10000000, 1000000, 100000,
+    10000, 1000, 100, 10, 1
+};
+
+fn uart_put_udec(value: usize) {
+    let mut leading: bool = true;
+    for i: usize in 0..<20 {
+        let place: usize = kernel_decimal_places[i];
+        // Unreachable -- the table above has no zero -- but it is what
+        // proves the divide below to --forbid-trap, and a table typo would
+        // stop the print rather than trap.
+        if (place == 0) { return; }
+        let digit: usize = (value / place) % 10;
+        if (digit != 0 || leading == false || place == 1) {
+            uart_putc((digit as u8) + 48);
+            leading = false;
+        }
+    }
+}

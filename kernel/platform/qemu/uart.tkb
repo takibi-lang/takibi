@@ -40,21 +40,6 @@ fn uart_puts(s: *u8) {
 // 0x40000000 = 1073741824), unlike RPi5's mailbox-reported base (always
 // near 0, comfortably under five digits) -- widened here, in this
 // platform's own copy, rather than touching kernel/platform/rpi5/uart.tkb.
-fn uart_put_udec(value: usize) {
-    let mut place_values: [usize; 10] =
-        { 1000000000, 100000000, 10000000, 1000000, 100000,
-          10000, 1000, 100, 10, 1 };
-    let mut leading: bool = true;
-    for i in 0..<10 {
-        let place: usize = place_values[i];
-        if (place == 0) { return; }
-        let digit: usize = (value / place) % 10;
-        if (digit != 0 || leading == false || place == 1) {
-            uart_putc((digit as u8) + 48);
-            leading = false;
-        }
-    }
-}
 
 fn uart_rx_discard(discarded: u8) !{unsafe} {
 }

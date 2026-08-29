@@ -15,66 +15,54 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
-## 2026-08-29: what the device tree says about RPi5's counters (#470, #472)
+## 2026-08-29: the counter was fine; the printer was not (#470)
 
-RPi5's ARM generic timer is not configured by the firmware this kernel boots
-behind. Measured twice on hardware: `MRS CNTFRQ_EL0` returns a DIFFERENT
-value on different reads -- proved by one `mrs` in the timer handler feeding
-both a stored frequency and a stored `freq >> 6`, which came out 0 and
-43750 -- so the tick period and every deadline derived from it is a fresh
-arbitrary number. `CNTPCT_EL0` is no better: its absolute value stays under
-2^17 sixteen seconds into a boot and is not monotonic across a run, while
-short deltas over a fixed loop are stable to four digits.
+This issue was opened on the strength of two hardware measurements. RPi5's
+`MRS CNTFRQ_EL0` appeared to return 0, then to return a DIFFERENT value on
+different reads -- 0 from one field and 43750 from another, both derived
+from one `mrs` -- and `CNTPCT_EL0`'s absolute value appeared to stay under
+2^17 sixteen seconds into a boot while short deltas stayed stable to four
+digits. From that came a scheduler with no real quantum, network deadlines
+that were all zero, and a per-process CPU total that summed to more than the
+interval it was measured inside.
 
-The device tree was the obvious place to look, and reading it settled two
-things without touching the board -- `qemu-system-aarch64 -machine
-virt,dumpdtb=` for one blob, the pinned Raspberry Pi firmware image for the
-other.
+All of it was one function. `uart_put_udec` was a copy per platform: QEMU's
+carried ten place values, RPi5's carried five. Every number of six digits or
+more printed as its low five, with no indication that anything had happened.
+54000000 prints as `0` -- every digit of its low five is zero. 843750, which
+is 54000000 >> 6, prints as `43750`. So `cntfrq=0` and `tval=43750` were the
+same correct read of a correctly programmed register, and the "different
+value on different reads" that made this look like a hardware fault was two
+different truncations of the same 54 MHz.
 
-The first is a no. Neither `/timer` node carries `clock-frequency`, because
-the property exists for boards whose firmware does not program
-`CNTFRQ_EL0` and is simply absent here. "Add DTB support and read
-`clock-frequency`" sounds like it should work and does not.
+There is one implementation now, in its own file so that a host-native test
+can compile the exact code the kernel runs, and `linux_user/decimal` checks
+the values that lied along with both ends of the range. Putting the five-place
+table back makes it fail. The bug was invisible for exactly as long as there
+was no test that could run anywhere.
 
-The second is a yes, to a different question. The same blob describes
-`/soc@107c000000/timer@7c003000`, `brcm,bcm2835-system-timer`,
-`clock-frequency = <1000000>`: 64-bit, free-running, memory-mapped, rate
-stated on the node, at a bus address the parent's `ranges` translates to
-0x107c003000 -- inside a device block this kernel already maps. Reading it
-needs no system register and no EL configuration, so it does not depend on
-whatever is wrong with the other one. That is the second witness this
-question needs, since everything known about `CNTPCT_EL0` so far came from
-`CNTPCT_EL0`.
+What found it was a cross-check rather than a re-reading. A device-tree
+lookup for the SoC's own 1 MHz counter was built to get a second opinion
+about `CNTPCT_EL0`, since everything known about that register so far had
+come from that register. The second opinion arrived as a contradiction the
+first witness could not produce on its own: the same accessor printed `0`
+Hz and, six lines later, divided by 100 to give 10000. A global does not
+change between two reads; a printer does.
 
-Building that lookup turned out to be #472's milestone 3 -- "a BCM2712
-SoC-direct device whose address translation is simple" -- written out of
-order and in another agent's file, so it was reverted and handed back. What
-stayed is what does not duplicate it: the finding above, and a host-native
-test for milestone 1's own work.
+With the printer fixed, the board says what it always was. `cntfrq=54000000`,
+and over 10000 ticks of the 1 MHz system timer the architectural counter
+advanced 539992 -- 54 MHz x 10 ms, two independent counters agreeing to
+0.001%. The busy pair's own numbers became coherent in the same run:
+`cpu_a + cpu_b` is 16.0M against an `elapsed` of 25.5M, where before the sum
+had exceeded the interval.
 
-That test exists because `fdt_memory_region_at` had no caller anywhere. The
-boot path asks the map only for its count and its total, so a `region_at`
-returning the wrong extent -- or a `verify` that agreed with it -- would
-have looked correct on both platforms. `linux_user/fdt` walks it over a blob
-with three regions spread across two nodes, one of which carries two `reg`
-tuples, because "several tuples in one node" and "several nodes" are two
-different things a device tree does and a one-region fixture distinguishes
-neither.
+So the scheduler quantum, the network deadlines and the bring-up delays on
+RPi5 were correct the whole time, and the issue's premise is withdrawn. The
+device-tree lookup that found this is #472's milestone 3 and was handed back
+there; what stayed is the formatter, its test, and this entry.
 
-One warning is worth carrying into milestone 3, because it cost a real
-debugging round. Property order is not fixed by the spec, and the Pi 5 blob
-writes `ranges` BEFORE the `#address-cells` it has to be decoded with. A
-reader that decodes `ranges` where it finds it uses the default cell widths,
-computes the wrong entry size, and concludes the node is not there -- which
-is exactly what happened, and what a synthetic fixture in the convenient
-order did not catch. Decode it when it is needed; a node's properties all
-precede its children, so by then every cell count is known. The fixture
-committed here writes the real order, and the timer node's own properties in
-an awkward one, for that reason.
-
-Found-by: hardware -- two instrumented RPi5 boots said the frequency
-register was not stable; reading the device tree said why looking there
-would not have helped, and what to look at instead
+Found-by: hardware -- two instrumented RPi5 boots, both of which were
+measuring the printer
 
 ---
 

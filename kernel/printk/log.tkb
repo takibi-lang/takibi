@@ -5,6 +5,8 @@
 //
 // Current limitation: the ordinary writer is core-0 main/syscall context only.
 // Interrupt-safe classified events remain kernel/diagnostic/event.tkb's job.
+use "kernel/printk/decimal.tkb";
+
 const KERNEL_LOG_RECORD_COUNT: usize = 256;
 const KERNEL_LOG_TEXT_MAX: usize = 160;
 const KERNEL_LOG_TEXT_BYTES: usize = 40960;
