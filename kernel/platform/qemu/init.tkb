@@ -411,11 +411,14 @@ fn main() !{unsafe} {
 
     match platform_memory_detect() {
         PlatformMemoryResult::Detected(detected) => {
-            let (mem_base, mem_size) = detected;
+            let mem_base: usize = fdt_memory_first_base(detected);
+            let mem_size: usize = fdt_memory_total_size(detected);
             kernel_boot_log("memory: source=dtb base_bytes=");
             uart_put_udec(mem_base as usize);
             kernel_boot_log(" detected_mib=");
             uart_put_udec((mem_size as usize) / (1024 * 1024));
+            kernel_boot_log(" regions=");
+            uart_put_udec(fdt_memory_region_count(detected));
             kernel_boot_log("\n");
         }
         PlatformMemoryResult::InvalidDtb => {

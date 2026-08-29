@@ -8,7 +8,7 @@
 must_use variant PlatformMemoryResult {
     InvalidDtb;
     MissingMemory;
-    Detected((usize, usize));
+    Detected(FdtMemoryMap);
 }
 
 fn platform_memory_detect() -> PlatformMemoryResult !{unsafe} {
@@ -22,6 +22,9 @@ fn platform_memory_detect() -> PlatformMemoryResult !{unsafe} {
             return PlatformMemoryResult::MissingMemory;
         }
         FdtMemoryResult::Found(memory) => {
+            if (fdt_memory_map_verify(memory) == false) {
+                return PlatformMemoryResult::InvalidDtb;
+            }
             return PlatformMemoryResult::Detected(memory);
         }
     }

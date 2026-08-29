@@ -4,6 +4,12 @@
 // debugger-assisted loader supplies its address.  Every offset and length is
 // checked against the blob's totalsize before a byte is read.  Raw pointers
 // are deliberate here because no Takibi array owns firmware-provided memory.
+//
+// FdtMemoryMap is a view over the validated blob rather than a fixed-capacity
+// array. region_at() rescans the structure block for the requested tuple, so
+// iteration is O(n^2); early-boot DTBs contain few RAM extents, and this keeps
+// the kernel from replacing the DTB's own finite size with an arbitrary
+// MAX_MEMORY_REGIONS resource ceiling before an allocator exists.
 
 const FDT_MAGIC: usize = 0xd00dfeed;
 const FDT_HEADER_SIZE: usize = 40;
@@ -15,10 +21,37 @@ const FDT_PROP: usize = 3;
 const FDT_NOP: usize = 4;
 const FDT_END: usize = 9;
 
+struct PhysicalMemoryRegion {
+    base: usize;
+    size: usize;
+}
+
+struct FdtMemoryMap {
+    private dtb: usize;
+    private region_count: usize;
+    private first_base: usize;
+    private total_size: usize;
+}
+
 must_use variant FdtMemoryResult {
     Invalid;
     NotFound;
-    Found((usize, usize));
+    Found(FdtMemoryMap);
+}
+
+must_use variant FdtMemoryRegionResult {
+    Invalid;
+    OutOfRange;
+    Found(PhysicalMemoryRegion);
+}
+
+struct FdtScanMemory {
+    first_base: usize;
+    total_size: usize;
+    region_count: usize;
+    wanted_base: usize;
+    wanted_size: usize;
+    wanted_found: bool;
 }
 
 // Internal result used across the one unsafe boundary below. The public
@@ -27,7 +60,7 @@ must_use variant FdtMemoryResult {
 variant FdtScanResult {
     Invalid;
     NotFound;
-    Found((usize, usize));
+    Found(FdtScanMemory);
 }
 
 private fn fdt_range_valid(total: usize, offset: usize, length: usize)
@@ -92,7 +125,23 @@ private fn fdt_cells_value(base: usize, total: usize, offset: usize,
     return 0;
 }
 
-private fn fdt_scan_memory(base: usize) -> FdtScanResult !{unsafe} {
+private fn fdt_reg_length_valid(length: usize, address_cells: usize,
+                                size_cells: usize) -> bool {
+    if (address_cells == 1 && size_cells == 1) {
+        return length >= 8 && length % 8 == 0;
+    }
+    if ((address_cells == 1 && size_cells == 2) ||
+        (address_cells == 2 && size_cells == 1)) {
+        return length >= 12 && length % 12 == 0;
+    }
+    if (address_cells == 2 && size_cells == 2) {
+        return length >= 16 && length % 16 == 0;
+    }
+    return false;
+}
+
+private fn fdt_scan_memory(base: usize, wanted: usize)
+        -> FdtScanResult !{unsafe} {
     // A zero physical address is valid: QEMU virt places its generated FDT
     // there.  Validate content, never use the address as an absence sentinel.
     let header_total: usize = FDT_HEADER_SIZE;
@@ -126,8 +175,14 @@ private fn fdt_scan_memory(base: usize) -> FdtScanResult !{unsafe} {
     let mut memory_depth: usize = 0;
     let mut memory_type: bool = false;
     let mut candidate_valid: bool = false;
-    let mut candidate_base: usize = 0;
-    let mut candidate_size: usize = 0;
+    let mut candidate_offset: usize = 0;
+    let mut candidate_length: usize = 0;
+    let mut first_base: usize = 0;
+    let mut total_size: usize = 0;
+    let mut region_count: usize = 0;
+    let mut wanted_base: usize = 0;
+    let mut wanted_size: usize = 0;
+    let mut wanted_found: bool = false;
 
     while (cursor < struct_end) {
         if (fdt_range_valid(struct_end, cursor, 4) == false) {
@@ -148,6 +203,8 @@ private fn fdt_scan_memory(base: usize) -> FdtScanResult !{unsafe} {
                 memory_depth = depth;
                 memory_type = false;
                 candidate_valid = false;
+                candidate_offset = 0;
+                candidate_length = 0;
             }
             cursor = fdt_align4(name_end + 1);
             if (cursor == 0 || cursor > struct_end) {
@@ -157,8 +214,34 @@ private fn fdt_scan_memory(base: usize) -> FdtScanResult !{unsafe} {
             if (depth == 0) { return FdtScanResult::Invalid; }
             if (memory_depth == depth) {
                 if (memory_type && candidate_valid) {
-                    return FdtScanResult::Found(
-                        (candidate_base, candidate_size));
+                    let tuple_bytes: usize =
+                        (address_cells + size_cells) * 4;
+                    let mut relative: usize = 0;
+                    while (relative <= candidate_length - tuple_bytes) {
+                        let region_base: usize = fdt_cells_value(
+                            base, total, candidate_offset + relative,
+                            address_cells);
+                        let region_size: usize = fdt_cells_value(
+                            base, total,
+                            candidate_offset + relative + address_cells * 4,
+                            size_cells);
+                        if (region_size != 0) {
+                            if (region_base > 0xFFFFFFFFFFFFFFFF - region_size ||
+                                total_size > 0xFFFFFFFFFFFFFFFF - region_size ||
+                                region_count == 0xFFFFFFFFFFFFFFFF) {
+                                return FdtScanResult::Invalid;
+                            }
+                            if (region_count == 0) { first_base = region_base; }
+                            if (region_count == wanted) {
+                                wanted_base = region_base;
+                                wanted_size = region_size;
+                                wanted_found = true;
+                            }
+                            total_size = total_size + region_size;
+                            region_count = region_count + 1;
+                        }
+                        relative = relative + tuple_bytes;
+                    }
                 }
                 memory_depth = 0;
             }
@@ -194,13 +277,13 @@ private fn fdt_scan_memory(base: usize) -> FdtScanResult !{unsafe} {
                 if ((address_cells == 1 || address_cells == 2) &&
                     (size_cells == 1 || size_cells == 2)) {
                     let tuple_bytes: usize = (address_cells + size_cells) * 4;
-                    if (length >= tuple_bytes) {
-                        candidate_base = fdt_cells_value(
-                            base, total, cursor, address_cells);
-                        candidate_size = fdt_cells_value(
-                            base, total, cursor + address_cells * 4,
-                            size_cells);
-                        candidate_valid = candidate_size != 0;
+                    if (fdt_reg_length_valid(
+                            length, address_cells, size_cells)) {
+                        candidate_offset = cursor;
+                        candidate_length = length;
+                        candidate_valid = true;
+                    } else {
+                        return FdtScanResult::Invalid;
                     }
                 }
             }
@@ -212,7 +295,12 @@ private fn fdt_scan_memory(base: usize) -> FdtScanResult !{unsafe} {
         } else if (token == FDT_NOP) {
         } else if (token == FDT_END) {
             if (depth != 0) { return FdtScanResult::Invalid; }
-            return FdtScanResult::NotFound;
+            if (region_count == 0) { return FdtScanResult::NotFound; }
+            let mut memory: FdtScanMemory = {
+                first_base, total_size, region_count,
+                wanted_base, wanted_size, wanted_found
+            };
+            return FdtScanResult::Found(memory);
         } else {
             return FdtScanResult::Invalid;
         }
@@ -221,12 +309,78 @@ private fn fdt_scan_memory(base: usize) -> FdtScanResult !{unsafe} {
 }
 
 fn fdt_detect_memory(base: usize) -> FdtMemoryResult !{unsafe} {
-    let scanned: FdtScanResult = fdt_scan_memory(base);
+    let scanned: FdtScanResult = fdt_scan_memory(base, 0);
     match scanned {
         FdtScanResult::Invalid => { return FdtMemoryResult::Invalid; }
         FdtScanResult::NotFound => { return FdtMemoryResult::NotFound; }
-        FdtScanResult::Found(memory) => {
+        FdtScanResult::Found(scanned_memory) => {
+            let mut memory: FdtMemoryMap = {
+                base, scanned_memory.region_count,
+                scanned_memory.first_base, scanned_memory.total_size
+            };
             return FdtMemoryResult::Found(memory);
         }
     }
+}
+
+fn fdt_memory_region_count(map: FdtMemoryMap) -> usize {
+    return map.region_count;
+}
+
+fn fdt_memory_first_base(map: FdtMemoryMap) -> usize {
+    return map.first_base;
+}
+
+fn fdt_memory_total_size(map: FdtMemoryMap) -> usize {
+    return map.total_size;
+}
+
+fn fdt_memory_region_at(map: FdtMemoryMap, index: usize)
+        -> FdtMemoryRegionResult !{unsafe} {
+    if (index >= map.region_count) {
+        return FdtMemoryRegionResult::OutOfRange;
+    }
+    let scanned: FdtScanResult = fdt_scan_memory(map.dtb, index);
+    match scanned {
+        FdtScanResult::Invalid => {
+            return FdtMemoryRegionResult::Invalid;
+        }
+        FdtScanResult::NotFound => {
+            return FdtMemoryRegionResult::Invalid;
+        }
+        FdtScanResult::Found(memory) => {
+            if (memory.region_count != map.region_count ||
+                memory.wanted_found == false) {
+                return FdtMemoryRegionResult::Invalid;
+            }
+            let mut region: PhysicalMemoryRegion = {
+                memory.wanted_base, memory.wanted_size
+            };
+            return FdtMemoryRegionResult::Found(region);
+        }
+    }
+}
+
+fn fdt_memory_map_verify(map: FdtMemoryMap) -> bool !{unsafe} {
+    if (map.region_count == 0) { return false; }
+    let mut index: usize = 0;
+    let mut total_size: usize = 0;
+    let mut first_base: usize = 0;
+    while (index < map.region_count) {
+        let result: FdtMemoryRegionResult =
+            fdt_memory_region_at(map, index);
+        match result {
+            FdtMemoryRegionResult::Invalid => { return false; }
+            FdtMemoryRegionResult::OutOfRange => { return false; }
+            FdtMemoryRegionResult::Found(region) => {
+                if (index == 0) { first_base = region.base; }
+                if (total_size > 0xFFFFFFFFFFFFFFFF - region.size) {
+                    return false;
+                }
+                total_size = total_size + region.size;
+            }
+        }
+        index = index + 1;
+    }
+    return first_base == map.first_base && total_size == map.total_size;
 }

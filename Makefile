@@ -39,7 +39,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -778,11 +778,14 @@ kernelcheck-rpi5: kernelbuild-rpi5
 ## one dependency graph, so $(TAKIBI) is still built exactly once (see the
 ## allcheck comment below).  The timing-sensitive DDB checks deliberately
 ## remain sequential within kernelcheck-ddb-qemu.
-kernelcheck-qemu: kernelcheck-qemu-main
+kernelcheck-qemu: kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank
 
 kernelcheck-qemu-main: kernelbuild-qemu
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" python3 scripts/run_kernel_shell_qemu_smoketest.py
+
+kernelcheck-qemu-fdt-multibank: kernelbuild-qemu
+	@python3 kernel/tests/check_fdt_multibank_qemu.py
 
 kernelcheck-qemu-ash: kernelbuild-qemu
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_ash_qemutest.sh
