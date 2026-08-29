@@ -257,13 +257,25 @@ secondary-entry path, and #448's two-core criterion. #222's remaining scope
 (the one-deep spare kernel-stack cell) is small and independent; the crash
 trace ring it also named is done, since #440's ring is already per-CPU.
 
-**Running a PROCESS on core 1 is the next issue, and it is a different kind
-of change.** The first thing it must do is raise `KERNEL_ACTIVE_CORES`,
-which prints the ten-site worklist #453 built for exactly this moment.
+**Running a PROCESS on core 1 is #479, and it is a different kind of
+change.** The first thing it must do is raise `KERNEL_ACTIVE_CORES`, which
+prints the ten-site worklist #453 built for exactly this moment.
 Everything up to here has been "a second core does work that reaches no
 shared state" -- which is why the constant could stay 1 through all of it.
 Past here it reaches shared state, and Phase 0's lock discipline stops
 being latent and starts being load-bearing.
+
+The worklist was read from a build rather than predicted, and doing that
+found three entries whose stated reasons had already been fixed (`4b87978`)
+-- one of them pointing at #446, which had closed two days earlier. The
+ten sites are not one problem: three are the scheduler becoming per-core,
+one is a lock a primitive never had, two are unsynchronised counters,
+three are the network stack's shared scratch, and one is the syscall
+path's whole re-entrancy assumption. #479's first job is deciding whether
+a busy loop -- which touches no socket and no filesystem -- has to answer
+all ten, or whether the constant should split into "cores that run kernel
+code" and "cores that run the scheduler". The trap to avoid there is
+renaming a constant as a way of declaring sites out of scope.
 
 **Decision recorded 2026-08-27: raw atomics are reachable only through
 `!{unsafe}`.** Ordinary kernel code goes through the spinlock or the
