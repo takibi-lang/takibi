@@ -269,10 +269,6 @@ fn push_retx(conn: *TcpConnection) -> bool !{unsafe} {
     }
 }
 
-fn uart_print_bool(value: bool) {
-    if (value) { uart_puts("true"); } else { uart_puts("false"); }
-}
-
 fn app_main() !{unsafe} {
     page_allocator_init();
     intrusive_pool_init(&conns);
@@ -451,25 +447,25 @@ fn app_main() !{unsafe} {
     // The claim TCP_CONNECTION_MAX = 2 exists to deny.
     uart_puts("one connection carries a retransmit chain longer than one, ");
     uart_puts("so the walk that replaces PENDING_TCP_MAX is exercised: ");
-    uart_print_bool(chain_extended == 2);
+    uart_print(chain_extended == 2);
     uart_puts("\n");
 
     uart_puts("more live connections than the old ceiling of 2: ");
-    uart_print_bool(built > 2);
+    uart_print(built > 2);
     uart_puts("\n");
 
     // 1. of the header: three stable owner fields in one struct, each
     // handed out empty by intrusive_pool_insert_zeroed. Any non-empty
     // displacement means the #369 premise broke again.
     uart_puts("every stable slot was empty when it was handed out: ");
-    uart_print_bool(stale_slots == 0);
+    uart_print(stale_slots == 0);
     uart_puts("\n");
 
     // 3. of the header: the retransmit entry holds the very frame the
     // connection built, not a copy of it.
     uart_puts("every transmit frame reached its retransmit entry by handle, ");
     uart_puts("not by copy: ");
-    uart_print_bool(moved_frames == built);
+    uart_print(moved_frames == built);
     uart_puts("\n");
 
     // -- Teardown. Connections are found by SCANNING the pool, which is
@@ -533,7 +529,7 @@ fn app_main() !{unsafe} {
     uart_puts("\n");
 
     uart_puts("every pool is empty: ");
-    uart_print_bool(intrusive_pool_live_count(&conns) == 0 &&
+    uart_print(intrusive_pool_live_count(&conns) == 0 &&
                     intrusive_pool_live_count(&frames) == 0 &&
                     intrusive_pool_live_count(&retxs) == 0);
     uart_puts("\n");
@@ -577,12 +573,12 @@ fn app_main() !{unsafe} {
     // remove() answered ForeignAddress is what says WHY it refused, which
     // no counter delta could.
     uart_puts("the alien address is a real slot of the other pool: ");
-    uart_print_bool(alien_slot != 0 &&
+    uart_print(alien_slot != 0 &&
                     intrusive_pool_slot_is_valid(&retxs, alien_slot));
     uart_puts("\n");
     uart_puts("a cross-pool handle the erased brand cannot catch is ");
     uart_puts("refused at runtime, as foreign: ");
-    uart_print_bool(removal_was_foreign(alien_result) &&
+    uart_print(removal_was_foreign(alien_result) &&
                     intrusive_pool_foreign_handle_count(&frames) == before + 1 &&
                     intrusive_pool_corrupt_free_chain_count(&frames) == 0);
     uart_puts("\n");
@@ -643,12 +639,12 @@ fn app_main() !{unsafe} {
             uart_puts("a stale (slot, generation) pair against a recycled ");
             uart_puts("slot is refused, and the new occupant survives ");
             uart_puts("(recycled, refused): ");
-            uart_print_bool(recycled);
+            uart_print(recycled);
             uart_puts(" ");
             // "on the generation rather than on the address" was
             // previously inferred from one counter moving while another
             // did not. removal_was_stale says it (issue #371).
-            uart_print_bool(matched == false &&
+            uart_print(matched == false &&
                             removal_was_stale(stale_result) &&
                             intrusive_pool_double_remove_count(&conns)
                                 == before_stale + 1 &&

@@ -42,7 +42,7 @@ fn app_main() !{unsafe} {
             intrusive_pool_ref(&pool, o).b = 9;
             uart_puts("allocate, write and read back through the bound ");
             uart_puts("provider (values, pages taken): ");
-            uart_print_bool(intrusive_pool_ref(&pool, o).a == 7 &&
+            uart_print(intrusive_pool_ref(&pool, o).a == 7 &&
                             intrusive_pool_ref(&pool, o).b == 9);
             uart_puts(" ");
             uart_print(page_allocator_live_count());
@@ -60,11 +60,7 @@ fn app_main() !{unsafe} {
     }
 
     uart_puts("the pool's own invariants hold under this provider too: ");
-    uart_print_bool(intrusive_pool_probe(&pool));
+    uart_print(intrusive_pool_probe(&pool));
     uart_puts("\n");
     uart_puts("done\n");
-}
-
-fn uart_print_bool(value: bool) {
-    if (value) { uart_puts("true"); } else { uart_puts("false"); }
 }

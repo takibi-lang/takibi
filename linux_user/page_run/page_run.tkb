@@ -29,9 +29,9 @@ fn app_main() !{unsafe} {
     let r_base: usize = page_run_physical_address(r);
     uart_puts("a 4-page run is page-aligned, 4-page aligned, and 4 pages ");
     uart_puts("long (aligned, run alignment, count, pages taken): ");
-    uart_print_bool(r_base % PAGE_SIZE == 0);
+    uart_print(r_base % PAGE_SIZE == 0);
     uart_puts(" ");
-    uart_print_bool(r_base % (4 * PAGE_SIZE) == 0);
+    uart_print(r_base % (4 * PAGE_SIZE) == 0);
     uart_puts(" ");
     uart_print(page_run_count(r));
     uart_puts(" ");
@@ -52,7 +52,7 @@ fn app_main() !{unsafe} {
     }
     uart_puts("the whole run is one writable range across its page ");
     uart_puts("boundaries: ");
-    uart_print_bool(intact);
+    uart_print(intact);
     uart_puts("\n");
 
     // -- Released as a unit.
@@ -62,7 +62,7 @@ fn app_main() !{unsafe} {
     uart_puts("(pages returned, provider back to empty): ");
     uart_print(pages_before_release - page_allocator_live_count());
     uart_puts(" ");
-    uart_print_bool(page_allocator_live_count() == 0);
+    uart_print(page_allocator_live_count() == 0);
     uart_puts("\n");
 
     // -- Fragmentation: enough free pages, none of them adjacent.
@@ -113,14 +113,10 @@ fn app_main() !{unsafe} {
     uart_puts("(free pages, run refused, a single page still works): ");
     uart_print(free_pages);
     uart_puts(" ");
-    uart_print_bool(two_run_failed);
+    uart_print(two_run_failed);
     uart_puts(" ");
-    uart_print_bool(single_ok);
+    uart_print(single_ok);
     uart_puts("\n");
 
     uart_puts("done\n");
-}
-
-fn uart_print_bool(value: bool) {
-    if (value) { uart_puts("true"); } else { uart_puts("false"); }
 }

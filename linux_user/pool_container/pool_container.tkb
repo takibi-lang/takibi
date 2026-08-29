@@ -103,7 +103,7 @@ fn app_main() !{unsafe} {
     uart_print(sum);
     uart_puts("\n");
     uart_puts("every node's stable slot was empty when it was handed out: ");
-    uart_print_bool(sum == built * (built + 1) / 2);
+    uart_print(sum == built * (built + 1) / 2);
     uart_puts("\n");
 
     // The head is the only handle still held; the rest are parked inside
@@ -112,12 +112,8 @@ fn app_main() !{unsafe} {
     // the STORAGE has no ceiling, not that the list is convenient.
     let head_held: bool = link_was_occupied(head);
     uart_puts("the head handle is still ours to discharge: ");
-    uart_print_bool(head_held);
+    uart_print(head_held);
     uart_puts("\n");
 
     uart_puts("done\n");
-}
-
-fn uart_print_bool(value: bool) {
-    if (value) { uart_puts("true"); } else { uart_puts("false"); }
 }

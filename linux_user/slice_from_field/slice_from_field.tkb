@@ -64,10 +64,6 @@ fn frame_byte(frame: *NetFrame, at: {0..<FRAME_MAX as usize}) -> usize {
     return bytes[at] as usize;
 }
 
-fn uart_print_bool(value: bool) {
-    if (value) { uart_puts("true"); } else { uart_puts("false"); }
-}
-
 fn app_main() {
     uart_puts("slice_from_field\n");
 
@@ -91,7 +87,7 @@ fn app_main() {
     // The second frame must be untouched by the first. A field slice that
     // addressed the containing array's element 0 would make these equal.
     uart_puts("two pooled frames are distinct storage: ");
-    uart_print_bool(frame_byte(p0, 0) == 100 && frame_byte(p1, 0) == 200);
+    uart_print(frame_byte(p0, 0) == 100 && frame_byte(p1, 0) == 200);
     uart_puts("\n");
 
     let copied: usize = frame_write_header(p0, 2);
@@ -142,7 +138,7 @@ fn app_main() {
     let c0: {0..<CONN_MAX as usize} = 0;
     let ip0 = conns[c0].remote_ip as []u8;
     uart_puts("slice_eq over two element fields separates them: ");
-    uart_print_bool(slice_eq(ip0[0..<4], ip2[0..<4]) == false &&
+    uart_print(slice_eq(ip0[0..<4], ip2[0..<4]) == false &&
                     slice_eq(ip2[0..<4], ip2[0..<4]));
     uart_puts("\n");
 
@@ -164,14 +160,14 @@ fn app_main() {
     // Writing the nested frame must not have touched the sibling field
     // that sits right before it in the struct.
     uart_puts("a sibling field is undisturbed by the nested write: ");
-    uart_print_bool(ip_solo[0] == 0 && ip_solo[1] == 1 && ip_solo[2] == 2 &&
+    uart_print(ip_solo[0] == 0 && ip_solo[1] == 1 && ip_solo[2] == 2 &&
                     ip_solo[3] == 3 && solo.port == 7);
     uart_puts("\n");
 
     // -- The minimum length is the FIELD's declared length, so a [u8; 4..]
     // parameter is satisfied without a runtime check.
     uart_puts("the slice's minimum is the field's own declared length: ");
-    uart_print_bool(needs_four(conns[c2].remote_ip as [u8; 4..]) == 20 + 21 + 22 + 23);
+    uart_print(needs_four(conns[c2].remote_ip as [u8; 4..]) == 20 + 21 + 22 + 23);
     uart_puts("\n");
 
     uart_puts("done\n");

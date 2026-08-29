@@ -302,7 +302,12 @@ $(COMMON_LINUX_SYSCALL_O): $(COMMON_LINUX_SYSCALL_S) | $(LINUX_USER_BUILD_DIR)
 # same static-pattern-rule idiom as examples/Makefile's own .tkb -> .o rule).
 # Every linux_user test only ever needs the same minimal uart+print HAL --
 # unlike examples/'s many hardware-HAL groupings, there is no MMIO/interrupt
-# surface here to vary by test.
+# surface here to vary by test.  That HAL is linked into every test
+# unconditionally (below), so a test must never define its own copy of a
+# printer: twelve of them had each pasted in the same uart_print_bool body,
+# which is exactly the shape that let GitHub issue #470's decimal formatter
+# stay wrong on one platform.  Need a new formatter?  Add it to
+# linux_user/common/print.tkb, where one edit reaches every caller.
 # GitHub issue #364: LINUX_USER_EXTRA_SRCS lets a test name sources that
 # must be compiled BEFORE its own, which is how a provider-agnostic
 # library binds to a stand-in here and to the real thing in a kernel

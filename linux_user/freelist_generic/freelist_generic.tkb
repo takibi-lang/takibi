@@ -75,10 +75,10 @@ fn app_main() {
     let probe_generation_before: usize = freelist_owner_generation(probe);
     let (probe_index, probe_generation) = freelist_owner_into_parts(probe);
     uart_puts("into_parts preserves index: ");
-    uart_print_bool(probe_index == probe_index_before);
+    uart_print(probe_index == probe_index_before);
     uart_puts("\n");
     uart_puts("into_parts preserves generation: ");
-    uart_print_bool(probe_generation == probe_generation_before);
+    uart_print(probe_generation == probe_generation_before);
     uart_puts("\n");
     // The slot is NOT back on the free list yet -- into_parts only
     // unwraps the linear proof, it does not release (see that function's
@@ -242,12 +242,4 @@ fn app_main() {
     freelist_remove(&point_pool, p2);
 
     uart_puts("done\n");
-}
-
-fn uart_print_bool(value: bool) {
-    if (value) {
-        uart_puts("true");
-    } else {
-        uart_puts("false");
-    }
 }

@@ -49,10 +49,10 @@ fn app_main() {
         }
     }
     uart_puts("abandon unretained slot: ");
-    uart_print_bool(refcount_pool_abandon(&pool, b_index, b_generation));
+    uart_print(refcount_pool_abandon(&pool, b_index, b_generation));
     uart_puts("\n");
     uart_puts("abandoned slot no longer matches: ");
-    uart_print_bool(refcount_pool_matches(&pool, b_index, b_generation));
+    uart_print(refcount_pool_matches(&pool, b_index, b_generation));
     uart_puts("\n");
 
     // Retain up to POOL_MAX_REFS, then confirm the bound is enforced --
@@ -104,7 +104,7 @@ fn app_main() {
         RefcountReleaseResult::Invalid => { uart_puts("release 2 of 2: wrongly invalid\n"); }
     }
     uart_puts("matches after full release: ");
-    uart_print_bool(refcount_pool_matches(&pool, a_index, a_generation));
+    uart_print(refcount_pool_matches(&pool, a_index, a_generation));
     uart_puts("\n");
 
     // Double-release detection (issue #242's actual motivating shape,
@@ -130,7 +130,7 @@ fn app_main() {
         RefcountReleaseResult::Freed => { uart_puts("unexpected freed\n"); }
     }
     uart_puts("double release detected: ");
-    uart_print_bool(refcount_pool_double_release_count(&pool) == before + 1);
+    uart_print(refcount_pool_double_release_count(&pool) == before + 1);
     uart_puts("\n");
 
     // Abandon must refuse a slot that IS currently retained (refusing to
@@ -142,7 +142,7 @@ fn app_main() {
         RefcountRetainResult::Overflow => { uart_puts("c retain overflow\n"); return; }
     }
     uart_puts("abandon on a retained slot refused: ");
-    uart_print_bool(refcount_pool_abandon(&pool, c_index, c_generation) == false);
+    uart_print(refcount_pool_abandon(&pool, c_index, c_generation) == false);
     uart_puts("\n");
     match refcount_pool_release(&pool, c_index, c_generation) {
         RefcountReleaseResult::Freed => {}
@@ -151,12 +151,4 @@ fn app_main() {
     }
 
     uart_puts("done\n");
-}
-
-fn uart_print_bool(value: bool) {
-    if (value) {
-        uart_puts("true");
-    } else {
-        uart_puts("false");
-    }
 }

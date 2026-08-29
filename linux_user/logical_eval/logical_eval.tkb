@@ -15,15 +15,11 @@ fn side(value: bool) -> bool {
     return value;
 }
 
-fn uart_print_bool(value: bool) {
-    if (value) { uart_puts("true"); } else { uart_puts("false"); }
-}
-
 fn app_main() {
     calls = 0;
     let and_false: bool = side(false) && side(true);
     uart_puts("&& with a false left operand: result=");
-    uart_print_bool(and_false);
+    uart_print(and_false);
     uart_puts(" operands evaluated=");
     uart_print(calls);
     uart_puts("\n");
@@ -31,7 +27,7 @@ fn app_main() {
     calls = 0;
     let or_true: bool = side(true) || side(false);
     uart_puts("|| with a true left operand:  result=");
-    uart_print_bool(or_true);
+    uart_print(or_true);
     uart_puts(" operands evaluated=");
     uart_print(calls);
     uart_puts("\n");

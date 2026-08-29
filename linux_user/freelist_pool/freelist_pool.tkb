@@ -222,7 +222,7 @@ fn app_main() {
         FreelistPopResult::Popped(o) => { o }
     };
     uart_puts("bare FreelistCore double free aliases c's index: ");
-    uart_print_bool(freelist_owner_index(aliased) == freelist_owner_index(c));
+    uart_print(freelist_owner_index(aliased) == freelist_owner_index(c));
     uart_puts("\n");
     freelist_core_remove(&pool, aliased);
 
@@ -231,12 +231,4 @@ fn app_main() {
     freelist_core_remove(&pool, r3);
     freelist_core_remove(&pool, c);
     uart_puts("done\n");
-}
-
-fn uart_print_bool(value: bool) {
-    if (value) {
-        uart_puts("true");
-    } else {
-        uart_puts("false");
-    }
 }

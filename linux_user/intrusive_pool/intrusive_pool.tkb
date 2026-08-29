@@ -262,9 +262,9 @@ fn app_main() {
     uart_puts("name the same chunk (beyond first page, base+valid, values): ");
     uart_print(huge_beyond_first_page);
     uart_puts(" ");
-    uart_print_bool(huge_base_ok);
+    uart_print(huge_base_ok);
     uart_puts(" ");
-    uart_print_bool(huge_values_ok);
+    uart_print(huge_values_ok);
     uart_puts("\n");
     // Reclaim returns the WHOLE chunk, not a page of it (issue #350's own
     // acceptance): the provider must be exactly back where it started.
@@ -322,7 +322,7 @@ fn app_main() {
     uart_print(sizeof(IntrusivePool(usize)));
     uart_puts("\n");
     uart_puts("intrusive pool size is the same for a 1960-byte payload: ");
-    uart_print_bool(
+    uart_print(
         sizeof(IntrusivePool(usize)) == sizeof(IntrusivePool(BigPayload)));
     uart_puts("\n");
 
@@ -357,7 +357,7 @@ fn app_main() {
     *intrusive_pool_ref(&pool_a, a0) = 111;
     *intrusive_pool_ref(&pool_a, a1) = 222;
     uart_puts("two live slots hold distinct values: ");
-    uart_print_bool(*intrusive_pool_ref(&pool_a, a0) == 111 &&
+    uart_print(*intrusive_pool_ref(&pool_a, a0) == 111 &&
                     *intrusive_pool_ref(&pool_a, a1) == 222);
     uart_puts("\n");
     uart_puts("one page backs both (live, chunks, pages): ");
@@ -371,7 +371,7 @@ fn app_main() {
     let a1_slot: usize = intrusive_owner_slot(a1);
     let a1_generation: usize = intrusive_owner_generation(a1);
     uart_puts("live handle matches before free: ");
-    uart_print_bool(intrusive_pool_matches(&pool_a, a1_slot, a1_generation));
+    uart_print(intrusive_pool_matches(&pool_a, a1_slot, a1_generation));
     uart_puts("\n");
     let g3 = intrusive_pool_lock(&pool_a);
     let removed1: bool =
@@ -379,7 +379,7 @@ fn app_main() {
     if (removed1 == false) { uart_puts("remove refused\n"); }
     intrusive_pool_unlock(&pool_a, g3);
     uart_puts("same handle rejected immediately after free: ");
-    uart_print_bool(
+    uart_print(
         intrusive_pool_matches(&pool_a, a1_slot, a1_generation) == false);
     uart_puts("\n");
 
@@ -398,10 +398,10 @@ fn app_main() {
         }
     };
     uart_puts("reinsert reused that exact slot address: ");
-    uart_print_bool(intrusive_owner_slot(a1b) == a1_slot);
+    uart_print(intrusive_owner_slot(a1b) == a1_slot);
     uart_puts("\n");
     uart_puts("stale handle still rejected after the reuse: ");
-    uart_print_bool(
+    uart_print(
         intrusive_pool_matches(&pool_a, a1_slot, a1_generation) == false);
     uart_puts("\n");
 
@@ -423,7 +423,7 @@ fn app_main() {
     let again_result = intrusive_pool_remove(&pool_a, g6, again);
     intrusive_pool_unlock(&pool_a, g6);
     uart_puts("double free of an already-freed slot counted, not acted on: ");
-    uart_print_bool(
+    uart_print(
         removal_was_stale(again_result) &&
         intrusive_pool_double_remove_count(&pool_a) == doubles_before + 1 &&
         intrusive_pool_live_count(&pool_a) == 1);
@@ -461,7 +461,7 @@ fn app_main() {
     intrusive_pool_unlock(&pool_b, g8);
     uart_puts("an address from another pool, rebranded by hand, is still ");
     uart_puts("rejected without dereferencing it: ");
-    uart_print_bool(removal_was_foreign(forged_result) &&
+    uart_print(removal_was_foreign(forged_result) &&
                     intrusive_pool_foreign_handle_count(&pool_b) == 1 &&
                     intrusive_pool_live_count(&pool_b) == 1 &&
                     intrusive_pool_matches(&pool_a, a0_slot, a0_generation) &&
@@ -665,9 +665,9 @@ fn app_main() {
     let r_b_valid: bool = intrusive_pool_slot_is_valid(&pool_r, r_b0);
     uart_puts("the released chunk's addresses stop validating at once, and ");
     uart_puts("the retained one's do not (both before, exactly one after): ");
-    uart_print_bool(r_both_valid_before);
+    uart_print(r_both_valid_before);
     uart_puts(" ");
-    uart_print_bool((r_a_valid && r_b_valid == false) ||
+    uart_print((r_a_valid && r_b_valid == false) ||
                     (r_a_valid == false && r_b_valid));
     uart_puts("\n");
 
@@ -682,7 +682,7 @@ fn app_main() {
             intrusive_owner_drop(o);
             uart_puts("reallocating after the drain reused the reserved ");
             uart_puts("chunk without asking for a page: ");
-            uart_print_bool(page_allocator_live_count() == pages_before_reuse &&
+            uart_print(page_allocator_live_count() == pages_before_reuse &&
                             intrusive_pool_chunk_count(&pool_r) == 1);
             uart_puts("\n");
         }
@@ -759,9 +759,9 @@ fn app_main() {
             intrusive_pool_unlock(&pool_z, g18);
             uart_puts("a pool retaining 0 returns its page as soon as the ");
             uart_puts("chunk empties (grew, back to start, chunks, retained): ");
-            uart_print_bool(z_grew);
+            uart_print(z_grew);
             uart_puts(" ");
-            uart_print_bool(page_allocator_live_count() == pages_before_z);
+            uart_print(page_allocator_live_count() == pages_before_z);
             uart_puts(" ");
             uart_print(intrusive_pool_chunk_count(&pool_z));
             uart_puts(" ");
@@ -823,7 +823,7 @@ fn app_main() {
         }
     };
     uart_puts("the poisoned slot is itself still handed out normally: ");
-    uart_print_bool(intrusive_owner_slot(c1) == c_slot1);
+    uart_print(intrusive_owner_slot(c1) == c_slot1);
     uart_puts("\n");
     intrusive_owner_drop(c1);
 
@@ -842,9 +842,9 @@ fn app_main() {
     }
     uart_puts("a corrupted next_free is rejected, not returned ");
     uart_puts("(rejected, handed back the poison, counted): ");
-    uart_print_bool(rejected);
+    uart_print(rejected);
     uart_puts(" ");
-    uart_print_bool(returned_poison);
+    uart_print(returned_poison);
     uart_puts(" ");
     uart_print(intrusive_pool_corrupt_free_chain_count(&pool_c) - corrupt_before);
     uart_puts("\n");
@@ -861,7 +861,7 @@ fn app_main() {
             let fresh: usize = intrusive_owner_slot(o);
             intrusive_owner_drop(o);
             uart_puts("the pool keeps working from a fresh chunk instead: ");
-            uart_print_bool(page_allocator_live_count() == pages_before_recovery + 1 &&
+            uart_print(page_allocator_live_count() == pages_before_recovery + 1 &&
                             intrusive_chunk_base_of(&pool_c, fresh) != poisoned_base);
             uart_puts("\n");
         }
@@ -909,7 +909,7 @@ fn app_main() {
             intrusive_owner_drop(o);
             uart_puts("emptying it neither re-admits it nor returns its page ");
             uart_puts("(allocated elsewhere, chunks, released): ");
-            uart_print_bool(intrusive_chunk_base_of(&pool_c, after) != poisoned_base);
+            uart_print(intrusive_chunk_base_of(&pool_c, after) != poisoned_base);
             uart_puts(" ");
             uart_print(intrusive_pool_chunk_count(&pool_c));
             uart_puts(" ");
@@ -944,7 +944,7 @@ fn app_main() {
         }
     }
     uart_puts("the aliasing target really is a live slot in the fresh chunk: ");
-    uart_print_bool(live_generation != 0 &&
+    uart_print(live_generation != 0 &&
                     intrusive_chunk_base_of(&pool_c, live_slot) != poisoned_base);
     uart_puts("\n");
     *intrusive_slot_link_at(&pool_c, free_head) = live_slot;
@@ -974,13 +974,13 @@ fn app_main() {
     }
     uart_puts("a chain pointing at a LIVE slot is refused, and its existing ");
     uart_puts("occupant is untouched (rejected, aliased, counted, occupant kept): ");
-    uart_print_bool(alias_rejected);
+    uart_print(alias_rejected);
     uart_puts(" ");
-    uart_print_bool(aliased);
+    uart_print(aliased);
     uart_puts(" ");
     uart_print(intrusive_pool_corrupt_free_chain_count(&pool_c) - alias_before);
     uart_puts(" ");
-    uart_print_bool(intrusive_pool_matches(&pool_c, live_slot, live_generation));
+    uart_print(intrusive_pool_matches(&pool_c, live_slot, live_generation));
     uart_puts("\n");
 
     if (intrusive_pool_probe(&pool_c) == false) { probes_ok = false; }
@@ -1007,9 +1007,9 @@ fn app_main() {
         uart_puts(", free chain ");
         uart_print(intrusive_chunk_free_chain_length(&pool_c, dump_cursor));
         uart_puts(", on partial list ");
-        uart_print_bool(intrusive_chunk_on_partial(&pool_c, dump_cursor));
+        uart_print(intrusive_chunk_on_partial(&pool_c, dump_cursor));
         uart_puts(", quarantined ");
-        uart_print_bool(intrusive_chunk_is_quarantined(&pool_c, dump_cursor));
+        uart_print(intrusive_chunk_is_quarantined(&pool_c, dump_cursor));
         uart_puts("\n");
         dump_index = dump_index + 1;
         dump_cursor = intrusive_pool_next_chunk(&pool_c, dump_cursor);
@@ -1047,7 +1047,7 @@ fn app_main() {
     let u_slot1: usize = intrusive_pool_next_slot(&pool_u, u_slot0);
     uart_puts("first use of a slot: the payload's first word is the chain ");
     uart_puts("link it was carrying, not a blank: ");
-    uart_print_bool(first_a == u_slot1 && first_a != 0);
+    uart_print(first_a == u_slot1 && first_a != 0);
     uart_puts("\n");
 
     let u0_slot: usize = intrusive_owner_slot(u0);
@@ -1071,11 +1071,11 @@ fn app_main() {
     };
     uart_puts("reuse of that same slot: previous occupant survives past the ");
     uart_puts("link word (same slot, b == 2, c == 3): ");
-    uart_print_bool(intrusive_owner_slot(u1) == u0_slot);
+    uart_print(intrusive_owner_slot(u1) == u0_slot);
     uart_puts(" ");
-    uart_print_bool(intrusive_pool_ref(&pool_u, u1).b == 2);
+    uart_print(intrusive_pool_ref(&pool_u, u1).b == 2);
     uart_puts(" ");
-    uart_print_bool(intrusive_pool_ref(&pool_u, u1).c == 3);
+    uart_print(intrusive_pool_ref(&pool_u, u1).c == 3);
     uart_puts("\n");
     intrusive_owner_drop(u1);
 
@@ -1105,11 +1105,11 @@ fn app_main() {
     u_header.live_count = 0xFFFF;
     uart_puts("a wrecked chunk header cannot widen what validates ");
     uart_puts("(real slot yes, off-by-one no, past the chunk no): ");
-    uart_print_bool(intrusive_pool_slot_is_valid(&pool_u, u0_slot));
+    uart_print(intrusive_pool_slot_is_valid(&pool_u, u0_slot));
     uart_puts(" ");
-    uart_print_bool(intrusive_pool_slot_is_valid(&pool_u, u0_slot + 1) == false);
+    uart_print(intrusive_pool_slot_is_valid(&pool_u, u0_slot + 1) == false);
     uart_puts(" ");
-    uart_print_bool(
+    uart_print(
         intrusive_pool_slot_is_valid(&pool_u, u_base + PAGE_SIZE) == false);
     uart_puts("\n");
 
@@ -1120,7 +1120,7 @@ fn app_main() {
     // above straight into a null dereference.
     uart_puts("the invariant probe reports the wrecked chunk and survives ");
     uart_puts("walking it: ");
-    uart_print_bool(intrusive_pool_probe(&pool_u) == false);
+    uart_print(intrusive_pool_probe(&pool_u) == false);
     uart_puts("\n");
 
     // -- pool_x: the last remaining ceiling is the page provider's.
@@ -1154,7 +1154,7 @@ fn app_main() {
     probes_run = probes_run + 1;
     uart_puts("every phase left its pool's own bookkeeping coherent ");
     uart_puts("(all passed, phases checked): ");
-    uart_print_bool(probes_ok);
+    uart_print(probes_ok);
     uart_puts(" ");
     uart_print(probes_run);
     uart_puts("\n");
@@ -1192,7 +1192,7 @@ fn app_main() {
     intrusive_pool_unlock(&pool_a, rb);
     intrusive_pool_unlock(&pool_a, ra);
     uart_puts("taking one pool's guard twice on a path is caught: ");
-    uart_print_bool(pool_lock_reentrant_count() == reentrant_before + 1);
+    uart_print(pool_lock_reentrant_count() == reentrant_before + 1);
     uart_puts("\n");
 
     // Lock ORDER. Neither site below is wrong on its own; the pair is.
@@ -1217,9 +1217,9 @@ fn app_main() {
     intrusive_pool_unlock(&pool_b, ob3);
     uart_puts("the same two pools in a consistent order are not reported, ");
     uart_puts("the reversed pair is (consistent quiet, reversal caught): ");
-    uart_print_bool(consistent_ok);
+    uart_print(consistent_ok);
     uart_puts(" ");
-    uart_print_bool(pool_lock_order_violation_count() == order_before + 1);
+    uart_print(pool_lock_order_violation_count() == order_before + 1);
     uart_puts("\n");
 
     uart_puts("done\n");
@@ -1247,12 +1247,4 @@ fn irq_reachable_probe() !{interrupt, unsafe} {
         IntrusivePoolInsertResult::OutOfMemory => {}
     }
     intrusive_pool_unlock(&irq_reachable_pool, g);
-}
-
-fn uart_print_bool(value: bool) {
-    if (value) {
-        uart_puts("true");
-    } else {
-        uart_puts("false");
-    }
 }

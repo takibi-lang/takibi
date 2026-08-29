@@ -106,14 +106,14 @@ fn app_main() {
     let read_a1: usize = *growable_pool_ref(&pool_a, a1);
     let read_a2: usize = *growable_pool_ref(&pool_a, a2);
     uart_puts("cross-chunk values distinct and unaliased: ");
-    uart_print_bool(read_a0 == 111 && read_a1 == 222 && read_a2 == 333);
+    uart_print(read_a0 == 111 && read_a1 == 222 && read_a2 == 333);
     uart_puts("\n");
 
     let stale_index: usize = freelist_owner_index(a1);
     let stale_generation: usize = freelist_owner_generation(a1);
     growable_pool_remove(&pool_a, a1);
     uart_puts("stale handle rejected immediately after remove: ");
-    uart_print_bool(
+    uart_print(
         growable_pool_matches(&pool_a, stale_index, stale_generation) == false);
     uart_puts("\n");
 
@@ -128,7 +128,7 @@ fn app_main() {
     };
     uart_puts("stale handle still rejected after reuse (proves generation, ");
     uart_puts("not mere occupancy, gates the check): ");
-    uart_print_bool(
+    uart_print(
         growable_pool_matches(&pool_a, stale_index, stale_generation) == false);
     uart_puts("\n");
 
@@ -147,7 +147,7 @@ fn app_main() {
         freelist_owner_new(a2_index, a2_generation);
     growable_pool_remove(&pool_a, dup);
     uart_puts("double free of a2's already-freed slot counted: ");
-    uart_print_bool(
+    uart_print(
         growable_pool_double_remove_count(&pool_a) == before_double_free + 1);
     uart_puts("\n");
 
@@ -170,7 +170,7 @@ fn app_main() {
         GrowablePoolInsertResult::OutOfMemory => {
             uart_puts("pool_c hit its own MAX_CHUNKS ceiling ");
             uart_puts("while the page provider still had a page free: ");
-            uart_print_bool(pages_before_pool_c_ceiling < PAGE_COUNT);
+            uart_print(pages_before_pool_c_ceiling < PAGE_COUNT);
             uart_puts("\n");
         }
         GrowablePoolInsertResult::Allocated(unexpected) => {
@@ -216,7 +216,7 @@ fn app_main() {
         return;
     }
     uart_puts("pool_d ensure(1) after ensure(0) grows nothing new (idempotent): ");
-    uart_print_bool(growable_pool_active_chunks(&pool_d) == chunks_after_first_ensure);
+    uart_print(growable_pool_active_chunks(&pool_d) == chunks_after_first_ensure);
     uart_puts("\n");
 
     if (ensure_ok(&pool_d, 3) == false) {
@@ -234,7 +234,7 @@ fn app_main() {
     let pool_d_read3: usize = *growable_pool_ref_at(&pool_d, 3);
     uart_puts("pool_d cross-chunk values distinct, and slot 2 (never ");
     uart_puts("written, same fresh chunk as slot 3) reads back zeroed: ");
-    uart_print_bool(pool_d_read0 == 111 && pool_d_read2 == 0 && pool_d_read3 == 333);
+    uart_print(pool_d_read0 == 111 && pool_d_read2 == 0 && pool_d_read3 == 333);
     uart_puts("\n");
 
     // Named, not merely rejected: an index past N is IndexOutOfRange, and
@@ -251,7 +251,7 @@ fn app_main() {
         GrowablePoolEnsureResult::OutOfMemory => {}
         GrowablePoolEnsureResult::Ok => {}
     }
-    uart_print_bool(
+    uart_print(
         pool_d_ceiling_ok && page_allocator_live_count() == pages_before_pool_d_ceiling);
     uart_puts("\n");
 
@@ -278,7 +278,7 @@ fn app_main() {
         return;
     }
     uart_puts("pool_f ensure(0) consumed exactly one more page: ");
-    uart_print_bool(page_allocator_live_count() == pages_before_pool_f + 1);
+    uart_print(page_allocator_live_count() == pages_before_pool_f + 1);
     uart_puts("\n");
     // GitHub issue #350 raised this stand-in's arena from 9 pages to 64,
     // so the provider being empty by now is no longer a side effect of
@@ -298,7 +298,7 @@ fn app_main() {
     }
     uart_puts("the shared provider is drained on purpose before the ");
     uart_puts("exhaustion case: ");
-    uart_print_bool(drained > 0);
+    uart_print(drained > 0);
     uart_puts("\n");
     // This is the assertion the old copy could not make. It wanted to say
     // "the PROVIDER ran out, not this pool's own ceiling", and had to
@@ -313,11 +313,11 @@ fn app_main() {
     }
     uart_puts("pool_f ensure(1) reports the PROVIDER out of memory, not ");
     uart_puts("its own chunk ceiling (provider, own ceiling, chunks < MAX): ");
-    uart_print_bool(pool_f_provider_ran_out);
+    uart_print(pool_f_provider_ran_out);
     uart_puts(" ");
-    uart_print_bool(pool_f_own_ceiling);
+    uart_print(pool_f_own_ceiling);
     uart_puts(" ");
-    uart_print_bool(growable_pool_active_chunks(&pool_f) < 3);
+    uart_print(growable_pool_active_chunks(&pool_f) < 3);
     uart_puts("\n");
 
     uart_puts("done\n");
@@ -337,13 +337,5 @@ fn ensure_ok(pool: &mut GrowablePool(usize, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
         GrowablePoolEnsureResult::IndexOutOfRange => { return false; }
         GrowablePoolEnsureResult::ChunkLimitReached => { return false; }
         GrowablePoolEnsureResult::OutOfMemory => { return false; }
-    }
-}
-
-fn uart_print_bool(value: bool) {
-    if (value) {
-        uart_puts("true");
-    } else {
-        uart_puts("false");
     }
 }

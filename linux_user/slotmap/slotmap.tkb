@@ -52,18 +52,18 @@ fn app_main() {
     let a_index: usize = freelist_owner_index(a);
     let a_generation: usize = freelist_owner_generation(a);
     uart_puts("a matches before remove: ");
-    uart_print_bool(slotmap_matches(&pool, a_index, a_generation));
+    uart_print(slotmap_matches(&pool, a_index, a_generation));
     uart_puts("\n");
     uart_puts("a matches wrong generation: ");
-    uart_print_bool(slotmap_matches(&pool, a_index, a_generation + 1));
+    uart_print(slotmap_matches(&pool, a_index, a_generation + 1));
     uart_puts("\n");
     uart_puts("out-of-range index matches: ");
-    uart_print_bool(slotmap_matches(&pool, POOL_N, 1));
+    uart_print(slotmap_matches(&pool, POOL_N, 1));
     uart_puts("\n");
 
     slotmap_remove(&pool, a);
     uart_puts("a matches after remove: ");
-    uart_print_bool(slotmap_matches(&pool, a_index, a_generation));
+    uart_print(slotmap_matches(&pool, a_index, a_generation));
     uart_puts("\n");
     uart_puts("live count after 1 remove: ");
     uart_print(slotmap_live_count(&pool));
@@ -88,7 +88,7 @@ fn app_main() {
     let before: usize = slotmap_double_remove_count(&pool);
     slotmap_remove(&pool, freelist_owner_new(a_index, a_generation));
     uart_puts("double remove detected: ");
-    uart_print_bool(slotmap_double_remove_count(&pool) == before + 1);
+    uart_print(slotmap_double_remove_count(&pool) == before + 1);
     uart_puts("\n");
     uart_puts("live count unchanged by double remove: ");
     uart_print(slotmap_live_count(&pool));
@@ -109,10 +109,10 @@ fn app_main() {
         FreelistPopResult::Popped(o) => { o }
     };
     uart_puts("reused index == a's old index: ");
-    uart_print_bool(freelist_owner_index(d) == a_index);
+    uart_print(freelist_owner_index(d) == a_index);
     uart_puts("\n");
     uart_puts("reused generation != a's old generation: ");
-    uart_print_bool(freelist_owner_generation(d) != a_generation);
+    uart_print(freelist_owner_generation(d) != a_generation);
     uart_puts("\n");
 
     uart_puts("occupant generation for b: ");
@@ -129,12 +129,4 @@ fn app_main() {
     uart_puts("\n");
 
     uart_puts("done\n");
-}
-
-fn uart_print_bool(value: bool) {
-    if (value) {
-        uart_puts("true");
-    } else {
-        uart_puts("false");
-    }
 }
