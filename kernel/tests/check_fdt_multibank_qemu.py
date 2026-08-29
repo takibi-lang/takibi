@@ -12,8 +12,8 @@ from pathlib import Path
 
 
 MULTIBANK_EXPECTED = (
-    b"memory: source=dtb base_bytes=1610612736 detected_mib=1024 "
-    b"regions=2 reservations=0")
+    b"memory: source=dtb base_bytes=1073741824 detected_mib=1024 "
+    b"regions=1 reservations=0")
 INVALID_EXPECTED = b"memory: invalid boot DTB; halting"
 
 
@@ -77,7 +77,7 @@ def main() -> int:
         print("FAIL kernel/qemu FDT multi-bank: expected memory line absent",
               file=sys.stderr)
         return 1
-    print("PASS kernel/qemu FDT multi-bank: two QEMU NUMA memory nodes, 1024 MiB total")
+    print("PASS kernel/qemu FDT multi-bank: two adjacent NUMA nodes normalized to one 1024 MiB region")
 
     with tempfile.TemporaryDirectory(prefix="takibi-fdt-") as directory:
         dtb = Path(directory) / "virt.dtb"

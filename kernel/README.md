@@ -660,9 +660,11 @@ are deliberate, not gaps to silently close:
   `kernel/boot/fdt.tkb`. Its memory view validates the header memory
   reservation map and subtracts those entries together with every enabled
   `/reserved-memory` child `reg` tuple, including overlapping entries,
-  without a fixed region-count ceiling. An invalid DTB or missing usable
-  memory node is a fatal boot-contract violation, not a reason to switch
-  data sources. Neither platform's
+  without a fixed region-count ceiling. The resulting view is ordered by
+  physical address and merges overlapping or adjacent memory tuples before
+  subtracting reservations. An invalid DTB or missing usable memory node is
+  a fatal boot-contract violation, not a reason to switch data sources.
+  Neither platform's
   page allocator actually consumes this value today (see "Current limits"
   below) -- it is diagnostic boot-log output on both.
 - **The MMU device/RAM layout is inverted from RPi5's.** RPi5's real RAM

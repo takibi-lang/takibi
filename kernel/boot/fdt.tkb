@@ -6,10 +6,10 @@
 // are deliberate here because no Takibi array owns firmware-provided memory.
 //
 // FdtMemoryMap is a view over the validated blob rather than a fixed-capacity
-// array. region_at() rescans the structure block for the requested tuple, so
-// iteration is O(n^2); early-boot DTBs contain few RAM extents, and this keeps
-// the kernel from replacing the DTB's own finite size with an arbitrary
-// MAX_MEMORY_REGIONS resource ceiling before an allocator exists.
+// array. region_at() repeatedly rescans the structure block while sweeping its
+// finite interval endpoints. This deliberately trades early-boot CPU time for
+// sorted, overlap-free output without replacing the DTB's own finite size with
+// an arbitrary MAX_MEMORY_REGIONS resource ceiling before an allocator exists.
 
 const FDT_MAGIC: usize = 0xd00dfeed;
 const FDT_HEADER_SIZE: usize = 40;
@@ -664,8 +664,24 @@ private fn fdt_memory_any_reservation_at(map: FdtMemoryMap, index: usize)
 
 fn fdt_memory_region_at(map: FdtMemoryMap, wanted: usize)
         -> FdtMemoryRegionResult !{unsafe} {
+    if (map.reservation_count >
+        0xFFFFFFFFFFFFFFFF - map.tree_reservation_count) {
+        return FdtMemoryRegionResult::Invalid;
+    }
+    let reservation_count: usize =
+        map.reservation_count + map.tree_reservation_count;
+    if (map.raw_region_count >
+        0x7FFFFFFFFFFFFFFF - reservation_count) {
+        return FdtMemoryRegionResult::Invalid;
+    }
+    let boundary_limit: usize =
+        (map.raw_region_count + reservation_count) * 2;
+
+    // Start at the lowest RAM base. Reservations below all RAM cannot make
+    // usable memory, so they do not need to seed the sweep.
+    let mut cursor: usize = 0;
+    let mut cursor_found: bool = false;
     let mut raw_index: usize = 0;
-    let mut usable_index: usize = 0;
     while (raw_index < map.raw_region_count) {
         let raw_result: FdtMemoryRegionResult =
             fdt_memory_raw_region_at(map, raw_index);
@@ -677,66 +693,118 @@ fn fdt_memory_region_at(map: FdtMemoryMap, wanted: usize)
                 return FdtMemoryRegionResult::Invalid;
             }
             FdtMemoryRegionResult::Found(raw) => {
-                let raw_end: usize = raw.base + raw.size;
-                let mut position: usize = raw.base;
-                while (position < raw_end) {
-                    let mut covered_end: usize = position;
-                    let mut next_reserved: usize = raw_end;
-                    let mut reservation_index: usize = 0;
-                    let all_reservations: usize =
-                        map.reservation_count + map.tree_reservation_count;
-                    while (reservation_index < all_reservations) {
-                        let reserved_result: FdtMemoryRegionResult =
-                            fdt_memory_any_reservation_at(
-                                map, reservation_index);
-                        match reserved_result {
-                            FdtMemoryRegionResult::Invalid => {
-                                return FdtMemoryRegionResult::Invalid;
-                            }
-                            FdtMemoryRegionResult::OutOfRange => {
-                                return FdtMemoryRegionResult::Invalid;
-                            }
-                            FdtMemoryRegionResult::Found(reserved) => {
-                                let reserved_end: usize =
-                                    reserved.base + reserved.size;
-                                if (reserved.base <= position &&
-                                    reserved_end > covered_end) {
-                                    covered_end = reserved_end;
-                                } else if (reserved.base > position &&
-                                           reserved.base < next_reserved &&
-                                           reserved.base < raw_end) {
-                                    next_reserved = reserved.base;
-                                }
-                            }
-                        }
-                        reservation_index = reservation_index + 1;
-                    }
-                    if (covered_end > position) {
-                        if (covered_end >= raw_end) {
-                            position = raw_end;
-                        } else {
-                            position = covered_end;
-                        }
-                    } else {
-                        if (next_reserved > position) {
-                            if (usable_index == wanted) {
-                                let mut region: PhysicalMemoryRegion = {
-                                    position, next_reserved - position
-                                };
-                                return FdtMemoryRegionResult::Found(region);
-                            }
-                            usable_index = usable_index + 1;
-                            position = next_reserved;
-                        } else {
-                            return FdtMemoryRegionResult::Invalid;
-                        }
-                    }
+                if (cursor_found == false || raw.base < cursor) {
+                    cursor = raw.base;
+                    cursor_found = true;
                 }
             }
         }
         raw_index = raw_index + 1;
     }
-    return FdtMemoryRegionResult::OutOfRange;
+    if (cursor_found == false) { return FdtMemoryRegionResult::Invalid; }
+
+    let mut boundary_steps: usize = 0;
+    let mut usable_index: usize = 0;
+    let mut region_open: bool = false;
+    let mut region_base: usize = 0;
+    while (boundary_steps <= boundary_limit) {
+        let mut next: usize = 0;
+        let mut next_found: bool = false;
+        let mut in_memory: bool = false;
+        raw_index = 0;
+        while (raw_index < map.raw_region_count) {
+            let raw_result: FdtMemoryRegionResult =
+                fdt_memory_raw_region_at(map, raw_index);
+            match raw_result {
+                FdtMemoryRegionResult::Invalid => {
+                    return FdtMemoryRegionResult::Invalid;
+                }
+                FdtMemoryRegionResult::OutOfRange => {
+                    return FdtMemoryRegionResult::Invalid;
+                }
+                FdtMemoryRegionResult::Found(raw) => {
+                    let raw_end: usize = raw.base + raw.size;
+                    if (raw.base <= cursor && cursor < raw_end) {
+                        in_memory = true;
+                    }
+                    if (raw.base > cursor &&
+                        (next_found == false || raw.base < next)) {
+                        next = raw.base;
+                        next_found = true;
+                    }
+                    if (raw_end > cursor &&
+                        (next_found == false || raw_end < next)) {
+                        next = raw_end;
+                        next_found = true;
+                    }
+                }
+            }
+            raw_index = raw_index + 1;
+        }
+
+        let mut in_reservation: bool = false;
+        let mut reservation_index: usize = 0;
+        while (reservation_index < reservation_count) {
+            let reserved_result: FdtMemoryRegionResult =
+                fdt_memory_any_reservation_at(map, reservation_index);
+            match reserved_result {
+                FdtMemoryRegionResult::Invalid => {
+                    return FdtMemoryRegionResult::Invalid;
+                }
+                FdtMemoryRegionResult::OutOfRange => {
+                    return FdtMemoryRegionResult::Invalid;
+                }
+                FdtMemoryRegionResult::Found(reserved) => {
+                    let reserved_end: usize = reserved.base + reserved.size;
+                    if (reserved.base <= cursor && cursor < reserved_end) {
+                        in_reservation = true;
+                    }
+                    if (reserved.base > cursor &&
+                        (next_found == false || reserved.base < next)) {
+                        next = reserved.base;
+                        next_found = true;
+                    }
+                    if (reserved_end > cursor &&
+                        (next_found == false || reserved_end < next)) {
+                        next = reserved_end;
+                        next_found = true;
+                    }
+                }
+            }
+            reservation_index = reservation_index + 1;
+        }
+
+        let usable: bool = in_memory && in_reservation == false;
+        if (usable && region_open == false) {
+            region_base = cursor;
+            region_open = true;
+        } else if (usable == false && region_open) {
+            if (usable_index == wanted) {
+                let mut region: PhysicalMemoryRegion = {
+                    region_base, cursor - region_base
+                };
+                return FdtMemoryRegionResult::Found(region);
+            }
+            usable_index = usable_index + 1;
+            region_open = false;
+        }
+
+        if (next_found == false) {
+            if (region_open) {
+                if (usable_index == wanted) {
+                    let mut region: PhysicalMemoryRegion = {
+                        region_base, cursor - region_base
+                    };
+                    return FdtMemoryRegionResult::Found(region);
+                }
+                usable_index = usable_index + 1;
+            }
+            return FdtMemoryRegionResult::OutOfRange;
+        }
+        cursor = next;
+        boundary_steps = boundary_steps + 1;
+    }
+    return FdtMemoryRegionResult::Invalid;
 }
 
 fn fdt_memory_region_count(map: FdtMemoryMap) -> usize !{unsafe} {
@@ -756,6 +824,8 @@ fn fdt_memory_region_count(map: FdtMemoryMap) -> usize !{unsafe} {
 }
 
 fn fdt_memory_reservation_count(map: FdtMemoryMap) -> usize {
+    if (map.reservation_count >
+        0xFFFFFFFFFFFFFFFF - map.tree_reservation_count) { return 0; }
     return map.reservation_count + map.tree_reservation_count;
 }
 

@@ -93,11 +93,13 @@ class Builder:
 
 
 def main():
-    valid_modes = ("--invalid-reservation", "--invalid-tree-reservation")
+    valid_modes = ("--invalid-memory", "--invalid-reservation",
+                   "--invalid-tree-reservation")
     if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and
                                      sys.argv[2] not in valid_modes):
         print("usage: make_fdt_fixture.py OUTPUT "
-              "[--invalid-reservation|--invalid-tree-reservation]",
+              "[--invalid-memory|--invalid-reservation|"
+              "--invalid-tree-reservation]",
               file=sys.stderr)
         return 2
     mode = sys.argv[2] if len(sys.argv) == 3 else ""
@@ -108,7 +110,9 @@ def main():
 
     b.begin("memory@0")
     b.prop("device_type", b"memory\0")
-    b.prop("reg", b.cells(0, 0, 0, 0x40000000,
+    b.prop("reg", b.cells(0, 0x3F000000, 0, 0x02000000,
+                          0, 0, 0, 0x40000000,
+                          0, 0x41000000, 0, 0x01000000,
                           0, 0x80000000, 0, 0x10000000))
     b.end()
 
@@ -116,6 +120,12 @@ def main():
     b.prop("device_type", b"memory\0")
     b.prop("reg", b.cells(1, 0, 0, 0x20000000))
     b.end()
+
+    if mode == "--invalid-memory":
+        b.begin("memory@ffffffffffffffff")
+        b.prop("device_type", b"memory\0")
+        b.prop("reg", b.cells(0xFFFFFFFF, 0xFFFFFFFF, 0, 2))
+        b.end()
 
     b.begin("reserved-memory")
     b.prop("#address-cells", b.cells(2))
@@ -166,7 +176,9 @@ def main():
     # Header reservation entries split the first memory tuple and trim the
     # beginning of the second one. The first two overlap, proving exclusion
     # uses their union rather than subtracting the overlap twice. The reader
-    # must enumerate four usable extents rather than the three raw tuples.
+    # must enumerate five normalized usable extents. The first memory node
+    # is deliberately unordered and includes overlapping and adjacent tuples;
+    # their union ends at 0x42000000 and must not be counted more than once.
     reservations = [
         (0x1000, 0x1000), (0x1800, 0x1000), (0x80000000, 0x2000)
     ]
