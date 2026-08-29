@@ -196,9 +196,21 @@ interrupt/locks rule, because handlers get built around whatever it says.
   instead of a QEMU boot. **#450** holds compare-and-swap, which LLVM's OCaml
   bindings cannot express (`build_atomicrmw` exists, `build_cmpxchg` does
   not) and which a test-and-set spinlock does not need.
-- **#445** -- the spinlock built on them, plus `cpu_id()`. `pool_lock`'s
-  signature does not change: its header already anticipated this exact
-  substitution.
+- **#445 -- DONE 2026-08-29, closed, QEMU and RPi5.** The spinlock, plus
+  `cpu_id()`. What its last criterion bought was not the code, which landed
+  in 2026-08-27 -- it was the evidence that the lock EXCLUDES, which needed
+  a second core running kernel code (#447) before it could be taken at all.
+  Two cores now run 4096 allocate/free cycles each against one pool through
+  one lock; removing the exchange corrupts the free list.
+
+  The board said something QEMU could not. The first version of that probe
+  passed with core 1 having completed ONE cycle to core 0's 4096, where
+  QEMU showed 4096 vs 4110 for the same binary: the lock excludes and does
+  not arbitrate, and QEMU's round-robin vCPU scheduling supplies a fairness
+  the hardware does not. Filed as **#478**; not urgent, since every current
+  caller holds the lock for a short straight-line critical section, but the
+  first measured argument this project has for why a criterion named real
+  hardware.
 - **#449** -- give the `locks` effect a meaning. It has existed in the checker
   since before there was a lock, has zero uses, and currently forbids the one
   case a spinlock exists for (an interrupt handler taking one).
