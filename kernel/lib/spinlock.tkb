@@ -78,7 +78,7 @@ const SPIN_LOCK_HELD: usize = 1;
 // a second attempt fail, give it back, watch a third succeed. With one
 // thread there is no other way to observe that the lock excludes anything,
 // and "it compiles" is not evidence a lock works.
-fn spin_trylock(lock: usize) -> bool !{unsafe} {
+fn spin_trylock(lock: usize) -> bool !{requires_mmu, unsafe} {
     let previous: usize = unsafe { atomic_swap_acquire(lock, SPIN_LOCK_HELD) };
     return previous == SPIN_LOCK_FREE;
 }
@@ -92,7 +92,7 @@ fn spin_trylock(lock: usize) -> bool !{unsafe} {
 // waiter. Reading instead lets the line stay shared until it actually
 // changes. On one core this is indistinguishable; it is written this way
 // because two cores are the point.
-fn spin_lock(lock: usize) !{unsafe} {
+fn spin_lock(lock: usize) !{requires_mmu, unsafe} {
     while (spin_trylock(lock) == false) {
         while (unsafe { atomic_load_acquire(lock) } != SPIN_LOCK_FREE) {
         }
@@ -102,13 +102,13 @@ fn spin_lock(lock: usize) !{unsafe} {
 // Gives it back. A release store, so everything this core did while holding
 // the lock is visible to whichever core takes it next -- that ordering, not
 // the write itself, is the entire reason this is not `*lock = 0`.
-fn spin_unlock(lock: usize) !{unsafe} {
+fn spin_unlock(lock: usize) !{requires_mmu, unsafe} {
     unsafe { atomic_store_release(lock, SPIN_LOCK_FREE); }
 }
 
 // Whether the word is currently held, for a probe or a diagnostic. Never a
 // basis for deciding to enter a critical section: the answer can be stale
 // before the caller acts on it, which is what spin_trylock is for.
-fn spin_lock_is_held(lock: usize) -> bool !{unsafe} {
+fn spin_lock_is_held(lock: usize) -> bool !{requires_mmu, unsafe} {
     return unsafe { atomic_load_acquire(lock) } != SPIN_LOCK_FREE;
 }

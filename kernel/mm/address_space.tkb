@@ -397,16 +397,21 @@ fn address_space_allocate_root(slot: usize)
 // Root 0 is constructed before the MMU is enabled. Keep its complete write
 // path separate from the pooled nonzero-slot path so the checker can prove
 // that bootstrap never reaches intrusive-pool growth.
+// GitHub issue #479: the boot variants, because this runs with the MMU off
+// and the locked entry points are `!{requires_mmu}` -- the lock is built
+// from exclusives, which AArch64 does not support on Device-typed memory.
+// Nothing to exclude here anyway: PSCI has not been asked to start a second
+// core yet.
 private fn address_space_allocate_boot_root()
-        -> AddressSpaceAllocateResult {
-    match page_alloc(PageOwnerTag::PageTable) {
+        -> AddressSpaceAllocateResult !{mmu_off} {
+    match page_alloc_boot(PageOwnerTag::PageTable) {
         PageAllocResult::OutOfMemory => {
             return AddressSpaceAllocateResult::OutOfMemory;
         }
         PageAllocResult::Allocated(l1) => {
-            match page_alloc(PageOwnerTag::PageTable) {
+            match page_alloc_boot(PageOwnerTag::PageTable) {
                 PageAllocResult::OutOfMemory => {
-                    page_free(l1);
+                    page_free_boot(l1);
                     return AddressSpaceAllocateResult::OutOfMemory;
                 }
                 PageAllocResult::Allocated(l2) => {

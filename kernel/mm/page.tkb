@@ -217,27 +217,6 @@ struct PageExtent {
 // -- exactly SlotMap(N)'s own shape, applied non-generically here since this
 // file's only ever going to have one pool.
 struct BootPagePool align(16) {
-    // GitHub issue #479. Everything below this line is shared mutable
-    // state reached from every page fault and every process creation, and
-    // until this field existed it had no lock and no assertion -- it was
-    // not even one of the ten sites raising KERNEL_ACTIVE_CORES reports,
-    // which is what made it worth finding.
-    //
-    // A Mutex, masking interrupts, rather than a TaskMutex. Not because
-    // the mask is needed here -- the effect checker proves the allocator
-    // is unreachable from interrupt context, transitively and by name
-    // ("interrupt function 'platform_el0_irq_dispatch' may allocate via
-    // ... -> page_alloc") -- but because of the NESTING.
-    // intrusive_pool_grow_one_chunk calls page_alloc_contiguous while
-    // holding the pool's own Mutex, so interrupts are already masked when
-    // this lock is taken from there. Taking a may_block TaskMutex under a
-    // mask is the shape that hangs; Mutex's acquire records "already
-    // masked" and its release restores what it found.
-    //
-    // The lock order is therefore POOL then PAGE, and it is one-way:
-    // page.tkb's only outward call is from a test probe
-    // (page_mapping_ref_ceiling_probe), so nothing takes page-then-pool.
-    private lock: Mutex;
     core: FreelistCore(BOOTSTRAP_PAGE_COUNT);
     meta: [PageMeta; BOOTSTRAP_PAGE_COUNT];
     runtime_meta_base: usize;
@@ -254,6 +233,35 @@ struct BootPagePool align(16) {
     run_generation: usize;
 }
 
+// GitHub issue #479. Everything below this line is shared mutable
+// state reached from every page fault and every process creation, and
+// until this field existed it had no lock and no assertion -- it was
+// not even one of the ten sites raising KERNEL_ACTIVE_CORES reports,
+// which is what made it worth finding.
+//
+// A Mutex, masking interrupts, rather than a TaskMutex. Not because
+// the mask is needed here -- the effect checker proves the allocator
+// is unreachable from interrupt context, transitively and by name
+// ("interrupt function 'platform_el0_irq_dispatch' may allocate via
+// ... -> page_alloc") -- but because of the NESTING.
+// intrusive_pool_grow_one_chunk calls page_alloc_contiguous while
+// holding the pool's own Mutex, so interrupts are already masked when
+// this lock is taken from there. Taking a may_block TaskMutex under a
+// mask is the shape that hangs; Mutex's acquire records "already
+// masked" and its release restores what it found.
+//
+// The lock order is therefore POOL then PAGE, and it is one-way:
+// page.tkb's only outward call is from a test probe
+// (page_mapping_ref_ceiling_probe), so nothing takes page-then-pool.
+//
+// A separate global rather than a field of BootPagePool, and that is not a
+// style choice. BootPagePool is `align(16)` and page_allocator_init runs
+// with the MMU OFF; putting an 8-byte field at its front shifted every
+// array behind it to 8-mod-16, and LLVM is then free to emit a 128-bit
+// store at an address it may not use. This file's own kernel_mmu_init
+// comment names that hazard, and RPi5 demonstrated it by booting to
+// exactly zero bytes of UART while every QEMU lane stayed green.
+private let mut page_allocator_lock: Mutex;
 private let mut boot_page_pool: BootPagePool;
 must_use variant PageIndexResult {
     NotManaged;
@@ -672,15 +680,15 @@ fn page_allocator_execution_model_assumption() {
 }
 
 private fn page_lock() -> usize !{unsafe} {
-    return pool_lock_acquire(0, &boot_page_pool.lock);
+    return pool_lock_acquire(0, &page_allocator_lock);
 }
 
 private fn page_unlock(flags: usize) !{unsafe} {
-    pool_lock_release(0, &boot_page_pool.lock, flags);
+    pool_lock_release(0, &page_allocator_lock, flags);
 }
 
 fn page_allocator_init() {
-    mutex_init(&boot_page_pool.lock);
+    mutex_init(&page_allocator_lock);
     freelist_core_init(&boot_page_pool.core);
     for i: usize in 0..<BOOTSTRAP_PAGE_COUNT {
         boot_page_pool.meta[i].occupied = false;
@@ -1024,6 +1032,37 @@ fn page_run_probe() -> bool !{unsafe} {
 // inside freelist_core_insert -- a lock around the pop alone would hand two
 // cores different indices and then let them interleave the metadata for
 // them, which the free-list probe cannot see and a page-owner audit would.
+// The bootstrap entry point, for the window before the MMU is on.
+//
+// It does NOT take the lock, and cannot: with the MMU off every access is
+// Device-typed, and AArch64 does not support exclusives there -- which is
+// what the lock is built from. Real hardware faults; QEMU does not enforce
+// it, so this was found as a board that produced no output at all while
+// every QEMU lane stayed green.
+//
+// Not taking it is also correct rather than merely forced. This runs from
+// kernel_mmu_init, before main(), before PSCI has been asked to start
+// anything: there is one context in the machine and no second core exists
+// to exclude. The lock would have nothing to do.
+//
+// What keeps the two apart is not this comment. spin_lock is
+// `!{requires_mmu}` and kernel_mmu_init is `!{mmu_off}`, so reaching the
+// locked entry point from the boot window is a compile error naming the
+// whole path -- which is how this bug was converted from a silent
+// hardware-only failure into a build failure.
+fn page_alloc_boot(owner: PageOwnerTag) -> PageAllocResult
+        !{allocates, mmu_off} {
+    if (owner == PageOwnerTag::Unowned ||
+        owner == PageOwnerTag::Unavailable) {
+        return PageAllocResult::OutOfMemory;
+    }
+    return page_alloc_locked(owner);
+}
+
+fn page_free_boot(owner: sink PageOwner[page]) !{mmu_off, unsafe} {
+    page_free_locked(owner);
+}
+
 fn page_alloc(owner: PageOwnerTag) -> PageAllocResult !{allocates} {
     if (owner == PageOwnerTag::Unowned ||
         owner == PageOwnerTag::Unavailable) {
@@ -1082,19 +1121,22 @@ private fn page_alloc_locked(owner: PageOwnerTag) -> PageAllocResult
 // its source instead of silently corrupting the chain a second time.
 fn page_free(owner: sink PageOwner[page]) !{unsafe} {
     let flags: usize = page_lock();
+    page_free_locked(owner);
+    page_unlock(flags);
+}
+
+private fn page_free_locked(owner: sink PageOwner[page]) !{unsafe} {
     let index: usize = owner.index;
-    if (index >= page_capacity()) { page_unlock(flags); return; }
+    if (index >= page_capacity()) { return; }
     let meta: *PageMeta = page_meta_at_index(index);
     if ((*meta).occupied == false) {
         boot_page_pool.double_remove_count = boot_page_pool.double_remove_count + 1;
-        page_unlock(flags);
         return;
     }
     (*meta).occupied = false;
     (*meta).owner = PageOwnerTag::Unowned;
     (*meta).map_refcount = 0;
     page_freelist_push(index, owner.generation);
-    page_unlock(flags);
 }
 
 fn page_physical_address(owner: borrow PageOwner[page]) -> usize {
