@@ -1,5 +1,6 @@
 use "kernel/lib/intrusive_pool.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/lib/pool_lock.tkb";
 
 // Current limitations (2026-08-24, issues #295/#392/#391). Keep this list
 // current as call sites change; a limitation that goes stale here is
@@ -571,7 +572,25 @@ must_use variant UnifiedObjectReleaseResult { Invalid; StillHeld; Freed; }
 // RefcountSlotMap's retain/release, over the object's own field. The
 // limit parameter is unchanged in meaning and still passed per call
 // (issue #401): it is the caller's world's bound, not the container's.
+// GitHub issue #479: the lock covers the MATCH as well as the add, and
+// that is the whole point rather than caution. Checking that the handle
+// still names a live occupant and then incrementing its counter is two
+// steps, and a core that frees the object in between leaves this one
+// adding to a slot that has been recycled. Measured without it: 4096
+// retain/release pairs took the count from 2 to 0 -- the object was freed
+// while both cores still held it -- and 978 later operations were refused
+// because the handle no longer named anything.
 private fn unified_object_retain(handle: UnifiedObjectHandle, limit: usize)
+        -> UnifiedObjectRetainResult !{unsafe} {
+    let flags: usize = pool_lock_acquire(0, &object_refcount_lock);
+    let result: UnifiedObjectRetainResult =
+        unified_object_retain_locked(handle, limit);
+    pool_lock_release(0, &object_refcount_lock, flags);
+    return result;
+}
+
+private fn unified_object_retain_locked(handle: UnifiedObjectHandle,
+                                        limit: usize)
         -> UnifiedObjectRetainResult !{unsafe} {
     if (unified_object_matches(handle) == false) {
         return UnifiedObjectRetainResult::Invalid;
@@ -587,6 +606,16 @@ private fn unified_object_retain(handle: UnifiedObjectHandle, limit: usize)
 // unified_fd_table_probe asserts the count is 0 at the end of a run.
 private let mut object_double_release_count: usize = 0;
 
+// GitHub issue #479. Its own global rather than a field, for the reason
+// kernel/mm/page.tkb's is: an 8-byte field at the front of an aligned
+// aggregate shifts the arrays behind it and LLVM may then emit a 128-bit
+// store the MMU-off window cannot use.
+//
+// ONE lock for the counter, not one per object. The critical section is a
+// compare and an add; a per-object word would cost 8 bytes times every
+// open file to shorten something already this short.
+private let mut object_refcount_lock: Mutex;
+
 // GitHub issue #414: for the boot suite's end-of-run baseline comparison.
 // See scheduled_process_pool_live_count. Only the fd CONTEXT pool has one:
 // the shared-object and descriptor-block pools are read through
@@ -596,11 +625,30 @@ fn unified_fd_context_live_count() -> usize !{unsafe} {
     return intrusive_pool_live_count(&fd_context_pool);
 }
 
+// GitHub issue #479: what a contention probe compares against. Reading the
+// count is not a basis for deciding anything -- the answer can be stale
+// before the caller acts on it -- which is why this is only used by the
+// probe, after both cores have stopped.
+private fn unified_object_refs_of(handle: UnifiedObjectHandle) -> usize
+        !{unsafe} {
+    if (unified_object_matches(handle) == false) { return 0; }
+    return unified_object_at(handle).refs;
+}
+
 fn unified_object_double_release_count() -> usize {
     return object_double_release_count;
 }
 
 private fn unified_object_release(handle: UnifiedObjectHandle)
+        -> UnifiedObjectReleaseResult !{unsafe} {
+    let flags: usize = pool_lock_acquire(0, &object_refcount_lock);
+    let result: UnifiedObjectReleaseResult =
+        unified_object_release_locked(handle);
+    pool_lock_release(0, &object_refcount_lock, flags);
+    return result;
+}
+
+private fn unified_object_release_locked(handle: UnifiedObjectHandle)
         -> UnifiedObjectReleaseResult !{unsafe} {
     if (unified_object_matches(handle) == false) {
         return UnifiedObjectReleaseResult::Invalid;
@@ -739,6 +787,7 @@ fn unified_fd_next_open(process: usize, from: usize)
 }
 
 fn unified_fd_table_init() !{unsafe} {
+    mutex_init(&object_refcount_lock);
     unified_fd_context_pool_init();
     unified_object_pool_init();
     // GitHub issue #391: giving every object back, rather than writing
@@ -2139,6 +2188,286 @@ fn unified_fd_probe_install(fd: usize, result: UnifiedObjectResult) -> bool {
             }
         }
     }
+}
+
+// GitHub issue #479, Group A: two cores retaining and releasing one shared
+// object at once.
+//
+// This lives in fd_table.tkb rather than beside the other contention probes
+// because unified_object_retain/_release are private to this file and
+// should stay that way -- a probe is not a reason to widen a boundary.
+//
+// What the race costs, both directions: a lost RETAIN means the count is
+// lower than the number of holders, so the object is freed while somebody
+// still has it. A lost RELEASE means it is never freed. The first is a
+// use-after-free with a descriptor pointing at it; the second is a leak.
+//
+// The detector is the object's own counter. Each core does N
+// retain-then-release PAIRS, so a run that lost nothing returns refs to
+// exactly where it started. Anything lost shows as a final count that is
+// not the baseline, and an underflow shows additionally in
+// object_double_release_count, which is already asserted at zero by the
+// boot suite.
+//
+// Current limitations:
+// - ONE object, deliberately. The race is on a single counter, so a second
+//   object would only make collisions rarer.
+// - The object is allocated here and released here; it is never installed
+//   in any descriptor table, so nothing else in the kernel can reach it.
+// - Measures exclusion, not ordering.
+
+const FD_REFCOUNT_CONTENTION_ROUNDS: usize = 2048;
+// A descriptor number for the probe's own object, in process 0's table.
+const FD_REFCOUNT_PROBE_FD: usize = 9;
+const FD_REFCOUNT_CONTENTION_OUTSIDE_WORK: usize = 64;
+
+private let mut fd_refcount_probe_handle: UnifiedObjectHandle;
+private let mut fd_refcount_probe_ready: bool = false;
+private let mut fd_refcount_probe_armed: usize;
+private let mut fd_refcount_probe_primary: usize;
+private let mut fd_refcount_probe_secondary: usize;
+private let mut fd_refcount_probe_refused: usize;
+private let mut fd_refcount_probe_active: usize;
+private let mut fd_refcount_probe_overlap: usize;
+
+private fn fd_refcount_probe_armed_address() -> usize {
+    return (&fd_refcount_probe_armed) as usize;
+}
+
+private fn fd_refcount_probe_primary_address() -> usize {
+    return (&fd_refcount_probe_primary) as usize;
+}
+
+private fn fd_refcount_probe_secondary_address() -> usize {
+    return (&fd_refcount_probe_secondary) as usize;
+}
+
+private fn fd_refcount_probe_refused_address() -> usize {
+    return (&fd_refcount_probe_refused) as usize;
+}
+
+private fn fd_refcount_probe_active_address() -> usize {
+    return (&fd_refcount_probe_active) as usize;
+}
+
+private fn fd_refcount_probe_overlap_address() -> usize {
+    return (&fd_refcount_probe_overlap) as usize;
+}
+
+// One retain/release pair. Both cores run this, on the same object.
+private fn fd_refcount_probe_cycle() !{unsafe} {
+    match unified_object_retain(fd_refcount_probe_handle,
+                                unified_object_ref_bound()) {
+        UnifiedObjectRetainResult::Invalid => {
+            unsafe {
+                atomic_fetch_add_relaxed(
+                    fd_refcount_probe_refused_address(), 1);
+            }
+        }
+        UnifiedObjectRetainResult::Overflow => {
+            unsafe {
+                atomic_fetch_add_relaxed(
+                    fd_refcount_probe_refused_address(), 1);
+            }
+        }
+        UnifiedObjectRetainResult::Ok => {
+            match unified_object_release(fd_refcount_probe_handle) {
+                UnifiedObjectReleaseResult::Invalid => {
+                    unsafe {
+                        atomic_fetch_add_relaxed(
+                            fd_refcount_probe_refused_address(), 1);
+                    }
+                }
+                UnifiedObjectReleaseResult::StillHeld => {}
+                UnifiedObjectReleaseResult::Freed => {}
+            }
+        }
+    }
+    for spin: usize in 0..<FD_REFCOUNT_CONTENTION_OUTSIDE_WORK { }
+}
+
+fn fd_refcount_contention_is_armed() -> bool !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(fd_refcount_probe_armed_address())
+    } == 1;
+}
+
+fn fd_refcount_contention_secondary_run() !{unsafe} {
+    unsafe { atomic_store_release(fd_refcount_probe_active_address(), 1); }
+    while (unsafe {
+               atomic_load_acquire(fd_refcount_probe_secondary_address())
+           } < FD_REFCOUNT_CONTENTION_ROUNDS &&
+           unsafe {
+               atomic_load_acquire(fd_refcount_probe_armed_address())
+           } == 1) {
+        fd_refcount_probe_cycle();
+        unsafe {
+            atomic_fetch_add_relaxed(
+                fd_refcount_probe_secondary_address(), 1);
+        }
+    }
+    unsafe { atomic_store_release(fd_refcount_probe_active_address(), 0); }
+}
+
+private fn fd_refcount_contention_report(stage: *u8, refs: usize,
+                                         baseline: usize) !{unsafe} {
+    kernel_boot_log("fd refcount contention stage: ");
+    kernel_boot_log(stage);
+    kernel_boot_log("\n");
+    kernel_boot_log("fd refcount contention counts: primary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(fd_refcount_probe_primary_address())
+    });
+    kernel_boot_log(" secondary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(fd_refcount_probe_secondary_address())
+    });
+    kernel_boot_log(" refs=");
+    uart_put_udec(refs);
+    kernel_boot_log(" baseline=");
+    uart_put_udec(baseline);
+    kernel_boot_log(" refused=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(fd_refcount_probe_refused_address())
+    });
+    kernel_boot_log(" overlap=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(fd_refcount_probe_overlap_address())
+    });
+    kernel_boot_log("\n");
+}
+
+fn fd_refcount_contention_probe() -> bool !{unsafe} {
+    unified_fd_table_init();
+    if (fd_refcount_probe_ready == false) {
+        // Every exit path reports, including these. The first version of
+        // this function returned here without printing anything, so a run
+        // that could not even allocate its object looked identical to one
+        // whose counter raced -- the same defect the pool probe had and
+        // had already fixed, reintroduced one file over.
+        match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
+            UnifiedObjectResult::Invalid => {
+                fd_refcount_contention_report("no-object" as *u8, 0, 0);
+                return false;
+            }
+            UnifiedObjectResult::Full => {
+                fd_refcount_contention_report("pool-full" as *u8, 0, 0);
+                return false;
+            }
+            UnifiedObjectResult::Allocated(handle) => {
+                fd_refcount_probe_handle = handle;
+                fd_refcount_probe_ready = true;
+            }
+        }
+        // The object needs a real descriptor holding it before any
+        // reference can be taken. unified_object_ref_bound() is
+        // fd_slot_total -- "a reference no descriptor slot could be
+        // holding" is an invariant break, not a limit -- and at this point
+        // in boot no slots exist, so the first version of this probe was
+        // correctly refused by the bound it was ignoring. Installing the
+        // object is also the more faithful arrangement: a shared object
+        // with a descriptor pointing at it is what the counter is for.
+        if (unified_fd_context_ensure(0) == false) {
+            fd_refcount_contention_report("no-context" as *u8, 0, 0);
+            return false;
+        }
+        match unified_fd_install(0, FD_REFCOUNT_PROBE_FD,
+                                 fd_refcount_probe_handle.slot,
+                                 fd_refcount_probe_handle.generation) {
+            UnifiedFdInstallResult::Ok => {}
+            UnifiedFdInstallResult::Invalid => {
+                fd_refcount_contention_report("install-invalid" as *u8, 0, 0);
+                return false;
+            }
+            UnifiedFdInstallResult::NoMemory => {
+                fd_refcount_contention_report("install-nomem" as *u8, 0, 0);
+                return false;
+            }
+            UnifiedFdInstallResult::RefOverflow => {
+                fd_refcount_contention_report("install-overflow" as *u8, 0, 0);
+                return false;
+            }
+        }
+        // One more reference this probe holds for the whole run, so a lost
+        // retain cannot take the count to zero and free the object out
+        // from under the other core -- which would be a different failure
+        // reported as this one.
+        match unified_object_retain(fd_refcount_probe_handle,
+                                    unified_object_ref_bound()) {
+            UnifiedObjectRetainResult::Ok => {}
+            UnifiedObjectRetainResult::Invalid => {
+                fd_refcount_contention_report("baseline-invalid" as *u8, 0, 0);
+                return false;
+            }
+            UnifiedObjectRetainResult::Overflow => {
+                fd_refcount_contention_report("baseline-overflow" as *u8, 0, 0);
+                return false;
+            }
+        }
+    }
+    let baseline: usize = unified_object_refs_of(fd_refcount_probe_handle);
+    let doubles_before: usize = unified_object_double_release_count();
+    unsafe { atomic_store_release(fd_refcount_probe_armed_address(), 1); }
+
+    let entry_window: i64 = read_cntfrq() >> 2;
+    let entry_start: i64 = read_cntpct();
+    let mut entered: bool = false;
+    while (entered == false && read_cntpct() - entry_start < entry_window) {
+        if (unsafe {
+                atomic_load_acquire(fd_refcount_probe_active_address())
+            } == 1) {
+            entered = true;
+        }
+    }
+    if (entered == false) {
+        unsafe {
+            atomic_store_release(fd_refcount_probe_armed_address(), 0);
+        }
+        fd_refcount_contention_report("secondary-never-entered" as *u8,
+                                      baseline, baseline);
+        return false;
+    }
+
+    for round: usize in 0..<FD_REFCOUNT_CONTENTION_ROUNDS {
+        fd_refcount_probe_cycle();
+        unsafe {
+            atomic_fetch_add_relaxed(fd_refcount_probe_primary_address(), 1);
+        }
+    }
+
+    unsafe {
+        atomic_store_release(fd_refcount_probe_overlap_address(),
+            atomic_load_acquire(fd_refcount_probe_secondary_address()));
+    }
+
+    let finish_window: i64 = read_cntfrq() * 2;
+    let finish_start: i64 = read_cntpct();
+    let mut finished: bool = false;
+    while (finished == false && read_cntpct() - finish_start < finish_window) {
+        if (unsafe {
+                atomic_load_acquire(fd_refcount_probe_secondary_address())
+            } >= FD_REFCOUNT_CONTENTION_ROUNDS) {
+            finished = true;
+        }
+    }
+    unsafe { atomic_store_release(fd_refcount_probe_armed_address(), 0); }
+
+    let refs: usize = unified_object_refs_of(fd_refcount_probe_handle);
+    if (finished == false) {
+        fd_refcount_contention_report("secondary-never-finished" as *u8,
+                                      refs, baseline);
+        return false;
+    }
+    fd_refcount_contention_report("complete" as *u8, refs, baseline);
+    let overlap: usize = unsafe {
+        atomic_load_acquire(fd_refcount_probe_overlap_address())
+    };
+    return refs == baseline &&
+           unified_object_double_release_count() == doubles_before &&
+           unsafe {
+               atomic_load_acquire(fd_refcount_probe_refused_address())
+           } == 0 &&
+           overlap > 0;
 }
 
 fn unified_fd_table_probe() -> bool !{unsafe} {

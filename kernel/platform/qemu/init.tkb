@@ -469,6 +469,11 @@ fn main() !{unsafe} {
             // GitHub issue #479: the page allocator's own lock. Added
             // after removing that lock changed nothing any lane could
             // see -- an audit is not evidence.
+            if (fd_refcount_contention_probe()) {
+                kernel_boot_log("fd refcount contention: two cores retaining and releasing one object, count back to baseline ok\n");
+            } else {
+                kernel_boot_log("fd refcount contention: failed\n");
+            }
             if (asid_contention_probe()) {
                 kernel_boot_log("asid contention: two cores assigning, every number advanced the counter once ok\n");
             } else {

@@ -1,3 +1,5 @@
+fd refcount contention stage: complete
+fd refcount contention: two cores retaining and releasing one object, count back to baseline ok
 asid contention stage: complete
 asid contention: two cores assigning, every number advanced the counter once ok
 page contention stage: complete
