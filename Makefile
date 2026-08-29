@@ -213,12 +213,15 @@ $(LINUX_USER_BUILD_DIR)/fdt_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_U
 $(LINUX_USER_BUILD_DIR)/fdt_invalid_reservation_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
 	python3 scripts/make_fdt_fixture.py $@ --invalid-reservation
 
+$(LINUX_USER_BUILD_DIR)/fdt_invalid_tree_reservation_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
+	python3 scripts/make_fdt_fixture.py $@ --invalid-tree-reservation
+
 # GitHub issue #470: the kernel's own number formatters, which were wrong on
 # one platform for as long as they had no test that could run anywhere.
 $(LINUX_USER_DIR)/number/number_exe.o: kernel/printk/number.tkb
 $(LINUX_USER_DIR)/number/number_exe.o: LINUX_USER_EXTRA_SRCS := kernel/printk/number.tkb
 
-$(LINUX_USER_DIR)/fdt/fdt_exe.o: kernel/boot/fdt.tkb $(LINUX_USER_BUILD_DIR)/fdt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_reservation_fixture.dtb
+$(LINUX_USER_DIR)/fdt/fdt_exe.o: kernel/boot/fdt.tkb $(LINUX_USER_BUILD_DIR)/fdt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_reservation_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_tree_reservation_fixture.dtb
 $(LINUX_USER_DIR)/fdt/fdt_exe.o: LINUX_USER_EXTRA_SRCS := kernel/boot/fdt.tkb
 
 # GitHub issue #445: the kernel's own spinlock, compiled and run natively.

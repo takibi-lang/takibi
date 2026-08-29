@@ -70,3 +70,4 @@ docs/talks/*/dist/
 # is an output, and committing it would give the same values two homes.
 linux_user/build/fdt_fixture.dtb
 linux_user/build/fdt_invalid_reservation_fixture.dtb
+linux_user/build/fdt_invalid_tree_reservation_fixture.dtb

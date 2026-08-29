@@ -93,11 +93,14 @@ class Builder:
 
 
 def main():
+    valid_modes = ("--invalid-reservation", "--invalid-tree-reservation")
     if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and
-                                     sys.argv[2] != "--invalid-reservation"):
-        print("usage: make_fdt_fixture.py OUTPUT [--invalid-reservation]",
+                                     sys.argv[2] not in valid_modes):
+        print("usage: make_fdt_fixture.py OUTPUT "
+              "[--invalid-reservation|--invalid-tree-reservation]",
               file=sys.stderr)
         return 2
+    mode = sys.argv[2] if len(sys.argv) == 3 else ""
     b = Builder()
     b.begin("")
     b.prop("#address-cells", b.cells(2))
@@ -112,6 +115,29 @@ def main():
     b.begin("memory@100000000")
     b.prop("device_type", b"memory\0")
     b.prop("reg", b.cells(1, 0, 0, 0x20000000))
+    b.end()
+
+    b.begin("reserved-memory")
+    b.prop("#address-cells", b.cells(2))
+    b.prop("#size-cells", b.cells(2))
+    b.prop("ranges", b"")
+    b.begin("firmware@2000")
+    b.prop("reg", b.cells(0, 0x2000, 0, 0x1000))
+    # Deliberately after reg: property order must not affect availability.
+    b.prop("status", b"okay\0")
+    b.end()
+    b.begin("buffer@100001000")
+    b.prop("reg", b.cells(1, 0x1000, 0, 0x1000))
+    b.end()
+    b.begin("disabled@30000000")
+    # Even a zero-sized reg is irrelevant once the node is disabled.
+    b.prop("reg", b.cells(0, 0x30000000, 0, 0))
+    b.prop("status", b"disabled\0")
+    b.end()
+    if mode == "--invalid-tree-reservation":
+        b.begin("invalid@4000")
+        b.prop("reg", b.cells(0, 0x4000, 0, 0))
+        b.end()
     b.end()
 
     # Property ORDER matters and is not fixed by the spec. These are in the
@@ -144,7 +170,7 @@ def main():
     reservations = [
         (0x1000, 0x1000), (0x1800, 0x1000), (0x80000000, 0x2000)
     ]
-    if len(sys.argv) == 3:
+    if mode == "--invalid-reservation":
         reservations.append((0xFFFFFFFFFFFFFFFF, 2))
     open(sys.argv[1], "wb").write(b.finish(reservations))
     return 0

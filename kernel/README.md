@@ -657,11 +657,12 @@ are deliberate, not gaps to silently close:
   injection. QEMU's direct-kernel loader generates an FDT from the selected
   machine and `-m` value and passes its physical address in `x0`. Both
   platforms read the `/memory` node through the bounded common reader in
-  `kernel/boot/fdt.tkb`. Its memory view also validates the header memory
-  reservation map and subtracts every reservation, including overlapping
-  entries, without a fixed region-count ceiling. An invalid DTB or missing
-  usable memory node is a fatal boot-contract violation, not a reason to
-  switch data sources. Neither platform's
+  `kernel/boot/fdt.tkb`. Its memory view validates the header memory
+  reservation map and subtracts those entries together with every enabled
+  `/reserved-memory` child `reg` tuple, including overlapping entries,
+  without a fixed region-count ceiling. An invalid DTB or missing usable
+  memory node is a fatal boot-contract violation, not a reason to switch
+  data sources. Neither platform's
   page allocator actually consumes this value today (see "Current limits"
   below) -- it is diagnostic boot-log output on both.
 - **The MMU device/RAM layout is inverted from RPi5's.** RPi5's real RAM
