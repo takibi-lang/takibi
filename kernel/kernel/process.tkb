@@ -1997,11 +1997,16 @@ private let mut execution_state: [ExecutionState; KERNEL_ACTIVE_CORES];
 //
 // It returns slot 0 unconditionally, and that is correct rather than
 // lazy: KERNEL_ACTIVE_CORES is 1, so slot 0 is the only slot, and the
-// core that runs kernel code is the only core that reaches here. The
-// static_assert is what makes that stop being true loudly -- issue #447
-// raises the constant, this fails to build, and whoever does it writes
-// `cpu_id()` here (kernel/platform/*/init.tkb) with a bounds proof rather
-// than discovering later that every core shared one scheduler.
+// core that runs kernel code is the only core that reaches here.
+//
+// A second core HAS taken interrupts since issue #447, and this is still
+// slot 0, which is not an oversight: that core reaches no kernel state --
+// its dispatch returns before every path that would -- so it never calls
+// this. The constant tracks cores that run kernel STATE, not cores that
+// execute. Raising it is what running a PROCESS on a second core requires,
+// and the static_assert is what makes that fail here rather than silently
+// give every core one scheduler. Whoever does it writes `cpu_id()`
+// (kernel/platform/*/init.tkb) here, with a bounds proof.
 //
 // One function, not 176 call sites, is the whole change issue #222 asked
 // for.

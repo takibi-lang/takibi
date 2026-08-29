@@ -2898,19 +2898,25 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
     return KernelTcpCloseResult::Closed(ready);
 }
 
-// GitHub issue #453, and this file is the worst case behind it.
+// GitHub issue #453. This assertion's original reason is FIXED and the
+// replacement is narrower, which is worth saying rather than quietly
+// rewording: RetxEntry used to have eleven public fields behind a guard
+// covering one, and TcpConnection twenty. Issue #452 made RetxEntry's
+// mutable state private behind retx_retry_state(), which needs the guard;
+// its remaining public fields are written once before the entry is linked
+// and read-only after, and the chain link's own acquire/release orders
+// that against a reader. Issue #462 made TcpConnectionOwner itself the
+// exclusion -- take acquires, put releases.
 //
-// RetxEntry has eleven fields and its guard covers one of them. The other
-// ten -- including a 1514-byte frame handed to the NIC -- are ordinary
-// public storage written by tcp_retransmit_scan with no guard held.
-// TcpConnection is the same shape with 4 private fields and 20 public.
-// That is safe today only because there is no second kernel context to
-// interleave with, which is exactly what both numbers below say.
-//
-// GitHub issue #452 is the fix: group the protected fields and reach them
-// only through a guard-derived accessor. Until then, this assertion is
-// what makes removing either leg fail here rather than in production.
+// What still rests on both numbers is the PROTOCOL STATE MACHINE around
+// them. tcp_service_once and the RX path read and advance a connection's
+// sequence numbers across several statements, and nothing makes that span
+// atomic: what makes it safe is that a syscall handler runs to completion
+// (KERNEL_PREEMPTIBLE == 0) and that no other core is in this file at all
+// (KERNEL_ACTIVE_CORES == 1). Holding the owner excludes another taker; it
+// does not make a multi-statement read-modify-write of the state it
+// protects indivisible against a preemption inside it.
 fn tcp_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1 && KERNEL_PREEMPTIBLE == 0,
-                  "RetxEntry's guard covers one field of eleven, including the 1514-byte frame the NIC reads -- see issue #452");
+                  "a connection's sequence numbers are advanced across several statements with nothing making that span atomic");
 }
