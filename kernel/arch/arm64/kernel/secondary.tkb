@@ -134,6 +134,15 @@ fn kernel_secondary_main(context: usize) {
         timer_irq_setup();
         enable_irq();
         while (true) {
+            // GitHub issue #445: the two-core contention probe, driven
+            // from here rather than from the tick, so both cores are
+            // inside the same lock at the same time instead of taking
+            // turns a timer period apart. It touches ONE pool, this
+            // kernel's only pool that no kernel subsystem uses, and it
+            // never reaches the page allocator -- see that file's floor.
+            if (pool_contention_is_armed()) {
+                pool_contention_secondary_run();
+            }
             wfi();
         }
     }

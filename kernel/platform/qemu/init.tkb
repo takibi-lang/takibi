@@ -1,5 +1,6 @@
 use "kernel/init/test_driver.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
+use "kernel/kernel/pool_contention_evidence.tkb";
 
 must_use variant SecondaryBootResult {
     Started;
@@ -452,6 +453,14 @@ fn main() !{unsafe} {
                     "smp bringup: core1 psci+el1+takibi+own-timer ok\n");
             } else {
                 kernel_boot_log("smp bringup: core1 idle but no ticks\n");
+            }
+            // GitHub issue #445: the first evidence that this kernel's
+            // spinlock EXCLUDES. Everything before it was single-threaded
+            // exercise and an instruction-level check.
+            if (pool_contention_probe()) {
+                kernel_boot_log("pool contention: two cores cycling one pool, every allocation given back, no handle refused ok\n");
+            } else {
+                kernel_boot_log("pool contention: failed\n");
             }
         }
         SecondaryBootResult::UnexpectedStatus(status) => {

@@ -1,0 +1,296 @@
+// GitHub issue #445's remaining acceptance criterion: two cores contending
+// on one IntrusivePool, allocating and freeing concurrently, in a test that
+// FAILS when the acquire is removed.
+//
+// It could not be written before #447 -- there was no second core running
+// kernel code to contend with. What it establishes is the one thing the
+// spinlock has never had evidence for: that it excludes. Everything so far
+// has been single-threaded exercise (linux_user/spinlock's "a second
+// attempt must fail") and a check on emitted instructions
+// (check_spinlock_is_atomic). Both are real and neither is contention.
+//
+// The pool is this file's own, not one the kernel uses. That is not
+// squeamishness: a probe that hammered a live pool would be measuring the
+// lock AND whatever else touches that pool, and a failure would not be
+// attributable to either.
+//
+// Current limitations:
+// - MEASURES EXCLUSION, NOT ORDERING. Two cores cycling a slot prove a
+//   second holder cannot exist; they say nothing about whether a write
+//   before the release is visible after the next acquire. That is the
+//   release/acquire pair's job and it is checked where it is emitted
+//   (scripts/check_kernel_asm_invariants.py's spin_unlock stlr line).
+// - RUNS ONCE, AT BOOT, for a bounded number of rounds. Not a soak test:
+//   a race this misses on one boot it may miss on every boot. What it is
+//   for is the substitution -- remove the acquire and it fails -- which is
+//   deterministic in a way the race itself is not.
+// - THE SECONDARY CORE MUST NOT REACH THE PAGE ALLOCATOR. Freeing a
+//   chunk's last slot releases its page (intrusive_pool_remove ->
+//   intrusive_pool_release_chunk), and the page allocator is kernel state
+//   with its own single-core assertion. CONTENTION_FLOOR is what keeps
+//   that from happening: those slots are allocated before anything is
+//   armed and held until after both cores have stopped, so no chunk ever
+//   empties and no cycle's free releases a page.
+// - The two cores run for different lengths. Core 0 does a fixed number of
+//   rounds and then disarms; core 1 spins on the armed flag and stops when
+//   it clears. So the cycle counts are not comparable and nothing here
+//   claims they are -- what matters is that BOTH advanced, which is what
+//   makes it contention rather than one core taking turns with itself.
+
+use "kernel/lib/intrusive_pool.tkb";
+
+// Pointer-sized at least, which IntrusivePool requires because the free
+// chain shares the slot's storage.
+struct ContentionItem {
+    stamp: usize;
+}
+
+// How many slots stay allocated for the whole run. Their only job is to
+// keep every chunk non-empty, so that a cycle's free never releases a page.
+const CONTENTION_FLOOR: usize = 4;
+
+// Core 0's rounds. Large enough that core 1 gets many chances to be inside
+// the lock at the same time, small enough not to lengthen the boot.
+const CONTENTION_ROUNDS: usize = 4096;
+
+private let mut contention_pool: IntrusivePool(ContentionItem);
+private let mut contention_pool_ready: bool = false;
+
+// The handshake and the results. Atomics, not `io`, because these are read
+// and written by two cores at the same time -- which is the one situation
+// volatile does not cover.
+private let mut contention_armed: usize;
+private let mut contention_primary_cycles: usize;
+private let mut contention_secondary_cycles: usize;
+private let mut contention_failed_removes: usize;
+// 1 while the secondary is inside its cycle loop. Core 0 waits for this
+// rather than for a duration, because "the secondary is between an
+// allocate and its free" and "the secondary has stopped" are different
+// states and only one of them makes live_count meaningful.
+private let mut contention_secondary_active: usize;
+
+private fn contention_armed_address() -> usize {
+    return (&contention_armed) as usize;
+}
+
+private fn contention_primary_cycles_address() -> usize {
+    return (&contention_primary_cycles) as usize;
+}
+
+private fn contention_secondary_cycles_address() -> usize {
+    return (&contention_secondary_cycles) as usize;
+}
+
+private fn contention_failed_removes_address() -> usize {
+    return (&contention_failed_removes) as usize;
+}
+
+private fn contention_secondary_active_address() -> usize {
+    return (&contention_secondary_active) as usize;
+}
+
+private fn contention_pool_init() {
+    if (contention_pool_ready) { return; }
+    contention_pool_ready = true;
+    intrusive_pool_init(&contention_pool);
+}
+
+// One allocate/free cycle. Both cores run THIS function, which is the
+// point: the same code, the same pool, the same lock, at the same time.
+//
+// A failed remove is the direct symptom of a lost race. If two cores are
+// handed the same slot, one of them frees it and the other's remove finds
+// a generation that is no longer its own -- StaleHandle -- rather than
+// corrupting anything. The pool refusing is itself the detector, which is
+// why this counts refusals rather than trying to catch the overlap.
+private fn contention_cycle() -> bool !{unsafe} {
+    let guard = intrusive_pool_lock(&contention_pool);
+    let inserted = intrusive_pool_insert_zeroed(&contention_pool, guard);
+    intrusive_pool_unlock(&contention_pool, guard);
+    match inserted {
+        IntrusivePoolInsertResult::OutOfMemory => {
+            return false;
+        }
+        IntrusivePoolInsertResult::Allocated(owner) => {
+            let address: usize = intrusive_owner_slot(owner);
+            let generation: usize = intrusive_owner_generation(owner);
+            intrusive_owner_drop(owner);
+            let handle = intrusive_owner_new(&contention_pool, address,
+                                             generation);
+            let release = intrusive_pool_lock(&contention_pool);
+            let (ok, reason) = intrusive_remove_outcome(
+                intrusive_pool_remove(&contention_pool, release, handle));
+            intrusive_pool_unlock(&contention_pool, release);
+            if (ok == false) {
+                unsafe {
+                    atomic_fetch_add_relaxed(
+                        contention_failed_removes_address(), 1);
+                }
+                return false;
+            }
+            return true;
+        }
+    }
+}
+
+// Called by the secondary core from its idle loop. Spins while core 0 keeps
+// it armed, so the two are inside the same lock at the same time rather
+// than taking turns a timer tick apart.
+fn pool_contention_secondary_run() !{unsafe} {
+    unsafe { atomic_store_release(contention_secondary_active_address(), 1); }
+    while (unsafe { atomic_load_acquire(contention_armed_address()) } == 1) {
+        if (contention_cycle()) {
+            unsafe {
+                atomic_fetch_add_relaxed(
+                    contention_secondary_cycles_address(), 1);
+            }
+        }
+    }
+    // Released AFTER the last cycle's free, so a core 0 that sees zero
+    // here knows every slot this core took is back.
+    unsafe { atomic_store_release(contention_secondary_active_address(), 0); }
+}
+
+fn pool_contention_is_armed() -> bool !{unsafe} {
+    return unsafe { atomic_load_acquire(contention_armed_address()) } == 1;
+}
+
+// Core 0's half, and the verdict. Returns true when both cores cycled, no
+// remove was refused, and the pool came back to exactly the floor.
+fn pool_contention_probe() -> bool !{unsafe} {
+    contention_pool_init();
+
+    // The floor. Allocated before anything is armed and held for the whole
+    // run, so no chunk ever empties and no cycle reaches the page
+    // allocator. Their addresses are kept so they can be given back.
+    let mut floor_address: [usize; CONTENTION_FLOOR];
+    let mut floor_generation: [usize; CONTENTION_FLOOR];
+    let mut held: usize = 0;
+    for i: usize in 0..<CONTENTION_FLOOR {
+        let guard = intrusive_pool_lock(&contention_pool);
+        let inserted = intrusive_pool_insert_zeroed(&contention_pool, guard);
+        intrusive_pool_unlock(&contention_pool, guard);
+        match inserted {
+            IntrusivePoolInsertResult::OutOfMemory => { }
+            IntrusivePoolInsertResult::Allocated(owner) => {
+                // Indexed by the loop variable, not by `held`: `i`
+                // carries the proven range and `held` does not, which
+                // --forbid-trap says out loud. They are equal on every
+                // path that reaches the check below.
+                floor_address[i] = intrusive_owner_slot(owner);
+                floor_generation[i] = intrusive_owner_generation(owner);
+                intrusive_owner_drop(owner);
+                held = held + 1;
+            }
+        }
+    }
+    if (held != CONTENTION_FLOOR) { return false; }
+
+    unsafe { atomic_store_release(contention_armed_address(), 1); }
+
+    // Wait for the secondary to be IN, before starting. Arming and
+    // immediately running was the first version and it measured nothing:
+    // the secondary sits in `wfi` and wakes only on its own timer, so a
+    // window shorter than one tick period closed before it ever looked.
+    // 4096 rounds take far less than the 15.6 ms tick, so `secondary=0`
+    // was the honest answer to a question that had not been asked.
+    //
+    // Waiting for the flag rather than for a duration is what makes the
+    // overlap real instead of likely. Bounded by the counter so a
+    // secondary that never arrives fails the probe rather than hanging
+    // the boot; the bound is several tick periods, since one is the
+    // minimum wait by construction.
+    let entry_window: i64 = read_cntfrq() >> 2;
+    let entry_start: i64 = read_cntpct();
+    let mut entered: bool = false;
+    while (entered == false && read_cntpct() - entry_start < entry_window) {
+        if (unsafe {
+                atomic_load_acquire(contention_secondary_active_address())
+            } == 1) {
+            entered = true;
+        }
+    }
+    if (entered == false) {
+        unsafe { atomic_store_release(contention_armed_address(), 0); }
+        return false;
+    }
+
+    for round: usize in 0..<CONTENTION_ROUNDS {
+        if (contention_cycle()) {
+            unsafe {
+                atomic_fetch_add_relaxed(
+                    contention_primary_cycles_address(), 1);
+            }
+        }
+    }
+    unsafe { atomic_store_release(contention_armed_address(), 0); }
+
+    // Wait for the secondary to actually be out of its loop, rather than
+    // for a duration. It may be holding a slot right now, and freeing the
+    // floor and reading live_count underneath it would report a leak that
+    // is really a core still working. Bounded so a secondary that never
+    // arrives fails the probe instead of hanging the boot.
+    let mut settled: bool = false;
+    for attempt: usize in 0..<CONTENTION_ROUNDS {
+        if (settled == false) {
+            if (unsafe {
+                    atomic_load_acquire(contention_secondary_active_address())
+                } == 0) {
+                settled = true;
+            }
+        }
+    }
+    if (settled == false) { return false; }
+
+    for i: usize in 0..<CONTENTION_FLOOR {
+        let handle = intrusive_owner_new(&contention_pool, floor_address[i],
+                                         floor_generation[i]);
+        let guard = intrusive_pool_lock(&contention_pool);
+        let (ok, reason) = intrusive_remove_outcome(
+            intrusive_pool_remove(&contention_pool, guard, handle));
+        intrusive_pool_unlock(&contention_pool, guard);
+        if (ok == false) { return false; }
+    }
+
+    let primary: usize = unsafe {
+        atomic_load_acquire(contention_primary_cycles_address())
+    };
+    let secondary: usize = unsafe {
+        atomic_load_acquire(contention_secondary_cycles_address())
+    };
+    let refused: usize = unsafe {
+        atomic_load_acquire(contention_failed_removes_address())
+    };
+    // Every allocation given back, on both cores, is the free list still
+    // being a free list. A lost race shows up here as a leak or as a
+    // refusal above -- both are counted, neither is inferred.
+    let live: usize = intrusive_pool_live_count(&contention_pool);
+    // Printed unconditionally, and deliberately not part of the view: the
+    // two cycle counts differ every boot (the cores run for different
+    // lengths by construction), so they are evidence for a human and the
+    // verdict below is what a test compares. A run where this says
+    // secondary=0 is a probe that measured nothing, which is exactly how
+    // the first version of it failed.
+    kernel_boot_log("pool contention counts: primary=");
+    uart_put_udec(primary);
+    kernel_boot_log(" secondary=");
+    uart_put_udec(secondary);
+    kernel_boot_log(" refused=");
+    uart_put_udec(refused);
+    kernel_boot_log(" live=");
+    uart_put_udec(live);
+    kernel_boot_log("\n");
+    return primary > 0 && secondary > 0 && refused == 0 && live == 0;
+}
+
+fn pool_contention_primary_cycles() -> usize !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(contention_primary_cycles_address())
+    };
+}
+
+fn pool_contention_secondary_cycles() -> usize !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(contention_secondary_cycles_address())
+    };
+}

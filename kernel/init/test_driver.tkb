@@ -359,6 +359,10 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     if (scheduled_process_record_missing_uses() != 0) {
         kernel_boot_log("process table: records MISSING uses=");
         uart_put_udec(scheduled_process_record_missing_uses());
+        kernel_boot_log(" first_slot=");
+        uart_put_hex(scheduled_process_missing_first_slot_value());
+        kernel_boot_log(" reason=");
+        uart_put_udec(scheduled_process_missing_reason_value());
         kernel_boot_log("\n");
     }
     if (page_allocator_double_free_count() == 0) {
