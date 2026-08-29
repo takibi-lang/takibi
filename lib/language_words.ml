@@ -10,7 +10,7 @@ let hard_keywords = [
   "void"; "extern"; "symbol"; "vector_table"; "exception_entry";
   "exception_restore"; "embed_file"; "struct"; "opaque"; "affine";
   "linear"; "view"; "variant"; "must_use"; "exists"; "borrow";
-  "sink"; "private"; "packed"; "be"; "io"; "enum"; "match";
+  "sink"; "private"; "packed"; "be"; "publish"; "io"; "enum"; "match";
   "align"; "sizeof"; "alignof"; "contains_stable_owner"; "use";
   "offsetof"; "static_assert"; "type"; "generic"; "bool"; "unsafe";
   "true"; "false"; "i8"; "i16"; "i32"; "i64"; "u8"; "u16";
@@ -46,6 +46,11 @@ let compiler_builtins = [
      unreachable. *)
   "atomic_load_acquire"; "atomic_store_release";
   "atomic_swap_acquire"; "atomic_fetch_add_relaxed";
+  (* GitHub issue #299: the publication record's four operations. Reserved
+     for the same reason -- and additionally because a user function named
+     publish_commit that did NOT commit would be the most misleading name
+     available in this language. *)
+  "publish_begin"; "publish_commit"; "publish_abandon"; "publish_copy";
 ]
 
 let predeclared_names = ["DMA_CACHE_LINE"]

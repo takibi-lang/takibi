@@ -2294,9 +2294,21 @@ let as_cond v =
    `Ast.type_expr`, already exhaustiveness-checked by OCaml since it's a
    compiler-internal type this file doesn't independently extend). *)
 let struct_name_of_type (ty : Ast.type_expr) : string option =
+  (* GitHub issue #299: a publish write token has no runtime existence of
+     its own -- it IS the pointer to the record it was minted from, so a
+     store through it is the instruction a store through `*Record` would
+     have been. The type is the entire mechanism, and it has already done
+     its work by the time anything here runs. Resolving the name once, at
+     the single place that turns a type into a struct name, is what keeps
+     field indexing (which must go through struct_llvm_field_index --
+     issue #362) from needing a second copy of this rule. *)
+  let resolve s = match Publish_registry.record_of_token s with
+    | Some record -> record
+    | None -> s
+  in
   match Ast.strip_singleton ty with
   | TypeNamed s | TypePtr (TypeNamed s) | TypeAlignedPtr (_, TypeNamed s)
-  | TypeRef (TypeNamed s) | TypeRefMut (TypeNamed s) -> Some s
+  | TypeRef (TypeNamed s) | TypeRefMut (TypeNamed s) -> Some (resolve s)
   | _ -> None
 
 (* Look up a struct field by name; returns (field_index, field_ast_type) *)
@@ -4336,6 +4348,172 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (* singlethread = false. The whole point is the other core. *)
            let r = build_atomicrmw op p v ord false "atomic.rmw" builder in
            (TypeUsize, r)
+       | _, _ ->
+           (* type_inf.ml has already rejected every other arity. *)
+           assert false)
+
+  | Call (("publish_begin" | "publish_commit" | "publish_abandon"
+          | "publish_copy") as name, args) ->
+      (* GitHub issue #299: the four operations of the publication record.
+         Each is a small fixed instruction sequence rather than a library
+         call, for the reason the record itself exists: the ORDER is the
+         protocol, and a sequence emitted here cannot be reordered by
+         someone editing .tkb.
+
+         The publication field is field 0 of the record, and its address is
+         therefore the record's own address -- but the offset still goes
+         through field_info, because the AST field order and the LLVM
+         member order are not the same thing when alignment padding is
+         materialised (issue #362), and hardcoding "it is at zero" would be
+         one more place that has to be right.
+
+         The acquire/release pair reuses the same inline asm the atomic
+         intrinsics lower to. This is deliberately not a call to those --
+         they require `unsafe` at the source level, and the entire point of
+         this surface is that its ordering argument was made once, here. *)
+      let triple = target_triple !the_module in
+      let is_aarch64 = starts_with triple "aarch64" in
+      let is_x86_64 = starts_with triple "x86_64" in
+      if not (is_aarch64 || is_x86_64) then
+        raise (Error (Printf.sprintf
+          "publication records are not implemented for target '%s'" triple));
+      let ity = usize_lltype () in
+      let load_acquire addr label =
+        let fty = function_type ity [| ity |] in
+        let asm = if is_aarch64 then "ldar $0, [$1]" else "movq ($1), $0" in
+        let inline = const_inline_asm fty asm "=r,r,~{memory}" true false in
+        build_call fty inline [| addr |] label builder
+      in
+      let store_release addr v =
+        let fty = function_type (void_type context) [| ity; ity |] in
+        let asm = if is_aarch64 then "stlr $1, [$0]" else "movq $1, ($0)" in
+        let inline = const_inline_asm fty asm "r,r,~{memory}" true false in
+        ignore (build_call fty inline [| addr; v |] "" builder)
+      in
+      (* The record pointer, and the address of its publication field. *)
+      let record_and_seq e =
+        let (ty, ptr) = gen_expr locals e in
+        let sname = match struct_name_of_type ty with
+          | Some s -> s
+          | None -> raise (Error (Printf.sprintf
+              "%s: argument is not a publish record pointer" name))
+        in
+        let seq_field = match Publish_registry.publication_field sname with
+          | Some f -> f
+          | None -> raise (Error (Printf.sprintf
+              "%s: '%s' is not a publish record" name sname))
+        in
+        let (idx, _) = field_info sname seq_field in
+        let llty = Hashtbl.find struct_lltypes sname in
+        let seq_ptr = build_in_bounds_gep llty ptr
+          [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
+          "publish.seq_ptr" builder in
+        (sname, ptr, build_ptrtoint seq_ptr ity "publish.seq_addr" builder)
+      in
+      (match name, args with
+       (* Two clears, in this order, and the order is load-bearing.
+          
+          The COMMIT WORD goes first, with a release, because until it is
+          zero a reader is entitled to accept the record -- and what
+          follows scribbles on the payload. Every reader from here until
+          the commit sees 0, which is this protocol's "nothing here", so a
+          record being written is indistinguishable from an empty slot
+          rather than from an old one that still looks plausible.
+
+          The PAYLOAD goes second, and it goes at all because a field the
+          writer does not set would otherwise keep the PREVIOUS record's
+          value and be published as this one's. That is not a hypothetical:
+          it is what linux_user/publish measured before this existed -- an
+          event reported a `detail` belonging to an event two writes
+          earlier, every field individually plausible and the record as a
+          whole never having happened. Which is the exact failure this
+          whole feature exists to make impossible, arriving through the one
+          gap the linear token does not close.
+
+          The token proves the payload is written only between the clear
+          and the commit. It does not prove the writer wrote all of it.
+          Zeroing makes a forgotten field READ as forgotten; making it a
+          compile error is GitHub issue #476. *)
+       | "publish_begin", [record_e] ->
+           let (sname, ptr, seq_addr) = record_and_seq record_e in
+           store_release seq_addr (const_int ity 0);
+           let llty = Hashtbl.find struct_lltypes sname in
+           List.iter (fun (fname, fty) ->
+             let (idx, _) = field_info sname fname in
+             let fptr = build_in_bounds_gep llty ptr
+               [| const_int (i32_type context) 0;
+                  const_int (i32_type context) idx |]
+               ("publish.clear." ^ fname) builder in
+             ignore (build_store (const_null (ltype_of_ast fty)) fptr builder))
+             (Publish_registry.payload_fields sname);
+           (TypePtr (TypeNamed (Publish_registry.token_name sname)), ptr)
+       (* The commit, and the only other store to the publication field. *)
+       | "publish_commit", [token_e; seq_e] ->
+           let (_, _, seq_addr) = record_and_seq token_e in
+           let (_, v) = gen_expr ~expected_ty:TypeUsize locals seq_e in
+           store_release seq_addr v;
+           (TypeVoid, const_null (i1_type context))
+       (* Nothing to emit: publish_begin already left the field at 0, which
+          IS the abandoned state. This exists so that a path which decides
+          not to publish can say so and discharge the obligation -- without
+          it, `if (...) { return; }` inside a write would be inexpressible
+          and callers would contort around the linear check. *)
+       | "publish_abandon", [_] ->
+           (TypeVoid, const_null (i1_type context))
+       | "publish_copy", [src_e; dst_e] ->
+           let (sname, src_ptr, src_seq_addr) = record_and_seq src_e in
+           let (_, dst_ptr) = gen_expr locals dst_e in
+           let (seq_idx, _) = field_info sname
+             (Option.get (Publish_registry.publication_field sname)) in
+           let llty = Hashtbl.find struct_lltypes sname in
+           let fn = block_parent (insertion_block builder) in
+           let result = build_alloca ity "publish.copy.result" builder in
+           ignore (build_store (const_int ity 0) result builder);
+           let copy_bb = append_block context "publish.copy" fn in
+           let recheck_bb = append_block context "publish.recheck" fn in
+           let ok_bb = append_block context "publish.ok" fn in
+           let done_bb = append_block context "publish.done" fn in
+           (* First read of the commit word. 0 means the slot was never
+              published, or is being written right now. *)
+           let first = load_acquire src_seq_addr "publish.first" in
+           let live = build_icmp Icmp.Ne first (const_int ity 0)
+             "publish.live" builder in
+           ignore (build_cond_br live copy_bb done_bb builder);
+           position_at_end copy_bb builder;
+           List.iter (fun (fname, _) ->
+             let (idx, fty) = field_info sname fname in
+             let src_f = build_in_bounds_gep llty src_ptr
+               [| const_int (i32_type context) 0;
+                  const_int (i32_type context) idx |]
+               ("publish.src." ^ fname) builder in
+             let dst_f = build_in_bounds_gep llty dst_ptr
+               [| const_int (i32_type context) 0;
+                  const_int (i32_type context) idx |]
+               ("publish.dst." ^ fname) builder in
+             let v = build_load (ltype_of_ast fty) src_f
+               ("publish.v." ^ fname) builder in
+             ignore (build_store v dst_f builder))
+             (Publish_registry.payload_fields sname);
+           ignore (build_br recheck_bb builder);
+           position_at_end recheck_bb builder;
+           (* THE STEP A HAND-WRITTEN READER LEAVES OUT. The copy above is
+              not atomic; a writer that wrapped onto this slot while it ran
+              leaves a mixture of two records that each look complete. The
+              only evidence of that is the commit word changing underneath,
+              so it is read again and the copy is thrown away if it did. *)
+           let second = load_acquire src_seq_addr "publish.second" in
+           let same = build_icmp Icmp.Eq first second "publish.same" builder in
+           ignore (build_cond_br same ok_bb done_bb builder);
+           position_at_end ok_bb builder;
+           let dst_seq = build_in_bounds_gep llty dst_ptr
+             [| const_int (i32_type context) 0;
+                const_int (i32_type context) seq_idx |]
+             "publish.dst.seq" builder in
+           ignore (build_store first dst_seq builder);
+           ignore (build_store first result builder);
+           ignore (build_br done_bb builder);
+           position_at_end done_bb builder;
+           (TypeUsize, build_load ity result "publish.copy.taken" builder)
        | _, _ ->
            (* type_inf.ml has already rejected every other arity. *)
            assert false)

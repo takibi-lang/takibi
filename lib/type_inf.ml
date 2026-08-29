@@ -1215,6 +1215,15 @@ type consume_sets = ResourceFlow.t
    union-at-join conservatism with no extra merge logic of its own. *)
 module TaintEnv = Takibi_core.Delta.Region_taint (PathSet)
 
+(* GitHub issue #299: a publish write token is a linear opaque handle
+   with no fields of its own, standing in for the record it was minted
+   from. Every field lookup routes through here so that one substitution
+   serves both the read and the write path. *)
+let publish_record_behind sname =
+  match Publish_registry.record_of_token sname with
+  | Some record -> record
+  | None -> sname
+
 let is_linear_ptr_ty t = match repr t with
   | TPtr (TStruct n) -> StringSet.mem n !linear_opaque_names
   | TIndexedStruct (n, _) ->
@@ -3338,6 +3347,103 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            raise (TypeError (e.loc, Printf.sprintf
              "%s expects two arguments: %s(addr, value)" fname fname)))
 
+  | Call (("publish_begin" | "publish_commit" | "publish_abandon"
+          | "publish_copy") as fname, args) ->
+      (* GitHub issue #299: the safe surface over #17's atomics that is not
+         a lock. A record is published by writing its payload and then
+         writing one designated field LAST, and read by loading that field,
+         copying, and loading it again.
+
+         The whole protocol is an ORDER, and an order is what a hand-
+         written version loses first -- swapping two adjacent stores
+         compiles, passes every single-threaded test, and publishes records
+         that were never finished. So the order is not a convention here:
+         the payload is unreachable except through a token that only
+         publish_begin produces and only publish_commit/publish_abandon
+         consume, which means a payload store can only be written between
+         the two.
+
+         These do NOT require `unsafe`, unlike the atomics they are made
+         of. That is the point of having them: the ordering argument is
+         made once, here, instead of at every call site. *)
+      let record_of_ptr arg what =
+        let t = infer_expr senv eenv tyenv fenv arg in
+        match repr t with
+        | TPtr inner ->
+            (match strip_singleton (repr inner) with
+             | TStruct name when Publish_registry.is_publish name -> name
+             | _ ->
+                 raise (TypeError (arg.loc, Printf.sprintf
+                   "%s expects %s, a pointer to a `struct publish` record; \
+                    '%s' is not one" fname what (to_string t))))
+        | _ ->
+            raise (TypeError (arg.loc, Printf.sprintf
+              "%s expects %s, a pointer to a `struct publish` record; '%s' \
+               is not a pointer" fname what (to_string t)))
+      in
+      let token_record arg =
+        let t = infer_expr senv eenv tyenv fenv arg in
+        match repr t with
+        | TPtr inner ->
+            (match strip_singleton (repr inner) with
+             | TStruct name ->
+                 (match Publish_registry.record_of_token name with
+                  | Some record -> record
+                  | None ->
+                      raise (TypeError (arg.loc, Printf.sprintf
+                        "%s expects the write token publish_begin returned; \
+                         '%s' is not one" fname (to_string t))))
+             | _ ->
+                 raise (TypeError (arg.loc, Printf.sprintf
+                   "%s expects the write token publish_begin returned; '%s' \
+                    is not one" fname (to_string t))))
+        | _ ->
+            raise (TypeError (arg.loc, Printf.sprintf
+              "%s expects the write token publish_begin returned; '%s' is \
+               not one" fname (to_string t)))
+      in
+      (match fname, args with
+       | "publish_begin", [record] ->
+           let name = record_of_ptr record "one argument" in
+           TPtr (TStruct (Publish_registry.token_name name))
+       | "publish_begin", _ ->
+           raise (TypeError (e.loc,
+             "publish_begin expects one argument: publish_begin(&record)"))
+       | "publish_commit", [token; seq] ->
+           let _ = token_record token in
+           let st = infer_expr senv eenv tyenv fenv seq in
+           unify_at seq.loc st TUsize;
+           TVoid
+       | "publish_commit", _ ->
+           raise (TypeError (e.loc,
+             "publish_commit expects two arguments: \
+              publish_commit(token, sequence)"))
+       | "publish_abandon", [token] ->
+           let _ = token_record token in TVoid
+       | "publish_abandon", _ ->
+           raise (TypeError (e.loc,
+             "publish_abandon expects one argument: publish_abandon(token)"))
+       (* The reader. Returns the sequence the copy is consistent at, or 0
+          for "nothing valid here" -- which is already this protocol's
+          unpublished value, since publish_begin writes it and a committed
+          sequence is never 0. `out` is left untouched unless the answer is
+          nonzero, so ignoring the result reads whatever `out` already held
+          rather than half a record. *)
+       | "publish_copy", [src; dst] ->
+           let src_name = record_of_ptr src "a source" in
+           let dst_name = record_of_ptr dst "a destination" in
+           if src_name <> dst_name then
+             raise (TypeError (e.loc, Printf.sprintf
+               "publish_copy copies '%s' into '%s': the source and \
+                destination are the same record type, because the copy is \
+                the record's own layout" src_name dst_name));
+           TUsize
+       | "publish_copy", _ ->
+           raise (TypeError (e.loc,
+             "publish_copy expects two arguments: \
+              publish_copy(&source, &destination)"))
+       | _, _ -> assert false)
+
   | Call (("smc4" | "hvc4") as fname, args) ->
       (* GitHub issue #226: the raw `smc #0` trap, exposed as a plain
          4-in/1-out hardware primitive (the real SMCCC x0-x3 in / x0 out
@@ -3887,6 +3993,38 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    Printf.sprintf "field assignment '.%s' on non-struct type '%s'"
                      fname (to_string bt)))
            in
+           (* GitHub issue #299: the two halves of the publication rule,
+              in the one place a struct field is stored to.
+
+              Through a live write token, `w.f = v` is an ordinary store
+              into the record -- except to the publication field, which
+              belongs to publish_begin and publish_commit and to nothing
+              else. That field is the ordering: it is written zero first
+              and the sequence last, and a third writer anywhere in
+              between is what makes a torn record look published.
+
+              Without a token there is no store at all. This is the rule
+              that makes the write ORDER checkable: a payload store can
+              only happen between a begin and a commit, because outside
+              that interval there is no value in scope to spell it
+              through. *)
+           let sname =
+             match Publish_registry.record_of_token sname with
+             | Some record ->
+                 (match Publish_registry.publication_field record with
+                  | Some seq when seq = fname ->
+                      raise (TypeError (e.loc, Printf.sprintf
+                        "publication field '%s.%s' cannot be assigned: it is                          cleared by publish_begin and written by                          publish_commit, and those two stores ARE the commit                          protocol. A third store to it publishes a record                          that was never finished"
+                        record fname))
+                  | _ -> ());
+                 record
+             | None ->
+                 if Publish_registry.is_publish sname then
+                   raise (TypeError (e.loc, Printf.sprintf
+                     "field '%s.%s' cannot be assigned directly: a publish                       record's payload is written through the linear token                       publish_begin returns, so that every store to it                       happens between the clear and the commit"
+                     sname fname));
+                 sname
+           in
            let fields = match StringMap.find_opt sname senv with
              | Some (fs, _, _) -> fs
              | None ->
@@ -4060,6 +4198,11 @@ and infer_field_access ~decay senv eenv tyenv fenv (loc : Ast.loc)
               Printf.sprintf "field access '.%s' on non-struct type '%s'"
                 fname (to_string bt)))
       in
+      (* GitHub issue #299: a write token is an opaque handle with no
+         fields of its own; `w.cpu` means the field of the RECORD it was
+         minted from. Reads through it are ordinary -- what the token
+         gates is stores, which is what the protocol is about. *)
+      let sname = publish_record_behind sname in
       let fields = match StringMap.find_opt sname senv with
         | Some (fs, _, _) -> fs
         | None ->
@@ -8378,6 +8521,28 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                require_available e.loc moved p;
                if consume then mv_consume p moved else moved
            | _ -> check_expr taints moved false base_expr)
+      (* GitHub issue #299: the write token's obligation, in the pass that
+         tracks obligations. publish_begin mints a linear value and the two
+         terminators consume it, but neither is a declared function, so the
+         call_params/call_returns tables below know nothing about them --
+         the same reason stable_replace is special-cased right here.
+
+         What this buys is the half of the protocol a type alone cannot
+         state: a record whose payload has been written but whose commit
+         has not is a live obligation, so every path out of the function
+         has to either publish it or abandon it. Forgetting is a compile
+         error rather than a slot that reads as torn forever. *)
+      | Ast.Call (("publish_commit" | "publish_abandon"), (token :: rest)) ->
+          let moved = check_expr taints moved true token in
+          List.fold_left (fun m a -> check_expr taints m false a) moved rest
+      | Ast.Call ("publish_begin", args) ->
+          if not consume then
+            raise (TypeError (e.loc,
+              "linear result of 'publish_begin' must be moved into a \
+               binding: it is the record's half-written state, and \
+               dropping it leaves a record that is never published and \
+               never abandoned"));
+          List.fold_left (fun m a -> check_expr taints m false a) moved args
       | Ast.Call ("stable_replace", [guard; lock; field; replacement]) ->
           if not consume then
             raise (TypeError (e.loc,

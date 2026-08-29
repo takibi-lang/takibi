@@ -185,7 +185,7 @@ let promote_be_field_type = function
 %token <string> IDENT
 %token <string> STRING
 %token <string> BS_STRING
-%token FN INLINE NOINLINE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE IO ENUM MATCH ALIGN SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
+%token FN INLINE NOINLINE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH IO ENUM MATCH ALIGN SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
 %token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
@@ -352,6 +352,7 @@ item:
         List.filter_map (fun (fname, _, is_priv) ->
           if is_priv then Some fname else None) $3 in
       Type_layout.finish_struct name fields is_packed align_opt;
+      Publish_registry.finish name fields;
       StructDef (name, fields, is_packed, align_opt, private_fields, $symbolstartpos) }
   | owned_struct_intro LBRACE struct_fields RBRACE
     { let (name, kind, static_params, is_private) = $1 in
@@ -410,6 +411,20 @@ struct_intro:
   | STRUCT IDENT
     { Type_layout.begin_struct $2;
       ($2, false, None, false) }
+  (* GitHub issue #299: a fixed-layout record with one atomic commit
+     publication field. Deliberately NOT combinable with `packed be` --
+     a publication record is read by this machine's own debugger, not
+     put on a wire, so there is no byte order to declare. Its layout is
+     the ordinary one, which Type_layout already owns and already
+     cross-checks against the code generator (issue #362). *)
+  | STRUCT PUBLISH IDENT
+    { Type_layout.begin_struct $3;
+      Publish_registry.mark $3;
+      ($3, false, None, false) }
+  | STRUCT PUBLISH IDENT ALIGN LPAREN alignment_value RPAREN
+    { Type_layout.begin_struct $3;
+      Publish_registry.mark $3;
+      ($3, false, Some $6, false) }
   | STRUCT PACKED IDENT
     { Type_layout.begin_struct $3;
       ($3, true, None, false) }

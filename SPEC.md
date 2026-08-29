@@ -486,6 +486,7 @@ struct Name[n: usize] { field: type; ... }   // ordinary struct carrying erased 
 struct packed Name align(N) { ... }          // both
 struct packed be Name { field: u16; ... }    // packed + auto-promote u16/u32 fields to u16be/u32be
 struct packed be Name align(N) { ... }       // packed + be + align, all three
+struct publish Name { seq: usize; ... }      // fixed-layout record with an atomic commit field (see "Publication Records")
 opaque struct Name;                          // incomplete type, pointer-only
 affine opaque struct Name;                   // opaque + ownership-handle semantics, see below
 affine struct Name[n: usize] { field: T; }   // indexed runtime owner
@@ -2368,8 +2369,8 @@ emitted instruction agree about it.
 does. An atomic's correctness is not a property of the operation; it is a
 property of the ordering argument relating it to every other access, and
 no check in this compiler can see that argument. Ordinary code is meant to
-use the lock built out of these, or a fixed-layout record with atomic
-commit publication -- not these directly. Reaching for one is exactly the
+use the lock built out of these, or the publication record described
+below -- not these directly. Reaching for one is exactly the
 moment `unsafe` exists to mark.
 
 The address is a plain `usize`, not a typed pointer, for the same reason:
@@ -2413,6 +2414,95 @@ a hand-written `ldaxr`/`stlxr` loop would cost on the a76.
 
 Any other target rejects all four at code generation, by name -- unlike
 the intrinsics above, which reach the assembler and fail on the mnemonic.
+
+### Publication Records (GitHub issue #299)
+
+```
+struct publish Event {
+    seq: usize;      // the publication field
+    cpu: usize;
+    code: usize;
+}
+```
+
+The second safe surface over the atomics above, beside the lock. A record
+is published by writing its payload and then writing one designated field
+LAST; it is read by loading that field, copying, and loading it again.
+
+**The protocol is an ORDER, and an order is what a hand-written version
+loses first.** Swapping two adjacent stores compiles, passes every
+single-threaded test, and publishes records that were never finished. So
+the order is not left to a comment here:
+
+```
+let w = publish_begin(&records[slot]);   // linear. clears, then hands over
+w.cpu = cpu;
+w.code = code;
+publish_commit(w, sequence);             // consumes w, release-stores it
+```
+
+- **The first field is the publication field**, positionally, and it must
+  be `usize`. It is also the field at offset 0, which is the address the
+  atomic takes -- a separate marker would let those two drift apart and
+  then need a check that they had not.
+- **Payload fields are integers, `bool`, and enums.** No pointers, no
+  aggregates, no arrays. The record is copied by value and decoded from
+  its emitted layout by a debugger outside this program; a pointer names
+  an address space that may not exist by the time anyone reads it.
+- **`publish_begin` returns a LINEAR token.** A record left in flight is
+  a compile error on every path that could leave it that way, not a slot
+  that stays torn until something wraps over it.
+- **`w.f = v` is the only way to write a payload field.** An ordinary
+  `records[slot].cpu = 1` is rejected: no live token. This is what makes
+  the write order checkable -- outside a begin/commit interval there is no
+  value in scope to spell a payload store through.
+- **`w.seq = v` is rejected outright.** `publish_begin` and
+  `publish_commit` are the only two stores to the publication field, and
+  those two stores are the commit protocol.
+- **`publish_abandon(w)`** is the second consumer, for a path that decides
+  not to publish. Without it, `if (...) { return; }` inside a write is
+  inexpressible. It leaves the field at 0, which readers already skip.
+
+**`publish_begin` clears the commit word first, with a release, then
+scrubs the payload.** The order is load-bearing: until the field is zero a
+reader may still accept the record, and what follows scribbles on it. The
+payload is scrubbed at all because a field the writer does not set would
+otherwise keep the PREVIOUS record's value and be published as this one's
+-- `linux_user/publish` measured exactly that before the scrub existed.
+The token proves the payload is written only between the clear and the
+commit; it does not prove the writer wrote all of it, and making THAT a
+compile error is GitHub issue #476.
+
+The reader:
+
+```
+let taken: usize = publish_copy(&records[slot], &out);
+```
+
+Acquire-load the commit word, copy the payload, acquire-load it again,
+compare. Returns the sequence the copy is consistent at, or `0` for
+"nothing valid here" -- already this protocol's unpublished value, since a
+committed sequence is never 0. `out` is written only on success, so
+ignoring the result reads whatever `out` held rather than half a record.
+
+**The re-check after the copy is the part being bought.** The copy is not
+atomic; a writer that wrapped onto the slot while it ran leaves a mixture
+of two records that each look complete, and the only evidence is the
+commit word changing underneath. It is the step a hand-written reader
+omits, and its absence is invisible in review because the code looks
+finished without it.
+
+**Stated limit.** Nothing forces the caller to branch on the returned
+sequence. `must_use` exists only on variants, and the variant that would
+carry the snapshot has to be generic in the record type, which this
+language does not have (generic structs and generic functions do; generic
+variants do not).
+
+**These do not require `unsafe`**, unlike the atomics they are built from.
+That is the point of having them: the ordering argument is made once, in
+the compiler, instead of at every call site. What is NOT here, and
+deliberately: a cross-CPU total order. Publication makes an individual
+record readable; per-CPU rings stay independently written.
 
 ## Function Pointers, extern fn, and Overloading
 

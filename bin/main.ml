@@ -157,6 +157,7 @@ let () =
   (try
     Const_env.reset ();
     Type_layout.reset ();
+    Publish_registry.reset ();
     Generic_scope.reset ();
     Ast.reset_precedence_errors ();
     (* GitHub issue #55: every file named on the command line is an entry
@@ -203,6 +204,12 @@ let () =
        only plain, already-monomorphic code, exactly like today. A no-op
        (returns prog unchanged) for any program with no generic struct
        templates at all. *)
+    (* GitHub issue #299: validate every `struct publish` declaration and
+       synthesise the linear write token that gates its payload stores.
+       Before monomorphization so that everything downstream sees only
+       ordinary StructDef/OpaqueStructDef declarations. *)
+    let prog = Publish_record.run prog in
+
     let prog = Monomorphize.run ~explain_inference:!explain_inference prog in
 
     (* GitHub issue #358: the parser cannot disambiguate `Name[args]`

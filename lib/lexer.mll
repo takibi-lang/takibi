@@ -39,6 +39,7 @@ let hard_keyword_token = function
   | "linear" -> LINEAR | "view" -> VIEW | "variant" -> VARIANT
   | "must_use" -> MUST_USE | "exists" -> EXISTS | "borrow" -> BORROW
   | "sink" -> SINK | "private" -> PRIVATE | "packed" -> PACKED | "be" -> BE
+  | "publish" -> PUBLISH
   | "io" -> IO | "enum" -> ENUM | "match" -> MATCH | "align" -> ALIGN
   | "sizeof" -> SIZEOF | "alignof" -> ALIGNOF
   | "contains_stable_owner" -> CONTAINS_STABLE_OWNER | "use" -> USE

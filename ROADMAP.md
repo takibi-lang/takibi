@@ -275,9 +275,15 @@ test-driver special case.
 - **#447** -- the secondary core enters an idle loop instead of parking, with
   its own GIC CPU interface and timer. Both are per-core banked registers that
   core 0's one-time initialization does not reach.
-- **#446** -- `mmu_tlb_invalidate_all()` becomes the broadcast `tlbi vmalle1is`.
-  This one has no dependency and is correct on one core today; it can land at
-  any time.
+- **#446 -- DONE 2026-08-29, closed.** `mmu_tlb_invalidate_all()` is the
+  broadcast `tlbi vmalle1is`, verified on QEMU and RPi5. It landed ahead of
+  the rest of this phase because it had no dependency of its own. What it
+  bought beyond the instruction: `kernel_mmu_activate` keeps the LOCAL form,
+  so the tree now holds the two whole-TLB invalidates that want OPPOSITE
+  answers, and the difference is checked on emitted instructions
+  (`check_kernel_asm_invariants.py`) in both directions rather than
+  described in a comment. The two mnemonics differ by two characters, both
+  are correct on one core, and the wrong one fails silently on two.
 - **#261** -- the shared-structure locking design: which structure gets which
   lock, in what order, and what PTE mutation looks like against a concurrent
   page-table walk. Two of its stated premises are stale and its inventory

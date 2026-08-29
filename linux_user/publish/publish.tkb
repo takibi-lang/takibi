@@ -1,0 +1,107 @@
+// GitHub issue #299: the publication record, run where a test costs
+// seconds instead of a QEMU boot.
+//
+// Single-threaded on purpose, and the limit of that is worth stating in
+// the file rather than discovering later: one thread cannot demonstrate
+// that the release store is ordered against another core's acquire load.
+// What it CAN demonstrate is every state the protocol distinguishes,
+// because each is reachable by choosing when to read -- before a record
+// exists, while one is in flight, after it commits, and after a writer
+// abandoned it.
+//
+// The torn-copy case is deliberately NOT here. It needs the slot to be
+// rewritten BETWEEN publish_copy's two loads of the commit word, and there
+// is no "between" with one thread -- the copy is one operation from this
+// side. What proves that half is a check on the emitted instructions
+// (test/test_takibi.ml's "publish_copy re-reads the commit word after the
+// copy"), because the failure mode is a MISSING second load, and a missing
+// instruction is exactly what a runtime test cannot see.
+
+struct publish Event {
+    seq: usize;
+    cpu: usize;
+    code: usize;
+    detail: usize;
+}
+
+let mut slot: Event;
+let mut snapshot: Event;
+
+fn write_event(cpu: usize, code: usize, detail: usize, sequence: usize) {
+    let w = publish_begin(&slot);
+    w.cpu = cpu;
+    w.code = code;
+    w.detail = detail;
+    publish_commit(w, sequence);
+}
+
+// The abandon path. A writer that decides mid-record not to publish still
+// has to discharge the token, and what it leaves behind is the same
+// unpublished state publish_begin created -- not a half-record.
+fn write_or_abandon(cpu: usize, code: usize, sequence: usize, keep: bool) {
+    let w = publish_begin(&slot);
+    w.cpu = cpu;
+    w.code = code;
+    if (keep) {
+        publish_commit(w, sequence);
+    } else {
+        publish_abandon(w);
+    }
+}
+
+fn report(taken: usize) {
+    uart_puts(" taken=");
+    uart_put_udec(taken);
+    uart_puts(" seq=");
+    uart_put_udec(snapshot.seq);
+    uart_puts(" cpu=");
+    uart_put_udec(snapshot.cpu);
+    uart_puts(" code=");
+    uart_put_udec(snapshot.code);
+    uart_puts(" detail=");
+    uart_put_udec(snapshot.detail);
+    uart_puts("\r\n");
+}
+
+fn app_main() {
+    // Never written. 0 is the protocol's "nothing here", so the reader
+    // refuses it and leaves the destination alone.
+    uart_puts("empty");
+    report(publish_copy(&slot, &snapshot));
+
+    write_event(3, 77, 1000, 5);
+    uart_puts("committed");
+    report(publish_copy(&slot, &snapshot));
+
+    // In flight: the payload is stored and the commit is not. A reader has
+    // to see this as nothing rather than as the record that was there
+    // before -- which is why publish_begin CLEARS the field first instead
+    // of leaving the old sequence standing until the new one lands on it.
+    // The snapshot below is the previous one, untouched, because a refused
+    // copy writes nothing.
+    let w = publish_begin(&slot);
+    w.cpu = 9;
+    w.code = 99;
+    w.detail = 9999;
+    uart_puts("in-flight");
+    report(publish_copy(&slot, &snapshot));
+    publish_commit(w, 6);
+    uart_puts("after commit");
+    report(publish_copy(&slot, &snapshot));
+
+    write_or_abandon(4, 44, 7, false);
+    uart_puts("abandoned");
+    report(publish_copy(&slot, &snapshot));
+
+    // write_or_abandon never touches `detail`. Before publish_begin
+    // scrubbed the payload this line reported detail=9999 -- a value
+    // belonging to an event two writes earlier, published as this one's,
+    // every field individually plausible and the record as a whole never
+    // having happened. It reads 0 now: a field the writer forgot reads as
+    // forgotten. The linear token proves the payload is written only
+    // between the clear and the commit; it does not prove the writer wrote
+    // ALL of it, and GitHub issue #476 holds making that a compile error.
+    write_or_abandon(5, 55, 8, true);
+    uart_puts("kept, detail never written");
+    report(publish_copy(&slot, &snapshot));
+}

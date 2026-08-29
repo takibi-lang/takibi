@@ -1,0 +1,6 @@
+empty taken=0 seq=0 cpu=0 code=0 detail=0
+committed taken=5 seq=5 cpu=3 code=77 detail=1000
+in-flight taken=0 seq=5 cpu=3 code=77 detail=1000
+after commit taken=6 seq=6 cpu=9 code=99 detail=9999
+abandoned taken=0 seq=6 cpu=9 code=99 detail=9999
+kept, detail never written taken=8 seq=8 cpu=5 code=55 detail=0

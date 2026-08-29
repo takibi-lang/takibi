@@ -31,17 +31,20 @@ let () =
 let parse src =
   Const_env.reset ();
   Type_layout.reset ();
+  Publish_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   let lexbuf = Lexing.from_string src in
   Parser.program Lexer.read lexbuf
 
-(* Mirrors bin/main.ml's pipeline order: monomorphize, then resolve the
-   parser's ambiguous declared-type spellings before type inference. Both
-   passes are no-ops when the program does not use their feature. *)
+(* Mirrors bin/main.ml's pipeline order: validate publish records and mint
+   their write tokens, monomorphize, then resolve the parser's ambiguous
+   declared-type spellings before type inference. All three passes are
+   no-ops when the program does not use their feature. *)
 let infer src =
   Type_inf.infer_program
-    (Declared_type_resolver.run (Monomorphize.run (parse src)))
+    (Declared_type_resolver.run
+       (Monomorphize.run (Publish_record.run (parse src))))
 
 (* Parses each (filename, src) pair as if it were a distinct source file
    (Lexing.set_filename, matching bin/main.ml's own parse_file) and
@@ -53,6 +56,7 @@ let infer src =
 let infer_files files =
   Const_env.reset ();
   Type_layout.reset ();
+  Publish_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   let prog = List.concat_map (fun (filename, src) ->
@@ -60,7 +64,9 @@ let infer_files files =
     Lexing.set_filename lexbuf filename;
     Parser.program Lexer.read lexbuf
   ) files in
-  Type_inf.infer_program (Declared_type_resolver.run (Monomorphize.run prog))
+  Type_inf.infer_program
+    (Declared_type_resolver.run
+       (Monomorphize.run (Publish_record.run prog)))
 
 (* Runs the full pipeline through LLVM codegen (no object-file emission).
    A test that did not select a target gets the project's primary AArch64
@@ -73,7 +79,9 @@ let infer_files files =
 let gen_codegen src =
   if Option.is_none !Llvm_gen.target_data then
     ignore (Llvm_gen.setup_target ~triple:"aarch64-none-elf" ());
-  let prog = Declared_type_resolver.run (Monomorphize.run (parse src)) in
+  let prog =
+    Declared_type_resolver.run
+      (Monomorphize.run (Publish_record.run (parse src))) in
   let prog_types = Type_inf.infer_program prog in
   Llvm_gen.gen_program ~prog_types prog
 
@@ -12690,6 +12698,222 @@ let codegen_tests = [
            (Printf.sprintf "fn %s() {}" name) ())
          ["atomic_load_acquire"; "atomic_store_release";
           "atomic_swap_acquire"; "atomic_fetch_add_relaxed"]);
+
+  (* ---- GitHub issue #299: fixed-layout records with atomic commit
+     publication. The record whose declaration these reuse is the shape
+     kernel/lib/diagnostic_ring.tkb writes by hand today. *)
+  Alcotest.test_case
+    "issue #299: a publish record's payload is written through the token"
+    `Quick
+    (fun () ->
+       expect_ok
+         "struct publish Ev { seq: usize; cpu: usize; code: usize; }
+          let mut slot: Ev;
+          let mut out: Ev;
+          fn issue299_write(cpu: usize, code: usize, n: usize) {
+            let w = publish_begin(&slot);
+            w.cpu = cpu;
+            w.code = code;
+            publish_commit(w, n);
+          }
+          fn issue299_read() -> usize {
+            return publish_copy(&slot, &out);
+          }" ());
+
+  Alcotest.test_case
+    "issue #299: a store that bypasses the token is rejected"
+    `Quick
+    (fun () ->
+       (* The rule that makes the write ORDER checkable: outside a
+          begin/commit interval there is no value in scope to spell a
+          payload store through. *)
+       expect_type_error "cannot be assigned directly"
+         "struct publish Ev { seq: usize; cpu: usize; }
+          let mut slot: Ev;
+          fn issue299_bypass() { slot.cpu = 1; }" ();
+       (* And the publication field is not writable even WITH the token:
+          those two stores are the commit protocol, and a third one
+          publishes a record that was never finished. *)
+       expect_type_error "cannot be assigned"
+         "struct publish Ev { seq: usize; cpu: usize; }
+          let mut slot: Ev;
+          fn issue299_forge() {
+            let w = publish_begin(&slot);
+            w.seq = 9;
+            publish_commit(w, 1);
+          }" ());
+
+  Alcotest.test_case
+    "issue #299: an unfinished record is a linear obligation"
+    `Quick
+    (fun () ->
+       (* The half of the protocol a type alone cannot state. A record
+          whose payload is written and whose commit is not stays torn
+          until something wraps over it; making the token linear turns
+          forgetting into a compile error instead. *)
+       expect_type_error "is never consumed"
+         "struct publish Ev { seq: usize; cpu: usize; }
+          let mut slot: Ev;
+          fn issue299_forgotten() {
+            let w = publish_begin(&slot);
+            w.cpu = 1;
+          }" ();
+       (* Every path, not just the common one. *)
+       expect_type_error "consumed on some paths but not on every path"
+         "struct publish Ev { seq: usize; cpu: usize; }
+          let mut slot: Ev;
+          fn issue299_one_path(keep: bool) {
+            let w = publish_begin(&slot);
+            w.cpu = 1;
+            if (keep) { publish_commit(w, 1); }
+          }" ();
+       (* publish_abandon is what makes the early-exit path expressible
+          at all, rather than pushing callers into contortions. *)
+       expect_ok
+         "struct publish Ev { seq: usize; cpu: usize; }
+          let mut slot: Ev;
+          fn issue299_abandon(keep: bool) {
+            let w = publish_begin(&slot);
+            w.cpu = 1;
+            if (keep) { publish_commit(w, 1); } else { publish_abandon(w); }
+          }" ());
+
+  Alcotest.test_case
+    "issue #299: the declaration rules are checked where the record is written"
+    `Quick
+    (fun () ->
+       expect_type_error "must be `usize`"
+         "struct publish Ev { seq: u32; cpu: usize; }" ();
+       expect_type_error "is a pointer"
+         "struct publish Ev { seq: usize; p: *usize; }" ();
+       expect_type_error "is an array"
+         "struct publish Ev { seq: usize; a: [usize; 4]; }" ();
+       expect_type_error "publishes nothing"
+         "struct publish Ev { seq: usize; }" ();
+       (* An enum payload is fine: it decodes from the emitted layout the
+          same way an integer does. *)
+       expect_ok
+         "enum Kind: usize { Wake = 1; Break = 2; }
+          struct publish Ev { seq: usize; kind: Kind; }
+          let mut slot: Ev;
+          fn issue299_enum() {
+            let w = publish_begin(&slot);
+            w.kind = Kind::Wake;
+            publish_commit(w, 1);
+          }" ());
+
+  Alcotest.test_case
+    "issue #299: the operations reject wrong arities and wrong arguments"
+    `Quick
+    (fun () ->
+       expect_type_error "is not one"
+         "struct publish Ev { seq: usize; cpu: usize; }
+          let mut slot: Ev;
+          fn issue299_not_a_token() { publish_commit(&slot, 1); }" ();
+       expect_type_error "not a pointer"
+         "fn issue299_not_a_record(v: usize) { let w = publish_begin(v); }" ();
+       expect_type_error "is not one"
+         "struct Plain { seq: usize; cpu: usize; }
+          let mut slot: Plain;
+          fn issue299_plain_struct() { let w = publish_begin(&slot); }" ();
+       expect_type_error "expects two arguments"
+         "struct publish Ev { seq: usize; cpu: usize; }
+          let mut slot: Ev;
+          fn issue299_arity() {
+            let w = publish_begin(&slot);
+            publish_commit(w);
+          }" ());
+
+  (* The step a hand-written reader leaves out, checked on the emitted
+     instructions because the failure mode is a MISSING one. The copy is
+     not atomic; a writer that wrapped onto the slot while it ran leaves a
+     mixture of two records that each look complete, and the only evidence
+     is the commit word changing underneath. A runtime test cannot see an
+     instruction that is not there, and one thread cannot reach the state
+     it would guard -- see linux_user/publish's own header. *)
+  Alcotest.test_case
+    "issue #299: publish_copy re-reads the commit word after the copy"
+    `Quick
+    (fun () ->
+       with_codegen_target "aarch64-none-elf" (fun () ->
+         expect_codegen_ok
+           "struct publish Ev { seq: usize; cpu: usize; code: usize; }
+            let mut slot: Ev;
+            let mut out: Ev;
+            fn issue299_copy() -> usize {
+              return publish_copy(&slot, &out);
+            }" ();
+         let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+         let count_substring hay needle =
+           let n = String.length needle in
+           let rec go i acc =
+             if i + n > String.length hay then acc
+             else if String.sub hay i n = needle then go (i + 1) (acc + 1)
+             else go (i + 1) acc
+           in go 0 0
+         in
+         Alcotest.(check int) "the commit word is acquire-loaded TWICE"
+           2 (count_substring ir "ldar $0, [$1]")));
+
+  Alcotest.test_case
+    "issue #299: publish_begin clears the commit word before the payload"
+    `Quick
+    (fun () ->
+       (* Order, not presence. The commit word goes first with a release so
+          that no reader accepts the record while the payload scrub that
+          follows is scribbling on it; the payload goes at all so that a
+          field the writer forgets reads as forgotten rather than carrying
+          the previous record's value into this one. linux_user/publish
+          measured exactly that leak before the scrub existed. *)
+       with_codegen_target "aarch64-none-elf" (fun () ->
+         expect_codegen_ok
+           "struct publish Ev { seq: usize; cpu: usize; code: usize; }
+            let mut slot: Ev;
+            fn issue299_begin() {
+              let w = publish_begin(&slot);
+              w.cpu = 1;
+              publish_commit(w, 2);
+            }" ();
+         let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+         (* Both GEPs constant-fold (the record is a global), so there are
+            no instruction names to match on -- the shape is the evidence. *)
+         let index_of needle =
+           let n = String.length needle in
+           let rec go i =
+             if i + n > String.length ir then -1
+             else if String.sub ir i n = needle then i
+             else go (i + 1)
+           in go 0
+         in
+         let count needle =
+           let n = String.length needle in
+           let rec go i acc =
+             if i + n > String.length ir then acc
+             else if String.sub ir i n = needle then go (i + 1) (acc + 1)
+             else go (i + 1) acc
+           in go 0 0
+         in
+         let release = index_of "stlr $1, [$0]" in
+         let first_scrub = index_of "store i64 0, ptr getelementptr" in
+         Alcotest.(check bool) "the commit word is released, not plain-stored"
+           true (release >= 0);
+         (* cpu and code, neither of which publish_begin's caller has
+            written yet. *)
+         Alcotest.(check int) "every payload field is scrubbed"
+           2 (count "store i64 0, ptr getelementptr");
+         Alcotest.(check bool)
+           "the commit word is cleared BEFORE the payload scrub"
+           true (release >= 0 && first_scrub >= 0 && release < first_scrub)));
+
+  Alcotest.test_case
+    "issue #299: publication builtin names cannot be redefined"
+    `Quick
+    (fun () ->
+       List.iter (fun name ->
+         expect_type_error "compiler builtin"
+           (Printf.sprintf "fn %s() {}" name) ())
+         ["publish_begin"; "publish_commit"; "publish_abandon";
+          "publish_copy"]);
 
   Alcotest.test_case
     "issue #226: system-register/barrier/TLBI builtin names cannot be redefined"
