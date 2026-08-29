@@ -25,13 +25,6 @@ fn uart_putc(c: u8) !{logs, unsafe} {
     *dr = c;
 }
 
-fn uart_puts(s: *u8) {
-    while (*s != 0) {
-        uart_putc(*s);
-        s = s + 1;
-    }
-}
-
 fn uart_rx_discard(discarded: u8) !{unsafe} {
 }
 

@@ -251,6 +251,19 @@ fn uart_put_hex(value: usize) {
     uart_put_hex_digits(value);
 }
 
+// Same reasoning as uart_put_hex above, for strings: uart_putc IS the
+// device and stays per-platform, but walking a NUL-terminated string is
+// not, and this body was byte-identical in kernel/platform/qemu/uart.tkb
+// and kernel/platform/rpi5/uart.tkb. That is the shape issue #470 was
+// made of -- two copies of platform-independent code in platform files,
+// free to drift, with only one of them read on any given boot.
+fn uart_puts(s: *u8) {
+    while (*s != 0) {
+        uart_putc(*s);
+        s = s + 1;
+    }
+}
+
 fn kernel_boot_log(message: *u8) {
     kernel_log_begin_fragment();
     uart_puts(message);
