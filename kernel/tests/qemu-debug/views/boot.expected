@@ -1,3 +1,3 @@
 takibi kernel: EL1
 memory: source=dtb base_bytes=1073741824 detected_mib=1024 regions=1 reservations=0 allocator_pages=261256
-uart: source=dtb base_bytes=150994944
+uart: source=dtb base_bytes=150994944 intid=33

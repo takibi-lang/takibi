@@ -94,12 +94,14 @@ class Builder:
 
 def main():
     valid_modes = ("--invalid-memory", "--invalid-reservation",
-                   "--invalid-tree-reservation", "--invalid-device")
+                   "--invalid-tree-reservation", "--invalid-device",
+                   "--invalid-interrupt", "--missing-interrupt")
     if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and
                                      sys.argv[2] not in valid_modes):
         print("usage: make_fdt_fixture.py OUTPUT "
               "[--invalid-memory|--invalid-reservation|"
-              "--invalid-tree-reservation|--invalid-device]",
+              "--invalid-tree-reservation|--invalid-device|"
+              "--invalid-interrupt|--missing-interrupt]",
               file=sys.stderr)
         return 2
     mode = sys.argv[2] if len(sys.argv) == 3 else ""
@@ -107,6 +109,7 @@ def main():
     b.begin("")
     b.prop("#address-cells", b.cells(2))
     b.prop("#size-cells", b.cells(2))
+    b.prop("interrupt-parent", b.cells(0x8003))
 
     # QEMU virt's actual console shape: a root child, a compatible list, and
     # a 64-bit root reg tuple. A disabled malformed match comes first to prove
@@ -123,8 +126,24 @@ def main():
         b.end()
     b.begin("pl011@9000000")
     b.prop("reg", b.cells(0, 0x09000000, 0, 0x1000))
+    if mode == "--invalid-interrupt":
+        b.prop("interrupts", b.cells(0, 1, 0))
+    elif mode != "--missing-interrupt":
+        b.prop("interrupts", b.cells(0, 1, 4))
     b.prop("compatible", b"arm,pl011\0arm,primecell\0")
     b.prop("status", b"okay\0")
+    b.end()
+
+    # QEMU virt's GICv2 interrupt parent. Keep its properties after devices
+    # in the structure and in a different order from the references above;
+    # phandles are links, not a declaration-before-use mechanism.
+    b.begin("intc@8000000")
+    b.prop("#interrupt-cells", b.cells(3))
+    b.prop("interrupt-controller", b"")
+    b.prop("phandle", b.cells(0x8003))
+    b.prop("compatible", b"arm,cortex-a15-gic\0")
+    b.prop("reg", b.cells(0, 0x08000000, 0, 0x10000,
+                          0, 0x08010000, 0, 0x10000))
     b.end()
 
     b.begin("memory@0")

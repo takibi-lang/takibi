@@ -451,6 +451,8 @@ fn main() !{unsafe} {
         QemuUartDtbResult::Applied => {
             kernel_boot_log("uart: source=dtb base_bytes=");
             uart_put_udec(uart_base);
+            kernel_boot_log(" intid=");
+            uart_put_udec(qemu_uart_gic_intid as usize);
             kernel_boot_log("\n");
         }
     }

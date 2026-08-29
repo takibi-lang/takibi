@@ -2,10 +2,10 @@
 // GIC SPI dispatch, unlike kernel/platform/rpi5/intc.tkb's three-level
 // GIC->MIP0->RP1-MSI-X routing (QEMU's virtio-mmio/PL011 devices are
 // ordinary GIC SPIs with no companion-chip indirection to model). Register
-// addresses and the UART's SPI number match examples/common_qemu/gic.tkb
-// and gic_regs.tkb exactly (hardware-proven by that tree's own bare-metal
-// examples): GICD at 0x08000000, GICC at 0x08010000, PL011 UART on SPI #1
-// (INTID 33).
+// bootstrap addresses match examples/common_qemu/gic.tkb and gic_regs.tkb
+// exactly (hardware-proven by that tree's own bare-metal examples): GICD at
+// 0x08000000 and GICC at 0x08010000. The PL011 route is decoded from the boot
+// DTB after comparison with the previously working SPI #1 (INTID 33).
 //
 // Unlike RPi5, this kernel runs its own code at EL1 (not EL2) with EL0 user
 // processes above it -- see kernel/platform/rpi5/intc.tkb's header comment
@@ -24,15 +24,21 @@ use "kernel/platform/qemu/timer_irq.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/arch/arm64/boot/cpu.tkb";
 
-const QEMU_UART_GIC_INTID: u32 = 33; // SPI #1
+let mut qemu_uart_gic_intid: u32 = 33; // bootstrap route until DTB comparison
 
 fn gic_uart_spi_setup() !{unsafe} {
-    let gicd_isenabler1: *io u32 = unsafe { 0x08000104 as *io u32 }; // INTIDs 32-63 (SPI)
-    let gicd_itargetsr8: *io u32 = unsafe { 0x08000820 as *io u32 }; // INTIDs 32-35
+    let enable_index: u32 = qemu_uart_gic_intid / 32;
+    let enable_bit: u32 = qemu_uart_gic_intid % 32;
+    let gicd_isenabler: *io u32 = unsafe {
+        (0x08000100 + (enable_index as usize) * 4) as *io u32
+    };
+    let gicd_itargetsr: *io u8 = unsafe {
+        (0x08000800 + qemu_uart_gic_intid as usize) as *io u8
+    };
     let gicd_ctlr: *io u32 = unsafe { 0x08000000 as *io u32 };
 
-    *gicd_itargetsr8 = 0x01010101; // route SPI #0-#3 to CPU0
-    *gicd_isenabler1 = *gicd_isenabler1 | (1 << 1); // SPI #1 (UART)
+    *gicd_itargetsr = 1; // route the discovered UART SPI to CPU0
+    *gicd_isenabler = *gicd_isenabler | (1 << enable_bit);
 
     *gicd_ctlr = *gicd_ctlr | 1;
 }
@@ -65,7 +71,7 @@ fn platform_irq_init() {
 }
 
 fn irq_uart_rx_unmask() !{unsafe} {
-    let uart0_imsc: *io u32 = unsafe { 0x09000038 as *io u32 };
+    let uart0_imsc: *io u32 = unsafe { (uart_base + 0x38) as *io u32 };
     *uart0_imsc = (1 << 4) | (1 << 6) | (1 << 9); // RXIM | RTIM | BEIM
 }
 
@@ -90,12 +96,12 @@ fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
 
     let mut debug_break: bool = false;
 
-    if (id == QEMU_UART_GIC_INTID) {
+    if (id == qemu_uart_gic_intid) {
         debug_break = uart_irq_handler();
     } else if (id == (virtio_net_gic_intid as u32) && virtio_net_gic_intid >= 0) {
         // GitHub issue #237 M4: virtio_net_gic_intid (kernel/drivers/net/
         // virtio_net.tkb) is discovered at runtime, not a compile-time
-        // constant like QEMU_UART_GIC_INTID above -- it starts at -1 (no
+        // Unlike the DTB-discovered UART INTID above, it starts at -1 (no
         // device found / net_init() not called yet), so the >= 0 guard
         // keeps that sentinel from ever matching a real GICC_IAR value.
         virtio_net_irq_handler();
