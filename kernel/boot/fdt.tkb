@@ -28,9 +28,8 @@ struct PhysicalMemoryRegion {
 
 struct FdtMemoryMap {
     private dtb: usize;
-    private region_count: usize;
-    private first_base: usize;
-    private total_size: usize;
+    private raw_region_count: usize;
+    private reservation_count: usize;
 }
 
 must_use variant FdtMemoryResult {
@@ -63,6 +62,18 @@ variant FdtScanResult {
     Found(FdtScanMemory);
 }
 
+struct FdtReservationScan {
+    count: usize;
+    wanted_base: usize;
+    wanted_size: usize;
+    wanted_found: bool;
+}
+
+variant FdtReservationScanResult {
+    Invalid;
+    Found(FdtReservationScan);
+}
+
 private fn fdt_range_valid(total: usize, offset: usize, length: usize)
         -> bool {
     return offset <= total && length <= total - offset;
@@ -83,6 +94,48 @@ private fn fdt_read_be32(base: usize, total: usize, offset: usize) -> usize
            (fdt_read_u8(base, total, offset + 1) << 16) |
            (fdt_read_u8(base, total, offset + 2) << 8) |
            fdt_read_u8(base, total, offset + 3);
+}
+
+private fn fdt_read_be64(base: usize, total: usize, offset: usize) -> usize
+        !{unsafe} {
+    if (fdt_range_valid(total, offset, 8) == false) { return 0; }
+    return (fdt_read_be32(base, total, offset) << 32) |
+           fdt_read_be32(base, total, offset + 4);
+}
+
+private fn fdt_scan_reservations(base: usize, total: usize, wanted: usize)
+        -> FdtReservationScanResult !{unsafe} {
+    let offset: usize = fdt_read_be32(base, total, 16);
+    if ((offset & 7) != 0 || offset < FDT_HEADER_SIZE || offset > total) {
+        return FdtReservationScanResult::Invalid;
+    }
+    let mut cursor: usize = offset;
+    let mut count: usize = 0;
+    let mut wanted_base: usize = 0;
+    let mut wanted_size: usize = 0;
+    let mut wanted_found: bool = false;
+    while (fdt_range_valid(total, cursor, 16)) {
+        let address: usize = fdt_read_be64(base, total, cursor);
+        let size: usize = fdt_read_be64(base, total, cursor + 8);
+        if (address == 0 && size == 0) {
+            let mut scan: FdtReservationScan = {
+                count, wanted_base, wanted_size, wanted_found
+            };
+            return FdtReservationScanResult::Found(scan);
+        }
+        if (size == 0 || address > 0xFFFFFFFFFFFFFFFF - size ||
+            count == 0xFFFFFFFFFFFFFFFF) {
+            return FdtReservationScanResult::Invalid;
+        }
+        if (count == wanted) {
+            wanted_base = address;
+            wanted_size = size;
+            wanted_found = true;
+        }
+        count = count + 1;
+        cursor = cursor + 16;
+    }
+    return FdtReservationScanResult::Invalid;
 }
 
 private fn fdt_align4(value: usize) -> usize {
@@ -314,30 +367,27 @@ fn fdt_detect_memory(base: usize) -> FdtMemoryResult !{unsafe} {
         FdtScanResult::Invalid => { return FdtMemoryResult::Invalid; }
         FdtScanResult::NotFound => { return FdtMemoryResult::NotFound; }
         FdtScanResult::Found(scanned_memory) => {
-            let mut memory: FdtMemoryMap = {
-                base, scanned_memory.region_count,
-                scanned_memory.first_base, scanned_memory.total_size
-            };
-            return FdtMemoryResult::Found(memory);
+            let total: usize = fdt_read_be32(base, FDT_HEADER_SIZE, 4);
+            let reserved: FdtReservationScanResult =
+                fdt_scan_reservations(base, total, 0);
+            match reserved {
+                FdtReservationScanResult::Invalid => {
+                    return FdtMemoryResult::Invalid;
+                }
+                FdtReservationScanResult::Found(reservations) => {
+                    let mut memory: FdtMemoryMap = {
+                        base, scanned_memory.region_count, reservations.count
+                    };
+                    return FdtMemoryResult::Found(memory);
+                }
+            }
         }
     }
 }
 
-fn fdt_memory_region_count(map: FdtMemoryMap) -> usize {
-    return map.region_count;
-}
-
-fn fdt_memory_first_base(map: FdtMemoryMap) -> usize {
-    return map.first_base;
-}
-
-fn fdt_memory_total_size(map: FdtMemoryMap) -> usize {
-    return map.total_size;
-}
-
-fn fdt_memory_region_at(map: FdtMemoryMap, index: usize)
+private fn fdt_memory_raw_region_at(map: FdtMemoryMap, index: usize)
         -> FdtMemoryRegionResult !{unsafe} {
-    if (index >= map.region_count) {
+    if (index >= map.raw_region_count) {
         return FdtMemoryRegionResult::OutOfRange;
     }
     let scanned: FdtScanResult = fdt_scan_memory(map.dtb, index);
@@ -349,7 +399,7 @@ fn fdt_memory_region_at(map: FdtMemoryMap, index: usize)
             return FdtMemoryRegionResult::Invalid;
         }
         FdtScanResult::Found(memory) => {
-            if (memory.region_count != map.region_count ||
+            if (memory.region_count != map.raw_region_count ||
                 memory.wanted_found == false) {
                 return FdtMemoryRegionResult::Invalid;
             }
@@ -361,26 +411,155 @@ fn fdt_memory_region_at(map: FdtMemoryMap, index: usize)
     }
 }
 
-fn fdt_memory_map_verify(map: FdtMemoryMap) -> bool !{unsafe} {
-    if (map.region_count == 0) { return false; }
-    let mut index: usize = 0;
-    let mut total_size: usize = 0;
-    let mut first_base: usize = 0;
-    while (index < map.region_count) {
-        let result: FdtMemoryRegionResult =
-            fdt_memory_region_at(map, index);
-        match result {
-            FdtMemoryRegionResult::Invalid => { return false; }
-            FdtMemoryRegionResult::OutOfRange => { return false; }
-            FdtMemoryRegionResult::Found(region) => {
-                if (index == 0) { first_base = region.base; }
-                if (total_size > 0xFFFFFFFFFFFFFFFF - region.size) {
-                    return false;
+private fn fdt_memory_reservation_at(map: FdtMemoryMap, index: usize)
+        -> FdtMemoryRegionResult !{unsafe} {
+    if (index >= map.reservation_count) {
+        return FdtMemoryRegionResult::OutOfRange;
+    }
+    let total: usize = fdt_read_be32(map.dtb, FDT_HEADER_SIZE, 4);
+    let scanned: FdtReservationScanResult =
+        fdt_scan_reservations(map.dtb, total, index);
+    match scanned {
+        FdtReservationScanResult::Invalid => {
+            return FdtMemoryRegionResult::Invalid;
+        }
+        FdtReservationScanResult::Found(reservations) => {
+            if (reservations.count != map.reservation_count ||
+                reservations.wanted_found == false) {
+                return FdtMemoryRegionResult::Invalid;
+            }
+            let mut region: PhysicalMemoryRegion = {
+                reservations.wanted_base, reservations.wanted_size
+            };
+            return FdtMemoryRegionResult::Found(region);
+        }
+    }
+}
+
+fn fdt_memory_region_at(map: FdtMemoryMap, wanted: usize)
+        -> FdtMemoryRegionResult !{unsafe} {
+    let mut raw_index: usize = 0;
+    let mut usable_index: usize = 0;
+    while (raw_index < map.raw_region_count) {
+        let raw_result: FdtMemoryRegionResult =
+            fdt_memory_raw_region_at(map, raw_index);
+        match raw_result {
+            FdtMemoryRegionResult::Invalid => {
+                return FdtMemoryRegionResult::Invalid;
+            }
+            FdtMemoryRegionResult::OutOfRange => {
+                return FdtMemoryRegionResult::Invalid;
+            }
+            FdtMemoryRegionResult::Found(raw) => {
+                let raw_end: usize = raw.base + raw.size;
+                let mut position: usize = raw.base;
+                while (position < raw_end) {
+                    let mut covered_end: usize = position;
+                    let mut next_reserved: usize = raw_end;
+                    let mut reservation_index: usize = 0;
+                    while (reservation_index < map.reservation_count) {
+                        let reserved_result: FdtMemoryRegionResult =
+                            fdt_memory_reservation_at(
+                                map, reservation_index);
+                        match reserved_result {
+                            FdtMemoryRegionResult::Invalid => {
+                                return FdtMemoryRegionResult::Invalid;
+                            }
+                            FdtMemoryRegionResult::OutOfRange => {
+                                return FdtMemoryRegionResult::Invalid;
+                            }
+                            FdtMemoryRegionResult::Found(reserved) => {
+                                let reserved_end: usize =
+                                    reserved.base + reserved.size;
+                                if (reserved.base <= position &&
+                                    reserved_end > covered_end) {
+                                    covered_end = reserved_end;
+                                } else if (reserved.base > position &&
+                                           reserved.base < next_reserved &&
+                                           reserved.base < raw_end) {
+                                    next_reserved = reserved.base;
+                                }
+                            }
+                        }
+                        reservation_index = reservation_index + 1;
+                    }
+                    if (covered_end > position) {
+                        if (covered_end >= raw_end) {
+                            position = raw_end;
+                        } else {
+                            position = covered_end;
+                        }
+                    } else {
+                        if (next_reserved > position) {
+                            if (usable_index == wanted) {
+                                let mut region: PhysicalMemoryRegion = {
+                                    position, next_reserved - position
+                                };
+                                return FdtMemoryRegionResult::Found(region);
+                            }
+                            usable_index = usable_index + 1;
+                            position = next_reserved;
+                        } else {
+                            return FdtMemoryRegionResult::Invalid;
+                        }
+                    }
                 }
-                total_size = total_size + region.size;
             }
         }
-        index = index + 1;
+        raw_index = raw_index + 1;
     }
-    return first_base == map.first_base && total_size == map.total_size;
+    return FdtMemoryRegionResult::OutOfRange;
+}
+
+fn fdt_memory_region_count(map: FdtMemoryMap) -> usize !{unsafe} {
+    let mut count: usize = 0;
+    while (count != 0xFFFFFFFFFFFFFFFF) {
+        let result: FdtMemoryRegionResult = fdt_memory_region_at(map, count);
+        match result {
+            FdtMemoryRegionResult::Invalid => { return 0; }
+            FdtMemoryRegionResult::OutOfRange => { return count; }
+            FdtMemoryRegionResult::Found(region) => {
+                if (region.size == 0) { return 0; }
+                count = count + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+fn fdt_memory_reservation_count(map: FdtMemoryMap) -> usize {
+    return map.reservation_count;
+}
+
+fn fdt_memory_first_base(map: FdtMemoryMap) -> usize !{unsafe} {
+    let result: FdtMemoryRegionResult = fdt_memory_region_at(map, 0);
+    match result {
+        FdtMemoryRegionResult::Invalid => { return 0; }
+        FdtMemoryRegionResult::OutOfRange => { return 0; }
+        FdtMemoryRegionResult::Found(region) => { return region.base; }
+    }
+}
+
+fn fdt_memory_total_size(map: FdtMemoryMap) -> usize !{unsafe} {
+    let mut index: usize = 0;
+    let mut total: usize = 0;
+    while (index != 0xFFFFFFFFFFFFFFFF) {
+        let result: FdtMemoryRegionResult = fdt_memory_region_at(map, index);
+        match result {
+            FdtMemoryRegionResult::Invalid => { return 0; }
+            FdtMemoryRegionResult::OutOfRange => { return total; }
+            FdtMemoryRegionResult::Found(region) => {
+                if (total > 0xFFFFFFFFFFFFFFFF - region.size) { return 0; }
+                total = total + region.size;
+                index = index + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+fn fdt_memory_map_verify(map: FdtMemoryMap) -> bool !{unsafe} {
+    if (map.raw_region_count == 0) { return false; }
+    let count: usize = fdt_memory_region_count(map);
+    return count != 0 && fdt_memory_total_size(map) != 0;
 }

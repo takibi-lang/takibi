@@ -419,6 +419,8 @@ fn main() !{unsafe} {
             uart_put_udec((mem_size as usize) / (1024 * 1024));
             kernel_boot_log(" regions=");
             uart_put_udec(fdt_memory_region_count(detected));
+            kernel_boot_log(" reservations=");
+            uart_put_udec(fdt_memory_reservation_count(detected));
             kernel_boot_log("\n");
         }
         PlatformMemoryResult::InvalidDtb => {

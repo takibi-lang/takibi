@@ -1,2 +1,2 @@
 takibi kernel: EL1
-memory: source=dtb base_bytes=0 detected_mib=1020 regions=1
+memory: source=dtb base_bytes=0 detected_mib=1020 regions=1 reservations=0

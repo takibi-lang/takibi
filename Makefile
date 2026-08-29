@@ -210,12 +210,15 @@ $(LINUX_USER_DIR)/byte_slice/byte_slice_exe.o: kernel/lib/byte_slice.tkb
 $(LINUX_USER_BUILD_DIR)/fdt_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
 	python3 scripts/make_fdt_fixture.py $@
 
+$(LINUX_USER_BUILD_DIR)/fdt_invalid_reservation_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
+	python3 scripts/make_fdt_fixture.py $@ --invalid-reservation
+
 # GitHub issue #470: the kernel's own decimal formatter, which was wrong on
 # one platform for as long as it had no test that could run anywhere.
 $(LINUX_USER_DIR)/decimal/decimal_exe.o: kernel/printk/decimal.tkb
 $(LINUX_USER_DIR)/decimal/decimal_exe.o: LINUX_USER_EXTRA_SRCS := kernel/printk/decimal.tkb
 
-$(LINUX_USER_DIR)/fdt/fdt_exe.o: kernel/boot/fdt.tkb $(LINUX_USER_BUILD_DIR)/fdt_fixture.dtb
+$(LINUX_USER_DIR)/fdt/fdt_exe.o: kernel/boot/fdt.tkb $(LINUX_USER_BUILD_DIR)/fdt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_reservation_fixture.dtb
 $(LINUX_USER_DIR)/fdt/fdt_exe.o: LINUX_USER_EXTRA_SRCS := kernel/boot/fdt.tkb
 
 # GitHub issue #445: the kernel's own spinlock, compiled and run natively.

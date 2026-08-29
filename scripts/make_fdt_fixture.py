@@ -76,10 +76,12 @@ class Builder:
     def cells(self, *values):
         return b"".join(struct.pack(">I", v) for v in values)
 
-    def finish(self):
+    def finish(self, reservations):
         self.struct += struct.pack(">I", FDT_END)
         header_size = 40
-        reserve = struct.pack(">QQ", 0, 0)
+        reserve = b"".join(struct.pack(">QQ", address, size)
+                           for address, size in reservations)
+        reserve += struct.pack(">QQ", 0, 0)
         off_rsv = header_size
         off_struct = off_rsv + len(reserve)
         off_strings = off_struct + len(self.struct)
@@ -91,8 +93,10 @@ class Builder:
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("usage: make_fdt_fixture.py OUTPUT", file=sys.stderr)
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and
+                                     sys.argv[2] != "--invalid-reservation"):
+        print("usage: make_fdt_fixture.py OUTPUT [--invalid-reservation]",
+              file=sys.stderr)
         return 2
     b = Builder()
     b.begin("")
@@ -133,7 +137,16 @@ def main():
     b.end()
 
     b.end()
-    open(sys.argv[1], "wb").write(b.finish())
+    # Header reservation entries split the first memory tuple and trim the
+    # beginning of the second one. The first two overlap, proving exclusion
+    # uses their union rather than subtracting the overlap twice. The reader
+    # must enumerate four usable extents rather than the three raw tuples.
+    reservations = [
+        (0x1000, 0x1000), (0x1800, 0x1000), (0x80000000, 0x2000)
+    ]
+    if len(sys.argv) == 3:
+        reservations.append((0xFFFFFFFFFFFFFFFF, 2))
+    open(sys.argv[1], "wb").write(b.finish(reservations))
     return 0
 
 

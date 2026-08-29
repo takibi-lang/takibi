@@ -12,7 +12,8 @@ from pathlib import Path
 
 
 MULTIBANK_EXPECTED = (
-    b"memory: source=dtb base_bytes=1610612736 detected_mib=1024 regions=2")
+    b"memory: source=dtb base_bytes=1610612736 detected_mib=1024 "
+    b"regions=2 reservations=0")
 INVALID_EXPECTED = b"memory: invalid boot DTB; halting"
 
 
