@@ -664,9 +664,10 @@ are deliberate, not gaps to silently close:
   physical address and merges overlapping or adjacent memory tuples before
   subtracting reservations. An invalid DTB or missing usable memory node is
   a fatal boot-contract violation, not a reason to switch data sources.
-  Neither platform's
-  page allocator actually consumes this value today (see "Current limits"
-  below) -- it is diagnostic boot-log output on both.
+  The bootstrap allocator first retains the page tables required to enable
+  the MMU, then rebuilds its free list from this view before any workload
+  allocation. The linker-owned image and stacks lie below `usable_ram_start`;
+  firmware reservations and any page overlapping the live DTB are excluded.
 - **The MMU device/RAM layout is inverted from RPi5's.** RPi5's real RAM
   starts at physical address 0; QEMU `virt`'s starts at `0x40000000`, with
   device MMIO below it -- roughly the opposite of RPi5's layout. See

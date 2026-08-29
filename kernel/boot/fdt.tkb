@@ -829,6 +829,25 @@ fn fdt_memory_reservation_count(map: FdtMemoryMap) -> usize {
     return map.reservation_count + map.tree_reservation_count;
 }
 
+fn fdt_blob_base(map: FdtMemoryMap) -> usize {
+    return map.dtb;
+}
+
+fn fdt_blob_size(map: FdtMemoryMap) -> usize !{unsafe} {
+    return fdt_read_be32(map.dtb, FDT_HEADER_SIZE, 4);
+}
+
+fn fdt_blob_overlaps(map: FdtMemoryMap, base: usize, size: usize)
+        -> bool !{unsafe} {
+    let blob_size: usize = fdt_blob_size(map);
+    if (size == 0 || blob_size == 0 ||
+        base > 0xFFFFFFFFFFFFFFFF - size ||
+        map.dtb > 0xFFFFFFFFFFFFFFFF - blob_size) {
+        return false;
+    }
+    return base < map.dtb + blob_size && map.dtb < base + size;
+}
+
 fn fdt_memory_first_base(map: FdtMemoryMap) -> usize !{unsafe} {
     let result: FdtMemoryRegionResult = fdt_memory_region_at(map, 0);
     match result {

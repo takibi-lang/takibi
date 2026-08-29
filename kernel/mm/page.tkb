@@ -26,10 +26,10 @@
 // stay effect-free: pure address arithmetic and comparison, no
 // dereference.
 //
-// This RPi5 unit's own real detected RAM is ~1020 MiB (HISTORY.md's
-// 2026-08-08 issue #247 entry) -- BOOT_PAGE_COUNT is chosen with generous
-// headroom below that, not maxed out, since this is the first hardware
-// verification of this redesign.
+// BOOT_PAGE_COUNT is the metadata/window capacity, not a claim that every
+// slot is backed by RAM. After bootstrap creates the active page tables,
+// page_allocator_apply_memory rebuilds the free list from the normalized DTB
+// regions, preserves those occupied tables, and excludes the live DTB itself.
 //
 // Slot allocation itself (issue #207, the most acute of that issue's five
 // call sites: a 1024-entry scan on every single page allocation) is O(1)
@@ -149,6 +149,9 @@ enum PageOwnerTag: u8 {
     // reading as Unowned while occupied a detectable invariant break
     // rather than an ordinary state.
     Unowned;
+    // A metadata slot whose physical page is outside the usable DTB map.
+    // It is never linked into the free list and therefore never handed out.
+    Unavailable;
     // kernel/mm/address_space.tkb's L1/L2/L3 tables.
     PageTable;
     // Mapped into a process's address space: image, heap, stack, COW.
@@ -265,7 +268,9 @@ private fn page_run_is_free(first: usize, count: usize) -> bool {
         let index: usize = first + k;
         if (index >= BOOT_PAGE_COUNT) { return false; }
         let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
-        if (boot_page_pool.meta[checked].occupied) { return false; }
+        if (boot_page_pool.meta[checked].owner ==
+                PageOwnerTag::Unavailable ||
+            boot_page_pool.meta[checked].occupied) { return false; }
     }
     return true;
 }
@@ -279,7 +284,10 @@ private fn page_run_is_free(first: usize, count: usize) -> bool {
 // already doing far more expensive work.
 fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
         -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
-    if (count == 0) { return PageRunAllocResult::OutOfMemory; }
+    if (count == 0 || owner == PageOwnerTag::Unowned ||
+        owner == PageOwnerTag::Unavailable) {
+        return PageRunAllocResult::OutOfMemory;
+    }
     // The alignment that matters is the ADDRESS's, and page INDEX zero is
     // not at an aligned address: both linker scripts only promise
     // `ALIGN(4096)` for usable_ram_start, and on QEMU it lands at
@@ -400,14 +408,7 @@ private fn page_run_release_indices(first: usize, count: usize) !{unsafe} {
 }
 
 fn page_allocator_init() {
-    // GitHub issue #259 (2026-08-16): a nested-field address
-    // (&boot_page_pool.core) now infers the generic call's N directly, no
-    // intermediate binding needed.
     freelist_core_init(&boot_page_pool.core);
-    // GitHub issue #217 (2026-08-15): boot_page_pool.meta[i] indexes the
-    // struct-embedded array field directly and is checked/proven by the
-    // for-loop counter's own {0..<BOOT_PAGE_COUNT} type -- no more
-    // manual `let`/raw-pointer-arithmetic workaround (issue #15) needed.
     for i: usize in 0..<BOOT_PAGE_COUNT {
         boot_page_pool.meta[i].occupied = false;
         boot_page_pool.meta[i].owner = PageOwnerTag::Unowned;
@@ -415,6 +416,116 @@ fn page_allocator_init() {
     }
     boot_page_pool.double_remove_count = 0;
     boot_page_pool.run_generation = 1;
+}
+
+must_use variant PageAllocatorMemoryResult {
+    Invalid;
+    Applied;
+}
+
+fn page_allocator_apply_memory(memory: FdtMemoryMap)
+        -> PageAllocatorMemoryResult !{unsafe} {
+
+    let pool_base: usize = usable_ram_start;
+    let pool_bytes: usize = PAGE_SIZE * BOOT_PAGE_COUNT;
+    let pool_end: usize = pool_base + pool_bytes;
+    let region_count: usize = fdt_memory_region_count(memory);
+
+    // If one normalized span covers the whole metadata window and the DTB
+    // is elsewhere, bootstrap already built exactly the right free list.
+    // Preserve it, including its occupied page tables and allocation order.
+    let mut whole_pool_usable: bool = false;
+    let mut check_index: usize = 0;
+    while (check_index < region_count) {
+        let result: FdtMemoryRegionResult =
+            fdt_memory_region_at(memory, check_index);
+        match result {
+            FdtMemoryRegionResult::Invalid => {}
+            FdtMemoryRegionResult::OutOfRange => {}
+            FdtMemoryRegionResult::Found(region) => {
+                let region_end: usize = region.base + region.size;
+                if (region.base <= pool_base && region_end >= pool_end) {
+                    whole_pool_usable = true;
+                }
+            }
+        }
+        check_index = check_index + 1;
+    }
+    let dtb_overlaps_pool: bool =
+        fdt_blob_overlaps(memory, pool_base, pool_bytes);
+    if (whole_pool_usable && dtb_overlaps_pool == false) {
+        return PageAllocatorMemoryResult::Applied;
+    }
+
+    freelist_core_init_empty(&boot_page_pool.core);
+    let mut bootstrap_remaining: usize = 0;
+    for i: usize in 0..<BOOT_PAGE_COUNT {
+        if (boot_page_pool.meta[i].occupied == false) {
+            boot_page_pool.meta[i].owner = PageOwnerTag::Unavailable;
+            boot_page_pool.meta[i].map_refcount = 0;
+        } else {
+            bootstrap_remaining = bootstrap_remaining + 1;
+        }
+    }
+    // The free list pushes at its head. Visit normalized regions and pages
+    // from high to low so allocation retains its established low-to-high
+    // physical order (important to early DMA consumers).
+    let mut region_index: usize = region_count;
+    while (region_index > 0) {
+        region_index = region_index - 1;
+        let result: FdtMemoryRegionResult =
+            fdt_memory_region_at(memory, region_index);
+        match result {
+            FdtMemoryRegionResult::Invalid => {}
+            FdtMemoryRegionResult::OutOfRange => {}
+            FdtMemoryRegionResult::Found(region) => {
+                let region_end: usize = region.base + region.size;
+                let mut start: usize = region.base;
+                if (start < pool_base) { start = pool_base; }
+                if (start % PAGE_SIZE != 0) {
+                    let padding: usize = PAGE_SIZE - start % PAGE_SIZE;
+                    if (start <= 0xFFFFFFFFFFFFFFFF - padding) {
+                        start = start + padding;
+                    } else {
+                        start = region_end;
+                    }
+                }
+                let mut end: usize = region_end;
+                if (end > pool_end) { end = pool_end; }
+                end = end - end % PAGE_SIZE;
+                let mut address: usize = end;
+                while (address > start) {
+                    address = address - PAGE_SIZE;
+                    let overlaps_dtb: bool =
+                        fdt_blob_overlaps(memory, address, PAGE_SIZE);
+                    if (overlaps_dtb == false) {
+                        let index: usize = (address - pool_base) / PAGE_SIZE;
+                        if (index < BOOT_PAGE_COUNT) {
+                            let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+                            if (boot_page_pool.meta[checked].occupied) {
+                                if (bootstrap_remaining == 0) {
+                                    return PageAllocatorMemoryResult::Invalid;
+                                }
+                                bootstrap_remaining = bootstrap_remaining - 1;
+                            } else {
+                                boot_page_pool.meta[checked].owner =
+                                    PageOwnerTag::Unowned;
+                                freelist_core_add_index(&boot_page_pool.core,
+                                                        checked);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Every bootstrap allocation must have appeared in one of the usable
+    // regions above. Otherwise an active page table was created from memory
+    // firmware says the kernel cannot use.
+    if (bootstrap_remaining != 0) {
+        return PageAllocatorMemoryResult::Invalid;
+    }
+    return PageAllocatorMemoryResult::Applied;
 }
 
 // GitHub issue #380's acceptance criteria, as a boot probe: a run is
@@ -547,6 +658,10 @@ fn page_run_probe() -> bool !{unsafe} {
 // least understood -- which is when the tag is worth the most. Making it a
 // parameter puts the question to the compiler instead.
 fn page_alloc(owner: PageOwnerTag) -> PageAllocResult !{allocates} {
+    if (owner == PageOwnerTag::Unowned ||
+        owner == PageOwnerTag::Unavailable) {
+        return PageAllocResult::OutOfMemory;
+    }
     match freelist_core_insert(&boot_page_pool.core) {
         FreelistPopResult::Empty => { return PageAllocResult::OutOfMemory; }
         FreelistPopResult::Popped(slot) => {
@@ -914,6 +1029,9 @@ fn page_owner_tag_at(address: usize) -> PageOwnerTag {
     let index: usize = (address - base) / PAGE_SIZE;
     if (index >= BOOT_PAGE_COUNT) { return PageOwnerTag::Unowned; }
     let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+    if (boot_page_pool.meta[checked].owner == PageOwnerTag::Unavailable) {
+        return PageOwnerTag::Unowned;
+    }
     if (boot_page_pool.meta[checked].occupied == false) {
         return PageOwnerTag::Unowned;
     }
@@ -949,6 +1067,9 @@ fn page_owner_description(address: usize) -> *u8 {
         return "outside this allocator's pages entirely" as *u8;
     }
     let checked: {0..<BOOT_PAGE_COUNT as usize} = index;
+    if (boot_page_pool.meta[checked].owner == PageOwnerTag::Unavailable) {
+        return "outside the usable DTB memory map" as *u8;
+    }
     if (boot_page_pool.meta[checked].occupied == false) {
         return "a free page" as *u8;
     }
@@ -970,7 +1091,13 @@ fn page_owner_description(address: usize) -> *u8 {
 // files_stat.max_files from the memory that exists) can then ask without
 // depending on parse order, which a const in a refined bound would.
 fn page_allocator_total_count() -> usize {
-    return BOOT_PAGE_COUNT;
+    let mut available: usize = 0;
+    for i: usize in 0..<BOOT_PAGE_COUNT {
+        if (boot_page_pool.meta[i].owner != PageOwnerTag::Unavailable) {
+            available = available + 1;
+        }
+    }
+    return available;
 }
 
 fn page_allocator_page_bytes() -> usize {

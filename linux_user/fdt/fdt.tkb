@@ -84,6 +84,14 @@ fn report_memory(result: FdtMemoryResult) !{unsafe} {
             } else {
                 uart_puts("no\r\n");
             }
+            uart_puts("blob overlap ");
+            if (fdt_blob_overlaps(found, fdt_blob_base(found), 1) &&
+                fdt_blob_overlaps(found, fdt_blob_base(found) + 956, 1) ==
+                    false) {
+                uart_puts("yes\r\n");
+            } else {
+                uart_puts("no\r\n");
+            }
         }
     }
 }

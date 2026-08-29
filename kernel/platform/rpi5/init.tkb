@@ -571,6 +571,13 @@ fn main() !{unsafe} {
     // not hide a parser or handoff regression behind a second data source.
     match platform_memory_detect() {
         PlatformMemoryResult::Detected(detected) => {
+            match page_allocator_apply_memory(detected) {
+                PageAllocatorMemoryResult::Invalid => {
+                    kernel_boot_log("memory: usable regions exclude bootstrap page tables; halting\n");
+                    while (true) { }
+                }
+                PageAllocatorMemoryResult::Applied => {}
+            }
             let mem_base: usize = fdt_memory_first_base(detected);
             let mem_size: usize = fdt_memory_total_size(detected);
             kernel_boot_log("memory: source=dtb base_bytes=");
@@ -581,6 +588,8 @@ fn main() !{unsafe} {
             uart_put_udec(fdt_memory_region_count(detected));
             kernel_boot_log(" reservations=");
             uart_put_udec(fdt_memory_reservation_count(detected));
+            kernel_boot_log(" allocator_pages=");
+            uart_put_udec(page_allocator_total_count());
             kernel_boot_log("\n");
         }
         PlatformMemoryResult::InvalidDtb => {

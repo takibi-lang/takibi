@@ -9,6 +9,7 @@ region 0x00000001 0x00000000 size 0x00000000 0x00001000
 region 0x00000001 0x00002000 size 0x00000000 0x1fffe000
 region out of range
 memory verifies yes
+blob overlap yes
 memory invalid
 memory invalid
 memory invalid

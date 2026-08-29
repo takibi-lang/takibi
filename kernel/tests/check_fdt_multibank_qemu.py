@@ -13,7 +13,10 @@ from pathlib import Path
 
 MULTIBANK_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=1024 "
-    b"regions=1 reservations=0")
+    b"regions=1 reservations=0 allocator_pages=204800")
+LOW_MEMORY_EXPECTED = (
+    b"memory: source=dtb base_bytes=1073741824 detected_mib=128 "
+    b"regions=1 reservations=0 allocator_pages=30728")
 INVALID_EXPECTED = b"memory: invalid boot DTB; halting"
 
 
@@ -78,6 +81,25 @@ def main() -> int:
               file=sys.stderr)
         return 1
     print("PASS kernel/qemu FDT multi-bank: two adjacent NUMA nodes normalized to one 1024 MiB region")
+
+    low_memory_command = [
+        "qemu-system-aarch64",
+        "-machine", "virt",
+        "-cpu", "cortex-a53",
+        "-smp", "2",
+        "-m", "128M",
+        "-display", "none",
+        "-monitor", "none",
+        "-serial", "stdio",
+        "-kernel", str(kernel),
+    ]
+    found, transcript = observe(low_memory_command, LOW_MEMORY_EXPECTED)
+    if not found:
+        sys.stderr.buffer.write(transcript)
+        print("FAIL kernel/qemu FDT allocator sizing: expected memory line absent",
+              file=sys.stderr)
+        return 1
+    print("PASS kernel/qemu FDT allocator sizing: 128 MiB DTB supplies 30728 pages")
 
     with tempfile.TemporaryDirectory(prefix="takibi-fdt-") as directory:
         dtb = Path(directory) / "virt.dtb"

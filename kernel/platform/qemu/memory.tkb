@@ -2,9 +2,8 @@
 // direct-kernel loader supplies its generated FDT in x0; entry_qemu.S
 // preserves that physical address before reusing the argument registers.
 // A usable DTB is part of this platform's boot contract, exactly as it is on
-// RPi5. Diagnostic only --
-// kernel/mm/page.tkb's allocator still uses its own fixed BOOT_PAGE_COUNT
-// regardless of this value on both platforms.
+// RPi5. The page allocator applies this normalized map after bootstrap page
+// tables have brought the MMU up and before any workload allocation.
 must_use variant PlatformMemoryResult {
     InvalidDtb;
     MissingMemory;
