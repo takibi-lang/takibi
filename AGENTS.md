@@ -786,6 +786,7 @@ being a complete list is the whole point of this one;
 | --- | --- |
 | `check_agents_paths.py` | a path named in `AGENTS.md` that no longer exists, or a `scripts/check_*.py` this file never names |
 | `check_compiler_sync_rules.py` | a `sync rule` comment in `type_inf.ml` or `llvm_gen.ml` with no counterpart reference in its peer |
+| `check_elf_symbol_alignment.py` | a linked ELF symbol whose address violates a hardware-required alignment |
 | `check_kernel_asm_invariants.py` | hand-written kernel assembly, disassembled from the built ELF, that breaks an EL0 entry/exit invariant (issues #229/#231) |
 | `check_kernel_lib_limitations_header.py` | a `kernel/lib`, `kernel/kernel`, or `kernel/net` file with no "Current limitations" header |
 | `check_diagnostic_event_ids.py` | duplicate or non-16-bit fixed diagnostic event ids |

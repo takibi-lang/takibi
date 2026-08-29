@@ -675,6 +675,11 @@ are deliberate, not gaps to silently close:
   layout requires the high end of one normalized extent to hold all
   `PageMeta` and `PageExtent` records without overlapping the live DTB or a
   bootstrap table; failure to place it is fatal.
+  When debugging that path with `kernel-debug.elf`, source
+  `scripts/kernel_page_allocator.gdb` and run `takibi-pages`. The read-only
+  command prints the runtime metadata and extent addresses and checks their
+  alignment, indexing, range, and total-page invariants without walking a
+  possibly damaged free list.
 - **The MMU device/RAM layout is inverted from RPi5's.** RPi5's real RAM
   starts at physical address 0; QEMU `virt`'s starts at `0x40000000`, with
   device MMIO below it -- roughly the opposite of RPi5's layout. See

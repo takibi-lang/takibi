@@ -106,6 +106,7 @@ test: build
 ## just forwards here via `$(MAKE) -C .. langcheck`.
 langcheck:
 	@python3 scripts/check_agents_paths.py
+	@python3 scripts/test_check_elf_symbol_alignment.py
 	@python3 scripts/check_stale_depfiles.py
 	@python3 scripts/check_compiler_sync_rules.py --quiet
 	@python3 scripts/check_raw_pos_fname.py
@@ -603,6 +604,7 @@ $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD)
 	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_MAIN_O) -o $@
 	python3 scripts/check_kernel_asm_invariants.py $@ 2
+	python3 scripts/check_elf_symbol_alignment.py $@ boot_page_pool 16
 
 # -- QEMU/AArch64 (GitHub issue #237) -----------------------------------------
 # Reuses the same aarch64-none-elf triple as RPi5 (no --cpu passed to
@@ -680,6 +682,7 @@ $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 $(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_MAIN_O) $(KERNEL_QEMU_LINK_LD)
 	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_MAIN_O) -o $@
 	python3 scripts/check_kernel_asm_invariants.py $@ 1
+	python3 scripts/check_elf_symbol_alignment.py $@ boot_page_pool 16
 
 kernelbuild-qemu: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_ELF)
 
@@ -705,6 +708,7 @@ $(KERNEL_QEMU_MAIN_DEBUG_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_T
 $(KERNEL_QEMU_DEBUG_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_MAIN_DEBUG_O) $(KERNEL_QEMU_LINK_LD)
 	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_MAIN_DEBUG_O) -o $@
 	python3 scripts/check_kernel_asm_invariants.py $@ 1
+	python3 scripts/check_elf_symbol_alignment.py $@ boot_page_pool 16
 
 kernelbuild-qemu-debug: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_DEBUG_ELF)
 
