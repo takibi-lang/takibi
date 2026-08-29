@@ -53,6 +53,25 @@ const CONTENTION_FLOOR: usize = 4;
 // the lock at the same time, small enough not to lengthen the boot.
 const CONTENTION_ROUNDS: usize = 4096;
 
+// Work each core does OUTSIDE the lock, per cycle.
+//
+// Not padding, and not a timing hack. Measured on RPi5: with both cores
+// re-acquiring the instant they release, core 0 completed 4096 cycles and
+// core 1 completed ONE. Reversing which core had the gap reversed the
+// result -- 892134 to 4096 the other way. The lock excludes and does not
+// arbitrate, so whichever core loops tightest owns it, and a probe with no
+// work outside the lock measures that monopoly rather than the lock.
+//
+// QEMU hid this completely (4096 vs 4110), because its round-robin vCPU
+// scheduling supplies a fairness the hardware does not. Which is the
+// clearest argument this file could carry for why the criterion named real
+// hardware.
+//
+// The unfairness itself is real and is filed separately; it is a property
+// of a test-and-set lock, not a defect in this probe. What the probe owes
+// is not to depend on it.
+const CONTENTION_OUTSIDE_WORK: usize = 64;
+
 private let mut contention_pool: IntrusivePool(ContentionItem);
 private let mut contention_pool_ready: bool = false;
 
@@ -68,6 +87,8 @@ private let mut contention_failed_removes: usize;
 // allocate and its free" and "the secondary has stopped" are different
 // states and only one of them makes live_count meaningful.
 private let mut contention_secondary_active: usize;
+// The secondary's count at the moment the primary stopped competing.
+private let mut contention_overlap: usize;
 
 private fn contention_armed_address() -> usize {
     return (&contention_armed) as usize;
@@ -88,6 +109,11 @@ private fn contention_failed_removes_address() -> usize {
 private fn contention_secondary_active_address() -> usize {
     return (&contention_secondary_active) as usize;
 }
+
+private fn contention_overlap_address() -> usize {
+    return (&contention_overlap) as usize;
+}
+
 
 private fn contention_pool_init() {
     if (contention_pool_ready) { return; }
@@ -128,6 +154,9 @@ private fn contention_cycle() -> bool !{unsafe} {
                 }
                 return false;
             }
+            // Outside the lock, on both cores, for the reason
+            // CONTENTION_OUTSIDE_WORK states.
+            for spin: usize in 0..<CONTENTION_OUTSIDE_WORK { }
             return true;
         }
     }
@@ -138,7 +167,13 @@ private fn contention_cycle() -> bool !{unsafe} {
 // than taking turns a timer tick apart.
 fn pool_contention_secondary_run() !{unsafe} {
     unsafe { atomic_store_release(contention_secondary_active_address(), 1); }
-    while (unsafe { atomic_load_acquire(contention_armed_address()) } == 1) {
+    // The SAME count the primary does, so the verdict is not a comparison
+    // between two numbers that depend on how fast each core happened to
+    // run. Stops early only if the primary gives up on it.
+    while (unsafe {
+               atomic_load_acquire(contention_secondary_cycles_address())
+           } < CONTENTION_ROUNDS &&
+           unsafe { atomic_load_acquire(contention_armed_address()) } == 1) {
         if (contention_cycle()) {
             unsafe {
                 atomic_fetch_add_relaxed(
@@ -153,6 +188,40 @@ fn pool_contention_secondary_run() !{unsafe} {
 
 fn pool_contention_is_armed() -> bool !{unsafe} {
     return unsafe { atomic_load_acquire(contention_armed_address()) } == 1;
+}
+
+// Every number this probe knows, printed on EVERY exit path including the
+// ones that give up. The first version printed them only after the last
+// bounded wait succeeded, so the run that most needed the evidence -- a
+// deliberately broken lock -- produced a boot that stopped with no counts
+// at all. A diagnostic that vanishes exactly when it fires is worse than
+// none, because it looks like a hang of unknown origin.
+private fn contention_report(stage: *u8) !{unsafe} {
+    // The stage is stable across boots and the numbers are not, so they
+    // are two lines: a view can compare the first and a human reads the
+    // second.
+    kernel_boot_log("pool contention stage: ");
+    kernel_boot_log(stage);
+    kernel_boot_log("\n");
+    kernel_boot_log("pool contention counts: primary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(contention_primary_cycles_address())
+    });
+    kernel_boot_log(" secondary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(contention_secondary_cycles_address())
+    });
+    kernel_boot_log(" refused=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(contention_failed_removes_address())
+    });
+    kernel_boot_log(" live=");
+    uart_put_udec(intrusive_pool_live_count(&contention_pool));
+    kernel_boot_log(" overlap=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(contention_overlap_address())
+    });
+    kernel_boot_log("\n");
 }
 
 // Core 0's half, and the verdict. Returns true when both cores cycled, no
@@ -184,7 +253,10 @@ fn pool_contention_probe() -> bool !{unsafe} {
             }
         }
     }
-    if (held != CONTENTION_FLOOR) { return false; }
+    if (held != CONTENTION_FLOOR) {
+        contention_report("floor" as *u8);
+        return false;
+    }
 
     unsafe { atomic_store_release(contention_armed_address(), 1); }
 
@@ -212,6 +284,7 @@ fn pool_contention_probe() -> bool !{unsafe} {
     }
     if (entered == false) {
         unsafe { atomic_store_release(contention_armed_address(), 0); }
+        contention_report("secondary-never-entered" as *u8);
         return false;
     }
 
@@ -223,7 +296,38 @@ fn pool_contention_probe() -> bool !{unsafe} {
             }
         }
     }
+
+    // THE OVERLAP, read the moment the primary stops competing: how many
+    // of the secondary's cycles happened while the primary was also inside
+    // this lock. Reported rather than asserted at a value -- it is 4110 on
+    // QEMU and 44 on RPi5, because the lock excludes without arbitrating
+    // and the emulator supplies a fairness the hardware does not. What is
+    // asserted is only that it is not zero, which is what makes the run
+    // contention rather than two cores taking turns.
+    unsafe {
+        atomic_store_release(contention_overlap_address(),
+            atomic_load_acquire(contention_secondary_cycles_address()));
+    }
+
+    // Now let the secondary reach the same count, unimpeded. Bounded, so a
+    // secondary that cannot get there fails the probe instead of hanging
+    // the boot -- generous, because how long this takes is exactly the
+    // thing that varies between a board and an emulator.
+    let finish_window: i64 = read_cntfrq() * 2;
+    let finish_start: i64 = read_cntpct();
+    let mut finished: bool = false;
+    while (finished == false && read_cntpct() - finish_start < finish_window) {
+        if (unsafe {
+                atomic_load_acquire(contention_secondary_cycles_address())
+            } >= CONTENTION_ROUNDS) {
+            finished = true;
+        }
+    }
     unsafe { atomic_store_release(contention_armed_address(), 0); }
+    if (finished == false) {
+        contention_report("secondary-never-finished" as *u8);
+        return false;
+    }
 
     // Wait for the secondary to actually be out of its loop, rather than
     // for a duration. It may be holding a slot right now, and freeing the
@@ -249,9 +353,13 @@ fn pool_contention_probe() -> bool !{unsafe} {
         let (ok, reason) = intrusive_remove_outcome(
             intrusive_pool_remove(&contention_pool, guard, handle));
         intrusive_pool_unlock(&contention_pool, guard);
-        if (ok == false) { return false; }
+        if (ok == false) {
+            contention_report("floor-not-returned" as *u8);
+            return false;
+        }
     }
 
+    contention_report("complete" as *u8);
     let primary: usize = unsafe {
         atomic_load_acquire(contention_primary_cycles_address())
     };
@@ -261,26 +369,12 @@ fn pool_contention_probe() -> bool !{unsafe} {
     let refused: usize = unsafe {
         atomic_load_acquire(contention_failed_removes_address())
     };
-    // Every allocation given back, on both cores, is the free list still
-    // being a free list. A lost race shows up here as a leak or as a
-    // refusal above -- both are counted, neither is inferred.
+    let overlap: usize = unsafe {
+        atomic_load_acquire(contention_overlap_address())
+    };
     let live: usize = intrusive_pool_live_count(&contention_pool);
-    // Printed unconditionally, and deliberately not part of the view: the
-    // two cycle counts differ every boot (the cores run for different
-    // lengths by construction), so they are evidence for a human and the
-    // verdict below is what a test compares. A run where this says
-    // secondary=0 is a probe that measured nothing, which is exactly how
-    // the first version of it failed.
-    kernel_boot_log("pool contention counts: primary=");
-    uart_put_udec(primary);
-    kernel_boot_log(" secondary=");
-    uart_put_udec(secondary);
-    kernel_boot_log(" refused=");
-    uart_put_udec(refused);
-    kernel_boot_log(" live=");
-    uart_put_udec(live);
-    kernel_boot_log("\n");
-    return primary > 0 && secondary > 0 && refused == 0 && live == 0;
+    return primary == CONTENTION_ROUNDS && secondary == CONTENTION_ROUNDS &&
+           overlap > 0 && refused == 0 && live == 0;
 }
 
 fn pool_contention_primary_cycles() -> usize !{unsafe} {

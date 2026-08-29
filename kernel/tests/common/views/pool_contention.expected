@@ -1,1 +1,2 @@
+pool contention stage: complete
 pool contention: two cores cycling one pool, every allocation given back, no handle refused ok

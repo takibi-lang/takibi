@@ -9,6 +9,24 @@
 // Current limitations (2026-08-27). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
+// - EXCLUDES, DOES NOT ARBITRATE. Measured on RPi5 (GitHub issue #478):
+//   with two cores running the same allocate/free cycle against one pool,
+//   core 0 completed 4096 cycles and core 1 completed ONE, because a core
+//   that releases and immediately re-acquires is closest to the lock and
+//   wins the swap. Reversing which core loops tightest reverses the result
+//   (892134 to 4096 the other way), and across boots of the same binary
+//   the overlap measure came out 1, 44, 73 and 4096 -- so no bound on how
+//   long a waiter waits can be read off this lock at all. QEMU showed
+//   4096 vs 4110 for the identical binary, its round-robin vCPU
+//   scheduling supplying a fairness the hardware does not.
+//   That is the known property of a test-and-set lock and it is not a
+//   defect here: every current caller holds it for a short, straight-line
+//   critical section reached from syscall context, so what starvation
+//   costs is latency and not correctness. #478 holds the ticket-lock
+//   option, which this kernel's atomics could already express -- it needs
+//   fetch-add and not compare-and-swap. Do not read the cache-line
+//   paragraph above as a fairness claim: it is about throughput under
+//   contention and says nothing about who goes next.
 // - NOT A PUBLIC API. kernel/lib/pool_lock.tkb is the only caller and
 //   should stay that way: these three functions are the inside of a lock,
 //   not an alternative to one. What makes taking a lock from an interrupt
