@@ -84,11 +84,21 @@ fn mmu_tlb_invalidate_asid(asid: usize) {
 
 // GitHub issue #402: every entry, whatever it is tagged with. This is what
 // an ASID rollover costs, and the reason a rollover is rare rather than
-// forbidden. `tlbi vmalle1` is the LOCAL TLB -- see asid.tkb's own
-// limitations note on the single-core assumption that rests on.
+// forbidden.
+//
+// GitHub issue #446: the Inner Shareable form, so it reaches every core in
+// the domain and not just this one. A rollover hands every live number to
+// somebody else; a core that kept entries tagged with the old ones would
+// read another address space's memory with no fault to show for it. The
+// per-page and per-ASID maintenance above was already broadcast -- this was
+// the one operation still local, and it is the one with the widest blast
+// radius when it is wrong.
+//
+// This is the only whole-TLB invalidate that is maintenance on somebody
+// else's behalf. kernel_mmu_activate's is not, and stays local; see there.
 fn mmu_tlb_invalidate_all() {
     dsb_ishst();
-    tlbi_vmalle1();
+    tlbi_vmalle1is();
     dsb_ish();
     isb();
 }
@@ -156,6 +166,13 @@ fn kernel_mmu_activate(l1_physical: usize, asid: usize) {
     msr_tcr_el1(tcr);
 
     mmu_activate_root(l1_physical, asid);
+    // GitHub issue #446: LOCAL, deliberately, and the one place in this
+    // file that stays that way. A core turning its own MMU on is discarding
+    // whatever its own TLB holds from before there was a translation
+    // regime; it is not maintenance any other core needs to see, and each
+    // core runs this once from its own entry path. Broadcasting it would
+    // make every core pay for one core's boot. mmu_tlb_invalidate_all is
+    // the opposite case and is `tlbi vmalle1is`.
     tlbi_vmalle1();
     dsb_ish();
     isb();

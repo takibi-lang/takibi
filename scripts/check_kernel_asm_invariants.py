@@ -331,6 +331,61 @@ def check_mutex_masks_before_taking(insns):
     return failures
 
 
+# GitHub issue #446: the whole-TLB invalidate has to be the BROADCAST form.
+#
+# `tlbi vmalle1` and `tlbi vmalle1is` differ by two characters and by
+# whether the other cores hear about it. The one that needs to broadcast is
+# mmu_tlb_invalidate_all, which the ASID rollover calls: every live number
+# is about to be handed to a different address space, so a core still
+# holding entries tagged with the old ones reads another process's memory
+# and takes no fault doing it. The one that must NOT is kernel_mmu_activate,
+# where a core is discarding its own pre-MMU TLB and no other core has
+# anything to discard.
+#
+# Checked here rather than by reading the source because the wrong one of
+# the pair is correct on one core, and the failure it causes on two is
+# silent. Source-level review has to notice a missing "is".
+TLBI_VMALLE1_RE = re.compile(r"^tlbi\s+vmalle1$")
+TLBI_VMALLE1IS_RE = re.compile(r"^tlbi\s+vmalle1is$")
+
+
+def check_tlb_invalidate_all_is_broadcast(insns):
+    failures = []
+    seen = {}
+    for _, text, fn in insns:
+        if fn in ("mmu_tlb_invalidate_all", "kernel_mmu_activate"):
+            seen.setdefault(fn, []).append(text)
+
+    body = seen.get("mmu_tlb_invalidate_all")
+    if body is None:
+        failures.append(
+            "mmu_tlb_invalidate_all is not in this image: the ASID rollover "
+            "calls it, so a build without it has either lost the rollover or "
+            "inlined the invalidate somewhere this check cannot see"
+        )
+    else:
+        if not any(TLBI_VMALLE1IS_RE.match(t) for t in body):
+            failures.append(
+                "mmu_tlb_invalidate_all emits no `tlbi vmalle1is`: an ASID "
+                "rollover that invalidates only the local TLB leaves another "
+                "core translating with numbers that have just been reassigned"
+            )
+        if any(TLBI_VMALLE1_RE.match(t) for t in body):
+            failures.append(
+                "mmu_tlb_invalidate_all still emits the LOCAL `tlbi vmalle1`: "
+                "the broadcast form replaced it, it did not join it"
+            )
+
+    body = seen.get("kernel_mmu_activate")
+    if body is not None and not any(TLBI_VMALLE1_RE.match(t) for t in body):
+        failures.append(
+            "kernel_mmu_activate emits no LOCAL `tlbi vmalle1`: a core "
+            "turning on its own MMU discards its own stale entries, and "
+            "broadcasting that makes every core pay for one core's boot"
+        )
+    return failures
+
+
 def main():
     if len(sys.argv) != 3:
         print(
@@ -347,14 +402,16 @@ def main():
         + check_eret_daif_mask(insns)
         + check_spinlock_is_atomic(insns)
         + check_mutex_masks_before_taking(insns)
+        + check_tlb_invalidate_all_is_broadcast(insns)
     )
     if failures:
         for f in failures:
             print("FAIL kernel/asm-invariants: %s" % f, file=sys.stderr)
         return 1
     print("PASS kernel/asm-invariants: UXN identity-block bits, eret DAIF.I "
-          "masking, the spinlock's atomicity, and mutex_acquire masking "
-          "before it takes, all verified statically")
+          "masking, the spinlock's atomicity, mutex_acquire masking "
+          "before it takes, and the whole-TLB invalidate broadcasting "
+          "while MMU activation stays local, all verified statically")
     return 0
 
 

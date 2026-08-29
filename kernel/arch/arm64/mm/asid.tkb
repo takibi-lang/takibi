@@ -33,12 +33,17 @@
 // stored beside the number.
 //
 // Current limitations:
-// - NOT SYNCHRONIZED, and the rollover assumes a single core is running
-//   user code. `tlbi vmalle1` invalidates the LOCAL TLB; a second core
-//   executing user code with an ASID that is about to be reassigned would
-//   keep stale entries. That is true of this kernel's scheduler generally
-//   (GitHub issue #222: the scheduler globals are not per-core), and this
-//   file's assumption is exactly as strong as that one, not stronger.
+// - NOT SYNCHRONIZED. asid_next/asid_generation are plain globals and two
+//   cores assigning at once could hand out the same number or miss a
+//   rollover; what protects them today is that one core runs kernel code
+//   (kernel/lib/execution_model.tkb's KERNEL_ACTIVE_CORES).
+// - The ROLLOVER's reach is no longer part of that. GitHub issue #446
+//   made mmu_tlb_invalidate_all() `tlbi vmalle1is`, so a rollover
+//   invalidates every core in the shareability domain rather than only the
+//   one that noticed the counter wrapped. A second core executing user
+//   code with an ASID about to be reassigned therefore does NOT keep stale
+//   entries -- the remaining single-core assumption is about the counter,
+//   not about the TLB.
 // - A number is not reused until the next rollover even if the address
 //   space holding it dies immediately. Linux keeps a bitmap and reuses
 //   freed numbers within a generation; here 65535 process creations

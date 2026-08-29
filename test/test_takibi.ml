@@ -12497,6 +12497,7 @@ let codegen_tests = [
             msr_daifclr_irq();
             msr_daifset_irq();
             tlbi_vmalle1();
+            tlbi_vmalle1is();
             dsb_ish();
             dsb_ishst();
             isb();
@@ -12700,6 +12701,7 @@ let codegen_tests = [
          ["mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1"; "mrs_mpidr_el1";
           "mrs_id_aa64mmfr0_el1";
           "msr_daifclr_irq"; "msr_daifset_irq"; "tlbi_vmalle1";
+          "tlbi_vmalle1is";
           "dsb_ish"; "dsb_ishst"; "isb"];
        List.iter (fun name ->
          expect_type_error "compiler builtin"
@@ -12720,6 +12722,7 @@ let codegen_tests = [
          "fn codegen_issue226_regs(v: usize) -> usize {
             msr_ttbr0_el1(v);
             tlbi_vaae1is(v);
+            tlbi_vmalle1is();
             dsb_ish();
             isb();
             msr_daifset_irq();
@@ -12738,6 +12741,11 @@ let codegen_tests = [
          (contains_substring ir "mrs $0, id_aa64mmfr0_el1");
        Alcotest.(check bool) "tlbi vaae1is" true
          (contains_substring ir "tlbi vaae1is, $0");
+       (* GitHub issue #446: the broadcast whole-TLB form, which the local
+          one is a textual prefix of -- so this checks the trailing `is`
+          is actually there rather than that a `vmalle1` appears. *)
+       Alcotest.(check bool) "tlbi vmalle1is" true
+         (contains_substring ir "tlbi vmalle1is");
        Alcotest.(check bool) "dsb ish" true (contains_substring ir "dsb ish");
        Alcotest.(check bool) "isb" true (contains_substring ir "isb");
        Alcotest.(check bool) "daifset" true

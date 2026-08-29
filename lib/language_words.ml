@@ -37,7 +37,8 @@ let compiler_builtins = [
   "msr_cntp_tval_el0"; "msr_cntp_ctl_el0"; "msr_sctlr_el1";
   "msr_mair_el1"; "msr_tcr_el1"; "msr_ttbr0_el1";
   "msr_daifclr_irq"; "msr_daifset_irq"; "mrs_daif";
-  "tlbi_vmalle1"; "tlbi_vaae1is"; "tlbi_vae1is"; "tlbi_aside1is";
+  "tlbi_vmalle1"; "tlbi_vmalle1is";
+  "tlbi_vaae1is"; "tlbi_vae1is"; "tlbi_aside1is";
   "dsb_ish"; "dsb_ishst"; "isb"; "smc4"; "hvc4"; "svc5";
   (* GitHub issue #17: the closed atomic set. Reserved for the same reason
      as every builtin above -- infer_expr dispatches on the name before it

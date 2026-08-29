@@ -2327,7 +2327,8 @@ the register chosen by LLVM's allocator rather than by the caller:
 `mrs_daif`;
 `msr_cntp_tval_el0`, `msr_cntp_ctl_el0`, `msr_sctlr_el1`, `msr_mair_el1`,
 `msr_tcr_el1`, `msr_ttbr0_el1`, `msr_daifclr_irq`, `msr_daifset_irq`;
-`tlbi_vmalle1`, `tlbi_vaae1is`, `tlbi_vae1is`, `tlbi_aside1is`;
+`tlbi_vmalle1`, `tlbi_vmalle1is`, `tlbi_vaae1is`, `tlbi_vae1is`,
+`tlbi_aside1is`;
 `dsb_ish`, `dsb_ishst`, `isb`; and the call gates `smc4`, `hvc4`,
 `svc5`. These are AArch64-only, but nothing rejects them during type
 checking -- the type checker does not know the target triple. On another

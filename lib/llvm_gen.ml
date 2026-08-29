@@ -4216,6 +4216,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (TypeUsize, v)
 
   | Call (("msr_daifclr_irq" | "msr_daifset_irq" | "tlbi_vmalle1"
+          | "tlbi_vmalle1is"
           | "dsb_ish" | "dsb_ishst" | "isb") as name, []) ->
       (* GitHub issue #226: zero-argument barrier/TLBI/DAIF-immediate
          instructions, same shape as signal_fence above. *)
@@ -4224,6 +4225,10 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | "msr_daifclr_irq" -> "msr DAIFClr, #0x2"
         | "msr_daifset_irq" -> "msr DAIFSet, #0x2"
         | "tlbi_vmalle1"    -> "tlbi vmalle1"
+        (* GitHub issue #446: the Inner Shareable sibling. Same operand
+           shape, different reach -- every core in the shareability
+           domain rather than this one. *)
+        | "tlbi_vmalle1is"  -> "tlbi vmalle1is"
         | "dsb_ish"         -> "dsb ish"
         | "dsb_ishst"       -> "dsb ishst"
         | "isb"             -> "isb"
