@@ -55,9 +55,8 @@ The current RPi5 kernel includes:
 - typed page allocation, AArch64 stage-1 page tables, process images, and
   deterministic teardown, backed by real physical RAM addressed directly
   (`kernel/mm/page.tkb`) and sized against the board's own real detected
-  RAM (the firmware-resolved DTB captured by the resident SWD stub, with
-  the VideoCore mailbox retained as a compatibility fallback, boot-logged
-  but not yet the allocator's own live bound);
+  RAM (the firmware-resolved DTB captured by the resident SWD stub,
+  boot-logged but not yet the allocator's own live bound);
 - ELF64 validation, static PIE loading, interpreter-aware PIE plus musl
   loading, initial Linux stack and auxv construction, `brk`, and bounded
   anonymous `mmap` behavior;
@@ -653,13 +652,14 @@ are deliberate, not gaps to silently close:
   and the kernel mounts it through `kernel/drivers/block/virtio_blk.tkb`.
   There is no RP1, PCIe, or xHCI/USB Mass Storage under QEMU, so the real USB
   provisioning and hardware-specific storage checks remain RPi5-only.
-- **RAM discovery uses different boot providers.** RPi5 firmware passes its
-  resolved FDT to the resident SD stub, which preserves it across SWD
-  injection; the VideoCore mailbox remains a compatibility fallback. QEMU's
-  direct-kernel loader generates an FDT from the selected machine and `-m`
-  value, passes its physical address in `x0`, and
-  `kernel/platform/qemu/memory.tkb` reads the `/memory` node through the
-  bounded common reader in `kernel/boot/fdt.tkb`. Neither platform's
+- **RAM discovery uses the boot DTB on both platforms.** RPi5 firmware passes
+  its resolved FDT to the resident SD stub, which preserves it across SWD
+  injection. QEMU's direct-kernel loader generates an FDT from the selected
+  machine and `-m` value and passes its physical address in `x0`. Both
+  platforms read the `/memory` node through the bounded common reader in
+  `kernel/boot/fdt.tkb`; an invalid DTB or missing usable memory node is a
+  fatal boot-contract violation, not a reason to switch data sources. Neither
+  platform's
   page allocator actually consumes this value today (see "Current limits"
   below) -- it is diagnostic boot-log output on both.
 - **The MMU device/RAM layout is inverted from RPi5's.** RPi5's real RAM

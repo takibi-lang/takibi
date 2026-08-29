@@ -32,7 +32,7 @@ def main() -> None:
 
     by_text = {text: timestamp for timestamp, text in records}
     first = b"takibi kernel: EL1"
-    assembled_prefix = b"memory: base_bytes="
+    assembled_prefix = b"memory: source=dtb base_bytes="
     if args.platform == "qemu":
         listener = b"virtio net: link ready mac=02:00:20:00:00:02"
         resumed = b"virtio net: tcp handshake echo close reconnect ok"

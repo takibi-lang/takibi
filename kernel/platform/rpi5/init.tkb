@@ -1,6 +1,6 @@
 use "kernel/init/test_driver.tkb";
 use "kernel/platform/rpi5/usb_xhci.tkb";
-use "kernel/platform/rpi5/mailbox.tkb";
+use "kernel/platform/rpi5/memory.tkb";
 
 private let mut kernel_secondary_boot_state: io usize;
 
@@ -566,31 +566,25 @@ fn main() !{unsafe} {
         kernel_boot_log("kernel log: bounds probe failed\n");
     }
 
-    // GitHub issue #247 step 1: query the platform for the real
-    // ARM-visible physical RAM base/size, instead of trusting
-    // kernel/mm/page.tkb's fixed 1024-page (4 MiB) reservation to reflect
-    // this board's actual installed memory. platform_memory_detect()
-    // (kernel/platform/rpi5/mailbox.tkb) is a VideoCore mailbox query on
-    // this platform specifically -- that file's own header explains why,
-    // and why device tree was rejected instead -- but this call site
-    // itself names no RPi5-specific mechanism, so a future QEMU/RISC-V
-    // port's own kernel/platform/<target>/ implementation of this same
-    // function name (most likely device-tree-based there) needs no change
-    // here. Read-only diagnostic today -- the allocator itself is not
-    // resized to match (see mailbox.tkb's header comment); that is
-    // deliberately deferred to a follow-up issue once this step's
-    // detected value has been cross-checked against real hardware.
+    // The firmware-resolved DTB is part of the arm64 boot contract on this
+    // platform. Memory discovery failing means that contract is broken; do
+    // not hide a parser or handoff regression behind a second data source.
     match platform_memory_detect() {
         PlatformMemoryResult::Detected(detected) => {
             let (mem_base, mem_size) = detected;
-            kernel_boot_log("memory: base_bytes=");
+            kernel_boot_log("memory: source=dtb base_bytes=");
             uart_put_udec(mem_base as usize);
             kernel_boot_log(" detected_mib=");
             uart_put_udec((mem_size as usize) / (1024 * 1024));
             kernel_boot_log("\n");
         }
-        PlatformMemoryResult::Failed => {
-            kernel_boot_log("memory: mailbox query failed\n");
+        PlatformMemoryResult::InvalidDtb => {
+            kernel_boot_log("memory: invalid boot DTB; halting\n");
+            while (true) { }
+        }
+        PlatformMemoryResult::MissingMemory => {
+            kernel_boot_log("memory: boot DTB has no usable /memory; halting\n");
+            while (true) { }
         }
     }
 

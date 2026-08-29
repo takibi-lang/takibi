@@ -19,9 +19,8 @@ const KERNEL_IDENTITY_L1_INDEX: usize = 0;
 
 // The two disjoint high-index device-MMIO ranges this board's real
 // physical map needs (GitHub issue #231's UXN/PXN device-block reasoning,
-// unchanged): indices 64-65 cover BCM2712 SoC peripherals including the
-// VideoCore mailbox (kernel/platform/rpi5/mailbox.tkb's own header cites
-// this range directly), indices 124-127 cover RP1's PCIe-translated
+// unchanged): indices 64-65 cover BCM2712 SoC peripherals, while indices
+// 124-127 cover RP1's PCIe-translated
 // MMIO/BAR window (kernel/platform/rpi5/pcie.tkb, uart.tkb, usb_xhci.tkb,
 // drivers/net/rp1_gem.tkb).
 fn platform_mmu_init_device_blocks(l1: usize) {

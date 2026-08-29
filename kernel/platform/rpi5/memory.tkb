@@ -1,10 +1,8 @@
-// platform_memory_detect() for QEMU's `virt` machine. QEMU's built-in
-// direct-kernel loader supplies its generated FDT in x0; entry_qemu.S
-// preserves that physical address before reusing the argument registers.
-// A usable DTB is part of this platform's boot contract, exactly as it is on
-// RPi5. Diagnostic only --
-// kernel/mm/page.tkb's allocator still uses its own fixed BOOT_PAGE_COUNT
-// regardless of this value on both platforms.
+// platform_memory_detect() for Raspberry Pi 5. The resident SD-card stub
+// preserves the firmware-resolved DTB in reserved low RAM, and the SWD loader
+// passes that physical address to the injected kernel in x0. A usable DTB is
+// therefore part of this platform's boot contract, just as it is for QEMU.
+
 must_use variant PlatformMemoryResult {
     InvalidDtb;
     MissingMemory;
