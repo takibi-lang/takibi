@@ -83,17 +83,32 @@ build; the boundaries are what matter.
 | `secondary_stack_run_bottom` | `0x009d8000` | `0x407e0000` | linker script `.stack` | CHECKED (ELF) |
 | `secondary_stack_bottom` | `0x009dc000` | `0x407e4000` | linker script `.stack` | CHECKED (ELF) |
 | `secondary_stack_top` | `0x009e0000` | `0x407e8000` | linker script `.stack` | CHECKED (ELF) |
+| `percpu_stack_base` | `0x009e0000` | `0x407e8000` | linker script `.stack` | CHECKED (ELF) |
 | `overflow_stack_run_bottom` | `0x009e0000` | `0x407e8000` | linker script `.stack` | CHECKED (ELF) |
 | `overflow_stack_bottom` | `0x009e4000` | `0x407ec000` | linker script `.stack` | CHECKED (ELF) |
 | `overflow_stack_top` | `0x009e8000` | `0x407f0000` | linker script `.stack` | CHECKED (ELF) |
 | `irq_stack_run_bottom` | `0x009e8000` | `0x407f0000` | linker script `.stack` | CHECKED (ELF) |
 | `irq_stack_bottom` | `0x009ec000` | `0x407f4000` | linker script `.stack` | CHECKED (ELF) |
 | `irq_stack_top` | `0x009f0000` | `0x407f8000` | linker script `.stack` | CHECKED (ELF) |
-| `usable_ram_start` | `0x009f0000` | `0x407f8000` | linker script, `ALIGN(4096)` | CHECKED (ELF) |
+| `percpu_stack_group_end` | `0x009f0000` | `0x407f8000` | linker script `.stack` | CHECKED (ELF) |
+| `secondary_percpu_stack_base` | `0x009f0000` | `0x407f8000` | linker script `.stack` | CHECKED (ELF) |
+| `percpu_stack_end` | `0x00a00000` | `0x40808000` | linker script `.stack` | CHECKED (ELF) |
+| `usable_ram_start` | `0x00a00000` | `0x40808000` | linker script, `ALIGN(4096)` | CHECKED (ELF) |
 
 `stack_top` is an alias of `boot_stack_top`, kept because `entry.S` names
-it. `irq_stack_top` and `usable_ram_start` are the same address: `.stack`
-ends where the page pool begins, and it is already page-aligned.
+it. `percpu_stack_end` and `usable_ram_start` are the same address:
+`.stack` ends where the page pool begins, and it is already page-aligned.
+
+GitHub issue #477: the rows from `percpu_stack_base` to
+`percpu_stack_group_end` are core 0's PER-CORE stack group, and
+`secondary_percpu_stack_base` is core 1's copy of the same shape one
+stride later. The named symbols are core 0's; each core's entry path puts
+its own byte offset into TPIDR_EL1, and the generated exception entries add
+it. The rows are what makes the stride checkable rather than assumed --
+`secondary_percpu_stack_base - percpu_stack_base` must equal
+`percpu_stack_group_end - percpu_stack_base`, and every run inside a group
+must stay 0x8000-aligned with its live half on top, which is what
+`stack_guard_shift`'s one-bit test depends on.
 
 ### An address between `_start` and `usable_ram_start` is kernel image
 

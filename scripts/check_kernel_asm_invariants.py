@@ -386,6 +386,93 @@ def check_tlb_invalidate_all_is_broadcast(insns):
     return failures
 
 
+# GitHub issue #477: every exception entry's stack switch must be PER CORE.
+#
+# The generated entries compute a stack address and `mov sp` to it. With one
+# global irq_stack_top that address was the same on every core, so the
+# second core's first interrupt landed on the first core's saved frame --
+# measured, not theorised: core 1's timer INTID (30) arrived as core 0's
+# ELR. The fix adds this core's offset, from TPIDR_EL1, to the address the
+# entry already computed.
+#
+# Checked on emitted instructions because the failure is invisible on one
+# core and unattributable on two. A `mov sp, xN` with no `mrs xM, tpidr_el1`
+# feeding it is correct on every single-core test that will ever be run.
+#
+# Deliberately NOT a check that some tpidr_el1 read exists somewhere in the
+# function: the question is whether THIS stack switch uses one. So the walk
+# pairs them up in order, which also catches an entry that reads the
+# register once and then switches stacks twice.
+ENTRY_SUFFIXES = ("_irq_entry", "_sync_entry")
+MOV_SP_RE = re.compile(r"^mov\s+sp,\s*x(\d+)$")
+# llvm-objdump prints system register names in UPPERCASE (the DAIFSet
+# check above relies on the same fact).
+MRS_TPIDR_RE = re.compile(r"^mrs\s+x(\d+),\s*tpidr_el1$", re.I)
+ADD_RE = re.compile(r"^add\s+x(\d+),\s*x(\d+),\s*x(\d+)$")
+
+
+def check_exception_stacks_are_per_core(insns):
+    failures = []
+    bodies = {}
+    for _, text, fn in insns:
+        if fn and fn.endswith(ENTRY_SUFFIXES):
+            bodies.setdefault(fn, []).append(text)
+    if not bodies:
+        failures.append(
+            "no exception entry found in this image: the generated entries "
+            "are what this checks, and a build without them has either "
+            "renamed them or stopped emitting them"
+        )
+        return failures
+
+    total_switches = 0
+    for fn, body in sorted(bodies.items()):
+        # Registers currently known to carry this core's offset, and those
+        # known to be a per-core stack address derived from it.
+        offset_regs = set()
+        percore_regs = set()
+        switches = 0
+        for text in body:
+            m = MRS_TPIDR_RE.match(text)
+            if m:
+                offset_regs.add(m.group(1))
+                continue
+            m = ADD_RE.match(text)
+            if m:
+                dst, a, b = m.groups()
+                if a in offset_regs or b in offset_regs:
+                    percore_regs.add(dst)
+                else:
+                    percore_regs.discard(dst)
+                continue
+            m = MOV_SP_RE.match(text)
+            if m:
+                switches += 1
+                # The dispatch's RETURNED sp (x0) is a frame pointer the
+                # handler chose, not a stack this entry located, so it is
+                # not part of this claim.
+                if m.group(1) == "0":
+                    continue
+                if m.group(1) not in percore_regs:
+                    failures.append(
+                        "%s switches to a stack in x%s that no tpidr_el1 "
+                        "offset was added to: that address is the same on "
+                        "every core, so a second core taking this exception "
+                        "lands on the first core's frame" % (fn, m.group(1))
+                    )
+        total_switches += switches
+    # Not per entry: el0_sync_entry legitimately switches to nothing, since
+    # a syscall runs on the process's own kernel stack. What would be a
+    # silent regression is the generator emitting NO stack switch anywhere,
+    # which would make every check above pass by having nothing to check.
+    if total_switches == 0:
+        failures.append(
+            "no exception entry switches stacks at all: every check above "
+            "passed by finding nothing, which is not the same as passing"
+        )
+    return failures
+
+
 def main():
     if len(sys.argv) != 3:
         print(
@@ -403,6 +490,7 @@ def main():
         + check_spinlock_is_atomic(insns)
         + check_mutex_masks_before_taking(insns)
         + check_tlb_invalidate_all_is_broadcast(insns)
+        + check_exception_stacks_are_per_core(insns)
     )
     if failures:
         for f in failures:
@@ -410,8 +498,9 @@ def main():
         return 1
     print("PASS kernel/asm-invariants: UXN identity-block bits, eret DAIF.I "
           "masking, the spinlock's atomicity, mutex_acquire masking "
-          "before it takes, and the whole-TLB invalidate broadcasting "
-          "while MMU activation stays local, all verified statically")
+          "before it takes, the whole-TLB invalidate broadcasting "
+          "while MMU activation stays local, and every exception entry "
+          "switching to a stack of its own core, all verified statically")
     return 0
 
 

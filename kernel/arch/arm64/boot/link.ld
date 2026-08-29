@@ -57,6 +57,28 @@ SECTIONS {
         secondary_stack_bottom = .;
         . += 0x4000;
         secondary_stack_top = .;
+        /* GitHub issue #477: the two stacks below are PER CORE, laid out as
+           KERNEL_CORES contiguous groups of identical shape.  A core's own
+           pair is its group index times one stride from these symbols, and
+           the index times the stride is what each core's entry path puts in
+           TPIDR_EL1 -- so the generated exception entry adds one register
+           to the address it already computes, and needs to know nothing
+           about which core it is running on.
+
+           The paragraph this replaces said "ONE stack, not one per core"
+           and named the exact condition under which that stops holding:
+           core 1 parking and never taking an interrupt.  GitHub issue #447
+           changed that condition, and the first timer tick on core 1
+           landed on core 0's saved frame -- its INTID, 30, arrived as core
+           0's ELR.  The reopen condition was written down and it fired.
+
+           Each group keeps the shape kernel/arch/arm64/kernel/
+           exception_frame.tkb's stack_guard_shift depends on: every run is
+           0x8000-aligned with the live half on top, so bit 14 of any
+           address inside a stack is 1.  A 0x10000 stride preserves that
+           for every group, which is why the stride is the group size and
+           not something rounder. */
+        percpu_stack_base = .;
         /* Where the exception-entry stack-overflow check lands.  A report
            about a stack cannot be trusted if it is written using that
            stack, which is why this exists at all.  Same shape as the
@@ -74,17 +96,20 @@ SECTIONS {
            interrupt reuses -- but everything the handler itself does
            happens here, so one kernel stack no longer has to hold the
            deepest syscall path and the deepest interrupt path at once.
-           Same arrangement as Linux's per-CPU IRQ stack.
-
-           ONE stack, not one per core: core 1 parks with DAIF masked and
-           never takes an interrupt, and nothing unmasks inside an IRQ
-           entry, so interrupts neither nest nor overlap.  If either
-           changes this must become per-core. */
+           Same arrangement as Linux's per-CPU IRQ stack, now including
+           the per-CPU part. */
         irq_stack_run_bottom = .;
         . += 0x4000;
         irq_stack_bottom = .;
         . += 0x4000;
         irq_stack_top = .;
+        percpu_stack_group_end = .;
+        /* One more group, for the one secondary this kernel starts
+           (kernel/arch/arm64/kernel/secondary.tkb's SECONDARY_CORE_ID).
+           Adding a core is adding a line here and raising KERNEL_CORES. */
+        secondary_percpu_stack_base = .;
+        . += (percpu_stack_group_end - percpu_stack_base);
+        percpu_stack_end = .;
     }
 
     /* GitHub issue #251: the first PAGE_SIZE-aligned physical address past

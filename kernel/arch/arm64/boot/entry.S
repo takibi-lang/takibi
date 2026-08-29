@@ -33,6 +33,29 @@ _start:
     bl      el2_drop_to_el1
 
 .Lel1_entry:
+    /* GitHub issue #477: this core's byte offset into the per-core stack
+     * groups, in TPIDR_EL1, which the generated exception entries add to
+     * every stack address they compute.  Zero for the primary: its group
+     * IS the base one the linker script's symbols name.
+     *
+     * The FIRST instruction after the drop, because VBAR_EL1 is already
+     * live by then (el2_drop_to_el1 sets it) and a vector that ran before
+     * this would compute its stack from a garbage register.  DAIF is
+     * masked across the whole window, so only a synchronous fault could
+     * reach it, and that is already fatal -- this just keeps it reportable.
+     *
+     * Linux sets the same register at the same point (init_cpu_task in
+     * __primary_switched, after the MMU and before C), except that it
+     * stores a per-CPU AREA offset because it has thousands of per-CPU
+     * variables to reach.  The only per-core thing a vector here has to
+     * find is its stack, so the offset is the whole answer.
+     *
+     * Neither entry path asks MPIDR which core it is.  It does not have
+     * to: PSCI starts exactly one secondary, so this path is core 0 by
+     * construction and kernel_secondary_entry is core 1 by construction.
+     * That is what keeps the per-platform affinity-field difference
+     * (GitHub issue #445) out of the shared logic. */
+    msr     tpidr_el1, xzr
     bl      el1_fpsimd_enable
     bl      kernel_mmu_init
     bl      main
@@ -70,6 +93,16 @@ kernel_secondary_entry:
     bl      el2_drop_to_el1
 
 .Lsecondary_el1:
+    /* GitHub issue #477: this core's offset into the per-core stack
+     * groups.  Computed from the two linker symbols rather than from a
+     * stride constant repeated here, so changing the layout moves this
+     * with it.  See .Lel1_entry for why neither path reads MPIDR. */
+    adrp    x0, secondary_percpu_stack_base
+    add     x0, x0, :lo12:secondary_percpu_stack_base
+    adrp    x1, percpu_stack_base
+    add     x1, x1, :lo12:percpu_stack_base
+    sub     x0, x0, x1
+    msr     tpidr_el1, x0
     bl      el1_fpsimd_enable
     bl      kernel_mmu_init_secondary
     mov     x0, x19

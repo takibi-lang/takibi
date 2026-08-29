@@ -7027,7 +7027,20 @@ let gen_exception_entry name frame dispatch before guard dispatch_stack =
   (match dispatch_stack with
    | Some sym ->
        a "\tmov\tx19, sp\n";
-       a "\tadrp\tx1, %s\n\tadd\tx1, x1, :lo12:%s\n\tmov\tsp, x1\n" sym sym;
+       a "\tadrp\tx1, %s\n\tadd\tx1, x1, :lo12:%s\n" sym sym;
+       (* GitHub issue #477: THIS core's copy of that stack. The symbol
+          names core 0's, the per-core stack groups are contiguous and
+          uniform, and each core's entry path put its own byte offset into
+          TPIDR_EL1 -- so one add reaches the right one and this sequence
+          needs to know nothing about which core is running it.
+
+          Unconditional rather than a declaration option. A dispatch stack
+          shared between cores is never right, and on one core the offset
+          is zero, so there is no correct use for the form without this.
+          The bug it removes was found the expensive way: with one global
+          irq_stack_top, core 1's first timer interrupt wrote its own INTID
+          over core 0's saved ELR. *)
+       a "\tmrs\tx2, tpidr_el1\n\tadd\tx1, x1, x2\n\tmov\tsp, x1\n";
        Option.iter (fun b -> a "\tbl\t%s\n" b) before;
        a "\tmov\tx0, x19\n"
    | None ->
@@ -7057,8 +7070,18 @@ let gen_exception_entry name frame dispatch before guard dispatch_stack =
   Option.iter (fun (_, guard_stack, handler) ->
     a ".L%s_stack_overflow:\n" name;
     a "\tmsr\tDAIFSet, #0xf\n";
-    a "\tadrp\tx1, %s\n\tadd\tx1, x1, :lo12:%s\n\tmov\tsp, x1\n"
-      guard_stack guard_stack;
+    a "\tadrp\tx1, %s\n\tadd\tx1, x1, :lo12:%s\n" guard_stack guard_stack;
+    (* GitHub issue #477: this core's guard stack, same reasoning as the
+       dispatch stack above. A report about a stack cannot be trusted if it
+       is written using that stack -- and on two cores, "that stack" would
+       include the other core's, silently, since a shared guard stack is
+       exactly as wrong here as a shared dispatch stack and fails in the
+       same unattributable way.
+
+       x2 is the interrupted context's, and clobbering it is free for the
+       same reason the comment below says x0's loss is: this path reports
+       and parks, and never resumes. *)
+    a "\tmrs\tx2, tpidr_el1\n\tadd\tx1, x1, x2\n\tmov\tsp, x1\n";
     (* x0 already holds the offending SP: the handler's only argument. *)
     a "\tbl\t%s\n" handler;
     (* The handler is checked to return void and is expected never to come

@@ -55,6 +55,26 @@ _start:
     add     x0, x0, :lo12:boot_stack_top
     mov     sp, x0
 
+    /* GitHub issue #477: this core's byte offset into the per-core stack
+     * groups, in TPIDR_EL1, which the generated exception entries add to
+     * every stack address they compute.  Zero for the primary: its group
+     * IS the base one the linker script's symbols name.
+     *
+     * Written before VBAR_EL1 below, so no exception can be taken between
+     * the vector table becoming live and the register the vectors read
+     * becoming valid.  Linux sets the same register in the same place for
+     * the same reason (init_cpu_task in __primary_switched), except that
+     * it stores a per-CPU AREA offset because it has thousands of per-CPU
+     * variables to reach; the only per-core thing a vector here has to
+     * find is its stack, so the offset is the whole answer.
+     *
+     * Neither entry path asks MPIDR which core it is.  It does not have
+     * to: PSCI starts exactly one secondary, so _start is core 0 by
+     * construction and kernel_secondary_entry is core 1 by construction.
+     * That is what keeps the per-platform affinity-field difference
+     * (GitHub issue #445) out of this file's shared logic. */
+    msr     tpidr_el1, xzr
+
     adrp    x0, el1_vectors
     add     x0, x0, :lo12:el1_vectors
     msr     vbar_el1, x0
@@ -94,6 +114,17 @@ kernel_secondary_entry:
     adrp    x0, secondary_stack_top
     add     x0, x0, :lo12:secondary_stack_top
     mov     sp, x0
+
+    /* GitHub issue #477: this core's offset into the per-core stack groups.
+     * Computed from the two linker symbols rather than from a stride
+     * constant repeated here, so changing the layout moves this with it.
+     * See _start for why neither path reads MPIDR. */
+    adrp    x0, secondary_percpu_stack_base
+    add     x0, x0, :lo12:secondary_percpu_stack_base
+    adrp    x1, percpu_stack_base
+    add     x1, x1, :lo12:percpu_stack_base
+    sub     x0, x0, x1
+    msr     tpidr_el1, x0
 
     adrp    x0, el1_vectors
     add     x0, x0, :lo12:el1_vectors
