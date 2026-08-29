@@ -21,6 +21,7 @@
 // Makefile's per-target file list needs to supply the right intc.tkb.
 
 use "kernel/platform/qemu/timer_irq.tkb";
+use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/arch/arm64/boot/cpu.tkb";
 
 const QEMU_UART_GIC_INTID: u32 = 33; // SPI #1
@@ -73,6 +74,20 @@ fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     let gicc_iar: *io u32 = unsafe { 0x0801000C as *io u32 };
     let gicc_eoir: *io u32 = unsafe { 0x08010010 as *io u32 };
     let id: u32 = *gicc_iar;
+
+    // GitHub issue #447: the secondary core takes its own timer tick and
+    // goes back to sleep. It must not fall into anything below -- every
+    // branch there reaches kernel state (the net wake list, the scheduler,
+    // DDB), and this core reaching none of it is what keeps
+    // KERNEL_ACTIVE_CORES at 1 while a second core runs kernel code.
+    // GICC_IAR is read before the branch, not after: acknowledging is the
+    // interrupted core's own job on its own banked interface.
+    if (cpu_id() != 0) {
+        if (id == QEMU_TIMER_GIC_INTID) { secondary_timer_tick(); }
+        *gicc_eoir = id;
+        return frame_sp;
+    }
+
     let mut debug_break: bool = false;
 
     if (id == QEMU_UART_GIC_INTID) {

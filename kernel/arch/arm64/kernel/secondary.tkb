@@ -1,27 +1,42 @@
-// The secondary core's entry point, and the state core 0 reads to know it
-// arrived.
+// GitHub issue #447: the second core stops parking and becomes an idle
+// execution context -- interrupts enabled at its OWN GIC CPU interface,
+// taking its OWN timer tick, and in `wfi` the rest of the time.
 //
-// One copy, in arch/, rather than one per platform. Both trees had a
-// byte-identical kernel_secondary_main and neither could see the other --
-// scripts/check_platform_file_parity.py listed it as a known duplication
-// waiting for multicore to claim it, and this is that claim. What is
-// genuinely per-platform stayed per-platform: cpu_id() reads a different
-// MPIDR affinity field on each part, and platform_irq_cpu_interface_init()
-// names different GICC addresses.
+// What core 1 does NOT do here is enter the scheduler. That is the next
+// issue, and the separation is what lets this one land without moving
+// KERNEL_ACTIVE_CORES: this core executes kernel code, but it reaches no
+// kernel STATE, so the three legs in kernel/lib/execution_model.tkb still
+// hold and the ten static_asserts that name them still say something true.
+// The constant's own comment moved from "core 1 parks" to that stricter
+// claim in the same change, because "it parks" stopped being why.
+//
+// Why the per-core work exists at all: GICC_PMR/GICC_CTLR are the GICv2
+// CPU INTERFACE and are banked per core, so core 0's one write does not
+// reach core 1 -- a core that never writes them has interrupts disabled at
+// its own interface no matter what the distributor says. The timer is the
+// same twice over: GICD_ISENABLER0 bit 30 is a PPI, which the GIC banks per
+// CPU (kernel/platform/*/timer_irq.tkb's own comment already said so, for a
+// different reason), and CNTP_TVAL_EL0/CNTP_CTL_EL0 are per-core registers
+// by construction. None of it is new code; what was missing was a path on
+// the secondary core that reached it.
 //
 // Current limitations:
 // - ONE secondary core, by decision of 2026-08-27: every class of race
 //   appears at two, and four adds reduced reproducibility plus a different
 //   problem (scalability) to a phase that is finding correctness bugs.
 //   SECONDARY_CORE_ID is that decision, not a hardware limit.
-// - THE SECONDARY CORE STILL PARKS. It reaches compiled Takibi, proves it
-//   can see the shared page table, and stops. Making it an idle execution
-//   context that takes its own timer tick is GitHub issue #447, and that
-//   is blocked on #477: the generated exception entry switches to ONE
-//   global IRQ stack, so a second core taking any interrupt lands on core
-//   0's frame. Measured, not anticipated -- core 1's first timer tick
-//   wrote its own INTID over core 0's saved ELR.
-// - Nothing here schedules. A process cannot run on core 1.
+// - The idle core reads and writes exactly one word of shared memory, its
+//   own tick counter, through atomics. It takes no lock because it enters
+//   no locked subsystem; if it ever does, that stops being true and
+//   kernel/lib/execution_model.tkb's leg 3 is what to reread.
+// - The core's exception stacks are its own as of GitHub issue #477. That
+//   was not true when this file was first written, and the first timer
+//   tick here landed on core 0's saved frame -- its INTID came back as
+//   core 0's ELR. Nothing in THIS file could have prevented that, which is
+//   why it is a separate issue and not a caveat here.
+// - The tick counter is evidence, not a clock. It counts this core's timer
+//   interrupts and says nothing about wall time.
+// - Nothing here schedules. A process cannot run on core 1 yet.
 
 use "kernel/lib/execution_model.tkb";
 
@@ -34,6 +49,21 @@ const SECONDARY_CORE_ID: usize = 1;
 // a single writer and a bounded poll, not a value read repeatedly.
 private let mut kernel_secondary_boot_state: io usize;
 
+// This core's timer-interrupt count. Written only by the secondary core,
+// from its interrupt handler; read only by core 0, for a view.
+//
+// Atomic rather than a plain global, and this is the first place in this
+// kernel where that is load-bearing rather than defensive: the two accesses
+// genuinely run on different cores at the same time, which is the exact
+// situation `io` (volatile, no ordering) does not cover. One writer means
+// no compare-and-swap is needed -- see GitHub issue #450 for why there
+// isn't one to reach for anyway.
+private let mut secondary_tick_count: usize;
+
+private fn secondary_tick_address() -> usize {
+    return (&secondary_tick_count) as usize;
+}
+
 fn kernel_secondary_boot_state_clear() {
     kernel_secondary_boot_state = 0;
 }
@@ -42,25 +72,101 @@ fn kernel_secondary_boot_state_value() -> usize {
     return kernel_secondary_boot_state;
 }
 
+// Read by core 0 for the view. The acquire pairs with the handler's own
+// release-free fetch-add on the same word: what is being ordered is this
+// core's view of a counter another core is incrementing, and the only
+// claim made is that the value read was one this core actually reached.
+fn secondary_tick_value() -> usize !{unsafe} {
+    return unsafe { atomic_load_acquire(secondary_tick_address()) };
+}
+
+// Called from a platform IRQ dispatch when the interrupted core is not core
+// 0 and the interrupt is the timer PPI. Rearms this core's own timer and
+// counts. Deliberately does NOT call kernel_process_net_wake_all() or
+// request a reschedule the way the core-0 path does -- both reach kernel
+// state, and this core reaching none of it is the property that keeps
+// KERNEL_ACTIVE_CORES at 1.
+fn secondary_timer_tick() !{interrupt, unsafe} {
+    timer_tick_rearm();
+    unsafe { atomic_fetch_add_relaxed(secondary_tick_address(), 1); }
+}
+
 // Reached only by the secondary core, after PSCI has installed the entry
 // point, that entry has selected its private stack, and the shared EL1 page
 // table is active. The context value prevents a coincidental stale write
 // from passing.
+//
+// One copy, in arch/, for the reason scripts/check_platform_file_parity.py
+// exists: the two platform trees are never compiled together, so two
+// identical copies of this would be free to drift with nothing able to
+// notice. What is genuinely per-platform is behind cpu_id() and
+// platform_irq_cpu_interface_init() -- the GICC addresses -- which is
+// where the difference belongs.
+//
+// Does not return. The `wfi` loop IS the idle context: interrupts are
+// enabled, the vector table is this core's, and the handler runs on this
+// core's own stack. `wfi` and not interrupt_wait()'s `wfe` because a core
+// waiting on wfe is woken by any core's SEV and core 0 executes one on
+// every tick -- the whole point is that this core wakes for its own
+// interrupt and nothing else.
 fn kernel_secondary_main(context: usize) {
-    // GitHub issue #453's worklist. This core reaches no kernel state,
-    // which is why KERNEL_ACTIVE_CORES is 1 even though a second core has
-    // executed compiled Takibi since bring-up. Raising the constant means
-    // core 1 gets an ExecutionState slot and may schedule, and this is one
-    // of the places that has to change first.
+    // GitHub issue #453's worklist, joined deliberately. This core runs
+    // kernel code and touches no kernel state, which is the ONLY reason
+    // KERNEL_ACTIVE_CORES can stay 1 while it does. Raising the constant
+    // means core 1 gets an ExecutionState slot and may schedule -- at
+    // which point the loop below stops being an idle loop and this
+    // function is one of the places that has to change.
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "the secondary core reaches no kernel state: give it a scheduler before giving it a slot");
+                  "the secondary core idles and reaches no kernel state: give it a scheduler before giving it a slot");
     let core_id: usize = cpu_id();
     if (context == 0x191 && core_id == SECONDARY_CORE_ID) {
         kernel_secondary_boot_state = 0x100 + core_id;
         signal_fence();
+        // Everything a core has to do FOR ITSELF, in the order it has to
+        // do it. Core 0 reaches the same three through its platform's
+        // platform_irq_init(), which additionally does the distributor and
+        // the device routing -- those belong to the machine, not to a
+        // core. Composing them is platform-independent, so it lives here
+        // rather than in two files that could drift
+        // (scripts/check_platform_file_parity.py caught exactly that when
+        // this was first written as a per-platform helper).
+        platform_irq_cpu_interface_init();
+        timer_irq_setup();
+        enable_irq();
+        while (true) {
+            wfi();
+        }
     }
-    // Returns to the entry path's own park. GitHub issue #447 replaces
-    // that with an idle loop here, once #477 has given this core a stack
-    // to take an interrupt on.
+    // Falls through to the entry path's own park for any core that is not
+    // the one PSCI was asked to start, or a context that does not match.
+    // That is a "this should not have happened" path, not an idle one.
 }
 
+// Does the secondary core's tick advance while core 0 CANNOT take an
+// interrupt at all? That is the independence claim, asked in the one way a
+// single boot can answer it deterministically: core 0 masks its own IRQs,
+// spins on the physical counter for a fixed window, and compares the
+// secondary's counter across it.
+//
+// Masking is what makes this evidence rather than a coincidence. With
+// interrupts enabled on both cores, a counter that advanced would prove
+// only that time passed. With core 0 unable to take even its own timer,
+// anything the secondary counts came from the secondary's own interface
+// and its own timer -- which is exactly the per-core banking this issue is
+// about.
+//
+// The window is a fraction of a second derived from CNTFRQ_EL0 rather than
+// a cycle count, because the two boards' counters run at different
+// frequencies (54 MHz on RPi5) and a fixed spin count would be a different
+// duration on each. The secondary's tick period is CNTFRQ >> 6, so a
+// window of CNTFRQ >> 4 covers several ticks with margin.
+fn secondary_ticks_independent() -> bool !{unsafe} {
+    let window: i64 = read_cntfrq() >> 4;
+    disable_irq();
+    let before: usize = secondary_tick_value();
+    let start: i64 = read_cntpct();
+    while (read_cntpct() - start < window) { }
+    let after: usize = secondary_tick_value();
+    enable_irq();
+    return after > before;
+}

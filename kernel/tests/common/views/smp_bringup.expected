@@ -1,1 +1,1 @@
-smp bringup: core1 psci+el1+takibi ok
+smp bringup: core1 psci+el1+takibi+own-timer ok

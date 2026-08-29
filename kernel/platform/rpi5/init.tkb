@@ -632,7 +632,16 @@ fn main() !{unsafe} {
 
     match kernel_secondary_boot_probe() {
         SecondaryBootResult::Started => {
-            kernel_boot_log("smp bringup: core1 psci+el1+takibi ok\n");
+            // GitHub issue #447: "and then it parked" is what this
+            // line used to mean. The core runs an idle loop with its own
+            // GIC CPU interface and its own timer now, so the assertion
+            // that replaces it is the one that could not be made before.
+            if (secondary_ticks_independent()) {
+                kernel_boot_log(
+                    "smp bringup: core1 psci+el1+takibi+own-timer ok\n");
+            } else {
+                kernel_boot_log("smp bringup: core1 idle but no ticks\n");
+            }
         }
         SecondaryBootResult::UnexpectedStatus(status) => {
             kernel_boot_log("smp bringup: core1 unexpected psci status\n");
