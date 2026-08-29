@@ -4014,14 +4014,21 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  (match Publish_registry.publication_field record with
                   | Some seq when seq = fname ->
                       raise (TypeError (e.loc, Printf.sprintf
-                        "publication field '%s.%s' cannot be assigned: it is                          cleared by publish_begin and written by                          publish_commit, and those two stores ARE the commit                          protocol. A third store to it publishes a record                          that was never finished"
+                        "publication field '%s.%s' cannot be assigned: it is cleared by \
+                         publish_begin and written by publish_commit, and \
+                         those two stores ARE the commit protocol. A third \
+                         store to it publishes a record that was never \
+                         finished"
                         record fname))
                   | _ -> ());
                  record
              | None ->
                  if Publish_registry.is_publish sname then
                    raise (TypeError (e.loc, Printf.sprintf
-                     "field '%s.%s' cannot be assigned directly: a publish                       record's payload is written through the linear token                       publish_begin returns, so that every store to it                       happens between the clear and the commit"
+                     "field '%s.%s' cannot be assigned directly: a publish record's \
+                      payload is written through the linear token \
+                      publish_begin returns, so that every store to it \
+                      happens between the clear and the commit"
                      sname fname));
                  sname
            in

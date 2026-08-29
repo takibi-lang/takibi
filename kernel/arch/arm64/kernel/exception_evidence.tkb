@@ -575,11 +575,15 @@ private fn ddb_render_trace() !{unsafe} {
     }
 }
 
+// GitHub issue #299: this used to index a flat word buffer -- records[base
+// + 3] was `a`, and the only thing tying that 3 to the writer's own
+// `base + 3` was that both were typed by the same person on the same day.
+// The records are DiagnosticEvent now and the fields have their names.
 private fn ddb_render_events() !{interrupt, unsafe} {
-    let mut records: [usize; DIAGNOSTIC_TRACE_CPU_WORDS];
+    let mut records: [DiagnosticEvent; DIAGNOSTIC_TRACE_EVENTS];
     for cpu: usize in 0..<DIAGNOSTIC_TRACE_CPUS {
         let mut copied: DiagnosticTraceCopyResult =
-            diagnostic_trace_copy_cpu(cpu, records as []usize);
+            diagnostic_trace_copy_cpu(cpu, records as []DiagnosticEvent);
         ddb_puts("ddb: events cpu="); ddb_put_udec(cpu);
         ddb_puts(" count="); ddb_put_udec(copied.count);
         ddb_puts(" damaged="); ddb_put_udec(copied.damaged);
@@ -587,14 +591,13 @@ private fn ddb_render_events() !{interrupt, unsafe} {
         ddb_puts("\n");
         for item: usize in 0..<DIAGNOSTIC_TRACE_EVENTS {
             if (item < copied.count) {
-                let base: usize = item * DIAGNOSTIC_TRACE_WORDS_PER_EVENT;
-                ddb_puts("ddb: event seq="); ddb_put_udec(records[base]);
-                ddb_puts(" cpu="); ddb_put_udec(records[base + 1]);
-                ddb_puts(" id="); ddb_put_hex(records[base + 2]);
-                ddb_puts(" a="); ddb_put_hex(records[base + 3]);
-                ddb_puts(" b="); ddb_put_hex(records[base + 4]);
-                ddb_puts(" c="); ddb_put_hex(records[base + 5]);
-                ddb_puts(" d="); ddb_put_hex(records[base + 6]);
+                ddb_puts("ddb: event seq="); ddb_put_udec(records[item].seq);
+                ddb_puts(" cpu="); ddb_put_udec(records[item].cpu);
+                ddb_puts(" id="); ddb_put_hex(records[item].id);
+                ddb_puts(" a="); ddb_put_hex(records[item].a);
+                ddb_puts(" b="); ddb_put_hex(records[item].b);
+                ddb_puts(" c="); ddb_put_hex(records[item].c);
+                ddb_puts(" d="); ddb_put_hex(records[item].d);
                 ddb_puts("\n");
             }
         }

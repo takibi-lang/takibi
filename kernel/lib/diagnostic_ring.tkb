@@ -1,5 +1,17 @@
 // Fixed-record per-CPU diagnostic ring for DDB and fail-stop evidence.
 //
+// GitHub issue #299: the record is a `struct publish` and the write/read
+// protocol is the compiler's, not this file's. What that replaced is worth
+// naming, because it was correct and it was also invisible: the storage was
+// a flat `[usize; 256]` reached by hand-computed word offsets, cleared at
+// `base + 0`, filled at `base + 1` through `base + 7`, and committed by
+// writing `base + 0` last. Every way of getting that wrong -- a wrong
+// offset, two stores swapped, the commit written before the payload, a
+// reader with no re-check -- compiled, and on one core most of them worked.
+// Now the payload is unreachable except through the linear token
+// publish_begin hands back, so a payload store can only happen between the
+// clear and the commit, and a record left in flight is a compile error.
+//
 // Current limitations:
 // - Four CPU rings are statically reserved, matching the largest maintained
 //   target. CPUs outside that range do not record.
@@ -8,12 +20,14 @@
 //   test configuration. There is no production control surface yet.
 // - Readers preserve per-CPU order only. They do not invent a global order
 //   between CPUs and do not yet carry timestamps for causal correlation.
+// - A writer that does not set every payload field publishes a zero there
+//   rather than an error. publish_begin scrubs, which makes a forgotten
+//   field read as forgotten; GitHub issue #476 is what would make it a
+//   compile error. Every writer here sets all six today.
 
 const DIAGNOSTIC_TRACE_CPUS: usize = 4;
 const DIAGNOSTIC_TRACE_EVENTS: usize = 8;
-const DIAGNOSTIC_TRACE_WORDS_PER_EVENT: usize = 8;
-const DIAGNOSTIC_TRACE_CPU_WORDS: usize = 64;
-const DIAGNOSTIC_TRACE_STORAGE_WORDS: usize = 256;
+const DIAGNOSTIC_TRACE_SLOTS: usize = 32;
 
 // 0x0100..0x01ff is the platform/interrupt range. The first concrete event
 // records a UART BREAK before control enters DDB.
@@ -23,6 +37,21 @@ const DiagnosticEventUartBreak: usize = 0x0101;
 // 3=byte consumed, 4=read must retry. Payload is byte/current pid/waiter pid.
 const DiagnosticEventProcessUartWake: usize = 0x0201;
 
+// The published record. `seq` is the publication field -- first, `usize`,
+// and written only by publish_begin and publish_commit. A decoder outside
+// this program gets the offsets from `--emit-struct-layout DiagnosticEvent`
+// rather than from a constant here agreeing with the field order by hand,
+// which is what DIAGNOSTIC_TRACE_WORDS_PER_EVENT used to be.
+struct publish DiagnosticEvent {
+    seq: usize;
+    cpu: usize;
+    id: usize;
+    a: usize;
+    b: usize;
+    c: usize;
+    d: usize;
+}
+
 struct DiagnosticTraceCopyResult {
     count: usize;
     damaged: usize;
@@ -31,7 +60,7 @@ struct DiagnosticTraceCopyResult {
 
 private let mut diagnostic_trace_next: [usize; DIAGNOSTIC_TRACE_CPUS];
 private let mut diagnostic_trace_records:
-    [usize; DIAGNOSTIC_TRACE_STORAGE_WORDS];
+    [DiagnosticEvent; DIAGNOSTIC_TRACE_SLOTS];
 let mut diagnostic_trace_test_enabled: bool;
 
 private fn diagnostic_trace_next_address(cpu: usize) -> usize {
@@ -39,9 +68,23 @@ private fn diagnostic_trace_next_address(cpu: usize) -> usize {
     return (next + (cpu as isize)) as usize;
 }
 
-private fn diagnostic_trace_record_address(word: usize) -> usize {
-    let records: *usize = diagnostic_trace_records;
-    return (records + (word as isize)) as usize;
+// Which record a (cpu, sequence) pair lands in. One function, so the ring's
+// only piece of address arithmetic has one home -- the writer and the
+// reader used to compute it separately from the same two constants.
+private fn diagnostic_trace_slot(cpu: {0..<DIAGNOSTIC_TRACE_CPUS as usize},
+                                 sequence: usize) -> *DiagnosticEvent {
+    // The storage array's size and this arithmetic have to agree, and an
+    // array size cannot be a product expression, so the product is a
+    // separate constant -- which is exactly the shape that goes stale when
+    // somebody raises the CPU count. Checked here rather than remembered.
+    static_assert(DIAGNOSTIC_TRACE_SLOTS ==
+                  DIAGNOSTIC_TRACE_CPUS * DIAGNOSTIC_TRACE_EVENTS,
+                  "DIAGNOSTIC_TRACE_SLOTS must be CPUS * EVENTS: this function indexes past the array otherwise");
+    let records: *DiagnosticEvent = diagnostic_trace_records;
+    let slot: usize =
+        cpu * DIAGNOSTIC_TRACE_EVENTS +
+        ((sequence - 1) % DIAGNOSTIC_TRACE_EVENTS);
+    return records + (slot as isize);
 }
 
 fn diagnostic_trace_record(event: usize, a: usize, b: usize,
@@ -52,44 +95,33 @@ fn diagnostic_trace_record(event: usize, a: usize, b: usize,
     let sequence: usize = unsafe {
         atomic_fetch_add_relaxed(diagnostic_trace_next_address(cpu), 1)
     } + 1;
-    let slot: usize = (sequence - 1) % DIAGNOSTIC_TRACE_EVENTS;
-    let base: usize =
-        (cpu * DIAGNOSTIC_TRACE_EVENTS + slot) *
-        DIAGNOSTIC_TRACE_WORDS_PER_EVENT;
-    if (base <= DIAGNOSTIC_TRACE_STORAGE_WORDS -
-            DIAGNOSTIC_TRACE_WORDS_PER_EVENT) {
-        unsafe {
-            atomic_store_release(diagnostic_trace_record_address(base), 0);
-        }
-        diagnostic_trace_records[base + 1] = cpu;
-        diagnostic_trace_records[base + 2] = event;
-        diagnostic_trace_records[base + 3] = a;
-        diagnostic_trace_records[base + 4] = b;
-        diagnostic_trace_records[base + 5] = c;
-        diagnostic_trace_records[base + 6] = d;
-        diagnostic_trace_records[base + 7] = 0;
-        unsafe {
-            atomic_store_release(diagnostic_trace_record_address(base),
-                                 sequence);
-        }
-    }
+    // publish_begin clears the commit word with a release before anything
+    // below runs, so an interrupt that reads this slot mid-write sees an
+    // empty record rather than the previous one still looking plausible.
+    let w = publish_begin(diagnostic_trace_slot(cpu, sequence));
+    w.cpu = cpu;
+    w.id = event;
+    w.a = a;
+    w.b = b;
+    w.c = c;
+    w.d = d;
+    publish_commit(w, sequence);
 }
 
 fn diagnostic_trace_record_uart_break(data: usize) !{interrupt, unsafe} {
     diagnostic_trace_record(DiagnosticEventUartBreak, data, 0, 0, 0);
 }
 
-// Copy one CPU oldest-to-newest. A commit is checked before and after copying
-// so a wrap during the copy becomes `damaged`, never plausible stale data.
+// Copy one CPU oldest-to-newest. publish_copy checks the commit word before
+// and after each record, so a wrap during the copy becomes `damaged` rather
+// than plausible stale data -- that re-check is the compiler's now, and it
+// is the step this loop used to have to remember.
 fn diagnostic_trace_copy_cpu(cpu: usize,
-        output: borrow [usize; DIAGNOSTIC_TRACE_CPU_WORDS..])
+        output: borrow [DiagnosticEvent; DIAGNOSTIC_TRACE_EVENTS..])
         -> DiagnosticTraceCopyResult !{interrupt, unsafe} {
     let mut count: usize = 0;
     let mut damaged: usize = 0;
     let mut overwritten: usize = 0;
-    for word: usize in 0..<DIAGNOSTIC_TRACE_CPU_WORDS {
-        output[word] = 0;
-    }
     if (cpu < DIAGNOSTIC_TRACE_CPUS) {
         let latest: usize = unsafe {
             atomic_load_acquire(diagnostic_trace_next_address(cpu))
@@ -99,35 +131,23 @@ fn diagnostic_trace_copy_cpu(cpu: usize,
             overwritten = latest - DIAGNOSTIC_TRACE_EVENTS;
             first = overwritten + 1;
         }
+        // Slice-to-pointer decay to the slice's OWN element type, which
+        // needs no length proof (SPEC.md, "Slices"). The bound is kept by
+        // the loop below never writing past DIAGNOSTIC_TRACE_EVENTS, which
+        // is the slice's declared minimum.
+        let target: *DiagnosticEvent = output as *DiagnosticEvent;
         for item: usize in 0..<DIAGNOSTIC_TRACE_EVENTS {
             let sequence: usize = first + item;
             if (sequence <= latest) {
-                let slot: usize = (sequence - 1) % DIAGNOSTIC_TRACE_EVENTS;
-                let source: usize =
-                    (cpu * DIAGNOSTIC_TRACE_EVENTS + slot) *
-                    DIAGNOSTIC_TRACE_WORDS_PER_EVENT;
-                let before: usize = unsafe {
-                    atomic_load_acquire(diagnostic_trace_record_address(source))
-                };
-                if (before == sequence) {
-                    let target: usize =
-                        count * DIAGNOSTIC_TRACE_WORDS_PER_EVENT;
-                    for word: usize in 0..<DIAGNOSTIC_TRACE_WORDS_PER_EVENT {
-                        let target_word: usize = target + word;
-                        let source_word: usize = source + word;
-                        if (target_word < DIAGNOSTIC_TRACE_CPU_WORDS &&
-                                source_word < DIAGNOSTIC_TRACE_STORAGE_WORDS) {
-                            output[target_word] =
-                                diagnostic_trace_records[source_word];
-                        }
-                    }
-                    let after: usize = unsafe {
-                        atomic_load_acquire(
-                            diagnostic_trace_record_address(source))
-                    };
-                    if (after == sequence) { count = count + 1; }
-                    else { damaged = damaged + 1; }
-                } else { damaged = damaged + 1; }
+                let taken: usize = publish_copy(
+                    diagnostic_trace_slot(cpu, sequence),
+                    target + (count as isize));
+                // The slot holds what the WRITER committed. This reader
+                // knows which sequence chronologically belongs here, so a
+                // consistent copy of a DIFFERENT record is still damage --
+                // the ring wrapped past this position while the copy ran.
+                if (taken == sequence) { count = count + 1; }
+                else { damaged = damaged + 1; }
             }
         }
     }
