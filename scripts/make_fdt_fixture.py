@@ -94,12 +94,12 @@ class Builder:
 
 def main():
     valid_modes = ("--invalid-memory", "--invalid-reservation",
-                   "--invalid-tree-reservation")
+                   "--invalid-tree-reservation", "--invalid-device")
     if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and
                                      sys.argv[2] not in valid_modes):
         print("usage: make_fdt_fixture.py OUTPUT "
               "[--invalid-memory|--invalid-reservation|"
-              "--invalid-tree-reservation]",
+              "--invalid-tree-reservation|--invalid-device]",
               file=sys.stderr)
         return 2
     mode = sys.argv[2] if len(sys.argv) == 3 else ""
@@ -107,6 +107,25 @@ def main():
     b.begin("")
     b.prop("#address-cells", b.cells(2))
     b.prop("#size-cells", b.cells(2))
+
+    # QEMU virt's actual console shape: a root child, a compatible list, and
+    # a 64-bit root reg tuple. A disabled malformed match comes first to prove
+    # completed-node status, rather than property order, controls validity.
+    b.begin("pl011-disabled@8ffffff")
+    b.prop("compatible", b"arm,pl011\0arm,primecell\0")
+    b.prop("reg", b.cells(0, 0x08FFFFFF, 0))
+    b.prop("status", b"disabled\0")
+    b.end()
+    if mode == "--invalid-device":
+        b.begin("pl011@8ffff000")
+        b.prop("compatible", b"arm,pl011\0arm,primecell\0")
+        b.prop("reg", b.cells(0, 0x08FFF000, 0, 0))
+        b.end()
+    b.begin("pl011@9000000")
+    b.prop("reg", b.cells(0, 0x09000000, 0, 0x1000))
+    b.prop("compatible", b"arm,pl011\0arm,primecell\0")
+    b.prop("status", b"okay\0")
+    b.end()
 
     b.begin("memory@0")
     b.prop("device_type", b"memory\0")

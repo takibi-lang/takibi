@@ -45,6 +45,21 @@ must_use variant FdtMemoryRegionResult {
     Found(PhysicalMemoryRegion);
 }
 
+struct FdtDeviceRegion {
+    base: usize;
+    size: usize;
+}
+
+// Deliberately narrow device lookup for the drivers being migrated from
+// constants. It accepts a root child (QEMU virt's PL011) or one simple-bus
+// bus with one ranges property (the first RPi5 SoC-direct device). It is not
+// a general path, phandle, or recursively translated device-tree framework.
+must_use variant FdtDeviceRegionResult {
+    Invalid;
+    NotFound;
+    Found(FdtDeviceRegion);
+}
+
 struct FdtScanMemory {
     first_base: usize;
     total_size: usize;
@@ -155,6 +170,27 @@ private fn fdt_string_is(base: usize, total: usize, offset: usize,
     return fdt_read_u8(base, total, offset + expected.len) == 0;
 }
 
+private fn fdt_string_list_contains(base: usize, total: usize, offset: usize,
+                                    length: usize, wanted: []u8)
+        -> bool !{unsafe} {
+    if (fdt_range_valid(total, offset, length) == false) { return false; }
+    let end: usize = offset + length;
+    let mut item: usize = offset;
+    while (item < end) {
+        let mut item_end: usize = item;
+        while (item_end < end && fdt_read_u8(base, total, item_end) != 0) {
+            item_end = item_end + 1;
+        }
+        if (item_end >= end) { return false; }
+        if (item_end - item == wanted.len &&
+            fdt_string_is(base, item_end + 1, item, wanted)) {
+            return true;
+        }
+        item = item_end + 1;
+    }
+    return false;
+}
+
 private fn fdt_node_is_memory(base: usize, total: usize, offset: usize)
         -> bool !{unsafe} {
     let name: [u8; 6..] = bs"memory";
@@ -204,6 +240,17 @@ private fn fdt_reg_length_valid(length: usize, address_cells: usize,
     if (address_cells == 2 && size_cells == 2) {
         return length >= 16 && length % 16 == 0;
     }
+    return false;
+}
+
+private fn fdt_ranges_length_valid(length: usize, child_cells: usize,
+                                   parent_cells: usize, size_cells: usize)
+        -> bool {
+    let cells: usize = child_cells + parent_cells + size_cells;
+    if (cells == 3) { return length >= 12 && length % 12 == 0; }
+    if (cells == 4) { return length >= 16 && length % 16 == 0; }
+    if (cells == 5) { return length >= 20 && length % 20 == 0; }
+    if (cells == 6) { return length >= 24 && length % 24 == 0; }
     return false;
 }
 
@@ -555,6 +602,240 @@ private fn fdt_scan_tree_reservations(base: usize, wanted: usize)
         }
     }
     return FdtReservationScanResult::Invalid;
+}
+
+fn fdt_find_compatible_reg(base: usize, compatible: []u8)
+        -> FdtDeviceRegionResult !{unsafe} {
+    if (fdt_read_be32(base, FDT_HEADER_SIZE, 0) != FDT_MAGIC) {
+        return FdtDeviceRegionResult::Invalid;
+    }
+    let total: usize = fdt_read_be32(base, FDT_HEADER_SIZE, 4);
+    if (total < FDT_HEADER_SIZE || total > FDT_MAX_SIZE) {
+        return FdtDeviceRegionResult::Invalid;
+    }
+    let struct_offset: usize = fdt_read_be32(base, total, 8);
+    let strings_offset: usize = fdt_read_be32(base, total, 12);
+    let strings_size: usize = fdt_read_be32(base, total, 32);
+    let struct_size: usize = fdt_read_be32(base, total, 36);
+    if (fdt_range_valid(total, struct_offset, struct_size) == false ||
+        fdt_range_valid(total, strings_offset, strings_size) == false ||
+        (struct_offset & 3) != 0) {
+        return FdtDeviceRegionResult::Invalid;
+    }
+
+    let struct_end: usize = struct_offset + struct_size;
+    let strings_end: usize = strings_offset + strings_size;
+    let mut cursor: usize = struct_offset;
+    let mut depth: usize = 0;
+    let mut root_address_cells: usize = 2;
+    let mut root_size_cells: usize = 1;
+
+    // The sole supported translated shape is root -> bus -> device. Keep the
+    // bus properties as offsets and decode ranges only when the child closes:
+    // property order is unspecified, and the Pi 5 blob puts ranges first.
+    let mut bus_depth: usize = 0;
+    let mut bus_address_cells: usize = 2;
+    let mut bus_size_cells: usize = 1;
+    let mut bus_ranges_seen: bool = false;
+    let mut bus_ranges_offset: usize = 0;
+    let mut bus_ranges_length: usize = 0;
+
+    let mut candidate_depth: usize = 0;
+    let mut candidate_enabled: bool = true;
+    let mut candidate_compatible: bool = false;
+    let mut candidate_reg_seen: bool = false;
+    let mut candidate_reg_offset: usize = 0;
+    let mut candidate_reg_length: usize = 0;
+
+    while (cursor < struct_end) {
+        if (fdt_range_valid(struct_end, cursor, 4) == false) {
+            return FdtDeviceRegionResult::Invalid;
+        }
+        let token: usize = fdt_read_be32(base, total, cursor);
+        cursor = cursor + 4;
+        if (token == FDT_BEGIN_NODE) {
+            let mut name_end: usize = cursor;
+            while (name_end < struct_end &&
+                   fdt_read_u8(base, total, name_end) != 0) {
+                name_end = name_end + 1;
+            }
+            if (name_end >= struct_end) {
+                return FdtDeviceRegionResult::Invalid;
+            }
+            depth = depth + 1;
+            if (depth == 2) {
+                bus_depth = depth;
+                bus_address_cells = root_address_cells;
+                bus_size_cells = root_size_cells;
+                bus_ranges_seen = false;
+                bus_ranges_offset = 0;
+                bus_ranges_length = 0;
+                candidate_depth = depth;
+                candidate_enabled = true;
+                candidate_compatible = false;
+                candidate_reg_seen = false;
+            } else if (depth == 3 && bus_depth == 2) {
+                candidate_depth = depth;
+                candidate_enabled = true;
+                candidate_compatible = false;
+                candidate_reg_seen = false;
+            }
+            cursor = fdt_align4(name_end + 1);
+            if (cursor == 0 || cursor > struct_end) {
+                return FdtDeviceRegionResult::Invalid;
+            }
+        } else if (token == FDT_END_NODE) {
+            if (depth == 0) { return FdtDeviceRegionResult::Invalid; }
+            if (candidate_depth == depth) {
+                if (candidate_enabled && candidate_compatible) {
+                    let mut address_cells: usize = bus_address_cells;
+                    let mut size_cells: usize = bus_size_cells;
+                    if (depth == 2) {
+                        address_cells = root_address_cells;
+                        size_cells = root_size_cells;
+                    }
+                    if (candidate_reg_seen == false ||
+                        fdt_reg_length_valid(candidate_reg_length,
+                                             address_cells, size_cells) ==
+                            false) {
+                        return FdtDeviceRegionResult::Invalid;
+                    }
+                    let child_base: usize = fdt_cells_value(
+                        base, total, candidate_reg_offset, address_cells);
+                    let child_size: usize = fdt_cells_value(
+                        base, total,
+                        candidate_reg_offset + address_cells * 4,
+                        size_cells);
+                    if (child_size == 0 ||
+                        child_base > 0xFFFFFFFFFFFFFFFF - child_size) {
+                        return FdtDeviceRegionResult::Invalid;
+                    }
+                    if (depth == 2) {
+                        let mut region: FdtDeviceRegion = {
+                            child_base, child_size
+                        };
+                        return FdtDeviceRegionResult::Found(region);
+                    }
+                    if (bus_ranges_seen == false) {
+                        return FdtDeviceRegionResult::Invalid;
+                    }
+                    // Empty ranges means the parent and child address spaces
+                    // are identical. This is common on simple buses.
+                    if (bus_ranges_length == 0) {
+                        let mut region: FdtDeviceRegion = {
+                            child_base, child_size
+                        };
+                        return FdtDeviceRegionResult::Found(region);
+                    }
+                    let tuple_cells: usize = bus_address_cells +
+                        root_address_cells + bus_size_cells;
+                    if (fdt_ranges_length_valid(
+                            bus_ranges_length, bus_address_cells,
+                            root_address_cells, bus_size_cells) == false) {
+                        return FdtDeviceRegionResult::Invalid;
+                    }
+                    let mut relative: usize = 0;
+                    while (relative <= bus_ranges_length - tuple_cells * 4) {
+                        let child_bus_base: usize = fdt_cells_value(
+                            base, total, bus_ranges_offset + relative,
+                            bus_address_cells);
+                        let parent_base: usize = fdt_cells_value(
+                            base, total,
+                            bus_ranges_offset + relative +
+                                bus_address_cells * 4,
+                            root_address_cells);
+                        let range_size: usize = fdt_cells_value(
+                            base, total,
+                            bus_ranges_offset + relative +
+                                (bus_address_cells + root_address_cells) * 4,
+                            bus_size_cells);
+                        if (range_size == 0 ||
+                            child_bus_base >
+                                0xFFFFFFFFFFFFFFFF - range_size ||
+                            parent_base > 0xFFFFFFFFFFFFFFFF - range_size) {
+                            return FdtDeviceRegionResult::Invalid;
+                        }
+                        if (child_base >= child_bus_base &&
+                            child_base - child_bus_base < range_size &&
+                            child_size <= range_size -
+                                (child_base - child_bus_base)) {
+                            let translated: usize = parent_base +
+                                (child_base - child_bus_base);
+                            let mut region: FdtDeviceRegion = {
+                                translated, child_size
+                            };
+                            return FdtDeviceRegionResult::Found(region);
+                        }
+                        relative = relative + tuple_cells * 4;
+                    }
+                    return FdtDeviceRegionResult::Invalid;
+                }
+                candidate_depth = 0;
+            }
+            if (bus_depth == depth) { bus_depth = 0; }
+            depth = depth - 1;
+        } else if (token == FDT_PROP) {
+            if (fdt_range_valid(struct_end, cursor, 8) == false) {
+                return FdtDeviceRegionResult::Invalid;
+            }
+            let length: usize = fdt_read_be32(base, total, cursor);
+            let name_relative: usize = fdt_read_be32(base, total, cursor + 4);
+            cursor = cursor + 8;
+            if (name_relative >= strings_size ||
+                fdt_range_valid(struct_end, cursor, length) == false) {
+                return FdtDeviceRegionResult::Invalid;
+            }
+            let prop_name: usize = strings_offset + name_relative;
+            if (prop_name >= strings_end) {
+                return FdtDeviceRegionResult::Invalid;
+            }
+            if (depth == 1 && length == 4 && fdt_string_is(
+                    base, strings_end, prop_name, bs"#address-cells")) {
+                root_address_cells = fdt_read_be32(base, total, cursor);
+            } else if (depth == 1 && length == 4 && fdt_string_is(
+                    base, strings_end, prop_name, bs"#size-cells")) {
+                root_size_cells = fdt_read_be32(base, total, cursor);
+            } else if (bus_depth == depth && length == 4 && fdt_string_is(
+                    base, strings_end, prop_name, bs"#address-cells")) {
+                bus_address_cells = fdt_read_be32(base, total, cursor);
+            } else if (bus_depth == depth && length == 4 && fdt_string_is(
+                    base, strings_end, prop_name, bs"#size-cells")) {
+                bus_size_cells = fdt_read_be32(base, total, cursor);
+            } else if (bus_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"ranges")) {
+                bus_ranges_seen = true;
+                bus_ranges_offset = cursor;
+                bus_ranges_length = length;
+            }
+            if (candidate_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"compatible")) {
+                candidate_compatible = fdt_string_list_contains(
+                    base, total, cursor, length, compatible);
+            } else if (candidate_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"status")) {
+                candidate_enabled = fdt_string_is(
+                    base, cursor + length, cursor, bs"okay") ||
+                    fdt_string_is(base, cursor + length, cursor, bs"ok");
+            } else if (candidate_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"reg")) {
+                candidate_reg_seen = true;
+                candidate_reg_offset = cursor;
+                candidate_reg_length = length;
+            }
+            let next: usize = fdt_align4(cursor + length);
+            if (next == 0 || next > struct_end) {
+                return FdtDeviceRegionResult::Invalid;
+            }
+            cursor = next;
+        } else if (token == FDT_NOP) {
+        } else if (token == FDT_END) {
+            if (depth != 0) { return FdtDeviceRegionResult::Invalid; }
+            return FdtDeviceRegionResult::NotFound;
+        } else {
+            return FdtDeviceRegionResult::Invalid;
+        }
+    }
+    return FdtDeviceRegionResult::Invalid;
 }
 
 fn fdt_detect_memory(base: usize) -> FdtMemoryResult !{unsafe} {

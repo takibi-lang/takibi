@@ -439,6 +439,22 @@ fn main() !{unsafe} {
         }
     }
 
+    match qemu_uart_apply_boot_dtb() {
+        QemuUartDtbResult::Invalid => {
+            kernel_boot_log("uart: invalid PL011 description in boot DTB; halting\n");
+            while (true) { }
+        }
+        QemuUartDtbResult::Missing => {
+            kernel_boot_log("uart: boot DTB has no enabled PL011; halting\n");
+            while (true) { }
+        }
+        QemuUartDtbResult::Applied => {
+            kernel_boot_log("uart: source=dtb base_bytes=");
+            uart_put_udec(uart_base);
+            kernel_boot_log("\n");
+        }
+    }
+
     platform_irq_init();
 
     if (fpsimd_irq_probe() == 0) {

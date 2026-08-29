@@ -1,3 +1,9 @@
+qemu pl011 base 0x00000000 0x09000000
+size 0x00000000 0x00001000
+rpi5 system timer base 0x00000010 0x7c003000
+size 0x00000000 0x00001000
+missing device not found
+invalid device invalid
 memory regions 0x00000005
 memory reservations 0x00000005
 memory base 0x00000000 0x00000000

@@ -16,12 +16,13 @@
 use "kernel/platform/qemu/intc.tkb";
 
 let mut uart_rx_handler: fn !{unsafe}(u8) -> void;
+let mut uart_base: usize = 0x09000000;
 
 fn uart_putc(c: u8) !{logs, unsafe} {
     kernel_log_capture_uart_byte(c);
-    let fr: *io u32 = unsafe { 0x09000018 as *io u32 }; // PL011 FR
+    let fr: *io u32 = unsafe { (uart_base + 0x18) as *io u32 }; // PL011 FR
     while ((*fr & (1 << 5)) != 0) { } // wait while TXFF (TX FIFO full)
-    let dr: *io u8 = unsafe { 0x09000000 as *io u8 }; // PL011 DR
+    let dr: *io u8 = unsafe { uart_base as *io u8 }; // PL011 DR
     *dr = c;
 }
 
@@ -29,7 +30,7 @@ fn uart_rx_discard(discarded: u8) !{unsafe} {
 }
 
 fn uart_isr_getc() -> u8 !{unsafe} {
-    let dr: *io u8 = unsafe { 0x09000000 as *io u8 };
+    let dr: *io u8 = unsafe { uart_base as *io u8 };
     return *dr;
 }
 
@@ -46,14 +47,14 @@ fn uart_debug_getc() -> u8 !{unsafe} {
 // The interrupt checker therefore sees the real MMIO-only operation rather
 // than granting the debugger a general logging escape hatch.
 fn uart_debug_putc(c: u8) !{unsafe} {
-    let fr: *io u32 = unsafe { 0x09000018 as *io u32 };
+    let fr: *io u32 = unsafe { (uart_base + 0x18) as *io u32 };
     while ((*fr & (1 << 5)) != 0) { }
-    let dr: *io u8 = unsafe { 0x09000000 as *io u8 };
+    let dr: *io u8 = unsafe { uart_base as *io u8 };
     *dr = c;
 }
 
 fn uart_rx_ready() -> bool !{unsafe} {
-    let fr: *io u32 = unsafe { 0x09000018 as *io u32 };
+    let fr: *io u32 = unsafe { (uart_base + 0x18) as *io u32 };
     return (*fr & (1 << 4)) == 0; // RXFE clear = data available
 }
 
@@ -69,10 +70,10 @@ fn uart_tx_isr() {
 // here -- QEMU's GICv2 needs only the ordinary GICC_EOIR this file's
 // caller already issues.
 fn uart_irq_handler() -> bool !{interrupt, unsafe} {
-    let uart_mis: *io u32 = unsafe { 0x09000040 as *io u32 };
-    let uart_icr: *io u32 = unsafe { 0x09000044 as *io u32 };
+    let uart_mis: *io u32 = unsafe { (uart_base + 0x40) as *io u32 };
+    let uart_icr: *io u32 = unsafe { (uart_base + 0x44) as *io u32 };
     if (uart_rx_ready()) {
-        let dr: *io u32 = unsafe { 0x09000000 as *io u32 };
+        let dr: *io u32 = unsafe { uart_base as *io u32 };
         let received: u32 = *dr;
         // QEMU represents CHR_EVENT_BREAK as a FIFO word carrying DR.BE.
         // Real PL011 also exposes BE through MIS when BEIM is enabled.
@@ -92,13 +93,13 @@ fn uart_irq_handler() -> bool !{interrupt, unsafe} {
 }
 
 fn uart_init() !{unsafe} {
-    let uart_cr: *io u32 = unsafe { 0x09000030 as *io u32 };
-    let uart_ibrd: *io u32 = unsafe { 0x09000024 as *io u32 };
-    let uart_fbrd: *io u32 = unsafe { 0x09000028 as *io u32 };
-    let uart_lcrh: *io u32 = unsafe { 0x0900002C as *io u32 };
-    let uart_imsc: *io u32 = unsafe { 0x09000038 as *io u32 };
-    let uart_icr: *io u32 = unsafe { 0x09000044 as *io u32 };
-    let uart_ifls: *io u32 = unsafe { 0x09000034 as *io u32 };
+    let uart_cr: *io u32 = unsafe { (uart_base + 0x30) as *io u32 };
+    let uart_ibrd: *io u32 = unsafe { (uart_base + 0x24) as *io u32 };
+    let uart_fbrd: *io u32 = unsafe { (uart_base + 0x28) as *io u32 };
+    let uart_lcrh: *io u32 = unsafe { (uart_base + 0x2C) as *io u32 };
+    let uart_imsc: *io u32 = unsafe { (uart_base + 0x38) as *io u32 };
+    let uart_icr: *io u32 = unsafe { (uart_base + 0x44) as *io u32 };
+    let uart_ifls: *io u32 = unsafe { (uart_base + 0x34) as *io u32 };
 
     uart_rx_handler = uart_rx_discard;
     *uart_cr = 0; // disable UART before reconfiguring it
@@ -118,7 +119,37 @@ fn uart_init() !{unsafe} {
     *uart_cr = (1 << 0) | (1 << 8) | (1 << 9); // UARTEN | TXE | RXE
 }
 
+must_use variant QemuUartDtbResult {
+    Invalid;
+    Missing;
+    Applied;
+}
+
+fn qemu_uart_apply_boot_dtb() -> QemuUartDtbResult !{unsafe} {
+    let dtb: usize = boot_dtb_address_read();
+    match fdt_find_compatible_reg(dtb, bs"arm,pl011") {
+        FdtDeviceRegionResult::Invalid => {
+            return QemuUartDtbResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            return QemuUartDtbResult::Missing;
+        }
+        FdtDeviceRegionResult::Found(region) => {
+            if (region.size < 0x48 ||
+                region.base > 0xFFFFFFFFFFFFFFFF - 0x44) {
+                return QemuUartDtbResult::Invalid;
+            }
+            uart_base = region.base;
+            uart_init();
+            return QemuUartDtbResult::Applied;
+        }
+    }
+}
+
 fn platform_init() {
+    // The fixed platform address is the bootstrap console used until the
+    // common memory reader has validated the whole boot blob. init.tkb then
+    // replaces it with the compatible/reg result before IRQs and workloads.
     uart_init();
 }
 
