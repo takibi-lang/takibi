@@ -5,7 +5,7 @@
 //
 // Current limitation: the ordinary writer is core-0 main/syscall context only.
 // Interrupt-safe classified events remain kernel/diagnostic/event.tkb's job.
-use "kernel/printk/decimal.tkb";
+use "kernel/printk/number.tkb";
 
 const KERNEL_LOG_RECORD_COUNT: usize = 256;
 const KERNEL_LOG_TEXT_MAX: usize = 160;
@@ -237,6 +237,18 @@ fn kernel_log_bounds_probe() -> bool {
         return false;
     }
     return true;
+}
+
+// Hexadecimal with its `0x`, through the log ring.
+//
+// GitHub issue #470 follow-up: the digits are kernel/printk/number.tkb's,
+// where a host test can reach them; the prefix is here because it goes
+// through kernel_boot_log, which begins a log fragment. Emitting it with
+// two uart_putc calls instead would print the same characters and record a
+// different line structure.
+fn uart_put_hex(value: usize) {
+    kernel_boot_log("0x");
+    uart_put_hex_digits(value);
 }
 
 fn kernel_boot_log(message: *u8) {

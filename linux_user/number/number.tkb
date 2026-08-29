@@ -1,4 +1,4 @@
-// GitHub issue #470: kernel/printk/decimal.tkb, checked where a test costs
+// GitHub issue #470: kernel/printk/number.tkb, checked where a test costs
 // milliseconds.
 //
 // This exists because the thing it checks was wrong on one platform for as
@@ -11,14 +11,26 @@
 // value on every read, and neither was true. Two instrumented hardware boots
 // and an investigation went into a timer that was working correctly.
 //
-// The values below are the ones that lied, plus the boundaries where the
-// old five-place table changed behaviour, plus the ends of the range.
+// The narrowing was deliberate and even documented -- RPi5's copy said five
+// digits "comfortably covers every value this kernel ever prints", which was
+// true when it was written, and QEMU's said it had been widened there
+// "rather than touching kernel/platform/rpi5/uart.tkb" when that stopped
+// being true on one platform. So the guard this test provides is not against
+// carelessness; it is against a capability bound whose justification expires
+// quietly.
 //
-// Expected output (linux_user/decimal/decimal.expected): each value, once
-// per line, printed by the kernel's own formatter.
+// The values below are the ones that lied, plus the boundaries where the
+// old five-place table changed behaviour, plus the ends of the range. The
+// hex half is here for the same reason, though its two copies had not yet
+// diverged.
+//
+// Expected output (linux_user/number/number.expected): each value, once
+// per line, in decimal and then in hex.
 
 fn show(value: usize) {
     uart_put_udec(value);
+    uart_puts(" ");
+    uart_put_hex_digits(value);
     uart_puts("\r\n");
 }
 

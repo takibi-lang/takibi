@@ -893,17 +893,6 @@ fn kernel_ddb_sync_dispatch(frame_sp: usize) -> usize !{interrupt, unsafe} {
     kernel_current_sync_fail_stop(frame_sp);
 }
 
-fn crash_snapshot_put_hex(value: usize) {
-    kernel_boot_log("0x");
-    let mut shift: usize = 60;
-    while (true) {
-        let digit: usize = (value >> shift) & 0xF;
-        if (digit < 10) { uart_putc((digit as u8) + 48); }
-        else { uart_putc((digit as u8) + 87); }
-        if (shift == 0) { return; }
-        shift = shift - 4;
-    }
-}
 
 fn crash_snapshot_put_data_abort(esr: usize) {
     let ec: usize = (esr >> 26) & 0x3F;
@@ -913,7 +902,7 @@ fn crash_snapshot_put_data_abort(esr: usize) {
     }
     if (ec == 0x24 || ec == 0x25) {
         kernel_boot_log("oops: data-abort dfsc=");
-        crash_snapshot_put_hex(esr & 0x3F);
+        uart_put_hex(esr & 0x3F);
         kernel_boot_log(" access=");
         if ((esr & (1 << 6)) != 0) { kernel_boot_log("write\n"); }
         else { kernel_boot_log("read\n"); }
@@ -928,10 +917,10 @@ fn crash_snapshot_render() !{unsafe} {
     kernel_boot_log(" slot=");
     uart_put_udec(crash_snapshot.vector_slot);
     kernel_boot_log(" ec=");
-    crash_snapshot_put_hex((crash_snapshot.esr_el1 >> 26) & 0x3F);
-    kernel_boot_log(" esr="); crash_snapshot_put_hex(crash_snapshot.esr_el1);
-    kernel_boot_log(" far="); crash_snapshot_put_hex(crash_snapshot.far_el1);
-    kernel_boot_log(" elr="); crash_snapshot_put_hex(crash_snapshot.elr_el1);
+    uart_put_hex((crash_snapshot.esr_el1 >> 26) & 0x3F);
+    kernel_boot_log(" esr="); uart_put_hex(crash_snapshot.esr_el1);
+    kernel_boot_log(" far="); uart_put_hex(crash_snapshot.far_el1);
+    kernel_boot_log(" elr="); uart_put_hex(crash_snapshot.elr_el1);
     kernel_boot_log("\n");
     crash_snapshot_put_data_abort(crash_snapshot.esr_el1);
     // GitHub issue #384: WHO owns the pages this fault names. Both
@@ -943,18 +932,18 @@ fn crash_snapshot_render() !{unsafe} {
     // kernel stack; that reads here as one line.
     crash_snapshot_put_page_owner("far", crash_snapshot.far_el1);
     crash_snapshot_put_page_owner("elr", crash_snapshot.elr_el1);
-    kernel_boot_log("oops: live sp_el0="); crash_snapshot_put_hex(crash_snapshot.sp_el0);
-    kernel_boot_log(" tpidr_el0="); crash_snapshot_put_hex(crash_snapshot.tpidr_el0);
-    kernel_boot_log(" ttbr0="); crash_snapshot_put_hex(crash_snapshot.ttbr0_el1);
+    kernel_boot_log("oops: live sp_el0="); uart_put_hex(crash_snapshot.sp_el0);
+    kernel_boot_log(" tpidr_el0="); uart_put_hex(crash_snapshot.tpidr_el0);
+    kernel_boot_log(" ttbr0="); uart_put_hex(crash_snapshot.ttbr0_el1);
     kernel_boot_log("\n");
     kernel_boot_log("oops: process pid="); uart_put_udec(crash_snapshot.process_pid);
     kernel_boot_log(" parent="); uart_put_udec(crash_snapshot.parent_pid);
     kernel_boot_log(" state="); uart_put_udec(crash_snapshot.process_state);
     kernel_boot_log(" wait="); uart_put_udec(crash_snapshot.wait_reason);
-    kernel_boot_log(" wait4_status_ptr="); crash_snapshot_put_hex(crash_snapshot.wait4_status_ptr);
+    kernel_boot_log(" wait4_status_ptr="); uart_put_hex(crash_snapshot.wait4_status_ptr);
     kernel_boot_log(" root="); uart_put_udec(crash_snapshot.root_slot);
     kernel_boot_log(" asid="); uart_put_udec(crash_snapshot.root_asid);
-    kernel_boot_log(" l1="); crash_snapshot_put_hex(crash_snapshot.root_l1);
+    kernel_boot_log(" l1="); uart_put_hex(crash_snapshot.root_l1);
     kernel_boot_log(" image=");
     if (crash_snapshot.image_kind == 1) { kernel_boot_log("exec\n"); }
     else { kernel_boot_log("bootstrap\n"); }
@@ -967,10 +956,10 @@ fn crash_snapshot_render() !{unsafe} {
         }
     }
     if (crash_snapshot.saved_frame_available != 0) {
-        kernel_boot_log("oops: saved sp_el0="); crash_snapshot_put_hex(crash_snapshot.saved_sp_el0);
-        kernel_boot_log(" tpidr_el0="); crash_snapshot_put_hex(crash_snapshot.saved_tpidr_el0);
-        kernel_boot_log(" elr="); crash_snapshot_put_hex(crash_snapshot.saved_elr_el1);
-        kernel_boot_log(" spsr="); crash_snapshot_put_hex(crash_snapshot.saved_spsr_el1);
+        kernel_boot_log("oops: saved sp_el0="); uart_put_hex(crash_snapshot.saved_sp_el0);
+        kernel_boot_log(" tpidr_el0="); uart_put_hex(crash_snapshot.saved_tpidr_el0);
+        kernel_boot_log(" elr="); uart_put_hex(crash_snapshot.saved_elr_el1);
+        kernel_boot_log(" spsr="); uart_put_hex(crash_snapshot.saved_spsr_el1);
         kernel_boot_log("\n");
     } else {
         kernel_boot_log("oops: saved-frame=unavailable\n");
@@ -1123,7 +1112,7 @@ private fn crash_snapshot_put_page_owner(what: *u8, address: usize) {
     kernel_boot_log("(via root ");
     uart_put_udec(crash_snapshot.root_slot);
     kernel_boot_log(" -> ");
-    crash_snapshot_put_hex(physical);
+    uart_put_hex(physical);
     kernel_boot_log(") is ");
     kernel_boot_log(page_owner_description(physical));
     kernel_boot_log("\n");

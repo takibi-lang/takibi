@@ -857,7 +857,7 @@ fn kernel_process_monitor_proc(pid: usize) !{unsafe} {
         ProcessWaitReason::NetRx => { uart_put_udec(3); }
     }
     kernel_boot_log(" saved_sp=");
-    kernel_process_trace_put_hex(scheduled_process_peek_saved_sp(slot));
+    uart_put_hex(scheduled_process_peek_saved_sp(slot));
     kernel_boot_log(" pages="); uart_put_udec(snapshot.resident_pages);
     kernel_boot_log(" command=");
     kernel_process_monitor_put_command(snapshot);
@@ -2171,17 +2171,6 @@ fn kernel_process_crash_trace_copy(output: *usize) -> usize {
     return copied;
 }
 
-private fn kernel_process_trace_put_hex(value: usize) {
-    kernel_boot_log("0x");
-    let mut shift: usize = 60;
-    while (true) {
-        let digit: usize = (value >> shift) & 0xF;
-        if (digit < 10) { uart_putc((digit as u8) + 48); }
-        else { uart_putc((digit as u8) + 87); }
-        if (shift == 0) { return; }
-        shift = shift - 4;
-    }
-}
 
 // One formatter for both a live on-demand report and the trace frozen into a
 // crash snapshot. `prefix` identifies the surrounding report while every row
@@ -2218,10 +2207,10 @@ fn kernel_process_trace_render(
             kernel_boot_log(" root=");
             uart_put_udec(trace[base + 9]);
             kernel_boot_log(" sp=");
-            kernel_process_trace_put_hex(
+            uart_put_hex(
                 trace[base + 10]);
             kernel_boot_log(" aux=");
-            kernel_process_trace_put_hex(
+            uart_put_hex(
                 trace[base + 11]);
             kernel_boot_log("\n");
         }

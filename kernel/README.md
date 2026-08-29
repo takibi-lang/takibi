@@ -822,8 +822,9 @@ run, not a specification.
   `uart_put_udec` was a copy per platform and the copies had drifted, so on
   RPi5 every value of six digits or more printed as its low five --
   54000000 as `0`, 843750 as `43750`. There is one implementation now
-  (`kernel/printk/decimal.tkb`), it covers the whole `usize` range, and
-  `linux_user/decimal` fails if it stops doing so. Any RPi5 boot-log number
+  (`kernel/printk/number.tkb`, which also holds the hex digits after the same
+  sweep found that pair duplicated), it covers the whole `usize` range, and
+  `linux_user/number` fails if it stops doing so. Any RPi5 boot-log number
   above 99999 recorded before this is truncated, whatever it says.
 
 - **Waiting for the network happens inside the kernel, except in

@@ -80,12 +80,6 @@ fn uart_puts(s: *u8) {
     }
 }
 
-// Decimal, not hex: every UART-visible number in this kernel (syscall
-// numbers, pids, byte counts) is read against SYSCALLS.md's own decimal
-// numbering, so hex would need a mental translation step every time.
-// Five digits (max 99999) comfortably covers every value this kernel ever
-// prints -- Takibi-internal syscall numbers top out at 452.
-
 fn uart_rx_discard(discarded: u8) !{unsafe} {
 }
 

@@ -35,11 +35,35 @@ same correct read of a correctly programmed register, and the "different
 value on different reads" that made this look like a hardware fault was two
 different truncations of the same 54 MHz.
 
+The narrowing was not an oversight, which is the part worth keeping. RPi5's
+copy said, in a comment: five digits "comfortably covers every value this
+kernel ever prints -- Takibi-internal syscall numbers top out at 452". That
+was true when it was written. QEMU's copy said it had been widened to ten
+"rather than touching kernel/platform/rpi5/uart.tkb", because that platform
+had started printing a full byte address. So the moment the justification
+expired was noticed, written down, and acted on for one platform only. A
+capability bound stated as "covers everything this kernel prints" is a claim
+about a codebase's whole future, and it was made in a file that only half of
+the codebase reads.
+
 There is one implementation now, in its own file so that a host-native test
-can compile the exact code the kernel runs, and `linux_user/decimal` checks
-the values that lied along with both ends of the range. Putting the five-place
-table back makes it fail. The bug was invisible for exactly as long as there
-was no test that could run anywhere.
+can compile the exact code the kernel runs, and `linux_user/number` checks
+the values that lied along with both ends of the range. Putting the
+five-place table back makes it fail. The bug was invisible for exactly as
+long as there was no test that could run anywhere -- and note that sharing
+alone would not have saved it: whoever merged the two copies could as easily
+have kept the five-place one. What keeps it right is the test.
+
+The same sweep found the hex printers: `kernel_process_trace_put_hex` and
+`crash_snapshot_put_hex` were byte-for-byte identical, same sink, in
+different files -- the same shape, one drift away. They are one function
+now, split so the digits live beside the decimal formatter where the host
+test can reach them and the `0x` stays with the log ring, whose fragment
+boundary it starts. `ddb_put_udec` and `ddb_put_hex` look like copies of
+these and are deliberately left alone: they write through `uart_debug_putc`,
+the interrupt-safe path a debugger uses when the ordinary log may not be,
+and merging them would give the debugger a dependency on the thing it exists
+to inspect.
 
 What found it was a cross-check rather than a re-reading. A device-tree
 lookup for the SoC's own 1 MHz counter was built to get a second opinion

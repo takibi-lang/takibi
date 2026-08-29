@@ -32,15 +32,6 @@ fn uart_puts(s: *u8) {
     }
 }
 
-// Decimal, not hex -- see kernel/platform/rpi5/uart.tkb's identical
-// function for why (every UART-visible number in this kernel is read
-// against SYSCALLS.md's decimal numbering). Ten digits, not RPi5's five:
-// this platform's own platform_memory_detect() (kernel/platform/qemu/
-// memory.tkb) reports a full byte address (QEMU `virt` RAM base
-// 0x40000000 = 1073741824), unlike RPi5's mailbox-reported base (always
-// near 0, comfortably under five digits) -- widened here, in this
-// platform's own copy, rather than touching kernel/platform/rpi5/uart.tkb.
-
 fn uart_rx_discard(discarded: u8) !{unsafe} {
 }
 

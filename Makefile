@@ -179,7 +179,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair \
                              field_lease match_int_lit \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock diagnostic_ring fdt decimal
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock diagnostic_ring fdt number
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
@@ -213,10 +213,10 @@ $(LINUX_USER_BUILD_DIR)/fdt_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_U
 $(LINUX_USER_BUILD_DIR)/fdt_invalid_reservation_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
 	python3 scripts/make_fdt_fixture.py $@ --invalid-reservation
 
-# GitHub issue #470: the kernel's own decimal formatter, which was wrong on
-# one platform for as long as it had no test that could run anywhere.
-$(LINUX_USER_DIR)/decimal/decimal_exe.o: kernel/printk/decimal.tkb
-$(LINUX_USER_DIR)/decimal/decimal_exe.o: LINUX_USER_EXTRA_SRCS := kernel/printk/decimal.tkb
+# GitHub issue #470: the kernel's own number formatters, which were wrong on
+# one platform for as long as they had no test that could run anywhere.
+$(LINUX_USER_DIR)/number/number_exe.o: kernel/printk/number.tkb
+$(LINUX_USER_DIR)/number/number_exe.o: LINUX_USER_EXTRA_SRCS := kernel/printk/number.tkb
 
 $(LINUX_USER_DIR)/fdt/fdt_exe.o: kernel/boot/fdt.tkb $(LINUX_USER_BUILD_DIR)/fdt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_reservation_fixture.dtb
 $(LINUX_USER_DIR)/fdt/fdt_exe.o: LINUX_USER_EXTRA_SRCS := kernel/boot/fdt.tkb
