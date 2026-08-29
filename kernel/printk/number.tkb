@@ -28,7 +28,9 @@
 //
 // Twenty places, so every usize prints. `uart_putc` stays per-platform
 // because it is the device; how a number becomes characters is not.
-private let mut kernel_decimal_places: [usize; 20] = {
+const KERNEL_DECIMAL_PLACES: usize = 20;
+
+private let mut kernel_decimal_places: [usize; KERNEL_DECIMAL_PLACES] = {
     10000000000000000000, 1000000000000000000, 100000000000000000,
     10000000000000000, 1000000000000000, 100000000000000,
     10000000000000, 1000000000000, 100000000000, 10000000000,
@@ -38,11 +40,23 @@ private let mut kernel_decimal_places: [usize; 20] = {
 
 fn uart_put_udec(value: usize) {
     let mut leading: bool = true;
-    for i: usize in 0..<20 {
+    for i: usize in 0..<KERNEL_DECIMAL_PLACES {
         let place: usize = kernel_decimal_places[i];
         // Unreachable -- the table above has no zero -- but it is what
         // proves the divide below to --forbid-trap, and a table typo would
         // stop the print rather than trap.
+        //
+        // Two stronger forms were measured and neither is available yet.
+        // A refined element type ([{1..<N as usize}; N]) does compile and
+        // does discharge the divide with no guard at all, but the largest
+        // place here is 10^19 and refined bounds are held signed, so
+        // anything above i64's maximum is rejected -- and 2^64-1 is not
+        // rejected, it wraps to -1 and reports a nonsense interval.
+        // static_assert cannot read a global array element at all
+        // ("unsupported constant expression").  Until one of those moves,
+        // linux_user/number is what catches a typo in the table: its
+        // largest value exercises every place, so a zero anywhere changes
+        // the output.
         if (place == 0) { return; }
         let digit: usize = (value / place) % 10;
         if (digit != 0 || leading == false || place == 1) {

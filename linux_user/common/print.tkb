@@ -1,18 +1,23 @@
-// Primitive UART formatting.  Decimal conversion is shared by width; the
-// overloaded public entry points only perform the required extension/cast.
+// Primitive UART formatting.  The overloaded public entry points only
+// perform the required extension/cast; the digits themselves come from the
+// kernel's own formatter.
+//
+// GitHub issue #470 follow-up: this file used to carry a second decimal
+// implementation, so linux_user checked its own printer and the kernel's
+// went unchecked on one platform for as long as it had no test that could
+// run anywhere.  Sharing it the other way round means every linux_user
+// test is now live coverage of kernel/printk/number.tkb -- 76 .expected
+// files break if the kernel's digits change.  uart_putc is not shared,
+// because it IS the device: here it is a write(2), in the kernel it is a
+// PL011 or an RP1 UART.  That boundary is exactly where the sharing stops.
+use "kernel/printk/number.tkb";
 
 fn uart_print_u32_core(n: u32) {
-    if (n >= 10) {
-        uart_print_u32_core(n / 10);
-    }
-    uart_putc(((n % 10) as u8) + '0');
+    uart_put_udec(n as usize);
 }
 
 fn uart_print_u64_core(n: u64) {
-    if (n >= 10) {
-        uart_print_u64_core(n / 10);
-    }
-    uart_putc(((n % 10) as u8) + '0');
+    uart_put_udec(n as usize);
 }
 
 fn uart_print_i32_core(n: i32) {

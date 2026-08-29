@@ -146,7 +146,7 @@ COMMON_LINUX_SYSCALL_S   := $(COMMON_LINUX_DIR)/syscall.S
 COMMON_LINUX_SYSCALL_O   := $(LINUX_USER_BUILD_DIR)/syscall.o
 COMMON_LINUX_UART        := $(COMMON_LINUX_DIR)/uart.tkb
 COMMON_LINUX_PRINT       := $(COMMON_LINUX_DIR)/print.tkb
-COMMON_LINUX_PRINT_BASE  := $(LINUX_USER_DIR)/common/print.tkb $(LINUX_USER_DIR)/common/runtime.tkb
+COMMON_LINUX_PRINT_BASE  := $(LINUX_USER_DIR)/common/print.tkb $(LINUX_USER_DIR)/common/runtime.tkb kernel/printk/number.tkb
 # One test per directory, name == directory name, matching examples/'s own
 # convention. Add to this list as tests are migrated in from examples/ or
 # written fresh (see AGENTS.md). Each of these six was verified to compile,
@@ -219,10 +219,11 @@ $(LINUX_USER_BUILD_DIR)/fdt_invalid_memory_fixture.dtb: scripts/make_fdt_fixture
 $(LINUX_USER_BUILD_DIR)/fdt_invalid_tree_reservation_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
 	python3 scripts/make_fdt_fixture.py $@ --invalid-tree-reservation
 
-# GitHub issue #470: the kernel's own number formatters, which were wrong on
-# one platform for as long as they had no test that could run anywhere.
-$(LINUX_USER_DIR)/number/number_exe.o: kernel/printk/number.tkb
-$(LINUX_USER_DIR)/number/number_exe.o: LINUX_USER_EXTRA_SRCS := kernel/printk/number.tkb
+# GitHub issue #470: linux_user/number checks the kernel's own number
+# formatters directly. It needs no LINUX_USER_EXTRA_SRCS -- since the #470
+# follow-up, linux_user/common/print.tkb `use`s kernel/printk/number.tkb and
+# delegates its unsigned decimals to it, so EVERY test here links the
+# kernel's formatter and this one just points at it deliberately.
 
 $(LINUX_USER_DIR)/fdt/fdt_exe.o: kernel/boot/fdt.tkb $(LINUX_USER_BUILD_DIR)/fdt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_memory_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_reservation_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_tree_reservation_fixture.dtb
 $(LINUX_USER_DIR)/fdt/fdt_exe.o: LINUX_USER_EXTRA_SRCS := kernel/boot/fdt.tkb
