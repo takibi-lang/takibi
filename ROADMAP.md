@@ -202,7 +202,7 @@ interrupt/locks rule, because handlers get built around whatever it says.
 - **#449** -- give the `locks` effect a meaning. It has existed in the checker
   since before there was a lock, has zero uses, and currently forbids the one
   case a spinlock exists for (an interrupt handler taking one).
-- **#299 -- DONE 2026-08-29 on QEMU, RPi5 lane still owed.** `struct
+- **#299 -- DONE 2026-08-29, closed, QEMU and RPi5.** `struct
   publish` is the second safe surface over #17, and the diagnostic ring has
   moved onto it. What it makes checkable is the write ORDER: the payload is
   unreachable except through a linear token `publish_begin` returns, so a
@@ -233,9 +233,15 @@ interrupt/locks rule, because handlers get built around whatever it says.
   is approachable at all: an SMP race with no per-CPU trace is the
   debugging bottleneck, not the coding.
 
-**Phase 0 is complete except for one RPi5 run of the migrated ring.** #17,
-#449, #440 and #299 are closed or done; #445 landed and holds open only its
-two-core contention test, which is #447's to unblock.
+**Phase 0 is complete.** #17, #449, #440 and #299 are closed. #445 landed
+and holds open only its two-core contention test and an RPi5 run of its
+changed secondary-entry path -- both of which are #447's to unblock, since
+neither can happen while core 1 parks.
+
+**Everything now waits on #447.** #445's remaining criteria, #448's two-core
+criterion, and Phase 3 itself are the same wait. #222's remaining scope (the
+one-deep spare kernel-stack cell) is small and independent; the crash trace
+ring it also named is done, since #440's ring is already per-CPU.
 
 **Decision recorded 2026-08-27: raw atomics are reachable only through
 `!{unsafe}`.** Ordinary kernel code goes through the spinlock or the
