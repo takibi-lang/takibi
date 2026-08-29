@@ -2,10 +2,6 @@ use "kernel/lib/byte_slice.tkb";
 
 let mut subject_calls: usize = 0;
 
-fn print_bool(value: bool) {
-    if (value) { uart_puts("yes"); } else { uart_puts("no"); }
-}
-
 fn print_split(value: borrow []u8, delimiter: u8) {
     match byte_slice_find_first(value, delimiter) {
         ByteSliceFindResult::Absent => { uart_puts("absent"); }
@@ -51,23 +47,23 @@ fn one_subject() -> []u8 {
 
 fn app_main() {
     uart_puts("equal=");
-    print_bool(slice_eq(bs"proc", bs"proc"));
+    uart_print(slice_eq(bs"proc", bs"proc"));
     uart_puts(" unequal=");
-    print_bool(slice_eq(bs"proc", bs"stat"));
+    uart_print(slice_eq(bs"proc", bs"stat"));
     uart_puts(" empty=");
-    print_bool(slice_eq(bs"", bs""));
+    uart_print(slice_eq(bs"", bs""));
 
     uart_puts(" prefix=");
-    print_bool(byte_slice_starts_with(bs"proc/7/stat",
+    uart_print(byte_slice_starts_with(bs"proc/7/stat",
                                       bs"proc/"));
     uart_puts(" whole=");
-    print_bool(byte_slice_starts_with(bs"proc",
+    uart_print(byte_slice_starts_with(bs"proc",
                                       bs"proc"));
     uart_puts(" long=");
-    print_bool(byte_slice_starts_with(bs"proc",
+    uart_print(byte_slice_starts_with(bs"proc",
                                       bs"proc/"));
     uart_puts(" empty-prefix=");
-    print_bool(byte_slice_starts_with(bs"proc", bs""));
+    uart_print(byte_slice_starts_with(bs"proc", bs""));
 
     uart_puts(" split-middle=");
     print_retained_split(bs"proc/7", 0x2F);
@@ -80,7 +76,7 @@ fn app_main() {
 
     let mut embedded: [u8; 3] = { 0x41, 0, 0x42 };
     uart_puts(" embedded-nul=");
-    print_bool(slice_eq(embedded as []u8, embedded as []u8));
+    uart_print(slice_eq(embedded as []u8, embedded as []u8));
     uart_puts(" nul-split=");
     print_split(embedded as []u8, 0);
     uart_puts(" match=");

@@ -67,11 +67,11 @@ fn test_foreach() {
     uart_print(slice_copy(sb, sa));
 
     uart_puts(" eq=");
-    if (slice_eq(sa, sb)) { uart_puts("yes"); } else { uart_puts("no"); }
+    uart_print(slice_eq(sa, sb));
 
     b[7] = 'X';
     uart_puts(" eq2=");
-    if (slice_eq(sa, sb)) { uart_puts("yes"); } else { uart_puts("no"); }
+    uart_print(slice_eq(sa, sb));
 
     uart_puts(" sum=");
     uart_print(sum_slice(sa));       // 'A'+...+'H' = 65+...+72

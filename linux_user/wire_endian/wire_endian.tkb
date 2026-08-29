@@ -86,11 +86,7 @@ fn test_wire_endian() {
     // == against a conventionally-written big-endian literal needs no cast:
     // 0x0806 already matches its own big-endian wire storage order.
     uart_puts("magic-eq: ");
-    if (hdr.magic == 0x0806) {
-        uart_puts("true");
-    } else {
-        uart_puts("false");
-    }
+    uart_print(hdr.magic == 0x0806);
     uart_puts("\r\n");
 
     // Bitwise masking directly on the wire-order value, no cast needed:
@@ -116,11 +112,7 @@ fn test_wire_endian() {
     // overlay, same fields, same values.
     let hdr_sugar: *WireHdrSugar = wire_bytes as *WireHdrSugar;
     uart_puts("sugar-magic-eq: ");
-    if (hdr_sugar.magic == 0x0806) {
-        uart_puts("true");
-    } else {
-        uart_puts("false");
-    }
+    uart_print(hdr_sugar.magic == 0x0806);
     uart_puts("\r\nsugar-seq: ");
     uart_print_hex((hdr_sugar.seq as u32) as i32);
     uart_puts("\r\n");
