@@ -6,7 +6,9 @@
 # single boot's UART transcript is projected through every kernel/tests/
 # common/views/*.filter plus qemu/views/*.filter are compared exactly
 # against their matching *.expected files. Platform-specific files override
-# common files with the same name. Unlike the RPi5 runner, this needs no SWD/reset/
+# common files with the same name; KERNEL_QEMU_EXPECTED_VIEW_DIR may overlay
+# expected output for another build of the same platform, such as the larger
+# DWARF-bearing debug ELF. Unlike the RPi5 runner, this needs no SWD/reset/
 # external-serial-device machinery at all -- QEMU's TCP serial chardev is
 # opened by the same pyserial driver used for the RPi5 UART, so capture and
 # ash input share one transport implementation.
@@ -35,6 +37,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="${KERNEL_QEMU_ELF:-$REPO_ROOT/kernel/build/qemu/kernel.elf}"
 RUN_LABEL="kernel/${KERNEL_QEMU_LABEL:-qemu}"
 VIEW_DIR="$REPO_ROOT/kernel/tests/qemu/views"
+EXPECTED_VIEW_DIR="${KERNEL_QEMU_EXPECTED_VIEW_DIR:-$VIEW_DIR}"
 COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
 ARTIFACT_DIR="${KERNEL_QEMU_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-qemu}"
@@ -197,7 +200,9 @@ while IFS= read -r name; do
     else
         filter="$COMMON_VIEW_DIR/$name.filter"
     fi
-    if [ -f "$VIEW_DIR/$name.expected" ]; then
+    if [ -f "$EXPECTED_VIEW_DIR/$name.expected" ]; then
+        expected="$EXPECTED_VIEW_DIR/$name.expected"
+    elif [ -f "$VIEW_DIR/$name.expected" ]; then
         expected="$VIEW_DIR/$name.expected"
     else
         expected="$COMMON_VIEW_DIR/$name.expected"
