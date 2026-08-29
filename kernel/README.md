@@ -55,8 +55,8 @@ The current RPi5 kernel includes:
 - typed page allocation, AArch64 stage-1 page tables, process images, and
   deterministic teardown, backed by real physical RAM addressed directly
   (`kernel/mm/page.tkb`) and sized against the board's own real detected
-  RAM (the firmware-resolved DTB captured by the resident SWD stub,
-  boot-logged but not yet the allocator's own live bound);
+  RAM (the firmware-resolved DTB captured by the resident SWD stub supplies
+  the allocator's normalized runtime extent inventory);
 - ELF64 validation, static PIE loading, interpreter-aware PIE plus musl
   loading, initial Linux stack and auxv construction, `brk`, and bounded
   anonymous `mmap` behavior;
@@ -671,7 +671,10 @@ are deliberate, not gaps to silently close:
   through runtime extent descriptors, so a hole between DTB regions is not
   mistaken for allocatable RAM. The linker-owned image and stacks lie below
   `usable_ram_start`; firmware reservations, allocator metadata, and any page
-  overlapping the live DTB are excluded from allocation.
+  overlapping the live DTB are excluded from allocation. The current metadata
+  layout requires the high end of one normalized extent to hold all
+  `PageMeta` and `PageExtent` records without overlapping the live DTB or a
+  bootstrap table; failure to place it is fatal.
 - **The MMU device/RAM layout is inverted from RPi5's.** RPi5's real RAM
   starts at physical address 0; QEMU `virt`'s starts at `0x40000000`, with
   device MMIO below it -- roughly the opposite of RPi5's layout. See

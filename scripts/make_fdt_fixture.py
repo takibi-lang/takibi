@@ -130,6 +130,15 @@ def main():
     b.prop("status", b"disabled\0")
     b.end()
 
+    # The inverse order is a separate regression shape: availability is a
+    # property of the completed node, not parser state at the instant reg is
+    # encountered.
+    b.begin("memory@210000000")
+    b.prop("device_type", b"memory\0")
+    b.prop("status", b"disabled\0")
+    b.prop("reg", b.cells(2, 0, 0))
+    b.end()
+
     if mode == "--invalid-memory":
         b.begin("memory@ffffffffffffffff")
         b.prop("device_type", b"memory\0")
