@@ -121,6 +121,15 @@ def main():
     b.prop("reg", b.cells(1, 0, 0, 0x20000000))
     b.end()
 
+    # Disabled memory is not RAM available to the OS. Keep status after a
+    # deliberately malformed reg so property order cannot make the parser
+    # reject a node it must ignore.
+    b.begin("memory@200000000")
+    b.prop("device_type", b"memory\0")
+    b.prop("reg", b.cells(2, 0, 0))
+    b.prop("status", b"disabled\0")
+    b.end()
+
     if mode == "--invalid-memory":
         b.begin("memory@ffffffffffffffff")
         b.prop("device_type", b"memory\0")

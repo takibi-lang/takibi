@@ -241,7 +241,9 @@ private fn fdt_scan_memory(base: usize, wanted: usize)
     let mut size_cells: usize = 1;
     let mut memory_depth: usize = 0;
     let mut memory_type: bool = false;
+    let mut memory_enabled: bool = true;
     let mut candidate_valid: bool = false;
+    let mut candidate_invalid: bool = false;
     let mut candidate_offset: usize = 0;
     let mut candidate_length: usize = 0;
     let mut first_base: usize = 0;
@@ -269,7 +271,9 @@ private fn fdt_scan_memory(base: usize, wanted: usize)
             if (depth == 2 && fdt_node_is_memory(base, total, name_offset)) {
                 memory_depth = depth;
                 memory_type = false;
+                memory_enabled = true;
                 candidate_valid = false;
+                candidate_invalid = false;
                 candidate_offset = 0;
                 candidate_length = 0;
             }
@@ -280,7 +284,10 @@ private fn fdt_scan_memory(base: usize, wanted: usize)
         } else if (token == FDT_END_NODE) {
             if (depth == 0) { return FdtScanResult::Invalid; }
             if (memory_depth == depth) {
-                if (memory_type && candidate_valid) {
+                if (memory_enabled && candidate_invalid) {
+                    return FdtScanResult::Invalid;
+                }
+                if (memory_enabled && memory_type && candidate_valid) {
                     let tuple_bytes: usize =
                         (address_cells + size_cells) * 4;
                     let mut relative: usize = 0;
@@ -340,6 +347,12 @@ private fn fdt_scan_memory(base: usize, wanted: usize)
                 memory_type = length >= 7 &&
                     fdt_string_is(base, cursor + length, cursor, bs"memory");
             } else if (memory_depth == depth &&
+                       fdt_string_is(base, strings_end, prop_name,
+                                     bs"status")) {
+                memory_enabled = fdt_string_is(
+                    base, cursor + length, cursor, bs"okay") ||
+                    fdt_string_is(base, cursor + length, cursor, bs"ok");
+            } else if (memory_depth == depth &&
                        fdt_string_is(base, strings_end, prop_name, bs"reg")) {
                 if ((address_cells == 1 || address_cells == 2) &&
                     (size_cells == 1 || size_cells == 2)) {
@@ -350,7 +363,7 @@ private fn fdt_scan_memory(base: usize, wanted: usize)
                         candidate_length = length;
                         candidate_valid = true;
                     } else {
-                        return FdtScanResult::Invalid;
+                        candidate_invalid = true;
                     }
                 }
             }
