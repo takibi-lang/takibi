@@ -202,9 +202,19 @@ interrupt/locks rule, because handlers get built around whatever it says.
 - **#449** -- give the `locks` effect a meaning. It has existed in the checker
   since before there was a lock, has zero uses, and currently forbids the one
   case a spinlock exists for (an interrupt handler taking one).
-- **#299** -- fixed-layout records with atomic commit publication, the second
-  of the two safe surfaces over #17. **Do it late within Phase 0, and
-  finish it before Phase 3.** The reasoning is Codex's, from working on the
+- **#299 -- DONE 2026-08-29 on QEMU, RPi5 lane still owed.** `struct
+  publish` is the second safe surface over #17, and the diagnostic ring has
+  moved onto it. What it makes checkable is the write ORDER: the payload is
+  unreachable except through a linear token `publish_begin` returns, so a
+  payload store can only happen between the clear and the commit, and a
+  record left in flight is a compile error. Measured against the real ring
+  by breaking it: moving the commit above the payload now says "linear value
+  'w' was already consumed". The reader's re-check-after-copy -- the step a
+  hand-written reader omits, invisibly -- is the compiler's. Follow-up
+  **#476**: the token proves the payload is written only between the clear
+  and the commit, not that the writer wrote all of it; today a forgotten
+  field is scrubbed to 0 rather than rejected. Original reasoning, which
+  held: The reasoning is Codex's, from working on the
   diagnostic ring: #299 is not a tracing feature, it is the publication
   protocol that lets DDB read a ring another CPU is writing. The current
   hand-written ring is correct for one CPU plus its own interrupts and says
@@ -218,7 +228,14 @@ interrupt/locks rule, because handlers get built around whatever it says.
   it follows #222; the fixed record layout and write-last publication are
   #299's and must exist before multicore starts; a cross-CPU total order
   and a general lock-free API are neither.
-- **#440** -- the classified, near-lock-free deferred log ring.
+- **#440 -- DONE, closed.** The classified deferred log ring, four per-CPU
+  readers, verified on QEMU and on RPi5 over SWD. It is the reason Phase 3
+  is approachable at all: an SMP race with no per-CPU trace is the
+  debugging bottleneck, not the coding.
+
+**Phase 0 is complete except for one RPi5 run of the migrated ring.** #17,
+#449, #440 and #299 are closed or done; #445 landed and holds open only its
+two-core contention test, which is #447's to unblock.
 
 **Decision recorded 2026-08-27: raw atomics are reachable only through
 `!{unsafe}`.** Ordinary kernel code goes through the spinlock or the
