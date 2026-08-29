@@ -1,0 +1,244 @@
+// GitHub issue #479, Group A: does `kernel/lib/freelist.tkb`'s free chain
+// actually break under two cores, and does the fix actually fix it.
+//
+// The order matters and is the point. This probe is written BEFORE the fix
+// and is expected to FAIL, because "the free chain has no lock, and a
+// concurrent push corrupts it silently" is an assertion message, not a
+// measurement. An assertion that names a race nobody has produced is a
+// claim; producing it first is what turns the fix into an answer to
+// something.
+//
+// The method is #479's: exercise one subsystem from core 1 while
+// KERNEL_ACTIVE_CORES is still 1 and core 1 still runs no process. That is
+// possible here for the same reason it was for the pool
+// (kernel/kernel/pool_contention_evidence.tkb) -- this probe owns its own
+// FreelistCore and touches nothing else, so a failure is attributable to
+// the primitive rather than to whatever else shares a live instance.
+//
+// What the race is: freelist_core_insert reads free_head, then writes
+// next_free[head] back into free_head. Two cores that read the same head
+// both pop the same index. Both then hold what each believes is an
+// exclusive allocation.
+//
+// Current limitations:
+// - DETECTS DOUBLE HAND-OUT, not every possible corruption. A chain that
+//   loses entries without duplicating them would show up as Empty rather
+//   than as a caught index; that is counted too, but the counter that
+//   matters is the duplicate one, because a duplicate is what a caller
+//   turns into two owners of one object.
+// - The instance is small on purpose. A short chain makes two cores
+//   collide on the same head often; a long one would need many more
+//   rounds to hit the same window.
+// - Says nothing about generations. FreelistOwner's generation is what
+//   makes a STALE handle detectable; this is about two LIVE ones.
+
+use "kernel/lib/freelist.tkb";
+use "kernel/lib/execution_model.tkb";
+
+const FREELIST_CONTENTION_SLOTS: usize = 8;
+const FREELIST_CONTENTION_ROUNDS: usize = 4096;
+
+// Same reasoning as the pool probe's CONTENTION_OUTSIDE_WORK: a core that
+// re-enters the instant it leaves owns the structure, and measures that
+// rather than the structure.
+const FREELIST_CONTENTION_OUTSIDE_WORK: usize = 64;
+
+private let mut freelist_probe: FreelistCore(FREELIST_CONTENTION_SLOTS);
+private let mut freelist_probe_ready: bool = false;
+
+// One word per slot: 1 while some core believes it exclusively holds that
+// index. Two cores handed the same index find it already 1, which is the
+// double hand-out this probe exists to catch.
+private let mut freelist_probe_held: [usize; FREELIST_CONTENTION_SLOTS];
+
+private let mut freelist_probe_armed: usize;
+private let mut freelist_probe_primary: usize;
+private let mut freelist_probe_secondary: usize;
+private let mut freelist_probe_duplicates: usize;
+private let mut freelist_probe_empty: usize;
+private let mut freelist_probe_active: usize;
+private let mut freelist_probe_overlap: usize;
+
+private fn freelist_probe_armed_address() -> usize {
+    return (&freelist_probe_armed) as usize;
+}
+
+private fn freelist_probe_primary_address() -> usize {
+    return (&freelist_probe_primary) as usize;
+}
+
+private fn freelist_probe_secondary_address() -> usize {
+    return (&freelist_probe_secondary) as usize;
+}
+
+private fn freelist_probe_duplicates_address() -> usize {
+    return (&freelist_probe_duplicates) as usize;
+}
+
+private fn freelist_probe_empty_address() -> usize {
+    return (&freelist_probe_empty) as usize;
+}
+
+private fn freelist_probe_active_address() -> usize {
+    return (&freelist_probe_active) as usize;
+}
+
+private fn freelist_probe_overlap_address() -> usize {
+    return (&freelist_probe_overlap) as usize;
+}
+
+private fn freelist_probe_held_address(index: usize) -> usize {
+    let base: *usize = freelist_probe_held;
+    return (base + (index as isize)) as usize;
+}
+
+private fn freelist_probe_init() {
+    if (freelist_probe_ready) { return; }
+    freelist_probe_ready = true;
+    freelist_core_init(&freelist_probe);
+}
+
+// Take an index, mark it held, give it back. Both cores run this.
+//
+// The marking is a real atomic exchange, so the DETECTOR is sound even
+// while the thing under test is not: a probe whose own bookkeeping raced
+// would report duplicates that were its own fault.
+private fn freelist_probe_cycle() -> bool !{unsafe} {
+    match freelist_core_insert(&freelist_probe) {
+        FreelistPopResult::Empty => {
+            unsafe {
+                atomic_fetch_add_relaxed(freelist_probe_empty_address(), 1);
+            }
+            return false;
+        }
+        FreelistPopResult::Popped(owner) => {
+            let index: usize = freelist_owner_index(owner);
+            if (index < FREELIST_CONTENTION_SLOTS) {
+                let previous: usize = unsafe {
+                    atomic_swap_acquire(freelist_probe_held_address(index), 1)
+                };
+                if (previous != 0) {
+                    unsafe {
+                        atomic_fetch_add_relaxed(
+                            freelist_probe_duplicates_address(), 1);
+                    }
+                }
+                unsafe {
+                    atomic_store_release(
+                        freelist_probe_held_address(index), 0);
+                }
+            }
+            freelist_core_remove(&freelist_probe, owner);
+            for spin: usize in 0..<FREELIST_CONTENTION_OUTSIDE_WORK { }
+            return true;
+        }
+    }
+}
+
+fn freelist_contention_is_armed() -> bool !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(freelist_probe_armed_address())
+    } == 1;
+}
+
+fn freelist_contention_secondary_run() !{unsafe} {
+    unsafe { atomic_store_release(freelist_probe_active_address(), 1); }
+    while (unsafe {
+               atomic_load_acquire(freelist_probe_secondary_address())
+           } < FREELIST_CONTENTION_ROUNDS &&
+           unsafe { atomic_load_acquire(freelist_probe_armed_address()) } == 1) {
+        if (freelist_probe_cycle()) {
+            unsafe {
+                atomic_fetch_add_relaxed(
+                    freelist_probe_secondary_address(), 1);
+            }
+        }
+    }
+    unsafe { atomic_store_release(freelist_probe_active_address(), 0); }
+}
+
+private fn freelist_contention_report(stage: *u8) !{unsafe} {
+    kernel_boot_log("freelist contention stage: ");
+    kernel_boot_log(stage);
+    kernel_boot_log("\n");
+    kernel_boot_log("freelist contention counts: primary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(freelist_probe_primary_address())
+    });
+    kernel_boot_log(" secondary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(freelist_probe_secondary_address())
+    });
+    kernel_boot_log(" duplicates=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(freelist_probe_duplicates_address())
+    });
+    kernel_boot_log(" empty=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(freelist_probe_empty_address())
+    });
+    kernel_boot_log(" overlap=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(freelist_probe_overlap_address())
+    });
+    kernel_boot_log("\n");
+}
+
+fn freelist_contention_probe() -> bool !{unsafe} {
+    freelist_probe_init();
+    unsafe { atomic_store_release(freelist_probe_armed_address(), 1); }
+
+    let entry_window: i64 = read_cntfrq() >> 2;
+    let entry_start: i64 = read_cntpct();
+    let mut entered: bool = false;
+    while (entered == false && read_cntpct() - entry_start < entry_window) {
+        if (unsafe {
+                atomic_load_acquire(freelist_probe_active_address())
+            } == 1) {
+            entered = true;
+        }
+    }
+    if (entered == false) {
+        unsafe { atomic_store_release(freelist_probe_armed_address(), 0); }
+        freelist_contention_report("secondary-never-entered" as *u8);
+        return false;
+    }
+
+    for round: usize in 0..<FREELIST_CONTENTION_ROUNDS {
+        if (freelist_probe_cycle()) {
+            unsafe {
+                atomic_fetch_add_relaxed(freelist_probe_primary_address(), 1);
+            }
+        }
+    }
+
+    unsafe {
+        atomic_store_release(freelist_probe_overlap_address(),
+            atomic_load_acquire(freelist_probe_secondary_address()));
+    }
+
+    let finish_window: i64 = read_cntfrq() * 2;
+    let finish_start: i64 = read_cntpct();
+    let mut finished: bool = false;
+    while (finished == false && read_cntpct() - finish_start < finish_window) {
+        if (unsafe {
+                atomic_load_acquire(freelist_probe_secondary_address())
+            } >= FREELIST_CONTENTION_ROUNDS) {
+            finished = true;
+        }
+    }
+    unsafe { atomic_store_release(freelist_probe_armed_address(), 0); }
+    if (finished == false) {
+        freelist_contention_report("secondary-never-finished" as *u8);
+        return false;
+    }
+
+    freelist_contention_report("complete" as *u8);
+    let duplicates: usize = unsafe {
+        atomic_load_acquire(freelist_probe_duplicates_address())
+    };
+    let overlap: usize = unsafe {
+        atomic_load_acquire(freelist_probe_overlap_address())
+    };
+    return duplicates == 0 && overlap > 0;
+}

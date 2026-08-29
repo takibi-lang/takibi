@@ -143,6 +143,13 @@ fn kernel_secondary_main(context: usize) {
             if (pool_contention_is_armed()) {
                 pool_contention_secondary_run();
             }
+            // GitHub issue #479 Group A: the same arrangement, one
+            // subsystem over. Each probe owns its own instance, so a
+            // failure names the primitive rather than whatever else shares
+            // a live one.
+            if (freelist_contention_is_armed()) {
+                freelist_contention_secondary_run();
+            }
             wfi();
         }
     }

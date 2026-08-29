@@ -3,6 +3,7 @@ use "kernel/platform/rpi5/usb_xhci.tkb";
 use "kernel/platform/rpi5/memory.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/kernel/pool_contention_evidence.tkb";
+use "kernel/kernel/freelist_contention_evidence.tkb";
 
 must_use variant SecondaryBootResult {
     Started;
@@ -646,6 +647,17 @@ fn main() !{unsafe} {
             // GitHub issue #445: the first evidence that this kernel's
             // spinlock EXCLUDES. Everything before it was single-threaded
             // exercise and an instruction-level check.
+            // GitHub issue #479 Group A. This one currently reports a
+            // DEFECT, not a test failure, and says so: freelist.tkb's free
+            // chain has no lock and two cores are handed the same index.
+            // The line is in the boot every time on purpose -- an open
+            // race that only shows up when someone remembers to look is
+            // the state this was written to leave behind.
+            if (freelist_contention_probe()) {
+                kernel_boot_log("freelist contention: two cores cycling one free chain, no index handed out twice ok\n");
+            } else {
+                kernel_boot_log("freelist contention: same index handed to both cores -- open, see GitHub issue #479\n");
+            }
             if (pool_contention_probe()) {
                 kernel_boot_log("pool contention: two cores cycling one pool, every allocation given back, no handle refused ok\n");
             } else {

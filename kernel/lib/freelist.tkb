@@ -276,6 +276,21 @@ fn freelist_ref(T: type, target: &mut Freelist(T, N),
 // library that works because every caller so far happened to be
 // single-context, adopted by one that isn't. That paragraph is now a
 // number the compiler checks.
+//
+// GitHub issue #479: the race is no longer hypothetical. Two cores
+// cycling one FreelistCore(8) were handed the same index seven times in
+// 4096 rounds each -- kernel/kernel/freelist_contention_evidence.tkb
+// produces it on demand, from core 1, with KERNEL_ACTIVE_CORES still 1.
+// freelist_core_insert reads free_head and then writes next_free[head]
+// back into it; two cores reading the same head pop the same index.
+//
+// THE FIX IS NOT IN THIS FILE, which is what measuring it settled. The
+// live kernel instance is kernel/mm/page.tkb's boot_page_pool.core, and
+// page_alloc pops from it and THEN writes three fields of
+// boot_page_pool.meta[index]. A lock inside the pop would not cover that
+// sequence. The lock belongs to the caller, as IntrusivePool's already
+// does -- and page.tkb has neither a lock nor an assertion today, which
+// is its own finding recorded in #479.
 fn freelist_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
                   "the free chain has no lock, and a concurrent push corrupts it silently");

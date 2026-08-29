@@ -1,2 +1,4 @@
+freelist contention stage: complete
+freelist contention: same index handed to both cores -- open, see GitHub issue #479
 pool contention stage: complete
 pool contention: two cores cycling one pool, every allocation given back, no handle refused ok
