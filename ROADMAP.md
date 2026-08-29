@@ -271,11 +271,32 @@ found three entries whose stated reasons had already been fixed (`4b87978`)
 ten sites are not one problem: three are the scheduler becoming per-core,
 one is a lock a primitive never had, two are unsynchronised counters,
 three are the network stack's shared scratch, and one is the syscall
-path's whole re-entrancy assumption. #479's first job is deciding whether
-a busy loop -- which touches no socket and no filesystem -- has to answer
-all ten, or whether the constant should split into "cores that run kernel
-code" and "cores that run the scheduler". The trap to avoid there is
-renaming a constant as a way of declaring sites out of scope.
+path's whole re-entrancy assumption. Splitting the
+constant into "cores that run kernel code" and "cores that run the
+scheduler" was considered and REJECTED: no Unix-like kernel has that
+state -- an online CPU runs both -- so it would invent a state this
+kernel's own target design does not have, to avoid fixing ten sites at
+once. An abstraction whose removal date is known before it is written
+should not be written.
+
+What replaces it is the method #446 and #477 already used, strengthened:
+make a site correct for two cores while the flag is still 1, and exercise
+it FROM core 1 to prove it. That is not hypothetical --
+`kernel/kernel/pool_contention_evidence.tkb` already has core 1 hammering
+a pool concurrently with `KERNEL_ACTIVE_CORES` at 1, because the probe
+touches only that one part.
+
+The ten sites split three ways by what can actually reach them, which is
+a real division rather than an invented one. Three (`freelist`, `asid`,
+`fd_table`'s refcount) are probe-able from core 1 today. Four
+(`process.tkb` x2, `syscall.tkb`, `secondary.tkb`) ARE the change --
+core 1 calling `execution_here()` is what "a process on core 1" means.
+The remaining four are the network stack, and they are the hard part: RX
+stays single-core because device SPIs are routed to CPU0, but a socket
+call from a process on core 1 enters `tcp.tkb` there anyway. A busy loop
+never makes one, and nothing enforces that -- which is the assumption
+shape this project exists to stop relying on. They need #261's design,
+not four locks bolted on.
 
 **Decision recorded 2026-08-27: raw atomics are reachable only through
 `!{unsafe}`.** Ordinary kernel code goes through the spinlock or the
