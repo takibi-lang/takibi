@@ -112,6 +112,7 @@ langcheck:
 	@python3 scripts/check_qemu_lane_ports.py
 	@python3 scripts/check_kernel_interactive_httpd_protocol.py
 	@python3 scripts/check_pool_release_paths.py
+	@python3 scripts/check_platform_file_parity.py
 	@python3 scripts/check_kernel_log_expectations.py
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash -c ' \
 		echo "Checking for non-ASCII characters in source files..."; \
