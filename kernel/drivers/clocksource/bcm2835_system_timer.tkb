@@ -1,0 +1,100 @@
+// The SoC's own free-running counter, found in the device tree.
+//
+// GitHub issue #470. This kernel's timestamps and its scheduler tick both
+// come from the ARM generic timer, and on RPi5 that timer is not configured
+// by the firmware this kernel boots behind: `MRS CNTFRQ_EL0` returns a
+// different value on every read, measured twice on real hardware, so every
+// duration derived from it -- the tick period, the network deadlines, the
+// PCIe bring-up delays -- is a fresh arbitrary number. `CNTPCT_EL0`'s
+// absolute value stays in the tens of thousands sixteen seconds into a
+// boot, which no 56-bit counter at any plausible rate would do.
+//
+// The device tree does not fix that. Its `/timer` node -- the ARM generic
+// timer, `arm,armv8-timer` -- carries no `clock-frequency` on this board or
+// under QEMU, because a board whose firmware programs CNTFRQ_EL0 does not
+// need one. What it does carry is a second counter: a BCM2835-style system
+// timer, 64 bits, free-running, with its rate stated on the node, at an
+// address the tree also states. Reading it needs no system register and no
+// EL configuration, so it is a witness that does not depend on whatever is
+// wrong with the other one.
+//
+// This file does not replace the generic timer. It provides a second
+// opinion, which is what an unexplained counter needs before anything is
+// built on either of them.
+//
+// Current limitations (2026-08-29):
+// - PROBE-ONLY. Nothing schedules on this and no deadline is derived from
+//   it yet. What it is for right now is saying, from the board, what the
+//   two counters do over the same real interval.
+// - ONE NODE, THE FIRST FOUND. kernel/boot/fdt.tkb returns the first
+//   `brcm,bcm2835-system-timer` whose address it can translate; a tree with
+//   two would silently get the earlier one. No tree has two.
+// - NO COMPARE REGISTERS. The counter is read; the timer's four compare
+//   channels and its interrupt are not touched, and the CS register is not
+//   written. Nothing here can disturb a firmware or a driver that owns one.
+// - READS ARE NOT SYNCHRONISED with anything. A caller that needs the two
+//   halves to be one instant gets that from the re-read below; a caller
+//   that needs an ordering against a device write does not get it here.
+
+// BCM2835 system timer register offsets. CS is deliberately unused; see the
+// limitations above.
+const BCM2835_SYSTEM_TIMER_CLO: usize = 0x04;
+const BCM2835_SYSTEM_TIMER_CHI: usize = 0x08;
+
+private let mut system_timer_base: usize = 0;
+private let mut system_timer_hz: usize = 0;
+
+must_use variant SystemTimerProbeResult { Missing; Invalid; Found; }
+
+// Ask the boot device tree where the counter is and how fast it runs.
+// Both answers come from the tree; nothing here is a constant this file
+// chose, which is the point -- an address this kernel hardcoded would be a
+// claim about a board it cannot check.
+fn system_timer_probe(dtb: usize) -> SystemTimerProbeResult !{unsafe} {
+    match fdt_detect_system_timer(dtb) {
+        FdtSystemTimerResult::Invalid => {
+            return SystemTimerProbeResult::Invalid;
+        }
+        FdtSystemTimerResult::NotFound => {
+            return SystemTimerProbeResult::Missing;
+        }
+        FdtSystemTimerResult::Found(found) => {
+            let (base, hz) = found;
+            if (base == 0 || hz == 0) { return SystemTimerProbeResult::Missing; }
+            system_timer_base = base;
+            system_timer_hz = hz;
+            return SystemTimerProbeResult::Found;
+        }
+    }
+}
+
+fn system_timer_present() -> bool { return system_timer_base != 0; }
+
+fn system_timer_hz_value() -> usize { return system_timer_hz; }
+
+fn system_timer_base_address() -> usize { return system_timer_base; }
+
+// The 64-bit count, as one instant.
+//
+// The two halves are separate 32-bit registers, so the low one can wrap
+// between the two reads. Reading the high half again and repeating the low
+// one when it moved is the standard answer and is bounded at one retry: the
+// high half advances once every 2^32 counts, which at any rate a device
+// tree would state is thousands of seconds.
+fn system_timer_now() -> usize !{unsafe} {
+    if (system_timer_base == 0) { return 0; }
+    let high_register: *io u32 = unsafe {
+        (system_timer_base + BCM2835_SYSTEM_TIMER_CHI) as *io u32
+    };
+    let low_register: *io u32 = unsafe {
+        (system_timer_base + BCM2835_SYSTEM_TIMER_CLO) as *io u32
+    };
+    let mut high: usize = *high_register as usize;
+    let mut low: usize = *low_register as usize;
+    let recheck: usize = *high_register as usize;
+    if (recheck != high) {
+        high = recheck;
+        low = *low_register as usize;
+    }
+    return (high << 32) | low;
+}

@@ -1,0 +1,73 @@
+// GitHub issue #470: kernel/boot/fdt.tkb's readers, run against a real
+// device-tree blob where a test costs milliseconds instead of a reset and
+// an SWD load.
+//
+// What this is for. RPi5's ARM generic timer is not configured by the
+// firmware this kernel boots behind -- CNTFRQ_EL0 returns a different value
+// on every read -- so the kernel needs a counter it can find rather than
+// one it has to be told about. The device tree describes one: a
+// BCM2835-style system timer with its own stated frequency. Finding it is
+// byte parsing over a blob, which means the verdict here is the same
+// verdict the board would give, and the board is not needed to get it.
+//
+// The blob is built by scripts/make_fdt_fixture.py from the values in the
+// pinned Raspberry Pi firmware DTB; see that file for each one and for why
+// it is generated rather than committed.
+//
+// Expected output (linux_user/fdt/fdt.expected):
+//   memory base and size, as the already-shipped scan reads them
+//   the system timer's PHYSICAL address, which is its bus address
+//     translated through the parent bus's `ranges` -- 0x7c003000 in the
+//     node, 0x107c003000 in memory
+//   its frequency
+//   then the two refusals: a blob whose magic does not match, and a scan
+//     that finds no such node
+
+let fdt_fixture: [u8; 477] = embed_file("linux_user/build/fdt_fixture.dtb");
+
+// The existing printer is 32 bits wide and these are physical addresses on
+// a board whose peripherals live above 4 GiB, so print both halves.
+fn println_hex64(value: usize) {
+    uart_print_hex((value >> 32) as i32);
+    uart_puts(" ");
+    uart_println_hex((value & 0xFFFFFFFF) as i32);
+}
+
+fn report_memory(result: FdtMemoryResult) {
+    match result {
+        FdtMemoryResult::Invalid => { uart_puts("memory invalid\r\n"); }
+        FdtMemoryResult::NotFound => { uart_puts("memory not found\r\n"); }
+        FdtMemoryResult::Found(found) => {
+            let (memory_base, memory_size) = found;
+            uart_puts("memory base ");
+            println_hex64(memory_base);
+            uart_puts("memory size ");
+            println_hex64(memory_size);
+        }
+    }
+}
+
+fn report_timer(result: FdtSystemTimerResult) {
+    match result {
+        FdtSystemTimerResult::Invalid => { uart_puts("timer invalid\r\n"); }
+        FdtSystemTimerResult::NotFound => { uart_puts("timer not found\r\n"); }
+        FdtSystemTimerResult::Found(found) => {
+            let (timer_base, timer_hz) = found;
+            uart_puts("timer base ");
+            println_hex64(timer_base);
+            uart_puts("timer hz ");
+            println_hex64(timer_hz);
+        }
+    }
+}
+
+fn app_main() !{unsafe} {
+    let blob: usize = (fdt_fixture as *u8) as usize;
+    report_memory(fdt_detect_memory(blob));
+    report_timer(fdt_detect_system_timer(blob));
+
+    // One byte into the header the magic no longer matches, and every
+    // reader refuses before it reads anything else.
+    report_memory(fdt_detect_memory(blob + 1));
+    report_timer(fdt_detect_system_timer(blob + 1));
+}

@@ -15,6 +15,53 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-08-29: a second counter, found in the device tree (#470)
+
+RPi5's ARM generic timer is not configured by the firmware this kernel boots
+behind. Measured twice on hardware: `MRS CNTFRQ_EL0` returns a DIFFERENT
+value on different reads -- proved by one `mrs` in the timer handler feeding
+both a stored frequency and a stored `freq >> 6`, which came out 0 and
+43750 -- so the tick period and every deadline derived from it is a fresh
+arbitrary number. `CNTPCT_EL0` is no better: its absolute value stays under
+2^17 sixteen seconds into a boot and is not monotonic across a run, while
+short deltas over a fixed loop are stable to four digits.
+
+The device tree was the obvious place to look, and the first thing it said
+was no. Its `/timer` node -- the ARM generic timer -- carries no
+`clock-frequency`, on the pinned Raspberry Pi firmware DTB or in QEMU's
+generated one, because a board whose firmware programs `CNTFRQ_EL0` does not
+need one. Reading the blob rather than assuming is what turned that from a
+plan into a fact, and it took no hardware: `qemu-system-aarch64
+-machine virt,dumpdtb=` for one, and the pinned firmware image for the other.
+
+What the same blob does carry is a different counter. `/soc@107c000000/
+timer@7c003000`, `brcm,bcm2835-system-timer`, `clock-frequency = <1000000>`:
+64 bits, free-running, memory-mapped, with its rate stated on the node and
+its address stated as a bus address the parent's `ranges` translates to
+0x107c003000 -- inside the device block this kernel already maps. Reading it
+needs no system register and no EL configuration, so it does not depend on
+whatever is wrong with the other one.
+
+So `kernel/boot/fdt.tkb` gained a second scanner, and the kernel reports both
+counters over the same real interval at boot. That is the second witness the
+first round of this investigation did not have: everything known about
+`CNTPCT_EL0` came from `CNTPCT_EL0`.
+
+The parsing is verified without the board. `linux_user/fdt` runs the real
+reader against a blob built by `scripts/make_fdt_fixture.py` with the
+board's own shape and values -- the nontrivial part being that the timer's
+`reg` is a bus address and only the parent's `ranges` says where that bus
+is. The fixture also carries the `/timer` node that has no frequency, since
+a scanner that matched that one would pass a test which omitted it. The blob
+is generated rather than committed for the same reason BusyBox is
+downloaded: it is built from another project's GPL sources.
+
+Found-by: hardware -- two instrumented RPi5 boots said the frequency
+register was not stable; reading the device tree said why looking there
+would not have helped, and what to look at instead
+
+---
+
 ## 2026-08-28: accept(2) stopped holding the whole machine (#469)
 
 The busy-pair workload found this and could not be run against it: a

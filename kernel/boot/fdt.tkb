@@ -308,6 +308,238 @@ private fn fdt_scan_memory(base: usize, wanted: usize)
     return FdtScanResult::Invalid;
 }
 
+// GitHub issue #470: the SoC's own free-running counter, found by what it
+// says it is rather than by an address this file would otherwise have to
+// hardcode.
+//
+// Why a second counter at all. On RPi5 the ARM generic timer is not
+// configured by the firmware this kernel boots behind: CNTFRQ_EL0 returns a
+// different value on every read, so the scheduler tick and every deadline
+// derived from it is a fresh arbitrary number, and CNTPCT_EL0's absolute
+// value stays in the tens of thousands sixteen seconds into a boot. The
+// device tree does not rescue that -- its `/timer` node (arm,armv8-timer)
+// carries no `clock-frequency` on this board or under QEMU. What it does
+// carry is a different node: a BCM2835-style system timer whose own
+// `clock-frequency` is stated, and which is memory-mapped, so reading it
+// depends on no system-register configuration at all.
+//
+// A second walk rather than one that collects everything. The memory scan
+// above is the boot's first and most safety-critical use of this blob and
+// is left exactly as it is; sharing a walk between the two would mean one
+// function whose state is the union of both searches, and this file's whole
+// argument is that each read is bounded and easy to check.
+must_use variant FdtSystemTimerResult {
+    Invalid;
+    NotFound;
+    Found((usize, usize));
+}
+
+variant FdtTimerScanResult {
+    Invalid;
+    NotFound;
+    Found((usize, usize));
+}
+
+private fn fdt_scan_system_timer(base: usize) -> FdtTimerScanResult
+        !{unsafe} {
+    let header_total: usize = FDT_HEADER_SIZE;
+    if (fdt_read_be32(base, header_total, 0) != FDT_MAGIC) {
+        return FdtTimerScanResult::Invalid;
+    }
+    let total: usize = fdt_read_be32(base, header_total, 4);
+    if (total < FDT_HEADER_SIZE || total > FDT_MAX_SIZE) {
+        return FdtTimerScanResult::Invalid;
+    }
+    let struct_offset: usize = fdt_read_be32(base, total, 8);
+    let strings_offset: usize = fdt_read_be32(base, total, 12);
+    let strings_size: usize = fdt_read_be32(base, total, 32);
+    let struct_size: usize = fdt_read_be32(base, total, 36);
+    let version: usize = fdt_read_be32(base, total, 20);
+    let last_compatible_version: usize = fdt_read_be32(base, total, 24);
+    if (fdt_range_valid(total, struct_offset, struct_size) == false ||
+        fdt_range_valid(total, strings_offset, strings_size) == false ||
+        (struct_offset & 3) != 0 || version < 17 ||
+        last_compatible_version > 17) {
+        return FdtTimerScanResult::Invalid;
+    }
+
+    let struct_end: usize = struct_offset + struct_size;
+    let strings_end: usize = strings_offset + strings_size;
+    let mut cursor: usize = struct_offset;
+    let mut depth: usize = 0;
+    // The root node's own cells, which say how wide a PARENT address is in
+    // the bus node's `ranges` below.
+    let mut root_address_cells: usize = 2;
+    // The bus node's cells, which say how wide a CHILD address is in both
+    // that `ranges` and in the timer's own `reg`.
+    let mut bus_address_cells: usize = 2;
+    let mut bus_size_cells: usize = 1;
+    let mut bus_ranges_valid: bool = false;
+    let mut bus_identity: bool = false;
+    let mut bus_child: usize = 0;
+    let mut bus_parent: usize = 0;
+    let mut bus_span: usize = 0;
+    let mut timer_depth: usize = 0;
+    let mut timer_match: bool = false;
+    let mut timer_reg_valid: bool = false;
+    let mut timer_reg: usize = 0;
+    let mut timer_hz: usize = 0;
+
+    while (cursor < struct_end) {
+        if (fdt_range_valid(struct_end, cursor, 4) == false) {
+            return FdtTimerScanResult::Invalid;
+        }
+        let token: usize = fdt_read_be32(base, total, cursor);
+        cursor = cursor + 4;
+        if (token == FDT_BEGIN_NODE) {
+            let mut name_end: usize = cursor;
+            while (name_end < struct_end &&
+                   fdt_read_u8(base, total, name_end) != 0) {
+                name_end = name_end + 1;
+            }
+            if (name_end >= struct_end) { return FdtTimerScanResult::Invalid; }
+            depth = depth + 1;
+            if (depth == 2) {
+                bus_address_cells = 2;
+                bus_size_cells = 1;
+                bus_ranges_valid = false;
+                bus_identity = false;
+            }
+            if (depth == 3) {
+                timer_depth = depth;
+                timer_match = false;
+                timer_reg_valid = false;
+                timer_hz = 0;
+            }
+            cursor = fdt_align4(name_end + 1);
+            if (cursor == 0 || cursor > struct_end) {
+                return FdtTimerScanResult::Invalid;
+            }
+        } else if (token == FDT_END_NODE) {
+            if (depth == 0) { return FdtTimerScanResult::Invalid; }
+            if (timer_depth == depth) {
+                if (timer_match && timer_reg_valid && timer_hz != 0) {
+                    if (bus_identity) {
+                        return FdtTimerScanResult::Found((timer_reg, timer_hz));
+                    }
+                    // Refuse rather than guess. An MMIO address this file
+                    // could not translate is not a fallback, it is a wrong
+                    // pointer into a device the kernel would then write.
+                    if (bus_ranges_valid && timer_reg >= bus_child &&
+                        timer_reg - bus_child < bus_span &&
+                        bus_parent <= 0xFFFFFFFFFFFFFFFF -
+                            (timer_reg - bus_child)) {
+                        return FdtTimerScanResult::Found(
+                            (bus_parent + (timer_reg - bus_child), timer_hz));
+                    }
+                    return FdtTimerScanResult::NotFound;
+                }
+                timer_depth = 0;
+            }
+            depth = depth - 1;
+        } else if (token == FDT_PROP) {
+            if (fdt_range_valid(struct_end, cursor, 8) == false) {
+                return FdtTimerScanResult::Invalid;
+            }
+            let length: usize = fdt_read_be32(base, total, cursor);
+            let name_relative: usize = fdt_read_be32(base, total, cursor + 4);
+            cursor = cursor + 8;
+            if (name_relative >= strings_size ||
+                fdt_range_valid(struct_end, cursor, length) == false) {
+                return FdtTimerScanResult::Invalid;
+            }
+            let prop_name: usize = strings_offset + name_relative;
+            if (prop_name >= strings_end) {
+                return FdtTimerScanResult::Invalid;
+            }
+            if (depth == 1 && length == 4 &&
+                fdt_string_is(base, strings_end, prop_name,
+                              bs"#address-cells")) {
+                root_address_cells = fdt_read_be32(base, total, cursor);
+            } else if (depth == 2 && length == 4 &&
+                       fdt_string_is(base, strings_end, prop_name,
+                                     bs"#address-cells")) {
+                bus_address_cells = fdt_read_be32(base, total, cursor);
+            } else if (depth == 2 && length == 4 &&
+                       fdt_string_is(base, strings_end, prop_name,
+                                     bs"#size-cells")) {
+                bus_size_cells = fdt_read_be32(base, total, cursor);
+            } else if (depth == 2 &&
+                       fdt_string_is(base, strings_end, prop_name,
+                                     bs"ranges")) {
+                // An empty `ranges` is the device tree's way of saying the
+                // child addresses ARE the parent's.
+                if (length == 0) {
+                    bus_identity = true;
+                } else if ((bus_address_cells == 1 || bus_address_cells == 2) &&
+                           (root_address_cells == 1 ||
+                            root_address_cells == 2) &&
+                           (bus_size_cells == 1 || bus_size_cells == 2)) {
+                    let entry_cells: usize =
+                        bus_address_cells + root_address_cells + bus_size_cells;
+                    if (length >= entry_cells * 4) {
+                        bus_child = fdt_cells_value(
+                            base, total, cursor, bus_address_cells);
+                        bus_parent = fdt_cells_value(
+                            base, total, cursor + bus_address_cells * 4,
+                            root_address_cells);
+                        bus_span = fdt_cells_value(
+                            base, total,
+                            cursor + (bus_address_cells + root_address_cells) * 4,
+                            bus_size_cells);
+                        bus_ranges_valid = bus_span != 0;
+                    }
+                }
+            } else if (timer_depth == depth &&
+                       fdt_string_is(base, strings_end, prop_name,
+                                     bs"compatible")) {
+                timer_match = fdt_string_is(base, cursor + length, cursor,
+                                            bs"brcm,bcm2835-system-timer");
+            } else if (timer_depth == depth &&
+                       fdt_string_is(base, strings_end, prop_name, bs"reg")) {
+                if ((bus_address_cells == 1 || bus_address_cells == 2) &&
+                    (bus_size_cells == 1 || bus_size_cells == 2) &&
+                    length >= (bus_address_cells + bus_size_cells) * 4) {
+                    timer_reg = fdt_cells_value(base, total, cursor,
+                                                bus_address_cells);
+                    timer_reg_valid = true;
+                }
+            } else if (timer_depth == depth && length == 4 &&
+                       fdt_string_is(base, strings_end, prop_name,
+                                     bs"clock-frequency")) {
+                timer_hz = fdt_read_be32(base, total, cursor);
+            }
+            let next: usize = fdt_align4(cursor + length);
+            if (next == 0 || next > struct_end) {
+                return FdtTimerScanResult::Invalid;
+            }
+            cursor = next;
+        } else if (token == FDT_NOP) {
+        } else if (token == FDT_END) {
+            if (depth != 0) { return FdtTimerScanResult::Invalid; }
+            return FdtTimerScanResult::NotFound;
+        } else {
+            return FdtTimerScanResult::Invalid;
+        }
+    }
+    return FdtTimerScanResult::Invalid;
+}
+
+fn fdt_detect_system_timer(base: usize) -> FdtSystemTimerResult !{unsafe} {
+    let scanned: FdtTimerScanResult = fdt_scan_system_timer(base);
+    match scanned {
+        FdtTimerScanResult::Invalid => {
+            return FdtSystemTimerResult::Invalid;
+        }
+        FdtTimerScanResult::NotFound => {
+            return FdtSystemTimerResult::NotFound;
+        }
+        FdtTimerScanResult::Found(found) => {
+            return FdtSystemTimerResult::Found(found);
+        }
+    }
+}
+
 fn fdt_detect_memory(base: usize) -> FdtMemoryResult !{unsafe} {
     let scanned: FdtScanResult = fdt_scan_memory(base, 0);
     match scanned {

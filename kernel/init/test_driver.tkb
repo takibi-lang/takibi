@@ -28,6 +28,7 @@ use "kernel/arch/arm64/boot/boot_extern.tkb";
 use "kernel/arch/arm64/kernel/fpsimd_probe_extern.tkb";
 use "kernel/arch/arm64/kernel/exception_evidence.tkb";
 use "kernel/arch/arm64/kernel/vector_table.tkb";
+use "kernel/drivers/clocksource/bcm2835_system_timer.tkb";
 
 let mut ext2_read_fixture: [u8; 32];
 let mut ext2_symlink_fixture: [u8; 64];
@@ -1173,4 +1174,49 @@ fn kernel_uart_rx_getc() -> u8 {
     let c: u8 = ring[tail as isize];
     kernel_uart_rx_tail = (tail + 1) % 64;
     return c;
+}
+
+// GitHub issue #470: which counters this board actually has, and what they
+// do over the same real interval. The generic timer's own frequency
+// register is not trustworthy on every board this kernel runs on, so the
+// question is asked with a second counter rather than answered with the
+// first one's own opinion of itself.
+fn kernel_report_counters() !{unsafe} {
+    match system_timer_probe(boot_dtb_address_read()) {
+        SystemTimerProbeResult::Invalid => {
+            kernel_boot_log("system timer: boot DTB unreadable\n");
+            return;
+        }
+        SystemTimerProbeResult::Missing => {
+            kernel_boot_log("system timer: none in the device tree\n");
+            return;
+        }
+        SystemTimerProbeResult::Found => {}
+    }
+    kernel_boot_log("system timer: device tree gives ");
+    uart_put_udec(system_timer_hz_value());
+    kernel_boot_log(" Hz\n");
+    // One real interval, measured by the counter that states its own rate,
+    // with the architectural counter read across the same span. A healthy
+    // generic timer advances by about its own frequency times the elapsed
+    // seconds; anything else is the measurement this issue is about.
+    let interval: usize = system_timer_hz_value() / 100;
+    let system_start: usize = system_timer_now();
+    let arch_start: usize = read_cntpct() as usize;
+    let mut spins: usize = 0;
+    while (system_timer_now() - system_start < interval &&
+           spins < 100000000) {
+        spins = spins + 1;
+    }
+    let system_delta: usize = system_timer_now() - system_start;
+    let arch_delta: usize = (read_cntpct() as usize) - arch_start;
+    kernel_boot_log("counters: system=");
+    uart_put_udec(system_delta);
+    kernel_boot_log(" arch=");
+    uart_put_udec(arch_delta);
+    kernel_boot_log(" cntfrq=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log(" spins=");
+    uart_put_udec(spins);
+    kernel_boot_log("\n");
 }

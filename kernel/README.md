@@ -816,18 +816,30 @@ run, not a specification.
 - **`ppoll`.** Blocks and wakes on UART RX for the single-descriptor stdin
   shape BusyBox ash's `read` builtin uses. Any other shape reports current
   readiness immediately, and a non-NULL timeout is never armed.
-- **RPi5 reads `CNTFRQ_EL0` as 0.** `timer_tick_rearm` derives the
-  scheduler tick from it (`read_cntfrq() >> 6`), so on that board the
-  countdown is programmed to zero and there is no real time slice: the
-  timer re-fires as fast as it can. Every other `read_cntfrq()`-derived
-  deadline in the kernel is zero there too, which makes each of them expire
-  on its first test. `CNTPCT_EL0` there is not trustworthy either: the
-  busy-pair report's per-process CPU totals sum to several times the
-  interval they were measured inside, which cannot happen with a monotonic
-  counter and does not happen under QEMU. The kernel works and every
-  fixture passes -- the fairness assertion counts syscall-reported rounds,
-  not ticks -- but no timeout on that board means what its source says it
-  means, and no tick-derived number from it should be believed.
+- **RPi5's ARM generic timer is not configured by its firmware.**
+  `MRS CNTFRQ_EL0` there returns a DIFFERENT value on different reads --
+  measured on hardware, from one `mrs` whose result fed two stored fields
+  that came out 0 and 43750. `timer_tick_rearm` derives the scheduler tick
+  from that register on every tick (`read_cntfrq() >> 6`), so the time slice
+  on that board is a fresh arbitrary number, and so is every other
+  `read_cntfrq()`-derived deadline: the network timeouts, and the PCIe and
+  USB bring-up delays. `CNTPCT_EL0` is no better -- its absolute value stays
+  under 2^17 sixteen seconds into a boot and is not monotonic across a run,
+  while short deltas over a fixed loop are stable to four digits. The kernel
+  works and every fixture passes (the busy-pair fairness assertion counts
+  syscall-reported rounds, not ticks) but no timeout on that board means
+  what its source says it means, and no tick-derived number from it should
+  be believed.
+
+  The device tree does not fix this: its `/timer` node carries no
+  `clock-frequency`, on this board's pinned firmware blob or in QEMU's
+  generated one, because a board whose firmware programs `CNTFRQ_EL0` does
+  not need one. What it does describe is a SECOND counter -- a BCM2835-style
+  system timer, 64-bit, free-running, memory-mapped, with its own rate
+  stated on the node -- and the kernel finds it there and reports what the
+  two counters do over the same real interval. That is the second witness
+  the question needs: everything previously known about `CNTPCT_EL0` came
+  from `CNTPCT_EL0`. QEMU's `virt` has no such node and says so.
 - **Waiting for the network happens inside the kernel, except in
   `accept`.** The TCP receive path still waits for a frame in a bounded
   in-kernel loop, and since kernel mode does not preempt, every other

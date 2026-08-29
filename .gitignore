@@ -64,3 +64,8 @@ __pycache__
 slides.html
 slides.pdf
 docs/talks/*/dist/
+
+# Generated device-tree fixture for linux_user/fdt (GitHub issue #470),
+# built by scripts/make_fdt_fixture.py. The script is the source; the blob
+# is an output, and committing it would give the same values two homes.
+linux_user/build/fdt_fixture.dtb
