@@ -71,11 +71,19 @@ const WORKLOAD_BUSY_ROUNDS: usize = 8;
 //
 // Note which half of the report is the assertion. ROUND COUNTS are, and
 // they are counted by this file from syscalls, so they mean the same thing
-// on both targets. The tick numbers below are diagnostic only, and on
-// RPi5 they are not currently trustworthy: `cpu_a + cpu_b` comes out
-// larger than the `elapsed` they were measured inside, which cannot happen
-// with a monotonic counter and does not happen under QEMU. Do not build an
-// assertion on them until that board's counter is understood.
+// on both targets. The tick numbers below are diagnostic only.
+//
+// They used to carry a warning that RPi5's were untrustworthy, because
+// `cpu_a + cpu_b` printed larger than the `elapsed` they were measured
+// inside -- impossible for a monotonic counter, and not seen under QEMU.
+// That was never this board's counter. It was uart_put_udec, which had
+// five place values on RPi5 and silently truncated anything above 99999
+// (GitHub issue #470). With one shared formatter the same boot reports
+// cpu_a=8438690 cpu_b=7585307 inside elapsed=25531883 at tickfreq
+// 54000000 -- 63% of the window, against QEMU's 24%, and the sum fits.
+// So these are now real numbers on both targets, which is what issue
+// #448's "report what the second core bought" criterion needs. They stay
+// diagnostic here only because no bound has been chosen for them yet.
 const WORKLOAD_BUSY_SKEW_BOUND: usize = 4;
 
 struct WorkloadBusyPair {
