@@ -834,12 +834,10 @@ run, not a specification.
   The device tree does not fix this: its `/timer` node carries no
   `clock-frequency`, on this board's pinned firmware blob or in QEMU's
   generated one, because a board whose firmware programs `CNTFRQ_EL0` does
-  not need one. What it does describe is a SECOND counter -- a BCM2835-style
-  system timer, 64-bit, free-running, memory-mapped, with its own rate
-  stated on the node -- and the kernel finds it there and reports what the
-  two counters do over the same real interval. That is the second witness
-  the question needs: everything previously known about `CNTPCT_EL0` came
-  from `CNTPCT_EL0`. QEMU's `virt` has no such node and says so.
+  not need one. It does describe a second counter -- a BCM2835-style system
+  timer, 64-bit, free-running, memory-mapped, with its own rate stated on
+  the node -- which is what a second opinion about this would be read from.
+  Nothing reads it yet.
 - **Waiting for the network happens inside the kernel, except in
   `accept`.** The TCP receive path still waits for a frame in a bounded
   in-kernel loop, and since kernel mode does not preempt, every other

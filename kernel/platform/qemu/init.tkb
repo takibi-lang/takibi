@@ -431,8 +431,6 @@ fn main() !{unsafe} {
         }
     }
 
-    kernel_report_counters();
-
     platform_irq_init();
 
     if (fpsimd_irq_probe() == 0) {

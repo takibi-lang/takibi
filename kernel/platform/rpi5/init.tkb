@@ -591,8 +591,6 @@ fn main() !{unsafe} {
         }
     }
 
-    kernel_report_counters();
-
     // GitHub issue #187: arms GIC/MIP0/MSI-X routing for UART0 and USB
     // xHCI and unmasks DAIF.I globally. UART0's own PL011 source stays
     // masked until this function's much later irq_uart_rx_unmask() call;

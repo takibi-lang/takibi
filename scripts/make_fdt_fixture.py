@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Build the device-tree blob linux_user/fdt tests kernel/boot/fdt.tkb against.
 
+GitHub issue #472.
+
 Synthetic, and deliberately shaped like the real thing. Every number here
 was read out of the pinned Raspberry Pi firmware DTB for the Pi 5
 (raspberrypi/firmware, boot/bcm2712-rpi-5-b.dtb), which is the blob that
@@ -13,6 +15,12 @@ board's firmware actually hands this kernel:
                              reg = <0x7c003000 0x1000>
                              clock-frequency = <1000000>
     /timer                   compatible = "arm,armv8-timer"   (no frequency)
+
+The memory here is deliberately NOT the board's single region. It is two
+nodes, and the first of them carries two `reg` tuples, because those are two
+different ways a device tree says "more than one extent" and the reader
+enumerates tuples across nodes rather than nodes. A fixture with one region
+would pass whether or not that enumeration worked.
 
 Generated rather than committed because the real blob is built from the
 Linux kernel's device tree source and this repository does not carry other
@@ -93,17 +101,30 @@ def main():
 
     b.begin("memory@0")
     b.prop("device_type", b"memory\0")
-    b.prop("reg", b.cells(0, 0, 0, 0x40000000))
+    b.prop("reg", b.cells(0, 0, 0, 0x40000000,
+                          0, 0x80000000, 0, 0x10000000))
     b.end()
 
+    b.begin("memory@100000000")
+    b.prop("device_type", b"memory\0")
+    b.prop("reg", b.cells(1, 0, 0, 0x20000000))
+    b.end()
+
+    # Property ORDER matters and is not fixed by the spec. These are in the
+    # order the real blob writes them, `ranges` BEFORE the cell counts it
+    # has to be decoded with -- which is the shape that caught a reader
+    # decoding `ranges` where it found it instead of when it needed it. The
+    # timer's own properties are then deliberately in an awkward order for
+    # the same reason.
     b.begin("soc@107c000000")
+    b.prop("compatible", b"simple-bus\0")
+    b.prop("ranges", b.cells(0x00000000, 0x00000010, 0x00000000, 0x80000000))
     b.prop("#address-cells", b.cells(1))
     b.prop("#size-cells", b.cells(1))
-    b.prop("ranges", b.cells(0x00000000, 0x00000010, 0x00000000, 0x80000000))
     b.begin("timer@7c003000")
-    b.prop("compatible", b"brcm,bcm2835-system-timer\0")
-    b.prop("reg", b.cells(0x7C003000, 0x00001000))
     b.prop("clock-frequency", b.cells(1000000))
+    b.prop("reg", b.cells(0x7C003000, 0x00001000))
+    b.prop("compatible", b"brcm,bcm2835-system-timer\0")
     b.end()
     b.end()
 

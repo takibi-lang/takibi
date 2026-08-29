@@ -1,29 +1,28 @@
-// GitHub issue #470: kernel/boot/fdt.tkb's readers, run against a real
+// GitHub issue #472: kernel/boot/fdt.tkb's memory reader, run against a
 // device-tree blob where a test costs milliseconds instead of a reset and
 // an SWD load.
 //
-// What this is for. RPi5's ARM generic timer is not configured by the
-// firmware this kernel boots behind -- CNTFRQ_EL0 returns a different value
-// on every read -- so the kernel needs a counter it can find rather than
-// one it has to be told about. The device tree describes one: a
-// BCM2835-style system timer with its own stated frequency. Finding it is
-// byte parsing over a blob, which means the verdict here is the same
-// verdict the board would give, and the board is not needed to get it.
+// Milestone 1 made the reader preserve every usable `reg` tuple from every
+// memory node, and gave it an enumeration API to read them back. That API
+// had no caller anywhere and no host-native test: the boot path asks only
+// for the count and the total, so a `region_at` that returned the wrong
+// extent, or a `verify` that agreed with it, would have looked correct on
+// both platforms. This is a caller.
+//
+// Parsing a blob is byte work, so the verdict here is the verdict the board
+// would give, and the board is not needed to get it.
 //
 // The blob is built by scripts/make_fdt_fixture.py from the values in the
 // pinned Raspberry Pi firmware DTB; see that file for each one and for why
 // it is generated rather than committed.
 //
 // Expected output (linux_user/fdt/fdt.expected):
-//   memory base and size, as the already-shipped scan reads them
-//   the system timer's PHYSICAL address, which is its bus address
-//     translated through the parent bus's `ranges` -- 0x7c003000 in the
-//     node, 0x107c003000 in memory
-//   its frequency
-//   then the two refusals: a blob whose magic does not match, and a scan
-//     that finds no such node
+//   how many memory regions the blob describes, the first one's base, the
+//     total across all of them, then each region and the refusal past the
+//     last, then the map's own self-check
+//   then the refusal: a blob whose magic does not match
 
-let fdt_fixture: [u8; 477] = embed_file("linux_user/build/fdt_fixture.dtb");
+let fdt_fixture: [u8; 593] = embed_file("linux_user/build/fdt_fixture.dtb");
 
 // The existing printer is 32 bits wide and these are physical addresses on
 // a board whose peripherals live above 4 GiB, so print both halves.
@@ -33,30 +32,50 @@ fn println_hex64(value: usize) {
     uart_println_hex((value & 0xFFFFFFFF) as i32);
 }
 
-fn report_memory(result: FdtMemoryResult) {
+fn report_region(result: FdtMemoryRegionResult) {
     match result {
-        FdtMemoryResult::Invalid => { uart_puts("memory invalid\r\n"); }
-        FdtMemoryResult::NotFound => { uart_puts("memory not found\r\n"); }
-        FdtMemoryResult::Found(found) => {
-            let (memory_base, memory_size) = found;
-            uart_puts("memory base ");
-            println_hex64(memory_base);
-            uart_puts("memory size ");
-            println_hex64(memory_size);
+        FdtMemoryRegionResult::Invalid => {
+            uart_puts("region invalid\r\n");
+        }
+        FdtMemoryRegionResult::OutOfRange => {
+            uart_puts("region out of range\r\n");
+        }
+        FdtMemoryRegionResult::Found(region) => {
+            uart_puts("region ");
+            uart_print_hex((region.base >> 32) as i32);
+            uart_puts(" ");
+            uart_print_hex((region.base & 0xFFFFFFFF) as i32);
+            uart_puts(" size ");
+            uart_print_hex((region.size >> 32) as i32);
+            uart_puts(" ");
+            uart_println_hex((region.size & 0xFFFFFFFF) as i32);
         }
     }
 }
 
-fn report_timer(result: FdtSystemTimerResult) {
+fn report_memory(result: FdtMemoryResult) !{unsafe} {
     match result {
-        FdtSystemTimerResult::Invalid => { uart_puts("timer invalid\r\n"); }
-        FdtSystemTimerResult::NotFound => { uart_puts("timer not found\r\n"); }
-        FdtSystemTimerResult::Found(found) => {
-            let (timer_base, timer_hz) = found;
-            uart_puts("timer base ");
-            println_hex64(timer_base);
-            uart_puts("timer hz ");
-            println_hex64(timer_hz);
+        FdtMemoryResult::Invalid => { uart_puts("memory invalid\r\n"); }
+        FdtMemoryResult::NotFound => { uart_puts("memory not found\r\n"); }
+        FdtMemoryResult::Found(found) => {
+            uart_puts("memory regions ");
+            uart_println_hex(fdt_memory_region_count(found) as i32);
+            uart_puts("memory base ");
+            println_hex64(fdt_memory_first_base(found));
+            uart_puts("memory size ");
+            println_hex64(fdt_memory_total_size(found));
+            // The enumeration this map exists for. Walking it is what says
+            // the count and the total above were not both computed from one
+            // region that happened to be the only one anybody asked for.
+            for index: usize in 0..<4 {
+                report_region(fdt_memory_region_at(found, index));
+            }
+            uart_puts("memory verifies ");
+            if (fdt_memory_map_verify(found)) {
+                uart_puts("yes\r\n");
+            } else {
+                uart_puts("no\r\n");
+            }
         }
     }
 }
@@ -64,10 +83,8 @@ fn report_timer(result: FdtSystemTimerResult) {
 fn app_main() !{unsafe} {
     let blob: usize = (fdt_fixture as *u8) as usize;
     report_memory(fdt_detect_memory(blob));
-    report_timer(fdt_detect_system_timer(blob));
 
     // One byte into the header the magic no longer matches, and every
     // reader refuses before it reads anything else.
     report_memory(fdt_detect_memory(blob + 1));
-    report_timer(fdt_detect_system_timer(blob + 1));
 }
