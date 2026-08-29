@@ -79,11 +79,17 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--stop-marker", default="resources: pages=0")
     # GitHub issue #448: the CPU-bound pair /etc/inittab starts runs
-    # concurrently with this ash session and reports its verdict when
-    # both halves have run their rounds side by side. The interactive
-    # HTTPd handshake finishes first, so without this the capture ends
-    # before the workload has anything to say and its view fails on a
-    # line that was only ever late.
+    # concurrently with this ash session and reports its verdict when both
+    # halves have run their rounds side by side. The interactive HTTPd
+    # handshake finishes first, so without this the capture can end before
+    # the workload has anything to say and its view fails on a line that
+    # was only ever late.
+    #
+    # It no longer SEQUENCES anything. It used to hold the HTTPd command
+    # back as well, because accept(2) waited for a connection inside the
+    # kernel and stopped every other process while it did (issue #469);
+    # with accept yielding, the two run concurrently and this is only a
+    # "do not stop capturing yet".
     parser.add_argument("--workload-marker", default=None)
     parser.add_argument("--stdin", required=True)
     parser.add_argument("--expected", required=True)
@@ -187,16 +193,7 @@ def main() -> int:
                 workload_seen = (
                     args.workload_marker is None or
                     args.workload_marker.encode("ascii") in output)
-                # GitHub issue #448: hold the interactive HTTPd sequence
-                # until the busy pair has reported. Not politeness -- an
-                # accept(2) with nothing connecting spins inside the kernel
-                # for its whole timeout, and this kernel does not preempt
-                # kernel mode, so every other process stops for the
-                # duration. Starting the daemon first would measure the
-                # scheduler's fairness across a machine that was frozen for
-                # most of the interval.
                 if (interactive_httpd and not httpd_shell_probe_sent and
-                        workload_seen and
                         b"persistent shell: uart blocked\n" in output):
                     write_uart_line(connection, b"echo httpd-shell-ready")
                     httpd_shell_probe_sent = True

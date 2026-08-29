@@ -15,6 +15,107 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-08-28: accept(2) stopped holding the whole machine (#469)
+
+The busy-pair workload found this and could not be run against it: a
+BusyBox `httpd -f` sitting in `accept()` with nothing connecting stopped
+every other process for its whole thirty-second budget. `kernel_tcp_accept_
+once` waited for a frame in a `read_cntpct` deadline loop at EL1, and kernel
+mode does not preempt, so "waiting for a connection" and "the machine is
+stopped" were the same thing. Nothing had noticed because every other
+process in the boot was blocked at the same moment; it took two processes
+that wanted the CPU to make it visible, as a ~1.9-billion-tick gap between
+two consecutive workload rounds and a gdbstub PC sample inside `read_cntpct`.
+
+The fix is the same shape as the UART read path's, and it asks the same
+question: is there another process that could run instead of me? With
+nothing else runnable, waiting here costs nothing and `accept` behaves
+exactly as every existing fixture was recorded against. With something else
+runnable, the call takes ONE step of the handshake and blocks.
+
+`EAGAIN` was tried there first and is wrong, which the EL0 payload's own
+socket fixture said immediately: it calls `accept` twice and checks the
+descriptors it gets back, with no retry, because that is what a blocking
+accept promises. It failed on RPi5 and not under QEMU -- `other_ready()`
+happens to be true there at that moment and false here -- and forcing the
+polling path unconditionally reproduced it under QEMU in one run, which is
+how a board-only failure became a local one. So the call blocks the process
+instead: `ProcessWaitReason::NetRx`, off the run queue, holding neither the
+receive capability nor a descriptor, woken on the next scheduler tick to run
+the same syscall again. The re-run mechanism already existed --
+`el0_context_retry_syscall` rewinds ELR by four, which is what an ash `read`
+woken from a UART block already does. The wake is on the TICK rather than on
+a frame arriving, because a handshake that lost its SYN-ACK is waiting on
+its own retransmission timer, not on a packet.
+
+What that needed was for a half-finished handshake to outlive a syscall.
+The loop's own locals -- when it started, its deadline, when the last
+SYN-ACK went out, how many retries it had spent -- moved into the
+`TcpConnection` record, the loop split into `kernel_tcp_accept_begin` plus a
+`kernel_tcp_accept_step` that waits for nothing (and is therefore not
+`may_block`), and the connection itself parks on the LISTENER between calls,
+as an address and a generation the pool validates on every use. That pair is
+its own two fields rather than the `transport_slot`/`transport_generation`
+an established connection uses: those accessors already ask `kind` first, so
+sharing would have worked, and would have put two meanings on one field told
+apart by a question a reader has to know to ask. The accepted descriptor is
+allocated at the end now rather than up front, since a call that returns
+without accepting is an ordinary outcome and one holding an fd would have to
+give it back on every poll. BusyBox `httpd`'s own loop is
+`n = accept(...); if (n < 0) continue;`, read from the pinned source, so it
+would have tolerated polling -- the EL0 payload is what would not.
+
+The runners no longer sequence the workload measurement ahead of the
+interactive HTTPd demo; the two run concurrently, which is what makes this
+continuously tested rather than verified once by hand.
+
+One thing the change exposed in the measurement rather than in the kernel:
+the busy pair's per-process CPU numbers came out 1.66x apart while their
+round counts stayed equal, which cannot both be true. The accounting hook
+was on the scheduler's own switch and nowhere else, so every switch through
+a blocking syscall, an exit, or a clone went uncounted -- and those are
+exactly the switches that happen when the machine is busy. Hooked at all of
+them, the same measurement reads within 5%.
+
+Adding a wait reason was also the change the checker had most to say
+about: three exhaustive matches on `ProcessWaitReason` stopped compiling at
+once, all of them diagnostic printers, and each had to name the new case
+before the build would go on.
+
+Two things had to be got right about the wake, and hardware found both.
+The wake belongs in the timer HANDLER, not in `kernel_process_timer_schedule`
+-- that function is the tick's EL0 half, so a tick taken at EL1 never
+reaches it, and a waiter whose only company was a process sitting in the
+syscall retry loop would have had every tick land at EL1 and the two would
+have waited for each other. And `accept_calls` had to go back to meaning
+"accept(2) the caller made": a restarted syscall re-enters the handler, and
+the evidence predicate asserts exactly 2. It is recorded now only when the
+listener has no handshake already in progress, which is the same statement
+as before for a caller and a different one for the kernel.
+
+The RPi5-only failures both became local before either was fixed, by
+forcing the new path unconditionally under QEMU -- first the `EAGAIN`
+version, which reproduced the hang in one run, then the blocking version,
+which reproduced the missing evidence line.
+
+The last casualty was in the harness rather than the kernel, and is worth
+recording because it is the same fact seen from outside. The RPi5 DDB lane
+enables the diagnostic ring by halting a core over SWD and writing one byte
+of kernel memory. OpenOCD does that by making the halted core perform the
+access, so the core has to be somewhere that can see a kernel address --
+and until now it always was, because a daemon waiting in `accept` held EL1
+for its whole timeout. With that wait gone, core 0 is usually running EL0
+code and the write faults (`current mode: EL0T`, `DSCR.ERR=1`). The write
+goes through core 1 now, which reaches EL1, proves it can see the shared
+page table, and parks there for the rest of the boot: always in the kernel,
+always mapped, and doing nothing a halt can disturb.
+
+Found-by: qemu -- gdbstub PC sample during a thirty-second gap in a
+CPU-bound workload's progress reports; the EAGAIN half was found on RPi5
+and reproduced under QEMU by forcing the path
+
+---
+
 ## 2026-08-28: a workload that occupies the scheduler, and the three N=1 assumptions it found (#448)
 
 Until now every fixture in this kernel was I/O-bound: it blocked on UART, on

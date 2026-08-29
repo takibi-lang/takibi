@@ -60,7 +60,12 @@ enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
 // exit switched back to it -- no longer true once the scheduler is
 // enabled across a fork, since a timer IRQ can preempt the child and
 // hand control to the parent early).
-enum ProcessWaitReason: u8 { None; UartRx; ChildExit; }
+// GitHub issue #469: NetRx is a process waiting for a frame to arrive.
+// It exists because the alternative was waiting for one INSIDE the kernel,
+// which stops every other process for the duration -- kernel mode does not
+// preempt. Added at the end so the numbers the oops path prints for the
+// first three are unchanged.
+enum ProcessWaitReason: u8 { None; UartRx; ChildExit; NetRx; }
 
 // GitHub issue #392: declared here, with the rest of a process's
 // lifecycle state, rather than in kernel/kernel/syscall.tkb where the
@@ -502,6 +507,7 @@ private fn scheduled_process_ddb_copy_one(
         ProcessWaitReason::None => { output[index].wait_reason = 0; }
         ProcessWaitReason::UartRx => { output[index].wait_reason = 1; }
         ProcessWaitReason::ChildExit => { output[index].wait_reason = 2; }
+        ProcessWaitReason::NetRx => { output[index].wait_reason = 3; }
     }
     output[index].saved_sp = record.saved_sp;
     output[index].root_slot = slot;
@@ -848,6 +854,7 @@ fn kernel_process_monitor_proc(pid: usize) !{unsafe} {
         ProcessWaitReason::None => { uart_put_udec(0); }
         ProcessWaitReason::UartRx => { uart_put_udec(1); }
         ProcessWaitReason::ChildExit => { uart_put_udec(2); }
+        ProcessWaitReason::NetRx => { uart_put_udec(3); }
     }
     kernel_boot_log(" saved_sp=");
     kernel_process_trace_put_hex(scheduled_process_peek_saved_sp(slot));
@@ -3289,9 +3296,68 @@ private fn kernel_process_block_current(current_sp: usize,
         return 0;
     }
     execution_here().current_handle = to;
+    // GitHub issue #448/#469: every switch that changes who is running is
+    // accounted, not just the scheduler's own. A blocking syscall switches
+    // here, an exit switches in kernel_process_child_exit, and a clone
+    // switches to the child -- and while only the timer path was counted,
+    // the per-process CPU numbers went missing exactly when the machine
+    // was busiest, which is the one time they are worth reading.
+    workload_busy_note_selected(
+        scheduled_process_pid_of_handle(to));
     process_image_activate_root(to.pool_index);
     kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
     return scheduled_process_record_at(to.pool_index).saved_sp;
+}
+
+// GitHub issue #469: block until something arrives on the network, or
+// until the tick that wakes every such waiter. The caller has already put
+// the receive capability back and parked whatever it had in progress, so
+// this process is holding nothing while it waits.
+fn kernel_process_block_net(current_sp: usize) -> usize {
+    return kernel_process_block_current(
+        current_sp, ProcessWaitReason::NetRx, 3);
+}
+
+// Every process waiting for a frame becomes runnable again.
+//
+// Called from the timer HANDLER, so a waiter is retried once per tick
+// whether or not anything arrived. That is deliberately coarse: what it
+// has to be is REGULAR, because a handshake that lost its SYN-ACK is
+// waiting on the retransmission timer inside its own retry, not on a
+// packet. A frame arriving earlier does not need to wake anybody either --
+// the next tick finds it still there.
+//
+// The handler and not kernel_process_timer_schedule, which is the tick's
+// EL0 half. A tick taken at EL1 does not reach that function, so a waiter
+// whose only company is a process sitting in the syscall retry loop would
+// never be woken by it -- every tick would land at EL1 and the two would
+// wait for each other. Waking is not a scheduling decision and does not
+// belong behind one.
+fn kernel_process_net_wake_all() !{interrupt, unsafe} {
+    if (execution_here().current_live == false) { return; }
+    let mut root: ProcessHandle =
+        kernel_process_chain_root(execution_here().current_handle);
+    let mut cursor: ProcessHandle = root;
+    let mut steps: usize = scheduled_process_pool_live_count() + 1;
+    while (steps != 0) {
+        steps = steps - 1;
+        if (scheduled_process_record_state(cursor.pool_index) ==
+                ProcessSlotState::Blocked &&
+            scheduled_process_record_wait_reason(cursor.pool_index) ==
+                ProcessWaitReason::NetRx) {
+            match scheduled_process_blocked_take(cursor) {
+                ScheduledProcessBlockedTakeResult::Missing => {}
+                ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+                    let (owner, blocked) = resources;
+                    let ready = scheduled_process_wake(owner, blocked);
+                    scheduled_process_record_at(owner.pool_index).wait_reason =
+                        ProcessWaitReason::None;
+                    scheduled_process_release(owner, ready);
+                }
+            }
+        }
+        cursor = kernel_process_next_successor(cursor, root);
+    }
 }
 
 fn kernel_process_block_uart(current_sp: usize) -> usize {
@@ -3864,6 +3930,8 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             // `kernel_process_current_pid() != 1`, which is always true here
             // regardless of who forked).
             execution_here().current_handle = child;
+            workload_busy_note_selected(
+                scheduled_process_pid_of_handle(child));
             process_test_evidence_record_clone();
             kernel_process_trace_record(
                 ProcessTraceFork, scheduled_process_pid_of_handle(child),
@@ -3927,6 +3995,8 @@ fn kernel_process_clone_rollback() {
     }
     scheduled_process_record_at(parent.pool_index).has_first_child = false;
     execution_here().current_handle = parent;
+    workload_busy_note_selected(
+        scheduled_process_pid_of_handle(parent));
     process_image_activate_root(parent.pool_index);
     process_test_evidence_release_clone();
 }
@@ -4045,6 +4115,7 @@ fn kernel_process_crash_wait_reason() -> usize !{unsafe} {
         ProcessWaitReason::None => { return 0; }
         ProcessWaitReason::UartRx => { return 1; }
         ProcessWaitReason::ChildExit => { return 2; }
+        ProcessWaitReason::NetRx => { return 3; }
     }
 }
 
@@ -4229,6 +4300,8 @@ fn kernel_process_child_exit(status: usize) -> usize {
     }
     if (kernel_process_start_handle(parent)) {
         execution_here().current_handle = parent;
+        workload_busy_note_selected(
+            scheduled_process_pid_of_handle(parent));
         process_image_activate_root(parent.pool_index);
         kernel_process_trace_handle(ProcessTraceResume, parent, child, 0);
         return scheduled_process_record_at(parent.pool_index).saved_sp;
@@ -4251,6 +4324,8 @@ fn kernel_process_child_exit(status: usize) -> usize {
         ProcessNextReadyResult::Next(successor) => {
             if (kernel_process_start_handle(successor)) {
                 execution_here().current_handle = successor;
+                workload_busy_note_selected(
+                    scheduled_process_pid_of_handle(successor));
                 process_image_activate_root(successor.pool_index);
                 kernel_process_trace_handle(
                     ProcessTraceResume, successor, child, 0);

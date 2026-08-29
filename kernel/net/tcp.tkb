@@ -179,6 +179,21 @@ struct TcpConnection {
     socket_buffer_length: usize;
     socket_buffer_offset: usize;
     inetd_response_length: usize;
+    // GitHub issue #469: the accept handshake's own state.
+    //
+    // These were locals of kernel_tcp_accept_once's loop, which was fine
+    // while that loop ran to completion inside one syscall. It cannot: the
+    // wait is at EL1 and this kernel does not preempt kernel mode, so for
+    // as long as it runs, every other process on the machine is stopped.
+    // The loop has to be able to stop and be resumed by a later accept(2),
+    // and everything it carried between iterations has to live somewhere
+    // that outlives the call. That is here, beside the rest of this
+    // connection's per-syscall state.
+    accept_start_at: i64;
+    accept_deadline_ticks: i64;
+    accept_retry_ticks: i64;
+    accept_syn_ack_sent_at: i64;
+    accept_syn_ack_retries: usize;
     // How many retransmit entries this connection still has on the queue.
     // Counted rather than walked: the chain is stable-owner storage, so
     // even a read-only walk of it has to take and put every link, and
@@ -2291,19 +2306,18 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
     return KernelTcpResult::TimedOut(ready);
 }
 
-// Blocks for one three-way handshake on the requested listening port. The
-// caller owns the returned RX capability in both outcomes; connected stream
-// I/O is added separately after accept establishes fd state.
-fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
-                          ready_in: sink NetRxCanAcquire, port: u16)
-        -> KernelTcpAcceptResult !{may_block} {
-    let mut ready = ready_in;
+must_use variant KernelTcpAcceptStep {
+    Pending(NetRxCanAcquire);
+    Accepted(NetRxCanAcquire);
+    GaveUp(NetRxCanAcquire);
+}
+
+// Start a handshake on this connection, on the requested listening port.
+// Everything the step below needs between calls is written here, so the
+// two together are the loop kernel_tcp_accept_once used to be.
+fn kernel_tcp_accept_begin(owner: borrow TcpConnectionOwner[connection],
+                           port: u16) !{unsafe} {
     let conn: *TcpConnection = tcp_connection_of(owner);
-    let remote_ip_bytes =
-        conn.remote_ip as []u8;
-    let remote_mac_bytes =
-        conn.remote_mac as []u8;
-    let stream_frames = tcp_connection_tx_slice(conn);
     conn.state = ConnState::Listen;
     conn.local_port = port;
     // GitHub issue #180: a fresh connection never inherits a stale queue
@@ -2312,9 +2326,9 @@ fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
     // function), so -- unlike before -- this loop no longer needs to
     // opportunistically service leftover pending_tcp state itself.
     pending_tcp_reset_all(conn.self_address);
-    let start: i64 = read_cntpct();
     let counter_frequency: i64 = read_cntfrq();
-    let deadline_ticks: i64 = counter_frequency * 30;
+    conn.accept_start_at = read_cntpct();
+    conn.accept_deadline_ticks = counter_frequency * 30;
     // /20 (50ms) gave TCP_RETRY_LIMIT * retry_ticks = 150ms total budget for
     // the injected SYN-ACK-drop recovery check (kernel_tcp_inject_drop_next_
     // syn_ack) -- too tight against scripts/run_kernel_hwtest_rpi5.sh's
@@ -2326,12 +2340,36 @@ fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
     // observation (kernel_tcp_injected_syn_ack_recovered() returned false;
     // 5 immediate re-runs afterward did not reproduce it). /5 (200ms) gives
     // 600ms total, comfortably inside curl's 1s budget while still well
-    // under deadline_ticks below.
-    let retry_ticks: i64 = counter_frequency / 5;
-    let mut syn_ack_sent_at: i64 = start;
-    let mut syn_ack_retries: usize = 0;
-    while ((read_cntpct() - start) < deadline_ticks) {
-        net_rx_wait();
+    // under accept_deadline_ticks.
+    conn.accept_retry_ticks = counter_frequency / 5;
+    conn.accept_syn_ack_sent_at = conn.accept_start_at;
+    conn.accept_syn_ack_retries = 0;
+}
+
+// One pass of that loop, and NOTHING that waits -- no net_rx_wait(), which
+// is why this is not `may_block`. It looks once, acts on whatever is
+// already there, services the SYN-ACK retransmission timer, and answers
+// with what the caller should do next. A caller that can afford to hold
+// the machine loops over it (kernel_tcp_accept_once below); a caller that
+// cannot returns to userspace between calls and comes back.
+fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
+                          ready_in: sink NetRxCanAcquire)
+        -> KernelTcpAcceptStep !{unsafe} {
+    let mut ready = ready_in;
+    let conn: *TcpConnection = tcp_connection_of(owner);
+    let remote_ip_bytes =
+        conn.remote_ip as []u8;
+    let remote_mac_bytes =
+        conn.remote_mac as []u8;
+    let stream_frames = tcp_connection_tx_slice(conn);
+    // The port this handshake is for. kernel_tcp_accept_begin wrote it and
+    // nothing changes it, so reading it back is what makes this function
+    // need no argument for it -- which is the point: a step resumed by a
+    // later syscall has only the connection to be told anything by.
+    let port: u16 = conn.local_port;
+    let retry_ticks: i64 = conn.accept_retry_ticks;
+    let mut syn_ack_sent_at: i64 = conn.accept_syn_ack_sent_at;
+    let mut syn_ack_retries: usize = conn.accept_syn_ack_retries;
         match net_rx_acquire(ready) {
             NetRxAcquire::None(next) => { ready = next; }
             NetRxAcquire::Acquired(acquired) => {
@@ -2417,7 +2455,7 @@ fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
                     }
                 }
                 if (accepted) {
-                    return KernelTcpAcceptResult::Accepted(ready);
+                    return KernelTcpAcceptStep::Accepted(ready);
                 }
             }
         }
@@ -2459,8 +2497,103 @@ fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
             conn.state = ConnState::Listen;
             tcp_injected_syn_pending = false;
         }
+    conn.accept_syn_ack_sent_at = syn_ack_sent_at;
+    conn.accept_syn_ack_retries = syn_ack_retries;
+    if ((read_cntpct() - conn.accept_start_at) >= conn.accept_deadline_ticks) {
+        return KernelTcpAcceptStep::GaveUp(ready);
     }
-    return KernelTcpAcceptResult::TimedOut(ready);
+    return KernelTcpAcceptStep::Pending(ready);
+}
+
+// Take the handshake as far as it will go right now.
+//
+// GitHub issue #469: `may_hold_machine` is the caller answering one
+// question -- is there another process that could run instead of me? The
+// wait below is at EL1 and this kernel does not preempt kernel mode, so
+// while it runs, nothing else on the machine does. When the answer is no,
+// waiting here costs nothing and is what every fixture in this tree was
+// written against. When it is yes, this takes ONE look and hands the
+// decision back to its caller, which returns to userspace and comes back.
+//
+// The same shape as the UART read path's own answer to the same question,
+// and for the same reason: "may I wait here" is a question about the rest
+// of the machine, not about this connection.
+fn kernel_tcp_accept_progress(owner: borrow TcpConnectionOwner[connection],
+                              ready_in: sink NetRxCanAcquire,
+                              may_hold_machine: bool)
+        -> KernelTcpAcceptStep !{may_block} {
+    let mut ready = ready_in;
+    if (may_hold_machine == false) {
+        return kernel_tcp_accept_step(owner, ready);
+    }
+    let conn: *TcpConnection = tcp_connection_of(owner);
+    while ((read_cntpct() - conn.accept_start_at) < conn.accept_deadline_ticks) {
+        net_rx_wait();
+        match kernel_tcp_accept_step(owner, ready) {
+            KernelTcpAcceptStep::Accepted(next) => {
+                return KernelTcpAcceptStep::Accepted(next);
+            }
+            KernelTcpAcceptStep::GaveUp(next) => {
+                return KernelTcpAcceptStep::GaveUp(next);
+            }
+            KernelTcpAcceptStep::Pending(next) => { ready = next; }
+        }
+    }
+    return KernelTcpAcceptStep::GaveUp(ready);
+}
+
+// Blocks for one three-way handshake on the requested listening port. The
+// caller owns the returned RX capability in both outcomes; connected stream
+// I/O is added separately after accept establishes fd state.
+//
+// GitHub issue #469: the one caller left is the kernel's own inetd-mode
+// fixture, which runs inside the bounded boot suite with a peer already
+// connecting and nothing else alive to starve. accept(2) goes through
+// kernel_tcp_accept_progress instead.
+fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
+                          ready_in: sink NetRxCanAcquire, port: u16)
+        -> KernelTcpAcceptResult !{may_block} {
+    let mut ready = ready_in;
+    kernel_tcp_accept_begin(owner, port);
+    match kernel_tcp_accept_progress(owner, ready, true) {
+        KernelTcpAcceptStep::Accepted(next) => {
+            return KernelTcpAcceptResult::Accepted(next);
+        }
+        KernelTcpAcceptStep::GaveUp(next) => {
+            return KernelTcpAcceptResult::TimedOut(next);
+        }
+        // Unreachable with may_hold_machine true: that path only leaves
+        // the loop by accepting or by running out of budget.
+        KernelTcpAcceptStep::Pending(next) => {
+            return KernelTcpAcceptResult::TimedOut(next);
+        }
+    }
+}
+
+// GitHub issue #469: resume the handshake this listener already had in
+// progress, or start a new one. The caller has only an address and a
+// generation to name it by -- the pool validates both, and a slot that no
+// longer holds that occupant simply starts over.
+fn kernel_tcp_accept_resume_or_begin(slot_value: usize, generation: usize,
+                                     port: u16)
+        -> TcpConnectionAllocResult !{unsafe} {
+    if (slot_value != 0) {
+        match tcp_connection_take(slot_value, generation) {
+            TcpConnectionTakeResult::Missing => {}
+            TcpConnectionTakeResult::Ready(owner) => {
+                return TcpConnectionAllocResult::Allocated(owner);
+            }
+        }
+    }
+    match tcp_connection_alloc() {
+        TcpConnectionAllocResult::Full => {
+            return TcpConnectionAllocResult::Full;
+        }
+        TcpConnectionAllocResult::Allocated(owner) => {
+            kernel_tcp_accept_begin(owner, port);
+            return TcpConnectionAllocResult::Allocated(owner);
+        }
+    }
 }
 
 fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection],

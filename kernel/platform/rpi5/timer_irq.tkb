@@ -50,5 +50,9 @@ fn timer_irq_setup() {
 
 fn timer_irq_handler() !{interrupt} {
     timer_tick_rearm();
+    // GitHub issue #469: every tick, regardless of which EL it interrupted.
+    // See kernel_process_net_wake_all for why this is not behind the
+    // EL0-only scheduling half of the tick.
+    kernel_process_net_wake_all();
     interrupt_notify();
 }

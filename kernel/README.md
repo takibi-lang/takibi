@@ -828,13 +828,18 @@ run, not a specification.
   fixture passes -- the fairness assertion counts syscall-reported rounds,
   not ticks -- but no timeout on that board means what its source says it
   means, and no tick-derived number from it should be believed.
-- **Waiting for the network happens inside the kernel.** `accept` and the
-  TCP receive path wait for a frame in a bounded in-kernel loop rather than
-  blocking the calling process. Since kernel mode does not preempt, every
-  other process stops for the duration -- so a daemon idling in `accept`
-  with nothing connecting freezes the machine until its timeout expires.
-  This is why the QEMU and RPi5 runners take the busy-pair fairness
-  measurement before starting the interactive HTTPd demo.
+- **Waiting for the network happens inside the kernel, except in
+  `accept`.** The TCP receive path still waits for a frame in a bounded
+  in-kernel loop, and since kernel mode does not preempt, every other
+  process stops for the duration. `accept(2)` asks first whether anything
+  else could run. When nothing can, it waits in the kernel as before, which
+  costs nothing. When something can, it takes the handshake one step, parks
+  the half-finished handshake on the listener, and BLOCKS the calling
+  process -- off the run queue, holding neither the receive capability nor
+  a descriptor -- to be woken on the next scheduler tick and run the same
+  syscall again. It does not answer `EAGAIN`: a blocking `accept` that said
+  "try again" would not be `accept`, and this kernel's own EL0 fixture
+  calls it once and checks the descriptor it gets back.
 - Unrecognized Linux calls return `-ENOSYS`.
 
 Filesystem, TCP, process, and VM features continue to be added only when an

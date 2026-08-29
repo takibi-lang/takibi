@@ -1008,6 +1008,32 @@ fn kernel_listener_port(fd: usize) -> u16 {
     }
 }
 
+// GitHub issue #469: the handshake this listener is part way through, as
+// the (address, generation) pair the connection pool minted. Both zero
+// means none.
+fn kernel_listener_pending(fd: usize) -> (usize, usize) {
+    match kernel_listener_handle(fd) {
+        UnifiedSocketResult::Missing => { return (0, 0); }
+        UnifiedSocketResult::Found(handle) => {
+            return (unified_listener_pending_slot(handle),
+                    unified_listener_pending_generation(handle));
+        }
+    }
+}
+
+fn kernel_listener_set_pending(fd: usize, slot: usize, generation: usize)
+        -> bool {
+    match kernel_listener_handle(fd) {
+        UnifiedSocketResult::Missing => { return false; }
+        UnifiedSocketResult::Found(handle) => {
+            match unified_listener_set_pending(handle, slot, generation) {
+                UnifiedFdResult::Invalid => { return false; }
+                UnifiedFdResult::Ok => { return true; }
+            }
+        }
+    }
+}
+
 fn kernel_listener_set_port(fd: usize, port: u16) -> bool {
     match kernel_listener_handle(fd) {
         UnifiedSocketResult::Missing => { return false; }
@@ -1889,6 +1915,23 @@ fn kernel_syscall_block_return(frame_sp: usize) {
     if (kernel_process_current_pending_block_reason() ==
             ProcessWaitReason::ChildExit) {
         next_sp = kernel_process_block_wait4(frame_sp);
+    } else if (kernel_process_current_pending_block_reason() ==
+                   ProcessWaitReason::NetRx) {
+        // GitHub issue #469: the woken process runs this same syscall
+        // again rather than resuming after it with an answer. accept(2)
+        // has no value to be handed on a wake -- what it wants is another
+        // look, which is exactly what an ash `read` already gets this way.
+        el0_context_retry_syscall(frame_sp);
+        next_sp = kernel_process_block_net(frame_sp);
+        if (next_sp == 0) {
+            // Nothing else to run after all -- the decision to block was
+            // taken a few instructions earlier and an interrupt can have
+            // changed the answer in between. Resume the frame instead: the
+            // rewind above already points it back at the syscall, so the
+            // process re-enters accept, finds itself alone, and waits in
+            // the kernel, which is what being alone means.
+            el0_context_resume(frame_sp);
+        }
     } else {
         kernel_syscall_uart_block_prepare(frame_sp);
         next_sp = kernel_process_block_uart(frame_sp);
@@ -3077,7 +3120,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 kernel_process_child_exit_count())) {
             return kernel_syscall_exit_current_process(0);
         }
-        syscall_test_evidence_record_accept();
         let accept_listener_fd: usize =
             match kernel_listener_fd_lookup(x0) {
                 KernelListenerLookupResult::Missing => {
@@ -3098,17 +3140,29 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             kernel_process_request_reschedule();
             return SyscallAction::Resume(LINUX_EAGAIN);
         }
-        let connected_fd: usize =
-            match kernel_socket_fd_alloc(5) {
-                KernelSocketFdAllocResult::Full => {
-                    kernel_boot_log_resource_exhausted(
-                        "process fd table" as *u8,
-                        kernel_syscall_fd_limit_soft());
-                    return SyscallAction::Resume(LINUX_EAGAIN);
-                }
-                KernelSocketFdAllocResult::Allocated(found) => { found }
-            };
-        match tcp_connection_alloc() {
+        // GitHub issue #469: whichever handshake this listener already has
+        // in progress, or a fresh one. accept(2) may return before the
+        // three-way handshake finishes now, so the connection carrying it
+        // has to outlive the call, and the listener is what holds it --
+        // see kernel/kernel/fd_table.tkb's pending_accept_slot.
+        let (pending_slot, pending_generation) =
+            kernel_listener_pending(accept_listener_fd);
+        // GitHub issue #469: counted once per accept(2) THE CALLER MADE,
+        // which is what it has always meant and is no longer the same as
+        // "once per entry into this handler" -- a blocked accept re-runs
+        // the syscall when it is woken. A call that resumes a handshake
+        // this listener already had is that same call coming back.
+        if (pending_slot == 0) {
+            syscall_test_evidence_record_accept();
+        }
+        // Whether this call may wait inside the kernel at all. The wait is
+        // at EL1 and kernel mode does not preempt, so it stops every other
+        // process for its duration -- which is fine when there is no other
+        // process to stop, and is the whole of issue #469 when there is.
+        let accept_may_wait: bool = kernel_process_other_ready() == false;
+        match kernel_tcp_accept_resume_or_begin(
+                pending_slot, pending_generation,
+                kernel_listener_port(accept_listener_fd)) {
           TcpConnectionAllocResult::Full => {
             kernel_boot_log_resource_exhausted(
                 "TCP connection pool" as *u8, 0);
@@ -3119,26 +3173,72 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
            let generation: usize = tcp_connection_identity(owner);
            match network_capability_take() {
             NetworkCapabilityTakeResult::Empty => {
-                tcp_connection_free(owner);
-                return SyscallAction::Resume(LINUX_EAGAIN);
+                // The handshake keeps its place: somebody else holds the
+                // one physical receive capability right now, which says
+                // nothing about this connection.
+                let parked: bool = kernel_listener_set_pending(
+                    accept_listener_fd, slot, generation);
+                tcp_connection_put(owner);
+                if (accept_may_wait) {
+                    return SyscallAction::Resume(LINUX_EAGAIN);
+                }
+                kernel_process_current_set_pending_block(
+                    ProcessWaitReason::NetRx, 0);
+                return SyscallAction::Block;
             }
             NetworkCapabilityTakeResult::Ready(ready) => {
-                match kernel_tcp_accept_once(
-                        owner, ready, kernel_listener_port(accept_listener_fd)) {
-                    KernelTcpAcceptResult::TimedOut(next) => {
+                match kernel_tcp_accept_progress(owner, ready, accept_may_wait) {
+                    KernelTcpAcceptStep::Pending(next) => {
+                        // Not finished, and not failed. Give the machine
+                        // back and leave the handshake where the next
+                        // accept(2) will find it.
                         match network_capability_put(next) {
                             NetworkCapabilityPutResult::Conflict => {
                                 tcp_connection_free(owner);
+                                let cleared: bool = kernel_listener_set_pending(
+                                    accept_listener_fd, 0, 0);
+                                return SyscallAction::Resume(LINUX_EINVAL);
+                            }
+                            NetworkCapabilityPutResult::Stored => {
+                                // No roundtrip recorded: the capability
+                                // came back, but this accept has not
+                                // finished, and that counter pairs with
+                                // the accept count above.
+                                let parked: bool = kernel_listener_set_pending(
+                                    accept_listener_fd, slot, generation);
+                                tcp_connection_put(owner);
+                                // GitHub issue #469: BLOCK, not EAGAIN. A
+                                // blocking accept(2) that answers "try
+                                // again" is not accept -- the EL0 payload
+                                // fixture calls it once and checks the
+                                // descriptor it gets, which is what Linux
+                                // promises. So this process waits, off the
+                                // run queue, holding nothing, and runs the
+                                // syscall again when it is woken.
+                                kernel_process_current_set_pending_block(
+                                    ProcessWaitReason::NetRx, 0);
+                                return SyscallAction::Block;
+                            }
+                        }
+                    }
+                    KernelTcpAcceptStep::GaveUp(next) => {
+                        match network_capability_put(next) {
+                            NetworkCapabilityPutResult::Conflict => {
+                                tcp_connection_free(owner);
+                                let cleared: bool = kernel_listener_set_pending(
+                                    accept_listener_fd, 0, 0);
                                 return SyscallAction::Resume(LINUX_EINVAL);
                             }
                             NetworkCapabilityPutResult::Stored => {
                                 syscall_test_evidence_record_accept_capability_roundtrip();
                                 tcp_connection_free(owner);
+                                let cleared: bool = kernel_listener_set_pending(
+                                    accept_listener_fd, 0, 0);
                                 return SyscallAction::Resume(LINUX_EAGAIN);
                             }
                         }
                     }
-                    KernelTcpAcceptResult::Accepted(next) => {
+                    KernelTcpAcceptStep::Accepted(next) => {
                         match network_capability_put(next) {
                             NetworkCapabilityPutResult::Conflict => {
                                 tcp_connection_free(owner);
@@ -3146,6 +3246,25 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             }
                             NetworkCapabilityPutResult::Stored => {
                                 syscall_test_evidence_record_accept_capability_roundtrip();
+                                let cleared: bool = kernel_listener_set_pending(
+                                    accept_listener_fd, 0, 0);
+                                // GitHub issue #469: the descriptor is
+                                // allocated HERE, not before the handshake.
+                                // A call that returns without accepting is
+                                // an ordinary outcome now, and one that had
+                                // already taken an fd would have to give it
+                                // back on every poll.
+                                let connected_fd: usize =
+                                    match kernel_socket_fd_alloc(5) {
+                                        KernelSocketFdAllocResult::Full => {
+                                            kernel_boot_log_resource_exhausted(
+                                                "process fd table" as *u8,
+                                                kernel_syscall_fd_limit_soft());
+                                            tcp_connection_free(owner);
+                                            return SyscallAction::Resume(LINUX_EAGAIN);
+                                        }
+                                        KernelSocketFdAllocResult::Allocated(found) => { found }
+                                    };
                                 // Issue #257 step 5: no Conflict arm and no
                                 // `slot >= TCP_CONNECTION_MAX` guard -- see
                                 // the identical site in the inetd accept

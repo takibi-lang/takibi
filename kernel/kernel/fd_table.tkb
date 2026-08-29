@@ -469,6 +469,21 @@ struct SharedObject {
     // descriptor's own object address) before this field is ever reached.
     transport_slot: usize;
     transport_generation: usize;
+    // GitHub issue #469: the handshake this LISTENER has in progress, if
+    // any. accept(2) no longer runs a whole three-way handshake inside one
+    // syscall -- it takes one step and returns -- so the connection being
+    // handshaked has to belong to something that outlives the call, and
+    // the listener is the only thing that does. Address plus generation,
+    // the same pair the two fields above carry for an established
+    // connection, and validated the same way by the pool on every use.
+    //
+    // Deliberately NOT those two fields reused under a different `kind`.
+    // Every accessor here already asks the kind first, so it would work --
+    // and it would put two meanings on one field, told apart by a question
+    // a future reader has to know to ask. A field that says what it is
+    // costs sixteen bytes on an object this kernel has few of.
+    pending_accept_slot: usize;
+    pending_accept_generation: usize;
     // GitHub issue #391: the reference count lives in the object, the way
     // Linux's `struct file.f_count` does, rather than in a parallel slot
     // of a refcounting container. Retained by unified_fd_install /
@@ -1186,6 +1201,8 @@ fn unified_listener_create(process: usize, fd: usize) -> UnifiedOpenResult {
             let object: *SharedObject = unified_object_at(handle);
             object.listener_state = UnifiedListenerState::Created;
             object.port = 0;
+            object.pending_accept_slot = 0;
+            object.pending_accept_generation = 0;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
@@ -1362,6 +1379,42 @@ fn unified_listener_set_port(handle: UnifiedObjectHandle, port: u16)
         let object: *SharedObject = unified_object_at(handle);
         if (object.kind == UnifiedFdKind::Listener) {
             object.port = port;
+            return UnifiedFdResult::Ok;
+        }
+    }
+    return UnifiedFdResult::Invalid;
+}
+
+// GitHub issue #469: the connection this listener is part way through
+// accepting, as the pool address it was minted at. 0 is "none" -- the
+// address no slot has, the same sentinel unified_connection_slot uses.
+fn unified_listener_pending_slot(handle: UnifiedObjectHandle) -> usize {
+    if (unified_object_matches(handle)) {
+        let object: *SharedObject = unified_object_at(handle);
+        if (object.kind == UnifiedFdKind::Listener) {
+            return object.pending_accept_slot;
+        }
+    }
+    return 0;
+}
+
+fn unified_listener_pending_generation(handle: UnifiedObjectHandle) -> usize {
+    if (unified_object_matches(handle)) {
+        let object: *SharedObject = unified_object_at(handle);
+        if (object.kind == UnifiedFdKind::Listener) {
+            return object.pending_accept_generation;
+        }
+    }
+    return 0;
+}
+
+fn unified_listener_set_pending(handle: UnifiedObjectHandle, slot: usize,
+                                generation: usize) -> UnifiedFdResult {
+    if (unified_object_matches(handle)) {
+        let object: *SharedObject = unified_object_at(handle);
+        if (object.kind == UnifiedFdKind::Listener) {
+            object.pending_accept_slot = slot;
+            object.pending_accept_generation = generation;
             return UnifiedFdResult::Ok;
         }
     }

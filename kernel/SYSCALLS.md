@@ -43,7 +43,7 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 | 198 | socket | Implemented | `AF_INET`/`AF_INET6`, `SOCK_STREAM` only |
 | 200 | bind | Implemented | IPv4/IPv6 sockaddr validated through the user-memory boundary |
 | 201 | listen | Implemented | |
-| 202/242 | accept/accept4 | Implemented | holds the sole physical RX capability across the blocking handshake |
+| 202/242 | accept/accept4 | Implemented | holds the sole physical RX capability while it works on the handshake, and gives it back before returning. Whether one call runs the whole three-way handshake depends on the rest of the machine: with nothing else runnable it waits in the kernel as it always did; with another process runnable it takes ONE step, parks the half-finished handshake on the listener, and blocks the caller (`ProcessWaitReason::NetRx`) until the next scheduler tick, which re-runs the syscall. Never `EAGAIN` for "the handshake is not finished yet" -- the caller sees a blocking accept either way. The in-kernel wait is at EL1 and kernel mode does not preempt, so a call that waited unconditionally would stop every other process for up to its whole timeout |
 | 205 | getpeername | Implemented | fixed `AF_INET` reply (single-peer-per-connection model) |
 | 208 | setsockopt | Partial | `optval`/`optlen` validated through the user-memory boundary when `optlen != 0`; no `level`/`optname` is actually honored, but none is meaningfully actionable in this kernel's single-listener-per-port/single-connection model either (the two real calls reached, `SO_REUSEADDR` on the listener and `SO_KEEPALIVE` on each accepted connection, are both genuinely no-ops here) |
 | 210 | shutdown | Implemented | `SHUT_WR` on fd 1, both direct and inetd response modes |
