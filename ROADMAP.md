@@ -238,10 +238,20 @@ and holds open only its two-core contention test and an RPi5 run of its
 changed secondary-entry path -- both of which are #447's to unblock, since
 neither can happen while core 1 parks.
 
-**Everything now waits on #447.** #445's remaining criteria, #448's two-core
-criterion, and Phase 3 itself are the same wait. #222's remaining scope (the
-one-deep spare kernel-stack cell) is small and independent; the crash trace
-ring it also named is done, since #440's ring is already per-CPU.
+**Phase 3's entry is open as of 2026-08-29.** A second core takes
+interrupts on both targets. What that unblocks was one wait rather than
+four: #445's two-core contention test, #445's RPi5 run of its changed
+secondary-entry path, and #448's two-core criterion. #222's remaining scope
+(the one-deep spare kernel-stack cell) is small and independent; the crash
+trace ring it also named is done, since #440's ring is already per-CPU.
+
+**Running a PROCESS on core 1 is the next issue, and it is a different kind
+of change.** The first thing it must do is raise `KERNEL_ACTIVE_CORES`,
+which prints the ten-site worklist #453 built for exactly this moment.
+Everything up to here has been "a second core does work that reaches no
+shared state" -- which is why the constant could stay 1 through all of it.
+Past here it reaches shared state, and Phase 0's lock discipline stops
+being latent and starts being load-bearing.
 
 **Decision recorded 2026-08-27: raw atomics are reachable only through
 `!{unsafe}`.** Ordinary kernel code goes through the spinlock or the
@@ -295,9 +305,26 @@ test-driver special case.
 
 ### Phase 3: two cores actually running
 
-- **#447** -- the secondary core enters an idle loop instead of parking, with
-  its own GIC CPU interface and timer. Both are per-core banked registers that
-  core 0's one-time initialization does not reach.
+- **#447 -- DONE 2026-08-29, closed, QEMU and RPi5.** The secondary core
+  idles instead of parking: its own GIC CPU interface, its own timer PPI,
+  its own tick, `wfi` in between. None of the three was new code -- all are
+  per-core banked registers that core 0's one-time initialization does not
+  reach, and what was missing was a path on the secondary that reached
+  them. `KERNEL_ACTIVE_CORES` stays 1, which was this issue's own first
+  question: the dispatch branch returns before every path that reaches
+  kernel state, so core 1 executes kernel code and touches no kernel STATE.
+  The view earns its line -- core 0 masks its own interrupts for a
+  CNTFRQ-derived window and compares core 1's counter across it, so what is
+  measured is core 1's own interface and not that time passed.
+- **#477 -- DONE 2026-08-29, closed.** What #447 cost on the way: the
+  generated exception entry switched to ONE global IRQ stack, so core 1's
+  first tick landed on core 0's frame and its INTID came back as core 0's
+  ELR. The linker script had already written that reopen condition
+  verbatim, and it fired exactly as predicted. Both the IRQ and the guard
+  stack are per-core now, selected through TPIDR_EL1, and neither entry
+  path reads MPIDR -- PSCI starts exactly one secondary, so each path IS
+  its core by construction, which keeps #445's per-platform affinity-field
+  difference out of shared generated code.
 - **#446 -- DONE 2026-08-29, closed.** `mmu_tlb_invalidate_all()` is the
   broadcast `tlbi vmalle1is`, verified on QEMU and RPi5. It landed ahead of
   the rest of this phase because it had no dependency of its own. What it
