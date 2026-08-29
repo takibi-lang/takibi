@@ -49,7 +49,10 @@ fn app_main() {
     // A tick count and a byte count of the sizes this kernel really logs.
     show(25532962);
     show(1073741824);
-    // Both ends of the range the type can hold.
+    // The last value the OTHER copy could print: QEMU's table carried ten
+    // places, so narrowing back to either historical size is caught here.
     show(9999999999);
+    // usize's maximum, which is the only value that exercises all twenty
+    // places at once.
     show(18446744073709551615);
 }
