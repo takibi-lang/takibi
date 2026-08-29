@@ -39,7 +39,7 @@ let compiler_builtins = [
   "msr_daifclr_irq"; "msr_daifset_irq"; "mrs_daif";
   "tlbi_vmalle1"; "tlbi_vmalle1is";
   "tlbi_vaae1is"; "tlbi_vae1is"; "tlbi_aside1is";
-  "dsb_ish"; "dsb_ishst"; "isb"; "smc4"; "hvc4"; "svc5";
+  "dsb_ish"; "dsb_ishst"; "isb"; "wfi"; "smc4"; "hvc4"; "svc5";
   (* GitHub issue #17: the closed atomic set. Reserved for the same reason
      as every builtin above -- infer_expr dispatches on the name before it
      consults fenv, so a user function of the same name would be silently

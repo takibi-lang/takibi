@@ -4229,7 +4229,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
   | Call (("msr_daifclr_irq" | "msr_daifset_irq" | "tlbi_vmalle1"
           | "tlbi_vmalle1is"
-          | "dsb_ish" | "dsb_ishst" | "isb") as name, []) ->
+          | "dsb_ish" | "dsb_ishst" | "isb" | "wfi") as name, []) ->
       (* GitHub issue #226: zero-argument barrier/TLBI/DAIF-immediate
          instructions, same shape as signal_fence above. *)
       let fty = function_type (void_type context) [||] in
@@ -4244,6 +4244,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | "dsb_ish"         -> "dsb ish"
         | "dsb_ishst"       -> "dsb ishst"
         | "isb"             -> "isb"
+        (* GitHub issue #447: NOT interrupt_wait()'s `wfe`. An idle core
+           waiting on wfe is woken by any core's SEV, and this kernel
+           executes one on every timer tick (interrupt_notify), so a core
+           that only wants its own interrupt has to say so. *)
+        | "wfi"             -> "wfi"
         | _ -> assert false
       in
       let inline = const_inline_asm fty asm "~{memory}" true false in

@@ -3263,7 +3263,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
 
   | Call (("msr_daifclr_irq" | "msr_daifset_irq" | "tlbi_vmalle1"
           | "tlbi_vmalle1is"
-          | "dsb_ish" | "dsb_ishst" | "isb") as fname, args) ->
+          | "dsb_ish" | "dsb_ishst" | "isb" | "wfi") as fname, args) ->
       (* GitHub issue #226: closed zero-argument barrier/TLBI/DAIF-immediate
          intrinsics. *)
       (match args with

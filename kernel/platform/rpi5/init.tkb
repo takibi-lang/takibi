@@ -1,8 +1,7 @@
 use "kernel/init/test_driver.tkb";
 use "kernel/platform/rpi5/usb_xhci.tkb";
 use "kernel/platform/rpi5/memory.tkb";
-
-private let mut kernel_secondary_boot_state: io usize;
+use "kernel/arch/arm64/kernel/secondary.tkb";
 
 must_use variant SecondaryBootResult {
     Started;
@@ -28,16 +27,8 @@ fn cpu_id() -> usize {
 // Reached only by core 1 after PSCI has installed the secondary entry point,
 // that entry has selected its private stack, and the shared EL1 page table is
 // active. The context value prevents a coincidental stale write from passing.
-fn kernel_secondary_main(context: usize) {
-    let core_id: usize = cpu_id();
-    if (context == 0x191 && core_id == 1) {
-        kernel_secondary_boot_state = 0x100 + core_id;
-        signal_fence();
-    }
-}
-
 fn kernel_secondary_boot_probe() -> SecondaryBootResult {
-    kernel_secondary_boot_state = 0;
+    kernel_secondary_boot_state_clear();
     signal_fence();
     let status: usize = psci_cpu_on(
         0x100, kernel_secondary_entry, 0x191);
@@ -45,7 +36,7 @@ fn kernel_secondary_boot_probe() -> SecondaryBootResult {
     let deadline_ticks: i64 = read_cntfrq();
     while ((read_cntpct() - start) < deadline_ticks) {
         signal_fence();
-        if (kernel_secondary_boot_state == 0x101) {
+        if (kernel_secondary_boot_state_value() == 0x101) {
             if (status == 0) {
                 return SecondaryBootResult::Started;
             }

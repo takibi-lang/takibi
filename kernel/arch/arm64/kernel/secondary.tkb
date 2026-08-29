@@ -1,0 +1,66 @@
+// The secondary core's entry point, and the state core 0 reads to know it
+// arrived.
+//
+// One copy, in arch/, rather than one per platform. Both trees had a
+// byte-identical kernel_secondary_main and neither could see the other --
+// scripts/check_platform_file_parity.py listed it as a known duplication
+// waiting for multicore to claim it, and this is that claim. What is
+// genuinely per-platform stayed per-platform: cpu_id() reads a different
+// MPIDR affinity field on each part, and platform_irq_cpu_interface_init()
+// names different GICC addresses.
+//
+// Current limitations:
+// - ONE secondary core, by decision of 2026-08-27: every class of race
+//   appears at two, and four adds reduced reproducibility plus a different
+//   problem (scalability) to a phase that is finding correctness bugs.
+//   SECONDARY_CORE_ID is that decision, not a hardware limit.
+// - THE SECONDARY CORE STILL PARKS. It reaches compiled Takibi, proves it
+//   can see the shared page table, and stops. Making it an idle execution
+//   context that takes its own timer tick is GitHub issue #447, and that
+//   is blocked on #477: the generated exception entry switches to ONE
+//   global IRQ stack, so a second core taking any interrupt lands on core
+//   0's frame. Measured, not anticipated -- core 1's first timer tick
+//   wrote its own INTID over core 0's saved ELR.
+// - Nothing here schedules. A process cannot run on core 1.
+
+use "kernel/lib/execution_model.tkb";
+
+// Which core PSCI starts. Two cores, not four.
+const SECONDARY_CORE_ID: usize = 1;
+
+// The handshake word core 0 polls to know the secondary reached compiled
+// Takibi. `io` rather than an atomic because that is what it has always
+// been and it is verified on both boards; it is a one-shot publication with
+// a single writer and a bounded poll, not a value read repeatedly.
+private let mut kernel_secondary_boot_state: io usize;
+
+fn kernel_secondary_boot_state_clear() {
+    kernel_secondary_boot_state = 0;
+}
+
+fn kernel_secondary_boot_state_value() -> usize {
+    return kernel_secondary_boot_state;
+}
+
+// Reached only by the secondary core, after PSCI has installed the entry
+// point, that entry has selected its private stack, and the shared EL1 page
+// table is active. The context value prevents a coincidental stale write
+// from passing.
+fn kernel_secondary_main(context: usize) {
+    // GitHub issue #453's worklist. This core reaches no kernel state,
+    // which is why KERNEL_ACTIVE_CORES is 1 even though a second core has
+    // executed compiled Takibi since bring-up. Raising the constant means
+    // core 1 gets an ExecutionState slot and may schedule, and this is one
+    // of the places that has to change first.
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "the secondary core reaches no kernel state: give it a scheduler before giving it a slot");
+    let core_id: usize = cpu_id();
+    if (context == 0x191 && core_id == SECONDARY_CORE_ID) {
+        kernel_secondary_boot_state = 0x100 + core_id;
+        signal_fence();
+    }
+    // Returns to the entry path's own park. GitHub issue #447 replaces
+    // that with an idle loop here, once #477 has given this core a stack
+    // to take an interrupt on.
+}
+

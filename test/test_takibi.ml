@@ -12509,6 +12509,7 @@ let codegen_tests = [
             dsb_ish();
             dsb_ishst();
             isb();
+            wfi();
           }" ();
        expect_type_error "expects no arguments"
          "fn bad_mrs_call() { let f: usize = mrs_cntfrq_el0(1); }" ();
@@ -12926,7 +12927,7 @@ let codegen_tests = [
           "mrs_id_aa64mmfr0_el1";
           "msr_daifclr_irq"; "msr_daifset_irq"; "tlbi_vmalle1";
           "tlbi_vmalle1is";
-          "dsb_ish"; "dsb_ishst"; "isb"];
+          "dsb_ish"; "dsb_ishst"; "isb"; "wfi"];
        List.iter (fun name ->
          expect_type_error "compiler builtin"
            (Printf.sprintf "extern fn %s(v: usize);" name) ())
@@ -12947,6 +12948,7 @@ let codegen_tests = [
             msr_ttbr0_el1(v);
             tlbi_vaae1is(v);
             tlbi_vmalle1is();
+            wfi();
             dsb_ish();
             isb();
             msr_daifset_irq();
@@ -12972,6 +12974,8 @@ let codegen_tests = [
          (contains_substring ir "tlbi vmalle1is");
        Alcotest.(check bool) "dsb ish" true (contains_substring ir "dsb ish");
        Alcotest.(check bool) "isb" true (contains_substring ir "isb");
+       (* GitHub issue #447: wfi, not wfe -- see the lowering's own note. *)
+       Alcotest.(check bool) "wfi" true (contains_substring ir "\"wfi\"");
        Alcotest.(check bool) "daifset" true
          (contains_substring ir "msr DAIFSet, #0x2");
        Alcotest.(check bool) "mrs sctlr_el1 with register output" true

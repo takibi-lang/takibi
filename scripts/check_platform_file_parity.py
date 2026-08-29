@@ -60,9 +60,6 @@ ALLOWED = {
         "GitHub issue #475 -- moves together with the uart_rx_handler global",
     "platform_memory_detect":
         "GitHub issue #472 is actively rewriting both copies from the DTB",
-    "kernel_secondary_main":
-        "multicore bring-up owns this; it stops being identical when a "
-        "second core actually starts",
 }
 
 FN_RE = re.compile(r"^(?:private )?fn ([A-Za-z0-9_]+)\s*\(")

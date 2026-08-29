@@ -1,12 +1,11 @@
 use "kernel/init/test_driver.tkb";
+use "kernel/arch/arm64/kernel/secondary.tkb";
 
 must_use variant SecondaryBootResult {
     Started;
     UnexpectedStatus(usize);
     NotStarted(usize);
 }
-
-private let mut kernel_secondary_boot_state: io usize;
 
 // GitHub issue #237: QEMU `virt`'s own guest-visible PSCI conduit is HVC,
 // not RPi5's real-firmware SMC -- confirmed by dumping this machine's
@@ -39,16 +38,8 @@ fn cpu_id() -> usize {
 }
 
 // QEMU uses Aff0 target numbering and HVC for PSCI, unlike RPi5's Aff1/SMC path.
-fn kernel_secondary_main(context: usize) {
-    let core_id: usize = cpu_id();
-    if (context == 0x191 && core_id == 1) {
-        kernel_secondary_boot_state = 0x100 + core_id;
-        signal_fence();
-    }
-}
-
 fn kernel_secondary_boot_probe() -> SecondaryBootResult {
-    kernel_secondary_boot_state = 0;
+    kernel_secondary_boot_state_clear();
     signal_fence();
     let status: usize = qemu_psci_cpu_on(
         0x1, kernel_secondary_entry, 0x191);
@@ -56,7 +47,7 @@ fn kernel_secondary_boot_probe() -> SecondaryBootResult {
     let deadline_ticks: i64 = read_cntfrq();
     while ((read_cntpct() - start) < deadline_ticks) {
         signal_fence();
-        if (kernel_secondary_boot_state == 0x101) {
+        if (kernel_secondary_boot_state_value() == 0x101) {
             if (status == 0) {
                 return SecondaryBootResult::Started;
             }

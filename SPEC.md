@@ -2330,7 +2330,7 @@ the register chosen by LLVM's allocator rather than by the caller:
 `msr_tcr_el1`, `msr_ttbr0_el1`, `msr_daifclr_irq`, `msr_daifset_irq`;
 `tlbi_vmalle1`, `tlbi_vmalle1is`, `tlbi_vaae1is`, `tlbi_vae1is`,
 `tlbi_aside1is`;
-`dsb_ish`, `dsb_ishst`, `isb`; and the call gates `smc4`, `hvc4`,
+`dsb_ish`, `dsb_ishst`, `isb`, `wfi`; and the call gates `smc4`, `hvc4`,
 `svc5`. These are AArch64-only, but nothing rejects them during type
 checking -- the type checker does not know the target triple. On another
 target they reach the assembler and fail there with a raw mnemonic error

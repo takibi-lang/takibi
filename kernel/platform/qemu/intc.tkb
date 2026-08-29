@@ -28,14 +28,24 @@ const QEMU_UART_GIC_INTID: u32 = 33; // SPI #1
 fn gic_uart_spi_setup() !{unsafe} {
     let gicd_isenabler1: *io u32 = unsafe { 0x08000104 as *io u32 }; // INTIDs 32-63 (SPI)
     let gicd_itargetsr8: *io u32 = unsafe { 0x08000820 as *io u32 }; // INTIDs 32-35
-    let gicc_ctlr: *io u32 = unsafe { 0x08010000 as *io u32 };
-    let gicc_pmr: *io u32 = unsafe { 0x08010004 as *io u32 };
     let gicd_ctlr: *io u32 = unsafe { 0x08000000 as *io u32 };
 
     *gicd_itargetsr8 = 0x01010101; // route SPI #0-#3 to CPU0
     *gicd_isenabler1 = *gicd_isenabler1 | (1 << 1); // SPI #1 (UART)
 
     *gicd_ctlr = *gicd_ctlr | 1;
+}
+
+// GitHub issue #447: the GICv2 CPU INTERFACE half, split from the
+// distributor half above because the two have different scopes. GICD_CTLR
+// and the SPI routing are global and core 0 does them once; GICC_PMR and
+// GICC_CTLR are BANKED PER CORE, so a core that never runs this has its
+// interrupts disabled at its own interface regardless of the distributor.
+// That is why core 1 could take no interrupt before this existed, not
+// anything about the distributor being unconfigured.
+fn platform_irq_cpu_interface_init() !{unsafe} {
+    let gicc_ctlr: *io u32 = unsafe { 0x08010000 as *io u32 };
+    let gicc_pmr: *io u32 = unsafe { 0x08010004 as *io u32 };
     *gicc_pmr = 0xFF;
     *gicc_ctlr = *gicc_ctlr | 1;
 }
@@ -48,6 +58,7 @@ fn gic_uart_spi_setup() !{unsafe} {
 // here.
 fn platform_irq_init() {
     gic_uart_spi_setup();
+    platform_irq_cpu_interface_init();
     timer_irq_setup();
     enable_irq();
 }
