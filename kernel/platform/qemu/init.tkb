@@ -3,6 +3,7 @@ use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/kernel/pool_contention_evidence.tkb";
 use "kernel/kernel/freelist_contention_evidence.tkb";
 use "kernel/kernel/page_contention_evidence.tkb";
+use "kernel/kernel/asid_contention_evidence.tkb";
 
 must_use variant SecondaryBootResult {
     Started;
@@ -468,6 +469,11 @@ fn main() !{unsafe} {
             // GitHub issue #479: the page allocator's own lock. Added
             // after removing that lock changed nothing any lane could
             // see -- an audit is not evidence.
+            if (asid_contention_probe()) {
+                kernel_boot_log("asid contention: two cores assigning, every number advanced the counter once ok\n");
+            } else {
+                kernel_boot_log("asid contention: failed\n");
+            }
             if (page_contention_probe()) {
                 kernel_boot_log("page contention: two cores allocating and freeing, every page back, none freed twice ok\n");
             } else {

@@ -58,6 +58,7 @@
 // 8-bit ASID field, so this is what the width query falls back to when it
 // reports anything this file does not recognise.
 use "kernel/lib/execution_model.tkb";
+use "kernel/lib/pool_lock.tkb";
 
 const ASID_BITS_FLOOR: usize = 8;
 
@@ -72,10 +73,19 @@ private let mut asid_rollover_count: usize = 0;
 private let mut asid_assign_count: usize = 0;
 private let mut asid_ready: bool = false;
 
+// GitHub issue #479. Its own global rather than a field of anything, for
+// the reason kernel/mm/page.tkb's is: an 8-byte field added to the front
+// of an `align(16)` aggregate shifts every array behind it to 8-mod-16,
+// and LLVM may then emit a 128-bit store the MMU-off window cannot use.
+// Nothing here is such an aggregate today, and putting the lock outside
+// keeps that from being a thing to re-check later.
+private let mut asid_lock: Mutex;
+
 // Called from kernel_mmu_init with the MMU OFF: an mrs and some
 // arithmetic, no allocation, nothing that touches a page that is not
 // mapped yet (see kernel/MEMORY_MAP.md's note on that window).
-fn asid_init() {
+fn asid_init() !{mmu_off} {
+    mutex_init(&asid_lock);
     if (asid_ready) { return; }
     asid_ready = true;
     asid_bits = mmu_asid_bits();
@@ -99,6 +109,14 @@ fn asid_current_generation() -> usize {
 
 fn asid_rollover_count_value() -> usize {
     return asid_rollover_count;
+}
+
+// GitHub issue #479: the counter a contention probe compares against. Each
+// successful assign advances asid_next by exactly one, so a delta smaller
+// than the number of calls IS a lost race -- two cores that read the same
+// value both write value+1, and one number gets handed out twice.
+fn asid_next_value() -> usize {
+    return asid_next;
 }
 
 fn asid_assign_count_value() -> usize {
@@ -134,7 +152,34 @@ private fn asid_rollover() {
 // space and alias its TLB entries with the new one's -- which is why a
 // new root is created with no ASID at all and gets one at its first
 // activation, the same lifetime Linux gives an mm.
+// GitHub issue #479. Everything below reads and writes asid_next, and two
+// cores that read it together both write value + 1 -- so one number goes to
+// two address spaces, which is what the hardware compares to decide whether
+// a TLB entry belongs to the address space asking. Silent cross-process
+// memory access, with no fault to point at. Measured before the lock:
+// 4096 assignments advanced the counter 3974 times.
+//
+// The lock is Mutex rather than TaskMutex for the same reason page.tkb's
+// is: asid_assign is reached from address_space_activate, which pool_lock
+// callers can be inside, and taking a may_block lock under an interrupt
+// mask is the shape that hangs.
 fn asid_assign() -> (usize, usize) {
+    let flags: usize = pool_lock_acquire(0, &asid_lock);
+    let result: (usize, usize) = asid_assign_locked();
+    pool_lock_release(0, &asid_lock, flags);
+    return result;
+}
+
+// The bootstrap entry point, for the window before the MMU is on. Not
+// taking the lock is forced -- exclusives are unavailable on Device-typed
+// memory, which is what spin_lock's `!{requires_mmu}` says -- and also
+// correct: root 0 takes its ASID before PSCI has been asked for a second
+// core.
+fn asid_assign_boot() -> (usize, usize) !{mmu_off} {
+    return asid_assign_locked();
+}
+
+private fn asid_assign_locked() -> (usize, usize) {
     if (asid_next > asid_last) { asid_rollover(); }
     let value: usize = asid_next;
     asid_next = asid_next + 1;

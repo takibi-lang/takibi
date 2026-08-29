@@ -153,6 +153,9 @@ fn kernel_secondary_main(context: usize) {
             if (page_contention_is_armed()) {
                 page_contention_secondary_run();
             }
+            if (asid_contention_is_armed()) {
+                asid_contention_secondary_run();
+            }
             wfi();
         }
     }

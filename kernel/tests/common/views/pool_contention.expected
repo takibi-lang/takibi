@@ -1,3 +1,5 @@
+asid contention stage: complete
+asid contention: two cores assigning, every number advanced the counter once ok
 page contention stage: complete
 page contention: two cores allocating and freeing, every page back, none freed twice ok
 freelist contention stage: unlocked

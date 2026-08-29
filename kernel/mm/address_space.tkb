@@ -421,7 +421,7 @@ private fn address_space_allocate_boot_root()
                     // kernel_mmu_activate needs a number for the very
                     // first TTBR0_EL1 write, and there is nothing running
                     // yet for a rollover to alias -- the counter is at 1.
-                    let (numeric_asid, generation) = asid_assign();
+                    let (numeric_asid, generation) = asid_assign_boot();
                     mmu_init_root(l1_physical, l2_physical);
                     address_space_backing_root0.l1_physical = l1_physical;
                     address_space_backing_root0.l2_physical = l2_physical;

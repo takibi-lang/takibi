@@ -1,0 +1,183 @@
+// GitHub issue #479, Group A: two cores assigning ASIDs at once.
+//
+// Written before the lock, expected to fail, for the reason the free-list
+// probe next door was: "asid_next/asid_generation are unlocked globals" is
+// an assertion message until somebody produces the number.
+//
+// What the race costs is the worst thing in this file's neighbourhood. An
+// ASID is what the hardware compares to decide whether a TLB entry belongs
+// to the address space asking; two address spaces holding one number is
+// silent cross-process memory access, with no fault to point at.
+//
+// The detector: asid_assign advances asid_next by exactly one per call, so
+//
+//     (asid_next after) - (asid_next before)  <  (calls made)
+//
+// means some call did not advance it -- two cores read the same value and
+// both wrote value+1. Exact, not statistical.
+//
+// "Calls made" is this probe's OWN pair of atomic counters and NOT
+// asid_assign_count_value(), which was the first version and was unsound:
+// that counter is an unlocked `+ 1` on the same racing path, so it loses
+// increments to the very race it was being used to detect. Measured
+// saying so -- calls=3978 against advanced=3984, a difference that can
+// only mean the counter undercounted, since a number cannot be handed out
+// more often than it is asked for. Comparing two racy counters would have
+// reported success whenever they happened to lose the same amount.
+//
+// Current limitations:
+// - CONSUMES REAL ASIDs, because there is no private ASID allocator and a
+//   copy would be testing a copy. Harmless: the space is 65535 wide and a
+//   run here uses a few thousand, and the scheme is a rollover counter --
+//   spending numbers is what it is for.
+// - A rollover DURING the probe would make the delta arithmetic wrong (the
+//   counter restarts at 1). The verdict refuses that run rather than
+//   reporting a race that is really a wrap; with the current numbers it
+//   cannot happen, and checking is cheaper than arguing that it cannot.
+// - Measures exclusion, not ordering.
+
+use "kernel/arch/arm64/mm/asid.tkb";
+use "kernel/lib/execution_model.tkb";
+
+const ASID_CONTENTION_ROUNDS: usize = 2048;
+const ASID_CONTENTION_OUTSIDE_WORK: usize = 64;
+
+private let mut asid_probe_armed: usize;
+private let mut asid_probe_primary: usize;
+private let mut asid_probe_secondary: usize;
+private let mut asid_probe_active: usize;
+private let mut asid_probe_overlap: usize;
+
+private fn asid_probe_armed_address() -> usize {
+    return (&asid_probe_armed) as usize;
+}
+
+private fn asid_probe_primary_address() -> usize {
+    return (&asid_probe_primary) as usize;
+}
+
+private fn asid_probe_secondary_address() -> usize {
+    return (&asid_probe_secondary) as usize;
+}
+
+private fn asid_probe_active_address() -> usize {
+    return (&asid_probe_active) as usize;
+}
+
+private fn asid_probe_overlap_address() -> usize {
+    return (&asid_probe_overlap) as usize;
+}
+
+private fn asid_probe_cycle() {
+    let (value, generation) = asid_assign();
+    for spin: usize in 0..<ASID_CONTENTION_OUTSIDE_WORK { }
+}
+
+fn asid_contention_is_armed() -> bool !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(asid_probe_armed_address())
+    } == 1;
+}
+
+fn asid_contention_secondary_run() !{unsafe} {
+    unsafe { atomic_store_release(asid_probe_active_address(), 1); }
+    while (unsafe {
+               atomic_load_acquire(asid_probe_secondary_address())
+           } < ASID_CONTENTION_ROUNDS &&
+           unsafe { atomic_load_acquire(asid_probe_armed_address()) } == 1) {
+        asid_probe_cycle();
+        unsafe {
+            atomic_fetch_add_relaxed(asid_probe_secondary_address(), 1);
+        }
+    }
+    unsafe { atomic_store_release(asid_probe_active_address(), 0); }
+}
+
+private fn asid_contention_report(stage: *u8, advanced: usize,
+                                  calls: usize) !{unsafe} {
+    kernel_boot_log("asid contention stage: ");
+    kernel_boot_log(stage);
+    kernel_boot_log("\n");
+    kernel_boot_log("asid contention counts: primary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(asid_probe_primary_address())
+    });
+    kernel_boot_log(" secondary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(asid_probe_secondary_address())
+    });
+    kernel_boot_log(" calls=");
+    uart_put_udec(calls);
+    kernel_boot_log(" advanced=");
+    uart_put_udec(advanced);
+    kernel_boot_log(" overlap=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(asid_probe_overlap_address())
+    });
+    kernel_boot_log("\n");
+}
+
+fn asid_contention_probe() -> bool !{unsafe} {
+    let next_before: usize = asid_next_value();
+    let rollovers_before: usize = asid_rollover_count_value();
+    unsafe { atomic_store_release(asid_probe_armed_address(), 1); }
+
+    let entry_window: i64 = read_cntfrq() >> 2;
+    let entry_start: i64 = read_cntpct();
+    let mut entered: bool = false;
+    while (entered == false && read_cntpct() - entry_start < entry_window) {
+        if (unsafe {
+                atomic_load_acquire(asid_probe_active_address())
+            } == 1) {
+            entered = true;
+        }
+    }
+    if (entered == false) {
+        unsafe { atomic_store_release(asid_probe_armed_address(), 0); }
+        asid_contention_report("secondary-never-entered" as *u8, 0, 0);
+        return false;
+    }
+
+    for round: usize in 0..<ASID_CONTENTION_ROUNDS {
+        asid_probe_cycle();
+        unsafe {
+            atomic_fetch_add_relaxed(asid_probe_primary_address(), 1);
+        }
+    }
+
+    unsafe {
+        atomic_store_release(asid_probe_overlap_address(),
+            atomic_load_acquire(asid_probe_secondary_address()));
+    }
+
+    let finish_window: i64 = read_cntfrq() * 2;
+    let finish_start: i64 = read_cntpct();
+    let mut finished: bool = false;
+    while (finished == false && read_cntpct() - finish_start < finish_window) {
+        if (unsafe {
+                atomic_load_acquire(asid_probe_secondary_address())
+            } >= ASID_CONTENTION_ROUNDS) {
+            finished = true;
+        }
+    }
+    unsafe { atomic_store_release(asid_probe_armed_address(), 0); }
+
+    let advanced: usize = asid_next_value() - next_before;
+    let calls: usize =
+        unsafe { atomic_load_acquire(asid_probe_primary_address()) } +
+        unsafe { atomic_load_acquire(asid_probe_secondary_address()) };
+    if (finished == false) {
+        asid_contention_report("secondary-never-finished" as *u8, advanced,
+                               calls);
+        return false;
+    }
+    if (asid_rollover_count_value() != rollovers_before) {
+        asid_contention_report("rolled-over" as *u8, advanced, calls);
+        return false;
+    }
+    asid_contention_report("complete" as *u8, advanced, calls);
+    let overlap: usize = unsafe {
+        atomic_load_acquire(asid_probe_overlap_address())
+    };
+    return advanced == calls && overlap > 0;
+}
