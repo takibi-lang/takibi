@@ -1,0 +1,42 @@
+// Boot-DTB application for BCM2712's enabled PCIe root complex. Firmware
+// describes three controllers with the same compatible string; status
+// selects PCIe2, the one connected to RP1.
+
+must_use variant Rpi5PcieDtbResult {
+    Invalid;
+    Missing;
+    Applied(usize);
+}
+
+fn rpi5_pcie2_apply_boot_dtb() -> Rpi5PcieDtbResult !{unsafe} {
+    let dtb: usize = boot_dtb_address_read();
+    match fdt_find_compatible_reg(dtb, bs"brcm,bcm2712-pcie") {
+        FdtDeviceRegionResult::Invalid => {
+            rpi5_pcie2_dtb_status = 1;
+            return Rpi5PcieDtbResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            rpi5_pcie2_dtb_status = 2;
+            return Rpi5PcieDtbResult::Missing;
+        }
+        FdtDeviceRegionResult::Found(region) => {
+            if (region.base != RPI5_PCIE2_BASE || region.size < 0x9310) {
+                rpi5_pcie2_dtb_status = 1;
+                return Rpi5PcieDtbResult::Invalid;
+            }
+            rpi5_pcie2_base = region.base;
+            rpi5_pcie2_dtb_status = 3;
+            return Rpi5PcieDtbResult::Applied(region.base);
+        }
+    }
+}
+
+fn rpi5_pcie2_boot_dtb_status() -> Rpi5PcieDtbResult {
+    if (rpi5_pcie2_dtb_status == 3) {
+        return Rpi5PcieDtbResult::Applied(rpi5_pcie2_base);
+    }
+    if (rpi5_pcie2_dtb_status == 2) {
+        return Rpi5PcieDtbResult::Missing;
+    }
+    return Rpi5PcieDtbResult::Invalid;
+}

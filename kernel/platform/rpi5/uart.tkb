@@ -181,6 +181,11 @@ fn uart_init() !{unsafe} {
 }
 
 fn platform_init() {
+    match rpi5_pcie2_apply_boot_dtb() {
+        Rpi5PcieDtbResult::Invalid => { }
+        Rpi5PcieDtbResult::Missing => { }
+        Rpi5PcieDtbResult::Applied(base) => { }
+    }
     // Resolve the register window before the first UART access. Every result
     // is recorded for main() to report; invalid/missing DTBs retain only the
     // known diagnostic address and are halted there before normal boot.

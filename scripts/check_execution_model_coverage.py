@@ -82,6 +82,8 @@ EXEMPT = {
     "drivers/block/memory.tkb": "device state; SPIs are routed to CPU0",
     "platform/qemu/uart.tkb": "device state; SPIs are routed to CPU0",
     "platform/rpi5/uart.tkb": "device state; MSI-X is routed to CPU0",
+    "platform/rpi5/pcie.tkb":
+        "PCIe2 device state is initialized and used only by CPU0",
     "platform/rpi5/usb_xhci.tkb": "device state; MSI-X is routed to CPU0",
 
     # --- Not state that depends on either number.

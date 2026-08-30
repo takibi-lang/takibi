@@ -255,9 +255,22 @@ def main():
     # their cell-count properties. The leading PCI address cell is the
     # 32-bit non-prefetchable memory-space code, not address magnitude.
     b.begin("axi")
+    b.prop("ranges", b.cells(
+        0, 0, 0, 0, 0x10, 0,
+        0x10, 0, 0x10, 0, 1, 0,
+        0x14, 0, 0x14, 0, 4, 0,
+        0x18, 0, 0x18, 0, 4, 0,
+        0x1C, 0, 0x1C, 0, 4, 0))
     b.prop("#address-cells", b.cells(2))
     b.prop("#size-cells", b.cells(2))
+    for address in (0x1000100000, 0x1000110000):
+        b.begin(f"pcie@{address:x}")
+        b.prop("compatible", b"brcm,bcm2712-pcie\0")
+        b.prop("reg", b.cells(0x10, address & 0xFFFFFFFF, 0))
+        b.prop("status", b"disabled\0")
+        b.end()
     b.begin("pcie@1000120000")
+    b.prop("reg", b.cells(0x10, 0x00120000, 0, 0x9310))
     if mode == "--invalid-pcie-ranges":
         b.prop("ranges", b.cells(0x02000000, 0, 0,
                                  0x1F, 0, 0))

@@ -2,3 +2,4 @@ takibi kernel: EL1
 memory: source=dtb base_bytes=524288 detected_mib=1019 regions=1 reservations=2 allocator_pages=259728
 system timer: source=dtb base_bytes=70799863808 counter_agrees_with_arch=yes
 rp1 uart: source=dtb base_bytes=133144182784 applied_to_driver=yes
+pcie2: source=dtb base_bytes=68720656384 applied_to_driver=yes

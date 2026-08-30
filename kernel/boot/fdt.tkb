@@ -752,7 +752,8 @@ private fn fdt_find_compatible_reg_bounded(
                 candidate_interrupts_offset = 0;
                 candidate_interrupts_length = 0;
             } else if (depth == 3 && bus_depth == 2 &&
-                       candidate_compatible == false) {
+                       (candidate_depth == 0 ||
+                        candidate_compatible == false)) {
                 candidate_depth = depth;
                 candidate_enabled = true;
                 candidate_compatible = false;
