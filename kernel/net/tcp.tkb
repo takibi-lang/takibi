@@ -770,7 +770,11 @@ fn tcp_connection_pool_init() !{unsafe} {
         tcp_frame_pool_ready = true;
     }
     if (tcp_retx_pool_ready == false) {
-        mutex_init(&tcp_retx_chain.mutex);
+        // No mutex_init: tcp_retx_chain is a global, so its mutex is
+        // already free from .bss, and mutex_init FORCE-FREES -- behind a
+        // lazy `ready` flag that is itself an unlocked read-modify-write.
+        // GitHub issue #479; scripts/check_lock_discipline.py found this
+        // one, and kernel/lib/mutex.tkb states the rule.
         // Retain NOTHING. #346's one-empty-chunk reserve is the right
         // default for a pool in steady churn, and the wrong one here: this
         // kernel checks "no page is held at rest" as an invariant (the

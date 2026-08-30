@@ -791,6 +791,7 @@ being a complete list is the whole point of this one;
 | `check_kernel_lib_limitations_header.py` | a `kernel/lib`, `kernel/kernel`, or `kernel/net` file with no "Current limitations" header |
 | `check_diagnostic_event_ids.py` | duplicate or non-16-bit fixed diagnostic event ids |
 | `check_flag_guarded_fields.py` | a read of an optional field `X` that did not consult its paired `has_X` first |
+| `check_lock_discipline.py` | `mutex_init` called on a GLOBAL Mutex (it is already free from zeroed .bss, and the call FORCE-FREES a lock another core may hold), and any use of a raw atomic intrinsic outside a short declared allowlist |
 | `check_execution_model_coverage.py` | a kernel file that declares mutable state and names neither `KERNEL_ACTIVE_CORES` nor `KERNEL_PREEMPTIBLE`, with no stated reason -- `kernel/lib/execution_model.tkb`'s own header called this hole out, and two files fell through it before the check existed |
 | `check_kernel_memory_map.py` | a build whose layout disagrees with `kernel/MEMORY_MAP.md` (`--update` rewrites the rows instead) |
 | `check_kernel_log_expectations.py` | a host-side test driver waiting for a boot-log line the kernel no longer emits |
