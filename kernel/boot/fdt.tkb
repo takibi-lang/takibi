@@ -64,6 +64,18 @@ struct FdtGicV2Regions {
     cpu_interface: FdtDeviceRegion;
 }
 
+struct FdtRp1GpioRegions {
+    ctrl: FdtDeviceRegion;
+    rio: FdtDeviceRegion;
+    pads: FdtDeviceRegion;
+}
+
+must_use variant FdtRp1GpioRegionsResult {
+    Invalid;
+    NotFound;
+    Found(FdtRp1GpioRegions);
+}
+
 struct FdtGicInterrupt {
     intid: usize;
     flags: usize;
@@ -1146,6 +1158,64 @@ private fn fdt_find_compatible_reg_bounded(
 fn fdt_find_compatible_reg(base: usize, compatible: []u8)
         -> FdtDeviceRegionResult !{unsafe} {
     return fdt_find_compatible_reg_bounded(base, compatible, false);
+}
+
+// RP1 GPIO exposes three adjacent register resources: pin control, RIO, and
+// pads. Keep the multi-region reader at this concrete maintained-driver
+// contract rather than generalizing the single-region lookup prematurely.
+fn fdt_find_compatible_rp1_gpio_regions(base: usize, compatible: []u8)
+        -> FdtRp1GpioRegionsResult !{unsafe} {
+    match fdt_find_compatible_pcie_reg(base, compatible) {
+        FdtDeviceRegionResult::Invalid => {
+            return FdtRp1GpioRegionsResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            return FdtRp1GpioRegionsResult::NotFound;
+        }
+        FdtDeviceRegionResult::Found(first) => {
+            if (first.address_cells != 2 || first.size_cells != 2 ||
+                first.reg_length != 48) {
+                return FdtRp1GpioRegionsResult::Invalid;
+            }
+            let total: usize = fdt_read_be32(
+                first.dtb, FDT_HEADER_SIZE, 4);
+            let first_child: usize = fdt_cells_value(
+                first.dtb, total, first.reg_offset, 2);
+            let rio_child: usize = fdt_cells_value(
+                first.dtb, total, first.reg_offset + 16, 2);
+            let pads_child: usize = fdt_cells_value(
+                first.dtb, total, first.reg_offset + 32, 2);
+            let rio_size: usize = fdt_cells_value(
+                first.dtb, total, first.reg_offset + 24, 2);
+            let pads_size: usize = fdt_cells_value(
+                first.dtb, total, first.reg_offset + 40, 2);
+            if (first.size == 0 || rio_size == 0 || pads_size == 0 ||
+                rio_child < first_child || pads_child < first_child ||
+                first.base > 0xFFFFFFFFFFFFFFFF -
+                    (rio_child - first_child) ||
+                first.base > 0xFFFFFFFFFFFFFFFF -
+                    (pads_child - first_child)) {
+                return FdtRp1GpioRegionsResult::Invalid;
+            }
+            let rio_base: usize = first.base + (rio_child - first_child);
+            let pads_base: usize = first.base + (pads_child - first_child);
+            if (rio_base > 0xFFFFFFFFFFFFFFFF - rio_size ||
+                pads_base > 0xFFFFFFFFFFFFFFFF - pads_size) {
+                return FdtRp1GpioRegionsResult::Invalid;
+            }
+            let mut ctrl: FdtDeviceRegion = first;
+            let mut rio: FdtDeviceRegion = {
+                rio_base, rio_size, first.dtb, first.reg_offset + 16,
+                48, 2, 2, false, 0, 0, 0
+            };
+            let mut pads: FdtDeviceRegion = {
+                pads_base, pads_size, first.dtb, first.reg_offset + 32,
+                48, 2, 2, false, 0, 0, 0
+            };
+            let mut regions: FdtRp1GpioRegions = { ctrl, rio, pads };
+            return FdtRp1GpioRegionsResult::Found(regions);
+        }
+    }
 }
 
 // Some RP1 devices have no RP1-specific compatible string. In particular,

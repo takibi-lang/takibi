@@ -5,6 +5,7 @@ use "kernel/platform/rpi5/system_timer_dtb.tkb";
 use "kernel/platform/rpi5/rp1_dtb.tkb";
 use "kernel/platform/rpi5/pcie_dtb.tkb";
 use "kernel/platform/rpi5/pcie_support_dtb.tkb";
+use "kernel/platform/rpi5/rp1_gem_dtb.tkb";
 use "kernel/platform/rpi5/gic_dtb.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/kernel/pool_contention_evidence.tkb";
@@ -687,6 +688,31 @@ fn main() !{unsafe} {
             uart_put_udec(distributor);
             kernel_boot_log(" cpu_interface_bytes=");
             uart_put_udec(cpu_interface);
+            kernel_boot_log(" applied_to_driver=yes\n");
+        }
+    }
+
+    match rpi5_gem_boot_dtb_status() {
+        Rpi5GemDtbResult::Invalid => {
+            kernel_boot_log("rp1 gem dtb: invalid device; halting\n");
+            while (true) { }
+        }
+        Rpi5GemDtbResult::Missing => {
+            kernel_boot_log("rp1 gem dtb: missing device; halting\n");
+            while (true) { }
+        }
+        Rpi5GemDtbResult::Applied(regions) => {
+            let (gem, clocks, gpio_ctrl, gpio_rio, gpio_pads) = regions;
+            kernel_boot_log("rp1 gem dtb: gem_bytes=");
+            uart_put_udec(gem);
+            kernel_boot_log(" clocks_bytes=");
+            uart_put_udec(clocks);
+            kernel_boot_log(" gpio_ctrl_bytes=");
+            uart_put_udec(gpio_ctrl);
+            kernel_boot_log(" gpio_rio_bytes=");
+            uart_put_udec(gpio_rio);
+            kernel_boot_log(" gpio_pads_bytes=");
+            uart_put_udec(gpio_pads);
             kernel_boot_log(" applied_to_driver=yes\n");
         }
     }

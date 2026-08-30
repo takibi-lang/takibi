@@ -22,22 +22,22 @@
 //     last, then the map's own self-check
 //   then the refusal: a blob whose magic does not match
 
-let fdt_fixture: [u8; 2886] = embed_file("linux_user/build/fdt_fixture.dtb");
-let fdt_invalid_memory_fixture: [u8; 2966] =
+let fdt_fixture: [u8; 3186] = embed_file("linux_user/build/fdt_fixture.dtb");
+let fdt_invalid_memory_fixture: [u8; 3266] =
     embed_file("linux_user/build/fdt_invalid_memory_fixture.dtb");
-let fdt_invalid_reservation_fixture: [u8; 2902] =
+let fdt_invalid_reservation_fixture: [u8; 3202] =
     embed_file("linux_user/build/fdt_invalid_reservation_fixture.dtb");
-let fdt_invalid_tree_reservation_fixture: [u8; 2938] =
+let fdt_invalid_tree_reservation_fixture: [u8; 3238] =
     embed_file("linux_user/build/fdt_invalid_tree_reservation_fixture.dtb");
-let fdt_invalid_device_fixture: [u8; 2974] =
+let fdt_invalid_device_fixture: [u8; 3258] =
     embed_file("linux_user/build/fdt_invalid_device_fixture.dtb");
-let fdt_invalid_interrupt_fixture: [u8; 2886] =
+let fdt_invalid_interrupt_fixture: [u8; 3186] =
     embed_file("linux_user/build/fdt_invalid_interrupt_fixture.dtb");
-let fdt_missing_interrupt_fixture: [u8; 2851] =
+let fdt_missing_interrupt_fixture: [u8; 3151] =
     embed_file("linux_user/build/fdt_missing_interrupt_fixture.dtb");
-let fdt_invalid_gic_fixture: [u8; 2862] =
+let fdt_invalid_gic_fixture: [u8; 3162] =
     embed_file("linux_user/build/fdt_invalid_gic_fixture.dtb");
-let fdt_invalid_pcie_ranges_fixture: [u8; 2882] =
+let fdt_invalid_pcie_ranges_fixture: [u8; 3182] =
     embed_file("linux_user/build/fdt_invalid_pcie_ranges_fixture.dtb");
 
 // The existing printer is 32 bits wide and these are physical addresses on
@@ -97,7 +97,7 @@ fn report_memory(result: FdtMemoryResult) !{unsafe} {
             }
             uart_puts("blob overlap ");
             if (fdt_blob_overlaps(found, fdt_blob_base(found), 1) &&
-                fdt_blob_overlaps(found, fdt_blob_base(found) + 2886, 1) ==
+                fdt_blob_overlaps(found, fdt_blob_base(found) + 3186, 1) ==
                     false) {
                 uart_puts("yes\r\n");
             } else {
@@ -161,6 +161,29 @@ fn report_gic(label: *u8, result: FdtGicV2RegionsResult) {
     }
 }
 
+fn report_rp1_gpio(label: *u8, result: FdtRp1GpioRegionsResult) {
+    uart_puts(label);
+    match result {
+        FdtRp1GpioRegionsResult::Invalid => { uart_puts(" invalid\n"); }
+        FdtRp1GpioRegionsResult::NotFound => { uart_puts(" not found\n"); }
+        FdtRp1GpioRegionsResult::Found(regions) => {
+            uart_puts(" ctrl ");
+            uart_print_hex((regions.ctrl.base >> 32) as i32);
+            uart_puts(" ");
+            uart_print_hex((regions.ctrl.base & 0xFFFFFFFF) as i32);
+            uart_puts(" rio ");
+            uart_print_hex((regions.rio.base >> 32) as i32);
+            uart_puts(" ");
+            uart_print_hex((regions.rio.base & 0xFFFFFFFF) as i32);
+            uart_puts(" pads ");
+            uart_print_hex((regions.pads.base >> 32) as i32);
+            uart_puts(" ");
+            uart_print_hex((regions.pads.base & 0xFFFFFFFF) as i32);
+            uart_puts("\n");
+        }
+    }
+}
+
 fn app_main() !{unsafe} {
     let blob: usize = (fdt_fixture as *u8) as usize;
     report_device("qemu pl011",
@@ -175,6 +198,13 @@ fn app_main() !{unsafe} {
         blob, bs"brcm,brcmstb-reset"));
     report_device("rpi5 rp1 uart", fdt_find_compatible_pcie_reg(
         blob, bs"arm,pl011-axi"));
+    report_device("rpi5 rp1 clocks", fdt_find_compatible_pcie_reg(
+        blob, bs"raspberrypi,rp1-clocks"));
+    report_device("rpi5 rp1 gem", fdt_find_compatible_pcie_reg(
+        blob, bs"raspberrypi,rp1-gem"));
+    report_rp1_gpio("rpi5 rp1 gpio",
+        fdt_find_compatible_rp1_gpio_regions(
+            blob, bs"raspberrypi,rp1-gpio"));
     let invalid_pcie_ranges_blob: usize =
         (fdt_invalid_pcie_ranges_fixture as *u8) as usize;
     report_device("invalid pcie ranges", fdt_find_compatible_pcie_reg(
@@ -185,6 +215,9 @@ fn app_main() !{unsafe} {
         (fdt_invalid_device_fixture as *u8) as usize;
     report_device("invalid device", fdt_find_compatible_reg(
         invalid_device_blob, bs"arm,pl011"));
+    report_rp1_gpio("invalid rp1 gpio",
+        fdt_find_compatible_rp1_gpio_regions(
+            invalid_device_blob, bs"raspberrypi,rp1-gpio"));
     report_interrupt("qemu pl011 interrupt",
                      fdt_find_compatible_gic_interrupt(
                          blob, bs"arm,pl011"));

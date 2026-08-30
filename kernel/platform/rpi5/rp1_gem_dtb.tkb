@@ -1,0 +1,89 @@
+must_use variant Rpi5GemDtbResult {
+    Invalid;
+    Missing;
+    Applied((usize, usize, usize, usize, usize));
+}
+
+fn rpi5_gem_apply_boot_dtb() -> Rpi5GemDtbResult !{unsafe} {
+    let dtb: usize = boot_dtb_address_read();
+    let mut gem_base: usize = 0;
+    let mut clocks_base: usize = 0;
+
+    match fdt_find_compatible_pcie_reg(dtb, bs"raspberrypi,rp1-gem") {
+        FdtDeviceRegionResult::Invalid => {
+            rp1_gem_dtb_status = 1;
+            return Rpi5GemDtbResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            rp1_gem_dtb_status = 2;
+            return Rpi5GemDtbResult::Missing;
+        }
+        FdtDeviceRegionResult::Found(region) => {
+            if (region.base != RP1_GEM_BASE || region.size < 0x4000) {
+                rp1_gem_dtb_status = 1;
+                return Rpi5GemDtbResult::Invalid;
+            }
+            gem_base = region.base;
+        }
+    }
+
+    match fdt_find_compatible_pcie_reg(
+            dtb, bs"raspberrypi,rp1-clocks") {
+        FdtDeviceRegionResult::Invalid => {
+            rp1_gem_dtb_status = 1;
+            return Rpi5GemDtbResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            rp1_gem_dtb_status = 2;
+            return Rpi5GemDtbResult::Missing;
+        }
+        FdtDeviceRegionResult::Found(region) => {
+            if (region.base != RP1_CLOCKS_BASE || region.size < 0x10038) {
+                rp1_gem_dtb_status = 1;
+                return Rpi5GemDtbResult::Invalid;
+            }
+            clocks_base = region.base;
+        }
+    }
+
+    match fdt_find_compatible_rp1_gpio_regions(
+            dtb, bs"raspberrypi,rp1-gpio") {
+        FdtRp1GpioRegionsResult::Invalid => {
+            rp1_gem_dtb_status = 1;
+            return Rpi5GemDtbResult::Invalid;
+        }
+        FdtRp1GpioRegionsResult::NotFound => {
+            rp1_gem_dtb_status = 2;
+            return Rpi5GemDtbResult::Missing;
+        }
+        FdtRp1GpioRegionsResult::Found(gpio) => {
+            if (gpio.ctrl.base != RP1_GPIO_CTRL_BASE ||
+                gpio.rio.base != RP1_GPIO_RIO_BASE ||
+                gpio.pads.base != RP1_GPIO_PADS_BASE ||
+                gpio.ctrl.size < 0xC000 || gpio.rio.size < 0xC000 ||
+                gpio.pads.size < 0xC000) {
+                rp1_gem_dtb_status = 1;
+                return Rpi5GemDtbResult::Invalid;
+            }
+            rp1_gem_base = gem_base;
+            rp1_clocks_base = clocks_base;
+            rp1_gpio_ctrl_base = gpio.ctrl.base;
+            rp1_gpio_rio_base = gpio.rio.base;
+            rp1_gpio_pads_base = gpio.pads.base;
+            rp1_gem_dtb_status = 3;
+            return Rpi5GemDtbResult::Applied((
+                rp1_gem_base, rp1_clocks_base, rp1_gpio_ctrl_base,
+                rp1_gpio_rio_base, rp1_gpio_pads_base));
+        }
+    }
+}
+
+fn rpi5_gem_boot_dtb_status() -> Rpi5GemDtbResult {
+    if (rp1_gem_dtb_status == 3) {
+        return Rpi5GemDtbResult::Applied((
+            rp1_gem_base, rp1_clocks_base, rp1_gpio_ctrl_base,
+            rp1_gpio_rio_base, rp1_gpio_pads_base));
+    }
+    if (rp1_gem_dtb_status == 2) { return Rpi5GemDtbResult::Missing; }
+    return Rpi5GemDtbResult::Invalid;
+}

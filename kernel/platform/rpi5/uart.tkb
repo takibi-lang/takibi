@@ -200,6 +200,13 @@ fn platform_init() {
             let (rescal, reset) = regions;
         }
     }
+    match rpi5_gem_apply_boot_dtb() {
+        Rpi5GemDtbResult::Invalid => { }
+        Rpi5GemDtbResult::Missing => { }
+        Rpi5GemDtbResult::Applied(regions) => {
+            let (gem, clocks, gpio_ctrl, gpio_rio, gpio_pads) = regions;
+        }
+    }
     // Resolve the register window before the first UART access. Every result
     // is recorded for main() to report; invalid/missing DTBs retain only the
     // known diagnostic address and are halted there before normal boot.

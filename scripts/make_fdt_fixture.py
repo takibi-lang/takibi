@@ -313,6 +313,26 @@ def main():
     b.prop("status", b"okay\0")
     b.prop("compatible", b"arm,pl011-axi\0")
     b.end()
+    b.begin("clocks@18000")
+    b.prop("reg", b.cells(0xC0, 0x40018000, 0, 0x10038))
+    b.prop("compatible", b"raspberrypi,rp1-clocks\0")
+    b.end()
+    b.begin("gpio@d0000")
+    if mode == "--invalid-device":
+        b.prop("reg", b.cells(
+            0xC0, 0x400D0000, 0, 0xC000,
+            0xC0, 0x400E0000, 0, 0xC000))
+    else:
+        b.prop("reg", b.cells(
+            0xC0, 0x400D0000, 0, 0xC000,
+            0xC0, 0x400E0000, 0, 0xC000,
+            0xC0, 0x400F0000, 0, 0xC000))
+    b.prop("compatible", b"raspberrypi,rp1-gpio\0")
+    b.end()
+    b.begin("ethernet@100000")
+    b.prop("reg", b.cells(0xC0, 0x40100000, 0, 0x4000))
+    b.prop("compatible", b"raspberrypi,rp1-gem\0cdns,macb\0")
+    b.end()
     b.end()
     b.end()
     b.end()

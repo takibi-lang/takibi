@@ -5,3 +5,4 @@
 ^pcie2: source=dtb base_bytes=
 ^pcie support: source=dtb rescal_bytes=
 ^gic: source=dtb distributor_bytes=
+^rp1 gem dtb: gem_bytes=
