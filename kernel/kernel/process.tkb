@@ -614,8 +614,22 @@ private fn scheduled_process_record_at(slot: usize) -> *ProcessRecord
             return &scheduled_process_record_absent;
         }
         IntrusiveSlotProbe::Live(slot_view) => {
-            return intrusive_pool_payload_of(&scheduled_process_pool,
-                                             slot_view);
+            // GitHub issue #488, and THIS IS THE SITE. Every read of a
+            // process record comes through here, and returning the payload
+            // drops the view -- the only proof that the slot was occupied
+            // when it was looked up. That is why a handle to a reaped
+            // record kept working: the pointer outlived its proof, landed
+            // on whatever was allocated at the address next, and nothing
+            // noticed.
+            //
+            // The unproven form is what this has always done; its name and
+            // its place in the trusted-base count are new, so the 159 call
+            // sites it feeds are a NUMBER rather than an assumption.
+            // Migrating them to hold the view is filed separately -- that
+            // is the difference between "the default is safe" (this
+            // change) and "nothing launders" (that one).
+            return intrusive_pool_payload_unproven_of(
+                &scheduled_process_pool, slot_view);
         }
     }
 }
@@ -656,10 +670,15 @@ struct ProcessDdbCopyResult {
     truncated: bool;
 }
 
+// `borrow *ProcessRecord`, and GitHub issue #488 is why. The caller reads
+// the record through a live IntrusiveSlotView; a retaining parameter would
+// let this function keep the pointer past the view, which is exactly the
+// escape the view exists to close. It only copies fields out, so borrowing
+// is what it meant all along.
 private fn scheduled_process_ddb_copy_one(
         output: borrow [ProcessDdbRecord; DDB_PROCESS_RECORDS..],
         index: usize, slot: usize,
-        record: *ProcessRecord) {
+        record: borrow *ProcessRecord) {
     if (index >= 32) { return; }
     output[index].pid = record.pid;
     output[index].ppid = 0;
@@ -706,9 +725,15 @@ fn kernel_process_ddb_copy(
         match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
             IntrusiveSlotProbe::NoPayload => {}
             IntrusiveSlotProbe::Live(slot_view) => {
+                // The view is held across the read and released after,
+                // which is the shape GitHub issue #488 wants everywhere:
+                // the payload pointer cannot outlive the proof that the
+                // slot was occupied. This walk was already doing the right
+                // thing by accident -- it just had no way to say so.
                 let record: *ProcessRecord = intrusive_pool_payload_of(
                     &scheduled_process_pool, slot_view);
                 scheduled_process_ddb_copy_one(output, count, slot, record);
+                intrusive_view_release(slot_view);
                 count = count + 1;
             }
         }
@@ -850,8 +875,13 @@ private fn scheduled_process_record_peek(slot: usize) -> *ProcessRecord
             return &scheduled_process_record_absent;
         }
         IntrusiveSlotProbe::Live(slot_view) => {
-            return intrusive_pool_payload_of(&scheduled_process_pool,
-                                             slot_view);
+            // Unproven DELIBERATELY here, unlike the counted accessor
+            // above: this whole function exists to tolerate a dead slot,
+            // for crash and trace paths asking about an already-reaped
+            // peer. Its callers must not hold the pointer, and the header
+            // above says so. GitHub issue #488.
+            return intrusive_pool_payload_unproven_of(
+                &scheduled_process_pool, slot_view);
         }
     }
 }

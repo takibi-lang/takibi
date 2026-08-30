@@ -248,8 +248,14 @@ private fn address_space_backing_at(slot: usize)
         scheduled_process_address_space_backing_generation(slot);
     let owner =
         intrusive_owner_new(&address_space_backing_pool, address, generation);
+    // GitHub issue #488: this RETURNS the pointer, so it cannot hold the
+    // owner for as long as the pointer lives. The unproven form says that
+    // in its name and in the trusted-base count, instead of the pool
+    // silently allowing it for every caller. Removing it means migrating
+    // address_space_backing_at's 36 call sites to hold the owner
+    // themselves -- filed, not done here.
     let backing: *AddressSpaceBacking =
-        intrusive_pool_ref(&address_space_backing_pool, owner);
+        intrusive_pool_ref_unproven(&address_space_backing_pool, owner);
     intrusive_owner_drop(owner);
     return backing;
 }
@@ -276,8 +282,14 @@ private fn address_space_backing_existing_at(slot: usize)
     }
     let owner =
         intrusive_owner_new(&address_space_backing_pool, address, generation);
+    // GitHub issue #488: this RETURNS the pointer, so it cannot hold the
+    // owner for as long as the pointer lives. The unproven form says that
+    // in its name and in the trusted-base count, instead of the pool
+    // silently allowing it for every caller. Removing it means migrating
+    // address_space_backing_at's 36 call sites to hold the owner
+    // themselves -- filed, not done here.
     let backing: *AddressSpaceBacking =
-        intrusive_pool_ref(&address_space_backing_pool, owner);
+        intrusive_pool_ref_unproven(&address_space_backing_pool, owner);
     intrusive_owner_drop(owner);
     return backing;
 }

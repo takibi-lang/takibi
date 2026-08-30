@@ -212,7 +212,7 @@ fn free_retx_chain(head: RetxLink) -> (usize, usize) !{unsafe} {
 // PENDING_TCP_MAX is 4 today, so a chain of one would leave the iteration
 // that replaces it -- free_retx_chain()'s walk, and the entry-to-entry
 // `next` link it follows -- never actually exercised.
-fn push_retx(conn: *TcpConnection) -> bool !{unsafe} {
+fn push_retx(conn: borrow *TcpConnection) -> bool !{unsafe} {
     let fg = intrusive_pool_lock(&frames);
     let fr = intrusive_pool_insert_zeroed(&frames, fg);
     intrusive_pool_unlock(&frames, fg);
@@ -507,6 +507,13 @@ fn app_main() !{unsafe} {
                 retxs_freed = retxs_freed + entries;
                 frames_freed = frames_freed + chain_frames;
 
+                // GitHub issue #488: give the proof back BEFORE removing
+                // the thing it is a proof of. The view says "this slot was
+                // occupied when it was probed"; the remove is what makes
+                // that stop being true, and holding it across the remove
+                // is exactly the shape the tie exists to stop. Nothing
+                // reads `conn` past this line.
+                intrusive_view_release(slot_view);
                 let owner = intrusive_owner_new(&conns, cursor, generation);
                 let g4 = intrusive_pool_lock(&conns);
                 let removed2: bool =

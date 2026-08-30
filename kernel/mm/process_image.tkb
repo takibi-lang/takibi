@@ -194,7 +194,7 @@ private fn process_image_record_at(root: usize) -> *ProcessImageRecord !{unsafe}
     }
     let owner = intrusive_owner_new(&process_image_pool, address, generation);
     let record: *ProcessImageRecord =
-        intrusive_pool_ref(&process_image_pool, owner);
+        intrusive_pool_ref_unproven(&process_image_pool, owner);
     intrusive_owner_drop(owner);
     return record;
 }
@@ -205,7 +205,7 @@ private fn process_image_record_at(root: usize) -> *ProcessImageRecord !{unsafe}
 // so "nothing grown yet" is the top page, not 0. It is only unread today
 // because stack_growth_active gates it, which is an argument the next
 // reader should not have to reconstruct.
-private fn process_image_record_reset(record: *ProcessImageRecord) {
+private fn process_image_record_reset(record: borrow *ProcessImageRecord) {
     record.active_page_count = 0;
     record.stack_growth_active = false;
     record.stack_lowest_l3 = process_stack_top_page();

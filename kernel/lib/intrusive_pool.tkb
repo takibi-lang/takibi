@@ -1606,8 +1606,12 @@ fn intrusive_pool_matches(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 // Field access through the result needs no explicit deref
 // (`intrusive_pool_ref(&pool, owner).field = 1;`); a whole-T read or write
 // does -- the same shape kernel/lib/freelist.tkb's freelist_ref has.
+// GitHub issue #488: `@ allocation`, so the payload dies with the OWNER
+// that proves the allocation is still this one. Returning a bare `*T` let
+// it outlive the owner, and an owner is exactly what a reap consumes.
 fn intrusive_pool_ref(T: type, pool: &mut IntrusivePool(T) @ pool_id,
-                      owner: borrow IntrusiveOwner[pool_id, allocation]) -> *T !{unsafe} {
+                      owner: borrow IntrusiveOwner[pool_id, allocation])
+        -> *T @ allocation !{unsafe} {
     return intrusive_pool_payload_at(pool, intrusive_owner_slot(owner));
 }
 
@@ -1705,9 +1709,67 @@ fn intrusive_view_drop(slot_view: sink IntrusiveSlotView[pool_id]) {}
 // view is a snapshot of a fact that a later insert or remove can undo, so
 // spending it here keeps a `*T` from being justified by a proof the
 // caller kept holding after it went stale.
+// The payload, tied to the proof that there IS one.
+//
+// GitHub issue #488. This used to take the view as `sink` and return a
+// bare `*T`: it CONSUMED the liveness proof and handed back a pointer with
+// no relation to it, so the pointer outlived the only evidence that the
+// slot was occupied. That is the pool laundering its own proof, and it is
+// the opposite of what the rest of this tree does -- compare
+// kernel/net/tcp.tkb's
+//
+//     fn retx_retry_state(guard: borrow RetxGuard[address], e: *RetxEntry)
+//             -> *RetxRetryState @ address
+//
+// where the pointer dies with the guard. Four mechanisms landed on
+// 2026-08-30 use that shape (issue #452's accessors, LockedCell,
+// GuardedUsize, occupancy's Quiesced); this one was written before it and
+// never revisited.
+//
+// `borrow` and `@ pool_id` are the whole change. The caller keeps the view
+// for as long as it wants the payload, and using the payload after
+// dropping the view is "pointer is derived from linear value ... and
+// cannot be used after ... is consumed".
+//
+// It does NOT make the pointer safe against another core freeing the slot
+// while the view is held -- the view proves occupancy at PROBE time, not
+// exclusion. That is issue #482, and this change is what makes adding the
+// guard there a local decision rather than a redesign.
 fn intrusive_pool_payload_of(T: type, pool: &mut IntrusivePool(T) @ pool_id,
-                             slot_view: sink IntrusiveSlotView[pool_id]) -> *T !{unsafe} {
+                             slot_view: borrow IntrusiveSlotView[pool_id])
+        -> *T @ pool_id !{unsafe} {
     return intrusive_pool_payload_at(pool, intrusive_view_slot(slot_view));
+}
+
+// Give a view back. Linear, so a probe whose Live case is taken cannot
+// simply be forgotten -- which is what stops the payload pointer from
+// being kept by dropping the proof early.
+fn intrusive_view_release(slot_view: sink IntrusiveSlotView[pool_id]) {}
+
+// THE ESCAPE, and it is the old behaviour with its name changed to say so.
+//
+// GitHub issue #488: a caller that cannot yet hold the view for as long as
+// it uses the payload -- typically because it RETURNS the pointer -- takes
+// this instead. It still requires a successful probe, so it cannot read a
+// free slot as a T (which is what kept intrusive_pool_payload_at private
+// since issue #348); what it drops is the LIFETIME relation, not the
+// occupancy check.
+//
+// `!{unsafe}`, so every remaining launderer is counted in the trusted-base
+// inventory rather than being invisible. That is the whole shape of this
+// change: laundering did not stop existing, it stopped being the DEFAULT
+// and started being a number.
+fn intrusive_pool_payload_unproven_of(
+        T: type, pool: &mut IntrusivePool(T) @ pool_id,
+        slot_view: sink IntrusiveSlotView[pool_id]) -> *T !{unsafe} {
+    return intrusive_pool_payload_at(pool, intrusive_view_slot(slot_view));
+}
+
+// The owner-shaped escape, same reasoning.
+fn intrusive_pool_ref_unproven(
+        T: type, pool: &mut IntrusivePool(T) @ pool_id,
+        owner: borrow IntrusiveOwner[pool_id, allocation]) -> *T !{unsafe} {
+    return intrusive_pool_payload_at(pool, intrusive_owner_slot(owner));
 }
 
 // -- Iteration ---------------------------------------------------------

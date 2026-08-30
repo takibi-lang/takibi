@@ -208,7 +208,7 @@ private fn fd_context_at(process: usize) -> *ProcessFdContext !{unsafe} {
     let address: usize = scheduled_process_fd_context(process);
     let generation: usize = scheduled_process_fd_context_generation(process);
     let owner = intrusive_owner_new(&fd_context_pool, address, generation);
-    let payload: *ProcessFdContext = intrusive_pool_ref(&fd_context_pool, owner);
+    let payload: *ProcessFdContext = intrusive_pool_ref_unproven(&fd_context_pool, owner);
     intrusive_owner_drop(owner);
     return payload;
 }
@@ -231,7 +231,7 @@ private fn fd_block_matches(address: usize, generation: usize) -> bool !{unsafe}
 
 private fn fd_block_at(address: usize, generation: usize) -> *FdBlock !{unsafe} {
     let owner = intrusive_owner_new(&fd_block_pool, address, generation);
-    let payload: *FdBlock = intrusive_pool_ref(&fd_block_pool, owner);
+    let payload: *FdBlock = intrusive_pool_ref_unproven(&fd_block_pool, owner);
     intrusive_owner_drop(owner);
     return payload;
 }
@@ -352,7 +352,7 @@ private fn fd_block_ensure(ctx: *ProcessFdContext, fd: usize)
 
 // Gives the whole chain back. The descriptors themselves are expected to
 // have been closed already (unified_fd_destroy); this is the storage.
-private fn fd_blocks_release(ctx: *ProcessFdContext) !{unsafe} {
+private fn fd_blocks_release(ctx: borrow *ProcessFdContext) !{unsafe} {
     let mut address: usize = ctx.block_head;
     let mut generation: usize = ctx.block_head_generation;
     ctx.block_head = 0;
@@ -560,7 +560,7 @@ private fn unified_object_matches(handle: UnifiedObjectHandle) -> bool !{unsafe}
 private fn unified_object_at(handle: UnifiedObjectHandle) -> *SharedObject !{unsafe} {
     let owner = intrusive_owner_new(&object_pool, handle.slot,
                                     handle.generation);
-    let payload: *SharedObject = intrusive_pool_ref(&object_pool, owner);
+    let payload: *SharedObject = intrusive_pool_ref_unproven(&object_pool, owner);
     intrusive_owner_drop(owner);
     return payload;
 }
@@ -870,7 +870,7 @@ fn unified_fd_table_init() !{unsafe} {
             IntrusiveSlotProbe::NoPayload => {}
             IntrusiveSlotProbe::Live(slot_view) => {
                 let live: *ProcessFdContext =
-                    intrusive_pool_payload_of(&fd_context_pool, slot_view);
+                    intrusive_pool_payload_unproven_of(&fd_context_pool, slot_view);
                 // GitHub issue #393: giving the descriptor blocks back is
                 // what "empty every entry" means once the entries are
                 // allocated rather than always there. The limits go back

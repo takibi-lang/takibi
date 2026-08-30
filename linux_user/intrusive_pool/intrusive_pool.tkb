@@ -533,7 +533,12 @@ fn app_main() {
             IntrusiveSlotProbe::NoPayload => {}
             IntrusiveSlotProbe::Live(slot_view) => {
                 seen = seen + 1;
+                // GitHub issue #488: the payload pointer is tied to the
+                // view now, so the view is released AFTER the read rather
+                // than consumed by it. The walk was already correct; it
+                // just had no way to say so, and the type now says it.
                 sum = sum + *intrusive_pool_payload_of(&pool_g, slot_view);
+                intrusive_view_release(slot_view);
             }
         }
         cursor = intrusive_pool_next_slot(&pool_g, cursor);

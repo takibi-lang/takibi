@@ -692,7 +692,7 @@ fn tcp_frame_slice(address: usize) -> [u8; 1514..] !{unsafe} {
         }
         IntrusiveSlotProbe::Live(slot_view) => {
             let frame: *NetFrame =
-                intrusive_pool_payload_of(&tcp_frame_pool, slot_view);
+                intrusive_pool_payload_unproven_of(&tcp_frame_pool, slot_view);
             return frame.bytes as [u8; 1514..];
         }
     }
@@ -734,7 +734,7 @@ fn tcp_connection_payload(address: usize) -> *TcpConnection !{unsafe} {
             return &tcp_connection_absent_fallback;
         }
         IntrusiveSlotProbe::Live(slot_view) => {
-            return intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
+            return intrusive_pool_payload_unproven_of(&tcp_connection_pool, slot_view);
         }
     }
 }
@@ -836,7 +836,7 @@ fn tcp_connection_open_at(address: usize) -> bool !{unsafe} {
         IntrusiveSlotProbe::NoPayload => { return false; }
         IntrusiveSlotProbe::Live(slot_view) => {
             let conn: *TcpConnection =
-                intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
+                intrusive_pool_payload_unproven_of(&tcp_connection_pool, slot_view);
             return conn.connection_open;
         }
     }
@@ -853,7 +853,7 @@ fn tcp_connection_has_pending_read(address: usize) -> bool !{unsafe} {
         IntrusiveSlotProbe::NoPayload => { return false; }
         IntrusiveSlotProbe::Live(slot_view) => {
             let conn: *TcpConnection =
-                intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
+                intrusive_pool_payload_unproven_of(&tcp_connection_pool, slot_view);
             return conn.connection_open &&
                    conn.socket_buffer_offset < conn.socket_buffer_length;
         }
@@ -869,7 +869,7 @@ fn tcp_any_connection_open() -> bool !{unsafe} {
             IntrusiveSlotProbe::NoPayload => {}
             IntrusiveSlotProbe::Live(slot_view) => {
                 let conn: *TcpConnection =
-                    intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
+                    intrusive_pool_payload_unproven_of(&tcp_connection_pool, slot_view);
                 if (conn.connection_open) { return true; }
             }
         }
@@ -905,7 +905,7 @@ fn tcp_connection_alloc() -> TcpConnectionAllocResult !{unsafe} {
             let address: usize = intrusive_owner_slot(pool_owner);
             let generation: usize = intrusive_owner_generation(pool_owner);
             let conn: *TcpConnection =
-                intrusive_pool_ref(&tcp_connection_pool, pool_owner);
+                intrusive_pool_ref_unproven(&tcp_connection_pool, pool_owner);
             conn.self_address = address;
             conn.state = ConnState::Listen;
             conn.local_port = TCP_ECHO_PORT;
@@ -1158,7 +1158,7 @@ fn kernel_tcp_clear_injection_markers() !{unsafe} {
             IntrusiveSlotProbe::NoPayload => {}
             IntrusiveSlotProbe::Live(slot_view) => {
                 let conn: *TcpConnection =
-                    intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
+                    intrusive_pool_payload_unproven_of(&tcp_connection_pool, slot_view);
                 conn.injected_data_entry = 0;
                 conn.injected_fin_entry = 0;
             }
@@ -1226,7 +1226,11 @@ fn retx_unlock(guard: sink RetxGuard[address],
 // The container is a plain *RetxEntry rather than one carrying `@ address`
 // -- the tie comes from the guard, and a field address through an
 // identity-annotated pointer is rejected today anyway.
-fn retx_retry_state(guard: borrow RetxGuard[address], e: *RetxEntry)
+// `borrow *RetxEntry` since GitHub issue #488: the entry pointer now comes
+// from a live IntrusiveSlotView or owner, and a retaining parameter would
+// let this keep it past that proof. It only takes a field address, so
+// borrowing is what it meant.
+fn retx_retry_state(guard: borrow RetxGuard[address], e: borrow *RetxEntry)
         -> *RetxRetryState @ address {
     return &e.retry;
 }
@@ -1261,7 +1265,7 @@ fn retx_chain_put(link: RetxLink) -> bool {
     }
 }
 
-fn retx_entry_take_next(entry: *RetxEntry) -> RetxLink {
+fn retx_entry_take_next(entry: borrow *RetxEntry) -> RetxLink {
     let guard = retx_lock(&entry.mutex);
     let next: RetxLink = stable_replace(
         guard, &entry.mutex, entry.next, RetxLink::End);
@@ -1269,7 +1273,7 @@ fn retx_entry_take_next(entry: *RetxEntry) -> RetxLink {
     return next;
 }
 
-fn retx_entry_put_next(entry: *RetxEntry, link: RetxLink) -> bool {
+fn retx_entry_put_next(entry: borrow *RetxEntry, link: RetxLink) -> bool {
     let guard = retx_lock(&entry.mutex);
     let displaced: RetxLink = stable_replace(
         guard, &entry.mutex, entry.next, link);
@@ -1322,7 +1326,7 @@ fn retx_chain_reverse(link_in: RetxLink) -> RetxLink !{unsafe} {
                     let branded =
                         intrusive_owner_new(&tcp_retx_pool, slot, generation);
                     let entry: *RetxEntry =
-                        intrusive_pool_ref(&tcp_retx_pool, branded);
+                        intrusive_pool_ref_unproven(&tcp_retx_pool, branded);
                     let following: RetxLink = retx_entry_take_next(entry);
                     if (retx_entry_put_next(entry, reversed) == false) {
                         kernel_boot_log("tcp retx: chain link was not empty\n");
@@ -1367,7 +1371,7 @@ fn pending_tcp_reset_all(connection_address: usize) !{unsafe} {
                     let branded =
                         intrusive_owner_new(&tcp_retx_pool, slot, generation);
                     let entry: *RetxEntry =
-                        intrusive_pool_ref(&tcp_retx_pool, branded);
+                        intrusive_pool_ref_unproven(&tcp_retx_pool, branded);
                     let following: RetxLink = retx_entry_take_next(entry);
                     let mine: bool = entry.connection == connection_address;
                     if (mine) {
@@ -1629,7 +1633,7 @@ fn pending_tcp_chain_probe_body(conn: *TcpConnection, other: *TcpConnection)
 // under --forbid-trap -- is now a struct the caller already has a pointer
 // to, and there is no index to bound.
 fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
-                           entry: *RetxEntry) -> bool {
+                           entry: borrow *RetxEntry) -> bool {
     if (entry.kind == PendingTcpKind::None || len < 54 || len > 1514) {
         return false;
     }
