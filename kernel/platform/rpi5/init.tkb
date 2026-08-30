@@ -4,6 +4,7 @@ use "kernel/platform/rpi5/memory.tkb";
 use "kernel/platform/rpi5/system_timer_dtb.tkb";
 use "kernel/platform/rpi5/rp1_dtb.tkb";
 use "kernel/platform/rpi5/pcie_dtb.tkb";
+use "kernel/platform/rpi5/pcie_support_dtb.tkb";
 use "kernel/platform/rpi5/gic_dtb.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/kernel/pool_contention_evidence.tkb";
@@ -648,6 +649,25 @@ fn main() !{unsafe} {
         Rpi5PcieDtbResult::Applied(base) => {
             kernel_boot_log("pcie2: source=dtb base_bytes=");
             uart_put_udec(base);
+            kernel_boot_log(" applied_to_driver=yes\n");
+        }
+    }
+
+    match rpi5_pcie_support_boot_dtb_status() {
+        Rpi5PcieSupportDtbResult::Invalid => {
+            kernel_boot_log("pcie support: invalid boot DTB device; halting\n");
+            while (true) { }
+        }
+        Rpi5PcieSupportDtbResult::Missing => {
+            kernel_boot_log("pcie support: missing from boot DTB; halting\n");
+            while (true) { }
+        }
+        Rpi5PcieSupportDtbResult::Applied(regions) => {
+            let (rescal, reset) = regions;
+            kernel_boot_log("pcie support: source=dtb rescal_bytes=");
+            uart_put_udec(rescal);
+            kernel_boot_log(" reset_bytes=");
+            uart_put_udec(reset);
             kernel_boot_log(" applied_to_driver=yes\n");
         }
     }

@@ -193,6 +193,13 @@ fn platform_init() {
         Rpi5PcieDtbResult::Missing => { }
         Rpi5PcieDtbResult::Applied(base) => { }
     }
+    match rpi5_pcie_support_apply_boot_dtb() {
+        Rpi5PcieSupportDtbResult::Invalid => { }
+        Rpi5PcieSupportDtbResult::Missing => { }
+        Rpi5PcieSupportDtbResult::Applied(regions) => {
+            let (rescal, reset) = regions;
+        }
+    }
     // Resolve the register window before the first UART access. Every result
     // is recorded for main() to report; invalid/missing DTBs retain only the
     // known diagnostic address and are halted there before normal boot.

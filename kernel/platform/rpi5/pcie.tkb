@@ -55,9 +55,14 @@
 use "kernel/arch/arm64/kernel/timer.tkb";
 
 const RPI5_PCIE2_BASE: usize = 0x1000120000;
+const RPI5_PCIE_RESCAL_BASE: usize = 0x1000119500;
+const RPI5_BCM_RESET_BASE: usize = 0x1001504318;
 
 let mut rpi5_pcie2_base: usize = RPI5_PCIE2_BASE;
 let mut rpi5_pcie2_dtb_status: usize;
+let mut rpi5_pcie_rescal_base: usize = RPI5_PCIE_RESCAL_BASE;
+let mut rpi5_bcm_reset_base: usize = RPI5_BCM_RESET_BASE;
+let mut rpi5_pcie_support_dtb_status: usize;
 
 // delay_us(us): busy-wait at least `us` microseconds, using CNTPCT_EL0's
 // free-running count and CNTFRQ_EL0's own frequency -- same technique
@@ -90,8 +95,10 @@ fn timed_out(t0: i64, timeout_us: i64) -> bool {
 // reset-brcmstb-rescal.c: set bit0 at +0x0 to start calibration, poll
 // bit0 at +0x8 until set (done), then clear bit0 at +0x0.
 fn pcie_rescal_reset() -> bool !{unsafe} {
-    let start: *io u32 = unsafe { 0x1000119500 as *io u32 };
-    let status: *io u32 = unsafe { 0x1000119508 as *io u32 };
+    let start: *io u32 = unsafe { rpi5_pcie_rescal_base as *io u32 };
+    let status: *io u32 = unsafe {
+        (rpi5_pcie_rescal_base + 0x08) as *io u32
+    };
 
     *start = (*start) | 1;
 
@@ -123,8 +130,10 @@ fn pcie_rescal_reset() -> bool !{unsafe} {
 // >> 5 == 1), at bits 0 and 12 respectively (index & 0x1f), so both can
 // be asserted/deasserted together with one write each.
 fn pcie2_bridge_reset(assert_reset: bool) !{unsafe} {
-    let bank1_set: *io u32 = unsafe { 0x1001504330 as *io u32 };   // bank 1 = base(0x1001504318) + 0x18
-    let bank1_clear: *io u32 = unsafe { 0x1001504334 as *io u32 }; // bank1_set + 0x04
+    let bank1_set: *io u32 = unsafe { (rpi5_bcm_reset_base + 0x18) as *io u32 }; // bank 1
+    let bank1_clear: *io u32 = unsafe {
+        (rpi5_bcm_reset_base + 0x1C) as *io u32
+    }; // bank1_set + 0x04
     let mask: u32 = (1 << 0) | (1 << 12);    // swinit (idx 32) | bridge (idx 44)
 
     if (assert_reset) {

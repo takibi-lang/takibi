@@ -1,0 +1,63 @@
+must_use variant Rpi5PcieSupportDtbResult {
+    Invalid;
+    Missing;
+    Applied((usize, usize));
+}
+
+fn rpi5_pcie_support_apply_boot_dtb()
+        -> Rpi5PcieSupportDtbResult !{unsafe} {
+    let dtb: usize = boot_dtb_address_read();
+    let mut rescal_base: usize = 0;
+    match fdt_find_compatible_reg(
+            dtb, bs"brcm,bcm7216-pcie-sata-rescal") {
+        FdtDeviceRegionResult::Invalid => {
+            rpi5_pcie_support_dtb_status = 1;
+            return Rpi5PcieSupportDtbResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            rpi5_pcie_support_dtb_status = 2;
+            return Rpi5PcieSupportDtbResult::Missing;
+        }
+        FdtDeviceRegionResult::Found(region) => {
+            if (region.base != RPI5_PCIE_RESCAL_BASE ||
+                region.size < 0x10) {
+                rpi5_pcie_support_dtb_status = 1;
+                return Rpi5PcieSupportDtbResult::Invalid;
+            }
+            rescal_base = region.base;
+        }
+    }
+
+    match fdt_find_compatible_reg(dtb, bs"brcm,brcmstb-reset") {
+        FdtDeviceRegionResult::Invalid => {
+            rpi5_pcie_support_dtb_status = 1;
+            return Rpi5PcieSupportDtbResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            rpi5_pcie_support_dtb_status = 2;
+            return Rpi5PcieSupportDtbResult::Missing;
+        }
+        FdtDeviceRegionResult::Found(region) => {
+            if (region.base != RPI5_BCM_RESET_BASE || region.size < 0x30) {
+                rpi5_pcie_support_dtb_status = 1;
+                return Rpi5PcieSupportDtbResult::Invalid;
+            }
+            rpi5_pcie_rescal_base = rescal_base;
+            rpi5_bcm_reset_base = region.base;
+            rpi5_pcie_support_dtb_status = 3;
+            return Rpi5PcieSupportDtbResult::Applied((
+                rpi5_pcie_rescal_base, rpi5_bcm_reset_base));
+        }
+    }
+}
+
+fn rpi5_pcie_support_boot_dtb_status() -> Rpi5PcieSupportDtbResult {
+    if (rpi5_pcie_support_dtb_status == 3) {
+        return Rpi5PcieSupportDtbResult::Applied((
+            rpi5_pcie_rescal_base, rpi5_bcm_reset_base));
+    }
+    if (rpi5_pcie_support_dtb_status == 2) {
+        return Rpi5PcieSupportDtbResult::Missing;
+    }
+    return Rpi5PcieSupportDtbResult::Invalid;
+}

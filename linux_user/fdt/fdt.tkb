@@ -22,22 +22,22 @@
 //     last, then the map's own self-check
 //   then the refusal: a blob whose magic does not match
 
-let fdt_fixture: [u8; 2702] = embed_file("linux_user/build/fdt_fixture.dtb");
-let fdt_invalid_memory_fixture: [u8; 2782] =
+let fdt_fixture: [u8; 2886] = embed_file("linux_user/build/fdt_fixture.dtb");
+let fdt_invalid_memory_fixture: [u8; 2966] =
     embed_file("linux_user/build/fdt_invalid_memory_fixture.dtb");
-let fdt_invalid_reservation_fixture: [u8; 2718] =
+let fdt_invalid_reservation_fixture: [u8; 2902] =
     embed_file("linux_user/build/fdt_invalid_reservation_fixture.dtb");
-let fdt_invalid_tree_reservation_fixture: [u8; 2754] =
+let fdt_invalid_tree_reservation_fixture: [u8; 2938] =
     embed_file("linux_user/build/fdt_invalid_tree_reservation_fixture.dtb");
-let fdt_invalid_device_fixture: [u8; 2790] =
+let fdt_invalid_device_fixture: [u8; 2974] =
     embed_file("linux_user/build/fdt_invalid_device_fixture.dtb");
-let fdt_invalid_interrupt_fixture: [u8; 2702] =
+let fdt_invalid_interrupt_fixture: [u8; 2886] =
     embed_file("linux_user/build/fdt_invalid_interrupt_fixture.dtb");
-let fdt_missing_interrupt_fixture: [u8; 2667] =
+let fdt_missing_interrupt_fixture: [u8; 2851] =
     embed_file("linux_user/build/fdt_missing_interrupt_fixture.dtb");
-let fdt_invalid_gic_fixture: [u8; 2678] =
+let fdt_invalid_gic_fixture: [u8; 2862] =
     embed_file("linux_user/build/fdt_invalid_gic_fixture.dtb");
-let fdt_invalid_pcie_ranges_fixture: [u8; 2698] =
+let fdt_invalid_pcie_ranges_fixture: [u8; 2882] =
     embed_file("linux_user/build/fdt_invalid_pcie_ranges_fixture.dtb");
 
 // The existing printer is 32 bits wide and these are physical addresses on
@@ -97,7 +97,7 @@ fn report_memory(result: FdtMemoryResult) !{unsafe} {
             }
             uart_puts("blob overlap ");
             if (fdt_blob_overlaps(found, fdt_blob_base(found), 1) &&
-                fdt_blob_overlaps(found, fdt_blob_base(found) + 2702, 1) ==
+                fdt_blob_overlaps(found, fdt_blob_base(found) + 2886, 1) ==
                     false) {
                 uart_puts("yes\r\n");
             } else {
@@ -169,6 +169,10 @@ fn app_main() !{unsafe} {
         blob, bs"brcm,bcm2835-system-timer"));
     report_device("rpi5 pcie2", fdt_find_compatible_reg(
         blob, bs"brcm,bcm2712-pcie"));
+    report_device("rpi5 pcie rescal", fdt_find_compatible_reg(
+        blob, bs"brcm,bcm7216-pcie-sata-rescal"));
+    report_device("rpi5 bcm reset", fdt_find_compatible_reg(
+        blob, bs"brcm,brcmstb-reset"));
     report_device("rpi5 rp1 uart", fdt_find_compatible_pcie_reg(
         blob, bs"arm,pl011-axi"));
     let invalid_pcie_ranges_blob: usize =
