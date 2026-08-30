@@ -95,9 +95,6 @@ EXEMPT = {
         "NOT AUDITED -- 2 globals, no locks; GitHub issue #479",
     "fs/elf64.tkb":
         "NOT AUDITED -- no locks; GitHub issue #479",
-    "printk/log.tkb":
-        "NOT AUDITED -- 14 globals, no locks; the console is shared and two "
-        "cores logging would interleave; GitHub issue #479",
     "lib/intrusive_pool.tkb":
         "NOT AUDITED -- its per-pool lock word is a field, and mutation "
         "requires the guard by typing, but the one global here is not "
@@ -114,9 +111,6 @@ EXEMPT = {
         "test counters, read by the boot fixture only",
     "kernel/syscall_test_lifecycle.tkb":
         "test-driver lifecycle state, driven from core 0 only",
-    "kernel/workload_evidence.tkb":
-        "NOT AUDITED -- the busy-pair counters, which a process on core 1 "
-        "reaches through the progress syscall; GitHub issue #479 Group B",
 }
 
 

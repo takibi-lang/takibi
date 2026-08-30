@@ -42,6 +42,7 @@
 //   and is the fixture's own business.
 
 use "kernel/arch/arm64/kernel/timer.tkb";
+use "kernel/lib/execution_model.tkb";
 
 // The two inittab entries, told apart by the tag they pass rather than by
 // their pid -- a respawned entry gets a new pid and is still the same
@@ -402,4 +403,36 @@ private fn workload_busy_pair_report() !{unsafe} {
         uart_put_udec(workload_busy_pair.refused);
         kernel_boot_log("\n");
     }
+}
+
+// GitHub issue #479: this file had no execution-model assertion and holds
+// the state a busy-loop process reports into -- which is precisely the
+// state a process on a SECOND core would report into. It was found by
+// chasing which syscall the busy loop actually makes, the same accidental
+// way kernel/mm/page.tkb was, which is why
+// scripts/check_execution_model_coverage.py now exists.
+//
+// What is and is not shared here, because the answer is not uniform:
+//
+// - The per-tag counters are naturally PARTITIONED. Tag A's fields are
+//   written only by the process running tag A and tag B's only by B's, and
+//   one process cannot be both. Two cores each reporting their own tag
+//   touch disjoint memory.
+// - `both_running`, `refused` and `restart_reported` are NOT. Two cores
+//   can both observe both_running false and both run the "start of the
+//   measured interval" step, which is what the fairness verdict is
+//   computed against.
+// - Any read that compares a_rounds against b_rounds reads two words the
+//   other core may be between.
+//
+// So what this needs is not a lock around the counter increments; it is one
+// around the shared transitions and the comparison. It is NOT taken here
+// yet, deliberately: the contention that would exercise it is the busy pair
+// running on two cores, which is #479 Group B's own milestone. A lock added
+// now would be one nothing exercises -- the mistake page.tkb's lock made,
+// and the reason its probe had to be written afterwards. This assertion is
+// what makes the flip stop here and take it.
+fn workload_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "both_running, refused and the a/b comparison are shared; the per-tag counters are not");
 }

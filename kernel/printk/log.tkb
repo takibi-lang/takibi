@@ -5,6 +5,7 @@
 //
 // Current limitation: the ordinary writer is core-0 main/syscall context only.
 // Interrupt-safe classified events remain kernel/diagnostic/event.tkb's job.
+use "kernel/lib/execution_model.tkb";
 use "kernel/printk/number.tkb";
 
 const KERNEL_LOG_RECORD_COUNT: usize = 256;
@@ -281,4 +282,31 @@ fn kernel_boot_log_resource_exhausted(resource: *u8, capacity: usize) {
     kernel_boot_log(" capacity=" as *u8);
     uart_put_udec(capacity);
     kernel_boot_log("\n" as *u8);
+}
+
+// GitHub issue #479: the console's own state, which had no
+// execution-model assertion until scripts/check_execution_model_coverage.py
+// asked every file with state for one.
+//
+// Two cores logging interleave, and not only inside the ring:
+// kernel_boot_log is begin_fragment followed by uart_puts, so a second core
+// entering between them splits one line across two. Every view in this
+// kernel compares text, so that is not a cosmetic failure -- it is every
+// text-comparing test at once, reported as a diff nobody can attribute.
+//
+// The ring underneath has the shape of every other: kernel_log_count,
+// _oldest, _overwritten and _active_slot are a read-modify-write set and
+// the text array is indexed from them.
+//
+// Not locked here, and the reason is a real question rather than a
+// deferral. A lock around logging is held across a UART write, which is
+// slow and is reached from fail-stop and DDB paths where the other core may
+// already be wedged -- a console that can block on a lock is a console that
+// cannot report the deadlock it is in. kernel/lib/diagnostic_ring.tkb
+// exists because of exactly that constraint and answers it with per-CPU
+// rings and atomic publication (issue #299) rather than with exclusion.
+// Whether the console follows it is the decision this assertion holds open.
+fn kernel_log_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "two cores logging split one line across two, and every view in this kernel compares text");
 }
