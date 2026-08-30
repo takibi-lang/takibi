@@ -283,7 +283,38 @@ fn process_image_record_release(root: usize) !{unsafe} {
     }
 }
 
-private let mut process_image_target_root: usize = 0;
+// GitHub issue #479: which root an image operation is aimed at, set when
+// one begins and cleared when it ends -- so it is PER-OPERATION state, and
+// on two cores that means per-core. A single global held one answer for
+// two concurrent operations, and each would overwrite the other's target
+// between the set and the read.
+//
+// This variable has already produced a real fault on one core. Issue
+// #437's RPi5-only failure was it left at 0 on wait4's fast path, aiming
+// the COW handler at PID 1's live image -- and that took a hardware bisect
+// to find, with only one writer. Two writers would reach the same class of
+// wrong root without needing the fast path's help.
+//
+// An array indexed by cpu_id(), sized by KERNEL_MAX_CORES, the same shape
+// execution_state and address_space_active_slot have. Not a lock: the
+// state is not shared, it is per-core state that was stored as though it
+// were global, and making two cores agree on it would be agreeing on the
+// wrong thing.
+private let mut process_image_target_root: [usize; KERNEL_MAX_CORES];
+
+private fn process_image_target_root_here() -> usize {
+    let base: *usize = process_image_target_root;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return *base; }
+    return *(base + (core as isize));
+}
+
+private fn process_image_set_target_root_here(root: usize) {
+    let base: *usize = process_image_target_root;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { *base = root; return; }
+    *(base + (core as isize)) = root;
+}
 
 // GitHub issue #392: a root is a process slot, and a process slot is a
 // pool address now, so there is no range to narrow it into. The question
@@ -302,10 +333,10 @@ fn process_image_root_fallback_uses() -> usize {
 }
 
 fn process_image_root_index() -> usize !{unsafe} {
-    if (scheduled_process_slot_valid(process_image_target_root)) {
-        return process_image_target_root;
+    if (scheduled_process_slot_valid(process_image_target_root_here())) {
+        return process_image_target_root_here();
     }
-    if (process_image_target_root != 0) {
+    if (process_image_target_root_here() != 0) {
         process_image_root_fallback_count =
             process_image_root_fallback_count + 1;
     }
@@ -313,20 +344,20 @@ fn process_image_root_index() -> usize !{unsafe} {
 }
 
 fn process_image_pte_read(index: usize) -> usize {
-    return address_space_pte_read(process_image_target_root, index);
+    return address_space_pte_read(process_image_target_root_here(), index);
 }
 
 fn process_image_pte_write(index: usize, value: usize)
         -> AddressSpacePteWriteResult {
-    return address_space_pte_write(process_image_target_root, index, value);
+    return address_space_pte_write(process_image_target_root_here(), index, value);
 }
 
 fn process_image_pte_clear(index: usize) {
-    address_space_pte_clear(process_image_target_root, index);
+    address_space_pte_clear(process_image_target_root_here(), index);
 }
 
 fn process_image_pte_invalidate(index: usize) {
-    address_space_tlb_invalidate(process_image_target_root,
+    address_space_tlb_invalidate(process_image_target_root_here(),
                                  USER_TEXT_VA + index * PAGE_SIZE);
 }
 
@@ -336,7 +367,7 @@ fn process_image_pte_invalidate(index: usize) {
 fn process_image_install_page(page: sink PageOwner[page_id],
                               index: usize, flags: usize) -> bool {
     match address_space_map_page(
-            process_image_target_root, index, page, flags) {
+            process_image_target_root_here(), index, page, flags) {
         AddressSpacePteWriteResult::Invalid => {
             return false;
         }
@@ -465,13 +496,13 @@ fn process_image_narrow_root(value: usize) -> usize !{unsafe} {
 
 fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsafe} {
     if (scheduled_process_slot_valid(dest_root) == false ||
-        dest_root == process_image_target_root ||
+        dest_root == process_image_target_root_here() ||
         address_space_is_live(dest_root) == false) {
         return ProcessCloneVmResult::OutOfMemory;
     }
     let dest: usize =
         process_image_narrow_root(dest_root);
-    let source: usize = process_image_target_root;
+    let source: usize = process_image_target_root_here();
     // GitHub issue #448: a clone already owed back on this root would be
     // leaked by overwriting its bookkeeping. It cannot happen (a root
     // belongs to one process, and that process cannot fork into itself),
@@ -612,7 +643,7 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
 // numbers.
 fn process_image_activate_root(root: usize) {
     if (scheduled_process_slot_valid(root) == false) { return; }
-    process_image_target_root = root;
+    process_image_set_target_root_here(root);
     address_space_activate_root(root);
     kernel_process_trace_address_space_activate(root);
 }
@@ -658,7 +689,7 @@ fn process_image_clone_vm_reaped_pages() -> usize {
 // support stack growth at all), and the pinned Alpine BusyBox binary's
 // recursion depth is not something this test controls.
 fn process_image_clone_growth_probe() -> bool !{unsafe} {
-    process_image_target_root = 0;
+    process_image_set_target_root_here(0);
     // GitHub issue #392: the child root is a live process's record now,
     // not the bare number 1 -- see
     // scheduled_process_probe_slot_acquire for why a probe has to be a
@@ -921,7 +952,7 @@ fn process_image_exec_reap_evidence() -> (usize, usize, usize) {
 fn process_image_exec_teardown(root_index: usize) {
     if (scheduled_process_slot_valid(root_index)) {
         let root: usize = root_index;
-        process_image_target_root = root;
+        process_image_set_target_root_here(root);
         // Take before acting, so an image is reaped once even though what
         // says it exists is now a bool rather than a linear value.
         let installed: bool =
@@ -945,7 +976,7 @@ fn process_image_exec_teardown(root_index: usize) {
                     process_image_exec_reap_clean_count + 1;
             }
         }
-        process_image_target_root = 0;
+        process_image_set_target_root_here(0);
     }
 }
 
@@ -1368,7 +1399,7 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
             return false;
         }
         let index: usize = (fault_address - USER_TEXT_VA) / PAGE_SIZE;
-        return address_space_resolve_cow(process_image_target_root, index);
+        return address_space_resolve_cow(process_image_target_root_here(), index);
     }
     // A missing PTE inside an existing L3 is a level-3 translation fault
     // (0x07). A stack expansion into an unpopulated lazy-L3 branch faults
@@ -1427,7 +1458,7 @@ fn process_image_unmap_pages(count: usize) {
         process_image_record_at(root).stack_lowest_l3 = process_stack_top_page();
     }
     process_image_cleanup();
-    process_image_target_root = 0;
+    process_image_set_target_root_here(0);
 }
 
 fn process_image_unmap(pages: sink ProcessImagePages[image]) {
@@ -1700,7 +1731,7 @@ fn process_image_pair_map_in_root(primary: DistroElfLoadPlan,
         address_space_is_live(root) == false) {
         return ProcessImagePairProbeResult::Invalid;
     }
-    process_image_target_root = root;
+    process_image_set_target_root_here(root);
     return process_image_pair_probe(
         primary, interpreter, interpreter_bias, argv, argc);
 }
@@ -1726,7 +1757,7 @@ fn process_image_pair_map_ext2_in_root(
         address_space_is_live(root) == false) {
         return ProcessImagePairProbeResult::Invalid;
     }
-    process_image_target_root = root;
+    process_image_set_target_root_here(root);
     process_image_ext2_source(
         primary_mount, primary_inode, primary_length);
     process_image_pair_ext2_source(
@@ -1836,7 +1867,7 @@ fn process_image_map_current(plan: DistroElfLoadPlan,
 fn process_image_map(plan: DistroElfLoadPlan,
                      argv: []u8,
                      argc: usize) -> ProcessImageMapResult {
-    process_image_target_root = 0;
+    process_image_set_target_root_here(0);
     return process_image_map_current(plan, argv, argc);
 }
 
@@ -1850,7 +1881,7 @@ fn process_image_map_ext2(plan: DistroElfLoadPlan,
                           file_length: usize,
                           argv: []u8,
                           argc: usize) -> ProcessImageMapResult {
-    process_image_target_root = 0;
+    process_image_set_target_root_here(0);
     process_image_ext2_source(mount, inode, file_length);
     let result = process_image_map_current(plan, argv, argc);
     process_image_ext2_source_clear();
@@ -1868,7 +1899,7 @@ fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
         address_space_is_live(root) == false) {
         return ProcessImageMapResult::InvalidImage;
     }
-    process_image_target_root = root;
+    process_image_set_target_root_here(root);
     process_image_ext2_source(mount, inode, file_length);
     let result = process_image_map_current(plan, argv, argc);
     process_image_ext2_source_clear();
@@ -1883,7 +1914,7 @@ fn process_image_map_in_root(plan: DistroElfLoadPlan,
         address_space_is_live(root) == false) {
         return ProcessImageMapResult::InvalidImage;
     }
-    process_image_target_root = root;
+    process_image_set_target_root_here(root);
     return process_image_map_current(plan, argv, argc);
 }
 
@@ -1935,14 +1966,17 @@ fn process_image_gap_is_unmapped() -> bool {
 
 // GitHub issue #479. Twenty globals, and they fall into three kinds.
 //
-// ONE IS THE WRONG SHAPE, not merely unlocked. process_image_target_root
-// names the root a COW fault should be resolved against, set by one call
-// and read by another -- so it is per-OPERATION state living in a global,
-// and on two cores it is per-CORE state living in one word. That variable
-// has already produced a real fault once: issue #437's RPi5-only failure
-// was target_root left at 0 on wait4's fast path, aiming the COW handler at
-// PID 1's live image. It cost a hardware bisect on ONE core; two would make
-// the same class of bug arrive without the fast path's help.
+// ONE WAS THE WRONG SHAPE and is fixed. process_image_target_root names
+// the root an image operation is aimed at, set by one call and read by
+// another -- per-OPERATION state living in a global, which on two cores
+// means one answer held for two concurrent operations. It is an array
+// indexed by cpu_id() now, the same treatment execution_state and
+// address_space_active_slot got.
+//
+// It had already produced a real fault with only one writer: issue #437's
+// RPi5-only failure was this variable left at 0 on wait4's fast path,
+// aiming the COW handler at PID 1's live image, and that took a hardware
+// bisect to find.
 //
 // SIX ARE SHARED STAGING for an exec's ext2 source
 // (process_image_ext2_active/_mount/_inode/_length/_block and the _pair_
@@ -1954,5 +1988,5 @@ fn process_image_gap_is_unmapped() -> bool {
 // flag, the missing-record fallback, and counters.
 fn process_image_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "process_image_target_root is per-operation state in a global, and the ext2 exec staging is shared");
+                  "the ext2 exec staging is shared: two cores exec'ing at once each stage over the other");
 }
