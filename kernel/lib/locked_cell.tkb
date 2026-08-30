@@ -1,0 +1,138 @@
+// GitHub issue #452: a value that cannot be reached without its lock.
+//
+// THE PROBLEM THIS EXISTS FOR
+//
+// Issue #479's Group A added five locks in one session, and every one of
+// them expressed what it protects in a comment:
+//
+//     private let mut asid_next: usize = 1;
+//     private let mut asid_lock: Mutex;      // protects asid_next
+//
+// The compiler does not know those two lines are related. A new call site
+// that reads asid_next without acquiring asid_lock compiles, and nothing
+// in this repository says anything. On one core that comment was true and
+// unfalsifiable in the same breath, because nothing else could be
+// running; as of issue #447 a second core takes interrupts, and issue
+// #479's Group B runs a process there, at which point "the caller holds
+// the lock" stops being a property of the machine and becomes a property
+// of each call site -- which is what a comment is worst at carrying.
+//
+// WHAT THIS CHANGES
+//
+// The value moves INSIDE a struct whose field is private to this file, so
+// no other file can name it at all. The only way to obtain a pointer to
+// it is locked_cell_value, which needs a `borrow LockedCellGuard[id]`,
+// and the only way to obtain one of those is locked_cell_take on THAT
+// cell. Three separate compile errors follow, none of which needed a
+// convention:
+//
+//   - reaching the value with no guard is a missing argument;
+//   - reaching it with ANOTHER cell's guard is a static value mismatch,
+//     because `[cell: addr]` carries the identity of the cell that minted
+//     it (issue #351's mechanism, unchanged);
+//   - using the returned pointer after locked_cell_give is "pointer 'v'
+//     is derived from linear value 'g' and cannot be used after 'g' is
+//     consumed", which is the half a `private` marker alone never gave.
+//
+// And forgetting to release is a compile error on every path including
+// early returns, because the guard is linear.
+//
+// WHY THE VALUE IS THE FIRST FIELD
+//
+// Deliberate, and it is the one layout decision here. Issue #479 lost an
+// RPi5 boot to this twice: an 8-byte lock word at the FRONT of an
+// `align(16)` aggregate shifts every array behind it to 8-mod-16, and
+// LLVM may then emit a 128-bit store that the MMU-off window cannot use.
+// The convention that came out of that was "the lock goes in its own
+// global, never as a field". With `value` at offset 0 the cell inherits
+// T's own alignment and T's interior is laid out exactly as it would be
+// standalone, so wrapping an aligned aggregate is safe and that
+// convention does not have to be re-litigated per call site.
+// `--emit-struct-layout` is how to check it for a given T.
+//
+// WHY NOT pool_lock_acquire
+//
+// The same reason kernel/lib/intrusive_pool.tkb's tag counter gives: a
+// tag registers the acquire in linux_user's lock-ORDER table, that table
+// is finite, and a cell is not a pool. Putting non-pools in it pushed
+// real pool acquires out as "untracked" once already.
+//
+// Current limitations (2026-08-30). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none, since it
+// invites relying on a guarantee that quietly stopped holding.
+// - IT PROVES THE DISCIPLINE, NOT THE ASSIGNMENT. That the value in this
+//   cell is the data this lock is supposed to protect is still a module
+//   obligation -- the same caveat kernel/net/tcp.tkb's retx_retry_state
+//   carries, and SPEC.md states it under "Guard-derived pointers". What
+//   is machine-checked is that nobody reaches the value without holding
+//   the guard, and that no path forgets to give it back.
+// - ONE VALUE, ONE LOCK. Two cells are two locks. A critical section
+//   spanning two cells takes two guards and therefore has an ORDER,
+//   which nothing here checks (issue #466). Prefer one cell holding a
+//   struct of everything the lock covers -- that is the shape
+//   kernel/arch/arm64/mm/asid.tkb uses.
+// - NO READER/WRITER DISTINCTION. locked_cell_value hands out a mutable
+//   `*T`; a read-only holder gets the same exclusion a writer does.
+// - locked_cell_value_boot IS AN ESCAPE HATCH and is `!{unsafe}` so that
+//   every use is visible in the trusted-base inventory. It exists for the
+//   MMU-off window, where a lock cannot be taken at all (spin_lock is
+//   `!{requires_mmu}`: AArch64 has no exclusives on Device-typed memory)
+//   and does not need to be, since that code runs before PSCI has been
+//   asked for a second core. Nothing checks that a caller is really in
+//   that window.
+// - THE GUARD IS 8 STACK BYTES while held, carrying the interrupt state
+//   the release must restore -- issue #451's `flags`, which is where
+//   Linux's `unsigned long flags` lives too.
+use "kernel/lib/mutex.tkb";
+
+generic struct LockedCell(T: type) {
+    // First, on purpose. See "WHY THE VALUE IS THE FIRST FIELD" above.
+    private value: T;
+    private lock: Mutex;
+}
+
+// Private: only this file may mint one, which is what makes "you hold a
+// guard" mean "you called locked_cell_take". `[cell: addr]` is the
+// identity of the cell it came from.
+private linear struct LockedCellGuard[cell: addr] {
+    private flags: usize;
+}
+
+// Acquires this cell. No mutex_init is needed or wanted for a cell in a
+// global: .bss is zeroed and a zeroed word is SPIN_LOCK_FREE, and
+// mutex_init FORCE-FREES, which on two cores releases a lock somebody
+// else is holding. kernel/lib/mutex.tkb has the whole argument, and
+// scripts/check_lock_discipline.py makes forgetting it a build failure.
+fn locked_cell_take(T: type, cell: &mut LockedCell(T) @ id)
+        -> LockedCellGuard[id] {
+    let mut g: LockedCellGuard[id] = { mutex_acquire(&(*cell).lock) };
+    return g;
+}
+
+// Linear, so forgetting this is a compile error on every path.
+fn locked_cell_give(T: type, cell: &mut LockedCell(T) @ id,
+                    g: sink LockedCellGuard[id]) {
+    mutex_release(&(*cell).lock, g.flags);
+}
+
+// The only way to reach the value. The returned pointer dies with the
+// guard.
+fn locked_cell_value(T: type, g: borrow LockedCellGuard[id],
+                     cell: &mut LockedCell(T) @ id) -> *T @ id {
+    return &(*cell).value;
+}
+
+// Observability, and public for the same reason spin_lock_is_held is: a
+// lock that never actually took would pass a take/give smoke test and
+// fail this. linux_user/locked_cell is the caller.
+fn locked_cell_is_held(T: type, cell: &mut LockedCell(T) @ id)
+        -> bool !{unsafe} {
+    return mutex_is_held(&(*cell).lock);
+}
+
+// The MMU-off window's way in, and the only one. See the limitation above
+// for why it is `unsafe` rather than merely documented.
+fn locked_cell_value_boot(T: type, cell: &mut LockedCell(T) @ id)
+        -> *T @ id !{unsafe} {
+    return &(*cell).value;
+}

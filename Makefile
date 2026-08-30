@@ -181,7 +181,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair \
                              field_lease match_int_lit \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock diagnostic_ring publish fdt number
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
@@ -250,6 +250,13 @@ $(LINUX_USER_DIR)/fdt/fdt_exe.o: LINUX_USER_EXTRA_SRCS := kernel/boot/fdt.tkb
 # note below for why that distinction is the point.
 $(LINUX_USER_DIR)/spinlock/spinlock_exe.o: kernel/lib/spinlock.tkb kernel/lib/task_mutex.tkb
 $(LINUX_USER_DIR)/spinlock/spinlock_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/spinlock.tkb kernel/lib/task_mutex.tkb
+
+# GitHub issue #452: kernel/lib/locked_cell.tkb, the container whose value
+# cannot be named without its guard. It needs the same stand-ins the pool
+# prototypes take -- spinlock for the exchange, pool_lock_check for the
+# mutex_irq_save/_restore pair a hosted build has no interrupts to mask.
+$(LINUX_USER_DIR)/locked_cell/locked_cell_exe.o: kernel/lib/spinlock.tkb kernel/lib/mutex.tkb kernel/lib/locked_cell.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
+$(LINUX_USER_DIR)/locked_cell/locked_cell_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 
 # GitHub issue #217 (2026-08-15) closed the array-field-decay gap this
 # comment used to describe for the four targets below: FreelistCore(N)'s

@@ -1,0 +1,82 @@
+// GitHub issue #452: kernel/lib/locked_cell.tkb, exercised where a test
+// costs seconds instead of a QEMU boot. The same source the kernel links,
+// not a copy.
+//
+// One thread, on purpose -- see linux_user/spinlock's header for why that
+// is not a limitation of the tier but a statement of what it can show.
+// What ONE thread demonstrates here is the part a two-core probe cannot:
+// that the accessor addresses the real storage, that give really releases,
+// and that two cells are two locks rather than one shared word.
+//
+// The compile-time half of this file's guarantee is NOT here: "using the
+// value pointer after the guard is consumed is rejected" and "another
+// cell's guard is rejected" are questions about whether something FAILS to
+// compile, which is test/test_takibi.ml's tier.
+//
+// Expected output (linux_user/locked_cell/locked_cell.expected):
+//   0x00000000   a fresh cell is not held
+//   0x00000001   ... and take really takes it
+//   0x00000000   the value starts at zero
+//   0x0000002a   the accessor writes through to the real storage
+//   0x00000000   give really releases
+//   0x00000001   a second take succeeds, so the first give was real
+//   0x0000002a   ... and the value survived it, so it lives in the cell
+//   0x00000000   cell b is untouched while cell a is held
+//   0x00000001   ... and b takes independently
+//   0x00000001   ... with a still held: two cells, two lock words
+//   0x00000063   b's value is b's own
+//   0x0000002a   ... and a's is still a's
+
+use "kernel/lib/locked_cell.tkb";
+
+let mut cell_a: LockedCell(usize);
+let mut cell_b: LockedCell(usize);
+
+fn report(flag: bool) {
+    if (flag) { uart_println_hex(1); } else { uart_println_hex(0); }
+}
+
+fn locked_cell_roundtrip() -> i32 !{unsafe} {
+    report(locked_cell_is_held(&cell_a));
+
+    let ga = locked_cell_take(&cell_a);
+    report(locked_cell_is_held(&cell_a));
+
+    let va = locked_cell_value(ga, &cell_a);
+    uart_println_hex(*va as i32);
+    *va = 42;
+    uart_println_hex(*va as i32);
+
+    locked_cell_give(&cell_a, ga);
+    report(locked_cell_is_held(&cell_a));
+
+    // The value must be in the cell, not in the guard: reading it through
+    // a SECOND acquisition is what proves the accessor was not handing
+    // back a copy.
+    let ga2 = locked_cell_take(&cell_a);
+    report(locked_cell_is_held(&cell_a));
+    let va2 = locked_cell_value(ga2, &cell_a);
+    uart_println_hex(*va2 as i32);
+
+    // Cell a is held right now. If both cells shared one lock word -- the
+    // failure a `generic struct` makes easy to write by accident, since
+    // one template becomes many instances -- b would read as held here.
+    report(locked_cell_is_held(&cell_b));
+
+    let gb = locked_cell_take(&cell_b);
+    report(locked_cell_is_held(&cell_b));
+    report(locked_cell_is_held(&cell_a));
+
+    let vb = locked_cell_value(gb, &cell_b);
+    *vb = 99;
+    uart_println_hex(*vb as i32);
+    uart_println_hex(*va2 as i32);
+
+    locked_cell_give(&cell_b, gb);
+    locked_cell_give(&cell_a, ga2);
+    return 0;
+}
+
+fn app_main() -> i32 !{unsafe} {
+    return locked_cell_roundtrip();
+}
