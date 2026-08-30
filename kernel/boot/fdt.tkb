@@ -48,9 +48,20 @@ must_use variant FdtMemoryRegionResult {
 struct FdtDeviceRegion {
     base: usize;
     size: usize;
+    private dtb: usize;
+    private reg_offset: usize;
+    private reg_length: usize;
+    private address_cells: usize;
+    private size_cells: usize;
+    private direct_root_child: bool;
     private interrupt_parent: usize;
     private interrupts_offset: usize;
     private interrupts_length: usize;
+}
+
+struct FdtGicV2Regions {
+    distributor: FdtDeviceRegion;
+    cpu_interface: FdtDeviceRegion;
 }
 
 struct FdtGicInterrupt {
@@ -72,6 +83,12 @@ must_use variant FdtGicInterruptResult {
     Invalid;
     NotFound;
     Found(FdtGicInterrupt);
+}
+
+must_use variant FdtGicV2RegionsResult {
+    Invalid;
+    NotFound;
+    Found(FdtGicV2Regions);
 }
 
 struct FdtScanMemory {
@@ -705,7 +722,8 @@ fn fdt_find_compatible_reg(base: usize, compatible: []u8)
                 candidate_interrupt_parent = root_interrupt_parent;
                 candidate_interrupts_offset = 0;
                 candidate_interrupts_length = 0;
-            } else if (depth == 3 && bus_depth == 2) {
+            } else if (depth == 3 && bus_depth == 2 &&
+                       candidate_compatible == false) {
                 candidate_depth = depth;
                 candidate_enabled = true;
                 candidate_compatible = false;
@@ -747,6 +765,9 @@ fn fdt_find_compatible_reg(base: usize, compatible: []u8)
                     if (depth == 2) {
                         let mut region: FdtDeviceRegion = {
                             child_base, child_size,
+                            base, candidate_reg_offset,
+                            candidate_reg_length, address_cells, size_cells,
+                            true,
                             candidate_interrupt_parent,
                             candidate_interrupts_offset,
                             candidate_interrupts_length
@@ -761,6 +782,9 @@ fn fdt_find_compatible_reg(base: usize, compatible: []u8)
                     if (bus_ranges_length == 0) {
                         let mut region: FdtDeviceRegion = {
                             child_base, child_size,
+                            base, candidate_reg_offset,
+                            candidate_reg_length, address_cells, size_cells,
+                            false,
                             candidate_interrupt_parent,
                             candidate_interrupts_offset,
                             candidate_interrupts_length
@@ -803,6 +827,9 @@ fn fdt_find_compatible_reg(base: usize, compatible: []u8)
                                 (child_base - child_bus_base);
                             let mut region: FdtDeviceRegion = {
                                 translated, child_size,
+                                base, candidate_reg_offset,
+                                candidate_reg_length, address_cells,
+                                size_cells, false,
                                 candidate_interrupt_parent,
                                 candidate_interrupts_offset,
                                 candidate_interrupts_length
@@ -891,6 +918,61 @@ fn fdt_find_compatible_reg(base: usize, compatible: []u8)
         }
     }
     return FdtDeviceRegionResult::Invalid;
+}
+
+fn fdt_find_compatible_gicv2_regions(base: usize, compatible: []u8)
+        -> FdtGicV2RegionsResult !{unsafe} {
+    match fdt_find_compatible_reg(base, compatible) {
+        FdtDeviceRegionResult::Invalid => {
+            return FdtGicV2RegionsResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            return FdtGicV2RegionsResult::NotFound;
+        }
+        FdtDeviceRegionResult::Found(first) => {
+            // QEMU's current GICv2 binding is a root child with exactly two
+            // 64-bit address/size tuples: distributor, then CPU interface.
+            // Keep this API at that concrete driver contract; recursively
+            // translated or differently shaped controllers are not needed.
+            if (first.direct_root_child == false ||
+                first.address_cells != 2 || first.size_cells != 2 ||
+                first.reg_length != 32) {
+                return FdtGicV2RegionsResult::Invalid;
+            }
+            let total: usize = fdt_read_be32(
+                first.dtb, FDT_HEADER_SIZE, 4);
+            let distributor_base: usize = fdt_cells_value(
+                first.dtb, total, first.reg_offset, 2);
+            let distributor_size: usize = fdt_cells_value(
+                first.dtb, total, first.reg_offset + 8, 2);
+            let cpu_base: usize = fdt_cells_value(
+                first.dtb, total, first.reg_offset + 16, 2);
+            let cpu_size: usize = fdt_cells_value(
+                first.dtb, total, first.reg_offset + 24, 2);
+            if (distributor_size == 0 || cpu_size == 0 ||
+                distributor_base >
+                    0xFFFFFFFFFFFFFFFF - distributor_size ||
+                cpu_base > 0xFFFFFFFFFFFFFFFF - cpu_size ||
+                first.base != distributor_base ||
+                first.size != distributor_size) {
+                return FdtGicV2RegionsResult::Invalid;
+            }
+            let mut distributor: FdtDeviceRegion = {
+                distributor_base, distributor_size,
+                first.dtb, first.reg_offset, 16, 2, 2, true,
+                0, 0, 0
+            };
+            let mut cpu_interface: FdtDeviceRegion = {
+                cpu_base, cpu_size,
+                first.dtb, first.reg_offset + 16, 16, 2, 2, true,
+                0, 0, 0
+            };
+            let mut regions: FdtGicV2Regions = {
+                distributor, cpu_interface
+            };
+            return FdtGicV2RegionsResult::Found(regions);
+        }
+    }
 }
 
 private fn fdt_find_interrupt_controller(base: usize, wanted_phandle: usize)

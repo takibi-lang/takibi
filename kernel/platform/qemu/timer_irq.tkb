@@ -15,7 +15,9 @@ fn timer_tick_rearm() {
 }
 
 fn gic_timer_ppi_enable() !{unsafe} {
-    let gicd_isenabler0: *io u32 = unsafe { 0x08000100 as *io u32 };
+    let gicd_isenabler0: *io u32 = unsafe {
+        (qemu_gicd_base + 0x100) as *io u32
+    };
     *gicd_isenabler0 = *gicd_isenabler0 | (1 << 30);
 }
 

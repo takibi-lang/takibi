@@ -8,6 +8,8 @@ qemu pl011 interrupt intid 0x00000021 flags 0x00000004
 missing interrupt not found
 invalid interrupt invalid
 missing interrupt property not found
+qemu gic distributor 0x00000000 0x08000000 cpu 0x00000000 0x08010000
+invalid gic invalid
 memory regions 0x00000005
 memory reservations 0x00000005
 memory base 0x00000000 0x00000000

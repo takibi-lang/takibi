@@ -119,44 +119,65 @@ fn uart_init() !{unsafe} {
     *uart_cr = (1 << 0) | (1 << 8) | (1 << 9); // UARTEN | TXE | RXE
 }
 
-must_use variant QemuUartDtbResult {
+must_use variant QemuBootDevicesResult {
     Invalid;
     Missing;
     Applied;
 }
 
-fn qemu_uart_apply_boot_dtb() -> QemuUartDtbResult !{unsafe} {
+fn qemu_boot_devices_apply_dtb() -> QemuBootDevicesResult !{unsafe} {
     let dtb: usize = boot_dtb_address_read();
     match fdt_find_compatible_reg(dtb, bs"arm,pl011") {
         FdtDeviceRegionResult::Invalid => {
-            return QemuUartDtbResult::Invalid;
+            return QemuBootDevicesResult::Invalid;
         }
         FdtDeviceRegionResult::NotFound => {
-            return QemuUartDtbResult::Missing;
+            return QemuBootDevicesResult::Missing;
         }
         FdtDeviceRegionResult::Found(region) => {
             if (region.size < 0x48 ||
                 region.base > 0xFFFFFFFFFFFFFFFF - 0x44) {
-                return QemuUartDtbResult::Invalid;
+                return QemuBootDevicesResult::Invalid;
             }
             match fdt_find_compatible_gic_interrupt(dtb, bs"arm,pl011") {
                 FdtGicInterruptResult::Invalid => {
-                    return QemuUartDtbResult::Invalid;
+                    return QemuBootDevicesResult::Invalid;
                 }
                 FdtGicInterruptResult::NotFound => {
-                    return QemuUartDtbResult::Missing;
+                    return QemuBootDevicesResult::Missing;
                 }
                 FdtGicInterruptResult::Found(interrupt) => {
                     // Compare against the route that was already exercised
                     // by QEMU before replacing its constant. The current
                     // driver is level-high SPI #1, architectural INTID 33.
                     if (interrupt.intid != 33 || interrupt.flags != 4) {
-                        return QemuUartDtbResult::Invalid;
+                        return QemuBootDevicesResult::Invalid;
                     }
-                    uart_base = region.base;
-                    qemu_uart_gic_intid = interrupt.intid as u32;
-                    uart_init();
-                    return QemuUartDtbResult::Applied;
+                    match fdt_find_compatible_gicv2_regions(
+                            dtb, bs"arm,cortex-a15-gic") {
+                        FdtGicV2RegionsResult::Invalid => {
+                            return QemuBootDevicesResult::Invalid;
+                        }
+                        FdtGicV2RegionsResult::NotFound => {
+                            return QemuBootDevicesResult::Missing;
+                        }
+                        FdtGicV2RegionsResult::Found(gic) => {
+                            // Preserve an explicit comparison with the
+                            // working route before replacing its constants.
+                            if (gic.distributor.base != 0x08000000 ||
+                                gic.cpu_interface.base != 0x08010000 ||
+                                gic.distributor.size < 0x824 ||
+                                gic.cpu_interface.size < 0x14) {
+                                return QemuBootDevicesResult::Invalid;
+                            }
+                            uart_base = region.base;
+                            qemu_uart_gic_intid = interrupt.intid as u32;
+                            qemu_gicd_base = gic.distributor.base;
+                            qemu_gicc_base = gic.cpu_interface.base;
+                            uart_init();
+                            return QemuBootDevicesResult::Applied;
+                        }
+                    }
                 }
             }
         }

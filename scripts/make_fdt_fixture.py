@@ -96,12 +96,13 @@ def main():
     valid_modes = ("--invalid-memory", "--invalid-reservation",
                    "--invalid-tree-reservation", "--invalid-device",
                    "--invalid-interrupt", "--missing-interrupt")
+    valid_modes = valid_modes + ("--invalid-gic",)
     if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and
                                      sys.argv[2] not in valid_modes):
         print("usage: make_fdt_fixture.py OUTPUT "
               "[--invalid-memory|--invalid-reservation|"
               "--invalid-tree-reservation|--invalid-device|"
-              "--invalid-interrupt|--missing-interrupt]",
+              "--invalid-interrupt|--missing-interrupt|--invalid-gic]",
               file=sys.stderr)
         return 2
     mode = sys.argv[2] if len(sys.argv) == 3 else ""
@@ -142,8 +143,15 @@ def main():
     b.prop("interrupt-controller", b"")
     b.prop("phandle", b.cells(0x8003))
     b.prop("compatible", b"arm,cortex-a15-gic\0")
-    b.prop("reg", b.cells(0, 0x08000000, 0, 0x10000,
-                          0, 0x08010000, 0, 0x10000))
+    if mode == "--invalid-gic":
+        b.prop("reg", b.cells(0, 0x08000000, 0, 0x10000))
+    else:
+        b.prop("reg", b.cells(0, 0x08000000, 0, 0x10000,
+                              0, 0x08010000, 0, 0x10000))
+    b.begin("v2m@8020000")
+    b.prop("compatible", b"arm,gic-v2m-frame\0")
+    b.prop("reg", b.cells(0, 0x08020000, 0, 0x1000))
+    b.end()
     b.end()
 
     b.begin("memory@0")

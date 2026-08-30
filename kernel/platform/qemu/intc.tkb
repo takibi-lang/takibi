@@ -2,7 +2,7 @@
 // GIC SPI dispatch, unlike kernel/platform/rpi5/intc.tkb's three-level
 // GIC->MIP0->RP1-MSI-X routing (QEMU's virtio-mmio/PL011 devices are
 // ordinary GIC SPIs with no companion-chip indirection to model). Register
-// bootstrap addresses match examples/common_qemu/gic.tkb and gic_regs.tkb
+// previously working addresses match examples/common_qemu/gic.tkb and gic_regs.tkb
 // exactly (hardware-proven by that tree's own bare-metal examples): GICD at
 // 0x08000000 and GICC at 0x08010000. The PL011 route is decoded from the boot
 // DTB after comparison with the previously working SPI #1 (INTID 33).
@@ -25,17 +25,19 @@ use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/arch/arm64/boot/cpu.tkb";
 
 let mut qemu_uart_gic_intid: u32 = 33; // bootstrap route until DTB comparison
+let mut qemu_gicd_base: usize = 0;
+let mut qemu_gicc_base: usize = 0;
 
 fn gic_uart_spi_setup() !{unsafe} {
     let enable_index: u32 = qemu_uart_gic_intid / 32;
     let enable_bit: u32 = qemu_uart_gic_intid % 32;
     let gicd_isenabler: *io u32 = unsafe {
-        (0x08000100 + (enable_index as usize) * 4) as *io u32
+        (qemu_gicd_base + 0x100 + (enable_index as usize) * 4) as *io u32
     };
     let gicd_itargetsr: *io u8 = unsafe {
-        (0x08000800 + qemu_uart_gic_intid as usize) as *io u8
+        (qemu_gicd_base + 0x800 + (qemu_uart_gic_intid as usize)) as *io u8
     };
-    let gicd_ctlr: *io u32 = unsafe { 0x08000000 as *io u32 };
+    let gicd_ctlr: *io u32 = unsafe { qemu_gicd_base as *io u32 };
 
     *gicd_itargetsr = 1; // route the discovered UART SPI to CPU0
     *gicd_isenabler = *gicd_isenabler | (1 << enable_bit);
@@ -51,8 +53,8 @@ fn gic_uart_spi_setup() !{unsafe} {
 // That is why core 1 could take no interrupt before this existed, not
 // anything about the distributor being unconfigured.
 fn platform_irq_cpu_interface_init() !{unsafe} {
-    let gicc_ctlr: *io u32 = unsafe { 0x08010000 as *io u32 };
-    let gicc_pmr: *io u32 = unsafe { 0x08010004 as *io u32 };
+    let gicc_ctlr: *io u32 = unsafe { qemu_gicc_base as *io u32 };
+    let gicc_pmr: *io u32 = unsafe { (qemu_gicc_base + 4) as *io u32 };
     *gicc_pmr = 0xFF;
     *gicc_ctlr = *gicc_ctlr | 1;
 }
@@ -77,8 +79,8 @@ fn irq_uart_rx_unmask() !{unsafe} {
 
 fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         -> usize !{interrupt, unsafe} {
-    let gicc_iar: *io u32 = unsafe { 0x0801000C as *io u32 };
-    let gicc_eoir: *io u32 = unsafe { 0x08010010 as *io u32 };
+    let gicc_iar: *io u32 = unsafe { (qemu_gicc_base + 0x0C) as *io u32 };
+    let gicc_eoir: *io u32 = unsafe { (qemu_gicc_base + 0x10) as *io u32 };
     let id: u32 = *gicc_iar;
 
     // GitHub issue #447: the secondary core takes its own timer tick and
