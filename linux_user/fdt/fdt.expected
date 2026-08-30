@@ -2,6 +2,9 @@ qemu pl011 base 0x00000000 0x09000000
 size 0x00000000 0x00001000
 rpi5 system timer base 0x00000010 0x7c003000
 size 0x00000000 0x00001000
+rpi5 rp1 uart base 0x0000001f 0x00030000
+size 0x00000000 0x00000100
+invalid pcie ranges invalid
 missing device not found
 invalid device invalid
 qemu pl011 interrupt intid 0x00000021 flags 0x00000004

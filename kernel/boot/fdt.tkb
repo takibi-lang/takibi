@@ -70,9 +70,10 @@ struct FdtGicInterrupt {
 }
 
 // Deliberately narrow device lookup for the drivers being migrated from
-// constants. It accepts a root child (QEMU virt's PL011) or one simple-bus
-// bus with one ranges property (the first RPi5 SoC-direct device). It is not
-// a general path, phandle, or recursively translated device-tree framework.
+// constants. It accepts a root child (QEMU virt's PL011), one simple-bus
+// translation (an RPi5 SoC-direct device), or the concrete
+// root/axi/PCIe/RP1/device path used by the current RPi5 UART. It is not a
+// general path, phandle, or recursively translated device-tree framework.
 must_use variant FdtDeviceRegionResult {
     Invalid;
     NotFound;
@@ -645,7 +646,8 @@ private fn fdt_scan_tree_reservations(base: usize, wanted: usize)
     return FdtReservationScanResult::Invalid;
 }
 
-fn fdt_find_compatible_reg(base: usize, compatible: []u8)
+private fn fdt_find_compatible_reg_bounded(
+        base: usize, compatible: []u8, pcie_nested_only: bool)
         -> FdtDeviceRegionResult !{unsafe} {
     if (fdt_read_be32(base, FDT_HEADER_SIZE, 0) != FDT_MAGIC) {
         return FdtDeviceRegionResult::Invalid;
@@ -692,6 +694,33 @@ fn fdt_find_compatible_reg(base: usize, compatible: []u8)
     let mut candidate_interrupts_offset: usize = 0;
     let mut candidate_interrupts_length: usize = 0;
 
+    // The other bounded shape is root -> axi -> PCIe -> RP1 -> device.
+    // PCI child addresses have a leading flags cell, so this remains a
+    // separate concrete path rather than pretending ordinary 64-bit bus
+    // addresses and PCI addresses are interchangeable.
+    let mut pcie_depth: usize = 0;
+    let mut pcie_enabled: bool = true;
+    let mut pcie_compatible: bool = false;
+    let mut pcie_address_cells: usize = 0;
+    let mut pcie_size_cells: usize = 0;
+    let mut pcie_ranges_seen: bool = false;
+    let mut pcie_ranges_offset: usize = 0;
+    let mut pcie_ranges_length: usize = 0;
+    let mut rp1_depth: usize = 0;
+    let mut rp1_enabled: bool = true;
+    let mut rp1_compatible: bool = false;
+    let mut rp1_address_cells: usize = 0;
+    let mut rp1_size_cells: usize = 0;
+    let mut rp1_ranges_seen: bool = false;
+    let mut rp1_ranges_offset: usize = 0;
+    let mut rp1_ranges_length: usize = 0;
+    let mut nested_depth: usize = 0;
+    let mut nested_enabled: bool = true;
+    let mut nested_compatible: bool = false;
+    let mut nested_reg_seen: bool = false;
+    let mut nested_reg_offset: usize = 0;
+    let mut nested_reg_length: usize = 0;
+
     while (cursor < struct_end) {
         if (fdt_range_valid(struct_end, cursor, 4) == false) {
             return FdtDeviceRegionResult::Invalid;
@@ -732,14 +761,148 @@ fn fdt_find_compatible_reg(base: usize, compatible: []u8)
                 candidate_interrupts_offset = 0;
                 candidate_interrupts_length = 0;
             }
+            if (depth == 3 && bus_depth == 2) {
+                pcie_depth = depth;
+                pcie_enabled = true;
+                pcie_compatible = false;
+                pcie_address_cells = 0;
+                pcie_size_cells = 0;
+                pcie_ranges_seen = false;
+                pcie_ranges_offset = 0;
+                pcie_ranges_length = 0;
+            } else if (depth == 4 && pcie_depth == 3) {
+                rp1_depth = depth;
+                rp1_enabled = true;
+                rp1_compatible = false;
+                rp1_address_cells = 0;
+                rp1_size_cells = 0;
+                rp1_ranges_seen = false;
+                rp1_ranges_offset = 0;
+                rp1_ranges_length = 0;
+            } else if (depth == 5 && rp1_depth == 4) {
+                nested_depth = depth;
+                nested_enabled = true;
+                nested_compatible = false;
+                nested_reg_seen = false;
+                nested_reg_offset = 0;
+                nested_reg_length = 0;
+            }
             cursor = fdt_align4(name_end + 1);
             if (cursor == 0 || cursor > struct_end) {
                 return FdtDeviceRegionResult::Invalid;
             }
         } else if (token == FDT_END_NODE) {
             if (depth == 0) { return FdtDeviceRegionResult::Invalid; }
+            if (nested_depth == depth) {
+                if (nested_enabled && nested_compatible) {
+                    if (pcie_enabled == false || pcie_compatible == false ||
+                        pcie_address_cells != 3 || pcie_size_cells != 2 ||
+                        pcie_ranges_seen == false ||
+                        rp1_enabled == false || rp1_compatible == false ||
+                        rp1_address_cells != 2 || rp1_size_cells != 2 ||
+                        rp1_ranges_seen == false ||
+                        nested_reg_seen == false || nested_reg_length < 16 ||
+                        nested_reg_length % 16 != 0 ||
+                        rp1_ranges_length < 28 ||
+                        rp1_ranges_length % 28 != 0 ||
+                        pcie_ranges_length < 28 ||
+                        pcie_ranges_length % 28 != 0) {
+                        return FdtDeviceRegionResult::Invalid;
+                    }
+                    let device_base: usize = fdt_cells_value(
+                        base, total, nested_reg_offset, 2);
+                    let device_size: usize = fdt_cells_value(
+                        base, total, nested_reg_offset + 8, 2);
+                    if (device_size == 0 || device_base >
+                            0xFFFFFFFFFFFFFFFF - device_size) {
+                        return FdtDeviceRegionResult::Invalid;
+                    }
+
+                    let mut pci_found: bool = false;
+                    let mut pci_base: usize = 0;
+                    let mut rp1_relative: usize = 0;
+                    while (rp1_relative <= rp1_ranges_length - 28) {
+                        let child_base: usize = fdt_cells_value(
+                            base, total,
+                            rp1_ranges_offset + rp1_relative, 2);
+                        let pci_space: usize = fdt_read_be32(
+                            base, total,
+                            rp1_ranges_offset + rp1_relative + 8);
+                        let parent_base: usize = fdt_cells_value(
+                            base, total,
+                            rp1_ranges_offset + rp1_relative + 12, 2);
+                        let range_size: usize = fdt_cells_value(
+                            base, total,
+                            rp1_ranges_offset + rp1_relative + 20, 2);
+                        if (range_size == 0 || child_base >
+                                0xFFFFFFFFFFFFFFFF - range_size ||
+                            parent_base >
+                                0xFFFFFFFFFFFFFFFF - range_size) {
+                            return FdtDeviceRegionResult::Invalid;
+                        }
+                        if (pci_space == 0x02000000 &&
+                            device_base >= child_base &&
+                            device_base - child_base < range_size &&
+                            device_size <= range_size -
+                                (device_base - child_base)) {
+                            pci_base = parent_base +
+                                (device_base - child_base);
+                            pci_found = true;
+                        }
+                        rp1_relative = rp1_relative + 28;
+                    }
+                    if (pci_found == false) {
+                        return FdtDeviceRegionResult::Invalid;
+                    }
+
+                    let mut physical_found: bool = false;
+                    let mut physical_base: usize = 0;
+                    let mut pcie_relative: usize = 0;
+                    while (pcie_relative <= pcie_ranges_length - 28) {
+                        let pci_space: usize = fdt_read_be32(
+                            base, total,
+                            pcie_ranges_offset + pcie_relative);
+                        let child_base: usize = fdt_cells_value(
+                            base, total,
+                            pcie_ranges_offset + pcie_relative + 4, 2);
+                        let parent_base: usize = fdt_cells_value(
+                            base, total,
+                            pcie_ranges_offset + pcie_relative + 12, 2);
+                        let range_size: usize = fdt_cells_value(
+                            base, total,
+                            pcie_ranges_offset + pcie_relative + 20, 2);
+                        if (range_size == 0 || child_base >
+                                0xFFFFFFFFFFFFFFFF - range_size ||
+                            parent_base >
+                                0xFFFFFFFFFFFFFFFF - range_size) {
+                            return FdtDeviceRegionResult::Invalid;
+                        }
+                        if (pci_space == 0x02000000 &&
+                            pci_base >= child_base &&
+                            pci_base - child_base < range_size &&
+                            device_size <= range_size -
+                                (pci_base - child_base)) {
+                            physical_base = parent_base +
+                                (pci_base - child_base);
+                            physical_found = true;
+                        }
+                        pcie_relative = pcie_relative + 28;
+                    }
+                    if (physical_found == false) {
+                        return FdtDeviceRegionResult::Invalid;
+                    }
+                    let mut region: FdtDeviceRegion = {
+                        physical_base, device_size,
+                        base, nested_reg_offset, nested_reg_length, 2, 2,
+                        false, 0, 0, 0
+                    };
+                    return FdtDeviceRegionResult::Found(region);
+                }
+                nested_depth = 0;
+            }
             if (candidate_depth == depth) {
-                if (candidate_enabled && candidate_compatible) {
+                if (candidate_enabled && candidate_compatible &&
+                    pcie_nested_only == false) {
                     let mut address_cells: usize = bus_address_cells;
                     let mut size_cells: usize = bus_size_cells;
                     if (depth == 2) {
@@ -843,6 +1006,8 @@ fn fdt_find_compatible_reg(base: usize, compatible: []u8)
                 candidate_depth = 0;
             }
             if (bus_depth == depth) { bus_depth = 0; }
+            if (rp1_depth == depth) { rp1_depth = 0; }
+            if (pcie_depth == depth) { pcie_depth = 0; }
             depth = depth - 1;
         } else if (token == FDT_PROP) {
             if (fdt_range_valid(struct_end, cursor, 8) == false) {
@@ -904,6 +1069,63 @@ fn fdt_find_compatible_reg(base: usize, compatible: []u8)
                 candidate_interrupts_offset = cursor;
                 candidate_interrupts_length = length;
             }
+            if (pcie_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"compatible")) {
+                pcie_compatible = fdt_string_list_contains(
+                    base, total, cursor, length, bs"brcm,bcm2712-pcie");
+            } else if (pcie_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"status")) {
+                pcie_enabled = fdt_string_is(
+                    base, cursor + length, cursor, bs"okay") ||
+                    fdt_string_is(base, cursor + length, cursor, bs"ok");
+            } else if (pcie_depth == depth && length == 4 && fdt_string_is(
+                    base, strings_end, prop_name, bs"#address-cells")) {
+                pcie_address_cells = fdt_read_be32(base, total, cursor);
+            } else if (pcie_depth == depth && length == 4 && fdt_string_is(
+                    base, strings_end, prop_name, bs"#size-cells")) {
+                pcie_size_cells = fdt_read_be32(base, total, cursor);
+            } else if (pcie_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"ranges")) {
+                pcie_ranges_seen = true;
+                pcie_ranges_offset = cursor;
+                pcie_ranges_length = length;
+            }
+            if (rp1_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"compatible")) {
+                rp1_compatible = fdt_string_list_contains(
+                    base, total, cursor, length, bs"simple-bus");
+            } else if (rp1_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"status")) {
+                rp1_enabled = fdt_string_is(
+                    base, cursor + length, cursor, bs"okay") ||
+                    fdt_string_is(base, cursor + length, cursor, bs"ok");
+            } else if (rp1_depth == depth && length == 4 && fdt_string_is(
+                    base, strings_end, prop_name, bs"#address-cells")) {
+                rp1_address_cells = fdt_read_be32(base, total, cursor);
+            } else if (rp1_depth == depth && length == 4 && fdt_string_is(
+                    base, strings_end, prop_name, bs"#size-cells")) {
+                rp1_size_cells = fdt_read_be32(base, total, cursor);
+            } else if (rp1_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"ranges")) {
+                rp1_ranges_seen = true;
+                rp1_ranges_offset = cursor;
+                rp1_ranges_length = length;
+            }
+            if (nested_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"compatible")) {
+                nested_compatible = fdt_string_list_contains(
+                    base, total, cursor, length, compatible);
+            } else if (nested_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"status")) {
+                nested_enabled = fdt_string_is(
+                    base, cursor + length, cursor, bs"okay") ||
+                    fdt_string_is(base, cursor + length, cursor, bs"ok");
+            } else if (nested_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"reg")) {
+                nested_reg_seen = true;
+                nested_reg_offset = cursor;
+                nested_reg_length = length;
+            }
             let next: usize = fdt_align4(cursor + length);
             if (next == 0 || next > struct_end) {
                 return FdtDeviceRegionResult::Invalid;
@@ -918,6 +1140,20 @@ fn fdt_find_compatible_reg(base: usize, compatible: []u8)
         }
     }
     return FdtDeviceRegionResult::Invalid;
+}
+
+fn fdt_find_compatible_reg(base: usize, compatible: []u8)
+        -> FdtDeviceRegionResult !{unsafe} {
+    return fdt_find_compatible_reg_bounded(base, compatible, false);
+}
+
+// Some RP1 devices have no RP1-specific compatible string. In particular,
+// both BCM2712's on-die UART and RP1 UART0 contain "arm,pl011-axi". This
+// entry point selects only the concrete PCIe/RP1 nesting above instead of
+// letting structure order choose between two different devices.
+fn fdt_find_compatible_pcie_reg(base: usize, compatible: []u8)
+        -> FdtDeviceRegionResult !{unsafe} {
+    return fdt_find_compatible_reg_bounded(base, compatible, true);
 }
 
 fn fdt_find_compatible_gicv2_regions(base: usize, compatible: []u8)

@@ -1,0 +1,29 @@
+// Boot-time agreement check for the first PCIe-attached RP1 device. The
+// UART driver still uses its established address until the translation path
+// has passed both host fixtures and a real-firmware hardware boot.
+
+const RPI5_RP1_UART0_BASE: usize = 0x1F00030000;
+
+must_use variant Rpi5Rp1UartDtbResult {
+    Invalid;
+    Missing;
+    Verified(usize);
+}
+
+fn rpi5_rp1_uart_verify_boot_dtb() -> Rpi5Rp1UartDtbResult !{unsafe} {
+    let dtb: usize = boot_dtb_address_read();
+    match fdt_find_compatible_pcie_reg(dtb, bs"arm,pl011-axi") {
+        FdtDeviceRegionResult::Invalid => {
+            return Rpi5Rp1UartDtbResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            return Rpi5Rp1UartDtbResult::Missing;
+        }
+        FdtDeviceRegionResult::Found(region) => {
+            if (region.base != RPI5_RP1_UART0_BASE || region.size < 0x48) {
+                return Rpi5Rp1UartDtbResult::Invalid;
+            }
+            return Rpi5Rp1UartDtbResult::Verified(region.base);
+        }
+    }
+}

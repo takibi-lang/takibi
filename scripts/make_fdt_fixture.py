@@ -15,6 +15,9 @@ board's firmware actually hands this kernel:
                              reg = <0x7c003000 0x1000>
                              clock-frequency = <1000000>
     /timer                   compatible = "arm,armv8-timer"   (no frequency)
+    /axi/pcie@1000120000/rp1/serial@30000
+                             compatible = "arm,pl011-axi"
+                             reg = <0xc0 0x40030000 0 0x100>
 
 The memory here is deliberately NOT the board's single region. It is two
 nodes, and the first of them carries two `reg` tuples, because those are two
@@ -97,12 +100,14 @@ def main():
                    "--invalid-tree-reservation", "--invalid-device",
                    "--invalid-interrupt", "--missing-interrupt")
     valid_modes = valid_modes + ("--invalid-gic",)
+    valid_modes = valid_modes + ("--invalid-pcie-ranges",)
     if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and
                                      sys.argv[2] not in valid_modes):
         print("usage: make_fdt_fixture.py OUTPUT "
               "[--invalid-memory|--invalid-reservation|"
               "--invalid-tree-reservation|--invalid-device|"
-              "--invalid-interrupt|--missing-interrupt|--invalid-gic]",
+              "--invalid-interrupt|--missing-interrupt|--invalid-gic|"
+              "--invalid-pcie-ranges]",
               file=sys.stderr)
         return 2
     mode = sys.argv[2] if len(sys.argv) == 3 else ""
@@ -230,10 +235,53 @@ def main():
     b.prop("reg", b.cells(0x7C003000, 0x00001000))
     b.prop("compatible", b"brcm,bcm2835-system-timer\0")
     b.end()
+
+    # The real firmware has this enabled on-die UART before the RP1 subtree.
+    # It deliberately shares RP1 UART0's first compatible string, proving
+    # the PCIe-only lookup does not accidentally select by structure order.
+    b.begin("serial@7d001000")
+    b.prop("compatible", b"arm,pl011-axi\0arm,pl011\0arm,primecell\0")
+    b.prop("reg", b.cells(0x7D001000, 0x1000))
+    b.prop("status", b"okay\0")
+    b.end()
     b.end()
 
     b.begin("timer")
     b.prop("compatible", b"arm,armv8-timer\0")
+    b.end()
+
+    # The concrete two-hop firmware path from the PCIe-attached RP1 UART to
+    # CPU physical space. As on the board, both ranges properties precede
+    # their cell-count properties. The leading PCI address cell is the
+    # 32-bit non-prefetchable memory-space code, not address magnitude.
+    b.begin("axi")
+    b.prop("#address-cells", b.cells(2))
+    b.prop("#size-cells", b.cells(2))
+    b.begin("pcie@1000120000")
+    if mode == "--invalid-pcie-ranges":
+        b.prop("ranges", b.cells(0x02000000, 0, 0,
+                                 0x1F, 0, 0))
+    else:
+        b.prop("ranges", b.cells(0x02000000, 0, 0,
+                                 0x1F, 0, 0, 0xFFFFFFFC))
+    b.prop("compatible", b"brcm,bcm2712-pcie\0")
+    b.prop("#size-cells", b.cells(2))
+    b.prop("#address-cells", b.cells(3))
+    b.prop("status", b"okay\0")
+    b.begin("rp1")
+    b.prop("ranges", b.cells(0xC0, 0x40000000,
+                             0x02000000, 0, 0,
+                             0, 0x00410000))
+    b.prop("compatible", b"simple-bus\0")
+    b.prop("#size-cells", b.cells(2))
+    b.prop("#address-cells", b.cells(2))
+    b.begin("serial@30000")
+    b.prop("reg", b.cells(0xC0, 0x40030000, 0, 0x100))
+    b.prop("status", b"okay\0")
+    b.prop("compatible", b"arm,pl011-axi\0")
+    b.end()
+    b.end()
+    b.end()
     b.end()
 
     b.end()
