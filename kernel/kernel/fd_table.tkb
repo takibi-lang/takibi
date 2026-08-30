@@ -1,17 +1,24 @@
 use "kernel/lib/intrusive_pool.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/pool_lock.tkb";
+use "kernel/lib/locked_cell.tkb";
 
 // Current limitations (2026-08-24, issues #295/#392/#391). Keep this list
 // current as call sites change; a limitation that goes stale here is
 // worse than none, since it invites relying on a guarantee that quietly
 // stopped holding.
-// - NOT SYNCHRONIZED. Reachable only from single-core boot/syscall-
-//   dispatch context today, same as every kernel/lib/-backed pool this
-//   file builds on (IntrusivePool).
-// - unified_object_retain()/_release() are a bare counter increment/
-//   decrement on SharedObject.refs, not linear-tracked: nothing in the
-//   type system proves a caller's retains and releases stay balanced.
+// - PARTLY SYNCHRONIZED. SharedObject.refs is protected, by construction
+//   as of GitHub issue #452: the field is private and the only pointer at
+//   it comes from guarded_usize_value, which needs the refcount guard, so
+//   an unguarded read or write does not compile. Everything ELSE in this
+//   file -- the fd context tables, the descriptor blocks, the listener
+//   state -- is still reachable only from single-core boot/syscall-
+//   dispatch context, same as every kernel/lib/-backed pool this file
+//   builds on (IntrusivePool, whose walks are issue #482).
+// - unified_object_retain()/_release() are still a counter increment and
+//   decrement, not linear-tracked: the guard proves nothing reaches the
+//   count without the lock, and proves nothing at all about whether a
+//   caller's retains and releases BALANCE.
 //   Issue #391 moved that counter out of RefcountSlotMap and into the
 //   object; it did not make it any more checkable, and issue #297 is
 //   still the issue that would. unified_fd_clone() leaked exactly this way on a mid-loop
@@ -491,7 +498,18 @@ struct SharedObject {
     // _duplicate / _clone, released by unified_fd_close, and the object is
     // given back to the pool when it reaches 0 -- unified_object_retain /
     // _release below are the only two places that touch it.
-    refs: usize;
+    //
+    // GitHub issue #452: PRIVATE, and the only way to a pointer at it is
+    // guarded_usize_value, which needs the refcount guard. #479 gave this
+    // counter a lock and said in a comment that the lock covered it; the
+    // compiler could not read that, so any of this 2400-line file's other
+    // functions could have read the field with nothing held. Now it
+    // cannot -- and what makes that worth the change is what the counter
+    // decides: a lost decrement frees an object somebody still holds.
+    // Measured before the lock: 4096 retain/release pairs took the count
+    // from 2 to 0 and 978 later operations were refused because the
+    // handle no longer named anything.
+    refs: GuardedUsize;
 }
 private let mut object_pool: IntrusivePool(SharedObject);
 
@@ -582,22 +600,27 @@ must_use variant UnifiedObjectReleaseResult { Invalid; StillHeld; Freed; }
 // because the handle no longer named anything.
 private fn unified_object_retain(handle: UnifiedObjectHandle, limit: usize)
         -> UnifiedObjectRetainResult !{unsafe} {
-    let flags: usize = pool_lock_acquire(0, &object_refcount_lock);
+    let guard = guarded_field_take(&object_refcount_lock);
     let result: UnifiedObjectRetainResult =
-        unified_object_retain_locked(handle, limit);
-    pool_lock_release(0, &object_refcount_lock, flags);
+        unified_object_retain_locked(guard, handle, limit);
+    guarded_field_give(guard, &object_refcount_lock);
     return result;
 }
 
-private fn unified_object_retain_locked(handle: UnifiedObjectHandle,
-                                        limit: usize)
+// `borrow GuardedFieldGuard[lock]` rather than a comment saying the
+// caller holds it: this function cannot be called without one, and cannot
+// reach the count without passing it on.
+private fn unified_object_retain_locked(
+        guard: borrow GuardedFieldGuard[lock],
+        handle: UnifiedObjectHandle, limit: usize)
         -> UnifiedObjectRetainResult !{unsafe} {
     if (unified_object_matches(handle) == false) {
         return UnifiedObjectRetainResult::Invalid;
     }
     let object: *SharedObject = unified_object_at(handle);
-    if (object.refs >= limit) { return UnifiedObjectRetainResult::Overflow; }
-    object.refs = object.refs + 1;
+    let refs = guarded_usize_value(guard, &object.refs);
+    if (*refs >= limit) { return UnifiedObjectRetainResult::Overflow; }
+    *refs = *refs + 1;
     return UnifiedObjectRetainResult::Ok;
 }
 
@@ -614,7 +637,35 @@ private let mut object_double_release_count: usize = 0;
 // ONE lock for the counter, not one per object. The critical section is a
 // compare and an add; a per-object word would cost 8 bytes times every
 // open file to shorten something already this short.
+//
+// NOT a LockedCell, and the difference is the shape rather than a
+// preference. kernel/lib/locked_cell.tkb holds ONE value beside ONE lock,
+// which is right for the pid, tag and ASID counters; here one lock covers
+// a field of every object in a pool. That is the RetxEntry shape issue
+// #452 verified first: the guard is separate from the data, and a
+// guard-derived accessor is what relates them.
 private let mut object_refcount_lock: Mutex;
+
+// GitHub issue #452. The guard and the accessor are
+// kernel/lib/locked_cell.tkb's, deliberately, and not a pair declared
+// here: `private` is per FILE, so a guard type and an accessor written in
+// THIS file would leave the count reachable from the rest of this file --
+// which is 2400 lines and is where a future unguarded read would be
+// written. Verified by trying exactly that: with the field merely
+// `private refs: usize` and an accessor beside it, an unguarded read added
+// to this file still compiled. As a GuardedField(usize) it does not, and
+// the pointer the accessor hands back dies with the guard.
+//
+// What it does NOT prove is that this lock is the RIGHT one for this
+// field; that stays a module obligation, and SPEC.md says so under
+// "Guard-derived pointers".
+//
+// There is deliberately no shared_object_refs(guard, object) wrapper here,
+// though one reads better: a pointer derived from a borrowed authority
+// cannot be RETURNED from the function that derived it ("authority-derived
+// pointer cannot be returned from this function, it is tied to authority
+// 'guard'"). That rule is the reason the tie holds at all, so the call
+// sites below name guarded_usize_value directly.
 
 // GitHub issue #414: for the boot suite's end-of-run baseline comparison.
 // See scheduled_process_pool_live_count. Only the fd CONTEXT pool has one:
@@ -632,7 +683,11 @@ fn unified_fd_context_live_count() -> usize !{unsafe} {
 private fn unified_object_refs_of(handle: UnifiedObjectHandle) -> usize
         !{unsafe} {
     if (unified_object_matches(handle) == false) { return 0; }
-    return unified_object_at(handle).refs;
+    let guard = guarded_field_take(&object_refcount_lock);
+    let refs = guarded_usize_value(guard, &unified_object_at(handle).refs);
+    let held: usize = *refs;
+    guarded_field_give(guard, &object_refcount_lock);
+    return held;
 }
 
 fn unified_object_double_release_count() -> usize {
@@ -641,14 +696,16 @@ fn unified_object_double_release_count() -> usize {
 
 private fn unified_object_release(handle: UnifiedObjectHandle)
         -> UnifiedObjectReleaseResult !{unsafe} {
-    let flags: usize = pool_lock_acquire(0, &object_refcount_lock);
+    let guard = guarded_field_take(&object_refcount_lock);
     let result: UnifiedObjectReleaseResult =
-        unified_object_release_locked(handle);
-    pool_lock_release(0, &object_refcount_lock, flags);
+        unified_object_release_locked(guard, handle);
+    guarded_field_give(guard, &object_refcount_lock);
     return result;
 }
 
-private fn unified_object_release_locked(handle: UnifiedObjectHandle)
+private fn unified_object_release_locked(
+        guard: borrow GuardedFieldGuard[lock],
+        handle: UnifiedObjectHandle)
         -> UnifiedObjectReleaseResult !{unsafe} {
     if (unified_object_matches(handle) == false) {
         return UnifiedObjectReleaseResult::Invalid;
@@ -659,12 +716,13 @@ private fn unified_object_release_locked(handle: UnifiedObjectHandle)
     // proves `held - 1` non-negative below, and it narrows the `<` form
     // on a binding (kernel/arch/arm64/mm/asid.tkb records the same
     // rewrite for the same reason).
-    let held: usize = object.refs;
+    let refs = guarded_usize_value(guard, &object.refs);
+    let held: usize = *refs;
     if (held < 1) {
         object_double_release_count = object_double_release_count + 1;
         return UnifiedObjectReleaseResult::Invalid;
     }
-    object.refs = held - 1;
+    *refs = held - 1;
     if (held < 2) {
         unified_object_free(handle.slot, handle.generation);
         return UnifiedObjectReleaseResult::Freed;
@@ -1130,7 +1188,18 @@ fn unified_object_alloc_first(kind: UnifiedFdKind) -> UnifiedObjectResult !{unsa
             let generation: usize = intrusive_owner_generation(owner);
             let object: *SharedObject = intrusive_pool_ref(&object_pool, owner);
             object.kind = kind;
-            object.refs = 0;
+            // insert_zeroed already left this 0. Written again through the
+            // guard rather than deleted, so that EVERY write to refs has
+            // one discipline -- a field whose writes are guarded except at
+            // creation is a field a reader has to check the history of.
+            // The pool lock is already released above, so this is
+            // fd-refcount taken alone, not under pool: the measured order
+            // (issue #479) is fd -> pool -> page and this does not reverse
+            // it.
+            let refcount_guard = guarded_field_take(&object_refcount_lock);
+            let refs = guarded_usize_value(refcount_guard, &object.refs);
+            *refs = 0;
+            guarded_field_give(refcount_guard, &object_refcount_lock);
             intrusive_owner_drop(owner);
             let mut handle: UnifiedObjectHandle = { slot, generation };
             return UnifiedObjectResult::Allocated(handle);
@@ -1390,9 +1459,17 @@ fn unified_fd_close_exec_descriptors(process: usize) !{unsafe} {
     }
 }
 
+// Takes the lock, which the bare field read it replaces did not. The
+// caveat unified_object_refs_of carries applies here too: the answer can
+// be stale before the caller acts on it, so this reports a count rather
+// than deciding anything.
 fn unified_object_references(handle: UnifiedObjectHandle) -> usize !{unsafe} {
     if (unified_object_matches(handle) == false) { return 0; }
-    return unified_object_at(handle).refs;
+    let guard = guarded_field_take(&object_refcount_lock);
+    let refs = guarded_usize_value(guard, &unified_object_at(handle).refs);
+    let held: usize = *refs;
+    guarded_field_give(guard, &object_refcount_lock);
+    return held;
 }
 
 fn unified_listener_state(handle: UnifiedObjectHandle) -> UnifiedListenerState {

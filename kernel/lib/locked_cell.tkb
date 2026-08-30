@@ -130,6 +130,66 @@ fn locked_cell_is_held(T: type, cell: &mut LockedCell(T) @ id)
     return mutex_is_held(&(*cell).lock);
 }
 
+// -- One lock, many values --------------------------------------------
+//
+// LockedCell above is one value beside one lock, which fits a counter.
+// The other shape issue #452 has to serve is one lock covering a FIELD OF
+// EVERY OBJECT in a pool -- kernel/kernel/fd_table.tkb's SharedObject.refs
+// is the case, where a per-object lock word would cost 8 bytes times every
+// open file to shorten a critical section that is already a compare and an
+// add.
+//
+// Marking the field `private` in its own struct does not do it, because
+// `private` is per FILE: the accessor and every other function in that
+// 2400-line file are the same file, so the field stays reachable from all
+// of them. Checked by trying it -- an unguarded read added to
+// fd_table.tkb compiled. The field's TYPE has to belong to a different
+// file, which is what this one is for.
+//
+// WHAT THIS DOES NOT CARRY, and it is the difference from LockedCell.
+// LockedCell's guard is minted from the cell, so `[cell: addr]` proves the
+// guard is THAT cell's. Here the lock is separate from the data by
+// construction, so a guard proves only that SOME lock was taken. With one
+// adopter and one lock that is vacuous; with two, nothing stops one
+// subsystem's guard opening another's field. If a second adopter appears,
+// that is the moment to give it a lock identity of its own
+// rather than the moment to notice.
+//
+// NOT generic, and not by preference. `GuardedField(T)` was written first
+// and does not compile in the one place it is for: SharedObject is the
+// payload of an IntrusivePool, whose slot sizes its storage with
+// `[u8; sizeof(T)]`, so the payload's layout is computed DURING
+// monomorphization -- before the pass that rewrites a plain struct's
+// generic field types -- and the field is still an unresolved
+// `GuardedField(...)` at that moment. GitHub issue #485 has a 14-line
+// reproduction. usize is the only width any caller wants today, so a
+// concrete struct costs nothing; widen it by adding a sibling, or by
+// fixing #485.
+struct GuardedUsize {
+    private value: usize;
+}
+
+private linear struct GuardedFieldGuard[lock: addr] {
+    private flags: usize;
+}
+
+// mutex_acquire, not pool_lock_acquire, for the reason at the top of this
+// file.
+fn guarded_field_take(m: *Mutex @ id) -> GuardedFieldGuard[id] {
+    let mut g: GuardedFieldGuard[id] = { mutex_acquire(m) };
+    return g;
+}
+
+fn guarded_field_give(g: sink GuardedFieldGuard[id], m: *Mutex @ id) {
+    mutex_release(m, g.flags);
+}
+
+// The only way to the value. Tied to the guard, so it dies with it.
+fn guarded_usize_value(g: borrow GuardedFieldGuard[lock],
+                       f: *GuardedUsize) -> *usize @ lock {
+    return &(*f).value;
+}
+
 // The MMU-off window's way in, and the only one. See the limitation above
 // for why it is `unsafe` rather than merely documented.
 //

@@ -163,9 +163,20 @@ let rec size_align_of_type pos seen ty =
                  in
                  walk 0 1 fields)
   | TypeKind -> fail pos "'type' has no runtime size or alignment"
-  | TypeGenericInst (name, _) -> fail pos (Printf.sprintf
-      "generic instantiation '%s(...)' is not implemented yet \
-       (GitHub issue #207)" name)
+  (* GitHub issue #485: this error carries no source location -- layout runs
+     after monomorphization, on types whose loc is long gone -- so the
+     enclosing struct chain is the only thing that says WHERE. Without it
+     the message names a generic and nothing else, and finding the field
+     meant bisecting the file. *)
+  | TypeGenericInst (name, _) ->
+      let where =
+        match seen with
+        | [] -> ""
+        | _ -> Printf.sprintf " (as a field of %s)" (String.concat " <- " seen)
+      in
+      fail pos (Printf.sprintf
+        "generic instantiation '%s(...)' is not implemented yet \
+         (GitHub issue #207)%s" name where)
   | TypeIntLit _ -> fail pos
       "BUG: a bare generic value argument reached layout unresolved -- \
        Monomorphize.run should have substituted it"
