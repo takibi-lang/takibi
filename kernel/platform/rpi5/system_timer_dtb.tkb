@@ -1,0 +1,75 @@
+// Read-only boot validation for the BCM2712 system timer. The kernel keeps
+// the ARM generic timer as its time and interrupt source; this probe gives
+// the first SoC-direct device a real DTB consumer without changing that
+// established driver choice.
+
+const RPI5_SYSTEM_TIMER_BASE: usize = 0x107c003000;
+const RPI5_SYSTEM_TIMER_CLO_OFFSET: usize = 0x04;
+const RPI5_SYSTEM_TIMER_SAMPLE_TICKS: usize = 10000;
+
+must_use variant Rpi5SystemTimerDtbResult {
+    Invalid;
+    Missing;
+    Verified(usize);
+}
+
+fn rpi5_system_timer_verify_boot_dtb()
+        -> Rpi5SystemTimerDtbResult !{unsafe} {
+    let dtb: usize = boot_dtb_address_read();
+    match fdt_find_compatible_reg(
+            dtb, bs"brcm,bcm2835-system-timer") {
+        FdtDeviceRegionResult::Invalid => {
+            return Rpi5SystemTimerDtbResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            return Rpi5SystemTimerDtbResult::Missing;
+        }
+        FdtDeviceRegionResult::Found(region) => {
+            // Compare with the board's already-established physical address
+            // before trusting the translated DTB value as an MMIO pointer.
+            if (region.base != RPI5_SYSTEM_TIMER_BASE ||
+                region.size < RPI5_SYSTEM_TIMER_CLO_OFFSET + 4 ||
+                region.base > 0xFFFFFFFFFFFFFFFF -
+                    RPI5_SYSTEM_TIMER_CLO_OFFSET) {
+                return Rpi5SystemTimerDtbResult::Invalid;
+            }
+            let counter: *io u32 = unsafe {
+                (region.base + RPI5_SYSTEM_TIMER_CLO_OFFSET) as *io u32
+            };
+            let system_start: u32 = *counter;
+            let arch_start: i64 = read_cntpct();
+            let arch_frequency: i64 = read_cntfrq();
+            if (arch_frequency <= 0) {
+                return Rpi5SystemTimerDtbResult::Invalid;
+            }
+
+            let mut system_elapsed: usize = 0;
+            while (system_elapsed < RPI5_SYSTEM_TIMER_SAMPLE_TICKS) {
+                let current: u32 = *counter;
+                if (current >= system_start) {
+                    system_elapsed = (current - system_start) as usize;
+                } else {
+                    let counter_max: u32 = 0xFFFFFFFF as u32;
+                    system_elapsed =
+                        ((counter_max - system_start) as usize) +
+                        (current as usize) + 1;
+                }
+                // One second is far beyond the expected 10 ms sample. It
+                // bounds a bad or stopped MMIO counter instead of hanging.
+                if (read_cntpct() - arch_start >= arch_frequency) {
+                    return Rpi5SystemTimerDtbResult::Invalid;
+                }
+            }
+
+            let arch_elapsed: i64 = read_cntpct() - arch_start;
+            let expected: i64 = arch_frequency / 100;
+            let tolerance: i64 = expected / 50;
+            if (expected <= 0 || tolerance <= 0 ||
+                arch_elapsed < expected - tolerance ||
+                arch_elapsed > expected + tolerance) {
+                return Rpi5SystemTimerDtbResult::Invalid;
+            }
+            return Rpi5SystemTimerDtbResult::Verified(region.base);
+        }
+    }
+}

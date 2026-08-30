@@ -1,6 +1,7 @@
 use "kernel/init/test_driver.tkb";
 use "kernel/platform/rpi5/usb_xhci.tkb";
 use "kernel/platform/rpi5/memory.tkb";
+use "kernel/platform/rpi5/system_timer_dtb.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/kernel/pool_contention_evidence.tkb";
 use "kernel/kernel/freelist_contention_evidence.tkb";
@@ -596,6 +597,22 @@ fn main() !{unsafe} {
         PlatformMemoryResult::MissingMemory => {
             kernel_boot_log("memory: boot DTB has no usable /memory; halting\n");
             while (true) { }
+        }
+    }
+
+    match rpi5_system_timer_verify_boot_dtb() {
+        Rpi5SystemTimerDtbResult::Invalid => {
+            kernel_boot_log("system timer: invalid boot DTB device; halting\n");
+            while (true) { }
+        }
+        Rpi5SystemTimerDtbResult::Missing => {
+            kernel_boot_log("system timer: missing from boot DTB; halting\n");
+            while (true) { }
+        }
+        Rpi5SystemTimerDtbResult::Verified(base) => {
+            kernel_boot_log("system timer: source=dtb base_bytes=");
+            uart_put_udec(base);
+            kernel_boot_log(" counter_agrees_with_arch=yes\n");
         }
     }
 
