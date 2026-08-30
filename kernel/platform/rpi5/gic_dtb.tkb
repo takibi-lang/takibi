@@ -23,11 +23,30 @@ fn rpi5_gic_apply_boot_dtb() -> Rpi5GicDtbResult !{unsafe} {
                 rpi5_gic_dtb_status = 1;
                 return Rpi5GicDtbResult::Invalid;
             }
-            rpi5_gicd_base = gic.distributor.base;
-            rpi5_gicc_base = gic.cpu_interface.base;
-            rpi5_gic_dtb_status = 3;
-            return Rpi5GicDtbResult::Applied((
-                rpi5_gicd_base, rpi5_gicc_base));
+            match fdt_find_armv8_timer_interrupt(dtb) {
+                FdtGicInterruptResult::Invalid => {
+                    rpi5_gic_dtb_status = 1;
+                    return Rpi5GicDtbResult::Invalid;
+                }
+                FdtGicInterruptResult::NotFound => {
+                    rpi5_gic_dtb_status = 2;
+                    return Rpi5GicDtbResult::Missing;
+                }
+                FdtGicInterruptResult::Found(interrupt) => {
+                    if (interrupt.intid !=
+                            RPI5_TIMER_GIC_INTID as usize ||
+                        (interrupt.flags & 0xF) != 8) {
+                        rpi5_gic_dtb_status = 1;
+                        return Rpi5GicDtbResult::Invalid;
+                    }
+                    rpi5_gicd_base = gic.distributor.base;
+                    rpi5_gicc_base = gic.cpu_interface.base;
+                    rpi5_timer_gic_intid = interrupt.intid as u32;
+                    rpi5_gic_dtb_status = 3;
+                    return Rpi5GicDtbResult::Applied((
+                        rpi5_gicd_base, rpi5_gicc_base));
+                }
+            }
         }
     }
 }

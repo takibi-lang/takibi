@@ -170,12 +170,30 @@ fn qemu_boot_devices_apply_dtb() -> QemuBootDevicesResult !{unsafe} {
                                 gic.cpu_interface.size < 0x14) {
                                 return QemuBootDevicesResult::Invalid;
                             }
-                            uart_base = region.base;
-                            qemu_uart_gic_intid = interrupt.intid as u32;
-                            qemu_gicd_base = gic.distributor.base;
-                            qemu_gicc_base = gic.cpu_interface.base;
-                            uart_init();
-                            return QemuBootDevicesResult::Applied;
+                            match fdt_find_armv8_timer_interrupt(dtb) {
+                                FdtGicInterruptResult::Invalid => {
+                                    return QemuBootDevicesResult::Invalid;
+                                }
+                                FdtGicInterruptResult::NotFound => {
+                                    return QemuBootDevicesResult::Missing;
+                                }
+                                FdtGicInterruptResult::Found(timer) => {
+                                    if (timer.intid !=
+                                            QEMU_TIMER_GIC_INTID as usize ||
+                                        (timer.flags & 0xF) != 4) {
+                                        return QemuBootDevicesResult::Invalid;
+                                    }
+                                    uart_base = region.base;
+                                    qemu_uart_gic_intid =
+                                        interrupt.intid as u32;
+                                    qemu_timer_gic_intid =
+                                        timer.intid as u32;
+                                    qemu_gicd_base = gic.distributor.base;
+                                    qemu_gicc_base = gic.cpu_interface.base;
+                                    uart_init();
+                                    return QemuBootDevicesResult::Applied;
+                                }
+                            }
                         }
                     }
                 }

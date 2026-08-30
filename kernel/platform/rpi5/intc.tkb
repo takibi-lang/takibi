@@ -296,7 +296,7 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     // GICC_IAR is read before the branch, not after: acknowledging is the
     // interrupted core's own job on its own banked interface.
     if (cpu_id() != 0) {
-        if (id == RPI5_TIMER_GIC_INTID) { secondary_timer_tick(); }
+        if (id == rpi5_timer_gic_intid) { secondary_timer_tick(); }
         *gicc_eoir = id;
         return frame_sp;
     }
@@ -326,7 +326,7 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
                 as *io u32
         };
         *rp1_msix_cfg6_set = 1 << 2; // MSIX_CFG_IACK
-    } else if (id == RPI5_TIMER_GIC_INTID) {
+    } else if (id == rpi5_timer_gic_intid) {
         timer_irq_handler();
         // GitHub issue #453: this branch is why most of kernel/ can share
         // mutable state with no lock. Interrupted EL0 -> switch now.

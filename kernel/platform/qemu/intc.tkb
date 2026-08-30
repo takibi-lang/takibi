@@ -91,7 +91,7 @@ fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     // GICC_IAR is read before the branch, not after: acknowledging is the
     // interrupted core's own job on its own banked interface.
     if (cpu_id() != 0) {
-        if (id == QEMU_TIMER_GIC_INTID) { secondary_timer_tick(); }
+        if (id == qemu_timer_gic_intid) { secondary_timer_tick(); }
         *gicc_eoir = id;
         return frame_sp;
     }
@@ -107,7 +107,7 @@ fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         // device found / net_init() not called yet), so the >= 0 guard
         // keeps that sentinel from ever matching a real GICC_IAR value.
         virtio_net_irq_handler();
-    } else if (id == QEMU_TIMER_GIC_INTID) {
+    } else if (id == qemu_timer_gic_intid) {
         timer_irq_handler();
         // GitHub issue #453: this branch is why most of kernel/ can share
         // mutable state with no lock. Interrupted EL0 -> switch now.

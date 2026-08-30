@@ -442,11 +442,11 @@ fn main() !{unsafe} {
 
     match qemu_boot_devices_apply_dtb() {
         QemuBootDevicesResult::Invalid => {
-            kernel_boot_log("devices: invalid UART/GIC description in boot DTB; halting\n");
+            kernel_boot_log("devices: invalid UART/GIC/timer description in boot DTB; halting\n");
             while (true) { }
         }
         QemuBootDevicesResult::Missing => {
-            kernel_boot_log("devices: boot DTB lacks enabled UART/GIC; halting\n");
+            kernel_boot_log("devices: boot DTB lacks enabled UART/GIC/timer; halting\n");
             while (true) { }
         }
         QemuBootDevicesResult::Applied => {
@@ -458,6 +458,8 @@ fn main() !{unsafe} {
             uart_put_udec(qemu_gicd_base);
             kernel_boot_log(" gicc_bytes=");
             uart_put_udec(qemu_gicc_base);
+            kernel_boot_log(" timer_intid=");
+            uart_put_udec(qemu_timer_gic_intid as usize);
             kernel_boot_log("\n");
         }
     }

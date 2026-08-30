@@ -34,6 +34,7 @@ let mut rpi5_gicc_base: usize = RPI5_GICC_BASE;
 let mut rpi5_gic_dtb_status: usize;
 
 const RPI5_TIMER_GIC_INTID: u32 = 30;
+let mut rpi5_timer_gic_intid: u32 = RPI5_TIMER_GIC_INTID;
 
 // read_cntfrq() >> 6 matches examples/common_qemu/timer.tkb and
 // examples/common_rpi3/timer.tkb's own scheduler-tick divisor exactly
@@ -47,7 +48,8 @@ fn gic_timer_ppi_enable() !{unsafe} {
     let gicd_isenabler0: *io u32 = unsafe {
         (rpi5_gicd_base + 0x100) as *io u32
     };
-    *gicd_isenabler0 = *gicd_isenabler0 | (1 << 30);
+    *gicd_isenabler0 = *gicd_isenabler0 |
+        (1 << rpi5_timer_gic_intid);
 }
 
 fn timer_irq_setup() {

@@ -268,6 +268,17 @@ def main():
     b.end()
 
     b.begin("timer")
+    if mode == "--invalid-interrupt":
+        b.prop("interrupts", b.cells(1, 14, 0))
+    elif mode != "--missing-interrupt":
+        # RPi5's five-entry armv8 timer shape. The second tuple is the
+        # non-secure physical timer used through CNTP_EL0.
+        b.prop("interrupts", b.cells(
+            1, 13, 0xF08,
+            1, 14, 0xF08,
+            1, 11, 0xF08,
+            1, 10, 0xF08,
+            1, 12, 0xF08))
     b.prop("compatible", b"arm,armv8-timer\0")
     b.end()
 

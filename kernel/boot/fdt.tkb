@@ -687,7 +687,8 @@ private fn fdt_scan_tree_reservations(base: usize, wanted: usize)
 
 private fn fdt_find_compatible_reg_bounded(
         base: usize, compatible: []u8, pcie_nested_only: bool,
-        required_candidate_base: usize, required_nested_base: usize)
+        required_candidate_base: usize, required_nested_base: usize,
+        allow_root_without_reg: bool)
         -> FdtDeviceRegionResult !{unsafe} {
     if (fdt_read_be32(base, FDT_HEADER_SIZE, 0) != FDT_MAGIC) {
         return FdtDeviceRegionResult::Invalid;
@@ -961,6 +962,18 @@ private fn fdt_find_compatible_reg_bounded(
                         address_cells = root_address_cells;
                         size_cells = root_size_cells;
                     }
+                    if (candidate_reg_seen == false &&
+                        allow_root_without_reg && depth == 2) {
+                        let mut properties: FdtDeviceRegion = {
+                            0, 0, base, 0, 0,
+                            root_address_cells, root_size_cells, true,
+                            candidate_interrupt_parent,
+                            candidate_interrupts_offset,
+                            candidate_interrupts_length,
+                            0, 0, 0, 0
+                        };
+                        return FdtDeviceRegionResult::Found(properties);
+                    }
                     if (candidate_reg_seen == false ||
                         fdt_reg_length_valid(candidate_reg_length,
                                              address_cells, size_cells) ==
@@ -1213,14 +1226,15 @@ private fn fdt_find_compatible_reg_bounded(
 
 fn fdt_find_compatible_reg(base: usize, compatible: []u8)
         -> FdtDeviceRegionResult !{unsafe} {
-    return fdt_find_compatible_reg_bounded(base, compatible, false, 0, 0);
+    return fdt_find_compatible_reg_bounded(
+        base, compatible, false, 0, 0, false);
 }
 
 fn fdt_find_compatible_reg_at(
         base: usize, compatible: []u8, child_base: usize)
         -> FdtDeviceRegionResult !{unsafe} {
     return fdt_find_compatible_reg_bounded(
-        base, compatible, false, child_base, 0);
+        base, compatible, false, child_base, 0, false);
 }
 
 fn fdt_find_compatible_mip_regions(
@@ -1393,14 +1407,15 @@ fn fdt_find_compatible_rp1_gpio_regions(base: usize, compatible: []u8)
 // letting structure order choose between two different devices.
 fn fdt_find_compatible_pcie_reg(base: usize, compatible: []u8)
         -> FdtDeviceRegionResult !{unsafe} {
-    return fdt_find_compatible_reg_bounded(base, compatible, true, 0, 0);
+    return fdt_find_compatible_reg_bounded(
+        base, compatible, true, 0, 0, false);
 }
 
 fn fdt_find_compatible_pcie_reg_at(
         base: usize, compatible: []u8, child_base: usize)
         -> FdtDeviceRegionResult !{unsafe} {
     return fdt_find_compatible_reg_bounded(
-        base, compatible, true, 0, child_base);
+        base, compatible, true, 0, child_base, false);
 }
 
 fn fdt_find_compatible_gicv2_regions(base: usize, compatible: []u8)
@@ -1670,6 +1685,67 @@ fn fdt_find_compatible_gic_interrupt(base: usize, compatible: []u8)
                     }
                     let mut found: FdtGicInterrupt = {
                         number + 32, flags
+                    };
+                    return FdtGicInterruptResult::Found(found);
+                }
+            }
+        }
+    }
+}
+
+// The architectural timer is a root child with no reg property. Its standard
+// interrupt list is ordered secure physical, non-secure physical, virtual,
+// hypervisor, followed on newer firmware by optional extra timer channels.
+// The kernel drives CNTP_EL0, so only the second three-cell GIC tuple is a
+// current consumer.
+fn fdt_find_armv8_timer_interrupt(base: usize)
+        -> FdtGicInterruptResult !{unsafe} {
+    match fdt_find_compatible_reg_bounded(
+            base, bs"arm,armv8-timer", false, 0, 0, true) {
+        FdtDeviceRegionResult::Invalid => {
+            return FdtGicInterruptResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            return FdtGicInterruptResult::NotFound;
+        }
+        FdtDeviceRegionResult::Found(timer) => {
+            if (timer.interrupt_parent == 0 ||
+                timer.interrupts_length == 0) {
+                return FdtGicInterruptResult::NotFound;
+            }
+            if (timer.interrupts_length < 48 ||
+                timer.interrupts_length % 12 != 0) {
+                return FdtGicInterruptResult::Invalid;
+            }
+            match fdt_find_interrupt_controller(
+                    base, timer.interrupt_parent) {
+                FdtInterruptControllerScanResult::Invalid => {
+                    return FdtGicInterruptResult::Invalid;
+                }
+                FdtInterruptControllerScanResult::NotFound => {
+                    return FdtGicInterruptResult::NotFound;
+                }
+                FdtInterruptControllerScanResult::Found(controller) => {
+                    if (controller.interrupt_cells != 3) {
+                        return FdtGicInterruptResult::Invalid;
+                    }
+                    let total: usize = fdt_read_be32(
+                        base, FDT_HEADER_SIZE, 4);
+                    let tuple: usize = timer.interrupts_offset + 12;
+                    let irq_type: usize = fdt_read_be32(base, total, tuple);
+                    let number: usize = fdt_read_be32(
+                        base, total, tuple + 4);
+                    let flags: usize = fdt_read_be32(
+                        base, total, tuple + 8);
+                    let trigger: usize = flags & 0xF;
+                    if (irq_type != 1 || number > 15 || flags > 0xFFFF ||
+                        (flags & 0xF0) != 0 ||
+                        (trigger != 1 && trigger != 2 && trigger != 4 &&
+                         trigger != 8)) {
+                        return FdtGicInterruptResult::Invalid;
+                    }
+                    let mut found: FdtGicInterrupt = {
+                        number + 16, flags
                     };
                     return FdtGicInterruptResult::Found(found);
                 }

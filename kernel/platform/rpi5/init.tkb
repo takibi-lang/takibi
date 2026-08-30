@@ -710,6 +710,8 @@ fn main() !{unsafe} {
             uart_put_udec(distributor);
             kernel_boot_log(" cpu_interface_bytes=");
             uart_put_udec(cpu_interface);
+            kernel_boot_log(" timer_intid=");
+            uart_put_udec(rpi5_timer_gic_intid as usize);
             kernel_boot_log(" applied_to_driver=yes\n");
         }
     }

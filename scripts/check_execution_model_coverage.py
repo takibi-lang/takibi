@@ -83,6 +83,8 @@ EXEMPT = {
     "drivers/block/virtio_blk.tkb": "device state; SPIs are routed to CPU0",
     "drivers/block/memory.tkb": "device state; SPIs are routed to CPU0",
     "platform/qemu/uart.tkb": "device state; SPIs are routed to CPU0",
+    "platform/qemu/timer_irq.tkb":
+        "GIC device state is initialized before interrupts and used by its routed cores",
     "platform/rpi5/uart.tkb": "device state; MSI-X is routed to CPU0",
     "platform/rpi5/pcie.tkb":
         "PCIe2 device state is initialized and used only by CPU0",

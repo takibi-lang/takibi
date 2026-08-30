@@ -7,6 +7,7 @@
 use "kernel/arch/arm64/kernel/timer.tkb";
 
 const QEMU_TIMER_GIC_INTID: u32 = 30;
+let mut qemu_timer_gic_intid: u32 = QEMU_TIMER_GIC_INTID;
 
 // read_cntfrq() >> 6 matches kernel/platform/rpi5/timer_irq.tkb and
 // examples/common_qemu/timer.tkb's own scheduler-tick divisor exactly.
@@ -18,7 +19,8 @@ fn gic_timer_ppi_enable() !{unsafe} {
     let gicd_isenabler0: *io u32 = unsafe {
         (qemu_gicd_base + 0x100) as *io u32
     };
-    *gicd_isenabler0 = *gicd_isenabler0 | (1 << 30);
+    *gicd_isenabler0 = *gicd_isenabler0 |
+        (1 << qemu_timer_gic_intid);
 }
 
 fn timer_irq_setup() {
