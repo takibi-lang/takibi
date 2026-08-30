@@ -257,7 +257,26 @@ secondary-entry path, and #448's two-core criterion. #222's remaining scope
 (the one-deep spare kernel-stack cell) is small and independent; the crash
 trace ring it also named is done, since #440's ring is already per-CPU.
 
-**Running a PROCESS on core 1 is #479, and it is a different kind of
+**#479 Group A is DONE, 2026-08-30, QEMU and RPi5.** Five locks -- the page
+allocator, the ASID counter, the shared-object refcount, the pid counter and
+the pool tag -- each with a probe that produced the race BEFORE the fix
+(`doublefree=1618`, `advanced=3974/4096`, `refs=0 refused=978`,
+`advanced=3936/4096`, `duplicates=1349` on the board against 3 under QEMU).
+Plus three PER-CORE conversions, which is the distinction worth carrying:
+`execution_state`, `address_space_active_slot` and
+`process_image_target_root` were not missing locks, they were per-core state
+stored as though it were global, and a lock would have made two cores agree
+on something that should have had two answers.
+
+`scripts/check_execution_model_coverage.py` closed the hole
+`execution_model.tkb` had named since it was written -- "the assertion set is
+a claim, not a proof". Two files fell through it this week, both found by
+accident while fixing something else. 35 files hold mutable state now, 16
+assert a constant, 19 are exempt with a stated reason, and none says "not
+audited". The worklist grew from 8 sites to 14, which is the check working:
+every one added was already true and none of them said so.
+
+**Running a PROCESS on core 1 is the rest of #479, and it is a different kind of
 change.** The first thing it must do is raise `KERNEL_ACTIVE_CORES`, which
 prints the ten-site worklist #453 built for exactly this moment.
 Everything up to here has been "a second core does work that reaches no
