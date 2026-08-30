@@ -22,22 +22,22 @@
 //     last, then the map's own self-check
 //   then the refusal: a blob whose magic does not match
 
-let fdt_fixture: [u8; 3330] = embed_file("linux_user/build/fdt_fixture.dtb");
-let fdt_invalid_memory_fixture: [u8; 3410] =
+let fdt_fixture: [u8; 3554] = embed_file("linux_user/build/fdt_fixture.dtb");
+let fdt_invalid_memory_fixture: [u8; 3634] =
     embed_file("linux_user/build/fdt_invalid_memory_fixture.dtb");
-let fdt_invalid_reservation_fixture: [u8; 3346] =
+let fdt_invalid_reservation_fixture: [u8; 3570] =
     embed_file("linux_user/build/fdt_invalid_reservation_fixture.dtb");
-let fdt_invalid_tree_reservation_fixture: [u8; 3382] =
+let fdt_invalid_tree_reservation_fixture: [u8; 3606] =
     embed_file("linux_user/build/fdt_invalid_tree_reservation_fixture.dtb");
-let fdt_invalid_device_fixture: [u8; 3398] =
+let fdt_invalid_device_fixture: [u8; 3606] =
     embed_file("linux_user/build/fdt_invalid_device_fixture.dtb");
-let fdt_invalid_interrupt_fixture: [u8; 3330] =
+let fdt_invalid_interrupt_fixture: [u8; 3554] =
     embed_file("linux_user/build/fdt_invalid_interrupt_fixture.dtb");
-let fdt_missing_interrupt_fixture: [u8; 3295] =
+let fdt_missing_interrupt_fixture: [u8; 3519] =
     embed_file("linux_user/build/fdt_missing_interrupt_fixture.dtb");
-let fdt_invalid_gic_fixture: [u8; 3306] =
+let fdt_invalid_gic_fixture: [u8; 3530] =
     embed_file("linux_user/build/fdt_invalid_gic_fixture.dtb");
-let fdt_invalid_pcie_ranges_fixture: [u8; 3326] =
+let fdt_invalid_pcie_ranges_fixture: [u8; 3550] =
     embed_file("linux_user/build/fdt_invalid_pcie_ranges_fixture.dtb");
 
 // The existing printer is 32 bits wide and these are physical addresses on
@@ -97,7 +97,7 @@ fn report_memory(result: FdtMemoryResult) !{unsafe} {
             }
             uart_puts("blob overlap ");
             if (fdt_blob_overlaps(found, fdt_blob_base(found), 1) &&
-                fdt_blob_overlaps(found, fdt_blob_base(found) + 3330, 1) ==
+                fdt_blob_overlaps(found, fdt_blob_base(found) + 3554, 1) ==
                     false) {
                 uart_puts("yes\r\n");
             } else {
@@ -184,6 +184,25 @@ fn report_rp1_gpio(label: *u8, result: FdtRp1GpioRegionsResult) {
     }
 }
 
+fn report_mip(label: *u8, result: FdtMipRegionsResult) {
+    uart_puts(label);
+    match result {
+        FdtMipRegionsResult::Invalid => { uart_puts(" invalid\n"); }
+        FdtMipRegionsResult::NotFound => { uart_puts(" not found\n"); }
+        FdtMipRegionsResult::Found(regions) => {
+            uart_puts(" controller ");
+            uart_print_hex((regions.controller.base >> 32) as i32);
+            uart_puts(" ");
+            uart_print_hex((regions.controller.base & 0xFFFFFFFF) as i32);
+            uart_puts(" target ");
+            uart_print_hex((regions.target.base >> 32) as i32);
+            uart_puts(" ");
+            uart_print_hex((regions.target.base & 0xFFFFFFFF) as i32);
+            uart_puts("\n");
+        }
+    }
+}
+
 fn app_main() !{unsafe} {
     let blob: usize = (fdt_fixture as *u8) as usize;
     report_device("qemu pl011",
@@ -192,6 +211,8 @@ fn app_main() !{unsafe} {
         blob, bs"brcm,bcm2835-system-timer"));
     report_device("rpi5 pcie2", fdt_find_compatible_reg(
         blob, bs"brcm,bcm2712-pcie"));
+    report_mip("rpi5 mip0", fdt_find_compatible_mip_regions(
+        blob, bs"brcm,bcm2712-mip", 0x1000130000));
     report_device("rpi5 pcie rescal", fdt_find_compatible_reg(
         blob, bs"brcm,bcm7216-pcie-sata-rescal"));
     report_device("rpi5 bcm reset", fdt_find_compatible_reg(
@@ -217,6 +238,8 @@ fn app_main() !{unsafe} {
         (fdt_invalid_device_fixture as *u8) as usize;
     report_device("invalid device", fdt_find_compatible_reg(
         invalid_device_blob, bs"arm,pl011"));
+    report_mip("invalid mip0", fdt_find_compatible_mip_regions(
+        invalid_device_blob, bs"brcm,bcm2712-mip", 0x1000130000));
     report_rp1_gpio("invalid rp1 gpio",
         fdt_find_compatible_rp1_gpio_regions(
             invalid_device_blob, bs"raspberrypi,rp1-gpio"));

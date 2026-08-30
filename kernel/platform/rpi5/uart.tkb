@@ -212,6 +212,13 @@ fn platform_init() {
         Rpi5UsbXhciDtbResult::Missing => { }
         Rpi5UsbXhciDtbResult::Applied(base) => { }
     }
+    match rpi5_mip0_apply_boot_dtb() {
+        Rpi5MipDtbResult::Invalid => { }
+        Rpi5MipDtbResult::Missing => { }
+        Rpi5MipDtbResult::Applied(regions) => {
+            let (controller, target) = regions;
+        }
+    }
     // Resolve the register window before the first UART access. Every result
     // is recorded for main() to report; invalid/missing DTBs retain only the
     // known diagnostic address and are halted there before normal boot.

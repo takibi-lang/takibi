@@ -70,6 +70,17 @@ struct FdtRp1GpioRegions {
     pads: FdtDeviceRegion;
 }
 
+struct FdtMipRegions {
+    controller: FdtDeviceRegion;
+    target: FdtDeviceRegion;
+}
+
+must_use variant FdtMipRegionsResult {
+    Invalid;
+    NotFound;
+    Found(FdtMipRegions);
+}
+
 must_use variant FdtRp1GpioRegionsResult {
     Invalid;
     NotFound;
@@ -660,7 +671,7 @@ private fn fdt_scan_tree_reservations(base: usize, wanted: usize)
 
 private fn fdt_find_compatible_reg_bounded(
         base: usize, compatible: []u8, pcie_nested_only: bool,
-        required_nested_base: usize)
+        required_candidate_base: usize, required_nested_base: usize)
         -> FdtDeviceRegionResult !{unsafe} {
     if (fdt_read_be32(base, FDT_HEADER_SIZE, 0) != FDT_MAGIC) {
         return FdtDeviceRegionResult::Invalid;
@@ -706,6 +717,7 @@ private fn fdt_find_compatible_reg_bounded(
     let mut candidate_interrupt_parent: usize = 0;
     let mut candidate_interrupts_offset: usize = 0;
     let mut candidate_interrupts_length: usize = 0;
+    let mut candidate_base_matches: bool = true;
 
     // The other bounded shape is root -> axi -> PCIe -> RP1 -> device.
     // PCI child addresses have a leading flags cell, so this remains a
@@ -765,6 +777,7 @@ private fn fdt_find_compatible_reg_bounded(
                 candidate_interrupt_parent = root_interrupt_parent;
                 candidate_interrupts_offset = 0;
                 candidate_interrupts_length = 0;
+                candidate_base_matches = true;
             } else if (depth == 3 && bus_depth == 2 &&
                        (candidate_depth == 0 ||
                         candidate_compatible == false)) {
@@ -775,6 +788,7 @@ private fn fdt_find_compatible_reg_bounded(
                 candidate_interrupt_parent = root_interrupt_parent;
                 candidate_interrupts_offset = 0;
                 candidate_interrupts_length = 0;
+                candidate_base_matches = true;
             }
             if (depth == 3 && bus_depth == 2) {
                 pcie_depth = depth;
@@ -919,6 +933,7 @@ private fn fdt_find_compatible_reg_bounded(
             }
             if (candidate_depth == depth) {
                 if (candidate_enabled && candidate_compatible &&
+                    candidate_base_matches &&
                     pcie_nested_only == false) {
                     let mut address_cells: usize = bus_address_cells;
                     let mut size_cells: usize = bus_size_cells;
@@ -1076,6 +1091,10 @@ private fn fdt_find_compatible_reg_bounded(
                 candidate_reg_seen = true;
                 candidate_reg_offset = cursor;
                 candidate_reg_length = length;
+                if (required_candidate_base != 0 && length >= 8) {
+                    candidate_base_matches = fdt_cells_value(
+                        base, total, cursor, 2) == required_candidate_base;
+                }
             } else if (candidate_depth == depth && length == 4 &&
                        fdt_string_is(base, strings_end, prop_name,
                                      bs"interrupt-parent")) {
@@ -1165,7 +1184,50 @@ private fn fdt_find_compatible_reg_bounded(
 
 fn fdt_find_compatible_reg(base: usize, compatible: []u8)
         -> FdtDeviceRegionResult !{unsafe} {
-    return fdt_find_compatible_reg_bounded(base, compatible, false, 0);
+    return fdt_find_compatible_reg_bounded(base, compatible, false, 0, 0);
+}
+
+fn fdt_find_compatible_reg_at(
+        base: usize, compatible: []u8, child_base: usize)
+        -> FdtDeviceRegionResult !{unsafe} {
+    return fdt_find_compatible_reg_bounded(
+        base, compatible, false, child_base, 0);
+}
+
+fn fdt_find_compatible_mip_regions(
+        base: usize, compatible: []u8, child_base: usize)
+        -> FdtMipRegionsResult !{unsafe} {
+    match fdt_find_compatible_reg_at(base, compatible, child_base) {
+        FdtDeviceRegionResult::Invalid => {
+            return FdtMipRegionsResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            return FdtMipRegionsResult::NotFound;
+        }
+        FdtDeviceRegionResult::Found(first) => {
+            if (first.address_cells != 2 || first.size_cells != 2 ||
+                first.reg_length != 32) {
+                return FdtMipRegionsResult::Invalid;
+            }
+            let total: usize = fdt_read_be32(
+                first.dtb, FDT_HEADER_SIZE, 4);
+            let target_base: usize = fdt_cells_value(
+                first.dtb, total, first.reg_offset + 16, 2);
+            let target_size: usize = fdt_cells_value(
+                first.dtb, total, first.reg_offset + 24, 2);
+            if (target_size == 0 ||
+                target_base > 0xFFFFFFFFFFFFFFFF - target_size) {
+                return FdtMipRegionsResult::Invalid;
+            }
+            let mut controller: FdtDeviceRegion = first;
+            let mut target: FdtDeviceRegion = {
+                target_base, target_size, first.dtb,
+                first.reg_offset + 16, 32, 2, 2, false, 0, 0, 0
+            };
+            let mut regions: FdtMipRegions = { controller, target };
+            return FdtMipRegionsResult::Found(regions);
+        }
+    }
 }
 
 // RP1 GPIO exposes three adjacent register resources: pin control, RIO, and
@@ -1232,14 +1294,14 @@ fn fdt_find_compatible_rp1_gpio_regions(base: usize, compatible: []u8)
 // letting structure order choose between two different devices.
 fn fdt_find_compatible_pcie_reg(base: usize, compatible: []u8)
         -> FdtDeviceRegionResult !{unsafe} {
-    return fdt_find_compatible_reg_bounded(base, compatible, true, 0);
+    return fdt_find_compatible_reg_bounded(base, compatible, true, 0, 0);
 }
 
 fn fdt_find_compatible_pcie_reg_at(
         base: usize, compatible: []u8, child_base: usize)
         -> FdtDeviceRegionResult !{unsafe} {
     return fdt_find_compatible_reg_bounded(
-        base, compatible, true, child_base);
+        base, compatible, true, 0, child_base);
 }
 
 fn fdt_find_compatible_gicv2_regions(base: usize, compatible: []u8)

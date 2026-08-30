@@ -7,3 +7,4 @@
 ^gic: source=dtb distributor_bytes=
 ^rp1 gem dtb: gem_bytes=
 ^rp1 usb0: source=dtb base_bytes=
+^mip0: source=dtb controller_bytes=

@@ -57,12 +57,17 @@ use "kernel/arch/arm64/kernel/timer.tkb";
 const RPI5_PCIE2_BASE: usize = 0x1000120000;
 const RPI5_PCIE_RESCAL_BASE: usize = 0x1000119500;
 const RPI5_BCM_RESET_BASE: usize = 0x1001504318;
+const RPI5_MIP0_BASE: usize = 0x1000130000;
+const RPI5_MIP0_TARGET: usize = 0xFFFFFFF000;
 
 let mut rpi5_pcie2_base: usize = RPI5_PCIE2_BASE;
 let mut rpi5_pcie2_dtb_status: usize;
 let mut rpi5_pcie_rescal_base: usize = RPI5_PCIE_RESCAL_BASE;
 let mut rpi5_bcm_reset_base: usize = RPI5_BCM_RESET_BASE;
 let mut rpi5_pcie_support_dtb_status: usize;
+let mut rpi5_mip0_base: usize = RPI5_MIP0_BASE;
+let mut rpi5_mip0_target: usize = RPI5_MIP0_TARGET;
+let mut rpi5_mip0_dtb_status: usize;
 
 // delay_us(us): busy-wait at least `us` microseconds, using CNTPCT_EL0's
 // free-running count and CNTFRQ_EL0's own frequency -- same technique
@@ -438,10 +443,10 @@ fn pcie2_mip0_inbound_setup() !{unsafe} {
     };
 
     // brcm_pcie_encode_ibar_size(4KB) = 0x1c.
-    *rc_bar1_lo = 0xFFFFF000 | 0x1C;
-    *rc_bar1_hi = 0xFF;
-    *ubus_bar1_remap_lo = 0x00130000 | 1; // MIP0 low address | ACCESS_ENABLE
-    *ubus_bar1_remap_hi = 0x10;
+    *rc_bar1_lo = (rpi5_mip0_target as u32) | 0x1C;
+    *rc_bar1_hi = (rpi5_mip0_target >> 32) as u32;
+    *ubus_bar1_remap_lo = (rpi5_mip0_base as u32) | 1;
+    *ubus_bar1_remap_hi = (rpi5_mip0_base >> 32) as u32;
 }
 
 // General inbound DMA window (GitHub issue #67 follow-up: RP1's XHCI USB

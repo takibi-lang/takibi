@@ -283,6 +283,19 @@ def main():
         0x1C, 0, 0x1C, 0, 4, 0))
     b.prop("#address-cells", b.cells(2))
     b.prop("#size-cells", b.cells(2))
+    b.begin("msi-controller@1000131000")
+    b.prop("reg", b.cells(0x10, 0x00131000, 0, 0xC0,
+                          0xFF, 0xFFFFE000, 0, 0x1000))
+    b.prop("compatible", b"brcm,bcm2712-mip\0")
+    b.end()
+    b.begin("msi-controller@1000130000")
+    if mode == "--invalid-device":
+        b.prop("reg", b.cells(0x10, 0x00130000, 0, 0xC0))
+    else:
+        b.prop("reg", b.cells(0x10, 0x00130000, 0, 0xC0,
+                              0xFF, 0xFFFFF000, 0, 0x1000))
+    b.prop("compatible", b"brcm,bcm2712-mip\0")
+    b.end()
     for address in (0x1000100000, 0x1000110000):
         b.begin(f"pcie@{address:x}")
         b.prop("compatible", b"brcm,bcm2712-pcie\0")

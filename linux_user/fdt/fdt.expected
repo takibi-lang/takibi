@@ -4,6 +4,7 @@ rpi5 system timer base 0x00000010 0x7c003000
 size 0x00000000 0x00001000
 rpi5 pcie2 base 0x00000010 0x00120000
 size 0x00000000 0x00009310
+rpi5 mip0 controller 0x00000010 0x00130000 target 0x000000ff 0xfffff000
 rpi5 pcie rescal base 0x00000010 0x00119500
 size 0x00000000 0x00000010
 rpi5 bcm reset base 0x00000010 0x01504318
@@ -20,6 +21,7 @@ rpi5 rp1 gpio ctrl 0x0000001f 0x000d0000 rio 0x0000001f 0x000e0000 pads 0x000000
 invalid pcie ranges invalid
 missing device not found
 invalid device invalid
+invalid mip0 invalid
 invalid rp1 gpio invalid
 invalid rp1 usb0 invalid
 qemu pl011 interrupt intid 0x00000021 flags 0x00000004

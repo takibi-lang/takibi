@@ -1,0 +1,43 @@
+must_use variant Rpi5MipDtbResult {
+    Invalid;
+    Missing;
+    Applied((usize, usize));
+}
+
+fn rpi5_mip0_apply_boot_dtb() -> Rpi5MipDtbResult !{unsafe} {
+    let dtb: usize = boot_dtb_address_read();
+    match fdt_find_compatible_mip_regions(
+            dtb, bs"brcm,bcm2712-mip", 0x1000130000) {
+        FdtMipRegionsResult::Invalid => {
+            rpi5_mip0_dtb_status = 1;
+            return Rpi5MipDtbResult::Invalid;
+        }
+        FdtMipRegionsResult::NotFound => {
+            rpi5_mip0_dtb_status = 2;
+            return Rpi5MipDtbResult::Missing;
+        }
+        FdtMipRegionsResult::Found(regions) => {
+            if (regions.controller.base != RPI5_MIP0_BASE ||
+                regions.controller.size < 0xC0 ||
+                regions.target.base != RPI5_MIP0_TARGET ||
+                regions.target.size < 0x1000) {
+                rpi5_mip0_dtb_status = 1;
+                return Rpi5MipDtbResult::Invalid;
+            }
+            rpi5_mip0_base = regions.controller.base;
+            rpi5_mip0_target = regions.target.base;
+            rpi5_mip0_dtb_status = 3;
+            return Rpi5MipDtbResult::Applied((
+                rpi5_mip0_base, rpi5_mip0_target));
+        }
+    }
+}
+
+fn rpi5_mip0_boot_dtb_status() -> Rpi5MipDtbResult {
+    if (rpi5_mip0_dtb_status == 3) {
+        return Rpi5MipDtbResult::Applied((
+            rpi5_mip0_base, rpi5_mip0_target));
+    }
+    if (rpi5_mip0_dtb_status == 2) { return Rpi5MipDtbResult::Missing; }
+    return Rpi5MipDtbResult::Invalid;
+}
