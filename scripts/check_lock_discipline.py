@@ -76,6 +76,14 @@ ATOMIC_ALLOWED = {
     "kernel/pid_contention_evidence.tkb": "two-core contention probe",
     "kernel/tag_contention_evidence.tkb": "two-core contention probe",
     "kernel/schedule_contention_evidence.tkb": "two-core contention probe",
+    "kernel/process.tkb":
+        "GitHub issue #479 Group B: the crash trace ring's global sequence. "
+        "Per-CPU segments make every other word single-writer, and the "
+        "sequence is the one shared value -- it is a fetch-add because a "
+        "reporter that can block cannot report the deadlock it is in, which "
+        "is the same reason Linux's printk ringbuffer is lock-free (see "
+        "issues #465 and #486). Not boot-reachable: nothing here runs before "
+        "main(), so issue #484's mmu_off hazard does not apply",
 }
 
 

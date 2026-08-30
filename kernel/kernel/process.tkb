@@ -2255,9 +2255,24 @@ private let mut kernel_process_trace_probe_child_frame:
 // implementation deliberately keeps the same field ABI and copy interface.
 // Sixteen records retain the complete first fork+exec handoff in the QEMU
 // fail-stop regression while remaining a small fixed 1536-byte object.
+// Records PER CPU. The output buffer below is still one core's worth,
+// because a snapshot carries the newest 16 records of the whole machine
+// however they are spread across cores.
 const KERNEL_CRASH_TRACE_EVENTS: usize = 16;
 const KERNEL_PROCESS_TRACE_WORDS_PER_EVENT: usize = 12;
+// The SNAPSHOT's size, and an ABI: kernel/arch/arm64/kernel/
+// exception_evidence.tkb's CrashSnapshot and DdbSnapshot both declare
+// `trace: [usize; KERNEL_CRASH_TRACE_WORDS]`, and the oops lane and the
+// DDB renderer read twelve-word records out of it. Unchanged by the
+// per-CPU split on purpose -- what grew is the STORAGE, not the report.
 const KERNEL_CRASH_TRACE_WORDS: usize = 192;
+// The storage: one segment per core. An array size cannot be a product
+// expression, so the product is its own constant -- which is exactly the
+// shape that goes stale when somebody raises the core count, so it is
+// checked rather than remembered (see kernel_crash_trace_slot below).
+const KERNEL_CRASH_TRACE_STORAGE_WORDS: usize = 384;
+// How many records the storage holds in total, for the reader's walk.
+const KERNEL_CRASH_TRACE_SLOTS: usize = 32;
 const ProcessTraceFork: usize = 1;
 const ProcessTraceExecPrepare: usize = 2;
 const ProcessTraceExecCommit: usize = 3;
@@ -2268,8 +2283,59 @@ const ProcessTraceResume: usize = 7;
 const ProcessTraceExit: usize = 8;
 const ProcessTraceReap: usize = 9;
 const ProcessTraceAddressSpaceActivate: usize = 10;
-private let mut kernel_crash_trace: [usize; KERNEL_CRASH_TRACE_WORDS];
-private let mut kernel_crash_trace_next: usize;
+// GitHub issue #479 Group B: PER-CPU storage, one global sequence.
+//
+// This ring was one segment and one `next` counter, and `next` was a read,
+// an add and a write with nothing excluding a second core. Two cores
+// recording at once would take the same slot and interleave twelve words
+// into it -- and this is the ring the oops lane and DDB read to find out
+// what a crashed kernel was doing, so a torn record is a wrong answer at
+// the one moment a wrong answer costs most.
+//
+// NOT A LOCK, and that is a deliberate choice rather than an omission. A
+// reporter that can block cannot report the deadlock it is in. Linux moved
+// printk to a lock-free ringbuffer in 5.10 for exactly this, and
+// bust_spinlocks()/oops_in_progress exists so an oops can reach the user
+// past a console lock; NetBSD's DDB reads every kernel structure through
+// db_read_bytes rather than taking anything; FreeBSD makes every mutex a
+// no-op under SCHEDULER_STOPPED(). This file's siblings in that class are
+// GitHub issues #465 (the retained text log) and #486 (the crash
+// snapshot), and kernel/lib/diagnostic_ring.tkb already answers it here
+// with per-CPU rings and issue #299's publication record.
+//
+// Each core writes only its own segment and its own slot counter, so the
+// only shared word is the sequence -- and that is an atomic fetch-add
+// rather than a lock, which is what #465 specifies for the same job.
+//
+// WHY A GLOBAL SEQUENCE AND NOT A PER-CPU ONE. diagnostic_ring.tkb's
+// limitation says it "does not invent a global order between CPUs", and
+// that is right for classified event tracing. It is wrong here: this ring
+// exists to answer "what was the kernel doing when it died", and on two
+// cores the interesting version of that question is the interleaving. One
+// atomic counter buys the total order, and the reader reconstructs it by
+// sequence rather than by segment.
+private let mut kernel_crash_trace:
+    [usize; KERNEL_CRASH_TRACE_STORAGE_WORDS];
+// How many records THIS core has written. Per-core, so it needs no
+// atomic: one writer, and it selects a slot inside that core's own
+// segment.
+private let mut kernel_crash_trace_next: [usize; KERNEL_MAX_CORES];
+// The order. Shared, so it is the one word here that is an atomic.
+private let mut kernel_crash_trace_sequence: usize;
+
+private fn kernel_crash_trace_sequence_address() -> usize {
+    return (&kernel_crash_trace_sequence) as usize;
+}
+
+// Which segment this core writes. Bounded for the same reason
+// execution_here() bounds its index: cpu_id() reads a hardware affinity
+// field, and a part numbering its cores differently would index past the
+// array. Falling back to segment 0 is wrong but bounded.
+private fn kernel_crash_trace_cpu() -> {0..<KERNEL_MAX_CORES as usize} {
+    let raw: usize = cpu_id();
+    if (raw >= KERNEL_MAX_CORES) { return 0; }
+    return raw;
+}
 // A debugger-owned boot-test switch. Production BSS leaves this false, while
 // a test may set it before the first process reset to retain a real workload's
 // tail without adding UART traffic or a production control surface.
@@ -2280,23 +2346,86 @@ private let mut kernel_process_trace_boot_enabled: bool;
 private let mut kernel_process_trace_fail_after_exec: bool;
 private let mut kernel_process_trace_enabled: bool;
 
-// Layout: local sequence, cpu, kind, subject pid/generation, peer
+// Layout: sequence, cpu, kind, subject pid/generation, peer
 // pid/generation, state, wait reason, root, saved SP, event-specific aux.
+// The sequence is global now (GitHub issue #479 Group B), so the cpu field
+// beside it stopped being a placeholder.
+
+// Where a (cpu, local count) pair lands. One function, so the ring's only
+// piece of index arithmetic has one home -- the writer and the reader used
+// to compute it separately from the same two constants, which is how
+// kernel/lib/diagnostic_ring.tkb's own equivalent went wrong.
+private fn kernel_crash_trace_slot(cpu: {0..<KERNEL_MAX_CORES as usize},
+                                   local: usize)
+        -> {0..<KERNEL_CRASH_TRACE_SLOTS as usize} {
+    static_assert(KERNEL_CRASH_TRACE_STORAGE_WORDS ==
+                  KERNEL_MAX_CORES * KERNEL_CRASH_TRACE_EVENTS *
+                  KERNEL_PROCESS_TRACE_WORDS_PER_EVENT,
+                  "the crash trace storage constant must be CORES * EVENTS * WORDS: this function indexes past the array otherwise");
+    static_assert(KERNEL_CRASH_TRACE_WORDS ==
+                  KERNEL_CRASH_TRACE_EVENTS *
+                  KERNEL_PROCESS_TRACE_WORDS_PER_EVENT,
+                  "the snapshot buffer must hold exactly EVENTS records: exception_evidence.tkb declares it that size");
+    static_assert(KERNEL_CRASH_TRACE_SLOTS ==
+                  KERNEL_MAX_CORES * KERNEL_CRASH_TRACE_EVENTS,
+                  "the slot count must be CORES * EVENTS: the reader walks every slot with it");
+    return cpu * KERNEL_CRASH_TRACE_EVENTS +
+           ((local - 1) % KERNEL_CRASH_TRACE_EVENTS);
+}
+
+// Empty the ring: every core's slot counter, the shared sequence, and
+// every slot's COMMIT word.
+//
+// Clearing the commit words is new and it is required, not tidiness. The
+// old reader derived "the newest sequence" from the single `next` counter,
+// so zeroing that counter was enough to make the whole ring invisible. The
+// per-CPU reader derives it from the SLOTS, because there is no longer one
+// counter that knows about every core -- so a reset that left stale
+// commits behind would leave the previous workload's records showing in
+// the next one's snapshot. Only word 0 needs clearing: a record whose
+// commit is 0 is never matched.
+//
+// This replaces two sites that each said `kernel_crash_trace_next = 0`.
+// Those still COMPILED after the counter became an array, which is GitHub
+// issue #487 -- an integer literal assigned to an array is accepted, the
+// same hole issue #460 found for structs.
+private fn kernel_process_crash_trace_reset() !{unsafe} {
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        kernel_crash_trace_next[core] = 0;
+    }
+    unsafe {
+        atomic_store_release(kernel_crash_trace_sequence_address(), 0);
+    }
+    for slot: usize in 0..<KERNEL_CRASH_TRACE_SLOTS {
+        kernel_crash_trace[slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT] = 0;
+    }
+}
+
 fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
                                peer_pid: usize, peer_generation: usize,
                                state: usize, wait_reason: usize, root: usize,
-                               saved_sp: usize, aux: usize) {
+                               saved_sp: usize, aux: usize) !{unsafe} {
     if (kernel_process_trace_enabled == false) { return; }
     // Publish the reservation before touching the entry. An IRQ that arrives
     // while ordinary EL1 code is recording therefore receives the next slot,
     // rather than interleaving words into this one. `sequence` is written
     // last; zero means an exception observed an in-progress entry.
-    let sequence: usize = kernel_crash_trace_next + 1;
-    kernel_crash_trace_next = sequence;
-    let slot: usize = (sequence - 1) % KERNEL_CRASH_TRACE_EVENTS;
+    //
+    // GitHub issue #479 Group B: the slot counter is this core's own, so
+    // the interrupt-versus-thread reservation above still works unchanged
+    // and needs no atomic. The SEQUENCE is shared and does, and it is a
+    // fetch-add returning the previous value.
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = kernel_crash_trace_cpu();
+    let sequence: usize = unsafe {
+        atomic_fetch_add_relaxed(kernel_crash_trace_sequence_address(), 1)
+    } + 1;
+    let local: usize = kernel_crash_trace_next[cpu] + 1;
+    kernel_crash_trace_next[cpu] = local;
+    let slot: {0..<KERNEL_CRASH_TRACE_SLOTS as usize} =
+        kernel_crash_trace_slot(cpu, local);
     let base: usize = slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
     kernel_crash_trace[base] = 0;
-    kernel_crash_trace[base + 1] = 0; // core 0; SMP becomes per-CPU rings.
+    kernel_crash_trace[base + 1] = cpu;
     kernel_crash_trace[base + 2] = event;
     kernel_crash_trace[base + 3] = pid;
     kernel_crash_trace[base + 4] = generation;
@@ -2373,13 +2502,28 @@ fn kernel_process_trace_handle(event: usize, subject: ProcessHandle,
 // Copies oldest-to-newest into the caller-owned fixed array. This gives the
 // crash report a stable chronological tail even after the ring wrapped.
 fn kernel_process_crash_trace_copy(output: *usize) -> usize {
-    // `next` is reserved before a writer fills its slot, so an IRQ may see a
-    // newer completed record while its interrupted predecessor still has
-    // sequence zero. Never derive chronology from a racy count: validate each
-    // slot's commit sequence against its expected position and skip an
-    // in-flight hole. This is safe for the current single CPU + IRQ producer
-    // and is the same validation a future per-CPU reader will retain.
-    let latest: usize = kernel_crash_trace_next;
+    // A slot's commit sequence is written LAST and is zero while the record
+    // is in flight, so chronology is never derived from a count: every slot
+    // is validated against the sequence being looked for, and an in-flight
+    // hole is skipped. That was true of the single-segment ring and is what
+    // the per-CPU one retains.
+    //
+    // GitHub issue #479 Group B: the newest KERNEL_CRASH_TRACE_EVENTS
+    // records OF THE MACHINE, however they are spread across segments, in
+    // sequence order. That is why the sequence is global -- on two cores the
+    // interesting version of "what was the kernel doing" is the
+    // interleaving, and a reader that concatenated segments would destroy
+    // exactly that.
+    //
+    // Cost: EVENTS * (CORES * EVENTS) comparisons, both bounds static, which
+    // is 512 today. A snapshot is taken once, while the machine is already
+    // stopping.
+    let mut latest: usize = 0;
+    for slot: usize in 0..<KERNEL_CRASH_TRACE_SLOTS {
+        let slot_base: usize = slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+        let committed: usize = kernel_crash_trace[slot_base];
+        if (committed > latest) { latest = committed; }
+    }
     let mut first: usize = 1;
     if (latest > KERNEL_CRASH_TRACE_EVENTS) {
         first = latest - KERNEL_CRASH_TRACE_EVENTS + 1;
@@ -2388,16 +2532,19 @@ fn kernel_process_crash_trace_copy(output: *usize) -> usize {
     for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
         let sequence: usize = first + item;
         if (sequence <= latest) {
-            let source: usize = (sequence - 1) % KERNEL_CRASH_TRACE_EVENTS;
-            let source_base: usize = source * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
-            if (kernel_crash_trace[source_base] == sequence) {
-                let output_base: usize =
-                    copied * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
-                for word: usize in 0..<KERNEL_PROCESS_TRACE_WORDS_PER_EVENT {
-                    *(output + (output_base as isize) + (word as isize)) =
-                        kernel_crash_trace[source_base + word];
+            for slot: usize in 0..<KERNEL_CRASH_TRACE_SLOTS {
+                let source_base: usize =
+                    slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+                if (kernel_crash_trace[source_base] == sequence &&
+                    copied < KERNEL_CRASH_TRACE_EVENTS) {
+                    let output_base: usize =
+                        copied * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+                    for word: usize in 0..<KERNEL_PROCESS_TRACE_WORDS_PER_EVENT {
+                        *(output + (output_base as isize) + (word as isize)) =
+                            kernel_crash_trace[source_base + word];
+                    }
+                    copied = copied + 1;
                 }
-                copied = copied + 1;
             }
         }
     }
@@ -2512,7 +2659,7 @@ fn kernel_process_execution_reset() {
     execution_here().current_live = false;
     process_test_evidence_reset();
     kernel_process_trace_enabled = kernel_process_trace_boot_enabled;
-    kernel_crash_trace_next = 0;
+    kernel_process_crash_trace_reset();
     // No per-slot clearing loop: scheduled_process_table_clear above
     // destroyed every pooled record and reset the bootstrap's static one,
     // which is strictly more than this loop did (issue #392).
@@ -4119,7 +4266,7 @@ fn kernel_process_crash_trace_ring_probe() -> bool {
     // The optional boot trace may have recorded this reset's initial resume.
     // This probe owns its synthetic ring contents, so start its wrap proof at
     // sequence one regardless of that external diagnostic policy.
-    kernel_crash_trace_next = 0;
+    kernel_process_crash_trace_reset();
     for event: usize in 1..<19 {
         kernel_process_trace_record(event, event + 100, event + 1000,
                                     event + 200, event + 2000, 3, 2,
@@ -5092,17 +5239,28 @@ fn kernel_process_clone_evidence() -> bool {
 // issue #451 -- it is a Mutex, not an erased view -- and execution_state is
 // per-core and indexed by cpu_id() as of Group B.
 //
-// What is actually left of "one scheduler's globals", after the pid
-// counter above got its lock: the BOOTSTRAP record and its two flags
-// (scheduled_process_boot_record/_live/_generation), which are one static
-// record two cores could both decide is current; the parent and sibling
-// LINKS inside ProcessRecord, which two cores forking at once would splice
-// concurrently; and the crash trace ring's own next-index counter. The
-// pool holding the records is not on that list -- mutating an
-// IntrusivePool requires its guard as a matter of typing.
+// Re-derived AGAIN, because Group B removed two of the three things this
+// message used to name. That is the point of keeping the message specific:
+// a message that stayed general would still read as true and would stop
+// saying anything.
+//
+// Gone: the parent and sibling LINKS, because the walk that reads them is
+// inside kernel_process_schedule's and kernel_process_block_current's
+// critical section now, and every state transition takes the scheduler
+// guard. Gone: the crash trace ring's next-index counter, which is per-CPU
+// with a global atomic sequence -- not a lock, because a reporter that can
+// block cannot report the deadlock it is in (issues #465, #486).
+//
+// What is left is ONE thing: the BOOTSTRAP record and its two flags
+// (scheduled_process_boot_record/_live/_generation). It is a static record
+// outside the pool, and two cores could both decide it is current --
+// which is not a locking problem so much as GitHub issue #415's, that the
+// bootstrap process is distinguished by a value (slot 0) rather than by a
+// type. The pool holding every OTHER record is not on the list: mutating
+// an IntrusivePool requires its guard as a matter of typing.
 fn process_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "the bootstrap record, the parent/sibling links, and the trace ring index are unlocked");
+                  "the bootstrap record and its two flags are one static record two cores could both decide is current (issue #415)");
 }
 
 
