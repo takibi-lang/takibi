@@ -56,7 +56,36 @@ private let mut address_space_backing_ready: bool = false;
 // the boot suite; 0 on a healthy kernel.
 private let mut address_space_backing_missing: AddressSpaceBacking;
 private let mut address_space_backing_missing_count: usize = 0;
-private let mut address_space_active_slot: usize;
+// GitHub issue #479: WHICH ADDRESS SPACE IS ACTIVE is a property of a
+// core, not of the kernel. Each core has its own TTBR0_EL1 and can be
+// running a different process, so two cores have two answers -- and one
+// global held one.
+//
+// An array indexed by cpu_id(), sized by KERNEL_MAX_CORES, exactly as
+// execution_state is. A no-op while one core runs kernel code: cpu_id()
+// answers 0 and the index adds nothing. Not a lock, because the problem
+// was never contention -- it was that the state had the wrong shape.
+//
+// What it would have cost: address_space_activate_root writes it and
+// address_space_release_root reads it to decide whether the root being
+// freed is the one on the CPU. On two cores that read would answer about
+// the OTHER core's root, so a release could leave this core running on a
+// root it had just torn down, or skip switching a core off one it had.
+private let mut address_space_active_slot: [usize; KERNEL_MAX_CORES];
+
+private fn address_space_active_slot_here() -> usize {
+    let base: *usize = address_space_active_slot;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return *base; }
+    return *(base + (core as isize));
+}
+
+private fn address_space_set_active_slot_here(slot: usize) {
+    let base: *usize = address_space_active_slot;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { *base = slot; return; }
+    *(base + (core as isize)) = slot;
+}
 
 // GitHub issue #406: how many address spaces exist right now. Root 0's
 // backing is a static rather than a pool allocation -- it is created with
@@ -496,7 +525,7 @@ fn address_space_activate_root(slot: usize) {
         if (backing.live) {
             address_space_refresh_asid(backing);
             mmu_activate_root(backing.l1_physical, backing.asid);
-            address_space_active_slot = checked;
+            address_space_set_active_slot_here(checked);
             return;
         }
     }
@@ -507,7 +536,7 @@ fn address_space_activate_root(slot: usize) {
         address_space_backing_existing_at(fallback);
     address_space_refresh_asid(fallback_backing);
     mmu_activate_root(fallback_backing.l1_physical, fallback_backing.asid);
-    address_space_active_slot = 0;
+    address_space_set_active_slot_here(0);
 }
 
 // Puts the root that is running back on the CPU with a current ASID. The
@@ -516,7 +545,7 @@ fn address_space_activate_root(slot: usize) {
 // the ASID generation over does: the running root's stamp is left behind
 // by that rollover, and its number is about to be handed to somebody else.
 fn address_space_reactivate_current_root() {
-    address_space_activate_root(address_space_active_slot);
+    address_space_activate_root(address_space_active_slot_here());
 }
 
 must_use variant AddressSpacePteWriteResult {
@@ -788,7 +817,7 @@ fn address_space_release_root(slot: usize) {
     if (slot == 0 || scheduled_process_slot_valid(slot) == false) { return; }
     let checked: usize = slot;
     if (address_space_backing_at(checked).live == false) { return; }
-    if (address_space_active_slot == checked) {
+    if (address_space_active_slot_here() == checked) {
         address_space_activate_root(0);
     }
     let l1_physical: usize = address_space_backing_at(checked).l1_physical;
@@ -931,7 +960,7 @@ fn process_address_space_probe() -> bool !{unsafe} {
     // recycled number is safe. So the assertion moved: no number before,
     // distinct nonzero numbers after, and the root that was running gets
     // its own back when the probe puts it back on the CPU.
-    let restore: usize = address_space_active_slot;
+    let restore: usize = address_space_active_slot_here();
     let unassigned_ok: bool =
         address_space_asid(root_a) == 0 && address_space_asid(root_b) == 0;
     address_space_activate_root(root_a);
@@ -1117,7 +1146,7 @@ fn address_space_asid_rollover_probe() -> bool {
     if (asid_generation_is_current(generation_before)) { ok = false; }
 
     address_space_reactivate_current_root();
-    let active: usize = address_space_active_slot;
+    let active: usize = address_space_active_slot_here();
     let running: *AddressSpaceBacking = address_space_backing_existing_at(active);
     if (asid_generation_is_current(running.asid_generation) == false) {
         ok = false;
@@ -1130,23 +1159,17 @@ fn address_space_asid_rollover_probe() -> bool {
 // unsynchronized kind; the sixth is a different problem and is the reason
 // this assertion is worth reading.
 //
-// address_space_active_slot records WHICH ADDRESS SPACE IS ACTIVE, and that
-// is not a property of the kernel -- it is a property of a core. Each core
-// has its own TTBR0_EL1 and can be running a different process, so two
-// cores have two answers and a single global can hold one. This is not
-// missing exclusion, it is state of the wrong SHAPE, the same thing
-// execution_state was before Group B indexed it by cpu_id() -- and the fix
-// is the same, not a lock.
+// address_space_active_slot USED to be the interesting one: it records
+// which address space is active, which is a property of a core rather than
+// of the kernel, and it was a single global. That is fixed -- it is an
+// array indexed by cpu_id() now, the same shape execution_state got --
+// because the problem was never contention, it was that the state had the
+// wrong shape, and a lock would not have helped.
 //
-// It matters concretely: address_space_activate reads it to decide whether
-// a switch is needed at all, so on two cores a core could skip a switch
-// because the OTHER core had already activated that root. The process would
-// then run against whatever TTBR0_EL1 this core happened to hold.
-//
-// The rest -- the backing pool (mutation guard-required by typing), its
-// ready flag, the missing-record fallback and its counter, and root 0's
-// static backing -- are the ordinary kind.
+// What is left is the ordinary kind: the backing pool (mutation
+// guard-required by typing), its ready flag, the missing-record fallback
+// and its counter, and root 0's static backing.
 fn address_space_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "address_space_active_slot is per-CORE state held in one global: two cores have two answers and it can hold one");
+                  "the ext2/exec staging and the missing-record fallback are shared; active_slot is per-core since GitHub issue #479");
 }
