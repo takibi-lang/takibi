@@ -284,10 +284,41 @@ private fn schedule_contention_run_phase(locked: usize, stage: *u8)
         }
     }
     unsafe { atomic_store_release(schedule_probe_armed_address(), 0); }
+
+    // Wait for the secondary to have LEFT, not merely to have been told to.
+    //
+    // GitHub issue #479 Group B: clearing `armed` stops the secondary's
+    // loop at its next condition check, so a core already inside
+    // schedule_probe_cycle finishes that cycle first. Every other probe in
+    // this tree can ignore that -- one extra pid or tag costs nothing --
+    // but this one is the first whose cleanup DESTROYS the object being
+    // raced. A late cycle then calls scheduled_process_ready_take on a
+    // record the primary is reaping, and reads it through the counted
+    // absent-record fallback.
+    //
+    // Measured before this handshake existed: 1 boot in 8 reported
+    // `process table: records MISSING uses=16 reason=2` at the end of the
+    // run, against 0 in 8 at the commit before this probe was written.
+    // Intermittent, silent in the passing runs, and it took a rate
+    // measurement on both sides to attribute rather than a re-read.
+    let leave_window: i64 = read_cntfrq();
+    let leave_start: i64 = read_cntpct();
+    let mut left: bool = false;
+    while (left == false && read_cntpct() - leave_start < leave_window) {
+        if (unsafe {
+                atomic_load_acquire(schedule_probe_active_address())
+            } == 0) {
+            left = true;
+        }
+    }
     // Printed on EVERY exit path, including the give-ups. Two probes in
     // this tree shipped with early returns that printed nothing, and a run
     // that could not set itself up looked identical to one whose counter
     // raced.
+    if (left == false) {
+        schedule_contention_report("secondary-never-left" as *u8);
+        return false;
+    }
     if (finished == false) {
         schedule_contention_report("secondary-never-finished" as *u8);
         return false;
