@@ -1078,6 +1078,45 @@ Collected from real incidents in this tree, each of which cost hours the
 first time. HISTORY.md has the full story behind each; this is the index
 so it is findable while you are stuck rather than only afterwards.
 
+**Before calling an intermittent failure fixed -- or calling it a flake --
+compute your confidence.** The trigger is specific and you will meet it
+often: **a test that has passed before fails, and then passes when you run
+it again.** That is the fork. Both roads from it are wrong without a rate.
+
+On 2026-08-30 one failure appearing in about one QEMU boot in six was
+declared fixed twice, on two different and plausible mechanisms, each on
+the evidence of a clean run of eight. But
+
+    (1 - 1/6)^8 = 0.23
+
+so a clean eight happens about a quarter of the time by luck. It was
+reported as "0 in 8, fixed" and came back both times with a byte-identical
+signature. To be 90% confident a one-in-six event is gone you need about 13
+runs; for 95%, about 17. Compute `(1 - p)^n` with `p` from the failures
+already seen, and if you have not measured `p`, say so instead of saying
+"fixed".
+
+Three things that work better than more samples:
+
+- **Prefer a discriminating experiment.** Disabling the suspect entirely
+  (0/12) and removing the suspected mechanism (still reproduced) each cost
+  one batch and each eliminated a whole theory. Rate measurement alone
+  eliminated neither.
+- **Instrument by recording into globals, not by printing.** Adding two
+  `kernel_boot_log` lines around the suspect suppressed the failure for
+  eight consecutive runs. You cannot narrate through the UART inside a
+  window you are trying to observe.
+- **When one caller of a pattern fails and another does not, the difference
+  is WHERE, not WHAT.** What finally located that bug was noticing that
+  `scheduled_process_table_probe` does the same allocate-and-reap 24 times
+  and had never tripped it -- so the two call sites got compared before any
+  mechanism got theorised about.
+
+And when a fix designed against a wrong cause is worth keeping anyway, say
+plainly in its commit message that it did not fix the symptom. A reader who
+believes it did will not look for the real cause when the symptom returns.
+HISTORY.md's 2026-08-30 entry has the whole sequence.
+
 **Re-read the evidence you already have before running another
 experiment.** Issue #237's virtio work spent hours testing hypotheses and
 found nothing; a fresh read of the SAME diagnostic output, with no new
