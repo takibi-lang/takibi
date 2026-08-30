@@ -270,33 +270,25 @@ fn freelist_ref(T: type, target: &mut Freelist(T, N),
     return (data as *T) + index;
 }
 
-// GitHub issue #453. The header above already states this file's whole
-// safety argument -- every instance "reachable ONLY from syscall-dispatch
-// context on core 0" -- and names the failure it guards against: a
-// library that works because every caller so far happened to be
-// single-context, adopted by one that isn't. That paragraph is now a
-// number the compiler checks.
+// GitHub issue #479: this file's execution-model assertion is GONE, and
+// the reason is not that the race went away -- it is that the claim
+// stopped being about the core count.
 //
-// GitHub issue #479: the race is no longer hypothetical. Two cores
-// cycling one FreelistCore(8) were handed the same index seven times in
-// 4096 rounds each -- kernel/kernel/freelist_contention_evidence.tkb
-// produces it on demand, from core 1, with KERNEL_ACTIVE_CORES still 1.
-// freelist_core_insert reads free_head and then writes next_free[head]
-// back into it; two cores reading the same head pop the same index.
+// It used to say "the free chain has no lock, and a concurrent push
+// corrupts it silently", gated on KERNEL_ACTIVE_CORES == 1. That was
+// measured: two cores cycling one FreelistCore(8) were handed the same
+// index 1349 times on RPi5 (3 under QEMU), and
+// kernel/kernel/freelist_contention_evidence.tkb produces it on demand.
 //
-// THE FIX IS NOT IN THIS FILE, which is what measuring it settled, and it
-// has landed where it belonged. The live kernel instance is
+// But the fix was not a lock HERE. The one live kernel instance is
 // kernel/mm/page.tkb's boot_page_pool.core, and page_alloc pops from it and
-// THEN writes three fields of boot_page_pool.meta[index]; a lock inside the
-// pop could not cover that sequence. page.tkb holds a Mutex across the
-// whole of it now.
+// then writes three fields of meta[index] -- a sequence a lock inside the
+// pop could not cover. page.tkb holds a Mutex across the whole of it.
 //
-// So this file stays unlocked BY DESIGN and the assertion below stays too,
-// with a different job: it is now aimed at the NEXT caller. An instance
-// adopted without a caller's lock gets the measured behaviour above, and
-// the probe demonstrates both halves every boot -- unlocked hands one index
-// to two cores, locked does not.
-fn freelist_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "this primitive is unlocked by design: a new instance needs its CALLER to hold a lock, as kernel/mm/page.tkb does");
-}
+// So this primitive is unlocked BY DESIGN, at any core count, and its
+// requirement is on the CALLER. A static_assert on the core count would
+// fire on a build where nothing is wrong, which sends the next reader
+// looking for a defect that is not there. What holds the requirement up
+// instead is the probe above, which demonstrates both halves every boot:
+// unlocked hands one index to two cores, locked does not.
+

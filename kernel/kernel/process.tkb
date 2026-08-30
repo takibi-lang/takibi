@@ -1991,35 +1991,40 @@ struct ExecutionState {
     scheduler_enabled: bool;
 }
 
-private let mut execution_state: [ExecutionState; KERNEL_ACTIVE_CORES];
+private let mut execution_state: [ExecutionState; KERNEL_MAX_CORES];
 
 // Which ExecutionState belongs to the core asking.
 //
-// It returns slot 0 unconditionally, and that is correct rather than
-// lazy: KERNEL_ACTIVE_CORES is 1, so slot 0 is the only slot, and the
-// core that runs kernel code is the only core that reaches here.
+// It asks cpu_id() which core is running, and indexes the array by that.
 //
-// A second core HAS taken interrupts since issue #447, and this is still
-// slot 0, which is not an oversight: that core reaches no kernel state --
-// its dispatch returns before every path that would -- so it never calls
-// this. The constant tracks cores that run kernel STATE, not cores that
-// execute. Raising it is what running a PROCESS on a second core requires,
-// and the static_assert is what makes that fail here rather than silently
-// give every core one scheduler. Whoever does it writes `cpu_id()`
-// (kernel/platform/*/init.tkb) here, with a bounds proof.
+// It used to return slot 0 unconditionally with a static_assert saying to
+// teach it cpu_id() before a second core ran kernel code. This is that
+// change (GitHub issue #479 Group B), and it is a no-op while
+// KERNEL_ACTIVE_CORES is 1: only core 0 reaches here, cpu_id() answers 0,
+// and the arithmetic below adds nothing.
+//
+// The array is sized by KERNEL_MAX_CORES rather than by the active count,
+// which is Linux's NR_CPUS versus cpu_online_mask -- storage for the most
+// cores the build could have, participation counted separately.
+//
+// The bound check is not defensive padding. cpu_id() reads a hardware
+// affinity field, and a part whose cores are numbered differently than
+// this platform's cpu_id() expects would index past the array; returning
+// slot 0 there is wrong but bounded, where the alternative is a write into
+// whatever follows.
 //
 // One function, not 176 call sites, is the whole change issue #222 asked
 // for.
 private fn execution_here() -> *ExecutionState {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "execution_here returns slot 0: teach it cpu_id() before a second core runs kernel code");
-    // `&execution_state[0]` is what this wants to say and GitHub issue
+    // `&execution_state[i]` is what this wants to say and GitHub issue
     // #385 rejects it -- there is no way to take the address of an array
-    // element. The array decays to a pointer to its first element, which
-    // IS slot 0, and a second core's slot will be that plus its index.
+    // element. The array decays to a pointer to its first element, and
+    // this core's slot is that plus its index.
     // linux_user/diagnostic_ring reaches per-CPU storage the same way.
     let base: *ExecutionState = execution_state;
-    return base;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return base; }
+    return base + (core as isize);
 }
 // GitHub issue #264 first stage keeps the #248 wait4 result fields and
 // #245 exec-image flag in the same ProcessRecord as their slot's state

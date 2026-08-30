@@ -2633,5 +2633,5 @@ fn kernel_fd_table_crash_object(process: usize, fd: usize) -> usize !{unsafe} {
 // atomic and no lock on that path.
 fn fd_table_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "unified_object_retain/_release are a bare counter; a lost decrement frees a live object");
+                  "fd_slot_total and the per-process block chain are unlocked: the refcount they bound is not, since GitHub issue #479");
 }

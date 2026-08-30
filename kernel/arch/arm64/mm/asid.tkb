@@ -187,21 +187,20 @@ private fn asid_assign_locked() -> (usize, usize) {
     return (value, asid_generation);
 }
 
-// GitHub issue #453. The reason this assertion exists CHANGED when issue
-// #446 landed, and the old reason is worth recording because it was the
-// stronger one: the rollover used to invalidate the LOCAL TLB, so a second
-// core running user code with an ASID about to be reassigned kept stale
-// entries -- silent cross-process memory access. That is fixed;
-// mmu_tlb_invalidate_all() is `tlbi vmalle1is` and reaches every core.
+// GitHub issue #479: this file HAD an execution-model assertion and no
+// longer needs one, which is worth saying rather than silently deleting.
 //
-// What is left is the bookkeeping. asid_next, asid_generation and
-// asid_assign_count are plain globals, read-modify-written with no lock,
-// and asid_assign() is called from address_space_activate on every switch
-// to an address space whose generation has expired. Two cores doing that
-// at once can hand the same number to two address spaces, or step past
-// asid_last without either noticing it needed a rollover -- which is the
-// same silent aliasing by a different route.
-fn asid_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "asid_next/asid_generation are unlocked globals: two cores assigning at once alias two address spaces onto one number");
-}
+// It named two reasons in turn, and both are now fixed. The first was
+// GitHub issue #446's -- the rollover invalidated the LOCAL TLB, so a
+// second core kept entries tagged with numbers about to be reassigned.
+// The second, after that landed, was that asid_next and asid_generation
+// were unlocked globals and two cores in asid_assign could alias two
+// address spaces onto one number. That was measured (4096 assignments
+// advanced the counter 3974 times) and then locked.
+//
+// Everything asid_assign_locked touches -- asid_next, asid_generation,
+// asid_last, asid_assign_count, and the rollover -- is inside that lock.
+// The remaining globals (asid_bits, asid_ready) are written once by
+// asid_init before any second core exists. So there is nothing left for an
+// assertion to be true ABOUT, and one that fires without a reason is worse
+// than none: it sends the next reader looking for a defect that was fixed.

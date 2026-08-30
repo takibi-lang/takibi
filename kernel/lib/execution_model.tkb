@@ -69,6 +69,21 @@
 // 1, because it parks without touching kernel state.
 const KERNEL_ACTIVE_CORES: usize = 1;
 
+// How many cores this build reserves per-core storage FOR. Distinct from
+// the number above, and the distinction is Linux's own NR_CPUS versus
+// cpu_online_mask -- an array is sized at compile time for the most cores
+// the build could ever have, and the online set grows at runtime as they
+// come up. Every SMP kernel has both.
+//
+// This is NOT the split that was proposed and withdrawn on 2026-08-29.
+// That one invented "cores that run kernel code" versus "cores that run
+// the scheduler", a state no Unix-like kernel has. This one is an array
+// bound against a participation count, which every one of them does.
+//
+// 2, because PSCI starts exactly one secondary (decision of 2026-08-27:
+// every class of race appears at two, and four adds a different problem).
+const KERNEL_MAX_CORES: usize = 2;
+
 // Whether a syscall handler can lose the CPU before it returns. 0 today:
 // see leg 2 above. A separate number from the core count because the two
 // are independently removable and each breaks a different set of sites --
