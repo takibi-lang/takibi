@@ -5,6 +5,7 @@ use "kernel/platform/rpi5/system_timer_dtb.tkb";
 use "kernel/platform/rpi5/rp1_dtb.tkb";
 use "kernel/platform/rpi5/pcie_dtb.tkb";
 use "kernel/platform/rpi5/pcie_support_dtb.tkb";
+use "kernel/platform/rpi5/pcie_address_map_dtb.tkb";
 use "kernel/platform/rpi5/rp1_gem_dtb.tkb";
 use "kernel/platform/rpi5/usb_xhci_dtb.tkb";
 use "kernel/platform/rpi5/mip_dtb.tkb";
@@ -671,6 +672,25 @@ fn main() !{unsafe} {
             uart_put_udec(rescal);
             kernel_boot_log(" reset_bytes=");
             uart_put_udec(reset);
+            kernel_boot_log(" applied_to_driver=yes\n");
+        }
+    }
+
+    match rpi5_pcie_address_map_boot_dtb_status() {
+        Rpi5PcieAddressMapDtbResult::Invalid => {
+            kernel_boot_log("pcie map: invalid boot DTB ranges; halting\n");
+            while (true) { }
+        }
+        Rpi5PcieAddressMapDtbResult::Missing => {
+            kernel_boot_log("pcie map: missing from boot DTB; halting\n");
+            while (true) { }
+        }
+        Rpi5PcieAddressMapDtbResult::Applied(addresses) => {
+            let (outbound_cpu, dma_offset) = addresses;
+            kernel_boot_log("pcie map: source=dtb outbound_cpu_bytes=");
+            uart_put_udec(outbound_cpu);
+            kernel_boot_log(" dma_pci_offset_bytes=");
+            uart_put_udec(dma_offset);
             kernel_boot_log(" applied_to_driver=yes\n");
         }
     }

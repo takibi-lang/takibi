@@ -59,6 +59,9 @@ const RPI5_PCIE_RESCAL_BASE: usize = 0x1000119500;
 const RPI5_BCM_RESET_BASE: usize = 0x1001504318;
 const RPI5_MIP0_BASE: usize = 0x1000130000;
 const RPI5_MIP0_TARGET: usize = 0xFFFFFFF000;
+const RPI5_PCIE_OUTBOUND_CPU_BASE: usize = 0x1F00000000;
+const RPI5_PCIE_OUTBOUND_RANGE_SIZE: usize = 0xFFFFFFFC;
+const RP1_DMA_PCI_OFFSET: usize = 0x1000000000;
 
 let mut rpi5_pcie2_base: usize = RPI5_PCIE2_BASE;
 let mut rpi5_pcie2_dtb_status: usize;
@@ -68,6 +71,9 @@ let mut rpi5_pcie_support_dtb_status: usize;
 let mut rpi5_mip0_base: usize = RPI5_MIP0_BASE;
 let mut rpi5_mip0_target: usize = RPI5_MIP0_TARGET;
 let mut rpi5_mip0_dtb_status: usize;
+let mut rpi5_pcie_outbound_cpu_base: usize = RPI5_PCIE_OUTBOUND_CPU_BASE;
+let mut rp1_dma_pci_offset: usize = RP1_DMA_PCI_OFFSET;
+let mut rpi5_pcie_address_map_dtb_status: usize;
 
 // delay_us(us): busy-wait at least `us` microseconds, using CNTPCT_EL0's
 // free-running count and CNTFRQ_EL0's own frequency -- same technique
@@ -359,7 +365,7 @@ fn pcie2_outbound_window_setup() !{unsafe} {
 
     *win0_lo = 0;
     *win0_hi = 0;
-    let cpu_addr: usize = 0x1F00000000;
+    let cpu_addr: usize = rpi5_pcie_outbound_cpu_base;
     let win_size: usize = 0x100000000; // 4GB, matching Linux's own live window and the devicetree's `ranges`
 
     // WIN0_BASE_HI and WIN0_LIMIT_HI are SEPARATE registers for the
@@ -512,10 +518,8 @@ fn pcie2_mip0_inbound_setup() !{unsafe} {
 // doorbell ring fault with USBSTS.HSE (Host System Error) + HCE, for ANY
 // command TRB type, with no Command Completion Event ever posted.
 //
-// Callers must therefore add RP1_DMA_PCI_OFFSET (below) to every CPU
-// physical address they hand to an RP1 bus master as a DMA target.
-const RP1_DMA_PCI_OFFSET: usize = 0x1000000000;
-
+// Callers must therefore add the boot-DTB-validated rp1_dma_pci_offset to
+// every CPU physical address they hand to an RP1 bus master as a DMA target.
 fn pcie2_dma_inbound_setup() !{unsafe} {
     let rc_bar2_lo: *io u32 = unsafe {
         (rpi5_pcie2_base + 0x4034) as *io u32

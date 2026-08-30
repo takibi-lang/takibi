@@ -100,14 +100,15 @@ def main():
                    "--invalid-tree-reservation", "--invalid-device",
                    "--invalid-interrupt", "--missing-interrupt")
     valid_modes = valid_modes + ("--invalid-gic",)
-    valid_modes = valid_modes + ("--invalid-pcie-ranges",)
+    valid_modes = valid_modes + ("--invalid-pcie-ranges",
+                                 "--invalid-pcie-dma-ranges")
     if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and
                                      sys.argv[2] not in valid_modes):
         print("usage: make_fdt_fixture.py OUTPUT "
               "[--invalid-memory|--invalid-reservation|"
               "--invalid-tree-reservation|--invalid-device|"
               "--invalid-interrupt|--missing-interrupt|--invalid-gic|"
-              "--invalid-pcie-ranges]",
+              "--invalid-pcie-ranges|--invalid-pcie-dma-ranges]",
               file=sys.stderr)
         return 2
     mode = sys.argv[2] if len(sys.argv) == 3 else ""
@@ -309,7 +310,18 @@ def main():
                                  0x1F, 0, 0))
     else:
         b.prop("ranges", b.cells(0x02000000, 0, 0,
-                                 0x1F, 0, 0, 0xFFFFFFFC))
+                                 0x1F, 0, 0, 0xFFFFFFFC,
+                                 0x43000000, 0x4, 0,
+                                 0x1C, 0, 0x3, 0))
+    if mode == "--invalid-pcie-dma-ranges":
+        b.prop("dma-ranges", b.cells(
+            0x02000000, 0, 0, 0x1F, 0, 0))
+    else:
+        b.prop("dma-ranges", b.cells(
+            0x02000000, 0, 0, 0x1F, 0, 0, 0x00400000,
+            0x43000000, 0x10, 0, 0, 0, 0x10, 0,
+            0x03000000, 0xFF, 0xFFFFF000,
+            0x10, 0x00130000, 0, 0x1000))
     b.prop("compatible", b"brcm,bcm2712-pcie\0")
     b.prop("#size-cells", b.cells(2))
     b.prop("#address-cells", b.cells(3))

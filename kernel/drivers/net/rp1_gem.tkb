@@ -14,7 +14,6 @@ const RP1_CLOCKS_BASE: usize = 0x1F00018000;
 const RP1_GPIO_CTRL_BASE: usize = 0x1F000D0000;
 const RP1_GPIO_RIO_BASE: usize = 0x1F000E0000;
 const RP1_GPIO_PADS_BASE: usize = 0x1F000F0000;
-const DMA_OFFSET: usize = 0x1000000000;
 const RX_BUF_SIZE: usize = 2048;
 
 // Only net_rx_acquire can validate a hardware-supplied length and mint this
@@ -190,11 +189,11 @@ fn net_init() -> NetInitResult !{unsafe} {
     gem_write(0x8C, (OUR_MAC[4] as u32) | ((OUR_MAC[5] as u32) << 8));
 
     let rx_base: usize = (gem_rx_buf as *u8) as usize;
-    let rx_dma: usize = rx_base + DMA_OFFSET;
+    let rx_dma: usize = rx_base + rp1_dma_pci_offset;
     let rxd_base: usize = (gem_rx_desc as *u32) as usize;
-    let rxd_dma: usize = rxd_base + DMA_OFFSET;
+    let rxd_dma: usize = rxd_base + rp1_dma_pci_offset;
     let txd_base: usize = (gem_tx_desc as *u32) as usize;
-    let txd_dma: usize = txd_base + DMA_OFFSET;
+    let txd_dma: usize = txd_base + rp1_dma_pci_offset;
 
     gem_rx_desc[2] = (rx_dma >> 32) as u32;
     gem_rx_desc[3] = 0;
@@ -301,7 +300,7 @@ fn net_rx_reply_ready(frame: sink NetRxValidated[desc], len: i32)
 fn net_transmit(reply: sink NetRxReplyReady[desc]) -> NetTxInFlight[desc] {
     let safe_len: {0..<1515 as i32} = reply.len;
     let tx_base: usize = (gem_tx_buf as *u8) as usize;
-    let tx_dma: usize = tx_base + DMA_OFFSET;
+    let tx_dma: usize = tx_base + rp1_dma_pci_offset;
     let txd_base: usize = (gem_tx_desc as *u32) as usize;
     slice_copy(gem_tx_buf[0..<safe_len as usize], gem_rx_buf[0..<safe_len as usize]);
     dma_prepare_tx(gem_tx_buf as *u8, safe_len as usize);
@@ -359,7 +358,7 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
         -> NetRxCanAcquire !{may_block} {
     let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
     let tx_base: usize = (gem_tx_buf as *u8) as usize;
-    let tx_dma: usize = tx_base + DMA_OFFSET;
+    let tx_dma: usize = tx_base + rp1_dma_pci_offset;
     slice_copy(gem_tx_buf[0..<safe_len as usize], bytes[0..<safe_len as usize]);
     dma_prepare_tx(gem_tx_buf as *u8, safe_len as usize);
     let mut slot: {0..<2 as usize} = 0;

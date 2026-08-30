@@ -16,7 +16,8 @@
 // examples/common_rpi3/fat12_usbmsc.tkb) can `use` it with no
 // target-specific fork above this layer. Unlike RPi3's dwc2-based driver,
 // disk_read/disk_write here take plain `*u8` (not `*align(32) u8`): the
-// DMA address handed to the controller is `cpu_phys + RP1_DMA_PCI_OFFSET`
+// DMA address handed to the controller is `cpu_phys + rp1_dma_pci_offset`,
+// whose value is validated and applied from the boot DTB's dma-ranges,
 // regardless of the buffer's own alignment, and every cache-maintenance
 // call below operates on whole-buffer ranges, not sub-cache-line slices --
 // no alignment constraint this driver's own correctness depends on.
@@ -36,7 +37,7 @@
 //
 // See examples/common_rpi5/AGENTS.md's USB bring-up status updates and
 // the rpi5_usb_bringup memory file for the full derivation of every
-// constant below (RP1_DMA_PCI_OFFSET, the 0xCE00FFE9 PORTSC neutral mask,
+// hardware values below (the 0xCE00FFE9 PORTSC neutral mask,
 // the Address Device port-reset requirement, U-Boot's endpoint-index/DCI
 // formulas) -- not re-derived here.
 
@@ -283,7 +284,7 @@ fn xhci_irq_handler() !{interrupt, unsafe} {
 // 31:24), or 0 if no matching event turned up.
 fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 !{unsafe} {
     let evt_ring: *Trb = xhci_evt_ring as *Trb;
-    let evt_ring_dma: usize = ((xhci_evt_ring as *u8) as usize) + RP1_DMA_PCI_OFFSET;
+    let evt_ring_dma: usize = ((xhci_evt_ring as *u8) as usize) + rp1_dma_pci_offset;
 
     for scan: usize in 0..<8 {
         let mut seen: bool = false;
@@ -533,12 +534,12 @@ fn xhci_reset_endpoint(dci: usize, ring_dma: usize, next_off: usize,
 fn xhci_recover_bulk_stall(dir_in: bool, ep_addr: u32, dci: usize) {
     if (dir_in) {
         let ring_base: usize = (xhci_bulk_in_ring as *u8) as usize;
-        let ring_dma: usize = ring_base + RP1_DMA_PCI_OFFSET;
+        let ring_dma: usize = ring_base + rp1_dma_pci_offset;
         xhci_reset_endpoint(dci, ring_dma, xhci_bulk_in_enq * 16,
                             xhci_bulk_in_cycle);
     } else {
         let ring_base: usize = (xhci_bulk_out_ring as *u8) as usize;
-        let ring_dma: usize = ring_base + RP1_DMA_PCI_OFFSET;
+        let ring_dma: usize = ring_base + rp1_dma_pci_offset;
         xhci_reset_endpoint(dci, ring_dma, xhci_bulk_out_enq * 16,
                             xhci_bulk_out_cycle);
     }
@@ -618,10 +619,10 @@ fn msc_cbw_header(data_len: u32, dir_in: bool, cb_len: u32) {
 fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
     let data_base: usize = data as usize;
     let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
-    let cbw_dma: usize = cbw_base + RP1_DMA_PCI_OFFSET;
+    let cbw_dma: usize = cbw_base + rp1_dma_pci_offset;
     let csw_base: usize = (msc_csw_buf as *u8) as usize;
-    let csw_dma: usize = csw_base + RP1_DMA_PCI_OFFSET;
-    let data_dma: usize = data_base + RP1_DMA_PCI_OFFSET;
+    let csw_dma: usize = csw_base + rp1_dma_pci_offset;
+    let data_dma: usize = data_base + rp1_dma_pci_offset;
 
     dma_prepare_tx(msc_cbw_buf as *u8, 64);
     let cbw_cc: u32 = usb_bulk_xfer(false, cbw_dma, 31);
@@ -799,9 +800,9 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
     let scratchpad_array_base: usize = (xhci_scratchpad_array as *u8) as usize;
     let scratchpad_buf0_base: usize = (xhci_scratchpad_buf0 as *u8) as usize;
     let scratchpad_buf1_base: usize = (xhci_scratchpad_buf1 as *u8) as usize;
-    let scratchpad_array_dma: usize = scratchpad_array_base + RP1_DMA_PCI_OFFSET;
-    let scratchpad_buf0_dma: usize = scratchpad_buf0_base + RP1_DMA_PCI_OFFSET;
-    let scratchpad_buf1_dma: usize = scratchpad_buf1_base + RP1_DMA_PCI_OFFSET;
+    let scratchpad_array_dma: usize = scratchpad_array_base + rp1_dma_pci_offset;
+    let scratchpad_buf0_dma: usize = scratchpad_buf0_base + rp1_dma_pci_offset;
+    let scratchpad_buf1_dma: usize = scratchpad_buf1_base + rp1_dma_pci_offset;
     xhci_scratchpad_array[0] = (scratchpad_buf0_dma & 0xFFFFFFFF) as u32;
     xhci_scratchpad_array[1] =
         ((scratchpad_buf0_dma >> 32) & 0xFFFFFFFF) as u32;
@@ -811,13 +812,13 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
     dma_prepare_tx(xhci_scratchpad_array as *u8, 16);
 
     let dcbaa_base: usize = (xhci_dcbaa as *u8) as usize;
-    let dcbaa_dma: usize = dcbaa_base + RP1_DMA_PCI_OFFSET;
+    let dcbaa_dma: usize = dcbaa_base + rp1_dma_pci_offset;
     xhci_dcbaa[0] = (scratchpad_array_dma & 0xFFFFFFFF) as u32;
     xhci_dcbaa[1] = ((scratchpad_array_dma >> 32) & 0xFFFFFFFF) as u32;
     dma_prepare_tx(xhci_dcbaa as *u8, 65 * 8);
 
     let cmd_ring: *Trb = xhci_cmd_ring as *Trb;
-    let cmd_ring_dma: usize = ((xhci_cmd_ring as *u8) as usize) + RP1_DMA_PCI_OFFSET;
+    let cmd_ring_dma: usize = ((xhci_cmd_ring as *u8) as usize) + rp1_dma_pci_offset;
     cmd_ring[0].dw3 = 0x00002401; // Enable Slot, Cycle=1
 
     let cmd_link_idx: usize = CMD_RING_TRBS - 1;
@@ -827,8 +828,8 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
     dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
 
     let erst_base: usize = (xhci_erst as *u8) as usize;
-    let evt_ring_dma: usize = ((xhci_evt_ring as *u8) as usize) + RP1_DMA_PCI_OFFSET;
-    let erst_dma: usize = erst_base + RP1_DMA_PCI_OFFSET;
+    let evt_ring_dma: usize = ((xhci_evt_ring as *u8) as usize) + rp1_dma_pci_offset;
+    let erst_dma: usize = erst_base + rp1_dma_pci_offset;
     xhci_erst[0] = (evt_ring_dma & 0xFFFFFFFF) as u32;
     xhci_erst[1] = ((evt_ring_dma >> 32) & 0xFFFFFFFF) as u32;
     xhci_erst[2] = 16;
@@ -914,7 +915,7 @@ fn xhci_enable_slot() -> bool !{unsafe} {
 fn xhci_address_device() -> bool !{unsafe} {
     let dcbaa_base: usize = (xhci_dcbaa as *u8) as usize;
     let device_ctx_base: usize = (xhci_device_ctx as *u8) as usize;
-    let device_ctx_dma: usize = device_ctx_base + RP1_DMA_PCI_OFFSET;
+    let device_ctx_dma: usize = device_ctx_base + rp1_dma_pci_offset;
     if (xhci_slot_id >= 65) { return false; }
     let slot: {0..<65 as usize} = xhci_slot_id;
     xhci_dcbaa[slot * 2] = (device_ctx_dma & 0xFFFFFFFF) as u32;
@@ -923,7 +924,7 @@ fn xhci_address_device() -> bool !{unsafe} {
     dma_prepare_tx(xhci_dcbaa as *u8, 65 * 8);
 
     let ep0_ring: *Trb = xhci_ep0_ring as *Trb;
-    let ep0_ring_dma: usize = ((xhci_ep0_ring as *u8) as usize) + RP1_DMA_PCI_OFFSET;
+    let ep0_ring_dma: usize = ((xhci_ep0_ring as *u8) as usize) + rp1_dma_pci_offset;
     let ep0_link_idx: usize = EP0_RING_TRBS - 1;
     ep0_ring[ep0_link_idx as isize].dw0 = (ep0_ring_dma & 0xFFFFFFFF) as u32;
     ep0_ring[ep0_link_idx as isize].dw1 = ((ep0_ring_dma >> 32) & 0xFFFFFFFF) as u32;
@@ -933,7 +934,7 @@ fn xhci_address_device() -> bool !{unsafe} {
     xhci_ep0_cycle = 1;
 
     let input_ctx_base: usize = (xhci_input_ctx as *u8) as usize;
-    let input_ctx_dma: usize = input_ctx_base + RP1_DMA_PCI_OFFSET;
+    let input_ctx_dma: usize = input_ctx_base + rp1_dma_pci_offset;
     xhci_input_ctx[0] = 0;
     xhci_input_ctx[1] = 3; // A0 (Slot) | A1 (EP0)
 
@@ -1028,7 +1029,7 @@ fn xhci_address_device() -> bool !{unsafe} {
 // endpoints -> Configure Endpoint -> SET_CONFIGURATION.
 fn xhci_configure() -> bool {
     let ctrl_buf_base: usize = (xhci_ctrl_buf as *u8) as usize;
-    let ctrl_buf_dma: usize = ctrl_buf_base + RP1_DMA_PCI_OFFSET;
+    let ctrl_buf_dma: usize = ctrl_buf_base + rp1_dma_pci_offset;
     let control_bytes = xhci_ctrl_buf as []u8;
 
     let cfg9_cc: u32 = usb_ctrl_xfer(0x80, 6, 0x0200, 0, 9, ctrl_buf_dma, true);
@@ -1134,7 +1135,7 @@ fn xhci_configure_endpoint(in_num: {1..<16 as usize},
     }
 
     let input_ctx_base: usize = (xhci_input_ctx as *u8) as usize;
-    let input_ctx_dma: usize = input_ctx_base + RP1_DMA_PCI_OFFSET;
+    let input_ctx_dma: usize = input_ctx_base + rp1_dma_pci_offset;
     dma_finish_rx(xhci_device_ctx, DEVICE_CTX_SIZE);
 
     // Seed the Input Context from the controller's OUTPUT Device
@@ -1153,9 +1154,9 @@ fn xhci_configure_endpoint(in_num: {1..<16 as usize},
         (slot_dw0 & 0x07FFFFFF) | (((max_idx + 1) as u32) << 27);
 
     let bulk_in_ring: *Trb = xhci_bulk_in_ring as *Trb;
-    let bulk_in_ring_dma: usize = ((xhci_bulk_in_ring as *u8) as usize) + RP1_DMA_PCI_OFFSET;
+    let bulk_in_ring_dma: usize = ((xhci_bulk_in_ring as *u8) as usize) + rp1_dma_pci_offset;
     let bulk_out_ring: *Trb = xhci_bulk_out_ring as *Trb;
-    let bulk_out_ring_dma: usize = ((xhci_bulk_out_ring as *u8) as usize) + RP1_DMA_PCI_OFFSET;
+    let bulk_out_ring_dma: usize = ((xhci_bulk_out_ring as *u8) as usize) + rp1_dma_pci_offset;
     let bulk_link_idx: usize = BULK_RING_TRBS - 1;
 
     bulk_in_ring[bulk_link_idx as isize].dw0 = (bulk_in_ring_dma & 0xFFFFFFFF) as u32;
@@ -1240,7 +1241,7 @@ fn disk_initialize() -> DiskIoResult {
     }
 
     let scratch_base: usize = (msc_scratch_buf as *u8) as usize;
-    let scratch_dma: usize = scratch_base + RP1_DMA_PCI_OFFSET;
+    let scratch_dma: usize = scratch_base + rp1_dma_pci_offset;
 
     // Get Max LUN -- a single-LUN device is allowed to STALL this rather
     // than answer, so its own outcome is not checked.

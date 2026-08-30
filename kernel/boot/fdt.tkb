@@ -57,6 +57,22 @@ struct FdtDeviceRegion {
     private interrupt_parent: usize;
     private interrupts_offset: usize;
     private interrupts_length: usize;
+    private device_ranges_offset: usize;
+    private device_ranges_length: usize;
+    private device_dma_ranges_offset: usize;
+    private device_dma_ranges_length: usize;
+}
+
+struct FdtPcieAddressMap {
+    outbound_cpu_base: usize;
+    outbound_range_size: usize;
+    dma_pci_offset: usize;
+}
+
+must_use variant FdtPcieAddressMapResult {
+    Invalid;
+    NotFound;
+    Found(FdtPcieAddressMap);
 }
 
 struct FdtGicV2Regions {
@@ -731,6 +747,8 @@ private fn fdt_find_compatible_reg_bounded(
     let mut pcie_ranges_seen: bool = false;
     let mut pcie_ranges_offset: usize = 0;
     let mut pcie_ranges_length: usize = 0;
+    let mut pcie_dma_ranges_offset: usize = 0;
+    let mut pcie_dma_ranges_length: usize = 0;
     let mut rp1_depth: usize = 0;
     let mut rp1_enabled: bool = true;
     let mut rp1_compatible: bool = false;
@@ -799,6 +817,8 @@ private fn fdt_find_compatible_reg_bounded(
                 pcie_ranges_seen = false;
                 pcie_ranges_offset = 0;
                 pcie_ranges_length = 0;
+                pcie_dma_ranges_offset = 0;
+                pcie_dma_ranges_length = 0;
             } else if (depth == 4 && pcie_depth == 3) {
                 rp1_depth = depth;
                 rp1_enabled = true;
@@ -925,7 +945,7 @@ private fn fdt_find_compatible_reg_bounded(
                     let mut region: FdtDeviceRegion = {
                         physical_base, device_size,
                         base, nested_reg_offset, nested_reg_length, 2, 2,
-                        false, 0, 0, 0
+                        false, 0, 0, 0, 0, 0, 0, 0
                     };
                     return FdtDeviceRegionResult::Found(region);
                 }
@@ -965,7 +985,8 @@ private fn fdt_find_compatible_reg_bounded(
                             true,
                             candidate_interrupt_parent,
                             candidate_interrupts_offset,
-                            candidate_interrupts_length
+                            candidate_interrupts_length,
+                            0, 0, 0, 0
                         };
                         return FdtDeviceRegionResult::Found(region);
                     }
@@ -982,7 +1003,8 @@ private fn fdt_find_compatible_reg_bounded(
                             false,
                             candidate_interrupt_parent,
                             candidate_interrupts_offset,
-                            candidate_interrupts_length
+                            candidate_interrupts_length,
+                            0, 0, 0, 0
                         };
                         return FdtDeviceRegionResult::Found(region);
                     }
@@ -1027,7 +1049,10 @@ private fn fdt_find_compatible_reg_bounded(
                                 size_cells, false,
                                 candidate_interrupt_parent,
                                 candidate_interrupts_offset,
-                                candidate_interrupts_length
+                                candidate_interrupts_length,
+                                pcie_ranges_offset, pcie_ranges_length,
+                                pcie_dma_ranges_offset,
+                                pcie_dma_ranges_length
                             };
                             return FdtDeviceRegionResult::Found(region);
                         }
@@ -1125,6 +1150,10 @@ private fn fdt_find_compatible_reg_bounded(
                 pcie_ranges_seen = true;
                 pcie_ranges_offset = cursor;
                 pcie_ranges_length = length;
+            } else if (pcie_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"dma-ranges")) {
+                pcie_dma_ranges_offset = cursor;
+                pcie_dma_ranges_length = length;
             }
             if (rp1_depth == depth && fdt_string_is(
                     base, strings_end, prop_name, bs"compatible")) {
@@ -1222,10 +1251,80 @@ fn fdt_find_compatible_mip_regions(
             let mut controller: FdtDeviceRegion = first;
             let mut target: FdtDeviceRegion = {
                 target_base, target_size, first.dtb,
-                first.reg_offset + 16, 32, 2, 2, false, 0, 0, 0
+                first.reg_offset + 16, 32, 2, 2, false,
+                0, 0, 0, 0, 0, 0, 0
             };
             let mut regions: FdtMipRegions = { controller, target };
             return FdtMipRegionsResult::Found(regions);
+        }
+    }
+}
+
+fn fdt_find_pcie_address_map(
+        base: usize, compatible: []u8, child_base: usize)
+        -> FdtPcieAddressMapResult !{unsafe} {
+    match fdt_find_compatible_reg_at(base, compatible, child_base) {
+        FdtDeviceRegionResult::Invalid => {
+            return FdtPcieAddressMapResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            return FdtPcieAddressMapResult::NotFound;
+        }
+        FdtDeviceRegionResult::Found(pcie) => {
+            if (pcie.device_ranges_length != 56 ||
+                pcie.device_dma_ranges_length != 84) {
+                return FdtPcieAddressMapResult::Invalid;
+            }
+            let total: usize = fdt_read_be32(
+                pcie.dtb, FDT_HEADER_SIZE, 4);
+            let outbound_space: usize = fdt_read_be32(
+                pcie.dtb, total, pcie.device_ranges_offset);
+            let outbound_child: usize = fdt_cells_value(
+                pcie.dtb, total, pcie.device_ranges_offset + 4, 2);
+            let outbound_cpu_base: usize = fdt_cells_value(
+                pcie.dtb, total, pcie.device_ranges_offset + 12, 2);
+            let outbound_range_size: usize = fdt_cells_value(
+                pcie.dtb, total, pcie.device_ranges_offset + 20, 2);
+            if (outbound_space != 0x02000000 || outbound_child != 0 ||
+                outbound_range_size == 0 || outbound_cpu_base >
+                    0xFFFFFFFFFFFFFFFF - outbound_range_size) {
+                return FdtPcieAddressMapResult::Invalid;
+            }
+
+            let mut dma_found: bool = false;
+            let mut dma_pci_offset: usize = 0;
+            let mut relative: usize = 0;
+            while (relative <= pcie.device_dma_ranges_length - 28) {
+                let pci_space: usize = fdt_read_be32(
+                    pcie.dtb, total,
+                    pcie.device_dma_ranges_offset + relative);
+                let pci_base: usize = fdt_cells_value(
+                    pcie.dtb, total,
+                    pcie.device_dma_ranges_offset + relative + 4, 2);
+                let cpu_base: usize = fdt_cells_value(
+                    pcie.dtb, total,
+                    pcie.device_dma_ranges_offset + relative + 12, 2);
+                let range_size: usize = fdt_cells_value(
+                    pcie.dtb, total,
+                    pcie.device_dma_ranges_offset + relative + 20, 2);
+                if (range_size == 0 ||
+                    pci_base > 0xFFFFFFFFFFFFFFFF - range_size ||
+                    cpu_base > 0xFFFFFFFFFFFFFFFF - range_size) {
+                    return FdtPcieAddressMapResult::Invalid;
+                }
+                if (pci_space == 0x43000000 && pci_base >= cpu_base) {
+                    dma_pci_offset = pci_base - cpu_base;
+                    dma_found = true;
+                }
+                relative = relative + 28;
+            }
+            if (dma_found == false) {
+                return FdtPcieAddressMapResult::Invalid;
+            }
+            let mut address_map: FdtPcieAddressMap = {
+                outbound_cpu_base, outbound_range_size, dma_pci_offset
+            };
+            return FdtPcieAddressMapResult::Found(address_map);
         }
     }
 }
@@ -1276,11 +1375,11 @@ fn fdt_find_compatible_rp1_gpio_regions(base: usize, compatible: []u8)
             let mut ctrl: FdtDeviceRegion = first;
             let mut rio: FdtDeviceRegion = {
                 rio_base, rio_size, first.dtb, first.reg_offset + 16,
-                48, 2, 2, false, 0, 0, 0
+                48, 2, 2, false, 0, 0, 0, 0, 0, 0, 0
             };
             let mut pads: FdtDeviceRegion = {
                 pads_base, pads_size, first.dtb, first.reg_offset + 32,
-                48, 2, 2, false, 0, 0, 0
+                48, 2, 2, false, 0, 0, 0, 0, 0, 0, 0
             };
             let mut regions: FdtRp1GpioRegions = { ctrl, rio, pads };
             return FdtRp1GpioRegionsResult::Found(regions);
@@ -1367,14 +1466,14 @@ fn fdt_find_compatible_gicv2_regions(base: usize, compatible: []u8)
                 first.dtb, first.reg_offset, tuple_length,
                 first.address_cells, first.size_cells,
                 first.direct_root_child,
-                0, 0, 0
+                0, 0, 0, 0, 0, 0, 0
             };
             let mut cpu_interface: FdtDeviceRegion = {
                 cpu_base, cpu_size,
                 first.dtb, first.reg_offset + tuple_length, tuple_length,
                 first.address_cells, first.size_cells,
                 first.direct_root_child,
-                0, 0, 0
+                0, 0, 0, 0, 0, 0, 0
             };
             let mut regions: FdtGicV2Regions = {
                 distributor, cpu_interface

@@ -200,6 +200,13 @@ fn platform_init() {
             let (rescal, reset) = regions;
         }
     }
+    match rpi5_pcie_address_map_apply_boot_dtb() {
+        Rpi5PcieAddressMapDtbResult::Invalid => { }
+        Rpi5PcieAddressMapDtbResult::Missing => { }
+        Rpi5PcieAddressMapDtbResult::Applied(addresses) => {
+            let (outbound_cpu, dma_offset) = addresses;
+        }
+    }
     match rpi5_gem_apply_boot_dtb() {
         Rpi5GemDtbResult::Invalid => { }
         Rpi5GemDtbResult::Missing => { }

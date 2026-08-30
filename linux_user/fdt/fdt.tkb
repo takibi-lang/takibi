@@ -22,23 +22,25 @@
 //     last, then the map's own self-check
 //   then the refusal: a blob whose magic does not match
 
-let fdt_fixture: [u8; 3554] = embed_file("linux_user/build/fdt_fixture.dtb");
-let fdt_invalid_memory_fixture: [u8; 3634] =
+let fdt_fixture: [u8; 3689] = embed_file("linux_user/build/fdt_fixture.dtb");
+let fdt_invalid_memory_fixture: [u8; 3769] =
     embed_file("linux_user/build/fdt_invalid_memory_fixture.dtb");
-let fdt_invalid_reservation_fixture: [u8; 3570] =
+let fdt_invalid_reservation_fixture: [u8; 3705] =
     embed_file("linux_user/build/fdt_invalid_reservation_fixture.dtb");
-let fdt_invalid_tree_reservation_fixture: [u8; 3606] =
+let fdt_invalid_tree_reservation_fixture: [u8; 3741] =
     embed_file("linux_user/build/fdt_invalid_tree_reservation_fixture.dtb");
-let fdt_invalid_device_fixture: [u8; 3606] =
+let fdt_invalid_device_fixture: [u8; 3741] =
     embed_file("linux_user/build/fdt_invalid_device_fixture.dtb");
-let fdt_invalid_interrupt_fixture: [u8; 3554] =
+let fdt_invalid_interrupt_fixture: [u8; 3689] =
     embed_file("linux_user/build/fdt_invalid_interrupt_fixture.dtb");
-let fdt_missing_interrupt_fixture: [u8; 3519] =
+let fdt_missing_interrupt_fixture: [u8; 3654] =
     embed_file("linux_user/build/fdt_missing_interrupt_fixture.dtb");
-let fdt_invalid_gic_fixture: [u8; 3530] =
+let fdt_invalid_gic_fixture: [u8; 3665] =
     embed_file("linux_user/build/fdt_invalid_gic_fixture.dtb");
-let fdt_invalid_pcie_ranges_fixture: [u8; 3550] =
+let fdt_invalid_pcie_ranges_fixture: [u8; 3657] =
     embed_file("linux_user/build/fdt_invalid_pcie_ranges_fixture.dtb");
+let fdt_invalid_pcie_dma_ranges_fixture: [u8; 3629] =
+    embed_file("linux_user/build/fdt_invalid_pcie_dma_ranges_fixture.dtb");
 
 // The existing printer is 32 bits wide and these are physical addresses on
 // a board whose peripherals live above 4 GiB, so print both halves.
@@ -97,7 +99,7 @@ fn report_memory(result: FdtMemoryResult) !{unsafe} {
             }
             uart_puts("blob overlap ");
             if (fdt_blob_overlaps(found, fdt_blob_base(found), 1) &&
-                fdt_blob_overlaps(found, fdt_blob_base(found) + 3554, 1) ==
+                fdt_blob_overlaps(found, fdt_blob_base(found) + 3689, 1) ==
                     false) {
                 uart_puts("yes\r\n");
             } else {
@@ -203,6 +205,26 @@ fn report_mip(label: *u8, result: FdtMipRegionsResult) {
     }
 }
 
+fn report_pcie_map(label: *u8, result: FdtPcieAddressMapResult) {
+    uart_puts(label);
+    match result {
+        FdtPcieAddressMapResult::Invalid => { uart_puts(" invalid\n"); }
+        FdtPcieAddressMapResult::NotFound => { uart_puts(" not found\n"); }
+        FdtPcieAddressMapResult::Found(address_map) => {
+            uart_puts(" outbound ");
+            uart_print_hex((address_map.outbound_cpu_base >> 32) as i32);
+            uart_puts(" ");
+            uart_print_hex(
+                (address_map.outbound_cpu_base & 0xFFFFFFFF) as i32);
+            uart_puts(" dma_offset ");
+            uart_print_hex((address_map.dma_pci_offset >> 32) as i32);
+            uart_puts(" ");
+            uart_print_hex((address_map.dma_pci_offset & 0xFFFFFFFF) as i32);
+            uart_puts("\n");
+        }
+    }
+}
+
 fn app_main() !{unsafe} {
     let blob: usize = (fdt_fixture as *u8) as usize;
     report_device("qemu pl011",
@@ -213,6 +235,8 @@ fn app_main() !{unsafe} {
         blob, bs"brcm,bcm2712-pcie"));
     report_mip("rpi5 mip0", fdt_find_compatible_mip_regions(
         blob, bs"brcm,bcm2712-mip", 0x1000130000));
+    report_pcie_map("rpi5 pcie map", fdt_find_pcie_address_map(
+        blob, bs"brcm,bcm2712-pcie", 0x1000120000));
     report_device("rpi5 pcie rescal", fdt_find_compatible_reg(
         blob, bs"brcm,bcm7216-pcie-sata-rescal"));
     report_device("rpi5 bcm reset", fdt_find_compatible_reg(
@@ -232,6 +256,13 @@ fn app_main() !{unsafe} {
         (fdt_invalid_pcie_ranges_fixture as *u8) as usize;
     report_device("invalid pcie ranges", fdt_find_compatible_pcie_reg(
         invalid_pcie_ranges_blob, bs"arm,pl011-axi"));
+    report_pcie_map("invalid pcie map", fdt_find_pcie_address_map(
+        invalid_pcie_ranges_blob, bs"brcm,bcm2712-pcie", 0x1000120000));
+    let invalid_pcie_dma_ranges_blob: usize =
+        (fdt_invalid_pcie_dma_ranges_fixture as *u8) as usize;
+    report_pcie_map("invalid pcie dma map", fdt_find_pcie_address_map(
+        invalid_pcie_dma_ranges_blob,
+        bs"brcm,bcm2712-pcie", 0x1000120000));
     report_device("missing device",
                   fdt_find_compatible_reg(blob, bs"not,a-device"));
     let invalid_device_blob: usize =
