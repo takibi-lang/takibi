@@ -379,10 +379,25 @@ test-driver special case.
   (`check_kernel_asm_invariants.py`) in both directions rather than
   described in a comment. The two mnemonics differ by two characters, both
   are correct on one core, and the wrong one fails silently on two.
-- **#261** -- the shared-structure locking design: which structure gets which
-  lock, in what order, and what PTE mutation looks like against a concurrent
-  page-table walk. Two of its stated premises are stale and its inventory
-  should be re-derived.
+- **#261 -- re-derived and split, 2026-08-30.** Its inventory was five parts
+  stale: every pool it named is an `IntrusivePool` whose mutation requires
+  the lock as a matter of TYPING (`insert`/`remove` take a
+  `borrow IntrusivePoolGuard[pool_id]`), one named file left `kernel/`
+  entirely, and #17 -- listed as an open dependency -- had closed. Its body
+  was rewritten rather than commented on, because a stale body is what a
+  long-lived coarse issue costs.
+
+  What survived is the one part where **the answer is not a lock**: PTE
+  mutation against the hardware page-table walker, which acquires nothing.
+  Every other unsynchronized structure in this kernel was fixed by adding
+  the mutual exclusion that was missing; here one participant cannot be
+  excluded, and break-before-make is the shape both Linux and NetBSD use
+  instead. #261 keeps that.
+
+  Split out: **#482** (pool WALKS take no guard while mutations do -- narrow
+  and real, `tcp.tkb` walks its connection pool that way) and **#483**
+  (#479's Group C: `arp`/`icmp` shared reply frames, `socket_capability`'s
+  init flag, `tcp`'s multi-statement sequence updates).
 
 **Decision recorded 2026-08-27: two cores before four.** Every class of race
 appears at two. Four adds reduced reproducibility and a different problem --
