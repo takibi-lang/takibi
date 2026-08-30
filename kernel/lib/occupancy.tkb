@@ -1,0 +1,176 @@
+// GitHub issue #479: "no other core is inside this region", as a value.
+//
+// WHAT THIS IS FOR
+//
+// The one defect this kernel's multicore work produced that the type
+// system did not catch was this shape: core 0 destroyed a resource while
+// core 1 might still hold a reference to it. Concretely, a probe cleared
+// an `armed` flag and immediately reaped the process it had been racing
+// for -- but clearing a flag stops the other core at its next CONDITION
+// CHECK, so a core already inside the loop finishes one more iteration
+// against a record being torn down. It appeared as one boot in eight
+// reporting `records MISSING`, was silent in the other seven, and took a
+// rate measurement on both sides of the change to attribute at all.
+//
+// The fix was two atomic booleans and a comment. This is that protocol
+// with a type, so the next one is a missing argument instead of a flake.
+//
+// HOW IT READS
+//
+//     let visit = occupancy_enter(&region);        // on the other core
+//     ... work ...
+//     occupancy_leave(visit, &region);
+//
+//     match occupancy_drain(&region, LIMIT) {      // on this core
+//         OccupancyDrainResult::Busy => { ... give up, say so ... }
+//         OccupancyDrainResult::Empty(proof) => {
+//             teardown(proof);                     // needs the proof
+//             quiesced_release(proof);
+//         }
+//     }
+//
+// `Quiesced[region]` is linear and is the only way to call a teardown that
+// declares `borrow Quiesced[region]`. So "reap before the other core has
+// left" stops being a thing a reviewer has to notice.
+//
+// NOT A LOCK, AND NOT A COUNTER
+//
+// Each core writes ONLY its own word, so there is no read-modify-write
+// here and nothing to exclude. That is deliberate twice over. A counter
+// would need an atomic subtract, which this language does not have
+// (`atomic_fetch_add_relaxed` is the only read-modify-write, GitHub issue
+// #450). And the paths this exists for are the paths where a lock is the
+// WRONG answer -- the same reason kernel/lib/diagnostic_ring.tkb is
+// per-CPU and Linux's printk ringbuffer is lock-free: a mechanism that
+// runs while something is being torn down cannot block on the thing
+// tearing it down.
+//
+// It is NetBSD's `CPUF_PAUSE` in a type. `sys/arch/amd64/amd64/
+// db_interface.c` sets that flag per cpu_info and spins on it, and
+// `db_mach_cpu` REFUSES to inspect a CPU that does not have it -- the same
+// "you may only touch what you have stopped" rule, checked at runtime
+// there and at compile time here.
+//
+// Current limitations (2026-08-30). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none, since it
+// invites relying on a guarantee that quietly stopped holding.
+// - IT PROVES ABSENCE, NOT EXCLUSION. `Quiesced` says every core had left
+//   at the moment of the drain. Nothing stops one entering again
+//   afterwards -- the caller has to be the reason that cannot happen (in
+//   the probe's case, because the same core cleared `armed` first). A
+//   region that a core can re-enter unprompted needs a lock, not this.
+// - THE DRAIN IS A BOUNDED SPIN, in iterations rather than in time,
+//   because this file has no timer -- kernel/lib/ is linked by hosted
+//   builds that have no CNTPCT. A caller that wants a deadline converts
+//   one. `Busy` on expiry is a report, never a fail-stop: a core that
+//   never leaves is exactly the situation where blocking forever is the
+//   worst available answer.
+// - ONE WORD PER CORE, sized by KERNEL_MAX_CORES. A core outside that
+//   range cannot record its presence, which would make a drain lie. The
+//   bound is checked, and out-of-range folds to core 0 -- wrong but
+//   bounded, the same trade kernel/kernel/process.tkb's execution_here()
+//   makes.
+// - NO NESTING. Entering twice on one core writes the same word twice and
+//   leaving once clears it, so a drain could succeed with that core still
+//   inside. The linear `Occupying` makes the SECOND enter visible (two
+//   live tokens), but nothing rejects it. Every caller today enters once.
+use "kernel/lib/execution_model.tkb";
+
+// Presence, per core. Private, so no other file can read or write it
+// except through the four entry points below -- which is what makes the
+// protocol the type rather than the convention.
+struct Occupancy {
+    private inside: [usize; KERNEL_MAX_CORES];
+}
+
+// Held by a core while it is inside the region. Linear, so leaving is not
+// optional and is checked on every path including early returns -- which
+// is the half of this protocol a hand-written flag is worst at.
+linear struct Occupying[region: addr] {
+    private cpu: usize;
+}
+
+// Proof that no core was inside the region. Linear so it cannot be
+// duplicated or conjured; the only source is a drain that observed every
+// core absent.
+linear struct Quiesced[region: addr] {
+    private cores: usize;
+}
+
+// Indexed by the region, for the reason IntrusivePoolInsertResult is
+// indexed by its pool (GitHub issue #345): without it the identity is lost
+// at exactly the boundary that matters, since a drain that can fail must
+// return a variant.
+must_use variant OccupancyDrainResult[region: addr] {
+    Busy;
+    Empty(Quiesced[region]);
+}
+
+private fn occupancy_cpu() -> {0..<KERNEL_MAX_CORES as usize} {
+    let raw: usize = cpu_id();
+    if (raw >= KERNEL_MAX_CORES) { return 0; }
+    return raw;
+}
+
+// Announce that this core is inside. Release ordering, so everything the
+// caller did before is visible to a core that later observes the word --
+// and, more to the point here, so a drain that sees 0 is seeing a core
+// that has really finished.
+fn occupancy_enter(region: *Occupancy @ id) -> Occupying[id] !{unsafe} {
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = occupancy_cpu();
+    unsafe {
+        atomic_store_release(occupancy_word_address(region, cpu), 1);
+    }
+    let mut visit: Occupying[id] = { cpu };
+    return visit;
+}
+
+fn occupancy_leave(visit: sink Occupying[id], region: *Occupancy @ id)
+        !{unsafe} {
+    let cpu: usize = visit.cpu;
+    if (cpu < KERNEL_MAX_CORES) {
+        unsafe {
+            atomic_store_release(occupancy_word_address(region, cpu), 0);
+        }
+    }
+}
+
+// Wait, bounded, for every core to be outside.
+//
+// The bound is in iterations because this file has no clock. A caller with
+// a deadline converts it; a caller without one picks a number and lives
+// with `Busy`.
+fn occupancy_drain(region: *Occupancy @ id, spins: usize)
+        -> OccupancyDrainResult[id] !{unsafe} {
+    let mut remaining: usize = spins;
+    let mut empty: bool = false;
+    while (empty == false && remaining != 0) {
+        remaining = remaining - 1;
+        let mut occupied: bool = false;
+        for cpu: usize in 0..<KERNEL_MAX_CORES {
+            if (unsafe {
+                    atomic_load_acquire(occupancy_word_address(region, cpu))
+                } != 0) {
+                occupied = true;
+            }
+        }
+        if (occupied == false) { empty = true; }
+    }
+    if (empty == false) { return OccupancyDrainResult::Busy; }
+    let mut proof: Quiesced[id] = { KERNEL_MAX_CORES };
+    return OccupancyDrainResult::Empty(proof);
+}
+
+// Give the proof back. It carries no runtime resource -- what it carries
+// is the obligation to have been obtained, and being linear is what makes
+// that obligation real.
+fn quiesced_release(proof: sink Quiesced[id]) {}
+
+// The address of one core's word. One function, so this file's only piece
+// of index arithmetic has one home.
+private fn occupancy_word_address(region: *Occupancy @ id,
+                                  cpu: {0..<KERNEL_MAX_CORES as usize})
+        -> usize {
+    let words: *usize = (*region).inside;
+    return (words + (cpu as isize)) as usize;
+}

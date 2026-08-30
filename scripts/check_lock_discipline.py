@@ -76,6 +76,15 @@ ATOMIC_ALLOWED = {
     "kernel/pid_contention_evidence.tkb": "two-core contention probe",
     "kernel/tag_contention_evidence.tkb": "two-core contention probe",
     "kernel/schedule_contention_evidence.tkb": "two-core contention probe",
+    "lib/occupancy.tkb":
+        "GitHub issue #479: \"no other core is inside this region\" as a "
+        "linear value. Each core writes ONLY its own word, so there is no "
+        "read-modify-write and nothing to exclude -- the atomics carry the "
+        "ORDERING, which is the whole content of the claim. A lock would be "
+        "the wrong answer here for the reason it is wrong in printk and in "
+        "a crash reporter: this runs while something is being torn down, "
+        "and it cannot block on the thing tearing it down. Not boot "
+        "reachable, so issue #484's mmu_off hazard does not apply",
     "kernel/process.tkb":
         "GitHub issue #479 Group B: the crash trace ring's global sequence. "
         "Per-CPU segments make every other word single-writer, and the "

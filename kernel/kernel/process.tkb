@@ -451,6 +451,26 @@ private fn scheduled_process_mint_pid() -> usize {
 // GitHub issue #479: the mint, reachable by the contention probe. Private
 // would be better and is not possible -- the probe is another file, and
 // putting it in this one would grow the kernel's largest file for a test.
+// POOL ONLY, and that distinction is load-bearing rather than pedantic.
+//
+// scheduled_process_table_init() additionally runs
+// scheduled_process_release_every_process(), which resets the per-slot
+// state that -- as that function's own comment says -- three OTHER tables
+// key by the same slot index. Initialising the pool alone and then
+// ALLOCATING leaves those three holding a previous life's state for the
+// slot, and something later reads through one of them with a handle the
+// pool no longer recognises.
+//
+// Measured (GitHub issue #479 Group B): a probe that allocated a record
+// after this call produced `process table: records MISSING uses=16
+// reason=2` in 3 boots out of 22, and 0 out of 14 after switching to
+// scheduled_process_table_init(). Intermittent, and it survived a wrong
+// first diagnosis -- the reap was blamed and removing the reap did not
+// remove it.
+//
+// So: this is for a probe that only wants the pool to EXIST (minting a
+// pid, reading a count). A probe that allocates a record wants
+// scheduled_process_table_init().
 fn scheduled_process_pool_init_for_probe() {
     scheduled_process_pool_init();
 }

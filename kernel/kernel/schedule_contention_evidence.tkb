@@ -43,6 +43,7 @@
 
 use "kernel/kernel/process.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/lib/occupancy.tkb";
 
 const SCHEDULE_CONTENTION_ROUNDS: usize = 4096;
 // Work OUTSIDE the critical section, and the size of it is a measurement
@@ -74,10 +75,21 @@ private let mut schedule_probe_held: usize;
 // 0 = phase 1, forged guard, the race is expected. 1 = phase 2, locked.
 private let mut schedule_probe_phase: usize;
 
+// GitHub issue #479: "the secondary is inside this loop", as a value
+// rather than as an atomic bool and a comment. See kernel/lib/occupancy.tkb
+// for what that bought and what it cost to learn.
+private let mut schedule_probe_occupancy: Occupancy;
+
+// How long the primary waits for the secondary to leave. Iterations, not
+// time, because Occupancy has no clock -- see its limitations. The
+// secondary's worst case is finishing one cycle: one guarded claim plus
+// SCHEDULE_CONTENTION_OUTSIDE_WORK spins, so this is four orders of
+// magnitude of headroom and still bounded.
+const SCHEDULE_CONTENTION_DRAIN_SPINS: usize = 1048576;
+
 private let mut schedule_probe_armed: usize;
 private let mut schedule_probe_primary: usize;
 private let mut schedule_probe_secondary: usize;
-private let mut schedule_probe_active: usize;
 private let mut schedule_probe_overlap: usize;
 private let mut schedule_probe_duplicates: usize;
 private let mut schedule_probe_missing: usize;
@@ -92,10 +104,6 @@ private fn schedule_probe_primary_address() -> usize {
 
 private fn schedule_probe_secondary_address() -> usize {
     return (&schedule_probe_secondary) as usize;
-}
-
-private fn schedule_probe_active_address() -> usize {
-    return (&schedule_probe_active) as usize;
 }
 
 private fn schedule_probe_overlap_address() -> usize {
@@ -181,7 +189,10 @@ fn schedule_contention_is_armed() -> bool !{unsafe} {
 }
 
 fn schedule_contention_secondary_run() !{unsafe} {
-    unsafe { atomic_store_release(schedule_probe_active_address(), 1); }
+    // Linear, so leaving is checked on every path out of this function --
+    // which is the half of the protocol a bare flag was worst at, and the
+    // half that cost a 1-in-8 flake when it was a bare flag.
+    let visit = occupancy_enter(&schedule_probe_occupancy);
     while (unsafe {
                atomic_load_acquire(schedule_probe_secondary_address())
            } < SCHEDULE_CONTENTION_ROUNDS &&
@@ -191,7 +202,7 @@ fn schedule_contention_secondary_run() !{unsafe} {
             atomic_fetch_add_relaxed(schedule_probe_secondary_address(), 1);
         }
     }
-    unsafe { atomic_store_release(schedule_probe_active_address(), 0); }
+    occupancy_leave(visit, &schedule_probe_occupancy);
 }
 
 private fn schedule_contention_report(stage: *u8) !{unsafe} {
@@ -247,9 +258,6 @@ private fn schedule_contention_run_phase(locked: usize, stage: *u8)
     let mut entered: bool = false;
     while (entered == false && read_cntpct() - entry_start < entry_window) {
         if (unsafe {
-                atomic_load_acquire(schedule_probe_active_address())
-            } == 1 &&
-            unsafe {
                 atomic_load_acquire(schedule_probe_secondary_address())
             } >= 1) {
             entered = true;
@@ -284,41 +292,10 @@ private fn schedule_contention_run_phase(locked: usize, stage: *u8)
         }
     }
     unsafe { atomic_store_release(schedule_probe_armed_address(), 0); }
-
-    // Wait for the secondary to have LEFT, not merely to have been told to.
-    //
-    // GitHub issue #479 Group B: clearing `armed` stops the secondary's
-    // loop at its next condition check, so a core already inside
-    // schedule_probe_cycle finishes that cycle first. Every other probe in
-    // this tree can ignore that -- one extra pid or tag costs nothing --
-    // but this one is the first whose cleanup DESTROYS the object being
-    // raced. A late cycle then calls scheduled_process_ready_take on a
-    // record the primary is reaping, and reads it through the counted
-    // absent-record fallback.
-    //
-    // Measured before this handshake existed: 1 boot in 8 reported
-    // `process table: records MISSING uses=16 reason=2` at the end of the
-    // run, against 0 in 8 at the commit before this probe was written.
-    // Intermittent, silent in the passing runs, and it took a rate
-    // measurement on both sides to attribute rather than a re-read.
-    let leave_window: i64 = read_cntfrq();
-    let leave_start: i64 = read_cntpct();
-    let mut left: bool = false;
-    while (left == false && read_cntpct() - leave_start < leave_window) {
-        if (unsafe {
-                atomic_load_acquire(schedule_probe_active_address())
-            } == 0) {
-            left = true;
-        }
-    }
     // Printed on EVERY exit path, including the give-ups. Two probes in
     // this tree shipped with early returns that printed nothing, and a run
     // that could not set itself up looked identical to one whose counter
     // raced.
-    if (left == false) {
-        schedule_contention_report("secondary-never-left" as *u8);
-        return false;
-    }
     if (finished == false) {
         schedule_contention_report("secondary-never-finished" as *u8);
         return false;
@@ -343,7 +320,15 @@ fn schedule_contention_probe() -> bool !{unsafe} {
     // its stack run are given back too, below.
     let pid_before: usize = scheduled_process_pid_counter();
     if (schedule_probe_ready == false) {
-        scheduled_process_pool_init_for_probe();
+        // The TABLE, not just the pool, and the difference is measurable
+        // rather than stylistic: scheduled_process_pool_init_for_probe()
+        // leaves the three other slot-keyed tables holding a previous
+        // life's state, and this probe ALLOCATES a record. See that
+        // function's comment for the numbers -- 3 boots in 22 against 0 in
+        // 14. kernel/kernel/scheduled_process_table_probe does the same
+        // thing and never tripped it, which is what said the difference
+        // was where rather than what.
+        scheduled_process_table_init();
         match scheduled_process_alloc() {
             ScheduledProcessAllocResult::Full => {
                 schedule_contention_report("no-process-to-race-for" as *u8);
@@ -378,9 +363,41 @@ fn schedule_contention_probe() -> bool !{unsafe} {
     };
 
     // Give the record and its kernel stack run back, so the boot
-    // accounting still balances.
-    let cleaned: bool = scheduled_process_probe_cycle(schedule_probe_handle);
-    schedule_probe_ready = false;
-    scheduled_process_pid_counter_restore(pid_before);
-    return raced > 0 && excluded == 0 && shared > 0 && cleaned;
+    // accounting still balances -- but only once the secondary has
+    // provably left.
+    //
+    // Clearing `armed` stops the secondary at its next CONDITION CHECK, so
+    // a core already inside schedule_probe_cycle finishes one more
+    // iteration, against a record this core is about to reap. That was a
+    // real 1-in-8 flake (`process table: records MISSING uses=16
+    // reason=2`) and the first defect in this session's multicore work
+    // that no type caught -- the protocol was two atomic booleans and a
+    // comment.
+    //
+    // Now it is a type: schedule_probe_teardown takes
+    // `borrow Quiesced[region]`, and the only source of one is a drain
+    // that observed every core absent. Reaping first is a missing
+    // argument.
+    match occupancy_drain(&schedule_probe_occupancy,
+                          SCHEDULE_CONTENTION_DRAIN_SPINS) {
+        OccupancyDrainResult::Busy => {
+            schedule_contention_report("secondary-never-left" as *u8);
+            return false;
+        }
+        OccupancyDrainResult::Empty(proof) => {
+            let cleaned: bool = schedule_probe_teardown(proof);
+            quiesced_release(proof);
+            schedule_probe_ready = false;
+            scheduled_process_pid_counter_restore(pid_before);
+            return raced > 0 && excluded == 0 && shared > 0 && cleaned;
+        }
+    }
+}
+
+// The teardown, and the reason this file exists in the shape it does: it
+// CANNOT be called without a proof that no other core is inside the loop
+// that was racing for this handle.
+private fn schedule_probe_teardown(proof: borrow Quiesced[region])
+        -> bool !{unsafe} {
+    return scheduled_process_probe_cycle(schedule_probe_handle);
 }
