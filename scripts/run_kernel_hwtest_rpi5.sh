@@ -115,10 +115,17 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --workload-marker 'workload: busy pair done' \
     --validate-ash &
 uart_driver_pid=$!
+archive_reason=""
 cleanup() {
+    status=$?
     if [ -n "${uart_driver_pid:-}" ]; then
         kill "$uart_driver_pid" 2>/dev/null || true
         wait "$uart_driver_pid" 2>/dev/null || true
+    fi
+    if [ "$status" -ne 0 ]; then
+        bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
+            "$REPO_ROOT/_build/kernel-hwtest-rpi5-failures" \
+            "${archive_reason:-exit status $status}" || true
     fi
     if [ -n "${pinned_neigh:-}" ]; then
         sudo ip neigh del "${ETH_TEST_SUBNET}.2" dev "$ETH_TEST_IFACE" \
@@ -583,22 +590,15 @@ done <<<"$view_names"
 if [ -n "$failed_views" ]; then
     echo "FAIL kernel/rpi5 views:$failed_views" >&2
     echo "artifacts: $ARTIFACT_DIR" >&2
-    # GitHub issue #233: an intermittent view failure's own $ARTIFACT_DIR
-    # (the raw uart.log included) is silently overwritten the next time
-    # anyone runs kernelcheck-rpi5 -- exactly how #233's own first two
-    # reproductions each lost their raw UART transcript before it could be
-    # read. Snapshot the whole capture to a timestamped directory nothing
-    # else ever writes to, so the NEXT time any view fails intermittently
-    # the full evidence survives regardless of what runs afterward. Taken
-    # once, after every view has been compared, so the archive holds every
-    # .actual rather than only those produced before the first failure.
-    failure_archive="$REPO_ROOT/_build/kernel-hwtest-rpi5-failures/$(date -u +%Y%m%dT%H%M%SZ)"
-    mkdir -p "$failure_archive"
-    cp -p "$ARTIFACT_DIR"/*.log "$ARTIFACT_DIR"/*.actual "$ARTIFACT_DIR"/*.normalized \
-        "$failure_archive/" 2>/dev/null || true
-    echo "failing views:$failed_views" >"$failure_archive/MANIFEST"
-    date -u +%Y-%m-%dT%H:%M:%SZ >>"$failure_archive/MANIFEST"
-    echo "archived full capture to: $failure_archive" >&2
+    # The archive is taken by the EXIT trap now (issue #233's reasoning,
+    # widened): it used to happen only here, so every failure that stops
+    # EARLIER than the view comparison -- ARP, TCP, the reset, a load --
+    # left nothing behind. That is what made issue #387's ARP diagnosis
+    # wait for a failure to land on the last run of a batch.
+    #
+    # Recorded here so the archive names the views rather than only the
+    # exit status.
+    archive_reason="failing views:$failed_views"
     exit 1
 fi
 

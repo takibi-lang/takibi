@@ -108,7 +108,22 @@ stop_qemu() {
         QEMU_PID=""
     fi
 }
-trap stop_qemu EXIT
+# GitHub issues #233/#488: keep a failing run's whole capture. The QEMU
+# lane had none of this, and an intermittent `records MISSING` failure
+# (#488) had its uart.log overwritten by the next run twice before the
+# diagnosis got hold of one. Armed for the WHOLE script, not just the view
+# comparison, so a failure that stops earlier still leaves evidence.
+archive_reason=""
+archive_on_failure() {
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
+            "$REPO_ROOT/_build/kernel-hwtest-qemu-failures" \
+            "${archive_reason:-exit status $status}" || true
+    fi
+    return $status
+}
+trap 'stop_qemu; archive_on_failure' EXIT
 trap 'stop_qemu; exit 130' INT TERM HUP
 
 python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
@@ -147,7 +162,11 @@ uart_driver_status=0
 wait "$uart_driver_pid" || uart_driver_status=$?
 uart_driver_pid=""
 stop_qemu
-trap - EXIT INT TERM HUP
+# QEMU is down, but the archive trap stays: every failure below this line
+# is a view or an integration mismatch, which is exactly what somebody
+# needs the raw capture for.
+trap archive_on_failure EXIT
+trap - INT TERM HUP
 
 if [ ! -s "$UART_LOG" ]; then
     # GitHub issue #407: an empty UART log means the guest said nothing,
@@ -232,6 +251,7 @@ done <<<"$view_names"
 if [ -n "$failed_views" ]; then
     echo "FAIL $RUN_LABEL views:$failed_views" >&2
     echo "artifacts: $ARTIFACT_DIR" >&2
+    archive_reason="failing views:$failed_views"
     exit 1
 fi
 

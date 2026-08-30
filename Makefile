@@ -39,7 +39,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelsh-qemu kernelsh-rpi5 profile-kernel-workload-chart langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelcheck-repeat kernelsh-qemu kernelsh-rpi5 profile-kernel-workload-chart langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -936,6 +936,20 @@ profile-kernel-workload-chart:
 ## one dependency graph, so $(TAKIBI) is still built exactly once (see the
 ## allcheck comment below).  The timing-sensitive DDB checks deliberately
 ## remain sequential within kernelcheck-ddb-qemu.
+## kernelcheck-repeat: run a lane N times and report the failure RATE
+## (make kernelcheck-repeat N=20 LANE=kernelcheck-qemu)
+##
+## GitHub issue #488 and AGENTS.md's confidence entry. An intermittent
+## failure was declared fixed on a clean run of eight -- twice, wrongly --
+## because nobody computed that a clean eight against a one-in-six event
+## happens 23% of the time. This prints the observed rate and how many
+## clean runs the claim would actually need, so the number is in front of
+## whoever is about to say "fixed".
+N ?= 10
+LANE ?= kernelcheck-qemu
+kernelcheck-repeat:
+	@bash scripts/repeat_kernel_lane.sh "$(N)" $(LANE)
+
 kernelcheck-qemu: kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank
 
 kernelcheck-qemu-main: kernelbuild-check
