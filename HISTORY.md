@@ -15,6 +15,89 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-08-30: two wrong diagnoses of one intermittent failure, and the arithmetic that would have stopped both (#479)
+
+Written for whoever debugs the next intermittent failure in this tree,
+human or otherwise. The fix at the end is three words long; the two wrong
+answers before it cost most of a day, and both were wrong in ways that
+looked like evidence at the time.
+
+The symptom: `process table: records MISSING uses=16 reason=2` at the end
+of a QEMU boot -- sixteen reads of a pooled process record with no live
+payload -- in roughly one boot in seven. Silent in the other six. It
+appeared the day a two-core scheduler contention probe was added.
+
+**Wrong answer one: "the secondary was still inside the loop when the
+primary reaped."** That mechanism is real, the fix for it was correct, and
+it was not this bug. What made it look settled was running the lane eight
+times and seeing it clean. Eight.
+
+    (1 - 1/6)^8 = 0.23
+
+A clean run of eight, against a one-in-six event, happens about a quarter
+of the time. It was not weak evidence; it was no evidence, and it was
+reported as "0 in 8, fixed". The flake returned with a byte-identical
+signature -- same count, same slot address.
+
+**The arithmetic to do before believing a clean run:** compute
+`(1 - p)^n` with `p` estimated from the failures already seen. To be 90%
+confident a one-in-six event is gone, `n` must be about 13. To be 95%
+confident, about 17. Anything less is a coin toss being reported as a
+result.
+
+**Wrong answer two: "something reads the slot after it is reaped."** More
+attractive than the first, because it explained `reason=2` exactly -- the
+pool does not recognise the address -- and because it generalised into a
+language feature worth building anyway (`kernel/lib/occupancy.tkb`, where
+"no other core is inside this region" became a linear value that three
+different ways of getting it wrong now fail to compile).
+
+It was killed by one experiment rather than by more samples: **remove the
+reap and see whether it still happens.** It did. There was no reaped slot,
+and the same sixteen reads occurred.
+
+**What actually found it** was not statistics either. It was noticing that
+`scheduled_process_table_probe` does the same allocate-and-reap twenty-four
+times over and has never tripped this. When one caller of a pattern fails
+and another does not, **the difference is where, not what** -- so the two
+call sites get compared before any mechanism gets theorised about.
+
+The difference was one function name. `scheduled_process_pool_init_for_probe()`
+initialises the pool. `scheduled_process_table_init()` also runs
+`scheduled_process_release_every_process()`, which resets the per-slot state
+that -- as its own comment had said all along -- **three other tables key by
+the same slot index**. A probe that allocates a record after the pool-only
+call leaves those three holding a previous life's state for that slot.
+
+    probe disabled                          0 / 12
+    probe, pool_init_for_probe + allocate   3 / 22
+    probe, table_init + allocate            0 / 14
+    probe, reap removed                     still trips (and leaks 14 / 14)
+
+`scheduled_process_pool_init_for_probe` now says which of the two a caller
+wants, with those numbers, so the next probe that allocates does not have to
+rediscover it.
+
+**Four things worth carrying out of this:**
+
+1. **Prefer a discriminating experiment to more samples.** Disabling the
+   suspect (0/12) and removing the suspected mechanism (still trips) each
+   cost one batch of runs and each eliminated an entire theory. Rate
+   measurement alone would have eliminated neither.
+2. **Instrumentation moves the window.** Adding two `kernel_boot_log` lines
+   around the suspect suppressed the failure for eight consecutive runs.
+   Record into globals and print at the end; do not narrate through the
+   UART inside a window you are trying to observe.
+3. **A designed-in fix for the wrong cause is still worth keeping, and must
+   still be relabelled.** `occupancy.tkb` was built against wrong answer
+   two and is a genuinely better mechanism than the flags it replaced --
+   but the commit message says plainly that it did not fix the flake,
+   because a future reader who believes it did will not look for the real
+   cause when the symptom returns.
+4. **`make kernelcheck-qemu` does not run `kernel-memory-map-check`.** Only
+   a full `make kernelbuild` does. A change that moves `.bss` looks clean
+   through the whole QEMU lane until then.
+
 ## 2026-08-29: the counter was fine; the printer was not (#470)
 
 This issue was opened on the strength of two hardware measurements. RPi5's
