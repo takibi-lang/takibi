@@ -1,0 +1,41 @@
+must_use variant Rpi5GicDtbResult {
+    Invalid;
+    Missing;
+    Applied((usize, usize));
+}
+
+fn rpi5_gic_apply_boot_dtb() -> Rpi5GicDtbResult !{unsafe} {
+    let dtb: usize = boot_dtb_address_read();
+    match fdt_find_compatible_gicv2_regions(dtb, bs"arm,gic-400") {
+        FdtGicV2RegionsResult::Invalid => {
+            rpi5_gic_dtb_status = 1;
+            return Rpi5GicDtbResult::Invalid;
+        }
+        FdtGicV2RegionsResult::NotFound => {
+            rpi5_gic_dtb_status = 2;
+            return Rpi5GicDtbResult::Missing;
+        }
+        FdtGicV2RegionsResult::Found(gic) => {
+            if (gic.distributor.base != RPI5_GICD_BASE ||
+                gic.cpu_interface.base != RPI5_GICC_BASE ||
+                gic.distributor.size < 0x1000 ||
+                gic.cpu_interface.size < 0x2000) {
+                rpi5_gic_dtb_status = 1;
+                return Rpi5GicDtbResult::Invalid;
+            }
+            rpi5_gicd_base = gic.distributor.base;
+            rpi5_gicc_base = gic.cpu_interface.base;
+            rpi5_gic_dtb_status = 3;
+            return Rpi5GicDtbResult::Applied((
+                rpi5_gicd_base, rpi5_gicc_base));
+        }
+    }
+}
+
+fn rpi5_gic_boot_dtb_status() -> Rpi5GicDtbResult {
+    if (rpi5_gic_dtb_status == 3) {
+        return Rpi5GicDtbResult::Applied((rpi5_gicd_base, rpi5_gicc_base));
+    }
+    if (rpi5_gic_dtb_status == 2) { return Rpi5GicDtbResult::Missing; }
+    return Rpi5GicDtbResult::Invalid;
+}

@@ -181,6 +181,13 @@ fn uart_init() !{unsafe} {
 }
 
 fn platform_init() {
+    match rpi5_gic_apply_boot_dtb() {
+        Rpi5GicDtbResult::Invalid => { }
+        Rpi5GicDtbResult::Missing => { }
+        Rpi5GicDtbResult::Applied(regions) => {
+            let (distributor, cpu_interface) = regions;
+        }
+    }
     match rpi5_pcie2_apply_boot_dtb() {
         Rpi5PcieDtbResult::Invalid => { }
         Rpi5PcieDtbResult::Missing => { }

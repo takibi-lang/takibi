@@ -244,6 +244,18 @@ def main():
     b.prop("reg", b.cells(0x7D001000, 0x1000))
     b.prop("status", b"okay\0")
     b.end()
+    b.begin("interrupt-controller@7fff9000")
+    if mode == "--invalid-gic":
+        b.prop("reg", b.cells(0x7FFF9000, 0x1000,
+                              0x7FFFA000, 0x2000,
+                              0x7FFFC000, 0x2000))
+    else:
+        b.prop("reg", b.cells(0x7FFF9000, 0x1000,
+                              0x7FFFA000, 0x2000,
+                              0x7FFFC000, 0x2000,
+                              0x7FFFE000, 0x2000))
+    b.prop("compatible", b"arm,gic-400\0")
+    b.end()
     b.end()
 
     b.begin("timer")

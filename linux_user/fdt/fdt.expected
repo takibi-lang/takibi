@@ -14,7 +14,9 @@ missing interrupt not found
 invalid interrupt invalid
 missing interrupt property not found
 qemu gic distributor 0x00000000 0x08000000 cpu 0x00000000 0x08010000
+rpi5 gic distributor 0x00000010 0x7fff9000 cpu 0x00000010 0x7fffa000
 invalid gic invalid
+invalid rpi5 gic invalid
 memory regions 0x00000005
 memory reservations 0x00000005
 memory base 0x00000000 0x00000000

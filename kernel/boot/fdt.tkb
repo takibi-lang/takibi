@@ -1167,25 +1167,46 @@ fn fdt_find_compatible_gicv2_regions(base: usize, compatible: []u8)
             return FdtGicV2RegionsResult::NotFound;
         }
         FdtDeviceRegionResult::Found(first) => {
-            // QEMU's current GICv2 binding is a root child with exactly two
-            // 64-bit address/size tuples: distributor, then CPU interface.
-            // Keep this API at that concrete driver contract; recursively
-            // translated or differently shaped controllers are not needed.
-            if (first.direct_root_child == false ||
-                first.address_cells != 2 || first.size_cells != 2 ||
-                first.reg_length != 32) {
-                return FdtGicV2RegionsResult::Invalid;
-            }
             let total: usize = fdt_read_be32(
                 first.dtb, FDT_HEADER_SIZE, 4);
-            let distributor_base: usize = fdt_cells_value(
-                first.dtb, total, first.reg_offset, 2);
-            let distributor_size: usize = fdt_cells_value(
-                first.dtb, total, first.reg_offset + 8, 2);
-            let cpu_base: usize = fdt_cells_value(
-                first.dtb, total, first.reg_offset + 16, 2);
-            let cpu_size: usize = fdt_cells_value(
-                first.dtb, total, first.reg_offset + 24, 2);
+            let mut distributor_base: usize = 0;
+            let mut distributor_size: usize = 0;
+            let mut cpu_base: usize = 0;
+            let mut cpu_size: usize = 0;
+            let mut tuple_length: usize = 0;
+            if (first.direct_root_child && first.address_cells == 2 &&
+                first.size_cells == 2 && first.reg_length == 32) {
+                distributor_base = fdt_cells_value(
+                    first.dtb, total, first.reg_offset, 2);
+                distributor_size = fdt_cells_value(
+                    first.dtb, total, first.reg_offset + 8, 2);
+                cpu_base = fdt_cells_value(
+                    first.dtb, total, first.reg_offset + 16, 2);
+                cpu_size = fdt_cells_value(
+                    first.dtb, total, first.reg_offset + 24, 2);
+                tuple_length = 16;
+            } else if (first.direct_root_child == false &&
+                       first.address_cells == 1 && first.size_cells == 1 &&
+                       first.reg_length == 32) {
+                let distributor_child: usize = fdt_cells_value(
+                    first.dtb, total, first.reg_offset, 1);
+                let cpu_child: usize = fdt_cells_value(
+                    first.dtb, total, first.reg_offset + 8, 1);
+                distributor_size = fdt_cells_value(
+                    first.dtb, total, first.reg_offset + 4, 1);
+                cpu_size = fdt_cells_value(
+                    first.dtb, total, first.reg_offset + 12, 1);
+                if (first.base < distributor_child ||
+                    cpu_child > 0xFFFFFFFFFFFFFFFF -
+                        (first.base - distributor_child)) {
+                    return FdtGicV2RegionsResult::Invalid;
+                }
+                distributor_base = first.base;
+                cpu_base = cpu_child + (first.base - distributor_child);
+                tuple_length = 8;
+            } else {
+                return FdtGicV2RegionsResult::Invalid;
+            }
             if (distributor_size == 0 || cpu_size == 0 ||
                 distributor_base >
                     0xFFFFFFFFFFFFFFFF - distributor_size ||
@@ -1196,12 +1217,16 @@ fn fdt_find_compatible_gicv2_regions(base: usize, compatible: []u8)
             }
             let mut distributor: FdtDeviceRegion = {
                 distributor_base, distributor_size,
-                first.dtb, first.reg_offset, 16, 2, 2, true,
+                first.dtb, first.reg_offset, tuple_length,
+                first.address_cells, first.size_cells,
+                first.direct_root_child,
                 0, 0, 0
             };
             let mut cpu_interface: FdtDeviceRegion = {
                 cpu_base, cpu_size,
-                first.dtb, first.reg_offset + 16, 16, 2, 2, true,
+                first.dtb, first.reg_offset + tuple_length, tuple_length,
+                first.address_cells, first.size_cells,
+                first.direct_root_child,
                 0, 0, 0
             };
             let mut regions: FdtGicV2Regions = {

@@ -55,11 +55,11 @@ const RP1_GEM_VECTOR: u32 = 6;
 const RPI5_GEM_GIC_INTID: u32 = 166; // 32 + (MIP0 SPI base 128 + vector 6)
 
 fn gic_uart0_msi_setup() !{unsafe} {
-    let gicd_ctlr: *io u32 = unsafe { 0x107FFF9000 as *io u32 };
-    let gicd_isenabler5: *io u32 = unsafe { 0x107FFF9114 as *io u32 }; // INTIDs 160..191
-    let gicd_icpendr5: *io u32 = unsafe { 0x107FFF9294 as *io u32 };
-    let gicd_itargetsr46: *io u32 = unsafe { 0x107FFF98B8 as *io u32 }; // INTIDs 184..187
-    let gicd_icfgr11: *io u32 = unsafe { 0x107FFF9C2C as *io u32 }; // INTIDs 176..191
+    let gicd_ctlr: *io u32 = unsafe { rpi5_gicd_base as *io u32 };
+    let gicd_isenabler5: *io u32 = unsafe { (rpi5_gicd_base + 0x114) as *io u32 }; // INTIDs 160..191
+    let gicd_icpendr5: *io u32 = unsafe { (rpi5_gicd_base + 0x294) as *io u32 };
+    let gicd_itargetsr46: *io u32 = unsafe { (rpi5_gicd_base + 0x8B8) as *io u32 }; // INTIDs 184..187
+    let gicd_icfgr11: *io u32 = unsafe { (rpi5_gicd_base + 0xC2C) as *io u32 }; // INTIDs 176..191
 
     // INTID 185 occupies byte 1 of ITARGETSR46. Route it to CPU interface
     // 0 without disturbing the neighboring interrupt targets.
@@ -82,8 +82,8 @@ fn gic_uart0_msi_setup() !{unsafe} {
 // never runs this has interrupts disabled at its own interface however the
 // distributor is configured.
 fn platform_irq_cpu_interface_init() !{unsafe} {
-    let gicc_ctlr: *io u32 = unsafe { 0x107FFFA000 as *io u32 };
-    let gicc_pmr: *io u32 = unsafe { 0x107FFFA004 as *io u32 };
+    let gicc_ctlr: *io u32 = unsafe { rpi5_gicc_base as *io u32 };
+    let gicc_pmr: *io u32 = unsafe { (rpi5_gicc_base + 0x04) as *io u32 };
     *gicc_pmr = 0xFF;
     *gicc_ctlr = *gicc_ctlr | 1;
 }
@@ -129,10 +129,10 @@ fn rp1_uart0_msix_setup() !{unsafe} {
 }
 
 fn gic_usb0_msi_setup() !{unsafe} {
-    let gicd_isenabler5: *io u32 = unsafe { 0x107FFF9114 as *io u32 }; // INTIDs 160..191 (shared with UART0)
-    let gicd_icpendr5: *io u32 = unsafe { 0x107FFF9294 as *io u32 };
-    let gicd_itargetsr47: *io u32 = unsafe { 0x107FFF98BC as *io u32 }; // INTIDs 188..191
-    let gicd_icfgr11: *io u32 = unsafe { 0x107FFF9C2C as *io u32 }; // INTIDs 176..191 (shared with UART0)
+    let gicd_isenabler5: *io u32 = unsafe { (rpi5_gicd_base + 0x114) as *io u32 }; // INTIDs 160..191 (shared with UART0)
+    let gicd_icpendr5: *io u32 = unsafe { (rpi5_gicd_base + 0x294) as *io u32 };
+    let gicd_itargetsr47: *io u32 = unsafe { (rpi5_gicd_base + 0x8BC) as *io u32 }; // INTIDs 188..191
+    let gicd_icfgr11: *io u32 = unsafe { (rpi5_gicd_base + 0xC2C) as *io u32 }; // INTIDs 176..191 (shared with UART0)
 
     // INTID 191 occupies byte 3 of ITARGETSR47.
     let targets: u32 = *gicd_itargetsr47;
@@ -185,10 +185,10 @@ fn rp1_usbhost0_msix_setup() !{unsafe} {
 }
 
 fn gic_gem_msi_setup() !{unsafe} {
-    let gicd_isenabler5: *io u32 = unsafe { 0x107FFF9114 as *io u32 }; // INTIDs 160..191 (shared with UART0/USB0)
-    let gicd_icpendr5: *io u32 = unsafe { 0x107FFF9294 as *io u32 };
-    let gicd_itargetsr41: *io u32 = unsafe { 0x107FFF98A4 as *io u32 }; // INTIDs 164..167
-    let gicd_icfgr10: *io u32 = unsafe { 0x107FFF9C28 as *io u32 }; // INTIDs 160..175
+    let gicd_isenabler5: *io u32 = unsafe { (rpi5_gicd_base + 0x114) as *io u32 }; // INTIDs 160..191 (shared with UART0/USB0)
+    let gicd_icpendr5: *io u32 = unsafe { (rpi5_gicd_base + 0x294) as *io u32 };
+    let gicd_itargetsr41: *io u32 = unsafe { (rpi5_gicd_base + 0x8A4) as *io u32 }; // INTIDs 164..167
+    let gicd_icfgr10: *io u32 = unsafe { (rpi5_gicd_base + 0xC28) as *io u32 }; // INTIDs 160..175
 
     // INTID 166 occupies byte 2 of ITARGETSR41.
     let targets: u32 = *gicd_itargetsr41;
@@ -270,8 +270,8 @@ fn irq_uart_rx_unmask() !{unsafe} {
 
 fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         -> usize !{interrupt, unsafe} {
-    let gicc_iar: *io u32 = unsafe { 0x107FFFA00C as *io u32 };
-    let gicc_eoir: *io u32 = unsafe { 0x107FFFA010 as *io u32 };
+    let gicc_iar: *io u32 = unsafe { (rpi5_gicc_base + 0x0C) as *io u32 };
+    let gicc_eoir: *io u32 = unsafe { (rpi5_gicc_base + 0x10) as *io u32 };
     let id: u32 = *gicc_iar;
 
     // GitHub issue #447: the secondary core takes its own timer tick and
