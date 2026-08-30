@@ -165,6 +165,15 @@ fn kernel_secondary_main(context: usize) {
             if (tag_contention_is_armed()) {
                 tag_contention_secondary_run();
             }
+            // GitHub issue #479 Group B: the scheduler's own state
+            // transition, which is the first probe here to race a
+            // subsystem the kernel actually schedules with rather than a
+            // private instance. It races for a process this probe
+            // allocated and never runs, so a failure names the transition
+            // rather than whatever else is live.
+            if (schedule_contention_is_armed()) {
+                schedule_contention_secondary_run();
+            }
             wfi();
         }
     }

@@ -75,6 +75,7 @@ ATOMIC_ALLOWED = {
     "kernel/asid_contention_evidence.tkb": "two-core contention probe",
     "kernel/pid_contention_evidence.tkb": "two-core contention probe",
     "kernel/tag_contention_evidence.tkb": "two-core contention probe",
+    "kernel/schedule_contention_evidence.tkb": "two-core contention probe",
 }
 
 

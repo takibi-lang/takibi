@@ -1,0 +1,329 @@
+// GitHub issue #479 Group B: do two cores really both claim one Ready
+// process, and does the scheduler lock really stop it?
+//
+// The claim under test is narrower than "the scheduler is unsafe", and the
+// narrowness is why this needed measuring. ProcessSlotState distinguishes
+// Ready from Running and kernel_process_next_ready only ever selects a
+// Ready successor, so two cores cannot pick the same process off the
+// chain. What they CAN do is both get through scheduled_process_ready_take
+// on one handle: it reads the state, finds Ready, and only then mints the
+// linear tokens that stand for the claim. Two cores in that window both
+// come out holding a token, and the linear types are satisfied on each
+// core separately -- each really did consume its own Ready and produce its
+// own Running.
+//
+// So the ownership discipline is sound per-core and says nothing across
+// cores, and no amount of reading the types would have shown it. That is
+// what this file turns from an argument into a number.
+//
+// Two-sided, on the pattern kernel/kernel/freelist_contention_evidence.tkb
+// established: phase 1 runs with a FORGED guard (no lock) and must SHOW
+// the double take; phase 2 runs with the real lock and must not. A probe
+// with only phase 2 goes quietly green the day the window stops
+// reproducing and then asserts nothing while looking like it asserts
+// something.
+//
+// Current limitations:
+// - DETECTS THE DOUBLE CLAIM, not every scheduler race. The parent/sibling
+//   links that kernel_process_next_ready walks are spliced by clone and
+//   child_exit, and this probe never forks, so it says nothing about a
+//   walk concurrent with a splice. That half is covered by the lock and
+//   not by this measurement.
+// - ONE HANDLE. Both cores race the same process on purpose -- a shared
+//   handle is what makes the window collide often. A wider table would
+//   need many more rounds to hit the same window.
+// - THE WINDOW IS SHORT, so the count is expected to be small on QEMU and
+//   larger on hardware. Every concurrency number in this kernel has gone
+//   that way (freelist duplicates: 1349 on RPi5, 3 on QEMU, same binary),
+//   so read a QEMU figure as a lower bound.
+// - THE DETECTOR IS THIS PROBE'S OWN atomic word, never the kernel's
+//   counters. The asid probe learned that the hard way: a counter on the
+//   racing path loses increments to the race it is being used to detect,
+//   and two racy counters losing the same amount report success.
+
+use "kernel/kernel/process.tkb";
+use "kernel/lib/execution_model.tkb";
+
+const SCHEDULE_CONTENTION_ROUNDS: usize = 4096;
+// Same reasoning as every other probe here: a core that re-enters the
+// instant it leaves owns the structure and measures that rather than the
+// structure.
+const SCHEDULE_CONTENTION_OUTSIDE_WORK: usize = 32;
+
+// The process both cores race for. Allocated by the primary at setup,
+// never run, and driven to Exited and reaped at the end so the pool and
+// the stack run come back.
+private let mut schedule_probe_handle: ProcessHandle;
+private let mut schedule_probe_ready: bool = false;
+
+// 1 while some core believes it holds a claim on that handle. A core that
+// swaps in 1 and finds 1 already there is the second holder -- which is
+// two cores each about to make one process Running.
+private let mut schedule_probe_held: usize;
+
+// 0 = phase 1, forged guard, the race is expected. 1 = phase 2, locked.
+private let mut schedule_probe_phase: usize;
+
+private let mut schedule_probe_armed: usize;
+private let mut schedule_probe_primary: usize;
+private let mut schedule_probe_secondary: usize;
+private let mut schedule_probe_active: usize;
+private let mut schedule_probe_overlap: usize;
+private let mut schedule_probe_duplicates: usize;
+private let mut schedule_probe_missing: usize;
+
+private fn schedule_probe_armed_address() -> usize {
+    return (&schedule_probe_armed) as usize;
+}
+
+private fn schedule_probe_primary_address() -> usize {
+    return (&schedule_probe_primary) as usize;
+}
+
+private fn schedule_probe_secondary_address() -> usize {
+    return (&schedule_probe_secondary) as usize;
+}
+
+private fn schedule_probe_active_address() -> usize {
+    return (&schedule_probe_active) as usize;
+}
+
+private fn schedule_probe_overlap_address() -> usize {
+    return (&schedule_probe_overlap) as usize;
+}
+
+private fn schedule_probe_held_address() -> usize {
+    return (&schedule_probe_held) as usize;
+}
+
+private fn schedule_probe_duplicates_address() -> usize {
+    return (&schedule_probe_duplicates) as usize;
+}
+
+private fn schedule_probe_missing_address() -> usize {
+    return (&schedule_probe_missing) as usize;
+}
+
+private fn schedule_probe_phase_address() -> usize {
+    return (&schedule_probe_phase) as usize;
+}
+
+// One claim, through the REAL entry point.
+//
+// scheduled_process_ready_take is the function the scheduler calls, not a
+// copy of its shape -- a fixture that reimplements the thing it is
+// measuring proves something about the fixture. Ready -> Running ->
+// Ready, so the handle is left as it was found and the next round can
+// race for it again.
+private fn schedule_probe_claim(guard: borrow ProcessRunGuard[lock])
+        !{unsafe} {
+    match scheduled_process_ready_take(guard, schedule_probe_handle) {
+        ScheduledProcessReadyTakeResult::Missing => {
+            unsafe {
+                atomic_fetch_add_relaxed(schedule_probe_missing_address(), 1);
+            }
+        }
+        ScheduledProcessReadyTakeResult::Ready(resources) => {
+            // Marked BEFORE the state is advanced, so the detector catches
+            // "both cores hold a token" rather than the narrower "both are
+            // inside the same instruction". The mark is cleared only after
+            // the release, which is what makes a window of a few
+            // instructions observable at all.
+            let was: usize = unsafe {
+                atomic_swap_acquire(schedule_probe_held_address(), 1)
+            };
+            if (was != 0) {
+                unsafe {
+                    atomic_fetch_add_relaxed(
+                        schedule_probe_duplicates_address(), 1);
+                }
+            }
+            let (owner, ready) = resources;
+            let running = scheduled_process_start(owner, ready);
+            let back = scheduled_process_yield(owner, running);
+            scheduled_process_release(owner, back);
+            unsafe {
+                atomic_store_release(schedule_probe_held_address(), 0);
+            }
+        }
+    }
+}
+
+private fn schedule_probe_cycle() !{unsafe} {
+    if (unsafe {
+            atomic_load_acquire(schedule_probe_phase_address())
+        } == 1) {
+        let guard = process_run_lock();
+        schedule_probe_claim(guard);
+        process_run_unlock(guard);
+    } else {
+        let forged = process_run_guard_forge_unlocked();
+        schedule_probe_claim(forged);
+        process_run_guard_discard_unlocked(forged);
+    }
+    for spin: usize in 0..<SCHEDULE_CONTENTION_OUTSIDE_WORK { }
+}
+
+fn schedule_contention_is_armed() -> bool !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(schedule_probe_armed_address())
+    } == 1;
+}
+
+fn schedule_contention_secondary_run() !{unsafe} {
+    unsafe { atomic_store_release(schedule_probe_active_address(), 1); }
+    while (unsafe {
+               atomic_load_acquire(schedule_probe_secondary_address())
+           } < SCHEDULE_CONTENTION_ROUNDS &&
+           unsafe { atomic_load_acquire(schedule_probe_armed_address()) } == 1) {
+        schedule_probe_cycle();
+        unsafe {
+            atomic_fetch_add_relaxed(schedule_probe_secondary_address(), 1);
+        }
+    }
+    unsafe { atomic_store_release(schedule_probe_active_address(), 0); }
+}
+
+private fn schedule_contention_report(stage: *u8) !{unsafe} {
+    kernel_boot_log("schedule contention stage: ");
+    kernel_boot_log(stage);
+    kernel_boot_log("\n");
+    kernel_boot_log("schedule contention counts: primary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(schedule_probe_primary_address())
+    });
+    kernel_boot_log(" secondary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(schedule_probe_secondary_address())
+    });
+    kernel_boot_log(" duplicates=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(schedule_probe_duplicates_address())
+    });
+    kernel_boot_log(" missing=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(schedule_probe_missing_address())
+    });
+    kernel_boot_log(" overlap=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(schedule_probe_overlap_address())
+    });
+    kernel_boot_log("\n");
+}
+
+// Run one phase to completion on both cores. Returns the duplicate count,
+// or refuses by reporting when the secondary never joined.
+private fn schedule_contention_run_phase(locked: usize, stage: *u8)
+        -> bool !{unsafe} {
+    unsafe {
+        atomic_store_release(schedule_probe_phase_address(), locked);
+        atomic_store_release(schedule_probe_primary_address(), 0);
+        atomic_store_release(schedule_probe_secondary_address(), 0);
+        atomic_store_release(schedule_probe_duplicates_address(), 0);
+        atomic_store_release(schedule_probe_missing_address(), 0);
+        atomic_store_release(schedule_probe_overlap_address(), 0);
+        atomic_store_release(schedule_probe_held_address(), 0);
+        atomic_store_release(schedule_probe_armed_address(), 1);
+    }
+
+    let entry_window: i64 = read_cntfrq() >> 2;
+    let entry_start: i64 = read_cntpct();
+    let mut entered: bool = false;
+    while (entered == false && read_cntpct() - entry_start < entry_window) {
+        if (unsafe {
+                atomic_load_acquire(schedule_probe_active_address())
+            } == 1) {
+            entered = true;
+        }
+    }
+    if (entered == false) {
+        unsafe { atomic_store_release(schedule_probe_armed_address(), 0); }
+        schedule_contention_report("secondary-never-entered" as *u8);
+        return false;
+    }
+
+    for round: usize in 0..<SCHEDULE_CONTENTION_ROUNDS {
+        schedule_probe_cycle();
+        unsafe {
+            atomic_fetch_add_relaxed(schedule_probe_primary_address(), 1);
+        }
+    }
+
+    unsafe {
+        atomic_store_release(schedule_probe_overlap_address(),
+            atomic_load_acquire(schedule_probe_secondary_address()));
+    }
+
+    let finish_window: i64 = read_cntfrq() * 2;
+    let finish_start: i64 = read_cntpct();
+    let mut finished: bool = false;
+    while (finished == false && read_cntpct() - finish_start < finish_window) {
+        if (unsafe {
+                atomic_load_acquire(schedule_probe_secondary_address())
+            } >= SCHEDULE_CONTENTION_ROUNDS) {
+            finished = true;
+        }
+    }
+    unsafe { atomic_store_release(schedule_probe_armed_address(), 0); }
+    // Printed on EVERY exit path, including the give-ups. Two probes in
+    // this tree shipped with early returns that printed nothing, and a run
+    // that could not set itself up looked identical to one whose counter
+    // raced.
+    if (finished == false) {
+        schedule_contention_report("secondary-never-finished" as *u8);
+        return false;
+    }
+    schedule_contention_report(stage);
+    return true;
+}
+
+fn schedule_contention_duplicate_count() -> usize !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(schedule_probe_duplicates_address())
+    };
+}
+
+fn schedule_contention_probe() -> bool !{unsafe} {
+    // Put the pid counter back at the end. Unlike the other probes here
+    // this one really does CREATE a process, so it really is owed the
+    // number -- but a pid appears in the process-lifecycle views, in ps
+    // and in every wait4 line, and a probe that shifted every later
+    // process by one would break views with nothing to do with it (issue
+    // #437 moved PID 1 once and 17 of 39 views changed). The record and
+    // its stack run are given back too, below.
+    let pid_before: usize = scheduled_process_pid_counter();
+    if (schedule_probe_ready == false) {
+        scheduled_process_pool_init_for_probe();
+        match scheduled_process_alloc() {
+            ScheduledProcessAllocResult::Full => {
+                schedule_contention_report("no-process-to-race-for" as *u8);
+                return false;
+            }
+            ScheduledProcessAllocResult::Allocated(handle) => {
+                schedule_probe_handle = handle;
+                schedule_probe_ready = true;
+            }
+        }
+    }
+
+    // Phase 1: no lock. The race is the expected result, and a run with no
+    // duplicates at all means the window closed rather than that the
+    // kernel is safe -- so it FAILS, loudly, instead of passing.
+    if (schedule_contention_run_phase(0, "unlocked" as *u8) == false) {
+        return false;
+    }
+    let raced: usize = schedule_contention_duplicate_count();
+
+    // Phase 2: the real lock. Nothing may claim twice.
+    if (schedule_contention_run_phase(1, "locked" as *u8) == false) {
+        return false;
+    }
+    let excluded: usize = schedule_contention_duplicate_count();
+
+    // Give the record and its kernel stack run back, so the boot
+    // accounting still balances.
+    let cleaned: bool = scheduled_process_probe_cycle(schedule_probe_handle);
+    schedule_probe_ready = false;
+    scheduled_process_pid_counter_restore(pid_before);
+    return raced > 0 && excluded == 0 && cleaned;
+}

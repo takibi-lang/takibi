@@ -60,6 +60,8 @@ EXEMPT = {
         "the two-core probes; every shared word is an atomic by design",
     "kernel/tag_contention_evidence.tkb":
         "the two-core probes; every shared word is an atomic by design",
+    "kernel/schedule_contention_evidence.tkb":
+        "the two-core probes; every shared word is an atomic by design",
     "lib/diagnostic_ring.tkb":
         "per-CPU rings published through GitHub issue #299's protocol; the "
         "commit word is an atomic and the reader re-checks it",

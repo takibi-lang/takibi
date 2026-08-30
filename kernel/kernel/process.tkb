@@ -1684,7 +1684,108 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
     return ScheduledProcessAllocResult::Allocated(handle);
 }
 
-fn scheduled_process_ready_take(handle: ProcessHandle)
+// GitHub issue #479 Group B: the scheduler's lock. Linux calls it
+// rq->lock and it is here for the reason Linux's is.
+//
+// WHAT IS ALREADY RIGHT, because it explains why this was easy to miss.
+// ProcessSlotState distinguishes Ready from Running, and
+// kernel_process_next_ready only ever selects a Ready successor -- so two
+// cores cannot pick the same process off the chain. There is no missing
+// runqueue.
+//
+// WHAT IS NOT. scheduled_process_ready_take reads the state, finds Ready,
+// and then mints the linear tokens that stand for the claim. Two cores
+// doing that on one handle both find Ready and both get tokens, and the
+// linear types are satisfied on each core SEPARATELY -- each really did
+// consume its own Ready and produce its own Running. The ownership
+// discipline is sound per-core and says nothing across cores, because the
+// race is between a read and a mint it has no reason to think are one
+// step.
+//
+// AND THE WALK. kernel_process_next_ready follows parent/first_child/
+// next_sibling, and clone and child_exit splice exactly those links. A
+// walk concurrent with a splice can follow a link into a record being
+// torn down -- so the walk and the take are ONE critical section. Locking
+// them separately would turn the race into a livelock (select a successor,
+// find it gone, return) rather than fixing it.
+//
+// Its own global, never a field, for the reason kernel/mm/page.tkb's is.
+// No mutex_init: a global Mutex is free from .bss and mutex_init
+// FORCE-FREES. See kernel/lib/mutex.tkb.
+//
+// LOCK ORDER: this is the OUTERMOST lock. run -> fd -> pool -> page, with
+// asid a leaf. Checked, not assumed: nothing on the transition path takes
+// a pool lock (scheduled_process_record_at reaches the pool through
+// intrusive_pool_probe_slot, a WALK, which takes no guard -- issue #482);
+// clone takes run and then the pool's, which is run -> pool; and
+// switch_to reaches asid through process_image_activate_root.
+private let mut scheduled_process_run_lock: Mutex;
+
+// THREADED, NOT ACQUIRED INTERNALLY, and that is the decision worth
+// reading. Eight functions here perform a state transition and several
+// call each other -- kernel_process_execution_reset alone has seven
+// callers in this file. If each acquired the lock itself, whether two of
+// them ever nest would be answered by reading, and being wrong is a HANG:
+// Mutex has no owner and no recursion count, so it cannot tell "another
+// core holds it" from "I hold it" (kernel/lib/mutex.tkb says so).
+//
+// Taking the guard as a PARAMETER makes self-deadlock unwritable. Whoever
+// is at the top acquires once and the compiler carries it down every path,
+// including the ones a reader would have missed. It also pushes the
+// parameter out into syscall.tkb and the test drivers, which is the point:
+// those are the boundaries where the lock belongs (syscall entry, timer
+// entry), and having the compiler name them beats deriving the list by
+// hand.
+//
+// `[lock: addr]` is the identity of the mutex it came from, so another
+// container's guard is a static value mismatch. Linear, so no path can
+// forget to give it back.
+linear struct ProcessRunGuard[lock: addr] {
+    private flags: usize;
+}
+
+// mutex_acquire, not pool_lock_acquire: the tag pool_lock takes registers
+// the acquire in linux_user's finite lock-ORDER table, and this is not a
+// pool lock. See kernel/lib/intrusive_pool.tkb's tag counter for what
+// putting a non-pool in that table cost.
+fn process_run_lock() -> ProcessRunGuard[scheduled_process_run_lock] {
+    let mut guard: ProcessRunGuard[scheduled_process_run_lock] =
+        { mutex_acquire(&scheduled_process_run_lock) };
+    return guard;
+}
+
+fn process_run_unlock(guard: sink ProcessRunGuard[scheduled_process_run_lock]) {
+    mutex_release(&scheduled_process_run_lock, guard.flags);
+}
+
+// Phase 1 of kernel/kernel/schedule_contention_evidence.tkb, and nothing
+// else. It mints a guard WITHOUT acquiring, which is exactly the thing the
+// guard exists to prevent -- so that the probe can produce the race before
+// the lock and show that the lock removes it.
+//
+// That pair is not optional caution. A probe that only ran the locked
+// phase would go quietly green the day the window stopped reproducing --
+// the timing shifts, the window closes -- and would then assert nothing
+// while looking like it asserted something.
+// kernel/kernel/freelist_contention_evidence.tkb carries the same pair for
+// the same reason.
+//
+// `unsafe`, so it is counted in the trusted base and any use outside that
+// probe is visible in the inventory rather than only in review.
+fn process_run_guard_forge_unlocked()
+        -> ProcessRunGuard[scheduled_process_run_lock] !{unsafe} {
+    let mut guard: ProcessRunGuard[scheduled_process_run_lock] = { 0 };
+    return guard;
+}
+
+// Consumes a forged guard. It holds nothing, so there is nothing to
+// release -- but it is linear, so it still has to be given somewhere, and
+// the probe cannot simply drop it.
+fn process_run_guard_discard_unlocked(
+        guard: sink ProcessRunGuard[scheduled_process_run_lock]) !{unsafe} {}
+
+fn scheduled_process_ready_take(guard: borrow ProcessRunGuard[lock],
+                                handle: ProcessHandle)
         -> ScheduledProcessReadyTakeResult {
     if (scheduled_process_record_state(handle.pool_index) !=
             ProcessSlotState::Ready) {
@@ -1714,7 +1815,8 @@ fn scheduled_process_exited_take(handle: ProcessHandle)
     return ScheduledProcessExitedTakeResult::Exited((owner, state));
 }
 
-fn scheduled_process_running_take(handle: ProcessHandle)
+fn scheduled_process_running_take(guard: borrow ProcessRunGuard[lock],
+                                  handle: ProcessHandle)
         -> ScheduledProcessRunningTakeResult {
     if (scheduled_process_record_state(handle.pool_index) !=
             ProcessSlotState::Running) {
@@ -1892,8 +1994,20 @@ fn scheduled_process_same_generation(
     return a.generation == b.generation;
 }
 
+// GitHub issue #479 Group B: one critical section for the whole cycle, so
+// the probe exercises the transitions the same way the scheduler does
+// rather than a looser way of its own.
 fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool {
-    match scheduled_process_ready_take(handle) {
+    let guard = process_run_lock();
+    let ok: bool = scheduled_process_probe_cycle_locked(guard, handle);
+    process_run_unlock(guard);
+    return ok;
+}
+
+private fn scheduled_process_probe_cycle_locked(
+        guard: borrow ProcessRunGuard[lock],
+        handle: ProcessHandle) -> bool {
+    match scheduled_process_ready_take(guard, handle) {
         ScheduledProcessReadyTakeResult::Missing => { return false; }
         ScheduledProcessReadyTakeResult::Ready(resources) => {
             let (owner, ready) = resources;
@@ -1902,7 +2016,7 @@ fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool {
             scheduled_process_release(owner, ready_again);
         }
     }
-    match scheduled_process_ready_take(handle) {
+    match scheduled_process_ready_take(guard, handle) {
         ScheduledProcessReadyTakeResult::Missing => { return false; }
         ScheduledProcessReadyTakeResult::Ready(resources) => {
             let (owner, ready) = resources;
@@ -2356,8 +2470,9 @@ fn kernel_process_trace_report() {
 
 must_use variant ProcessUartProgressResult { Invalid; Recorded; }
 
-fn kernel_process_start_handle(handle: ProcessHandle) -> bool {
-    match scheduled_process_ready_take(handle) {
+fn kernel_process_start_handle(guard: borrow ProcessRunGuard[lock],
+                               handle: ProcessHandle) -> bool {
+    match scheduled_process_ready_take(guard, handle) {
         ScheduledProcessReadyTakeResult::Missing => { return false; }
         ScheduledProcessReadyTakeResult::Ready(resources) => {
             let (owner, ready) = resources;
@@ -2368,8 +2483,9 @@ fn kernel_process_start_handle(handle: ProcessHandle) -> bool {
     }
 }
 
-fn kernel_process_yield_handle(handle: ProcessHandle) -> bool {
-    match scheduled_process_running_take(handle) {
+fn kernel_process_yield_handle(guard: borrow ProcessRunGuard[lock],
+                               handle: ProcessHandle) -> bool {
+    match scheduled_process_running_take(guard, handle) {
         ScheduledProcessRunningTakeResult::Missing => { return false; }
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
@@ -2404,7 +2520,10 @@ fn kernel_process_execution_reset() {
         ScheduledProcessAllocResult::Full => {}
         ScheduledProcessAllocResult::Allocated(root) => {
             execution_here().current_handle = root;
-            execution_here().current_live = kernel_process_start_handle(root);
+            let start_guard = process_run_lock();
+            execution_here().current_live =
+                kernel_process_start_handle(start_guard, root);
+            process_run_unlock(start_guard);
             if (execution_here().current_live) {
                 kernel_process_trace_record(
                     ProcessTraceResume,
@@ -2482,14 +2601,15 @@ fn kernel_process_schedulable_count() -> usize {
 // saved frame. Both of this file's schedulers and both of its blockers end
 // here, so "how a switch is performed" has one implementation and only the
 // choice of target varies.
-private fn kernel_process_switch_to(from: ProcessHandle, to: ProcessHandle,
+private fn kernel_process_switch_to(guard: borrow ProcessRunGuard[lock],
+                                    from: ProcessHandle, to: ProcessHandle,
                                     current_sp: usize) -> usize {
     scheduled_process_record_at(from.pool_index).saved_sp = current_sp;
-    if (kernel_process_yield_handle(from) == false) {
+    if (kernel_process_yield_handle(guard, from) == false) {
         return current_sp;
     }
-    if (kernel_process_start_handle(to) == false) {
-        if (kernel_process_start_handle(from)) {}
+    if (kernel_process_start_handle(guard, to) == false) {
+        if (kernel_process_start_handle(guard, from)) {}
         return current_sp;
     }
     execution_here().current_handle = to;
@@ -2634,13 +2754,32 @@ private fn kernel_process_next_ready(from: ProcessHandle)
 // That still only ever looked at ONE relative; the rotation above looks at
 // every live process, which is what a chain deeper than that one relative
 // requires.
+// GitHub issue #479 Group B: ONE critical section, covering the walk and
+// the transition together. Two sections would not be a smaller version of
+// this -- selecting a successor under one lock and then finding it
+// claimed under another is a livelock, not a fix -- and the walk itself
+// reads the parent/sibling links that clone and child_exit splice.
+//
+// The lock is released before this returns, and that is safe because the
+// switch is not performed here: this returns the incoming process's saved
+// SP and the exception-return path installs it. So the guard's lifetime
+// does not have to survive a context switch, which is the problem Linux
+// solves with finish_task_switch.
 fn kernel_process_schedule(current_sp: usize) -> usize {
     if (execution_here().current_live == false) { return current_sp; }
+    let guard = process_run_lock();
+    let next: usize = kernel_process_schedule_locked(guard, current_sp);
+    process_run_unlock(guard);
+    return next;
+}
+
+private fn kernel_process_schedule_locked(guard: borrow ProcessRunGuard[lock],
+                                          current_sp: usize) -> usize {
     match kernel_process_next_ready(execution_here().current_handle) {
         ProcessNextReadyResult::Missing => { return current_sp; }
         ProcessNextReadyResult::Next(to) => {
             return kernel_process_switch_to(
-                execution_here().current_handle, to, current_sp);
+                guard, execution_here().current_handle, to, current_sp);
         }
     }
 }
@@ -3385,19 +3524,35 @@ fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {
 // shell reading the terminal while its own child waits on a daemon is an
 // ordinary shape, and it is exactly the shape a script that starts a
 // background daemon produces.
+// GitHub issue #479 Group B: ONE critical section for the successor walk
+// and both transitions, for the same reason kernel_process_schedule has
+// one -- choosing a successor and then taking it are one decision, and the
+// walk reads links that clone and child_exit splice.
 private fn kernel_process_block_current(current_sp: usize,
                                         reason: ProcessWaitReason,
                                         trace_aux: usize) -> usize {
     if (execution_here().current_live == false) {
         return 0;
     }
+    let guard = process_run_lock();
+    let next: usize = kernel_process_block_current_locked(
+        guard, current_sp, reason, trace_aux);
+    process_run_unlock(guard);
+    return next;
+}
+
+private fn kernel_process_block_current_locked(
+        guard: borrow ProcessRunGuard[lock],
+        current_sp: usize,
+        reason: ProcessWaitReason,
+        trace_aux: usize) -> usize {
     let mut from: ProcessHandle = execution_here().current_handle;
     let mut to: ProcessHandle = match kernel_process_next_ready(from) {
         ProcessNextReadyResult::Missing => { return 0; }
         ProcessNextReadyResult::Next(next) => { next }
     };
     scheduled_process_record_at(from.pool_index).saved_sp = current_sp;
-    match scheduled_process_running_take(from) {
+    match scheduled_process_running_take(guard, from) {
         ScheduledProcessRunningTakeResult::Missing => { return 0; }
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
@@ -3408,7 +3563,7 @@ private fn kernel_process_block_current(current_sp: usize,
                                         trace_aux);
         }
     }
-    if (kernel_process_start_handle(to) == false) {
+    if (kernel_process_start_handle(guard, to) == false) {
         return 0;
     }
     execution_here().current_handle = to;
@@ -3801,6 +3956,34 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
 // Bookkeeping-only, like scheduled_process_table_probe beside it: the
 // children never run user code, they are driven Ready->Running->Exited
 // directly, so this needs no images and no address spaces.
+// Ready -> Running -> Exited for one handle, under the scheduler lock.
+//
+// GitHub issue #479 Group B: hoisted out of the loop it was written in,
+// because the guard is linear and the match arm it lived in returns early
+// -- a local acquire around that match does not compile, which is the
+// mechanism doing its job rather than an inconvenience.
+private fn kernel_process_probe_run_to_exit(handle: ProcessHandle) -> bool {
+    let guard = process_run_lock();
+    let ok: bool = kernel_process_probe_run_to_exit_locked(guard, handle);
+    process_run_unlock(guard);
+    return ok;
+}
+
+private fn kernel_process_probe_run_to_exit_locked(
+        guard: borrow ProcessRunGuard[lock],
+        handle: ProcessHandle) -> bool {
+    match scheduled_process_ready_take(guard, handle) {
+        ScheduledProcessReadyTakeResult::Missing => { return false; }
+        ScheduledProcessReadyTakeResult::Ready(resources) => {
+            let (owner, ready) = resources;
+            let running = scheduled_process_start(owner, ready);
+            let exited = scheduled_process_exit(owner, running);
+            scheduled_process_release(owner, exited);
+        }
+    }
+    return true;
+}
+
 fn kernel_process_fanout_probe() -> bool !{unsafe} {
     kernel_process_execution_reset();
     let parent_pid: usize = kernel_process_current_pid();
@@ -3847,14 +4030,8 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
         // Head insertion means the list runs newest-first, so the pid
         // stamped here is pids[2 - i].
         scheduled_process_record_at(cursor.pool_index).exit_status = 42 - i;
-        match scheduled_process_ready_take(cursor) {
-            ScheduledProcessReadyTakeResult::Missing => { return false; }
-            ScheduledProcessReadyTakeResult::Ready(resources) => {
-                let (owner, ready) = resources;
-                let running = scheduled_process_start(owner, ready);
-                let exited = scheduled_process_exit(owner, running);
-                scheduled_process_release(owner, exited);
-            }
+        if (kernel_process_probe_run_to_exit(cursor) == false) {
+            return false;
         }
         if (has_following == false && i != 2) { return false; }
         cursor = following;
@@ -4093,7 +4270,8 @@ fn kernel_process_clone_rollback() {
     // and exactly the kind of use-after-reap an array of never-freed slots
     // cannot show you.
     scheduled_process_record_at(child.pool_index).has_parent = false;
-    match scheduled_process_ready_take(child) {
+    let guard = process_run_lock();
+    match scheduled_process_ready_take(guard, child) {
         ScheduledProcessReadyTakeResult::Missing => {}
         ScheduledProcessReadyTakeResult::Ready(resources) => {
             let (owner, ready) = resources;
@@ -4109,6 +4287,7 @@ fn kernel_process_clone_rollback() {
             }
         }
     }
+    process_run_unlock(guard);
     scheduled_process_record_at(parent.pool_index).has_first_child = false;
     execution_here().current_handle = parent;
     workload_busy_note_selected(
@@ -4132,8 +4311,14 @@ fn kernel_process_clone_context_install(parent_sp: usize, child_sp: usize)
     let mut child: ProcessHandle = execution_here().current_handle;
     let mut parent: ProcessHandle =
         scheduled_process_record_at(child.pool_index).parent;
-    if (kernel_process_yield_handle(parent) == false ||
-        kernel_process_start_handle(child) == false) {
+    // GitHub issue #479 Group B: both transitions inside ONE section, and
+    // the guard given back before the early return -- which the compiler
+    // insists on, since it is linear.
+    let guard = process_run_lock();
+    let swapped: bool = kernel_process_yield_handle(guard, parent) &&
+                        kernel_process_start_handle(guard, child);
+    process_run_unlock(guard);
+    if (swapped == false) {
         return 0;
     }
     scheduled_process_record_at(parent.pool_index).saved_sp = parent_sp;
@@ -4372,7 +4557,19 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // never finishes, which is exactly how this first went wrong.
     scheduled_process_record_at(parent.pool_index).last_child_pid =
         scheduled_process_pid_of_handle(child);
-    match scheduled_process_running_take(child) {
+    // GitHub issue #479 Group B: three short sections in this function
+    // rather than one covering the whole exit, and that is a stated
+    // limitation rather than the finished shape. What each section does
+    // guarantee is that no two cores can take the same handle's state;
+    // what a single section would additionally give is that the exit, the
+    // parent wake and the successor choice are one decision. Widening it
+    // means holding the lock across kernel_syscall_wait4_deliver, which
+    // WRITES USER MEMORY and can therefore fault -- and a fault handler
+    // that reaches the scheduler while this lock is held is a deadlock.
+    // That is the same reason Linux does not touch user memory under a
+    // spinlock, and it needs its own answer before the section widens.
+    let exit_guard = process_run_lock();
+    match scheduled_process_running_take(exit_guard, child) {
         ScheduledProcessRunningTakeResult::Missing => {}
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
@@ -4380,6 +4577,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
             scheduled_process_release(owner, exited);
         }
     }
+    process_run_unlock(exit_guard);
     // GitHub issue #244: the parent may be genuinely Blocked here (wait4
     // called kernel_process_block_wait4() before this child had exited),
     // not just Ready from an ordinary scheduler preemption -- wake it
@@ -4414,7 +4612,11 @@ fn kernel_process_child_exit(status: usize) -> usize {
             }
         }
     }
-    if (kernel_process_start_handle(parent)) {
+    let parent_guard = process_run_lock();
+    let parent_started: bool =
+        kernel_process_start_handle(parent_guard, parent);
+    process_run_unlock(parent_guard);
+    if (parent_started) {
         execution_here().current_handle = parent;
         workload_busy_note_selected(
             scheduled_process_pid_of_handle(parent));
@@ -4435,10 +4637,10 @@ fn kernel_process_child_exit(status: usize) -> usize {
     //
     // The scheduler already knows who should run when the current process
     // cannot continue. Ask it, rather than insisting on a relative.
-    match kernel_process_next_ready(child) {
+    match kernel_process_exit_start_successor(child) {
         ProcessNextReadyResult::Missing => {}
         ProcessNextReadyResult::Next(successor) => {
-            if (kernel_process_start_handle(successor)) {
+            {
                 execution_here().current_handle = successor;
                 workload_busy_note_selected(
                     scheduled_process_pid_of_handle(successor));
@@ -4456,6 +4658,38 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // retry -- so this is still a fail-stop, and a real idle task is what
     // would remove it.
     return 0;
+}
+
+// Choose a successor and take it, in ONE critical section.
+//
+// GitHub issue #479 Group B: the walk and the take have to agree, so they
+// share a section -- selecting under one lock and taking under another
+// would let the chosen process be claimed in between, which reads as
+// "nothing can run" and fail-stops. Returns Missing when nothing was
+// chosen OR when the chosen one could not be started, which is what the
+// caller already did with those two cases.
+private fn kernel_process_exit_start_successor(child: ProcessHandle)
+        -> ProcessNextReadyResult {
+    let guard = process_run_lock();
+    // A bool and a handle rather than building the result inside the
+    // section and assigning over it: ProcessNextReadyResult is `must_use`,
+    // so overwriting a Missing placeholder discards an obligation and does
+    // not compile. Constructing it once, after the unlock, is what the
+    // checker is asking for and reads better anyway.
+    let mut started: bool = false;
+    let mut chosen: ProcessHandle = child;
+    match kernel_process_next_ready(child) {
+        ProcessNextReadyResult::Missing => {}
+        ProcessNextReadyResult::Next(successor) => {
+            if (kernel_process_start_handle(guard, successor)) {
+                started = true;
+                chosen = successor;
+            }
+        }
+    }
+    process_run_unlock(guard);
+    if (started) { return ProcessNextReadyResult::Next(chosen); }
+    return ProcessNextReadyResult::Missing;
 }
 
 // GitHub issue #248: per-slot now, indexed by whichever slot is CURRENTLY
