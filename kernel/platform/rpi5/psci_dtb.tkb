@@ -1,0 +1,27 @@
+must_use variant Rpi5PsciDtbResult {
+    Invalid;
+    Missing;
+    Applied;
+}
+
+// KERNEL_ACTIVE_CORES = 4. The boot core writes this before CPU_ON; secondary
+// cores never enter this parser or mutate the selected firmware conduit.
+let mut rpi5_psci_use_hvc: bool = false;
+
+fn rpi5_psci_apply_boot_dtb() -> Rpi5PsciDtbResult !{unsafe} {
+    match fdt_find_psci_method(boot_dtb_address_read()) {
+        FdtPsciMethodResult::Invalid => {
+            return Rpi5PsciDtbResult::Invalid;
+        }
+        FdtPsciMethodResult::NotFound => {
+            return Rpi5PsciDtbResult::Missing;
+        }
+        FdtPsciMethodResult::Hvc => {
+            return Rpi5PsciDtbResult::Invalid;
+        }
+        FdtPsciMethodResult::Smc => {
+            rpi5_psci_use_hvc = false;
+            return Rpi5PsciDtbResult::Applied;
+        }
+    }
+}

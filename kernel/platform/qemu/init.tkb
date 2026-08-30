@@ -25,7 +25,10 @@ must_use variant SecondaryBootResult {
 // (hvc4 vs smc4, both in lib/llvm_gen.ml/type_inf.ml).
 fn qemu_psci_cpu_on(target_affinity: usize, entry: usize, context: usize)
         -> usize {
-    return hvc4(0xc4000003, target_affinity, entry, context);
+    if (qemu_psci_use_hvc) {
+        return hvc4(0xc4000003, target_affinity, entry, context);
+    }
+    return smc4(0xc4000003, target_affinity, entry, context);
 }
 
 // GitHub issue #445: which core is asking, as a callable function.
@@ -442,11 +445,11 @@ fn main() !{unsafe} {
 
     match qemu_boot_devices_apply_dtb() {
         QemuBootDevicesResult::Invalid => {
-            kernel_boot_log("devices: invalid UART/GIC/timer/virtio description in boot DTB; halting\n");
+            kernel_boot_log("devices: invalid UART/GIC/timer/PSCI/virtio description in boot DTB; halting\n");
             while (true) { }
         }
         QemuBootDevicesResult::Missing => {
-            kernel_boot_log("devices: boot DTB lacks enabled UART/GIC/timer; halting\n");
+            kernel_boot_log("devices: boot DTB lacks enabled UART/GIC/timer/PSCI; halting\n");
             while (true) { }
         }
         QemuBootDevicesResult::Applied => {
@@ -461,6 +464,7 @@ fn main() !{unsafe} {
             kernel_boot_log(" timer_intid=");
             uart_put_udec(qemu_timer_gic_intid as usize);
             kernel_boot_log("\n");
+            kernel_boot_log("psci: source=dtb method=hvc applied_to_cpu_on=yes\n");
             kernel_boot_log("virtio: source=dtb net_base_bytes=");
             uart_put_udec(virtio_base as usize);
             kernel_boot_log(" net_intid=");

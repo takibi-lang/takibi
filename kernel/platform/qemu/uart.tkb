@@ -130,6 +130,8 @@ must_use variant QemuVirtioDtbResult {
     Applied;
 }
 
+let mut qemu_psci_use_hvc: bool = false;
+
 fn qemu_virtio_apply_boot_dtb(dtb: usize)
         -> QemuVirtioDtbResult !{unsafe} {
     let mut index: usize = 0;
@@ -240,6 +242,20 @@ fn qemu_boot_devices_apply_dtb() -> QemuBootDevicesResult !{unsafe} {
                                             QEMU_TIMER_GIC_INTID as usize ||
                                         (timer.flags & 0xF) != 4) {
                                         return QemuBootDevicesResult::Invalid;
+                                    }
+                                    match fdt_find_psci_method(dtb) {
+                                        FdtPsciMethodResult::Invalid => {
+                                            return QemuBootDevicesResult::Invalid;
+                                        }
+                                        FdtPsciMethodResult::NotFound => {
+                                            return QemuBootDevicesResult::Missing;
+                                        }
+                                        FdtPsciMethodResult::Smc => {
+                                            return QemuBootDevicesResult::Invalid;
+                                        }
+                                        FdtPsciMethodResult::Hvc => {
+                                            qemu_psci_use_hvc = true;
+                                        }
                                     }
                                     match qemu_virtio_apply_boot_dtb(dtb) {
                                         QemuVirtioDtbResult::Invalid => {

@@ -242,13 +242,16 @@ $(LINUX_USER_BUILD_DIR)/fdt_invalid_pcie_dma_ranges_fixture.dtb: scripts/make_fd
 $(LINUX_USER_BUILD_DIR)/fdt_invalid_virtio_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
 	python3 scripts/make_fdt_fixture.py $@ --invalid-virtio
 
+$(LINUX_USER_BUILD_DIR)/fdt_psci_smc_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
+	python3 scripts/make_fdt_fixture.py $@ --psci-smc
+
 # GitHub issue #470: linux_user/number checks the kernel's own number
 # formatters directly. It needs no LINUX_USER_EXTRA_SRCS -- since the #470
 # follow-up, linux_user/common/print.tkb `use`s kernel/printk/number.tkb and
 # delegates its unsigned decimals to it, so EVERY test here links the
 # kernel's formatter and this one just points at it deliberately.
 
-$(LINUX_USER_DIR)/fdt/fdt_exe.o: kernel/boot/fdt.tkb $(LINUX_USER_BUILD_DIR)/fdt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_memory_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_reservation_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_tree_reservation_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_device_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_interrupt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_missing_interrupt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_gic_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_pcie_ranges_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_pcie_dma_ranges_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_virtio_fixture.dtb
+$(LINUX_USER_DIR)/fdt/fdt_exe.o: kernel/boot/fdt.tkb $(LINUX_USER_BUILD_DIR)/fdt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_memory_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_reservation_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_tree_reservation_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_device_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_interrupt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_missing_interrupt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_gic_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_pcie_ranges_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_pcie_dma_ranges_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_virtio_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_psci_smc_fixture.dtb
 $(LINUX_USER_DIR)/fdt/fdt_exe.o: LINUX_USER_EXTRA_SRCS := kernel/boot/fdt.tkb
 
 # GitHub issue #445: the kernel's own spinlock, compiled and run natively.

@@ -103,6 +103,7 @@ def main():
     valid_modes = valid_modes + ("--invalid-pcie-ranges",
                                  "--invalid-pcie-dma-ranges")
     valid_modes = valid_modes + ("--invalid-virtio",)
+    valid_modes = valid_modes + ("--psci-smc",)
     if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and
                                      sys.argv[2] not in valid_modes):
         print("usage: make_fdt_fixture.py OUTPUT "
@@ -110,7 +111,7 @@ def main():
               "--invalid-tree-reservation|--invalid-device|"
               "--invalid-interrupt|--missing-interrupt|--invalid-gic|"
               "--invalid-pcie-ranges|--invalid-pcie-dma-ranges|"
-              "--invalid-virtio]",
+              "--invalid-virtio|--psci-smc]",
               file=sys.stderr)
         return 2
     mode = sys.argv[2] if len(sys.argv) == 3 else ""
@@ -119,6 +120,19 @@ def main():
     b.prop("#address-cells", b.cells(2))
     b.prop("#size-cells", b.cells(2))
     b.prop("interrupt-parent", b.cells(0x8003))
+
+    if mode != "--missing-interrupt":
+        b.begin("psci")
+        b.prop("compatible", b"arm,psci-1.0\0arm,psci-0.2\0arm,psci\0")
+        if mode == "--invalid-device":
+            b.prop("method", b"doorbell\0")
+        elif mode == "--psci-smc":
+            b.prop("method", b"smc\0")
+        else:
+            b.prop("method", b"hvc\0")
+        if mode == "--invalid-gic":
+            b.prop("status", b"disabled\0")
+        b.end()
 
     # QEMU virt's actual console shape: a root child, a compatible list, and
     # a 64-bit root reg tuple. A disabled malformed match comes first to prove

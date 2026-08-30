@@ -1,4 +1,5 @@
 ^takibi kernel:
 ^memory: source=dtb base_bytes=
 ^uart: source=dtb base_bytes=
+^psci: source=dtb method=
 ^virtio: source=dtb net_base_bytes=

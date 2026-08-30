@@ -61,6 +61,8 @@ struct FdtDeviceRegion {
     private device_ranges_length: usize;
     private device_dma_ranges_offset: usize;
     private device_dma_ranges_length: usize;
+    private method_offset: usize;
+    private method_length: usize;
 }
 
 struct FdtPcieAddressMap {
@@ -118,6 +120,13 @@ must_use variant FdtMmioTransportResult {
     Invalid;
     NotFound;
     Found(FdtMmioTransport);
+}
+
+must_use variant FdtPsciMethodResult {
+    Invalid;
+    NotFound;
+    Hvc;
+    Smc;
 }
 
 // Deliberately narrow device lookup for the drivers being migrated from
@@ -748,6 +757,8 @@ private fn fdt_find_compatible_reg_bounded(
     let mut candidate_interrupts_length: usize = 0;
     let mut candidate_base_matches: bool = true;
     let mut candidate_matches_seen: usize = 0;
+    let mut candidate_method_offset: usize = 0;
+    let mut candidate_method_length: usize = 0;
 
     // The other bounded shape is root -> axi -> PCIe -> RP1 -> device.
     // PCI child addresses have a leading flags cell, so this remains a
@@ -810,6 +821,8 @@ private fn fdt_find_compatible_reg_bounded(
                 candidate_interrupts_offset = 0;
                 candidate_interrupts_length = 0;
                 candidate_base_matches = true;
+                candidate_method_offset = 0;
+                candidate_method_length = 0;
             } else if (depth == 3 && bus_depth == 2 &&
                        (candidate_depth == 0 ||
                         candidate_compatible == false)) {
@@ -821,6 +834,8 @@ private fn fdt_find_compatible_reg_bounded(
                 candidate_interrupts_offset = 0;
                 candidate_interrupts_length = 0;
                 candidate_base_matches = true;
+                candidate_method_offset = 0;
+                candidate_method_length = 0;
             }
             if (depth == 3 && bus_depth == 2) {
                 pcie_depth = depth;
@@ -959,7 +974,7 @@ private fn fdt_find_compatible_reg_bounded(
                     let mut region: FdtDeviceRegion = {
                         physical_base, device_size,
                         base, nested_reg_offset, nested_reg_length, 2, 2,
-                        false, 0, 0, 0, 0, 0, 0, 0
+                        false, 0, 0, 0, 0, 0, 0, 0, 0, 0
                     };
                     return FdtDeviceRegionResult::Found(region);
                 }
@@ -989,7 +1004,8 @@ private fn fdt_find_compatible_reg_bounded(
                             candidate_interrupt_parent,
                             candidate_interrupts_offset,
                             candidate_interrupts_length,
-                            0, 0, 0, 0
+                            0, 0, 0, 0,
+                            candidate_method_offset, candidate_method_length
                         };
                         return FdtDeviceRegionResult::Found(properties);
                     }
@@ -1018,7 +1034,8 @@ private fn fdt_find_compatible_reg_bounded(
                             candidate_interrupt_parent,
                             candidate_interrupts_offset,
                             candidate_interrupts_length,
-                            0, 0, 0, 0
+                            0, 0, 0, 0,
+                            candidate_method_offset, candidate_method_length
                         };
                         return FdtDeviceRegionResult::Found(region);
                     }
@@ -1036,7 +1053,8 @@ private fn fdt_find_compatible_reg_bounded(
                             candidate_interrupt_parent,
                             candidate_interrupts_offset,
                             candidate_interrupts_length,
-                            0, 0, 0, 0
+                            0, 0, 0, 0,
+                            candidate_method_offset, candidate_method_length
                         };
                         return FdtDeviceRegionResult::Found(region);
                     }
@@ -1084,7 +1102,9 @@ private fn fdt_find_compatible_reg_bounded(
                                 candidate_interrupts_length,
                                 pcie_ranges_offset, pcie_ranges_length,
                                 pcie_dma_ranges_offset,
-                                pcie_dma_ranges_length
+                                pcie_dma_ranges_length,
+                                candidate_method_offset,
+                                candidate_method_length
                             };
                             return FdtDeviceRegionResult::Found(region);
                         }
@@ -1161,6 +1181,10 @@ private fn fdt_find_compatible_reg_bounded(
                     base, strings_end, prop_name, bs"interrupts")) {
                 candidate_interrupts_offset = cursor;
                 candidate_interrupts_length = length;
+            } else if (candidate_depth == depth && fdt_string_is(
+                    base, strings_end, prop_name, bs"method")) {
+                candidate_method_offset = cursor;
+                candidate_method_length = length;
             }
             if (pcie_depth == depth && fdt_string_is(
                     base, strings_end, prop_name, bs"compatible")) {
@@ -1292,7 +1316,7 @@ fn fdt_find_compatible_mip_regions(
             let mut target: FdtDeviceRegion = {
                 target_base, target_size, first.dtb,
                 first.reg_offset + 16, 32, 2, 2, false,
-                0, 0, 0, 0, 0, 0, 0
+                0, 0, 0, 0, 0, 0, 0, 0, 0
             };
             let mut regions: FdtMipRegions = { controller, target };
             return FdtMipRegionsResult::Found(regions);
@@ -1415,11 +1439,11 @@ fn fdt_find_compatible_rp1_gpio_regions(base: usize, compatible: []u8)
             let mut ctrl: FdtDeviceRegion = first;
             let mut rio: FdtDeviceRegion = {
                 rio_base, rio_size, first.dtb, first.reg_offset + 16,
-                48, 2, 2, false, 0, 0, 0, 0, 0, 0, 0
+                48, 2, 2, false, 0, 0, 0, 0, 0, 0, 0, 0, 0
             };
             let mut pads: FdtDeviceRegion = {
                 pads_base, pads_size, first.dtb, first.reg_offset + 32,
-                48, 2, 2, false, 0, 0, 0, 0, 0, 0, 0
+                48, 2, 2, false, 0, 0, 0, 0, 0, 0, 0, 0, 0
             };
             let mut regions: FdtRp1GpioRegions = { ctrl, rio, pads };
             return FdtRp1GpioRegionsResult::Found(regions);
@@ -1507,14 +1531,14 @@ fn fdt_find_compatible_gicv2_regions(base: usize, compatible: []u8)
                 first.dtb, first.reg_offset, tuple_length,
                 first.address_cells, first.size_cells,
                 first.direct_root_child,
-                0, 0, 0, 0, 0, 0, 0
+                0, 0, 0, 0, 0, 0, 0, 0, 0
             };
             let mut cpu_interface: FdtDeviceRegion = {
                 cpu_base, cpu_size,
                 first.dtb, first.reg_offset + tuple_length, tuple_length,
                 first.address_cells, first.size_cells,
                 first.direct_root_child,
-                0, 0, 0, 0, 0, 0, 0
+                0, 0, 0, 0, 0, 0, 0, 0, 0
             };
             let mut regions: FdtGicV2Regions = {
                 distributor, cpu_interface
@@ -1830,6 +1854,37 @@ fn fdt_find_armv8_timer_interrupt(base: usize)
                     return FdtGicInterruptResult::Found(found);
                 }
             }
+        }
+    }
+}
+
+// PSCI 0.2 and newer describe the firmware-call conduit as a mandatory
+// NUL-terminated method property. CPU_ON must use that conduit: an SMC on a
+// QEMU virt guest configured for HVC traps before PSCI can return an error.
+fn fdt_find_psci_method(base: usize) -> FdtPsciMethodResult !{unsafe} {
+    match fdt_find_compatible_reg_bounded(
+            base, bs"arm,psci-0.2", false, 0, 0, true, 0) {
+        FdtDeviceRegionResult::Invalid => {
+            return FdtPsciMethodResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            return FdtPsciMethodResult::NotFound;
+        }
+        FdtDeviceRegionResult::Found(psci) => {
+            if (psci.method_length != 4) {
+                return FdtPsciMethodResult::Invalid;
+            }
+            let total: usize = fdt_read_be32(
+                base, FDT_HEADER_SIZE, 4);
+            if (fdt_string_is(
+                    base, total, psci.method_offset, bs"hvc")) {
+                return FdtPsciMethodResult::Hvc;
+            }
+            if (fdt_string_is(
+                    base, total, psci.method_offset, bs"smc")) {
+                return FdtPsciMethodResult::Smc;
+            }
+            return FdtPsciMethodResult::Invalid;
         }
     }
 }

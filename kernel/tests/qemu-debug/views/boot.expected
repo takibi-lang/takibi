@@ -1,4 +1,5 @@
 takibi kernel: EL1
 memory: source=dtb base_bytes=1073741824 detected_mib=1024 regions=1 reservations=0 allocator_pages=261248
 uart: source=dtb base_bytes=150994944 intid=33 gicd_bytes=134217728 gicc_bytes=134283264 timer_intid=30
+psci: source=dtb method=hvc applied_to_cpu_on=yes
 virtio: source=dtb net_base_bytes=167787520 net_intid=78 block_base_bytes=167788032

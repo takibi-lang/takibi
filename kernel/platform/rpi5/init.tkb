@@ -10,6 +10,7 @@ use "kernel/platform/rpi5/rp1_gem_dtb.tkb";
 use "kernel/platform/rpi5/usb_xhci_dtb.tkb";
 use "kernel/platform/rpi5/mip_dtb.tkb";
 use "kernel/platform/rpi5/gic_dtb.tkb";
+use "kernel/platform/rpi5/psci_dtb.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/kernel/pool_contention_evidence.tkb";
 use "kernel/kernel/freelist_contention_evidence.tkb";
@@ -40,13 +41,21 @@ fn cpu_id() -> usize {
     return (mrs_mpidr_el1() >> 8) & 3;
 }
 
+fn rpi5_psci_cpu_on(target_affinity: usize, entry: usize, context: usize)
+        -> usize {
+    if (rpi5_psci_use_hvc) {
+        return hvc4(0xc4000003, target_affinity, entry, context);
+    }
+    return smc4(0xc4000003, target_affinity, entry, context);
+}
+
 // Reached only by core 1 after PSCI has installed the secondary entry point,
 // that entry has selected its private stack, and the shared EL1 page table is
 // active. The context value prevents a coincidental stale write from passing.
 fn kernel_secondary_boot_probe() -> SecondaryBootResult {
     kernel_secondary_boot_state_clear();
     signal_fence();
-    let status: usize = psci_cpu_on(
+    let status: usize = rpi5_psci_cpu_on(
         0x100, kernel_secondary_entry, 0x191);
     let start: i64 = read_cntpct();
     let deadline_ticks: i64 = read_cntfrq();
@@ -622,6 +631,21 @@ fn main() !{unsafe} {
             kernel_boot_log("system timer: source=dtb base_bytes=");
             uart_put_udec(base);
             kernel_boot_log(" counter_agrees_with_arch=yes\n");
+        }
+    }
+
+    match rpi5_psci_apply_boot_dtb() {
+        Rpi5PsciDtbResult::Invalid => {
+            kernel_boot_log("psci: invalid boot DTB method; halting\n");
+            while (true) { }
+        }
+        Rpi5PsciDtbResult::Missing => {
+            kernel_boot_log("psci: missing from boot DTB; halting\n");
+            while (true) { }
+        }
+        Rpi5PsciDtbResult::Applied => {
+            kernel_boot_log(
+                "psci: source=dtb method=smc applied_to_cpu_on=yes\n");
         }
     }
 
