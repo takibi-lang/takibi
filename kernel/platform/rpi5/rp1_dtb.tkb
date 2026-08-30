@@ -1,8 +1,6 @@
-// Boot-time agreement check for the first PCIe-attached RP1 device. The
-// UART driver still uses its established address until the translation path
-// has passed both host fixtures and a real-firmware hardware boot.
-
-const RPI5_RP1_UART0_BASE: usize = 0x1F00030000;
+// Boot-DTB application for the first PCIe-attached RP1 device. The known
+// address remains only as a validation boundary and as the emergency output
+// path used to explain an invalid DTB before the kernel halts.
 
 must_use variant Rpi5Rp1UartDtbResult {
     Invalid;
@@ -10,20 +8,35 @@ must_use variant Rpi5Rp1UartDtbResult {
     Verified(usize);
 }
 
-fn rpi5_rp1_uart_verify_boot_dtb() -> Rpi5Rp1UartDtbResult !{unsafe} {
+fn rpi5_rp1_uart_apply_boot_dtb() -> Rpi5Rp1UartDtbResult !{unsafe} {
     let dtb: usize = boot_dtb_address_read();
     match fdt_find_compatible_pcie_reg(dtb, bs"arm,pl011-axi") {
         FdtDeviceRegionResult::Invalid => {
+            rpi5_uart_dtb_status = 1;
             return Rpi5Rp1UartDtbResult::Invalid;
         }
         FdtDeviceRegionResult::NotFound => {
+            rpi5_uart_dtb_status = 2;
             return Rpi5Rp1UartDtbResult::Missing;
         }
         FdtDeviceRegionResult::Found(region) => {
             if (region.base != RPI5_RP1_UART0_BASE || region.size < 0x48) {
+                rpi5_uart_dtb_status = 1;
                 return Rpi5Rp1UartDtbResult::Invalid;
             }
+            rpi5_uart_base = region.base;
+            rpi5_uart_dtb_status = 3;
             return Rpi5Rp1UartDtbResult::Verified(region.base);
         }
     }
+}
+
+fn rpi5_rp1_uart_boot_dtb_status() -> Rpi5Rp1UartDtbResult {
+    if (rpi5_uart_dtb_status == 3) {
+        return Rpi5Rp1UartDtbResult::Verified(rpi5_uart_base);
+    }
+    if (rpi5_uart_dtb_status == 2) {
+        return Rpi5Rp1UartDtbResult::Missing;
+    }
+    return Rpi5Rp1UartDtbResult::Invalid;
 }

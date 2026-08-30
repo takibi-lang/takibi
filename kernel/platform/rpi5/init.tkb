@@ -617,7 +617,7 @@ fn main() !{unsafe} {
         }
     }
 
-    match rpi5_rp1_uart_verify_boot_dtb() {
+    match rpi5_rp1_uart_boot_dtb_status() {
         Rpi5Rp1UartDtbResult::Invalid => {
             kernel_boot_log("rp1 uart: invalid boot DTB device; halting\n");
             while (true) { }
@@ -629,7 +629,7 @@ fn main() !{unsafe} {
         Rpi5Rp1UartDtbResult::Verified(base) => {
             kernel_boot_log("rp1 uart: source=dtb base_bytes=");
             uart_put_udec(base);
-            kernel_boot_log(" agrees_with_active_driver=yes\n");
+            kernel_boot_log(" applied_to_driver=yes\n");
         }
     }
 

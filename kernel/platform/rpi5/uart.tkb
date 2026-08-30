@@ -63,13 +63,17 @@
 
 use "kernel/platform/rpi5/intc.tkb";
 
+const RPI5_RP1_UART0_BASE: usize = 0x1F00030000;
+
 let mut uart_rx_handler: fn !{unsafe}(u8) -> void;
+let mut rpi5_uart_base: usize = RPI5_RP1_UART0_BASE;
+let mut rpi5_uart_dtb_status: usize;
 
 fn uart_putc(c: u8) !{logs, unsafe} {
     kernel_log_capture_uart_byte(c);
-    let fr: *io u32 = unsafe { 0x1F00030018 as *io u32 }; // UART0_FR (RP1 rp1_uart0, base 0x1F00030000 + 0x018)
+    let fr: *io u32 = unsafe { (rpi5_uart_base + 0x18) as *io u32 };
     while ((*fr & (1 << 5)) != 0) { } // wait while TXFF (TX FIFO full)
-    let dr: *io u8 = unsafe { 0x1F00030000 as *io u8 }; // UART0_DR
+    let dr: *io u8 = unsafe { rpi5_uart_base as *io u8 };
     *dr = c;
 }
 
@@ -80,7 +84,7 @@ fn uart_rx_discard(discarded: u8) !{unsafe} {
 // RX data is present. Reading DR advances the PL011 FIFO and deasserts its
 // level condition once the FIFO drops below the configured threshold.
 fn uart_isr_getc() -> u8 !{unsafe} {
-    let dr: *io u8 = unsafe { 0x1F00030000 as *io u8 };
+    let dr: *io u8 = unsafe { rpi5_uart_base as *io u8 };
     return *dr;
 }
 
@@ -97,14 +101,14 @@ fn uart_debug_getc() -> u8 !{unsafe} {
 // The interrupt checker therefore sees the real MMIO-only operation rather
 // than granting the debugger a general logging escape hatch.
 fn uart_debug_putc(c: u8) !{unsafe} {
-    let fr: *io u32 = unsafe { 0x1F00030018 as *io u32 };
+    let fr: *io u32 = unsafe { (rpi5_uart_base + 0x18) as *io u32 };
     while ((*fr & (1 << 5)) != 0) { }
-    let dr: *io u8 = unsafe { 0x1F00030000 as *io u8 };
+    let dr: *io u8 = unsafe { rpi5_uart_base as *io u8 };
     *dr = c;
 }
 
 fn uart_rx_ready() -> bool !{unsafe} {
-    let fr: *io u32 = unsafe { 0x1F00030018 as *io u32 };
+    let fr: *io u32 = unsafe { (rpi5_uart_base + 0x18) as *io u32 };
     return (*fr & (1 << 4)) == 0; // RXFE clear = data available
 }
 
@@ -119,10 +123,10 @@ fn uart_tx_isr() {
 // vector. The controller-level RP1 IACK and GICC EOIR happen in intc.tkb
 // after this source-level acknowledgement is complete.
 fn uart_irq_handler() -> bool !{interrupt, unsafe} {
-    let uart_mis: *io u32 = unsafe { 0x1F00030040 as *io u32 };
-    let uart_icr: *io u32 = unsafe { 0x1F00030044 as *io u32 };
+    let uart_mis: *io u32 = unsafe { (rpi5_uart_base + 0x40) as *io u32 };
+    let uart_icr: *io u32 = unsafe { (rpi5_uart_base + 0x44) as *io u32 };
     if (uart_rx_ready()) {
-        let dr: *io u32 = unsafe { 0x1F00030000 as *io u32 };
+        let dr: *io u32 = unsafe { rpi5_uart_base as *io u32 };
         let received: u32 = *dr;
         if ((received & (1 << 10)) != 0 || (*uart_mis & (1 << 9)) != 0) {
             diagnostic_trace_record_uart_break(received as usize);
@@ -142,13 +146,13 @@ fn uart_irq_handler() -> bool !{interrupt, unsafe} {
 }
 
 fn uart_init() !{unsafe} {
-    let uart_cr: *io u32 = unsafe { 0x1F00030030 as *io u32 };
-    let uart_ibrd: *io u32 = unsafe { 0x1F00030024 as *io u32 };
-    let uart_fbrd: *io u32 = unsafe { 0x1F00030028 as *io u32 };
-    let uart_lcrh: *io u32 = unsafe { 0x1F0003002C as *io u32 };
-    let uart_imsc: *io u32 = unsafe { 0x1F00030038 as *io u32 };
-    let uart_icr: *io u32 = unsafe { 0x1F00030044 as *io u32 };
-    let uart_ifls: *io u32 = unsafe { 0x1F00030034 as *io u32 };
+    let uart_cr: *io u32 = unsafe { (rpi5_uart_base + 0x30) as *io u32 };
+    let uart_ibrd: *io u32 = unsafe { (rpi5_uart_base + 0x24) as *io u32 };
+    let uart_fbrd: *io u32 = unsafe { (rpi5_uart_base + 0x28) as *io u32 };
+    let uart_lcrh: *io u32 = unsafe { (rpi5_uart_base + 0x2C) as *io u32 };
+    let uart_imsc: *io u32 = unsafe { (rpi5_uart_base + 0x38) as *io u32 };
+    let uart_icr: *io u32 = unsafe { (rpi5_uart_base + 0x44) as *io u32 };
+    let uart_ifls: *io u32 = unsafe { (rpi5_uart_base + 0x34) as *io u32 };
 
     uart_rx_handler = uart_rx_discard;
     *uart_cr = 0; // disable UART before reconfiguring it
@@ -165,8 +169,10 @@ fn uart_init() !{unsafe} {
 
     // Peripheral state survives SWD re-injection. Drain stale input before
     // enabling RX so the first delivered byte always belongs to this run.
-    let fr_drain: *io u32 = unsafe { 0x1F00030018 as *io u32 };
-    let dr_drain: *io u8 = unsafe { 0x1F00030000 as *io u8 };
+    let fr_drain: *io u32 = unsafe {
+        (rpi5_uart_base + 0x18) as *io u32
+    };
+    let dr_drain: *io u8 = unsafe { rpi5_uart_base as *io u8 };
     while ((*fr_drain & (1 << 4)) == 0) {
         let discarded: u8 = *dr_drain;
     }
@@ -175,6 +181,14 @@ fn uart_init() !{unsafe} {
 }
 
 fn platform_init() {
+    // Resolve the register window before the first UART access. Every result
+    // is recorded for main() to report; invalid/missing DTBs retain only the
+    // known diagnostic address and are halted there before normal boot.
+    match rpi5_rp1_uart_apply_boot_dtb() {
+        Rpi5Rp1UartDtbResult::Invalid => { }
+        Rpi5Rp1UartDtbResult::Missing => { }
+        Rpi5Rp1UartDtbResult::Verified(base) => { }
+    }
     // GPIO14/15 expose RP1's UART0, so the PCIe link, root bridge, and
     // endpoint BARs must exist before the first UART register access.
     if (pcie2_init()) {
