@@ -338,6 +338,39 @@ private let mut scheduled_process_boot_generation: usize = 0;
 // uncounted one would have absorbed 1648 accesses on one boot.
 private let mut scheduled_process_record_absent: ProcessRecord;
 private let mut scheduled_process_record_missing_count: usize = 0;
+// GitHub issue #488: how many times a reap took the record that
+// execution_here() still calls current, with current_live still true.
+//
+// It must be zero. When it is not, every later read through
+// execution_here().current_handle lands on a slot the pool no longer
+// recognises -- or, worse and more usually, on whatever record has since
+// been allocated at that address, so the kernel operates on the WRONG
+// process in silence. The boot suite reported it as `records MISSING`
+// only because an unrelated probe had shifted the pool layout enough to
+// stop the address being recycled.
+//
+// MEASURED 2026-08-30 AND IT IS NOT ZERO: 26 per QEMU boot, every boot,
+// and all 26 come from one place. kernel/kernel/syscall.tkb's
+// kernel_syscall_wait4_deliver reaps the exiting child through
+// kernel_process_child_wait_status_consume_for, and it is called FROM
+// kernel_process_child_exit while that child is still what
+// execution_here() calls current -- the comment beside that call already
+// says so ("whoever is current here (the exiting child)").
+//
+// kernel_process_child_exit then keeps using `child` afterwards: the trace
+// arguments read its record, and kernel_process_exit_start_successor walks
+// the process chain starting FROM it. On one core the slot is almost
+// always recycled immediately, so those reads land on some record and the
+// damage is invisible; the rare boot where it is not recycled is what
+// surfaced as `records MISSING`. On two cores another core can allocate
+// that slot between the reap and the walk.
+//
+// A counter and a printed line rather than a fail-stop, deliberately: this
+// tree's convention is to ship the counter first and prove it fires before
+// enforcing it, and it has now fired. GitHub issue #488 carries the fix,
+// which has to reorder the exit path rather than add a guard, and needs
+// hardware.
+private let mut scheduled_process_reaped_current_count: usize = 0;
 
 // The kernel stack run of a reaped process, held until something can
 // safely take it.
@@ -520,6 +553,10 @@ private fn scheduled_process_pool_init() {
     // flag that is itself an unlocked read-modify-write. See
     // kernel/lib/mutex.tkb.
     intrusive_pool_init(&scheduled_process_pool);
+}
+
+fn scheduled_process_reaped_current_count_value() -> usize {
+    return scheduled_process_reaped_current_count;
 }
 
 fn scheduled_process_record_missing_uses() -> usize {
@@ -1933,6 +1970,12 @@ fn scheduled_process_reap(
         owner: sink ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Exited])
         !{unsafe} {
+    // GitHub issue #488: see scheduled_process_reaped_current_count.
+    if (execution_here().current_live &&
+        execution_here().current_handle.pool_index == owner.pool_index) {
+        scheduled_process_reaped_current_count =
+            scheduled_process_reaped_current_count + 1;
+    }
     kernel_process_trace_record(
         ProcessTraceReap, scheduled_process_pid_of_slot(owner.pool_index),
         owner.generation, 0, 0, 4, 0, owner.pool_index,
@@ -5308,7 +5351,35 @@ fn kernel_process_reap_own_zombies() !{unsafe} {
             match cursor {
                 ProcessSlotCursor::Done => { walking = false; }
                 ProcessSlotCursor::At(slot) => {
+                    // NOT the slot execution_here() calls current, and
+                    // this file's own doc above is the reason: this
+                    // collects "every child of the current process that has
+                    // exited", and a process is not its own child. The
+                    // implementation sweeps by STATE rather than by
+                    // relationship, which is what let it reap the current
+                    // record -- leaving current_handle naming a slot the
+                    // pool no longer recognises while current_live stayed
+                    // true.
+                    //
+                    // GitHub issue #488. Every read through
+                    // execution_here().current_handle after that point
+                    // lands on the counted absent-record fallback; the
+                    // boot suite reported `records MISSING uses=11
+                    // reason=2` in roughly one QEMU boot in eight. It was
+                    // visible at all only because an unrelated probe had
+                    // shifted the pool layout so the freed address was NOT
+                    // recycled. Without that shift the same stale handle
+                    // resolves to whatever record now occupies the
+                    // address, and the kernel operates on the wrong
+                    // process in silence -- which is the real cost, and why
+                    // this is a guard rather than a tolerated counter.
+                    //
+                    // The other three kernel_process_reap_zombie call
+                    // sites are scoped by relationship (a process's own
+                    // children) and cannot reach the current record, so
+                    // they need nothing.
                     if (found == false &&
+                        execution_here().current_handle.pool_index != slot &&
                         scheduled_process_record_state(slot) ==
                             ProcessSlotState::Exited) {
                         found = true;
