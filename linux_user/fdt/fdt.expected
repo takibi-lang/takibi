@@ -14,11 +14,14 @@ rpi5 rp1 clocks base 0x0000001f 0x00018000
 size 0x00000000 0x00010038
 rpi5 rp1 gem base 0x0000001f 0x00100000
 size 0x00000000 0x00004000
+rpi5 rp1 usb0 base 0x0000001f 0x00200000
+size 0x00000000 0x00100000
 rpi5 rp1 gpio ctrl 0x0000001f 0x000d0000 rio 0x0000001f 0x000e0000 pads 0x0000001f 0x000f0000
 invalid pcie ranges invalid
 missing device not found
 invalid device invalid
 invalid rp1 gpio invalid
+invalid rp1 usb0 invalid
 qemu pl011 interrupt intid 0x00000021 flags 0x00000004
 missing interrupt not found
 invalid interrupt invalid

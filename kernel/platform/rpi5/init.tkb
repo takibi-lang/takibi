@@ -6,6 +6,7 @@ use "kernel/platform/rpi5/rp1_dtb.tkb";
 use "kernel/platform/rpi5/pcie_dtb.tkb";
 use "kernel/platform/rpi5/pcie_support_dtb.tkb";
 use "kernel/platform/rpi5/rp1_gem_dtb.tkb";
+use "kernel/platform/rpi5/usb_xhci_dtb.tkb";
 use "kernel/platform/rpi5/gic_dtb.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/kernel/pool_contention_evidence.tkb";
@@ -713,6 +714,22 @@ fn main() !{unsafe} {
             uart_put_udec(gpio_rio);
             kernel_boot_log(" gpio_pads_bytes=");
             uart_put_udec(gpio_pads);
+            kernel_boot_log(" applied_to_driver=yes\n");
+        }
+    }
+
+    match rpi5_usb_xhci_boot_dtb_status() {
+        Rpi5UsbXhciDtbResult::Invalid => {
+            kernel_boot_log("rp1 usb0: invalid boot DTB device; halting\n");
+            while (true) { }
+        }
+        Rpi5UsbXhciDtbResult::Missing => {
+            kernel_boot_log("rp1 usb0: missing from boot DTB; halting\n");
+            while (true) { }
+        }
+        Rpi5UsbXhciDtbResult::Applied(base) => {
+            kernel_boot_log("rp1 usb0: source=dtb base_bytes=");
+            uart_put_udec(base);
             kernel_boot_log(" applied_to_driver=yes\n");
         }
     }

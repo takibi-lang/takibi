@@ -333,6 +333,19 @@ def main():
     b.prop("reg", b.cells(0xC0, 0x40100000, 0, 0x4000))
     b.prop("compatible", b"raspberrypi,rp1-gem\0cdns,macb\0")
     b.end()
+    # USB1 deliberately precedes USB0 although both are enabled and share
+    # one compatible string. The USB0 lookup must select by its child reg.
+    b.begin("usb@300000")
+    b.prop("reg", b.cells(0xC0, 0x40300000, 0, 0x100000))
+    b.prop("compatible", b"snps,dwc3\0")
+    b.end()
+    b.begin("usb@200000")
+    if mode == "--invalid-device":
+        b.prop("reg", b.cells(0xC0, 0x40200000, 0))
+    else:
+        b.prop("reg", b.cells(0xC0, 0x40200000, 0, 0x100000))
+    b.prop("compatible", b"snps,dwc3\0")
+    b.end()
     b.end()
     b.end()
     b.end()

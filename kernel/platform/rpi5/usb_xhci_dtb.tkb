@@ -1,0 +1,43 @@
+must_use variant Rpi5UsbXhciDtbResult {
+    Invalid;
+    Missing;
+    Applied(usize);
+}
+
+fn rpi5_usb_xhci_apply_boot_dtb() -> Rpi5UsbXhciDtbResult !{unsafe} {
+    let dtb: usize = boot_dtb_address_read();
+    match fdt_find_compatible_pcie_reg_at(
+            dtb, bs"snps,dwc3", 0xC040200000) {
+        FdtDeviceRegionResult::Invalid => {
+            rp1_usbhost0_dtb_status = 1;
+            return Rpi5UsbXhciDtbResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            rp1_usbhost0_dtb_status = 2;
+            return Rpi5UsbXhciDtbResult::Missing;
+        }
+        FdtDeviceRegionResult::Found(region) => {
+            if (region.base != RP1_USBHOST0_BASE || region.size < 0x100000) {
+                rp1_usbhost0_dtb_status = 1;
+                return Rpi5UsbXhciDtbResult::Invalid;
+            }
+            rp1_usbhost0_base = region.base;
+            rp1_usbhost0_op = region.base + 0x20;
+            rp1_usbhost0_doorbell = region.base + 0x500;
+            rp1_usbhost0_portsc3 = region.base + 0x440;
+            rp1_usbhost0_ir0 = region.base + 0x480;
+            rp1_usbhost0_dtb_status = 3;
+            return Rpi5UsbXhciDtbResult::Applied(region.base);
+        }
+    }
+}
+
+fn rpi5_usb_xhci_boot_dtb_status() -> Rpi5UsbXhciDtbResult {
+    if (rp1_usbhost0_dtb_status == 3) {
+        return Rpi5UsbXhciDtbResult::Applied(rp1_usbhost0_base);
+    }
+    if (rp1_usbhost0_dtb_status == 2) {
+        return Rpi5UsbXhciDtbResult::Missing;
+    }
+    return Rpi5UsbXhciDtbResult::Invalid;
+}

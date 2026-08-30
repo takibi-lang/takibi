@@ -46,13 +46,15 @@
 // rp1_usb_smoke.tkb's own Step 1 read of CAPLENGTH|HCIVERSION). Doorbell
 // array and Runtime/interrupter registers are Capability-base-relative
 // directly (DBOFF/RTSOFF are themselves Capability registers), so
-// RP1_USBHOST0_DOORBELL/RP1_USBHOST0_IR0 below are NOT offset from
-// RP1_USBHOST0_OP.
+// rp1_usbhost0_doorbell/rp1_usbhost0_ir0 below are NOT offset from
+// rp1_usbhost0_op.
 const RP1_USBHOST0_BASE: usize = 0x1F00200000;
-const RP1_USBHOST0_OP: usize = 0x1F00200020; // RP1_USBHOST0_BASE + CAPLENGTH(0x20)
-const RP1_USBHOST0_DOORBELL: usize = 0x1F00200500;
-const RP1_USBHOST0_PORTSC3: usize = 0x1F00200440;
-const RP1_USBHOST0_IR0: usize = 0x1F00200480; // RP1_USBHOST0_BASE + 0x460 + 0x20
+let mut rp1_usbhost0_base: usize = RP1_USBHOST0_BASE;
+let mut rp1_usbhost0_op: usize = 0x1F00200020;
+let mut rp1_usbhost0_doorbell: usize = 0x1F00200500;
+let mut rp1_usbhost0_portsc3: usize = 0x1F00200440;
+let mut rp1_usbhost0_ir0: usize = 0x1F00200480;
+let mut rp1_usbhost0_dtb_status: usize;
 
 const CMD_RING_TRBS: usize = 16;
 const EVT_RING_TRBS: usize = 16;
@@ -264,11 +266,11 @@ fn disk_io_ok(r: DiskIoResult) -> bool {
 // unconditionally on every interrupt, so a still-unconsumed event never
 // blocks the next one's interrupt from firing.
 fn xhci_irq_handler() !{interrupt, unsafe} {
-    let iman_ptr: *io u32 = unsafe { RP1_USBHOST0_IR0 as *io u32 };
+    let iman_ptr: *io u32 = unsafe { rp1_usbhost0_ir0 as *io u32 };
     *iman_ptr = *iman_ptr | 1; // IMAN.IP write-1-to-clear
-    let usbsts_ptr: *io u32 = unsafe { (RP1_USBHOST0_OP + 0x04) as *io u32 };
+    let usbsts_ptr: *io u32 = unsafe { (rp1_usbhost0_op + 0x04) as *io u32 };
     *usbsts_ptr = 1 << 3; // USBSTS.EINT write-1-to-clear
-    let erdp_lo_ptr: *io u32 = unsafe { (RP1_USBHOST0_IR0 + 0x18) as *io u32 };
+    let erdp_lo_ptr: *io u32 = unsafe { (rp1_usbhost0_ir0 + 0x18) as *io u32 };
     *erdp_lo_ptr = *erdp_lo_ptr | (1 << 3); // ERDP.EHB write-1-to-clear
     interrupt_notify();
 }
@@ -323,9 +325,9 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 !{unsafe} {
         // one blocks in interrupt_wait() forever. The pointer's own low 4
         // bits are already 0 (16-byte TRB alignment, single ERST segment),
         // so ORing in EHB cannot corrupt them.
-        let erdp_lo_ptr: *io u32 = unsafe { (RP1_USBHOST0_IR0 + 0x18) as *io u32 };
+        let erdp_lo_ptr: *io u32 = unsafe { (rp1_usbhost0_ir0 + 0x18) as *io u32 };
         *erdp_lo_ptr = (((evt_ring_dma + xhci_evt_idx * 16) & 0xFFFFFFFF) as u32) | (1 << 3);
-        let erdp_hi_ptr: *io u32 = unsafe { (RP1_USBHOST0_IR0 + 0x1C) as *io u32 };
+        let erdp_hi_ptr: *io u32 = unsafe { (rp1_usbhost0_ir0 + 0x1C) as *io u32 };
         *erdp_hi_ptr = (((evt_ring_dma + xhci_evt_idx * 16) >> 32) & 0xFFFFFFFF) as u32;
 
         if (trb_type == want_type) {
@@ -397,7 +399,7 @@ fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
     xhci_ep0_enq = idx + 1;
     dma_prepare_tx(xhci_ep0_ring as *u8, EP0_RING_TRBS * 16);
 
-    let db_ptr: *io u32 = unsafe { (RP1_USBHOST0_DOORBELL + xhci_slot_id * 4) as *io u32 };
+    let db_ptr: *io u32 = unsafe { (rp1_usbhost0_doorbell + xhci_slot_id * 4) as *io u32 };
     *db_ptr = 1;
 
     return usb_await_event(32, 1000);
@@ -458,7 +460,7 @@ fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 !{unsafe} {
         xhci_bulk_out_cycle = cyc;
     }
 
-    let db_ptr: *io u32 = unsafe { (RP1_USBHOST0_DOORBELL + xhci_slot_id * 4) as *io u32 };
+    let db_ptr: *io u32 = unsafe { (rp1_usbhost0_doorbell + xhci_slot_id * 4) as *io u32 };
     *db_ptr = dci as u32;
 
     return usb_await_event(32, 5000);
@@ -501,7 +503,7 @@ fn xhci_run_command(dw0: u32, dw1: u32, dw2: u32, trb_type: u32,
     dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
     xhci_cmd_advance();
 
-    let doorbell0_ptr: *io u32 = unsafe { RP1_USBHOST0_DOORBELL as *io u32 };
+    let doorbell0_ptr: *io u32 = unsafe { rp1_usbhost0_doorbell as *io u32 };
     *doorbell0_ptr = 0;
     return usb_await_event(33, 1000);
 }
@@ -704,13 +706,13 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
 // investigation history behind every constant/mask below). ------------
 
 fn xhci_halt_and_reset() -> bool !{unsafe} {
-    let usbcmd_ptr: *io u32 = unsafe { RP1_USBHOST0_OP as *io u32 };
+    let usbcmd_ptr: *io u32 = unsafe { rp1_usbhost0_op as *io u32 };
     let usbcmd_before: u32 = *usbcmd_ptr;
     *usbcmd_ptr = usbcmd_before & 0xFFFFFFFE;
 
     let mut halt_confirmed: bool = false;
     for i: usize in 0..<100 {
-        let usbsts_ptr: *io u32 = unsafe { (RP1_USBHOST0_OP + 0x04) as *io u32 };
+        let usbsts_ptr: *io u32 = unsafe { (rp1_usbhost0_op + 0x04) as *io u32 };
         let usbsts: u32 = *usbsts_ptr;
         if ((usbsts & 1) == 1) {
             halt_confirmed = true;
@@ -726,15 +728,15 @@ fn xhci_halt_and_reset() -> bool !{unsafe} {
     // because firmware leaves this controller running with a device
     // already fully addressed on port 3; a soft RS-cycle alone does not
     // discard that internal state.
-    let usbcmd_hcrst_ptr: *io u32 = unsafe { RP1_USBHOST0_OP as *io u32 };
+    let usbcmd_hcrst_ptr: *io u32 = unsafe { rp1_usbhost0_op as *io u32 };
     let usbcmd_before_hcrst: u32 = *usbcmd_hcrst_ptr;
     *usbcmd_hcrst_ptr = usbcmd_before_hcrst | 2;
 
     let mut hcrst_confirmed: bool = false;
     for i: usize in 0..<1000 {
-        let usbcmd_poll_ptr: *io u32 = unsafe { RP1_USBHOST0_OP as *io u32 };
+        let usbcmd_poll_ptr: *io u32 = unsafe { rp1_usbhost0_op as *io u32 };
         let usbcmd_poll: u32 = *usbcmd_poll_ptr;
-        let usbsts_poll_ptr: *io u32 = unsafe { (RP1_USBHOST0_OP + 0x04) as *io u32 };
+        let usbsts_poll_ptr: *io u32 = unsafe { (rp1_usbhost0_op + 0x04) as *io u32 };
         let usbsts_poll: u32 = *usbsts_poll_ptr;
         if (((usbcmd_poll >> 1) & 1) == 0 && ((usbsts_poll >> 11) & 1) == 0) {
             hcrst_confirmed = true;
@@ -836,15 +838,15 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
     // Linux's own xhci_add_interrupter() exactly -- a different order
     // was tried first and silently never produced a Command Completion
     // Event.
-    let erstsz_ptr: *io u32 = unsafe { RP1_USBHOST0_IR0 as *io u32 };
+    let erstsz_ptr: *io u32 = unsafe { rp1_usbhost0_ir0 as *io u32 };
     *erstsz_ptr = 1;
-    let erstba_lo_ptr: *io u32 = unsafe { (RP1_USBHOST0_IR0 + 0x10) as *io u32 };
+    let erstba_lo_ptr: *io u32 = unsafe { (rp1_usbhost0_ir0 + 0x10) as *io u32 };
     *erstba_lo_ptr = (erst_dma & 0xFFFFFFFF) as u32;
-    let erstba_hi_ptr: *io u32 = unsafe { (RP1_USBHOST0_IR0 + 0x14) as *io u32 };
+    let erstba_hi_ptr: *io u32 = unsafe { (rp1_usbhost0_ir0 + 0x14) as *io u32 };
     *erstba_hi_ptr = ((erst_dma >> 32) & 0xFFFFFFFF) as u32;
-    let erdp_lo_ptr: *io u32 = unsafe { (RP1_USBHOST0_IR0 + 0x18) as *io u32 };
+    let erdp_lo_ptr: *io u32 = unsafe { (rp1_usbhost0_ir0 + 0x18) as *io u32 };
     *erdp_lo_ptr = (evt_ring_dma & 0xFFFFFFFF) as u32;
-    let erdp_hi_ptr: *io u32 = unsafe { (RP1_USBHOST0_IR0 + 0x1C) as *io u32 };
+    let erdp_hi_ptr: *io u32 = unsafe { (rp1_usbhost0_ir0 + 0x1C) as *io u32 };
     *erdp_hi_ptr = ((evt_ring_dma >> 32) & 0xFFFFFFFF) as u32;
 
     // GitHub issue #187: enable this primary interrupter (IMAN.IE, bit 1) so
@@ -856,31 +858,31 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
     // across the many bulk transfers block_copy's 1024-block USB-ext2
     // provisioning issues, which is unnecessary now that every wait is a
     // real interrupt rather than a 1ms polling step.
-    let imod_ptr: *io u32 = unsafe { (RP1_USBHOST0_IR0 + 0x04) as *io u32 };
+    let imod_ptr: *io u32 = unsafe { (rp1_usbhost0_ir0 + 0x04) as *io u32 };
     *imod_ptr = 0;
-    let iman_ptr: *io u32 = unsafe { RP1_USBHOST0_IR0 as *io u32 };
+    let iman_ptr: *io u32 = unsafe { rp1_usbhost0_ir0 as *io u32 };
     *iman_ptr = *iman_ptr | (1 << 1);
 
-    let dcbaap_lo_ptr: *io u32 = unsafe { (RP1_USBHOST0_OP + 0x30) as *io u32 };
+    let dcbaap_lo_ptr: *io u32 = unsafe { (rp1_usbhost0_op + 0x30) as *io u32 };
     *dcbaap_lo_ptr = (dcbaa_dma & 0xFFFFFFFF) as u32;
-    let dcbaap_hi_ptr: *io u32 = unsafe { (RP1_USBHOST0_OP + 0x34) as *io u32 };
+    let dcbaap_hi_ptr: *io u32 = unsafe { (rp1_usbhost0_op + 0x34) as *io u32 };
     *dcbaap_hi_ptr = ((dcbaa_dma >> 32) & 0xFFFFFFFF) as u32;
 
-    let crcr_lo_ptr: *io u32 = unsafe { (RP1_USBHOST0_OP + 0x18) as *io u32 };
+    let crcr_lo_ptr: *io u32 = unsafe { (rp1_usbhost0_op + 0x18) as *io u32 };
     *crcr_lo_ptr = ((cmd_ring_dma & 0xFFFFFFC0) | 1) as u32;
-    let crcr_hi_ptr: *io u32 = unsafe { (RP1_USBHOST0_OP + 0x1C) as *io u32 };
+    let crcr_hi_ptr: *io u32 = unsafe { (rp1_usbhost0_op + 0x1C) as *io u32 };
     *crcr_hi_ptr = ((cmd_ring_dma >> 32) & 0xFFFFFFFF) as u32;
 
-    let config_ptr: *io u32 = unsafe { (RP1_USBHOST0_OP + 0x38) as *io u32 };
+    let config_ptr: *io u32 = unsafe { (rp1_usbhost0_op + 0x38) as *io u32 };
     *config_ptr = 1; // MaxSlotsEn=1
 
-    let usbcmd_restart_ptr: *io u32 = unsafe { RP1_USBHOST0_OP as *io u32 };
+    let usbcmd_restart_ptr: *io u32 = unsafe { rp1_usbhost0_op as *io u32 };
     let usbcmd_fresh: u32 = *usbcmd_restart_ptr;
     *usbcmd_restart_ptr = usbcmd_fresh | 1 | (1 << 2); // Run/Stop | INTE
 
     let mut run_confirmed: bool = false;
     for i: usize in 0..<100 {
-        let usbsts_run_ptr: *io u32 = unsafe { (RP1_USBHOST0_OP + 0x04) as *io u32 };
+        let usbsts_run_ptr: *io u32 = unsafe { (rp1_usbhost0_op + 0x04) as *io u32 };
         let usbsts_run: u32 = *usbsts_run_ptr;
         if ((usbsts_run & 1) == 0) {
             run_confirmed = true;
@@ -892,7 +894,7 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
 }
 
 fn xhci_enable_slot() -> bool !{unsafe} {
-    let doorbell0_ptr: *io u32 = unsafe { RP1_USBHOST0_DOORBELL as *io u32 };
+    let doorbell0_ptr: *io u32 = unsafe { rp1_usbhost0_doorbell as *io u32 };
     *doorbell0_ptr = 0;
 
     let enable_cc: u32 = usb_await_event(33, 1000);
@@ -950,7 +952,7 @@ fn xhci_address_device() -> bool !{unsafe} {
     // hardware. Poll until Speed is nonzero before trusting it.
     let mut slot_speed: u32 = 0;
     for i: usize in 0..<500 {
-        let portsc3_speed_ptr: *io u32 = unsafe { RP1_USBHOST0_PORTSC3 as *io u32 };
+        let portsc3_speed_ptr: *io u32 = unsafe { rp1_usbhost0_portsc3 as *io u32 };
         let portsc3_speed_read: u32 = *portsc3_speed_ptr;
         slot_speed = (portsc3_speed_read >> 10) & 0xF;
         if (slot_speed != 0) {
@@ -975,13 +977,13 @@ fn xhci_address_device() -> bool !{unsafe} {
     // zero everywhere else. Getting this wrong is not cosmetic: bit1
     // (PED) is RW1CS, so writing back a read-modify-write that preserves
     // PED=1 actually DISABLES the port.
-    let portsc3_reset_ptr: *io u32 = unsafe { RP1_USBHOST0_PORTSC3 as *io u32 };
+    let portsc3_reset_ptr: *io u32 = unsafe { rp1_usbhost0_portsc3 as *io u32 };
     let portsc3_before_reset: u32 = *portsc3_reset_ptr;
     *portsc3_reset_ptr = (portsc3_before_reset & 0xCE00FFE9) | (1 << 4);
 
     let mut reset_confirmed: bool = false;
     for i: usize in 0..<500 {
-        let portsc3_poll_ptr: *io u32 = unsafe { RP1_USBHOST0_PORTSC3 as *io u32 };
+        let portsc3_poll_ptr: *io u32 = unsafe { rp1_usbhost0_portsc3 as *io u32 };
         let portsc3_poll: u32 = *portsc3_poll_ptr;
         if (((portsc3_poll >> 21) & 1) == 1) {
             reset_confirmed = true;
@@ -994,7 +996,7 @@ fn xhci_address_device() -> bool !{unsafe} {
     }
 
     // Clear the change bits the reset raised (RW1C), same neutral mask.
-    let portsc3_clear_ptr: *io u32 = unsafe { RP1_USBHOST0_PORTSC3 as *io u32 };
+    let portsc3_clear_ptr: *io u32 = unsafe { rp1_usbhost0_portsc3 as *io u32 };
     let portsc3_before_clear: u32 = *portsc3_clear_ptr;
     *portsc3_clear_ptr = (portsc3_before_clear & 0xCE00FFE9)
         | (1 << 21) | (1 << 17) | (1 << 19);
@@ -1010,7 +1012,7 @@ fn xhci_address_device() -> bool !{unsafe} {
     cmd_ring[1].dw3 = (1 | (11 << 10) | (xhci_slot_id << 24)) as u32;
     dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
 
-    let doorbell0_ptr: *io u32 = unsafe { RP1_USBHOST0_DOORBELL as *io u32 };
+    let doorbell0_ptr: *io u32 = unsafe { rp1_usbhost0_doorbell as *io u32 };
     *doorbell0_ptr = 0;
 
     // The port reset above queues its own async Port Status Change
@@ -1199,7 +1201,7 @@ fn xhci_configure_endpoint(in_num: {1..<16 as usize},
     cmd_ring[2].dw3 = (1 | (12 << 10) | (xhci_slot_id << 24)) as u32;
     dma_prepare_tx(xhci_cmd_ring as *u8, CMD_RING_TRBS * 16);
 
-    let doorbell0_ptr: *io u32 = unsafe { RP1_USBHOST0_DOORBELL as *io u32 };
+    let doorbell0_ptr: *io u32 = unsafe { rp1_usbhost0_doorbell as *io u32 };
     *doorbell0_ptr = 0;
     let ce_cc: u32 = usb_await_event(33, 1000);
     if (ce_cc != 1) {
