@@ -131,20 +131,47 @@ fn page_contention_probe() -> bool !{allocates, unsafe} {
     let doubles_before: usize = page_allocator_double_free_count();
     unsafe { atomic_store_release(page_probe_armed_address(), 1); }
 
+    // GitHub issue #479 Group B: wait for the secondary to have COMPLETED A
+    // ROUND, not merely to have set `active`. The difference is the whole
+    // verdict here.
+    //
+    // `active` is set before the first cycle, so the old gate let the
+    // primary start while the secondary had done nothing -- and then
+    // GitHub issue #478 decides how much it ever does. This probe holds
+    // the page lock for longer than any other in this tree, so the
+    // starvation bites hardest here: on RPi5 the overlap was 61 rounds out
+    // of 2048, passing `overlap > 0` by luck rather than by construction.
+    // Adding an unrelated probe ahead of this one in the boot sequence
+    // moved the phase of the secondary's wfi wake-ups and took it to 0,
+    // which is how this was found. The number was fragile before that
+    // change and would have broken for the next person instead.
+    //
+    // Waiting for a completed round does not lower the bar. It makes
+    // `overlap > 0` mean what it was written to mean -- the two cores were
+    // really in the loop together -- instead of meaning the secondary got
+    // a slice before the primary finished.
+    //
+    // The other probes here have the same gate and healthy overlaps
+    // (2048, 2031, 2048...), because their cycles are short enough that
+    // the secondary keeps up. They are fragile in the same way and should
+    // follow this when one of them next moves.
     let entry_window: i64 = read_cntfrq() >> 2;
     let entry_start: i64 = read_cntpct();
     let mut entered: bool = false;
     while (entered == false && read_cntpct() - entry_start < entry_window) {
         if (unsafe {
                 atomic_load_acquire(page_probe_active_address())
-            } == 1) {
+            } == 1 &&
+            unsafe {
+                atomic_load_acquire(page_probe_secondary_address())
+            } >= 1) {
             entered = true;
         }
     }
     if (entered == false) {
         unsafe { atomic_store_release(page_probe_armed_address(), 0); }
-        page_contention_report("secondary-never-entered" as *u8, baseline,
-                               doubles_before);
+        page_contention_report("secondary-never-completed-a-round" as *u8,
+                               baseline, doubles_before);
         return false;
     }
 

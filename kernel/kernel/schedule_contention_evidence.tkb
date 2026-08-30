@@ -45,10 +45,20 @@ use "kernel/kernel/process.tkb";
 use "kernel/lib/execution_model.tkb";
 
 const SCHEDULE_CONTENTION_ROUNDS: usize = 4096;
-// Same reasoning as every other probe here: a core that re-enters the
-// instant it leaves owns the structure and measures that rather than the
-// structure.
-const SCHEDULE_CONTENTION_OUTSIDE_WORK: usize = 32;
+// Work OUTSIDE the critical section, and the size of it is a measurement
+// rather than a guess. A core that re-enters the instant it leaves owns
+// the structure and measures that rather than the structure.
+//
+// 32 was the first value and it was too small, which RPi5 said and QEMU
+// did not: the locked phase came back with overlap=1, meaning the
+// secondary completed one round to the primary's 4096. "No duplicates"
+// from a run the second core never really joined is nearly vacuous, and
+// it is GitHub issue #478 -- the spinlock excludes but does not
+// arbitrate, so a core in a tight acquire/release loop starves the other.
+// The unlocked phase of the same run had overlap=3918, which is the same
+// fact from the other side: without a lock there is nothing to be unfair
+// about.
+const SCHEDULE_CONTENTION_OUTSIDE_WORK: usize = 512;
 
 // The process both cores race for. Allocated by the primary at setup,
 // never run, and driven to Exited and reaped at the end so the pool and
@@ -226,19 +236,28 @@ private fn schedule_contention_run_phase(locked: usize, stage: *u8)
         atomic_store_release(schedule_probe_armed_address(), 1);
     }
 
+    // Wait for a COMPLETED round, not merely for `active`, which the
+    // secondary sets before its first cycle. Under issue #478's
+    // starvation the difference is whether the primary can run its whole
+    // phase before the secondary does anything at all -- which is exactly
+    // what kernel/kernel/page_contention_evidence.tkb's overlap was
+    // failing on when this probe was added ahead of it.
     let entry_window: i64 = read_cntfrq() >> 2;
     let entry_start: i64 = read_cntpct();
     let mut entered: bool = false;
     while (entered == false && read_cntpct() - entry_start < entry_window) {
         if (unsafe {
                 atomic_load_acquire(schedule_probe_active_address())
-            } == 1) {
+            } == 1 &&
+            unsafe {
+                atomic_load_acquire(schedule_probe_secondary_address())
+            } >= 1) {
             entered = true;
         }
     }
     if (entered == false) {
         unsafe { atomic_store_release(schedule_probe_armed_address(), 0); }
-        schedule_contention_report("secondary-never-entered" as *u8);
+        schedule_contention_report("secondary-never-completed-a-round" as *u8);
         return false;
     }
 
@@ -319,11 +338,18 @@ fn schedule_contention_probe() -> bool !{unsafe} {
         return false;
     }
     let excluded: usize = schedule_contention_duplicate_count();
+    // How much of the locked phase the second core was actually present
+    // for. Asserted, because "no duplicates" from a phase the second core
+    // barely joined says nothing -- and issue #478 makes that the default
+    // outcome rather than an unlucky one.
+    let shared: usize = unsafe {
+        atomic_load_acquire(schedule_probe_overlap_address())
+    };
 
     // Give the record and its kernel stack run back, so the boot
     // accounting still balances.
     let cleaned: bool = scheduled_process_probe_cycle(schedule_probe_handle);
     schedule_probe_ready = false;
     scheduled_process_pid_counter_restore(pid_before);
-    return raced > 0 && excluded == 0 && cleaned;
+    return raced > 0 && excluded == 0 && shared > 0 && cleaned;
 }
