@@ -1,3 +1,6 @@
+// GitHub issue #452: the tag counter lives in a LockedCell.
+use "kernel/lib/locked_cell.tkb";
+
 // Design prototype for GitHub issue #344: a slot pool with NO compile-time
 // ceiling on the number of live objects at all -- not even a hidden one.
 //
@@ -541,21 +544,29 @@ must_use variant IntrusivePoolGrowResult {
 // header). A plain counter rather than the pool's own address: an address
 // would need an unsafe cast in what is otherwise a fully safe entry
 // point.
-private let mut intrusive_pool_next_tag: usize = 1;
-
-// GitHub issue #479. A LEAF lock, and the earlier note in this file
-// guessing it would need the pool's own was wrong: the counter is touched
-// in exactly one place, and that place runs BEFORE the pool it is
-// initialising has a usable lock (mutex_init is the next statement). So
-// there is nothing to nest into and no order to re-derive.
 //
-// Its own global, not a field, for the reason kernel/mm/page.tkb's is.
-// No mutex_init: a global Mutex is free from .bss, and the lazy
-// initialisation this used to carry was a race in the function whose point
-// was to remove one -- `ready` was set BEFORE the init, so a second core
-// could see the flag true and acquire a mutex the first had not written
-// yet. See kernel/lib/mutex.tkb.
-private let mut intrusive_pool_tag_lock: Mutex;
+// GitHub issue #452: the counter and the lock that protects it are ONE
+// value now, not two globals related by a comment. #479 gave this counter
+// a lock and said in a comment that the lock covered it; nothing checked
+// that, and a new read anywhere in this 2000-line file would have
+// compiled. The count is a private field of LockedCell, so the only way
+// to reach it is locked_cell_value, which needs the guard.
+//
+// A LEAF lock, and the earlier note in this file guessing it would need
+// the pool's own was wrong: the count is touched in exactly one place,
+// and that place runs BEFORE the pool it is initialising has a usable
+// lock. So there is nothing to nest into and no order to re-derive.
+//
+// HOW MANY tags have been handed out, deliberately, rather than WHICH tag
+// comes next. A LockedCell cannot carry an initialiser -- its field is
+// private, so no other file can write a literal for it -- and it does not
+// need one this way: .bss is zeroed by both entry paths, and zero is
+// already the right starting count. That is the same argument
+// kernel/lib/mutex.tkb makes for never calling mutex_init on a global,
+// and it matters for the same reason: the alternative is a lazy
+// initialiser, which is what raced here in the first place. A tag is
+// count + 1, so the first pool still gets 1 and 0 still means no pool.
+private let mut intrusive_pool_tag_cell: LockedCell(usize);
 
 // The counter's whole critical section: a read and an add. Two cores each
 // initialising a different pool -- which the lazy `*_pool_ready` pattern
@@ -569,20 +580,20 @@ private let mut intrusive_pool_tag_lock: Mutex;
 // address". Two pools sharing one makes each one's handles look valid to
 // the other, which is exactly the cross-pool confusion the tag exists to
 // prevent.
+//
+// LockedCell takes mutex_acquire rather than pool_lock_acquire, and the
+// difference matters rather than being style. pool_lock_acquire's tag is
+// what linux_user/intrusive_pool/pool_lock_check.tkb registers to check
+// lock ORDER between pools -- and this is not a pool lock. Passing it a
+// tag put a non-pool into that table, and since the table is finite it
+// pushed the last 13 real acquires out as "untracked". The checker
+// reported it, which is how the mistake was found rather than shipped.
 private fn intrusive_pool_mint_tag() -> usize {
-    // mutex_acquire directly, NOT pool_lock_acquire, and the difference
-    // matters rather than being style. pool_lock_acquire's tag is what
-    // linux_user/intrusive_pool/pool_lock_check.tkb registers to check
-    // lock ORDER between pools -- and this is not a pool lock. Passing it
-    // a tag put a non-pool into that table, and since the table is finite
-    // it pushed the last 13 real acquires out as "untracked". The checker
-    // reported it, which is how the mistake was found rather than shipped;
-    // this file's own note about TcpConnectionOwner already says the same
-    // thing about a lock that is not a pool's.
-    let flags: usize = mutex_acquire(&intrusive_pool_tag_lock);
-    let tag: usize = intrusive_pool_next_tag;
-    intrusive_pool_next_tag = tag + 1;
-    mutex_release(&intrusive_pool_tag_lock, flags);
+    let guard = locked_cell_take(&intrusive_pool_tag_cell);
+    let minted = locked_cell_value(guard, &intrusive_pool_tag_cell);
+    let tag: usize = *minted + 1;
+    *minted = tag;
+    locked_cell_give(&intrusive_pool_tag_cell, guard);
     return tag;
 }
 
@@ -590,12 +601,26 @@ private fn intrusive_pool_mint_tag() -> usize {
 // the reason the pid probe does: nothing was created, so nothing is owed
 // those numbers, and a pool initialised later should get the tag it would
 // have got.
+//
+// Both of these take the lock, which the globals they replace did not.
+// That is not extra caution: a probe reading a counter the other core is
+// advancing is how the ASID probe first reported an impossible number
+// (issue #479's "detectors must not be built from racy counters"), and
+// with the count inside a LockedCell an unlocked read is no longer
+// expressible anyway.
 fn intrusive_pool_tag_counter() -> usize {
-    return intrusive_pool_next_tag;
+    let guard = locked_cell_take(&intrusive_pool_tag_cell);
+    let minted = locked_cell_value(guard, &intrusive_pool_tag_cell);
+    let count: usize = *minted;
+    locked_cell_give(&intrusive_pool_tag_cell, guard);
+    return count;
 }
 
 fn intrusive_pool_tag_counter_restore(value: usize) {
-    intrusive_pool_next_tag = value;
+    let guard = locked_cell_take(&intrusive_pool_tag_cell);
+    let minted = locked_cell_value(guard, &intrusive_pool_tag_cell);
+    *minted = value;
+    locked_cell_give(&intrusive_pool_tag_cell, guard);
 }
 
 fn intrusive_pool_mint_tag_for_probe() -> usize {
@@ -2122,23 +2147,25 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
            stale_refused && stale_counted && invariants_ok && pages_returned;
 }
 
-// GitHub issue #479: intrusive_pool_next_tag is a monotonic counter, read
-// and incremented with nothing excluding a second core -- the same shape as
-// the pid and ASID counters, which were measured racing and then locked.
+// GitHub issue #479. The tag counter used to be this assertion's whole
+// subject: a monotonic global read and incremented with nothing excluding a
+// second core, measured racing (advanced=3936 of 4096 calls) and then
+// locked. It is a LockedCell now (issue #452), so no path can even name it
+// without the guard, and it is no longer what this assertion is about.
 //
-// What a duplicate tag costs here is worse than a duplicate number
-// elsewhere. The tag is a pool's IDENTITY (issue #399): every chunk header
-// carries it, and intrusive_pool_slot_is_valid uses it to answer "does this
-// pool own this address". Two pools sharing a tag makes each one's handles
-// look valid to the other, which is precisely the cross-pool confusion the
-// tag exists to prevent.
+// What IS still about it: issue #482. Every MUTATION of a pool takes
+// `borrow IntrusivePoolGuard[pool_id]` and so cannot happen without the
+// pool's lock, but the WALKS do not -- intrusive_pool_ref and the chunk
+// traversals read slot state with no guard held. One core walking while
+// another frees is a read of a slot being torn down, and unlike the tag
+// counter it is not fixed by adding an acquire in one place: a walk is a
+// sequence, so the lock has to be the CALLER's, and every caller's critical
+// section changes shape.
 //
-// Not locked here, and the reason is placement rather than difficulty: the
-// counter is a leaf, and taking pool_lock inside this file would put the
-// pool's own lock underneath a lock this file also hands out -- the kind of
-// self-nesting that needs the whole order re-derived rather than one
-// acquire added. #479 Group A's measured order is fd -> pool -> page.
+// A busy loop reaches this. Page allocation and process creation both walk
+// pools, so this is not one of the sites #479 Group B can argue a workload
+// avoids.
 fn intrusive_pool_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "intrusive_pool_next_tag is an unlocked counter, and a duplicate tag makes two pools accept each other's handles");
+                  "issue #482: pool WALKS take no guard, so one core can read a slot while another frees it -- the mutations are guarded, the traversals are not");
 }
