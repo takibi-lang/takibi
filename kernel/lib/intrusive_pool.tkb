@@ -550,8 +550,12 @@ private let mut intrusive_pool_next_tag: usize = 1;
 // there is nothing to nest into and no order to re-derive.
 //
 // Its own global, not a field, for the reason kernel/mm/page.tkb's is.
+// No mutex_init: a global Mutex is free from .bss, and the lazy
+// initialisation this used to carry was a race in the function whose point
+// was to remove one -- `ready` was set BEFORE the init, so a second core
+// could see the flag true and acquire a mutex the first had not written
+// yet. See kernel/lib/mutex.tkb.
 private let mut intrusive_pool_tag_lock: Mutex;
-private let mut intrusive_pool_tag_lock_ready: bool = false;
 
 // The counter's whole critical section: a read and an add. Two cores each
 // initialising a different pool -- which the lazy `*_pool_ready` pattern
@@ -566,10 +570,6 @@ private let mut intrusive_pool_tag_lock_ready: bool = false;
 // the other, which is exactly the cross-pool confusion the tag exists to
 // prevent.
 private fn intrusive_pool_mint_tag() -> usize {
-    if (intrusive_pool_tag_lock_ready == false) {
-        intrusive_pool_tag_lock_ready = true;
-        mutex_init(&intrusive_pool_tag_lock);
-    }
     // mutex_acquire directly, NOT pool_lock_acquire, and the difference
     // matters rather than being style. pool_lock_acquire's tag is what
     // linux_user/intrusive_pool/pool_lock_check.tkb registers to check

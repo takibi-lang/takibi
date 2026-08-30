@@ -85,7 +85,7 @@ private let mut asid_lock: Mutex;
 // arithmetic, no allocation, nothing that touches a page that is not
 // mapped yet (see kernel/MEMORY_MAP.md's note on that window).
 fn asid_init() !{mmu_off} {
-    mutex_init(&asid_lock);
+    // No mutex_init for asid_lock; see kernel/lib/mutex.tkb.
     if (asid_ready) { return; }
     asid_ready = true;
     asid_bits = mmu_asid_bits();

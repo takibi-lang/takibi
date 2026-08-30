@@ -61,7 +61,28 @@ struct Mutex { private word: usize; }
 // same boundary, not a second one.
 
 // Free. Call once, before the Mutex is reachable by anything else.
+// A GLOBAL Mutex needs no mutex_init, and calling one on it is worse than
+// redundant.
+//
+// It needs none because .bss is zeroed by both entry paths before any
+// Takibi runs, and a zeroed word is SPIN_LOCK_FREE -- asserted just below
+// rather than assumed, since the whole argument collapses if that constant
+// ever stops being 0.
+//
+// Calling one is destructive because mutex_init FORCE-FREES: on two cores
+// it can release a lock another core is holding, and re-initialising is
+// exactly what a lazily-initialised subsystem does on every entry. Three
+// locks added on 2026-08-30 got this wrong -- one of them behind a
+// `ready` flag that was itself a racy read-modify-write, in the function
+// whose purpose was to remove a race.
+//
+// What mutex_init IS for: a Mutex embedded in a value whose storage is
+// recycled, where zero-initialisation is not what the caller has.
+// IntrusivePool's per-pool lock is the one real caller, and its own
+// comment argues why re-initialising there is safe.
 fn mutex_init(m: *Mutex @ id) {
+    static_assert(SPIN_LOCK_FREE == 0,
+                  "a zeroed global Mutex is only free while SPIN_LOCK_FREE is 0, and every global lock in this kernel relies on that instead of calling mutex_init");
     // Every function below reaches the word through `m as usize`, which is
     // the word's address only because the word is the first field. That is
     // an accidental-looking property with a real reader, so it is checked

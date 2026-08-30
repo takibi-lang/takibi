@@ -787,7 +787,12 @@ fn unified_fd_next_open(process: usize, from: usize)
 }
 
 fn unified_fd_table_init() !{unsafe} {
-    mutex_init(&object_refcount_lock);
+    // No mutex_init for object_refcount_lock. This function is called
+    // repeatedly -- from syscall.tkb and twice from this file -- and
+    // mutex_init FORCE-FREES, so on two cores it would release the
+    // refcount lock out from under a core holding it. A global Mutex is
+    // free from .bss and needs no initialisation at all; see
+    // kernel/lib/mutex.tkb.
     unified_fd_context_pool_init();
     unified_object_pool_init();
     // GitHub issue #391: giving every object back, rather than writing

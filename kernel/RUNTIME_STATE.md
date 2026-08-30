@@ -38,14 +38,22 @@ core, one UART, one boot-time filesystem mount).
 
 `scheduled_process_pool` (`IntrusivePool(ProcessRecord)`, private) and the
 static `scheduled_process_boot_record` beside it, and
-`execution_state: [ExecutionState; KERNEL_ACTIVE_CORES]` -- the four
+`execution_state: [ExecutionState; KERNEL_MAX_CORES]` -- the four
 former `execution_*` scalars (`current_handle`, `current_live`,
 `scheduler_enabled`, `reschedule_pending`), grouped and made an array by
 issue #222.
 
-**Why global:** there is exactly one scheduler on this single-core kernel
-(see the file's own "NOT SYNCHRONIZED, single-core scheduler" limitation
-header). `ProcessRecord` is already the per-process owner (#264) -- every
+**Why global:** there is exactly one scheduler, because only core 0 ever
+runs one (see the file's own "SINGLE-CORE SCHEDULER" limitation header --
+core 1 stopped parking at issue #447 and still never enters here, because
+its dispatch returns before every path that reaches kernel state).
+
+`execution_state` is no longer global in the sense this section means:
+issue #479 made `execution_here()` ask `cpu_id()` and index the array, and
+it is sized by `KERNEL_MAX_CORES` rather than by the active count -- which
+is Linux's `NR_CPUS` versus `cpu_online_mask`, storage for the most cores a
+build could have against participation counted separately. The pid counter
+beside it is minted under `scheduled_process_pid_lock`. `ProcessRecord` is already the per-process owner (#264) -- every
 process's state, wait reason, parent/child links, and saved SP live in one
 record, not scattered scalars. Since #392 that record is a pool allocation
 and a process slot is its ADDRESS; the bootstrap is the one static, because
@@ -105,6 +113,21 @@ remain confined to core 0.
 
 ### VM / address-space (`kernel/mm/`, `kernel/arch/arm64/mm/`)
 
+**Locked and per-core since issue #479 (2026-08-30).** Four of this
+section's entries stopped being plain unsynchronized globals:
+
+| what | what changed |
+|---|---|
+| `page.tkb`'s `boot_page_pool` | one acquire of `page_allocator_lock` covers each allocator entry point; `page_alloc_boot`/`page_free_boot` are the MMU-off window's lock-free path, because AArch64 has no exclusives on Device memory |
+| `asid.tkb`'s `asid_next`/`asid_generation` | minted under `asid_lock`; the file's execution-model assertion was deleted, since nothing there is left to assert |
+| `address_space.tkb`'s `address_space_active_slot` | now `[usize; KERNEL_MAX_CORES]` indexed by `cpu_id()` -- it was never shared state, it was PER-CORE state stored as one global |
+| `process_image.tkb`'s `process_image_target_root` | same, and the same shape: per-operation state, which on two cores means per-core |
+
+The last two are the distinction this section should keep: five subsystems
+this week were missing exclusion, and three were not shared at all. A lock
+on either of those would have made two cores agree on something that has
+two correct answers.
+
 `mm/process_image.tkb`'s `process_image_pool`/`_ready` and its counted
 fallback pair `process_image_record_missing`/`_count` (issue #392 -- the
 per-root `ProcessImageRecord` array of #258/#264 is now pooled, keyed by a
@@ -148,6 +171,16 @@ file would be ceremony, not a diagnosability improvement, unlike the
 state genuinely hard to see.
 
 ### FD / socket (`kernel/kernel/fd_table.tkb`)
+
+**Locked since issue #479.** `unified_object_retain`/`_release` take
+`object_refcount_lock`, and the acquire covers the handle MATCH as well as
+the arithmetic -- checking that a handle still names a live occupant and
+then incrementing its counter is two steps, and a core that frees the
+object in between leaves the other adding to a recycled slot. Measured
+before the lock: two cores took a refcount from a baseline of 2 to 0, so
+the object was freed while both still held it, and 978 later operations
+found a handle naming nothing. `fd_slot_total` and the per-process block
+chain are still unlocked, which is what the file's assertion now says.
 
 `fd_context_pool`/`fd_context_pool_ready` (issue #392 -- the per-process
 `ProcessFdContext` array of #264 is now pooled, keyed by a handle in

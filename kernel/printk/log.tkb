@@ -294,9 +294,18 @@ fn kernel_boot_log_resource_exhausted(resource: *u8, capacity: usize) {
 // kernel compares text, so that is not a cosmetic failure -- it is every
 // text-comparing test at once, reported as a diff nobody can attribute.
 //
-// The ring underneath has the shape of every other: kernel_log_count,
-// _oldest, _overwritten and _active_slot are a read-modify-write set and
-// the text array is indexed from them.
+// The ring underneath has two different problems, not one. kernel_log_count,
+// _oldest and _overwritten are a read-modify-write set, the ordinary kind.
+// kernel_log_active and kernel_log_active_slot are NOT: they say which slot
+// THIS caller is assembling a line into, which is per-core state stored as
+// one global -- the same shape address_space_active_slot and
+// process_image_target_root had before GitHub issue #479 indexed them by
+// cpu_id().
+//
+// That is why the answer here is more likely per-CPU rings than a lock: two
+// cores assembling two lines is not contention to be serialised, it is two
+// pieces of state that a single global cannot hold. A lock would make them
+// take turns at something they should be doing independently.
 //
 // Not locked here, and the reason is a real question rather than a
 // deferral. A lock around logging is held across a UART write, which is

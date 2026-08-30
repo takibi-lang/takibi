@@ -109,7 +109,9 @@ private fn freelist_probe_init() {
     if (freelist_probe_ready) { return; }
     freelist_probe_ready = true;
     freelist_core_init(&freelist_probe);
-    mutex_init(&freelist_probe_lock);
+    // No mutex_init: a global Mutex is free from .bss, and initialising it
+    // behind this `ready` flag would be the same lazy-init race the tag
+    // counter's version was. See kernel/lib/mutex.tkb.
 }
 
 // Take an index, mark it held, give it back. Both cores run this.

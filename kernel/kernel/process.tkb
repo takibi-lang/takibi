@@ -15,9 +15,16 @@ use "kernel/lib/mutex.tkb";
 // Current limitations (2026-08-13, issue #295). Keep this list current as
 // call sites change; a limitation that goes stale here is worse than
 // none.
-// - NOT SYNCHRONIZED, single-core scheduler: only core 0 ever runs the
-//   scheduler/dispatches syscalls. Core 1 proves autonomous EL1 entry and
-//   shared-MMU visibility via PSCI CPU_ON, then parks permanently.
+// - SINGLE-CORE SCHEDULER: only core 0 runs the scheduler or dispatches
+//   syscalls. Core 1 no longer parks -- since GitHub issue #447 it takes
+//   its own timer interrupt and idles in wfi -- but its dispatch returns
+//   before every path that reaches kernel state, so it never enters here.
+//   That, not parking, is why KERNEL_ACTIVE_CORES is still 1.
+// - PARTLY SYNCHRONIZED as of GitHub issue #479. The pid counter is minted
+//   under scheduled_process_pid_lock, and execution_state is per-core,
+//   indexed by cpu_id(). What is still unsynchronized is named by this
+//   file's process_execution_model_assumption: the bootstrap record and
+//   its two flags, the parent/sibling links, and the trace ring index.
 // - scheduled_process_spare_lock takes a real lock as of issue #451. It
 //   returns a linear STRUCT carrying the interrupt state its release
 //   restores, where it used to return an erased `linear view` that emitted
@@ -466,7 +473,10 @@ fn kernel_process_reap_unlinked_count_value() -> usize {
 private fn scheduled_process_pool_init() {
     if (scheduled_process_pool_ready) { return; }
     scheduled_process_pool_ready = true;
-    mutex_init(&scheduled_process_pid_lock);
+    // No mutex_init for scheduled_process_pid_lock: a global Mutex is free
+    // from .bss, and initialising it HERE would have put it behind a
+    // `ready` flag that is itself an unlocked read-modify-write. See
+    // kernel/lib/mutex.tkb.
     intrusive_pool_init(&scheduled_process_pool);
 }
 
