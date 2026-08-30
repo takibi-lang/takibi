@@ -1,0 +1,168 @@
+// GitHub issue #479 Group B: two cores minting a pid at once.
+//
+// Written before the lock, expected to fail, on the pattern Group A
+// established. What the race costs: two processes carrying one pid, and
+// every accounting this kernel does by pid -- wait4 by pid, the process
+// tree walk, ps -- becomes a question with two answers.
+//
+// The detector is the counter's own arithmetic: each mint advances it by
+// exactly one, so an advance smaller than the number of mints means two
+// cores read the same value. "Number of mints" is this probe's OWN pair of
+// atomic counters, never the kernel's, for the reason the asid probe
+// learned -- a counter on the racing path loses increments to the race it
+// is being used to detect.
+//
+// Current limitations:
+// - IT PUTS THE COUNTER BACK. A pid appears in the process-lifecycle
+//   views, in ps and in every wait4 line, so a probe that consumed
+//   thousands of real numbers would move every later process's pid and
+//   break views with nothing to do with it -- issue #437 moved PID 1 once
+//   and 17 of 39 views changed. Nothing was created here, so nothing is
+//   owed those numbers. The restore is stated rather than quiet because it
+//   IS a mutation of kernel state for a test's convenience.
+// - Measures exclusion, not ordering.
+
+use "kernel/kernel/process.tkb";
+use "kernel/lib/execution_model.tkb";
+
+const PID_CONTENTION_ROUNDS: usize = 2048;
+const PID_CONTENTION_OUTSIDE_WORK: usize = 64;
+
+private let mut pid_probe_armed: usize;
+private let mut pid_probe_primary: usize;
+private let mut pid_probe_secondary: usize;
+private let mut pid_probe_active: usize;
+private let mut pid_probe_overlap: usize;
+
+private fn pid_probe_armed_address() -> usize {
+    return (&pid_probe_armed) as usize;
+}
+
+private fn pid_probe_primary_address() -> usize {
+    return (&pid_probe_primary) as usize;
+}
+
+private fn pid_probe_secondary_address() -> usize {
+    return (&pid_probe_secondary) as usize;
+}
+
+private fn pid_probe_active_address() -> usize {
+    return (&pid_probe_active) as usize;
+}
+
+private fn pid_probe_overlap_address() -> usize {
+    return (&pid_probe_overlap) as usize;
+}
+
+private fn pid_probe_cycle() {
+    let pid: usize = scheduled_process_mint_pid_for_probe();
+    for spin: usize in 0..<PID_CONTENTION_OUTSIDE_WORK { }
+}
+
+fn pid_contention_is_armed() -> bool !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(pid_probe_armed_address())
+    } == 1;
+}
+
+fn pid_contention_secondary_run() !{unsafe} {
+    unsafe { atomic_store_release(pid_probe_active_address(), 1); }
+    while (unsafe {
+               atomic_load_acquire(pid_probe_secondary_address())
+           } < PID_CONTENTION_ROUNDS &&
+           unsafe { atomic_load_acquire(pid_probe_armed_address()) } == 1) {
+        pid_probe_cycle();
+        unsafe {
+            atomic_fetch_add_relaxed(pid_probe_secondary_address(), 1);
+        }
+    }
+    unsafe { atomic_store_release(pid_probe_active_address(), 0); }
+}
+
+private fn pid_contention_report(stage: *u8, advanced: usize,
+                                  calls: usize) !{unsafe} {
+    kernel_boot_log("pid contention stage: ");
+    kernel_boot_log(stage);
+    kernel_boot_log("\n");
+    kernel_boot_log("pid contention counts: primary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(pid_probe_primary_address())
+    });
+    kernel_boot_log(" secondary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(pid_probe_secondary_address())
+    });
+    kernel_boot_log(" calls=");
+    uart_put_udec(calls);
+    kernel_boot_log(" advanced=");
+    uart_put_udec(advanced);
+    kernel_boot_log(" overlap=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(pid_probe_overlap_address())
+    });
+    kernel_boot_log("\n");
+}
+
+fn pid_contention_probe() -> bool !{unsafe} {
+    let next_before: usize = scheduled_process_pid_counter();
+    scheduled_process_pool_init_for_probe();
+    unsafe { atomic_store_release(pid_probe_armed_address(), 1); }
+
+    let entry_window: i64 = read_cntfrq() >> 2;
+    let entry_start: i64 = read_cntpct();
+    let mut entered: bool = false;
+    while (entered == false && read_cntpct() - entry_start < entry_window) {
+        if (unsafe {
+                atomic_load_acquire(pid_probe_active_address())
+            } == 1) {
+            entered = true;
+        }
+    }
+    if (entered == false) {
+        unsafe { atomic_store_release(pid_probe_armed_address(), 0); }
+        pid_contention_report("secondary-never-entered" as *u8, 0, 0);
+        return false;
+    }
+
+    for round: usize in 0..<PID_CONTENTION_ROUNDS {
+        pid_probe_cycle();
+        unsafe {
+            atomic_fetch_add_relaxed(pid_probe_primary_address(), 1);
+        }
+    }
+
+    unsafe {
+        atomic_store_release(pid_probe_overlap_address(),
+            atomic_load_acquire(pid_probe_secondary_address()));
+    }
+
+    let finish_window: i64 = read_cntfrq() * 2;
+    let finish_start: i64 = read_cntpct();
+    let mut finished: bool = false;
+    while (finished == false && read_cntpct() - finish_start < finish_window) {
+        if (unsafe {
+                atomic_load_acquire(pid_probe_secondary_address())
+            } >= PID_CONTENTION_ROUNDS) {
+            finished = true;
+        }
+    }
+    unsafe { atomic_store_release(pid_probe_armed_address(), 0); }
+
+    let advanced: usize = scheduled_process_pid_counter() - next_before;
+    let calls: usize =
+        unsafe { atomic_load_acquire(pid_probe_primary_address()) } +
+        unsafe { atomic_load_acquire(pid_probe_secondary_address()) };
+    if (finished == false) {
+        pid_contention_report("secondary-never-finished" as *u8, advanced,
+                               calls);
+        return false;
+    }
+    // Back where it started, before the verdict, so a failed probe does
+    // not also leave the counter moved.
+    scheduled_process_pid_counter_restore(next_before);
+    pid_contention_report("complete" as *u8, advanced, calls);
+    let overlap: usize = unsafe {
+        atomic_load_acquire(pid_probe_overlap_address())
+    };
+    return advanced == calls && overlap > 0;
+}

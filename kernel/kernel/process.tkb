@@ -2,6 +2,7 @@ use "kernel/mm/page.tkb";
 use "kernel/lib/diagnostic_ring.tkb";
 use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
+use "kernel/lib/pool_lock.tkb";
 use "kernel/kernel/process_test_evidence.tkb";
 // A process slot remains the temporary address-space key, but process.tkb
 // owns no table details. scheduled_process_alloc/reap are the lifecycle
@@ -401,6 +402,53 @@ private let mut scheduled_process_stack_deepest_reaped: usize = 0;
 // independent of the slot it happens to occupy.
 private let mut scheduled_process_next_pid: usize = 1;
 
+// GitHub issue #479. Its own global, never a field, for the reason
+// kernel/mm/page.tkb's is.
+private let mut scheduled_process_pid_lock: Mutex;
+
+// The one place a pid is minted, and now the only place the counter is
+// read or written outside a reset. It used to be a read at one statement
+// and an increment nine lines later, with a counter frequency division in
+// between -- two cores would both read the same value and both write it
+// plus one, so two processes would carry one pid. Every accounting this
+// kernel does by pid (wait4 by pid, the process tree walk, ps) would then
+// be asking a question with two answers.
+//
+// The critical section is a read and an add, which is shorter than what it
+// replaces rather than longer.
+private fn scheduled_process_mint_pid() -> usize {
+    let flags: usize = pool_lock_acquire(0, &scheduled_process_pid_lock);
+    let pid: usize = scheduled_process_next_pid;
+    scheduled_process_next_pid = pid + 1;
+    pool_lock_release(0, &scheduled_process_pid_lock, flags);
+    return pid;
+}
+
+// The probe below mints thousands of pids and then puts the counter back.
+// Restoring is not tidying: a pid appears in the process-lifecycle views,
+// in ps, and in every wait4 line, so a probe that consumed real numbers
+// would move every later process's pid and break views that have nothing
+// to do with it (issue #437 moved PID 1 once and 17 of 39 views changed).
+// Nothing was created here, so nothing is owed those numbers.
+// GitHub issue #479: the mint, reachable by the contention probe. Private
+// would be better and is not possible -- the probe is another file, and
+// putting it in this one would grow the kernel's largest file for a test.
+fn scheduled_process_pool_init_for_probe() {
+    scheduled_process_pool_init();
+}
+
+fn scheduled_process_mint_pid_for_probe() -> usize {
+    return scheduled_process_mint_pid();
+}
+
+fn scheduled_process_pid_counter() -> usize {
+    return scheduled_process_next_pid;
+}
+
+fn scheduled_process_pid_counter_restore(value: usize) {
+    scheduled_process_next_pid = value;
+}
+
 // GitHub issue #448: how many reaps found nothing to unlink, i.e. were
 // handed a parent with no first_child. Only the teardown sweep can
 // produce one, and only for a record whose has_parent is false. It is
@@ -418,6 +466,7 @@ fn kernel_process_reap_unlinked_count_value() -> usize {
 private fn scheduled_process_pool_init() {
     if (scheduled_process_pool_ready) { return; }
     scheduled_process_pool_ready = true;
+    mutex_init(&scheduled_process_pid_lock);
     intrusive_pool_init(&scheduled_process_pool);
 }
 
@@ -1578,7 +1627,7 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
         bottom + KERNEL_PROCESS_STACK_SIZE;
     // GitHub issue #392: the one place a pid is minted. Past every branch
     // that can still refuse the slot.
-    scheduled_process_record_at(slot).pid = scheduled_process_next_pid;
+    scheduled_process_record_at(slot).pid = scheduled_process_mint_pid();
     let counter_frequency: usize = read_cntfrq() as usize;
     let tick_divisor: usize = counter_frequency / 100;
     if (tick_divisor != 0) {
@@ -1587,7 +1636,6 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
     } else {
         scheduled_process_record_at(slot).start_time_ticks = 0;
     }
-    scheduled_process_next_pid = scheduled_process_next_pid + 1;
     scheduled_process_record_reset_syscall_state(slot);
     // GitHub issues #375/#376: a reused run would otherwise inherit the
     // previous occupant's marks. Re-poison BOTH halves here so the guard,
@@ -4772,9 +4820,22 @@ fn kernel_process_clone_evidence() -> bool {
 // scheduled_process_spare_lock returns an erased view that emits no
 // instruction -- a compile-time proof that no second holder exists, which
 // stops being a proof when a second core can reap (#451).
+// GitHub issue #479: re-derived, because the old message had gone stale in
+// both halves. The spare-run guard has emitted real instructions since
+// issue #451 -- it is a Mutex, not an erased view -- and execution_state is
+// per-core and indexed by cpu_id() as of Group B.
+//
+// What is actually left of "one scheduler's globals", after the pid
+// counter above got its lock: the BOOTSTRAP record and its two flags
+// (scheduled_process_boot_record/_live/_generation), which are one static
+// record two cores could both decide is current; the parent and sibling
+// LINKS inside ProcessRecord, which two cores forking at once would splice
+// concurrently; and the crash trace ring's own next-index counter. The
+// pool holding the records is not on that list -- mutating an
+// IntrusivePool requires its guard as a matter of typing.
 fn process_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "one scheduler's globals, and a spare-run guard that emits no instruction");
+                  "the bootstrap record, the parent/sibling links, and the trace ring index are unlocked");
 }
 
 

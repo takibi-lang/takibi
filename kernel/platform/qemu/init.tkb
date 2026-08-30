@@ -4,6 +4,7 @@ use "kernel/kernel/pool_contention_evidence.tkb";
 use "kernel/kernel/freelist_contention_evidence.tkb";
 use "kernel/kernel/page_contention_evidence.tkb";
 use "kernel/kernel/asid_contention_evidence.tkb";
+use "kernel/kernel/pid_contention_evidence.tkb";
 
 must_use variant SecondaryBootResult {
     Started;
@@ -469,6 +470,11 @@ fn main() !{unsafe} {
             // GitHub issue #479: the page allocator's own lock. Added
             // after removing that lock changed nothing any lane could
             // see -- an audit is not evidence.
+            if (pid_contention_probe()) {
+                kernel_boot_log("pid contention: two cores minting, every pid advanced the counter once ok\n");
+            } else {
+                kernel_boot_log("pid contention: failed\n");
+            }
             if (fd_refcount_contention_probe()) {
                 kernel_boot_log("fd refcount contention: two cores retaining and releasing one object, count back to baseline ok\n");
             } else {

@@ -1,3 +1,5 @@
+pid contention stage: complete
+pid contention: two cores minting, every pid advanced the counter once ok
 fd refcount contention stage: complete
 fd refcount contention: two cores retaining and releasing one object, count back to baseline ok
 asid contention stage: complete
