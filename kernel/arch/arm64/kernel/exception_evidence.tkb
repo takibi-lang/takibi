@@ -1,4 +1,5 @@
 use "kernel/kernel/process.tkb";
+use "kernel/lib/execution_model.tkb";
 use "kernel/kernel/fd_table.tkb";
 use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
 
@@ -1174,4 +1175,30 @@ fn el1_exception_evidence(slot: usize) !{unsafe} { crash_snapshot_capture(slot, 
 // EL0 synchronous exceptions have EXC_CONTEXT_SAVE's frame at this SP.
 fn el1_exception_evidence_from_frame(slot: usize, frame_sp: usize) !{unsafe} {
     crash_snapshot_capture(slot, frame_sp);
+}
+
+// GitHub issue #479: the crash and debugger state, which is singular in a
+// way the rest of this kernel's state is not.
+//
+// THERE IS ONE crash_snapshot AND ONE ddb_snapshot. Two cores faulting
+// produce one report, and which one survives is whichever wrote last -- so
+// the first fault, which is usually the interesting one, is the one lost.
+// crash_snapshot_capturing is the flag meant to stop a fault inside the
+// capture from recursing, and on two cores it also stops the SECOND CORE's
+// unrelated fault from being recorded at all.
+//
+// kernel_ddb_memory_access_active/_faulted/_address are what make DDB's
+// memory reads safe: the handler consults them to tell a read it expected
+// from a real fault. They are a single set, so two cores in DDB would each
+// answer the other's question -- and this is the path that runs when
+// something has already gone wrong, where a wrong answer is least
+// affordable.
+//
+// The shape of the answer is probably not a lock. Locking a crash reporter
+// is what kernel/printk/log.tkb's own note argues against: a reporter that
+// can block cannot report the deadlock it is in. Per-core snapshots are the
+// arrangement kernel/lib/diagnostic_ring.tkb already uses, for this reason.
+fn exception_evidence_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "one crash snapshot and one DDB fault-catch state for the machine: two cores faulting lose one report");
 }

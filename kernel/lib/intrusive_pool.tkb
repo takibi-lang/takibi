@@ -2063,3 +2063,24 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
     return stored_ok && removed_ok && removed_a1_ok && recycled &&
            stale_refused && stale_counted && invariants_ok && pages_returned;
 }
+
+// GitHub issue #479: intrusive_pool_next_tag is a monotonic counter, read
+// and incremented with nothing excluding a second core -- the same shape as
+// the pid and ASID counters, which were measured racing and then locked.
+//
+// What a duplicate tag costs here is worse than a duplicate number
+// elsewhere. The tag is a pool's IDENTITY (issue #399): every chunk header
+// carries it, and intrusive_pool_slot_is_valid uses it to answer "does this
+// pool own this address". Two pools sharing a tag makes each one's handles
+// look valid to the other, which is precisely the cross-pool confusion the
+// tag exists to prevent.
+//
+// Not locked here, and the reason is placement rather than difficulty: the
+// counter is a leaf, and taking pool_lock inside this file would put the
+// pool's own lock underneath a lock this file also hands out -- the kind of
+// self-nesting that needs the whole order re-derived rather than one
+// acquire added. #479 Group A's measured order is fd -> pool -> page.
+fn intrusive_pool_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "intrusive_pool_next_tag is an unlocked counter, and a duplicate tag makes two pools accept each other's handles");
+}

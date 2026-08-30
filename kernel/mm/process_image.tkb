@@ -1,4 +1,5 @@
 use "kernel/mm/page.tkb";
+use "kernel/lib/execution_model.tkb";
 use "kernel/lib/intrusive_pool.tkb";
 use "kernel/kernel/process.tkb";
 use "kernel/mm/address_space.tkb";
@@ -1930,4 +1931,28 @@ fn process_image_gap_is_unmapped() -> bool {
         if (process_image_pte_read(i) != 0) { return false; }
     }
     return true;
+}
+
+// GitHub issue #479. Twenty globals, and they fall into three kinds.
+//
+// ONE IS THE WRONG SHAPE, not merely unlocked. process_image_target_root
+// names the root a COW fault should be resolved against, set by one call
+// and read by another -- so it is per-OPERATION state living in a global,
+// and on two cores it is per-CORE state living in one word. That variable
+// has already produced a real fault once: issue #437's RPi5-only failure
+// was target_root left at 0 on wait4's fast path, aiming the COW handler at
+// PID 1's live image. It cost a hardware bisect on ONE core; two would make
+// the same class of bug arrive without the fast path's help.
+//
+// SIX ARE SHARED STAGING for an exec's ext2 source
+// (process_image_ext2_active/_mount/_inode/_length/_block and the _pair_
+// set beside them). Two cores exec'ing at once would each stage over the
+// other, and the result is a process started from another process's file --
+// which does not fault, it runs.
+//
+// The rest are the pool (mutation guard-required by typing), its ready
+// flag, the missing-record fallback, and counters.
+fn process_image_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "process_image_target_root is per-operation state in a global, and the ext2 exec staging is shared");
 }

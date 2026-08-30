@@ -1,4 +1,5 @@
 use "kernel/mm/page.tkb";
+use "kernel/lib/execution_model.tkb";
 use "kernel/lib/intrusive_pool.tkb";
 use "kernel/arch/arm64/mm/mmu.tkb";
 use "kernel/arch/arm64/mm/asid.tkb";
@@ -1123,4 +1124,29 @@ fn address_space_asid_rollover_probe() -> bool {
     }
     if (running.asid == 0 || running.asid > last) { ok = false; }
     return ok;
+}
+
+// GitHub issue #479. Five of this file's six globals are the ordinary
+// unsynchronized kind; the sixth is a different problem and is the reason
+// this assertion is worth reading.
+//
+// address_space_active_slot records WHICH ADDRESS SPACE IS ACTIVE, and that
+// is not a property of the kernel -- it is a property of a core. Each core
+// has its own TTBR0_EL1 and can be running a different process, so two
+// cores have two answers and a single global can hold one. This is not
+// missing exclusion, it is state of the wrong SHAPE, the same thing
+// execution_state was before Group B indexed it by cpu_id() -- and the fix
+// is the same, not a lock.
+//
+// It matters concretely: address_space_activate reads it to decide whether
+// a switch is needed at all, so on two cores a core could skip a switch
+// because the OTHER core had already activated that root. The process would
+// then run against whatever TTBR0_EL1 this core happened to hold.
+//
+// The rest -- the backing pool (mutation guard-required by typing), its
+// ready flag, the missing-record fallback and its counter, and root 0's
+// static backing -- are the ordinary kind.
+fn address_space_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "address_space_active_slot is per-CORE state held in one global: two cores have two answers and it can hold one");
 }

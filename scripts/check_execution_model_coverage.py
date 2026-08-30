@@ -82,25 +82,10 @@ EXEMPT = {
     "platform/rpi5/uart.tkb": "device state; MSI-X is routed to CPU0",
     "platform/rpi5/usb_xhci.tkb": "device state; MSI-X is routed to CPU0",
 
-    # --- NOT AUDITED. Real kernel state, no assertion, no reason yet.
-    # These are the findings this script exists to surface, recorded rather
-    # than hidden: an entry saying "not audited" is a claim someone can act
-    # on, where silence was not. Each needs the same treatment the four
-    # GitHub issue #479 Group A sites got -- produce the race, then fix it.
-    "mm/address_space.tkb":
-        "NOT AUDITED -- 6 globals, 2 lock sites; GitHub issue #479",
-    "mm/process_image.tkb":
-        "NOT AUDITED -- 20 globals, 2 lock sites; GitHub issue #479",
-    "fs/ext2/ext2.tkb":
-        "NOT AUDITED -- 2 globals, no locks; GitHub issue #479",
+    # --- Not state that depends on either number.
     "fs/elf64.tkb":
-        "NOT AUDITED -- no locks; GitHub issue #479",
-    "lib/intrusive_pool.tkb":
-        "NOT AUDITED -- its per-pool lock word is a field, and mutation "
-        "requires the guard by typing, but the one global here is not "
-        "covered by that; GitHub issue #479",
-    "arch/arm64/kernel/exception_evidence.tkb":
-        "NOT AUDITED -- DDB and crash-snapshot state; GitHub issue #479",
+        "ELF_IDENT_MAGIC is a lookup table that is never written; `let mut` "
+        "is how this language declares an initialised array",
 
     # --- Test-only state, reached from the boot fixture on core 0.
     "init/test_driver.tkb":
