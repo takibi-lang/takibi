@@ -7,6 +7,7 @@ use "kernel/kernel/freelist_contention_evidence.tkb";
 use "kernel/kernel/page_contention_evidence.tkb";
 use "kernel/kernel/asid_contention_evidence.tkb";
 use "kernel/kernel/pid_contention_evidence.tkb";
+use "kernel/kernel/tag_contention_evidence.tkb";
 
 must_use variant SecondaryBootResult {
     Started;
@@ -659,6 +660,11 @@ fn main() !{unsafe} {
             // GitHub issue #479: the page allocator's own lock. Added
             // after removing that lock changed nothing any lane could
             // see -- an audit is not evidence.
+            if (tag_contention_probe()) {
+                kernel_boot_log("tag contention: two cores minting a pool tag, every one advanced the counter once ok\n");
+            } else {
+                kernel_boot_log("tag contention: failed\n");
+            }
             if (pid_contention_probe()) {
                 kernel_boot_log("pid contention: two cores minting, every pid advanced the counter once ok\n");
             } else {

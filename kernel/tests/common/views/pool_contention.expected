@@ -1,3 +1,5 @@
+tag contention stage: complete
+tag contention: two cores minting a pool tag, every one advanced the counter once ok
 pid contention stage: complete
 pid contention: two cores minting, every pid advanced the counter once ok
 fd refcount contention stage: complete

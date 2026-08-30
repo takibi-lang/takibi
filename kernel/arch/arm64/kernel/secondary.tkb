@@ -162,6 +162,9 @@ fn kernel_secondary_main(context: usize) {
             if (pid_contention_is_armed()) {
                 pid_contention_secondary_run();
             }
+            if (tag_contention_is_armed()) {
+                tag_contention_secondary_run();
+            }
             wfi();
         }
     }

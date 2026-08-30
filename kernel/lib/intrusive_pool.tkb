@@ -543,6 +543,65 @@ must_use variant IntrusivePoolGrowResult {
 // point.
 private let mut intrusive_pool_next_tag: usize = 1;
 
+// GitHub issue #479. A LEAF lock, and the earlier note in this file
+// guessing it would need the pool's own was wrong: the counter is touched
+// in exactly one place, and that place runs BEFORE the pool it is
+// initialising has a usable lock (mutex_init is the next statement). So
+// there is nothing to nest into and no order to re-derive.
+//
+// Its own global, not a field, for the reason kernel/mm/page.tkb's is.
+private let mut intrusive_pool_tag_lock: Mutex;
+private let mut intrusive_pool_tag_lock_ready: bool = false;
+
+// The counter's whole critical section: a read and an add. Two cores each
+// initialising a different pool -- which the lazy `*_pool_ready` pattern
+// makes ordinary, since the first user of a pool initialises it -- would
+// otherwise both read the same value and both write it plus one, and the
+// two pools would carry one tag.
+//
+// A duplicate tag is worse here than a duplicate number elsewhere. The tag
+// is a pool's IDENTITY (issue #399): every chunk header carries it and
+// intrusive_pool_slot_is_valid uses it to answer "does this pool own this
+// address". Two pools sharing one makes each one's handles look valid to
+// the other, which is exactly the cross-pool confusion the tag exists to
+// prevent.
+private fn intrusive_pool_mint_tag() -> usize {
+    if (intrusive_pool_tag_lock_ready == false) {
+        intrusive_pool_tag_lock_ready = true;
+        mutex_init(&intrusive_pool_tag_lock);
+    }
+    // mutex_acquire directly, NOT pool_lock_acquire, and the difference
+    // matters rather than being style. pool_lock_acquire's tag is what
+    // linux_user/intrusive_pool/pool_lock_check.tkb registers to check
+    // lock ORDER between pools -- and this is not a pool lock. Passing it
+    // a tag put a non-pool into that table, and since the table is finite
+    // it pushed the last 13 real acquires out as "untracked". The checker
+    // reported it, which is how the mistake was found rather than shipped;
+    // this file's own note about TcpConnectionOwner already says the same
+    // thing about a lock that is not a pool's.
+    let flags: usize = mutex_acquire(&intrusive_pool_tag_lock);
+    let tag: usize = intrusive_pool_next_tag;
+    intrusive_pool_next_tag = tag + 1;
+    mutex_release(&intrusive_pool_tag_lock, flags);
+    return tag;
+}
+
+// The probe below mints thousands of tags and puts the counter back, for
+// the reason the pid probe does: nothing was created, so nothing is owed
+// those numbers, and a pool initialised later should get the tag it would
+// have got.
+fn intrusive_pool_tag_counter() -> usize {
+    return intrusive_pool_next_tag;
+}
+
+fn intrusive_pool_tag_counter_restore(value: usize) {
+    intrusive_pool_next_tag = value;
+}
+
+fn intrusive_pool_mint_tag_for_probe() -> usize {
+    return intrusive_pool_mint_tag();
+}
+
 // GitHub issue #399: a pool tag is not 1, 2, 3, ...
 //
 // intrusive_pool_owns_chunk decides "is this page one of MY chunks" by
@@ -746,8 +805,7 @@ fn intrusive_pool_init(T: type, pool: &mut IntrusivePool(T) @ pool_id) {
 // per-POOL axis and the cheap one -- see this file's header.
 fn intrusive_pool_init_retaining(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                                  retained_chunks: usize) {
-    pool.pool_tag = intrusive_pool_mix_tag(intrusive_pool_next_tag);
-    intrusive_pool_next_tag = intrusive_pool_next_tag + 1;
+    pool.pool_tag = intrusive_pool_mix_tag(intrusive_pool_mint_tag());
     // Free. Re-initialising a pool that some core is inside would be a bug
     // this cannot detect, and is not a thing any caller does: init runs
     // once, before the pool is reachable.

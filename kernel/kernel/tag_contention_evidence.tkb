@@ -1,0 +1,168 @@
+// GitHub issue #479 Group A follow-up: two cores minting an IntrusivePool
+// TAG at once.
+//
+// Written before the lock, expected to fail. What the race costs is worse
+// than a duplicate number elsewhere: the tag is a pool's IDENTITY (issue
+// #399), carried in every chunk header and used by
+// intrusive_pool_slot_is_valid to answer "does this pool own this
+// address". Two pools sharing one makes each one's handles look valid to
+// the other -- the exact cross-pool confusion the tag exists to prevent,
+// and the thing #345's indexed handles were built to make impossible.
+//
+// The detector is the counter's own arithmetic, compared against this
+// probe's OWN atomic counters and never against a kernel one -- the asid
+// probe's first version compared two racing counters and could not have
+// failed.
+//
+// Current limitations:
+// - IT PUTS THE COUNTER BACK, like the pid probe. Nothing was created, so
+//   nothing is owed those numbers, and a pool initialised later should get
+//   the tag it would have got.
+// - Two cores initialising two pools at once is the situation this models,
+//   and it is ordinary rather than exotic: the lazy `*_pool_ready` pattern
+//   means the first USER of a pool initialises it.
+// - Measures exclusion, not ordering.
+
+use "kernel/lib/intrusive_pool.tkb";
+use "kernel/lib/execution_model.tkb";
+
+const TAG_CONTENTION_ROUNDS: usize = 2048;
+const TAG_CONTENTION_OUTSIDE_WORK: usize = 64;
+
+private let mut tag_probe_armed: usize;
+private let mut tag_probe_primary: usize;
+private let mut tag_probe_secondary: usize;
+private let mut tag_probe_active: usize;
+private let mut tag_probe_overlap: usize;
+
+private fn tag_probe_armed_address() -> usize {
+    return (&tag_probe_armed) as usize;
+}
+
+private fn tag_probe_primary_address() -> usize {
+    return (&tag_probe_primary) as usize;
+}
+
+private fn tag_probe_secondary_address() -> usize {
+    return (&tag_probe_secondary) as usize;
+}
+
+private fn tag_probe_active_address() -> usize {
+    return (&tag_probe_active) as usize;
+}
+
+private fn tag_probe_overlap_address() -> usize {
+    return (&tag_probe_overlap) as usize;
+}
+
+private fn tag_probe_cycle() {
+    let pid: usize = intrusive_pool_mint_tag_for_probe();
+    for spin: usize in 0..<TAG_CONTENTION_OUTSIDE_WORK { }
+}
+
+fn tag_contention_is_armed() -> bool !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(tag_probe_armed_address())
+    } == 1;
+}
+
+fn tag_contention_secondary_run() !{unsafe} {
+    unsafe { atomic_store_release(tag_probe_active_address(), 1); }
+    while (unsafe {
+               atomic_load_acquire(tag_probe_secondary_address())
+           } < TAG_CONTENTION_ROUNDS &&
+           unsafe { atomic_load_acquire(tag_probe_armed_address()) } == 1) {
+        tag_probe_cycle();
+        unsafe {
+            atomic_fetch_add_relaxed(tag_probe_secondary_address(), 1);
+        }
+    }
+    unsafe { atomic_store_release(tag_probe_active_address(), 0); }
+}
+
+private fn tag_contention_report(stage: *u8, advanced: usize,
+                                  calls: usize) !{unsafe} {
+    kernel_boot_log("tag contention stage: ");
+    kernel_boot_log(stage);
+    kernel_boot_log("\n");
+    kernel_boot_log("tag contention counts: primary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(tag_probe_primary_address())
+    });
+    kernel_boot_log(" secondary=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(tag_probe_secondary_address())
+    });
+    kernel_boot_log(" calls=");
+    uart_put_udec(calls);
+    kernel_boot_log(" advanced=");
+    uart_put_udec(advanced);
+    kernel_boot_log(" overlap=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(tag_probe_overlap_address())
+    });
+    kernel_boot_log("\n");
+}
+
+fn tag_contention_probe() -> bool !{unsafe} {
+    let next_before: usize = intrusive_pool_tag_counter();
+    unsafe { atomic_store_release(tag_probe_armed_address(), 1); }
+
+    let entry_window: i64 = read_cntfrq() >> 2;
+    let entry_start: i64 = read_cntpct();
+    let mut entered: bool = false;
+    while (entered == false && read_cntpct() - entry_start < entry_window) {
+        if (unsafe {
+                atomic_load_acquire(tag_probe_active_address())
+            } == 1) {
+            entered = true;
+        }
+    }
+    if (entered == false) {
+        unsafe { atomic_store_release(tag_probe_armed_address(), 0); }
+        tag_contention_report("secondary-never-entered" as *u8, 0, 0);
+        return false;
+    }
+
+    for round: usize in 0..<TAG_CONTENTION_ROUNDS {
+        tag_probe_cycle();
+        unsafe {
+            atomic_fetch_add_relaxed(tag_probe_primary_address(), 1);
+        }
+    }
+
+    unsafe {
+        atomic_store_release(tag_probe_overlap_address(),
+            atomic_load_acquire(tag_probe_secondary_address()));
+    }
+
+    let finish_window: i64 = read_cntfrq() * 2;
+    let finish_start: i64 = read_cntpct();
+    let mut finished: bool = false;
+    while (finished == false && read_cntpct() - finish_start < finish_window) {
+        if (unsafe {
+                atomic_load_acquire(tag_probe_secondary_address())
+            } >= TAG_CONTENTION_ROUNDS) {
+            finished = true;
+        }
+    }
+    unsafe { atomic_store_release(tag_probe_armed_address(), 0); }
+
+    let advanced: usize = intrusive_pool_tag_counter() - next_before;
+    let calls: usize =
+        unsafe { atomic_load_acquire(tag_probe_primary_address()) } +
+        unsafe { atomic_load_acquire(tag_probe_secondary_address()) };
+    if (finished == false) {
+        tag_contention_report("secondary-never-finished" as *u8, advanced,
+                               calls);
+        return false;
+    }
+    // Back where it started, before the verdict, so a failed probe does
+    // not also leave the counter moved.
+    intrusive_pool_tag_counter_restore(next_before);
+    tag_contention_report("complete" as *u8, advanced, calls);
+    let overlap: usize = unsafe {
+        atomic_load_acquire(tag_probe_overlap_address())
+    };
+    return advanced == calls && overlap > 0;
+}
