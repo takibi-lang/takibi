@@ -1,12 +1,7 @@
-// QEMU virtio-blk legacy MMIO backend.  This deliberately follows the
+// QEMU virtio-blk legacy MMIO backend. The transport base is selected from
+// the boot DTB before this driver runs. The queue deliberately follows the
 // descriptor/avail/used layout used by kernel/drivers/net/virtio_net.tkb.
 
-const VIRTIO_BLK_MMIO_FIRST: i32 = 0x0a000000;
-const VIRTIO_BLK_MMIO_STRIDE: i32 = 0x200;
-const VIRTIO_BLK_MMIO_SLOTS: i32 = 32;
-const VIRTIO_BLK_MAGIC: u32 = 0x74726976;
-const VIRTIO_BLK_ID: u32 = 2;
-const VIRTIO_BLK_DEVICE_ID: i32 = 0x08;
 const VIRTIO_BLK_GUEST_FEATURES: i32 = 0x20;
 const VIRTIO_BLK_GUEST_PAGE_SIZE: i32 = 0x28;
 const VIRTIO_BLK_QUEUE_SEL: i32 = 0x30;
@@ -97,25 +92,18 @@ fn virtio_blk_setup_queue() {
 
 fn virtio_blk_init() -> bool !{unsafe} {
     if (virtio_blk_ready) { return true; }
-    for i in 0..<VIRTIO_BLK_MMIO_SLOTS {
-        let base: i32 = VIRTIO_BLK_MMIO_FIRST + i * VIRTIO_BLK_MMIO_STRIDE;
-        let magic: *io u32 = unsafe { base as *io u32 };
-        let device: *io u32 = unsafe { (base + VIRTIO_BLK_DEVICE_ID) as *io u32 };
-        if (*magic == VIRTIO_BLK_MAGIC && *device == VIRTIO_BLK_ID) {
-            virtio_blk_base = base;
-            *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 0;
-            *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 1;
-            *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 3;
-            *(virtio_blk_reg(VIRTIO_BLK_GUEST_FEATURES)) = 0;
-            *(virtio_blk_reg(VIRTIO_BLK_GUEST_PAGE_SIZE)) = VIRTIO_BLK_PAGE_SIZE as i32;
-            virtio_blk_setup_queue();
-            *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 7;
-            virtio_blk_used_seen = 0;
-            virtio_blk_ready = true;
-            return true;
-        }
-    }
-    return false;
+    if (virtio_blk_base == 0) { return false; }
+    *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 0;
+    *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 1;
+    *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 3;
+    *(virtio_blk_reg(VIRTIO_BLK_GUEST_FEATURES)) = 0;
+    *(virtio_blk_reg(VIRTIO_BLK_GUEST_PAGE_SIZE)) =
+        VIRTIO_BLK_PAGE_SIZE as i32;
+    virtio_blk_setup_queue();
+    *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 7;
+    virtio_blk_used_seen = 0;
+    virtio_blk_ready = true;
+    return true;
 }
 
 fn virtio_blk_submit(request_type: u32, sector: u32,

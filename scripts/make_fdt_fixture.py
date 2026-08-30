@@ -102,13 +102,15 @@ def main():
     valid_modes = valid_modes + ("--invalid-gic",)
     valid_modes = valid_modes + ("--invalid-pcie-ranges",
                                  "--invalid-pcie-dma-ranges")
+    valid_modes = valid_modes + ("--invalid-virtio",)
     if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and
                                      sys.argv[2] not in valid_modes):
         print("usage: make_fdt_fixture.py OUTPUT "
               "[--invalid-memory|--invalid-reservation|"
               "--invalid-tree-reservation|--invalid-device|"
               "--invalid-interrupt|--missing-interrupt|--invalid-gic|"
-              "--invalid-pcie-ranges|--invalid-pcie-dma-ranges]",
+              "--invalid-pcie-ranges|--invalid-pcie-dma-ranges|"
+              "--invalid-virtio]",
               file=sys.stderr)
         return 2
     mode = sys.argv[2] if len(sys.argv) == 3 else ""
@@ -139,6 +141,27 @@ def main():
         b.prop("interrupts", b.cells(0, 1, 4))
     b.prop("compatible", b"arm,pl011\0arm,primecell\0")
     b.prop("status", b"okay\0")
+    b.end()
+
+    b.begin("virtio_mmio@9ffff00")
+    b.prop("compatible", b"virtio,mmio\0")
+    b.prop("reg", b.cells(0, 0x09FFFF00, 0))
+    b.prop("status", b"disabled\0")
+    b.end()
+    b.begin("virtio_mmio@a000000")
+    b.prop("compatible", b"virtio,mmio\0")
+    b.prop("reg", b.cells(0, 0x0A000000, 0, 0x200))
+    if mode != "--missing-interrupt":
+        b.prop("interrupts", b.cells(0, 16, 1))
+    b.end()
+    b.begin("virtio_mmio@a000200")
+    b.prop("compatible", b"virtio,mmio\0")
+    if mode == "--invalid-virtio":
+        b.prop("reg", b.cells(0, 0x0A000200, 0))
+    else:
+        b.prop("reg", b.cells(0, 0x0A000200, 0, 0x200))
+    if mode != "--missing-interrupt":
+        b.prop("interrupts", b.cells(0, 17, 1))
     b.end()
 
     # QEMU virt's GICv2 interrupt parent. Keep its properties after devices

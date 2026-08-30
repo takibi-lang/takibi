@@ -29,11 +29,16 @@ invalid rp1 gpio invalid
 invalid rp1 usb0 invalid
 qemu pl011 interrupt intid 0x00000021 flags 0x00000004
 rpi5 generic timer interrupt intid 0x0000001e flags 0x00000f08
+qemu virtio 0 base 0x00000000 0x0a000000 intid 0x00000030 flags 0x00000001
+qemu virtio 1 base 0x00000000 0x0a000200 intid 0x00000031 flags 0x00000001
+qemu virtio 2 not found
 missing interrupt not found
 invalid interrupt invalid
 invalid timer interrupt invalid
 missing interrupt property not found
 missing timer interrupt not found
+missing virtio interrupt invalid
+invalid virtio 1 invalid
 qemu gic distributor 0x00000000 0x08000000 cpu 0x00000000 0x08010000
 rpi5 gic distributor 0x00000010 0x7fff9000 cpu 0x00000010 0x7fffa000
 invalid gic invalid

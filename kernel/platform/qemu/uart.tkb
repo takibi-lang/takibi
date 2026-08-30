@@ -125,6 +125,64 @@ must_use variant QemuBootDevicesResult {
     Applied;
 }
 
+must_use variant QemuVirtioDtbResult {
+    Invalid;
+    Applied;
+}
+
+fn qemu_virtio_apply_boot_dtb(dtb: usize)
+        -> QemuVirtioDtbResult !{unsafe} {
+    let mut index: usize = 0;
+    let mut net_found: bool = false;
+    let mut block_found: bool = false;
+    while (true) {
+        match fdt_find_compatible_gic_transport_index(
+                dtb, bs"virtio,mmio", index) {
+            FdtMmioTransportResult::Invalid => {
+                return QemuVirtioDtbResult::Invalid;
+            }
+            FdtMmioTransportResult::NotFound => {
+                return QemuVirtioDtbResult::Applied;
+            }
+            FdtMmioTransportResult::Found(transport) => {
+                if (transport.base > 0x7FFFFFFF ||
+                    transport.size < 0x108 ||
+                    transport.interrupt.intid > 0x7FFFFFFF) {
+                    return QemuVirtioDtbResult::Invalid;
+                }
+                let magic: *io u32 = unsafe {
+                    transport.base as *io u32
+                };
+                let device: *io u32 = unsafe {
+                    (transport.base + 0x08) as *io u32
+                };
+                if (*magic == 0x74726976) {
+                    if (*device == 1) {
+                        if (net_found) {
+                            return QemuVirtioDtbResult::Invalid;
+                        }
+                        virtio_base = transport.base as i32;
+                        virtio_net_gic_intid =
+                            transport.interrupt.intid as i32;
+                        net_found = true;
+                    } else if (*device == 2) {
+                        if (block_found) {
+                            return QemuVirtioDtbResult::Invalid;
+                        }
+                        virtio_blk_base = transport.base as i32;
+                        block_found = true;
+                    }
+                }
+                if (index == 0xFFFFFFFFFFFFFFFF) {
+                    return QemuVirtioDtbResult::Invalid;
+                }
+                index = index + 1;
+            }
+        }
+    }
+    return QemuVirtioDtbResult::Invalid;
+}
+
 fn qemu_boot_devices_apply_dtb() -> QemuBootDevicesResult !{unsafe} {
     let dtb: usize = boot_dtb_address_read();
     match fdt_find_compatible_reg(dtb, bs"arm,pl011") {
@@ -182,6 +240,12 @@ fn qemu_boot_devices_apply_dtb() -> QemuBootDevicesResult !{unsafe} {
                                             QEMU_TIMER_GIC_INTID as usize ||
                                         (timer.flags & 0xF) != 4) {
                                         return QemuBootDevicesResult::Invalid;
+                                    }
+                                    match qemu_virtio_apply_boot_dtb(dtb) {
+                                        QemuVirtioDtbResult::Invalid => {
+                                            return QemuBootDevicesResult::Invalid;
+                                        }
+                                        QemuVirtioDtbResult::Applied => { }
                                     }
                                     uart_base = region.base;
                                     qemu_uart_gic_intid =

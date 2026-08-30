@@ -108,6 +108,18 @@ struct FdtGicInterrupt {
     flags: usize;
 }
 
+struct FdtMmioTransport {
+    base: usize;
+    size: usize;
+    interrupt: FdtGicInterrupt;
+}
+
+must_use variant FdtMmioTransportResult {
+    Invalid;
+    NotFound;
+    Found(FdtMmioTransport);
+}
+
 // Deliberately narrow device lookup for the drivers being migrated from
 // constants. It accepts a root child (QEMU virt's PL011), one simple-bus
 // translation (an RPi5 SoC-direct device), or the concrete
@@ -688,7 +700,7 @@ private fn fdt_scan_tree_reservations(base: usize, wanted: usize)
 private fn fdt_find_compatible_reg_bounded(
         base: usize, compatible: []u8, pcie_nested_only: bool,
         required_candidate_base: usize, required_nested_base: usize,
-        allow_root_without_reg: bool)
+        allow_root_without_reg: bool, required_candidate_index: usize)
         -> FdtDeviceRegionResult !{unsafe} {
     if (fdt_read_be32(base, FDT_HEADER_SIZE, 0) != FDT_MAGIC) {
         return FdtDeviceRegionResult::Invalid;
@@ -735,6 +747,7 @@ private fn fdt_find_compatible_reg_bounded(
     let mut candidate_interrupts_offset: usize = 0;
     let mut candidate_interrupts_length: usize = 0;
     let mut candidate_base_matches: bool = true;
+    let mut candidate_matches_seen: usize = 0;
 
     // The other bounded shape is root -> axi -> PCIe -> RP1 -> device.
     // PCI child addresses have a leading flags cell, so this remains a
@@ -951,6 +964,12 @@ private fn fdt_find_compatible_reg_bounded(
                     return FdtDeviceRegionResult::Found(region);
                 }
                 nested_depth = 0;
+            }
+            if (candidate_depth == depth && candidate_enabled &&
+                candidate_compatible && pcie_nested_only == false &&
+                candidate_matches_seen < required_candidate_index) {
+                candidate_matches_seen = candidate_matches_seen + 1;
+                candidate_compatible = false;
             }
             if (candidate_depth == depth) {
                 if (candidate_enabled && candidate_compatible &&
@@ -1227,14 +1246,21 @@ private fn fdt_find_compatible_reg_bounded(
 fn fdt_find_compatible_reg(base: usize, compatible: []u8)
         -> FdtDeviceRegionResult !{unsafe} {
     return fdt_find_compatible_reg_bounded(
-        base, compatible, false, 0, 0, false);
+        base, compatible, false, 0, 0, false, 0);
+}
+
+fn fdt_find_compatible_reg_index(
+        base: usize, compatible: []u8, index: usize)
+        -> FdtDeviceRegionResult !{unsafe} {
+    return fdt_find_compatible_reg_bounded(
+        base, compatible, false, 0, 0, false, index);
 }
 
 fn fdt_find_compatible_reg_at(
         base: usize, compatible: []u8, child_base: usize)
         -> FdtDeviceRegionResult !{unsafe} {
     return fdt_find_compatible_reg_bounded(
-        base, compatible, false, child_base, 0, false);
+        base, compatible, false, child_base, 0, false, 0);
 }
 
 fn fdt_find_compatible_mip_regions(
@@ -1408,14 +1434,14 @@ fn fdt_find_compatible_rp1_gpio_regions(base: usize, compatible: []u8)
 fn fdt_find_compatible_pcie_reg(base: usize, compatible: []u8)
         -> FdtDeviceRegionResult !{unsafe} {
     return fdt_find_compatible_reg_bounded(
-        base, compatible, true, 0, 0, false);
+        base, compatible, true, 0, 0, false, 0);
 }
 
 fn fdt_find_compatible_pcie_reg_at(
         base: usize, compatible: []u8, child_base: usize)
         -> FdtDeviceRegionResult !{unsafe} {
     return fdt_find_compatible_reg_bounded(
-        base, compatible, true, 0, child_base, false);
+        base, compatible, true, 0, child_base, false, 0);
 }
 
 fn fdt_find_compatible_gicv2_regions(base: usize, compatible: []u8)
@@ -1693,6 +1719,60 @@ fn fdt_find_compatible_gic_interrupt(base: usize, compatible: []u8)
     }
 }
 
+fn fdt_find_compatible_gic_transport_index(
+        base: usize, compatible: []u8, index: usize)
+        -> FdtMmioTransportResult !{unsafe} {
+    match fdt_find_compatible_reg_index(base, compatible, index) {
+        FdtDeviceRegionResult::Invalid => {
+            return FdtMmioTransportResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            return FdtMmioTransportResult::NotFound;
+        }
+        FdtDeviceRegionResult::Found(device) => {
+            if (device.interrupt_parent == 0 ||
+                device.interrupts_length == 0) {
+                return FdtMmioTransportResult::Invalid;
+            }
+            match fdt_find_interrupt_controller(
+                    base, device.interrupt_parent) {
+                FdtInterruptControllerScanResult::Invalid => {
+                    return FdtMmioTransportResult::Invalid;
+                }
+                FdtInterruptControllerScanResult::NotFound => {
+                    return FdtMmioTransportResult::Invalid;
+                }
+                FdtInterruptControllerScanResult::Found(controller) => {
+                    if (controller.interrupt_cells != 3 ||
+                        device.interrupts_length != 12) {
+                        return FdtMmioTransportResult::Invalid;
+                    }
+                    let total: usize = fdt_read_be32(
+                        base, FDT_HEADER_SIZE, 4);
+                    let irq_type: usize = fdt_read_be32(
+                        base, total, device.interrupts_offset);
+                    let number: usize = fdt_read_be32(
+                        base, total, device.interrupts_offset + 4);
+                    let flags: usize = fdt_read_be32(
+                        base, total, device.interrupts_offset + 8);
+                    if (irq_type != 0 || number > 987 ||
+                        (flags != 1 && flags != 2 && flags != 4 &&
+                         flags != 8)) {
+                        return FdtMmioTransportResult::Invalid;
+                    }
+                    let mut interrupt: FdtGicInterrupt = {
+                        number + 32, flags
+                    };
+                    let mut transport: FdtMmioTransport = {
+                        device.base, device.size, interrupt
+                    };
+                    return FdtMmioTransportResult::Found(transport);
+                }
+            }
+        }
+    }
+}
+
 // The architectural timer is a root child with no reg property. Its standard
 // interrupt list is ordered secure physical, non-secure physical, virtual,
 // hypervisor, followed on newer firmware by optional extra timer channels.
@@ -1701,7 +1781,7 @@ fn fdt_find_compatible_gic_interrupt(base: usize, compatible: []u8)
 fn fdt_find_armv8_timer_interrupt(base: usize)
         -> FdtGicInterruptResult !{unsafe} {
     match fdt_find_compatible_reg_bounded(
-            base, bs"arm,armv8-timer", false, 0, 0, true) {
+            base, bs"arm,armv8-timer", false, 0, 0, true, 0) {
         FdtDeviceRegionResult::Invalid => {
             return FdtGicInterruptResult::Invalid;
         }
