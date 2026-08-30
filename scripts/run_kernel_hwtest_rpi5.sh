@@ -120,6 +120,10 @@ cleanup() {
         kill "$uart_driver_pid" 2>/dev/null || true
         wait "$uart_driver_pid" 2>/dev/null || true
     fi
+    if [ -n "${pinned_neigh:-}" ]; then
+        sudo ip neigh del "${ETH_TEST_SUBNET}.2" dev "$ETH_TEST_IFACE" \
+            2>/dev/null || true
+    fi
 }
 trap cleanup EXIT INT TERM HUP
 
@@ -132,9 +136,84 @@ if ! "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$ELF" >"$LOADER_LOG" 2>&1; then
 fi
 echo "[kernel/rpi5] kernel loaded in $((SECONDS - load_started))s; waiting for integration completion"
 
+# GitHub issue #387: ONE readiness gate, before the FIRST wire test, rather
+# than one answer per script.
+#
+# What this replaces: the three wire tests below used to start the moment
+# rpi5_jtag_load.sh returned -- which is when SWD finished injecting, not
+# when the board can answer. eth_arp_reply_test.py does retry (RETRIES = 20
+# at RETRY_TIMEOUT_SECS = 0.5), so it tolerates ten seconds of silence; that
+# budget had to cover boot, PCIe enumeration, RP1 GEM bring-up and PHY
+# auto-negotiation, and when it did not, a board that was simply not up yet
+# was reported as "ARP integration failed". Measured 2026-08-30: three of
+# five consecutive runs failed on the wire tests while the change under test
+# was clean.
+#
+# The kernel already says when it is ready. Waiting for it costs nothing on
+# a healthy run and turns a misattributed protocol failure into an accurate
+# one -- the same fix the TCP flake took on 2026-08-02, which was the test
+# harness firing before the kernel was listening rather than anything in
+# kernel/net/tcp.tkb.
+#
+# The elapsed time is printed because it is GitHub issue #411's number and
+# this wait measures it directly: a ten-second retry budget against a boot
+# nobody had timed is exactly the pairing that issue was opened about.
+echo "[kernel/rpi5] waiting for the RP1 GEM link"
+link_started=$SECONDS
+link_ready=0
+for _wait in $(seq 1 600); do
+    if LC_ALL=C grep -aFq 'rp1 gem: link ready' "$UART_LOG"; then
+        link_ready=1
+        break
+    fi
+    # A failed bring-up is a different answer from a slow one, and the
+    # kernel distinguishes them. Say so immediately instead of spending the
+    # whole window discovering it.
+    if LC_ALL=C grep -aFq 'rp1 gem: link failed' "$UART_LOG"; then
+        echo "FAIL kernel/rpi5: the kernel reported 'rp1 gem: link failed' (see $UART_LOG)" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+if [ "$link_ready" -ne 1 ]; then
+    echo "FAIL kernel/rpi5: the kernel never announced 'rp1 gem: link ready' (see $UART_LOG) -- the board did not reach a usable link, which is NOT a protocol defect in the tests below" >&2
+    exit 1
+fi
+echo "[kernel/rpi5] RP1 GEM link ready $((SECONDS - link_started))s after load"
+
+# GitHub issue #387: stop the HOST from asking, because the board can only
+# answer once.
+#
+# kernel/platform/rpi5/init.tkb calls kernel_arp_reply_once(link_ready): the
+# affine RX readiness capability is spent on exactly ONE real ARP request,
+# by design, because spending it once is what the fixture proves. So
+# whichever request arrives first gets the reply -- and the host has its own
+# reason to send one. `ip neigh` keeps an entry for the board from the
+# previous run's TCP and HTTP traffic; it goes STALE between runs and Linux
+# re-probes it unprompted. That probe consumes the board's single reply, and
+# the test's own `who-has 192.168.20.2` then times out against a kernel that
+# has already moved on.
+#
+# Both observed failure shapes are that one cause: the probe's reply landing
+# inside the negative control's window (reported as "unexpected reply for a
+# non-owned IP", though its SPA was the board's OWN address), and the
+# positive test failing outright.
+#
+# A permanent neighbour entry means Linux never asks. It does not weaken
+# either assertion: eth_arp_reply_test.py builds raw frames on AF_PACKET and
+# bypasses the neighbour table entirely, so both its request and the board's
+# reply still traverse the whole path. Removed again on exit rather than
+# left behind, since a test should not permanently edit the host's network
+# state.
+echo "[kernel/rpi5] pinning the board's neighbour entry so the host does not ARP for it"
+sudo ip neigh replace "${ETH_TEST_SUBNET}.2" lladdr "$ETH_TEST_MAC" \
+    dev "$ETH_TEST_IFACE" nud permanent
+pinned_neigh=1
+
 # The kernel holds its affine RX readiness capability while waiting for one
-# real ARP request. Exercise the wire path immediately after resume; keep the
-# raw-socket privilege confined to the existing protocol checker.
+# real ARP request. Exercise the wire path now that the link exists and the
+# host has been told not to compete for that one reply; keep the raw-socket
+# privilege confined to the existing protocol checker.
 echo "[kernel/rpi5] checking ARP reply on $ETH_TEST_IFACE"
 if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
         ARP_TEST_REQUESTER_IP="$ETH_TEST_HOST_IP" \

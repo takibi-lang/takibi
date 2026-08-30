@@ -239,6 +239,23 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
     }
     unsafe { atomic_store_release(freelist_probe_armed_address(), 1); }
 
+    // DELIBERATELY the `active` gate, not the completed-round gate that
+    // page/tag/asid/schedule take.
+    //
+    // GitHub issue #479: waiting for the secondary to finish a round makes
+    // the two cores start OFFSET rather than together. That is what those
+    // probes want -- their verdicts need overlap, and issue #478 otherwise
+    // starves the second core out of the measurement. This one is
+    // different: its phase 1 has to SHOW the race, and its detection
+    // window is a few instructions wide (freelist_core_insert reads
+    // free_head and writes it back), not a whole claim like
+    // schedule_contention's. Measured: with the completed-round gate,
+    // phase 1 came back duplicates=0 on QEMU -- the race stopped
+    // reproducing and the two-sided test correctly failed.
+    //
+    // So the rule is not "always gate on a completed round". It is: gate on
+    // a completed round when the verdict needs OVERLAP, and gate on
+    // presence when phase 1 needs the cores to COLLIDE.
     let entry_window: i64 = read_cntfrq() >> 2;
     let entry_start: i64 = read_cntpct();
     let mut entered: bool = false;

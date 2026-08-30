@@ -130,14 +130,52 @@ def drain_received_frames(sock: socket.socket) -> None:
     sock.settimeout(RETRY_TIMEOUT_SECS)
 
 
+def claims_to_be(reply: bytes, ip: bytes) -> bool:
+    """Is this an ARP REPLY whose sender protocol address is `ip`?
+
+    GitHub issue #387. The silence assertion used to fail on ANY frame that
+    was not its own looped-back request, which is not what it means to
+    assert. Measured on RPi5 2026-08-30: one run in five failed here with
+
+        unexpected reply for a non-owned IP: ...c0a81402...
+
+    and c0a81402 is 192.168.20.2 -- the board's OWN address, in a correct
+    reply to somebody else's legitimate question, arriving while this window
+    happened to be open. The segment is shared with the host's own stack and
+    with whatever the previous run left connected, so a correct reply for the
+    board's real IP is ordinary traffic, not evidence of the defect under
+    test.
+
+    What this assertion means is narrower and is now what it checks: nothing
+    claimed to be OTHER_IP. A board that really did answer for an address it
+    does not own still fails, because its reply would carry OTHER_IP as SPA.
+    """
+    if len(reply) < 42:
+        return False
+    reply = reply[:42]
+    ethertype = reply[12:14]
+    arp = reply[14:42]
+    return (
+        ethertype == ARP_ETHERTYPE and
+        arp[0:2] == bytes([0x00, 0x01]) and   # HTYPE = Ethernet
+        arp[2:4] == bytes([0x08, 0x00]) and   # PTYPE = IPv4
+        arp[4] == 6 and arp[5] == 4 and
+        arp[6:8] == bytes([0x00, 0x02]) and   # OPER = reply
+        arp[14:18] == ip                      # SPA
+    )
+
+
 def test_who_has_other_stays_silent(sock: socket.socket, requester_mac: bytes) -> bool:
-    # arp_reply_stm32 must not answer for an IP it doesn't own. There is no
-    # "definitely never arrives" proof possible, so this just waits a bit
-    # longer than a real reply would take and checks nothing showed up.
+    # The board must not answer for an IP it doesn't own. There is no
+    # "definitely never arrives" proof possible, so this waits a bit longer
+    # than a real reply would take and checks that nothing CLAIMING THAT
+    # ADDRESS showed up -- see claims_to_be for why the distinction is the
+    # whole difference between an assertion and a flake.
     drain_received_frames(sock)
     frame = build_arp_request(requester_mac, OTHER_IP)
     sock.send(frame)
     deadline = time.monotonic() + SILENCE_TIMEOUT_SECS
+    unrelated = 0
     while time.monotonic() < deadline:
         try:
             reply = sock.recv(2000)
@@ -145,8 +183,15 @@ def test_who_has_other_stays_silent(sock: socket.socket, requester_mac: bytes) -
             continue
         if reply[: len(frame)] == frame:
             continue  # our own outgoing frame looped back -- not a reply
-        print("  unexpected reply for a non-owned IP:", reply.hex())
-        return False
+        if claims_to_be(reply, OTHER_IP):
+            print("  unexpected reply for a non-owned IP:", reply.hex())
+            return False
+        unrelated += 1
+    # Reported rather than silent: a busy segment is not a failure here, but
+    # it IS the thing that used to be reported as one, so a reader who sees
+    # this test go green on a noisy wire can tell the two apart.
+    if unrelated:
+        print(f"  ignored {unrelated} unrelated frame(s) during the silence window")
     return True
 
 

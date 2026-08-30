@@ -122,19 +122,29 @@ fn asid_contention_probe() -> bool !{unsafe} {
     let rollovers_before: usize = asid_rollover_count_value();
     unsafe { atomic_store_release(asid_probe_armed_address(), 1); }
 
+    // GitHub issue #479: wait for a COMPLETED ROUND, not merely for
+    // `active`, which the secondary sets BEFORE its first cycle. Under
+    // issue #478's starvation the primary can otherwise run its entire
+    // phase before the secondary does anything, and `overlap > 0` then
+    // fails on a healthy kernel.
+    //
+    // Applied to page_contention first, then to schedule_contention, and
+    // recorded at the time as something the remaining probes were fragile
+    // about and should take "when one of them next moves". `tag` moved on
+    // its own: it failed on RPi5 with overlap 18 of 2048 and then with 0.
     let entry_window: i64 = read_cntfrq() >> 2;
     let entry_start: i64 = read_cntpct();
     let mut entered: bool = false;
     while (entered == false && read_cntpct() - entry_start < entry_window) {
         if (unsafe {
-                atomic_load_acquire(asid_probe_active_address())
-            } == 1) {
+                atomic_load_acquire(asid_probe_secondary_address())
+            } >= 1) {
             entered = true;
         }
     }
     if (entered == false) {
         unsafe { atomic_store_release(asid_probe_armed_address(), 0); }
-        asid_contention_report("secondary-never-entered" as *u8, 0, 0);
+        asid_contention_report("secondary-never-completed-a-round" as *u8, 0, 0);
         return false;
     }
 
