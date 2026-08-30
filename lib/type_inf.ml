@@ -508,6 +508,36 @@ let check_literal_fits_refined loc (e : Ast.expr) (target : ty) =
              "cannot use integer literal %d where bool is expected; use true/false"
              k))
        | None -> ())
+  (* GitHub issues #460/#487: an integer literal where an AGGREGATE is
+     expected. `infer_expr`'s `IntLit _ -> fresh ()` makes a literal's type
+     a bare type variable so context can pick the integer width, and a bare
+     variable unifies with anything -- including `[usize; 4]` and a struct.
+     A non-literal of the wrong type is caught ("cannot unify usize with
+     [usize; 4]"); only the literal slips past, and codegen then emits a
+     store at the LITERAL's width. Measured on x86-64: `arr = 0` on a
+     32-byte array emits `movl $0x0, (%rax)`. Four bytes.
+
+     What that costs is not a wrong value, it is a type change that fails
+     to produce its errors. #487 found two sites saying
+     `kernel_crash_trace_next = 0` that kept compiling after that counter
+     became an array, and stayed silently wrong because clearing the low
+     half of element zero happened to be enough for one core. #460 is the
+     same shape one field over: `entry.mutex = 0` after `mutex` became a
+     `Mutex`, writing four bytes of an eight-byte lock word.
+
+     Rejecting the aggregates by name rather than accepting the integers by
+     name, deliberately: pointers really do take literals here (a `0` for a
+     null MMIO base, an `io` pointer via the coercion at
+     `adapt_actual_to_expected`), and an accept-list would have to keep up
+     with every such case or start breaking them. *)
+  | TArray _ | TStruct _ | TIndexedStruct _ | TTuple _ | TSlice _ ->
+      (match Const_env.bound_value e with
+       | Some k ->
+           raise (TypeError (loc, Printf.sprintf
+             "cannot use integer literal %d where %s is expected: it would \
+              store the literal's own width, not the target's"
+             k (to_string target)))
+       | None -> ())
   | _ -> ()
 
 let rec static_place_key (e : Ast.expr) =

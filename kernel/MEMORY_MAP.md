@@ -75,8 +75,8 @@ build; the boundaries are what matter.
 | Symbol | RPi5 | QEMU `virt` | Defined by | State |
 |---|---|---|---|---|
 | `_start` | `0x00200000` | `0x40000000` | linker script `.` assignment | CHECKED (ELF) |
-| `__bss_start` | `0x004d9000` | `0x402d8000` | linker script `.bss` | CHECKED (ELF) |
-| `__bss_end` | `0x00539bc0` | `0x40340110` | linker script `.bss` | CHECKED (ELF) |
+| `__bss_start` | `0x004dc000` | `0x402db000` | linker script `.bss` | CHECKED (ELF) |
+| `__bss_end` | `0x0053cc20` | `0x403437a0` | linker script `.bss` | CHECKED (ELF) |
 | `boot_stack_run_bottom` | `0x00540000` | `0x40348000` | linker script `.stack` | CHECKED (ELF) |
 | `boot_stack_bottom` | `0x00544000` | `0x4034c000` | linker script `.stack` | CHECKED (ELF) |
 | `boot_stack_top` | `0x00548000` | `0x40350000` | linker script `.stack` | CHECKED (ELF) |

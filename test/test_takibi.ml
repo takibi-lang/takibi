@@ -5872,6 +5872,76 @@ let infer_tests = [
         struct NsOpaqueStruct { x: i32; }
         fn use_ns_opaque_struct(p: *NsOpaqueStruct) {}");
 
+  (* GitHub issues #460/#487: an integer literal is inferred as a bare type
+     variable so context can pick its width, and a bare variable unified
+     with anything -- so `arr = 0` on an array and `s = 0` on a struct both
+     compiled and emitted a store at the LITERAL's width. Four bytes into a
+     32-byte array, measured on x86-64 as `movl $0x0, (%rax)`.
+
+     Both spellings are covered because both were found the same way: a type
+     change that should have produced compile errors produced none. #487's
+     was `kernel_crash_trace_next = 0` surviving a scalar-to-array change,
+     #460's was `entry.mutex = 0` surviving `i32`-to-`Mutex`. *)
+  Alcotest.test_case
+    "integer literal assigned to an ARRAY is rejected (#487)" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "let mut arr: [usize; 4];
+                   fn f() { arr = 0; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the literal" true
+             (contains_substring msg "integer literal");
+           Alcotest.(check bool) "names the target type" true
+             (contains_substring msg "[usize; 4]"));
+
+  Alcotest.test_case
+    "integer literal assigned to a STRUCT field is rejected (#460)" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "struct M { w: usize; }
+                   struct E { m: M; }
+                   let mut e: E;
+                   fn f() { e.m = 0; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the struct" true
+             (contains_substring msg "M"));
+
+  Alcotest.test_case
+    "integer literal in a let-init and a call argument is rejected too"
+    `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "fn takes(a: [usize; 2]) -> usize { return a[0]; }
+                   fn f() -> usize { return takes(0); }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the literal" true
+             (contains_substring msg "integer literal"));
+
+  (* Negative control: the accept side is expressed by REJECTING aggregates
+     rather than by listing the integers, precisely so that a literal
+     reaching a pointer keeps working. A `0` for a null MMIO base is real
+     kernel code. *)
+  Alcotest.test_case
+    "negative control: an integer literal still reaches a scalar and a \
+     pointer" `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "let mut n: usize;
+                   fn f() { n = 0; }
+                   fn g(p: *u8) -> *u8 { return p; }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf
+             "expected an integer literal to still reach a scalar, got: %s"
+             msg);
+
   (* GitHub issue #452: a `generic struct`'s private field used to be private
      to NOWHERE. Monomorphization emitted the generated StructDef with
      Lexing.dummy_pos, whose source file is "", and type_inf's private-field
