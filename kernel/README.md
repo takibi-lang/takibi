@@ -645,8 +645,10 @@ are deliberate, not gaps to silently close:
   sequence `entry.S` needs for RPi5's real TF-A hand-off. Its PSCI conduit
   is HVC, not RPi5's real-firmware SMC, and its per-core MPIDR numbering
   puts the core index in Aff0, not RPi5/BCM2712's Aff1.
-  `kernel/platform/qemu/init.tkb` uses the `hvc4` compiler intrinsic where RPi5
-  uses `smc4` for exactly this reason.
+  Both platforms decode the mandatory PSCI `method` from the boot DTB and
+  route CPU_ON through the selected compiler intrinsic; the QEMU contract
+  requires `hvc`, while the RPi5 contract requires `smc`, and either platform
+  halts before SMP bring-up if the enabled node is missing or disagrees.
 - **Storage uses virtio-blk, not RPi5's USB Mass Storage path.** The harness
   attaches `kernel/build/user/ext2.img` as a legacy virtio-mmio block device,
   and the kernel mounts it through `kernel/drivers/block/virtio_blk.tkb`.
