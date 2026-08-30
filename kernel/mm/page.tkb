@@ -273,6 +273,12 @@ must_use variant PagePhysicalResult {
     Found(usize);
 }
 
+must_use variant PageDiscontiguousProbeResult {
+    Invalid;
+    NotDiscontiguous;
+    Verified;
+}
+
 private fn page_capacity() -> usize {
     if (boot_page_pool.runtime_applied) {
         return boot_page_pool.runtime_page_count;
@@ -899,6 +905,100 @@ fn page_allocator_apply_memory(memory: FdtMemoryMap)
     }
     page_runtime_freelist_rebuild();
     return PageAllocatorMemoryResult::Applied;
+}
+
+// A focused boot probe for a DT memory map with a physical hole. It checks
+// the composition boundary that the allocator's ordinary low-address-first
+// workload cannot cheaply reach: logical indices on both sides round-trip,
+// the hole maps to no index, and every extent contributes exactly its pages
+// to the runtime metadata array.
+fn page_discontiguous_extent_probe() -> PageDiscontiguousProbeResult
+        !{unsafe} {
+    if (boot_page_pool.runtime_applied == false ||
+        boot_page_pool.runtime_extent_count < 2) {
+        return PageDiscontiguousProbeResult::NotDiscontiguous;
+    }
+    let mut extent_index: usize = 0;
+    let mut next_index: usize = 0;
+    let mut found_hole: bool = false;
+    while (extent_index < boot_page_pool.runtime_extent_count) {
+        let extent: *PageExtent = page_extent_at_index(extent_index);
+        if ((*extent).start >= (*extent).end ||
+            (*extent).start % PAGE_SIZE != 0 ||
+            (*extent).end % PAGE_SIZE != 0 ||
+            (*extent).first_index != next_index) {
+            return PageDiscontiguousProbeResult::Invalid;
+        }
+        let pages: usize = ((*extent).end - (*extent).start) / PAGE_SIZE;
+        if (pages == 0 || next_index > 0xFFFFFFFFFFFFFFFF - pages) {
+            return PageDiscontiguousProbeResult::Invalid;
+        }
+        let first_index: usize = (*extent).first_index;
+        let last_index: usize = first_index + pages - 1;
+        match page_index_for_physical((*extent).start) {
+            PageIndexResult::NotManaged => {
+                return PageDiscontiguousProbeResult::Invalid;
+            }
+            PageIndexResult::Found(index) => {
+                if (index != first_index) {
+                    return PageDiscontiguousProbeResult::Invalid;
+                }
+                match page_physical_for_index(index) {
+                    PagePhysicalResult::NotManaged => {
+                        return PageDiscontiguousProbeResult::Invalid;
+                    }
+                    PagePhysicalResult::Found(physical) => {
+                        if (physical != (*extent).start) {
+                            return PageDiscontiguousProbeResult::Invalid;
+                        }
+                    }
+                }
+            }
+        }
+        match page_physical_for_index(last_index) {
+            PagePhysicalResult::NotManaged => {
+                return PageDiscontiguousProbeResult::Invalid;
+            }
+            PagePhysicalResult::Found(physical) => {
+                if (physical != (*extent).end - PAGE_SIZE) {
+                    return PageDiscontiguousProbeResult::Invalid;
+                }
+                match page_index_for_physical(physical) {
+                    PageIndexResult::NotManaged => {
+                        return PageDiscontiguousProbeResult::Invalid;
+                    }
+                    PageIndexResult::Found(index) => {
+                        if (index != last_index) {
+                            return PageDiscontiguousProbeResult::Invalid;
+                        }
+                    }
+                }
+            }
+        }
+        if (extent_index + 1 < boot_page_pool.runtime_extent_count) {
+            let following: *PageExtent =
+                page_extent_at_index(extent_index + 1);
+            if ((*extent).end > (*following).start) {
+                return PageDiscontiguousProbeResult::Invalid;
+            }
+            if ((*extent).end < (*following).start) {
+                match page_index_for_physical((*extent).end) {
+                    PageIndexResult::Found(index) => {
+                        return PageDiscontiguousProbeResult::Invalid;
+                    }
+                    PageIndexResult::NotManaged => { }
+                }
+                found_hole = true;
+            }
+        }
+        next_index = next_index + pages;
+        extent_index = extent_index + 1;
+    }
+    if (next_index != boot_page_pool.runtime_page_count ||
+        found_hole == false) {
+        return PageDiscontiguousProbeResult::Invalid;
+    }
+    return PageDiscontiguousProbeResult::Verified;
 }
 
 // GitHub issue #380's acceptance criteria, as a boot probe: a run is

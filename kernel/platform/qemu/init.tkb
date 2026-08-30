@@ -432,6 +432,18 @@ fn main() !{unsafe} {
             kernel_boot_log(" allocator_pages=");
             uart_put_udec(page_allocator_total_count());
             kernel_boot_log("\n");
+            match page_discontiguous_extent_probe() {
+                PageDiscontiguousProbeResult::Invalid => {
+                    kernel_boot_log(
+                        "memory: discontiguous extent probe failed; halting\n");
+                    while (true) { }
+                }
+                PageDiscontiguousProbeResult::NotDiscontiguous => { }
+                PageDiscontiguousProbeResult::Verified => {
+                    kernel_boot_log(
+                        "memory: physical hole excluded and both extent boundaries round-trip\n");
+                }
+            }
         }
         PlatformMemoryResult::InvalidDtb => {
             kernel_boot_log("memory: invalid boot DTB; halting\n");
