@@ -11,6 +11,7 @@ use "kernel/kernel/process_test_evidence.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/mutex.tkb";
+use "kernel/lib/locked_cell.tkb";
 
 // Current limitations (2026-08-13, issue #295). Keep this list current as
 // call sites change; a limitation that goes stale here is worse than
@@ -21,7 +22,8 @@ use "kernel/lib/mutex.tkb";
 //   before every path that reaches kernel state, so it never enters here.
 //   That, not parking, is why KERNEL_ACTIVE_CORES is still 1.
 // - PARTLY SYNCHRONIZED as of GitHub issue #479. The pid counter is minted
-//   under scheduled_process_pid_lock, and execution_state is per-core,
+//   inside a LockedCell whose guard is the only way to reach the count
+//   (issue #452), and execution_state is per-core,
 //   indexed by cpu_id(). What is still unsynchronized is named by this
 //   file's process_execution_model_assumption: the bootstrap record and
 //   its two flags, the parent/sibling links, and the trace ring index.
@@ -189,7 +191,7 @@ struct ProcessRecord {
     // into every oops line, and expected to be 1 for the bootstrap
     // process by the oops lane's own pattern.
     //
-    // Allocated monotonically from scheduled_process_next_pid, so a
+    // Allocated monotonically from scheduled_process_pid_cell, so a
     // reused slot does NOT reuse its pid. That is a deliberate behaviour
     // change and the Unix one: `pid - 1` was a valid way to find a
     // process only while a pid named a table row.
@@ -407,11 +409,19 @@ private let mut scheduled_process_stack_deepest_reaped: usize = 0;
 // created right after a reset is pid 1, which the oops lane matches
 // literally. Nothing recycles a pid inside one run: that is what makes it
 // independent of the slot it happens to occupy.
-private let mut scheduled_process_next_pid: usize = 1;
-
-// GitHub issue #479. Its own global, never a field, for the reason
-// kernel/mm/page.tkb's is.
-private let mut scheduled_process_pid_lock: Mutex;
+//
+// GitHub issue #452: the counter and its lock are ONE value. #479 gave the
+// counter a lock and a comment saying the lock covered it; the compiler
+// could not read the comment, so a new read anywhere in this file -- the
+// kernel's largest -- would have compiled. The count is a private field of
+// LockedCell, so the guard is the only way in.
+//
+// HOW MANY pids have been minted, not WHICH pid is next: a LockedCell
+// carries no initialiser (its field belongs to another file), and this way
+// it needs none, because .bss zero is already the right starting count and
+// a pid is count + 1. So the bootstrap process is still pid 1 and the oops
+// lane still matches it literally.
+private let mut scheduled_process_pid_cell: LockedCell(usize);
 
 // The one place a pid is minted, and now the only place the counter is
 // read or written outside a reset. It used to be a read at one statement
@@ -424,10 +434,11 @@ private let mut scheduled_process_pid_lock: Mutex;
 // The critical section is a read and an add, which is shorter than what it
 // replaces rather than longer.
 private fn scheduled_process_mint_pid() -> usize {
-    let flags: usize = pool_lock_acquire(0, &scheduled_process_pid_lock);
-    let pid: usize = scheduled_process_next_pid;
-    scheduled_process_next_pid = pid + 1;
-    pool_lock_release(0, &scheduled_process_pid_lock, flags);
+    let guard = locked_cell_take(&scheduled_process_pid_cell);
+    let minted = locked_cell_value(guard, &scheduled_process_pid_cell);
+    let pid: usize = *minted + 1;
+    *minted = pid;
+    locked_cell_give(&scheduled_process_pid_cell, guard);
     return pid;
 }
 
@@ -448,12 +459,23 @@ fn scheduled_process_mint_pid_for_probe() -> usize {
     return scheduled_process_mint_pid();
 }
 
+// Both take the lock, which the bare globals they replace did not -- and
+// with the count inside a LockedCell an unlocked read is not expressible.
+// The probe reads this WHILE the other core is minting, which is exactly
+// the shape that made the first ASID detector report an impossible number.
 fn scheduled_process_pid_counter() -> usize {
-    return scheduled_process_next_pid;
+    let guard = locked_cell_take(&scheduled_process_pid_cell);
+    let minted = locked_cell_value(guard, &scheduled_process_pid_cell);
+    let count: usize = *minted;
+    locked_cell_give(&scheduled_process_pid_cell, guard);
+    return count;
 }
 
 fn scheduled_process_pid_counter_restore(value: usize) {
-    scheduled_process_next_pid = value;
+    let guard = locked_cell_take(&scheduled_process_pid_cell);
+    let minted = locked_cell_value(guard, &scheduled_process_pid_cell);
+    *minted = value;
+    locked_cell_give(&scheduled_process_pid_cell, guard);
 }
 
 // GitHub issue #448: how many reaps found nothing to unlink, i.e. were
@@ -473,9 +495,9 @@ fn kernel_process_reap_unlinked_count_value() -> usize {
 private fn scheduled_process_pool_init() {
     if (scheduled_process_pool_ready) { return; }
     scheduled_process_pool_ready = true;
-    // No mutex_init for scheduled_process_pid_lock: a global Mutex is free
-    // from .bss, and initialising it HERE would have put it behind a
-    // `ready` flag that is itself an unlocked read-modify-write. See
+    // No mutex_init for the pid cell's lock: a global Mutex is free from
+    // .bss, and initialising it HERE would have put it behind a `ready`
+    // flag that is itself an unlocked read-modify-write. See
     // kernel/lib/mutex.tkb.
     intrusive_pool_init(&scheduled_process_pool);
 }
@@ -1295,7 +1317,8 @@ private fn scheduled_process_release_every_process() !{unsafe} {
     scheduled_process_release_slot_resources(0);
     scheduled_process_record_reset(0);
     scheduled_process_boot_live = false;
-    scheduled_process_next_pid = 1;
+    // Back to zero minted, so the next process created is pid 1 again.
+    scheduled_process_pid_counter_restore(0);
 }
 
 // No exec teardown here, deliberately: a whole-world reset is not a
