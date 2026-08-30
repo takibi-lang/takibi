@@ -426,6 +426,14 @@ type struct_template = {
   st_is_packed : bool;
   st_align_opt : int option;
   st_private_fields : string list;
+  (* GitHub issue #452: the template's own declaration site, carried so the
+     generated StructDef keeps it. It used to be Lexing.dummy_pos, whose
+     source file is "", and type_inf's private-field check compares a field's
+     owning file against the accessing file -- so a `generic struct`'s
+     private field was private to NOWHERE and unreachable even from the file
+     that declared it. Fail-closed, which is why nothing noticed: no generic
+     struct in the tree had a private field until one was wanted. *)
+  st_loc : Lexing.position;
 }
 
 (* A generic VALUE argument is a bare integer literal (TypeIntLit, from
@@ -763,13 +771,13 @@ let rec unify_arg ?(trace = fun _ -> ())
 let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
   let struct_templates : (string, struct_template) Hashtbl.t = Hashtbl.create 8 in
   List.iter (function
-    | GenericStructDef (name, tps, fields, packed, align, priv, _loc) ->
+    | GenericStructDef (name, tps, fields, packed, align, priv, loc) ->
         if Hashtbl.mem struct_templates name then
           raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
             "'%s' is already defined as a generic struct" name));
         Hashtbl.replace struct_templates name
           { st_params = tps; st_fields = fields; st_is_packed = packed;
-            st_align_opt = align; st_private_fields = priv }
+            st_align_opt = align; st_private_fields = priv; st_loc = loc }
     | _ -> ()
   ) prog;
 
@@ -1346,7 +1354,7 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
       let fields = List.combine field_names (List.map resolve_ty raw) in
       Type_layout.finish_struct mangled fields tpl.st_is_packed tpl.st_align_opt;
       let def = StructDef (mangled, fields, tpl.st_is_packed, tpl.st_align_opt,
-                            tpl.st_private_fields, Lexing.dummy_pos) in
+                            tpl.st_private_fields, tpl.st_loc) in
       let prev = Option.value (Hashtbl.find_opt struct_by_template_name name) ~default:[] in
       Hashtbl.replace struct_by_template_name name (def :: prev)
     ) raw_fields;

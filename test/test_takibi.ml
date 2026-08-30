@@ -5872,6 +5872,43 @@ let infer_tests = [
         struct NsOpaqueStruct { x: i32; }
         fn use_ns_opaque_struct(p: *NsOpaqueStruct) {}");
 
+  (* GitHub issue #452: a `generic struct`'s private field used to be private
+     to NOWHERE. Monomorphization emitted the generated StructDef with
+     Lexing.dummy_pos, whose source file is "", and type_inf's private-field
+     check compares a field's owning file against the accessing file -- so
+     even the declaring file was refused. Fail-closed, which is why nothing
+     noticed: no generic struct in the tree had a private field until
+     kernel/lib/locked_cell.tkb wanted one. *)
+  Alcotest.test_case
+    "generic struct: its own file CAN reach a private field of an instance"
+    `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "generic struct GCell(T: type) { private v: T; }
+                   fn gcell_get(T: type, c: *GCell(T)) -> T { return (*c).v; }
+                   fn use_it(c: *GCell(usize)) -> usize { return gcell_get(c); }";
+       ] with
+       | _ -> ()
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf
+             "expected the declaring file to reach its own generic struct's \
+              private field, got: %s" msg);
+
+  Alcotest.test_case
+    "generic struct: another file CANNOT reach a private field of an instance"
+    `Quick
+    (fun () ->
+       match infer_files [
+         "a.tkb", "generic struct GCell(T: type) { private v: T; }";
+         "b.tkb", "fn b_reads(c: *GCell(usize)) -> usize { return (*c).v; }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the monomorphized struct" true
+             (contains_substring msg "GCell");
+           Alcotest.(check bool) "names the declaring file" true
+             (contains_substring msg "a.tkb"));
+
   (* GitHub issue #108: `private let` restricts a global to references from
      its own declaring file. Discovered via examples/common/http_server_common.tkb's
      conn_state et al -- see HISTORY.md's issue #117 follow-up entry. *)
