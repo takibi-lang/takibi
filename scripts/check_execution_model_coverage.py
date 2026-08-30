@@ -87,6 +87,13 @@ EXEMPT = {
     "platform/rpi5/usb_xhci.tkb": "device state; MSI-X is routed to CPU0",
 
     # --- Not state that depends on either number.
+    "arch/arm64/mm/asid.tkb":
+        "GitHub issue #452: the four numbers an assignment touches are a "
+        "private field of a LockedCell, so an unguarded read is a compile "
+        "error rather than a thing an assertion has to warn about; what is "
+        "left (asid_bits, asid_last, asid_ready) is written once by "
+        "asid_init in the MMU-off window, before PSCI has been asked for a "
+        "second core",
     "fs/elf64.tkb":
         "ELF_IDENT_MAGIC is a lookup table that is never written; `let mut` "
         "is how this language declares an initialised array",

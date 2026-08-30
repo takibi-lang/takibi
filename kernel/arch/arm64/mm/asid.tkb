@@ -33,10 +33,24 @@
 // stored beside the number.
 //
 // Current limitations:
-// - NOT SYNCHRONIZED. asid_next/asid_generation are plain globals and two
-//   cores assigning at once could hand out the same number or miss a
-//   rollover; what protects them today is that one core runs kernel code
-//   (kernel/lib/execution_model.tkb's KERNEL_ACTIVE_CORES).
+// - SYNCHRONIZED, and by construction rather than by convention as of
+//   GitHub issue #452. The four numbers one assignment touches live in an
+//   AsidState inside a LockedCell, so no path can read or write them
+//   without holding the guard -- reaching them any other way is a compile
+//   error naming kernel/lib/locked_cell.tkb. Before #479 they were plain
+//   globals and two cores measurably aliased 122 numbers onto two address
+//   spaces each; between #479 and #452 they were locked but the binding
+//   was a comment.
+// - THE ONE WAY AROUND IT is asid_init/asid_assign_boot, which reach the
+//   state through locked_cell_value_boot and are `!{unsafe}` so that the
+//   exception is visible in their signatures and in the trusted-base
+//   inventory. Both run in the MMU-off window, where a lock is impossible
+//   (AArch64 has no exclusives on Device-typed memory, which is what
+//   everything is until the MMU is on) and unnecessary (PSCI has not been
+//   asked for a second core yet).
+// - asid_bits and asid_last are still plain globals, deliberately: written
+//   once by asid_init and never again, which is what keeps
+//   asid_width_bits() and asid_highest_value() lock-free.
 // - The ROLLOVER's reach is no longer part of that. GitHub issue #446
 //   made mmu_tlb_invalidate_all() `tlbi vmalle1is`, so a rollover
 //   invalidates every core in the shareability domain rather than only the
@@ -59,6 +73,7 @@
 // reports anything this file does not recognise.
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/pool_lock.tkb";
+use "kernel/lib/locked_cell.tkb";
 
 const ASID_BITS_FLOOR: usize = 8;
 
@@ -67,32 +82,61 @@ private let mut asid_bits: usize = ASID_BITS_FLOOR;
 // value TTBR0_EL1 holds before any address space exists, and treating it
 // as "no ASID" is what lets address_space.tkb test `asid != 0`.
 private let mut asid_last: usize = 255;
-private let mut asid_generation: usize = 1;
-private let mut asid_next: usize = 1;
-private let mut asid_rollover_count: usize = 0;
-private let mut asid_assign_count: usize = 0;
 private let mut asid_ready: bool = false;
 
-// GitHub issue #479. Its own global rather than a field of anything, for
-// the reason kernel/mm/page.tkb's is: an 8-byte field added to the front
-// of an `align(16)` aggregate shifts every array behind it to 8-mod-16,
-// and LLVM may then emit a 128-bit store the MMU-off window cannot use.
-// Nothing here is such an aggregate today, and putting the lock outside
-// keeps that from being a thing to re-check later.
-private let mut asid_lock: Mutex;
+// GitHub issue #452: everything one assignment touches, in one struct
+// behind one lock.
+//
+// #479 gave these four numbers a lock and a comment saying the lock
+// covered them. The compiler could not read the comment; a new read of
+// asid_generation anywhere would have compiled, and this file hands out
+// the number the HARDWARE compares to decide whether a TLB entry belongs
+// to the address space asking. Getting it wrong is silent cross-process
+// memory access with no fault to point at -- measured, before the lock,
+// as 122 numbers handed to two address spaces each.
+//
+// They are one struct rather than four cells on purpose: a rollover
+// advances the generation, resets the counter and bumps the rollover
+// count as one step, and four separate cells would be four locks with an
+// order to get right (issue #466). One cell, one critical section.
+struct AsidState {
+    // The next number to hand out. 1 after every rollover; ASID 0 is
+    // never assigned, because it is what TTBR0_EL1 holds before any
+    // address space exists.
+    next: usize;
+    // Which round of the counter this is. An address space whose recorded
+    // stamp is not this value has lost its number.
+    generation: usize;
+    // How many times the counter has wrapped. The cost of the scheme, and
+    // the boot suite prints it.
+    rollover_count: usize;
+    // How many numbers have been handed out, for the contention probe.
+    assign_count: usize;
+}
+
+// Zeroed from .bss like every global, which is NOT the starting state
+// here -- next and generation must both be 1. asid_init supplies them,
+// and it runs in the MMU-off window where no lock can be taken at all
+// (see asid_assign_boot below), so it goes through locked_cell_value_boot.
+private let mut asid_cell: LockedCell(AsidState);
 
 // Called from kernel_mmu_init with the MMU OFF: an mrs and some
 // arithmetic, no allocation, nothing that touches a page that is not
 // mapped yet (see kernel/MEMORY_MAP.md's note on that window).
-fn asid_init() !{mmu_off} {
-    // No mutex_init for asid_lock; see kernel/lib/mutex.tkb.
+fn asid_init() !{mmu_off, unsafe} {
+    // No mutex_init for the cell's lock; see kernel/lib/mutex.tkb.
     if (asid_ready) { return; }
     asid_ready = true;
     asid_bits = mmu_asid_bits();
     // 1 << 16 is 65536 numbers, of which 65535 are assignable.
     asid_last = (1 << asid_bits) - 1;
-    asid_generation = 1;
-    asid_next = 1;
+    // locked_cell_value_boot, not locked_cell_value: this runs with the
+    // MMU off, where spin_lock is unavailable by architecture rather than
+    // by choice (no exclusives on Device-typed memory) and unnecessary
+    // besides -- PSCI has not been asked for a second core yet.
+    let state = locked_cell_value_boot(&asid_cell);
+    state.generation = 1;
+    state.next = 1;
 }
 
 fn asid_width_bits() -> usize {
@@ -103,12 +147,26 @@ fn asid_highest_value() -> usize {
     return asid_last;
 }
 
+// The four readers below take the lock, which the bare globals they
+// replace did not. Two reasons, and the second is the one that bit: a
+// reader racing a rollover can see the new generation with the old
+// counter, and a probe built on an unlocked read of the counter it is
+// measuring is how the first ASID detector reported handing out more
+// numbers than it asked for (issue #479).
 fn asid_current_generation() -> usize {
-    return asid_generation;
+    let guard = locked_cell_take(&asid_cell);
+    let state = locked_cell_value(guard, &asid_cell);
+    let generation: usize = state.generation;
+    locked_cell_give(&asid_cell, guard);
+    return generation;
 }
 
 fn asid_rollover_count_value() -> usize {
-    return asid_rollover_count;
+    let guard = locked_cell_take(&asid_cell);
+    let state = locked_cell_value(guard, &asid_cell);
+    let count: usize = state.rollover_count;
+    locked_cell_give(&asid_cell, guard);
+    return count;
 }
 
 // GitHub issue #479: the counter a contention probe compares against. Each
@@ -116,26 +174,34 @@ fn asid_rollover_count_value() -> usize {
 // than the number of calls IS a lost race -- two cores that read the same
 // value both write value+1, and one number gets handed out twice.
 fn asid_next_value() -> usize {
-    return asid_next;
+    let guard = locked_cell_take(&asid_cell);
+    let state = locked_cell_value(guard, &asid_cell);
+    let next: usize = state.next;
+    locked_cell_give(&asid_cell, guard);
+    return next;
 }
 
 fn asid_assign_count_value() -> usize {
-    return asid_assign_count;
+    let guard = locked_cell_take(&asid_cell);
+    let state = locked_cell_value(guard, &asid_cell);
+    let count: usize = state.assign_count;
+    locked_cell_give(&asid_cell, guard);
+    return count;
 }
 
 // Does this recorded stamp still name the generation the hardware's TLB is
 // tagged for? A stamp of 0 is "never assigned" and is never current.
 fn asid_generation_is_current(generation: usize) -> bool {
     if (generation == 0) { return false; }
-    return generation == asid_generation;
+    return generation == asid_current_generation();
 }
 
 // The whole cost of the scheme, in one place. Every number is about to be
 // handed out again, so every entry tagged with one has to go.
-private fn asid_rollover() {
-    asid_generation = asid_generation + 1;
-    asid_next = 1;
-    asid_rollover_count = asid_rollover_count + 1;
+private fn asid_rollover(state: borrow *AsidState) {
+    state.generation = state.generation + 1;
+    state.next = 1;
+    state.rollover_count = state.rollover_count + 1;
     mmu_tlb_invalidate_all();
 }
 
@@ -164,9 +230,10 @@ private fn asid_rollover() {
 // callers can be inside, and taking a may_block lock under an interrupt
 // mask is the shape that hangs.
 fn asid_assign() -> (usize, usize) {
-    let flags: usize = pool_lock_acquire(0, &asid_lock);
-    let result: (usize, usize) = asid_assign_locked();
-    pool_lock_release(0, &asid_lock, flags);
+    let guard = locked_cell_take(&asid_cell);
+    let state = locked_cell_value(guard, &asid_cell);
+    let result: (usize, usize) = asid_assign_locked(state);
+    locked_cell_give(&asid_cell, guard);
     return result;
 }
 
@@ -175,16 +242,22 @@ fn asid_assign() -> (usize, usize) {
 // memory, which is what spin_lock's `!{requires_mmu}` says -- and also
 // correct: root 0 takes its ASID before PSCI has been asked for a second
 // core.
-fn asid_assign_boot() -> (usize, usize) !{mmu_off} {
-    return asid_assign_locked();
+fn asid_assign_boot() -> (usize, usize) !{mmu_off, unsafe} {
+    let state = locked_cell_value_boot(&asid_cell);
+    return asid_assign_locked(state);
 }
 
-private fn asid_assign_locked() -> (usize, usize) {
-    if (asid_next > asid_last) { asid_rollover(); }
-    let value: usize = asid_next;
-    asid_next = asid_next + 1;
-    asid_assign_count = asid_assign_count + 1;
-    return (value, asid_generation);
+// asid_last and asid_bits stay outside the cell deliberately: asid_init
+// writes them once, before PSCI has been asked for a second core, and
+// nothing writes them again. Keeping them out is what lets
+// asid_width_bits() and asid_highest_value() stay lock-free for the
+// callers that only want to print the width.
+private fn asid_assign_locked(state: borrow *AsidState) -> (usize, usize) {
+    if (state.next > asid_last) { asid_rollover(state); }
+    let value: usize = state.next;
+    state.next = state.next + 1;
+    state.assign_count = state.assign_count + 1;
+    return (value, state.generation);
 }
 
 // GitHub issue #479: this file HAD an execution-model assertion and no
@@ -198,9 +271,11 @@ private fn asid_assign_locked() -> (usize, usize) {
 // address spaces onto one number. That was measured (4096 assignments
 // advanced the counter 3974 times) and then locked.
 //
-// Everything asid_assign_locked touches -- asid_next, asid_generation,
-// asid_last, asid_assign_count, and the rollover -- is inside that lock.
-// The remaining globals (asid_bits, asid_ready) are written once by
-// asid_init before any second core exists. So there is nothing left for an
-// assertion to be true ABOUT, and one that fires without a reason is worse
-// than none: it sends the next reader looking for a defect that was fixed.
+// Everything asid_assign_locked touches -- the whole AsidState, plus
+// asid_last, plus the rollover -- is inside that lock, and since GitHub
+// issue #452 it is inside it structurally: the state is a private field
+// of a LockedCell, so an unguarded read does not compile. The remaining
+// globals (asid_bits, asid_last, asid_ready) are written once by asid_init
+// before any second core exists. So there is nothing left for an assertion
+// to be true ABOUT, and one that fires without a reason is worse than
+// none: it sends the next reader looking for a defect that was fixed.

@@ -132,7 +132,14 @@ fn locked_cell_is_held(T: type, cell: &mut LockedCell(T) @ id)
 
 // The MMU-off window's way in, and the only one. See the limitation above
 // for why it is `unsafe` rather than merely documented.
+//
+// A plain `*T`, with no `@ id`: there is no guard here for a pointer to
+// be tied to, and saying so is the point. The compiler agrees -- a return
+// annotation naming a region needs a borrow parameter that supplies it,
+// so writing `@ id` on this one does not type-check. What a caller gets
+// is an ordinary pointer with an ordinary lifetime, which is exactly the
+// weaker thing an escape hatch should hand back.
 fn locked_cell_value_boot(T: type, cell: &mut LockedCell(T) @ id)
-        -> *T @ id !{unsafe} {
+        -> *T !{unsafe} {
     return &(*cell).value;
 }
