@@ -2363,6 +2363,52 @@ let infer_tests = [
       Alcotest.(check int) "fresh inference clears audit" 0
         (List.length (Type_inf.overflow_audit_sites ())));
 
+  Alcotest.test_case "overflow audit retains guarded endpoint exclusions" `Quick
+    (fun () ->
+      ignore (infer
+        "fn guarded_increment(value: u16) -> u16 {
+           if (value == 65535) { return 0; }
+           return value + 1;
+         }
+         fn guarded_decrement(value: u16) -> u16 {
+           if (value == 0) { return 0; }
+           return value - 1;
+         }");
+      let sites = Type_inf.overflow_audit_sites () in
+      let facts_for op =
+        let site = List.find (fun site ->
+          site.Type_inf.overflow_op = op) sites in
+        site.Type_inf.overflow_lhs_facts
+      in
+      let maximum = Value_facts.positive 65535L in
+      Alcotest.(check bool) "increment excludes u16 maximum" true
+        (match facts_for Ast.Add with
+         | Some facts -> Value_facts.excludes facts maximum
+         | None -> false);
+      Alcotest.(check bool) "decrement excludes zero" true
+        (match facts_for Ast.Sub with
+         | Some facts -> Value_facts.excludes facts Value_facts.zero
+         | None -> false));
+
+  Alcotest.test_case "overflow audit merges exclusions across compilations" `Quick
+    (fun () ->
+      let base = Value_facts.{ signedness = Unsigned; bits = 16 } in
+      let maximum = Value_facts.positive 65535L in
+      let excluded = Value_facts.add_exclusion
+        (Value_facts.unknown base) maximum in
+      let common = Type_inf.merge_overflow_audit_facts
+        (Some excluded) (Some excluded) in
+      let missing = Type_inf.merge_overflow_audit_facts
+        common (Some (Value_facts.unknown base)) in
+      Alcotest.(check bool) "common exclusion survives" true
+        (match common with
+         | Some facts -> Value_facts.excludes facts maximum
+         | None -> false);
+      Alcotest.(check bool) "one-sided exclusion drops" true
+        (match missing with
+         | Some facts -> not (Value_facts.excludes facts maximum)
+         | None -> false));
+
   Alcotest.test_case "division proof decisions begin in type inference value facts" `Quick
     (fun () ->
       ignore (infer

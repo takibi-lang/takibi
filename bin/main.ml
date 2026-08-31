@@ -283,19 +283,24 @@ let () =
               | None -> Printf.sprintf "interval-inclusive:%s..%s"
                   (to_string facts.interval.lo) (to_string facts.interval.hi)
             in
-            base, fact
+            let excluded = facts.excluded
+              |> List.sort_uniq compare_integer
+              |> List.map to_string
+              |> function [] -> "-" | values -> String.concat "," values
+            in
+            base, fact, excluded
         | None -> match Types.repr ty with
         | Types.TRefinedInt (lo, hi, base) ->
-            Types.to_string base, Printf.sprintf "range:%d..<%d" lo hi
+            Types.to_string base, Printf.sprintf "range:%d..<%d" lo hi, "-"
         | Types.TSingleton (base, n) ->
             Types.to_string base,
-            Printf.sprintf "singleton:%s" (Types.static_to_string n)
+            Printf.sprintf "singleton:%s" (Types.static_to_string n), "-"
         | base ->
             let fact = match Const_env.folded_value expr with
               | Some n -> Printf.sprintf "constant:%d" n
               | None -> "unknown"
             in
-            Types.to_string base, fact
+            Types.to_string base, fact, "-"
       in
       let sites = Type_inf.overflow_audit_sites () |> List.sort (fun a b ->
         let la = a.Type_inf.overflow_loc and lb = b.Type_inf.overflow_loc in
@@ -304,16 +309,19 @@ let () =
       in
       let out = open_out !emit_overflow_audit in
       Printf.fprintf out
-        "file\tline\tcolumn\toperator\tlhs_type\tlhs_fact\trhs_type\trhs_fact\n";
+        "file\tline\tcolumn\toperator\tlhs_type\tlhs_fact\tlhs_excluded\trhs_type\trhs_fact\trhs_excluded\n";
       List.iter (fun site ->
         let loc = site.Type_inf.overflow_loc in
-        let lhs_ty, lhs_fact = describe site.overflow_lhs site.overflow_lhs_ty
+        let lhs_ty, lhs_fact, lhs_excluded =
+          describe site.overflow_lhs site.overflow_lhs_ty
           site.overflow_lhs_facts in
-        let rhs_ty, rhs_fact = describe site.overflow_rhs site.overflow_rhs_ty
+        let rhs_ty, rhs_fact, rhs_excluded =
+          describe site.overflow_rhs site.overflow_rhs_ty
           site.overflow_rhs_facts in
-        Printf.fprintf out "%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\n"
+        Printf.fprintf out "%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n"
           loc.pos_fname loc.pos_lnum (loc.pos_cnum - loc.pos_bol + 1)
-          (op_name site.overflow_op) lhs_ty lhs_fact rhs_ty rhs_fact
+          (op_name site.overflow_op) lhs_ty lhs_fact lhs_excluded
+          rhs_ty rhs_fact rhs_excluded
       ) sites;
       close_out out
     end;

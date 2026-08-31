@@ -48,7 +48,8 @@ let active_binding_types : (Local_bindings.id, ty) Hashtbl.t = Hashtbl.create 32
 
 (* Diagnostic-only inventory for the overflow survey.  The source-position
    key deduplicates an expression if generic expansion or inference visits it
-   more than once.  Keeping [ty] values here is intentional: inference may
+   more than once; ValueFacts.join retains only exclusions common to every
+   visit.  Keeping [ty] values here is intentional: inference may
    link a type variable after the expression was first visited, and the report
    should print that final resolved type. *)
 type overflow_audit_site = {
@@ -70,6 +71,13 @@ let overflow_audit_sites () =
   Hashtbl.to_seq_values overflow_audit_table |> List.of_seq
 
 let active_overflow_audit_sites : overflow_audit_site list ref = ref []
+
+let merge_overflow_audit_facts left right =
+  match left, right with
+  | Some a, Some b
+    when Value_facts.same_base a.Value_facts.base b.Value_facts.base ->
+      Some (Value_facts.join a b)
+  | _ -> None
 
 (* First Value_facts consumer: type checking records a positive nonzero
    proof for each divisor expression it can settle.  Code generation reads
@@ -2005,7 +2013,6 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          (TPtr _ | TAlignedPtr _) -> ()
        | (Add | Sub | Mul | Div | Mod | Shl), _, _ ->
            let loc = e.loc in
-           let col = loc.pos_cnum - loc.pos_bol + 1 in
            let site =
              { overflow_loc = loc; overflow_op = op;
                overflow_lhs = e1; overflow_lhs_ty = t1;
@@ -2013,9 +2020,6 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                overflow_lhs_facts = value_facts_of_expr t1 e1;
                overflow_rhs_facts = value_facts_of_expr t2 e2 }
            in
-           Hashtbl.replace overflow_audit_table
-             (loc.pos_fname, loc.pos_lnum, col, op)
-             site;
            (match op with
             | Div ->
                 (match Const_env.folded_value e with
@@ -5761,6 +5765,16 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
       if site.overflow_rhs_facts = None then
         site.overflow_rhs_facts <-
           value_facts_of_expr site.overflow_rhs_ty site.overflow_rhs;
+      let loc = site.overflow_loc in
+      let col = loc.pos_cnum - loc.pos_bol + 1 in
+      let key = (loc.pos_fname, loc.pos_lnum, col, site.overflow_op) in
+      (match Hashtbl.find_opt overflow_audit_table key with
+       | None -> Hashtbl.add overflow_audit_table key site
+       | Some previous ->
+           previous.overflow_lhs_facts <- merge_overflow_audit_facts
+             previous.overflow_lhs_facts site.overflow_lhs_facts;
+           previous.overflow_rhs_facts <- merge_overflow_audit_facts
+             previous.overflow_rhs_facts site.overflow_rhs_facts);
       (match site.overflow_op with
        | Div ->
            record_signed_division_overflow_proof site.overflow_rhs.loc

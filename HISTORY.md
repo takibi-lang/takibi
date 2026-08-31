@@ -15,6 +15,18 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-08-31: excluded endpoints in the overflow audit (#423)
+
+The diagnostic-only overflow TSV now records each operand's bounded ValueFacts
+exclusion set in stable numeric order. Repeated compilation of one source
+location retains only exclusions present in every context, both inside one
+compiler process and while the repository survey deduplicates target builds.
+The survey can tighten an operand interval past excluded endpoints before
+classifying addition, subtraction, or multiplication; interior exclusions
+remain review items rather than being treated as arbitrary disjoint ranges.
+Self-tests cover guarded `u16` increment/decrement proofs, interior-exclusion
+negative controls, and conservative cross-build intersection.
+
 ## 2026-08-31: refresh the RPi5 kernel-size boundary after DDB growth
 
 The synchronized DDB command work moved the linked image across the next

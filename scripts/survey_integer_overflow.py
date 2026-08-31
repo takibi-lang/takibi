@@ -16,7 +16,8 @@ from pathlib import Path
 HEADER = [
     "surface", "classification", "proof_reason",
     "file", "line", "column", "operator",
-    "lhs_type", "lhs_fact", "rhs_type", "rhs_fact",
+    "lhs_type", "lhs_fact", "lhs_excluded",
+    "rhs_type", "rhs_fact", "rhs_excluded",
 ]
 
 TYPE_RANGES = {
@@ -54,6 +55,25 @@ def fact_interval(fact: str) -> tuple[int, int] | None:
     return None
 
 
+def excluded_values(field: str) -> set[int]:
+    if not field or field == "-":
+        return set()
+    return {int(value) for value in field.split(",")}
+
+
+def tighten_endpoints(
+    interval: tuple[int, int] | None, excluded: set[int]
+) -> tuple[int, int] | None:
+    if interval is None:
+        return None
+    lo, hi = interval
+    while lo <= hi and lo in excluded:
+        lo += 1
+    while lo <= hi and hi in excluded:
+        hi -= 1
+    return None if lo > hi else (lo, hi)
+
+
 def classify(row: dict[str, str]) -> tuple[str, str]:
     type_range = TYPE_RANGES.get(row["lhs_type"])
     lhs = fact_interval(row["lhs_fact"])
@@ -70,6 +90,10 @@ def classify(row: dict[str, str]) -> tuple[str, str]:
         if rhs is not None and not (rhs[0] <= -1 <= rhs[1]):
             return "proven", "divisor-range-excludes-minus-one"
         return "review", "cannot-exclude-signed-min-divided-by-minus-one"
+
+    if op in ("add", "sub", "mul"):
+        lhs = tighten_endpoints(lhs, excluded_values(row["lhs_excluded"]))
+        rhs = tighten_endpoints(rhs, excluded_values(row["rhs_excluded"]))
 
     if lhs is None or rhs is None:
         missing = "both" if lhs is None and rhs is None else (
@@ -103,7 +127,8 @@ def check_classifier() -> None:
     def row(op: str, ty: str, lhs: str, rhs: str) -> dict[str, str]:
         return {
             "operator": op, "lhs_type": ty,
-            "lhs_fact": lhs, "rhs_fact": rhs,
+            "lhs_fact": lhs, "lhs_excluded": "-",
+            "rhs_fact": rhs, "rhs_excluded": "-",
         }
 
     controls = [
@@ -117,12 +142,61 @@ def check_classifier() -> None:
         ("proven", row("shl", "u8", "constant:1", "constant:7")),
         ("review", row("shl", "u8", "constant:2", "constant:7")),
     ]
+    excluded_max_add = row(
+        "add", "u16", "interval-inclusive:0..65535", "constant:1"
+    )
+    excluded_max_add["lhs_excluded"] = "65535"
+    controls.append(("proven", excluded_max_add))
+    excluded_zero_sub = row(
+        "sub", "u16", "interval-inclusive:0..65535", "constant:1"
+    )
+    excluded_zero_sub["lhs_excluded"] = "0"
+    controls.append(("proven", excluded_zero_sub))
+    interior_add = row(
+        "add", "u16", "interval-inclusive:0..65535", "constant:1"
+    )
+    interior_add["lhs_excluded"] = "32768"
+    controls.append(("review", interior_add))
+    interior_sub = row(
+        "sub", "u16", "interval-inclusive:0..65535", "constant:1"
+    )
+    interior_sub["lhs_excluded"] = "32768"
+    controls.append(("review", interior_sub))
     for expected, control in controls:
         actual, reason = classify(control)
         if actual != expected:
             raise RuntimeError(
                 f"classifier control expected {expected}, got {actual}: {reason}"
             )
+
+    common = {
+        "lhs_type": "u16", "lhs_fact": "interval-inclusive:0..65535",
+        "lhs_excluded": "0,65535", "rhs_type": "u16",
+        "rhs_fact": "constant:1", "rhs_excluded": "0",
+    }
+    other = {**common, "lhs_excluded": "65535", "rhs_excluded": "-"}
+    merge_duplicate(common, other)
+    if common["lhs_excluded"] != "65535" or common["rhs_excluded"] != "-":
+        raise RuntimeError("deduplication retained an exclusion missing from one build")
+
+
+def merge_duplicate(previous: dict[str, str], row: dict[str, str]) -> None:
+    for side in ("lhs", "rhs"):
+        type_field = f"{side}_type"
+        fact_field = f"{side}_fact"
+        excluded_field = f"{side}_excluded"
+        if previous[type_field] != row[type_field]:
+            previous[type_field] = "unknown"
+        if previous[fact_field] != row[fact_field]:
+            previous[fact_field] = "unknown"
+        common = excluded_values(previous[excluded_field]) & excluded_values(
+            row[excluded_field]
+        )
+        previous[excluded_field] = (
+            ",".join(str(value) for value in sorted(common)) if common else "-"
+        )
+        if previous[type_field] == "unknown":
+            previous[excluded_field] = "-"
 
 
 def surface(path: str) -> str:
@@ -223,9 +297,7 @@ def main() -> int:
                         # The same shared source can be compiled for several
                         # targets.  Retain a fact only when every compilation
                         # agrees, so the source-level verdict is conservative.
-                        for field in ("lhs_type", "lhs_fact", "rhs_type", "rhs_fact"):
-                            if previous[field] != row[field]:
-                                previous[field] = "unknown"
+                        merge_duplicate(previous, row)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     ordered = [rows[key] for key in sorted(rows)]
