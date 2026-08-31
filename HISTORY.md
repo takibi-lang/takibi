@@ -21939,3 +21939,17 @@ whose recipe invokes root `langcheck` and then root `test` sequentially.
 QEMU integration and STM32 artifact work remain parallel siblings, while the
 only two sub-makes that own Dune's workspace lock can no longer overlap. No
 historical source or runtime expectation changed.
+
+## 2026-08-31: Final session audit corrections
+
+The final cross-check found that the DDB inventory scanner still recognized
+an exact dispatcher-call shape inside a comment. It now blanks line and block
+comments with a string-aware lexical pass before extracting calls; a control
+proves commented fake commands are ignored while the existing active fake
+command still fails with the expected drift diagnostic.
+
+The refined-bound wording in `SPEC.md` was also narrowed to match the actual
+literal pipeline. The bound-specific rejection prevents a sign-bit-set
+64-bit pattern from becoming a negative interval endpoint; digit strings
+wider than 64 bits retain the language's older lexer-wide low-64-bit wrapping
+semantics. No compiler behavior changed in this documentation correction.

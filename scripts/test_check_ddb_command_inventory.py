@@ -27,8 +27,22 @@ if positive.returncode != 0:
     raise SystemExit("positive DDB inventory control failed:\n" + positive.stdout)
 
 with tempfile.TemporaryDirectory() as temporary:
-    changed = Path(temporary) / "exception_evidence.tkb"
+    commented = Path(temporary) / "commented_exception_evidence.tkb"
     source = SOURCE.read_text(encoding="ascii")
+    commented.write_text(
+        source
+        + '\n// if (ddb_command_is(line as []u8, length, bs"staleprobe")) {}\n'
+        + '/* ddb_command_is(line as []u8, length, bs"otherprobe") */\n',
+        encoding="ascii",
+    )
+    commented_result = run("--source", str(commented))
+    if commented_result.returncode != 0:
+        raise SystemExit(
+            "commented DDB command shape was treated as active:\n"
+            + commented_result.stdout
+        )
+
+    changed = Path(temporary) / "exception_evidence.tkb"
     needle = 'if (ddb_command_is(line as []u8, length, bs"continue")) {'
     changed.write_text(
         source.replace(

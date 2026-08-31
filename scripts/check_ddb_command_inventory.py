@@ -17,6 +17,48 @@ DEFAULTS = {
 }
 
 
+def without_comments(text: str) -> str:
+    """Blank comments while preserving strings, offsets, and newlines."""
+    out = list(text)
+    index = 0
+    state = "code"
+    while index < len(text):
+        char = text[index]
+        following = text[index + 1] if index + 1 < len(text) else ""
+        if state == "code":
+            if char == "/" and following == "/":
+                out[index] = out[index + 1] = " "
+                index += 2
+                state = "line-comment"
+                continue
+            if char == "/" and following == "*":
+                out[index] = out[index + 1] = " "
+                index += 2
+                state = "block-comment"
+                continue
+            if char in {'"', "'"}:
+                state = char
+        elif state == "line-comment":
+            if char == "\n":
+                state = "code"
+            else:
+                out[index] = " "
+        elif state == "block-comment":
+            if char == "*" and following == "/":
+                out[index] = out[index + 1] = " "
+                index += 2
+                state = "code"
+                continue
+            if char != "\n":
+                out[index] = " "
+        elif char == "\\":
+            index += 1
+        elif char == state:
+            state = "code"
+        index += 1
+    return "".join(out)
+
+
 def fail(surface: str, expected: list[str], actual: list[str]) -> None:
     missing = [item for item in expected if item not in actual]
     extra = [item for item in actual if item not in expected]
@@ -102,7 +144,7 @@ def check(paths: dict[str, Path]) -> None:
     all_names = public_names + [entry["name"] for entry in hidden]
     usages = [entry["usage"] for entry in public]
 
-    source = paths["source"].read_text(encoding="ascii")
+    source = without_comments(paths["source"].read_text(encoding="ascii"))
     dispatched = dispatcher_commands(source)
     if set(dispatched) != set(all_names):
         fail("dispatcher", all_names, dispatched)

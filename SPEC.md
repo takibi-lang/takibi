@@ -2686,10 +2686,12 @@ record readable; per-CPU rings stay independently written.
   at parse time (e.g. `{0..<300 as u8}` is a compile error; `i64`/`u64`
   impose no upper-bound check, since their true range doesn't fit the
   bound-storage representation anyway). Bounds themselves are stored as
-  native signed integers in the compiler. A non-negative literal that does
-  not fit that representation is rejected; its raw 64-bit pattern is never
-  reinterpreted as a negative bound. Negative bounds remain available through
-  arithmetic such as `0 - 1`.
+  native signed integers in the compiler. Within the language's 64-bit
+  literal representation, a non-negative value with its sign bit set is
+  rejected rather than reinterpreted as a negative bound. As elsewhere in
+  the language, a digit string wider than 64 bits has already wrapped to its
+  low 64 bits in the lexer before this bound-specific check. Negative bounds
+  remain available through arithmetic such as `0 - 1`.
 - **Range propagation** through ordinary arithmetic preserves the
   operand's own base (not always `i32`): `{a..<b} + {c..<d} ->
   {a+c..<b+d-1}`; `{a..<b} + k -> {a+k..<b+k}` (`k` may be checked
