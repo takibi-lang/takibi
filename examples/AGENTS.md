@@ -95,6 +95,76 @@ hardware-test details live in `common_stm32/AGENTS.md`.
 The TCP/IP progression and the rationale for its incremental construction are
 recorded in `HISTORY.md`; each example's header gives its local purpose.
 
+## TCP/IP stack and bare-metal HTTP server
+
+The TCP/IP stack and bare-metal HTTP server were the first waypoint toward the
+standalone kernel. They ran on QEMU/AArch64 and STM32F746G-DISCOVERY and proved
+that Takibi could express nontrivial systems code. The ongoing work then moved
+from demonstrating runtime behavior to pushing that behavior's error surface
+into compile-time refinement and ownership checks.
+
+Network TX is synchronous despite interrupt-driven completion: it sleeps
+rather than spins, but retains the caller until DMA finishes. A truly
+asynchronous API would need an affine in-flight handle before callers could
+safely reuse the buffer.
+
+When a network test flakes, check the harness's readiness assumption before
+the protocol implementation. Historical flakes included a real `tcp.tkb` bug,
+but more often the host runner started before the kernel or PHY was ready.
+
+## STM32 notes
+
+Hardware bring-up polling still needs bounded timeouts. MDIO busy, MAC reset,
+PHY reset and autonegotiation, and RTC initialization poll status bits with no
+useful completion interrupt. A disconnected or failed device can otherwise
+block forever; add a monotonic deadline and an actionable error result before
+growing these drivers.
+
+The shared high-level entry point calls `platform_init`, `app_main`, and
+`platform_shutdown`. QEMU hooks are empty, while the STM32 hooks own UART
+setup and drain. If another always-on service needs lifecycle work, introduce
+an explicit runtime module that composes drivers instead of coupling UART to
+an unrelated device.
+
+STM32 Ethernet bring-up established the DMA/device memory-barrier builtins. A
+`dsb` is required between publishing a descriptor and kicking poll demand;
+volatile `*io` writes alone do not guarantee that the descriptor reached the
+DMA engine first. The target-specific `dma_publish`, `dma_consume`, and
+`device_fence` lowerings replace the old handwritten assembly workaround.
+Cache-aware `dma_prepare_tx`, `dma_prepare_rx`, and `dma_finish_rx` operations
+maintain Cortex-M7 cache lines, while indexed linear owners reject premature
+or repeated buffer release.
+
+QEMU TCG does not model caches as storage distinct from RAM, so it cannot
+reproduce these coherence failures. This was visible in the STM32 FAT storage
+harness: OpenOCD injects and extracts the live `disk` array through the debug
+port, bypassing the CPU cache just like DMA. Without explicit cache maintenance,
+the same test could pass in QEMU and read or dump stale data on hardware.
+
+## Profiling
+
+QEMU gdbstub PC sampling is useful for CPU-bound experiments, but a poor fit
+for network and interrupt-driven I/O because idle wait time dominates samples.
+
+The STM32 HTTP+SD+RTOS and KVS+SD+RTOS demos instead use
+`takibi --profile-functions`, which emits fixed DWT `CYCCNT` function and call
+path tables. `make profile-stm32-http-server-sdcard-rtos` provisions the card,
+warms the server, profiles an `/ICON.PNG` request, dumps the tables through
+OpenOCD, and writes a FlameGraph-compatible folded stack file under
+`_build/takibi_profile/http_server_sdcard_rtos/`.
+
+`make profile-stm32-kvs-server-sdcard-rtos` profiles a KVS PUT and eventual SD
+write-back. `TAKIBI_PROFILE_LOAD=stress` drives it with `scripts/kvs_stress.py`.
+The reported cycles are inclusive wall-clock time, so blocking paths include
+their wait time.
+
+## STM32 tools
+
+STM32 hardware work needs OpenOCD and stlink-tools. OpenOCD provides SWD and
+gdbstub access; `st-flash` and `st-info` provide flashing and probe inspection.
+USB passthrough is configured in `.devcontainer/devcontainer.json`. The
+`hwcheck-stm32` targets need a connected board; `stm32build` does not.
+
 The live QEMU/GDB DWARF fixture is `dwarf_debug/dwarf_debug.tkb`, with expected
 output in `dwarf_debug/dwarf_debug.gdb.expected` and its harness in
 `scripts/run_qemutest.sh`.

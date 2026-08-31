@@ -16,14 +16,6 @@ spirit of ATS2's proof-driven style and its at-view mechanism, generalized past 
 arbitrary linear/affine resources) toward that stated goal was judged more tractable than
 retrofitting it onto an existing systems language.
 
-The TCP/IP stack + bare-metal HTTP server was the first waypoint on the way there, and is
-already implemented and running on QEMU/AArch64 and STM32F746G-DISCOVERY -- see the target
-sections below. It exists to prove takibi can express real, nontrivial systems code at all; the
-harder, ongoing work is proving that code's runtime-error surface can be pushed to compile time,
-which the `--forbid-trap` refinement-type work and the Takibi Core ownership slices are the
-first concrete steps toward, on the way to expressing Unix-like kernel constructs (schedulers,
-virtual memory, drivers, syscall boundaries) with the same discipline.
-
 **Looking for the current language syntax/grammar (types, statements, expressions)?
 See `SPEC.md`.** This file is the engineering log -- design rationale, bugs found
 and fixed, and the history behind each decision.
@@ -254,7 +246,7 @@ human or another agent.
 ## Design Principle: Detect Errors at Compile Time
 
 **In embedded products, zero runtime exceptions and panics is a hard requirement.**
-If a runtime trap occurs in a bare-metal environment running timers, UART, and a TCP/IP stack,
+If a runtime trap occurs in a bare-metal environment running timers, UART, and other services,
 the system will silently break or run amok. Nothing is communicated to the user.
 
 - **Detect errors at compile time.** The ultimate goal is to make any access that the type system cannot prove into a compile error.
@@ -687,46 +679,7 @@ size.
   check-then-sleep race. AMD64 and RISC-V code generation deliberately rejects
   these builtins until an equally race-free wake protocol (not a bare `hlt` or
   `wfi`) is designed with the interrupt controller/runtime.
-- **Hardware bring-up waits still need bounded timeouts.** STM32 MDIO busy,
-  MAC software reset, PHY reset/autonegotiation, and RTC initialization poll
-  status bits during startup. These are not steady-state CPU-spin paths and
-  generally have no useful completion IRQ, but a disconnected or failed device
-  can currently block forever. Add a monotonic deadline and actionable error
-  return before growing the driver set.
-- **Platform lifecycle composition is intentionally minimal.** The shared
-  high-level `main` calls `platform_init`, `app_main`, and `platform_shutdown`;
-  QEMU hooks are empty and STM32 hooks currently own UART setup/drain. When a
-  second always-on platform service needs lifecycle work, introduce an explicit
-  platform runtime module that composes drivers rather than making UART depend
-  on unrelated devices. Integer return values from `app_main` are currently
-  ignored because both bare-metal exits use a fixed success status.
-- **TX APIs are synchronous despite interrupt-driven completion.** Network TX
-  sleeps rather than spins, but retains the caller until DMA completion. Fully
-  asynchronous TX needs an affine `NetTxInFlight` handle (or equivalent buffer
-  ownership token) before callers may safely reuse memory.
 - **Language-level known limitations** (function overloading, the flat top-level namespace, `isize`, scoped refinement-type inference, `sizeof`/`offsetof` restrictions, `use` file dependencies) -- see `SPEC.md`'s dedicated sections (Function Pointers/extern fn/Overloading, Refined Integer Types, Types) and its own "Known Limitations (Language-Level)" list for current behavior; see `HISTORY.md` for the design investigations behind each.
-- **DMA/device memory-barrier builtins are implemented** -- the STM32 Ethernet DMA bring-up needed a `dsb` instruction between a
-  descriptor-ring write and the "poll demand" register kick, because `*io` volatile writes alone don't guarantee the
-  CPU's write buffer has retired before a subsequent register write reaches the DMA engine (see the "Hardware
-  STM32 Ethernet bring-up -- found only via live
-  openocd/gdb-multiarch debugging on real hardware, not something the compiler flagged). The original handwritten
-  `extern fn eth_dsb()`/`eth_asm.S` workaround has been removed. `dma_publish()`, `dma_consume()`, and
-  `device_fence()` now lower per target and are placed inside the STM32 and virtio driver ownership transitions.
-  The cache-aware `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` operations maintain Cortex-M7 cache lines,
-  so applications do not manually select barriers. The RX/TX API now uses indexed linear owners plus
-  authority-derived region ties to reject use-after-release, double-release, and early release while TX DMA is
-  still in flight without changing the source-level barrier semantics.
-- **QEMU (TCG mode, which is all this project uses -- no KVM) does not model caches as physically separate storage
-  from RAM, so cache-coherency bugs are invisible there and can ONLY be found on real hardware.** Found again
-  while bringing up FAT storage on the STM32 board: the hardware test harness injects/extracts the `disk`
-  array's live RAM directly over the debug port with OpenOCD (`load_image`/`dump_image`), which -- like a real DMA
-  engine -- bypasses the CPU's D-cache entirely; without an explicit `dma_finish_rx`/`dma_prepare_tx` around that
-  boundary, the CPU could read stale cached data (or the debugger could dump stale un-flushed RAM) despite the
-  exact same test passing cleanly under QEMU every time, because QEMU's single unified memory model has no cache
-  to go stale in the first place. Same reasoning applies to any future genuinely concurrent hardware feature
-  (multi-core, issue #6, still Backlog): a missing memory barrier or cache-maintenance op between cores can look
-  perfectly correct in QEMU and fail only on real silicon, so that kind of work should get real-hardware
-  integration testing early, not just as a final check once "everything already works in QEMU."
 - **EL0 fail-stop is intentional design, not a bug to route around.**
   `kernel/arch/arm64/kernel/exception_evidence.tkb`'s `el1_exception_evidence` (ordinary `.tkb` since
   issue #227 item 3; previously hand-written in `kernel/arch/arm64/boot/entry.S`) is the landing site
@@ -856,13 +809,8 @@ size.
   static struct that is written identically on every run) still cannot detect staleness in general and
   must not be used to argue an unverified read is fresh.
 - **RISC-V has no `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` lowering yet** -- these now raise a compile
-  error on RISC-V targets rather than silently falling back to a bare barrier (issue #146). AArch64 previously
-  had the same silent-fallback gap (found during Raspberry Pi 3B USB host stack bring-up, issue #140/#144, once
-  its D-cache was turned back on for `ldaxr`/`stlxr` reasons and its DWC2 controller/VideoCore mailbox needed real
-  cache maintenance around DMA hand-offs) and now gets a real `dc cvac`/`dc civac`/`dc ivac` VA-range-loop
-  lowering in `lib/llvm_gen.ml`, matching the real Cortex-M7 `DCCMVAC`/`DCIMVAC` the STM32 backend already had --
-  AArch64 code calls the standard builtins directly, same as STM32's `eth.tkb`, with no
-  hand-written cache-range assembly stub needed on this target anymore. RISC-V's own real
+  error on RISC-V targets rather than silently falling back to a bare barrier (issue #146). AArch64 gets a real
+  `dc cvac`/`dc civac`/`dc ivac` VA-range-loop lowering in `lib/llvm_gen.ml`. RISC-V's own real
   lowering (gated on the Zicbom extension's `cbo.clean`/`cbo.flush`/`cbo.inval`) is deferred until an actual
   RISC-V target exists in this project to verify it against, rather than shipping unverified speculative codegen.
 
@@ -934,12 +882,6 @@ sensitive to memory layout, so ANY change of similar size silenced it.
 Verify against the mechanism (a measurement, a canary, an invariant),
 never against "the failing test stopped failing".
 
-**When a network test flakes, suspect the harness's readiness assumption
-before the protocol code.** Three flakes in this tree so far: one was
-genuinely `tcp.tkb`, two were the host-side harness starting before the
-kernel or the PHY was ready. Check what the runner waits for -- often
-nothing -- before reading the stack.
-
 **A value's accidental properties have readers you never declared -- grep
 the SHAPE, not the name.** Three times in one week's work (issues #392,
 #390, #399), changing what a value IS broke a consumer nobody had written
@@ -992,24 +934,6 @@ sessions, not just to satisfy `llvm-dwarfdump`. The maintained full-kernel regre
 runs the ordinary QEMU view and ash TCP suites with separate ports and
 artifacts from the non-debug lane.
 
-The same QEMU gdbstub plumbing is also used by the sampling profilers for
-HTTP/TCP experiments. That technique is useful for CPU-bound code, but it
-is a poor fit for network/interrupt-driven I/O where idle wait time can
-dominate samples.
-
-For the real STM32 HTTP+SD+RTOS and KVS+SD+RTOS demos,
-`takibi --profile-functions` emits a fixed DWT `CYCCNT` profiler table plus
-a fixed call-path table. `make profile-stm32-http-server-sdcard-rtos`
-provisions the SD card, warms the server, profiles a measured `/ICON.PNG`
-fetch, dumps the tables through OpenOCD, and writes a FlameGraph-compatible
-folded stack file under `_build/takibi_profile/http_server_sdcard_rtos/`.
-`make profile-stm32-kvs-server-sdcard-rtos` profiles a KVS PUT plus its
-eventual SD write-back; set `TAKIBI_PROFILE_LOAD=stress` to drive it with `scripts/kvs_stress.py`
-(defaulting to concurrency 4 and a fixed key, the practical STM32 stress
-profile setting). The numbers are inclusive wall-clock cycles, so blocking
-paths such as `cond_wait`, `kvs_sd_request_recv`, and `net_rx_wait` are
-expected to include wait time.
-
 ## Instructions for Coding Agents
 
 - Follow the repository-wide "Agents Commit, Humans Push" workflow above.
@@ -1033,13 +957,6 @@ qemu-system-aarch64     (for QEMU execution)
 gdb-multiarch           (AArch64-capable gdb; stock `gdb` on this platform is x86_64-only and
                          cannot parse QEMU's AArch64 target-description XML over the remote
                          protocol -- confirmed by the "unknown architecture aarch64" / truncated
-                         register errors it raises. Needed by the live DWARF/GDB regression,
-                         QEMU-based sampling profilers, and STM32 hardware debugging via
-                         openocd's gdbstub.)
-openocd, stlink-tools   (for STM32F746G-DISCOVERY: openocd for SWD debug/register inspection,
-                         `st-flash`/`st-info` (stlink-tools) for flashing -- see "STM32F746G-
-                         DISCOVERY Bare-Metal" above. Requires USB passthrough set up in
-                         .devcontainer/devcontainer.json; `make hwcheck-stm32` needs the real board
-                         connected, everything else (including `make check`'s `stm32build`)
-                         does not.)
+                         register errors it raises. Needed by the live DWARF/GDB regression and
+                         QEMU-based sampling profilers.)
 ```
