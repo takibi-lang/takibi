@@ -105,6 +105,7 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         [ "$(grep -c '^ddb: usage: xu PID HEX_ADDRESS \[COUNT_1_TO_64\]$' "$UART_LOG")" -ne 2 ] ||
         ! grep -q '^ddb: xu pid not captured$' "$UART_LOG" ||
         ! grep -q '^ddb: xu unmapped address=0x0000000070000000$' "$UART_LOG" ||
+        ! grep -q '^commands: oops regs intr sched current vm fds ps proc PID trace events xk ADDRESS \[COUNT\] xp PHYSICAL \[COUNT\] xu PID ADDRESS \[COUNT\] help continue$' "$UART_LOG" ||
         ! grep -q '^ddb: continuing$' "$UART_LOG" ||
         ! grep -q '^init: ash bootstrap$' "$UART_LOG"; then
     echo "FAIL kernel/qemu ddb: BREAK inspection did not resume boot" >&2

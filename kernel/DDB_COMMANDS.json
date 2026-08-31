@@ -1,0 +1,28 @@
+{
+  "public": [
+    {"name": "oops", "usage": "oops", "coverage": "qemu"},
+    {"name": "regs", "usage": "regs", "coverage": "qemu"},
+    {"name": "intr", "usage": "intr", "coverage": "qemu"},
+    {"name": "sched", "usage": "sched", "coverage": "qemu"},
+    {"name": "current", "usage": "current", "coverage": "qemu"},
+    {"name": "vm", "usage": "vm", "coverage": "qemu"},
+    {"name": "fds", "usage": "fds", "coverage": "qemu"},
+    {"name": "ps", "usage": "ps", "coverage": "qemu"},
+    {"name": "proc", "usage": "proc PID", "coverage": "qemu"},
+    {"name": "trace", "usage": "trace", "coverage": "qemu"},
+    {"name": "events", "usage": "events", "coverage": "qemu"},
+    {"name": "xk", "usage": "xk ADDRESS [COUNT]", "coverage": "qemu"},
+    {"name": "xp", "usage": "xp PHYSICAL [COUNT]", "coverage": "qemu"},
+    {"name": "xu", "usage": "xu PID ADDRESS [COUNT]", "coverage": "qemu"},
+    {"name": "help", "usage": "help", "coverage": "qemu"},
+    {"name": "continue", "usage": "continue", "coverage": "qemu"}
+  ],
+  "hidden": [
+    {
+      "name": "xkfault",
+      "classification": "test-only",
+      "reason": "bypasses the RAM classifier to exercise guarded fault recovery",
+      "coverage": "qemu"
+    }
+  ]
+}

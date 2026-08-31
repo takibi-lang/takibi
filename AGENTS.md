@@ -652,7 +652,15 @@ automates both real UART BREAK and software `brk` entry. The normal
 `make kernelcheck-rpi5` suite verifies physical Debug Probe BREAK, inspection,
 and resume after its ordinary workload.
 
-The useful first-pass commands are:
+The public command inventory is:
+
+<!-- DDB-COMMAND-INVENTORY-START -->
+`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `proc PID`;
+`trace`; `events`; `xk ADDRESS [COUNT]`; `xp PHYSICAL [COUNT]`;
+`xu PID ADDRESS [COUNT]`; `help`; `continue`.
+<!-- DDB-COMMAND-INVENTORY-END -->
+
+Useful first-pass groupings are:
 
 - `regs`, `intr`, `sched`, and `current` -- saved CPU, interrupt-entry, and
   scheduler state;
@@ -790,6 +798,7 @@ being a complete list is the whole point of this one;
 | `check_kernel_asm_invariants.py` | hand-written kernel assembly, disassembled from the built ELF, that breaks an EL0 entry/exit invariant (issues #229/#231) |
 | `check_kernel_lib_limitations_header.py` | a `kernel/lib`, `kernel/kernel`, or `kernel/net` file with no "Current limitations" header |
 | `check_diagnostic_event_ids.py` | duplicate or non-16-bit fixed diagnostic event ids |
+| `check_ddb_command_inventory.py` | drift between the resumable DDB dispatcher, help text, public documentation, hidden-command classification, and integration coverage |
 | `check_direct_mmio_literals.py` | a numeric physical address cast directly to `*io` instead of an address derived from a validated device-resource base |
 | `check_flag_guarded_fields.py` | a read of an optional field `X` that did not consult its paired `has_X` first |
 | `check_lock_discipline.py` | `mutex_init` called on a GLOBAL Mutex (it is already free from zeroed .bss, and the call FORCE-FREES a lock another core may hold), and any use of a raw atomic intrinsic outside a short declared allowlist |

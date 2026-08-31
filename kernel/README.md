@@ -188,9 +188,13 @@ Neither key is forwarded to ash. On RPi5 the host sends one automatically
 released 250 ms physical serial BREAK; on QEMU the console asks the PL011
 chardev to deliver the equivalent BREAK through a private QMP control socket.
 The existing TCP UART/miniterm data path is unchanged. The kernel prints
-`ddb>` and accepts `oops`, `regs`, `intr`, `sched`, `current`, `vm`, `fds`,
-`ps`, `proc PID`, `trace`, `events`, `xk`, `xp`, `xu`, `help`, and
-`continue`. Use
+`ddb>` and accepts the following commands.
+<!-- DDB-COMMAND-INVENTORY-START -->
+`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `proc PID`;
+`trace`; `events`; `xk ADDRESS [COUNT]`; `xp PHYSICAL [COUNT]`;
+`xu PID ADDRESS [COUNT]`; `help`; `continue`.
+<!-- DDB-COMMAND-INVENTORY-END -->
+Use
 `continue` to return through the saved exception frame. Ctrl-C remains an
 ordinary terminal byte and is not reserved by the debugger. The console
 prints this key reminder when it starts. Miniterm's generic Ctrl-T, Ctrl-B
@@ -479,10 +483,13 @@ deliberately remains typed `!{interrupt, unsafe}`: it does not pretend that
 acknowledgement turns an interrupt frame into ordinary kernel context. Every
 reachable operation is fixed-size and polling-only, with no allocator, lock,
 scheduler, sleep, filesystem, network, or ordinary logging dependency. Its
-commands are `oops`, `regs`, `intr`, `sched`, `current`, `vm`, `fds`, `ps`, `proc PID`,
-`trace`, `events`, `xk ADDRESS [COUNT]`, `xp PHYSICAL [COUNT]`,
-`xu PID ADDRESS [COUNT]`, and `continue`
-(`help` lists them).
+public command inventory follows.
+<!-- DDB-COMMAND-INVENTORY-START -->
+`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `proc PID`;
+`trace`; `events`; `xk ADDRESS [COUNT]`; `xp PHYSICAL [COUNT]`;
+`xu PID ADDRESS [COUNT]`; `help`; `continue`.
+<!-- DDB-COMMAND-INVENTORY-END -->
+`help` lists the same inventory.
 
 `regs` reads the compiler-defined `ExceptionFrame` directly. DDB does not
 copy registers with handwritten assembly and does not duplicate frame

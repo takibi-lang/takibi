@@ -15,6 +15,17 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-08-31: synchronized resumable-DDB command inventory (#458)
+
+The public resumable-DDB commands, their argument shapes, integration
+coverage, and the hidden `xkfault` test command now have one machine-readable
+inventory. A `langcheck` guard compares it with the actual exact/prefix
+dispatcher recognizers, runtime `help`, both command lists in
+`kernel/README.md`, agent guidance, and the QEMU command driver. The control
+adds a temporary dispatcher command and independently requires a nonzero exit
+and the named dispatcher-drift diagnostic. `help` itself is now exercised by
+both real-UART-BREAK and deliberate-BRK QEMU lanes.
+
 ## 2026-08-31: immutable lookup-table assertions (#474)
 
 `static_assert` can now read a literal or earlier `const` index from an
