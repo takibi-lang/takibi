@@ -21917,3 +21917,25 @@ readiness before DDB, DDB entry, a second register-summary line proving its
 `oops` command ran, `continue`, and the shell marker emitted after resume.
 The existing Ctrl-] cleanup verdict also proves that a normal exit leaves the
 artifact readable.
+
+## 2026-08-31: Serialize the historical check's recursive compiler build
+
+`make -f examples/Makefile allcheck` intermittently corrupted Dune's global
+lock before running QEMU. Its QEMU lane expands `check` in parallel: `test`
+and every example object shared the examples graph's `build` prerequisite,
+but the `langcheck` forwarder did not. It could therefore enter the root
+Makefile's independent `build` graph while the examples graph was still in
+its own recursive `make -f Makefile build`, leaving two `dune build`
+processes racing over `_build/.lock`. The observed failure contained an
+empty lock file instead of a PID; all 65 STM32 hardware checks passed in the
+other lane.
+
+An initial attempt made the `langcheck` forwarder depend on the same
+examples-side `build` target as `test`. That correctly serialized the first
+recursive compiler build, but a clean rerun exposed the second layer: the
+root `langcheck` and root `test` sub-makes still each reached their own Dune
+build concurrently. The final fix gives `check` one `check-host` prerequisite
+whose recipe invokes root `langcheck` and then root `test` sequentially.
+QEMU integration and STM32 artifact work remain parallel siblings, while the
+only two sub-makes that own Dune's workspace lock can no longer overlap. No
+historical source or runtime expectation changed.

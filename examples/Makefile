@@ -348,7 +348,12 @@ langcheck:
 	$(MAKE) -f Makefile langcheck
 
 ## check: run unit tests + QEMU/host integration tests + STM32 build check + ASCII check
-check: langcheck test stm32build qemutest
+.PHONY: check-host
+check-host: build
+	$(MAKE) -f Makefile langcheck
+	$(MAKE) -f Makefile test
+
+check: check-host stm32build qemutest
 
 ## optimizercheck: inspect generated objects for backend optimization regressions
 examples/inline_check/inline_check.o: examples/inline_check/inline_check.tkb $(TAKIBI)
