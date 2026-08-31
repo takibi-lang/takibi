@@ -433,6 +433,22 @@ exercises this interactive QEMU path automatically. The standalone target is
 also useful when diagnosing a terminal-specific regression without running
 the whole QEMU suite.
 
+The aggregate QEMU check also runs a focused boot-DTB lane. It boots QEMU's
+ordinary adjacent NUMA banks, a patched two-extent map with a physical hole,
+a low-memory machine, and a missing-memory negative control. QEMU's raw-ELF
+boot keeps its generated FDT at physical address zero; `-dtb` does not replace
+that handoff. The focused runner therefore pauses before the first instruction
+and uses the QEMU gdbstub to overwrite address zero, then requires an outcome
+specific to the patched tree. This proves the negative control did not merely
+boot without a usable DTB.
+
+For an interactive handoff check with `kernel-debug.elf`, source
+`scripts/kernel_boot_dtb.gdb` after `_start` has saved `x0`, then run
+`takibi-dtb`. The command is read-only: it validates the FDT magic and prints
+the total size, structure/string offsets, and version. Use the separately
+documented `takibi-pages` command below after memory discovery to inspect the
+allocator's normalized extents.
+
 The kernel never exits (a `while (true) {}` park at the end of boot, same as
 RPi5). `scripts/kernel_net_test.py <local-port> <remote-port>` is the host-side
 peer `kernelcheck-qemu` drives automatically; use the automated runner rather

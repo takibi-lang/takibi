@@ -107,6 +107,8 @@ test: build
 langcheck:
 	@python3 scripts/check_agents_paths.py
 	@python3 scripts/test_check_elf_symbol_alignment.py
+	@python3 scripts/test_check_direct_mmio_literals.py
+	@python3 scripts/check_direct_mmio_literals.py kernel
 	@python3 scripts/check_stale_depfiles.py
 	@python3 scripts/check_compiler_sync_rules.py --quiet
 	@python3 scripts/check_raw_pos_fname.py

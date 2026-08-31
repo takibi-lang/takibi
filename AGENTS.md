@@ -790,6 +790,7 @@ being a complete list is the whole point of this one;
 | `check_kernel_asm_invariants.py` | hand-written kernel assembly, disassembled from the built ELF, that breaks an EL0 entry/exit invariant (issues #229/#231) |
 | `check_kernel_lib_limitations_header.py` | a `kernel/lib`, `kernel/kernel`, or `kernel/net` file with no "Current limitations" header |
 | `check_diagnostic_event_ids.py` | duplicate or non-16-bit fixed diagnostic event ids |
+| `check_direct_mmio_literals.py` | a numeric physical address cast directly to `*io` instead of an address derived from a validated device-resource base |
 | `check_flag_guarded_fields.py` | a read of an optional field `X` that did not consult its paired `has_X` first |
 | `check_lock_discipline.py` | `mutex_init` called on a GLOBAL Mutex (it is already free from zeroed .bss, and the call FORCE-FREES a lock another core may hold), and any use of a raw atomic intrinsic outside a short declared allowlist |
 | `check_execution_model_coverage.py` | a kernel file that declares mutable state and names neither `KERNEL_ACTIVE_CORES` nor `KERNEL_PREEMPTIBLE`, with no stated reason -- `kernel/lib/execution_model.tkb`'s own header called this hole out, and two files fell through it before the check existed |
