@@ -104,7 +104,19 @@ test: build
 ## Repo-wide (kernel/, examples/, the compiler itself), so this is the one
 ## canonical implementation; examples/Makefile's own `langcheck` target
 ## just forwards here via `$(MAKE) -C .. langcheck`.
-langcheck:
+.PHONY: unused-function-control
+unused-function-control: build
+	@$(TAKIBI) test/fixtures/unused_function_positive.tkb --target $(LINUX_AMD64_TARGET) \
+		--forbid-trap --reject-unused-functions --external-entry main -o /tmp/takibi-unused-positive.o
+	@status=0; output=`$(TAKIBI) test/fixtures/unused_function_negative.tkb \
+		--target $(LINUX_AMD64_TARGET) --forbid-trap --reject-unused-functions \
+		--external-entry main -o /tmp/takibi-unused-negative.o 2>&1` || status=$$?; \
+	if [ $$status -eq 0 ]; then echo "FAIL unused-function-control: negative build succeeded" >&2; exit 1; fi; \
+	case "$$output" in *"unused function 'stale_helper': no reachable caller or declared entry point"*) ;; \
+	*) echo "FAIL unused-function-control: expected diagnostic not found" >&2; echo "$$output" >&2; exit 1;; esac; \
+	echo "PASS unused-function-control: positive build succeeded and negative build failed for stale_helper"
+
+langcheck: unused-function-control
 	@python3 scripts/check_agents_paths.py
 	@python3 scripts/test_check_elf_symbol_alignment.py
 	@python3 scripts/test_check_direct_mmio_literals.py
@@ -142,6 +154,10 @@ langcheck:
 # so it has no dependency on that frozen tree.
 LINUX_AMD64_TARGET      := x86_64-pc-linux-gnu
 LINUX_USER_DIR           := linux_user
+LINUX_UNUSED_CHECK       := --reject-unused-functions --external-entry main
+KERNEL_UNUSED_CHECK      := --reject-unused-functions \
+	--external-entry main --external-entry kernel_secondary_main \
+	--check-unused-file kernel/arch/arm64/boot/cpu.tkb
 LINUX_USER_BUILD_DIR     := $(LINUX_USER_DIR)/build
 COMMON_LINUX_DIR         := $(LINUX_USER_DIR)/common_linux
 COMMON_LINUX_STARTUP_S   := $(COMMON_LINUX_DIR)/startup.S
@@ -358,7 +374,7 @@ $(COMMON_LINUX_SYSCALL_O): $(COMMON_LINUX_SYSCALL_S) | $(LINUX_USER_BUILD_DIR)
 LINUX_USER_EXTRA_SRCS :=
 
 $(LINUX_USER_DIR)/%_exe.o: $(LINUX_USER_DIR)/%.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE) $(TAKIBI)
-	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(LINUX_USER_EXTRA_SRCS) $< --target $(LINUX_AMD64_TARGET) -o $@ --forbid-trap
+	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(LINUX_USER_EXTRA_SRCS) $< --target $(LINUX_AMD64_TARGET) -o $@ --forbid-trap $(LINUX_UNUSED_CHECK) --check-unused-file $<
 
 $(LINUX_USER_DIR)/%.exe: $(LINUX_USER_DIR)/%_exe.o $(COMMON_LINUX_STARTUP_O) $(COMMON_LINUX_SYSCALL_O)
 	$(LLD) -static -nostdlib -e _start $^ -o $@
@@ -595,7 +611,7 @@ $(KERNEL_RPI5_FPSIMD_O): $(KERNEL_RPI5_FPSIMD_S) | $(KERNEL_BUILD_DIR)
 # so the resulting ET_DYN ELF has zero dynamic relocations -- verified
 # empirically before this rule existed (see HISTORY.md's #241 entry).
 $(KERNEL_RPI5_USER_PAYLOAD_TKB_O): $(KERNEL_RPI5_USER_PAYLOAD_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --emit-depfile $@.d -o $@
+	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry initial_user_payload --emit-depfile $@.d -o $@
 
 $(KERNEL_RPI5_USER_PAYLOAD_ASM_O): $(KERNEL_RPI5_USER_PAYLOAD_ASM_S) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
@@ -610,7 +626,7 @@ $(KERNEL_RPI5_USER_PAYLOAD_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5
 # which of the two inittab entries they are. Same static-PIE shape and same
 # no-writable-globals rule as the payload above.
 $(KERNEL_BUSY_LOOP_O): $(KERNEL_BUSY_LOOP_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --emit-depfile $@.d -o $@
+	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry busy_loop_a --external-entry busy_loop_b --external-entry busy_loop_spin --emit-depfile $@.d -o $@
 
 -include $(KERNEL_BUSY_LOOP_O).d
 
@@ -628,7 +644,7 @@ $(KERNEL_BUSY_LOOP_SPIN_ELF): $(KERNEL_BUSY_LOOP_O)
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_INTC_TKB) $(KERNEL_RPI5_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --emit-depfile $@.d -o $@
+	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap $(KERNEL_UNUSED_CHECK) --emit-depfile $@.d -o $@
 
 # GitHub issue #306: same depfile fix as $(KERNEL_QEMU_MAIN_O)'s own, for
 # this target's own hand-written prerequisite list above.
@@ -696,7 +712,7 @@ $(KERNEL_QEMU_FPSIMD_O): $(KERNEL_RPI5_FPSIMD_S) | $(KERNEL_QEMU_BUILD_DIR)
 # duplicate top-level definition is a compile error by design.
 $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) | $(KERNEL_QEMU_BUILD_DIR)
-	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --forbid-trap --emit-depfile $@.d -o $@
+	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --forbid-trap $(KERNEL_UNUSED_CHECK) --emit-depfile $@.d -o $@
 
 # GitHub issue #306: the hand-written prerequisite list on $(KERNEL_QEMU_MAIN_O)
 # above is a second, independently-maintained copy of exactly what the
@@ -732,7 +748,7 @@ KERNEL_QEMU_DEBUG_ELF    := $(KERNEL_QEMU_BUILD_DIR)/kernel-debug.elf
 
 $(KERNEL_QEMU_MAIN_DEBUG_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) | $(KERNEL_QEMU_BUILD_DIR)
-	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --forbid-trap -g --emit-depfile $@.d -o $@
+	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --forbid-trap $(KERNEL_UNUSED_CHECK) -g --emit-depfile $@.d -o $@
 
 # GitHub issue #306: same depfile fix as $(KERNEL_QEMU_MAIN_O)'s own, for
 # this target's own hand-written prerequisite list above.

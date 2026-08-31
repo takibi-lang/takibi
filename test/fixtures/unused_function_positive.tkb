@@ -1,0 +1,10 @@
+fn callback() {
+}
+
+fn consume(f: fn() -> void) {
+    f();
+}
+
+fn main() {
+    consume(callback);
+}

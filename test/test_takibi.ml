@@ -46,6 +46,12 @@ let infer src =
     (Declared_type_resolver.run
        (Monomorphize.run (Publish_record.run (parse src))))
 
+let unused_errors ?(external_entries = ["main"]) src =
+  let prog = Declared_type_resolver.run
+      (Monomorphize.run (Publish_record.run (parse src))) in
+  let types = Type_inf.infer_program prog in
+  Unused_functions.check ~external_entries ~check_files:[] prog types
+
 (* Parses each (filename, src) pair as if it were a distinct source file
    (Lexing.set_filename, matching bin/main.ml's own parse_file) and
    concatenates the results, mirroring how multiple .tkb files given to
@@ -2282,6 +2288,29 @@ let async_tx_fixture =
    "
 
 let infer_tests = [
+  Alcotest.test_case "unused function reachability rejects a dead helper" `Quick
+    (fun () ->
+      match unused_errors "fn dead() {} fn main() {}" with
+      | [Unused_functions.Unused f] ->
+          Alcotest.(check string) "dead function" "dead" f.Ast.name
+      | _ -> Alcotest.fail "expected exactly one unused function");
+
+  Alcotest.test_case "unused function reachability follows direct calls" `Quick
+    (fun () ->
+      Alcotest.(check int) "no unused functions" 0
+        (List.length (unused_errors "fn helper() {} fn main() { helper(); }")));
+
+  Alcotest.test_case "unused function reachability follows function values" `Quick
+    (fun () ->
+      Alcotest.(check int) "no unused functions" 0
+        (List.length (unused_errors
+          "fn callback() {} fn take(f: fn() -> void) { f(); } fn main() { take(callback); }")));
+
+  Alcotest.test_case "unused function reachability accepts explicit entries" `Quick
+    (fun () ->
+      Alcotest.(check int) "no unused functions" 0
+        (List.length (unused_errors ~external_entries:["asm_entry"]
+          "fn asm_entry() {}")));
   Alcotest.test_case "overflow audit records source integer operators only and resets" `Quick
     (fun () ->
       ignore (infer_files ["audit.tkb",

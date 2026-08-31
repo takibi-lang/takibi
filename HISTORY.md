@@ -15,6 +15,20 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-08-31: resolved-call-graph unused-function rejection (#494)
+
+Maintained builds can now request a fatal post-typecheck reachability check
+with `--reject-unused-functions`. The pass consumes the type checker's resolved
+direct-call and function-value targets rather than guessing from source text.
+Language interrupt/exception roots, generated vector/exception callbacks, and
+explicit assembly/linker entries are roots. `--check-unused-file` narrows the
+reported definitions while retaining the whole program as the reachability
+graph; linux_user uses that boundary for each executable's own test source,
+whose imported support modules intentionally expose a wider reusable API. The
+kernel checks the boot CPU module where the stale fixed-SMC bypass was found.
+Positive and negative build controls independently prove successful execution,
+nonzero rejection, and the exact unused-function diagnostic.
+
 ## 2026-08-30: two wrong diagnoses of one intermittent failure, and the arithmetic that would have stopped both (#479)
 
 Written for whoever debugs the next intermittent failure in this tree,

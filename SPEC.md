@@ -17,7 +17,8 @@ describes behavior in prose instead.
 
 File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
 [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features
-<features>] [-g] [--forbid-trap] [--forbid-unsafe] [--explain-inference]
+<features>] [-g] [--forbid-trap] [--forbid-unsafe] [--reject-unused-functions]
+[--external-entry <function>] [--check-unused-file <path>] [--explain-inference]
 [--version]`. Multiple `.tkb` files are
 concatenated (flat global namespace) before compilation -- there is no
 module/import system beyond `use` (see "Known Limitations" below).

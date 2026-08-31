@@ -1340,6 +1340,7 @@ let is_variant_ty t = match repr t with
 (* Direct calls are resolved during inference.  Codegen must consume this
    exact decision rather than attempting a second overload resolution. *)
 let resolved_call_targets = ref StringMap.empty
+let resolved_function_values = ref StringMap.empty
 let resolved_indirect_call_effects : string list option StringMap.t ref =
   ref StringMap.empty
 
@@ -1961,7 +1962,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | None ->
            (* Function name used as a value (function pointer) *)
            match StringMap.find_opt name fenv with
-           | Some [(_, ft)] ->
+           | Some [(target, ft)] ->
+               resolved_function_values :=
+                 StringMap.add (loc_key e.loc) target !resolved_function_values;
                let ft = instantiate_static_params ft in
                if contains_view_ty ft then
                  raise (TypeError (e.loc, Printf.sprintf
@@ -5806,6 +5809,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   active_parameter_bindings := IntSet.empty;
   enclosing_future_writes := StringSet.empty;  (* fresh per compilation / per unit test *)
   resolved_call_targets := StringMap.empty;
+  resolved_function_values := StringMap.empty;
   resolved_indirect_call_effects := StringMap.empty;
   (* Reset every module-scoped per-program table up front. Some are reset
      again immediately before their population below; this single preamble
@@ -9631,10 +9635,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let enums = StringMap.map (fun (underlying, variants, _) ->
     { underlying; variants }
   ) eenv in
+  let function_def_keys = List.fold_left (fun keys -> function
+    | Ast.FuncDef f ->
+        StringMap.add (loc_key f.def_loc) (overload_key f.name f.params) keys
+    | _ -> keys
+  ) StringMap.empty prog in
   {
     globals   = StringMap.map (fun (ty, _) -> to_ast ty) genv;
     functions;
     structs   = senv;
     enums;
     call_targets = !resolved_call_targets;
+    function_values = !resolved_function_values;
+    function_def_keys;
   }

@@ -46,6 +46,9 @@ let () =
   let debug_info = ref false in
   let forbid_trap = ref false in
   let forbid_unsafe = ref false in
+  let reject_unused_functions = ref false in
+  let external_entries = ref [] in
+  let check_unused_files = ref [] in
   let explain_inference = ref false in
   let profile_functions = ref false in
   let show_version = ref false in
@@ -116,6 +119,20 @@ let () =
          forbid_trap := true
      | "--forbid-unsafe" ->
          forbid_unsafe := true
+     | "--reject-unused-functions" ->
+         reject_unused_functions := true
+     | "--external-entry" ->
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --external-entry requires a function name\n"; exit 1
+         );
+         external_entries := Sys.argv.(!i) :: !external_entries
+     | "--check-unused-file" ->
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --check-unused-file requires a source path\n"; exit 1
+         );
+         check_unused_files := Sys.argv.(!i) :: !check_unused_files
      | "--explain-inference" ->
          explain_inference := true
      | "--profile-functions" ->
@@ -133,7 +150,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--explain-inference] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -220,6 +237,22 @@ let () =
 
     (* HM type inference -- catches type errors and produces resolved types *)
     let prog_types = Typechecker.infer_program prog in
+
+    if !reject_unused_functions then begin
+      let errors = Unused_functions.check
+        ~external_entries:(List.rev !external_entries)
+        ~check_files:(List.rev !check_unused_files) prog prog_types in
+      List.iter (function
+        | Unused_functions.Unknown_entry name ->
+            Printf.eprintf "Error: --external-entry names unknown Takibi function '%s'\n" name
+        | Unused_functions.Unknown_check_file file ->
+            Printf.eprintf "Error: --check-unused-file contains no Takibi functions: '%s'\n" file
+        | Unused_functions.Unused f ->
+            report_error f.Ast.def_loc (Printf.sprintf
+              "unused function '%s': no reachable caller or declared entry point"
+              f.Ast.name)) errors;
+      if errors <> [] then exit 1
+    end;
 
     if !emit_overflow_audit <> "" then begin
       let op_name = function

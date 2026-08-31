@@ -813,6 +813,8 @@ type program_types = {
        this is a direct passthrough of. *)
   enums     : enum_info StringMap.t;
   call_targets : string StringMap.t;
+  function_values : string StringMap.t;
+  function_def_keys : string StringMap.t;
   (* struct name -> ordered field list [(field_name, field_type)] *)
   (* enum name  -> underlying type + variant list                 *)
 }
