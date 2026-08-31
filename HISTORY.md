@@ -15,6 +15,15 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-08-31: refresh the RPi5 kernel-size boundary after DDB growth
+
+The synchronized DDB command work moved the linked image across the next
+32-KiB per-CPU-stack alignment boundary. Consequently `usable_ram_start`
+moved from `0x570000` to `0x578000`, leaving eight fewer allocator pages on
+the RPi5 hardware fixture. The checked memory-map rows and the exact hardware
+boot view now record that linked layout. No detected RAM or firmware
+reservation changed.
+
 ## 2026-08-31: synchronized resumable-DDB command inventory (#458)
 
 The public resumable-DDB commands, their argument shapes, integration
