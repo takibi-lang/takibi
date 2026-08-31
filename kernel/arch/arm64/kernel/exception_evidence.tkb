@@ -874,7 +874,9 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
                             ddb_command_is(line as []u8, length, bs"xkfault")) {
                         // Test-only bypass of the ordinary-RAM classifier:
                         // exercise a real translation fault and prompt return.
-                        ddb_render_kernel_memory(0x1000000000, 1);
+                        // L1 index 32 is unmapped on both maintained targets;
+                        // index 64 is RPi5 device MMIO despite faulting on QEMU.
+                        ddb_render_kernel_memory(0x800000000, 1);
                     } else if (ddb_command_is(line as []u8, length, bs"help")) {
                         ddb_puts("commands: oops regs intr sched current vm fds ps proc PID trace events xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] help continue\n");
                     } else { ddb_puts("ddb: unknown command; try help\n"); }

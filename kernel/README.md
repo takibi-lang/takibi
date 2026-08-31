@@ -558,10 +558,13 @@ continues afterward. A second lane executes Takibi's reserved deliberate
 resume behavior. Other Current-EL synchronous exceptions remain fatal. The
 RPi5 implementation uses the same PL011 DR.BE/BEIM
 path. The normal RPi5 integration enables the test-only ring byte over SWD
-after its ordinary workload, sends an ordinary byte followed by timed CDC
-BREAK, runs `events`, and continues in the same boot. This verifies the
-process-wake and platform-BREAK records, undamaged per-CPU reading, and resume
-on the physical board.
+after its ordinary workload together with the test-only guarded-fault command,
+then sends an ordinary byte followed by timed CDC BREAK. It runs the guarded
+fault command, verifies the recovered prompt with an `events` inspection,
+continues, and executes a shell command in the same boot. This verifies the
+process-wake and platform-BREAK records, fault recovery with the debugger
+environment intact, undamaged per-CPU reading, and resumed workload on the
+physical board.
 
 When enabled for a boot test, the process layer records a fixed 16-entry,
 allocation-free lifecycle ring: fork, exec prepare/commit, schedule, block,

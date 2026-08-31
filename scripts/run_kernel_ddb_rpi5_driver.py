@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise UART-wake and BREAK diagnostic events on a running RPi5 kernel."""
+"""Exercise guarded-fault recovery through a real RPi5 UART BREAK."""
 
 import argparse
 import time
@@ -17,7 +17,8 @@ def main() -> int:
     deadline = time.monotonic() + args.timeout
     received = bytearray()
     prompt_count = 0
-    commands = (b"events\n", b"continue\n")
+    resume_command_sent = False
+    commands = (b"xkfault\n", b"events\n", b"continue\n")
     with serial.Serial(args.port, 115200, timeout=0.25) as uart, open(
         args.log, "ab"
     ) as log:
@@ -37,19 +38,38 @@ def main() -> int:
                     uart.write(commands[prompt_count])
                     uart.flush()
                 prompt_count += 1
-            if b"ddb: continuing\n" in received:
+            if not resume_command_sent and b"ddb: continuing\n" in received:
+                uart.write(b"echo ddb-resume-ok\n")
+                uart.flush()
+                resume_command_sent = True
+            normalized = bytes(received).replace(b"\r", b"")
+            if b"\n/ # ddb-resume-ok\n/ # " in normalized:
                 break
-        else:
-            raise SystemExit("RPi5 DDB BREAK/events/continue sequence timed out")
 
     text = received.decode("ascii", errors="replace")
+    if "oops: fail-stop" in text:
+        raise SystemExit(
+            "RPi5 DDB did not resume after guarded fault "
+            "(entered fail-stop crash console)"
+        )
+    if prompt_count < 2:
+        raise SystemExit("RPi5 DDB did not return to a prompt after guarded fault")
+    if "ddb: xk fault address=0x0000000800000000" not in text:
+        raise SystemExit("RPi5 DDB guarded fault was not reported")
+    if "ddb: events cpu=0 count=" not in text:
+        raise SystemExit("RPi5 DDB post-fault inspection command did not complete")
     if "id=0x0000000000000201" not in text:
         raise SystemExit("RPi5 DDB did not retain the process UART-wake event")
     if "id=0x0000000000000101" not in text:
         raise SystemExit("RPi5 DDB did not retain the platform UART BREAK event")
     if "damaged=0 overwritten=0" not in text:
         raise SystemExit("RPi5 DDB diagnostic ring reported damaged/overwritten data")
-    print("PASS kernel/rpi5 ddb: UART wake and BREAK events inspected and resumed")
+    if "ddb: continuing\n" not in text:
+        raise SystemExit("RPi5 DDB did not continue after post-fault inspection")
+    if (b"\n/ # ddb-resume-ok\n/ # " not in
+            bytes(received).replace(b"\r", b"")):
+        raise SystemExit("RPi5 workload did not resume after DDB continue")
+    print("PASS kernel/rpi5 ddb: guarded fault recovered, inspected, and resumed")
     return 0
 
 

@@ -21849,3 +21849,27 @@ change in this entry; `make -f examples/Makefile qemutest` (168
 integration tests, including every `*_wrong`/`*_never_consumed` negative
 fixture) also passed after the #325 migration specifically. No RPi5
 hardware was touched this session.
+
+## 2026-08-31: RPi5 hardware coverage for guarded DDB read faults (#457)
+
+The normal RPi5 hardware integration now enables DDB's existing test-only
+guarded-fault command over SWD after the ordinary workload completes. Its
+real Debug Probe CDC BREAK session runs `xkfault`, requires the expected
+fault address and a subsequent prompt, inspects the diagnostic event ring,
+continues, and executes a shell command to prove that the interrupted
+workload resumed. The UART artifact therefore preserves the fault report,
+post-fault inspection, and post-debugger workload evidence in one boot.
+
+The driver recognizes entry into the fail-stop crash console before checking
+the recovered prompt or rendered fault line, and otherwise reports a missing
+post-fault prompt first. This makes removal of the synchronous-abort recovery
+path fail with a relevant resume diagnostic even though fail-stop itself
+provides a read-only `ddb>` prompt. The command remains hidden behind its
+test-only byte and is not exposed in production DDB sessions.
+
+The first hardware run also found that `xkfault`'s original fixed address,
+`0x1000000000`, was not target-independent: it faults on QEMU but belongs to
+RPi5's mapped BCM2712 device L1 block. The test-only command now reads from
+unmapped L1 index 32 (`0x800000000`) on both maintained targets. This keeps
+the command a translation-fault exercise instead of accidentally issuing an
+MMIO read on the physical board.
