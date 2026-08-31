@@ -10,6 +10,7 @@ EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
 ARTIFACT_DIR="${KERNEL_QEMU_SHELL_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-shell-qemu}"
 SHELL_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 QMP_SOCKET="$ARTIFACT_DIR/qmp.sock"
+TRANSCRIPT_OVERRIDE="${KERNEL_SHELL_TRANSCRIPT:-}"
 
 # The top-level Makefile normally enables -Oline, which captures a recipe's
 # stdout/stderr until its command exits. This is an intentionally long-lived
@@ -39,6 +40,17 @@ fi
 # experiment from changing the source fixture used by the next automated
 # kernelcheck run.
 mkdir -p "$ARTIFACT_DIR"
+if [ -n "$TRANSCRIPT_OVERRIDE" ]; then
+    TRANSCRIPT="$TRANSCRIPT_OVERRIDE"
+    mkdir -p "$(dirname "$TRANSCRIPT")"
+    if [ -e "$TRANSCRIPT" ]; then
+        echo "error: refusing to overwrite UART transcript: $TRANSCRIPT" >&2
+        exit 1
+    fi
+else
+    TRANSCRIPT="$ARTIFACT_DIR/uart-transcript.log"
+    rm -f "$TRANSCRIPT"
+fi
 cp "$EXT2_IMAGE" "$SHELL_EXT2_IMAGE"
 rm -f "$QMP_SOCKET"
 
@@ -86,6 +98,7 @@ fi
 export KERNEL_SHELL_PLATFORM=qemu
 export KERNEL_SHELL_LAUNCH_NS="$QEMU_LAUNCH_NS"
 export KERNEL_SHELL_QMP_SOCKET="$QMP_SOCKET"
+export KERNEL_SHELL_TRANSCRIPT="$TRANSCRIPT"
 if [ "${KERNEL_QEMU_SHELL_MEASURE_ONLY:-0}" = 1 ]; then
     export KERNEL_SHELL_MEASURE_ONLY=1
 fi

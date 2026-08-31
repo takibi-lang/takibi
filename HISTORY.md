@@ -21893,3 +21893,27 @@ clean inventory: the host-native FDT fixture emitted its first 51 lines with
 LF, then one memory-map line with LF followed by 15 with CRLF. That new block
 now uses the fixture's established LF convention, and the expected bytes were
 normalized accordingly; no cross-fixture newline convention was imposed.
+
+## 2026-08-31: Continuously preserve interactive kernel UART sessions (#459)
+
+The shared QEMU/RPi5 miniterm reader now writes every raw UART receive chunk
+to a session transcript and flushes it immediately before decoding or drawing
+the same bytes. This preserves the single-reader design, terminal rendering,
+BREAK handling, and readiness detection while retaining evidence up to the
+last chunk received before an exit or interruption. Measure-only QEMU boots
+use the same recording path.
+
+Each wrapper supplies a deterministic default beneath its existing
+`_build/kernel-shell-*` directory and removes only that default at the start
+of a later session. `KERNEL_SHELL_TRANSCRIPT` selects a valuable session's
+own path; the console opens it exclusively so an existing artifact cannot be
+overwritten. Start and exit diagnostics print the selected path, and the
+kernel documentation warns that raw transcripts may contain shell input,
+output, addresses, and other data that needs review before sharing.
+
+The QEMU PTY smoke test now judges the artifact independently of what
+miniterm drew on the host terminal. One flushed transcript must contain ash
+readiness before DDB, DDB entry, a second register-summary line proving its
+`oops` command ran, `continue`, and the shell marker emitted after resume.
+The existing Ctrl-] cleanup verdict also proves that a normal exit leaves the
+artifact readable.

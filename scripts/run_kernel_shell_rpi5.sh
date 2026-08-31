@@ -9,6 +9,8 @@ ETH_TEST_IFACE="${ETH_TEST_IFACE:-enp5s0}"
 ETH_TEST_SUBNET="${ETH_TEST_SUBNET:-192.168.20}"
 ETH_TEST_MAC="${ETH_TEST_MAC:-02:00:20:00:00:02}"
 ETH_TEST_HOST_IP="${ETH_TEST_HOST_IP:-192.168.20.1}"
+ARTIFACT_DIR="${KERNEL_RPI5_SHELL_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-shell-rpi5}"
+TRANSCRIPT_OVERRIDE="${KERNEL_SHELL_TRANSCRIPT:-}"
 
 # See run_kernel_shell_qemu.sh: Make's normal -Oline setting captures this
 # long-lived recipe's standard streams. The shell must instead attach directly
@@ -30,6 +32,19 @@ if [ -z "$SERIAL_DEV" ] || [ ! -e "$SERIAL_DEV" ]; then
     exit 1
 fi
 
+mkdir -p "$ARTIFACT_DIR"
+if [ -n "$TRANSCRIPT_OVERRIDE" ]; then
+    TRANSCRIPT="$TRANSCRIPT_OVERRIDE"
+    mkdir -p "$(dirname "$TRANSCRIPT")"
+    if [ -e "$TRANSCRIPT" ]; then
+        echo "error: refusing to overwrite UART transcript: $TRANSCRIPT" >&2
+        exit 1
+    fi
+else
+    TRANSCRIPT="$ARTIFACT_DIR/uart-transcript.log"
+    rm -f "$TRANSCRIPT"
+fi
+
 stty -F "$SERIAL_DEV" 115200 raw -echo
 SHELL_LAUNCH_NS="$(date +%s%N)"
 echo "[kernel/rpi5] resetting resident image before SWD load"
@@ -44,7 +59,7 @@ load_finished="$(date +%s%N)"
 echo "[kernel/rpi5] load completed in $(( (load_finished - load_started) / 1000000 )) ms"
 
 NETWORK_PEER_PID=""
-NETWORK_PEER_LOG="${RPI5_SHELL_NETWORK_LOG:-$REPO_ROOT/_build/kernel-shell-rpi5/network-peer.log}"
+NETWORK_PEER_LOG="${RPI5_SHELL_NETWORK_LOG:-$ARTIFACT_DIR/network-peer.log}"
 if [ "${KERNEL_RPI5_SHELL_NETWORK_PEER:-1}" = 1 ]; then
     mkdir -p "$(dirname "$NETWORK_PEER_LOG")"
     : >"$NETWORK_PEER_LOG"
@@ -76,6 +91,7 @@ echo "[kernel/rpi5] starting UART console on $SERIAL_DEV"
 # not lose the interactive session.
 export KERNEL_SHELL_PLATFORM=rpi5
 export KERNEL_SHELL_LAUNCH_NS="$SHELL_LAUNCH_NS"
+export KERNEL_SHELL_TRANSCRIPT="$TRANSCRIPT"
 cleanup() {
     if [ -n "$NETWORK_PEER_PID" ]; then
         kill "$NETWORK_PEER_PID" 2>/dev/null || true

@@ -182,6 +182,16 @@ be opened from the host browser. Both use pyserial's
 python3-serial`. Press Ctrl-] to leave either console.
 Exiting this way also restores the host terminal settings.
 
+The shared console continuously flushes the raw UART bytes it receives to
+`_build/kernel-shell-qemu/uart-transcript.log` or
+`_build/kernel-shell-rpi5/uart-transcript.log`. It prints that path both when
+recording starts and when the console exits. A later default session replaces
+the corresponding default file. Set `KERNEL_SHELL_TRANSCRIPT` to a unique
+path before starting a valuable session; an existing override path is refused
+rather than overwritten. The transcript can contain typed shell commands,
+command output, addresses, and other sensitive session data, so review it
+before sharing.
+
 To stop a live kernel in DDB from either `make kernelsh-qemu` or
 `make kernelsh-rpi5`, press Ctrl-T and then the ordinary lowercase `b` key.
 Neither key is forwarded to ash. On RPi5 the host sends one automatically

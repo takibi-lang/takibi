@@ -167,9 +167,10 @@ def ash_ready(output: bytes) -> bool:
 
 
 class TimingMiniterm(miniterm.Miniterm):
-    def __init__(self, serial_instance, launch_ns):
+    def __init__(self, serial_instance, launch_ns, transcript):
         super().__init__(serial_instance, echo=True, eol="lf")
         self.launch_ns = launch_ns
+        self.transcript = transcript
         self.pending = b""
         self.reported = False
 
@@ -197,6 +198,8 @@ class TimingMiniterm(miniterm.Miniterm):
                 data = self.serial.read(self.serial.in_waiting or 1)
                 if not data:
                     continue
+                self.transcript.write(data)
+                self.transcript.flush()
                 if not self.reported:
                     self.pending = (self.pending + data)[-READY_MARKER_WINDOW:]
                     if ash_ready(self.pending):
@@ -230,46 +233,69 @@ def main() -> int:
     port = sys.argv[1]
     baudrate = int(sys.argv[2])
     launch_ns = int(os.environ["KERNEL_SHELL_LAUNCH_NS"])
-    serial_instance = serial.serial_for_url(port, baudrate, do_not_open=True)
-    open_with_retry(serial_instance)
-    connected_ms = (time.time_ns() - launch_ns) / 1_000_000
-    print(
-        f"{LABEL} UART connected: {connected_ms:.1f} ms after launch",
-        file=sys.stderr,
-        flush=True,
-    )
-    if os.environ.get("KERNEL_SHELL_MEASURE_ONLY") == "1":
-        pending = b""
-        line_buffer = b""
-        reported_phases = set()
-        while True:
-            data = serial_instance.read(serial_instance.in_waiting or 1)
-            if not data:
-                continue
-            line_buffer += data
-            while b"\n" in line_buffer:
-                line, line_buffer = line_buffer.split(b"\n", 1)
-                for marker, phase in BOOT_PHASE_MARKERS:
-                    if phase not in reported_phases and marker in line:
-                        elapsed_ms = (time.time_ns() - launch_ns) / 1_000_000
+    transcript_path = os.environ["KERNEL_SHELL_TRANSCRIPT"]
+    transcript = open(transcript_path, "xb")
+    print(f"{LABEL} UART transcript: {transcript_path}", file=sys.stderr, flush=True)
+    try:
+        serial_instance = serial.serial_for_url(port, baudrate, do_not_open=True)
+        open_with_retry(serial_instance)
+        connected_ms = (time.time_ns() - launch_ns) / 1_000_000
+        print(
+            f"{LABEL} UART connected: {connected_ms:.1f} ms after launch",
+            file=sys.stderr,
+            flush=True,
+        )
+        if os.environ.get("KERNEL_SHELL_MEASURE_ONLY") == "1":
+            pending = b""
+            line_buffer = b""
+            reported_phases = set()
+            while True:
+                data = serial_instance.read(serial_instance.in_waiting or 1)
+                if not data:
+                    continue
+                transcript.write(data)
+                transcript.flush()
+                line_buffer += data
+                while b"\n" in line_buffer:
+                    line, line_buffer = line_buffer.split(b"\n", 1)
+                    for marker, phase in BOOT_PHASE_MARKERS:
+                        if phase not in reported_phases and marker in line:
+                            elapsed_ms = (time.time_ns() - launch_ns) / 1_000_000
+                            print(
+                                f"{LABEL} {phase}: {elapsed_ms:.1f} ms",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            reported_phases.add(phase)
+                pending = (pending + data)[-READY_MARKER_WINDOW:]
+                if ash_ready(pending):
+                    elapsed_ms = (time.time_ns() - launch_ns) / 1_000_000
+                    if "ash readiness" not in reported_phases:
                         print(
-                            f"{LABEL} {phase}: {elapsed_ms:.1f} ms",
+                            f"{LABEL} ash readiness: {elapsed_ms:.1f} ms "
+                            "(interactive shell UART blocked)",
                             file=sys.stderr,
                             flush=True,
                         )
-                        reported_phases.add(phase)
-            pending = (pending + data)[-READY_MARKER_WINDOW:]
-            if ash_ready(pending):
-                elapsed_ms = (time.time_ns() - launch_ns) / 1_000_000
-                if "ash readiness" not in reported_phases:
+                    transcript.flush()
+                    transcript.close()
                     print(
-                        f"{LABEL} ash readiness: {elapsed_ms:.1f} ms "
-                        "(interactive shell UART blocked)",
+                        f"{LABEL} UART transcript saved: {transcript_path}",
                         file=sys.stderr,
                         flush=True,
                     )
-                return 0
-    terminal = TimingMiniterm(serial_instance, launch_ns)
+                    return 0
+    except BaseException:
+        transcript.flush()
+        transcript.close()
+        print(
+            f"{LABEL} UART transcript saved: {transcript_path}",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise
+
+    terminal = TimingMiniterm(serial_instance, launch_ns, transcript)
     terminal.raw = True
     terminal.set_rx_encoding("UTF-8")
     terminal.set_tx_encoding("UTF-8")
@@ -302,6 +328,13 @@ def main() -> int:
         # a daemon thread and the shutdown path must not wait forever for it.
         terminal.join(True)
         terminal.console.cleanup()
+        transcript.flush()
+        transcript.close()
+        print(
+            f"{LABEL} UART transcript saved: {transcript_path}",
+            file=sys.stderr,
+            flush=True,
+        )
     return 0
 
 

@@ -12,6 +12,8 @@ import time
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 READY_MARKER = b"interactive shell: uart blocked"
 COMMAND_RESULT = b"__KERNELSH_PTY_SMOKE__"
+ARTIFACT_DIR = os.path.join(REPO_ROOT, "_build", "kernelcheck-shell-qemu")
+TRANSCRIPT_PATH = os.path.join(ARTIFACT_DIR, "uart-transcript.log")
 START_TIMEOUT_SECONDS = 45
 EXIT_TIMEOUT_SECONDS = 15
 
@@ -52,13 +54,55 @@ def fail(pid, transcript, message):
     raise SystemExit(1)
 
 
+def drain_terminal(terminal, transcript):
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        readable, _, _ = select.select([terminal], [], [], 0.1)
+        if not readable:
+            continue
+        try:
+            data = os.read(terminal, 4096)
+        except OSError:
+            return
+        if not data:
+            return
+        transcript.extend(data)
+
+
+def verify_uart_transcript(pid, terminal_transcript):
+    path_bytes = TRANSCRIPT_PATH.encode()
+    for marker, description in (
+        ("UART transcript: ".encode() + path_bytes, "transcript start path"),
+        ("UART transcript saved: ".encode() + path_bytes, "transcript exit path"),
+    ):
+        if marker not in terminal_transcript:
+            fail(pid, terminal_transcript, f"terminal missed {description}")
+
+    try:
+        with open(TRANSCRIPT_PATH, "rb") as transcript:
+            uart = transcript.read().replace(b"\r", b"")
+    except OSError as error:
+        fail(pid, terminal_transcript, f"UART transcript is not readable: {error}")
+
+    required = (
+        (READY_MARKER, "pre-DDB ash readiness"),
+        (b"ddb: interrupt-safe UART debugger", "DDB entry"),
+        (b"ddb: continuing", "DDB continue output"),
+        (b"\n" + COMMAND_RESULT + b"\n", "post-resume shell output"),
+    )
+    for marker, description in required:
+        if marker not in uart:
+            fail(pid, terminal_transcript, f"UART transcript missed {description}")
+    if uart.count(b"ddb: break seq=") < 2:
+        fail(pid, terminal_transcript, "UART transcript missed oops command output")
+
+
 def main():
     pid, terminal = pty.fork()
     if pid == 0:
         os.chdir(REPO_ROOT)
-        os.environ["KERNEL_QEMU_SHELL_ARTIFACT_DIR"] = os.path.join(
-            REPO_ROOT, "_build", "kernelcheck-shell-qemu"
-        )
+        os.environ.pop("KERNEL_SHELL_TRANSCRIPT", None)
+        os.environ["KERNEL_QEMU_SHELL_ARTIFACT_DIR"] = ARTIFACT_DIR
         os.environ["KERNEL_QEMU_SHELL_SERIAL_PORT"] = "18707"
         os.environ["KERNEL_QEMU_SHELL_HTTP_PORT"] = "18708"
         os.environ["KERNEL_QEMU_SHELL_SKIP_NETWORK"] = "1"
@@ -109,6 +153,8 @@ def main():
             exited_pid, status = os.waitpid(pid, os.WNOHANG)
             if exited_pid:
                 if status == 0:
+                    drain_terminal(terminal, transcript)
+                    verify_uart_transcript(pid, transcript)
                     print("kernelsh-qemu PTY smoke test: PASS")
                     return
                 fail(pid, transcript, "make kernelsh-qemu exited unsuccessfully")
