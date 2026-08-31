@@ -74,22 +74,26 @@ let make_binop loc op left right =
    enum's discriminant, an array's element count) -- so overflow here is a
    hard TypeError instead. *)
 let narrow_int64 pos what (n : Int64.t) : int =
-  (* INT tokens are digit strings and therefore never denote a negative
-     source value. The lexer preserves their raw 64-bit pattern, so a
-     literal with bit 63 set arrives here as a negative Int64.t (for
-     example 0xFFFFFFFFFFFFFFFF arrives as -1L). Ast.int_of_intlit would
-     accept that as the native integer -1, turning a huge positive refined
-     bound into a false negative bound. Reject that representation here;
-     genuinely negative grammar values are still expressible as arithmetic
-     such as `0 - 1`, after each non-negative operand has been narrowed. *)
   match Ast.int_of_intlit n with
-  | Some _ when Int64.compare n 0L < 0 ->
-      raise (Types.TypeError (pos,
-        Printf.sprintf "%s value %Lu is too large to represent" what n))
   | Some i -> i
   | None ->
       raise (Types.TypeError (pos,
         Printf.sprintf "%s value %Ld is too large to represent" what n))
+
+let narrow_refined_bound pos (n : Int64.t) : int =
+  (* INT tokens are digit strings and therefore never denote a negative
+     source value. The lexer preserves their raw 64-bit pattern, so a
+     literal with bit 63 set arrives here as a negative Int64.t (for
+     example 0xFFFFFFFFFFFFFFFF arrives as -1L). The general narrow_int64
+     helper deliberately preserves that bit-pattern convention for such
+     grammar positions as array-size arithmetic; a refined bound instead
+     describes a mathematical interval, so reinterpreting the literal as
+     -1 would create a false proof. Genuinely negative bounds remain
+     expressible as arithmetic such as `0 - 1`. *)
+  if Int64.compare n 0L < 0 then
+    raise (Types.TypeError (pos,
+      Printf.sprintf "refined type bound value %Lu is too large to represent" n));
+  narrow_int64 pos "refined type bound" n
 
 (* GitHub issue #184: an arm body's LAST statement (for BOTH plain
    `match` and `let mut id: ty = match disc { arms };`) must be `Yield e`
@@ -1174,7 +1178,7 @@ type_expr:
         (TypeRefined (lo, hi, base), n) }
 
 refined_bound:
-  | n = INT { narrow_int64 $symbolstartpos "refined type bound" n }
+  | n = INT { narrow_refined_bound $symbolstartpos n }
   | name = IDENT
     { match Const_env.find name with
       | Some n -> n
