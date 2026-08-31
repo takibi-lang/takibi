@@ -21953,3 +21953,26 @@ literal pipeline. The bound-specific rejection prevents a sign-bit-set
 64-bit pattern from becoming a negative interval endpoint; digit strings
 wider than 64 bits retain the language's older lexer-wide low-64-bit wrapping
 semantics. No compiler behavior changed in this documentation correction.
+
+## 2026-08-31: Close the scheduler-probe stop/check gap
+
+An intermittent QEMU debug boot again reported `process table: records
+MISSING`, disproving the earlier zero-in-fourteen observation after the
+probe switched to whole-table initialization. The remaining race was in the
+probe's shutdown protocol: the secondary could observe the atomic `armed`
+gate while true, lose the CPU before acquiring the process-run lock, and
+resume after the primary had drained the separate occupancy words and reaped
+the probe record. Release/acquire operations on the two independent atomics
+did not order that check against teardown.
+
+The locked phase now checks `armed` again after acquiring the same process-run
+lock taken by teardown. A late entrant therefore either finishes before the
+teardown acquires the lock or observes the closed gate afterwards and never
+touches the handle. Five consecutive DWARF QEMU boots passed after the change.
+
+`kernelcheck-qemu-debug-repeat` was added as a diagnostic sampling target. It
+runs five boots by default, accepts `KERNEL_QEMU_DEBUG_REPEAT=<count>`, and
+keeps each boot's UART, timing, network, and projected-view artifacts in a
+separate directory so a later sample cannot overwrite the failure being
+investigated. It is deliberately outside `allcheck`: repetition improves the
+confidence of a timing-sensitive check but adds no new product coverage.

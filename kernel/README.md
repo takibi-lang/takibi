@@ -164,6 +164,7 @@ make kernelcheck-qemu  # build and run the complete QEMU integration test (no ha
 make kernelcheck-shell-qemu  # PTY smoke test for the interactive QEMU ash path
 make kernelbuild-qemu-debug  # build kernel/build/qemu/kernel-debug.elf with DWARF info
 make kernelcheck-qemu-debug  # run the complete QEMU integration test against the DWARF build
+make kernelcheck-qemu-debug-repeat  # repeat it 5 times, preserving each boot's artifacts
 make kernelcheck-oops-qemu  # verify parked QEMU oops records and the retained lifecycle trace
 make kernelcheck-ddb-qemu  # enter DDB through a real UART BREAK, inspect, and resume
 make kernelcheck-lifecycle-gap-qemu  # verify the interactive-HTTPd checkpoint diagnosis names a real gap

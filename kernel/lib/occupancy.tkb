@@ -56,9 +56,12 @@
 // invites relying on a guarantee that quietly stopped holding.
 // - IT PROVES ABSENCE, NOT EXCLUSION. `Quiesced` says every core had left
 //   at the moment of the drain. Nothing stops one entering again
-//   afterwards -- the caller has to be the reason that cannot happen (in
-//   the probe's case, because the same core cleared `armed` first). A
-//   region that a core can re-enter unprompted needs a lock, not this.
+//   afterwards -- the caller has to be the reason that cannot happen. In
+//   the scheduler probe, clearing `armed` alone was NOT enough: another
+//   core could have observed its old value before the clear and enter late.
+//   Its locked path therefore rechecks the gate while holding the same lock
+//   as teardown. A region without an equivalently ordered closed gate needs
+//   a lock, not this.
 // - THE DRAIN IS A BOUNDED SPIN, in iterations rather than in time,
 //   because this file has no timer -- kernel/lib/ is linked by hosted
 //   builds that have no CNTPCT. A caller that wants a deadline converts

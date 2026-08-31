@@ -172,7 +172,18 @@ private fn schedule_probe_cycle() !{unsafe} {
             atomic_load_acquire(schedule_probe_phase_address())
         } == 1) {
         let guard = process_run_lock();
-        schedule_probe_claim(guard);
+        // Recheck the gate while holding the same lock the teardown takes.
+        // The loop condition alone leaves a check/acquire gap: core 1 may
+        // read armed=1, lose the CPU, and acquire the lock only after core 0
+        // has drained Occupancy and reaped the record.  A release/acquire
+        // pair on two different atomics does not close that gap.  Once core
+        // 0 stores armed=0, either this section finishes before teardown, or
+        // it enters afterwards and refuses to touch the handle.
+        if (unsafe {
+                atomic_load_acquire(schedule_probe_armed_address())
+            } == 1) {
+            schedule_probe_claim(guard);
+        }
         process_run_unlock(guard);
     } else {
         let forged = process_run_guard_forge_unlocked();
@@ -374,10 +385,11 @@ fn schedule_contention_probe() -> bool !{unsafe} {
     // that no type caught -- the protocol was two atomic booleans and a
     // comment.
     //
-    // Now it is a type: schedule_probe_teardown takes
-    // `borrow Quiesced[region]`, and the only source of one is a drain
-    // that observed every core absent. Reaping first is a missing
-    // argument.
+    // The proof and the closed gate do different jobs. The Quiesced value
+    // proves every core was absent during the drain; the armed recheck in
+    // schedule_probe_cycle orders any late locked entrant against teardown.
+    // Reaping without the first is a missing argument, while removing the
+    // second reopens the check/acquire race described at that recheck.
     match occupancy_drain(&schedule_probe_occupancy,
                           SCHEDULE_CONTENTION_DRAIN_SPINS) {
         OccupancyDrainResult::Busy => {

@@ -39,7 +39,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelsh-qemu kernelsh-rpi5 langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -903,6 +903,14 @@ kernelcheck-qemu-debug: kernelcheck-qemu-debug-main
 
 kernelcheck-qemu-debug-main: kernelbuild-qemu-debug
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_LABEL=qemu-debug KERNEL_QEMU_EXPECTED_VIEW_DIR="$(CURDIR)/kernel/tests/qemu-debug/views" KERNEL_QEMU_HWTEST_ARTIFACT_DIR="$(CURDIR)/_build/kernel-hwtest-qemu-debug" KERNEL_QEMU_SERIAL_PORT=18683 KERNEL_QEMU_NETDEV_LOCAL_PORT=18684 KERNEL_QEMU_NETDEV_REMOTE_PORT=18685 bash scripts/run_kernel_qemutest.sh
+
+## Preserve every boot separately when chasing a probabilistic failure.
+## This is intentionally not part of allcheck: repetition is a diagnostic
+## sampling tool, not additional product coverage. Override the default with
+## KERNEL_QEMU_DEBUG_REPEAT=<count>.
+KERNEL_QEMU_DEBUG_REPEAT ?= 5
+kernelcheck-qemu-debug-repeat: kernelbuild-qemu-debug
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DEBUG_REPEAT="$(KERNEL_QEMU_DEBUG_REPEAT)" bash scripts/repeat_kernel_qemu_debug_check.sh
 
 kernelcheck-qemu-debug-ash: kernelbuild-qemu-debug
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ASH_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_ASH_LABEL=qemu-debug KERNEL_QEMU_ASH_ARTIFACT_DIR="$(CURDIR)/_build/kernel-hwtest-qemu-debug-ash" KERNEL_QEMU_ASH_SERIAL_PORT=18686 KERNEL_QEMU_ASH_NETDEV_LOCAL_PORT=18687 KERNEL_QEMU_ASH_NETDEV_REMOTE_PORT=18688 bash scripts/run_kernel_ash_qemutest.sh
