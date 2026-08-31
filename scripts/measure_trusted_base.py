@@ -28,47 +28,68 @@ def count_lines(paths: list[Path]) -> int:
     return sum(len(path.read_text().splitlines()) for path in paths)
 
 
-def unsafe_blocks(path: Path) -> list[tuple[int, str]]:
-    """Return line/body pairs, ignoring braces in comments and literals."""
-    text = path.read_text()
-    result = []
-    for match in re.finditer(r"\bunsafe\s*\{", text):
-        brace = text.find("{", match.start(), match.end())
-        depth, i, state, quote = 0, brace, "code", ""
-        while i < len(text):
-            ch = text[i]
-            nxt = text[i + 1] if i + 1 < len(text) else ""
-            if state == "code":
-                if ch == "/" and nxt == "/":
-                    state, i = "line-comment", i + 2
-                    continue
-                if ch == "/" and nxt == "*":
-                    state, i = "block-comment", i + 2
-                    continue
-                if ch in {'"', "'"}:
-                    state, quote = "quoted", ch
-                elif ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        result.append((text.count("\n", 0, match.start()) + 1,
-                                       text[match.start():i + 1]))
-                        break
-            elif state == "line-comment":
-                if ch == "\n":
-                    state = "code"
-            elif state == "block-comment":
-                if ch == "*" and nxt == "/":
-                    state, i = "code", i + 2
-                    continue
-            elif state == "quoted":
-                if ch == "\\":
-                    i += 2
-                    continue
-                if ch == quote:
-                    state = "code"
+def code_tokens(text: str) -> list[tuple[str, int, int]]:
+    """Return code tokens while skipping lexer-equivalent comments/literals."""
+    tokens = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if ch.isspace():
             i += 1
+        elif ch == "/" and nxt == "/":
+            newline = text.find("\n", i + 2)
+            i = len(text) if newline < 0 else newline + 1
+        elif ch == "/" and nxt == "*":
+            end = text.find("*/", i + 2)
+            i = len(text) if end < 0 else end + 2
+        elif ch in {'"', "'"}:
+            start = i
+            quote = ch
+            i += 1
+            while i < len(text):
+                if text[i] == "\\":
+                    i = min(i + 2, len(text))
+                elif text[i] == quote:
+                    i += 1
+                    break
+                else:
+                    i += 1
+            tokens.append(("literal", start, i))
+        elif ch.isalpha() or ch == "_":
+            start = i
+            i += 1
+            while i < len(text) and (text[i].isalnum() or text[i] == "_"):
+                i += 1
+            tokens.append((text[start:i], start, i))
+        else:
+            tokens.append((ch, i, i + 1))
+            i += 1
+    return tokens
+
+
+def unsafe_blocks(path: Path) -> list[tuple[int, str]]:
+    """Return real unsafe-block line/body pairs from one lexical token pass."""
+    text = path.read_text()
+    tokens = code_tokens(text)
+    result = []
+    for index, (token, start, _) in enumerate(tokens):
+        if token != "unsafe" or index + 1 >= len(tokens):
+            continue
+        if tokens[index + 1][0] != "{":
+            continue
+        depth = 0
+        for closing in range(index + 1, len(tokens)):
+            current = tokens[closing][0]
+            if current == "{":
+                depth += 1
+            elif current == "}":
+                depth -= 1
+                if depth == 0:
+                    end = tokens[closing][2]
+                    result.append((text.count("\n", 0, start) + 1,
+                                   text[start:end]))
+                    break
         else:
             sys.exit(f"error: unterminated unsafe block in {path}")
     return result

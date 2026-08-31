@@ -15,6 +15,17 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-08-31: lexical trusted-base unsafe-block discovery (#404)
+
+The trusted-base inventory now finds `unsafe` openings and their matching
+braces through one lexer-shaped token pass rather than first applying a regex
+to raw source text. Line comments, non-nested block comments, escaped strings,
+and character literals cannot create a site or alter a real block's depth;
+identifier boundaries and comments between `unsafe` and `{` follow the
+language lexer. Controls retain real expression/multiline start lines and the
+actionable unterminated-block error. Both aggregate and `--verbose` output for
+the repository's real source union remained byte-for-byte unchanged.
+
 ## 2026-08-31: excluded endpoints in the overflow audit (#423)
 
 The diagnostic-only overflow TSV now records each operand's bounded ValueFacts
