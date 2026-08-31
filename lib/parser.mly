@@ -74,7 +74,18 @@ let make_binop loc op left right =
    enum's discriminant, an array's element count) -- so overflow here is a
    hard TypeError instead. *)
 let narrow_int64 pos what (n : Int64.t) : int =
+  (* INT tokens are digit strings and therefore never denote a negative
+     source value. The lexer preserves their raw 64-bit pattern, so a
+     literal with bit 63 set arrives here as a negative Int64.t (for
+     example 0xFFFFFFFFFFFFFFFF arrives as -1L). Ast.int_of_intlit would
+     accept that as the native integer -1, turning a huge positive refined
+     bound into a false negative bound. Reject that representation here;
+     genuinely negative grammar values are still expressible as arithmetic
+     such as `0 - 1`, after each non-negative operand has been narrowed. *)
   match Ast.int_of_intlit n with
+  | Some _ when Int64.compare n 0L < 0 ->
+      raise (Types.TypeError (pos,
+        Printf.sprintf "%s value %Lu is too large to represent" what n))
   | Some i -> i
   | None ->
       raise (Types.TypeError (pos,

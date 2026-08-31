@@ -974,6 +974,30 @@ let parser_tests = [
            scan 0)
   );
 
+  Alcotest.test_case
+    "issue #473: a full-width u64 literal is not reinterpreted as the \n\
+     signed refined bound -1"
+    `Quick (fun () ->
+    match parse
+      "fn f(x: {0..<0xFFFFFFFFFFFFFFFF as u64}) u64 { return x; }"
+    with
+    | _ -> Alcotest.fail "expected an error, but parsing succeeded"
+    | exception Types.TypeError (_, msg) ->
+        Alcotest.(check bool) "mentions the unrepresentable bound" true
+          (contains_substring msg "too large to represent")
+  );
+
+  Alcotest.test_case
+    "issue #473 negative control: a negative refined bound written as an \n\
+     arithmetic expression remains valid"
+    `Quick (fun () ->
+    match parse "fn f(x: {0 - 1..<1 as i8}) i8 { return x; }" with
+    | [Ast.FuncDef {
+        params = [(_, Some (Ast.TypeRefined (-1, 1, Ast.TypeI8)))]; _
+      }] -> ()
+    | _ -> Alcotest.fail "expected a {-1..<1 as i8} refined parameter"
+  );
+
   (* -- Explicit-base {lo..<hi as base} surface syntax -------------------- *)
   (* Source refinements always name their representation base explicitly.
      This lets a refined FUNCTION PARAMETER unify against a genuinely
